@@ -73,9 +73,38 @@ func NewSession(
 	}
 }
 
-// ApprovalFunc is called when a tool requires user approval.
-// Returns true if approved, false if denied.
+// ApprovalFunc is the legacy synchronous approval callback.
+// Deprecated: Use SendAsync with channel-based approval instead.
 type ApprovalFunc func(toolName string, input json.RawMessage) bool
+
+// SendAsync processes a user message through the full agentic loop.
+// Approval requests are sent to approvalCh; the frontend must respond via
+// the embedded Response channel. The 30s timeout prevents deadlock if the
+// frontend dies.
+func (s *Session) SendAsync(ctx context.Context, userMsg string, approvalCh chan<- provider.ApprovalRequest) <-chan ai.StreamEvent {
+	approvalFn := func(toolName string, input json.RawMessage) bool {
+		resp := make(chan bool, 1)
+		select {
+		case approvalCh <- provider.ApprovalRequest{
+			ToolName: toolName,
+			Input:    input,
+			Response: resp,
+		}:
+		case <-ctx.Done():
+			return false
+		}
+		select {
+		case approved := <-resp:
+			return approved
+		case <-ctx.Done():
+			return false
+		case <-time.After(30 * time.Second):
+			s.logger.Warn("approval timeout, denying", "tool", toolName)
+			return false
+		}
+	}
+	return s.Send(ctx, userMsg, approvalFn)
+}
 
 // Send processes a user message through the full agentic loop.
 // It streams events through the returned channel.

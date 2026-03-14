@@ -81,6 +81,36 @@ type ContentBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   string          `json:"content,omitempty"`
 	IsError   bool            `json:"is_error,omitempty"`
+	Source    *ImageSource    `json:"source,omitempty"` // for type "image"
+}
+
+// ImageSource holds base64-encoded image data for Claude's vision API.
+type ImageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // "image/png", "image/jpeg", etc.
+	Data      string `json:"data"`       // base64-encoded image bytes
+}
+
+// ImageBlock creates a content block with an inline image.
+func ImageBlock(mediaType, base64Data string) ContentBlock {
+	return ContentBlock{
+		Type: "image",
+		Source: &ImageSource{
+			Type:      "base64",
+			MediaType: mediaType,
+			Data:      base64Data,
+		},
+	}
+}
+
+// MultimodalMessage creates a user message with text and images.
+func MultimodalMessage(text string, images []ContentBlock) Message {
+	blocks := make([]ContentBlock, 0, len(images)+1)
+	blocks = append(blocks, images...)
+	if text != "" {
+		blocks = append(blocks, ContentBlock{Type: "text", Text: text})
+	}
+	return Message{Role: "user", Content: blocks}
 }
 
 // ToolResult holds the result of a tool execution.

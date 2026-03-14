@@ -59,6 +59,7 @@ func main() {
 		modelFlag   = flag.String("model", "", "Model override (e.g. claude-opus-4-6-20250514)")
 		yolo        = flag.Bool("yolo", false, "Skip all tool approval prompts")
 		noMemory    = flag.Bool("no-memory", false, "Disable memory extraction for this session")
+		noTUI       = flag.Bool("no-tui", false, "Force legacy REPL (no bubbletea)")
 		cont        = flag.Bool("continue", false, "Resume last conversation")
 		versionFlag = flag.Bool("version", false, "Print version and exit")
 	)
@@ -138,17 +139,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Determine run mode: pipe, one-shot, or REPL.
-	repl := tui.NewREPL(orch, cfg.Display.ShowCost)
-
+	// Determine run mode: pipe, one-shot, or interactive TUI.
 	if !tui.IsTerminal() {
 		// Pipe mode: read all stdin and send as one message.
 		input, _ := io.ReadAll(os.Stdin)
 		if len(input) > 0 {
-			if err := repl.RunOneShot(firstSession, strings.TrimSpace(string(input))); err != nil {
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				os.Exit(1)
-			}
+			tui.RunPipe(firstSession, string(input), cfg.Display.ShowCost)
 		}
 		return
 	}
@@ -156,17 +152,25 @@ func main() {
 	if args := flag.Args(); len(args) > 0 {
 		// One-shot mode: message from command line args.
 		message := strings.Join(args, " ")
-		if err := repl.RunOneShot(firstSession, message); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
+		tui.RunOneShot(firstSession, message, cfg.Display.ShowCost)
 		return
 	}
 
-	// Interactive REPL.
-	if err := repl.Run(firstSession); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+	// Interactive mode: bubbletea TUI unless forced plain.
+	usePlainREPL := *noTUI || cfg.Display.PlainMode ||
+		os.Getenv("TERM") == "dumb" || os.Getenv("GHOST_PLAIN") != ""
+
+	if usePlainREPL {
+		repl := tui.NewREPL(orch, cfg.Display.ShowCost)
+		if err := repl.Run(firstSession); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		if err := tui.RunApp(orch, cfg, firstSession); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 	}
 }
 

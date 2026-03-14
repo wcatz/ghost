@@ -37,6 +37,7 @@ type Config struct {
 	Telegram  TelegramConfig  `koanf:"telegram"`
 	Calendar  CalendarConfig  `koanf:"calendar"`
 	Briefing  BriefingConfig  `koanf:"briefing"`
+	Voice     VoiceConfig     `koanf:"voice"`
 }
 
 // APIConfig holds Claude API settings.
@@ -57,9 +58,22 @@ type DefaultsConfig struct {
 
 // DisplayConfig holds display preferences.
 type DisplayConfig struct {
-	ShowTokenUsage   bool `koanf:"show_token_usage"`
-	ShowCost         bool `koanf:"show_cost"`
-	StreamToolOutput bool `koanf:"stream_tool_output"`
+	ShowTokenUsage   bool   `koanf:"show_token_usage"`
+	ShowCost         bool   `koanf:"show_cost"`
+	StreamToolOutput bool   `koanf:"stream_tool_output"`
+	Theme            string `koanf:"theme"`           // "dark", "light", "auto"
+	ImageProtocol    string `koanf:"image_protocol"`  // "auto", "sixel", "kitty", "iterm2", "none"
+	PlainMode        bool   `koanf:"plain_mode"`      // force legacy REPL (no bubbletea)
+}
+
+// VoiceConfig holds voice interface settings (Phase C — reserved).
+type VoiceConfig struct {
+	Enabled    bool   `koanf:"enabled"`
+	STTModel   string `koanf:"stt_model"`
+	TTSModel   string `koanf:"tts_model"`
+	TTSVoice   string `koanf:"tts_voice"`
+	WakeWord   string `koanf:"wake_word"`
+	PushToTalk string `koanf:"push_to_talk"`
 }
 
 // ServerConfig holds ghost serve settings.
@@ -145,6 +159,11 @@ var defaults = map[string]interface{}{
 	"display.show_token_usage":   true,
 	"display.show_cost":          true,
 	"display.stream_tool_output": true,
+	"display.theme":              "auto",
+	"display.image_protocol":     "auto",
+	"display.plain_mode":         false,
+	"voice.enabled":              false,
+	"voice.push_to_talk":         "ctrl+space",
 	"server.listen_addr":         "127.0.0.1:2187",
 	"embedding.enabled":          true,
 	"embedding.ollama_url":       "http://localhost:11434",
