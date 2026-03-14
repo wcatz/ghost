@@ -221,7 +221,7 @@ func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit in
 		  AND memories_fts MATCH ?
 		ORDER BY rank, m.importance DESC
 		LIMIT ?
-	`, projectID, query, limit)
+	`, projectID, sanitizeFTS(query), limit)
 	if err != nil {
 		return nil, fmt.Errorf("search memories: %w", err)
 	}

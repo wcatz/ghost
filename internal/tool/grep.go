@@ -95,7 +95,7 @@ func buildGrepArgs(in grepInput, searchPath string, maxResults int) []string {
 	if in.Glob != "" {
 		args = append(args, "--glob", in.Glob)
 	}
-	args = append(args, in.Pattern, searchPath)
+	args = append(args, "-e", in.Pattern, "--", searchPath)
 	return args
 }
 
@@ -107,6 +107,6 @@ func buildGrepFallbackArgs(in grepInput, searchPath string, maxResults int) []st
 	if in.Glob != "" {
 		args = append(args, "--include", in.Glob)
 	}
-	args = append(args, in.Pattern, searchPath)
+	args = append(args, "-e", in.Pattern, "--", searchPath)
 	return args
 }

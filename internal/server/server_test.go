@@ -98,55 +98,8 @@ func (m *mockStore) Close() error { return nil }
 // newTestServer creates a Server with a mock store and silent logger.
 func newTestServer(store *mockStore) *Server {
 	return New(store, &config.ServerConfig{
-		ListenAddr:    "127.0.0.1:0",
-		TailscaleAuth: false,
+		ListenAddr: "127.0.0.1:0",
 	}, slog.Default())
-}
-
-// --- tailscaleAuth middleware ---
-
-func TestTailscaleAuth_MissingHeader(t *testing.T) {
-	s := newTestServer(&mockStore{})
-	handler := s.tailscaleAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", rr.Code)
-	}
-
-	var body map[string]string
-	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
-		t.Fatalf("decode error body: %v", err)
-	}
-	if body["error"] == "" {
-		t.Fatal("expected error message in body")
-	}
-}
-
-func TestTailscaleAuth_WithHeader(t *testing.T) {
-	s := newTestServer(&mockStore{})
-	called := false
-	handler := s.tailscaleAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		called = true
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("Tailscale-User-Login", "user@example.com")
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rr.Code)
-	}
-	if !called {
-		t.Fatal("next handler was not called")
-	}
 }
 
 // --- handleHealth ---

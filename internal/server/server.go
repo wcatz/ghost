@@ -43,10 +43,6 @@ func (s *Server) Run(ctx context.Context) error {
 	r.Use(s.logMiddleware)
 	r.Use(middleware.Timeout(30 * time.Second))
 
-	if s.cfg.TailscaleAuth {
-		r.Use(s.tailscaleAuth)
-	}
-
 	// Routes.
 	r.Get("/api/v1/health", s.handleHealth)
 	r.Route("/api/v1/memories", func(r chi.Router) {
@@ -64,7 +60,7 @@ func (s *Server) Run(ctx context.Context) error {
 		BaseContext:       func(_ net.Listener) context.Context { return ctx },
 	}
 
-	s.logger.Info("ghost serve starting", "addr", s.cfg.ListenAddr, "tailscale_auth", s.cfg.TailscaleAuth)
+	s.logger.Info("ghost serve starting", "addr", s.cfg.ListenAddr)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -241,17 +237,6 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 			"bytes", ww.BytesWritten(),
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
-	})
-}
-
-func (s *Server) tailscaleAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user := r.Header.Get("Tailscale-User-Login")
-		if user == "" {
-			writeError(w, http.StatusUnauthorized, "tailscale auth required")
-			return
-		}
-		next.ServeHTTP(w, r)
 	})
 }
 

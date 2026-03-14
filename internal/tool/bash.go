@@ -65,7 +65,11 @@ func execBash(ctx context.Context, projectPath string, input json.RawMessage) Re
 
 	workDir := projectPath
 	if in.WorkingDir != "" {
-		workDir = resolvePath(projectPath, in.WorkingDir)
+		safeDir, err := safePath(projectPath, in.WorkingDir)
+		if err != nil {
+			return Result{Content: fmt.Sprintf("invalid working directory: %v", err), IsError: true}
+		}
+		workDir = safeDir
 	}
 
 	cmd := exec.CommandContext(execCtx, "bash", "-c", in.Command)

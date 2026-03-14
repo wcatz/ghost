@@ -115,14 +115,33 @@ func resolvePath(projectPath, path string) string {
 }
 
 // safePath resolves a path and ensures it stays within the project directory.
-// Returns the resolved path and an error if the path escapes the project root.
+// It resolves symlinks to prevent symlink-based traversal attacks.
 func safePath(projectPath, path string) (string, error) {
 	resolved := resolvePath(projectPath, path)
 	cleaned := filepath.Clean(resolved)
 	projCleaned := filepath.Clean(projectPath)
 
+	// Lexical check first (fast fail for obvious ../.. attempts).
 	if !strings.HasPrefix(cleaned, projCleaned+string(filepath.Separator)) && cleaned != projCleaned {
 		return "", fmt.Errorf("path %q escapes project directory", path)
 	}
+
+	// Resolve symlinks to catch symlink-based escapes.
+	realPath, err := filepath.EvalSymlinks(cleaned)
+	if err != nil {
+		// Path doesn't exist yet (e.g., new file write) — lexical check is sufficient.
+		if os.IsNotExist(err) {
+			return cleaned, nil
+		}
+		return "", fmt.Errorf("resolve path %q: %w", path, err)
+	}
+	realProject, err := filepath.EvalSymlinks(projCleaned)
+	if err != nil {
+		return "", fmt.Errorf("resolve project path: %w", err)
+	}
+	if !strings.HasPrefix(realPath, realProject+string(filepath.Separator)) && realPath != realProject {
+		return "", fmt.Errorf("path %q resolves outside project directory", path)
+	}
+
 	return cleaned, nil
 }

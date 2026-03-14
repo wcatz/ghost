@@ -104,8 +104,15 @@ func (s *Server) registerTools() {
 		if args.Importance <= 0 {
 			args.Importance = 0.7
 		}
+		if args.Importance > 1 {
+			args.Importance = 1
+		}
 		if args.Tags == nil {
 			args.Tags = []string{}
+		}
+
+		if err := s.store.EnsureProject(ctx, args.ProjectID, "", args.ProjectID); err != nil {
+			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
 
 		id, merged, err := s.store.Upsert(ctx, args.ProjectID, args.Category, args.Content, "mcp", args.Importance, args.Tags)
@@ -144,13 +151,19 @@ func (s *Server) registerTools() {
 		var sb strings.Builder
 
 		memories, err := s.store.GetTopMemories(ctx, args.ProjectID, args.Limit)
-		if err == nil && len(memories) > 0 {
+		if err != nil {
+			return nil, nil, fmt.Errorf("get memories: %w", err)
+		}
+		if len(memories) > 0 {
 			sb.WriteString("## Memories\n\n")
 			sb.WriteString(formatMemories(memories))
 		}
 
 		learned, err := s.store.GetLearnedContext(ctx, args.ProjectID)
-		if err == nil && learned != "" {
+		if err != nil {
+			return nil, nil, fmt.Errorf("get learned context: %w", err)
+		}
+		if learned != "" {
 			sb.WriteString("\n\n## Learned Context\n\n")
 			sb.WriteString(learned)
 		}

@@ -48,9 +48,6 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Server.ListenAddr != "127.0.0.1:2187" {
 		t.Errorf("expected listen_addr=127.0.0.1:2187, got %q", cfg.Server.ListenAddr)
 	}
-	if cfg.Server.TailscaleAuth {
-		t.Error("expected tailscale_auth=false by default")
-	}
 	if !cfg.Embedding.Enabled {
 		t.Error("expected embedding.enabled=true")
 	}

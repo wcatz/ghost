@@ -22,10 +22,11 @@ var readOnlyGitCmds = map[string]bool{
 	"ls-files": true, "ls-tree": true, "blame": true, "shortlog": true,
 }
 
-// blockedGitPatterns are dangerous operations that are never allowed.
-var blockedGitPatterns = []string{
-	"push --force", "push -f", "reset --hard", "clean -f",
-	"clean -fd", "clean -fx",
+// blockedGitOps maps subcommands to flags that are never allowed.
+var blockedGitOps = map[string][]string{
+	"push":  {"--force", "-f"},
+	"reset": {"--hard"},
+	"clean": {"-f", "-fd", "-fx", "-xf", "-df"},
 }
 
 func registerGit(r *Registry) {
@@ -53,11 +54,14 @@ func execGit(ctx context.Context, projectPath string, input json.RawMessage) Res
 		return Result{Content: fmt.Sprintf("invalid input: %v", err), IsError: true}
 	}
 
-	// Check for blocked patterns.
-	fullCmd := in.Subcommand + " " + strings.Join(in.Args, " ")
-	for _, blocked := range blockedGitPatterns {
-		if strings.Contains(fullCmd, blocked) {
-			return Result{Content: fmt.Sprintf("blocked: '%s' is a destructive operation", blocked), IsError: true}
+	// Check for blocked operations by matching subcommand + individual flags.
+	if blockedFlags, ok := blockedGitOps[in.Subcommand]; ok {
+		for _, arg := range in.Args {
+			for _, blocked := range blockedFlags {
+				if arg == blocked {
+					return Result{Content: fmt.Sprintf("blocked: 'git %s %s' is a destructive operation", in.Subcommand, blocked), IsError: true}
+				}
+			}
 		}
 	}
 

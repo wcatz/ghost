@@ -60,8 +60,7 @@ type DisplayConfig struct {
 
 // ServerConfig holds ghost serve settings.
 type ServerConfig struct {
-	ListenAddr    string `koanf:"listen_addr"`
-	TailscaleAuth bool   `koanf:"tailscale_auth"`
+	ListenAddr string `koanf:"listen_addr"`
 }
 
 // EmbeddingConfig holds local embedding settings.
@@ -143,7 +142,6 @@ var defaults = map[string]interface{}{
 	"display.show_cost":          true,
 	"display.stream_tool_output": true,
 	"server.listen_addr":         "127.0.0.1:2187",
-	"server.tailscale_auth":      false,
 	"embedding.enabled":          true,
 	"embedding.ollama_url":       "http://localhost:11434",
 	"embedding.model":            "nomic-embed-text:v1.5",

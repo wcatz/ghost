@@ -135,13 +135,17 @@ func (o *Orchestrator) StopSession(projectPath string) error {
 // Shutdown stops all sessions.
 func (o *Orchestrator) Shutdown(_ context.Context) error {
 	o.mu.Lock()
-	defer o.mu.Unlock()
+	toStop := make([]*Session, 0, len(o.sessions))
+	for _, s := range o.sessions {
+		toStop = append(toStop, s)
+	}
+	o.sessions = make(map[string]*Session)
+	o.mu.Unlock()
 
-	for id, s := range o.sessions {
+	for _, s := range toStop {
 		s.mu.Lock()
 		s.Active = false
 		s.mu.Unlock()
-		delete(o.sessions, id)
 	}
 	return nil
 }
