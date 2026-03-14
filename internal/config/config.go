@@ -24,13 +24,15 @@ import (
 
 // Config holds the global ghost configuration.
 type Config struct {
-	API      APIConfig      `koanf:"api"`
-	Defaults DefaultsConfig `koanf:"defaults"`
-	Display  DisplayConfig  `koanf:"display"`
+	API       APIConfig       `koanf:"api"`
+	Defaults  DefaultsConfig  `koanf:"defaults"`
+	Display   DisplayConfig   `koanf:"display"`
 	Server    ServerConfig    `koanf:"server"`
 	Embedding EmbeddingConfig `koanf:"embedding"`
 	GitHub    GitHubConfig    `koanf:"github"`
 	Telegram  TelegramConfig  `koanf:"telegram"`
+	Calendar  CalendarConfig  `koanf:"calendar"`
+	Briefing  BriefingConfig  `koanf:"briefing"`
 }
 
 // APIConfig holds Claude API settings.
@@ -80,6 +82,19 @@ type GitHubConfig struct {
 type TelegramConfig struct {
 	Token      string `koanf:"token"`
 	AllowedIDs string `koanf:"allowed_ids"` // comma-separated user IDs
+}
+
+// CalendarConfig holds CalDAV calendar settings.
+type CalendarConfig struct {
+	URL      string `koanf:"url"`
+	Username string `koanf:"username"`
+	Password string `koanf:"password"`
+}
+
+// BriefingConfig holds morning briefing schedule settings.
+type BriefingConfig struct {
+	Enabled  bool   `koanf:"enabled"`
+	Schedule string `koanf:"schedule"` // cron expression, e.g. "0 8 * * *"
 }
 
 // ProjectConfig holds per-project configuration from .ghost/config.toml.
@@ -134,6 +149,8 @@ var defaults = map[string]interface{}{
 	"embedding.model":            "nomic-embed-text:v1.5",
 	"embedding.dimensions":       768,
 	"github.interval":            60,
+	"briefing.enabled":           false,
+	"briefing.schedule":          "0 8 * * 1-5",
 }
 
 // Load reads configuration with layered precedence.

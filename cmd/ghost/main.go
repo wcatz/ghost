@@ -1,0 +1,340 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/wcatz/ghost/internal/ai"
+	"github.com/wcatz/ghost/internal/briefing"
+	"github.com/wcatz/ghost/internal/calendar"
+	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/embedding"
+	"github.com/wcatz/ghost/internal/github"
+	"github.com/wcatz/ghost/internal/mcpserver"
+	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/orchestrator"
+	"github.com/wcatz/ghost/internal/scheduler"
+	"github.com/wcatz/ghost/internal/server"
+	"github.com/wcatz/ghost/internal/telegram"
+	"github.com/wcatz/ghost/internal/tool"
+	"github.com/wcatz/ghost/internal/tui"
+)
+
+var version = "dev"
+
+type stringSlice []string
+
+func (s *stringSlice) String() string { return strings.Join(*s, ",") }
+func (s *stringSlice) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+func main() {
+	// Check for subcommands before flag parsing.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "serve":
+			runServe()
+			return
+		case "mcp":
+			runMCP()
+			return
+		}
+	}
+
+	var (
+		projects    stringSlice
+		modeFlag    = flag.String("mode", "", "Operating mode: chat, code, debug, review, plan, refactor")
+		modelFlag   = flag.String("model", "", "Model override (e.g. claude-opus-4-6-20250514)")
+		yolo        = flag.Bool("yolo", false, "Skip all tool approval prompts")
+		noMemory    = flag.Bool("no-memory", false, "Disable memory extraction for this session")
+		cont        = flag.Bool("continue", false, "Resume last conversation")
+		versionFlag = flag.Bool("version", false, "Print version and exit")
+	)
+	flag.Var(&projects, "project", "Project path (can be specified multiple times)")
+	flag.Parse()
+
+	if *versionFlag {
+		fmt.Printf("ghost %s\n", version)
+		os.Exit(0)
+	}
+
+	cfg, logger, store, _ := bootstrap()
+	defer store.Close()
+
+	if cfg.API.Key == "" {
+		fmt.Fprintln(os.Stderr, "error: ANTHROPIC_API_KEY not set")
+		fmt.Fprintln(os.Stderr, "Set it via environment variable or in ~/.config/ghost/config.toml")
+		os.Exit(1)
+	}
+
+	// Initialize AI client.
+	client := ai.NewClient(cfg.API.Key, logger)
+
+	// Initialize tool registry.
+	registry := tool.NewRegistry()
+	tool.RegisterAll(registry, store)
+
+	// Apply flag overrides.
+	if *modeFlag != "" {
+		cfg.Defaults.Mode = *modeFlag
+	}
+	if *modelFlag != "" {
+		cfg.API.ModelQuality = *modelFlag
+	}
+	if *yolo {
+		cfg.Defaults.ApprovalMode = "yolo"
+	}
+	if *noMemory {
+		cfg.Defaults.AutoMemory = false
+	}
+
+	_ = *cont // TODO: implement conversation resume
+
+	// Create orchestrator.
+	orch := orchestrator.New(client, store, registry, cfg, logger)
+
+	// Determine projects to load.
+	if len(projects) == 0 {
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot get working directory: %v\n", err)
+			os.Exit(1)
+		}
+		projects = []string{cwd}
+	}
+
+	// Start sessions.
+	var firstSession *orchestrator.Session
+	for _, p := range projects {
+		absPath, err := filepath.Abs(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: bad path %s: %v\n", p, err)
+			continue
+		}
+		s, err := orch.StartSession(absPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cannot start session for %s: %v\n", absPath, err)
+			continue
+		}
+		if firstSession == nil {
+			firstSession = s
+		}
+	}
+
+	if firstSession == nil {
+		fmt.Fprintln(os.Stderr, "error: no valid project sessions")
+		os.Exit(1)
+	}
+
+	// Determine run mode: pipe, one-shot, or REPL.
+	repl := tui.NewREPL(orch, cfg.Display.ShowCost)
+
+	if !tui.IsTerminal() {
+		// Pipe mode: read all stdin and send as one message.
+		input, _ := os.ReadFile("/dev/stdin")
+		if len(input) > 0 {
+			if err := repl.RunOneShot(firstSession, strings.TrimSpace(string(input))); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		return
+	}
+
+	if args := flag.Args(); len(args) > 0 {
+		// One-shot mode: message from command line args.
+		message := strings.Join(args, " ")
+		if err := repl.RunOneShot(firstSession, message); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Interactive REPL.
+	if err := repl.Run(firstSession); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runServe starts ghost as an HTTP daemon with all optional subsystems.
+func runServe() {
+	serveFlags := flag.NewFlagSet("serve", flag.ExitOnError)
+	addr := serveFlags.String("addr", "", "Listen address (overrides config)")
+	serveFlags.Parse(os.Args[2:])
+
+	cfg, logger, store, db := bootstrap()
+	defer store.Close()
+
+	if *addr != "" {
+		cfg.Server.ListenAddr = *addr
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	// --- Embedding worker (background vectorization via Ollama) ---
+	if cfg.Embedding.Enabled {
+		embedClient := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
+		embedWorker := embedding.NewWorker(embedClient, store, logger, 2*time.Minute)
+		projectCh := make(chan string, 16)
+		go embedWorker.Run(ctx, projectCh)
+		if embedClient.Alive(ctx) {
+			logger.Info("embedding worker started", "model", cfg.Embedding.Model, "ollama", cfg.Embedding.OllamaURL)
+		} else {
+			logger.Info("embedding worker started (ollama offline, will retry)", "ollama", cfg.Embedding.OllamaURL)
+		}
+		_ = projectCh // projects get sent here when memories are created
+	}
+
+	// --- Scheduler (cron jobs + reminders) ---
+	sched, err := scheduler.New(db, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: scheduler: %v\n", err)
+		os.Exit(1)
+	}
+	go sched.Start(ctx)
+	logger.Info("scheduler started")
+
+	// --- GitHub notification monitor ---
+	var ghMonitor *github.Monitor
+	if cfg.GitHub.Token != "" {
+		interval := time.Duration(cfg.GitHub.Interval) * time.Second
+		if interval < 30*time.Second {
+			interval = 60 * time.Second
+		}
+		ghMonitor = github.NewMonitor(cfg.GitHub.Token, db, logger, interval)
+		go ghMonitor.Run(ctx)
+		logger.Info("github monitor started", "interval", interval)
+	}
+
+	// --- CalDAV calendar ---
+	var calClient *calendar.Client
+	if cfg.Calendar.URL != "" {
+		var err error
+		calClient, err = calendar.NewClient(ctx, calendar.Config{
+			URL:      cfg.Calendar.URL,
+			Username: cfg.Calendar.Username,
+			Password: cfg.Calendar.Password,
+		}, logger)
+		if err != nil {
+			logger.Warn("caldav init failed, calendar disabled", "error", err)
+		} else {
+			logger.Info("calendar connected", "url", cfg.Calendar.URL)
+		}
+	}
+
+	// --- Telegram bot ---
+	var tgBot *telegram.Bot
+	if cfg.Telegram.Token != "" {
+		allowedIDs := telegram.ParseAllowedIDs(cfg.Telegram.AllowedIDs)
+		tgBot, err = telegram.New(telegram.Config{
+			Token:      cfg.Telegram.Token,
+			AllowedIDs: allowedIDs,
+		}, store, ghMonitor, db, logger)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: telegram bot: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Wire P0/P1 GitHub alerts to Telegram.
+		if ghMonitor != nil {
+			ghMonitor.OnAlert(func(n github.Notification) {
+				msg := fmt.Sprintf("*P%d Alert*\n`%s`\n%s\n_%s_",
+					n.Priority, n.RepoFullName, n.SubjectTitle, n.Reason)
+				tgBot.SendToAll(ctx, msg)
+			})
+		}
+
+		// Wire reminder alerts to Telegram.
+		sched.OnAlert(func(message string) {
+			tgBot.SendToAll(ctx, message)
+		})
+
+		go tgBot.Run(ctx)
+		logger.Info("telegram bot started", "allowed_users", len(allowedIDs))
+	}
+
+	// --- Morning briefing cron ---
+	if cfg.Briefing.Enabled && tgBot != nil {
+		briefingSources := briefing.Sources{
+			GitHub:    ghMonitor,
+			Calendar:  calClient,
+			Scheduler: sched,
+		}
+		err := sched.AddCronJob(ctx, "morning-briefing", cfg.Briefing.Schedule, nil, func() {
+			msg := briefing.Generate(ctx, briefingSources)
+			tgBot.SendToAll(ctx, msg)
+			logger.Info("morning briefing sent")
+		})
+		if err != nil {
+			logger.Error("failed to schedule briefing", "error", err)
+		} else {
+			logger.Info("morning briefing scheduled", "cron", cfg.Briefing.Schedule)
+		}
+	}
+
+	// --- HTTP server (blocks) ---
+	srv := server.New(store, &cfg.Server, logger)
+	if err := srv.Run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runMCP starts ghost as an MCP server on stdio.
+func runMCP() {
+	_, logger, store, _ := bootstrap()
+	defer store.Close()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	srv := mcpserver.New(store, logger)
+	if err := srv.Run(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// bootstrap loads config, sets up logging, and opens the database.
+func bootstrap() (*config.Config, *slog.Logger, *memory.Store, *sql.DB) {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	logLevel := slog.LevelInfo
+	if os.Getenv("GHOST_DEBUG") != "" {
+		logLevel = slog.LevelDebug
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+
+	dataDir, err := config.DataDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot create data directory: %v\n", err)
+		os.Exit(1)
+	}
+	dbPath := filepath.Join(dataDir, "ghost.db")
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: database: %v\n", err)
+		os.Exit(1)
+	}
+
+	store := memory.NewStore(db, logger)
+	return cfg, logger, store, db
+}
