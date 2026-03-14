@@ -94,41 +94,41 @@ cat error.log | ghost "what went wrong?"
 
 ### Global Config
 
-`~/.config/ghost/config.toml`:
+`~/.config/ghost/config.yaml`:
 
-```toml
-[api]
-key = ""                                   # or use ANTHROPIC_API_KEY env var
-model_quality = "claude-sonnet-4-5-20250929"
-model_fast = "claude-haiku-4-5-20251001"
+```yaml
+api:
+  # key: ""                                # or use ANTHROPIC_API_KEY env var
+  model_quality: "claude-sonnet-4-5-20250929"
+  model_fast: "claude-haiku-4-5-20251001"
 
-[defaults]
-mode = "code"
-reflection_interval = 10
-auto_memory = true
-approval_mode = "normal"                   # "normal", "yolo", "strict"
+defaults:
+  mode: "code"
+  reflection_interval: 10
+  auto_memory: true
+  approval_mode: "normal"                  # "normal", "yolo", "strict"
 
-[display]
-show_token_usage = true
-show_cost = true
+display:
+  show_token_usage: true
+  show_cost: true
 ```
 
 ### Per-Project Config
 
-`.ghost.toml` in your project root:
+`.ghost/config.yaml` in your project root:
 
-```toml
-[project]
-name = "my-project"
+```yaml
+project:
+  name: "my-project"
 
-[conventions]
-test_command = "go test ./..."
-lint_command = "golangci-lint run"
-build_command = "go build ./..."
+conventions:
+  test_command: "go test ./..."
+  lint_command: "golangci-lint run"
+  build_command: "go build ./..."
 
-[context]
-include_files = ["CLAUDE.md", "ARCHITECTURE.md"]
-ignore_patterns = ["vendor/", "node_modules/"]
+context:
+  include_files: ["CLAUDE.md", "ARCHITECTURE.md"]
+  ignore_patterns: ["vendor/", "node_modules/"]
 ```
 
 ## Memory System

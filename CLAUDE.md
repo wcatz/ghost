@@ -16,7 +16,7 @@
 - `internal/prompt/` — 3-block system prompt construction
 - `internal/mode/` — Operating modes (chat, code, debug, review, plan, refactor)
 - `internal/project/` — Project detection and context gathering
-- `internal/config/` — TOML config + environment variables
+- `internal/config/` — YAML config + environment variables
 - `internal/tui/` — Terminal REPL with streaming output
 
 ## Key Patterns

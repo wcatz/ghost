@@ -2,10 +2,10 @@
 //
 // Loading order (later layers override earlier):
 //  1. Compiled defaults
-//  2. /etc/ghost/config.toml          (system-wide)
-//  3. ~/.config/ghost/config.toml     (user-global)
-//  4. .ghost/config.toml              (project, checked in)
-//  5. .ghost/config.local.toml        (project, gitignored)
+//  2. /etc/ghost/config.yaml          (system-wide)
+//  3. ~/.config/ghost/config.yaml     (user-global)
+//  4. .ghost/config.yaml              (project, checked in)
+//  5. .ghost/config.local.yaml        (project, gitignored)
 //  6. GHOST_* environment variables
 //  7. CLI flag overrides (applied by caller after Load)
 package config
@@ -15,7 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/knadh/koanf/parsers/toml"
+	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
@@ -96,7 +96,7 @@ type BriefingConfig struct {
 	Schedule string `koanf:"schedule"` // cron expression, e.g. "0 8 * * *"
 }
 
-// ProjectConfig holds per-project configuration from .ghost/config.toml.
+// ProjectConfig holds per-project configuration from .ghost/config.yaml.
 type ProjectConfig struct {
 	Project     ProjectInfo     `koanf:"project"`
 	Conventions ConventionsInfo `koanf:"conventions"`
@@ -162,14 +162,14 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	parser := toml.Parser()
+	parser := yaml.Parser()
 
-	// Layer 2: /etc/ghost/config.toml (system-wide).
-	loadFileIfExists(k, "/etc/ghost/config.toml", parser)
+	// Layer 2: /etc/ghost/config.yaml (system-wide).
+	loadFileIfExists(k, "/etc/ghost/config.yaml", parser)
 
-	// Layer 3: ~/.config/ghost/config.toml (user-global).
+	// Layer 3: ~/.config/ghost/config.yaml (user-global).
 	if configDir, err := os.UserConfigDir(); err == nil {
-		loadFileIfExists(k, filepath.Join(configDir, "ghost", "config.toml"), parser)
+		loadFileIfExists(k, filepath.Join(configDir, "ghost", "config.yaml"), parser)
 	}
 
 	// Layer 6: GHOST_* environment variables.
@@ -195,7 +195,7 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// LoadProject reads per-project config from .ghost/config.toml in the given directory.
+// LoadProject reads per-project config from .ghost/config.yaml in the given directory.
 func LoadProject(projectPath string) (*ProjectConfig, error) {
 	k := koanf.New(".")
 
@@ -210,13 +210,13 @@ func LoadProject(projectPath string) (*ProjectConfig, error) {
 		return nil, err
 	}
 
-	parser := toml.Parser()
+	parser := yaml.Parser()
 
-	// .ghost/config.toml (checked in)
-	loadFileIfExists(k, filepath.Join(projectPath, ".ghost", "config.toml"), parser)
+	// .ghost/config.yaml (checked in)
+	loadFileIfExists(k, filepath.Join(projectPath, ".ghost", "config.yaml"), parser)
 
-	// .ghost/config.local.toml (gitignored)
-	loadFileIfExists(k, filepath.Join(projectPath, ".ghost", "config.local.toml"), parser)
+	// .ghost/config.local.yaml (gitignored)
+	loadFileIfExists(k, filepath.Join(projectPath, ".ghost", "config.local.yaml"), parser)
 
 	cfg := &ProjectConfig{}
 	if err := k.Unmarshal("", cfg); err != nil {
@@ -242,7 +242,7 @@ func DataDir() (string, error) {
 	return dir, nil
 }
 
-// loadFileIfExists loads a TOML file into koanf if it exists, silently skipping missing files.
+// loadFileIfExists loads a config file into koanf if it exists, silently skipping missing files.
 func loadFileIfExists(k *koanf.Koanf, path string, parser koanf.Parser) {
 	if _, err := os.Stat(path); err == nil {
 		_ = k.Load(file.Provider(path), parser)
