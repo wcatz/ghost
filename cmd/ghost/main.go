@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -142,7 +143,7 @@ func main() {
 
 	if !tui.IsTerminal() {
 		// Pipe mode: read all stdin and send as one message.
-		input, _ := os.ReadFile("/dev/stdin")
+		input, _ := io.ReadAll(os.Stdin)
 		if len(input) > 0 {
 			if err := repl.RunOneShot(firstSession, strings.TrimSpace(string(input))); err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)

@@ -22,11 +22,16 @@ var readOnlyGitCmds = map[string]bool{
 	"ls-files": true, "ls-tree": true, "blame": true, "shortlog": true,
 }
 
-// blockedGitOps maps subcommands to flags that are never allowed.
+// blockedGitOps maps subcommands to exact flags that are never allowed.
 var blockedGitOps = map[string][]string{
 	"push":  {"--force", "-f"},
 	"reset": {"--hard"},
-	"clean": {"-f", "-fd", "-fx", "-xf", "-df"},
+}
+
+// blockedGitClean checks if a git clean arg contains the -f flag
+// in any combination (e.g. -f, -fd, -fdx, -xf).
+func isBlockedCleanArg(arg string) bool {
+	return strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.ContainsRune(arg, 'f')
 }
 
 func registerGit(r *Registry) {
@@ -61,6 +66,14 @@ func execGit(ctx context.Context, projectPath string, input json.RawMessage) Res
 				if arg == blocked {
 					return Result{Content: fmt.Sprintf("blocked: 'git %s %s' is a destructive operation", in.Subcommand, blocked), IsError: true}
 				}
+			}
+		}
+	}
+	// git clean with -f in any flag combination is always blocked.
+	if in.Subcommand == "clean" {
+		for _, arg := range in.Args {
+			if isBlockedCleanArg(arg) {
+				return Result{Content: fmt.Sprintf("blocked: 'git clean %s' is a destructive operation", arg), IsError: true}
 			}
 		}
 	}

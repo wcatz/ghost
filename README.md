@@ -66,7 +66,7 @@ Most AI tools start fresh every session. Ghost persists knowledge in SQLite with
 
 ## Install
 
-Requires Go 1.24+ and CGO (for SQLite).
+Requires Go 1.25+ and CGO (for SQLite).
 
 ```bash
 go install -tags fts5 github.com/wcatz/ghost/cmd/ghost@latest
@@ -187,7 +187,7 @@ Then use `ghost_memory_search`, `ghost_memory_save`, and `ghost_project_context`
 
 ## REPL Commands
 
-```
+```text
 /mode <name>       Switch mode: chat, code, debug, review, plan, refactor
 /switch <project>  Switch active project (multi-project mode)
 /projects          List active project sessions
@@ -203,7 +203,7 @@ Then use `ghost_memory_search`, `ghost_memory_save`, and `ghost_project_context`
 
 ## Architecture
 
-```
+```text
 cmd/ghost/main.go          CLI entrypoint + daemon bootstrap
 internal/
   ai/                      Claude API client + streaming + tool_use

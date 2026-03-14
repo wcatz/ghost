@@ -1,7 +1,7 @@
 # Ghost — Memory-First Coding Agent
 
 ## Stack
-- Go 1.24+ CLI application
+- Go 1.25+ CLI application
 - SQLite with FTS5 for memory persistence
 - Claude API (manual HTTP client, not SDK)
 - Native tool_use for file operations, search, git, and shell

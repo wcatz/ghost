@@ -52,6 +52,7 @@ func New(db *sql.DB, logger *slog.Logger) (*Scheduler, error) {
 }
 
 // OnAlert registers a callback for reminder notifications.
+// Must be called before Start.
 func (s *Scheduler) OnAlert(fn AlertFunc) {
 	s.onAlert = fn
 }
@@ -209,6 +210,8 @@ func (s *Scheduler) fireReminders(ctx context.Context) {
 
 func randomID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }

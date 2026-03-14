@@ -53,7 +53,22 @@ func makeMemorySearchExec(store *memory.Store) Executor {
 		var memories []memory.Memory
 		var err error
 
-		if in.Category != "" {
+		if in.Category != "" && in.Query != "" {
+			// Search within category: FTS search then filter.
+			all, searchErr := store.SearchFTS(ctx, projectID, in.Query, limit*3)
+			if searchErr != nil {
+				err = searchErr
+			} else {
+				for _, m := range all {
+					if m.Category == in.Category {
+						memories = append(memories, m)
+					}
+					if len(memories) >= limit {
+						break
+					}
+				}
+			}
+		} else if in.Category != "" {
 			memories, err = store.GetByCategory(ctx, projectID, in.Category, limit)
 		} else {
 			memories, err = store.SearchFTS(ctx, projectID, in.Query, limit)
