@@ -1,0 +1,472 @@
+package memory
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Memory represents a single discrete memory.
+type Memory struct {
+	ID           string   `json:"id"`
+	ProjectID    string   `json:"project_id"`
+	Category     string   `json:"category"`
+	Content      string   `json:"content"`
+	Importance   float32  `json:"importance"`
+	AccessCount  int      `json:"access_count"`
+	LastAccessed *string  `json:"last_accessed,omitempty"`
+	Source       string   `json:"source"`
+	Tags         []string `json:"tags"`
+	Pinned       bool     `json:"pinned"`
+	CreatedAt    string   `json:"created_at"`
+	UpdatedAt    string   `json:"updated_at"`
+}
+
+// Store manages the SQLite memory database.
+type Store struct {
+	db     *sql.DB
+	mu     sync.RWMutex
+	logger *slog.Logger
+}
+
+// NewStore creates a new memory store from an open database.
+func NewStore(db *sql.DB, logger *slog.Logger) *Store {
+	return &Store{db: db, logger: logger}
+}
+
+// Close closes the underlying database.
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+// EnsureProject creates a project record if it doesn't exist.
+func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO projects (id, path, name) VALUES (?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET path = excluded.path, updated_at = datetime('now')
+	`, id, path, name)
+	if err != nil {
+		return fmt.Errorf("ensure project: %w", err)
+	}
+
+	// Also ensure ghost_state exists.
+	_, err = s.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)
+	`, id)
+	return err
+}
+
+// Create inserts a new memory and returns its ID.
+func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tags, _ := json.Marshal(m.Tags)
+
+	var id string
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO memories (project_id, category, content, source, importance, tags)
+		VALUES (?, ?, ?, ?, ?, ?)
+		RETURNING id
+	`, projectID, m.Category, m.Content, m.Source, m.Importance, string(tags)).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("create memory: %w", err)
+	}
+	return id, nil
+}
+
+// Upsert checks for an existing similar memory (same category, FTS overlap).
+// If found, it strengthens the existing memory. If not, creates a new one.
+func (s *Store) Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (id string, merged bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var existingID string
+	var existingImportance float32
+	var existingContent string
+
+	err = s.db.QueryRowContext(ctx, `
+		SELECT m.id, m.importance, m.content
+		FROM memories m
+		JOIN memories_fts f ON f.rowid = m.rowid
+		WHERE m.project_id = ?
+		  AND m.category = ?
+		  AND memories_fts MATCH ?
+		ORDER BY rank, m.importance DESC
+		LIMIT 1
+	`, projectID, category, content).Scan(&existingID, &existingImportance, &existingContent)
+
+	if err == nil && existingID != "" {
+		// Found a match — strengthen it.
+		newImportance := existingImportance + (importance * 0.2)
+		if newImportance > 1.0 {
+			newImportance = 1.0
+		}
+		finalContent := existingContent
+		if len(content) > len(existingContent) {
+			finalContent = content
+		}
+
+		_, err = s.db.ExecContext(ctx, `
+			UPDATE memories
+			SET content = CASE WHEN source = 'manual' THEN content ELSE ? END,
+			    importance = ?, access_count = access_count + 1, updated_at = datetime('now')
+			WHERE id = ? AND project_id = ?
+		`, finalContent, newImportance, existingID, projectID)
+		if err != nil {
+			return "", false, fmt.Errorf("strengthen memory: %w", err)
+		}
+		return existingID, true, nil
+	}
+
+	// No match — create new.
+	tagsJSON, _ := json.Marshal(tags)
+
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO memories (project_id, category, content, source, importance, tags)
+		VALUES (?, ?, ?, ?, ?, ?)
+		RETURNING id
+	`, projectID, category, content, source, importance, string(tagsJSON)).Scan(&id)
+	if err != nil {
+		return "", false, fmt.Errorf("create memory: %w", err)
+	}
+	return id, false, nil
+}
+
+// GetTopMemories returns the top N memories ranked by composite score
+// with category-aware time decay and pinned boost.
+func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int) ([]Memory, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, project_id, category, content, importance, access_count,
+		       last_accessed, source, tags, pinned, created_at, updated_at
+		FROM memories
+		WHERE project_id = ? OR project_id = '_global'
+		ORDER BY (
+			importance
+			* CASE
+				WHEN category IN ('preference', 'convention', 'fact') THEN 1.0
+				WHEN category IN ('pattern', 'architecture') THEN
+					MAX(0.3, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 45.0))
+				ELSE
+					MAX(0.15, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 30.0))
+			END
+			* CASE WHEN pinned = 1 THEN 1.5 ELSE 1.0 END
+		) DESC
+		LIMIT ?
+	`, projectID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get top memories: %w", err)
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
+// SearchFTS searches memories using full-text search.
+func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit int) ([]Memory, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT m.id, m.project_id, m.category, m.content, m.importance, m.access_count,
+		       m.last_accessed, m.source, m.tags, m.pinned, m.created_at, m.updated_at
+		FROM memories m
+		JOIN memories_fts f ON f.rowid = m.rowid
+		WHERE (m.project_id = ? OR m.project_id = '_global')
+		  AND memories_fts MATCH ?
+		ORDER BY rank, m.importance DESC
+		LIMIT ?
+	`, projectID, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search memories: %w", err)
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
+// GetByCategory returns memories of a specific category.
+func (s *Store) GetByCategory(ctx context.Context, projectID, category string, limit int) ([]Memory, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, project_id, category, content, importance, access_count,
+		       last_accessed, source, tags, pinned, created_at, updated_at
+		FROM memories
+		WHERE project_id = ? AND category = ?
+		ORDER BY importance DESC, created_at DESC
+		LIMIT ?
+	`, projectID, category, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get by category: %w", err)
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
+// GetAll returns all memories for a project.
+func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memory, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, project_id, category, content, importance, access_count,
+		       last_accessed, source, tags, pinned, created_at, updated_at
+		FROM memories
+		WHERE project_id = ?
+		ORDER BY importance DESC, created_at DESC
+		LIMIT ?
+	`, projectID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get all memories: %w", err)
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
+// Touch increments access_count and updates last_accessed.
+func (s *Store) Touch(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	query := fmt.Sprintf(`
+		UPDATE memories
+		SET access_count = access_count + 1, last_accessed = '%s'
+		WHERE id IN (%s)
+	`, now, strings.Join(placeholders, ","))
+
+	_, err := s.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+// Delete removes a specific memory.
+func (s *Store) Delete(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result, err := s.db.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete memory: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("memory not found: %s", id)
+	}
+	return nil
+}
+
+// TogglePin sets or clears the pinned flag.
+func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	pinnedInt := 0
+	if pinned {
+		pinnedInt = 1
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE memories SET pinned = ?, updated_at = datetime('now') WHERE id = ?
+	`, pinnedInt, id)
+	return err
+}
+
+// ReplaceNonManual atomically replaces all non-manual memories for a project.
+// Manual-sourced memories are preserved. Refuses to replace with an empty set.
+func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory) error {
+	if len(memories) == 0 {
+		return fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual'`, projectID)
+	if err != nil {
+		return fmt.Errorf("delete old memories: %w", err)
+	}
+
+	for _, m := range memories {
+		tags, _ := json.Marshal(m.Tags)
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO memories (project_id, category, content, source, importance, tags)
+			VALUES (?, ?, ?, 'reflection', ?, ?)
+		`, projectID, m.Category, m.Content, m.Importance, string(tags))
+		if err != nil {
+			return fmt.Errorf("insert memory: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// CountMemories returns the total number of memories for a project.
+func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE project_id = ?`, projectID).Scan(&count)
+	return count, err
+}
+
+// IncrementInteraction increments the interaction count and returns the new value.
+func (s *Store) IncrementInteraction(ctx context.Context, projectID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		UPDATE ghost_state
+		SET interaction_count = interaction_count + 1, updated_at = datetime('now')
+		WHERE project_id = ?
+		RETURNING interaction_count
+	`, projectID).Scan(&count)
+	return count, err
+}
+
+// GetLearnedContext returns the learned context for a project.
+func (s *Store) GetLearnedContext(ctx context.Context, projectID string) (string, error) {
+	var ctx_ string
+	err := s.db.QueryRowContext(ctx, `SELECT learned_context FROM ghost_state WHERE project_id = ?`, projectID).Scan(&ctx_)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return ctx_, err
+}
+
+// UpdateLearnedContext updates the learned context and reflection metadata.
+func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedContext, summary string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE ghost_state
+		SET learned_context = ?, reflection_summary = ?,
+		    last_reflection_at = datetime('now'), updated_at = datetime('now')
+		WHERE project_id = ?
+	`, learnedContext, summary, projectID)
+	return err
+}
+
+// --- Conversation persistence ---
+
+// CreateConversation starts a new conversation.
+func (s *Store) CreateConversation(ctx context.Context, projectID, mode string) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO conversations (project_id, mode)
+		VALUES (?, ?)
+		RETURNING id
+	`, projectID, mode).Scan(&id)
+	return id, err
+}
+
+// AppendMessage adds a message to a conversation.
+func (s *Store) AppendMessage(ctx context.Context, conversationID, role, content string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO messages (conversation_id, role, content)
+		VALUES (?, ?, ?)
+	`, conversationID, role, content)
+	return err
+}
+
+// GetRecentExchanges returns the last N user+assistant pairs for reflection.
+func (s *Store) GetRecentExchanges(ctx context.Context, projectID string, limit int) ([][2]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT m.role, m.content
+		FROM messages m
+		JOIN conversations c ON c.id = m.conversation_id
+		WHERE c.project_id = ? AND m.role IN ('user', 'assistant')
+		ORDER BY m.created_at DESC
+		LIMIT ?
+	`, projectID, limit*2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var pairs [][2]string
+	var current [2]string
+	for rows.Next() {
+		var role, content string
+		if err := rows.Scan(&role, &content); err != nil {
+			return nil, err
+		}
+		if role == "assistant" {
+			current[1] = content
+		} else {
+			current[0] = content
+			if current[1] != "" {
+				pairs = append(pairs, current)
+			}
+			current = [2]string{}
+		}
+	}
+	return pairs, rows.Err()
+}
+
+// RecordUsage saves token usage for cost tracking.
+func (s *Store) RecordUsage(ctx context.Context, projectID, model string, usage TokenUsage) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO token_usage (project_id, model, input_tokens, output_tokens, cache_creation, cache_read, cost_usd)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, projectID, model, usage.InputTokens, usage.OutputTokens, usage.CacheCreation, usage.CacheRead, usage.CostUSD)
+	return err
+}
+
+// TokenUsage for cost tracking.
+type TokenUsage struct {
+	InputTokens   int
+	OutputTokens  int
+	CacheCreation int
+	CacheRead     int
+	CostUSD       float64
+}
+
+func scanMemories(rows *sql.Rows) ([]Memory, error) {
+	var memories []Memory
+	for rows.Next() {
+		var m Memory
+		var lastAccessed sql.NullString
+		var tagsJSON string
+		var pinned int
+
+		if err := rows.Scan(
+			&m.ID, &m.ProjectID, &m.Category, &m.Content, &m.Importance,
+			&m.AccessCount, &lastAccessed, &m.Source, &tagsJSON,
+			&pinned, &m.CreatedAt, &m.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan memory: %w", err)
+		}
+
+		if lastAccessed.Valid {
+			m.LastAccessed = &lastAccessed.String
+		}
+		m.Pinned = pinned == 1
+
+		if err := json.Unmarshal([]byte(tagsJSON), &m.Tags); err != nil {
+			m.Tags = []string{}
+		}
+
+		memories = append(memories, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("memory rows: %w", err)
+	}
+	return memories, nil
+}

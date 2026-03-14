@@ -1,0 +1,165 @@
+package ai
+
+import "encoding/json"
+
+const (
+	APIURL     = "https://api.anthropic.com/v1/messages"
+	APIVersion = "2023-06-01"
+
+	ModelSonnet46 = "claude-sonnet-4-5-20250929"
+	ModelHaiku45  = "claude-haiku-4-5-20251001"
+	ModelOpus46   = "claude-opus-4-6-20250514"
+)
+
+// SystemBlock is a system prompt block for the Claude API.
+// Multiple blocks enable prompt caching: static blocks with CacheControl
+// are cached across requests (5min TTL), saving ~90% on input token cost.
+type SystemBlock struct {
+	Type         string        `json:"type"`
+	Text         string        `json:"text"`
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
+}
+
+type cacheControl struct {
+	Type string `json:"type"`
+}
+
+// CachedBlock creates a system block with ephemeral cache control.
+func CachedBlock(text string) SystemBlock {
+	return SystemBlock{
+		Type:         "text",
+		Text:         text,
+		CacheControl: &cacheControl{Type: "ephemeral"},
+	}
+}
+
+// PlainBlock creates a system block without cache control.
+func PlainBlock(text string) SystemBlock {
+	return SystemBlock{
+		Type: "text",
+		Text: text,
+	}
+}
+
+// Message represents a conversation message.
+type Message struct {
+	Role    string         `json:"role"`
+	Content []ContentBlock `json:"content"`
+}
+
+// TextMessage creates a simple text message.
+func TextMessage(role, text string) Message {
+	return Message{
+		Role: role,
+		Content: []ContentBlock{
+			{Type: "text", Text: text},
+		},
+	}
+}
+
+// ToolResultMessage creates a tool_result message.
+func ToolResultMessage(results []ToolResult) Message {
+	blocks := make([]ContentBlock, len(results))
+	for i, r := range results {
+		blocks[i] = ContentBlock{
+			Type:      "tool_result",
+			ToolUseID: r.ToolUseID,
+			Content:   r.Content,
+			IsError:   r.IsError,
+		}
+	}
+	return Message{Role: "user", Content: blocks}
+}
+
+// ContentBlock represents a content block in a message.
+type ContentBlock struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
+}
+
+// ToolResult holds the result of a tool execution.
+type ToolResult struct {
+	ToolUseID string
+	Content   string
+	IsError   bool
+}
+
+// ToolDefinition defines a tool for the Claude API.
+type ToolDefinition struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	InputSchema interface{} `json:"input_schema"`
+}
+
+// TokenUsage holds token counts from a Claude API response.
+type TokenUsage struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+}
+
+// StreamEvent is emitted during streaming for TUI rendering.
+type StreamEvent struct {
+	Type       string      // "text", "tool_use_start", "tool_input_delta", "tool_use_end", "done", "error"
+	Text       string      // for text deltas
+	ToolUse    *ToolUseEvent
+	Usage      *TokenUsage
+	StopReason string // on "done": "end_turn" or "tool_use"
+	Error      error
+}
+
+// ToolUseEvent holds data for tool-related stream events.
+type ToolUseEvent struct {
+	ID         string
+	Name       string
+	InputDelta string          // partial JSON for input_json_delta
+	InputFull  json.RawMessage // complete input on tool_use_end
+}
+
+// --- internal request/response types ---
+
+type apiRequest struct {
+	Model     string         `json:"model"`
+	MaxTokens int            `json:"max_tokens"`
+	System    []SystemBlock  `json:"system,omitempty"`
+	Stream    bool           `json:"stream"`
+	Messages  []Message      `json:"messages"`
+	Tools     []ToolDefinition `json:"tools,omitempty"`
+}
+
+type streamEventRaw struct {
+	Type         string          `json:"type"`
+	Delta        json.RawMessage `json:"delta,omitempty"`
+	ContentBlock *contentBlockRaw `json:"content_block,omitempty"`
+	Index        int             `json:"index,omitempty"`
+	Usage        *struct {
+		OutputTokens int `json:"output_tokens,omitempty"`
+	} `json:"usage,omitempty"`
+	Message *struct {
+		Usage struct {
+			InputTokens              int `json:"input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+		} `json:"usage"`
+	} `json:"message,omitempty"`
+}
+
+type contentBlockRaw struct {
+	Type string `json:"type"`
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
+}
+
+type deltaRaw struct {
+	Type        string `json:"type"`
+	Text        string `json:"text,omitempty"`
+	PartialJSON string `json:"partial_json,omitempty"`
+	StopReason  string `json:"stop_reason,omitempty"`
+}

@@ -1,0 +1,97 @@
+// Package provider defines the core interfaces for Ghost's pluggable components.
+// Each interface can be satisfied by different implementations — the existing code
+// becomes the default, and new backends (e.g., Ollama, MCP server) implement the
+// same contracts.
+package provider
+
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/wcatz/ghost/internal/ai"
+	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/mode"
+	"github.com/wcatz/ghost/internal/project"
+)
+
+// LLMProvider abstracts LLM interactions for streaming chat and reflection.
+type LLMProvider interface {
+	// ChatStream sends a conversation to the LLM and streams events back.
+	ChatStream(
+		ctx context.Context,
+		messages []ai.Message,
+		system []ai.SystemBlock,
+		tools []ai.ToolDefinition,
+		model string,
+		maxTokens int,
+	) (<-chan ai.StreamEvent, error)
+
+	// Reflect calls a fast model (e.g., Haiku) for memory extraction/reflection.
+	// Returns the response text and token usage.
+	Reflect(ctx context.Context, prompt string) (string, ai.TokenUsage, error)
+}
+
+// MemoryStore abstracts persistent memory operations.
+type MemoryStore interface {
+	// Core CRUD
+	Create(ctx context.Context, projectID string, m memory.Memory) (string, error)
+	Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (string, bool, error)
+	Delete(ctx context.Context, id string) error
+
+	// Queries
+	GetTopMemories(ctx context.Context, projectID string, limit int) ([]memory.Memory, error)
+	SearchFTS(ctx context.Context, projectID, query string, limit int) ([]memory.Memory, error)
+	SearchHybrid(ctx context.Context, projectID, query string, queryVec []float32, limit int) ([]memory.Memory, error)
+	SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]memory.ScoredMemory, error)
+	GetByCategory(ctx context.Context, projectID, category string, limit int) ([]memory.Memory, error)
+	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
+	GetAll(ctx context.Context, projectID string, limit int) ([]memory.Memory, error)
+	CountMemories(ctx context.Context, projectID string) (int, error)
+
+	// Embeddings
+	StoreEmbedding(ctx context.Context, memoryID string, vec []float32, model string) error
+	DeleteEmbedding(ctx context.Context, memoryID string) error
+	UnembeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error)
+	GetMemoryContent(ctx context.Context, id string) (string, error)
+
+	// Access tracking
+	Touch(ctx context.Context, ids []string) error
+	TogglePin(ctx context.Context, id string, pinned bool) error
+
+	// Reflection
+	ReplaceNonManual(ctx context.Context, projectID string, memories []memory.Memory) error
+
+	// Project management
+	EnsureProject(ctx context.Context, id, path, name string) error
+
+	// Conversation persistence
+	CreateConversation(ctx context.Context, projectID, mode string) (string, error)
+	AppendMessage(ctx context.Context, conversationID, role, content string) error
+	GetRecentExchanges(ctx context.Context, projectID string, limit int) ([][2]string, error)
+
+	// State
+	IncrementInteraction(ctx context.Context, projectID string) (int, error)
+	GetLearnedContext(ctx context.Context, projectID string) (string, error)
+	UpdateLearnedContext(ctx context.Context, projectID, learnedContext, summary string) error
+
+	// Cost tracking
+	RecordUsage(ctx context.Context, projectID, model string, usage memory.TokenUsage) error
+
+	// Lifecycle
+	Close() error
+}
+
+// PromptBuilder constructs the system prompt blocks for a given context.
+type PromptBuilder interface {
+	BuildSystemBlocks(ctx context.Context, projCtx *project.Context, m mode.Mode) []ai.SystemBlock
+}
+
+// ApprovalFunc is called when a tool requires user approval.
+// Returns true if approved, false if denied.
+type ApprovalFunc func(toolName string, input json.RawMessage) bool
+
+// Frontend renders agent output and handles user input.
+type Frontend interface {
+	// Run starts the frontend event loop. Blocks until done.
+	Run(ctx context.Context) error
+}
