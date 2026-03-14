@@ -1,0 +1,38 @@
+# Binaries
+ghost
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build output
+/dist/
+/build/
+
+# Test
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+
+# Ghost data (local)
+*.db
+*.db-wal
+*.db-shm
+
+# Environment
+.env
+.env.*
