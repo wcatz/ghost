@@ -29,6 +29,8 @@ type Config struct {
 	Display  DisplayConfig  `koanf:"display"`
 	Server    ServerConfig    `koanf:"server"`
 	Embedding EmbeddingConfig `koanf:"embedding"`
+	GitHub    GitHubConfig    `koanf:"github"`
+	Telegram  TelegramConfig  `koanf:"telegram"`
 }
 
 // APIConfig holds Claude API settings.
@@ -66,6 +68,18 @@ type EmbeddingConfig struct {
 	OllamaURL  string `koanf:"ollama_url"`
 	Model      string `koanf:"model"`
 	Dimensions int    `koanf:"dimensions"`
+}
+
+// GitHubConfig holds GitHub notification monitor settings.
+type GitHubConfig struct {
+	Token    string `koanf:"token"`
+	Interval int    `koanf:"interval"` // poll interval in seconds
+}
+
+// TelegramConfig holds Telegram bot settings.
+type TelegramConfig struct {
+	Token      string `koanf:"token"`
+	AllowedIDs string `koanf:"allowed_ids"` // comma-separated user IDs
 }
 
 // ProjectConfig holds per-project configuration from .ghost/config.toml.
@@ -119,6 +133,7 @@ var defaults = map[string]interface{}{
 	"embedding.ollama_url":       "http://localhost:11434",
 	"embedding.model":            "nomic-embed-text:v1.5",
 	"embedding.dimensions":       768,
+	"github.interval":            60,
 }
 
 // Load reads configuration with layered precedence.
@@ -152,53 +167,6 @@ func Load() (*Config, error) {
 	}
 
 	// Also support the standard ANTHROPIC_API_KEY.
-	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		_ = k.Load(confmap.Provider(map[string]interface{}{
-			"api.key": key,
-		}, "."), nil)
-	}
-
-	cfg := &Config{}
-	if err := k.Unmarshal("", cfg); err != nil {
-		return nil, err
-	}
-	return cfg, nil
-}
-
-// LoadWithProject loads global config then layers project-specific config on top.
-// projectPath is the root directory of the project.
-func LoadWithProject(projectPath string) (*Config, error) {
-	k := koanf.New(".")
-
-	// Layer 1: compiled defaults.
-	if err := k.Load(confmap.Provider(defaults, "."), nil); err != nil {
-		return nil, err
-	}
-
-	parser := toml.Parser()
-
-	// Layer 2: /etc/ghost/config.toml
-	loadFileIfExists(k, "/etc/ghost/config.toml", parser)
-
-	// Layer 3: ~/.config/ghost/config.toml
-	if configDir, err := os.UserConfigDir(); err == nil {
-		loadFileIfExists(k, filepath.Join(configDir, "ghost", "config.toml"), parser)
-	}
-
-	// Layer 4: .ghost/config.toml (project, checked in)
-	loadFileIfExists(k, filepath.Join(projectPath, ".ghost", "config.toml"), parser)
-
-	// Layer 5: .ghost/config.local.toml (project, gitignored)
-	loadFileIfExists(k, filepath.Join(projectPath, ".ghost", "config.local.toml"), parser)
-
-	// Layer 6: GHOST_* environment variables.
-	if err := k.Load(env.Provider("GHOST_", ".", func(s string) string {
-		return strings.ToLower(strings.Replace(
-			strings.TrimPrefix(s, "GHOST_"), "_", ".", -1))
-	}), nil); err != nil {
-		return nil, err
-	}
-
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
 		_ = k.Load(confmap.Provider(map[string]interface{}{
 			"api.key": key,

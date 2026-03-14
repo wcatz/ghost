@@ -200,13 +200,27 @@ func (s *Session) Send(ctx context.Context, userMsg string, approvalFn ApprovalF
 
 		// Post-exchange: memory extraction + reflection (fire and forget).
 		if fullResponse != "" {
-			go reflection.ExtractMemories(
-				context.Background(), s.client, s.store, s.logger,
-				s.ProjectID, userMsg, fullResponse,
-			)
-			go s.reflector.MaybeReflect(
-				context.Background(), s.ProjectID, s.projectCtx,
-			)
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						s.logger.Error("panic in memory extraction", "error", r)
+					}
+				}()
+				reflection.ExtractMemories(
+					context.Background(), s.client, s.store, s.logger,
+					s.ProjectID, userMsg, fullResponse,
+				)
+			}()
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						s.logger.Error("panic in reflection", "error", r)
+					}
+				}()
+				s.reflector.MaybeReflect(
+					context.Background(), s.ProjectID, s.projectCtx,
+				)
+			}()
 		}
 	}()
 

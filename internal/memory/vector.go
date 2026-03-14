@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 )
 
 // StoreEmbedding saves an embedding vector for a memory.
@@ -230,7 +231,7 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 		       last_accessed, source, tags, pinned, created_at, updated_at
 		FROM memories
 		WHERE id IN (%s)
-	`, joinStrings(placeholders, ","))
+	`, strings.Join(placeholders, ","))
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -238,17 +239,6 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 	}
 	defer rows.Close()
 	return scanMemories(rows)
-}
-
-func joinStrings(ss []string, sep string) string {
-	result := ""
-	for i, s := range ss {
-		if i > 0 {
-			result += sep
-		}
-		result += s
-	}
-	return result
 }
 
 func float32sToBytes(fs []float32) []byte {

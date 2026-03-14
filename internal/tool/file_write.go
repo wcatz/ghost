@@ -40,7 +40,10 @@ func execFileWrite(ctx context.Context, projectPath string, input json.RawMessag
 		return Result{Content: fmt.Sprintf("invalid input: %v", err), IsError: true}
 	}
 
-	path := resolvePath(projectPath, in.Path)
+	path, err := safePath(projectPath, in.Path)
+	if err != nil {
+		return Result{Content: err.Error(), IsError: true}
+	}
 
 	// Create parent directories.
 	dir := filepath.Dir(path)

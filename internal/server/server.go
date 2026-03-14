@@ -13,7 +13,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/wcatz/ghost/internal/config"
-	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 )
 
@@ -146,6 +145,20 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Category == "" {
 		req.Category = "fact"
 	}
+	validCategories := map[string]bool{
+		"architecture": true, "decision": true, "pattern": true, "convention": true,
+		"gotcha": true, "dependency": true, "preference": true, "fact": true,
+	}
+	if !validCategories[req.Category] {
+		writeError(w, http.StatusBadRequest, "invalid category")
+		return
+	}
+	if req.Importance < 0 {
+		req.Importance = 0
+	}
+	if req.Importance > 1 {
+		req.Importance = 1
+	}
 	if req.Source == "" {
 		req.Source = "manual"
 	}
@@ -242,5 +255,3 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// Ensure Memory type is importable for JSON responses.
-var _ = memory.Memory{}

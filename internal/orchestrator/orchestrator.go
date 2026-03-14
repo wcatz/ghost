@@ -123,7 +123,9 @@ func (o *Orchestrator) StopSession(projectPath string) error {
 	defer o.mu.Unlock()
 
 	if s, ok := o.sessions[projCtx.ID]; ok {
+		s.mu.Lock()
 		s.Active = false
+		s.mu.Unlock()
 		delete(o.sessions, projCtx.ID)
 		o.logger.Info("session stopped", "project", projCtx.Name)
 	}
@@ -136,7 +138,9 @@ func (o *Orchestrator) Shutdown(_ context.Context) error {
 	defer o.mu.Unlock()
 
 	for id, s := range o.sessions {
+		s.mu.Lock()
 		s.Active = false
+		s.mu.Unlock()
 		delete(o.sessions, id)
 	}
 	return nil

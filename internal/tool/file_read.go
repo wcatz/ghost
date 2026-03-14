@@ -44,7 +44,10 @@ func execFileRead(ctx context.Context, projectPath string, input json.RawMessage
 		return Result{Content: fmt.Sprintf("invalid input: %v", err), IsError: true}
 	}
 
-	path := resolvePath(projectPath, in.Path)
+	path, err := safePath(projectPath, in.Path)
+	if err != nil {
+		return Result{Content: err.Error(), IsError: true}
+	}
 
 	info, err := os.Stat(path)
 	if err != nil {
@@ -109,4 +112,17 @@ func resolvePath(projectPath, path string) string {
 		return path
 	}
 	return filepath.Join(projectPath, path)
+}
+
+// safePath resolves a path and ensures it stays within the project directory.
+// Returns the resolved path and an error if the path escapes the project root.
+func safePath(projectPath, path string) (string, error) {
+	resolved := resolvePath(projectPath, path)
+	cleaned := filepath.Clean(resolved)
+	projCleaned := filepath.Clean(projectPath)
+
+	if !strings.HasPrefix(cleaned, projCleaned+string(filepath.Separator)) && cleaned != projCleaned {
+		return "", fmt.Errorf("path %q escapes project directory", path)
+	}
+	return cleaned, nil
 }

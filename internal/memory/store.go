@@ -46,6 +46,9 @@ func (s *Store) Close() error {
 
 // EnsureProject creates a project record if it doesn't exist.
 func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO projects (id, path, name) VALUES (?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET path = excluded.path, updated_at = datetime('now')
@@ -90,6 +93,8 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 	var existingImportance float32
 	var existingContent string
 
+	// Extract keywords for FTS match (strip FTS5 operators to prevent injection).
+	ftsQuery := sanitizeFTS(content)
 	err = s.db.QueryRowContext(ctx, `
 		SELECT m.id, m.importance, m.content
 		FROM memories m
@@ -99,7 +104,7 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 		  AND memories_fts MATCH ?
 		ORDER BY rank, m.importance DESC
 		LIMIT 1
-	`, projectID, category, content).Scan(&existingID, &existingImportance, &existingContent)
+	`, projectID, category, ftsQuery).Scan(&existingID, &existingImportance, &existingContent)
 
 	if err == nil && existingID != "" {
 		// Found a match — strengthen it.
@@ -240,18 +245,18 @@ func (s *Store) Touch(ctx context.Context, ids []string) error {
 	defer s.mu.Unlock()
 
 	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
+	args := make([]interface{}, len(ids)+1)
+	args[0] = time.Now().UTC().Format(time.RFC3339)
 	for i, id := range ids {
 		placeholders[i] = "?"
-		args[i] = id
+		args[i+1] = id
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
 	query := fmt.Sprintf(`
 		UPDATE memories
-		SET access_count = access_count + 1, last_accessed = '%s'
+		SET access_count = access_count + 1, last_accessed = ?
 		WHERE id IN (%s)
-	`, now, strings.Join(placeholders, ","))
+	`, strings.Join(placeholders, ","))
 
 	_, err := s.db.ExecContext(ctx, query, args...)
 	return err
@@ -325,6 +330,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 
 // CountMemories returns the total number of memories for a project.
 func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE project_id = ?`, projectID).Scan(&count)
 	return count, err
@@ -332,6 +340,9 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 
 // IncrementInteraction increments the interaction count and returns the new value.
 func (s *Store) IncrementInteraction(ctx context.Context, projectID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		UPDATE ghost_state
@@ -344,6 +355,9 @@ func (s *Store) IncrementInteraction(ctx context.Context, projectID string) (int
 
 // GetLearnedContext returns the learned context for a project.
 func (s *Store) GetLearnedContext(ctx context.Context, projectID string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var ctx_ string
 	err := s.db.QueryRowContext(ctx, `SELECT learned_context FROM ghost_state WHERE project_id = ?`, projectID).Scan(&ctx_)
 	if err == sql.ErrNoRows {
@@ -354,6 +368,9 @@ func (s *Store) GetLearnedContext(ctx context.Context, projectID string) (string
 
 // UpdateLearnedContext updates the learned context and reflection metadata.
 func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedContext, summary string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE ghost_state
 		SET learned_context = ?, reflection_summary = ?,
@@ -367,6 +384,9 @@ func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedCont
 
 // CreateConversation starts a new conversation.
 func (s *Store) CreateConversation(ctx context.Context, projectID, mode string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	var id string
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO conversations (project_id, mode)
@@ -378,6 +398,9 @@ func (s *Store) CreateConversation(ctx context.Context, projectID, mode string) 
 
 // AppendMessage adds a message to a conversation.
 func (s *Store) AppendMessage(ctx context.Context, conversationID, role, content string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO messages (conversation_id, role, content)
 		VALUES (?, ?, ?)
@@ -387,6 +410,9 @@ func (s *Store) AppendMessage(ctx context.Context, conversationID, role, content
 
 // GetRecentExchanges returns the last N user+assistant pairs for reflection.
 func (s *Store) GetRecentExchanges(ctx context.Context, projectID string, limit int) ([][2]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.role, m.content
 		FROM messages m
@@ -422,6 +448,9 @@ func (s *Store) GetRecentExchanges(ctx context.Context, projectID string, limit 
 
 // RecordUsage saves token usage for cost tracking.
 func (s *Store) RecordUsage(ctx context.Context, projectID, model string, usage TokenUsage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO token_usage (project_id, model, input_tokens, output_tokens, cache_creation, cache_read, cost_usd)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -469,4 +498,29 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 		return nil, fmt.Errorf("memory rows: %w", err)
 	}
 	return memories, nil
+}
+
+// sanitizeFTS strips FTS5 special operators from text to prevent query injection.
+// Extracts plain words and quotes each one so they're treated as literals.
+func sanitizeFTS(text string) string {
+	// Remove FTS5 operators and punctuation, keep only words.
+	var words []string
+	for _, word := range strings.Fields(text) {
+		// Strip non-alphanumeric characters from edges.
+		clean := strings.TrimFunc(word, func(r rune) bool {
+			return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+		})
+		if len(clean) >= 2 {
+			// Quote each word to treat as literal.
+			words = append(words, `"`+clean+`"`)
+		}
+	}
+	if len(words) == 0 {
+		return `""`
+	}
+	// Limit to first 10 words to keep the query reasonable.
+	if len(words) > 10 {
+		words = words[:10]
+	}
+	return strings.Join(words, " OR ")
 }

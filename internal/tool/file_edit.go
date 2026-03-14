@@ -42,7 +42,10 @@ func execFileEdit(ctx context.Context, projectPath string, input json.RawMessage
 		return Result{Content: fmt.Sprintf("invalid input: %v", err), IsError: true}
 	}
 
-	path := resolvePath(projectPath, in.Path)
+	path, err := safePath(projectPath, in.Path)
+	if err != nil {
+		return Result{Content: err.Error(), IsError: true}
+	}
 
 	content, err := os.ReadFile(path)
 	if err != nil {

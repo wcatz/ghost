@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"time"
 )
@@ -110,24 +109,3 @@ func (c *Client) Dimensions() int {
 	return c.dimensions
 }
 
-// CosineSimilarity computes the cosine similarity between two vectors.
-// Returns a value in [-1, 1] where 1 means identical direction.
-func CosineSimilarity(a, b []float32) float32 {
-	if len(a) != len(b) || len(a) == 0 {
-		return 0
-	}
-
-	var dot, normA, normB float64
-	for i := range a {
-		ai, bi := float64(a[i]), float64(b[i])
-		dot += ai * bi
-		normA += ai * ai
-		normB += bi * bi
-	}
-
-	denom := math.Sqrt(normA) * math.Sqrt(normB)
-	if denom == 0 {
-		return 0
-	}
-	return float32(dot / denom)
-}

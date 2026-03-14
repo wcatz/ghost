@@ -129,6 +129,46 @@ CREATE TABLE IF NOT EXISTS memory_embeddings (
     model       TEXT NOT NULL DEFAULT 'nomic-embed-text',
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id              TEXT PRIMARY KEY,
+    github_id       TEXT NOT NULL UNIQUE,
+    repo_full_name  TEXT NOT NULL,
+    subject_title   TEXT NOT NULL,
+    subject_type    TEXT NOT NULL,
+    subject_url     TEXT DEFAULT '',
+    reason          TEXT NOT NULL,
+    priority        INTEGER NOT NULL DEFAULT 4,
+    unread          INTEGER NOT NULL DEFAULT 1,
+    updated_at      TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    dismissed_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_notif_priority ON notifications(priority, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notif_repo ON notifications(repo_full_name, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notif_unread ON notifications(unread, priority);
+
+CREATE TABLE IF NOT EXISTS scheduled_jobs (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    name        TEXT NOT NULL,
+    schedule    TEXT NOT NULL,
+    payload     TEXT DEFAULT '{}',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    last_run    TEXT,
+    next_run    TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    message     TEXT NOT NULL,
+    due_at      TEXT NOT NULL,
+    fired       INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(fired, due_at);
 `
 
 // OpenDB opens or creates the SQLite database and runs migrations.

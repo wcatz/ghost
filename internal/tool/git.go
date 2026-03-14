@@ -79,7 +79,3 @@ func execGit(ctx context.Context, projectPath string, input json.RawMessage) Res
 	return Result{Content: result}
 }
 
-// IsReadOnlyGit returns true if a git subcommand is read-only.
-func IsReadOnlyGit(subcommand string) bool {
-	return readOnlyGitCmds[subcommand]
-}
