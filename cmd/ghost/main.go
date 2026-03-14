@@ -74,7 +74,7 @@ func main() {
 
 	if cfg.API.Key == "" {
 		fmt.Fprintln(os.Stderr, "error: ANTHROPIC_API_KEY not set")
-		fmt.Fprintln(os.Stderr, "Set it via environment variable or in ~/.config/ghost/config.toml")
+		fmt.Fprintln(os.Stderr, "Set it via environment variable or in ~/.config/ghost/config.yaml")
 		os.Exit(1)
 	}
 
@@ -314,6 +314,13 @@ func runMCP() {
 
 // bootstrap loads config, sets up logging, and opens the database.
 func bootstrap() (*config.Config, *slog.Logger, *memory.Store, *sql.DB) {
+	configPath, created, err := config.EnsureConfigFile()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not create config file: %v\n", err)
+	} else if created {
+		fmt.Fprintf(os.Stderr, "Created config file: %s\n", configPath)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

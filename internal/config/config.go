@@ -11,6 +11,7 @@
 package config
 
 import (
+	_ "embed"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,9 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 )
+
+//go:embed config.example.yaml
+var exampleConfig []byte
 
 // Config holds the global ghost configuration.
 type Config struct {
@@ -240,6 +244,29 @@ func DataDir() (string, error) {
 		return "", err
 	}
 	return dir, nil
+}
+
+// EnsureConfigFile creates ~/.config/ghost/config.yaml from the embedded example
+// if it doesn't already exist. Returns the path and whether a new file was created.
+func EnsureConfigFile() (path string, created bool, err error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", false, err
+	}
+	dir := filepath.Join(configDir, "ghost")
+	path = filepath.Join(dir, "config.yaml")
+
+	if _, err := os.Stat(path); err == nil {
+		return path, false, nil
+	}
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", false, err
+	}
+	if err := os.WriteFile(path, exampleConfig, 0o644); err != nil {
+		return "", false, err
+	}
+	return path, true, nil
 }
 
 // loadFileIfExists loads a config file into koanf if it exists, silently skipping missing files.

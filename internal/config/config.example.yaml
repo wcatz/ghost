@@ -1,0 +1,65 @@
+# Ghost — Personal Assistant Daemon Configuration
+# ~/.config/ghost/config.yaml
+#
+# Loading order (later overrides earlier):
+#   1. Compiled defaults
+#   2. /etc/ghost/config.yaml
+#   3. ~/.config/ghost/config.yaml  (this file)
+#   4. .ghost/config.yaml           (per-project)
+#   5. .ghost/config.local.yaml     (per-project, gitignored)
+#   6. GHOST_* environment variables
+#
+# All settings can also be set via env vars:
+#   GHOST_API_KEY, GHOST_SERVER_LISTEN_ADDR, etc.
+
+# --- Claude API ---
+# api:
+#   key: ""                          # or set ANTHROPIC_API_KEY env var
+#   model_quality: "claude-sonnet-4-5-20250929"
+#   model_fast: "claude-haiku-4-5-20251001"
+
+# --- Daemon defaults ---
+# defaults:
+#   mode: "code"                     # chat, code, debug, review, plan, refactor
+#   reflection_interval: 10          # conversations between reflection passes
+#   max_conversation_turns: 50
+#   auto_memory: true
+#   approval_mode: "normal"          # normal or yolo
+
+# --- Display (REPL only) ---
+# display:
+#   show_token_usage: true
+#   show_cost: true
+#   stream_tool_output: true
+
+# --- HTTP Server (ghost serve) ---
+# server:
+#   listen_addr: "127.0.0.1:2187"
+
+# --- Local Embeddings (Ollama) ---
+# embedding:
+#   enabled: true
+#   ollama_url: "http://localhost:11434"
+#   model: "nomic-embed-text:v1.5"   # 274MB, runs fine on CPU
+#   dimensions: 768
+
+# --- GitHub Notifications ---
+# github:
+#   token: ""                        # PAT with notifications scope
+#   interval: 60                     # poll interval in seconds
+
+# --- Telegram Bot ---
+# telegram:
+#   token: ""                        # BotFather token
+#   allowed_ids: ""                  # comma-separated numeric user IDs
+
+# --- CalDAV Calendar ---
+# calendar:
+#   url: ""                          # CalDAV server URL (iCloud, Fastmail, etc.)
+#   username: ""
+#   password: ""                     # app-specific password recommended
+
+# --- Morning Briefing ---
+# briefing:
+#   enabled: false
+#   schedule: "0 8 * * 1-5"         # cron: 8am weekdays
