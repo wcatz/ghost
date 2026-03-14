@@ -295,6 +295,11 @@ func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.input.blur()
 		return a, nil
 
+	case key.Matches(msg, keys.NewLine):
+		// Insert a literal newline into the textarea.
+		a.input.textarea.InsertString("\n")
+		return a, nil
+
 	case key.Matches(msg, keys.Send):
 		if a.isProcessing {
 			return a, nil

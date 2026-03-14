@@ -17,7 +17,7 @@ type inputArea struct {
 
 func newInputArea() inputArea {
 	ta := textarea.New()
-	ta.Placeholder = "Type a message... (Enter to send, Shift+Enter for newline)"
+	ta.Placeholder = "Type a message... (Enter to send, Alt+Enter for newline)"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 10000
 	ta.SetHeight(2)

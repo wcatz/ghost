@@ -30,8 +30,8 @@ var keys = keyMap{
 		key.WithHelp("enter", "send message"),
 	),
 	NewLine: key.NewBinding(
-		key.WithKeys("shift+enter"),
-		key.WithHelp("shift+enter", "new line"),
+		key.WithKeys("alt+enter"),
+		key.WithHelp("alt+enter", "new line"),
 	),
 	Quit: key.NewBinding(
 		key.WithKeys("ctrl+c"),
