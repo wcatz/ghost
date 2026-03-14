@@ -13,18 +13,22 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/wcatz/ghost/internal/briefing"
 	gh "github.com/wcatz/ghost/internal/github"
 	"github.com/wcatz/ghost/internal/provider"
+	"github.com/wcatz/ghost/internal/scheduler"
 )
 
 // Bot is the Ghost Telegram bot.
 type Bot struct {
-	bot       *bot.Bot
-	store     provider.MemoryStore
-	ghMonitor *gh.Monitor
-	db        *sql.DB
-	logger    *slog.Logger
-	allowedIDs map[int64]bool
+	bot            *bot.Bot
+	store          provider.MemoryStore
+	ghMonitor      *gh.Monitor
+	sched          *scheduler.Scheduler
+	briefingSources briefing.Sources
+	db             *sql.DB
+	logger         *slog.Logger
+	allowedIDs     map[int64]bool
 }
 
 // Config holds Telegram bot configuration.
@@ -34,10 +38,11 @@ type Config struct {
 }
 
 // New creates and configures the Telegram bot.
-func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, db *sql.DB, logger *slog.Logger) (*Bot, error) {
+func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *scheduler.Scheduler, db *sql.DB, logger *slog.Logger) (*Bot, error) {
 	tb := &Bot{
 		store:      store,
 		ghMonitor:  ghMonitor,
+		sched:      sched,
 		db:         db,
 		logger:     logger,
 		allowedIDs: make(map[int64]bool, len(cfg.AllowedIDs)),
@@ -205,20 +210,35 @@ func (tb *Bot) handleMemory(ctx context.Context, b *bot.Bot, update *models.Upda
 
 func (tb *Bot) handleRemind(ctx context.Context, b *bot.Bot, update *models.Update) {
 	text := update.Message.Text
-	// Simple: /remind <message>
 	parts := strings.SplitN(text, " ", 2)
 	if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
-		tb.reply(ctx, b, update, "Usage: `/remind <message>`\nScheduler integration coming soon.")
+		tb.reply(ctx, b, update, "Usage: `/remind <message>`\nExample: `/remind tomorrow at 2pm check the deploy`")
 		return
 	}
 
-	// For now, just acknowledge. Full scheduler integration in B.3.
-	tb.reply(ctx, b, update, "⏰ Reminder noted (scheduler not yet wired): "+parts[1])
+	if tb.sched == nil {
+		tb.reply(ctx, b, update, "Scheduler not configured.")
+		return
+	}
+
+	dueAt, err := tb.sched.AddReminder(ctx, parts[1])
+	if err != nil {
+		tb.reply(ctx, b, update, "Failed to create reminder: "+err.Error())
+		return
+	}
+
+	tb.reply(ctx, b, update, fmt.Sprintf("⏰ Reminder set for %s:\n%s",
+		dueAt.Local().Format("Mon Jan 2 15:04"), parts[1]))
 }
 
 func (tb *Bot) handleBriefing(ctx context.Context, b *bot.Bot, update *models.Update) {
-	briefing := tb.generateBriefing(ctx)
-	tb.reply(ctx, b, update, briefing)
+	msg := briefing.Generate(ctx, tb.briefingSources)
+	tb.reply(ctx, b, update, msg)
+}
+
+// SetBriefingSources configures the data sources for on-demand briefings.
+func (tb *Bot) SetBriefingSources(src briefing.Sources) {
+	tb.briefingSources = src
 }
 
 func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -237,49 +257,6 @@ func (tb *Bot) handleDefault(ctx context.Context, b *bot.Bot, update *models.Upd
 		return
 	}
 	tb.reply(ctx, b, update, "Use /help to see available commands.")
-}
-
-// --- Briefing ---
-
-func (tb *Bot) generateBriefing(ctx context.Context) string {
-	var sb strings.Builder
-	sb.WriteString("*☀️ Ghost Briefing*\n\n")
-
-	// GitHub notifications.
-	if tb.ghMonitor != nil {
-		summary, err := tb.ghMonitor.Summary(ctx)
-		if err == nil {
-			total := 0
-			for _, c := range summary {
-				total += c
-			}
-			if total > 0 {
-				sb.WriteString(fmt.Sprintf("*GitHub* — %d unread\n", total))
-				for p := gh.P0; p <= gh.P4; p++ {
-					if c, ok := summary[p]; ok && c > 0 {
-						sb.WriteString(fmt.Sprintf("  P%d: %d\n", p, c))
-					}
-				}
-
-				// Show P0-P2 details.
-				urgent, _ := tb.ghMonitor.GetByPriority(ctx, gh.P2, 5)
-				for _, n := range urgent {
-					sb.WriteString(fmt.Sprintf("  %s `%s` — %s\n", priorityEmoji(n.Priority), n.RepoFullName, n.SubjectTitle))
-				}
-				sb.WriteString("\n")
-			} else {
-				sb.WriteString("*GitHub* — All clear ✅\n\n")
-			}
-		}
-	}
-
-	// Reminders due today.
-	sb.WriteString("*Reminders* — (scheduler B.3 pending)\n\n")
-
-	// Calendar.
-	sb.WriteString("*Calendar* — (integration B.4 pending)\n")
-
-	return sb.String()
 }
 
 // --- Helpers ---

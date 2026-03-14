@@ -199,7 +199,9 @@ func (s *Scheduler) fireReminders(ctx context.Context) {
 	}
 
 	for _, id := range fired {
-		s.db.ExecContext(ctx, `UPDATE reminders SET fired = 1 WHERE id = ?`, id)
+		if _, err := s.db.ExecContext(ctx, `UPDATE reminders SET fired = 1 WHERE id = ?`, id); err != nil {
+			s.logger.Error("mark reminder fired", "error", err, "id", id)
+		}
 	}
 }
 

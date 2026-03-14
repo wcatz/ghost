@@ -243,7 +243,7 @@ func runServe() {
 		tgBot, err = telegram.New(telegram.Config{
 			Token:      cfg.Telegram.Token,
 			AllowedIDs: allowedIDs,
-		}, store, ghMonitor, db, logger)
+		}, store, ghMonitor, sched, db, logger)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: telegram bot: %v\n", err)
 			os.Exit(1)
@@ -268,12 +268,15 @@ func runServe() {
 	}
 
 	// --- Morning briefing cron ---
+	briefingSources := briefing.Sources{
+		GitHub:    ghMonitor,
+		Calendar:  calClient,
+		Scheduler: sched,
+	}
+	if tgBot != nil {
+		tgBot.SetBriefingSources(briefingSources)
+	}
 	if cfg.Briefing.Enabled && tgBot != nil {
-		briefingSources := briefing.Sources{
-			GitHub:    ghMonitor,
-			Calendar:  calClient,
-			Scheduler: sched,
-		}
 		err := sched.AddCronJob(ctx, "morning-briefing", cfg.Briefing.Schedule, nil, func() {
 			msg := briefing.Generate(ctx, briefingSources)
 			tgBot.SendToAll(ctx, msg)

@@ -62,6 +62,7 @@ type MemoryStore interface {
 	ReplaceNonManual(ctx context.Context, projectID string, memories []memory.Memory) error
 
 	// Project management
+	ListProjects(ctx context.Context) ([]memory.Project, error)
 	EnsureProject(ctx context.Context, id, path, name string) error
 
 	// Conversation persistence

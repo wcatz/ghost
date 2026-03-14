@@ -27,6 +27,15 @@ type Memory struct {
 	UpdatedAt    string   `json:"updated_at"`
 }
 
+// Project represents a registered project.
+type Project struct {
+	ID        string `json:"id"`
+	Path      string `json:"path"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
 // Store manages the SQLite memory database.
 type Store struct {
 	db     *sql.DB
@@ -42,6 +51,30 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 // Close closes the underlying database.
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// ListProjects returns all registered projects.
+func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, path, name, created_at, updated_at FROM projects ORDER BY name ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var projects []Project
+	for rows.Next() {
+		var p Project
+		if err := rows.Scan(&p.ID, &p.Path, &p.Name, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	return projects, rows.Err()
 }
 
 // EnsureProject creates a project record if it doesn't exist.

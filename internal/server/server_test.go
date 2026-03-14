@@ -78,7 +78,8 @@ func (m *mockStore) TogglePin(_ context.Context, _ string, _ bool) error        
 func (m *mockStore) ReplaceNonManual(_ context.Context, _ string, _ []memory.Memory) error {
 	return nil
 }
-func (m *mockStore) EnsureProject(_ context.Context, _, _, _ string) error { return nil }
+func (m *mockStore) ListProjects(_ context.Context) ([]memory.Project, error) { return nil, nil }
+func (m *mockStore) EnsureProject(_ context.Context, _, _, _ string) error    { return nil }
 func (m *mockStore) CreateConversation(_ context.Context, _, _ string) (string, error) {
 	return "", nil
 }

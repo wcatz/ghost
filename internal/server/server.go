@@ -218,8 +218,13 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
-	// Simple query — not on the provider interface yet, but we can list from memories.
-	writeJSON(w, http.StatusOK, map[string]string{"status": "not implemented"})
+	projects, err := s.store.ListProjects(r.Context())
+	if err != nil {
+		s.logger.Error("list projects", "error", err)
+		writeError(w, http.StatusInternalServerError, "list failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, projects)
 }
 
 // --- Middleware ---
