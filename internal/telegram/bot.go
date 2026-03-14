@@ -101,7 +101,7 @@ func (tb *Bot) SendToAll(ctx context.Context, text string) {
 
 func (tb *Bot) authMiddleware(next bot.HandlerFunc) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
-		if update.Message == nil {
+		if update.Message == nil || update.Message.From == nil {
 			return
 		}
 		userID := update.Message.From.ID

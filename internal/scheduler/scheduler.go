@@ -143,6 +143,8 @@ func (s *Scheduler) AddCronJob(ctx context.Context, name, cronExpr string, paylo
 		gocron.WithName(name),
 	)
 	if err != nil {
+		// Clean up orphaned DB record on schedule failure.
+		s.db.ExecContext(ctx, `DELETE FROM scheduled_jobs WHERE id = ?`, id)
 		return fmt.Errorf("schedule job: %w", err)
 	}
 
