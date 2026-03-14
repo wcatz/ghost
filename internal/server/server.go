@@ -166,6 +166,13 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		req.Tags = []string{}
 	}
 
+	// Auto-ensure project exists before creating memory.
+	if err := s.store.EnsureProject(r.Context(), req.ProjectID, "", req.ProjectID); err != nil {
+		s.logger.Error("ensure project", "error", err)
+		writeError(w, http.StatusInternalServerError, "create failed")
+		return
+	}
+
 	id, merged, err := s.store.Upsert(r.Context(), req.ProjectID, req.Category, req.Content, req.Source, req.Importance, req.Tags)
 	if err != nil {
 		s.logger.Error("create memory", "error", err)
