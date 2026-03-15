@@ -102,6 +102,14 @@ func newTestServer(store *mockStore) *Server {
 	}, slog.Default())
 }
 
+// newTestServerWithAuth creates a Server with auth configured.
+func newTestServerWithAuth(store *mockStore, token string) *Server {
+	return New(store, &config.ServerConfig{
+		ListenAddr: "127.0.0.1:0",
+		AuthToken:  token,
+	}, slog.Default())
+}
+
 // --- handleHealth ---
 
 func TestHandleHealth(t *testing.T) {
@@ -253,5 +261,106 @@ func TestHandleCreate_DefaultCategory(t *testing.T) {
 	// Should succeed — category defaults to "fact".
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// --- Auth Middleware ---
+
+// authRouter creates a chi router with the same auth structure as production.
+func authRouter(s *Server) chi.Router {
+	r := chi.NewRouter()
+	r.Get("/api/v1/health", s.handleHealth)
+	r.Group(func(r chi.Router) {
+		if s.cfg.AuthToken != "" {
+			r.Use(s.authMiddleware)
+		}
+		r.Get("/api/v1/projects", s.handleListProjects)
+		r.Route("/api/v1/memories", func(r chi.Router) {
+			r.Post("/search", s.handleSearch)
+		})
+	})
+	return r
+}
+
+func TestAuthMiddleware_NoTokenConfig_Passthrough(t *testing.T) {
+	s := newTestServer(&mockStore{})
+	r := authRouter(s)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	// No auth configured → should pass through (200).
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 with no auth config, got %d", rr.Code)
+	}
+}
+
+func TestAuthMiddleware_ValidToken(t *testing.T) {
+	s := newTestServerWithAuth(&mockStore{}, "test-secret-token")
+	r := authRouter(s)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	req.Header.Set("Authorization", "Bearer test-secret-token")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 with valid token, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAuthMiddleware_MissingHeader(t *testing.T) {
+	s := newTestServerWithAuth(&mockStore{}, "test-secret-token")
+	r := authRouter(s)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth header, got %d", rr.Code)
+	}
+}
+
+func TestAuthMiddleware_WrongToken(t *testing.T) {
+	s := newTestServerWithAuth(&mockStore{}, "test-secret-token")
+	r := authRouter(s)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 with wrong token, got %d", rr.Code)
+	}
+}
+
+func TestAuthMiddleware_BasicAuthRejected(t *testing.T) {
+	s := newTestServerWithAuth(&mockStore{}, "test-secret-token")
+	r := authRouter(s)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for Basic auth, got %d", rr.Code)
+	}
+}
+
+func TestAuthMiddleware_HealthNoAuthRequired(t *testing.T) {
+	s := newTestServerWithAuth(&mockStore{}, "test-secret-token")
+	r := authRouter(s)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	// No Authorization header.
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for health without auth, got %d", rr.Code)
 	}
 }

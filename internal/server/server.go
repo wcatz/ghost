@@ -4,10 +4,12 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -45,13 +47,20 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Routes.
 	r.Get("/api/v1/health", s.handleHealth)
-	r.Route("/api/v1/memories", func(r chi.Router) {
-		r.Post("/search", s.handleSearch)
-		r.Post("/", s.handleCreate)
-		r.Get("/{projectID}", s.handleList)
-		r.Delete("/{memoryID}", s.handleDelete)
+
+	// Authenticated routes — auth enforced only when auth_token is configured.
+	r.Group(func(r chi.Router) {
+		if s.cfg.AuthToken != "" {
+			r.Use(s.authMiddleware)
+		}
+		r.Route("/api/v1/memories", func(r chi.Router) {
+			r.Post("/search", s.handleSearch)
+			r.Post("/", s.handleCreate)
+			r.Get("/{projectID}", s.handleList)
+			r.Delete("/{memoryID}", s.handleDelete)
+		})
+		r.Get("/api/v1/projects", s.handleListProjects)
 	})
-	r.Get("/api/v1/projects", s.handleListProjects)
 
 	s.srv = &http.Server{
 		Addr:              s.cfg.ListenAddr,
@@ -60,6 +69,11 @@ func (s *Server) Run(ctx context.Context) error {
 		BaseContext:       func(_ net.Listener) context.Context { return ctx },
 	}
 
+	if s.cfg.AuthToken != "" {
+		s.logger.Info("bearer auth enabled for API routes")
+	} else {
+		s.logger.Warn("no auth_token configured, API is unauthenticated")
+	}
 	s.logger.Info("ghost serve starting", "addr", s.cfg.ListenAddr)
 
 	errCh := make(chan error, 1)
@@ -224,6 +238,24 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Middleware ---
+
+// authMiddleware validates Bearer token authentication.
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if !strings.HasPrefix(auth, prefix) {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		token := auth[len(prefix):]
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AuthToken)) != 1 {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 func (s *Server) logMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
