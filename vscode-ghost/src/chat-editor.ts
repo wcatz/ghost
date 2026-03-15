@@ -162,6 +162,8 @@ export class ChatEditorPanel {
       this.postMessage({ type: "tool_delta", ...data }));
     events.on("tool_end", (data: { id: string; name: string }) =>
       this.postMessage({ type: "tool_end", ...data }));
+    events.on("tool_diff", (data: Record<string, string>) =>
+      this.postMessage({ type: "tool_diff", ...data }));
     events.on("approval", (data: ApprovalRequest) =>
       this.postMessage({ type: "approval_required", tool_name: data.tool_name, input: data.input }));
     events.on("approval_resolved", () =>

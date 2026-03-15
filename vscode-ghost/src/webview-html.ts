@@ -521,6 +521,37 @@ export function getChatHtml(
           break;
         }
 
+        case 'tool_diff': {
+          if (msg.diff) {
+            const diffEl = document.createElement('div');
+            diffEl.className = 'diff-block';
+            const header = document.createElement('div');
+            header.className = 'diff-header';
+            header.textContent = msg.path || msg.name || 'file edit';
+            diffEl.appendChild(header);
+            const pre = document.createElement('pre');
+            pre.className = 'diff-content';
+            const lines = msg.diff.split('\\n');
+            for (const line of lines) {
+              const span = document.createElement('span');
+              if (line.startsWith('+ ')) {
+                span.className = 'diff-add';
+              } else if (line.startsWith('- ')) {
+                span.className = 'diff-del';
+              } else if (line.startsWith('---') || line.startsWith('+++')) {
+                span.className = 'diff-meta';
+              }
+              span.textContent = line;
+              pre.appendChild(span);
+              pre.appendChild(document.createTextNode('\\n'));
+            }
+            diffEl.appendChild(pre);
+            messagesEl.appendChild(diffEl);
+            scrollToBottom();
+          }
+          break;
+        }
+
         case 'approval_required':
           if (autoApprove) {
             vscode.postMessage({ type: 'approve', approved: true });

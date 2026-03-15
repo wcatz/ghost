@@ -389,6 +389,15 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 					Text: fmt.Sprintf("\n<tool_result name=%q duration=%s>\n", tc.Name, result.Duration),
 				}
 
+				// Emit diff metadata for file_edit/file_write tools.
+				if result.Metadata != nil {
+					events <- ai.StreamEvent{
+						Type:     "tool_diff",
+						ToolUse:  &ai.ToolUseEvent{ID: tc.ID, Name: tc.Name},
+						Metadata: result.Metadata,
+					}
+				}
+
 				results = append(results, ai.ToolResult{
 					ToolUseID: tc.ID,
 					Content:   result.Content,
