@@ -21,7 +21,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.28
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/olebedev/when v1.1.0
-	golang.org/x/term v0.36.0
+	golang.org/x/term v0.41.0
 )
 
 require (
