@@ -10,7 +10,8 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
-	"time"
+
+	goog "github.com/wcatz/ghost/internal/google"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -35,26 +36,9 @@ type Bot struct {
 
 // GoogleProvider is the interface for Google Calendar/Gmail access.
 type GoogleProvider interface {
-	TodayEvents(ctx context.Context) ([]GoogleEvent, error)
+	TodayEvents(ctx context.Context) ([]goog.Event, error)
 	UnreadCount(ctx context.Context) (int, error)
-	RecentUnread(ctx context.Context, limit int) ([]GoogleEmail, error)
-}
-
-// GoogleEvent is a simplified calendar event for Telegram display.
-type GoogleEvent struct {
-	Summary  string
-	Start    time.Time
-	End      time.Time
-	Location string
-	MeetLink string
-	AllDay   bool
-}
-
-// GoogleEmail is a simplified email for Telegram display.
-type GoogleEmail struct {
-	From    string
-	Subject string
-	Snippet string
+	RecentUnread(ctx context.Context, limit int) ([]goog.Email, error)
 }
 
 // Config holds Telegram bot configuration.
