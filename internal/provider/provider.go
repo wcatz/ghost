@@ -17,6 +17,7 @@ import (
 // LLMProvider abstracts LLM interactions for streaming chat and reflection.
 type LLMProvider interface {
 	// ChatStream sends a conversation to the LLM and streams events back.
+	// thinkingBudget > 0 enables extended thinking with the given token budget.
 	ChatStream(
 		ctx context.Context,
 		messages []ai.Message,
@@ -24,6 +25,7 @@ type LLMProvider interface {
 		tools []ai.ToolDefinition,
 		model string,
 		maxTokens int,
+		thinkingBudget int,
 	) (<-chan ai.StreamEvent, error)
 
 	// Reflect calls a fast model (e.g., Haiku) for memory extraction/reflection.

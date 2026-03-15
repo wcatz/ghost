@@ -31,6 +31,7 @@ func NewClient(apiKey string, logger *slog.Logger) *Client {
 
 // ChatStream sends a request and streams events through the returned channel.
 // The channel is closed when the response is complete or an error occurs.
+// thinkingBudget > 0 enables extended thinking with the given token budget.
 func (c *Client) ChatStream(
 	ctx context.Context,
 	messages []Message,
@@ -38,6 +39,7 @@ func (c *Client) ChatStream(
 	tools []ToolDefinition,
 	model string,
 	maxTokens int,
+	thinkingBudget int,
 ) (<-chan StreamEvent, error) {
 	reqBody := apiRequest{
 		Model:     model,
@@ -46,6 +48,12 @@ func (c *Client) ChatStream(
 		Stream:    true,
 		Messages:  messages,
 		Tools:     tools,
+	}
+	if thinkingBudget > 0 {
+		reqBody.Thinking = &ThinkingConfig{
+			Type:         "enabled",
+			BudgetTokens: thinkingBudget,
+		}
 	}
 
 	body, err := json.Marshal(reqBody)

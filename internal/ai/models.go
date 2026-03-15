@@ -137,8 +137,8 @@ type TokenUsage struct {
 
 // StreamEvent is emitted during streaming for TUI rendering.
 type StreamEvent struct {
-	Type       string      // "text", "tool_use_start", "tool_input_delta", "tool_use_end", "done", "error"
-	Text       string      // for text deltas
+	Type       string // "text", "thinking", "tool_use_start", "tool_input_delta", "tool_use_end", "done", "error"
+	Text       string // for text deltas and thinking deltas
 	ToolUse    *ToolUseEvent
 	Usage      *TokenUsage
 	StopReason string // on "done": "end_turn" or "tool_use"
@@ -155,13 +155,20 @@ type ToolUseEvent struct {
 
 // --- internal request/response types ---
 
+// ThinkingConfig controls extended thinking (Claude's internal reasoning).
+type ThinkingConfig struct {
+	Type         string `json:"type"`          // "enabled" or "disabled"
+	BudgetTokens int    `json:"budget_tokens"` // max tokens for thinking
+}
+
 type apiRequest struct {
-	Model     string         `json:"model"`
-	MaxTokens int            `json:"max_tokens"`
-	System    []SystemBlock  `json:"system,omitempty"`
-	Stream    bool           `json:"stream"`
-	Messages  []Message      `json:"messages"`
+	Model     string           `json:"model"`
+	MaxTokens int              `json:"max_tokens"`
+	System    []SystemBlock    `json:"system,omitempty"`
+	Stream    bool             `json:"stream"`
+	Messages  []Message        `json:"messages"`
 	Tools     []ToolDefinition `json:"tools,omitempty"`
+	Thinking  *ThinkingConfig  `json:"thinking,omitempty"`
 }
 
 type streamEventRaw struct {
@@ -190,6 +197,7 @@ type contentBlockRaw struct {
 type deltaRaw struct {
 	Type        string `json:"type"`
 	Text        string `json:"text,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`    // for thinking_delta
 	PartialJSON string `json:"partial_json,omitempty"`
 	StopReason  string `json:"stop_reason,omitempty"`
 }

@@ -19,6 +19,7 @@ func parseStream(r io.Reader, events chan<- StreamEvent) error {
 		currentToolName string
 		inputAccum      strings.Builder
 		usage           TokenUsage
+		inThinking      bool
 	)
 
 	for scanner.Scan() {
@@ -46,7 +47,13 @@ func parseStream(r io.Reader, events chan<- StreamEvent) error {
 			}
 
 		case "content_block_start":
-			if event.ContentBlock != nil && event.ContentBlock.Type == "tool_use" {
+			if event.ContentBlock == nil {
+				continue
+			}
+			switch event.ContentBlock.Type {
+			case "thinking":
+				inThinking = true
+			case "tool_use":
 				currentToolID = event.ContentBlock.ID
 				currentToolName = event.ContentBlock.Name
 				inputAccum.Reset()
@@ -66,6 +73,8 @@ func parseStream(r io.Reader, events chan<- StreamEvent) error {
 			}
 
 			switch delta.Type {
+			case "thinking_delta":
+				events <- StreamEvent{Type: "thinking", Text: delta.Thinking}
 			case "text_delta":
 				events <- StreamEvent{Type: "text", Text: delta.Text}
 			case "input_json_delta":
@@ -81,7 +90,9 @@ func parseStream(r io.Reader, events chan<- StreamEvent) error {
 			}
 
 		case "content_block_stop":
-			if currentToolID != "" {
+			if inThinking {
+				inThinking = false
+			} else if currentToolID != "" {
 				fullInput := json.RawMessage(inputAccum.String())
 				events <- StreamEvent{
 					Type: "tool_use_end",

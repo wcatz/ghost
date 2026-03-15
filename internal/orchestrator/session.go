@@ -130,11 +130,10 @@ func (s *Session) Send(ctx context.Context, userMsg string, approvalFn ApprovalF
 		var fullResponse string
 		for {
 			s.mu.Lock()
-			msgs := make([]ai.Message, len(s.messages))
-			copy(msgs, s.messages)
+			msgs := s.windowedMessages()
 			s.mu.Unlock()
 
-			stream, err := s.client.ChatStream(ctx, msgs, system, tools, s.model, s.Mode.MaxTokens)
+			stream, err := s.client.ChatStream(ctx, msgs, system, tools, s.model, s.Mode.MaxTokens, s.Mode.ThinkingBudget)
 			if err != nil {
 				events <- ai.StreamEvent{Type: "error", Error: err}
 				return
@@ -148,6 +147,8 @@ func (s *Session) Send(ctx context.Context, userMsg string, approvalFn ApprovalF
 
 			for evt := range stream {
 				switch evt.Type {
+				case "thinking":
+					events <- evt // pass thinking to TUI but don't accumulate
 				case "text":
 					textAccum += evt.Text
 					events <- evt
@@ -294,6 +295,70 @@ func (s *Session) MessageCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.messages)
+}
+
+// maxContextTokens is the target context budget. Messages are trimmed to stay
+// under this when the conversation grows long. Memories and system prompt are
+// separate, so this covers only the messages array.
+const maxContextTokens = 180000
+
+// windowedMessages returns a copy of messages, trimming the oldest exchanges
+// if the estimated token count exceeds maxContextTokens. Must be called with
+// s.mu held.
+func (s *Session) windowedMessages() []ai.Message {
+	msgs := make([]ai.Message, len(s.messages))
+	copy(msgs, s.messages)
+
+	est := estimateTokens(msgs)
+	if est <= maxContextTokens {
+		return msgs
+	}
+
+	// Trim oldest user+assistant pairs (skip tool_result messages that follow).
+	// Keep at least the last 4 messages to preserve recent context.
+	for est > maxContextTokens && len(msgs) > 4 {
+		msgs = msgs[2:] // drop one user+assistant pair
+		// Skip any orphaned tool_result messages at the start.
+		for len(msgs) > 0 && isToolResult(msgs[0]) {
+			msgs = msgs[1:]
+		}
+		est = estimateTokens(msgs)
+	}
+
+	if len(msgs) < len(s.messages) {
+		s.logger.Info("context windowed",
+			"original", len(s.messages), "trimmed", len(msgs),
+			"est_tokens", est)
+	}
+	return msgs
+}
+
+// estimateTokens gives a rough token count. Claude averages ~4 chars per token
+// for English text. This is intentionally conservative (slightly overestimates).
+func estimateTokens(msgs []ai.Message) int {
+	total := 0
+	for _, m := range msgs {
+		for _, b := range m.Content {
+			total += len(b.Text)/3 + len(b.Content)/3
+			if b.Input != nil {
+				total += len(b.Input) / 3
+			}
+		}
+	}
+	return total
+}
+
+// isToolResult checks if a message contains only tool_result blocks.
+func isToolResult(m ai.Message) bool {
+	if m.Role != "user" || len(m.Content) == 0 {
+		return false
+	}
+	for _, b := range m.Content {
+		if b.Type != "tool_result" {
+			return false
+		}
+	}
+	return true
 }
 
 // Store returns the memory store for direct access (e.g., REPL commands).
