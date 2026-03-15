@@ -74,8 +74,36 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 
 // Run starts the bot polling loop. Blocks until ctx is cancelled.
 func (tb *Bot) Run(ctx context.Context) {
+	// Clear old commands and register Ghost's command menu.
+	tb.registerCommands(ctx)
 	tb.logger.Info("telegram bot starting")
 	tb.bot.Start(ctx)
+}
+
+// registerCommands pushes Ghost's command menu to the Telegram API,
+// replacing any previously registered commands.
+func (tb *Bot) registerCommands(ctx context.Context) {
+	// Delete all existing commands first.
+	if _, err := tb.bot.DeleteMyCommands(ctx, &bot.DeleteMyCommandsParams{}); err != nil {
+		tb.logger.Error("delete old telegram commands", "error", err)
+	}
+
+	commands := []models.BotCommand{
+		{Command: "status", Description: "System status + notification summary"},
+		{Command: "notifications", Description: "List unread GitHub notifications"},
+		{Command: "memory", Description: "Search memories: /memory search <project> <query>"},
+		{Command: "remind", Description: "Set a reminder: /remind <message>"},
+		{Command: "briefing", Description: "Get your morning briefing"},
+		{Command: "help", Description: "Show available commands"},
+	}
+
+	if _, err := tb.bot.SetMyCommands(ctx, &bot.SetMyCommandsParams{
+		Commands: commands,
+	}); err != nil {
+		tb.logger.Error("set telegram commands", "error", err)
+	} else {
+		tb.logger.Info("telegram commands registered", "count", len(commands))
+	}
 }
 
 // SendMessage sends a message to a specific chat. Used for proactive alerts.

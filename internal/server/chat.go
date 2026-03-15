@@ -150,14 +150,22 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// Create approval channel for this request.
 	approvalCh := make(chan provider.ApprovalRequest, 1)
 
-	// Track pending approval for this session.
+	// Reject concurrent sends — only one stream per session.
 	state := &chatState{}
 	s.chatMu.Lock()
+	if _, active := s.chatStates[id]; active {
+		s.chatMu.Unlock()
+		writeError(w, http.StatusConflict, "stream already active for this session")
+		return
+	}
 	s.chatStates[id] = state
 	s.chatMu.Unlock()
 	defer func() {
 		s.chatMu.Lock()
-		delete(s.chatStates, id)
+		// Only delete if we own the state (prevents race on cleanup).
+		if s.chatStates[id] == state {
+			delete(s.chatStates, id)
+		}
 		s.chatMu.Unlock()
 	}()
 

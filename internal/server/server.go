@@ -67,6 +67,7 @@ func (s *Server) Run(ctx context.Context) error {
 			r.Use(s.authMiddleware)
 		}
 		r.Route("/api/v1/memories", func(r chi.Router) {
+			r.Use(bodyLimitMiddleware(1 << 20)) // 1MB
 			r.Post("/search", s.handleSearch)
 			r.Post("/", s.handleCreate)
 			r.Get("/{projectID}", s.handleList)
@@ -77,12 +78,12 @@ func (s *Server) Run(ctx context.Context) error {
 		// Chat streaming endpoints (requires orchestrator).
 		if s.orchestrator != nil {
 			r.Route("/api/v1/sessions", func(r chi.Router) {
-				r.Post("/", s.handleCreateSession)
+				r.Post("/", withBodyLimit(s.handleCreateSession, 1<<20))      // 1MB
 				r.Get("/", s.handleListSessions)
 				r.Delete("/{id}", s.handleDeleteSession)
-				r.Post("/{id}/send", s.handleSendMessage)
-				r.Post("/{id}/approve", s.handleApprove)
-				r.Post("/{id}/mode", s.handleSetMode)
+				r.Post("/{id}/send", withBodyLimit(s.handleSendMessage, 10<<20)) // 10MB (large messages)
+				r.Post("/{id}/approve", withBodyLimit(s.handleApprove, 1<<20))
+				r.Post("/{id}/mode", withBodyLimit(s.handleSetMode, 1<<20))
 			})
 		}
 	})
@@ -295,6 +296,30 @@ func (s *Server) logMiddleware(next http.Handler) http.Handler {
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
 	})
+}
+
+// --- Body Limit ---
+
+// bodyLimitMiddleware wraps all requests in the group with a body size limit.
+func bodyLimitMiddleware(maxBytes int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Body != nil {
+				r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// withBodyLimit wraps a single handler with a body size limit.
+func withBodyLimit(h http.HandlerFunc, maxBytes int64) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		}
+		h(w, r)
+	}
 }
 
 // --- Helpers ---

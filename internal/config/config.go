@@ -268,7 +268,7 @@ func DataDir() (string, error) {
 		dataHome = filepath.Join(home, ".local", "share")
 	}
 	dir := filepath.Join(dataHome, "ghost")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -288,10 +288,10 @@ func EnsureConfigFile() (path string, created bool, err error) {
 		return path, false, nil
 	}
 
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", false, err
 	}
-	if err := os.WriteFile(path, exampleConfig, 0o644); err != nil {
+	if err := os.WriteFile(path, exampleConfig, 0o600); err != nil {
 		return "", false, err
 	}
 	return path, true, nil

@@ -44,7 +44,11 @@ func execGlob(ctx context.Context, projectPath string, input json.RawMessage) Re
 
 	basePath := projectPath
 	if in.Path != "" {
-		basePath = resolvePath(projectPath, in.Path)
+		var err error
+		basePath, err = safePath(projectPath, in.Path)
+		if err != nil {
+			return Result{Content: fmt.Sprintf("path error: %v", err), IsError: true}
+		}
 	}
 
 	type fileEntry struct {

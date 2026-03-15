@@ -48,7 +48,11 @@ func execGrep(ctx context.Context, projectPath string, input json.RawMessage) Re
 
 	searchPath := projectPath
 	if in.Path != "" {
-		searchPath = resolvePath(projectPath, in.Path)
+		var err error
+		searchPath, err = safePath(projectPath, in.Path)
+		if err != nil {
+			return Result{Content: fmt.Sprintf("path error: %v", err), IsError: true}
+		}
 	}
 
 	maxResults := in.MaxResults
