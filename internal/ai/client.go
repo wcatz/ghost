@@ -105,7 +105,7 @@ func (c *Client) ChatStream(
 				if resp.StatusCode == http.StatusOK {
 					break
 				}
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				retryAfter *= 2
 			}
 			if resp.StatusCode != http.StatusOK {
@@ -208,13 +208,13 @@ func parseAPIError(statusCode int, body []byte) error {
 		switch {
 		case statusCode == 400 && apiErr.Error.Type == "invalid_request_error" &&
 			(len(apiErr.Error.Message) > 20 && apiErr.Error.Message[:20] == "Your credit balance "):
-			return fmt.Errorf("Anthropic billing: credit balance too low. Add credits at console.anthropic.com/settings/billing")
+			return fmt.Errorf("credit balance too low — add credits at console.anthropic.com/settings/billing")
 		case statusCode == 401:
-			return fmt.Errorf("Anthropic auth: invalid API key. Check your config")
+			return fmt.Errorf("invalid API key — check ghost config")
 		case statusCode == 403:
-			return fmt.Errorf("Anthropic: permission denied — %s", apiErr.Error.Message)
+			return fmt.Errorf("permission denied: %s", apiErr.Error.Message)
 		default:
-			return fmt.Errorf("Anthropic API error (%d): %s", statusCode, apiErr.Error.Message)
+			return fmt.Errorf("api error (%d): %s", statusCode, apiErr.Error.Message)
 		}
 	}
 	return fmt.Errorf("API returned %d: %s", statusCode, string(body))
