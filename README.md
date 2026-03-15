@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" width="200" alt="Ghost logo" />
+</p>
+
 # Ghost
 
 [![CI](https://github.com/wcatz/ghost/actions/workflows/ci.yml/badge.svg)](https://github.com/wcatz/ghost/actions/workflows/ci.yml)
@@ -6,11 +10,29 @@
 
 A memory-first personal assistant daemon. Ghost remembers what matters about your projects across sessions — architecture decisions, conventions, gotchas, patterns — and surfaces that knowledge through an MCP server, HTTP API, Telegram bot, or interactive REPL.
 
-## What Makes Ghost Different
+## Why Ghost
 
-Most AI tools start fresh every session. Ghost persists knowledge in SQLite with FTS5 full-text search and time-decay scoring, so stale information fades while core knowledge persists.
+Most AI tools start fresh every session. Ghost gives them persistent memory.
 
-**Memory categories:**
+**Cheaper.** 3-block prompt caching puts static system prompt behind Claude's `cache_control: ephemeral` (5min TTL). Cache reads cost 10% of regular input tokens. In a typical agentic tool loop (5-20 API calls per interaction), that's ~90% savings on 1300-2600 tokens of system prompt per cached call.
+
+**Faster search.** Hybrid retrieval combines FTS5 keyword search (30%) with local vector cosine similarity (70%) via Reciprocal Rank Fusion. Better recall than either method alone.
+
+**Free embeddings.** `nomic-embed-text:v1.5` runs locally through Ollama — 274MB, works on CPU. No embedding API costs. If Ollama is offline, search falls back to FTS5 with no hard failure.
+
+**Self-pruning.** Time-decay scoring fades stale memories by category half-life. Context windows stay small and relevant without manual cleanup.
+
+| | Without Ghost | With Ghost |
+|--|--|--|
+| System prompt tokens | Full price every call | 90% cheaper after first call |
+| Embedding cost | $0.001-0.005/embed (API) | $0 (local Ollama) |
+| Search method | Keyword only | Semantic + keyword hybrid |
+| Cross-session memory | None | Persistent, scored, categorized |
+| Offline capable | No | Yes (embeddings + search) |
+
+## Memory System
+
+Ghost stores memories in SQLite with FTS5 full-text search, optional vector embeddings, and time-decay scoring.
 
 | Category | Decay | Purpose |
 |----------|-------|---------|
@@ -23,46 +45,7 @@ Most AI tools start fresh every session. Ghost persists knowledge in SQLite with
 | preference | none | Developer's preferred approaches |
 | fact | none | Durable project facts |
 
-## Features
-
-### Memory Daemon (`ghost serve`)
-- SQLite-backed memory with FTS5 search and optional vector embeddings (Ollama)
-- HTTP API for memory CRUD and project management
-- Automatic reflection — Haiku consolidates memories periodically
-- Embedding worker for semantic search via `nomic-embed-text`
-
-### MCP Server (`ghost mcp`)
-- Exposes Ghost's memory as an [MCP](https://modelcontextprotocol.io/) server on stdio
-- Works with Claude Code, Cursor, Goose, and any MCP-compatible client
-- Tools: `ghost_memory_search`, `ghost_memory_save`, `ghost_project_context`, `ghost_memories_list`, `ghost_memory_delete`
-
-### Telegram Bot
-- Remote access via Telegram with user-ID whitelisting
-- Commands: `/status`, `/notifications`, `/memory search`, `/remind`, `/briefing`, `/help`
-- Proactive alerts for P0/P1 GitHub notifications and fired reminders
-
-### GitHub Monitor
-- Polls GitHub notifications with priority classification (P0-P4)
-- P0/P1 alerts pushed to Telegram in real-time
-
-### Scheduler
-- Cron jobs and one-shot reminders with natural language date parsing
-- Persisted in SQLite — survives restarts
-
-### Morning Briefing
-- Configurable cron-triggered daily briefing
-- Aggregates GitHub notifications, calendar events, and pending reminders
-
-### CalDAV Calendar
-- Connects to any CalDAV server (iCloud, Fastmail, Nextcloud)
-- Pulls upcoming events for briefings
-
-### Interactive REPL (`ghost`)
-- 6 operating modes: chat, code, debug, review, plan, refactor
-- Native Claude tool_use for file operations, code search, git, and shell
-- 3-block prompt caching for ~90% input token savings
-- Multi-project sessions with isolated memory spaces
-- Safety controls: approval levels for writes, destructive git commands blocked
+Memories with no decay persist indefinitely. Decaying memories lose importance over their half-life, keeping context windows focused on what's still relevant.
 
 ## Install
 
@@ -92,6 +75,9 @@ ghost
 # One-shot query
 ghost "explain the authentication flow"
 
+# Pipe mode
+echo "summarize this project" | ghost
+
 # Start the daemon (HTTP API + all subsystems)
 ghost serve
 
@@ -99,20 +85,118 @@ ghost serve
 ghost mcp
 ```
 
+## Runtime Modes
+
+### `ghost` — Interactive REPL
+
+Conversational session with tool use, memory, and streaming output.
+
+```bash
+ghost                                    # REPL in current directory
+ghost "what does the auth middleware do"  # one-shot query
+echo "explain this" | ghost              # pipe mode
+```
+
+| Flag | Description |
+|------|-------------|
+| `-mode <name>` | `chat`, `code`, `debug`, `review`, `plan`, `refactor` |
+| `-model <id>` | Model override (e.g. `claude-opus-4-6-20250514`) |
+| `-project <path>` | Project path (repeatable for multi-project) |
+| `-yolo` | Skip all tool approval prompts |
+| `-no-memory` | Disable memory for this session |
+| `-continue` | Resume last conversation |
+
+**REPL commands:**
+
+```text
+/mode <name>       Switch operating mode
+/switch <project>  Switch active project
+/projects          List project sessions
+/memory            List memories
+/memory search <q> Search memories
+/memory add <text> Add a manual memory
+/reflect           Force memory consolidation
+/context           Show project context
+/cost              Show token usage and spend
+/clear             Clear conversation (keep memories)
+/quit              Exit
+```
+
+### `ghost serve` — Daemon
+
+Headless background service. Starts the HTTP API and all configured subsystems.
+
+```bash
+ghost serve                    # use config defaults
+ghost serve -addr :3000        # override listen address
+```
+
+| Subsystem | Config key | What it does |
+|-----------|-----------|--------------|
+| HTTP API | `server.listen_addr` | REST API on `127.0.0.1:2187` |
+| Embedding worker | `embedding.enabled` | Vectorizes memories via Ollama |
+| Scheduler | *(always on)* | Cron jobs + one-shot reminders |
+| Telegram bot | `telegram.token` | Remote access + alerts |
+| GitHub monitor | `github.token` | Polls notifications, classifies P0-P4 |
+| Calendar | `calendar.url` | Pulls CalDAV events for briefings |
+| Morning briefing | `briefing.enabled` | Cron-triggered daily summary |
+
+### `ghost mcp` — MCP Server
+
+[MCP](https://modelcontextprotocol.io/) server over stdio. Connects Claude Code, Cursor, Goose, or any MCP-compatible client to Ghost's memory.
+
+**Claude Code** (`~/.claude.json`):
+
+```json
+{
+  "mcpServers": {
+    "ghost": {
+      "type": "stdio",
+      "command": "/path/to/ghost",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Cursor** (`.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "ghost": {
+      "command": "ghost",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+| MCP Tool | Description |
+|----------|-------------|
+| `ghost_memory_search` | Search memories by keyword (FTS5) |
+| `ghost_memory_save` | Store a memory with category, importance, tags |
+| `ghost_memories_list` | List memories, optionally filtered by category |
+| `ghost_memory_delete` | Delete a memory by ID |
+| `ghost_project_context` | Top memories ranked by importance and recency |
+
+All three modes share the same SQLite database — memories saved from the REPL are searchable via MCP and the HTTP API.
+
 ## Configuration
 
-Ghost auto-creates `~/.config/ghost/config.yaml` on first run with all options documented.
+Ghost auto-creates `~/.config/ghost/config.yaml` on first run.
 
-Config is loaded in layers (later overrides earlier):
+Config loads in layers (later overrides earlier):
+
 1. Compiled defaults
-2. `/etc/ghost/config.yaml` (system-wide)
-3. `~/.config/ghost/config.yaml` (user)
+2. `/etc/ghost/config.yaml`
+3. `~/.config/ghost/config.yaml`
 4. `.ghost/config.yaml` (per-project, checked in)
 5. `.ghost/config.local.yaml` (per-project, gitignored)
 6. `GHOST_*` environment variables
 7. CLI flags
 
-### Example
+### Example Config
 
 ```yaml
 api:
@@ -168,38 +252,15 @@ context:
   ignore_patterns: ["vendor/", "node_modules/"]
 ```
 
-## MCP Integration
+### Embeddings
 
-Add Ghost as an MCP server in your tool's config:
+Ghost uses [Ollama](https://ollama.com/) for local embeddings. The worker retries automatically — just start Ollama and pull the model:
 
-```json
-{
-  "mcpServers": {
-    "ghost": {
-      "command": "ghost",
-      "args": ["mcp"]
-    }
-  }
-}
+```bash
+ollama pull nomic-embed-text:v1.5
 ```
 
-Then use `ghost_memory_search`, `ghost_memory_save`, and `ghost_project_context` from your AI tool to recall and store project knowledge.
-
-## REPL Commands
-
-```text
-/mode <name>       Switch mode: chat, code, debug, review, plan, refactor
-/switch <project>  Switch active project (multi-project mode)
-/projects          List active project sessions
-/memory            List all memories for current project
-/memory search <q> Search memories
-/memory add <text> Add a manual memory
-/reflect           Force memory consolidation
-/context           Show project context
-/cost              Show token usage
-/clear             Clear conversation (keep memories)
-/quit              Exit
-```
+Ghost connects on its next retry cycle. No restart required.
 
 ## Architecture
 
@@ -207,25 +268,26 @@ Then use `ghost_memory_search`, `ghost_memory_save`, and `ghost_project_context`
 cmd/ghost/main.go          CLI entrypoint + daemon bootstrap
 internal/
   ai/                      Claude API client + streaming + tool_use
-  memory/                  SQLite persistence, FTS5, time-decay scoring
-  tool/                    Tool registry + built-in executors
+  memory/                  SQLite + FTS5 + vector search + time-decay
+  tool/                    Tool registry + 10 built-in executors
   orchestrator/            Multi-project session manager
-  reflection/              Memory extraction + consolidation engine
-  prompt/                  3-block system prompt construction
+  reflection/              Haiku-based memory consolidation
+  prompt/                  3-block cached system prompt
   mode/                    Operating mode definitions
-  project/                 Project detection + context gathering
-  config/                  YAML config + environment variables
-  tui/                     Terminal REPL with streaming output
-  server/                  HTTP API (chi)
-  mcpserver/               MCP server (stdio transport)
-  telegram/                Telegram bot interface
-  github/                  GitHub notification monitor + priority
-  scheduler/               Cron jobs + one-shot reminders
-  briefing/                Morning briefing aggregator
+  project/                 Auto-detection (language, tests, git)
+  config/                  Layered YAML/env/flag config (koanf)
+  tui/                     Terminal REPL with streaming
+  server/                  HTTP REST API (chi)
+  mcpserver/               MCP server (stdio)
+  telegram/                Telegram bot + alerts
+  github/                  Notification monitor + P0-P4 priority
+  scheduler/               Cron + one-shot reminders (gocron)
+  briefing/                Daily briefing aggregator
   calendar/                CalDAV client
-  embedding/               Ollama embedding worker
+  embedding/               Ollama async worker
   provider/                Interface contracts
-migrations/                Embedded SQLite migrations
+  audit/                   Per-action cost + token logging
+migrations/                Embedded SQLite schema
 ```
 
 ## License

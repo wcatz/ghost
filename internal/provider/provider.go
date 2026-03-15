@@ -87,9 +87,39 @@ type PromptBuilder interface {
 	BuildSystemBlocks(ctx context.Context, projCtx *project.Context, m mode.Mode) []ai.SystemBlock
 }
 
-// ApprovalFunc is called when a tool requires user approval.
-// Returns true if approved, false if denied.
+// ApprovalRequest is sent from the agentic loop to the frontend when a tool
+// needs user approval. The frontend writes true (approve) or false (deny) to
+// the Response channel.
+type ApprovalRequest struct {
+	ToolName string
+	Input    json.RawMessage
+	Response chan<- bool
+}
+
+// ApprovalFunc is the legacy synchronous approval callback.
+// Deprecated: Use ApprovalRequest channel-based flow instead.
 type ApprovalFunc func(toolName string, input json.RawMessage) bool
+
+// InputSource produces user text (keyboard, voice transcription, etc.).
+type InputSource interface {
+	Text() <-chan string
+	State() InputState
+}
+
+// InputState represents the current state of an input source.
+type InputState int
+
+const (
+	InputIdle        InputState = iota // Not active
+	InputListening                     // Capturing input (e.g., microphone recording)
+	InputTranscribing                  // Processing input (e.g., STT)
+)
+
+// OutputSink consumes assistant text (display, TTS, etc.).
+type OutputSink interface {
+	Receive(text string)
+	Flush()
+}
 
 // Frontend renders agent output and handles user input.
 type Frontend interface {

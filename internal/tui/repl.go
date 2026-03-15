@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/wcatz/ghost/internal/orchestrator"
-	"golang.org/x/term"
 )
 
 // Colors for terminal output.
@@ -318,7 +317,4 @@ func (r *REPL) printHelp() {
 `, colorBold, colorReset)
 }
 
-// IsTerminal returns true if stdin is a terminal (not piped).
-func IsTerminal() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
-}
+// Note: IsTerminal moved to oneshot.go to avoid duplication.
