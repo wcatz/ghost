@@ -74,6 +74,23 @@ func main() {
 	cfg, logger, store, _ := bootstrap()
 	defer store.Close()
 
+	// Redirect logs early if TUI mode, before creating components that capture the logger.
+	willUseTUI := tui.IsTerminal() && len(flag.Args()) == 0 &&
+		!*noTUI && !cfg.Display.PlainMode &&
+		os.Getenv("TERM") != "dumb" && os.Getenv("GHOST_PLAIN") == ""
+	if willUseTUI {
+		dataDir, _ := config.DataDir()
+		if dataDir != "" {
+			logFile, err := os.OpenFile(filepath.Join(dataDir, "ghost.log"),
+				os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if err == nil {
+				defer logFile.Close()
+				logger = slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo}))
+				slog.SetDefault(logger)
+			}
+		}
+	}
+
 	if cfg.API.Key == "" {
 		fmt.Fprintln(os.Stderr, "error: ANTHROPIC_API_KEY not set")
 		fmt.Fprintln(os.Stderr, "Set it via environment variable or in ~/.config/ghost/config.yaml")

@@ -5,25 +5,30 @@ import (
 	"charm.land/lipgloss/v2/compat"
 )
 
-// Color palette — adapts to terminal theme via compat.AdaptiveColor.
+// Color palette — cyan/teal theme matching the ghost gopher logo.
 var (
-	colorPrimary   = compat.AdaptiveColor{Light: lipgloss.Color("#7D56F4"), Dark: lipgloss.Color("#AD8CFF")}
-	colorSecondary = compat.AdaptiveColor{Light: lipgloss.Color("#04B575"), Dark: lipgloss.Color("#3EE8B5")}
-	colorAccent    = compat.AdaptiveColor{Light: lipgloss.Color("#FF6F61"), Dark: lipgloss.Color("#FF9A8C")}
-	colorSubtle    = compat.AdaptiveColor{Light: lipgloss.Color("#9B9B9B"), Dark: lipgloss.Color("#5C5C5C")}
-	colorText      = compat.AdaptiveColor{Light: lipgloss.Color("#1A1A2E"), Dark: lipgloss.Color("#FFFDF5")}
-	colorDim       = compat.AdaptiveColor{Light: lipgloss.Color("#A49FA5"), Dark: lipgloss.Color("#777777")}
-	colorError     = compat.AdaptiveColor{Light: lipgloss.Color("#CC0000"), Dark: lipgloss.Color("#FF5555")}
-	colorSuccess   = compat.AdaptiveColor{Light: lipgloss.Color("#04B575"), Dark: lipgloss.Color("#3EE8B5")}
-	colorWarning   = compat.AdaptiveColor{Light: lipgloss.Color("#E5A100"), Dark: lipgloss.Color("#FFCC00")}
+	colorPrimary   = compat.AdaptiveColor{Light: lipgloss.Color("#0097A7"), Dark: lipgloss.Color("#00D4AA")}
+	colorBright    = compat.AdaptiveColor{Light: lipgloss.Color("#00ACC1"), Dark: lipgloss.Color("#5CE0D6")}
+	colorSecondary = compat.AdaptiveColor{Light: lipgloss.Color("#00897B"), Dark: lipgloss.Color("#4DB6AC")}
+	colorAccent    = compat.AdaptiveColor{Light: lipgloss.Color("#FF8A65"), Dark: lipgloss.Color("#FFAB91")}
+	colorSubtle    = compat.AdaptiveColor{Light: lipgloss.Color("#90A4AE"), Dark: lipgloss.Color("#546E7A")}
+	colorText      = compat.AdaptiveColor{Light: lipgloss.Color("#1A1A2E"), Dark: lipgloss.Color("#ECEFF1")}
+	colorDim       = compat.AdaptiveColor{Light: lipgloss.Color("#B0BEC5"), Dark: lipgloss.Color("#607D8B")}
+	colorError     = compat.AdaptiveColor{Light: lipgloss.Color("#D32F2F"), Dark: lipgloss.Color("#EF5350")}
+	colorSuccess   = compat.AdaptiveColor{Light: lipgloss.Color("#2E7D32"), Dark: lipgloss.Color("#66BB6A")}
+	colorWarning   = compat.AdaptiveColor{Light: lipgloss.Color("#F57F17"), Dark: lipgloss.Color("#FFD54F")}
+	colorGhost     = compat.AdaptiveColor{Light: lipgloss.Color("#00838F"), Dark: lipgloss.Color("#00E5CC")}
 )
 
 // Layout styles.
 var (
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(colorPrimary).
+			Foreground(colorGhost).
 			PaddingLeft(1)
+
+	headerDividerStyle = lipgloss.NewStyle().
+				Foreground(colorSubtle)
 
 	statusBarStyle = lipgloss.NewStyle().
 			Foreground(colorDim).
@@ -32,29 +37,33 @@ var (
 
 	statusProjectStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(colorSecondary)
+				Foreground(colorBright)
 
 	statusModeStyle = lipgloss.NewStyle().
-			Foreground(colorPrimary)
+			Foreground(colorSecondary)
 
 	statusCostStyle = lipgloss.NewStyle().
 			Foreground(colorWarning)
+
+	statusTokenStyle = lipgloss.NewStyle().
+				Foreground(colorDim)
 )
 
 // Message styles.
 var (
 	userMsgStyle = lipgloss.NewStyle().
-			Foreground(colorSecondary).
+			Foreground(colorText).
+			PaddingLeft(2)
+
+	userLabelStyle = lipgloss.NewStyle().
+			Foreground(colorAccent).
 			Bold(true).
 			PaddingLeft(1)
 
-	userLabelStyle = lipgloss.NewStyle().
-			Foreground(colorSecondary).
-			Bold(true)
-
 	assistantLabelStyle = lipgloss.NewStyle().
-				Foreground(colorPrimary).
-				Bold(true)
+				Foreground(colorGhost).
+				Bold(true).
+				PaddingLeft(1)
 
 	errorStyle = lipgloss.NewStyle().
 			Foreground(colorError).
@@ -65,11 +74,11 @@ var (
 // Tool styles.
 var (
 	toolNameStyle = lipgloss.NewStyle().
-			Foreground(colorDim).
+			Foreground(colorBright).
 			Bold(true)
 
 	toolSpinnerStyle = lipgloss.NewStyle().
-				Foreground(colorPrimary)
+				Foreground(colorGhost)
 
 	toolDoneStyle = lipgloss.NewStyle().
 			Foreground(colorSuccess)
@@ -78,7 +87,7 @@ var (
 			Foreground(colorError)
 
 	toolDurationStyle = lipgloss.NewStyle().
-				Foreground(colorSubtle)
+				Foreground(colorDim)
 )
 
 // Approval dialog styles.
@@ -93,7 +102,7 @@ var (
 				Bold(true)
 
 	approvalKeyStyle = lipgloss.NewStyle().
-			Foreground(colorPrimary).
+			Foreground(colorGhost).
 			Bold(true)
 )
 
@@ -101,11 +110,11 @@ var (
 var (
 	paletteBorderStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(colorPrimary).
+				BorderForeground(colorGhost).
 				Padding(0, 1)
 
 	paletteSelectedStyle = lipgloss.NewStyle().
-				Foreground(colorPrimary).
+				Foreground(colorGhost).
 				Bold(true)
 
 	paletteItemStyle = lipgloss.NewStyle().
@@ -122,6 +131,6 @@ var (
 			BorderForeground(colorSubtle)
 
 	inputPromptStyle = lipgloss.NewStyle().
-			Foreground(colorPrimary).
+			Foreground(colorGhost).
 			Bold(true)
 )

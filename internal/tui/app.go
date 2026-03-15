@@ -162,10 +162,13 @@ func (a App) View() tea.View {
 		content = "Loading..."
 	} else {
 		// Header.
-		header := headerStyle.Render(
-			fmt.Sprintf("ghost %s | %s (%s)",
-				version, a.session.ProjectName, a.session.Mode.Name),
-		)
+		ghostLabel := headerStyle.Render("ghost")
+		divider := headerDividerStyle.Render(" · ")
+		projectInfo := statusProjectStyle.Render(a.session.ProjectName) +
+			headerDividerStyle.Render("/") +
+			statusModeStyle.Render(a.session.Mode.Name)
+		ver := headerDividerStyle.Render(version)
+		header := ghostLabel + divider + projectInfo + divider + ver
 
 		// Main viewport.
 		viewport := a.chatView.view()
@@ -350,9 +353,9 @@ func (a App) sendMessage(text string) (tea.Model, tea.Cmd) {
 	a.chatView.startNewAssistantMessage()
 
 	// Send to session with async approval.
-	events := a.session.SendAsync(a.ctx, text, a.approvalCh)
+	a.activeStream = a.session.SendAsync(a.ctx, text, a.approvalCh)
 
-	return a, waitForStreamEvent(events)
+	return a, waitForStreamEvent(a.activeStream)
 }
 
 // handleCommand executes a slash command.

@@ -18,14 +18,17 @@ type inputArea struct {
 
 func newInputArea() inputArea {
 	ta := textarea.New()
-	ta.Placeholder = "Type a message... (Shift+Enter for newline)"
+	ta.Placeholder = "Type a message..."
+	ta.Prompt = "> "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 10000
 	ta.SetHeight(2)
 
-	// Disable cursor line background highlight.
+	// Clean up default styles.
 	s := ta.Styles()
 	s.Focused.CursorLine = lipgloss.NewStyle()
+	s.Focused.Prompt = lipgloss.NewStyle().Foreground(colorGhost).Bold(true)
+	s.Blurred.Prompt = lipgloss.NewStyle().Foreground(colorDim)
 	ta.SetStyles(s)
 	ta.Focus()
 
@@ -103,7 +106,5 @@ func (i inputArea) update(msg tea.Msg) (inputArea, tea.Cmd) {
 }
 
 func (i inputArea) view() string {
-	return inputBorderStyle.Render(
-		inputPromptStyle.Render("> ") + i.textarea.View(),
-	)
+	return inputBorderStyle.Render(i.textarea.View())
 }
