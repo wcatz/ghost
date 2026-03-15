@@ -353,6 +353,13 @@ func runServe() {
 	// --- HTTP server (blocks) ---
 	srv := server.New(store, &cfg.Server, logger)
 	srv.SetOrchestrator(orch)
+
+	// Wire Telegram bot as approval notifier + give it the server address.
+	if tgBot != nil {
+		srv.SetApprovalNotifier(tgBot)
+		tgBot.SetServerAddr(cfg.Server.ListenAddr)
+	}
+
 	if err := srv.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

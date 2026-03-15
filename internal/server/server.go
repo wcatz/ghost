@@ -20,13 +20,20 @@ import (
 	"github.com/wcatz/ghost/internal/provider"
 )
 
+// ApprovalNotifier is called when a tool needs approval.
+// The Telegram bot implements this to forward approvals to the user's phone.
+type ApprovalNotifier interface {
+	NotifyApproval(sessionID, projectName, toolName string, input json.RawMessage)
+}
+
 // Server is the ghost HTTP daemon.
 type Server struct {
-	store        provider.MemoryStore
-	cfg          *config.ServerConfig
-	orchestrator *orchestrator.Orchestrator
-	logger       *slog.Logger
-	srv          *http.Server
+	store             provider.MemoryStore
+	cfg               *config.ServerConfig
+	orchestrator      *orchestrator.Orchestrator
+	approvalNotifier  ApprovalNotifier
+	logger            *slog.Logger
+	srv               *http.Server
 
 	// Chat streaming state.
 	chatMu     sync.RWMutex
@@ -47,6 +54,16 @@ func New(store provider.MemoryStore, cfg *config.ServerConfig, logger *slog.Logg
 // Must be called before Run() if chat endpoints are needed.
 func (s *Server) SetOrchestrator(o *orchestrator.Orchestrator) {
 	s.orchestrator = o
+}
+
+// SetApprovalNotifier wires an external approval forwarder (e.g. Telegram bot).
+func (s *Server) SetApprovalNotifier(n ApprovalNotifier) {
+	s.approvalNotifier = n
+}
+
+// ListenAddr returns the configured listen address.
+func (s *Server) ListenAddr() string {
+	return s.cfg.ListenAddr
 }
 
 // Run starts the HTTP server. Blocks until ctx is cancelled.

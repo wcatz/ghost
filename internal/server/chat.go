@@ -209,6 +209,15 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				"input":     json.RawMessage(approval.Input),
 			})
 
+			// Forward to external notifier (Telegram) if configured.
+			if s.approvalNotifier != nil {
+				projectName := ""
+				if session != nil {
+					projectName = session.ProjectName
+				}
+				go s.approvalNotifier.NotifyApproval(id, projectName, approval.ToolName, approval.Input)
+			}
+
 		case <-r.Context().Done():
 			return
 		}
