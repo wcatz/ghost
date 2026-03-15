@@ -1,0 +1,92 @@
+{
+  "name": "ghost",
+  "displayName": "Ghost",
+  "description": "Memory-first coding agent — chat, memories, and project context powered by Ghost",
+  "version": "0.1.0",
+  "publisher": "wcatz",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI", "Chat"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ghost",
+          "title": "Ghost",
+          "icon": "media/ghost-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ghost": [
+        {
+          "type": "webview",
+          "id": "ghost.chat",
+          "name": "Chat"
+        },
+        {
+          "type": "webview",
+          "id": "ghost.memories",
+          "name": "Memories"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ghost.sendMessage",
+        "title": "Ghost: Send Message"
+      },
+      {
+        "command": "ghost.newSession",
+        "title": "Ghost: New Session"
+      },
+      {
+        "command": "ghost.setMode",
+        "title": "Ghost: Set Mode"
+      },
+      {
+        "command": "ghost.searchMemories",
+        "title": "Ghost: Search Memories"
+      },
+      {
+        "command": "ghost.showChat",
+        "title": "Ghost: Show Chat"
+      }
+    ],
+    "configuration": {
+      "title": "Ghost",
+      "properties": {
+        "ghost.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:2444",
+          "description": "URL of the ghost serve daemon"
+        },
+        "ghost.authToken": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token for ghost API authentication"
+        },
+        "ghost.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically start ghost serve if not running"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src/"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.5.0"
+  }
+}
