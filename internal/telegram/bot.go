@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -25,10 +26,35 @@ type Bot struct {
 	store          provider.MemoryStore
 	ghMonitor      *gh.Monitor
 	sched          *scheduler.Scheduler
+	google         GoogleProvider
 	briefingSources briefing.Sources
 	db             *sql.DB
 	logger         *slog.Logger
 	allowedIDs     map[int64]bool
+}
+
+// GoogleProvider is the interface for Google Calendar/Gmail access.
+type GoogleProvider interface {
+	TodayEvents(ctx context.Context) ([]GoogleEvent, error)
+	UnreadCount(ctx context.Context) (int, error)
+	RecentUnread(ctx context.Context, limit int) ([]GoogleEmail, error)
+}
+
+// GoogleEvent is a simplified calendar event for Telegram display.
+type GoogleEvent struct {
+	Summary  string
+	Start    time.Time
+	End      time.Time
+	Location string
+	MeetLink string
+	AllDay   bool
+}
+
+// GoogleEmail is a simplified email for Telegram display.
+type GoogleEmail struct {
+	From    string
+	Subject string
+	Snippet string
 }
 
 // Config holds Telegram bot configuration.
@@ -67,9 +93,16 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 	b.RegisterHandler(bot.HandlerTypeMessageText, "memory", bot.MatchTypeCommand, tb.handleMemory)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "remind", bot.MatchTypeCommand, tb.handleRemind)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "briefing", bot.MatchTypeCommand, tb.handleBriefing)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "meetings", bot.MatchTypeCommand, tb.handleMeetings)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "emails", bot.MatchTypeCommand, tb.handleEmails)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "help", bot.MatchTypeCommand, tb.handleHelp)
 
 	return tb, nil
+}
+
+// SetGoogle configures the Google Calendar/Gmail provider.
+func (tb *Bot) SetGoogle(g GoogleProvider) {
+	tb.google = g
 }
 
 // Run starts the bot polling loop. Blocks until ctx is cancelled.
@@ -91,6 +124,8 @@ func (tb *Bot) registerCommands(ctx context.Context) {
 	commands := []models.BotCommand{
 		{Command: "status", Description: "System status + notification summary"},
 		{Command: "notifications", Description: "List unread GitHub notifications"},
+		{Command: "meetings", Description: "Today's calendar with Meet links"},
+		{Command: "emails", Description: "Recent unread emails"},
 		{Command: "memory", Description: "Search memories: /memory search <project> <query>"},
 		{Command: "remind", Description: "Set a reminder: /remind <message>"},
 		{Command: "briefing", Description: "Get your morning briefing"},
@@ -269,11 +304,91 @@ func (tb *Bot) SetBriefingSources(src briefing.Sources) {
 	tb.briefingSources = src
 }
 
+func (tb *Bot) handleMeetings(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if tb.google == nil {
+		tb.reply(ctx, b, update, "Google Calendar not configured.")
+		return
+	}
+
+	events, err := tb.google.TodayEvents(ctx)
+	if err != nil {
+		tb.reply(ctx, b, update, "Error fetching calendar: "+err.Error())
+		return
+	}
+
+	if len(events) == 0 {
+		tb.reply(ctx, b, update, "No meetings today. 🎉")
+		return
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "*Today's Meetings* (%d)\n\n", len(events))
+	for _, e := range events {
+		if e.AllDay {
+			fmt.Fprintf(&sb, "📅 %s (all day)\n", e.Summary)
+		} else {
+			fmt.Fprintf(&sb, "🕐 %s – %s  *%s*\n",
+				e.Start.Local().Format("15:04"),
+				e.End.Local().Format("15:04"),
+				e.Summary)
+		}
+		if e.Location != "" {
+			fmt.Fprintf(&sb, "  📍 %s\n", e.Location)
+		}
+		if e.MeetLink != "" {
+			fmt.Fprintf(&sb, "  🔗 %s\n", e.MeetLink)
+		}
+		sb.WriteString("\n")
+	}
+	tb.reply(ctx, b, update, sb.String())
+}
+
+func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if tb.google == nil {
+		tb.reply(ctx, b, update, "Gmail not configured.")
+		return
+	}
+
+	count, err := tb.google.UnreadCount(ctx)
+	if err != nil {
+		tb.reply(ctx, b, update, "Error fetching emails: "+err.Error())
+		return
+	}
+
+	if count == 0 {
+		tb.reply(ctx, b, update, "Inbox zero! 📭")
+		return
+	}
+
+	emails, err := tb.google.RecentUnread(ctx, 10)
+	if err != nil {
+		tb.reply(ctx, b, update, fmt.Sprintf("📬 %d unread (error fetching details: %s)", count, err))
+		return
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "*Unread Emails* (%d total)\n\n", count)
+	for _, e := range emails {
+		fmt.Fprintf(&sb, "📧 *%s*\n  From: %s\n", e.Subject, e.From)
+		if e.Snippet != "" {
+			snippet := e.Snippet
+			if len(snippet) > 100 {
+				snippet = snippet[:100] + "..."
+			}
+			fmt.Fprintf(&sb, "  _%s_\n", snippet)
+		}
+		sb.WriteString("\n")
+	}
+	tb.reply(ctx, b, update, sb.String())
+}
+
 func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update) {
 	tb.reply(ctx, b, update, `*Ghost Commands*
 
 /status — System status + notification summary
 /notifications — List unread GitHub notifications
+/meetings — Today's calendar with Meet links
+/emails — Recent unread emails
 /memory search <project> <query> — Search memories
 /remind <message> — Set a reminder
 /briefing — Get your morning briefing
