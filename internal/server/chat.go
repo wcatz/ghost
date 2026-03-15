@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/wcatz/ghost/internal/ai"
+	"github.com/wcatz/ghost/internal/orchestrator"
 	"github.com/wcatz/ghost/internal/provider"
 )
 
@@ -191,10 +192,13 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		select {
 		case evt, ok := <-events:
 			if !ok {
-				writeSSE(w, flusher, "done", map[string]string{"status": "complete"})
+				writeSSE(w, flusher, "done", map[string]interface{}{
+					"status":       "complete",
+					"session_cost": session.Cost.Summary(),
+				})
 				return
 			}
-			s.handleStreamEvent(w, flusher, evt)
+			s.handleStreamEvent(w, flusher, evt, session)
 
 		case approval := <-approvalCh:
 			respCh := make(chan provider.ApprovalResponse, 1)
@@ -236,7 +240,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleStreamEvent(w http.ResponseWriter, flusher http.Flusher, evt ai.StreamEvent) {
+func (s *Server) handleStreamEvent(w http.ResponseWriter, flusher http.Flusher, evt ai.StreamEvent, session *orchestrator.Session) {
 	switch evt.Type {
 	case "text":
 		writeSSE(w, flusher, "text", map[string]string{"text": evt.Text})
@@ -276,7 +280,8 @@ func (s *Server) handleStreamEvent(w http.ResponseWriter, flusher http.Flusher, 
 		}
 	case "done":
 		data := map[string]interface{}{
-			"stop_reason": evt.StopReason,
+			"stop_reason":  evt.StopReason,
+			"session_cost": session.Cost.Summary(),
 		}
 		if evt.Usage != nil {
 			data["usage"] = evt.Usage

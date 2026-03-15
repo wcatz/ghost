@@ -44,6 +44,7 @@ type Session struct {
 	logger      *slog.Logger
 	model       string
 	autoApprove bool
+	Cost        ai.CostTracker
 }
 
 // NewSession creates a project session.
@@ -333,6 +334,7 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 				case "done":
 					stopReason = evt.StopReason
 					usage = evt.Usage
+					s.Cost.Add(usage)
 				case "error":
 					events <- evt
 					return
@@ -502,6 +504,11 @@ func (s *Session) windowedMessages() []ai.Message {
 
 	msgs = sanitizeMessages(msgs)
 
+	// Multi-turn caching: mark the last user+assistant exchange with
+	// cache_control so the API caches everything up to that point.
+	// This saves ~90% on input tokens for agentic tool loops.
+	msgs = addTurnCaching(msgs)
+
 	est := estimateTokens(msgs)
 	if est <= compressionThreshold {
 		return msgs
@@ -612,6 +619,42 @@ func isToolResult(m ai.Message) bool {
 		}
 	}
 	return true
+}
+
+// addTurnCaching marks the last user message's content blocks with
+// cache_control so the Anthropic API caches all prior conversation turns.
+// In an agentic tool loop (send → tool_use → tool_result → send), this
+// means subsequent API calls only pay for the new tool results, not the
+// entire conversation history. The API allows up to 4 cache breakpoints;
+// we use one on conversation turns (system blocks use the other 3).
+func addTurnCaching(msgs []ai.Message) []ai.Message {
+	if len(msgs) < 4 {
+		return msgs // too short to benefit from caching
+	}
+
+	// Find the last user message that isn't the very last message
+	// (we want to cache everything before the newest exchange).
+	cacheIdx := -1
+	for i := len(msgs) - 2; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			cacheIdx = i
+			break
+		}
+	}
+	if cacheIdx < 0 {
+		return msgs
+	}
+
+	// Clone the message and add cache_control to its last content block.
+	m := msgs[cacheIdx]
+	blocks := make([]ai.ContentBlock, len(m.Content))
+	copy(blocks, m.Content)
+	if len(blocks) > 0 {
+		last := &blocks[len(blocks)-1]
+		last.CacheControl = &ai.CacheControlEphemeral
+	}
+	msgs[cacheIdx] = ai.Message{Role: m.Role, Content: blocks}
+	return msgs
 }
 
 // sanitizeMessages fixes orphaned tool_use blocks that have no matching
