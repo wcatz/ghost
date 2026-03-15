@@ -106,9 +106,43 @@ func (s *Session) SendAsync(ctx context.Context, userMsg string, approvalCh chan
 	return s.Send(ctx, userMsg, approvalFn)
 }
 
+// SendImageAsync sends a user message with an attached image through the agentic loop.
+func (s *Session) SendImageAsync(ctx context.Context, text, mediaType, base64Data string, approvalCh chan<- provider.ApprovalRequest) <-chan ai.StreamEvent {
+	approvalFn := func(toolName string, input json.RawMessage) bool {
+		resp := make(chan bool, 1)
+		select {
+		case approvalCh <- provider.ApprovalRequest{
+			ToolName: toolName,
+			Input:    input,
+			Response: resp,
+		}:
+		case <-ctx.Done():
+			return false
+		}
+		select {
+		case approved := <-resp:
+			return approved
+		case <-ctx.Done():
+			return false
+		case <-time.After(30 * time.Second):
+			s.logger.Warn("approval timeout, denying", "tool", toolName)
+			return false
+		}
+	}
+	imageBlocks := []ai.ContentBlock{ai.ImageBlock(mediaType, base64Data)}
+	msg := ai.MultimodalMessage(text, imageBlocks)
+	return s.SendMessage(ctx, msg, text, approvalFn)
+}
+
 // Send processes a user message through the full agentic loop.
 // It streams events through the returned channel.
 func (s *Session) Send(ctx context.Context, userMsg string, approvalFn ApprovalFunc) <-chan ai.StreamEvent {
+	return s.SendMessage(ctx, ai.TextMessage("user", userMsg), userMsg, approvalFn)
+}
+
+// SendMessage processes a pre-built user message through the agentic loop.
+// userText is the plain text for memory extraction.
+func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userText string, approvalFn ApprovalFunc) <-chan ai.StreamEvent {
 	events := make(chan ai.StreamEvent, 128)
 
 	go func() {
@@ -118,7 +152,7 @@ func (s *Session) Send(ctx context.Context, userMsg string, approvalFn ApprovalF
 		s.LastActiveAt = time.Now()
 
 		// Append user message.
-		s.messages = append(s.messages, ai.TextMessage("user", userMsg))
+		s.messages = append(s.messages, userMessage)
 
 		// Build system blocks.
 		system := s.builder.BuildSystemBlocks(ctx, s.projectCtx, s.Mode)
@@ -238,7 +272,7 @@ func (s *Session) Send(ctx context.Context, userMsg string, approvalFn ApprovalF
 				}()
 				reflection.ExtractMemories(
 					context.Background(), s.client, s.store, s.logger,
-					s.ProjectID, userMsg, fullResponse,
+					s.ProjectID, userText, fullResponse,
 				)
 			}()
 			go func() {
