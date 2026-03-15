@@ -103,11 +103,11 @@ func getTokenFromWeb(ctx context.Context, cfg *oauth2.Config, logger *slog.Logge
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			errCh <- fmt.Errorf("no code in callback: %s", r.URL.Query().Get("error"))
-			fmt.Fprint(w, "<html><body><h2>Error — no authorization code received.</h2></body></html>")
+			_, _ = fmt.Fprint(w, "<html><body><h2>Error — no authorization code received.</h2></body></html>")
 			return
 		}
 		codeCh <- code
-		fmt.Fprint(w, "<html><body><h2>Ghost authorized! You can close this tab.</h2></body></html>")
+		_, _ = fmt.Fprint(w, "<html><body><h2>Ghost authorized! You can close this tab.</h2></body></html>")
 	})
 
 	srv := &http.Server{
@@ -121,7 +121,7 @@ func getTokenFromWeb(ctx context.Context, cfg *oauth2.Config, logger *slog.Logge
 			errCh <- err
 		}
 	}()
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 
 	authURL := cfg.AuthCodeURL("ghost-state", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
 	logger.Info("open this URL in your browser to authorize Ghost", "url", authURL)
@@ -148,7 +148,7 @@ func loadToken(path string) (*oauth2.Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var tok oauth2.Token
 	if err := json.NewDecoder(f).Decode(&tok); err != nil {
@@ -166,6 +166,6 @@ func saveToken(path string, tok *oauth2.Token) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return json.NewEncoder(f).Encode(tok)
 }

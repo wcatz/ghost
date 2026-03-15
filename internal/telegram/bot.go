@@ -322,21 +322,21 @@ func (tb *Bot) handleMeetings(ctx context.Context, b *bot.Bot, update *models.Up
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("*Today's Meetings* (%d)\n\n", len(events)))
+	fmt.Fprintf(&sb, "*Today's Meetings* (%d)\n\n", len(events))
 	for _, e := range events {
 		if e.AllDay {
-			sb.WriteString(fmt.Sprintf("📅 %s (all day)\n", e.Summary))
+			fmt.Fprintf(&sb, "📅 %s (all day)\n", e.Summary)
 		} else {
-			sb.WriteString(fmt.Sprintf("🕐 %s – %s  *%s*\n",
+			fmt.Fprintf(&sb, "🕐 %s – %s  *%s*\n",
 				e.Start.Local().Format("15:04"),
 				e.End.Local().Format("15:04"),
-				e.Summary))
+				e.Summary)
 		}
 		if e.Location != "" {
-			sb.WriteString(fmt.Sprintf("  📍 %s\n", e.Location))
+			fmt.Fprintf(&sb, "  📍 %s\n", e.Location)
 		}
 		if e.MeetLink != "" {
-			sb.WriteString(fmt.Sprintf("  🔗 %s\n", e.MeetLink))
+			fmt.Fprintf(&sb, "  🔗 %s\n", e.MeetLink)
 		}
 		sb.WriteString("\n")
 	}
