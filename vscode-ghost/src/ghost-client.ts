@@ -112,11 +112,23 @@ export class GhostClient extends EventEmitter {
     );
   }
 
+  async setAutoApprove(
+    sessionId: string,
+    enabled: boolean
+  ): Promise<{ auto_approve: boolean }> {
+    return this.request(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/auto-approve`,
+      { enabled }
+    );
+  }
+
   // --- Chat (SSE streaming) ---
 
   sendMessage(
     sessionId: string,
-    message: string
+    message: string,
+    image?: { media_type: string; data: string }
   ): { events: EventEmitter; abort: () => void } {
     const emitter = new EventEmitter();
     const url = new URL(
@@ -124,7 +136,11 @@ export class GhostClient extends EventEmitter {
       this.baseUrl
     );
 
-    const body = JSON.stringify({ message });
+    const payload: Record<string, unknown> = { message };
+    if (image) {
+      payload.images = [{ type: "base64", media_type: image.media_type, data: image.data }];
+    }
+    const body = JSON.stringify(payload);
     const isHttps = url.protocol === "https:";
     const mod = isHttps ? https : http;
 

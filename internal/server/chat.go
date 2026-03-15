@@ -327,6 +327,32 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// --- Auto-Approve Handler ---
+
+type autoApproveRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (s *Server) handleAutoApprove(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	session := s.orchestrator.GetSessionByID(id)
+	if session == nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	var req autoApproveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	session.SetAutoApprove(req.Enabled)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"auto_approve": req.Enabled,
+	})
+}
+
 // --- SSE Helper ---
 
 func writeSSE(w http.ResponseWriter, flusher http.Flusher, eventType string, data interface{}) {

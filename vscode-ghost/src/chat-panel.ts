@@ -2,9 +2,9 @@ import * as vscode from "vscode";
 import {
   GhostClient,
   Session,
-  StreamEvent,
   ApprovalRequest,
 } from "./ghost-client";
+import { getChatHtml } from "./webview-html";
 
 export class ChatPanelProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "ghost.chat";
@@ -39,12 +39,12 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
       ],
     };
 
-    webviewView.webview.html = this.getHtml(webviewView.webview);
+    webviewView.webview.html = getChatHtml(webviewView.webview, this.extensionUri);
 
     webviewView.webview.onDidReceiveMessage(async (msg) => {
       switch (msg.type) {
         case "send":
-          await this.handleSend(msg.text);
+          await this.handleSend(msg.text, msg.image);
           break;
         case "approve":
           await this.handleApprove(msg.approved);
@@ -55,6 +55,12 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
         case "setMode":
           await this.handleSetMode(msg.mode);
           break;
+        case "set_auto_approve":
+          await this.handleAutoApprove(msg.enabled);
+          break;
+        case "attach_image":
+          await this.handleAttachImage();
+          break;
         case "ready":
           await this.handleReady();
           break;
@@ -64,11 +70,7 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
 
   private async handleReady(): Promise<void> {
     const available = await this.client.isAvailable();
-    this.postMessage({
-      type: "status",
-      connected: available,
-    });
-
+    this.postMessage({ type: "status", connected: available });
     if (available) {
       await this.ensureSession();
     }
@@ -78,7 +80,6 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     if (this.session) {
       return;
     }
-
     const folders = vscode.workspace.workspaceFolders;
     if (!folders || folders.length === 0) {
       this.postMessage({
@@ -87,28 +88,18 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
       });
       return;
     }
-
     try {
-      this.session = await this.client.createSession(
-        folders[0].uri.fsPath
-      );
-      this.postMessage({
-        type: "session",
-        session: this.session,
-      });
+      this.session = await this.client.createSession(folders[0].uri.fsPath);
+      this.postMessage({ type: "session", session: this.session });
     } catch (err) {
-      this.postMessage({
-        type: "error",
-        text: `Failed to create session: ${err}`,
-      });
+      this.postMessage({ type: "error", text: `Failed to create session: ${err}` });
     }
   }
 
-  private async handleSend(text: string): Promise<void> {
-    if (!text.trim()) {
+  private async handleSend(text: string, image?: { media_type: string; data: string }): Promise<void> {
+    if (!text.trim() && !image) {
       return;
     }
-
     await this.ensureSession();
     if (!this.session) {
       return;
@@ -117,59 +108,29 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
     this.postMessage({ type: "user_message", text });
     this.postMessage({ type: "streaming", active: true });
 
-    const { events, abort } = this.client.sendMessage(
-      this.session.id,
-      text
-    );
+    const { events, abort } = this.client.sendMessage(this.session.id, text, image);
     this.abortFn = abort;
 
-    events.on("text", (text: string) => {
-      this.postMessage({ type: "text_delta", text });
-    });
-
-    events.on("thinking", (text: string) => {
-      this.postMessage({ type: "thinking_delta", text });
-    });
-
-    events.on("tool_start", (data: { id: string; name: string }) => {
-      this.postMessage({ type: "tool_start", ...data });
-    });
-
-    events.on(
-      "tool_delta",
-      (data: { id: string; delta: string }) => {
-        this.postMessage({ type: "tool_delta", ...data });
-      }
-    );
-
-    events.on("tool_end", (data: { id: string; name: string }) => {
-      this.postMessage({ type: "tool_end", ...data });
-    });
-
-    events.on("approval", (data: ApprovalRequest) => {
-      this.postMessage({
-        type: "approval_required",
-        tool_name: data.tool_name,
-        input: data.input,
-      });
-    });
-
+    events.on("text", (t: string) => this.postMessage({ type: "text_delta", text: t }));
+    events.on("thinking", (t: string) => this.postMessage({ type: "thinking_delta", text: t }));
+    events.on("tool_start", (data: { id: string; name: string }) =>
+      this.postMessage({ type: "tool_start", ...data }));
+    events.on("tool_delta", (data: { id: string; delta: string }) =>
+      this.postMessage({ type: "tool_delta", ...data }));
+    events.on("tool_end", (data: { id: string; name: string }) =>
+      this.postMessage({ type: "tool_end", ...data }));
+    events.on("approval", (data: ApprovalRequest) =>
+      this.postMessage({ type: "approval_required", tool_name: data.tool_name, input: data.input }));
     events.on("done", (data: Record<string, unknown>) => {
-      this.postMessage({
-        type: "done",
-        usage: data.usage,
-        stop_reason: data.stop_reason,
-      });
+      this.postMessage({ type: "done", usage: data.usage, stop_reason: data.stop_reason });
       this.postMessage({ type: "streaming", active: false });
       this.abortFn = undefined;
     });
-
     events.on("error", (err: Error) => {
       this.postMessage({ type: "error", text: err.message });
       this.postMessage({ type: "streaming", active: false });
       this.abortFn = undefined;
     });
-
     events.on("close", () => {
       this.postMessage({ type: "streaming", active: false });
       this.abortFn = undefined;
@@ -177,16 +138,11 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleApprove(approved: boolean): Promise<void> {
-    if (!this.session) {
-      return;
-    }
+    if (!this.session) return;
     try {
       await this.client.approve(this.session.id, approved);
     } catch (err) {
-      this.postMessage({
-        type: "error",
-        text: `Approval failed: ${err}`,
-      });
+      this.postMessage({ type: "error", text: `Approval failed: ${err}` });
     }
   }
 
@@ -199,250 +155,44 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleSetMode(mode: string): Promise<void> {
-    if (!this.session) {
-      return;
-    }
+    if (!this.session) return;
     try {
       const result = await this.client.setMode(this.session.id, mode);
       this.postMessage({ type: "mode_changed", mode: result.mode });
     } catch (err) {
-      this.postMessage({
-        type: "error",
-        text: `Set mode failed: ${err}`,
-      });
+      this.postMessage({ type: "error", text: `Set mode failed: ${err}` });
     }
+  }
+
+  private async handleAutoApprove(enabled: boolean): Promise<void> {
+    if (!this.session) return;
+    try {
+      await this.client.setAutoApprove(this.session.id, enabled);
+    } catch (err) {
+      this.postMessage({ type: "error", text: `Auto-approve failed: ${err}` });
+    }
+  }
+
+  private async handleAttachImage(): Promise<void> {
+    const uris = await vscode.window.showOpenDialog({
+      canSelectMany: false,
+      filters: { Images: ["png", "jpg", "jpeg", "gif", "webp"] },
+    });
+    if (!uris || uris.length === 0) return;
+    const data = await vscode.workspace.fs.readFile(uris[0]);
+    const base64 = Buffer.from(data).toString("base64");
+    const ext = uris[0].fsPath.split(".").pop()?.toLowerCase() || "png";
+    const mimeMap: Record<string, string> = {
+      png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+      gif: "image/gif", webp: "image/webp",
+    };
+    this.postMessage({
+      type: "image_data",
+      image: { media_type: mimeMap[ext] || "image/png", data: base64 },
+    });
   }
 
   public postMessage(msg: Record<string, unknown>): void {
     this.view?.webview.postMessage(msg);
   }
-
-  private getHtml(webview: vscode.Webview): string {
-    const nonce = getNonce();
-    const styleUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, "media", "chat.css")
-    );
-
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy"
-    content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
-  <link rel="stylesheet" href="${styleUri}">
-  <title>Ghost Chat</title>
-</head>
-<body>
-  <div id="status-bar">
-    <span id="connection-status">Connecting...</span>
-    <span id="session-info"></span>
-    <span id="mode-display"></span>
-  </div>
-  <div id="messages"></div>
-  <div id="approval-bar" class="hidden">
-    <span id="approval-tool"></span>
-    <button id="approve-btn" class="approve">Allow</button>
-    <button id="deny-btn" class="deny">Deny</button>
-  </div>
-  <div id="input-area">
-    <textarea id="input" placeholder="Message Ghost..." rows="2"></textarea>
-    <button id="send-btn" title="Send (Enter)">&#x27A4;</button>
-    <button id="abort-btn" class="hidden" title="Stop">&#x25A0;</button>
-  </div>
-  <script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
-    const messagesEl = document.getElementById('messages');
-    const inputEl = document.getElementById('input');
-    const sendBtn = document.getElementById('send-btn');
-    const abortBtn = document.getElementById('abort-btn');
-    const approvalBar = document.getElementById('approval-bar');
-    const approvalTool = document.getElementById('approval-tool');
-    const approveBtn = document.getElementById('approve-btn');
-    const denyBtn = document.getElementById('deny-btn');
-    const connectionStatus = document.getElementById('connection-status');
-    const sessionInfo = document.getElementById('session-info');
-    const modeDisplay = document.getElementById('mode-display');
-
-    let currentAssistantEl = null;
-    let currentThinkingEl = null;
-    let streaming = false;
-
-    function scrollToBottom() {
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
-
-    function addMessage(role, text) {
-      const div = document.createElement('div');
-      div.className = 'message ' + role;
-      div.textContent = text;
-      messagesEl.appendChild(div);
-      scrollToBottom();
-      return div;
-    }
-
-    function ensureAssistantBubble() {
-      if (!currentAssistantEl) {
-        currentAssistantEl = document.createElement('div');
-        currentAssistantEl.className = 'message assistant';
-        messagesEl.appendChild(currentAssistantEl);
-      }
-      return currentAssistantEl;
-    }
-
-    function addToolIndicator(name, status) {
-      const div = document.createElement('div');
-      div.className = 'tool-indicator ' + status;
-      div.dataset.toolName = name;
-      div.innerHTML = '<span class="tool-icon">' +
-        (status === 'running' ? '&#9881;' : '&#10003;') +
-        '</span> ' + name;
-      messagesEl.appendChild(div);
-      scrollToBottom();
-      return div;
-    }
-
-    // --- Send ---
-    function send() {
-      const text = inputEl.value.trim();
-      if (!text || streaming) return;
-      vscode.postMessage({ type: 'send', text });
-      inputEl.value = '';
-      inputEl.style.height = 'auto';
-    }
-
-    sendBtn.addEventListener('click', send);
-    inputEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        send();
-      }
-    });
-
-    // Auto-resize textarea.
-    inputEl.addEventListener('input', () => {
-      inputEl.style.height = 'auto';
-      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
-    });
-
-    // --- Abort ---
-    abortBtn.addEventListener('click', () => {
-      vscode.postMessage({ type: 'abort' });
-    });
-
-    // --- Approval ---
-    approveBtn.addEventListener('click', () => {
-      vscode.postMessage({ type: 'approve', approved: true });
-      approvalBar.classList.add('hidden');
-    });
-    denyBtn.addEventListener('click', () => {
-      vscode.postMessage({ type: 'approve', approved: false });
-      approvalBar.classList.add('hidden');
-    });
-
-    // --- Messages from extension ---
-    window.addEventListener('message', (event) => {
-      const msg = event.data;
-      switch (msg.type) {
-        case 'status':
-          connectionStatus.textContent = msg.connected ? 'Connected' : 'Disconnected';
-          connectionStatus.className = msg.connected ? 'connected' : 'disconnected';
-          break;
-
-        case 'session':
-          sessionInfo.textContent = msg.session.project_name;
-          modeDisplay.textContent = msg.session.mode;
-          break;
-
-        case 'user_message':
-          addMessage('user', msg.text);
-          currentAssistantEl = null;
-          currentThinkingEl = null;
-          break;
-
-        case 'text_delta':
-          ensureAssistantBubble().textContent += msg.text;
-          scrollToBottom();
-          break;
-
-        case 'thinking_delta':
-          if (!currentThinkingEl) {
-            currentThinkingEl = document.createElement('div');
-            currentThinkingEl.className = 'message thinking';
-            messagesEl.appendChild(currentThinkingEl);
-          }
-          currentThinkingEl.textContent += msg.text;
-          scrollToBottom();
-          break;
-
-        case 'tool_start':
-          addToolIndicator(msg.name, 'running');
-          break;
-
-        case 'tool_end': {
-          const indicators = messagesEl.querySelectorAll('.tool-indicator.running');
-          indicators.forEach(el => {
-            if (el.dataset.toolName === msg.name) {
-              el.className = 'tool-indicator done';
-              el.querySelector('.tool-icon').innerHTML = '&#10003;';
-            }
-          });
-          break;
-        }
-
-        case 'approval_required':
-          approvalTool.textContent = msg.tool_name + ': approve?';
-          approvalBar.classList.remove('hidden');
-          scrollToBottom();
-          break;
-
-        case 'done':
-          currentAssistantEl = null;
-          currentThinkingEl = null;
-          if (msg.usage) {
-            const usage = msg.usage;
-            const info = document.createElement('div');
-            info.className = 'usage-info';
-            info.textContent = 'in:' + (usage.input_tokens || 0) +
-              ' out:' + (usage.output_tokens || 0);
-            if (usage.cache_read_input_tokens) {
-              info.textContent += ' cache:' + usage.cache_read_input_tokens;
-            }
-            messagesEl.appendChild(info);
-            scrollToBottom();
-          }
-          break;
-
-        case 'streaming':
-          streaming = msg.active;
-          sendBtn.classList.toggle('hidden', msg.active);
-          abortBtn.classList.toggle('hidden', !msg.active);
-          break;
-
-        case 'mode_changed':
-          modeDisplay.textContent = msg.mode;
-          break;
-
-        case 'error':
-          addMessage('error', msg.text);
-          break;
-      }
-    });
-
-    // Signal ready.
-    vscode.postMessage({ type: 'ready' });
-  </script>
-</body>
-</html>`;
-  }
-}
-
-function getNonce(): string {
-  let text = "";
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  for (let i = 0; i < 32; i++) {
-    text += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return text;
 }
