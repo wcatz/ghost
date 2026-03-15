@@ -55,6 +55,17 @@
       {
         "command": "ghost.showChat",
         "title": "Ghost: Show Chat"
+      },
+      {
+        "command": "ghost.openEditor",
+        "title": "Ghost: Open Chat in Editor"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "ghost.openEditor",
+        "key": "ctrl+shift+g",
+        "mac": "cmd+shift+g"
       }
     ],
     "configuration": {
