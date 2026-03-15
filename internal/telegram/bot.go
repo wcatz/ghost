@@ -111,7 +111,7 @@ func (tb *Bot) SendMessage(ctx context.Context, chatID int64, text string) error
 	_, err := tb.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
 		Text:      text,
-		ParseMode: models.ParseModeMarkdown,
+		ParseMode: models.ParseModeMarkdownV1,
 	})
 	return err
 }
@@ -296,7 +296,7 @@ func (tb *Bot) reply(ctx context.Context, b *bot.Bot, update *models.Update, tex
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
 		Text:      text,
-		ParseMode: models.ParseModeMarkdown,
+		ParseMode: models.ParseModeMarkdownV1,
 	})
 	if err != nil {
 		tb.logger.Error("telegram send", "error", err, "chat_id", update.Message.Chat.ID)

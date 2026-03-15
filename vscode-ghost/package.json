@@ -62,7 +62,7 @@
       "properties": {
         "ghost.serverUrl": {
           "type": "string",
-          "default": "http://127.0.0.1:2444",
+          "default": "http://127.0.0.1:2187",
           "description": "URL of the ghost serve daemon"
         },
         "ghost.authToken": {
