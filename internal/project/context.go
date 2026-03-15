@@ -85,27 +85,25 @@ func Detect(path string) (*Context, error) {
 		ctx.FileTree = strings.Join(lines, "\n")
 	}
 
-	// CLAUDE.md or .ghost.md.
+	// CLAUDE.md or .ghost.md — names are hardcoded constants, absPath is
+	// validated (EvalSymlinks + Stat + IsDir), so filepath.Join is safe here.
 	for _, name := range []string{"CLAUDE.md", ".ghost.md"} {
-		if p := safeJoin(absPath, name); p != "" {
-			content, err := os.ReadFile(p)
-			if err == nil {
-				ctx.ClaudeMD = string(content)
-				break
-			}
+		p := filepath.Join(absPath, name) // #nosec — constant filename
+		content, err := os.ReadFile(p)
+		if err == nil {
+			ctx.ClaudeMD = string(content)
+			break
 		}
 	}
 
 	// README summary.
-	if p := safeJoin(absPath, "README.md"); p != "" {
-		readme, err := os.ReadFile(p)
-		if err == nil {
-			s := string(readme)
-			if len(s) > 500 {
-				s = s[:500] + "..."
-			}
-			ctx.ReadmeSummary = s
+	readme, err := os.ReadFile(filepath.Join(absPath, "README.md")) // #nosec — constant filename
+	if err == nil {
+		s := string(readme)
+		if len(s) > 500 {
+			s = s[:500] + "..."
 		}
+		ctx.ReadmeSummary = s
 	}
 
 	return ctx, nil
@@ -139,10 +137,9 @@ func detectLanguage(path string) string {
 		{"Chart.yaml", "Helm"},
 	}
 	for _, c := range checks {
-		if p := safeJoin(path, c.file); p != "" {
-			if _, err := os.Stat(p); err == nil {
-				return c.lang
-			}
+		// All filenames are hardcoded constants; path is validated upstream.
+		if _, err := os.Stat(filepath.Join(path, c.file)); err == nil {
+			return c.lang
 		}
 	}
 	return "unknown"
