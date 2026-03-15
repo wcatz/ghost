@@ -104,7 +104,32 @@ func (e *Engine) MaybeReflect(ctx context.Context, projectID string, projCtx *pr
 
 	result := parseReflectionResponse(responseText)
 
+	// Filter out empty-content memories before processing.
+	var validMemories []ReflectMemory
+	for _, m := range result.Memories {
+		if strings.TrimSpace(m.Content) != "" {
+			validMemories = append(validMemories, m)
+		}
+	}
+	result.Memories = validMemories
+
 	if len(result.Memories) > 0 {
+		// Guard against dramatic reduction — count existing non-manual memories.
+		var existingNonManual int
+		for _, m := range existingMemories {
+			if m.Source != "manual" {
+				existingNonManual++
+			}
+		}
+		if existingNonManual >= 6 && len(result.Memories) < existingNonManual/2 {
+			e.logger.Warn("reflection returned too few memories — skipping replace to prevent data loss",
+				"project_id", projectID,
+				"existing_non_manual", existingNonManual,
+				"reflection_returned", len(result.Memories),
+			)
+			return
+		}
+
 		dbMemories := make([]memory.Memory, len(result.Memories))
 		for i, m := range result.Memories {
 			dbMemories[i] = memory.Memory{
