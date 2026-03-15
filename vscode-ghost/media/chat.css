@@ -87,6 +87,21 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
 }
 .header-btn:hover { background: var(--ghost-hover); color: var(--ghost-fg); }
 
+/* Ghost auto-approve toggle */
+.ghost-toggle {
+  width: 18px;
+  height: 18px;
+  vertical-align: middle;
+  color: var(--ghost-muted);
+  transition: color 0.2s ease, filter 0.2s ease;
+}
+#auto-approve-btn.yolo .ghost-toggle {
+  color: var(--ghost-error);
+  filter: drop-shadow(0 0 6px var(--ghost-error));
+}
+#auto-approve-btn.yolo { border-color: var(--ghost-error); }
+#auto-approve-btn { padding: 3px 5px; }
+
 #session-cost {
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 11px;
@@ -296,48 +311,131 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
 .slash-desc { color: var(--ghost-muted); font-size: 0.9em; }
 
 /* --- Approval Bar --- */
-#approval-bar {
-  border-top: 1px solid var(--ghost-accent);
-  background: var(--ghost-widget-bg);
-  padding: 8px 12px;
-  flex-shrink: 0;
-  animation: slideUp 0.2s ease-out;
-}
-#approval-bar.hidden { display: none; }
-
-@keyframes slideUp {
-  from { transform: translateY(10px); opacity: 0; }
-  to { transform: translateY(0); opacity: 1; }
-}
-
-.approval-content {
+/* --- Approval Modal Overlay --- */
+#approval-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  justify-content: center;
+  z-index: 100;
+  animation: fadeIn 0.15s ease-out;
+}
+#approval-overlay.hidden { display: none; }
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
-#approval-tool { font-size: 0.9em; flex: 1; }
+#approval-modal {
+  background: var(--ghost-widget-bg);
+  border: 1px solid var(--ghost-accent);
+  border-radius: 8px;
+  padding: 20px;
+  min-width: 320px;
+  max-width: 480px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  animation: scaleIn 0.15s ease-out;
+}
 
-.approval-actions { display: flex; gap: 6px; }
-.approval-actions button {
-  padding: 4px 14px;
+@keyframes scaleIn {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.modal-header {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ghost-accent);
+  margin-bottom: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.modal-tool {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ghost-fg);
+  padding: 8px 0;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.modal-preview {
+  font-size: 12px;
+  color: var(--ghost-muted);
+  background: var(--ghost-input-bg);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 8px 0 16px;
+  max-height: 120px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: var(--vscode-editor-font-family, monospace);
+}
+.modal-preview:empty { display: none; }
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.modal-btn {
+  padding: 8px 20px;
   border: none;
   border-radius: 4px;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
+  flex: 1;
 }
-#approve-btn {
+.modal-btn kbd {
+  font-size: 10px;
+  opacity: 0.6;
+  margin-left: 4px;
+  padding: 1px 4px;
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 3px;
+}
+.modal-btn.approve {
   background: var(--ghost-button-bg);
   color: var(--ghost-button-fg);
 }
-#approve-btn:hover { opacity: 0.9; }
-#deny-btn {
+.modal-btn.approve:hover { opacity: 0.9; }
+.modal-btn.deny {
   background: var(--vscode-button-secondaryBackground, #3a3d41);
   color: var(--vscode-button-secondaryForeground, #d4d4d4);
 }
-#deny-btn:hover { opacity: 0.9; }
+.modal-btn.deny:hover { opacity: 0.9; }
+
+.modal-instructions {
+  display: flex;
+  gap: 6px;
+}
+.modal-instructions input {
+  flex: 1;
+  background: var(--ghost-input-bg);
+  color: var(--ghost-fg);
+  border: 1px solid var(--ghost-border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  outline: none;
+}
+.modal-instructions input:focus {
+  border-color: var(--ghost-accent);
+}
+.modal-btn.deny-with {
+  background: var(--ghost-error);
+  color: #fff;
+  white-space: nowrap;
+  font-size: 11px;
+  padding: 6px 12px;
+}
+.modal-btn.deny-with:hover { opacity: 0.9; }
 
 /* --- Image Preview --- */
 #image-preview {

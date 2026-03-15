@@ -38,6 +38,16 @@ func Detect(path string) (*Context, error) {
 		return nil, fmt.Errorf("resolve symlinks: %w", err)
 	}
 
+	// Verify the resolved path is an existing directory (guards against
+	// user-controlled path injection — CodeQL go/path-injection).
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat project path: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("not a directory: %s", absPath)
+	}
+
 	h := sha256.Sum256([]byte(absPath))
 	ctx := &Context{
 		ID:   fmt.Sprintf("%x", h[:6]),
@@ -87,13 +97,15 @@ func Detect(path string) (*Context, error) {
 	}
 
 	// README summary.
-	readme, err := os.ReadFile(safeJoin(absPath, "README.md"))
-	if err == nil {
-		s := string(readme)
-		if len(s) > 500 {
-			s = s[:500] + "..."
+	if p := safeJoin(absPath, "README.md"); p != "" {
+		readme, err := os.ReadFile(p)
+		if err == nil {
+			s := string(readme)
+			if len(s) > 500 {
+				s = s[:500] + "..."
+			}
+			ctx.ReadmeSummary = s
 		}
-		ctx.ReadmeSummary = s
 	}
 
 	return ctx, nil
