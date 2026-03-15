@@ -95,6 +95,7 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 	b.RegisterHandler(bot.HandlerTypeMessageText, "help", bot.MatchTypeCommand, tb.handleHelp)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "sessions", bot.MatchTypeCommand, tb.handleSessions)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "chat", bot.MatchTypeCommand, tb.handleChat)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "cost", bot.MatchTypeCommand, tb.handleCost)
 
 	// Callback query handlers.
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "approve:", bot.MatchTypePrefix, tb.handleApprovalCallback)
@@ -466,18 +467,71 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 	tb.replyWithKeyboard(ctx, b, update, sb.String(), buttons)
 }
 
+func (tb *Bot) handleCost(ctx context.Context, b *bot.Bot, update *models.Update) {
+	tb.sendTyping(ctx, update)
+
+	var sb strings.Builder
+	sb.WriteString("*Ghost Cost Summary*\n\n")
+
+	periods := []struct {
+		label string
+		since string
+	}{
+		{"Today", "24h"},
+		{"This Week", "7d"},
+		{"This Month", "30d"},
+		{"All Time", ""},
+	}
+
+	for _, p := range periods {
+		cs, err := tb.store.GetCostSummary(ctx, p.since)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&sb, "*%s*\n", mdv2.Esc(p.label))
+		fmt.Fprintf(&sb, "  Cost: $%s\n", mdv2.Esc(fmt.Sprintf("%.2f", cs.TotalCost)))
+		fmt.Fprintf(&sb, "  Tokens: %s in / %s out\n",
+			mdv2.Esc(formatTokens(cs.TotalInput)),
+			mdv2.Esc(formatTokens(cs.TotalOutput)))
+		if cs.TotalCacheRead > 0 {
+			fmt.Fprintf(&sb, "  Cache reads: %s\n", mdv2.Esc(formatTokens(cs.TotalCacheRead)))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Compare to Max subscription.
+	allTime, _ := tb.store.GetCostSummary(ctx, "")
+	monthly, _ := tb.store.GetCostSummary(ctx, "30d")
+	fmt.Fprintf(&sb, "_Max subscription: $200/mo_\n")
+	fmt.Fprintf(&sb, "_Ghost this month: $%s_\n", mdv2.Esc(fmt.Sprintf("%.2f", monthly.TotalCost)))
+	fmt.Fprintf(&sb, "_Ghost all time: $%s_", mdv2.Esc(fmt.Sprintf("%.2f", allTime.TotalCost)))
+
+	tb.reply(ctx, b, update, sb.String())
+}
+
+func formatTokens(n int) string {
+	if n >= 1000000 {
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	}
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fK", float64(n)/1e3)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
 func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update) {
 	tb.reply(ctx, b, update, `*Ghost Commands*
 
-/status — System status \+ notification summary
-/notifications — List unread GitHub notifications
-/meetings — Today's calendar with Meet links
+/status — System status
+/notifications — GitHub notifications
+/meetings — Today's calendar
 /emails — Recent unread emails
-/sessions — List active Ghost sessions
+/sessions — Active Ghost sessions
 /chat — Chat with a session
+/cost — Cost tracking vs Max
 /memory search — Search memories
 /remind — Set a reminder
-/briefing — Get your morning briefing
+/briefing — Morning briefing
 /help — This message`)
 }
 
