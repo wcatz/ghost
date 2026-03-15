@@ -89,10 +89,30 @@ export class ChatPanelProvider implements vscode.WebviewViewProvider {
       return;
     }
     try {
-      this.session = await this.client.createSession(folders[0].uri.fsPath);
+      this.session = await this.client.createSession(folders[0].uri.fsPath, undefined, true);
       this.postMessage({ type: "session", session: this.session });
+      await this.loadHistory();
     } catch (err) {
       this.postMessage({ type: "error", text: `Failed to create session: ${err}` });
+    }
+  }
+
+  private async loadHistory(): Promise<void> {
+    if (!this.session) return;
+    try {
+      const history = await this.client.getHistory(this.session.id);
+      if (history && history.length > 0) {
+        for (const msg of history) {
+          if (msg.role === "user") {
+            this.postMessage({ type: "user_message", text: msg.content });
+          } else if (msg.role === "assistant") {
+            this.postMessage({ type: "text_delta", text: msg.content });
+            this.postMessage({ type: "done", usage: null, stop_reason: "history" });
+          }
+        }
+      }
+    } catch {
+      // No history — fresh session.
     }
   }
 

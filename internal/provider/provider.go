@@ -71,6 +71,8 @@ type MemoryStore interface {
 	CreateConversation(ctx context.Context, projectID, mode string) (string, error)
 	AppendMessage(ctx context.Context, conversationID, role, content string) error
 	GetRecentExchanges(ctx context.Context, projectID string, limit int) ([][2]string, error)
+	GetLatestConversation(ctx context.Context, projectID string) (string, error)
+	GetConversationMessages(ctx context.Context, conversationID string) ([]memory.ConversationMessage, error)
 
 	// State
 	IncrementInteraction(ctx context.Context, projectID string) (int, error)

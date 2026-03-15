@@ -41,8 +41,9 @@ type chatState struct {
 // --- Session Handlers ---
 
 type createSessionRequest struct {
-	Path string `json:"path"`
-	Mode string `json:"mode,omitempty"`
+	Path   string `json:"path"`
+	Mode   string `json:"mode,omitempty"`
+	Resume bool   `json:"resume,omitempty"`
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +57,11 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := s.orchestrator.StartSession(req.Path)
+	startFn := s.orchestrator.StartSession
+	if req.Resume {
+		startFn = s.orchestrator.ResumeSession
+	}
+	session, err := startFn(req.Path)
 	if err != nil {
 		s.logger.Error("start session", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to start session")
@@ -329,6 +334,38 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	state.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "responded"})
+}
+
+// --- History Handler ---
+
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	session := s.orchestrator.GetSessionByID(id)
+	if session == nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	if session.ConversationID == "" {
+		writeJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+
+	msgs, err := s.store.GetConversationMessages(r.Context(), session.ConversationID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load history")
+		return
+	}
+
+	type historyMsg struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	out := make([]historyMsg, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, historyMsg{Role: m.Role, Content: m.Content})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // --- Mode Handler ---

@@ -102,6 +102,7 @@ func (s *Server) Run(ctx context.Context) error {
 				r.Post("/{id}/approve", withBodyLimit(s.handleApprove, 1<<20))
 				r.Post("/{id}/mode", withBodyLimit(s.handleSetMode, 1<<20))
 				r.Post("/{id}/auto-approve", withBodyLimit(s.handleAutoApprove, 1<<20))
+				r.Get("/{id}/history", s.handleHistory)
 			})
 		}
 	})
