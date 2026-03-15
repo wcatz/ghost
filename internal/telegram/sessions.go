@@ -45,16 +45,55 @@ func (tb *Bot) handleSessions(ctx context.Context, b *bot.Bot, update *models.Up
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "*Active Sessions* \\(%d\\)\n\n", len(sessions))
+
+	var rows [][]models.InlineKeyboardButton
 	for _, s := range sessions {
 		status := "🟢"
 		if !s.Active {
 			status = "🔴"
 		}
+		shortID := s.ID[:8]
 		fmt.Fprintf(&sb, "%s `%s`\n  %s \\| %s \\| %d msgs\n\n",
-			status, mdv2.Esc(s.ID[:8]), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode), s.Messages)
+			status, mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode), s.Messages)
+		rows = append(rows, []models.InlineKeyboardButton{
+			{Text: fmt.Sprintf("💬 %s (%s)", s.ProjectName, shortID), CallbackData: "chat:" + s.ID},
+		})
 	}
-	sb.WriteString("Use `/chat <session_id> <message>` to interact")
-	tb.reply(ctx, b, update, sb.String())
+
+	tb.replyWithKeyboard(ctx, b, update, sb.String(), rows)
+}
+
+// handleChatCallback handles inline button taps from /sessions.
+func (tb *Bot) handleChatCallback(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.CallbackQuery == nil {
+		return
+	}
+	sessionID := strings.TrimPrefix(update.CallbackQuery.Data, "chat:")
+
+	// Acknowledge the button tap.
+	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+		CallbackQueryID: update.CallbackQuery.ID,
+		Text:            "Send a message to this session",
+	})
+
+	// Prompt the user to reply with a message.
+	chatID := update.CallbackQuery.Message.Message.Chat.ID
+	shortID := sessionID[:8]
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:    chatID,
+		Text:      fmt.Sprintf("💬 Session `%s` selected.\nReply to this message with your prompt:", shortID),
+		ParseMode: models.ParseModeMarkdown,
+		ReplyMarkup: &models.ForceReply{
+			ForceReply:            true,
+			InputFieldPlaceholder: "Type your message...",
+			Selective:             true,
+		},
+	})
+
+	// Store pending chat session so the reply handler can route it.
+	tb.mu.Lock()
+	tb.pendingChat[chatID] = sessionID
+	tb.mu.Unlock()
 }
 
 // handleChat sends a message to a specific Ghost session.
@@ -104,6 +143,37 @@ func (tb *Bot) handleChat(ctx context.Context, b *bot.Bot, update *models.Update
 
 	tb.reply(ctx, b, update, fmt.Sprintf("📤 Sent to `%s`:\n_%s_",
 		mdv2.Esc(fullID[:8]), mdv2.Esc(message)))
+}
+
+// handlePendingChatReply routes text replies to the pending chat session.
+func (tb *Bot) handlePendingChatReply(ctx context.Context, b *bot.Bot, update *models.Update) bool {
+	chatID := update.Message.Chat.ID
+	tb.mu.Lock()
+	sessionID, ok := tb.pendingChat[chatID]
+	if ok {
+		delete(tb.pendingChat, chatID)
+	}
+	tb.mu.Unlock()
+	if !ok {
+		return false
+	}
+
+	message := update.Message.Text
+	if message == "" {
+		return false
+	}
+
+	tb.sendTyping(ctx, update)
+
+	err := tb.sendChatMessage(sessionID, message)
+	if err != nil {
+		tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
+		return true
+	}
+
+	tb.reply(ctx, b, update, fmt.Sprintf("📤 Sent to `%s`:\n_%s_",
+		mdv2.Esc(sessionID[:8]), mdv2.Esc(message)))
+	return true
 }
 
 func (tb *Bot) fetchSessions() ([]apiSession, error) {
