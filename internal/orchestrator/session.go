@@ -75,15 +75,15 @@ func NewSession(
 
 // ApprovalFunc is the legacy synchronous approval callback.
 // Deprecated: Use SendAsync with channel-based approval instead.
-type ApprovalFunc func(toolName string, input json.RawMessage) bool
+type ApprovalFunc func(toolName string, input json.RawMessage) provider.ApprovalResponse
 
 // SendAsync processes a user message through the full agentic loop.
 // Approval requests are sent to approvalCh; the frontend must respond via
 // the embedded Response channel. The 30s timeout prevents deadlock if the
 // frontend dies.
 func (s *Session) SendAsync(ctx context.Context, userMsg string, approvalCh chan<- provider.ApprovalRequest) <-chan ai.StreamEvent {
-	approvalFn := func(toolName string, input json.RawMessage) bool {
-		resp := make(chan bool, 1)
+	approvalFn := func(toolName string, input json.RawMessage) provider.ApprovalResponse {
+		resp := make(chan provider.ApprovalResponse, 1)
 		select {
 		case approvalCh <- provider.ApprovalRequest{
 			ToolName: toolName,
@@ -91,16 +91,16 @@ func (s *Session) SendAsync(ctx context.Context, userMsg string, approvalCh chan
 			Response: resp,
 		}:
 		case <-ctx.Done():
-			return false
+			return provider.ApprovalResponse{Approved: false}
 		}
 		select {
-		case approved := <-resp:
-			return approved
+		case ar := <-resp:
+			return ar
 		case <-ctx.Done():
-			return false
+			return provider.ApprovalResponse{Approved: false}
 		case <-time.After(30 * time.Second):
 			s.logger.Warn("approval timeout, denying", "tool", toolName)
-			return false
+			return provider.ApprovalResponse{Approved: false}
 		}
 	}
 	return s.Send(ctx, userMsg, approvalFn)
@@ -108,8 +108,8 @@ func (s *Session) SendAsync(ctx context.Context, userMsg string, approvalCh chan
 
 // SendImageAsync sends a user message with an attached image through the agentic loop.
 func (s *Session) SendImageAsync(ctx context.Context, text, mediaType, base64Data string, approvalCh chan<- provider.ApprovalRequest) <-chan ai.StreamEvent {
-	approvalFn := func(toolName string, input json.RawMessage) bool {
-		resp := make(chan bool, 1)
+	approvalFn := func(toolName string, input json.RawMessage) provider.ApprovalResponse {
+		resp := make(chan provider.ApprovalResponse, 1)
 		select {
 		case approvalCh <- provider.ApprovalRequest{
 			ToolName: toolName,
@@ -117,16 +117,16 @@ func (s *Session) SendImageAsync(ctx context.Context, text, mediaType, base64Dat
 			Response: resp,
 		}:
 		case <-ctx.Done():
-			return false
+			return provider.ApprovalResponse{Approved: false}
 		}
 		select {
-		case approved := <-resp:
-			return approved
+		case ar := <-resp:
+			return ar
 		case <-ctx.Done():
-			return false
+			return provider.ApprovalResponse{Approved: false}
 		case <-time.After(30 * time.Second):
 			s.logger.Warn("approval timeout, denying", "tool", toolName)
-			return false
+			return provider.ApprovalResponse{Approved: false}
 		}
 	}
 	imageBlocks := []ai.ContentBlock{ai.ImageBlock(mediaType, base64Data)}
@@ -233,13 +233,20 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 				// Check approval.
 				level := s.registry.GetApprovalLevel(tc.Name)
 				if level == tool.ApprovalRequire && !s.autoApprove {
-					if approvalFn != nil && !approvalFn(tc.Name, tc.Input) {
-						results = append(results, ai.ToolResult{
-							ToolUseID: tc.ID,
-							Content:   "User denied this operation",
-							IsError:   true,
-						})
-						continue
+					if approvalFn != nil {
+						ar := approvalFn(tc.Name, tc.Input)
+						if !ar.Approved {
+							msg := "User denied this operation"
+							if ar.Instructions != "" {
+								msg = "User denied with instructions: " + ar.Instructions
+							}
+							results = append(results, ai.ToolResult{
+								ToolUseID: tc.ID,
+								Content:   msg,
+								IsError:   true,
+							})
+							continue
+						}
 					}
 				}
 

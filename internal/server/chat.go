@@ -28,7 +28,7 @@ type sessionInfo struct {
 type pendingApproval struct {
 	ToolName string          `json:"tool_name"`
 	Input    json.RawMessage `json:"input"`
-	response chan bool
+	response chan provider.ApprovalResponse
 }
 
 // chatState holds per-session streaming state for HTTP clients.
@@ -190,7 +190,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		case approval := <-approvalCh:
 			// Tool needs approval — emit event and store pending.
 			// We need a bidirectional channel to both send and receive.
-			respCh := make(chan bool, 1)
+			respCh := make(chan provider.ApprovalResponse, 1)
 			// Forward the response back to the approval request's send-only channel.
 			go func() {
 				v := <-respCh
@@ -262,7 +262,8 @@ func (s *Server) handleStreamEvent(w http.ResponseWriter, flusher http.Flusher, 
 // --- Approval Handler ---
 
 type approvalResponse struct {
-	Approved bool `json:"approved"`
+	Approved     bool   `json:"approved"`
+	Instructions string `json:"instructions,omitempty"`
 }
 
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
@@ -293,7 +294,10 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pending.response <- req.Approved
+	pending.response <- provider.ApprovalResponse{
+		Approved:     req.Approved,
+		Instructions: req.Instructions,
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "responded"})
 }
 
