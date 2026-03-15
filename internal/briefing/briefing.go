@@ -1,5 +1,6 @@
 // Package briefing generates daily briefing digests aggregating
 // GitHub notifications, calendar events, and pending reminders.
+// Output is MarkdownV2-safe for Telegram.
 package briefing
 
 import (
@@ -24,19 +25,14 @@ type Sources struct {
 func Generate(ctx context.Context, src Sources) string {
 	var sb strings.Builder
 	sb.WriteString("*☀️ Ghost Morning Briefing*\n")
-	sb.WriteString(fmt.Sprintf("_%s_\n\n", time.Now().Format("Monday, January 2")))
+	fmt.Fprintf(&sb, "_%s_\n\n", esc(time.Now().Format("Monday, January 2")))
 
-	// GitHub notifications.
 	if src.GitHub != nil {
 		writeGitHub(ctx, &sb, src.GitHub)
 	}
-
-	// Calendar events.
 	if src.Calendar != nil {
 		writeCalendar(ctx, &sb, src.Calendar)
 	}
-
-	// Pending reminders.
 	if src.Scheduler != nil {
 		writeReminders(ctx, &sb, src.Scheduler)
 	}
@@ -61,19 +57,18 @@ func writeGitHub(ctx context.Context, sb *strings.Builder, mon *gh.Monitor) {
 		return
 	}
 
-	sb.WriteString(fmt.Sprintf("*GitHub* — %d unread\n", total))
+	fmt.Fprintf(sb, "*GitHub* — %d unread\n", total)
 	for p := gh.P0; p <= gh.P4; p++ {
 		if c, ok := summary[p]; ok && c > 0 {
-			sb.WriteString(fmt.Sprintf("  P%d: %d %s\n", p, c, priorityLabel(p)))
+			fmt.Fprintf(sb, "  P%d: %d %s\n", p, c, esc(priorityLabel(p)))
 		}
 	}
 
-	// Show P0-P2 details.
 	urgent, _ := mon.GetByPriority(ctx, gh.P2, 5)
 	if len(urgent) > 0 {
 		sb.WriteString("\n")
 		for _, n := range urgent {
-			sb.WriteString(fmt.Sprintf("  %s `%s` — %s\n", priorityEmoji(n.Priority), n.RepoFullName, n.SubjectTitle))
+			fmt.Fprintf(sb, "  %s `%s` — %s\n", priorityEmoji(n.Priority), esc(n.RepoFullName), esc(n.SubjectTitle))
 		}
 	}
 	sb.WriteString("\n")
@@ -91,16 +86,16 @@ func writeCalendar(ctx context.Context, sb *strings.Builder, cal *calendar.Clien
 		return
 	}
 
-	sb.WriteString(fmt.Sprintf("*Calendar* — %d events today\n", len(events)))
+	fmt.Fprintf(sb, "*Calendar* — %d events today\n", len(events))
 	for _, e := range events {
 		if e.AllDay {
-			sb.WriteString(fmt.Sprintf("  📅 %s (all day)\n", e.Summary))
+			fmt.Fprintf(sb, "  📅 %s \\(all day\\)\n", esc(e.Summary))
 		} else {
-			sb.WriteString(fmt.Sprintf("  🕐 %s — %s\n",
-				e.StartTime.Local().Format("15:04"), e.Summary))
+			fmt.Fprintf(sb, "  🕐 %s — %s\n",
+				esc(e.StartTime.Local().Format("15:04")), esc(e.Summary))
 		}
 		if e.Location != "" {
-			sb.WriteString(fmt.Sprintf("     📍 %s\n", e.Location))
+			fmt.Fprintf(sb, "     📍 %s\n", esc(e.Location))
 		}
 	}
 	sb.WriteString("\n")
@@ -112,10 +107,10 @@ func writeReminders(ctx context.Context, sb *strings.Builder, sched *scheduler.S
 		return
 	}
 
-	sb.WriteString(fmt.Sprintf("*Reminders* — %d pending\n", len(reminders)))
+	fmt.Fprintf(sb, "*Reminders* — %d pending\n", len(reminders))
 	for _, r := range reminders {
 		dueAt, _ := time.Parse(time.RFC3339, r.DueAt)
-		sb.WriteString(fmt.Sprintf("  ⏰ %s — %s\n", dueAt.Local().Format("15:04"), r.Message))
+		fmt.Fprintf(sb, "  ⏰ %s — %s\n", esc(dueAt.Local().Format("15:04")), esc(r.Message))
 	}
 	sb.WriteString("\n")
 }
@@ -146,4 +141,16 @@ func priorityEmoji(p int) string {
 	default:
 		return "⚪"
 	}
+}
+
+// esc escapes MarkdownV2 special characters for Telegram.
+func esc(s string) string {
+	replacer := strings.NewReplacer(
+		"_", "\\_", "*", "\\*", "[", "\\[", "]", "\\]",
+		"(", "\\(", ")", "\\)", "~", "\\~", "`", "\\`",
+		">", "\\>", "#", "\\#", "+", "\\+", "-", "\\-",
+		"=", "\\=", "|", "\\|", "{", "\\{", "}", "\\}",
+		".", "\\.", "!", "\\!",
+	)
+	return replacer.Replace(s)
 }
