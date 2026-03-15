@@ -10,40 +10,53 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/orchestrator"
 	"github.com/wcatz/ghost/internal/provider"
 )
 
 // Server is the ghost HTTP daemon.
 type Server struct {
-	store  provider.MemoryStore
-	cfg    *config.ServerConfig
-	logger *slog.Logger
-	srv    *http.Server
+	store        provider.MemoryStore
+	cfg          *config.ServerConfig
+	orchestrator *orchestrator.Orchestrator
+	logger       *slog.Logger
+	srv          *http.Server
+
+	// Chat streaming state.
+	chatMu     sync.RWMutex
+	chatStates map[string]*chatState // key: session/project ID
 }
 
 // New creates a new server.
 func New(store provider.MemoryStore, cfg *config.ServerConfig, logger *slog.Logger) *Server {
 	return &Server{
-		store:  store,
-		cfg:    cfg,
-		logger: logger,
+		store:      store,
+		cfg:        cfg,
+		logger:     logger,
+		chatStates: make(map[string]*chatState),
 	}
+}
+
+// SetOrchestrator wires the orchestrator for chat endpoints.
+// Must be called before Run() if chat endpoints are needed.
+func (s *Server) SetOrchestrator(o *orchestrator.Orchestrator) {
+	s.orchestrator = o
 }
 
 // Run starts the HTTP server. Blocks until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
 	r := chi.NewRouter()
 
-	// Middleware.
+	// Middleware (no global timeout — SSE streams run indefinitely).
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RealIP)
 	r.Use(s.logMiddleware)
-	r.Use(middleware.Timeout(30 * time.Second))
 
 	// Routes.
 	r.Get("/api/v1/health", s.handleHealth)
@@ -60,6 +73,18 @@ func (s *Server) Run(ctx context.Context) error {
 			r.Delete("/{memoryID}", s.handleDelete)
 		})
 		r.Get("/api/v1/projects", s.handleListProjects)
+
+		// Chat streaming endpoints (requires orchestrator).
+		if s.orchestrator != nil {
+			r.Route("/api/v1/sessions", func(r chi.Router) {
+				r.Post("/", s.handleCreateSession)
+				r.Get("/", s.handleListSessions)
+				r.Delete("/{id}", s.handleDeleteSession)
+				r.Post("/{id}/send", s.handleSendMessage)
+				r.Post("/{id}/approve", s.handleApprove)
+				r.Post("/{id}/mode", s.handleSetMode)
+			})
+		}
 	})
 
 	s.srv = &http.Server{

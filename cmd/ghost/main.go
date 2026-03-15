@@ -311,8 +311,21 @@ func runServe() {
 		}
 	}
 
+	// --- Orchestrator for chat API (optional — requires API key) ---
+	var orch *orchestrator.Orchestrator
+	if cfg.API.Key != "" {
+		aiClient := ai.NewClient(cfg.API.Key, logger)
+		chatRegistry := tool.NewRegistry()
+		tool.RegisterAll(chatRegistry, store)
+		orch = orchestrator.New(aiClient, store, chatRegistry, cfg, logger)
+		logger.Info("chat API enabled")
+	} else {
+		logger.Warn("no API key, chat endpoints disabled (memory API still available)")
+	}
+
 	// --- HTTP server (blocks) ---
 	srv := server.New(store, &cfg.Server, logger)
+	srv.SetOrchestrator(orch)
 	if err := srv.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
