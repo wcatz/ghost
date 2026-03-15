@@ -77,6 +77,17 @@ func execGit(ctx context.Context, projectPath string, input json.RawMessage) Res
 			}
 		}
 	}
+	// Block flags that redirect git to a different repository.
+	for _, arg := range in.Args {
+		lower := strings.ToLower(arg)
+		if lower == "-c" || strings.HasPrefix(lower, "--git-dir") || strings.HasPrefix(lower, "--work-tree") {
+			return Result{Content: fmt.Sprintf("blocked: '%s' flag not allowed — git must operate in project directory", arg), IsError: true}
+		}
+	}
+	// Also block -C passed as the subcommand itself (git -C /path ...).
+	if strings.ToLower(in.Subcommand) == "-c" {
+		return Result{Content: "blocked: '-C' flag not allowed — git must operate in project directory", IsError: true}
+	}
 
 	args := append([]string{in.Subcommand}, in.Args...)
 	cmd := exec.CommandContext(ctx, "git", args...)
