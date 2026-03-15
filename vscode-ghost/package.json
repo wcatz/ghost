@@ -2,7 +2,7 @@
   "name": "ghost",
   "displayName": "Ghost",
   "description": "Memory-first coding agent — chat, memories, and project context powered by Ghost",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "wcatz",
   "license": "MIT",
   "icon": "media/icon.png",
