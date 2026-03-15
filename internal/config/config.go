@@ -36,6 +36,7 @@ type Config struct {
 	GitHub    GitHubConfig    `koanf:"github"`
 	Telegram  TelegramConfig  `koanf:"telegram"`
 	Calendar  CalendarConfig  `koanf:"calendar"`
+	Google    GoogleConfig    `koanf:"google"`
 	Briefing  BriefingConfig  `koanf:"briefing"`
 	Voice     VoiceConfig     `koanf:"voice"`
 }
@@ -115,6 +116,12 @@ type CalendarConfig struct {
 	Password string `koanf:"password"`
 }
 
+// GoogleConfig holds Google OAuth2 API settings.
+type GoogleConfig struct {
+	CredentialsFile string `koanf:"credentials_file"`
+	TokenFile       string `koanf:"token_file"`
+}
+
 // BriefingConfig holds morning briefing schedule settings.
 type BriefingConfig struct {
 	Enabled  bool   `koanf:"enabled"`
@@ -186,6 +193,8 @@ var defaults = map[string]interface{}{
 	"github.interval":            60,
 	"briefing.enabled":           false,
 	"briefing.schedule":          "0 8 * * 1-5",
+	"google.credentials_file":   "~/.config/ghost/google-credentials.json",
+	"google.token_file":          "~/.config/ghost/google-token.json",
 }
 
 // Load reads configuration with layered precedence.
