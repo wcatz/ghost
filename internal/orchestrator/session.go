@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -195,8 +197,67 @@ func (s *Session) SendImageAsync(ctx context.Context, text, mediaType, base64Dat
 
 // Send processes a user message through the full agentic loop.
 // It streams events through the returned channel.
+// Expands @file references to inline file contents before sending.
 func (s *Session) Send(ctx context.Context, userMsg string, approvalFn ApprovalFunc) <-chan ai.StreamEvent {
-	return s.SendMessage(ctx, ai.TextMessage("user", userMsg), userMsg, approvalFn)
+	expanded := s.expandFileRefs(userMsg)
+	return s.SendMessage(ctx, ai.TextMessage("user", expanded), userMsg, approvalFn)
+}
+
+// expandFileRefs finds @path references in user text and appends file contents.
+// Paths are resolved relative to the project directory.
+func (s *Session) expandFileRefs(text string) string {
+	refs := parseFileRefs(text)
+	if len(refs) == 0 {
+		return text
+	}
+
+	var sb strings.Builder
+	sb.WriteString(text)
+
+	for _, ref := range refs {
+		absPath := ref
+		if !filepath.IsAbs(ref) {
+			absPath = filepath.Join(s.ProjectPath, ref)
+		}
+
+		// Validate path is within project directory.
+		cleaned := filepath.Clean(absPath)
+		if !strings.HasPrefix(cleaned, filepath.Clean(s.ProjectPath)) {
+			continue
+		}
+
+		data, err := os.ReadFile(cleaned)
+		if err != nil {
+			s.logger.Debug("@file not found", "path", ref, "error", err)
+			continue
+		}
+
+		// Cap at 50KB per file to avoid blowing up context.
+		content := string(data)
+		if len(content) > 50000 {
+			content = content[:50000] + "\n... (truncated at 50KB)"
+		}
+
+		fmt.Fprintf(&sb, "\n\n---\n**File: %s**\n```\n%s\n```\n", ref, content)
+	}
+	return sb.String()
+}
+
+// parseFileRefs extracts @path references from text.
+// Matches @path/to/file.ext patterns (alphanumeric, slashes, dots, dashes, underscores).
+func parseFileRefs(text string) []string {
+	var refs []string
+	words := strings.Fields(text)
+	for _, w := range words {
+		if strings.HasPrefix(w, "@") && len(w) > 1 {
+			ref := strings.TrimPrefix(w, "@")
+			// Must look like a file path (has an extension or slash).
+			if strings.Contains(ref, ".") || strings.Contains(ref, "/") {
+				refs = append(refs, ref)
+			}
+		}
+	}
+	return refs
 }
 
 // SendMessage processes a pre-built user message through the agentic loop.
