@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -414,35 +415,99 @@ func (s *Session) MessageCount() int {
 // separate, so this covers only the messages array.
 const maxContextTokens = 180000
 
-// windowedMessages returns a copy of messages, trimming the oldest exchanges
-// if the estimated token count exceeds maxContextTokens. Must be called with
-// s.mu held.
+// compressionThreshold is the token count at which we start compressing.
+// Set lower than maxContextTokens to give room for the summary.
+const compressionThreshold = 150000
+
+// windowedMessages returns a copy of messages, compressing older exchanges
+// into a summary if the estimated token count exceeds compressionThreshold.
+// Must be called with s.mu held.
 func (s *Session) windowedMessages() []ai.Message {
 	msgs := make([]ai.Message, len(s.messages))
 	copy(msgs, s.messages)
 
 	est := estimateTokens(msgs)
-	if est <= maxContextTokens {
+	if est <= compressionThreshold {
 		return msgs
 	}
 
-	// Trim oldest user+assistant pairs (skip tool_result messages that follow).
-	// Keep at least the last 4 messages to preserve recent context.
-	for est > maxContextTokens && len(msgs) > 4 {
-		msgs = msgs[2:] // drop one user+assistant pair
-		// Skip any orphaned tool_result messages at the start.
-		for len(msgs) > 0 && isToolResult(msgs[0]) {
-			msgs = msgs[1:]
+	// Find the split point — keep the most recent messages that fit in half the budget.
+	keepTokens := maxContextTokens / 2
+	keepStart := len(msgs)
+	keepEst := 0
+	for keepStart > 0 {
+		keepStart--
+		keepEst = estimateTokens(msgs[keepStart:])
+		if keepEst > keepTokens {
+			keepStart++
+			break
 		}
-		est = estimateTokens(msgs)
 	}
 
-	if len(msgs) < len(s.messages) {
-		s.logger.Info("context windowed",
-			"original", len(s.messages), "trimmed", len(msgs),
-			"est_tokens", est)
+	// Ensure we don't split in the middle of a tool_use/tool_result pair.
+	for keepStart < len(msgs) && isToolResult(msgs[keepStart]) {
+		keepStart++
 	}
-	return msgs
+
+	if keepStart <= 2 {
+		// Not enough old messages to compress — just return as-is.
+		return msgs
+	}
+
+	// Summarize the old messages.
+	oldMsgs := msgs[:keepStart]
+	summary := s.compressMessages(oldMsgs)
+
+	// Build compressed message list: summary + recent messages.
+	compressed := make([]ai.Message, 0, 1+len(msgs)-keepStart)
+	compressed = append(compressed, ai.TextMessage("user", "[Conversation summary from earlier in this session]\n\n"+summary))
+	compressed = append(compressed, ai.TextMessage("assistant", "Understood. I have the context from our earlier conversation. Let's continue."))
+	compressed = append(compressed, msgs[keepStart:]...)
+
+	s.logger.Info("context compressed",
+		"original_msgs", len(s.messages),
+		"old_msgs_summarized", keepStart,
+		"kept_msgs", len(msgs)-keepStart,
+		"original_tokens", est,
+		"compressed_tokens", estimateTokens(compressed),
+	)
+	return compressed
+}
+
+// compressMessages summarizes a slice of messages into a compact text summary.
+func (s *Session) compressMessages(msgs []ai.Message) string {
+	var sb strings.Builder
+	for _, m := range msgs {
+		role := m.Role
+		for _, b := range m.Content {
+			switch {
+			case b.Type == "text" && b.Text != "":
+				fmt.Fprintf(&sb, "[%s] %s\n", role, truncate(b.Text, 500))
+			case b.Type == "tool_use":
+				fmt.Fprintf(&sb, "[%s] tool:%s\n", role, b.Name)
+			case b.Type == "tool_result":
+				fmt.Fprintf(&sb, "[tool_result] %s\n", truncate(b.Content, 200))
+			}
+		}
+	}
+
+	prompt := fmt.Sprintf("Summarize this conversation concisely. Focus on: what was discussed, what decisions were made, what files were modified, and what the current task is. Be specific about file names and code changes.\n\n%s", sb.String())
+
+	summary, _, err := s.client.Reflect(context.Background(), prompt)
+	if err != nil {
+		s.logger.Warn("compression reflect failed, using simple summary", "error", err)
+		// Fallback: just list the topics.
+		return sb.String()
+	}
+	return summary
+}
+
+// truncate shortens text to maxLen, adding "..." if truncated.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // estimateTokens gives a rough token count. Claude averages ~4 chars per token
