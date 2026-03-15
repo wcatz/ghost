@@ -49,10 +49,10 @@ Memories with no decay persist indefinitely. Decaying memories lose importance o
 
 ## Install
 
-Requires Go 1.25+ and CGO (for SQLite).
+Requires Go 1.25+.
 
 ```bash
-go install -tags fts5 github.com/wcatz/ghost/cmd/ghost@latest
+go install github.com/wcatz/ghost/cmd/ghost@latest
 ```
 
 Or build from source:
@@ -60,7 +60,7 @@ Or build from source:
 ```bash
 git clone https://github.com/wcatz/ghost.git
 cd ghost
-go build -tags fts5 -o ghost ./cmd/ghost
+go build -o ghost ./cmd/ghost
 ```
 
 ## Quick Start
