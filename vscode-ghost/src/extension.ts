@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { GhostClient } from "./ghost-client";
 import { ChatPanelProvider } from "./chat-panel";
+import { ChatEditorPanel } from "./chat-editor";
 import { MemoryPanelProvider } from "./memory-panel";
 import { GhostStatusBar } from "./status-bar";
 
@@ -131,6 +132,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand("ghost.showChat", () => {
       vscode.commands.executeCommand("ghost.chat.focus");
+    }),
+
+    vscode.commands.registerCommand("ghost.openEditor", () => {
+      ChatEditorPanel.createOrShow(context.extensionUri, client);
     })
   );
 
