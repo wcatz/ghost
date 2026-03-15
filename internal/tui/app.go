@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -440,11 +441,30 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 	case "/image":
 		if len(msg.Args) > 0 {
 			path := strings.Join(msg.Args, " ")
-			if isImagePath(path) {
-				imgStr := renderImageFile(path, a.imgProtocol)
-				a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: imgStr})
-				// TODO: send image to Claude via SendMultimodal
+			if !isImagePath(path) {
+				a.chatView.addMessage(chatMessage{kind: msgError, raw: "unsupported image format"})
+				return a, nil
 			}
+			// Load and base64-encode the image.
+			data, mediaType, err := loadImageBase64(path)
+			if err != nil {
+				a.chatView.addMessage(chatMessage{kind: msgError, raw: err.Error()})
+				return a, nil
+			}
+			// Show preview in chat.
+			imgStr := renderImageFile(path, a.imgProtocol)
+			a.chatView.addMessage(chatMessage{kind: msgUser, raw: fmt.Sprintf("[image: %s]", filepath.Base(path))})
+			if imgStr != "" {
+				a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: imgStr})
+			}
+			// Send to Claude with vision API.
+			a.isProcessing = true
+			a.status.isProcessing = true
+			a.chatView.startNewAssistantMessage()
+			a.activeStream = a.session.SendImageAsync(
+				a.ctx, "Describe and analyze this image.", mediaType, data, a.approvalCh,
+			)
+			return a, waitForStreamEvent(a.activeStream)
 		}
 
 	case "auto-approve":

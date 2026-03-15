@@ -7,15 +7,24 @@ import (
 )
 
 func TestLoad_Defaults(t *testing.T) {
-	// Clear any env vars that could interfere.
+	// Isolate from real config files by pointing HOME/XDG to temp dir.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	// Unset any env vars that could interfere. We save/restore manually
+	// because t.Setenv("X","") would set it to empty (not unset), and
+	// koanf's env provider treats empty as an override.
 	for _, key := range []string{
 		"GHOST_API_KEY",
 		"GHOST_DEFAULTS_MODE",
 		"GHOST_SERVER_LISTEN_ADDR",
 		"ANTHROPIC_API_KEY",
 	} {
-		t.Setenv(key, "")
-		os.Unsetenv(key)
+		if old, ok := os.LookupEnv(key); ok {
+			os.Unsetenv(key)
+			t.Cleanup(func() { os.Setenv(key, old) })
+		}
 	}
 
 	cfg, err := Load()
