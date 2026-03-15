@@ -243,47 +243,16 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   font-size: 0.9em;
 }
 
-/* --- Tool Indicators (collapsible) --- */
+/* --- Tool Indicators --- */
 .tool-indicator {
   font-size: 0.85em;
-  padding: 2px 10px;
+  padding: 4px 10px;
   color: var(--ghost-muted);
-  animation: fadeIn 0.15s ease-out;
-}
-
-.tool-indicator summary {
   display: flex;
   align-items: center;
   gap: 6px;
-  cursor: pointer;
-  list-style: none;
-  padding: 2px 0;
+  animation: fadeIn 0.15s ease-out;
 }
-.tool-indicator summary::-webkit-details-marker { display: none; }
-.tool-indicator summary::before {
-  content: '\25B6';
-  font-size: 8px;
-  transition: transform 0.15s;
-}
-.tool-indicator[open] summary::before {
-  transform: rotate(90deg);
-}
-
-.tool-output {
-  margin: 4px 0 4px 20px;
-  padding: 6px 8px;
-  background: var(--ghost-widget-bg);
-  border-radius: 4px;
-  border-left: 2px solid var(--ghost-border);
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: 0.85em;
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 200px;
-  overflow-y: auto;
-  color: var(--ghost-fg);
-}
-.tool-output:empty { display: none; }
 
 .tool-name { font-family: var(--vscode-editor-font-family, monospace); }
 .tool-time { font-size: 0.85em; opacity: 0.6; }
@@ -421,16 +390,14 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
 }
 
 .modal-btn {
-  padding: 10px 24px;
+  padding: 8px 20px;
   border: none;
-  border-radius: 6px;
+  border-radius: 4px;
   cursor: pointer;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 500;
   flex: 1;
-  transition: background 0.15s, transform 0.1s;
 }
-.modal-btn:active { transform: scale(0.97); }
 .modal-btn kbd {
   font-size: 10px;
   opacity: 0.6;
