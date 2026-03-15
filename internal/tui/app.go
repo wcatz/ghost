@@ -226,9 +226,13 @@ func (a App) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg.Type {
+	case "thinking":
+		a.toolbar.setThinking(true)
 	case "text":
+		a.toolbar.setThinking(false)
 		a.chatView.appendToLastAssistant(msg.Text)
 	case "tool_use_start":
+		a.toolbar.setThinking(false)
 		if msg.ToolUse != nil {
 			a.toolbar.addTool(msg.ToolUse.ID, msg.ToolUse.Name)
 		}

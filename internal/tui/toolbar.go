@@ -20,10 +20,11 @@ type activeTool struct {
 	inputPreview string
 }
 
-// toolbar manages active tool progress spinners.
+// toolbar manages active tool progress spinners and thinking state.
 type toolbar struct {
-	tools   []activeTool
-	spinner spinner.Model
+	tools    []activeTool
+	spinner  spinner.Model
+	thinking bool // true while extended thinking is active
 }
 
 func newToolbar() toolbar {
@@ -72,11 +73,19 @@ func (t *toolbar) denyTool(id string) {
 	}
 }
 
+func (t *toolbar) setThinking(active bool) {
+	t.thinking = active
+}
+
 func (t *toolbar) clear() {
 	t.tools = nil
+	t.thinking = false
 }
 
 func (t *toolbar) hasActive() bool {
+	if t.thinking {
+		return true
+	}
 	for _, tool := range t.tools {
 		if !tool.done {
 			return true
@@ -92,11 +101,17 @@ func (t toolbar) update(msg tea.Msg) (toolbar, tea.Cmd) {
 }
 
 func (t toolbar) view() string {
-	if len(t.tools) == 0 {
+	if len(t.tools) == 0 && !t.thinking {
 		return ""
 	}
 
 	var lines []string
+	if t.thinking {
+		lines = append(lines, fmt.Sprintf("  %s %s",
+			t.spinner.View(),
+			toolNameStyle.Render("thinking..."),
+		))
+	}
 	for _, tool := range t.tools {
 		var line string
 		if tool.denied {
