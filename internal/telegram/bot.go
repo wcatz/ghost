@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 
 	goog "github.com/wcatz/ghost/internal/google"
 	"github.com/wcatz/ghost/internal/mdv2"
@@ -41,6 +42,8 @@ type Bot struct {
 	allowedIDs      map[int64]bool
 	serverAddr      string        // Ghost serve address for API calls
 	approval        approvalState // pending approval tracking
+	mu              sync.Mutex
+	pendingChat     map[int64]string // chatID → sessionID for reply routing
 }
 
 // GoogleProvider is the interface for Google Calendar/Gmail access.
@@ -64,7 +67,8 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 		sched:      sched,
 		db:         db,
 		logger:     logger,
-		allowedIDs: make(map[int64]bool, len(cfg.AllowedIDs)),
+		allowedIDs:  make(map[int64]bool, len(cfg.AllowedIDs)),
+		pendingChat: make(map[int64]string),
 	}
 
 	for _, id := range cfg.AllowedIDs {
@@ -92,9 +96,10 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 	b.RegisterHandler(bot.HandlerTypeMessageText, "sessions", bot.MatchTypeCommand, tb.handleSessions)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "chat", bot.MatchTypeCommand, tb.handleChat)
 
-	// Callback query handlers for inline button approvals.
+	// Callback query handlers.
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "approve:", bot.MatchTypePrefix, tb.handleApprovalCallback)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "deny:", bot.MatchTypePrefix, tb.handleApprovalCallback)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "chat:", bot.MatchTypePrefix, tb.handleChatCallback)
 
 	return tb, nil
 }
@@ -482,6 +487,10 @@ func (tb *Bot) handleDefault(ctx context.Context, b *bot.Bot, update *models.Upd
 	}
 	// Check if this is a reply to an approval message with instructions.
 	if tb.handleInstructionReply(ctx, b, update) {
+		return
+	}
+	// Check if this is a reply to a pending chat session prompt.
+	if tb.handlePendingChatReply(ctx, b, update) {
 		return
 	}
 	tb.reply(ctx, b, update, "Use /help to see available commands\\.")
