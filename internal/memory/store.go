@@ -516,7 +516,7 @@ func (s *Store) GetConversationMessages(ctx context.Context, conversationID stri
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var msgs []ConversationMessage
 	for rows.Next() {
