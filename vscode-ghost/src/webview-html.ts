@@ -527,7 +527,7 @@ export function getChatHtml(
             currentAssistantText += filtered;
             const el = ensureAssistantBubble();
             el.innerHTML = renderMarkdown(currentAssistantText);
-            if (userIsNearBottom) scrollToBottom();
+            if (!userScrolledUp) scrollToBottom();
           }
           break;
         }
