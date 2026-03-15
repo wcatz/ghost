@@ -178,6 +178,9 @@ func (p *Pipeline) HandlePushToTalk(ctx context.Context) (transcript, response s
 	return transcript, response, nil
 }
 
+// maxRecordingBytes caps recording at ~5 minutes of 16kHz 16-bit mono audio (~9.6MB).
+const maxRecordingBytes = 10 * 1024 * 1024
+
 // collectUntilSilence accumulates audio frames until VAD detects
 // sustained silence (silenceMs worth of non-speech frames).
 func (p *Pipeline) collectUntilSilence(ctx context.Context, frames <-chan []byte) ([]byte, error) {
@@ -201,6 +204,12 @@ func (p *Pipeline) collectUntilSilence(ctx context.Context, frames <-chan []byte
 			}
 
 			buf.Write(frame)
+
+			// Cap recording to prevent unbounded memory growth.
+			if buf.Len() > maxRecordingBytes {
+				p.logger.Warn("max recording size reached", "bytes", buf.Len())
+				return buf.Bytes(), nil
+			}
 
 			// If no VAD, collect until channel closes (manual stop).
 			if p.vad == nil {
