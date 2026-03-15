@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/emersion/go-webdav"
@@ -37,7 +38,11 @@ type Config struct {
 }
 
 // NewClient creates a CalDAV client and discovers calendars.
+// The URL must use HTTPS to protect credentials in transit.
 func NewClient(ctx context.Context, cfg Config, logger *slog.Logger) (*Client, error) {
+	if cfg.URL != "" && !strings.HasPrefix(cfg.URL, "https://") {
+		return nil, fmt.Errorf("caldav URL must use HTTPS (got %q) — credentials would be transmitted in plaintext over HTTP", cfg.URL)
+	}
 	httpClient := webdav.HTTPClientWithBasicAuth(nil, cfg.Username, cfg.Password)
 	c, err := caldav.NewClient(httpClient, cfg.URL)
 	if err != nil {
