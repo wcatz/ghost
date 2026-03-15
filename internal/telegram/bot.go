@@ -130,7 +130,7 @@ func (tb *Bot) SendMessage(ctx context.Context, chatID int64, text string) error
 	_, err := tb.bot.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
 		Text:      text,
-		ParseMode: models.ParseModeMarkdownV1,
+		ParseMode: models.ParseModeMarkdown,
 	})
 	return err
 }
@@ -189,7 +189,7 @@ func (tb *Bot) handleStatus(ctx context.Context, b *bot.Bot, update *models.Upda
 
 func (tb *Bot) handleNotifications(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if tb.ghMonitor == nil {
-		tb.reply(ctx, b, update, "GitHub monitor not configured.")
+		tb.reply(ctx, b, update, "GitHub monitor not configured\\.")
 		return
 	}
 
@@ -200,16 +200,16 @@ func (tb *Bot) handleNotifications(ctx context.Context, b *bot.Bot, update *mode
 	}
 
 	if len(notifs) == 0 {
-		tb.reply(ctx, b, update, "No unread notifications. 🎉")
+		tb.reply(ctx, b, update, "No unread notifications\\. 🎉")
 		return
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("*Unread Notifications* (%d)\n\n", len(notifs)))
+	fmt.Fprintf(&sb, "*Unread Notifications* \\(%d\\)\n\n", len(notifs))
 	for _, n := range notifs {
 		emoji := priorityEmoji(n.Priority)
-		sb.WriteString(fmt.Sprintf("%s *P%d* `%s`\n  %s\n  _%s_\n\n",
-			emoji, n.Priority, n.RepoFullName, n.SubjectTitle, n.Reason))
+		fmt.Fprintf(&sb, "%s *P%d* `%s`\n  %s\n  _%s_\n\n",
+			emoji, n.Priority, escV2(n.RepoFullName), escV2(n.SubjectTitle), escV2(n.Reason))
 	}
 	tb.reply(ctx, b, update, sb.String())
 }
@@ -232,7 +232,7 @@ func (tb *Bot) handleMemory(ctx context.Context, b *bot.Bot, update *models.Upda
 	projectID := parts[2]
 	query := strings.Join(parts[3:], " ")
 	if query == "" {
-		tb.reply(ctx, b, update, "Please provide a search query.")
+		tb.reply(ctx, b, update, "Please provide a search query\\.")
 		return
 	}
 
@@ -243,14 +243,14 @@ func (tb *Bot) handleMemory(ctx context.Context, b *bot.Bot, update *models.Upda
 	}
 
 	if len(memories) == 0 {
-		tb.reply(ctx, b, update, "No matching memories found.")
+		tb.reply(ctx, b, update, "No matching memories found\\.")
 		return
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("*Memories* (%d results)\n\n", len(memories)))
+	fmt.Fprintf(&sb, "*Memories* \\(%d results\\)\n\n", len(memories))
 	for _, m := range memories {
-		sb.WriteString(fmt.Sprintf("• \\[%s\\] %.1f — %s\n", m.Category, m.Importance, m.Content))
+		fmt.Fprintf(&sb, "• \\[%s\\] %.1f — %s\n", escV2(m.Category), m.Importance, escV2(m.Content))
 	}
 	tb.reply(ctx, b, update, sb.String())
 }
@@ -264,7 +264,7 @@ func (tb *Bot) handleRemind(ctx context.Context, b *bot.Bot, update *models.Upda
 	}
 
 	if tb.sched == nil {
-		tb.reply(ctx, b, update, "Scheduler not configured.")
+		tb.reply(ctx, b, update, "Scheduler not configured\\.")
 		return
 	}
 
@@ -290,7 +290,7 @@ func (tb *Bot) SetBriefingSources(src briefing.Sources) {
 
 func (tb *Bot) handleMeetings(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if tb.google == nil {
-		tb.reply(ctx, b, update, "Google Calendar not configured.")
+		tb.reply(ctx, b, update, "Google Calendar not configured\\.")
 		return
 	}
 
@@ -301,26 +301,26 @@ func (tb *Bot) handleMeetings(ctx context.Context, b *bot.Bot, update *models.Up
 	}
 
 	if len(events) == 0 {
-		tb.reply(ctx, b, update, "No meetings today. 🎉")
+		tb.reply(ctx, b, update, "No meetings today\\. 🎉")
 		return
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "*Today's Meetings* (%d)\n\n", len(events))
+	fmt.Fprintf(&sb, "*Today's Meetings* \\(%d\\)\n\n", len(events))
 	for _, e := range events {
 		if e.AllDay {
-			fmt.Fprintf(&sb, "📅 %s (all day)\n", e.Summary)
+			fmt.Fprintf(&sb, "📅 %s \\(all day\\)\n", escV2(e.Summary))
 		} else {
 			fmt.Fprintf(&sb, "🕐 %s – %s  *%s*\n",
-				e.Start.Local().Format("15:04"),
-				e.End.Local().Format("15:04"),
-				e.Summary)
+				escV2(e.Start.Local().Format("15:04")),
+				escV2(e.End.Local().Format("15:04")),
+				escV2(e.Summary))
 		}
 		if e.Location != "" {
-			fmt.Fprintf(&sb, "  📍 %s\n", e.Location)
+			fmt.Fprintf(&sb, "  📍 %s\n", escV2(e.Location))
 		}
 		if e.MeetLink != "" {
-			fmt.Fprintf(&sb, "  🔗 %s\n", e.MeetLink)
+			fmt.Fprintf(&sb, "  🔗 %s\n", escV2(e.MeetLink))
 		}
 		sb.WriteString("\n")
 	}
@@ -329,7 +329,7 @@ func (tb *Bot) handleMeetings(ctx context.Context, b *bot.Bot, update *models.Up
 
 func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if tb.google == nil {
-		tb.reply(ctx, b, update, "Gmail not configured.")
+		tb.reply(ctx, b, update, "Gmail not configured\\.")
 		return
 	}
 
@@ -340,7 +340,7 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 	}
 
 	if count == 0 {
-		tb.reply(ctx, b, update, "Inbox zero! 📭")
+		tb.reply(ctx, b, update, "Inbox zero\\! 📭")
 		return
 	}
 
@@ -351,15 +351,15 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "*Unread Emails* (%d total)\n\n", count)
+	fmt.Fprintf(&sb, "*Unread Emails* \\(%d total\\)\n\n", count)
 	for _, e := range emails {
-		fmt.Fprintf(&sb, "📧 *%s*\n  From: %s\n", e.Subject, e.From)
+		fmt.Fprintf(&sb, "📧 *%s*\n  From: %s\n", escV2(e.Subject), escV2(e.From))
 		if e.Snippet != "" {
 			snippet := e.Snippet
 			if len(snippet) > 100 {
-				snippet = snippet[:100] + "..."
+				snippet = snippet[:100] + "\\.\\.\\."
 			}
-			fmt.Fprintf(&sb, "  _%s_\n", snippet)
+			fmt.Fprintf(&sb, "  _%s_\n", escV2(snippet))
 		}
 		sb.WriteString("\n")
 	}
@@ -369,12 +369,12 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update) {
 	tb.reply(ctx, b, update, `*Ghost Commands*
 
-/status — System status + notification summary
+/status — System status \+ notification summary
 /notifications — List unread GitHub notifications
 /meetings — Today's calendar with Meet links
 /emails — Recent unread emails
-/memory search <project> <query> — Search memories
-/remind <message> — Set a reminder
+/memory search — Search memories
+/remind — Set a reminder
 /briefing — Get your morning briefing
 /help — This message`)
 }
@@ -383,7 +383,7 @@ func (tb *Bot) handleDefault(ctx context.Context, b *bot.Bot, update *models.Upd
 	if update.Message == nil {
 		return
 	}
-	tb.reply(ctx, b, update, "Use /help to see available commands.")
+	tb.reply(ctx, b, update, "Use /help to see available commands\\.")
 }
 
 // --- Helpers ---
@@ -395,11 +395,24 @@ func (tb *Bot) reply(ctx context.Context, b *bot.Bot, update *models.Update, tex
 	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    update.Message.Chat.ID,
 		Text:      text,
-		ParseMode: models.ParseModeMarkdownV1,
+		ParseMode: models.ParseModeMarkdown,
 	})
 	if err != nil {
 		tb.logger.Error("telegram send", "error", err, "chat_id", update.Message.Chat.ID)
 	}
+}
+
+// escV2 escapes special characters for Telegram MarkdownV2.
+// See https://core.telegram.org/bots/api#markdownv2-style
+func escV2(s string) string {
+	replacer := strings.NewReplacer(
+		"_", "\\_", "*", "\\*", "[", "\\[", "]", "\\]",
+		"(", "\\(", ")", "\\)", "~", "\\~", "`", "\\`",
+		">", "\\>", "#", "\\#", "+", "\\+", "-", "\\-",
+		"=", "\\=", "|", "\\|", "{", "\\{", "}", "\\}",
+		".", "\\.", "!", "\\!",
+	)
+	return replacer.Replace(s)
 }
 
 func priorityEmoji(p int) string {

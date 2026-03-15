@@ -112,19 +112,31 @@ func (n *MeetingNotifier) formatAlert(ev Event, until time.Duration) string {
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "📅 *Meeting in %d min*\n", minutes)
-	fmt.Fprintf(&sb, "  %s\n", ev.Summary)
-	fmt.Fprintf(&sb, "  🕐 %s", ev.Start.Local().Format("15:04"))
+	fmt.Fprintf(&sb, "  %s\n", escMD2(ev.Summary))
+	fmt.Fprintf(&sb, "  🕐 %s", escMD2(ev.Start.Local().Format("15:04")))
 	if !ev.End.IsZero() {
-		fmt.Fprintf(&sb, " – %s", ev.End.Local().Format("15:04"))
+		fmt.Fprintf(&sb, " – %s", escMD2(ev.End.Local().Format("15:04")))
 	}
 	sb.WriteString("\n")
 	if ev.Location != "" {
-		fmt.Fprintf(&sb, "  📍 %s\n", ev.Location)
+		fmt.Fprintf(&sb, "  📍 %s\n", escMD2(ev.Location))
 	}
 	if ev.MeetLink != "" {
-		fmt.Fprintf(&sb, "  🔗 %s\n", ev.MeetLink)
+		fmt.Fprintf(&sb, "  🔗 %s\n", escMD2(ev.MeetLink))
 	}
 	return sb.String()
+}
+
+// escMD2 escapes special characters for Telegram MarkdownV2.
+func escMD2(s string) string {
+	r := strings.NewReplacer(
+		"_", "\\_", "*", "\\*", "[", "\\[", "]", "\\]",
+		"(", "\\(", ")", "\\)", "~", "\\~", "`", "\\`",
+		">", "\\>", "#", "\\#", "+", "\\+", "-", "\\-",
+		"=", "\\=", "|", "\\|", "{", "\\{", "}", "\\}",
+		".", "\\.", "!", "\\!",
+	)
+	return r.Replace(s)
 }
 
 func (n *MeetingNotifier) cleanNotified() {
