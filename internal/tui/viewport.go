@@ -2,33 +2,11 @@ package tui
 
 import (
 	"strings"
-	"sync"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/wcatz/ghost/assets"
 )
-
-// ghostBanner is the large ASCII art for the welcome screen.
-var ghostBanner = strings.Join([]string{
-	`  ██████╗ ██╗  ██╗ ██████╗ ███████╗████████╗`,
-	` ██╔════╝ ██║  ██║██╔═══██╗██╔════╝╚══██╔══╝`,
-	` ██║  ███╗███████║██║   ██║███████╗   ██║   `,
-	` ██║   ██║██╔══██║██║   ██║╚════██║   ██║   `,
-	` ╚██████╔╝██║  ██║╚██████╔╝███████║   ██║   `,
-	`  ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   `,
-}, "\n")
-
-// ghostShadow is a small dim ghost watermark at the top of chat.
-var ghostShadow = strings.Join([]string{
-	`    ▄█████▄`,
-	`   █████████`,
-	`   ██ █ █ ██`,
-	`   █████████`,
-	`   █████████`,
-	`    █ █ █ █`,
-}, "\n")
 
 // chatViewport wraps a bubbles viewport with message management.
 type chatViewport struct {
@@ -104,11 +82,6 @@ func (cv *chatViewport) startNewAssistantMessage() {
 func (cv *chatViewport) rerender() {
 	var b strings.Builder
 
-	// Ghost shadow watermark at the top of chat history.
-	shadow := lipgloss.NewStyle().Foreground(colorSubtle).Render(ghostShadow)
-	b.WriteString(lipgloss.PlaceHorizontal(cv.width, lipgloss.Center, shadow))
-	b.WriteString("\n\n")
-
 	for _, msg := range cv.messages {
 		b.WriteString(cv.renderer.render(msg))
 		b.WriteString("\n")
@@ -134,34 +107,12 @@ func (cv chatViewport) update(msg tea.Msg) (chatViewport, tea.Cmd) {
 	return cv, cmd
 }
 
-// cachedLogo caches the half-block logo render (computed once).
-var (
-	cachedLogo     string
-	cachedLogoOnce sync.Once
-)
-
-func getLogoHalfBlock() string {
-	cachedLogoOnce.Do(func() {
-		cachedLogo = renderImageHalfBlock(assets.LogoPNG, 24)
-	})
-	return cachedLogo
-}
-
 // welcomeView renders a centered welcome screen when chat is empty.
 func (cv chatViewport) welcomeView() string {
-	// Try rendering the actual logo as half-block characters.
-	logo := getLogoHalfBlock()
-
-	var banner string
-	if logo != "" {
-		banner = logo
-	} else {
-		// Fallback to ASCII banner.
-		banner = lipgloss.NewStyle().
-			Foreground(colorGhost).
-			Bold(true).
-			Render(ghostBanner)
-	}
+	title := lipgloss.NewStyle().
+		Foreground(colorGhost).
+		Bold(true).
+		Render("ghost")
 
 	tagline := lipgloss.NewStyle().
 		Foreground(colorDim).
@@ -173,7 +124,7 @@ func (cv chatViewport) welcomeView() string {
 		Render("enter send · shift+enter newline · ctrl+k commands")
 
 	content := lipgloss.JoinVertical(lipgloss.Center,
-		banner,
+		title,
 		"",
 		tagline,
 		"",
