@@ -39,6 +39,8 @@ type Bot struct {
 	db              *sql.DB
 	logger          *slog.Logger
 	allowedIDs      map[int64]bool
+	serverAddr      string        // Ghost serve address for API calls
+	approval        approvalState // pending approval tracking
 }
 
 // GoogleProvider is the interface for Google Calendar/Gmail access.
@@ -87,6 +89,12 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 	b.RegisterHandler(bot.HandlerTypeMessageText, "meetings", bot.MatchTypeCommand, tb.handleMeetings)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "emails", bot.MatchTypeCommand, tb.handleEmails)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "help", bot.MatchTypeCommand, tb.handleHelp)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "sessions", bot.MatchTypeCommand, tb.handleSessions)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "chat", bot.MatchTypeCommand, tb.handleChat)
+
+	// Callback query handlers for inline button approvals.
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "approve:", bot.MatchTypePrefix, tb.handleApprovalCallback)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "deny:", bot.MatchTypePrefix, tb.handleApprovalCallback)
 
 	return tb, nil
 }
@@ -114,6 +122,8 @@ func (tb *Bot) registerCommands(ctx context.Context) {
 		{Command: "notifications", Description: "List unread GitHub notifications"},
 		{Command: "meetings", Description: "Today's calendar with Meet links"},
 		{Command: "emails", Description: "Recent unread emails"},
+		{Command: "sessions", Description: "List active Ghost sessions"},
+		{Command: "chat", Description: "Chat with a session: /chat <id> <msg>"},
 		{Command: "memory", Description: "Search memories: /memory search <project> <query>"},
 		{Command: "remind", Description: "Set a reminder: /remind <message>"},
 		{Command: "briefing", Description: "Get your morning briefing"},
@@ -458,6 +468,8 @@ func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update
 /notifications — List unread GitHub notifications
 /meetings — Today's calendar with Meet links
 /emails — Recent unread emails
+/sessions — List active Ghost sessions
+/chat — Chat with a session
 /memory search — Search memories
 /remind — Set a reminder
 /briefing — Get your morning briefing
@@ -466,6 +478,10 @@ func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update
 
 func (tb *Bot) handleDefault(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil {
+		return
+	}
+	// Check if this is a reply to an approval message with instructions.
+	if tb.handleInstructionReply(ctx, b, update) {
 		return
 	}
 	tb.reply(ctx, b, update, "Use /help to see available commands\\.")
