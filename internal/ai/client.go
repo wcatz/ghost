@@ -160,7 +160,7 @@ func (c *Client) CountTokens(ctx context.Context, messages []Message, system []S
 	if err != nil {
 		return 0, fmt.Errorf("count tokens request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if err != nil {
