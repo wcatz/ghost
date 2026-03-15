@@ -479,6 +479,56 @@ func (s *Store) GetRecentExchanges(ctx context.Context, projectID string, limit 
 	return pairs, rows.Err()
 }
 
+// GetLatestConversation returns the most recent conversation ID for a project.
+func (s *Store) GetLatestConversation(ctx context.Context, projectID string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var id string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id FROM conversations
+		WHERE project_id = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, projectID).Scan(&id)
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// ConversationMessage is a stored message with role and JSON content.
+type ConversationMessage struct {
+	Role    string
+	Content string
+}
+
+// GetConversationMessages returns all messages in a conversation, ordered.
+func (s *Store) GetConversationMessages(ctx context.Context, conversationID string) ([]ConversationMessage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT role, content FROM messages
+		WHERE conversation_id = ?
+		ORDER BY created_at ASC
+	`, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var msgs []ConversationMessage
+	for rows.Next() {
+		var m ConversationMessage
+		if err := rows.Scan(&m.Role, &m.Content); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
+}
+
 // RecordUsage saves token usage for cost tracking.
 func (s *Store) RecordUsage(ctx context.Context, projectID, model string, usage TokenUsage) error {
 	s.mu.Lock()

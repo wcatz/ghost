@@ -87,6 +87,12 @@ func (m *mockStore) AppendMessage(_ context.Context, _, _, _ string) error { ret
 func (m *mockStore) GetRecentExchanges(_ context.Context, _ string, _ int) ([][2]string, error) {
 	return nil, nil
 }
+func (m *mockStore) GetLatestConversation(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+func (m *mockStore) GetConversationMessages(_ context.Context, _ string) ([]memory.ConversationMessage, error) {
+	return nil, nil
+}
 func (m *mockStore) IncrementInteraction(_ context.Context, _ string) (int, error) { return 0, nil }
 func (m *mockStore) GetLearnedContext(_ context.Context, _ string) (string, error) { return "", nil }
 func (m *mockStore) UpdateLearnedContext(_ context.Context, _, _, _ string) error  { return nil }

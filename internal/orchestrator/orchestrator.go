@@ -82,6 +82,24 @@ func (o *Orchestrator) StartSession(projectPath string) (*Session, error) {
 	return s, nil
 }
 
+// ResumeSession creates a session and loads its latest conversation from SQLite.
+func (o *Orchestrator) ResumeSession(projectPath string) (*Session, error) {
+	s, err := o.StartSession(projectPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Only resume if the session has no messages (freshly created).
+	if s.MessageCount() == 0 {
+		ctx := context.Background()
+		if err := s.Resume(ctx); err != nil {
+			o.logger.Info("no previous conversation to resume", "project", s.ProjectName, "reason", err)
+			// Not fatal — just start fresh.
+		}
+	}
+	return s, nil
+}
+
 // GetSession returns an existing session or nil.
 func (o *Orchestrator) GetSession(projectPath string) *Session {
 	projCtx, err := project.Detect(projectPath)

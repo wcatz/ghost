@@ -38,7 +38,7 @@ export function getChatHtml(
   </div>
   <div id="messages"></div>
   <div id="slash-menu" class="hidden"></div>
-  <div id="approval-overlay" class="hidden">
+  <div id="approval-overlay" class="hidden" tabindex="0">
     <div id="approval-modal">
       <div class="modal-header">Tool Approval Required</div>
       <div id="approval-tool" class="modal-tool"></div>

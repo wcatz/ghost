@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/ai"
+	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/mode"
 	"github.com/wcatz/ghost/internal/project"
 	"github.com/wcatz/ghost/internal/prompt"
@@ -71,6 +72,63 @@ func NewSession(
 		logger:       logger,
 		model:        model,
 	}
+}
+
+// InitConversation creates a conversation record in SQLite for message persistence.
+func (s *Session) InitConversation(ctx context.Context) error {
+	convID, err := s.store.CreateConversation(ctx, s.ProjectID, s.Mode.Name)
+	if err != nil {
+		return fmt.Errorf("create conversation: %w", err)
+	}
+	s.ConversationID = convID
+	return nil
+}
+
+// Resume loads the latest conversation from SQLite and restores messages.
+func (s *Session) Resume(ctx context.Context) error {
+	convID, err := s.store.GetLatestConversation(ctx, s.ProjectID)
+	if err != nil {
+		return fmt.Errorf("get latest conversation: %w", err)
+	}
+	s.ConversationID = convID
+
+	stored, err := s.store.GetConversationMessages(ctx, convID)
+	if err != nil {
+		return fmt.Errorf("load messages: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, m := range stored {
+		msg := decodeStoredMessage(m)
+		if msg.Role != "" {
+			s.messages = append(s.messages, msg)
+		}
+	}
+	s.logger.Info("session resumed", "project", s.ProjectName, "messages", len(s.messages), "conversation", convID[:8])
+	return nil
+}
+
+// persistMessage saves a message to SQLite if we have a conversation ID.
+func (s *Session) persistMessage(ctx context.Context, role, content string) {
+	if s.ConversationID == "" {
+		return
+	}
+	if err := s.store.AppendMessage(ctx, s.ConversationID, role, content); err != nil {
+		s.logger.Error("persist message", "error", err)
+	}
+}
+
+// decodeStoredMessage converts a stored message back to an ai.Message.
+func decodeStoredMessage(m memory.ConversationMessage) ai.Message {
+	// Try JSON decode first (tool_result, multi-block messages).
+	var blocks []ai.ContentBlock
+	if err := json.Unmarshal([]byte(m.Content), &blocks); err == nil && len(blocks) > 0 {
+		return ai.Message{Role: m.Role, Content: blocks}
+	}
+	// Plain text message.
+	return ai.TextMessage(m.Role, m.Content)
 }
 
 // ApprovalFunc is the legacy synchronous approval callback.
@@ -151,8 +209,16 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 		s.mu.Lock()
 		s.LastActiveAt = time.Now()
 
+		// Ensure conversation exists for persistence.
+		if s.ConversationID == "" {
+			if err := s.InitConversation(ctx); err != nil {
+				s.logger.Error("init conversation", "error", err)
+			}
+		}
+
 		// Append user message.
 		s.messages = append(s.messages, userMessage)
+		s.persistMessage(ctx, "user", userText)
 
 		// Build system blocks.
 		system := s.builder.BuildSystemBlocks(ctx, s.projectCtx, s.Mode)
@@ -218,6 +284,11 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 			s.mu.Lock()
 			s.messages = append(s.messages, ai.Message{Role: "assistant", Content: assistantBlocks})
 			s.mu.Unlock()
+
+			// Persist assistant response.
+			if textAccum != "" {
+				s.persistMessage(ctx, "assistant", textAccum)
+			}
 
 			// If no tool calls, we're done.
 			if stopReason != "tool_use" || len(toolCalls) == 0 {

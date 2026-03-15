@@ -81,8 +81,12 @@ export class GhostClient extends EventEmitter {
 
   // --- Sessions ---
 
-  async createSession(path: string, mode?: string): Promise<Session> {
-    return this.request("POST", "/api/v1/sessions", { path, mode });
+  async createSession(path: string, mode?: string, resume?: boolean): Promise<Session> {
+    return this.request("POST", "/api/v1/sessions", { path, mode, resume });
+  }
+
+  async getHistory(sessionId: string): Promise<{ role: string; content: string }[]> {
+    return this.request("GET", `/api/v1/sessions/${sessionId}/history`);
   }
 
   async listSessions(): Promise<Session[]> {

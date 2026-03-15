@@ -21,6 +21,7 @@ import (
 	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/github"
 	goog "github.com/wcatz/ghost/internal/google"
+	"github.com/wcatz/ghost/internal/mdv2"
 	"github.com/wcatz/ghost/internal/mcpserver"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/orchestrator"
@@ -291,7 +292,7 @@ func runServe() {
 		if ghMonitor != nil {
 			ghMonitor.OnAlert(func(n github.Notification) {
 				msg := fmt.Sprintf("*P%d Alert*\n`%s`\n%s\n_%s_",
-					n.Priority, n.RepoFullName, n.SubjectTitle, n.Reason)
+					n.Priority, mdv2.Esc(n.RepoFullName), mdv2.Esc(n.SubjectTitle), mdv2.Esc(n.Reason))
 				tgBot.SendToAll(ctx, msg)
 			})
 		}
