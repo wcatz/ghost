@@ -66,14 +66,20 @@ type DisplayConfig struct {
 	PlainMode        bool   `koanf:"plain_mode"`      // force legacy REPL (no bubbletea)
 }
 
-// VoiceConfig holds voice interface settings (Phase C — reserved).
+// VoiceConfig holds voice interface settings.
 type VoiceConfig struct {
-	Enabled    bool   `koanf:"enabled"`
-	STTModel   string `koanf:"stt_model"`
-	TTSModel   string `koanf:"tts_model"`
-	TTSVoice   string `koanf:"tts_voice"`
-	WakeWord   string `koanf:"wake_word"`
-	PushToTalk string `koanf:"push_to_talk"`
+	Enabled     bool    `koanf:"enabled"`
+	STTBackend  string  `koanf:"stt_backend"`  // "whisper" or "subprocess"
+	STTModel    string  `koanf:"stt_model"`    // whisper model name/path
+	TTSBackend  string  `koanf:"tts_backend"`  // "piper", "espeak", or "none"
+	TTSModel    string  `koanf:"tts_model"`    // piper model path
+	TTSVoice    string  `koanf:"tts_voice"`    // voice name
+	TTSRate     float64 `koanf:"tts_rate"`     // speech rate multiplier
+	WakeWord    string  `koanf:"wake_word"`    // reserved for future use
+	PushToTalk  string  `koanf:"push_to_talk"` // keybind, e.g. "ctrl+space"
+	SilenceMs   int     `koanf:"silence_ms"`   // silence duration to end recording (ms)
+	SampleRate  int     `koanf:"sample_rate"`  // audio sample rate
+	InputDevice string  `koanf:"input_device"` // audio input device ("default" or device ID)
 }
 
 // ServerConfig holds ghost serve settings.
@@ -164,7 +170,14 @@ var defaults = map[string]interface{}{
 	"display.image_protocol":     "auto",
 	"display.plain_mode":         false,
 	"voice.enabled":              false,
+	"voice.stt_backend":          "whisper",
+	"voice.stt_model":            "base",
+	"voice.tts_backend":          "piper",
+	"voice.tts_rate":             1.0,
 	"voice.push_to_talk":         "ctrl+space",
+	"voice.silence_ms":           800,
+	"voice.sample_rate":          16000,
+	"voice.input_device":         "default",
 	"server.listen_addr":         "127.0.0.1:2187",
 	"embedding.enabled":          true,
 	"embedding.ollama_url":       "http://localhost:11434",
