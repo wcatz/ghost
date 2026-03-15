@@ -111,18 +111,18 @@ func (n *MeetingNotifier) formatAlert(ev Event, until time.Duration) string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📅 *Meeting in %d min*\n", minutes))
-	sb.WriteString(fmt.Sprintf("  %s\n", ev.Summary))
-	sb.WriteString(fmt.Sprintf("  🕐 %s", ev.Start.Local().Format("15:04")))
+	fmt.Fprintf(&sb, "📅 *Meeting in %d min*\n", minutes)
+	fmt.Fprintf(&sb, "  %s\n", ev.Summary)
+	fmt.Fprintf(&sb, "  🕐 %s", ev.Start.Local().Format("15:04"))
 	if !ev.End.IsZero() {
-		sb.WriteString(fmt.Sprintf(" – %s", ev.End.Local().Format("15:04")))
+		fmt.Fprintf(&sb, " – %s", ev.End.Local().Format("15:04"))
 	}
 	sb.WriteString("\n")
 	if ev.Location != "" {
-		sb.WriteString(fmt.Sprintf("  📍 %s\n", ev.Location))
+		fmt.Fprintf(&sb, "  📍 %s\n", ev.Location)
 	}
 	if ev.MeetLink != "" {
-		sb.WriteString(fmt.Sprintf("  🔗 %s\n", ev.MeetLink))
+		fmt.Fprintf(&sb, "  🔗 %s\n", ev.MeetLink)
 	}
 	return sb.String()
 }
