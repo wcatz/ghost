@@ -109,6 +109,10 @@ func (s *Session) Resume(ctx context.Context) error {
 			s.messages = append(s.messages, msg)
 		}
 	}
+
+	// Fix orphaned tool_use blocks from interrupted sessions.
+	s.messages = sanitizeMessages(s.messages)
+
 	s.logger.Info("session resumed", "project", s.ProjectName, "messages", len(s.messages), "conversation", convID[:8])
 	return nil
 }
@@ -496,6 +500,8 @@ func (s *Session) windowedMessages() []ai.Message {
 	msgs := make([]ai.Message, len(s.messages))
 	copy(msgs, s.messages)
 
+	msgs = sanitizeMessages(msgs)
+
 	est := estimateTokens(msgs)
 	if est <= compressionThreshold {
 		return msgs
@@ -606,6 +612,50 @@ func isToolResult(m ai.Message) bool {
 		}
 	}
 	return true
+}
+
+// sanitizeMessages fixes orphaned tool_use blocks that have no matching
+// tool_result. This happens when a session is interrupted mid-tool-execution.
+// Claude's API requires every tool_use block to be followed by a tool_result.
+func sanitizeMessages(msgs []ai.Message) []ai.Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
+
+	// Check if the last assistant message has tool_use blocks.
+	last := msgs[len(msgs)-1]
+	if last.Role != "assistant" {
+		return msgs
+	}
+
+	hasToolUse := false
+	for _, b := range last.Content {
+		if b.Type == "tool_use" {
+			hasToolUse = true
+			break
+		}
+	}
+
+	if !hasToolUse {
+		return msgs
+	}
+
+	// The last message is an assistant with tool_use but no following tool_result.
+	// Inject a synthetic tool_result for each tool_use.
+	var results []ai.ToolResult
+	for _, b := range last.Content {
+		if b.Type == "tool_use" {
+			results = append(results, ai.ToolResult{
+				ToolUseID: b.ID,
+				Content:   "tool execution was interrupted",
+				IsError:   true,
+			})
+		}
+	}
+	if len(results) > 0 {
+		msgs = append(msgs, ai.ToolResultMessage(results))
+	}
+	return msgs
 }
 
 // Store returns the memory store for direct access (e.g., REPL commands).
