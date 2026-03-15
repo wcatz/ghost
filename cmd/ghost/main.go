@@ -20,6 +20,7 @@ import (
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/github"
+	goog "github.com/wcatz/ghost/internal/google"
 	"github.com/wcatz/ghost/internal/mcpserver"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/orchestrator"
@@ -258,6 +259,21 @@ func runServe() {
 		}
 	}
 
+	// --- Google Calendar + Gmail (OAuth2) ---
+	var googleClient *goog.Client
+	credFile := expandHome(cfg.Google.CredentialsFile)
+	if _, err := os.Stat(credFile); err == nil {
+		googleClient, err = goog.NewClient(ctx, goog.Config{
+			CredentialsFile: credFile,
+			TokenFile:       expandHome(cfg.Google.TokenFile),
+		}, logger)
+		if err != nil {
+			logger.Warn("google API init failed", "error", err)
+		} else {
+			logger.Info("google API connected (calendar + gmail)")
+		}
+	}
+
 	// --- Telegram bot ---
 	var tgBot *telegram.Bot
 	if cfg.Telegram.Token != "" {
@@ -284,6 +300,17 @@ func runServe() {
 		sched.OnAlert(func(message string) {
 			tgBot.SendToAll(ctx, message)
 		})
+
+		// Wire Google Calendar/Gmail to Telegram.
+		if googleClient != nil {
+			tgBot.SetGoogle(googleClient)
+
+			// Start meeting notifier.
+			notifier := goog.NewMeetingNotifier(googleClient, func(msg string) {
+				tgBot.SendToAll(ctx, msg)
+			}, logger)
+			go notifier.Run(ctx)
+		}
 
 		go tgBot.Run(ctx)
 		logger.Info("telegram bot started", "allowed_users", len(allowedIDs))
@@ -382,4 +409,16 @@ func bootstrap() (*config.Config, *slog.Logger, *memory.Store, *sql.DB) {
 
 	store := memory.NewStore(db, logger)
 	return cfg, logger, store, db
+}
+
+// expandHome replaces a leading ~ with the user's home directory.
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }
