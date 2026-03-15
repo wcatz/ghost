@@ -24,6 +24,9 @@ type cacheControl struct {
 	Type string `json:"type"`
 }
 
+// CacheControlEphemeral is the cache_control value for ephemeral caching.
+var CacheControlEphemeral = cacheControl{Type: "ephemeral"}
+
 // CachedBlock creates a system block with ephemeral cache control.
 func CachedBlock(text string) SystemBlock {
 	return SystemBlock{
@@ -73,15 +76,16 @@ func ToolResultMessage(results []ToolResult) Message {
 
 // ContentBlock represents a content block in a message.
 type ContentBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
-	Source    *ImageSource    `json:"source,omitempty"` // for type "image"
+	Type         string        `json:"type"`
+	Text         string        `json:"text,omitempty"`
+	ID           string        `json:"id,omitempty"`
+	Name         string        `json:"name,omitempty"`
+	Input        json.RawMessage `json:"input,omitempty"`
+	ToolUseID    string        `json:"tool_use_id,omitempty"`
+	Content      string        `json:"content,omitempty"`
+	IsError      bool          `json:"is_error,omitempty"`
+	Source       *ImageSource  `json:"source,omitempty"`       // for type "image"
+	CacheControl *cacheControl `json:"cache_control,omitempty"` // for multi-turn caching
 }
 
 // ImageSource holds base64-encoded image data for Claude's vision API.
