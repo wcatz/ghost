@@ -54,9 +54,7 @@ func ExtractMemories(ctx context.Context, client reflector, store memoryStore, l
 		if m.Tags == nil {
 			m.Tags = []string{}
 		}
-		if m.Category == "" {
-			m.Category = "fact"
-		}
+		m.Category = validCategory(m.Category)
 
 		_, wasMerged, err := store.Upsert(extractCtx, projectID, m.Category, m.Content, "chat", m.Importance, m.Tags)
 		if err != nil {
@@ -82,6 +80,35 @@ func buildExtractionPrompt(userMsg, assistantResponse string) string {
 	sb.WriteString(fmt.Sprintf("USER: %s\n\n", userMsg))
 	sb.WriteString(fmt.Sprintf("ASSISTANT: %s", assistantResponse))
 	return sb.String()
+}
+
+// validCategories is the set allowed by the SQLite CHECK constraint.
+var validCategories = map[string]bool{
+	"architecture": true, "decision": true, "pattern": true, "convention": true,
+	"gotcha": true, "dependency": true, "preference": true, "fact": true,
+}
+
+// categoryMap maps common LLM outputs to valid categories.
+var categoryMap = map[string]string{
+	"observation": "fact", "context": "fact", "info": "fact", "note": "fact",
+	"bug": "gotcha", "issue": "gotcha", "warning": "gotcha", "edge_case": "gotcha",
+	"config": "convention", "style": "convention", "naming": "convention",
+	"library": "dependency", "tool": "dependency", "framework": "dependency",
+	"design": "architecture", "structure": "architecture", "layout": "architecture",
+	"choice": "decision", "tradeoff": "decision", "rationale": "decision",
+	"workflow": "pattern", "approach": "pattern", "technique": "pattern",
+	"pref": "preference", "opinion": "preference",
+}
+
+func validCategory(cat string) string {
+	cat = strings.ToLower(strings.TrimSpace(cat))
+	if validCategories[cat] {
+		return cat
+	}
+	if mapped, ok := categoryMap[cat]; ok {
+		return mapped
+	}
+	return "fact"
 }
 
 func parseExtractionResponse(text string) []ReflectMemory {
