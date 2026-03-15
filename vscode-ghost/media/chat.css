@@ -159,6 +159,12 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   border-left: 3px solid var(--ghost-error);
   padding-left: 10px;
 }
+.message.queued {
+  color: var(--ghost-muted);
+  font-size: 0.85em;
+  font-style: italic;
+  align-self: flex-end;
+}
 
 /* --- Thinking blocks (collapsible) --- */
 .thinking-block {

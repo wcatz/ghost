@@ -299,11 +299,13 @@ export function getChatHtml(
     }
 
     // --- Send ---
+    let messageQueue = [];
+
     function send() {
       const text = inputEl.value.trim();
-      if (!text || streaming) return;
+      if (!text) return;
 
-      // Handle slash commands locally
+      // Handle slash commands locally (even during streaming).
       if (text.startsWith('/')) {
         const match = slashCommands.find(c => c.cmd === text || text.startsWith(c.cmd));
         if (match) {
@@ -321,10 +323,24 @@ export function getChatHtml(
         pendingImage = null;
         imagePreview.classList.add('hidden');
       }
-      vscode.postMessage(msg);
+
+      if (streaming) {
+        // Queue for after current response completes.
+        messageQueue.push(msg);
+        addMessage('queued', '⏳ Queued: ' + text);
+      } else {
+        vscode.postMessage(msg);
+      }
       inputEl.value = '';
       inputEl.style.height = 'auto';
       slashMenu.classList.add('hidden');
+    }
+
+    function drainQueue() {
+      if (messageQueue.length > 0 && !streaming) {
+        const next = messageQueue.shift();
+        vscode.postMessage(next);
+      }
     }
 
     sendBtn.addEventListener('click', send);
@@ -616,6 +632,7 @@ export function getChatHtml(
             attachBtn.classList.add('hidden');
           } else {
             attachBtn.classList.remove('hidden');
+            drainQueue();
           }
           break;
 
