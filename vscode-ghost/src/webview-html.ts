@@ -147,25 +147,31 @@ export function getChatHtml(
     }
 
     // --- Markdown rendering ---
+    // Regexes built with new RegExp() because backtick literals inside
+    // template literal strings cause SyntaxError. String.fromCharCode(96) = backtick.
+    const BT = String.fromCharCode(96);
+    const codeBlockRe = new RegExp(BT + BT + BT + '(\\\\w*)?\\n([\\\\s\\\\S]*?)' + BT + BT + BT, 'g');
+    const inlineCodeRe = new RegExp(BT + '([^' + BT + ']+)' + BT, 'g');
+
     function renderMarkdown(text) {
       let html = escapeHtml(text);
       // Code blocks
-      html = html.replace(/\`\`\`(\\w*)?\\n([\\s\\S]*?)\`\`\`/g, (_, lang, code) => {
+      html = html.replace(codeBlockRe, function(_, lang, code) {
         const id = 'cb-' + Math.random().toString(36).substr(2, 6);
         return '<div class="code-block"><div class="code-header"><span class="code-lang">' +
           (lang || '') + '</span><button class="copy-btn" data-target="' + id +
           '">Copy</button></div><pre><code id="' + id + '">' + code.trim() + '</code></pre></div>';
       });
       // Inline code
-      html = html.replace(/\`([^\`]+)\`/g, '<code class="inline-code">$1</code>');
+      html = html.replace(inlineCodeRe, '<code class="inline-code">$1</code>');
       // Bold
-      html = html.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');
+      html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
       // Italic
-      html = html.replace(/(?<![*])\\*(?![*])(.+?)(?<![*])\\*(?![*])/g, '<em>$1</em>');
+      html = html.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
       // Links
-      html = html.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="$2">$1</a>');
+      html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
       // Line breaks
-      html = html.replace(/\\n/g, '<br>');
+      html = html.replace(/\n/g, '<br>');
       return html;
     }
 
@@ -524,7 +530,7 @@ export function getChatHtml(
           currentAssistantText += msg.text;
           const el = ensureAssistantBubble();
           el.innerHTML = renderMarkdown(currentAssistantText);
-          scrollToBottom();
+          if (!userScrolledUp) scrollToBottom();
           break;
 
         case 'thinking_delta':
