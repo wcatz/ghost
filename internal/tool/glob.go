@@ -52,6 +52,8 @@ func execGlob(ctx context.Context, projectPath string, input json.RawMessage) Re
 		modTime int64
 	}
 
+	const maxDepth = 15
+
 	var matches []fileEntry
 	pattern := in.Pattern
 
@@ -59,10 +61,14 @@ func execGlob(ctx context.Context, projectPath string, input json.RawMessage) Re
 		if err != nil {
 			return nil // skip errors
 		}
-		// Skip common ignored directories.
+		// Skip common ignored directories and enforce depth limit.
 		if info.IsDir() {
 			name := info.Name()
 			if name == ".git" || name == "node_modules" || name == "vendor" || name == ".next" || name == "dist" || name == "build" {
+				return filepath.SkipDir
+			}
+			relDir, _ := filepath.Rel(basePath, path)
+			if relDir != "." && strings.Count(relDir, string(filepath.Separator)) >= maxDepth {
 				return filepath.SkipDir
 			}
 			return nil
@@ -82,10 +88,13 @@ func execGlob(ctx context.Context, projectPath string, input json.RawMessage) Re
 
 		if matched {
 			matches = append(matches, fileEntry{relPath, info.ModTime().Unix()})
+			if len(matches) >= 1000 {
+				return fmt.Errorf("match limit reached")
+			}
 		}
 		return nil
 	})
-	if err != nil {
+	if err != nil && len(matches) == 0 {
 		return Result{Content: fmt.Sprintf("glob error: %v", err), IsError: true}
 	}
 

@@ -13,11 +13,12 @@ import (
 
 // approvalDialog shows a non-blocking overlay for tool approval.
 type approvalDialog struct {
-	active   bool
-	request  provider.ApprovalRequest
-	toolName string
-	summary  string
-	width    int
+	active      bool
+	request     provider.ApprovalRequest
+	toolName    string
+	summary     string
+	width       int
+	confirmAll  bool // true when showing "are you sure?" for Allow All
 }
 
 func newApprovalDialog() approvalDialog {
@@ -49,17 +50,29 @@ func (a approvalDialog) update(msg tea.Msg) (approvalDialog, tea.Cmd) {
 	}
 
 	if msg, ok := msg.(tea.KeyPressMsg); ok {
+		if a.confirmAll {
+			// Second confirmation for Allow All.
+			switch {
+			case key.Matches(msg, keys.Approve):
+				a.confirmAll = false
+				a.respond(true)
+				return a, func() tea.Msg {
+					return commandMsg{Command: "auto-approve"}
+				}
+			default:
+				// Any other key cancels the confirmation.
+				a.confirmAll = false
+			}
+			return a, nil
+		}
+
 		switch {
 		case key.Matches(msg, keys.Approve):
 			a.respond(true)
 		case key.Matches(msg, keys.Deny), key.Matches(msg, keys.Cancel):
 			a.respond(false)
 		case key.Matches(msg, keys.ApproveAll):
-			a.respond(true)
-			// Return a command to set auto-approve.
-			return a, func() tea.Msg {
-				return commandMsg{Command: "auto-approve"}
-			}
+			a.confirmAll = true // require second confirmation
 		}
 	}
 
@@ -81,11 +94,18 @@ func (a approvalDialog) view() string {
 		content = fmt.Sprintf("%s\n\n%s", title, tool)
 	}
 
-	hint := fmt.Sprintf("\n%s Allow  %s Deny  %s Allow All",
-		approvalKeyStyle.Render("[y]"),
-		approvalKeyStyle.Render("[n]"),
-		approvalKeyStyle.Render("[a]"),
-	)
+	var hint string
+	if a.confirmAll {
+		hint = fmt.Sprintf("\n%s to auto-approve ALL tools this session?",
+			approvalKeyStyle.Render("[y] Confirm"),
+		)
+	} else {
+		hint = fmt.Sprintf("\n%s Allow  %s Deny  %s Allow All",
+			approvalKeyStyle.Render("[y]"),
+			approvalKeyStyle.Render("[n]"),
+			approvalKeyStyle.Render("[a]"),
+		)
+	}
 
 	boxWidth := a.width - 10
 	if boxWidth < 40 {
