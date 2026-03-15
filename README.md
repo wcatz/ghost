@@ -1,14 +1,10 @@
-<p align="center">
-  <img src="assets/logo.png" width="200" alt="Ghost logo" />
-</p>
-
 # Ghost
 
 [![CI](https://github.com/wcatz/ghost/actions/workflows/ci.yml/badge.svg)](https://github.com/wcatz/ghost/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/github/go-mod/go-version/wcatz/ghost)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-A memory-first personal assistant daemon. Ghost remembers what matters about your projects across sessions — architecture decisions, conventions, gotchas, patterns — and surfaces that knowledge through an MCP server, HTTP API, Telegram bot, or interactive REPL.
+A memory-first personal assistant daemon. Ghost remembers what matters about your projects across sessions — architecture decisions, conventions, gotchas, patterns — and surfaces that knowledge through an MCP server, HTTP API, VSCode extension, Telegram bot, or interactive REPL.
 
 ## Why Ghost
 
@@ -21,6 +17,8 @@ Most AI tools start fresh every session. Ghost gives them persistent memory.
 **Free embeddings.** `nomic-embed-text:v1.5` runs locally through Ollama — 274MB, works on CPU. No embedding API costs. If Ollama is offline, search falls back to FTS5 with no hard failure.
 
 **Self-pruning.** Time-decay scoring fades stale memories by category half-life. Context windows stay small and relevant without manual cleanup.
+
+**Pure Go.** No CGO required. Uses `modernc.org/sqlite` with FTS5 built-in. Single static binary, cross-compiles to linux/darwin amd64/arm64.
 
 | | Without Ghost | With Ghost |
 |--|--|--|
@@ -60,7 +58,7 @@ Or build from source:
 ```bash
 git clone https://github.com/wcatz/ghost.git
 cd ghost
-go build -o ghost ./cmd/ghost
+make build
 ```
 
 ## Quick Start
@@ -138,7 +136,9 @@ ghost serve -addr :3000        # override listen address
 | Scheduler | *(always on)* | Cron jobs + one-shot reminders |
 | Telegram bot | `telegram.token` | Remote access + alerts |
 | GitHub monitor | `github.token` | Polls notifications, classifies P0-P4 |
-| Calendar | `calendar.url` | Pulls CalDAV events for briefings |
+| Google Calendar | `google.credentials_file` | Meeting notifications via OAuth2 |
+| Gmail | `google.credentials_file` | Unread email summaries |
+| Meeting notifier | *(auto with Google)* | 10min + 5min alerts via Telegram |
 | Morning briefing | `briefing.enabled` | Cron-triggered daily summary |
 
 ### `ghost mcp` — MCP Server
@@ -181,6 +181,69 @@ ghost serve -addr :3000        # override listen address
 | `ghost_project_context` | Top memories ranked by importance and recency |
 
 All three modes share the same SQLite database — memories saved from the REPL are searchable via MCP and the HTTP API.
+
+## VSCode Extension
+
+The Ghost extension provides a chat interface directly in VSCode.
+
+```bash
+cd vscode-ghost && npm install && npm run compile
+npx @vscode/vsce package --allow-missing-repository
+code --install-extension ghost-0.1.0.vsix
+```
+
+**Features:**
+- Sidebar chat panel + full editor tab (`Ctrl+Shift+G`)
+- SSE streaming with thinking display, tool progress indicators
+- Markdown rendering with syntax-highlighted code blocks + copy buttons
+- Collapsible thinking sections
+- Token usage and cost tracking with cache savings
+- Auto-approve toggle (YOLO mode)
+- Image attachment support (paste or file picker)
+- Slash commands (`/mode`, `/clear`, `/cost`, `/auto-approve`)
+- Memory browser with project selector and FTS search
+- Status bar with connection state, mode, and token counts
+
+## Telegram Bot
+
+Remote access to Ghost from your phone.
+
+**Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `/status` | System status + notification summary |
+| `/notifications` | GitHub notifications with priority + inline "Open" buttons |
+| `/memory search <project> <query>` | Full-text memory search |
+| `/remind <message>` | Set a reminder |
+| `/briefing` | Morning briefing with progressive loading |
+| `/meetings` | Today's Google Calendar meetings with "Join Meet" buttons |
+| `/emails` | Unread Gmail with "Open" buttons |
+| `/sessions` | List active Ghost sessions with inline picker |
+| `/chat <id> <message>` | Send a message to a Ghost session |
+| `/help` | Show available commands |
+
+**Approval forwarding:** When Ghost needs tool approval during a session, it forwards the request to Telegram with Allow/Deny inline buttons. Reply with text to deny with instructions.
+
+**Features:** Typing indicators, message splitting (4096 char limit), link preview suppression, MarkdownV2 formatting, progressive briefing updates.
+
+## Google Calendar + Gmail
+
+Ghost connects to Google Workspace via OAuth2 for calendar and email integration.
+
+**Setup:**
+1. Create a Google Cloud project and enable Calendar API + Gmail API
+2. Create OAuth2 Desktop credentials
+3. Save the credentials JSON to `~/.config/ghost/google-credentials.json`
+4. On first `ghost serve`, open the printed URL to authorize
+5. Token auto-refreshes after initial authorization
+
+**Config:**
+
+```yaml
+google:
+  credentials_file: "~/.config/ghost/google-credentials.json"
+```
 
 ## Configuration
 
@@ -228,10 +291,8 @@ briefing:
   enabled: true
   schedule: "0 8 * * 1-5"      # 8am weekdays
 
-calendar:
-  url: "https://caldav.example.com/..."
-  username: "user"
-  password: "app-specific-password"
+google:
+  credentials_file: "~/.config/ghost/google-credentials.json"
 ```
 
 ### Per-Project Config
@@ -279,15 +340,18 @@ internal/
   tui/                     Terminal REPL with streaming
   server/                  HTTP REST API (chi)
   mcpserver/               MCP server (stdio)
-  telegram/                Telegram bot + alerts
+  telegram/                Telegram bot + approval forwarding
+  google/                  Google Calendar + Gmail OAuth2 client
   github/                  Notification monitor + P0-P4 priority
   scheduler/               Cron + one-shot reminders (gocron)
   briefing/                Daily briefing aggregator
-  calendar/                CalDAV client
   embedding/               Ollama async worker
+  mdv2/                    MarkdownV2 escaping utilities
+  voice/                   Voice pipeline interfaces (WIP)
   provider/                Interface contracts
   audit/                   Per-action cost + token logging
 migrations/                Embedded SQLite schema
+vscode-ghost/              VSCode extension (TypeScript)
 ```
 
 ## License
