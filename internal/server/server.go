@@ -92,6 +92,8 @@ func (s *Server) Run(ctx context.Context) error {
 		Addr:              s.cfg.ListenAddr,
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		BaseContext:       func(_ net.Listener) context.Context { return ctx },
 	}
 

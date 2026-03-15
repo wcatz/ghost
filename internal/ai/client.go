@@ -77,7 +77,7 @@ func (c *Client) ChatStream(
 
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -126,7 +126,7 @@ func (c *Client) Reflect(ctx context.Context, prompt string) (string, TokenUsage
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
 	if err != nil {
 		return "", TokenUsage{}, fmt.Errorf("read reflect response: %w", err)
 	}

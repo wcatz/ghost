@@ -58,7 +58,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	session, err := s.orchestrator.StartSession(req.Path)
 	if err != nil {
 		s.logger.Error("start session", "error", err)
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to start session")
 		return
 	}
 
@@ -104,7 +104,8 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.orchestrator.StopSession(session.ProjectPath); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.logger.Error("stop session", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to stop session")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "stopped"})
@@ -134,23 +135,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set up SSE headers.
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, "streaming not supported")
-		return
-	}
-
-	// Create approval channel for this request.
-	approvalCh := make(chan provider.ApprovalRequest, 1)
-
 	// Reject concurrent sends — only one stream per session.
+	// Must happen before writing SSE headers (can't send JSON error after SSE 200).
 	state := &chatState{}
 	s.chatMu.Lock()
 	if _, active := s.chatStates[id]; active {
@@ -160,6 +146,25 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	s.chatStates[id] = state
 	s.chatMu.Unlock()
+
+	// Set up SSE headers.
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		s.chatMu.Lock()
+		delete(s.chatStates, id)
+		s.chatMu.Unlock()
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	// Create approval channel for this request.
+	approvalCh := make(chan provider.ApprovalRequest, 1)
 	defer func() {
 		s.chatMu.Lock()
 		// Only delete if we own the state (prevents race on cleanup).

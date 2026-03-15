@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -45,12 +44,18 @@ func (w *WhisperSTT) Transcribe(ctx context.Context, audio []byte) (string, erro
 	}
 
 	// Write audio as WAV to temp file (whisper expects WAV input).
-	tmpDir := os.TempDir()
-	wavPath := filepath.Join(tmpDir, "ghost-stt.wav")
+	// Use CreateTemp for unique name + secure permissions.
+	tmpFile, err := os.CreateTemp("", "ghost-stt-*.wav")
+	if err != nil {
+		return "", fmt.Errorf("create temp wav: %w", err)
+	}
+	wavPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(wavPath)
+
 	if err := writeWAV(wavPath, audio, 16000); err != nil {
 		return "", fmt.Errorf("write temp wav: %w", err)
 	}
-	defer os.Remove(wavPath)
 
 	// Run whisper.
 	var stdout, stderr bytes.Buffer

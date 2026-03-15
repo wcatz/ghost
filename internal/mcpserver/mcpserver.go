@@ -101,6 +101,13 @@ func (s *Server) registerTools() {
 		if args.Category == "" {
 			args.Category = "fact"
 		}
+		validCategories := map[string]bool{
+			"architecture": true, "decision": true, "pattern": true, "convention": true,
+			"gotcha": true, "dependency": true, "preference": true, "fact": true,
+		}
+		if !validCategories[args.Category] {
+			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
+		}
 		if args.Importance <= 0 {
 			args.Importance = 0.7
 		}
