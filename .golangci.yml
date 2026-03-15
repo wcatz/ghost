@@ -6,4 +6,3 @@ linters:
     - staticcheck
     - unused
     - ineffassign
-    - gosimple
