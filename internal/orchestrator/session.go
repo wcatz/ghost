@@ -424,6 +424,20 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 					Text: fmt.Sprintf("\n<tool_result name=%q duration=%s>\n", tc.Name, result.Duration),
 				}
 
+				// Send tool result for TUI display (before summarization).
+				events <- ai.StreamEvent{
+					Type: "tool_result",
+					ToolUse: &ai.ToolUseEvent{
+						ID:   tc.ID,
+						Name: tc.Name,
+					},
+					Text: result.Content,
+					Metadata: map[string]string{
+						"is_error": fmt.Sprintf("%v", result.IsError),
+						"duration": result.Duration.String(),
+					},
+				}
+
 				// Emit diff metadata for file_edit/file_write tools.
 				if result.Metadata != nil {
 					events <- ai.StreamEvent{
