@@ -228,13 +228,20 @@ func (tb *Bot) handleNotifications(ctx context.Context, b *bot.Bot, update *mode
 	}
 
 	var sb strings.Builder
+	var buttons [][]models.InlineKeyboardButton
 	fmt.Fprintf(&sb, "*Unread Notifications* \\(%d\\)\n\n", len(notifs))
 	for _, n := range notifs {
 		emoji := priorityEmoji(n.Priority)
 		fmt.Fprintf(&sb, "%s *P%d* `%s`\n  %s\n  _%s_\n\n",
 			emoji, n.Priority, mdv2.Esc(n.RepoFullName), mdv2.Esc(n.SubjectTitle), mdv2.Esc(n.Reason))
+		if htmlURL := ghAPIToHTML(n.SubjectURL, n.SubjectType); htmlURL != "" {
+			label := fmt.Sprintf("%s %s", emoji, truncate(n.SubjectTitle, 30))
+			buttons = append(buttons, []models.InlineKeyboardButton{
+				{Text: label, URL: htmlURL},
+			})
+		}
 	}
-	tb.reply(ctx, b, update, sb.String())
+	tb.replyWithKeyboard(ctx, b, update, sb.String(), buttons)
 }
 
 func (tb *Bot) handleMemory(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -312,9 +319,40 @@ func (tb *Bot) handleRemind(ctx context.Context, b *bot.Bot, update *models.Upda
 }
 
 func (tb *Bot) handleBriefing(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	chatID := update.Message.Chat.ID
 	tb.sendTyping(ctx, update)
+
+	// Send initial message, then edit in-place as sections arrive.
+	sent, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:    chatID,
+		Text:      "⏳ Loading briefing\\.\\.\\.",
+		ParseMode: models.ParseModeMarkdown,
+		LinkPreviewOptions: &models.LinkPreviewOptions{
+			IsDisabled: bot.True(),
+		},
+	})
+	if err != nil {
+		tb.logger.Error("telegram send", "error", err)
+		return
+	}
+
 	msg := briefing.Generate(ctx, tb.briefingSources)
-	tb.reply(ctx, b, update, msg)
+
+	_, err = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:    chatID,
+		MessageID: sent.ID,
+		Text:      msg,
+		ParseMode: models.ParseModeMarkdown,
+		LinkPreviewOptions: &models.LinkPreviewOptions{
+			IsDisabled: bot.True(),
+		},
+	})
+	if err != nil {
+		tb.logger.Error("telegram edit", "error", err)
+	}
 }
 
 // SetBriefingSources configures the data sources for on-demand briefings.
@@ -389,6 +427,7 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 	}
 
 	var sb strings.Builder
+	var buttons [][]models.InlineKeyboardButton
 	fmt.Fprintf(&sb, "*Unread Emails* \\(%d total\\)\n\n", count)
 	for _, e := range emails {
 		fmt.Fprintf(&sb, "📧 *%s*\n  From: %s\n", mdv2.Esc(e.Subject), mdv2.Esc(e.From))
@@ -400,8 +439,16 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 			fmt.Fprintf(&sb, "  _%s_\n", mdv2.Esc(snippet))
 		}
 		sb.WriteString("\n")
+		gmailURL := fmt.Sprintf("https://mail.google.com/mail/u/0/#inbox/%s", e.ID)
+		label := truncate(e.Subject, 35)
+		if label == "" {
+			label = "Open email"
+		}
+		buttons = append(buttons, []models.InlineKeyboardButton{
+			{Text: "📧 " + label, URL: gmailURL},
+		})
 	}
-	tb.reply(ctx, b, update, sb.String())
+	tb.replyWithKeyboard(ctx, b, update, sb.String(), buttons)
 }
 
 func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -455,6 +502,63 @@ func (tb *Bot) reply(ctx context.Context, b *bot.Bot, update *models.Update, tex
 			return
 		}
 	}
+}
+
+func (tb *Bot) replyWithKeyboard(ctx context.Context, b *bot.Bot, update *models.Update, text string, buttons [][]models.InlineKeyboardButton) {
+	if update.Message == nil {
+		return
+	}
+	chatID := update.Message.Chat.ID
+	// Telegram allows max 100 inline buttons. Trim if needed.
+	if len(buttons) > 20 {
+		buttons = buttons[:20]
+	}
+	var markup *models.InlineKeyboardMarkup
+	if len(buttons) > 0 {
+		markup = &models.InlineKeyboardMarkup{InlineKeyboard: buttons}
+	}
+	chunks := mdv2.Split(text, telegramMsgMax)
+	for i, chunk := range chunks {
+		params := &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      chunk,
+			ParseMode: models.ParseModeMarkdown,
+			LinkPreviewOptions: &models.LinkPreviewOptions{
+				IsDisabled: bot.True(),
+			},
+		}
+		// Attach keyboard to last chunk only.
+		if i == len(chunks)-1 && markup != nil {
+			params.ReplyMarkup = markup
+		}
+		if _, err := b.SendMessage(ctx, params); err != nil {
+			tb.logger.Error("telegram send", "error", err, "chat_id", chatID)
+			return
+		}
+	}
+}
+
+// ghAPIToHTML converts a GitHub API URL to the corresponding HTML URL.
+// e.g. https://api.github.com/repos/owner/repo/pulls/123 -> https://github.com/owner/repo/pull/123
+func ghAPIToHTML(apiURL, subjectType string) string {
+	if apiURL == "" {
+		return ""
+	}
+	s := strings.Replace(apiURL, "https://api.github.com/repos/", "https://github.com/", 1)
+	// API uses "pulls" but HTML uses "pull".
+	s = strings.Replace(s, "/pulls/", "/pull/", 1)
+	// API uses "issues" which is the same in HTML.
+	if s == apiURL {
+		return "" // couldn't convert
+	}
+	return s
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "…"
 }
 
 func priorityEmoji(p int) string {
