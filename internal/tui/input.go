@@ -1,8 +1,9 @@
 package tui
 
 import (
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 const maxHistory = 100
@@ -17,11 +18,15 @@ type inputArea struct {
 
 func newInputArea() inputArea {
 	ta := textarea.New()
-	ta.Placeholder = "Type a message... (Enter to send, Alt+Enter for newline)"
+	ta.Placeholder = "Type a message... (Shift+Enter for newline)"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 10000
 	ta.SetHeight(2)
-	ta.FocusedStyle.CursorLine = ta.FocusedStyle.CursorLine.UnsetBackground()
+
+	// Disable cursor line background highlight.
+	s := ta.Styles()
+	s.Focused.CursorLine = lipgloss.NewStyle()
+	ta.SetStyles(s)
 	ta.Focus()
 
 	return inputArea{

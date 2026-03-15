@@ -3,9 +3,9 @@ package tui
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 )
 
 // paletteItem is a command available in the palette.
@@ -69,7 +69,7 @@ func (p *commandPalette) close() {
 
 func (p *commandPalette) setWidth(width int) {
 	p.width = width
-	p.input.Width = width - 10
+	p.input.SetWidth(width - 10)
 }
 
 func (p *commandPalette) filter() {
@@ -99,7 +99,7 @@ func (p commandPalette) update(msg tea.Msg) (commandPalette, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch {
 		case key.Matches(msg, keys.Cancel):
 			p.close()

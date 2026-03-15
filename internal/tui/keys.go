@@ -1,6 +1,6 @@
 package tui
 
-import "github.com/charmbracelet/bubbles/key"
+import "charm.land/bubbles/v2/key"
 
 // keyMap defines all key bindings for the TUI.
 type keyMap struct {
@@ -30,8 +30,8 @@ var keys = keyMap{
 		key.WithHelp("enter", "send message"),
 	),
 	NewLine: key.NewBinding(
-		key.WithKeys("alt+enter"),
-		key.WithHelp("alt+enter", "new line"),
+		key.WithKeys("shift+enter", "alt+enter"),
+		key.WithHelp("shift+enter", "new line"),
 	),
 	Quit: key.NewBinding(
 		key.WithKeys("ctrl+c"),

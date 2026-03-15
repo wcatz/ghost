@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/orchestrator"
@@ -120,7 +120,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case commandMsg:
 		return a.handleCommand(msg)
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return a.handleKey(msg)
 	}
 
@@ -155,65 +155,67 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the entire TUI.
-func (a App) View() string {
+func (a App) View() tea.View {
+	var content string
+
 	if a.width == 0 {
-		return "Loading..."
-	}
+		content = "Loading..."
+	} else {
+		// Header.
+		header := headerStyle.Render(
+			fmt.Sprintf("ghost %s | %s (%s)",
+				version, a.session.ProjectName, a.session.Mode.Name),
+		)
 
-	// Header.
-	header := headerStyle.Render(
-		fmt.Sprintf("ghost %s | %s (%s)",
-			version, a.session.ProjectName, a.session.Mode.Name),
-	)
+		// Main viewport.
+		viewport := a.chatView.view()
 
-	// Main viewport.
-	viewport := a.chatView.view()
+		// Tool panel (only if tools active or recently completed).
+		toolView := a.toolbar.view()
 
-	// Tool panel (only if tools active or recently completed).
-	toolView := a.toolbar.view()
+		// Input area.
+		inputView := a.input.view()
 
-	// Input area.
-	inputView := a.input.view()
+		// Status bar.
+		statusView := a.status.view()
 
-	// Status bar.
-	statusView := a.status.view()
-
-	// Assemble main layout.
-	var sections []string
-	sections = append(sections, header)
-	sections = append(sections, viewport)
-	if toolView != "" {
-		sections = append(sections, toolView)
-	}
-	sections = append(sections, inputView)
-	sections = append(sections, statusView)
-
-	main := lipgloss.JoinVertical(lipgloss.Left, sections...)
-
-	// Overlays.
-	switch a.currentView {
-	case viewApprove:
-		overlay := a.approval.view()
-		if overlay != "" {
-			// Place overlay in the center of the screen.
-			return lipgloss.Place(a.width, a.height,
-				lipgloss.Center, lipgloss.Center,
-				overlay,
-				lipgloss.WithWhitespaceBackground(lipgloss.NoColor{}),
-			)
+		// Assemble main layout.
+		var sections []string
+		sections = append(sections, header)
+		sections = append(sections, viewport)
+		if toolView != "" {
+			sections = append(sections, toolView)
 		}
-	case viewPalette:
-		paletteView := a.palette.view()
-		if paletteView != "" {
-			return lipgloss.Place(a.width, a.height,
-				lipgloss.Center, lipgloss.Top,
-				paletteView,
-				lipgloss.WithWhitespaceBackground(lipgloss.NoColor{}),
-			)
+		sections = append(sections, inputView)
+		sections = append(sections, statusView)
+
+		content = lipgloss.JoinVertical(lipgloss.Left, sections...)
+
+		// Overlays.
+		switch a.currentView {
+		case viewApprove:
+			overlay := a.approval.view()
+			if overlay != "" {
+				content = lipgloss.Place(a.width, a.height,
+					lipgloss.Center, lipgloss.Center,
+					overlay,
+				)
+			}
+		case viewPalette:
+			paletteView := a.palette.view()
+			if paletteView != "" {
+				content = lipgloss.Place(a.width, a.height,
+					lipgloss.Center, lipgloss.Top,
+					paletteView,
+				)
+			}
 		}
 	}
 
-	return main
+	v := tea.NewView(content)
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
 }
 
 // handleStreamEvent processes a streaming event from the session.
@@ -256,7 +258,7 @@ func (a App) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleKey processes keyboard input.
-func (a App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Global keys.
 	switch {
 	case key.Matches(msg, keys.Quit):
@@ -539,11 +541,7 @@ func (a App) listenForApprovals() tea.Cmd {
 func RunApp(orch *orchestrator.Orchestrator, cfg *config.Config, session *orchestrator.Session) error {
 	app := NewApp(orch, session, cfg)
 
-	p := tea.NewProgram(
-		app,
-		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
-	)
+	p := tea.NewProgram(app)
 
 	_, err := p.Run()
 	return err

@@ -1,18 +1,21 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/compat"
+)
 
-// Color palette — adapts to terminal theme via lipgloss.AdaptiveColor.
+// Color palette — adapts to terminal theme via compat.AdaptiveColor.
 var (
-	colorPrimary   = lipgloss.AdaptiveColor{Light: "#7D56F4", Dark: "#AD8CFF"}
-	colorSecondary = lipgloss.AdaptiveColor{Light: "#04B575", Dark: "#3EE8B5"}
-	colorAccent    = lipgloss.AdaptiveColor{Light: "#FF6F61", Dark: "#FF9A8C"}
-	colorSubtle    = lipgloss.AdaptiveColor{Light: "#9B9B9B", Dark: "#5C5C5C"}
-	colorText      = lipgloss.AdaptiveColor{Light: "#1A1A2E", Dark: "#FFFDF5"}
-	colorDim       = lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"}
-	colorError     = lipgloss.AdaptiveColor{Light: "#CC0000", Dark: "#FF5555"}
-	colorSuccess   = lipgloss.AdaptiveColor{Light: "#04B575", Dark: "#3EE8B5"}
-	colorWarning   = lipgloss.AdaptiveColor{Light: "#E5A100", Dark: "#FFCC00"}
+	colorPrimary   = compat.AdaptiveColor{Light: lipgloss.Color("#7D56F4"), Dark: lipgloss.Color("#AD8CFF")}
+	colorSecondary = compat.AdaptiveColor{Light: lipgloss.Color("#04B575"), Dark: lipgloss.Color("#3EE8B5")}
+	colorAccent    = compat.AdaptiveColor{Light: lipgloss.Color("#FF6F61"), Dark: lipgloss.Color("#FF9A8C")}
+	colorSubtle    = compat.AdaptiveColor{Light: lipgloss.Color("#9B9B9B"), Dark: lipgloss.Color("#5C5C5C")}
+	colorText      = compat.AdaptiveColor{Light: lipgloss.Color("#1A1A2E"), Dark: lipgloss.Color("#FFFDF5")}
+	colorDim       = compat.AdaptiveColor{Light: lipgloss.Color("#A49FA5"), Dark: lipgloss.Color("#777777")}
+	colorError     = compat.AdaptiveColor{Light: lipgloss.Color("#CC0000"), Dark: lipgloss.Color("#FF5555")}
+	colorSuccess   = compat.AdaptiveColor{Light: lipgloss.Color("#04B575"), Dark: lipgloss.Color("#3EE8B5")}
+	colorWarning   = compat.AdaptiveColor{Light: lipgloss.Color("#E5A100"), Dark: lipgloss.Color("#FFCC00")}
 )
 
 // Layout styles.

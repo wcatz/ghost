@@ -3,22 +3,25 @@ package tui
 import (
 	"strings"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 )
 
 // chatViewport wraps a bubbles viewport with message management.
 type chatViewport struct {
-	viewport     viewport.Model
-	messages     []chatMessage
-	renderer     *messageRenderer
-	autoScroll   bool
-	width        int
-	height       int
+	viewport   viewport.Model
+	messages   []chatMessage
+	renderer   *messageRenderer
+	autoScroll bool
+	width      int
+	height     int
 }
 
 func newChatViewport(width, height int) chatViewport {
-	vp := viewport.New(width, height)
+	vp := viewport.New(
+		viewport.WithWidth(width),
+		viewport.WithHeight(height),
+	)
 	vp.MouseWheelEnabled = true
 
 	return chatViewport{
@@ -33,8 +36,8 @@ func newChatViewport(width, height int) chatViewport {
 func (cv *chatViewport) setSize(width, height int) {
 	cv.width = width
 	cv.height = height
-	cv.viewport.Width = width
-	cv.viewport.Height = height
+	cv.viewport.SetWidth(width)
+	cv.viewport.SetHeight(height)
 	cv.renderer.setWidth(width)
 	cv.rerender()
 }

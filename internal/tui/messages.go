@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/glamour"
+	"charm.land/glamour/v2"
 )
 
 // messageType distinguishes message sources.
@@ -31,7 +31,7 @@ type messageRenderer struct {
 
 func newMessageRenderer(width int) *messageRenderer {
 	r, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithEnvironmentConfig(),
 		glamour.WithWordWrap(width-4),
 	)
 	if err != nil {
@@ -45,7 +45,7 @@ func (mr *messageRenderer) setWidth(width int) {
 	mr.width = width
 	// Re-create renderer with new width.
 	r, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithEnvironmentConfig(),
 		glamour.WithWordWrap(width-4),
 	)
 	if err == nil {

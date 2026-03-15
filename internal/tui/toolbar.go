@@ -5,18 +5,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 )
 
 // activeTool tracks a tool call in progress.
 type activeTool struct {
-	id        string
-	name      string
-	startedAt time.Time
-	done      bool
-	denied    bool
-	duration  time.Duration
+	id           string
+	name         string
+	startedAt    time.Time
+	done         bool
+	denied       bool
+	duration     time.Duration
 	inputPreview string
 }
 
