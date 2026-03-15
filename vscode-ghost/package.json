@@ -6,6 +6,26 @@
   "publisher": "wcatz",
   "license": "MIT",
   "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wcatz/ghost.git"
+  },
+  "homepage": "https://github.com/wcatz/ghost#readme",
+  "bugs": {
+    "url": "https://github.com/wcatz/ghost/issues"
+  },
+  "keywords": [
+    "ai",
+    "assistant",
+    "claude",
+    "chat",
+    "memory",
+    "coding-agent",
+    "anthropic",
+    "llm",
+    "automation",
+    "developer-tools"
+  ],
   "engines": {
     "vscode": "^1.85.0"
   },
