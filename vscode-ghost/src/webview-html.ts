@@ -211,18 +211,18 @@ export function getChatHtml(
     }
 
     function addToolIndicator(name, status) {
-      const details = document.createElement('details');
-      details.className = 'tool-indicator ' + status;
-      details.dataset.toolName = name;
-      details.dataset.toolId = name;
+      const div = document.createElement('div');
+      div.className = 'tool-indicator ' + status;
+      div.dataset.toolName = name;
+      div.dataset.toolId = name;
       const icon = status === 'running' ? '<span class="spinner"></span>' : '<span class="check">&#10003;</span>';
-      details.innerHTML = '<summary>' + icon + ' <span class="tool-name">' + escapeHtml(name) + '</span><span class="tool-time"></span></summary><div class="tool-output"></div>';
-      messagesEl.appendChild(details);
+      div.innerHTML = icon + ' <span class="tool-name">' + escapeHtml(name) + '</span><span class="tool-time"></span>';
+      messagesEl.appendChild(div);
       if (status === 'running') {
         toolTimers[name] = Date.now();
       }
       scrollToBottom();
-      return details;
+      return div;
     }
 
     // --- Slash commands ---
@@ -520,17 +520,12 @@ export function getChatHtml(
           currentThinkingText = '';
           break;
 
-        case 'text_delta': {
-          // Filter out raw tool_result tags from display.
-          const filtered = msg.text.replace(/<tool_result[^>]*>\n?/g, '');
-          if (filtered) {
-            currentAssistantText += filtered;
-            const el = ensureAssistantBubble();
-            el.innerHTML = renderMarkdown(currentAssistantText);
-            if (!userScrolledUp) scrollToBottom();
-          }
+        case 'text_delta':
+          currentAssistantText += msg.text;
+          const el = ensureAssistantBubble();
+          el.innerHTML = renderMarkdown(currentAssistantText);
+          scrollToBottom();
           break;
-        }
 
         case 'thinking_delta':
           currentThinkingText += msg.text;
