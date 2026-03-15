@@ -35,6 +35,8 @@
 # --- HTTP Server (ghost serve) ---
 # server:
 #   listen_addr: "127.0.0.1:2187"
+#   auth_token: ""               # bearer token for API auth (or GHOST_SERVER_AUTH_TOKEN env var)
+                                  # generate with: openssl rand -hex 32
 
 # --- Local Embeddings (Ollama) ---
 # embedding:

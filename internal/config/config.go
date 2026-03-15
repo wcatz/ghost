@@ -79,6 +79,7 @@ type VoiceConfig struct {
 // ServerConfig holds ghost serve settings.
 type ServerConfig struct {
 	ListenAddr string `koanf:"listen_addr"`
+	AuthToken  string `koanf:"auth_token"`
 }
 
 // EmbeddingConfig holds local embedding settings.
@@ -208,6 +209,14 @@ func Load() (*Config, error) {
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
 		_ = k.Load(confmap.Provider(map[string]interface{}{
 			"api.key": key,
+		}, "."), nil)
+	}
+
+	// Explicit env override for auth token (koanf's _ → . transformer would
+	// map GHOST_SERVER_AUTH_TOKEN to server.auth.token instead of server.auth_token).
+	if token := os.Getenv("GHOST_SERVER_AUTH_TOKEN"); token != "" {
+		_ = k.Load(confmap.Provider(map[string]interface{}{
+			"server.auth_token": token,
 		}, "."), nil)
 	}
 
