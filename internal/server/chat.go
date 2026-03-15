@@ -183,26 +183,26 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// Start streaming.
 	events := session.SendAsync(r.Context(), req.Message, approvalCh)
 
+	// resolvedCh is nil when no approval is pending; set during approval flow.
+	// A nil channel in select blocks forever (never fires), which is what we want.
+	var resolvedCh chan struct{}
+
 	for {
 		select {
 		case evt, ok := <-events:
 			if !ok {
-				// Stream complete.
 				writeSSE(w, flusher, "done", map[string]string{"status": "complete"})
 				return
 			}
 			s.handleStreamEvent(w, flusher, evt)
 
 		case approval := <-approvalCh:
-			// Tool needs approval — emit event and store pending.
-			// We need a bidirectional channel to both send and receive.
 			respCh := make(chan provider.ApprovalResponse, 1)
-			// Forward the response back to the approval request's send-only channel.
 			go func() {
 				v := <-respCh
 				approval.Response <- v
 			}()
-			resolvedCh := make(chan struct{}, 1)
+			resolvedCh = make(chan struct{}, 1)
 			state.mu.Lock()
 			state.pending = &pendingApproval{
 				ToolName: approval.ToolName,
@@ -217,13 +217,6 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				"input":     json.RawMessage(approval.Input),
 			})
 
-			// Wait for external approval resolution to notify SSE client.
-			go func() {
-				<-resolvedCh
-				writeSSE(w, flusher, "approval_resolved", map[string]string{})
-			}()
-
-			// Forward to external notifier (Telegram) if configured.
 			if s.approvalNotifier != nil {
 				projectName := ""
 				if session != nil {
@@ -231,6 +224,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				}
 				go s.approvalNotifier.NotifyApproval(id, projectName, approval.ToolName, approval.Input)
 			}
+
+		case <-resolvedCh:
+			// External approval (Telegram) resolved — dismiss VSCode overlay.
+			writeSSE(w, flusher, "approval_resolved", map[string]string{})
+			resolvedCh = nil
 
 		case <-r.Context().Done():
 			return
