@@ -20,7 +20,7 @@
 
 body {
   font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, sans-serif);
-  font-size: var(--vscode-font-size, 13px);
+  font-size: var(--vscode-editor-font-size, 14px);
   color: var(--ghost-fg);
   background: var(--ghost-bg);
   display: flex;
@@ -243,15 +243,38 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   font-size: 0.9em;
 }
 
-/* --- Tool Indicators --- */
+/* --- Tool Indicators (collapsible) --- */
 .tool-indicator {
-  font-size: 0.85em;
+  font-size: 0.9em;
   padding: 4px 10px;
   color: var(--ghost-muted);
+  animation: fadeIn 0.15s ease-out;
+  cursor: pointer;
+}
+
+.tool-indicator summary {
   display: flex;
   align-items: center;
   gap: 6px;
-  animation: fadeIn 0.15s ease-out;
+  list-style: none;
+  user-select: none;
+}
+
+.tool-indicator summary::-webkit-details-marker { display: none; }
+
+.tool-indicator summary:hover { color: var(--ghost-fg); }
+
+.tool-output {
+  margin: 4px 0 4px 20px;
+  padding: 6px 8px;
+  background: var(--ghost-input-bg);
+  border-radius: 4px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  max-height: 300px;
+  overflow-y: auto;
+  color: var(--ghost-muted);
 }
 
 .tool-name { font-family: var(--vscode-editor-font-family, monospace); }
