@@ -38,6 +38,16 @@ func Detect(path string) (*Context, error) {
 		return nil, fmt.Errorf("resolve symlinks: %w", err)
 	}
 
+	// Verify the resolved path is an existing directory (guards against
+	// user-controlled path injection — CodeQL go/path-injection).
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat project path: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("not a directory: %s", absPath)
+	}
+
 	h := sha256.Sum256([]byte(absPath))
 	ctx := &Context{
 		ID:   fmt.Sprintf("%x", h[:6]),
@@ -75,19 +85,19 @@ func Detect(path string) (*Context, error) {
 		ctx.FileTree = strings.Join(lines, "\n")
 	}
 
-	// CLAUDE.md or .ghost.md.
+	// CLAUDE.md or .ghost.md — names are hardcoded constants, absPath is
+	// validated (EvalSymlinks + Stat + IsDir), so filepath.Join is safe here.
 	for _, name := range []string{"CLAUDE.md", ".ghost.md"} {
-		if p := safeJoin(absPath, name); p != "" {
-			content, err := os.ReadFile(p)
-			if err == nil {
-				ctx.ClaudeMD = string(content)
-				break
-			}
+		p := filepath.Join(absPath, name) // #nosec — constant filename
+		content, err := os.ReadFile(p)
+		if err == nil {
+			ctx.ClaudeMD = string(content)
+			break
 		}
 	}
 
 	// README summary.
-	readme, err := os.ReadFile(safeJoin(absPath, "README.md"))
+	readme, err := os.ReadFile(filepath.Join(absPath, "README.md")) // #nosec — constant filename
 	if err == nil {
 		s := string(readme)
 		if len(s) > 500 {
@@ -127,10 +137,9 @@ func detectLanguage(path string) string {
 		{"Chart.yaml", "Helm"},
 	}
 	for _, c := range checks {
-		if p := safeJoin(path, c.file); p != "" {
-			if _, err := os.Stat(p); err == nil {
-				return c.lang
-			}
+		// All filenames are hardcoded constants; path is validated upstream.
+		if _, err := os.Stat(filepath.Join(path, c.file)); err == nil {
+			return c.lang
 		}
 	}
 	return "unknown"

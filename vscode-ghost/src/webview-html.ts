@@ -32,18 +32,24 @@ export function getChatHtml(
       <span id="mode-badge"></span>
     </div>
     <div id="header-right">
-      <button id="auto-approve-btn" class="header-btn" title="Toggle auto-approve">&#x1f512;</button>
+      <button id="auto-approve-btn" class="header-btn" title="Auto-approve OFF"><svg class="ghost-toggle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C7 2 3 6 3 11v7c0 1 1 2 2 2h1c1 0 1-1 1-2v-1c0-1 1-1 1 0v1c0 1 0 2 1 2h1c1 0 1-1 1-2v-1c0-1 1-1 1 0v1c0 1 0 2 1 2h1c1 0 1-1 1-2v-1c0-1 1-1 1 0v1c0 1 0 2 1 2h1c1 0 2-1 2-2v-7c0-5-4-9-9-9z"/><circle cx="9" cy="10" r="1.5" fill="currentColor"/><circle cx="15" cy="10" r="1.5" fill="currentColor"/></svg></button>
       <span id="session-cost"></span>
     </div>
   </div>
   <div id="messages"></div>
   <div id="slash-menu" class="hidden"></div>
-  <div id="approval-bar" class="hidden">
-    <div class="approval-content">
-      <span id="approval-tool"></span>
-      <div class="approval-actions">
-        <button id="approve-btn">Allow</button>
-        <button id="deny-btn">Deny</button>
+  <div id="approval-overlay" class="hidden">
+    <div id="approval-modal">
+      <div class="modal-header">Tool Approval Required</div>
+      <div id="approval-tool" class="modal-tool"></div>
+      <div id="approval-input-preview" class="modal-preview"></div>
+      <div class="modal-actions">
+        <button id="approve-btn" class="modal-btn approve">Allow <kbd>y</kbd></button>
+        <button id="deny-btn" class="modal-btn deny">Deny <kbd>n</kbd></button>
+      </div>
+      <div class="modal-instructions">
+        <input id="deny-instructions" type="text" placeholder="Deny with instructions... (optional)" />
+        <button id="deny-with-btn" class="modal-btn deny-with">Deny with feedback</button>
       </div>
     </div>
   </div>
@@ -70,10 +76,13 @@ export function getChatHtml(
     const sendBtn = document.getElementById('send-btn');
     const abortBtn = document.getElementById('abort-btn');
     const attachBtn = document.getElementById('attach-btn');
-    const approvalBar = document.getElementById('approval-bar');
+    const approvalOverlay = document.getElementById('approval-overlay');
     const approvalTool = document.getElementById('approval-tool');
+    const approvalPreview = document.getElementById('approval-input-preview');
     const approveBtn = document.getElementById('approve-btn');
     const denyBtn = document.getElementById('deny-btn');
+    const denyInstructions = document.getElementById('deny-instructions');
+    const denyWithBtn = document.getElementById('deny-with-btn');
     const connectionDot = document.getElementById('connection-dot');
     const sessionInfo = document.getElementById('session-info');
     const modeBadge = document.getElementById('mode-badge');
@@ -166,7 +175,15 @@ export function getChatHtml(
       return d.innerHTML;
     }
 
-    function scrollToBottom() {
+    let userScrolledUp = false;
+
+    messagesEl.addEventListener('scroll', () => {
+      const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+      userScrolledUp = !atBottom;
+    });
+
+    function scrollToBottom(force) {
+      if (!force && userScrolledUp) return;
       messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' });
     }
 
@@ -369,19 +386,40 @@ export function getChatHtml(
     // --- Auto-approve toggle ---
     autoApproveBtn.addEventListener('click', () => {
       autoApprove = !autoApprove;
-      autoApproveBtn.innerHTML = autoApprove ? '&#x1f513;' : '&#x1f512;';
-      autoApproveBtn.title = autoApprove ? 'Auto-approve ON' : 'Auto-approve OFF';
+      autoApproveBtn.classList.toggle('yolo', autoApprove);
+      autoApproveBtn.title = autoApprove ? 'Auto-approve ON (YOLO)' : 'Auto-approve OFF';
       vscode.postMessage({ type: 'set_auto_approve', enabled: autoApprove });
     });
 
     // --- Approval ---
+    function closeApproval() {
+      approvalOverlay.classList.add('hidden');
+      denyInstructions.value = '';
+    }
     approveBtn.addEventListener('click', () => {
       vscode.postMessage({ type: 'approve', approved: true });
-      approvalBar.classList.add('hidden');
+      closeApproval();
     });
     denyBtn.addEventListener('click', () => {
       vscode.postMessage({ type: 'approve', approved: false });
-      approvalBar.classList.add('hidden');
+      closeApproval();
+    });
+    denyWithBtn.addEventListener('click', () => {
+      const instructions = denyInstructions.value.trim();
+      vscode.postMessage({ type: 'approve', approved: false, instructions: instructions || undefined });
+      closeApproval();
+    });
+    denyInstructions.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        denyWithBtn.click();
+      }
+    });
+    // Keyboard shortcuts on overlay
+    approvalOverlay.addEventListener('keydown', (e) => {
+      if (e.target === denyInstructions) return;
+      if (e.key === 'y') { approveBtn.click(); e.preventDefault(); }
+      if (e.key === 'n') { denyBtn.click(); e.preventDefault(); }
     });
 
     // --- Image attach ---
@@ -487,9 +525,20 @@ export function getChatHtml(
           if (autoApprove) {
             vscode.postMessage({ type: 'approve', approved: true });
           } else {
-            approvalTool.innerHTML = '<strong>' + escapeHtml(msg.tool_name) + '</strong> requires approval';
-            approvalBar.classList.remove('hidden');
-            scrollToBottom();
+            approvalTool.textContent = msg.tool_name;
+            // Show input preview
+            let preview = '';
+            try {
+              const inp = typeof msg.input === 'string' ? JSON.parse(msg.input) : msg.input;
+              if (inp.command) preview = inp.command;
+              else if (inp.path) preview = inp.path;
+              else if (inp.content) preview = inp.content.substring(0, 200);
+              else preview = JSON.stringify(inp, null, 2).substring(0, 300);
+            } catch(e) { preview = ''; }
+            approvalPreview.textContent = preview;
+            approvalOverlay.classList.remove('hidden');
+            approvalOverlay.focus();
+            scrollToBottom(true);
           }
           break;
 
