@@ -1,5 +1,5 @@
 // Package telegram provides a Telegram bot interface for Ghost.
-// Commands: /status, /notifications, /memory, /remind, /briefing.
+// Commands: /status, /notifications, /memory, /remind, /briefing, /meetings, /emails.
 // Only responds to whitelisted user IDs.
 package telegram
 
@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	goog "github.com/wcatz/ghost/internal/google"
+	"github.com/wcatz/ghost/internal/mdv2"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -21,17 +22,23 @@ import (
 	"github.com/wcatz/ghost/internal/scheduler"
 )
 
+const (
+	maxQueryLen    = 200
+	maxRemindLen   = 500
+	telegramMsgMax = 4096
+)
+
 // Bot is the Ghost Telegram bot.
 type Bot struct {
-	bot            *bot.Bot
-	store          provider.MemoryStore
-	ghMonitor      *gh.Monitor
-	sched          *scheduler.Scheduler
-	google         GoogleProvider
+	bot             *bot.Bot
+	store           provider.MemoryStore
+	ghMonitor       *gh.Monitor
+	sched           *scheduler.Scheduler
+	google          GoogleProvider
 	briefingSources briefing.Sources
-	db             *sql.DB
-	logger         *slog.Logger
-	allowedIDs     map[int64]bool
+	db              *sql.DB
+	logger          *slog.Logger
+	allowedIDs      map[int64]bool
 }
 
 // GoogleProvider is the interface for Google Calendar/Gmail access.
@@ -91,16 +98,13 @@ func (tb *Bot) SetGoogle(g GoogleProvider) {
 
 // Run starts the bot polling loop. Blocks until ctx is cancelled.
 func (tb *Bot) Run(ctx context.Context) {
-	// Clear old commands and register Ghost's command menu.
 	tb.registerCommands(ctx)
 	tb.logger.Info("telegram bot starting")
 	tb.bot.Start(ctx)
 }
 
-// registerCommands pushes Ghost's command menu to the Telegram API,
-// replacing any previously registered commands.
+// registerCommands pushes Ghost's command menu to the Telegram API.
 func (tb *Bot) registerCommands(ctx context.Context) {
-	// Delete all existing commands first.
 	if _, err := tb.bot.DeleteMyCommands(ctx, nil); err != nil {
 		tb.logger.Warn("delete old telegram commands (non-fatal)", "error", err)
 	}
@@ -127,12 +131,20 @@ func (tb *Bot) registerCommands(ctx context.Context) {
 
 // SendMessage sends a message to a specific chat. Used for proactive alerts.
 func (tb *Bot) SendMessage(ctx context.Context, chatID int64, text string) error {
-	_, err := tb.bot.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:    chatID,
-		Text:      text,
-		ParseMode: models.ParseModeMarkdown,
-	})
-	return err
+	for _, chunk := range mdv2.Split(text, telegramMsgMax) {
+		_, err := tb.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      chunk,
+			ParseMode: models.ParseModeMarkdown,
+			LinkPreviewOptions: &models.LinkPreviewOptions{
+				IsDisabled: bot.True(),
+			},
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SendToAll sends a message to all allowed users.
@@ -148,25 +160,34 @@ func (tb *Bot) SendToAll(ctx context.Context, text string) {
 
 func (tb *Bot) authMiddleware(next bot.HandlerFunc) bot.HandlerFunc {
 	return func(ctx context.Context, b *bot.Bot, update *models.Update) {
-		if update.Message == nil || update.Message.From == nil {
+		// Check Message-based updates.
+		if update.Message != nil && update.Message.From != nil {
+			if !tb.allowedIDs[update.Message.From.ID] {
+				tb.logger.Warn("unauthorized telegram user", "user_id", update.Message.From.ID, "username", update.Message.From.Username)
+				return
+			}
+			next(ctx, b, update)
 			return
 		}
-		userID := update.Message.From.ID
-		if !tb.allowedIDs[userID] {
-			tb.logger.Warn("unauthorized telegram user", "user_id", userID, "username", update.Message.From.Username)
+		// Check CallbackQuery-based updates.
+		if update.CallbackQuery != nil && update.CallbackQuery.From.ID != 0 {
+			if !tb.allowedIDs[update.CallbackQuery.From.ID] {
+				return
+			}
+			next(ctx, b, update)
 			return
 		}
-		next(ctx, b, update)
 	}
 }
 
 // --- Command Handlers ---
 
 func (tb *Bot) handleStatus(ctx context.Context, b *bot.Bot, update *models.Update) {
+	tb.sendTyping(ctx, update)
+
 	var sb strings.Builder
 	sb.WriteString("*Ghost Status*\n\n")
 
-	// Notification summary.
 	if tb.ghMonitor != nil {
 		summary, err := tb.ghMonitor.Summary(ctx)
 		if err == nil {
@@ -174,10 +195,10 @@ func (tb *Bot) handleStatus(ctx context.Context, b *bot.Bot, update *models.Upda
 			for _, c := range summary {
 				total += c
 			}
-			sb.WriteString(fmt.Sprintf("📬 Notifications: %d unread\n", total))
+			fmt.Fprintf(&sb, "📬 Notifications: %d unread\n", total)
 			for p := gh.P0; p <= gh.P4; p++ {
 				if c, ok := summary[p]; ok && c > 0 {
-					sb.WriteString(fmt.Sprintf("  P%d: %d\n", p, c))
+					fmt.Fprintf(&sb, "  P%d: %d\n", p, c)
 				}
 			}
 		}
@@ -193,9 +214,11 @@ func (tb *Bot) handleNotifications(ctx context.Context, b *bot.Bot, update *mode
 		return
 	}
 
+	tb.sendTyping(ctx, update)
+
 	notifs, err := tb.ghMonitor.GetUnread(ctx, 15)
 	if err != nil {
-		tb.reply(ctx, b, update, "Error fetching notifications: "+escV2(err.Error()))
+		tb.reply(ctx, b, update, "Error fetching notifications: "+mdv2.Esc(err.Error()))
 		return
 	}
 
@@ -209,14 +232,13 @@ func (tb *Bot) handleNotifications(ctx context.Context, b *bot.Bot, update *mode
 	for _, n := range notifs {
 		emoji := priorityEmoji(n.Priority)
 		fmt.Fprintf(&sb, "%s *P%d* `%s`\n  %s\n  _%s_\n\n",
-			emoji, n.Priority, escV2(n.RepoFullName), escV2(n.SubjectTitle), escV2(n.Reason))
+			emoji, n.Priority, mdv2.Esc(n.RepoFullName), mdv2.Esc(n.SubjectTitle), mdv2.Esc(n.Reason))
 	}
 	tb.reply(ctx, b, update, sb.String())
 }
 
 func (tb *Bot) handleMemory(ctx context.Context, b *bot.Bot, update *models.Update) {
 	text := update.Message.Text
-	// Parse: /memory search <project> <query>
 	parts := strings.Fields(text)
 	if len(parts) < 3 {
 		tb.reply(ctx, b, update, "Usage: `/memory search <project_id> <query>`")
@@ -235,10 +257,15 @@ func (tb *Bot) handleMemory(ctx context.Context, b *bot.Bot, update *models.Upda
 		tb.reply(ctx, b, update, "Please provide a search query\\.")
 		return
 	}
+	if len(query) > maxQueryLen {
+		query = query[:maxQueryLen]
+	}
+
+	tb.sendTyping(ctx, update)
 
 	memories, err := tb.store.SearchFTS(ctx, projectID, query, 10)
 	if err != nil {
-		tb.reply(ctx, b, update, "Search error: "+escV2(err.Error()))
+		tb.reply(ctx, b, update, "Search error: "+mdv2.Esc(err.Error()))
 		return
 	}
 
@@ -250,7 +277,7 @@ func (tb *Bot) handleMemory(ctx context.Context, b *bot.Bot, update *models.Upda
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "*Memories* \\(%d results\\)\n\n", len(memories))
 	for _, m := range memories {
-		fmt.Fprintf(&sb, "• \\[%s\\] %.1f — %s\n", escV2(m.Category), m.Importance, escV2(m.Content))
+		fmt.Fprintf(&sb, "• \\[%s\\] %.1f — %s\n", mdv2.Esc(m.Category), m.Importance, mdv2.Esc(m.Content))
 	}
 	tb.reply(ctx, b, update, sb.String())
 }
@@ -268,17 +295,24 @@ func (tb *Bot) handleRemind(ctx context.Context, b *bot.Bot, update *models.Upda
 		return
 	}
 
-	dueAt, err := tb.sched.AddReminder(ctx, parts[1])
+	reminder := parts[1]
+	if len(reminder) > maxRemindLen {
+		tb.reply(ctx, b, update, fmt.Sprintf("Reminder too long \\(%d chars\\)\\. Max %d\\.", len(reminder), maxRemindLen))
+		return
+	}
+
+	dueAt, err := tb.sched.AddReminder(ctx, reminder)
 	if err != nil {
-		tb.reply(ctx, b, update, "Failed to create reminder: "+escV2(err.Error()))
+		tb.reply(ctx, b, update, "Failed to create reminder: "+mdv2.Esc(err.Error()))
 		return
 	}
 
 	tb.reply(ctx, b, update, fmt.Sprintf("⏰ Reminder set for %s:\n%s",
-		escV2(dueAt.Local().Format("Mon Jan 2 15:04")), escV2(parts[1])))
+		mdv2.Esc(dueAt.Local().Format("Mon Jan 2 15:04")), mdv2.Esc(reminder)))
 }
 
 func (tb *Bot) handleBriefing(ctx context.Context, b *bot.Bot, update *models.Update) {
+	tb.sendTyping(ctx, update)
 	msg := briefing.Generate(ctx, tb.briefingSources)
 	tb.reply(ctx, b, update, msg)
 }
@@ -294,9 +328,11 @@ func (tb *Bot) handleMeetings(ctx context.Context, b *bot.Bot, update *models.Up
 		return
 	}
 
+	tb.sendTyping(ctx, update)
+
 	events, err := tb.google.TodayEvents(ctx)
 	if err != nil {
-		tb.reply(ctx, b, update, "Error fetching calendar: "+escV2(err.Error()))
+		tb.reply(ctx, b, update, "Error fetching calendar: "+mdv2.Esc(err.Error()))
 		return
 	}
 
@@ -309,18 +345,18 @@ func (tb *Bot) handleMeetings(ctx context.Context, b *bot.Bot, update *models.Up
 	fmt.Fprintf(&sb, "*Today's Meetings* \\(%d\\)\n\n", len(events))
 	for _, e := range events {
 		if e.AllDay {
-			fmt.Fprintf(&sb, "📅 %s \\(all day\\)\n", escV2(e.Summary))
+			fmt.Fprintf(&sb, "📅 %s \\(all day\\)\n", mdv2.Esc(e.Summary))
 		} else {
 			fmt.Fprintf(&sb, "🕐 %s – %s  *%s*\n",
-				escV2(e.Start.Local().Format("15:04")),
-				escV2(e.End.Local().Format("15:04")),
-				escV2(e.Summary))
+				mdv2.Esc(e.Start.Local().Format("15:04")),
+				mdv2.Esc(e.End.Local().Format("15:04")),
+				mdv2.Esc(e.Summary))
 		}
 		if e.Location != "" {
-			fmt.Fprintf(&sb, "  📍 %s\n", escV2(e.Location))
+			fmt.Fprintf(&sb, "  📍 %s\n", mdv2.Esc(e.Location))
 		}
 		if e.MeetLink != "" {
-			fmt.Fprintf(&sb, "  🔗 %s\n", escV2(e.MeetLink))
+			fmt.Fprintf(&sb, "  🔗 [Join Meet](%s)\n", e.MeetLink)
 		}
 		sb.WriteString("\n")
 	}
@@ -333,9 +369,11 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 		return
 	}
 
+	tb.sendTyping(ctx, update)
+
 	count, err := tb.google.UnreadCount(ctx)
 	if err != nil {
-		tb.reply(ctx, b, update, "Error fetching emails: "+escV2(err.Error()))
+		tb.reply(ctx, b, update, "Error fetching emails: "+mdv2.Esc(err.Error()))
 		return
 	}
 
@@ -346,20 +384,20 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 
 	emails, err := tb.google.RecentUnread(ctx, 10)
 	if err != nil {
-		tb.reply(ctx, b, update, fmt.Sprintf("📬 %d unread \\(error fetching details: %s\\)", count, escV2(err.Error())))
+		tb.reply(ctx, b, update, fmt.Sprintf("📬 %d unread \\(error fetching details: %s\\)", count, mdv2.Esc(err.Error())))
 		return
 	}
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "*Unread Emails* \\(%d total\\)\n\n", count)
 	for _, e := range emails {
-		fmt.Fprintf(&sb, "📧 *%s*\n  From: %s\n", escV2(e.Subject), escV2(e.From))
+		fmt.Fprintf(&sb, "📧 *%s*\n  From: %s\n", mdv2.Esc(e.Subject), mdv2.Esc(e.From))
 		if e.Snippet != "" {
 			snippet := e.Snippet
 			if len(snippet) > 100 {
-				snippet = snippet[:100] + "\\.\\.\\."
+				snippet = snippet[:100] + "..."
 			}
-			fmt.Fprintf(&sb, "  _%s_\n", escV2(snippet))
+			fmt.Fprintf(&sb, "  _%s_\n", mdv2.Esc(snippet))
 		}
 		sb.WriteString("\n")
 	}
@@ -388,31 +426,35 @@ func (tb *Bot) handleDefault(ctx context.Context, b *bot.Bot, update *models.Upd
 
 // --- Helpers ---
 
+func (tb *Bot) sendTyping(ctx context.Context, update *models.Update) {
+	if update.Message == nil {
+		return
+	}
+	_, _ = tb.bot.SendChatAction(ctx, &bot.SendChatActionParams{
+		ChatID: update.Message.Chat.ID,
+		Action: models.ChatActionTyping,
+	})
+}
+
 func (tb *Bot) reply(ctx context.Context, b *bot.Bot, update *models.Update, text string) {
 	if update.Message == nil {
 		return
 	}
-	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:    update.Message.Chat.ID,
-		Text:      text,
-		ParseMode: models.ParseModeMarkdown,
-	})
-	if err != nil {
-		tb.logger.Error("telegram send", "error", err, "chat_id", update.Message.Chat.ID)
+	chatID := update.Message.Chat.ID
+	for _, chunk := range mdv2.Split(text, telegramMsgMax) {
+		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      chunk,
+			ParseMode: models.ParseModeMarkdown,
+			LinkPreviewOptions: &models.LinkPreviewOptions{
+				IsDisabled: bot.True(),
+			},
+		})
+		if err != nil {
+			tb.logger.Error("telegram send", "error", err, "chat_id", chatID)
+			return
+		}
 	}
-}
-
-// escV2 escapes special characters for Telegram MarkdownV2.
-// See https://core.telegram.org/bots/api#markdownv2-style
-func escV2(s string) string {
-	replacer := strings.NewReplacer(
-		"_", "\\_", "*", "\\*", "[", "\\[", "]", "\\]",
-		"(", "\\(", ")", "\\)", "~", "\\~", "`", "\\`",
-		">", "\\>", "#", "\\#", "+", "\\+", "-", "\\-",
-		"=", "\\=", "|", "\\|", "{", "\\{", "}", "\\}",
-		".", "\\.", "!", "\\!",
-	)
-	return replacer.Replace(s)
 }
 
 func priorityEmoji(p int) string {
