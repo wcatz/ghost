@@ -84,8 +84,8 @@ func (tb *Bot) Run(ctx context.Context) {
 // replacing any previously registered commands.
 func (tb *Bot) registerCommands(ctx context.Context) {
 	// Delete all existing commands first.
-	if _, err := tb.bot.DeleteMyCommands(ctx, &bot.DeleteMyCommandsParams{}); err != nil {
-		tb.logger.Error("delete old telegram commands", "error", err)
+	if _, err := tb.bot.DeleteMyCommands(ctx, nil); err != nil {
+		tb.logger.Warn("delete old telegram commands (non-fatal)", "error", err)
 	}
 
 	commands := []models.BotCommand{
