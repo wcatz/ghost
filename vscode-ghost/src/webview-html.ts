@@ -445,6 +445,28 @@ export function getChatHtml(
       imagePreview.classList.add('hidden');
     });
 
+    // Paste image from clipboard
+    document.addEventListener('paste', (e) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          e.preventDefault();
+          const file = item.getAsFile();
+          if (!file) continue;
+          const reader = new FileReader();
+          reader.onload = () => {
+            const base64 = reader.result.split(',')[1];
+            pendingImage = { media_type: file.type, data: base64 };
+            previewImg.src = reader.result;
+            imagePreview.classList.remove('hidden');
+          };
+          reader.readAsDataURL(file);
+          break;
+        }
+      }
+    });
+
     // Drag-drop
     document.body.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('drag-over'); });
     document.body.addEventListener('dragleave', () => document.body.classList.remove('drag-over'));
