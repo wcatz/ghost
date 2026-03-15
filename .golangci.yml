@@ -7,6 +7,3 @@ linters:
     - unused
     - ineffassign
     - gosimple
-issues:
-  exclude-dirs:
-    - vendor
