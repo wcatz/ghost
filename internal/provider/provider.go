@@ -89,18 +89,23 @@ type PromptBuilder interface {
 	BuildSystemBlocks(ctx context.Context, projCtx *project.Context, m mode.Mode) []ai.SystemBlock
 }
 
+// ApprovalResponse carries the user's decision and optional instructions.
+type ApprovalResponse struct {
+	Approved     bool
+	Instructions string // non-empty when denying with feedback
+}
+
 // ApprovalRequest is sent from the agentic loop to the frontend when a tool
-// needs user approval. The frontend writes true (approve) or false (deny) to
-// the Response channel.
+// needs user approval. The frontend writes an ApprovalResponse to the channel.
 type ApprovalRequest struct {
 	ToolName string
 	Input    json.RawMessage
-	Response chan<- bool
+	Response chan<- ApprovalResponse
 }
 
 // ApprovalFunc is the legacy synchronous approval callback.
 // Deprecated: Use ApprovalRequest channel-based flow instead.
-type ApprovalFunc func(toolName string, input json.RawMessage) bool
+type ApprovalFunc func(toolName string, input json.RawMessage) ApprovalResponse
 
 // InputSource produces user text (keyboard, voice transcription, etc.).
 type InputSource interface {

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/wcatz/ghost/internal/orchestrator"
+	"github.com/wcatz/ghost/internal/provider"
 )
 
 // Colors for terminal output.
@@ -93,7 +94,7 @@ func (r *REPL) RunOneShot(session *orchestrator.Session, message string) error {
 }
 
 func (r *REPL) sendMessage(input string) {
-	approvalFn := func(toolName string, toolInput json.RawMessage) bool {
+	approvalFn := func(toolName string, toolInput json.RawMessage) provider.ApprovalResponse {
 		fmt.Printf("\n%s⚡ [%s]%s ", colorYellow, toolName, colorReset)
 
 		// Show a summary of what the tool wants to do.
@@ -110,7 +111,8 @@ func (r *REPL) sendMessage(input string) {
 		reader := bufio.NewReader(os.Stdin)
 		response, _ := reader.ReadString('\n')
 		response = strings.TrimSpace(strings.ToLower(response))
-		return response == "y" || response == "yes"
+		approved := response == "y" || response == "yes"
+		return provider.ApprovalResponse{Approved: approved}
 	}
 
 	events := r.active.Send(r.ctx, input, approvalFn)

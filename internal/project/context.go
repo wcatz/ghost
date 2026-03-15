@@ -32,6 +32,11 @@ func Detect(path string) (*Context, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve path: %w", err)
 	}
+	// Resolve symlinks to get a canonical path (mitigates path traversal).
+	absPath, err = filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve symlinks: %w", err)
+	}
 
 	h := sha256.Sum256([]byte(absPath))
 	ctx := &Context{
@@ -72,15 +77,17 @@ func Detect(path string) (*Context, error) {
 
 	// CLAUDE.md or .ghost.md.
 	for _, name := range []string{"CLAUDE.md", ".ghost.md"} {
-		content, err := os.ReadFile(filepath.Join(absPath, name))
-		if err == nil {
-			ctx.ClaudeMD = string(content)
-			break
+		if p := safeJoin(absPath, name); p != "" {
+			content, err := os.ReadFile(p)
+			if err == nil {
+				ctx.ClaudeMD = string(content)
+				break
+			}
 		}
 	}
 
 	// README summary.
-	readme, err := os.ReadFile(filepath.Join(absPath, "README.md"))
+	readme, err := os.ReadFile(safeJoin(absPath, "README.md"))
 	if err == nil {
 		s := string(readme)
 		if len(s) > 500 {
@@ -90,6 +97,15 @@ func Detect(path string) (*Context, error) {
 	}
 
 	return ctx, nil
+}
+
+// safeJoin joins base and name, ensuring the result stays within base.
+func safeJoin(base, name string) string {
+	joined := filepath.Join(base, filepath.Clean(name))
+	if !strings.HasPrefix(joined, base+string(filepath.Separator)) && joined != base {
+		return ""
+	}
+	return joined
 }
 
 func detectLanguage(path string) string {
@@ -111,8 +127,10 @@ func detectLanguage(path string) string {
 		{"Chart.yaml", "Helm"},
 	}
 	for _, c := range checks {
-		if _, err := os.Stat(filepath.Join(path, c.file)); err == nil {
-			return c.lang
+		if p := safeJoin(path, c.file); p != "" {
+			if _, err := os.Stat(p); err == nil {
+				return c.lang
+			}
 		}
 	}
 	return "unknown"

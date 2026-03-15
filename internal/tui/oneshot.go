@@ -9,6 +9,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/orchestrator"
+	"github.com/wcatz/ghost/internal/provider"
 	"golang.org/x/term"
 )
 
@@ -20,7 +21,7 @@ func IsTerminal() bool {
 // RunOneShot sends a single message and prints the streamed response.
 // Used for pipe mode and one-shot CLI mode. No bubbletea involved.
 func RunOneShot(session *orchestrator.Session, message string, showCost bool) {
-	approvalFn := func(toolName string, toolInput json.RawMessage) bool {
+	approvalFn := func(toolName string, toolInput json.RawMessage) provider.ApprovalResponse {
 		// In one-shot mode, auto-approve reads, prompt for writes.
 		fmt.Fprintf(os.Stderr, "\n%s⚡ [%s]%s ", colorYellow, toolName, colorReset)
 
@@ -35,14 +36,15 @@ func RunOneShot(session *orchestrator.Session, message string, showCost bool) {
 
 		// If not a terminal, auto-approve.
 		if !IsTerminal() {
-			return true
+			return provider.ApprovalResponse{Approved: true}
 		}
 
 		fmt.Fprintf(os.Stderr, "Allow? [y/n]: ")
 		reader := bufio.NewReader(os.Stdin)
 		response, _ := reader.ReadString('\n')
 		response = strings.TrimSpace(strings.ToLower(response))
-		return response == "y" || response == "yes"
+		approved := response == "y" || response == "yes"
+		return provider.ApprovalResponse{Approved: approved}
 	}
 
 	events := session.Send(nil, message, approvalFn)

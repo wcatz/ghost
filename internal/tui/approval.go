@@ -33,10 +33,14 @@ func (a *approvalDialog) show(req provider.ApprovalRequest) {
 }
 
 func (a *approvalDialog) respond(approved bool) {
+	a.respondWith(provider.ApprovalResponse{Approved: approved})
+}
+
+func (a *approvalDialog) respondWith(resp provider.ApprovalResponse) {
 	if !a.active {
 		return
 	}
-	a.request.Response <- approved
+	a.request.Response <- resp
 	a.active = false
 }
 
