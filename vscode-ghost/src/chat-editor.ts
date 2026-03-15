@@ -143,6 +143,8 @@ export class ChatEditorPanel {
       this.postMessage({ type: "tool_end", ...data }));
     events.on("approval", (data: ApprovalRequest) =>
       this.postMessage({ type: "approval_required", tool_name: data.tool_name, input: data.input }));
+    events.on("approval_resolved", () =>
+      this.postMessage({ type: "approval_resolved" }));
     events.on("done", (data: Record<string, unknown>) => {
       this.postMessage({ type: "done", usage: data.usage, stop_reason: data.stop_reason });
       this.postMessage({ type: "streaming", active: false });

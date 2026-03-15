@@ -78,7 +78,42 @@ func (c *Client) ChatStream(
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
+
+		// Retry on rate limit (429) and overloaded (529) with exponential backoff.
+		if resp.StatusCode == 429 || resp.StatusCode == 529 {
+			retryAfter := 2 * time.Second
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if d, err := time.ParseDuration(ra + "s"); err == nil {
+					retryAfter = d
+				}
+			}
+			for attempt := 0; attempt < 3; attempt++ {
+				c.logger.Warn("API rate limited, retrying", "status", resp.StatusCode, "attempt", attempt+1, "wait", retryAfter)
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(retryAfter):
+				}
+				retryReq, _ := http.NewRequestWithContext(ctx, "POST", APIURL, bytes.NewReader(body))
+				retryReq.Header.Set("Content-Type", "application/json")
+				retryReq.Header.Set("x-api-key", c.apiKey)
+				retryReq.Header.Set("anthropic-version", APIVersion)
+				resp, err = c.httpClient.Do(retryReq)
+				if err != nil {
+					return nil, fmt.Errorf("retry request: %w", err)
+				}
+				if resp.StatusCode == http.StatusOK {
+					break
+				}
+				_ = resp.Body.Close()
+				retryAfter *= 2
+			}
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("API rate limited after 3 retries (status %d)", resp.StatusCode)
+			}
+		} else {
+			return nil, parseAPIError(resp.StatusCode, respBody)
+		}
 	}
 
 	events := make(chan StreamEvent, 64)
@@ -159,4 +194,28 @@ func (c *Client) Reflect(ctx context.Context, prompt string) (string, TokenUsage
 	}
 
 	return text, usage, nil
+}
+
+// parseAPIError extracts a user-friendly message from Claude API error responses.
+func parseAPIError(statusCode int, body []byte) error {
+	var apiErr struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Error.Message != "" {
+		switch {
+		case statusCode == 400 && apiErr.Error.Type == "invalid_request_error" &&
+			(len(apiErr.Error.Message) > 20 && apiErr.Error.Message[:20] == "Your credit balance "):
+			return fmt.Errorf("credit balance too low — add credits at console.anthropic.com/settings/billing")
+		case statusCode == 401:
+			return fmt.Errorf("invalid API key — check ghost config")
+		case statusCode == 403:
+			return fmt.Errorf("permission denied: %s", apiErr.Error.Message)
+		default:
+			return fmt.Errorf("api error (%d): %s", statusCode, apiErr.Error.Message)
+		}
+	}
+	return fmt.Errorf("API returned %d: %s", statusCode, string(body))
 }

@@ -33,8 +33,9 @@ type pendingApproval struct {
 
 // chatState holds per-session streaming state for HTTP clients.
 type chatState struct {
-	mu       sync.Mutex
-	pending  *pendingApproval
+	mu              sync.Mutex
+	pending         *pendingApproval
+	approvalResolved chan struct{} // signals external approval to SSE stream
 }
 
 // --- Session Handlers ---
@@ -196,18 +197,26 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				v := <-respCh
 				approval.Response <- v
 			}()
+			resolvedCh := make(chan struct{}, 1)
 			state.mu.Lock()
 			state.pending = &pendingApproval{
 				ToolName: approval.ToolName,
 				Input:    approval.Input,
 				response: respCh,
 			}
+			state.approvalResolved = resolvedCh
 			state.mu.Unlock()
 
 			writeSSE(w, flusher, "approval_required", map[string]interface{}{
 				"tool_name": approval.ToolName,
 				"input":     json.RawMessage(approval.Input),
 			})
+
+			// Wait for external approval resolution to notify SSE client.
+			go func() {
+				<-resolvedCh
+				writeSSE(w, flusher, "approval_resolved", map[string]string{})
+			}()
 
 			// Forward to external notifier (Telegram) if configured.
 			if s.approvalNotifier != nil {
@@ -307,6 +316,18 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		Approved:     req.Approved,
 		Instructions: req.Instructions,
 	}
+
+	// Signal the SSE stream that approval was resolved externally.
+	state.mu.Lock()
+	if state.approvalResolved != nil {
+		select {
+		case state.approvalResolved <- struct{}{}:
+		default:
+		}
+		state.approvalResolved = nil
+	}
+	state.mu.Unlock()
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "responded"})
 }
 
