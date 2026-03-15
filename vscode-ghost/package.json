@@ -4,8 +4,16 @@
   "description": "Memory-first coding agent — chat, memories, and project context powered by Ghost",
   "version": "0.4.0",
   "publisher": "wcatz",
-  "license": "MIT",
+  "author": {
+    "name": "Wayne Catz",
+    "url": "https://github.com/wcatz"
+  },
+  "license": "Apache-2.0",
   "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/wcatz/ghost.git"
