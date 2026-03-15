@@ -367,15 +367,15 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("*Unread Emails* (%d total)\n\n", count))
+	fmt.Fprintf(&sb, "*Unread Emails* (%d total)\n\n", count)
 	for _, e := range emails {
-		sb.WriteString(fmt.Sprintf("📧 *%s*\n  From: %s\n", e.Subject, e.From))
+		fmt.Fprintf(&sb, "📧 *%s*\n  From: %s\n", e.Subject, e.From)
 		if e.Snippet != "" {
 			snippet := e.Snippet
 			if len(snippet) > 100 {
 				snippet = snippet[:100] + "..."
 			}
-			sb.WriteString(fmt.Sprintf("  _%s_\n", snippet))
+			fmt.Fprintf(&sb, "  _%s_\n", snippet)
 		}
 		sb.WriteString("\n")
 	}
