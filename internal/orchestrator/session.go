@@ -615,47 +615,58 @@ func isToolResult(m ai.Message) bool {
 }
 
 // sanitizeMessages fixes orphaned tool_use blocks that have no matching
-// tool_result. This happens when a session is interrupted mid-tool-execution.
-// Claude's API requires every tool_use block to be followed by a tool_result.
+// tool_result anywhere in the conversation. This happens when a session is
+// interrupted mid-tool-execution. Claude's API requires every tool_use block
+// to be immediately followed by a user message containing tool_result.
 func sanitizeMessages(msgs []ai.Message) []ai.Message {
 	if len(msgs) == 0 {
 		return msgs
 	}
 
-	// Check if the last assistant message has tool_use blocks.
-	last := msgs[len(msgs)-1]
-	if last.Role != "assistant" {
-		return msgs
-	}
+	var sanitized []ai.Message
+	for i, m := range msgs {
+		sanitized = append(sanitized, m)
 
-	hasToolUse := false
-	for _, b := range last.Content {
-		if b.Type == "tool_use" {
-			hasToolUse = true
-			break
+		// If this is an assistant message with tool_use blocks,
+		// check if the next message has matching tool_results.
+		if m.Role != "assistant" {
+			continue
+		}
+		var toolIDs []string
+		for _, b := range m.Content {
+			if b.Type == "tool_use" {
+				toolIDs = append(toolIDs, b.ID)
+			}
+		}
+		if len(toolIDs) == 0 {
+			continue
+		}
+
+		// Check if the next message is a user message with tool_results.
+		hasResults := false
+		if i+1 < len(msgs) && msgs[i+1].Role == "user" {
+			for _, b := range msgs[i+1].Content {
+				if b.Type == "tool_result" {
+					hasResults = true
+					break
+				}
+			}
+		}
+
+		if !hasResults {
+			// Inject synthetic tool_results for all tool_use blocks.
+			var results []ai.ToolResult
+			for _, id := range toolIDs {
+				results = append(results, ai.ToolResult{
+					ToolUseID: id,
+					Content:   "tool execution was interrupted",
+					IsError:   true,
+				})
+			}
+			sanitized = append(sanitized, ai.ToolResultMessage(results))
 		}
 	}
-
-	if !hasToolUse {
-		return msgs
-	}
-
-	// The last message is an assistant with tool_use but no following tool_result.
-	// Inject a synthetic tool_result for each tool_use.
-	var results []ai.ToolResult
-	for _, b := range last.Content {
-		if b.Type == "tool_use" {
-			results = append(results, ai.ToolResult{
-				ToolUseID: b.ID,
-				Content:   "tool execution was interrupted",
-				IsError:   true,
-			})
-		}
-	}
-	if len(results) > 0 {
-		msgs = append(msgs, ai.ToolResultMessage(results))
-	}
-	return msgs
+	return sanitized
 }
 
 // Store returns the memory store for direct access (e.g., REPL commands).
