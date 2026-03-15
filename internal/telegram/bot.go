@@ -195,7 +195,7 @@ func (tb *Bot) handleNotifications(ctx context.Context, b *bot.Bot, update *mode
 
 	notifs, err := tb.ghMonitor.GetUnread(ctx, 15)
 	if err != nil {
-		tb.reply(ctx, b, update, "Error fetching notifications: "+err.Error())
+		tb.reply(ctx, b, update, "Error fetching notifications: "+escV2(err.Error()))
 		return
 	}
 
@@ -238,7 +238,7 @@ func (tb *Bot) handleMemory(ctx context.Context, b *bot.Bot, update *models.Upda
 
 	memories, err := tb.store.SearchFTS(ctx, projectID, query, 10)
 	if err != nil {
-		tb.reply(ctx, b, update, "Search error: "+err.Error())
+		tb.reply(ctx, b, update, "Search error: "+escV2(err.Error()))
 		return
 	}
 
@@ -270,12 +270,12 @@ func (tb *Bot) handleRemind(ctx context.Context, b *bot.Bot, update *models.Upda
 
 	dueAt, err := tb.sched.AddReminder(ctx, parts[1])
 	if err != nil {
-		tb.reply(ctx, b, update, "Failed to create reminder: "+err.Error())
+		tb.reply(ctx, b, update, "Failed to create reminder: "+escV2(err.Error()))
 		return
 	}
 
 	tb.reply(ctx, b, update, fmt.Sprintf("⏰ Reminder set for %s:\n%s",
-		dueAt.Local().Format("Mon Jan 2 15:04"), parts[1]))
+		escV2(dueAt.Local().Format("Mon Jan 2 15:04")), escV2(parts[1])))
 }
 
 func (tb *Bot) handleBriefing(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -296,7 +296,7 @@ func (tb *Bot) handleMeetings(ctx context.Context, b *bot.Bot, update *models.Up
 
 	events, err := tb.google.TodayEvents(ctx)
 	if err != nil {
-		tb.reply(ctx, b, update, "Error fetching calendar: "+err.Error())
+		tb.reply(ctx, b, update, "Error fetching calendar: "+escV2(err.Error()))
 		return
 	}
 
@@ -335,7 +335,7 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 
 	count, err := tb.google.UnreadCount(ctx)
 	if err != nil {
-		tb.reply(ctx, b, update, "Error fetching emails: "+err.Error())
+		tb.reply(ctx, b, update, "Error fetching emails: "+escV2(err.Error()))
 		return
 	}
 
@@ -346,7 +346,7 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 
 	emails, err := tb.google.RecentUnread(ctx, 10)
 	if err != nil {
-		tb.reply(ctx, b, update, fmt.Sprintf("📬 %d unread (error fetching details: %s)", count, err))
+		tb.reply(ctx, b, update, fmt.Sprintf("📬 %d unread \\(error fetching details: %s\\)", count, escV2(err.Error())))
 		return
 	}
 
