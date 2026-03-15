@@ -205,6 +205,9 @@ export class GhostClient extends EventEmitter {
                 case "approval_required":
                   emitter.emit("approval", data as ApprovalRequest);
                   break;
+                case "approval_resolved":
+                  emitter.emit("approval_resolved", {});
+                  break;
                 case "done":
                   emitter.emit("done", data);
                   break;

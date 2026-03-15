@@ -542,6 +542,11 @@ export function getChatHtml(
           }
           break;
 
+        case 'approval_resolved':
+          // External approval (e.g. via Telegram) — dismiss the overlay.
+          approvalOverlay.classList.add('hidden');
+          break;
+
         case 'done': {
           currentAssistantEl = null;
           currentAssistantText = '';
