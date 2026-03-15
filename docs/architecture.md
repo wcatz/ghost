@@ -173,8 +173,8 @@ VSCode extension → POST /api/v1/sessions/{id}/send
 ## Build
 
 ```bash
-# Requires CGO for SQLite + FTS5
-CGO_ENABLED=1 go build -tags fts5 -o ghost ./cmd/ghost
+# Pure Go — no CGO required (modernc.org/sqlite with FTS5 built-in)
+go build -o ghost ./cmd/ghost
 
 # Release (goreleaser)
 # Targets: linux/{amd64,arm64}, darwin/{amd64,arm64}

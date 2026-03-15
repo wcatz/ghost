@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // initSQL is the schema for the ghost database.
@@ -173,7 +173,7 @@ CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(fired, due_at);
 
 // OpenDB opens or creates the SQLite database and runs migrations.
 func OpenDB(dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=ON&_busy_timeout=5000")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}

@@ -29,6 +29,6 @@ jobs:
           build-mode: manual
 
       - name: Build
-        run: go build -tags "fts5" ./cmd/ghost
+        run: go build ./cmd/ghost
 
       - uses: github/codeql-action/analyze@v4

@@ -20,10 +20,10 @@ jobs:
           go-version-file: go.mod
 
       - name: Vet
-        run: go vet -tags "fts5" ./...
+        run: go vet ./...
 
       - name: Test
-        run: go test -tags "fts5" -race -count=1 ./...
+        run: go test -race -count=1 ./...
 
       - name: Build
-        run: go build -tags "fts5" -o /dev/null ./cmd/ghost
+        run: go build -o /dev/null ./cmd/ghost
