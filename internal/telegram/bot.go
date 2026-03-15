@@ -62,12 +62,12 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 	tb.bot = b
 
 	// Register commands.
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/status", bot.MatchTypeCommand, tb.handleStatus)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/notifications", bot.MatchTypeCommand, tb.handleNotifications)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/memory", bot.MatchTypeCommand, tb.handleMemory)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/remind", bot.MatchTypeCommand, tb.handleRemind)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/briefing", bot.MatchTypeCommand, tb.handleBriefing)
-	b.RegisterHandler(bot.HandlerTypeMessageText, "/help", bot.MatchTypeCommand, tb.handleHelp)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "status", bot.MatchTypeCommand, tb.handleStatus)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "notifications", bot.MatchTypeCommand, tb.handleNotifications)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "memory", bot.MatchTypeCommand, tb.handleMemory)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "remind", bot.MatchTypeCommand, tb.handleRemind)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "briefing", bot.MatchTypeCommand, tb.handleBriefing)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "help", bot.MatchTypeCommand, tb.handleHelp)
 
 	return tb, nil
 }
