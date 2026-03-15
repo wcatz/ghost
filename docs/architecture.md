@@ -78,17 +78,41 @@ internal/
     server.go              stdio transport, 5 memory tools
   telegram/                Telegram bot
     bot.go                 Commands, whitelist auth, alerts
+    approval.go            Approval forwarding with inline keyboards
+    sessions.go            /sessions, /chat, inline session picker
+  google/                  Google Workspace integration
+    auth.go                OAuth2 flow with token persistence
+    calendar.go            Google Calendar API client
+    gmail.go               Gmail API client (unread emails)
+    notifier.go            Meeting alerts (10min + 5min via Telegram)
   github/                  GitHub monitor
     monitor.go             Notification polling, P0-P4 priority
     types.go               Notification types
   scheduler/               Job scheduling
     scheduler.go           gocron + NLP date parsing (when)
   briefing/                Daily briefing
-    briefing.go            Aggregate GitHub + calendar + reminders
-  calendar/                CalDAV client
+    briefing.go            Aggregate GitHub + calendar + Gmail + reminders
+  calendar/                CalDAV client (legacy, replaced by google/)
     client.go              Read-only event fetching
+  mdv2/                    MarkdownV2 utilities
+    escape.go              Shared escaper for Telegram formatting
+  voice/                   Voice pipeline (WIP)
+    voice.go               STT, TTS, AudioSource, AudioSink, VAD interfaces
+    pipeline.go            Push-to-talk orchestrator
   audit/                   Logging
     audit.go               Per-action cost + token tracking
+  provider/                Interface contracts
+    provider.go            LLMProvider, MemoryStore, Frontend, ApprovalRequest
+vscode-ghost/              VSCode extension
+  src/extension.ts         Activation, commands, health polling
+  src/ghost-client.ts      HTTP + SSE client for all API endpoints
+  src/chat-panel.ts        Sidebar chat webview provider
+  src/chat-editor.ts       Full editor tab chat panel
+  src/memory-panel.ts      Memory browser with FTS search
+  src/webview-html.ts      Shared HTML/CSS/JS for chat webviews
+  src/status-bar.ts        Connection + mode + token status bar
+  media/chat.css           Polished dark theme with animations
+  media/ghost-icon.svg     Activity bar icon
 migrations/
   001_init.sql             Schema reference (actual DDL in schema.go)
 ```
