@@ -263,6 +263,17 @@ func (s *Server) handleStreamEvent(w http.ResponseWriter, flusher http.Flusher, 
 				"name": evt.ToolUse.Name,
 			})
 		}
+	case "tool_diff":
+		if evt.ToolUse != nil && evt.Metadata != nil {
+			data := map[string]string{
+				"id":   evt.ToolUse.ID,
+				"name": evt.ToolUse.Name,
+			}
+			for k, v := range evt.Metadata {
+				data[k] = v
+			}
+			writeSSE(w, flusher, "tool_diff", data)
+		}
 	case "done":
 		data := map[string]interface{}{
 			"stop_reason": evt.StopReason,

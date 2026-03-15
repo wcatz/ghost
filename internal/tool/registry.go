@@ -24,6 +24,7 @@ type Result struct {
 	Content  string
 	IsError  bool
 	Duration time.Duration
+	Metadata map[string]string // optional extra data (e.g. "diff" for file_edit)
 }
 
 // Executor runs a tool and returns the result.

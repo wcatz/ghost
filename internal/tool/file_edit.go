@@ -67,5 +67,19 @@ func execFileEdit(ctx context.Context, projectPath string, input json.RawMessage
 		return Result{Content: fmt.Sprintf("write failed: %v", err), IsError: true}
 	}
 
-	return Result{Content: fmt.Sprintf("edited %s (replaced %d chars with %d chars)", path, len(in.OldText), len(in.NewText))}
+	// Build unified diff for inline preview.
+	diff := fmt.Sprintf("--- a/%s\n+++ b/%s\n", in.Path, in.Path)
+	oldLines := strings.Split(in.OldText, "\n")
+	newLines := strings.Split(in.NewText, "\n")
+	for _, l := range oldLines {
+		diff += "- " + l + "\n"
+	}
+	for _, l := range newLines {
+		diff += "+ " + l + "\n"
+	}
+
+	return Result{
+		Content:  fmt.Sprintf("edited %s (replaced %d chars with %d chars)", path, len(in.OldText), len(in.NewText)),
+		Metadata: map[string]string{"diff": diff, "path": in.Path},
+	}
 }

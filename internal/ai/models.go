@@ -137,12 +137,13 @@ type TokenUsage struct {
 
 // StreamEvent is emitted during streaming for TUI rendering.
 type StreamEvent struct {
-	Type       string // "text", "thinking", "tool_use_start", "tool_input_delta", "tool_use_end", "done", "error"
+	Type       string // "text", "thinking", "tool_use_start", "tool_input_delta", "tool_use_end", "tool_diff", "done", "error"
 	Text       string // for text deltas and thinking deltas
 	ToolUse    *ToolUseEvent
 	Usage      *TokenUsage
-	StopReason string // on "done": "end_turn" or "tool_use"
+	StopReason string            // on "done": "end_turn" or "tool_use"
 	Error      error
+	Metadata   map[string]string // optional extra data (e.g. diff content)
 }
 
 // ToolUseEvent holds data for tool-related stream events.
