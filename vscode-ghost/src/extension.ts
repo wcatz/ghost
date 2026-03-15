@@ -167,7 +167,7 @@ function createClient(): GhostClient {
   const config = vscode.workspace.getConfiguration("ghost");
   const serverUrl = config.get<string>(
     "serverUrl",
-    "http://127.0.0.1:2444"
+    "http://127.0.0.1:2187"
   );
   const authToken = config.get<string>("authToken", "");
   return new GhostClient(serverUrl, authToken);
