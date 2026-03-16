@@ -16,7 +16,7 @@ export class ChatWebview implements vscode.Disposable {
   private extensionUri: vscode.Uri;
   private client: GhostClient;
   private session?: SessionInfo;
-  private abortController?: AbortController;
+  private abortFn?: () => void;
   private disposables: vscode.Disposable[] = [];
 
   constructor(
@@ -49,7 +49,7 @@ export class ChatWebview implements vscode.Disposable {
   }
 
   dispose(): void {
-    this.abortController?.abort();
+    this.abortFn?.();
     this.disposables.forEach((d) => d.dispose());
   }
 
@@ -66,7 +66,7 @@ export class ChatWebview implements vscode.Disposable {
         await this.handleApprove(msg.approved, msg.instructions);
         break;
       case "abort":
-        this.abortController?.abort();
+        this.abortFn?.();
         break;
       case "set_auto_approve":
         if (this.session) {
@@ -89,11 +89,10 @@ export class ChatWebview implements vscode.Disposable {
     }
 
     this.postMessage({ type: "streaming", active: true });
-    this.abortController = new AbortController();
 
     try {
       const { events: emitter, abort } = this.client.sendMessage(this.session.id, text, image);
-      this.abortController = { signal: new AbortController().signal, abort } as unknown as AbortController;
+      this.abortFn = abort;
 
       // Event names and shapes must match ghost-client.ts emit calls exactly.
       // "text" and "thinking" emit strings; others emit objects.
