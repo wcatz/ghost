@@ -45,6 +45,10 @@
         "title": "Ghost: New Session"
       },
       {
+        "command": "ghost.setMode",
+        "title": "Ghost: Set Mode"
+      },
+      {
         "command": "ghost.searchMemories",
         "title": "Ghost: Search Memories"
       },
@@ -77,6 +81,11 @@
           "default": "",
           "scope": "machine",
           "description": "Bearer token for ghost API authentication"
+        },
+        "ghost.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically start ghost serve if not running"
         }
       }
     }

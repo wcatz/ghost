@@ -46,6 +46,12 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.window.showErrorMessage(`Ghost: ${err}`);
       }
     }),
+    vscode.commands.registerCommand("ghost.setMode", async () => {
+      const mode = await vscode.window.showQuickPick(["chat"], { placeHolder: "Select mode" });
+      if (mode) {
+        statusBar.setMode(mode);
+      }
+    }),
     vscode.commands.registerCommand("ghost.searchMemories", async () => {
       vscode.commands.executeCommand("ghost.memories.focus");
     }),

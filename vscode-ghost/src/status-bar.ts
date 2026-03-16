@@ -3,12 +3,12 @@ import { GhostClient } from "./ghost-client";
 
 export class GhostStatusBar {
   private item: vscode.StatusBarItem;
-  private client: GhostClient;
+  private client?: GhostClient;
   private connected = false;
   private mode = "";
   private tokenInfo = "";
 
-  constructor(client: GhostClient) {
+  constructor(client?: GhostClient) {
     this.client = client;
     this.item = vscode.window.createStatusBarItem(
       vscode.StatusBarAlignment.Right,
