@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/wcatz/ghost/internal/provider"
@@ -13,16 +14,21 @@ import (
 
 // approvalDialog shows a non-blocking overlay for tool approval.
 type approvalDialog struct {
-	active      bool
-	request     provider.ApprovalRequest
-	toolName    string
-	summary     string
-	width       int
-	confirmAll  bool // true when showing "are you sure?" for Allow All
+	active       bool
+	request      provider.ApprovalRequest
+	toolName     string
+	summary      string
+	width        int
+	confirmAll   bool              // true when showing "are you sure?" for Allow All
+	showDenyInput bool             // true when collecting deny reason
+	denyInput    textinput.Model
 }
 
 func newApprovalDialog() approvalDialog {
-	return approvalDialog{}
+	ti := textinput.New()
+	ti.Placeholder = "Reason (optional, enter to skip)"
+	ti.CharLimit = 200
+	return approvalDialog{denyInput: ti}
 }
 
 func (a *approvalDialog) show(req provider.ApprovalRequest) {
@@ -30,6 +36,8 @@ func (a *approvalDialog) show(req provider.ApprovalRequest) {
 	a.request = req
 	a.toolName = req.ToolName
 	a.summary = extractSummary(req.Input)
+	a.confirmAll = false
+	a.showDenyInput = false
 }
 
 func (a *approvalDialog) respond(approved bool) {
@@ -42,10 +50,12 @@ func (a *approvalDialog) respondWith(resp provider.ApprovalResponse) {
 	}
 	a.request.Response <- resp
 	a.active = false
+	a.showDenyInput = false
 }
 
 func (a *approvalDialog) setWidth(width int) {
 	a.width = width
+	a.denyInput.SetWidth(width - 20)
 }
 
 func (a approvalDialog) update(msg tea.Msg) (approvalDialog, tea.Cmd) {
@@ -54,6 +64,28 @@ func (a approvalDialog) update(msg tea.Msg) (approvalDialog, tea.Cmd) {
 	}
 
 	if msg, ok := msg.(tea.KeyPressMsg); ok {
+		// Deny input mode — collecting reason text.
+		if a.showDenyInput {
+			switch {
+			case msg.String() == "enter":
+				reason := a.denyInput.Value()
+				a.denyInput.Reset()
+				a.respondWith(provider.ApprovalResponse{
+					Approved:     false,
+					Instructions: reason,
+				})
+			case key.Matches(msg, keys.Cancel):
+				a.showDenyInput = false
+				a.denyInput.Reset()
+				a.denyInput.Blur()
+			default:
+				var cmd tea.Cmd
+				a.denyInput, cmd = a.denyInput.Update(msg)
+				return a, cmd
+			}
+			return a, nil
+		}
+
 		if a.confirmAll {
 			// Second confirmation for Allow All.
 			switch {
@@ -73,7 +105,12 @@ func (a approvalDialog) update(msg tea.Msg) (approvalDialog, tea.Cmd) {
 		switch {
 		case key.Matches(msg, keys.Approve):
 			a.respond(true)
-		case key.Matches(msg, keys.Deny), key.Matches(msg, keys.Cancel):
+		case key.Matches(msg, keys.Deny):
+			// Show deny reason input instead of immediately denying.
+			a.showDenyInput = true
+			a.denyInput.Focus()
+			return a, a.denyInput.Focus()
+		case key.Matches(msg, keys.Cancel):
 			a.respond(false)
 		case key.Matches(msg, keys.ApproveAll):
 			a.confirmAll = true // require second confirmation
@@ -99,7 +136,10 @@ func (a approvalDialog) view() string {
 	}
 
 	var hint string
-	if a.confirmAll {
+	if a.showDenyInput {
+		hint = "\nDeny reason:\n" + a.denyInput.View() +
+			"\n" + lipgloss.NewStyle().Foreground(colorDim).Render("enter to deny · esc to cancel")
+	} else if a.confirmAll {
 		hint = fmt.Sprintf("\n%s to auto-approve ALL tools this session?",
 			approvalKeyStyle.Render("[y] Confirm"),
 		)
@@ -137,8 +177,8 @@ func extractSummary(input json.RawMessage) string {
 		return ""
 	}
 
-	// Try common fields in priority order.
-	for _, field := range []string{"command", "path", "pattern", "query", "content"} {
+	// Priority order for memory tools (query for search, content for save).
+	for _, field := range []string{"query", "content", "category", "message"} {
 		if v, ok := m[field]; ok {
 			s := fmt.Sprintf("%v", v)
 			if len(s) > 120 {

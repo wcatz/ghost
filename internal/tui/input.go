@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"strings"
+
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -105,6 +107,35 @@ func (i inputArea) update(msg tea.Msg) (inputArea, tea.Cmd) {
 	return i, cmd
 }
 
+// completionHint returns a dim hint line showing matching slash commands.
+func (i inputArea) completionHint() string {
+	val := i.textarea.Value()
+	if !strings.HasPrefix(val, "/") || strings.Contains(val, " ") {
+		return ""
+	}
+
+	var matches []string
+	for _, item := range paletteCommands {
+		cmd := strings.Fields(item.command)[0]
+		if strings.HasPrefix(cmd, val) && cmd != val {
+			matches = append(matches, cmd+" "+item.desc)
+		}
+		if len(matches) >= 3 {
+			break
+		}
+	}
+	if len(matches) == 0 {
+		return ""
+	}
+
+	hint := strings.Join(matches, "  ·  ")
+	return lipgloss.NewStyle().Foreground(colorDim).Render("  " + hint)
+}
+
 func (i inputArea) view() string {
-	return inputBorderStyle.Render(i.textarea.View())
+	v := inputBorderStyle.Render(i.textarea.View())
+	if hint := i.completionHint(); hint != "" {
+		v += "\n" + hint
+	}
+	return v
 }
