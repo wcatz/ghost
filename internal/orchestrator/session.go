@@ -398,8 +398,13 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 
 				result := s.registry.Execute(ctx, tc.Name, s.ProjectPath, tc.Input)
 				events <- ai.StreamEvent{
-					Type: "text",
-					Text: fmt.Sprintf("\n<tool_result name=%q duration=%s>\n", tc.Name, result.Duration),
+					Type: "tool_result",
+					Text: result.Content,
+					ToolUse: &ai.ToolUseEvent{ID: tc.ID, Name: tc.Name},
+					Metadata: map[string]string{
+						"is_error": fmt.Sprintf("%v", result.IsError),
+						"duration": result.Duration.String(),
+					},
 				}
 
 				// Emit diff metadata for file_edit/file_write tools.
