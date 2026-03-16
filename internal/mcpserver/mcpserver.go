@@ -380,6 +380,123 @@ func (s *Server) registerTools() {
 		}, nil, nil
 	})
 
+	// ghost_task_create — create a project task.
+	type taskCreateArgs struct {
+		ProjectID   string `json:"project_id" jsonschema:"Project ID or name"`
+		Title       string `json:"title" jsonschema:"Task title"`
+		Description string `json:"description,omitempty" jsonschema:"Task description"`
+		Priority    int    `json:"priority,omitempty" jsonschema:"Priority 0-4 (0=critical, 2=normal, 4=low)"`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_task_create",
+		Description: "Create a task for a project. Use to track planned work, bugs, or action items.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args taskCreateArgs) (*mcp.CallToolResult, any, error) {
+		if args.ProjectID == "" || args.Title == "" {
+			return nil, nil, fmt.Errorf("project_id and title are required")
+		}
+		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		if args.Priority < 0 || args.Priority > 4 {
+			args.Priority = 2
+		}
+		id, err := s.store.CreateTask(ctx, args.ProjectID, args.Title, args.Description, args.Priority)
+		if err != nil {
+			return nil, nil, fmt.Errorf("create task: %w", err)
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Task created (id: %s)", id)}},
+		}, nil, nil
+	})
+
+	// ghost_task_list — list project tasks.
+	type taskListArgs struct {
+		ProjectID string `json:"project_id" jsonschema:"Project ID or name"`
+		Status    string `json:"status,omitempty" jsonschema:"Filter by status: pending, active, done, blocked"`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_task_list",
+		Description: "List tasks for a project, optionally filtered by status.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args taskListArgs) (*mcp.CallToolResult, any, error) {
+		if args.ProjectID == "" {
+			return nil, nil, fmt.Errorf("project_id is required")
+		}
+		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		tasks, err := s.store.ListTasks(ctx, args.ProjectID, args.Status, 30)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list tasks: %w", err)
+		}
+		if len(tasks) == 0 {
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: "No tasks found."}},
+			}, nil, nil
+		}
+		var sb strings.Builder
+		for _, t := range tasks {
+			sb.WriteString(fmt.Sprintf("- [%s] P%d `%s` %s\n", t.Status, t.Priority, t.ID[:8], t.Title))
+			if t.Description != "" {
+				sb.WriteString(fmt.Sprintf("  %s\n", t.Description))
+			}
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+		}, nil, nil
+	})
+
+	// ghost_task_complete — mark a task as done.
+	type taskCompleteArgs struct {
+		TaskID string `json:"task_id" jsonschema:"Task ID"`
+		Notes  string `json:"notes,omitempty" jsonschema:"Completion notes"`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_task_complete",
+		Description: "Mark a task as done with optional completion notes.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args taskCompleteArgs) (*mcp.CallToolResult, any, error) {
+		if args.TaskID == "" {
+			return nil, nil, fmt.Errorf("task_id is required")
+		}
+		if err := s.store.CompleteTask(ctx, args.TaskID, args.Notes); err != nil {
+			return nil, nil, fmt.Errorf("complete task: %w", err)
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "Task completed."}},
+		}, nil, nil
+	})
+
+	// ghost_decision_record — record a decision with rationale.
+	type decisionRecordArgs struct {
+		ProjectID    string   `json:"project_id" jsonschema:"Project ID or name"`
+		Title        string   `json:"title" jsonschema:"Decision title (e.g., 'Use SQLite for storage')"`
+		Decision     string   `json:"decision" jsonschema:"What was decided"`
+		Rationale    string   `json:"rationale" jsonschema:"Why this was chosen"`
+		Alternatives []string `json:"alternatives,omitempty" jsonschema:"What was considered and rejected"`
+		Tags         []string `json:"tags,omitempty" jsonschema:"Tags for categorization"`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_decision_record",
+		Description: "Record an architectural or design decision with rationale and alternatives considered. Also saved as a memory for future recall.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args decisionRecordArgs) (*mcp.CallToolResult, any, error) {
+		if args.ProjectID == "" || args.Title == "" || args.Decision == "" || args.Rationale == "" {
+			return nil, nil, fmt.Errorf("project_id, title, decision, and rationale are required")
+		}
+		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		if args.Alternatives == nil {
+			args.Alternatives = []string{}
+		}
+		if args.Tags == nil {
+			args.Tags = []string{}
+		}
+		id, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, args.Alternatives, args.Tags)
+		if err != nil {
+			return nil, nil, fmt.Errorf("record decision: %w", err)
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Decision recorded (id: %s)", id)}},
+		}, nil, nil
+	})
+
 	// ghost_health — system health and stats.
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_health",

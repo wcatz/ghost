@@ -81,6 +81,20 @@ func (m *mockStore) TogglePin(_ context.Context, _ string, _ bool) error        
 func (m *mockStore) ReplaceNonManual(_ context.Context, _ string, _ []memory.Memory) error {
 	return nil
 }
+func (m *mockStore) CreateTask(_ context.Context, _, _, _ string, _ int) (string, error) {
+	return "task1", nil
+}
+func (m *mockStore) ListTasks(_ context.Context, _, _ string, _ int) ([]memory.Task, error) {
+	return nil, nil
+}
+func (m *mockStore) CompleteTask(_ context.Context, _, _ string) error { return nil }
+func (m *mockStore) UpdateTask(_ context.Context, _, _ string, _ int, _ string) error { return nil }
+func (m *mockStore) RecordDecision(_ context.Context, _, _, _, _ string, _, _ []string) (string, error) {
+	return "dec1", nil
+}
+func (m *mockStore) ListDecisions(_ context.Context, _, _ string, _ int) ([]memory.Decision, error) {
+	return nil, nil
+}
 func (m *mockStore) ListProjects(_ context.Context) ([]memory.Project, error) { return nil, nil }
 func (m *mockStore) EnsureProject(_ context.Context, _, _, _ string) error    { return nil }
 func (m *mockStore) ResolveProjectByName(_ context.Context, _ string) (string, error) {

@@ -64,6 +64,16 @@ type MemoryStore interface {
 	// Reflection
 	ReplaceNonManual(ctx context.Context, projectID string, memories []memory.Memory) error
 
+	// Tasks
+	CreateTask(ctx context.Context, projectID, title, description string, priority int) (string, error)
+	ListTasks(ctx context.Context, projectID, status string, limit int) ([]memory.Task, error)
+	CompleteTask(ctx context.Context, taskID, notes string) error
+	UpdateTask(ctx context.Context, taskID, status string, priority int, description string) error
+
+	// Decisions
+	RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (string, error)
+	ListDecisions(ctx context.Context, projectID, status string, limit int) ([]memory.Decision, error)
+
 	// Project management
 	ListProjects(ctx context.Context) ([]memory.Project, error)
 	EnsureProject(ctx context.Context, id, path, name string) error

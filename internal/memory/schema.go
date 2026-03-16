@@ -169,6 +169,41 @@ CREATE TABLE IF NOT EXISTS reminders (
 );
 
 CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(fired, due_at);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title         TEXT NOT NULL,
+    description   TEXT DEFAULT '',
+    status        TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending', 'active', 'done', 'blocked')),
+    priority      INTEGER NOT NULL DEFAULT 2
+                  CHECK (priority BETWEEN 0 AND 4),
+    blocked_by    TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    branch        TEXT DEFAULT '',
+    pr_number     INTEGER,
+    notes         TEXT DEFAULT '',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project_id, status);
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id                TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title             TEXT NOT NULL,
+    decision          TEXT NOT NULL,
+    alternatives      TEXT DEFAULT '[]',
+    rationale         TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'active'
+                      CHECK (status IN ('active', 'superseded', 'revisit')),
+    superseded_by     TEXT REFERENCES decisions(id) ON DELETE SET NULL,
+    tags              TEXT DEFAULT '[]',
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id, status);
 `
 
 // OpenDB opens or creates the SQLite database and runs migrations.
