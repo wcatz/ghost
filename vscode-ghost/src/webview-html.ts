@@ -227,12 +227,7 @@ export function getChatHtml(
 
     // --- Slash commands ---
     const slashCommands = [
-      { cmd: '/mode code', desc: 'Code writing mode' },
       { cmd: '/mode chat', desc: 'Conversational mode' },
-      { cmd: '/mode debug', desc: 'Debugging mode' },
-      { cmd: '/mode review', desc: 'Code review mode' },
-      { cmd: '/mode plan', desc: 'Architecture planning' },
-      { cmd: '/mode refactor', desc: 'Refactoring mode' },
       { cmd: '/clear', desc: 'Clear conversation' },
       { cmd: '/cost', desc: 'Show session cost' },
       { cmd: '/auto-approve', desc: 'Toggle auto-approve' },

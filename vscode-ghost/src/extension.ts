@@ -66,12 +66,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand("ghost.setMode", async () => {
       const modes = [
-        "code",
         "chat",
-        "debug",
-        "review",
-        "plan",
-        "refactor",
       ];
       const mode = await vscode.window.showQuickPick(modes, {
         placeHolder: "Select Ghost mode",

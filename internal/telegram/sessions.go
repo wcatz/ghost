@@ -178,7 +178,14 @@ func (tb *Bot) handlePendingChatReply(ctx context.Context, b *bot.Bot, update *m
 
 func (tb *Bot) fetchSessions() ([]apiSession, error) {
 	url := fmt.Sprintf("http://%s/api/v1/sessions", tb.serverAddr)
-	resp, err := http.Get(url) //nolint:gosec
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create sessions request: %w", err)
+	}
+	if tb.serverToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +206,15 @@ func (tb *Bot) sendChatMessage(sessionID, message string) error {
 	payload, _ := json.Marshal(map[string]string{"message": message})
 	url := fmt.Sprintf("http://%s/api/v1/sessions/%s/send", tb.serverAddr, sessionID)
 
-	resp, err := http.Post(url, "application/json", bytes.NewReader(payload)) //nolint:gosec
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create chat request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if tb.serverToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}

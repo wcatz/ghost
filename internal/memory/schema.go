@@ -66,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_project_source ON memories(project_id, s
 CREATE TABLE IF NOT EXISTS conversations (
     id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    mode        TEXT NOT NULL DEFAULT 'code',
+    mode        TEXT NOT NULL DEFAULT 'chat',
     title       TEXT DEFAULT '',
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))

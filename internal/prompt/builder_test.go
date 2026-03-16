@@ -61,7 +61,7 @@ func TestBuildSystemBlocks_ThreeBlocks(t *testing.T) {
 		Language: "Go",
 	}
 
-	m := mode.Modes["code"]
+	m := mode.Modes["chat"]
 
 	blocks := builder.BuildSystemBlocks(context.Background(), projCtx, m)
 
@@ -85,7 +85,7 @@ func TestBuildSystemBlocks_ThreeBlocks(t *testing.T) {
 	if !strings.Contains(blocks[1].Text, "testproject") {
 		t.Error("expected block 2 to contain project name")
 	}
-	if !strings.Contains(blocks[1].Text, "Mode: code") {
+	if !strings.Contains(blocks[1].Text, "Mode: chat") {
 		t.Error("expected block 2 to contain mode")
 	}
 
@@ -114,9 +114,10 @@ func TestBuildSystemBlocks_StaticPersonality(t *testing.T) {
 	personality := blocks[0].Text
 	expectedPhrases := []string{
 		"You are Ghost",
-		"memory-first coding agent",
+		"memory-first personal assistant",
 		"CAPABILITIES",
 		"RULES",
+		"Never persist secrets",
 		"RESPONSE STYLE",
 	}
 
@@ -142,7 +143,7 @@ func TestBuildSystemBlocks_ProjectContext(t *testing.T) {
 		TestCommand: "go test ./...",
 	}
 
-	m := mode.Modes["code"]
+	m := mode.Modes["chat"]
 
 	blocks := builder.BuildSystemBlocks(context.Background(), projCtx, m)
 
@@ -160,7 +161,7 @@ func TestBuildSystemBlocks_ProjectContext(t *testing.T) {
 		"Git status: 3 files modified": "git status",
 		"Last commit: abc123 Add feature": "last commit",
 		"Test command: go test ./...": "test command",
-		"Mode: code":                  "mode name",
+		"Mode: chat":                  "mode name",
 	}
 
 	for field, desc := range expectedFields {
@@ -184,7 +185,7 @@ func TestBuildSystemBlocks_ClaudeMD(t *testing.T) {
 		ClaudeMD: claudeMD,
 	}
 
-	m := mode.Modes["code"]
+	m := mode.Modes["chat"]
 
 	blocks := builder.BuildSystemBlocks(context.Background(), projCtx, m)
 
@@ -213,7 +214,7 @@ func TestBuildSystemBlocks_ClaudeMD_Truncation(t *testing.T) {
 		ClaudeMD: longContent,
 	}
 
-	m := mode.Modes["code"]
+	m := mode.Modes["chat"]
 
 	blocks := builder.BuildSystemBlocks(context.Background(), projCtx, m)
 
@@ -235,7 +236,7 @@ func TestBuildSystemBlocks_Memories(t *testing.T) {
 	builder := NewBuilder(store)
 
 	projCtx := &project.Context{ID: "test", Name: "test", Path: "/test", Language: "Go"}
-	m := mode.Modes["code"]
+	m := mode.Modes["chat"]
 
 	blocks := builder.BuildSystemBlocks(context.Background(), projCtx, m)
 
@@ -269,7 +270,7 @@ func TestBuildSystemBlocks_LearnedContext(t *testing.T) {
 	builder := NewBuilder(store)
 
 	projCtx := &project.Context{ID: "test", Name: "test", Path: "/test", Language: "Go"}
-	m := mode.Modes["code"]
+	m := mode.Modes["chat"]
 
 	blocks := builder.BuildSystemBlocks(context.Background(), projCtx, m)
 
@@ -303,7 +304,7 @@ func TestBuildSystemBlocks_RecentGitActivity(t *testing.T) {
 		},
 	}
 
-	m := mode.Modes["code"]
+	m := mode.Modes["chat"]
 
 	blocks := builder.BuildSystemBlocks(context.Background(), projCtx, m)
 
@@ -344,7 +345,7 @@ func TestBuildSystemBlocks_NoMemories(t *testing.T) {
 		LastCommits: []string{"abc123 commit"}, // Only 1 commit, so no "Recent git activity"
 	}
 
-	m := mode.Modes["code"]
+	m := mode.Modes["chat"]
 
 	blocks := builder.BuildSystemBlocks(context.Background(), projCtx, m)
 
@@ -361,7 +362,7 @@ func TestBuildSystemBlocks_ErrorFetchingMemories(t *testing.T) {
 	builder := NewBuilder(store)
 
 	projCtx := &project.Context{ID: "test", Name: "test", Path: "/test", Language: "Go"}
-	m := mode.Modes["code"]
+	m := mode.Modes["chat"]
 
 	// Should not panic, should gracefully handle error
 	blocks := builder.BuildSystemBlocks(context.Background(), projCtx, m)
@@ -377,7 +378,7 @@ func TestBuildSystemBlocks_DifferentModes(t *testing.T) {
 
 	projCtx := &project.Context{ID: "test", Name: "test", Path: "/test", Language: "Go"}
 
-	modes := []string{"chat", "code", "debug", "review", "plan", "refactor"}
+	modes := []string{"chat"}
 
 	for _, modeName := range modes {
 		t.Run(modeName, func(t *testing.T) {
@@ -416,7 +417,7 @@ func TestBuildSystemBlocks_MemoryLimit(t *testing.T) {
 	builder := NewBuilder(store)
 
 	projCtx := &project.Context{ID: "test", Name: "test", Path: "/test", Language: "Go"}
-	m := mode.Modes["code"]
+	m := mode.Modes["chat"]
 
 	blocks := builder.BuildSystemBlocks(context.Background(), projCtx, m)
 
@@ -442,7 +443,7 @@ func TestBuildSystemBlocks_CachingStrategy(t *testing.T) {
 	builder := NewBuilder(store)
 
 	projCtx := &project.Context{ID: "test", Name: "test", Path: "/test", Language: "Go"}
-	m := mode.Modes["code"]
+	m := mode.Modes["chat"]
 
 	blocks := builder.BuildSystemBlocks(context.Background(), projCtx, m)
 

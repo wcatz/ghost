@@ -165,7 +165,7 @@ type GitInfo struct {
 var defaults = map[string]interface{}{
 	"api.model_quality":          "claude-sonnet-4-5-20250929",
 	"api.model_fast":             "claude-haiku-4-5-20251001",
-	"defaults.mode":              "code",
+	"defaults.mode":              "chat",
 	"defaults.reflection_interval": 10,
 	"defaults.max_conversation_turns": 50,
 	"defaults.auto_memory":       true,
