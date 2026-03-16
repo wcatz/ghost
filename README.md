@@ -1,4 +1,4 @@
-<img src="assets/ghost.png" alt="Ghost" width="140" align="right" />
+<img src="assets/ghost.png" alt="Ghost" width="200" align="right" />
 
 # Ghost
 

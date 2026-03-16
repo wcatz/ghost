@@ -15,16 +15,13 @@ type keyMap struct {
 	PageDown    key.Binding
 	Home        key.Binding
 	End         key.Binding
-	HistoryUp    key.Binding
-	HistoryDown  key.Binding
-	Approve      key.Binding
-	Deny         key.Binding
-	ApproveAll   key.Binding
-	Cancel       key.Binding
-	PushToTalk   key.Binding // Phase C — reserved
-	ToolNext     key.Binding
-	ToolPrev     key.Binding
-	ToolToggle   key.Binding
+	HistoryUp   key.Binding
+	HistoryDown key.Binding
+	Approve     key.Binding
+	Deny        key.Binding
+	ApproveAll  key.Binding
+	Cancel      key.Binding
+	PushToTalk  key.Binding // Phase C — reserved
 }
 
 var keys = keyMap{
@@ -99,17 +96,5 @@ var keys = keyMap{
 	PushToTalk: key.NewBinding(
 		key.WithKeys("ctrl+space"),
 		key.WithHelp("ctrl+space", "push to talk"),
-	),
-	ToolNext: key.NewBinding(
-		key.WithKeys("ctrl+j"),
-		key.WithHelp("ctrl+j", "next tool/thinking"),
-	),
-	ToolPrev: key.NewBinding(
-		key.WithKeys("ctrl+h"),
-		key.WithHelp("ctrl+h", "prev tool/thinking"),
-	),
-	ToolToggle: key.NewBinding(
-		key.WithKeys("space"),
-		key.WithHelp("space", "expand/collapse tool"),
 	),
 }

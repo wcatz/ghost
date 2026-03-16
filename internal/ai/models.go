@@ -107,18 +107,6 @@ func ImageBlock(mediaType, base64Data string) ContentBlock {
 	}
 }
 
-// DocumentBlock creates a content block with an inline PDF document.
-func DocumentBlock(base64Data string) ContentBlock {
-	return ContentBlock{
-		Type: "document",
-		Source: &ImageSource{
-			Type:      "base64",
-			MediaType: "application/pdf",
-			Data:      base64Data,
-		},
-	}
-}
-
 // MultimodalMessage creates a user message with text and images.
 func MultimodalMessage(text string, images []ContentBlock) Message {
 	blocks := make([]ContentBlock, 0, len(images)+1)

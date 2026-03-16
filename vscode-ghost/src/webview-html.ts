@@ -211,18 +211,18 @@ export function getChatHtml(
     }
 
     function addToolIndicator(name, status) {
-      const el = document.createElement('details');
-      el.className = 'tool-indicator ' + status;
-      el.dataset.toolName = name;
-      el.dataset.toolId = name;
+      const div = document.createElement('div');
+      div.className = 'tool-indicator ' + status;
+      div.dataset.toolName = name;
+      div.dataset.toolId = name;
       const icon = status === 'running' ? '<span class="spinner"></span>' : '<span class="check">&#10003;</span>';
-      el.innerHTML = '<summary>' + icon + ' <span class="tool-name">' + escapeHtml(name) + '</span><span class="tool-time"></span></summary><pre class="tool-output"></pre>';
-      messagesEl.appendChild(el);
+      div.innerHTML = icon + ' <span class="tool-name">' + escapeHtml(name) + '</span><span class="tool-time"></span>';
+      messagesEl.appendChild(div);
       if (status === 'running') {
         toolTimers[name] = Date.now();
       }
       scrollToBottom();
-      return el;
+      return div;
     }
 
     // --- Slash commands ---
@@ -521,9 +521,7 @@ export function getChatHtml(
           break;
 
         case 'text_delta':
-          // Filter out tool_result XML tags - tool output is shown in tool indicators
-          const cleanText = msg.text.replace(/<tool_result[^>]*>/g, '').replace(/<\/tool_result>/g, '');
-          currentAssistantText += cleanText;
+          currentAssistantText += msg.text;
           const el = ensureAssistantBubble();
           el.innerHTML = renderMarkdown(currentAssistantText);
           scrollToBottom();
@@ -546,27 +544,14 @@ export function getChatHtml(
           addToolIndicator(msg.name, 'running');
           break;
 
-        case 'tool_delta': {
-          const tools = messagesEl.querySelectorAll('.tool-indicator');
-          for (let i = tools.length - 1; i >= 0; i--) {
-            if (tools[i].dataset.toolName === msg.name || tools[i].dataset.toolId === msg.id) {
-              const out = tools[i].querySelector('.tool-output');
-              if (out) out.textContent += msg.delta;
-              break;
-            }
-          }
-          break;
-        }
-
         case 'tool_end': {
           const indicators = messagesEl.querySelectorAll('.tool-indicator.running');
           indicators.forEach(ind => {
             if (ind.dataset.toolName === msg.name) {
               ind.className = 'tool-indicator done';
-              const s = ind.querySelector('summary .spinner, summary .check');
-              if (s) s.outerHTML = '<span class="check">&#10003;</span>';
+              ind.querySelector('.spinner, .check').outerHTML = '<span class="check">&#10003;</span>';
               const elapsed = toolTimers[msg.name] ? ((Date.now() - toolTimers[msg.name]) / 1000).toFixed(1) + 's' : '';
-              const timeEl = ind.querySelector('summary .tool-time');
+              const timeEl = ind.querySelector('.tool-time');
               if (timeEl && elapsed) timeEl.textContent = ' ' + elapsed;
               delete toolTimers[msg.name];
             }

@@ -267,17 +267,6 @@ func (s *Server) handleStreamEvent(w http.ResponseWriter, flusher http.Flusher, 
 				"name": evt.ToolUse.Name,
 			})
 		}
-	case "tool_delta":
-		if evt.ToolUse != nil {
-			writeSSE(w, flusher, "tool_delta", map[string]string{
-				"id":    evt.ToolUse.ID,
-				"name":  evt.ToolUse.Name,
-				"delta": evt.Text,
-			})
-		}
-	case "tool_result":
-		// Tool result event for TUI (not needed for VSCode, uses tool_delta)
-		// Skip sending to HTTP clients
 	case "tool_diff":
 		if evt.ToolUse != nil && evt.Metadata != nil {
 			data := map[string]string{
