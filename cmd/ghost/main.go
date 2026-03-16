@@ -210,17 +210,18 @@ func runServe() {
 	defer cancel()
 
 	// --- Embedding worker (background vectorization via Ollama) ---
+	var embedClient *embedding.Client
+	var projectCh chan string
 	if cfg.Embedding.Enabled {
-		embedClient := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
+		embedClient = embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
 		embedWorker := embedding.NewWorker(embedClient, store, logger, 2*time.Minute)
-		projectCh := make(chan string, 16)
+		projectCh = make(chan string, 16)
 		go embedWorker.Run(ctx, projectCh)
 		if embedClient.Alive(ctx) {
 			logger.Info("embedding worker started", "model", cfg.Embedding.Model, "ollama", cfg.Embedding.OllamaURL)
 		} else {
 			logger.Info("embedding worker started (ollama offline, will retry)", "ollama", cfg.Embedding.OllamaURL)
 		}
-		_ = projectCh // projects get sent here when memories are created
 	}
 
 	// --- Scheduler (cron jobs + reminders) ---
@@ -370,13 +371,24 @@ func runServe() {
 
 // runMCP starts ghost as an MCP server on stdio.
 func runMCP() {
-	_, logger, store, _ := bootstrap()
+	cfg, logger, store, _ := bootstrap()
 	defer store.Close()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	srv := mcpserver.New(store, logger)
+
+	// Wire embedding for hybrid search if configured.
+	if cfg.Embedding.Enabled {
+		embedClient := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
+		embedWorker := embedding.NewWorker(embedClient, store, logger, 2*time.Minute)
+		projectCh := make(chan string, 16)
+		go embedWorker.Run(ctx, projectCh)
+		srv.SetEmbedder(embedClient, projectCh)
+		logger.Info("mcp: embedding enabled", "model", cfg.Embedding.Model)
+	}
+
 	if err := srv.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

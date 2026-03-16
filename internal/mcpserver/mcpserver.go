@@ -15,11 +15,18 @@ import (
 	"github.com/wcatz/ghost/internal/provider"
 )
 
+// Embedder generates vector embeddings for text. Optional — when nil, search falls back to FTS only.
+type Embedder interface {
+	Embed(ctx context.Context, text string) ([]float32, error)
+}
+
 // Server wraps the MCP server with Ghost's memory store.
 type Server struct {
-	store  provider.MemoryStore
-	logger *slog.Logger
-	mcp    *mcp.Server
+	store     provider.MemoryStore
+	logger    *slog.Logger
+	mcp       *mcp.Server
+	embedder  Embedder
+	projectCh chan<- string // notify embedding worker of new memories
 }
 
 // New creates and configures the MCP server with all Ghost tools.
@@ -39,6 +46,12 @@ func New(store provider.MemoryStore, logger *slog.Logger) *Server {
 
 	s.registerTools()
 	return s
+}
+
+// SetEmbedder configures optional vector embedding for hybrid search.
+func (s *Server) SetEmbedder(e Embedder, projectCh chan<- string) {
+	s.embedder = e
+	s.projectCh = projectCh
 }
 
 // Run starts the MCP server on stdio transport. Blocks until done.
@@ -91,7 +104,14 @@ func (s *Server) registerTools() {
 		}
 		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
 
-		memories, err := s.store.SearchFTS(ctx, args.ProjectID, args.Query, args.Limit)
+		// Use hybrid search (FTS5 + vector) when embedder is available.
+		var queryVec []float32
+		if s.embedder != nil {
+			if vec, err := s.embedder.Embed(ctx, args.Query); err == nil {
+				queryVec = vec
+			}
+		}
+		memories, err := s.store.SearchHybrid(ctx, args.ProjectID, args.Query, queryVec, args.Limit)
 		if err != nil {
 			return nil, nil, fmt.Errorf("search failed: %w", err)
 		}
@@ -151,6 +171,14 @@ func (s *Server) registerTools() {
 		id, merged, err := s.store.Upsert(ctx, args.ProjectID, args.Category, args.Content, "mcp", args.Importance, args.Tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
+		}
+
+		// Notify embedding worker of new/updated memory.
+		if s.projectCh != nil {
+			select {
+			case s.projectCh <- args.ProjectID:
+			default: // non-blocking
+			}
 		}
 
 		action := "saved"
