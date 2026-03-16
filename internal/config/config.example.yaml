@@ -20,7 +20,7 @@
 
 # --- Daemon defaults ---
 # defaults:
-#   mode: "code"                     # chat, code, debug, review, plan, refactor
+#   mode: "chat"
 #   reflection_interval: 10          # conversations between reflection passes
 #   max_conversation_turns: 50
 #   auto_memory: true
@@ -31,12 +31,13 @@
 #   show_token_usage: true
 #   show_cost: true
 #   stream_tool_output: true
+#   plain_mode: false                # force legacy REPL (no bubbletea)
 
 # --- HTTP Server (ghost serve) ---
 # server:
 #   listen_addr: "127.0.0.1:2187"
-#   auth_token: ""               # bearer token for API auth (or GHOST_SERVER_AUTH_TOKEN env var)
-                                  # generate with: openssl rand -hex 32
+#   auth_token: ""                   # bearer token for API auth
+                                     # generate with: openssl rand -hex 32
 
 # --- Local Embeddings (Ollama) ---
 # embedding:
@@ -55,7 +56,12 @@
 #   token: ""                        # BotFather token
 #   allowed_ids: ""                  # comma-separated numeric user IDs
 
-# --- CalDAV Calendar ---
+# --- Google Calendar + Gmail (OAuth2) ---
+# google:
+#   credentials_file: "~/.config/ghost/google-credentials.json"
+#   token_file: "~/.config/ghost/google-token.json"
+
+# --- CalDAV Calendar (legacy — use Google OAuth instead) ---
 # calendar:
 #   url: ""                          # CalDAV server URL (iCloud, Fastmail, etc.)
 #   username: ""
@@ -64,16 +70,20 @@
 # --- Voice Pipeline ---
 # voice:
 #   enabled: false
-#   stt_backend: "whisper"           # "whisper" (whisper.cpp CLI)
-#   stt_model: "base"               # model name or path to ggml-*.bin
-#   tts_backend: "piper"            # "piper", "espeak", or "none"
-#   tts_model: ""                   # path to piper .onnx model file
-#   tts_voice: ""                   # voice name (espeak backend)
+#   stt_backend: "whisper"           # "whisper", "assemblyai"
+#   stt_model: "base"               # whisper model name or path
+#   tts_backend: "piper"            # "piper", "elevenlabs", "espeak", "none"
+#   tts_model: ""                   # piper .onnx model path
+#   tts_voice: ""                   # voice name or ElevenLabs voice ID
 #   tts_rate: 1.0                   # speech rate multiplier
 #   push_to_talk: "ctrl+space"      # keybind for push-to-talk
+#   trigger_word: "ghost"           # wake word for voice activation
 #   silence_ms: 800                 # ms of silence to end recording
 #   sample_rate: 16000              # audio sample rate
 #   input_device: "default"         # ALSA device name
+#   elevenlabs_api_key: ""          # ElevenLabs API key (for TTS)
+#   elevenlabs_voice_id: ""         # ElevenLabs voice ID
+#   assemblyai_api_key: ""          # AssemblyAI API key (for STT)
 
 # --- Morning Briefing ---
 # briefing:

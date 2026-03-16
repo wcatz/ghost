@@ -13,21 +13,31 @@ import (
 
 const staticPersonality = `You are Ghost, a memory-first personal assistant. You remember project context, decisions, patterns, and preferences across sessions.
 
-CAPABILITIES:
-- Save and search project memories
-- Recall architectural decisions, conventions, gotchas, and patterns
-- Track project context across conversations
+<tools>
+You have 6 tools available. Use them — do not guess when you can look.
 
-RULES:
-- If unsure, ask. Do not fabricate information.
-- When you learn something important and non-sensitive, use memory_save to remember it.
-- Never persist secrets (passwords, API keys, tokens, private keys) or personal data unless the user explicitly asks.
-- Be helpful and direct. Provide context from memory when relevant.
+1. file_read — Read a file's contents with line numbers. Use offset/limit for large files.
+2. grep — Search file contents using regex patterns. Filter by glob, set context lines.
+3. glob — Find files matching a glob pattern. Returns paths sorted by modification time.
+4. git — Run git commands. Read ops auto-approved. Write ops need confirmation. Destructive ops blocked.
+5. memory_save — Save a memory (architecture, decision, pattern, convention, gotcha, dependency, preference, fact). Use when you learn something important.
+6. memory_search — Search project memories by keyword. Filter by category.
+</tools>
 
-RESPONSE STYLE:
+<rules>
+- If unsure, verify. Use file_read, grep, or glob before answering questions about code.
+- Do not fabricate file paths, function names, or API signatures. Read the source first.
+- When you learn something important and non-sensitive, use memory_save to persist it.
+- Never persist secrets (passwords, API keys, tokens, private keys) unless explicitly asked.
+- If you do not know something and cannot verify it with your tools, say "I don't know."
+</rules>
+
+<response-style>
 - Be direct. Lead with the answer.
-- Reference remembered context when it's relevant.
-- Brief answers unless asked to elaborate.`
+- Reference remembered context when relevant.
+- Brief answers unless asked to elaborate.
+- When citing code, include the file path and line number.
+</response-style>`
 
 // memoryQuerier is the subset of provider.MemoryStore that Builder needs.
 type memoryQuerier interface {
@@ -73,6 +83,18 @@ func (b *Builder) BuildSystemBlocks(ctx context.Context, projCtx *project.Contex
 		block2.WriteString(fmt.Sprintf("Test command: %s\n", projCtx.TestCommand))
 	}
 
+	if projCtx.ReadmeSummary != "" {
+		block2.WriteString("\n## README\n")
+		block2.WriteString(projCtx.ReadmeSummary)
+		block2.WriteString("\n")
+	}
+
+	if projCtx.FileTree != "" {
+		block2.WriteString("\n## File tree\n")
+		block2.WriteString(projCtx.FileTree)
+		block2.WriteString("\n")
+	}
+
 	block2.WriteString(fmt.Sprintf("\n## Mode: %s (max %d tokens)\n", currentMode.Name, currentMode.MaxTokens))
 	block2.WriteString(currentMode.SystemHint)
 
@@ -93,12 +115,31 @@ func (b *Builder) BuildSystemBlocks(ctx context.Context, projCtx *project.Contex
 	memories, err := b.store.GetTopMemories(ctx, projCtx.ID, 20)
 	if err == nil && len(memories) > 0 {
 		block3.WriteString("## Ghost memories\n")
-		for _, m := range memories {
-			pin := ""
-			if m.Pinned {
-				pin = " [pinned]"
+
+		// Group memories by category for readability.
+		// Order: identity-tier (no decay) → behavioral-tier (45d) → situational-tier (30d)
+		categoryOrder := []string{
+			"preference", "convention", "fact",
+			"architecture", "pattern",
+			"decision", "gotcha", "dependency",
+		}
+		buckets := make(map[string][]memory.Memory, len(categoryOrder))
+		for i := range memories {
+			buckets[memories[i].Category] = append(buckets[memories[i].Category], memories[i])
+		}
+		for _, cat := range categoryOrder {
+			mems := buckets[cat]
+			if len(mems) == 0 {
+				continue
 			}
-			block3.WriteString(fmt.Sprintf("- [%s] %s (imp: %.1f%s)\n", m.Category, m.Content, m.Importance, pin))
+			block3.WriteString(fmt.Sprintf("\n### %s\n", cat))
+			for _, m := range mems {
+				pin := ""
+				if m.Pinned {
+					pin = " [pinned]"
+				}
+				block3.WriteString(fmt.Sprintf("- %s (imp: %.1f%s)\n", m.Content, m.Importance, pin))
+			}
 		}
 	}
 

@@ -115,10 +115,16 @@ func TestBuildSystemBlocks_StaticPersonality(t *testing.T) {
 	expectedPhrases := []string{
 		"You are Ghost",
 		"memory-first personal assistant",
-		"CAPABILITIES",
-		"RULES",
+		"<tools>",
+		"file_read",
+		"grep",
+		"glob",
+		"git",
+		"memory_save",
+		"memory_search",
+		"<rules>",
 		"Never persist secrets",
-		"RESPONSE STYLE",
+		"<response-style>",
 	}
 
 	for _, phrase := range expectedPhrases {
@@ -252,8 +258,8 @@ func TestBuildSystemBlocks_Memories(t *testing.T) {
 	if !strings.Contains(block3, "Use TDD") {
 		t.Error("expected memory content")
 	}
-	if !strings.Contains(block3, "[pattern]") {
-		t.Error("expected category tag")
+	if !strings.Contains(block3, "### pattern") {
+		t.Error("expected category section header")
 	}
 	if !strings.Contains(block3, "(imp: 0.9)") {
 		t.Error("expected importance score")
