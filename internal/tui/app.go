@@ -529,7 +529,11 @@ func (a App) handleMemoryCommand(args []string) (tea.Model, tea.Cmd) {
 		}
 		var lines []string
 		for _, m := range memories {
-			lines = append(lines, fmt.Sprintf("- **[%s]** %.1f %s", m.Category, m.Importance, m.Content))
+			id := m.ID
+			if len(id) > 8 {
+				id = id[:8]
+			}
+			lines = append(lines, fmt.Sprintf("- `%s` **[%s]** %.1f %s", id, m.Category, m.Importance, m.Content))
 		}
 		a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: strings.Join(lines, "\n")})
 		return a, nil
@@ -567,6 +571,17 @@ func (a App) handleMemoryCommand(args []string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: "Memory saved."})
+
+	case "delete":
+		if len(args) < 2 {
+			a.chatView.addMessage(chatMessage{kind: msgError, raw: "Usage: /memory delete <id>"})
+			return a, nil
+		}
+		if err := a.session.Store().Delete(ctx, args[1]); err != nil {
+			a.chatView.addMessage(chatMessage{kind: msgError, raw: err.Error()})
+			return a, nil
+		}
+		a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: "Memory deleted."})
 	}
 
 	return a, nil

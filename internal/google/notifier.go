@@ -124,7 +124,7 @@ func (n *MeetingNotifier) formatAlert(ev Event, until time.Duration) string {
 		fmt.Fprintf(&sb, "  📍 %s\n", mdv2.Esc(ev.Location))
 	}
 	if ev.MeetLink != "" {
-		fmt.Fprintf(&sb, "  🔗 %s\n", mdv2.Esc(ev.MeetLink))
+		fmt.Fprintf(&sb, "  🔗 [Join Meet](%s)\n", mdv2.Esc(ev.MeetLink))
 	}
 	return sb.String()
 }

@@ -10,12 +10,14 @@ import (
 
 // Event is a simplified calendar event.
 type Event struct {
-	Summary  string    `json:"summary"`
-	Start    time.Time `json:"start"`
-	End      time.Time `json:"end"`
-	Location string    `json:"location,omitempty"`
-	MeetLink string    `json:"meet_link,omitempty"`
-	AllDay   bool      `json:"all_day"`
+	Summary    string    `json:"summary"`
+	Start      time.Time `json:"start"`
+	End        time.Time `json:"end"`
+	Location   string    `json:"location,omitempty"`
+	MeetLink   string    `json:"meet_link,omitempty"`
+	AllDay     bool      `json:"all_day"`
+	Attendees  []string  `json:"attendees,omitempty"`
+	Organizer  string    `json:"organizer,omitempty"`
 }
 
 var meetURLRe = regexp.MustCompile(`https://meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}`)
@@ -89,6 +91,25 @@ func (c *Client) EventsInRange(ctx context.Context, start, end time.Time) ([]Eve
 		// Fallback: hangout link.
 		if ev.MeetLink == "" && item.HangoutLink != "" {
 			ev.MeetLink = item.HangoutLink
+		}
+
+		// Extract attendees.
+		if item.Attendees != nil {
+			for _, a := range item.Attendees {
+				name := a.DisplayName
+				if name == "" {
+					name = a.Email
+				}
+				if name != "" {
+					ev.Attendees = append(ev.Attendees, name)
+				}
+			}
+		}
+		if item.Organizer != nil {
+			ev.Organizer = item.Organizer.DisplayName
+			if ev.Organizer == "" {
+				ev.Organizer = item.Organizer.Email
+			}
 		}
 
 		events = append(events, ev)

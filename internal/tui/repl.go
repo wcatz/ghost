@@ -217,7 +217,11 @@ func (r *REPL) handleCommand(input string) bool {
 		fmt.Println("Conversation cleared (memories preserved).")
 
 	case "/cost":
-		fmt.Println("Cost tracking: coming soon")
+		summary := r.active.Cost.Summary()
+		savings := r.active.Cost.Savings()
+		rate := r.active.Cost.CacheHitRate()
+		fmt.Printf("Session cost: %s\n", summary)
+		fmt.Printf("Saved: $%.4f (%.0f%% cache hit rate)\n", savings, rate*100)
 
 	default:
 		fmt.Printf("Unknown command: %s (type /help)\n", cmd)

@@ -15,10 +15,10 @@ type paletteItem struct {
 }
 
 var paletteCommands = []paletteItem{
-	{"/mode chat", "Conversational mode"},
-	{"/memory", "List all memories"},
+	{"/memory", "List all memories (with IDs)"},
 	{"/memory search", "Search memories"},
 	{"/memory add", "Add a manual memory"},
+	{"/memory delete", "Delete a memory by ID"},
 	{"/reflect", "Force memory consolidation"},
 	{"/context", "Show project context"},
 	{"/cost", "Show token usage and cost"},
