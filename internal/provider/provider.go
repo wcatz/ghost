@@ -43,6 +43,7 @@ type MemoryStore interface {
 	// Queries
 	GetTopMemories(ctx context.Context, projectID string, limit int) ([]memory.Memory, error)
 	SearchFTS(ctx context.Context, projectID, query string, limit int) ([]memory.Memory, error)
+	SearchFTSAll(ctx context.Context, query string, limit int) ([]memory.Memory, error)
 	SearchHybrid(ctx context.Context, projectID, query string, queryVec []float32, limit int) ([]memory.Memory, error)
 	SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]memory.ScoredMemory, error)
 	GetByCategory(ctx context.Context, projectID, category string, limit int) ([]memory.Memory, error)

@@ -36,6 +36,9 @@ func (m *mockStore) Upsert(_ context.Context, _, _, _, _ string, _ float32, _ []
 func (m *mockStore) SearchFTS(_ context.Context, _, _ string, _ int) ([]memory.Memory, error) {
 	return m.searchResult, m.searchErr
 }
+func (m *mockStore) SearchFTSAll(_ context.Context, _ string, _ int) ([]memory.Memory, error) {
+	return m.searchResult, m.searchErr
+}
 
 func (m *mockStore) GetTopMemories(_ context.Context, _ string, _ int) ([]memory.Memory, error) {
 	return m.topResult, m.topErr

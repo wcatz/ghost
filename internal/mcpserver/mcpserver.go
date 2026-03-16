@@ -303,6 +303,118 @@ func (s *Server) registerTools() {
 			Content: []mcp.Content{&mcp.TextContent{Text: "Memory deleted."}},
 		}, nil, nil
 	})
+
+	// ghost_search_all — search across all projects.
+	type searchAllArgs struct {
+		Query string `json:"query" jsonschema:"Search query"`
+		Limit int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_search_all",
+		Description: "Search Ghost memories across ALL projects. Use when looking for cross-project patterns or when unsure which project a memory belongs to.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args searchAllArgs) (*mcp.CallToolResult, any, error) {
+		if args.Query == "" {
+			return nil, nil, fmt.Errorf("query is required")
+		}
+		if args.Limit <= 0 {
+			args.Limit = 10
+		}
+		memories, err := s.store.SearchFTSAll(ctx, args.Query, args.Limit)
+		if err != nil {
+			return nil, nil, fmt.Errorf("search failed: %w", err)
+		}
+		if len(memories) == 0 {
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: "No matching memories found."}},
+			}, nil, nil
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: formatMemories(memories)}},
+		}, nil, nil
+	})
+
+	// ghost_save_global — save a cross-project memory.
+	type saveGlobalArgs struct {
+		Content    string   `json:"content" jsonschema:"The memory content to save"`
+		Category   string   `json:"category,omitempty" jsonschema:"Category (default: fact)"`
+		Importance float32  `json:"importance,omitempty" jsonschema:"Importance 0.0-1.0 (default 0.8)"`
+		Tags       []string `json:"tags,omitempty" jsonschema:"Optional tags"`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_save_global",
+		Description: "Save a memory that applies across all projects: personal preferences, coding conventions, toolchain facts, cross-repo relationships.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args saveGlobalArgs) (*mcp.CallToolResult, any, error) {
+		if args.Content == "" {
+			return nil, nil, fmt.Errorf("content is required")
+		}
+		if args.Category == "" {
+			args.Category = "fact"
+		}
+		if args.Importance <= 0 {
+			args.Importance = 0.8
+		}
+		if args.Importance > 1 {
+			args.Importance = 1
+		}
+		if args.Tags == nil {
+			args.Tags = []string{}
+		}
+
+		if err := s.store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+			return nil, nil, fmt.Errorf("ensure global project: %w", err)
+		}
+		id, merged, err := s.store.Upsert(ctx, "_global", args.Category, args.Content, "mcp", args.Importance, args.Tags)
+		if err != nil {
+			return nil, nil, fmt.Errorf("save failed: %w", err)
+		}
+		action := "saved"
+		if merged {
+			action = "merged with existing"
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{
+				Text: fmt.Sprintf("Global memory %s (id: %s)", action, id),
+			}},
+		}, nil, nil
+	})
+
+	// ghost_health — system health and stats.
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_health",
+		Description: "Get Ghost system health: project count, memory counts, embedding status.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+		projects, err := s.store.ListProjects(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list projects: %w", err)
+		}
+
+		var sb strings.Builder
+		sb.WriteString("## Ghost Health\n\n")
+		sb.WriteString(fmt.Sprintf("**Projects:** %d\n\n", len(projects)))
+
+		totalMemories := 0
+		for _, p := range projects {
+			count, err := s.store.CountMemories(ctx, p.ID)
+			if err != nil {
+				continue
+			}
+			totalMemories += count
+			sb.WriteString(fmt.Sprintf("- **%s** (%s): %d memories\n", p.Name, p.ID[:8], count))
+		}
+		sb.WriteString(fmt.Sprintf("\n**Total memories:** %d\n", totalMemories))
+
+		if s.embedder != nil {
+			sb.WriteString("**Embeddings:** enabled\n")
+		} else {
+			sb.WriteString("**Embeddings:** disabled\n")
+		}
+
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+		}, nil, nil
+	})
 }
 
 func formatMemories(memories []memory.Memory) string {

@@ -263,6 +263,27 @@ func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit in
 	return scanMemories(rows)
 }
 
+// SearchFTSAll searches memories across ALL projects using full-text search.
+func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Memory, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT m.id, m.project_id, m.category, m.content, m.importance, m.access_count,
+		       m.last_accessed, m.source, m.tags, m.pinned, m.created_at, m.updated_at
+		FROM memories m
+		JOIN memories_fts f ON f.rowid = m.rowid
+		WHERE memories_fts MATCH ?
+		ORDER BY rank, m.importance DESC
+		LIMIT ?
+	`, sanitizeFTS(query), limit)
+	if err != nil {
+		return nil, fmt.Errorf("search all memories: %w", err)
+	}
+	defer rows.Close()
+	return scanMemories(rows)
+}
+
 // GetByCategory returns memories of a specific category.
 func (s *Store) GetByCategory(ctx context.Context, projectID, category string, limit int) ([]Memory, error) {
 	s.mu.RLock()
