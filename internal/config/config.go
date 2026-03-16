@@ -38,7 +38,6 @@ type Config struct {
 	Calendar  CalendarConfig  `koanf:"calendar"`
 	Google    GoogleConfig    `koanf:"google"`
 	Briefing  BriefingConfig  `koanf:"briefing"`
-	Voice     VoiceConfig     `koanf:"voice"`
 }
 
 // APIConfig holds Claude API settings.
@@ -65,22 +64,6 @@ type DisplayConfig struct {
 	Theme            string `koanf:"theme"`           // "dark", "light", "auto"
 	ImageProtocol    string `koanf:"image_protocol"`  // "auto", "sixel", "kitty", "iterm2", "none"
 	PlainMode        bool   `koanf:"plain_mode"`      // force legacy REPL (no bubbletea)
-}
-
-// VoiceConfig holds voice interface settings.
-type VoiceConfig struct {
-	Enabled     bool    `koanf:"enabled"`
-	STTBackend  string  `koanf:"stt_backend"`  // "whisper" or "subprocess"
-	STTModel    string  `koanf:"stt_model"`    // whisper model name/path
-	TTSBackend  string  `koanf:"tts_backend"`  // "piper", "espeak", or "none"
-	TTSModel    string  `koanf:"tts_model"`    // piper model path
-	TTSVoice    string  `koanf:"tts_voice"`    // voice name
-	TTSRate     float64 `koanf:"tts_rate"`     // speech rate multiplier
-	WakeWord    string  `koanf:"wake_word"`    // reserved for future use
-	PushToTalk  string  `koanf:"push_to_talk"` // keybind, e.g. "ctrl+space"
-	SilenceMs   int     `koanf:"silence_ms"`   // silence duration to end recording (ms)
-	SampleRate  int     `koanf:"sample_rate"`  // audio sample rate
-	InputDevice string  `koanf:"input_device"` // audio input device ("default" or device ID)
 }
 
 // ServerConfig holds ghost serve settings.
@@ -165,7 +148,7 @@ type GitInfo struct {
 var defaults = map[string]interface{}{
 	"api.model_quality":          "claude-sonnet-4-5-20250929",
 	"api.model_fast":             "claude-haiku-4-5-20251001",
-	"defaults.mode":              "code",
+	"defaults.mode":              "chat",
 	"defaults.reflection_interval": 10,
 	"defaults.max_conversation_turns": 50,
 	"defaults.auto_memory":       true,
@@ -176,15 +159,6 @@ var defaults = map[string]interface{}{
 	"display.theme":              "auto",
 	"display.image_protocol":     "auto",
 	"display.plain_mode":         false,
-	"voice.enabled":              false,
-	"voice.stt_backend":          "whisper",
-	"voice.stt_model":            "base",
-	"voice.tts_backend":          "piper",
-	"voice.tts_rate":             1.0,
-	"voice.push_to_talk":         "ctrl+space",
-	"voice.silence_ms":           800,
-	"voice.sample_rate":          16000,
-	"voice.input_device":         "default",
 	"server.listen_addr":         "127.0.0.1:2187",
 	"embedding.enabled":          true,
 	"embedding.ollama_url":       "http://localhost:11434",

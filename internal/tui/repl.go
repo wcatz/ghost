@@ -157,7 +157,7 @@ func (r *REPL) handleCommand(input string) bool {
 	case "/mode":
 		if len(args) == 0 {
 			fmt.Printf("Current mode: %s%s%s\n", colorCyan, r.active.Mode.Name, colorReset)
-			fmt.Println("Available: chat, code, debug, review, plan, refactor")
+			fmt.Println("Available: chat")
 		} else {
 			r.active.SetMode(args[0])
 			fmt.Printf("Mode: %s%s%s\n", colorCyan, r.active.Mode.Name, colorReset)
@@ -303,7 +303,7 @@ func (r *REPL) handleMemoryCommand(args []string) {
 
 func (r *REPL) printHelp() {
 	fmt.Printf(`%sGhost Commands:%s
-  /mode [name]      Switch mode (chat, code, debug, review, plan, refactor)
+  /mode [name]      Switch mode (chat)
   /switch [name]    Switch active project
   /projects         List active project sessions
   /memory           List all memories

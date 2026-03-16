@@ -57,7 +57,7 @@ func main() {
 
 	var (
 		projects    stringSlice
-		modeFlag    = flag.String("mode", "", "Operating mode: chat, code, debug, review, plan, refactor")
+		modeFlag    = flag.String("mode", "", "Operating mode (default: chat)")
 		modelFlag   = flag.String("model", "", "Model override (e.g. claude-opus-4-6-20250514)")
 		yolo        = flag.Bool("yolo", false, "Skip all tool approval prompts")
 		noMemory    = flag.Bool("no-memory", false, "Disable memory extraction for this session")
