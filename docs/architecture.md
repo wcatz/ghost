@@ -29,8 +29,6 @@ internal/
     store.go               SQLite CRUD, FTS5 search, token tracking
     schema.go              DDL (13 tables, embedded via const)
     vector.go              Cosine similarity, hybrid RRF search
-    store_test.go          Table-driven tests
-    vector_test.go         Embedding tests
   orchestrator/            Session management
     orchestrator.go        Multi-project session map
     session.go             Agentic loop: Send() → tool_use → execute → repeat
@@ -41,17 +39,12 @@ internal/
   reflection/              Memory consolidation
     engine.go              Haiku-based periodic reflection
     extractor.go           Extract memories from conversation
-    reflection_test.go     Tests
   tool/                    Tool execution
     registry.go            Register, Execute, approval levels
-    bash.go                Shell execution (blocked patterns)
-    file_*.go              Read, write, edit
-    git.go                 Git operations (blocked: force-push, reset --hard)
-    glob.go                File pattern matching
-    grep.go                Content search
-    memory_*.go            Memory save/search tools
-  mode/                    Operating modes
-    modes.go               chat, code, debug, review, plan, refactor
+    memory_save.go         Save a memory via tool_use
+    memory_search.go       Search memories via tool_use
+  mode/                    Operating mode
+    modes.go               chat (single mode)
   project/                 Project detection
     context.go             Language, git, test/lint commands, CLAUDE.md
   tui/                     Terminal UI
@@ -72,10 +65,8 @@ internal/
   server/                  HTTP API
     server.go              chi router, middleware, routes
     chat.go                Session + SSE streaming endpoints
-    approval.go            Pending approval state
-    sse.go                 SSE write helpers
   mcpserver/               MCP server
-    server.go              stdio transport, 5 memory tools
+    mcpserver.go           stdio transport, 5 memory tools
   telegram/                Telegram bot
     bot.go                 Commands, whitelist auth, alerts
     approval.go            Approval forwarding with inline keyboards
@@ -92,27 +83,12 @@ internal/
     scheduler.go           gocron + NLP date parsing (when)
   briefing/                Daily briefing
     briefing.go            Aggregate GitHub + calendar + Gmail + reminders
-  calendar/                CalDAV client (legacy, replaced by google/)
+  calendar/                CalDAV client
     client.go              Read-only event fetching
   mdv2/                    MarkdownV2 utilities
     escape.go              Shared escaper for Telegram formatting
-  voice/                   Voice pipeline (WIP)
-    voice.go               STT, TTS, AudioSource, AudioSink, VAD interfaces
-    pipeline.go            Push-to-talk orchestrator
   audit/                   Logging
     audit.go               Per-action cost + token tracking
-  provider/                Interface contracts
-    provider.go            LLMProvider, MemoryStore, Frontend, ApprovalRequest
-vscode-ghost/              VSCode extension
-  src/extension.ts         Activation, commands, health polling
-  src/ghost-client.ts      HTTP + SSE client for all API endpoints
-  src/chat-panel.ts        Sidebar chat webview provider
-  src/chat-editor.ts       Full editor tab chat panel
-  src/memory-panel.ts      Memory browser with FTS search
-  src/webview-html.ts      Shared HTML/CSS/JS for chat webviews
-  src/status-bar.ts        Connection + mode + token status bar
-  media/chat.css           Polished dark theme with animations
-  media/ghost-icon.svg     Activity bar icon
 migrations/
   001_init.sql             Schema reference (actual DDL in schema.go)
 ```
@@ -150,18 +126,6 @@ Claude Code / Cursor → stdio JSON-RPC → mcpserver
                                  ghost_project_context → store.GetTopMemories()
                                           ↓
                                  SQLite query (no LLM calls)
-```
-
-### HTTP API (for VSCode extension)
-```
-VSCode extension → POST /api/v1/sessions/{id}/send
-                          ↓
-                 Session.Send() → SSE stream back to client
-                          ↓
-                 data: {"type":"text","text":"..."}
-                 data: {"type":"approval_required",...}
-                          ↓
-                 POST /api/v1/sessions/{id}/approve → response channel
 ```
 
 ## Cost Optimization
@@ -205,7 +169,7 @@ go build -o ghost ./cmd/ghost
 # ldflags: -s -w -X main.version={{.Version}}
 ```
 
-## SQLite Schema (13 tables)
+## SQLite Schema
 
 | Table | Purpose |
 |-------|---------|
@@ -221,18 +185,3 @@ go build -o ghost ./cmd/ghost
 | `notifications` | GitHub notifications (priority P0-P4) |
 | `scheduled_jobs` | Persistent cron jobs |
 | `reminders` | One-shot reminders with due_at |
-
-## Voice Integration Points (Phase C, designed not implemented)
-
-```
-InputSource interface:  Text() <-chan string, State() InputState
-OutputSink interface:   Receive(text string), Flush()
-
-Textarea → InputSource
-Mic + whisper.cpp → InputSource
-Viewport → OutputSink
-Kokoro TTS → OutputSink
-
-Push-to-talk: Ctrl+Space (reserved in keys.go)
-Status bar: mic state indicator (idle/listening/speaking)
-```

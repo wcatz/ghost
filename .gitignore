@@ -1,5 +1,7 @@
 # Binaries
 ghost
+ghost-test
+cmd/ghost/ghost-tui
 *.exe
 *.dll
 *.so
