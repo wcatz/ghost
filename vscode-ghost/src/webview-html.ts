@@ -521,7 +521,9 @@ export function getChatHtml(
           break;
 
         case 'text_delta':
-          currentAssistantText += msg.text;
+          // Filter out tool_result XML tags - tool output is shown in tool indicators
+          const cleanText = msg.text.replace(/<tool_result[^>]*>/g, '').replace(/<\/tool_result>/g, '');
+          currentAssistantText += cleanText;
           const el = ensureAssistantBubble();
           el.innerHTML = renderMarkdown(currentAssistantText);
           scrollToBottom();
