@@ -21,6 +21,13 @@ type commandMsg struct {
 	Args    []string
 }
 
+// voiceResultMsg carries the result of a push-to-talk cycle.
+type voiceResultMsg struct {
+	transcript string
+	response   string
+	err        error
+}
+
 // errorMsg carries an error to display.
 type errorMsg struct{ err error }
 

@@ -50,6 +50,10 @@ type App struct {
 	isProcessing bool
 	imgProtocol  imageProtocol
 
+	// Voice: set via SetVoice(). Nil if voice disabled.
+	voiceFn     func(ctx context.Context) (transcript, response string, err error)
+	voiceActive bool
+
 	// Channels for async communication.
 	activeStream <-chan ai.StreamEvent // current event channel from Session.SendAsync
 	approvalCh   chan provider.ApprovalRequest
@@ -118,6 +122,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Continue listening for more approvals.
 		cmds = append(cmds, a.listenForApprovals())
 		return a, tea.Batch(cmds...)
+
+	case voiceResultMsg:
+		a.voiceActive = false
+		if msg.err != nil {
+			a.chatView.addMessage(chatMessage{kind: msgError, raw: fmt.Sprintf("Voice error: %v", msg.err)})
+		} else if msg.transcript != "" {
+			a.chatView.addMessage(chatMessage{kind: msgUser, raw: fmt.Sprintf("🎤 %s", msg.transcript)})
+			if msg.response != "" {
+				a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: msg.response})
+			}
+		}
+		return a, nil
 
 	case commandMsg:
 		return a.handleCommand(msg)
@@ -368,6 +384,16 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.toolbar.toggleSelected()
 			return a, nil
 		}
+
+	case key.Matches(msg, keys.PushToTalk):
+		if a.voiceFn != nil && !a.voiceActive && !a.isProcessing {
+			a.voiceActive = true
+			a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: "🎤 Listening..."})
+			return a, func() tea.Msg {
+				transcript, response, err := a.voiceFn(a.ctx)
+				return voiceResultMsg{transcript: transcript, response: response, err: err}
+			}
+		}
 	}
 
 	// ? opens help when input is empty.
@@ -585,6 +611,13 @@ func (a App) handleMemoryCommand(args []string) (tea.Model, tea.Cmd) {
 	}
 
 	return a, nil
+}
+
+// SetVoice configures the voice push-to-talk function.
+// The function should execute one full PTT cycle (record → transcribe → respond → speak)
+// and return the transcript and response text.
+func (a *App) SetVoice(fn func(ctx context.Context) (transcript, response string, err error)) {
+	a.voiceFn = fn
 }
 
 // resize adjusts all component sizes.
