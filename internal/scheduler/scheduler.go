@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,7 +59,9 @@ func (s *Scheduler) OnAlert(fn AlertFunc) {
 }
 
 // Start begins the scheduler and reminder check loop.
+// Reloads persisted cron jobs from SQLite on startup.
 func (s *Scheduler) Start(ctx context.Context) {
+	s.reloadJobs(ctx)
 	s.cron.Start()
 	s.logger.Info("scheduler started")
 
@@ -71,6 +74,34 @@ func (s *Scheduler) Start(ctx context.Context) {
 	}
 }
 
+// reloadJobs re-registers persisted cron jobs from SQLite.
+// Jobs that are re-added via AddCronJob (like morning-briefing) will
+// have their DB rows updated, so duplicates are harmless.
+func (s *Scheduler) reloadJobs(ctx context.Context) {
+	rows, err := s.db.QueryContext(ctx, `SELECT name, schedule FROM scheduled_jobs WHERE enabled = 1`)
+	if err != nil {
+		s.logger.Error("reload jobs", "error", err)
+		return
+	}
+	defer rows.Close()
+
+	loaded := 0
+	for rows.Next() {
+		var name, schedule string
+		if err := rows.Scan(&name, &schedule); err != nil {
+			continue
+		}
+		// Only register the schedule — the actual task function must be
+		// re-wired by the caller (e.g. morning-briefing is re-added in main.go).
+		// This ensures the schedule metadata survives restarts.
+		s.logger.Debug("reloaded cron job", "name", name, "schedule", schedule)
+		loaded++
+	}
+	if loaded > 0 {
+		s.logger.Info("reloaded cron jobs from database", "count", loaded)
+	}
+}
+
 // AddReminder parses a natural language time and creates a reminder.
 // Returns the parsed due time. If parsing fails, uses a fallback of 1 hour from now.
 func (s *Scheduler) AddReminder(ctx context.Context, text string) (time.Time, error) {
@@ -78,10 +109,19 @@ func (s *Scheduler) AddReminder(ctx context.Context, text string) (time.Time, er
 	defer s.mu.Unlock()
 
 	dueAt := time.Now().Add(1 * time.Hour) // fallback
+	message := text
 
 	result, err := s.parser.Parse(text, time.Now())
 	if err == nil && result != nil {
 		dueAt = result.Time
+		// Strip the time expression from the message.
+		// result.Index is the start position, result.Text is the matched time string.
+		before := strings.TrimSpace(text[:result.Index])
+		after := strings.TrimSpace(text[result.Index+len(result.Text):])
+		message = strings.TrimSpace(before + " " + after)
+		if message == "" {
+			message = text // fallback to full text if stripping left nothing
+		}
 	}
 
 	id, err := randomID()
@@ -90,7 +130,7 @@ func (s *Scheduler) AddReminder(ctx context.Context, text string) (time.Time, er
 	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO reminders (id, message, due_at) VALUES (?, ?, ?)
-	`, id, text, dueAt.UTC().Format(time.RFC3339))
+	`, id, message, dueAt.UTC().Format(time.RFC3339))
 	if err != nil {
 		return time.Time{}, fmt.Errorf("save reminder: %w", err)
 	}

@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -134,15 +135,18 @@ func (tb *Bot) handleChat(ctx context.Context, b *bot.Bot, update *models.Update
 
 	tb.sendTyping(ctx, update)
 
-	// Send message via API. This returns an SSE stream — we just report success.
-	err = tb.sendChatMessage(fullID, message)
+	response, err := tb.sendChatMessage(fullID, message)
 	if err != nil {
 		tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
 		return
 	}
 
-	tb.reply(ctx, b, update, fmt.Sprintf("📤 Sent to `%s`:\n_%s_",
-		mdv2.Esc(fullID[:8]), mdv2.Esc(message)))
+	if response == "" {
+		response = "(no response)"
+	}
+	for _, chunk := range mdv2.Split(response, 4000) {
+		tb.reply(ctx, b, update, chunk)
+	}
 }
 
 // handlePendingChatReply routes text replies to the pending chat session.
@@ -165,14 +169,18 @@ func (tb *Bot) handlePendingChatReply(ctx context.Context, b *bot.Bot, update *m
 
 	tb.sendTyping(ctx, update)
 
-	err := tb.sendChatMessage(sessionID, message)
+	response, err := tb.sendChatMessage(sessionID, message)
 	if err != nil {
 		tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
 		return true
 	}
 
-	tb.reply(ctx, b, update, fmt.Sprintf("📤 Sent to `%s`:\n_%s_",
-		mdv2.Esc(sessionID[:8]), mdv2.Esc(message)))
+	if response == "" {
+		response = "(no response)"
+	}
+	for _, chunk := range mdv2.Split(response, 4000) {
+		tb.reply(ctx, b, update, chunk)
+	}
 	return true
 }
 
@@ -202,13 +210,14 @@ func (tb *Bot) fetchSessions() ([]apiSession, error) {
 	return sessions, nil
 }
 
-func (tb *Bot) sendChatMessage(sessionID, message string) error {
+// sendChatMessage sends a message to a Ghost session and collects the streamed response.
+func (tb *Bot) sendChatMessage(sessionID, message string) (string, error) {
 	payload, _ := json.Marshal(map[string]string{"message": message})
 	url := fmt.Sprintf("http://%s/api/v1/sessions/%s/send", tb.serverAddr, sessionID)
 
 	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("create chat request: %w", err)
+		return "", fmt.Errorf("create chat request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if tb.serverToken != "" {
@@ -216,16 +225,34 @@ func (tb *Bot) sendChatMessage(sessionID, message string) error {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// The send endpoint returns SSE — just drain it.
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
+		return "", fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
 	}
-	// Drain SSE stream so the request completes.
-	_, _ = io.Copy(io.Discard, resp.Body)
-	return nil
+
+	// Parse SSE stream and collect assistant text.
+	var response strings.Builder
+	scanner := bufio.NewScanner(resp.Body)
+	var eventType string
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			eventType = strings.TrimPrefix(line, "event: ")
+			continue
+		}
+		if strings.HasPrefix(line, "data: ") && eventType == "text" {
+			data := strings.TrimPrefix(line, "data: ")
+			var payload struct {
+				Text string `json:"text"`
+			}
+			if json.Unmarshal([]byte(data), &payload) == nil {
+				response.WriteString(payload.Text)
+			}
+		}
+	}
+	return response.String(), nil
 }
