@@ -95,31 +95,36 @@ export class ChatWebview implements vscode.Disposable {
       const { events: emitter, abort } = this.client.sendMessage(this.session.id, text, image);
       this.abortController = { signal: new AbortController().signal, abort } as unknown as AbortController;
 
-      emitter.on("text", (data: Record<string, unknown>) => {
-        this.postMessage({ type: "text_delta", text: data.text as string });
+      // Event names and shapes must match ghost-client.ts emit calls exactly.
+      // "text" and "thinking" emit strings; others emit objects.
+      emitter.on("text", (text: string) => {
+        this.postMessage({ type: "text_delta", text });
       });
-      emitter.on("thinking", (data: Record<string, unknown>) => {
-        this.postMessage({ type: "thinking_delta", text: data.text as string });
+      emitter.on("thinking", (text: string) => {
+        this.postMessage({ type: "thinking_delta", text });
       });
-      emitter.on("tool_use_start", (data: Record<string, unknown>) => {
-        this.postMessage({ type: "tool_start", id: data.id as string, name: data.name as string });
+      emitter.on("tool_start", (data: Record<string, string>) => {
+        this.postMessage({ type: "tool_start", id: data.id, name: data.name });
       });
-      emitter.on("tool_input_delta", (data: Record<string, unknown>) => {
-        this.postMessage({ type: "tool_delta", id: data.id as string, delta: data.delta as string });
+      emitter.on("tool_delta", (data: Record<string, string>) => {
+        this.postMessage({ type: "tool_delta", id: data.id, delta: data.delta });
       });
-      emitter.on("tool_use_end", (data: Record<string, unknown>) => {
-        this.postMessage({ type: "tool_end", id: data.id as string, name: data.name as string });
+      emitter.on("tool_end", (data: Record<string, string>) => {
+        this.postMessage({ type: "tool_end", id: data.id, name: data.name });
       });
-      emitter.on("tool_result", (data: Record<string, unknown>) => {
-        this.postMessage({
-          type: "tool_result",
-          id: data.id as string,
-          name: data.name as string,
-          output: (data.text as string) ?? "",
-          is_error: data.is_error === "true",
-        });
+      // tool_result comes via generic "event" since ghost-client doesn't emit a named event for it
+      emitter.on("event", (evt: { type: string; data: Record<string, unknown> }) => {
+        if (evt.type === "tool_result") {
+          this.postMessage({
+            type: "tool_result",
+            id: (evt.data.id as string) ?? "",
+            name: (evt.data.name as string) ?? "",
+            output: (evt.data.text as string) ?? "",
+            is_error: evt.data.is_error === "true",
+          });
+        }
       });
-      emitter.on("approval_required", (data: Record<string, unknown>) => {
+      emitter.on("approval", (data: Record<string, unknown>) => {
         this.postMessage({
           type: "approval_required",
           tool_name: data.tool_name as string,
@@ -138,8 +143,8 @@ export class ChatWebview implements vscode.Disposable {
         });
         this.postMessage({ type: "streaming", active: false });
       });
-      emitter.on("error", (data: Record<string, unknown>) => {
-        this.postMessage({ type: "error", text: (data.error as string) ?? "Unknown error" });
+      emitter.on("error", (err: Error) => {
+        this.postMessage({ type: "error", text: err.message ?? "Unknown error" });
         this.postMessage({ type: "streaming", active: false });
       });
       emitter.on("close", () => {
