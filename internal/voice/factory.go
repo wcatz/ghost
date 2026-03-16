@@ -10,16 +10,20 @@ import (
 
 // Options holds the configuration for building a voice pipeline.
 type Options struct {
-	STTBackend  string  // "whisper" or "subprocess" (both use whisper CLI)
-	STTModel    string  // model name or path
-	TTSBackend  string  // "piper", "espeak", or "none"
-	TTSModel    string  // model path for piper
-	TTSVoice    string  // voice name for espeak
-	TTSRate     float64 // speech rate multiplier
-	SilenceMs   int     // ms of silence before ending recording
-	SampleRate  int     // audio sample rate (default 16000)
-	InputDevice string  // ALSA device name
-	Logger      *slog.Logger
+	STTBackend         string  // "whisper", "assemblyai"
+	STTModel           string  // model name or path (whisper)
+	TTSBackend         string  // "piper", "elevenlabs", "espeak", or "none"
+	TTSModel           string  // model path for piper
+	TTSVoice           string  // voice name (espeak) or voice ID (elevenlabs)
+	TTSRate            float64 // speech rate multiplier
+	SilenceMs          int     // ms of silence before ending recording
+	SampleRate         int     // audio sample rate (default 16000)
+	InputDevice        string  // ALSA device name
+	TriggerWord        string  // wake word (default "ghost")
+	ElevenLabsAPIKey   string  // ElevenLabs API key
+	ElevenLabsVoiceID  string  // ElevenLabs voice ID
+	AssemblyAIAPIKey   string  // AssemblyAI API key
+	Logger             *slog.Logger
 }
 
 // New builds a complete voice pipeline from the given options.
@@ -64,22 +68,27 @@ func New(opts Options, respond ResponseFunc) (*Pipeline, error) {
 
 // buildSTT creates the STT backend.
 func buildSTT(opts Options) (STT, error) {
-	// Try common whisper binary names.
-	binaries := []string{"whisper-cpp", "whisper", "main"}
-
-	var binary string
-	for _, b := range binaries {
-		if _, err := lookPath(b); err == nil {
-			binary = b
-			break
+	switch opts.STTBackend {
+	case "assemblyai":
+		if opts.AssemblyAIAPIKey == "" {
+			return nil, fmt.Errorf("assemblyai requires assemblyai_api_key")
 		}
+		return NewAssemblyAISTT(opts.AssemblyAIAPIKey), nil
+	default: // "whisper" or empty
+		binaries := []string{"whisper-cpp", "whisper", "whisper-cli", "main"}
+		var binary string
+		for _, b := range binaries {
+			if _, err := lookPath(b); err == nil {
+				binary = b
+				break
+			}
+		}
+		if binary == "" {
+			return nil, fmt.Errorf("whisper binary not found (tried: %v)", binaries)
+		}
+		model := resolveWhisperModel(opts.STTModel)
+		return NewWhisperSTT(binary, model)
 	}
-	if binary == "" {
-		return nil, fmt.Errorf("whisper binary not found (tried: %v)", binaries)
-	}
-
-	model := resolveWhisperModel(opts.STTModel)
-	return NewWhisperSTT(binary, model)
 }
 
 // buildTTS creates the TTS backend.
@@ -99,6 +108,18 @@ func buildTTS(opts Options) (TTS, error) {
 		}
 		tts.SetRate(opts.TTSRate)
 		return tts, nil
+	case "elevenlabs":
+		if opts.ElevenLabsAPIKey == "" {
+			return nil, fmt.Errorf("elevenlabs requires elevenlabs_api_key")
+		}
+		voiceID := opts.ElevenLabsVoiceID
+		if voiceID == "" {
+			voiceID = opts.TTSVoice
+		}
+		if voiceID == "" {
+			return nil, fmt.Errorf("elevenlabs requires a voice_id")
+		}
+		return NewElevenLabsTTS(opts.ElevenLabsAPIKey, voiceID), nil
 	default:
 		return nil, fmt.Errorf("unknown tts backend: %s", opts.TTSBackend)
 	}
