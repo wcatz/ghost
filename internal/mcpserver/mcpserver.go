@@ -47,6 +47,30 @@ func (s *Server) Run(ctx context.Context) error {
 	return s.mcp.Run(ctx, &mcp.StdioTransport{})
 }
 
+// resolveProjectID resolves a project_id that may be a name (e.g. "ghost")
+// into the actual hash ID (e.g. "6bdc098af7f5") stored in the database.
+// Tries direct ID match first, then falls back to name lookup.
+func (s *Server) resolveProjectID(ctx context.Context, input string) string {
+	// Check if input directly matches a project ID.
+	projects, err := s.store.ListProjects(ctx)
+	if err == nil {
+		for _, p := range projects {
+			if p.ID == input {
+				return input
+			}
+		}
+	}
+
+	// Try name lookup.
+	resolved, err := s.store.ResolveProjectByName(ctx, input)
+	if err == nil && resolved != "" {
+		return resolved
+	}
+
+	// Return as-is if nothing matched — let downstream handle the miss.
+	return input
+}
+
 func (s *Server) registerTools() {
 	// ghost_memory_search — search memories by keyword or semantic query.
 	type searchArgs struct {
@@ -65,6 +89,8 @@ func (s *Server) registerTools() {
 		if args.Limit <= 0 {
 			args.Limit = 10
 		}
+
+		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
 
 		memories, err := s.store.SearchFTS(ctx, args.ProjectID, args.Query, args.Limit)
 		if err != nil {
@@ -118,6 +144,8 @@ func (s *Server) registerTools() {
 			args.Tags = []string{}
 		}
 
+		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+
 		if err := s.store.EnsureProject(ctx, args.ProjectID, "", args.ProjectID); err != nil {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
@@ -154,6 +182,8 @@ func (s *Server) registerTools() {
 		if args.Limit <= 0 {
 			args.Limit = 20
 		}
+
+		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
 
 		var sb strings.Builder
 
@@ -202,6 +232,8 @@ func (s *Server) registerTools() {
 		if args.Limit <= 0 {
 			args.Limit = 30
 		}
+
+		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
 
 		var memories []memory.Memory
 		var err error
