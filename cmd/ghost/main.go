@@ -160,20 +160,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Determine run mode: pipe, one-shot, or interactive TUI.
+	// Determine run mode: one-shot, pipe, or interactive TUI.
+	// One-shot check first — args take priority over pipe detection.
+	if args := flag.Args(); len(args) > 0 {
+		message := strings.Join(args, " ")
+		tui.RunOneShot(firstSession, message, cfg.Display.ShowCost)
+		return
+	}
+
 	if !tui.IsTerminal() {
 		// Pipe mode: read all stdin and send as one message.
 		input, _ := io.ReadAll(os.Stdin)
 		if len(input) > 0 {
 			tui.RunPipe(firstSession, string(input), cfg.Display.ShowCost)
 		}
-		return
-	}
-
-	if args := flag.Args(); len(args) > 0 {
-		// One-shot mode: message from command line args.
-		message := strings.Join(args, " ")
-		tui.RunOneShot(firstSession, message, cfg.Display.ShowCost)
 		return
 	}
 

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -47,7 +48,7 @@ func RunOneShot(session *orchestrator.Session, message string, showCost bool) {
 		return provider.ApprovalResponse{Approved: approved}
 	}
 
-	events := session.Send(nil, message, approvalFn)
+	events := session.Send(context.Background(), message, approvalFn)
 
 	for evt := range events {
 		switch evt.Type {
