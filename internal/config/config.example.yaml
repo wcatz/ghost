@@ -20,7 +20,7 @@
 
 # --- Daemon defaults ---
 # defaults:
-#   mode: "code"                     # chat, code, debug, review, plan, refactor
+#   mode: "chat"
 #   reflection_interval: 10          # conversations between reflection passes
 #   max_conversation_turns: 50
 #   auto_memory: true
@@ -60,20 +60,6 @@
 #   url: ""                          # CalDAV server URL (iCloud, Fastmail, etc.)
 #   username: ""
 #   password: ""                     # app-specific password recommended
-
-# --- Voice Pipeline ---
-# voice:
-#   enabled: false
-#   stt_backend: "whisper"           # "whisper" (whisper.cpp CLI)
-#   stt_model: "base"               # model name or path to ggml-*.bin
-#   tts_backend: "piper"            # "piper", "espeak", or "none"
-#   tts_model: ""                   # path to piper .onnx model file
-#   tts_voice: ""                   # voice name (espeak backend)
-#   tts_rate: 1.0                   # speech rate multiplier
-#   push_to_talk: "ctrl+space"      # keybind for push-to-talk
-#   silence_ms: 800                 # ms of silence to end recording
-#   sample_rate: 16000              # audio sample rate
-#   input_device: "default"         # ALSA device name
 
 # --- Morning Briefing ---
 # briefing:

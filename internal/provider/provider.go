@@ -109,27 +109,6 @@ type ApprovalRequest struct {
 // Deprecated: Use ApprovalRequest channel-based flow instead.
 type ApprovalFunc func(toolName string, input json.RawMessage) ApprovalResponse
 
-// InputSource produces user text (keyboard, voice transcription, etc.).
-type InputSource interface {
-	Text() <-chan string
-	State() InputState
-}
-
-// InputState represents the current state of an input source.
-type InputState int
-
-const (
-	InputIdle        InputState = iota // Not active
-	InputListening                     // Capturing input (e.g., microphone recording)
-	InputTranscribing                  // Processing input (e.g., STT)
-)
-
-// OutputSink consumes assistant text (display, TTS, etc.).
-type OutputSink interface {
-	Receive(text string)
-	Flush()
-}
-
 // Frontend renders agent output and handles user input.
 type Frontend interface {
 	// Run starts the frontend event loop. Blocks until done.

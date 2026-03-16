@@ -39,8 +39,8 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.API.ModelFast != "claude-haiku-4-5-20251001" {
 		t.Errorf("expected model_fast default, got %q", cfg.API.ModelFast)
 	}
-	if cfg.Defaults.Mode != "code" {
-		t.Errorf("expected defaults.mode=code, got %q", cfg.Defaults.Mode)
+	if cfg.Defaults.Mode != "chat" {
+		t.Errorf("expected defaults.mode=chat, got %q", cfg.Defaults.Mode)
 	}
 	if cfg.Defaults.ReflectionInterval != 10 {
 		t.Errorf("expected reflection_interval=10, got %d", cfg.Defaults.ReflectionInterval)
