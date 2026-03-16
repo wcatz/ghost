@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS memories (
     access_count  INTEGER NOT NULL DEFAULT 0,
     last_accessed TEXT,
     source        TEXT NOT NULL DEFAULT 'reflection'
-                  CHECK (source IN ('reflection', 'chat', 'manual', 'tool', 'mcp')),
+                  CHECK (source IN ('reflection', 'chat', 'manual', 'tool', 'mcp', 'onboarding', 'decision_log')),
     tags          TEXT DEFAULT '[]',
     pinned        INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),

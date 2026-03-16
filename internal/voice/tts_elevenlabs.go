@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
 
 // ElevenLabsTTS implements TTS using the ElevenLabs REST API.
@@ -22,7 +23,7 @@ func NewElevenLabsTTS(apiKey, voiceID string) *ElevenLabsTTS {
 	return &ElevenLabsTTS{
 		apiKey:  apiKey,
 		voiceID: voiceID,
-		client:  &http.Client{Timeout: 30_000_000_000}, // 30s
+		client:  &http.Client{Timeout: 30 * time.Second},
 	}
 }
 

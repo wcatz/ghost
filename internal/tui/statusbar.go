@@ -21,10 +21,10 @@ type statusBar struct {
 	requestStart time.Time
 }
 
-func newStatusBar(projectName, modeName string, cost *ai.CostTracker) statusBar {
+func newStatusBar(projectName, modelName string, cost *ai.CostTracker) statusBar {
 	return statusBar{
 		projectName: projectName,
-		modeName:    modeName,
+		modelName:   modelName,
 		cost:        cost,
 	}
 }

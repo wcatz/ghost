@@ -225,13 +225,24 @@ func (s *Session) expandFileRefs(text string) string {
 			absPath = filepath.Join(s.ProjectPath, ref)
 		}
 
-		// Validate path is within project directory.
+		// Validate path is within project directory (resolve symlinks to prevent escape).
 		cleaned := filepath.Clean(absPath)
 		if !strings.HasPrefix(cleaned, filepath.Clean(s.ProjectPath)) {
 			continue
 		}
+		resolved, err := filepath.EvalSymlinks(cleaned)
+		if err != nil {
+			continue
+		}
+		projectResolved, err := filepath.EvalSymlinks(filepath.Clean(s.ProjectPath))
+		if err != nil {
+			continue
+		}
+		if !strings.HasPrefix(resolved, projectResolved) {
+			continue
+		}
 
-		data, err := os.ReadFile(cleaned)
+		data, err := os.ReadFile(resolved)
 		if err != nil {
 			s.logger.Debug("@file not found", "path", ref, "error", err)
 			continue

@@ -1,4 +1,4 @@
-# Ghost — Memory-First Coding Agent
+# Ghost — Memory-First Personal Assistant
 
 ## Stack
 - Go 1.25+ CLI application

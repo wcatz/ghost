@@ -221,7 +221,7 @@ func (r *REPL) handleCommand(input string) bool {
 		savings := r.active.Cost.Savings()
 		rate := r.active.Cost.CacheHitRate()
 		fmt.Printf("Session cost: %s\n", summary)
-		fmt.Printf("Saved: $%.4f (%.0f%% cache hit rate)\n", savings, rate*100)
+		fmt.Printf("Saved: $%.4f (%.0f%% cache hit rate)\n", savings, rate)
 
 	default:
 		fmt.Printf("Unknown command: %s (type /help)\n", cmd)
