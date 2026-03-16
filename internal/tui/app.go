@@ -229,6 +229,7 @@ func (a App) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case "thinking":
 		a.toolbar.setThinking(true)
+		a.toolbar.appendThinking(msg.Text)
 	case "text":
 		a.toolbar.setThinking(false)
 		a.chatView.appendToLastAssistant(msg.Text)
@@ -244,6 +245,11 @@ func (a App) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 	case "tool_use_end":
 		if msg.ToolUse != nil {
 			a.toolbar.completeTool(msg.ToolUse.ID)
+		}
+	case "tool_result":
+		if msg.ToolUse != nil {
+			isError := msg.Metadata != nil && msg.Metadata["is_error"] == "true"
+			a.toolbar.setToolOutput(msg.ToolUse.ID, msg.Text, isError)
 		}
 	case "done":
 		a.isProcessing = false
@@ -339,6 +345,18 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		a.chatView, cmd = a.chatView.update(msg)
 		return a, cmd
+
+	case key.Matches(msg, keys.ToolNext):
+		a.toolbar.selectNext()
+		return a, nil
+	case key.Matches(msg, keys.ToolPrev):
+		a.toolbar.selectPrev()
+		return a, nil
+	case key.Matches(msg, keys.ToolToggle):
+		if a.input.value() == "" {
+			a.toolbar.toggleSelected()
+			return a, nil
+		}
 	}
 
 	// Default: pass to input area.
