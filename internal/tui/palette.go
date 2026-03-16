@@ -16,11 +16,6 @@ type paletteItem struct {
 
 var paletteCommands = []paletteItem{
 	{"/mode chat", "Conversational mode"},
-	{"/mode code", "Code writing mode"},
-	{"/mode debug", "Debugging mode"},
-	{"/mode review", "Code review mode"},
-	{"/mode plan", "Architecture planning mode"},
-	{"/mode refactor", "Refactoring mode"},
 	{"/memory", "List all memories"},
 	{"/memory search", "Search memories"},
 	{"/memory add", "Add a manual memory"},

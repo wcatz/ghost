@@ -84,7 +84,10 @@ func (s *Scheduler) AddReminder(ctx context.Context, text string) (time.Time, er
 		dueAt = result.Time
 	}
 
-	id := randomID()
+	id, err := randomID()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("generate id: %w", err)
+	}
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO reminders (id, message, due_at) VALUES (?, ?, ?)
 	`, id, text, dueAt.UTC().Format(time.RFC3339))
@@ -129,9 +132,12 @@ func (s *Scheduler) AddCronJob(ctx context.Context, name, cronExpr string, paylo
 	defer s.mu.Unlock()
 
 	payloadJSON, _ := json.Marshal(payload)
-	id := randomID()
+	id, err := randomID()
+	if err != nil {
+		return fmt.Errorf("generate id: %w", err)
+	}
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO scheduled_jobs (id, name, schedule, payload) VALUES (?, ?, ?, ?)
 	`, id, name, cronExpr, string(payloadJSON))
 	if err != nil {
@@ -208,10 +214,10 @@ func (s *Scheduler) fireReminders(ctx context.Context) {
 	}
 }
 
-func randomID() string {
+func randomID() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		panic("crypto/rand failed: " + err.Error())
+		return "", fmt.Errorf("crypto/rand: %w", err)
 	}
-	return hex.EncodeToString(b)
+	return hex.EncodeToString(b), nil
 }

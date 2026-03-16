@@ -117,7 +117,7 @@ func (cv chatViewport) welcomeView() string {
 	tagline := lipgloss.NewStyle().
 		Foreground(colorDim).
 		Italic(true).
-		Render("memory-first coding agent")
+		Render("your personal memory daemon")
 
 	tips := lipgloss.NewStyle().
 		Foreground(colorSubtle).
