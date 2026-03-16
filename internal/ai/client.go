@@ -49,10 +49,16 @@ func (c *Client) ChatStream(
 		Messages:  messages,
 		Tools:     tools,
 	}
+	// thinkingBudget: -1 = adaptive (Claude auto-scales), >0 = fixed budget, 0 = disabled
 	if thinkingBudget > 0 {
 		reqBody.Thinking = &ThinkingConfig{
 			Type:         "enabled",
 			BudgetTokens: thinkingBudget,
+		}
+	} else if thinkingBudget < 0 {
+		// Adaptive thinking — omit budget_tokens, Claude decides.
+		reqBody.Thinking = &ThinkingConfig{
+			Type: "enabled",
 		}
 	}
 

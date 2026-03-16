@@ -161,9 +161,10 @@ type ToolUseEvent struct {
 // --- internal request/response types ---
 
 // ThinkingConfig controls extended thinking (Claude's internal reasoning).
+// When BudgetTokens is 0, adaptive thinking is used (Claude auto-scales effort).
 type ThinkingConfig struct {
-	Type         string `json:"type"`          // "enabled" or "disabled"
-	BudgetTokens int    `json:"budget_tokens"` // max tokens for thinking
+	Type         string      `json:"type"`                    // "enabled" or "disabled"
+	BudgetTokens interface{} `json:"budget_tokens,omitempty"` // int for fixed, or omitted for adaptive
 }
 
 type apiRequest struct {
