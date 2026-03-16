@@ -438,6 +438,16 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 					},
 				}
 
+				// Send tool_delta for VSCode extension (expects streaming format).
+				events <- ai.StreamEvent{
+					Type: "tool_delta",
+					ToolUse: &ai.ToolUseEvent{
+						ID:   tc.ID,
+						Name: tc.Name,
+					},
+					Text: result.Content,
+				}
+
 				// Emit diff metadata for file_edit/file_write tools.
 				if result.Metadata != nil {
 					events <- ai.StreamEvent{
