@@ -21,9 +21,14 @@ type approvalState struct {
 	toolName  string
 }
 
-// SetServerAddr configures the Ghost server address for API calls.
+// SetServerAddr configures the Ghost server address and auth token for API calls.
 func (tb *Bot) SetServerAddr(addr string) {
 	tb.serverAddr = addr
+}
+
+// SetServerToken configures the bearer token for Ghost server API auth.
+func (tb *Bot) SetServerToken(token string) {
+	tb.serverToken = token
 }
 
 // NotifyApproval sends an approval request to all allowed Telegram users
@@ -193,7 +198,15 @@ func (tb *Bot) callApproveAPI(sessionID string, approved bool, instructions stri
 	}
 
 	url := fmt.Sprintf("http://%s/api/v1/sessions/%s/approve", tb.serverAddr, sessionID)
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body)) //nolint:gosec
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create approve request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if tb.serverToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("approve API call: %w", err)
 	}
@@ -213,18 +226,13 @@ func formatToolInput(toolName string, input json.RawMessage) string {
 	}
 
 	switch toolName {
-	case "bash":
-		if cmd, ok := m["command"].(string); ok {
-			return cmd
+	case "memory_save":
+		if content, ok := m["content"].(string); ok {
+			return content
 		}
-	case "file_write", "file_edit":
-		if path, ok := m["path"].(string); ok {
-			return path
-		}
-	case "git":
-		if sub, ok := m["subcommand"].(string); ok {
-			args, _ := m["args"].(string)
-			return "git " + sub + " " + args
+	case "memory_search":
+		if query, ok := m["query"].(string); ok {
+			return query
 		}
 	}
 

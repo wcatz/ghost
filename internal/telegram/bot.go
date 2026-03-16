@@ -40,7 +40,8 @@ type Bot struct {
 	db              *sql.DB
 	logger          *slog.Logger
 	allowedIDs      map[int64]bool
-	serverAddr      string        // Ghost serve address for API calls
+	serverAddr      string // Ghost serve address for API calls
+	serverToken     string // Bearer token for Ghost API auth
 	approval        approvalState // pending approval tracking
 	mu              sync.Mutex
 	pendingChat     map[int64]string // chatID → sessionID for reply routing

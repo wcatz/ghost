@@ -359,6 +359,7 @@ func runServe() {
 	if tgBot != nil {
 		srv.SetApprovalNotifier(tgBot)
 		tgBot.SetServerAddr(cfg.Server.ListenAddr)
+		tgBot.SetServerToken(cfg.Server.AuthToken)
 	}
 
 	if err := srv.Run(ctx); err != nil {

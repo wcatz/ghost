@@ -287,6 +287,9 @@ func boolToInt(b bool) int {
 
 func randomID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback to timestamp-based ID if crypto/rand fails.
+		return hex.EncodeToString([]byte(time.Now().String()))[:32]
+	}
 	return hex.EncodeToString(b)
 }

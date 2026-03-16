@@ -203,8 +203,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		case approval := <-approvalCh:
 			respCh := make(chan provider.ApprovalResponse, 1)
 			go func() {
-				v := <-respCh
-				approval.Response <- v
+				select {
+				case v := <-respCh:
+					approval.Response <- v
+				case <-r.Context().Done():
+					// Client disconnected; don't block forever.
+				}
 			}()
 			resolvedCh = make(chan struct{}, 1)
 			state.mu.Lock()
