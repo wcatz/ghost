@@ -164,7 +164,7 @@ func (s *Server) registerTools() {
 		}
 		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
 
-		if err := s.store.EnsureProject(ctx, args.ProjectID, "", args.ProjectID); err != nil {
+		if err := s.store.EnsureProject(ctx, args.ProjectID, args.ProjectID, args.ProjectID); err != nil {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
 

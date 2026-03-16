@@ -219,6 +219,15 @@ func runServe() {
 		embedWorker := embedding.NewWorker(embedClient, store, logger, 2*time.Minute)
 		projectCh = make(chan string, 16)
 		go embedWorker.Run(ctx, projectCh)
+		// Notify embedding worker whenever a memory is saved from any path
+		// (tool, MCP, HTTP, reflection, etc.)
+		store.SetOnSave(func(projectID string) {
+			select {
+			case projectCh <- projectID:
+			default: // non-blocking — if buffer full, periodic sweep catches it
+			}
+		})
+
 		if embedClient.Alive(ctx) {
 			logger.Info("embedding worker started", "model", cfg.Embedding.Model, "ollama", cfg.Embedding.OllamaURL)
 		} else {

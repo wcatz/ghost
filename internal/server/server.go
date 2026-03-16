@@ -224,7 +224,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Auto-ensure project exists before creating memory.
-	if err := s.store.EnsureProject(r.Context(), req.ProjectID, "", req.ProjectID); err != nil {
+	if err := s.store.EnsureProject(r.Context(), req.ProjectID, req.ProjectID, req.ProjectID); err != nil {
 		s.logger.Error("ensure project", "error", err)
 		writeError(w, http.StatusInternalServerError, "create failed")
 		return

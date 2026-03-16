@@ -41,6 +41,15 @@ type Store struct {
 	db     *sql.DB
 	mu     sync.RWMutex
 	logger *slog.Logger
+	onSave func(projectID string) // optional callback after memory create/upsert
+}
+
+// SetOnSave registers a callback invoked after each successful memory save.
+// The callback must be non-blocking (e.g., a non-blocking channel send).
+func (s *Store) SetOnSave(fn func(projectID string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onSave = fn
 }
 
 // NewStore creates a new memory store from an open database.
@@ -129,6 +138,9 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 	if err != nil {
 		return "", fmt.Errorf("create memory: %w", err)
 	}
+	if s.onSave != nil {
+		s.onSave(projectID)
+	}
 	return id, nil
 }
 
@@ -175,6 +187,9 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 		if err != nil {
 			return "", false, fmt.Errorf("strengthen memory: %w", err)
 		}
+		if s.onSave != nil {
+			s.onSave(projectID)
+		}
 		return existingID, true, nil
 	}
 
@@ -188,6 +203,9 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 	`, projectID, category, content, source, importance, string(tagsJSON)).Scan(&id)
 	if err != nil {
 		return "", false, fmt.Errorf("create memory: %w", err)
+	}
+	if s.onSave != nil {
+		s.onSave(projectID)
 	}
 	return id, false, nil
 }
