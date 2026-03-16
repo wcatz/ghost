@@ -42,6 +42,8 @@ type Bot struct {
 	allowedIDs      map[int64]bool
 	serverAddr      string // Ghost serve address for API calls
 	serverToken     string // Bearer token for Ghost API auth
+	token           string // Telegram bot token (for file download URLs)
+	stt             STTProvider   // optional voice transcription
 	approval        approvalState // pending approval tracking
 	mu              sync.Mutex
 	pendingChat     map[int64]string // chatID → sessionID for reply routing
@@ -68,6 +70,7 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 		sched:      sched,
 		db:         db,
 		logger:     logger,
+		token:      cfg.Token,
 		allowedIDs:  make(map[int64]bool, len(cfg.AllowedIDs)),
 		pendingChat: make(map[int64]string),
 	}
@@ -484,6 +487,11 @@ func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update
 
 func (tb *Bot) handleDefault(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.Message == nil {
+		return
+	}
+	// Handle voice messages.
+	if update.Message.Voice != nil {
+		tb.handleVoice(ctx, b, update)
 		return
 	}
 	// Check if this is a reply to an approval message with instructions.
