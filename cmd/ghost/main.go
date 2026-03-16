@@ -322,6 +322,7 @@ func runServe() {
 	briefingSources := briefing.Sources{
 		GitHub:    ghMonitor,
 		Calendar:  calClient,
+		Google:    googleClient,
 		Scheduler: sched,
 	}
 	if tgBot != nil {

@@ -11,14 +11,23 @@ import (
 
 	"github.com/wcatz/ghost/internal/calendar"
 	gh "github.com/wcatz/ghost/internal/github"
+	goog "github.com/wcatz/ghost/internal/google"
 	"github.com/wcatz/ghost/internal/mdv2"
 	"github.com/wcatz/ghost/internal/scheduler"
 )
 
+// GoogleProvider is the interface for Google Calendar/Gmail access.
+type GoogleProvider interface {
+	TodayEvents(ctx context.Context) ([]goog.Event, error)
+	UnreadCount(ctx context.Context) (int, error)
+	RecentUnread(ctx context.Context, limit int) ([]goog.Email, error)
+}
+
 // Sources holds the optional data sources for a briefing.
 type Sources struct {
 	GitHub    *gh.Monitor
-	Calendar  *calendar.Client
+	Calendar  *calendar.Client // legacy CalDAV
+	Google    GoogleProvider   // Google Calendar + Gmail
 	Scheduler *scheduler.Scheduler
 }
 
@@ -31,7 +40,10 @@ func Generate(ctx context.Context, src Sources) string {
 	if src.GitHub != nil {
 		writeGitHub(ctx, &sb, src.GitHub)
 	}
-	if src.Calendar != nil {
+	if src.Google != nil {
+		writeGoogleCalendar(ctx, &sb, src.Google)
+		writeGmail(ctx, &sb, src.Google)
+	} else if src.Calendar != nil {
 		writeCalendar(ctx, &sb, src.Calendar)
 	}
 	if src.Scheduler != nil {
@@ -129,6 +141,56 @@ func priorityLabel(p int) string {
 	default:
 		return ""
 	}
+}
+
+func writeGoogleCalendar(ctx context.Context, sb *strings.Builder, g GoogleProvider) {
+	events, err := g.TodayEvents(ctx)
+	if err != nil {
+		sb.WriteString("*Calendar* — error fetching\n\n")
+		return
+	}
+
+	if len(events) == 0 {
+		sb.WriteString("*Calendar* — No events today 📅\n\n")
+		return
+	}
+
+	fmt.Fprintf(sb, "*Calendar* — %d events today\n", len(events))
+	for _, e := range events {
+		if e.AllDay {
+			fmt.Fprintf(sb, "  📅 %s \\(all day\\)\n", mdv2.Esc(e.Summary))
+		} else {
+			fmt.Fprintf(sb, "  🕐 %s — %s\n",
+				mdv2.Esc(e.Start.Local().Format("15:04")), mdv2.Esc(e.Summary))
+		}
+		if e.Location != "" {
+			fmt.Fprintf(sb, "     📍 %s\n", mdv2.Esc(e.Location))
+		}
+		if e.MeetLink != "" {
+			fmt.Fprintf(sb, "     🔗 [Join Meet](%s)\n", mdv2.Esc(e.MeetLink))
+		}
+	}
+	sb.WriteString("\n")
+}
+
+func writeGmail(ctx context.Context, sb *strings.Builder, g GoogleProvider) {
+	count, err := g.UnreadCount(ctx)
+	if err != nil {
+		return // silently skip if Gmail unavailable
+	}
+	if count == 0 {
+		sb.WriteString("*Email* — Inbox zero 📧\n\n")
+		return
+	}
+
+	fmt.Fprintf(sb, "*Email* — %d unread\n", count)
+	emails, err := g.RecentUnread(ctx, 5)
+	if err == nil {
+		for _, e := range emails {
+			fmt.Fprintf(sb, "  📧 %s — %s\n", mdv2.Esc(e.From), mdv2.Esc(e.Subject))
+		}
+	}
+	sb.WriteString("\n")
 }
 
 func priorityEmoji(p int) string {
