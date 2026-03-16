@@ -107,12 +107,17 @@ export class GhostClient extends EventEmitter {
 
   async approve(
     sessionId: string,
-    approved: boolean
+    approved: boolean,
+    instructions?: string,
   ): Promise<{ status: string }> {
+    const body: Record<string, unknown> = { approved };
+    if (instructions) {
+      body.instructions = instructions;
+    }
     return this.request(
       "POST",
       `/api/v1/sessions/${encodeURIComponent(sessionId)}/approve`,
-      { approved }
+      body,
     );
   }
 

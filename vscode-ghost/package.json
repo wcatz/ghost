@@ -1,8 +1,8 @@
 {
   "name": "ghost",
   "displayName": "Ghost",
-  "description": "Memory-first personal assistant — chat, memories, and project context powered by Ghost",
-  "version": "0.1.0",
+  "description": "Memory daemon and personal assistant — chat, memories, and project context",
+  "version": "0.2.0",
   "publisher": "wcatz",
   "license": "MIT",
   "engines": {
@@ -45,10 +45,6 @@
         "title": "Ghost: New Session"
       },
       {
-        "command": "ghost.setMode",
-        "title": "Ghost: Set Mode"
-      },
-      {
         "command": "ghost.searchMemories",
         "title": "Ghost: Search Memories"
       },
@@ -79,25 +75,27 @@
         "ghost.authToken": {
           "type": "string",
           "default": "",
+          "scope": "machine",
           "description": "Bearer token for ghost API authentication"
-        },
-        "ghost.autoStart": {
-          "type": "boolean",
-          "default": false,
-          "description": "Automatically start ghost serve if not running"
         }
       }
     }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "lint": "eslint src/"
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "lint": "eslint src/",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "marked": "^15.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
-    "typescript": "^5.5.0"
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
   }
 }
