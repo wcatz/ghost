@@ -122,7 +122,7 @@ func TestBuildSystemBlocks_StaticPersonality(t *testing.T) {
 		"git",
 		"memory_save",
 		"memory_search",
-		"<rules>",
+		"<behavior>",
 		"Never persist secrets",
 		"<response-style>",
 	}
