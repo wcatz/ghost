@@ -97,6 +97,23 @@ func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error 
 	return err
 }
 
+// ResolveProjectByName looks up a project by name and returns its hash ID.
+// Returns empty string if no project with that name exists.
+func (s *Store) ResolveProjectByName(ctx context.Context, name string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE name = ? LIMIT 1`, name).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve project by name: %w", err)
+	}
+	return id, nil
+}
+
 // Create inserts a new memory and returns its ID.
 func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string, error) {
 	s.mu.Lock()
