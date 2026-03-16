@@ -178,6 +178,7 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
+	db.SetMaxOpenConns(1) // SQLite is single-writer; prevent connection pool contention
 	if _, err := db.Exec(initSQL); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
