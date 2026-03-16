@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -13,7 +12,7 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/ai"
-	memstore "github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/mode"
 	"github.com/wcatz/ghost/internal/project"
 	"github.com/wcatz/ghost/internal/prompt"
@@ -130,7 +129,7 @@ func (s *Session) persistMessage(ctx context.Context, role, content string) {
 }
 
 // decodeStoredMessage converts a stored message back to an ai.Message.
-func decodeStoredMessage(m memstore.ConversationMessage) ai.Message {
+func decodeStoredMessage(m memory.ConversationMessage) ai.Message {
 	// Try JSON decode first (tool_result, multi-block messages).
 	var blocks []ai.ContentBlock
 	if err := json.Unmarshal([]byte(m.Content), &blocks); err == nil && len(blocks) > 0 {
@@ -204,21 +203,19 @@ func (s *Session) SendImageAsync(ctx context.Context, text, mediaType, base64Dat
 // Send processes a user message through the full agentic loop.
 // It streams events through the returned channel.
 // Expands @file references to inline file contents before sending.
-// PDF files are sent as document content blocks; all other files are inlined as text.
 func (s *Session) Send(ctx context.Context, userMsg string, approvalFn ApprovalFunc) <-chan ai.StreamEvent {
-	msg := s.buildUserMessage(userMsg)
-	return s.SendMessage(ctx, msg, userMsg, approvalFn)
+	expanded := s.expandFileRefs(userMsg)
+	return s.SendMessage(ctx, ai.TextMessage("user", expanded), userMsg, approvalFn)
 }
 
-// buildUserMessage creates a user message, expanding @file refs.
-// PDFs become document content blocks; text files are appended inline.
-func (s *Session) buildUserMessage(text string) ai.Message {
+// expandFileRefs finds @path references in user text and appends file contents.
+// Paths are resolved relative to the project directory.
+func (s *Session) expandFileRefs(text string) string {
 	refs := parseFileRefs(text)
 	if len(refs) == 0 {
-		return ai.TextMessage("user", text)
+		return text
 	}
 
-	var blocks []ai.ContentBlock
 	var sb strings.Builder
 	sb.WriteString(text)
 
@@ -240,27 +237,15 @@ func (s *Session) buildUserMessage(text string) ai.Message {
 			continue
 		}
 
-		// PDF files → document content block (base64).
-		if strings.HasSuffix(strings.ToLower(ref), ".pdf") {
-			encoded := base64.StdEncoding.EncodeToString(data)
-			blocks = append(blocks, ai.DocumentBlock(encoded))
-			fmt.Fprintf(&sb, "\n\n[Attached PDF: %s]", ref)
-			continue
-		}
-
-		// All other files → inline text.
+		// Cap at 50KB per file to avoid blowing up context.
 		content := string(data)
 		if len(content) > 50000 {
 			content = content[:50000] + "\n... (truncated at 50KB)"
 		}
+
 		fmt.Fprintf(&sb, "\n\n---\n**File: %s**\n```\n%s\n```\n", ref, content)
 	}
-
-	// Build message: document blocks first, then text.
-	var allBlocks []ai.ContentBlock
-	allBlocks = append(allBlocks, blocks...)
-	allBlocks = append(allBlocks, ai.ContentBlock{Type: "text", Text: sb.String()})
-	return ai.Message{Role: "user", Content: allBlocks}
+	return sb.String()
 }
 
 // parseFileRefs extracts @path references from text.
@@ -350,20 +335,6 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 					stopReason = evt.StopReason
 					usage = evt.Usage
 					s.Cost.Add(usage)
-					// Persist usage to SQLite for all-time cost tracking.
-					if usage != nil {
-						costUSD := float64(usage.InputTokens)/1e6*ai.SonnetInputPerM +
-							float64(usage.OutputTokens)/1e6*ai.SonnetOutputPerM +
-							float64(usage.CacheCreationInputTokens)/1e6*ai.SonnetCacheWritePerM +
-							float64(usage.CacheReadInputTokens)/1e6*ai.SonnetCacheReadPerM
-						_ = s.store.RecordUsage(ctx, s.ProjectID, s.model, memstore.TokenUsage{
-							InputTokens:   usage.InputTokens,
-							OutputTokens:  usage.OutputTokens,
-							CacheCreation: usage.CacheCreationInputTokens,
-							CacheRead:     usage.CacheReadInputTokens,
-							CostUSD:       costUSD,
-						})
-					}
 				case "error":
 					events <- evt
 					return
@@ -419,29 +390,9 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 				}
 
 				result := s.registry.Execute(ctx, tc.Name, s.ProjectPath, tc.Input)
-
-				// Send tool result for TUI display (before summarization).
 				events <- ai.StreamEvent{
-					Type: "tool_result",
-					ToolUse: &ai.ToolUseEvent{
-						ID:   tc.ID,
-						Name: tc.Name,
-					},
-					Text: result.Content,
-					Metadata: map[string]string{
-						"is_error": fmt.Sprintf("%v", result.IsError),
-						"duration": result.Duration.String(),
-					},
-				}
-
-				// Send tool_delta for VSCode extension (expects streaming format).
-				events <- ai.StreamEvent{
-					Type: "tool_delta",
-					ToolUse: &ai.ToolUseEvent{
-						ID:   tc.ID,
-						Name: tc.Name,
-					},
-					Text: result.Content,
+					Type: "text",
+					Text: fmt.Sprintf("\n<tool_result name=%q duration=%s>\n", tc.Name, result.Duration),
 				}
 
 				// Emit diff metadata for file_edit/file_write tools.
@@ -453,19 +404,9 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 					}
 				}
 
-				// Summarize large tool results with Haiku to save Sonnet input tokens.
-				content := result.Content
-				if !result.IsError && len(content) > 10000 {
-					if summary, _, err := s.client.Reflect(ctx,
-						fmt.Sprintf("Summarize this tool output concisely, preserving all important details (file paths, line numbers, error messages, key values). Do NOT wrap in JSON.\n\nTool: %s\nOutput:\n%s", tc.Name, truncate(content, 30000)),
-					); err == nil && len(summary) > 0 {
-						content = summary + "\n\n[summarized from " + fmt.Sprintf("%d", len(result.Content)) + " chars by Haiku]"
-					}
-				}
-
 				results = append(results, ai.ToolResult{
 					ToolUseID: tc.ID,
-					Content:   content,
+					Content:   result.Content,
 					IsError:   result.IsError,
 				})
 			}

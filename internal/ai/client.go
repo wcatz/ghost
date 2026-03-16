@@ -128,58 +128,6 @@ func (c *Client) ChatStream(
 	return events, nil
 }
 
-// CountTokens returns the exact token count for a set of messages + system blocks.
-// Uses the /v1/messages/count_tokens API endpoint.
-func (c *Client) CountTokens(ctx context.Context, messages []Message, system []SystemBlock, tools []ToolDefinition, model string) (int, error) {
-	reqBody := struct {
-		Model    string           `json:"model"`
-		System   []SystemBlock    `json:"system,omitempty"`
-		Messages []Message        `json:"messages"`
-		Tools    []ToolDefinition `json:"tools,omitempty"`
-	}{
-		Model:    model,
-		System:   system,
-		Messages: messages,
-		Tools:    tools,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return 0, fmt.Errorf("marshal count request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages/count_tokens", bytes.NewReader(body))
-	if err != nil {
-		return 0, fmt.Errorf("create count request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
-	req.Header.Set("anthropic-version", APIVersion)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("count tokens request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if err != nil {
-		return 0, fmt.Errorf("read count response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("count tokens API status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		InputTokens int `json:"input_tokens"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return 0, fmt.Errorf("unmarshal count response: %w", err)
-	}
-	return result.InputTokens, nil
-}
-
 // Reflect calls Haiku (non-streaming) for memory extraction/reflection.
 func (c *Client) Reflect(ctx context.Context, prompt string) (string, TokenUsage, error) {
 	reqBody := apiRequest{

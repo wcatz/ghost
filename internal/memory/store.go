@@ -550,44 +550,6 @@ type TokenUsage struct {
 	CostUSD       float64
 }
 
-// CostSummary holds aggregated cost data.
-type CostSummary struct {
-	TotalCost      float64
-	TotalInput     int
-	TotalOutput    int
-	TotalCacheRead int
-	SessionCount   int
-	Since          string // earliest record
-}
-
-// GetCostSummary returns aggregated cost data, optionally filtered by time range.
-// Pass empty since for all-time, or "24h", "7d", "30d" for recent.
-func (s *Store) GetCostSummary(ctx context.Context, since string) (CostSummary, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	query := `SELECT COALESCE(SUM(cost_usd), 0), COALESCE(SUM(input_tokens), 0),
-		COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_read), 0),
-		COUNT(*), COALESCE(MIN(created_at), '') FROM token_usage`
-
-	var args []interface{}
-	switch since {
-	case "24h":
-		query += " WHERE created_at > datetime('now', '-1 day')"
-	case "7d":
-		query += " WHERE created_at > datetime('now', '-7 days')"
-	case "30d":
-		query += " WHERE created_at > datetime('now', '-30 days')"
-	}
-
-	var cs CostSummary
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(
-		&cs.TotalCost, &cs.TotalInput, &cs.TotalOutput,
-		&cs.TotalCacheRead, &cs.SessionCount, &cs.Since,
-	)
-	return cs, err
-}
-
 func scanMemories(rows *sql.Rows) ([]Memory, error) {
 	var memories []Memory
 	for rows.Next() {

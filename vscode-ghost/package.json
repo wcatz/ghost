@@ -2,38 +2,9 @@
   "name": "ghost",
   "displayName": "Ghost",
   "description": "Memory-first coding agent — chat, memories, and project context powered by Ghost",
-  "version": "0.4.0",
+  "version": "0.1.0",
   "publisher": "wcatz",
-  "author": {
-    "name": "Wayne Catz",
-    "url": "https://github.com/wcatz"
-  },
-  "license": "Apache-2.0",
-  "icon": "media/icon.png",
-  "galleryBanner": {
-    "color": "#1e1e1e",
-    "theme": "dark"
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/wcatz/ghost.git"
-  },
-  "homepage": "https://github.com/wcatz/ghost#readme",
-  "bugs": {
-    "url": "https://github.com/wcatz/ghost/issues"
-  },
-  "keywords": [
-    "ai",
-    "assistant",
-    "claude",
-    "chat",
-    "memory",
-    "coding-agent",
-    "anthropic",
-    "llm",
-    "automation",
-    "developer-tools"
-  ],
+  "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
   },
