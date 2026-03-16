@@ -2,6 +2,7 @@ package ai
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -293,6 +294,7 @@ func TestStreamEvent_Types(t *testing.T) {
 }
 
 func TestThinkingConfig(t *testing.T) {
+	// Fixed budget.
 	cfg := ThinkingConfig{
 		Type:         "enabled",
 		BudgetTokens: 5000,
@@ -311,8 +313,17 @@ func TestThinkingConfig(t *testing.T) {
 	if decoded.Type != "enabled" {
 		t.Errorf("expected type 'enabled', got %q", decoded.Type)
 	}
-	if decoded.BudgetTokens != 5000 {
-		t.Errorf("expected budget 5000, got %d", decoded.BudgetTokens)
+	// BudgetTokens is interface{} — JSON decodes numbers as float64.
+	if budget, ok := decoded.BudgetTokens.(float64); !ok || budget != 5000 {
+		t.Errorf("expected budget 5000, got %v", decoded.BudgetTokens)
+	}
+
+	// Adaptive thinking — no budget_tokens in JSON.
+	adaptive := ThinkingConfig{Type: "enabled"}
+	data2, _ := json.Marshal(adaptive)
+	s := string(data2)
+	if strings.Contains(s, "budget_tokens") {
+		t.Errorf("adaptive config should omit budget_tokens, got: %s", s)
 	}
 }
 

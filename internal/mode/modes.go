@@ -4,16 +4,17 @@ package mode
 type Mode struct {
 	Name           string
 	MaxTokens      int
-	ThinkingBudget int // 0 = disabled, >0 = extended thinking token budget
+	ThinkingBudget int // -1 = adaptive (Claude auto-scales), 0 = disabled, >0 = fixed budget
 	SystemHint     string
 }
 
 // Modes is the complete set of operating modes.
 var Modes = map[string]Mode{
 	"chat": {
-		Name:      "chat",
-		MaxTokens: 4096,
-		SystemHint: "Conversational assistant. Brief answers unless asked to elaborate. Save important facts to memory.",
+		Name:           "chat",
+		MaxTokens:      8192,
+		ThinkingBudget: -1, // adaptive — Claude decides when and how much to think
+		SystemHint:     "Conversational assistant. Brief answers unless asked to elaborate. Save important facts to memory.",
 	},
 }
 

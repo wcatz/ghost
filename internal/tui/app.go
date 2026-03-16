@@ -20,6 +20,7 @@ const (
 	viewMain    = "main"
 	viewApprove = "approve"
 	viewPalette = "palette"
+	viewHelp    = "help"
 )
 
 // version is set at build time.
@@ -213,6 +214,12 @@ func (a App) View() tea.View {
 					paletteView,
 				)
 			}
+		case viewHelp:
+			helpView := renderHelp(a.width)
+			content = lipgloss.Place(a.width, a.height,
+				lipgloss.Center, lipgloss.Center,
+				helpView,
+			)
 		}
 	}
 
@@ -300,6 +307,11 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.input.focus()
 		}
 		return a, cmd
+	case viewHelp:
+		// Any key closes help.
+		a.currentView = viewMain
+		a.input.focus()
+		return a, nil
 	}
 
 	// Main view keys.
@@ -356,6 +368,13 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.toolbar.toggleSelected()
 			return a, nil
 		}
+	}
+
+	// ? opens help when input is empty.
+	if msg.String() == "?" && a.input.value() == "" {
+		a.currentView = viewHelp
+		a.input.blur()
+		return a, nil
 	}
 
 	// Default: pass to input area.
