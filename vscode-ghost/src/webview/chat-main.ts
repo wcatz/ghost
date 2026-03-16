@@ -365,5 +365,113 @@ window.addEventListener("message", (event) => {
   }
 });
 
+// --- Slash commands ---
+
+const slashCommands = [
+  { cmd: "/mode chat", desc: "Conversational mode" },
+  { cmd: "/clear", desc: "Clear conversation" },
+  { cmd: "/cost", desc: "Show session cost" },
+  { cmd: "/auto-approve", desc: "Toggle auto-approve" },
+];
+
+const slashMenu = document.getElementById("slash-menu")!;
+let slashSelectedIndex = 0;
+let slashFiltered: typeof slashCommands = [];
+
+function updateSlashMenu(): void {
+  const value = inputEl.value;
+  if (!value.startsWith("/") || streaming) {
+    slashMenu.classList.add("hidden");
+    return;
+  }
+
+  const query = value.toLowerCase();
+  slashFiltered = slashCommands.filter(
+    (c) => c.cmd.toLowerCase().startsWith(query) || c.desc.toLowerCase().includes(query.slice(1))
+  );
+
+  if (slashFiltered.length === 0) {
+    slashMenu.classList.add("hidden");
+    return;
+  }
+
+  slashSelectedIndex = Math.min(slashSelectedIndex, slashFiltered.length - 1);
+  slashMenu.innerHTML = slashFiltered
+    .map((c, i) =>
+      `<div class="slash-item${i === slashSelectedIndex ? " selected" : ""}" role="option" aria-selected="${i === slashSelectedIndex}">${escapeHtml(c.cmd)} <span class="slash-desc">${escapeHtml(c.desc)}</span></div>`
+    )
+    .join("");
+  slashMenu.classList.remove("hidden");
+}
+
+function executeSlashCommand(cmd: string): void {
+  slashMenu.classList.add("hidden");
+  inputEl.value = "";
+
+  if (cmd === "/clear") {
+    messagesEl.innerHTML = "";
+    return;
+  }
+  if (cmd === "/cost") {
+    const costText = footerCost.textContent || "No cost data yet";
+    const el = document.createElement("div");
+    el.className = "message system-message";
+    el.textContent = costText;
+    messagesEl.appendChild(el);
+    scrollToBottom();
+    return;
+  }
+  if (cmd === "/auto-approve") {
+    autoApproveBtn.click();
+    return;
+  }
+  if (cmd.startsWith("/mode ")) {
+    vscode.postMessage({ type: "setMode", mode: cmd.split(" ")[1] });
+    return;
+  }
+}
+
+inputEl.addEventListener("input", updateSlashMenu);
+
+inputEl.addEventListener("keydown", (e) => {
+  if (!slashMenu.classList.contains("hidden")) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      slashSelectedIndex = Math.min(slashSelectedIndex + 1, slashFiltered.length - 1);
+      updateSlashMenu();
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      slashSelectedIndex = Math.max(slashSelectedIndex - 1, 0);
+      updateSlashMenu();
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (slashFiltered[slashSelectedIndex]) {
+        executeSlashCommand(slashFiltered[slashSelectedIndex].cmd);
+      }
+      return;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      slashMenu.classList.add("hidden");
+      inputEl.value = "";
+      return;
+    }
+  }
+});
+
+slashMenu.addEventListener("click", (e) => {
+  const target = (e.target as HTMLElement).closest(".slash-item");
+  if (target) {
+    const index = Array.from(slashMenu.children).indexOf(target);
+    if (slashFiltered[index]) {
+      executeSlashCommand(slashFiltered[index].cmd);
+    }
+  }
+});
+
 // Tell extension we're ready
 vscode.postMessage({ type: "ready" });

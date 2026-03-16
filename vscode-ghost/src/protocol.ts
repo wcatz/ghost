@@ -34,6 +34,7 @@ export type WebviewToExtMessage =
   | { type: "send"; text: string; image?: ImageAttachment }
   | { type: "approve"; approved: boolean; instructions?: string }
   | { type: "abort" }
+  | { type: "setMode"; mode: string }
   | { type: "set_auto_approve"; enabled: boolean }
   | { type: "attach_image" };
 

@@ -92,43 +92,44 @@ export class ChatWebview implements vscode.Disposable {
     this.abortController = new AbortController();
 
     try {
-      const events = this.client.sendMessage(this.session.id, text, image);
+      const { events: emitter, abort } = this.client.sendMessage(this.session.id, text, image);
+      this.abortController = { signal: new AbortController().signal, abort } as unknown as AbortController;
 
-      events.on("text", (data: Record<string, unknown>) => {
+      emitter.on("text", (data: Record<string, unknown>) => {
         this.postMessage({ type: "text_delta", text: data.text as string });
       });
-      events.on("thinking", (data: Record<string, unknown>) => {
+      emitter.on("thinking", (data: Record<string, unknown>) => {
         this.postMessage({ type: "thinking_delta", text: data.text as string });
       });
-      events.on("tool_use_start", (data: Record<string, unknown>) => {
+      emitter.on("tool_use_start", (data: Record<string, unknown>) => {
         this.postMessage({ type: "tool_start", id: data.id as string, name: data.name as string });
       });
-      events.on("tool_input_delta", (data: Record<string, unknown>) => {
+      emitter.on("tool_input_delta", (data: Record<string, unknown>) => {
         this.postMessage({ type: "tool_delta", id: data.id as string, delta: data.delta as string });
       });
-      events.on("tool_use_end", (data: Record<string, unknown>) => {
+      emitter.on("tool_use_end", (data: Record<string, unknown>) => {
         this.postMessage({ type: "tool_end", id: data.id as string, name: data.name as string });
       });
-      events.on("tool_result", (data: Record<string, unknown>) => {
+      emitter.on("tool_result", (data: Record<string, unknown>) => {
         this.postMessage({
           type: "tool_result",
           id: data.id as string,
           name: data.name as string,
-          output: data.text as string ?? "",
+          output: (data.text as string) ?? "",
           is_error: data.is_error === "true",
         });
       });
-      events.on("approval_required", (data: Record<string, unknown>) => {
+      emitter.on("approval_required", (data: Record<string, unknown>) => {
         this.postMessage({
           type: "approval_required",
           tool_name: data.tool_name as string,
           input: data.input,
         });
       });
-      events.on("approval_resolved", () => {
+      emitter.on("approval_resolved", () => {
         this.postMessage({ type: "approval_resolved" });
       });
-      events.on("done", (data: Record<string, unknown>) => {
+      emitter.on("done", (data: Record<string, unknown>) => {
         this.postMessage({
           type: "done",
           session_cost: (data.session_cost as string) ?? null,
@@ -137,11 +138,11 @@ export class ChatWebview implements vscode.Disposable {
         });
         this.postMessage({ type: "streaming", active: false });
       });
-      events.on("error", (data: Record<string, unknown>) => {
+      emitter.on("error", (data: Record<string, unknown>) => {
         this.postMessage({ type: "error", text: (data.error as string) ?? "Unknown error" });
         this.postMessage({ type: "streaming", active: false });
       });
-      events.on("close", () => {
+      emitter.on("close", () => {
         this.postMessage({ type: "streaming", active: false });
       });
     } catch (err) {
@@ -257,6 +258,8 @@ export class ChatWebview implements vscode.Disposable {
     <img id="preview-img" alt="Attached image">
     <button id="remove-image" aria-label="Remove attached image">&times;</button>
   </div>
+
+  <div id="slash-menu" class="hidden" role="listbox" aria-label="Slash commands"></div>
 
   <div id="input-area" role="form" aria-label="Message input">
     <textarea id="input" aria-label="Type a message" placeholder="Message Ghost... (/ for commands)" rows="1"></textarea>
