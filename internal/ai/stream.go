@@ -121,6 +121,21 @@ func parseStream(r io.Reader, events chan<- StreamEvent) error {
 					Usage:      &usage,
 				}
 			}
+
+		case "error":
+			// API can emit errors mid-stream (context overflow, internal errors).
+			var apiErr struct {
+				Error struct {
+					Type    string `json:"type"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			msg := "unknown API error"
+			if json.Unmarshal([]byte(data), &apiErr) == nil && apiErr.Error.Message != "" {
+				msg = fmt.Sprintf("%s: %s", apiErr.Error.Type, apiErr.Error.Message)
+			}
+			events <- StreamEvent{Type: "error", Error: fmt.Errorf("api stream error: %s", msg)}
+			return nil
 		}
 	}
 

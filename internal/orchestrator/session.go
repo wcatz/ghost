@@ -308,6 +308,7 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 
 			// Collect response.
 			var textAccum string
+			var thinkingAccum string
 			var toolCalls []ai.ContentBlock
 			var stopReason string
 			var usage *ai.TokenUsage
@@ -315,7 +316,8 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 			for evt := range stream {
 				switch evt.Type {
 				case "thinking":
-					events <- evt // pass thinking to TUI but don't accumulate
+					thinkingAccum += evt.Text
+					events <- evt
 				case "text":
 					textAccum += evt.Text
 					events <- evt
@@ -334,7 +336,7 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 				case "done":
 					stopReason = evt.StopReason
 					usage = evt.Usage
-					s.Cost.Add(usage)
+					s.Cost.AddWithModel(usage, s.model)
 				case "error":
 					events <- evt
 					return
@@ -342,7 +344,12 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 			}
 
 			// Build assistant message from accumulated content.
+			// Thinking blocks must be preserved — the API requires them
+			// in message history when extended thinking is enabled.
 			var assistantBlocks []ai.ContentBlock
+			if thinkingAccum != "" {
+				assistantBlocks = append(assistantBlocks, ai.ContentBlock{Type: "thinking", Text: thinkingAccum})
+			}
 			if textAccum != "" {
 				assistantBlocks = append(assistantBlocks, ai.ContentBlock{Type: "text", Text: textAccum})
 				fullResponse += textAccum
