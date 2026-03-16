@@ -210,16 +210,16 @@ export function getChatHtml(
       return currentAssistantEl;
     }
 
-    function addToolIndicator(name, status) {
+    function addToolIndicator(id, name, status) {
       const el = document.createElement('details');
       el.className = 'tool-indicator ' + status;
       el.dataset.toolName = name;
-      el.dataset.toolId = name;
+      el.dataset.toolId = id;
       const icon = status === 'running' ? '<span class="spinner"></span>' : '<span class="check">&#10003;</span>';
       el.innerHTML = '<summary>' + icon + ' <span class="tool-name">' + escapeHtml(name) + '</span><span class="tool-time"></span></summary><pre class="tool-output"></pre>';
       messagesEl.appendChild(el);
       if (status === 'running') {
-        toolTimers[name] = Date.now();
+        toolTimers[id] = Date.now();
       }
       scrollToBottom();
       return el;
@@ -521,9 +521,7 @@ export function getChatHtml(
           break;
 
         case 'text_delta':
-          // Filter out tool_result XML tags - tool output is shown in tool indicators
-          const cleanText = msg.text.replace(/<tool_result[^>]*>/g, '').replace(/<\/tool_result>/g, '');
-          currentAssistantText += cleanText;
+          currentAssistantText += msg.text;
           const el = ensureAssistantBubble();
           el.innerHTML = renderMarkdown(currentAssistantText);
           scrollToBottom();
@@ -543,13 +541,13 @@ export function getChatHtml(
           break;
 
         case 'tool_start':
-          addToolIndicator(msg.name, 'running');
+          addToolIndicator(msg.id, msg.name, 'running');
           break;
 
         case 'tool_delta': {
           const tools = messagesEl.querySelectorAll('.tool-indicator');
           for (let i = tools.length - 1; i >= 0; i--) {
-            if (tools[i].dataset.toolName === msg.name || tools[i].dataset.toolId === msg.id) {
+            if (tools[i].dataset.toolId === msg.id) {
               const out = tools[i].querySelector('.tool-output');
               if (out) out.textContent += msg.delta;
               break;
@@ -561,14 +559,14 @@ export function getChatHtml(
         case 'tool_end': {
           const indicators = messagesEl.querySelectorAll('.tool-indicator.running');
           indicators.forEach(ind => {
-            if (ind.dataset.toolName === msg.name) {
+            if (ind.dataset.toolId === msg.id) {
               ind.className = 'tool-indicator done';
               const s = ind.querySelector('summary .spinner, summary .check');
               if (s) s.outerHTML = '<span class="check">&#10003;</span>';
-              const elapsed = toolTimers[msg.name] ? ((Date.now() - toolTimers[msg.name]) / 1000).toFixed(1) + 's' : '';
+              const elapsed = toolTimers[msg.id] ? ((Date.now() - toolTimers[msg.id]) / 1000).toFixed(1) + 's' : '';
               const timeEl = ind.querySelector('summary .tool-time');
               if (timeEl && elapsed) timeEl.textContent = ' ' + elapsed;
-              delete toolTimers[msg.name];
+              delete toolTimers[msg.id];
             }
           });
           break;

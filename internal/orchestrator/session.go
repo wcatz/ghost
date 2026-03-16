@@ -419,10 +419,6 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 				}
 
 				result := s.registry.Execute(ctx, tc.Name, s.ProjectPath, tc.Input)
-				events <- ai.StreamEvent{
-					Type: "text",
-					Text: fmt.Sprintf("\n<tool_result name=%q duration=%s>\n", tc.Name, result.Duration),
-				}
 
 				// Send tool result for TUI display (before summarization).
 				events <- ai.StreamEvent{
