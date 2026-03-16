@@ -120,8 +120,6 @@ func main() {
 		cfg.Defaults.AutoMemory = false
 	}
 
-	_ = *cont // TODO: implement conversation resume
-
 	// Create orchestrator.
 	orch := orchestrator.New(client, store, registry, cfg, logger)
 
@@ -143,7 +141,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "warning: bad path %s: %v\n", p, err)
 			continue
 		}
-		s, err := orch.StartSession(absPath)
+		startFn := orch.StartSession
+		if *cont {
+			startFn = orch.ResumeSession
+		}
+		s, err := startFn(absPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: cannot start session for %s: %v\n", absPath, err)
 			continue

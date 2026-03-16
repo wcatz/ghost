@@ -73,7 +73,7 @@ func NewApp(
 		chatView:    newChatViewport(80, 20),
 		input:       newInputArea(),
 		toolbar:     newToolbar(),
-		status:      newStatusBar(session.ProjectName, session.Mode.Name),
+		status:      newStatusBar(session.ProjectName, shortModelName(session.Model()), &session.Cost),
 		approval:    newApprovalDialog(),
 		palette:     newCommandPalette(),
 		currentView: viewMain,
@@ -253,14 +253,13 @@ func (a App) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		}
 	case "done":
 		a.isProcessing = false
-		a.status.isProcessing = false
-		a.status.updateUsage(msg.Usage)
+		a.status.stopProcessing()
 	case "error":
 		if msg.Error != nil {
 			a.chatView.addMessage(chatMessage{kind: msgError, raw: msg.Error.Error()})
 		}
 		a.isProcessing = false
-		a.status.isProcessing = false
+		a.status.stopProcessing()
 	}
 
 	// Keep listening for more events (the channel is still open).
@@ -368,7 +367,7 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // sendMessage sends user text to the session and starts consuming events.
 func (a App) sendMessage(text string) (tea.Model, tea.Cmd) {
 	a.isProcessing = true
-	a.status.isProcessing = true
+	a.status.startProcessing()
 	a.status.modeName = a.session.Mode.Name
 
 	// Add user message to viewport.
@@ -419,12 +418,11 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 		a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: info})
 
 	case "/cost":
-		info := fmt.Sprintf("**Session Cost**\n- Input: %s tokens\n- Output: %s tokens\n- Cache reads: %s tokens\n- Estimated: $%.4f",
-			formatTokens(a.status.totalInput),
-			formatTokens(a.status.totalOutput),
-			formatTokens(a.status.totalCacheRead),
-			a.status.totalCostUSD,
-		)
+		cost := a.session.Cost.Cost()
+		savings := a.session.Cost.Savings()
+		cacheRate := a.session.Cost.CacheHitRate()
+		info := fmt.Sprintf("**Session Cost**\n- Total: $%.4f\n- Savings: $%.2f (%.0f%% cache hit rate)\n- Messages: %d exchanges",
+			cost, savings, cacheRate, a.session.MessageCount())
 		a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: info})
 
 	case "/switch":
@@ -477,7 +475,7 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 			}
 			// Send to Claude with vision API.
 			a.isProcessing = true
-			a.status.isProcessing = true
+			a.status.startProcessing()
 			a.chatView.startNewAssistantMessage()
 			a.activeStream = a.session.SendImageAsync(
 				a.ctx, "Describe and analyze this image.", mediaType, data, a.approvalCh,
