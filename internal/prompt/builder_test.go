@@ -117,6 +117,7 @@ func TestBuildSystemBlocks_StaticPersonality(t *testing.T) {
 		"memory-first personal assistant",
 		"CAPABILITIES",
 		"RULES",
+		"Never persist secrets",
 		"RESPONSE STYLE",
 	}
 

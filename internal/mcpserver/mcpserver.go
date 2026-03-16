@@ -47,8 +47,18 @@ func (s *Server) Run(ctx context.Context) error {
 	return s.mcp.Run(ctx, &mcp.StdioTransport{})
 }
 
-// resolveProjectID resolves a project_id that may be a name into the actual hash ID.
+// resolveProjectID resolves a project_id that may be a name (e.g. "ghost")
+// into the actual hash ID (e.g. "6bdc098af7f5") stored in the database.
+// Name lookup takes precedence to avoid collisions where a project name
+// happens to match another project's hash ID.
 func (s *Server) resolveProjectID(ctx context.Context, input string) string {
+	// Try name lookup first — most MCP clients pass project names.
+	resolved, err := s.store.ResolveProjectByName(ctx, input)
+	if err == nil && resolved != "" {
+		return resolved
+	}
+
+	// Fall back to direct ID match.
 	projects, err := s.store.ListProjects(ctx)
 	if err == nil {
 		for _, p := range projects {
@@ -57,10 +67,7 @@ func (s *Server) resolveProjectID(ctx context.Context, input string) string {
 			}
 		}
 	}
-	resolved, err := s.store.ResolveProjectByName(ctx, input)
-	if err == nil && resolved != "" {
-		return resolved
-	}
+
 	return input
 }
 
