@@ -728,3 +728,8 @@ func sanitizeMessages(msgs []ai.Message) []ai.Message {
 func (s *Session) Store() provider.MemoryStore {
 	return s.store
 }
+
+// Model returns the model ID used for this session.
+func (s *Session) Model() string {
+	return s.model
+}
