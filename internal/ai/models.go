@@ -61,13 +61,18 @@ func TextMessage(role, text string) Message {
 }
 
 // ToolResultMessage creates a tool_result message.
+// The Claude API requires tool_result content to be an array of content blocks.
 func ToolResultMessage(results []ToolResult) Message {
 	blocks := make([]ContentBlock, len(results))
 	for i, r := range results {
+		// Marshal content as [{"type": "text", "text": "..."}] per API spec.
+		contentArray, _ := json.Marshal([]map[string]string{
+			{"type": "text", "text": r.Content},
+		})
 		blocks[i] = ContentBlock{
 			Type:      "tool_result",
 			ToolUseID: r.ToolUseID,
-			Content:   r.Content,
+			Content:   json.RawMessage(contentArray),
 			IsError:   r.IsError,
 		}
 	}
@@ -75,17 +80,18 @@ func ToolResultMessage(results []ToolResult) Message {
 }
 
 // ContentBlock represents a content block in a message.
+// For tool_result blocks, Content must be a list per the Claude API spec.
 type ContentBlock struct {
-	Type         string        `json:"type"`
-	Text         string        `json:"text,omitempty"`
-	ID           string        `json:"id,omitempty"`
-	Name         string        `json:"name,omitempty"`
+	Type         string          `json:"type"`
+	Text         string          `json:"text,omitempty"`
+	ID           string          `json:"id,omitempty"`
+	Name         string          `json:"name,omitempty"`
 	Input        json.RawMessage `json:"input,omitempty"`
-	ToolUseID    string        `json:"tool_use_id,omitempty"`
-	Content      string        `json:"content,omitempty"`
-	IsError      bool          `json:"is_error,omitempty"`
-	Source       *ImageSource  `json:"source,omitempty"`       // for type "image"
-	CacheControl *cacheControl `json:"cache_control,omitempty"` // for multi-turn caching
+	ToolUseID    string          `json:"tool_use_id,omitempty"`
+	Content      json.RawMessage `json:"content,omitempty"` // tool_result: array of content blocks
+	IsError      bool            `json:"is_error,omitempty"`
+	Source       *ImageSource    `json:"source,omitempty"`       // for type "image"
+	CacheControl *cacheControl   `json:"cache_control,omitempty"` // for multi-turn caching
 }
 
 // ImageSource holds base64-encoded image data for Claude's vision API.

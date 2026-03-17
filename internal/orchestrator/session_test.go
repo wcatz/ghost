@@ -190,7 +190,7 @@ func TestDecodeStoredMessage_PlainText(t *testing.T) {
 
 func TestDecodeStoredMessage_JSONBlocks(t *testing.T) {
 	blocks := []ai.ContentBlock{
-		{Type: "tool_result", ToolUseID: "t1", Content: "file contents"},
+		{Type: "tool_result", ToolUseID: "t1", Content: json.RawMessage(`[{"type":"text","text":"file contents"}]`)},
 	}
 	raw, _ := json.Marshal(blocks)
 
@@ -477,7 +477,7 @@ func TestIsToolResult(t *testing.T) {
 		{
 			name: "mixed content",
 			msg: ai.Message{Role: "user", Content: []ai.ContentBlock{
-				{Type: "tool_result", ToolUseID: "t1", Content: "ok"},
+				{Type: "tool_result", ToolUseID: "t1", Content: json.RawMessage(`[{"type":"text","text":"ok"}]`)},
 				{Type: "text", Text: "extra"},
 			}},
 			want: false,

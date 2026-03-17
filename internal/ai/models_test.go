@@ -76,8 +76,8 @@ func TestToolResultMessage(t *testing.T) {
 	if msg.Content[0].ToolUseID != "tool1" {
 		t.Errorf("expected tool_use_id 'tool1', got %q", msg.Content[0].ToolUseID)
 	}
-	if msg.Content[0].Content != "output1" {
-		t.Errorf("expected content 'output1', got %q", msg.Content[0].Content)
+	if !strings.Contains(string(msg.Content[0].Content), "output1") {
+		t.Errorf("expected content to contain 'output1', got %s", string(msg.Content[0].Content))
 	}
 	if msg.Content[0].IsError {
 		t.Error("expected IsError false")

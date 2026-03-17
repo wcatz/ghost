@@ -592,7 +592,7 @@ func (s *Session) compressMessages(msgs []ai.Message) string {
 			case b.Type == "tool_use":
 				fmt.Fprintf(&sb, "[%s] tool:%s\n", role, b.Name)
 			case b.Type == "tool_result":
-				fmt.Fprintf(&sb, "[tool_result] %s\n", truncate(b.Content, 200))
+				fmt.Fprintf(&sb, "[tool_result] %s\n", truncate(string(b.Content), 200))
 			}
 		}
 	}
