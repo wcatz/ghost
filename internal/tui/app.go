@@ -140,6 +140,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		return a.handleKey(msg)
+
+	case tea.MouseWheelMsg:
+		// Route mouse wheel to chat viewport for scrolling.
+		if a.currentView == viewMain {
+			var cmd tea.Cmd
+			a.chatView, cmd = a.chatView.update(msg)
+			cmds = append(cmds, cmd)
+			return a, tea.Batch(cmds...)
+		}
+
+	case tea.MouseClickMsg:
+		// Route clicks to toolbar for expand/collapse triangles.
+		if a.currentView == viewMain {
+			a.toolbar.toggleSelected()
+			return a, nil
+		}
 	}
 
 	// Pass to sub-components.
