@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/glamour/v2"
+	"github.com/wcatz/ghost/assets"
 )
 
 // messageType distinguishes message sources.
@@ -31,7 +32,7 @@ type messageRenderer struct {
 
 func newMessageRenderer(width int) *messageRenderer {
 	r, err := glamour.NewTermRenderer(
-		glamour.WithEnvironmentConfig(),
+		glamour.WithStylesFromJSONBytes(assets.GhostBlueStyle),
 		glamour.WithWordWrap(width-4),
 	)
 	if err != nil {
@@ -45,7 +46,7 @@ func (mr *messageRenderer) setWidth(width int) {
 	mr.width = width
 	// Re-create renderer with new width.
 	r, err := glamour.NewTermRenderer(
-		glamour.WithEnvironmentConfig(),
+		glamour.WithStylesFromJSONBytes(assets.GhostBlueStyle),
 		glamour.WithWordWrap(width-4),
 	)
 	if err == nil {
