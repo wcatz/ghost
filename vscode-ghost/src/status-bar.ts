@@ -1,15 +1,12 @@
 import * as vscode from "vscode";
-import { GhostClient } from "./ghost-client";
 
 export class GhostStatusBar {
   private item: vscode.StatusBarItem;
-  private client?: GhostClient;
   private connected = false;
   private mode = "";
-  private tokenInfo = "";
+  private cost = "";
 
-  constructor(client?: GhostClient) {
-    this.client = client;
+  constructor() {
     this.item = vscode.window.createStatusBarItem(
       vscode.StatusBarAlignment.Right,
       100
@@ -17,10 +14,6 @@ export class GhostStatusBar {
     this.item.command = "ghost.setMode";
     this.update();
     this.item.show();
-  }
-
-  public setClient(client: GhostClient): void {
-    this.client = client;
   }
 
   public setConnected(connected: boolean): void {
@@ -33,12 +26,8 @@ export class GhostStatusBar {
     this.update();
   }
 
-  public setTokenInfo(input: number, output: number, cached?: number): void {
-    const parts = [`in:${input}`, `out:${output}`];
-    if (cached) {
-      parts.push(`cache:${cached}`);
-    }
-    this.tokenInfo = parts.join(" ");
+  public setCost(cost: string): void {
+    this.cost = cost;
     this.update();
   }
 
@@ -58,8 +47,8 @@ export class GhostStatusBar {
     if (this.mode) {
       parts.push(this.mode);
     }
-    if (this.tokenInfo) {
-      parts.push(this.tokenInfo);
+    if (this.cost) {
+      parts.push(this.cost);
     }
 
     this.item.text = parts.join(" | ");

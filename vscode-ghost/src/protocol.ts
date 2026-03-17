@@ -1,5 +1,5 @@
 // Shared message protocol between extension host and webview.
-// Single source of truth — imported by both sides.
+// Single source of truth -- imported by both sides.
 
 // --- Extension -> Webview ---
 
@@ -25,7 +25,9 @@ export type ExtToWebviewMessage =
   | { type: "image_data"; image: ImageAttachment }
   | { type: "error"; text: string }
   | { type: "history"; messages: HistoryMessage[] }
-  | { type: "send_from_command"; text: string };
+  | { type: "send_from_command"; text: string }
+  | { type: "system_message"; text: string }
+  | { type: "mode_changed"; mode: string };
 
 // --- Webview -> Extension ---
 
@@ -36,7 +38,8 @@ export type WebviewToExtMessage =
   | { type: "abort" }
   | { type: "setMode"; mode: string }
   | { type: "set_auto_approve"; enabled: boolean }
-  | { type: "attach_image" };
+  | { type: "attach_image" }
+  | { type: "slash_command"; command: string; args?: string };
 
 // --- Shared types ---
 

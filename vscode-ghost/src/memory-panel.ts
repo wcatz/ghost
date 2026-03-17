@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
-import { GhostClient, Memory } from "./ghost-client";
+import { GhostClient } from "./ghost-client";
+import { getNonce } from "./util";
 
 export class MemoryPanelProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "ghost.memories";
@@ -149,11 +150,11 @@ export class MemoryPanelProvider implements vscode.WebviewViewProvider {
   </style>
 </head>
 <body>
-  <div id="controls">
-    <select id="project-select"><option value="">Select project...</option></select>
-    <input id="search-input" type="text" placeholder="Search memories...">
+  <div id="controls" role="search" aria-label="Memory browser controls">
+    <select id="project-select" aria-label="Select project"><option value="">Select project...</option></select>
+    <input id="search-input" type="text" placeholder="Search memories..." aria-label="Search memories">
   </div>
-  <div id="memory-list">
+  <div id="memory-list" role="list" aria-label="Memory list">
     <div class="empty-state">Select a project to view memories</div>
   </div>
   <script nonce="${nonce}">
@@ -193,15 +194,15 @@ export class MemoryPanelProvider implements vscode.WebviewViewProvider {
       memoryList.innerHTML = memories.map(m => {
         const tags = (m.tags || []).map(t => '<span class="memory-tag">' + escapeHtml(t) + '</span>').join('');
         const date = new Date(m.created_at).toLocaleDateString();
-        return '<div class="memory-card">' +
+        return '<div class="memory-card" role="listitem">' +
           '<div class="memory-header">' +
             '<span class="memory-category">' + escapeHtml(m.category) + '</span>' +
             '<span class="memory-importance">' + (m.importance * 100).toFixed(0) + '%</span>' +
           '</div>' +
           '<div class="memory-content">' + escapeHtml(m.content) + '</div>' +
           '<div class="memory-footer">' +
-            '<div class="memory-tags">' + tags + '<span>' + escapeHtml(m.source) + ' · ' + date + '</span></div>' +
-            '<button class="delete-btn" data-id="' + m.id + '">delete</button>' +
+            '<div class="memory-tags">' + tags + '<span>' + escapeHtml(m.source) + ' \\u00b7 ' + date + '</span></div>' +
+            '<button class="delete-btn" data-id="' + m.id + '" aria-label="Delete memory">delete</button>' +
           '</div>' +
         '</div>';
       }).join('');
@@ -240,14 +241,4 @@ export class MemoryPanelProvider implements vscode.WebviewViewProvider {
 </body>
 </html>`;
   }
-}
-
-function getNonce(): string {
-  let text = "";
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  for (let i = 0; i < 32; i++) {
-    text += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return text;
 }

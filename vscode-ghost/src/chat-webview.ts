@@ -3,6 +3,7 @@
 
 import * as vscode from "vscode";
 import { GhostClient } from "./ghost-client";
+import { GhostStatusBar } from "./status-bar";
 import { getNonce } from "./util";
 import type {
   ExtToWebviewMessage,
@@ -15,6 +16,7 @@ export class ChatWebview implements vscode.Disposable {
   private webview: vscode.Webview;
   private extensionUri: vscode.Uri;
   private client: GhostClient;
+  private statusBar: GhostStatusBar;
   private session?: SessionInfo;
   private abortFn?: () => void;
   private disposables: vscode.Disposable[] = [];
@@ -23,10 +25,12 @@ export class ChatWebview implements vscode.Disposable {
     webview: vscode.Webview,
     extensionUri: vscode.Uri,
     client: GhostClient,
+    statusBar: GhostStatusBar,
   ) {
     this.webview = webview;
     this.extensionUri = extensionUri;
     this.client = client;
+    this.statusBar = statusBar;
 
     webview.options = {
       enableScripts: true,
@@ -73,8 +77,14 @@ export class ChatWebview implements vscode.Disposable {
           await this.client.setAutoApprove(this.session.id, msg.enabled);
         }
         break;
+      case "setMode":
+        await this.handleSetMode(msg.mode);
+        break;
       case "attach_image":
         await this.handleAttachImage();
+        break;
+      case "slash_command":
+        await this.handleSlashCommand(msg.command, msg.args);
         break;
     }
   }
@@ -94,8 +104,6 @@ export class ChatWebview implements vscode.Disposable {
       const { events: emitter, abort } = this.client.sendMessage(this.session.id, text, image);
       this.abortFn = abort;
 
-      // Event names and shapes must match ghost-client.ts emit calls exactly.
-      // "text" and "thinking" emit strings; others emit objects.
       emitter.on("text", (text: string) => {
         this.postMessage({ type: "text_delta", text });
       });
@@ -111,18 +119,6 @@ export class ChatWebview implements vscode.Disposable {
       emitter.on("tool_end", (data: Record<string, string>) => {
         this.postMessage({ type: "tool_end", id: data.id, name: data.name });
       });
-      // tool_result comes via generic "event" since ghost-client doesn't emit a named event for it
-      emitter.on("event", (evt: { type: string; data: Record<string, unknown> }) => {
-        if (evt.type === "tool_result") {
-          this.postMessage({
-            type: "tool_result",
-            id: (evt.data.id as string) ?? "",
-            name: (evt.data.name as string) ?? "",
-            output: (evt.data.text as string) ?? "",
-            is_error: evt.data.is_error === "true",
-          });
-        }
-      });
       emitter.on("approval", (data: Record<string, unknown>) => {
         this.postMessage({
           type: "approval_required",
@@ -134,13 +130,19 @@ export class ChatWebview implements vscode.Disposable {
         this.postMessage({ type: "approval_resolved" });
       });
       emitter.on("done", (data: Record<string, unknown>) => {
+        const sessionCost = (data.session_cost as string) ?? null;
+        const stopReason = (data.stop_reason as string) ?? "end_turn";
         this.postMessage({
           type: "done",
-          session_cost: (data.session_cost as string) ?? null,
+          session_cost: sessionCost,
           usage: (data.usage as ExtToWebviewMessage & { type: "done" })["usage"] ?? null,
-          stop_reason: (data.stop_reason as string) ?? "end_turn",
+          stop_reason: stopReason,
         });
         this.postMessage({ type: "streaming", active: false });
+        // Update status bar cost
+        if (sessionCost) {
+          this.statusBar.setCost(sessionCost);
+        }
       });
       emitter.on("error", (err: Error) => {
         this.postMessage({ type: "error", text: err.message ?? "Unknown error" });
@@ -164,6 +166,17 @@ export class ChatWebview implements vscode.Disposable {
     }
   }
 
+  private async handleSetMode(mode: string): Promise<void> {
+    if (!this.session) return;
+    try {
+      const result = await this.client.setMode(this.session.id, mode);
+      this.statusBar.setMode(result.mode);
+      this.postMessage({ type: "mode_changed", mode: result.mode });
+    } catch (err) {
+      this.postMessage({ type: "error", text: `Set mode failed: ${err}` });
+    }
+  }
+
   private async handleAttachImage(): Promise<void> {
     const uris = await vscode.window.showOpenDialog({
       canSelectFiles: true,
@@ -183,19 +196,68 @@ export class ChatWebview implements vscode.Disposable {
     });
   }
 
+  private async handleSlashCommand(command: string, args?: string): Promise<void> {
+    switch (command) {
+      case "model":
+        this.postMessage({ type: "system_message", text: "Model selection not yet implemented" });
+        break;
+      case "continue":
+        if (this.session) {
+          await this.handleSend("Continue from where you left off.");
+        }
+        break;
+      case "compact":
+        this.postMessage({ type: "system_message", text: "Compact not yet implemented" });
+        break;
+      case "tokens":
+        this.postMessage({ type: "system_message", text: "Token info displayed in footer" });
+        break;
+      case "cost":
+        // Handled in webview directly
+        break;
+      case "clear":
+        // Handled in webview directly
+        break;
+      case "auto-approve":
+        // Handled in webview directly
+        break;
+      case "export":
+        this.postMessage({ type: "system_message", text: "Export not yet implemented" });
+        break;
+      case "health": {
+        const available = await this.client.isAvailable();
+        this.postMessage({
+          type: "system_message",
+          text: available ? "Ghost daemon: connected" : "Ghost daemon: disconnected",
+        });
+        break;
+      }
+      case "theme":
+        this.postMessage({ type: "system_message", text: "Theme follows VS Code settings" });
+        break;
+      case "mode":
+        if (args) {
+          await this.handleSetMode(args);
+        }
+        break;
+    }
+  }
+
   private async ensureSession(): Promise<void> {
     try {
       const sessions = await this.client.listSessions();
       if (sessions.length > 0) {
         this.session = sessions[0];
       } else {
-        this.session = await this.client.createSession(process.cwd());
+        const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+        this.session = await this.client.createSession(workspacePath);
       }
       if (this.session) {
         this.postMessage({ type: "session", session: this.session });
+        this.statusBar.setMode(this.session.mode);
       }
     } catch {
-      // Server not available — will retry on next send
+      // Server not available -- will retry on next send
     }
   }
 
@@ -247,13 +309,17 @@ export class ChatWebview implements vscode.Disposable {
   <div id="messages" role="log" aria-label="Chat messages" aria-live="polite"></div>
 
   <div id="approval-overlay" class="hidden" role="dialog" aria-modal="true" aria-label="Tool approval required" tabindex="-1">
-    <div class="approval-box">
-      <div class="approval-title">Tool Approval Required</div>
-      <div id="approval-tool-name" class="approval-tool"></div>
-      <pre id="approval-summary" class="approval-summary"></pre>
-      <div class="approval-actions">
-        <button id="approve-btn" aria-label="Allow tool execution">[y] Allow</button>
-        <button id="deny-btn" aria-label="Deny tool execution">[n] Deny</button>
+    <div id="approval-modal">
+      <div class="modal-header">Tool Approval Required</div>
+      <div id="approval-tool-name" class="modal-tool"></div>
+      <pre id="approval-summary" class="modal-preview"></pre>
+      <div class="modal-actions">
+        <button id="approve-btn" class="modal-btn approve" aria-label="Allow tool execution">[y] Allow</button>
+        <button id="deny-btn" class="modal-btn deny" aria-label="Deny tool execution">[n] Deny</button>
+      </div>
+      <div class="modal-instructions">
+        <input id="deny-instructions" type="text" placeholder="Deny with instructions..." aria-label="Deny with instructions">
+        <button id="deny-with-btn" class="modal-btn deny-with" aria-label="Deny with instructions">Deny + instruct</button>
       </div>
     </div>
   </div>
@@ -293,11 +359,12 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly extensionUri: vscode.Uri,
     private client: GhostClient,
+    private readonly statusBar: GhostStatusBar,
   ) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.chatWebview?.dispose();
-    this.chatWebview = new ChatWebview(view.webview, this.extensionUri, this.client);
+    this.chatWebview = new ChatWebview(view.webview, this.extensionUri, this.client, this.statusBar);
   }
 
   setClient(client: GhostClient): void {
@@ -317,16 +384,16 @@ export class ChatEditorPanel {
   private chatWebview: ChatWebview;
   private panel: vscode.WebviewPanel;
 
-  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, client: GhostClient) {
+  private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, client: GhostClient, statusBar: GhostStatusBar) {
     this.panel = panel;
-    this.chatWebview = new ChatWebview(panel.webview, extensionUri, client);
+    this.chatWebview = new ChatWebview(panel.webview, extensionUri, client, statusBar);
     panel.onDidDispose(() => {
       this.chatWebview.dispose();
       ChatEditorPanel.currentPanel = undefined;
     });
   }
 
-  static createOrShow(extensionUri: vscode.Uri, client: GhostClient): void {
+  static createOrShow(extensionUri: vscode.Uri, client: GhostClient, statusBar: GhostStatusBar): void {
     if (ChatEditorPanel.currentPanel) {
       ChatEditorPanel.currentPanel.panel.reveal();
       return;
@@ -335,9 +402,13 @@ export class ChatEditorPanel {
       "ghost.editor",
       "Ghost Chat",
       vscode.ViewColumn.One,
-      { enableScripts: true, retainContextWhenHidden: true },
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [vscode.Uri.joinPath(extensionUri, "media"), vscode.Uri.joinPath(extensionUri, "out")],
+      },
     );
-    ChatEditorPanel.currentPanel = new ChatEditorPanel(panel, extensionUri, client);
+    ChatEditorPanel.currentPanel = new ChatEditorPanel(panel, extensionUri, client, statusBar);
   }
 
   setClient(client: GhostClient): void {

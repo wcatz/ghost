@@ -191,8 +191,6 @@ export class GhostClient extends EventEmitter {
             const dataStr = line.slice(6);
             try {
               const data = JSON.parse(dataStr);
-              const event: StreamEvent = { type: currentEvent, data };
-              emitter.emit("event", event);
 
               // Emit typed events for convenience.
               switch (currentEvent) {
@@ -210,9 +208,6 @@ export class GhostClient extends EventEmitter {
                   break;
                 case "tool_use_end":
                   emitter.emit("tool_end", data);
-                  break;
-                case "tool_diff":
-                  emitter.emit("tool_diff", data);
                   break;
                 case "approval_required":
                   emitter.emit("approval", data as ApprovalRequest);

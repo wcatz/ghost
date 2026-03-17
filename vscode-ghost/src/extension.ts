@@ -1,4 +1,4 @@
-// Ghost VSCode Extension — activation and command registration.
+// Ghost VSCode Extension -- activation and command registration.
 
 import * as vscode from "vscode";
 import { GhostClient } from "./ghost-client";
@@ -19,9 +19,9 @@ function createClient(): GhostClient {
 export function activate(context: vscode.ExtensionContext): void {
   currentClient = createClient();
 
-  const chatProvider = new ChatSidebarProvider(context.extensionUri, currentClient);
-  const memoryProvider = new MemoryPanelProvider(context.extensionUri, currentClient);
   const statusBar = new GhostStatusBar();
+  const chatProvider = new ChatSidebarProvider(context.extensionUri, currentClient, statusBar);
+  const memoryProvider = new MemoryPanelProvider(context.extensionUri, currentClient);
 
   // Register view providers
   context.subscriptions.push(
@@ -47,7 +47,8 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.commands.registerCommand("ghost.setMode", async () => {
-      const mode = await vscode.window.showQuickPick(["chat"], { placeHolder: "Select mode" });
+      const modes = ["chat", "code", "debug", "review", "plan", "refactor"];
+      const mode = await vscode.window.showQuickPick(modes, { placeHolder: "Select mode" });
       if (mode) {
         statusBar.setMode(mode);
       }
@@ -59,11 +60,11 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.executeCommand("ghost.chat.focus");
     }),
     vscode.commands.registerCommand("ghost.openEditor", () => {
-      ChatEditorPanel.createOrShow(context.extensionUri, currentClient);
+      ChatEditorPanel.createOrShow(context.extensionUri, currentClient, statusBar);
     }),
   );
 
-  // Health check — uses mutable currentClient reference
+  // Health check -- uses mutable currentClient reference via closure
   async function checkHealth(): Promise<void> {
     const available = await currentClient.isAvailable();
     statusBar.setConnected(available);
@@ -73,13 +74,16 @@ export function activate(context: vscode.ExtensionContext): void {
   healthInterval = setInterval(checkHealth, 15000);
   checkHealth();
 
-  // Config change handler — updates client everywhere
+  // Config change handler -- updates client everywhere
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration("ghost.serverUrl") || e.affectsConfiguration("ghost.authToken")) {
         currentClient = createClient();
         chatProvider.setClient(currentClient);
         memoryProvider.setClient(currentClient);
+        if (ChatEditorPanel.currentPanel) {
+          ChatEditorPanel.currentPanel.setClient(currentClient);
+        }
         checkHealth();
       }
     }),

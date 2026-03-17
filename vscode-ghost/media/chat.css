@@ -1,4 +1,4 @@
-/* Ghost Chat — VSCode native theme integration */
+/* Ghost Chat -- VSCode native theme integration */
 :root {
   --ghost-accent: var(--vscode-textLink-foreground, #4fc1ff);
   --ghost-bg: var(--vscode-editor-background, #1e1e1e);
@@ -11,6 +11,7 @@
   --ghost-button-fg: var(--vscode-button-foreground, #fff);
   --ghost-error: var(--vscode-errorForeground, #f44747);
   --ghost-success: var(--vscode-testing-iconPassed, #73c991);
+  --ghost-warning: var(--vscode-editorWarning-foreground, #e5c07b);
   --ghost-muted: var(--vscode-descriptionForeground, #888);
   --ghost-widget-bg: var(--vscode-editorWidget-background, #252526);
   --ghost-hover: var(--vscode-list-hoverBackground, #2a2d2e);
@@ -86,21 +87,7 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   line-height: 1;
 }
 .header-btn:hover { background: var(--ghost-hover); color: var(--ghost-fg); }
-
-/* Ghost auto-approve toggle */
-.ghost-toggle {
-  width: 18px;
-  height: 18px;
-  vertical-align: middle;
-  color: var(--ghost-muted);
-  transition: color 0.2s ease, filter 0.2s ease;
-}
-#auto-approve-btn.yolo .ghost-toggle {
-  color: var(--ghost-error);
-  filter: drop-shadow(0 0 6px var(--ghost-error));
-}
-#auto-approve-btn.yolo { border-color: var(--ghost-error); }
-#auto-approve-btn { padding: 3px 5px; }
+.header-btn.active { border-color: var(--ghost-error); color: var(--ghost-error); }
 
 #session-cost {
   font-family: var(--vscode-editor-font-family, monospace);
@@ -116,7 +103,6 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   display: flex;
   flex-direction: column;
   gap: 8px;
-  scroll-behavior: smooth;
 }
 
 .message {
@@ -146,6 +132,41 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   background: transparent;
 }
 
+/* Markdown content inside assistant messages */
+.message.assistant p { margin: 0 0 0.5em 0; }
+.message.assistant p:last-child { margin-bottom: 0; }
+.message.assistant ul, .message.assistant ol { padding-left: 1.5em; margin: 0.3em 0; }
+.message.assistant li { margin: 0.15em 0; }
+.message.assistant blockquote {
+  border-left: 3px solid var(--ghost-accent);
+  padding-left: 10px;
+  color: var(--ghost-muted);
+  margin: 0.3em 0;
+}
+.message.assistant h1, .message.assistant h2, .message.assistant h3,
+.message.assistant h4, .message.assistant h5, .message.assistant h6 {
+  margin: 0.5em 0 0.25em 0;
+}
+.message.assistant table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  width: 100%;
+}
+.message.assistant th, .message.assistant td {
+  border: 1px solid var(--ghost-border);
+  padding: 4px 8px;
+  text-align: left;
+}
+.message.assistant th {
+  background: var(--ghost-input-bg);
+  font-weight: 600;
+}
+.message.assistant hr {
+  border: none;
+  border-top: 1px solid var(--ghost-border);
+  margin: 0.5em 0;
+}
+
 .message.system {
   align-self: center;
   color: var(--ghost-muted);
@@ -157,13 +178,20 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   color: var(--ghost-error);
   font-size: 0.9em;
   border-left: 3px solid var(--ghost-error);
-  padding-left: 10px;
+  border: 1px solid var(--ghost-error);
+  border-radius: 6px;
+  padding: 8px 12px;
+  background: rgba(244, 71, 71, 0.06);
 }
-.message.queued {
-  color: var(--ghost-muted);
-  font-size: 0.85em;
-  font-style: italic;
-  align-self: flex-end;
+
+.message.warning {
+  color: var(--ghost-warning);
+  font-size: 0.9em;
+  border-left: 3px solid var(--ghost-warning);
+  border: 1px solid var(--ghost-warning);
+  border-radius: 6px;
+  padding: 8px 12px;
+  background: rgba(229, 192, 123, 0.06);
 }
 
 /* --- Thinking blocks (collapsible) --- */
@@ -272,14 +300,54 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   to { transform: rotate(360deg); }
 }
 
-/* --- Usage Info --- */
-.usage-info {
-  font-size: 0.8em;
-  font-family: var(--vscode-editor-font-family, monospace);
-  color: var(--ghost-muted);
-  text-align: right;
-  padding: 2px 10px;
+/* --- Tool Result Blocks --- */
+.tool-result-block {
+  margin: 4px 0;
+  font-size: 0.85em;
   animation: fadeIn 0.15s ease-out;
+}
+
+.tool-result-block summary {
+  color: var(--ghost-muted);
+  cursor: pointer;
+  padding: 2px 10px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  user-select: none;
+}
+.tool-result-block summary:hover { color: var(--ghost-fg); }
+
+.tool-result-block.tool-error summary { color: var(--ghost-error); }
+
+.tool-result-content {
+  padding: 4px 10px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.tool-output {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--ghost-muted);
+  margin: 0;
+}
+
+/* --- Diff coloring --- */
+.diff-add {
+  color: #73c991;
+  display: block;
+  background: rgba(115,201,145,0.08);
+}
+.diff-del {
+  color: #f44747;
+  display: block;
+  background: rgba(244,71,71,0.08);
+}
+.diff-meta {
+  color: var(--ghost-muted);
+  display: block;
 }
 
 /* --- Slash Command Menu --- */
@@ -316,7 +384,6 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
 }
 .slash-desc { color: var(--ghost-muted); font-size: 0.9em; }
 
-/* --- Approval Bar --- */
 /* --- Approval Modal Overlay --- */
 #approval-overlay {
   position: fixed;
@@ -329,11 +396,6 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   animation: fadeIn 0.15s ease-out;
 }
 #approval-overlay.hidden { display: none; }
-
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
 
 #approval-modal {
   background: var(--ghost-widget-bg);
@@ -440,6 +502,7 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   white-space: nowrap;
   font-size: 11px;
   padding: 6px 12px;
+  flex: none;
 }
 .modal-btn.deny-with:hover { opacity: 0.9; }
 
@@ -533,52 +596,12 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   min-height: 18px;
 }
 
-#footer-savings { color: var(--ghost-success); }
-
 /* --- Utilities --- */
 .hidden { display: none !important; }
 
 a { color: var(--ghost-accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 strong { font-weight: 600; }
-
-/* Diff blocks */
-.diff-block {
-  margin: 8px 0;
-  border: 1px solid var(--ghost-border);
-  border-radius: 6px;
-  overflow: hidden;
-  font-size: 12px;
-}
-.diff-header {
-  padding: 6px 12px;
-  background: rgba(255,255,255,0.05);
-  border-bottom: 1px solid var(--ghost-border);
-  font-weight: 600;
-  color: var(--ghost-accent);
-}
-.diff-content {
-  padding: 8px 12px;
-  margin: 0;
-  overflow-x: auto;
-  line-height: 1.5;
-  font-family: var(--vscode-editor-font-family, monospace);
-  font-size: var(--vscode-editor-font-size, 13px);
-}
-.diff-add {
-  color: #73c991;
-  display: block;
-  background: rgba(115,201,145,0.08);
-}
-.diff-del {
-  color: #f44747;
-  display: block;
-  background: rgba(244,71,71,0.08);
-}
-.diff-meta {
-  color: var(--ghost-muted);
-  display: block;
-}
 
 /* Scrollbar */
 #messages::-webkit-scrollbar { width: 6px; }
