@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/wcatz/ghost/internal/ai"
 )
@@ -45,6 +46,11 @@ func execFileWrite(ctx context.Context, projectPath string, input json.RawMessag
 		return Result{Content: err.Error(), IsError: true}
 	}
 
+	// Validate that existing ancestor directories don't escape the project via symlinks.
+	if err := validateAncestors(projectPath, path); err != nil {
+		return Result{Content: err.Error(), IsError: true}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return Result{Content: fmt.Sprintf("cannot create directories: %v", err), IsError: true}
 	}
@@ -54,4 +60,42 @@ func execFileWrite(ctx context.Context, projectPath string, input json.RawMessag
 	}
 
 	return Result{Content: fmt.Sprintf("wrote %d bytes to %s", len(in.Content), path)}
+}
+
+// validateAncestors checks that all existing ancestor directories of path
+// resolve within projectPath, guarding against symlink-based directory traversal.
+func validateAncestors(projectPath, path string) error {
+	projReal, err := filepath.EvalSymlinks(filepath.Clean(projectPath))
+	if err != nil {
+		return fmt.Errorf("resolve project path: %w", err)
+	}
+
+	dir := filepath.Dir(path)
+	projCleaned := filepath.Clean(projectPath)
+
+	for dir != projCleaned && dir != "." && dir != "/" {
+		info, err := os.Lstat(dir)
+		if os.IsNotExist(err) {
+			dir = filepath.Dir(dir)
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("stat ancestor %q: %w", dir, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			real, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				return fmt.Errorf("resolve symlink %q: %w", dir, err)
+			}
+			if !strings.HasPrefix(real, projReal+string(filepath.Separator)) && real != projReal {
+				return fmt.Errorf("ancestor directory %q resolves outside project", dir)
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return nil
 }

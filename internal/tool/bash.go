@@ -24,11 +24,18 @@ type bashInput struct {
 var blockedBashPatterns = []string{
 	"rm -rf /",
 	"rm -rf ~/",
+	"rm -rf /*",
+	"rm -rf .",
 	"mkfs",
 	"dd if=/dev/zero",
 	"dd if=/dev/urandom",
 	":(){ :|:& };:",
 	"> /dev/sd",
+	"chmod -r 777 /",
+	"> /etc/passwd",
+	"> /etc/shadow",
+	"> /etc/sudoers",
+	"> /etc/hosts",
 }
 
 func registerBash(r *Registry) {

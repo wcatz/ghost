@@ -70,7 +70,13 @@ func execFileEdit(ctx context.Context, projectPath string, input json.RawMessage
 		updated = strings.Replace(content, in.OldString, in.NewString, 1)
 	}
 
-	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
+	// Preserve original file permissions; fall back to 0o644 if stat fails.
+	var mode os.FileMode = 0o644
+	if fi, err := os.Stat(path); err == nil {
+		mode = fi.Mode().Perm()
+	}
+
+	if err := os.WriteFile(path, []byte(updated), mode); err != nil {
 		return Result{Content: fmt.Sprintf("cannot write file: %v", err), IsError: true}
 	}
 
