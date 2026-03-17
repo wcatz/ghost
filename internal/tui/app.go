@@ -50,6 +50,10 @@ type App struct {
 	isProcessing bool
 	imgProtocol  imageProtocol
 
+	// Inline block accumulators.
+	thinkingAccum string                        // accumulated thinking text for current turn
+	completedTools map[string]completedToolInfo  // tool_use_end info keyed by tool ID, awaiting tool_result
+
 	// Voice: set via SetVoice(). Nil if voice disabled.
 	voiceFn     func(ctx context.Context) (transcript, response string, err error)
 	voiceActive bool
@@ -110,9 +114,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.handleStreamEvent(msg)
 
 	case streamDoneMsg:
+		a.flushThinking()
 		a.isProcessing = false
 		a.status.isProcessing = false
 		a.toolbar.clear()
+		a.completedTools = nil
 		return a, nil
 
 	case approvalRequestMsg:
@@ -151,9 +157,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.MouseClickMsg:
-		// Route clicks to toolbar for expand/collapse triangles.
+		// Route clicks to viewport for expand/collapse on tool/thinking blocks.
 		if a.currentView == viewMain {
-			a.toolbar.toggleSelected()
+			// The Y coordinate is relative to the terminal. Subtract header (1 line)
+			// to get viewport-relative line.
+			viewportLine := msg.Y - 1
+			if viewportLine >= 0 && viewportLine < a.chatView.height {
+				a.chatView.toggleBlockAtLine(viewportLine)
+			}
 			return a, nil
 		}
 	}
@@ -207,7 +218,7 @@ func (a App) View() tea.View {
 		// Main viewport.
 		viewport := a.chatView.view()
 
-		// Tool panel (only if tools active or recently completed).
+		// Active tool indicator (1 line when running, 0 when idle).
 		toolView := a.toolbar.view()
 
 		// Input area.
@@ -261,6 +272,15 @@ func (a App) View() tea.View {
 	return v
 }
 
+// flushThinking writes accumulated thinking text as an inline block in the viewport.
+func (a *App) flushThinking() {
+	if a.thinkingAccum != "" {
+		a.chatView.addThinkingBlock(a.thinkingAccum)
+		a.thinkingAccum = ""
+	}
+	a.toolbar.setThinking(false)
+}
+
 // handleStreamEvent processes a streaming event from the session.
 func (a App) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
@@ -268,37 +288,63 @@ func (a App) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case "thinking":
 		a.toolbar.setThinking(true)
-		a.toolbar.appendThinking(msg.Text)
+		a.thinkingAccum += msg.Text
+
 	case "text":
-		a.toolbar.setThinking(false)
+		// Thinking phase ended — flush it inline before appending text.
+		a.flushThinking()
 		a.chatView.appendToLastAssistant(msg.Text)
+
 	case "tool_use_start":
-		a.toolbar.setThinking(false)
+		// Thinking phase ended — flush it inline before tool starts.
+		a.flushThinking()
 		if msg.ToolUse != nil {
-			a.toolbar.addTool(msg.ToolUse.ID, msg.ToolUse.Name)
+			a.toolbar.startTool(msg.ToolUse.ID, msg.ToolUse.Name)
 		}
+
 	case "tool_input_delta":
 		if msg.ToolUse != nil {
 			a.toolbar.updateInput(msg.ToolUse.ID, msg.ToolUse.InputDelta)
 		}
+
 	case "tool_use_end":
 		if msg.ToolUse != nil {
-			a.toolbar.completeTool(msg.ToolUse.ID)
+			name, dur, ok := a.toolbar.completeTool(msg.ToolUse.ID)
+			if ok {
+				// Stash completed tool info; it will be rendered inline when tool_result arrives.
+				if a.completedTools == nil {
+					a.completedTools = make(map[string]completedToolInfo)
+				}
+				a.completedTools[msg.ToolUse.ID] = completedToolInfo{name: name, duration: dur}
+			}
 		}
+
 	case "tool_result":
 		if msg.ToolUse != nil {
 			isError := msg.Metadata != nil && msg.Metadata["is_error"] == "true"
-			a.toolbar.setToolOutput(msg.ToolUse.ID, msg.Text, isError)
+			info, ok := a.completedTools[msg.ToolUse.ID]
+			if ok {
+				// Render the completed tool inline in the chat viewport.
+				a.chatView.addToolBlock(msg.ToolUse.ID, info.name, info.duration, msg.Text, isError, false)
+				delete(a.completedTools, msg.ToolUse.ID)
+			}
 		}
+
 	case "done":
+		a.flushThinking()
 		a.isProcessing = false
 		a.status.stopProcessing()
+		// Clear any stale completed tool info.
+		a.completedTools = nil
+
 	case "error":
+		a.flushThinking()
 		if msg.Error != nil {
 			a.chatView.addMessage(chatMessage{kind: msgError, raw: msg.Error.Error()})
 		}
 		a.isProcessing = false
 		a.status.stopProcessing()
+		a.completedTools = nil
 	}
 
 	// Keep listening for more events (the channel is still open).
@@ -389,15 +435,15 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		a.chatView, cmd = a.chatView.update(msg)
 		return a, cmd
 
-	case key.Matches(msg, keys.ToolNext):
-		a.toolbar.selectNext()
-		return a, nil
-	case key.Matches(msg, keys.ToolPrev):
-		a.toolbar.selectPrev()
-		return a, nil
+	case key.Matches(msg, keys.ToolNext), key.Matches(msg, keys.ToolPrev):
+		// Scroll viewport (tool blocks are inline now).
+		var cmd tea.Cmd
+		a.chatView, cmd = a.chatView.update(msg)
+		return a, cmd
 	case key.Matches(msg, keys.ToolToggle):
 		if a.input.value() == "" {
-			a.toolbar.toggleSelected()
+			// Toggle the last tool/thinking block in the viewport.
+			a.toggleLastBlock()
 			return a, nil
 		}
 
@@ -636,15 +682,23 @@ func (a *App) SetVoice(fn func(ctx context.Context) (transcript, response string
 	a.voiceFn = fn
 }
 
+// toggleLastBlock finds the last tool or thinking block in the viewport and toggles it.
+func (a *App) toggleLastBlock() {
+	for i := len(a.chatView.messages) - 1; i >= 0; i-- {
+		msg := a.chatView.messages[i]
+		if msg.kind == msgToolBlock || msg.kind == msgThinkingBlock {
+			a.chatView.toggleBlock(i)
+			return
+		}
+	}
+}
+
 // resize adjusts all component sizes.
 func (a *App) resize() {
 	headerH := 1
 	statusH := 1
 	inputH := 4
-	toolH := 0
-	if a.toolbar.hasActive() {
-		toolH = 3
-	}
+	toolH := a.toolbar.height() // 0 when idle, 1 when active
 
 	viewportH := a.height - headerH - statusH - inputH - toolH - 2
 	if viewportH < 5 {

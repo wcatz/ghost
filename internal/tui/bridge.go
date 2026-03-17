@@ -1,10 +1,19 @@
 package tui
 
 import (
+	"time"
+
 	tea "charm.land/bubbletea/v2"
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/provider"
 )
+
+// completedToolInfo holds metadata for a tool that finished execution,
+// pending its tool_result event to be rendered inline in the viewport.
+type completedToolInfo struct {
+	name     string
+	duration time.Duration
+}
 
 // streamEventMsg wraps an ai.StreamEvent as a bubbletea message.
 type streamEventMsg ai.StreamEvent
