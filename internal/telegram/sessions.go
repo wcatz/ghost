@@ -144,9 +144,8 @@ func (tb *Bot) handleChat(ctx context.Context, b *bot.Bot, update *models.Update
 	if response == "" {
 		response = "(no response)"
 	}
-	for _, chunk := range mdv2.Split(response, 4000) {
-		tb.reply(ctx, b, update, chunk)
-	}
+	// Claude's response is standard Markdown, not MarkdownV2-escaped — use plain text.
+	tb.replyText(ctx, b, update, response)
 }
 
 // handlePendingChatReply routes text replies to the pending chat session.
@@ -178,9 +177,8 @@ func (tb *Bot) handlePendingChatReply(ctx context.Context, b *bot.Bot, update *m
 	if response == "" {
 		response = "(no response)"
 	}
-	for _, chunk := range mdv2.Split(response, 4000) {
-		tb.reply(ctx, b, update, chunk)
-	}
+	// Claude's response is standard Markdown, not MarkdownV2-escaped — use plain text.
+	tb.replyText(ctx, b, update, response)
 	return true
 }
 

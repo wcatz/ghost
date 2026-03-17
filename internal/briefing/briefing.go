@@ -167,7 +167,8 @@ func writeGoogleCalendar(ctx context.Context, sb *strings.Builder, g GoogleProvi
 			fmt.Fprintf(sb, "     📍 %s\n", mdv2.Esc(e.Location))
 		}
 		if e.MeetLink != "" {
-			fmt.Fprintf(sb, "     🔗 [Join Meet](%s)\n", mdv2.Esc(e.MeetLink))
+			// URL part of a MarkdownV2 link needs only ) and \ escaped — not all 18 chars.
+			fmt.Fprintf(sb, "     🔗 [Join Meet](%s)\n", e.MeetLink)
 		}
 	}
 	sb.WriteString("\n")

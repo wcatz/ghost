@@ -538,6 +538,70 @@ func (tb *Bot) reply(ctx context.Context, b *bot.Bot, update *models.Update, tex
 	}
 }
 
+// replyText sends plain text with no parse mode — safe for unescaped content such
+// as raw Claude responses that contain standard Markdown but are not MarkdownV2-escaped.
+func (tb *Bot) replyText(ctx context.Context, b *bot.Bot, update *models.Update, text string) {
+	if update.Message == nil {
+		return
+	}
+	chatID := update.Message.Chat.ID
+	for _, chunk := range mdv2.Split(text, telegramMsgMax) {
+		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   chunk,
+			LinkPreviewOptions: &models.LinkPreviewOptions{
+				IsDisabled: bot.True(),
+			},
+		})
+		if err != nil {
+			tb.logger.Error("telegram send (plain)", "error", err, "chat_id", chatID)
+			return
+		}
+	}
+}
+
+// SendAlertToAll sends a formatted P0/P1 GitHub notification alert to all allowed users.
+// Includes the priority emoji, repo/title, reason, and an inline button linking to the PR/issue.
+func (tb *Bot) SendAlertToAll(ctx context.Context, n gh.Notification) {
+	emoji := priorityEmoji(n.Priority)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s *P%d Alert*\n", emoji, n.Priority)
+	fmt.Fprintf(&sb, "`%s`\n", mdv2.Esc(n.RepoFullName))
+	fmt.Fprintf(&sb, "%s\n", mdv2.Esc(n.SubjectTitle))
+	fmt.Fprintf(&sb, "_%s_", mdv2.Esc(n.Reason))
+	text := sb.String()
+
+	var markup *models.InlineKeyboardMarkup
+	if htmlURL := ghAPIToHTML(n.SubjectURL, n.SubjectType); htmlURL != "" {
+		label := truncate(n.SubjectTitle, 35)
+		if label == "" {
+			label = "Open"
+		}
+		markup = &models.InlineKeyboardMarkup{
+			InlineKeyboard: [][]models.InlineKeyboardButton{
+				{{Text: emoji + " " + label, URL: htmlURL}},
+			},
+		}
+	}
+
+	for id := range tb.allowedIDs {
+		params := &bot.SendMessageParams{
+			ChatID:    id,
+			Text:      text,
+			ParseMode: models.ParseModeMarkdown,
+			LinkPreviewOptions: &models.LinkPreviewOptions{
+				IsDisabled: bot.True(),
+			},
+		}
+		if markup != nil {
+			params.ReplyMarkup = markup
+		}
+		if _, err := tb.bot.SendMessage(ctx, params); err != nil {
+			tb.logger.Error("telegram alert", "error", err, "user_id", id)
+		}
+	}
+}
+
 func (tb *Bot) replyWithKeyboard(ctx context.Context, b *bot.Bot, update *models.Update, text string, buttons [][]models.InlineKeyboardButton) {
 	if update.Message == nil {
 		return
