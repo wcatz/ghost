@@ -74,6 +74,13 @@ func (ct *CostTracker) totals() (input, output, cacheWrite, cacheRead int) {
 	return
 }
 
+// Totals returns aggregate token counts across all entries (exported).
+func (ct *CostTracker) Totals() (input, output, cacheWrite, cacheRead int) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	return ct.totals()
+}
+
 // Cost returns the total cost in USD using per-model pricing.
 func (ct *CostTracker) Cost() float64 {
 	ct.mu.Lock()

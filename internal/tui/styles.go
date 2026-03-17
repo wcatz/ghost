@@ -124,6 +124,28 @@ var (
 			Foreground(colorDim)
 )
 
+// Diff styles — used for colorizing unified diff output.
+var (
+	diffAddStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#9ece6a"))
+
+	diffRemoveStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#f7768e"))
+
+	diffHunkStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#7dcfff"))
+
+	diffHeaderStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#7dcfff")).
+			Bold(true)
+)
+
+// Warning style — used for truncation warnings and similar.
+var warningStyle = lipgloss.NewStyle().
+	Foreground(colorWarning).
+	Bold(true).
+	PaddingLeft(1)
+
 // Input area styles.
 var (
 	inputBorderStyle = lipgloss.NewStyle().

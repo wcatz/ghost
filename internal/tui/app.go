@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -25,6 +26,9 @@ const (
 
 // version is set at build time.
 var version = "dev"
+
+// thinkingTickMsg fires periodically while thinking is active.
+type thinkingTickMsg time.Time
 
 // App is the root bubbletea model.
 type App struct {
@@ -53,6 +57,11 @@ type App struct {
 	// Inline block accumulators.
 	thinkingAccum string                        // accumulated thinking text for current turn
 	completedTools map[string]completedToolInfo  // tool_use_end info keyed by tool ID, awaiting tool_result
+
+	// Thinking timer state.
+	thinkingStart  time.Time // when thinking phase began
+	thinkingTokens int       // estimated token count for thinking phase
+	thinkingActive bool      // true while thinking events are streaming
 
 	// Voice: set via SetVoice(). Nil if voice disabled.
 	voiceFn     func(ctx context.Context) (transcript, response string, err error)
@@ -119,7 +128,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.status.isProcessing = false
 		a.toolbar.clear()
 		a.completedTools = nil
+		a.thinkingActive = false
 		return a, nil
+
+	case thinkingTickMsg:
+		// Only continue ticking if still actively thinking.
+		if a.thinkingActive {
+			cmds = append(cmds, thinkingTickCmd())
+		}
+		return a, tea.Batch(cmds...)
 
 	case approvalRequestMsg:
 		a.currentView = viewApprove
@@ -129,12 +146,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, a.listenForApprovals())
 		return a, tea.Batch(cmds...)
 
+	case imagePasteMsg:
+		// Image paste: show preview and send to Claude.
+		a.chatView.addMessage(chatMessage{kind: msgUser, raw: "[pasted image]"})
+		a.isProcessing = true
+		a.status.startProcessing()
+		a.chatView.startNewAssistantMessage()
+		a.activeStream = a.session.SendImageAsync(
+			a.ctx, "Describe and analyze this image.", msg.mediaType, msg.data, a.approvalCh,
+		)
+		return a, waitForStreamEvent(a.activeStream)
+
 	case voiceResultMsg:
 		a.voiceActive = false
 		if msg.err != nil {
 			a.chatView.addMessage(chatMessage{kind: msgError, raw: fmt.Sprintf("Voice error: %v", msg.err)})
 		} else if msg.transcript != "" {
-			a.chatView.addMessage(chatMessage{kind: msgUser, raw: fmt.Sprintf("🎤 %s", msg.transcript)})
+			a.chatView.addMessage(chatMessage{kind: msgUser, raw: fmt.Sprintf("[voice] %s", msg.transcript)})
 			if msg.response != "" {
 				a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: msg.response})
 			}
@@ -279,6 +307,14 @@ func (a *App) flushThinking() {
 		a.thinkingAccum = ""
 	}
 	a.toolbar.setThinking(false)
+	a.thinkingActive = false
+}
+
+// thinkingTickCmd returns a tea.Cmd that fires after 100ms.
+func thinkingTickCmd() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+		return thinkingTickMsg(t)
+	})
 }
 
 // handleStreamEvent processes a streaming event from the session.
@@ -287,8 +323,18 @@ func (a App) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.Type {
 	case "thinking":
+		if !a.thinkingActive {
+			a.thinkingActive = true
+			a.thinkingStart = time.Now()
+			a.thinkingTokens = 0
+			cmds = append(cmds, thinkingTickCmd())
+		}
 		a.toolbar.setThinking(true)
 		a.thinkingAccum += msg.Text
+		// Approximate token count: ~4 chars per token.
+		delta := len(msg.Text) / 4
+		a.thinkingTokens += delta
+		a.toolbar.addThinkingTokens(delta)
 
 	case "text":
 		// Thinking phase ended — flush it inline before appending text.
@@ -336,6 +382,14 @@ func (a App) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		a.status.stopProcessing()
 		// Clear any stale completed tool info.
 		a.completedTools = nil
+
+		// Check for truncation (max_tokens hit).
+		if msg.StopReason == "max_tokens" {
+			a.chatView.addMessage(chatMessage{
+				kind: msgWarning,
+				raw:  "Response truncated -- hit token limit. Use /continue to get more.",
+			})
+		}
 
 	case "error":
 		a.flushThinking()
@@ -447,10 +501,22 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
+	case key.Matches(msg, keys.CopyBlock):
+		if a.input.value() == "" {
+			code := extractLastCodeBlock(a.chatView.messages)
+			if code != "" {
+				copyOSC52(code)
+				a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: "*Copied code block to clipboard*"})
+			} else {
+				a.chatView.addMessage(chatMessage{kind: msgWarning, raw: "No code block found to copy."})
+			}
+			return a, nil
+		}
+
 	case key.Matches(msg, keys.PushToTalk):
 		if a.voiceFn != nil && !a.voiceActive && !a.isProcessing {
 			a.voiceActive = true
-			a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: "🎤 Listening..."})
+			a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: "[voice] Listening..."})
 			return a, func() tea.Msg {
 				transcript, response, err := a.voiceFn(a.ctx)
 				return voiceResultMsg{transcript: transcript, response: response, err: err}
@@ -504,6 +570,120 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 			})
 		}
 
+	case "/model":
+		if len(msg.Args) > 0 {
+			name := strings.ToLower(msg.Args[0])
+			var modelID string
+			switch {
+			case strings.Contains(name, "haiku"):
+				modelID = ai.ModelHaiku45
+			case strings.Contains(name, "opus"):
+				modelID = ai.ModelOpus46
+			default:
+				modelID = ai.ModelSonnet46
+			}
+			a.session.SetModel(modelID)
+			a.status.modelName = shortModelName(modelID)
+			a.chatView.addMessage(chatMessage{
+				kind: msgAssistant,
+				raw:  fmt.Sprintf("Model switched to **%s**", shortModelName(modelID)),
+			})
+		} else {
+			a.chatView.addMessage(chatMessage{
+				kind: msgAssistant,
+				raw:  fmt.Sprintf("Current model: **%s**\nUsage: `/model sonnet` | `/model haiku` | `/model opus`", shortModelName(a.session.Model())),
+			})
+		}
+
+	case "/continue":
+		if a.isProcessing {
+			return a, nil
+		}
+		return a.sendMessage("Please continue from where you left off.")
+
+	case "/compact":
+		if a.isProcessing {
+			return a, nil
+		}
+		// Trigger compression by sending a message that forces a windowedMessages call.
+		a.chatView.addMessage(chatMessage{
+			kind: msgAssistant,
+			raw:  "Compacting conversation history...",
+		})
+		// A regular send will trigger windowedMessages() which handles compression.
+		return a.sendMessage("Summarize what we've been working on so far in 2-3 sentences, then continue.")
+
+	case "/tokens":
+		est := a.session.EstimateTokens()
+		input, output, cacheWrite, cacheRead := a.session.Cost.Totals()
+		info := fmt.Sprintf("**Token Estimates**\n"+
+			"- Context: ~%s tokens\n"+
+			"- Input: %s | Output: %s\n"+
+			"- Cache write: %s | Cache read: %s\n"+
+			"- Cache hit rate: %.0f%%",
+			formatTokens(est),
+			formatTokens(input), formatTokens(output),
+			formatTokens(cacheWrite), formatTokens(cacheRead),
+			a.session.Cost.CacheHitRate(),
+		)
+		a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: info})
+
+	case "/export":
+		msgs := a.session.Messages()
+		if len(msgs) == 0 {
+			a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: "No messages to export."})
+			return a, nil
+		}
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("# Ghost Conversation Export\n\n**Project:** %s\n**Date:** %s\n\n---\n\n",
+			a.session.ProjectName, time.Now().Format("2006-01-02 15:04")))
+		for _, m := range msgs {
+			role := strings.ToUpper(m.Role[:1]) + m.Role[1:]
+			for _, b := range m.Content {
+				if b.Type == "text" && b.Text != "" {
+					sb.WriteString(fmt.Sprintf("### %s\n\n%s\n\n", role, b.Text))
+				} else if b.Type == "tool_use" {
+					sb.WriteString(fmt.Sprintf("**Tool:** %s\n\n", b.Name))
+				}
+			}
+		}
+		// Copy to clipboard via OSC 52.
+		copyOSC52(sb.String())
+		a.chatView.addMessage(chatMessage{
+			kind: msgAssistant,
+			raw:  fmt.Sprintf("Exported %d messages to clipboard (markdown).", len(msgs)),
+		})
+
+	case "/sessions":
+		sessions := a.orch.ListSessions()
+		if len(sessions) == 0 {
+			a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: "No active sessions."})
+			return a, nil
+		}
+		var lines []string
+		for _, s := range sessions {
+			marker := "  "
+			if s.ProjectID == a.session.ProjectID {
+				marker = "* "
+			}
+			lines = append(lines, fmt.Sprintf("%s**%s** %s (%d messages)",
+				marker, s.ProjectName, s.Mode.Name, s.MessageCount()))
+		}
+		a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: strings.Join(lines, "\n")})
+
+	case "/new":
+		a.session.ClearMessages()
+		a.chatView.clear()
+		a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: "Fresh session started. Memories are preserved."})
+
+	case "/resume":
+		err := a.session.Resume(a.ctx)
+		if err != nil {
+			a.chatView.addMessage(chatMessage{kind: msgError, raw: fmt.Sprintf("Resume failed: %v", err)})
+		} else {
+			a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: fmt.Sprintf("Resumed previous session (%d messages loaded).", a.session.MessageCount())})
+		}
+
 	case "/clear":
 		a.session.ClearMessages()
 		a.chatView.clear()
@@ -517,6 +697,12 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 			kind: msgAssistant,
 			raw:  "Reflection triggered.",
 		})
+
+	case "/briefing":
+		if a.isProcessing {
+			return a, nil
+		}
+		return a.sendMessage("Give me a brief status update. What project am I working on? What have we discussed? Any pending tasks or decisions?")
 
 	case "/context":
 		a.session.Refresh()
@@ -540,6 +726,7 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 					a.session = s
 					a.status.projectName = s.ProjectName
 					a.status.modeName = s.Mode.Name
+					a.status.modelName = shortModelName(s.Model())
 					a.chatView.addMessage(chatMessage{
 						kind: msgAssistant,
 						raw:  fmt.Sprintf("Switched to **%s**", s.ProjectName),
@@ -589,6 +776,109 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 			)
 			return a, waitForStreamEvent(a.activeStream)
 		}
+
+	case "/voice":
+		if a.voiceFn != nil {
+			a.chatView.addMessage(chatMessage{
+				kind: msgAssistant,
+				raw:  "**Voice mode** is available. Press `ctrl+space` to start push-to-talk.",
+			})
+		} else {
+			a.chatView.addMessage(chatMessage{
+				kind: msgAssistant,
+				raw:  "Voice mode is not configured. Set up whisper.cpp or a voice provider first.",
+			})
+		}
+
+	case "/health":
+		ctx := context.Background()
+		memCount, err := a.session.Store().CountMemories(ctx, a.session.ProjectID)
+		countStr := "error"
+		if err == nil {
+			countStr = fmt.Sprintf("%d", memCount)
+		}
+		unembedded, err := a.session.Store().UnembeddedMemoryIDs(ctx, a.session.ProjectID, 1000)
+		embedStatus := "unknown"
+		if err == nil {
+			if len(unembedded) == 0 {
+				embedStatus = "all embedded"
+			} else {
+				embedStatus = fmt.Sprintf("%d pending", len(unembedded))
+			}
+		}
+		cost := a.session.Cost.Cost()
+		info := fmt.Sprintf("**Health Check**\n"+
+			"- Memories: %s\n"+
+			"- Embeddings: %s\n"+
+			"- Session cost: $%.4f\n"+
+			"- Model: %s\n"+
+			"- Messages: %d",
+			countStr, embedStatus, cost,
+			shortModelName(a.session.Model()),
+			a.session.MessageCount(),
+		)
+		a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: info})
+
+	case "/history":
+		msgs := a.session.Messages()
+		userCount := 0
+		assistantCount := 0
+		toolCount := 0
+		for _, m := range msgs {
+			switch m.Role {
+			case "user":
+				for _, b := range m.Content {
+					if b.Type == "tool_result" {
+						toolCount++
+					} else {
+						userCount++
+					}
+				}
+			case "assistant":
+				assistantCount++
+			}
+		}
+		est := a.session.EstimateTokens()
+		info := fmt.Sprintf("**Conversation Stats**\n"+
+			"- User messages: %d\n"+
+			"- Assistant messages: %d\n"+
+			"- Tool calls: %d\n"+
+			"- Total messages: %d\n"+
+			"- Estimated tokens: %s",
+			userCount, assistantCount, toolCount, len(msgs), formatTokens(est))
+		a.chatView.addMessage(chatMessage{kind: msgAssistant, raw: info})
+
+	case "/theme":
+		if len(msg.Args) > 0 {
+			name := msg.Args[0]
+			a.chatView.renderer.setTheme(name)
+			a.chatView.rerenderAll()
+			a.chatView.addMessage(chatMessage{
+				kind: msgAssistant,
+				raw:  fmt.Sprintf("Theme switched to **%s**", name),
+			})
+		} else {
+			a.chatView.addMessage(chatMessage{
+				kind: msgAssistant,
+				raw:  "Usage: `/theme <name>`\nAvailable: `ghost-blue`, `dark`, `light`, `notty`, `auto`",
+			})
+		}
+
+	case "/remind":
+		if len(msg.Args) < 2 {
+			a.chatView.addMessage(chatMessage{kind: msgWarning, raw: "Usage: /remind <time> <message>"})
+		} else {
+			a.chatView.addMessage(chatMessage{
+				kind: msgWarning,
+				raw:  "Reminders require a scheduler (not yet configured).",
+			})
+		}
+
+	case "/reminders":
+		a.chatView.addMessage(chatMessage{
+			kind: msgAssistant,
+			raw:  "No scheduler configured. Reminders are not available yet.",
+		})
 
 	case "auto-approve":
 		a.session.SetAutoApprove(true)
@@ -676,7 +966,7 @@ func (a App) handleMemoryCommand(args []string) (tea.Model, tea.Cmd) {
 }
 
 // SetVoice configures the voice push-to-talk function.
-// The function should execute one full PTT cycle (record → transcribe → respond → speak)
+// The function should execute one full PTT cycle (record -> transcribe -> respond -> speak)
 // and return the transcript and response text.
 func (a *App) SetVoice(fn func(ctx context.Context) (transcript, response string, err error)) {
 	a.voiceFn = fn

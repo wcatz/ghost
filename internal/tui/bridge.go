@@ -37,6 +37,12 @@ type voiceResultMsg struct {
 	err        error
 }
 
+// imagePasteMsg wraps a base64 image pasted into the TUI.
+type imagePasteMsg struct {
+	mediaType string
+	data      string
+}
+
 // errorMsg carries an error to display.
 type errorMsg struct{ err error }
 

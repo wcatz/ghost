@@ -744,3 +744,26 @@ func (s *Session) Store() provider.MemoryStore {
 func (s *Session) Model() string {
 	return s.model
 }
+
+// SetModel changes the model for this session.
+func (s *Session) SetModel(model string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.model = model
+}
+
+// EstimateTokens returns the estimated token count for the current conversation.
+func (s *Session) EstimateTokens() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return estimateTokens(s.messages)
+}
+
+// Messages returns a copy of the current conversation messages.
+func (s *Session) Messages() []ai.Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msgs := make([]ai.Message, len(s.messages))
+	copy(msgs, s.messages)
+	return msgs
+}

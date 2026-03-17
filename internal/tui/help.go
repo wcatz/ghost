@@ -17,17 +17,18 @@ func renderHelp(width int) string {
 		{"enter", "send message"},
 		{"shift+enter", "new line"},
 		{"ctrl+k", "command palette"},
+		{"ctrl+y", "copy last code block (OSC 52)"},
 		{"ctrl+j / ctrl+h", "next / prev tool"},
 		{"space", "expand/collapse tool output"},
 		{"alt+up / alt+down", "input history"},
 		{"pgup / pgdown", "scroll chat"},
-		{"ctrl+space", "push to talk (Phase C)"},
+		{"ctrl+space", "push to talk"},
 		{"ctrl+c", "quit"},
 		{"?", "this help"},
 	}
 
 	for _, bind := range bindings {
-		k := lipgloss.NewStyle().Foreground(colorAccent).Width(22).Render(bind.key)
+		k := lipgloss.NewStyle().Foreground(colorAccent).Width(24).Render(bind.key)
 		d := lipgloss.NewStyle().Foreground(colorSubtle).Render(bind.desc)
 		b.WriteString("  " + k + d + "\n")
 	}
@@ -37,6 +38,14 @@ func renderHelp(width int) string {
 	b.WriteString(cmdTitle + "\n\n")
 
 	commands := []struct{ cmd, desc string }{
+		{"/model <name>", "switch model (sonnet/haiku/opus)"},
+		{"/continue", "continue from where left off"},
+		{"/compact", "compress conversation history"},
+		{"/tokens", "token estimates + cache stats"},
+		{"/export", "export conversation as markdown"},
+		{"/sessions", "list sessions with counts"},
+		{"/new", "start fresh session"},
+		{"/resume", "resume last session"},
 		{"/memory", "list all memories"},
 		{"/memory search <q>", "search memories"},
 		{"/memory add", "add a manual memory"},
@@ -44,9 +53,16 @@ func renderHelp(width int) string {
 		{"/context", "show project context"},
 		{"/image <path>", "send image to Claude"},
 		{"/reflect", "force memory consolidation"},
-		{"/clear", "clear conversation"},
+		{"/briefing", "ask Ghost for a briefing"},
+		{"/voice", "voice mode info"},
+		{"/health", "memory, embeddings, cost"},
+		{"/history", "conversation stats"},
+		{"/theme <name>", "switch glamour theme"},
+		{"/remind <t> <msg>", "set a reminder"},
+		{"/reminders", "list pending reminders"},
 		{"/switch <name>", "switch project"},
 		{"/projects", "list project sessions"},
+		{"/clear", "clear conversation"},
 		{"/quit", "exit ghost"},
 	}
 
@@ -59,8 +75,8 @@ func renderHelp(width int) string {
 	b.WriteString("\n  " + lipgloss.NewStyle().Foreground(colorDim).Render("press any key to close"))
 
 	boxWidth := width - 10
-	if boxWidth > 60 {
-		boxWidth = 60
+	if boxWidth > 65 {
+		boxWidth = 65
 	}
 	if boxWidth < 40 {
 		boxWidth = 40

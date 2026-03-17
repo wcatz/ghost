@@ -25,6 +25,7 @@ type keyMap struct {
 	ToolNext     key.Binding
 	ToolPrev     key.Binding
 	ToolToggle   key.Binding
+	CopyBlock    key.Binding
 }
 
 var keys = keyMap{
@@ -111,5 +112,9 @@ var keys = keyMap{
 	ToolToggle: key.NewBinding(
 		key.WithKeys("space"),
 		key.WithHelp("space", "expand/collapse tool"),
+	),
+	CopyBlock: key.NewBinding(
+		key.WithKeys("ctrl+y"),
+		key.WithHelp("ctrl+y", "copy last code block"),
 	),
 }

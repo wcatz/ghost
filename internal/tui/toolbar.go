@@ -21,7 +21,9 @@ type activeTool struct {
 type toolbar struct {
 	current *activeTool   // nil when idle
 	spinner spinner.Model
-	thinking bool // true while extended thinking is active
+	thinking      bool      // true while extended thinking is active
+	thinkingStart time.Time // when thinking started
+	thinkingTokens int      // estimated thinking tokens (len/4 approx)
 }
 
 func newToolbar() toolbar {
@@ -75,7 +77,16 @@ func (t *toolbar) denyTool(id string) (string, bool) {
 }
 
 func (t *toolbar) setThinking(active bool) {
+	if active && !t.thinking {
+		t.thinkingStart = time.Now()
+		t.thinkingTokens = 0
+	}
 	t.thinking = active
+}
+
+// addThinkingTokens accumulates estimated thinking token count.
+func (t *toolbar) addThinkingTokens(n int) {
+	t.thinkingTokens += n
 }
 
 // clear resets the toolbar to idle state.
@@ -109,9 +120,12 @@ func (t toolbar) update(msg tea.Msg) (toolbar, tea.Cmd) {
 // view renders the toolbar: 0 lines when idle, 1 line when active.
 func (t toolbar) view() string {
 	if t.thinking && t.current == nil {
-		return fmt.Sprintf("  %s %s",
+		elapsed := time.Since(t.thinkingStart).Seconds()
+		tokens := formatTokens(t.thinkingTokens)
+		return fmt.Sprintf("  %s %s %s",
 			t.spinner.View(),
 			toolNameStyle.Render("thinking..."),
+			toolDurationStyle.Render(fmt.Sprintf("%.1fs (%s tokens)", elapsed, tokens)),
 		)
 	}
 	if t.current != nil {
