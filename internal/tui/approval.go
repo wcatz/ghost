@@ -177,8 +177,9 @@ func extractSummary(input json.RawMessage) string {
 		return ""
 	}
 
-	// Priority order for memory tools (query for search, content for save).
-	for _, field := range []string{"query", "content", "category", "message"} {
+	// Priority order: human-readable description first, then key identifiers.
+	// bash: description > command; file_edit/file_write: path; memory: query/content.
+	for _, field := range []string{"description", "command", "path", "query", "content", "category", "message"} {
 		if v, ok := m[field]; ok {
 			s := fmt.Sprintf("%v", v)
 			if len(s) > 120 {
