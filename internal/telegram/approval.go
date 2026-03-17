@@ -226,6 +226,36 @@ func formatToolInput(toolName string, input json.RawMessage) string {
 	}
 
 	switch toolName {
+	case "bash":
+		desc, _ := m["description"].(string)
+		cmd, _ := m["command"].(string)
+		if desc != "" && cmd != "" {
+			if len(cmd) > 80 {
+				cmd = cmd[:80] + "..."
+			}
+			return desc + "\n$ " + cmd
+		}
+		if desc != "" {
+			return desc
+		}
+		if cmd != "" {
+			return cmd
+		}
+	case "file_write":
+		if path, ok := m["path"].(string); ok && path != "" {
+			return path
+		}
+	case "file_edit":
+		if path, ok := m["path"].(string); ok && path != "" {
+			old, _ := m["old_string"].(string)
+			if len(old) > 60 {
+				old = old[:60] + "..."
+			}
+			if old != "" {
+				return path + "\n- " + old
+			}
+			return path
+		}
 	case "memory_save":
 		if content, ok := m["content"].(string); ok {
 			return content
