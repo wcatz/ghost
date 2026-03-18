@@ -120,8 +120,14 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 
 // --- Chat SSE Handler ---
 
+type imagePayload struct {
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+}
+
 type sendRequest struct {
-	Message string `json:"message"`
+	Message string         `json:"message"`
+	Images  []imagePayload `json:"images,omitempty"`
 }
 
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
@@ -181,8 +187,36 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		s.chatMu.Unlock()
 	}()
 
-	// Start streaming.
-	events := session.SendAsync(r.Context(), req.Message, approvalCh)
+	// Start streaming — use multimodal path when images are present.
+	var events <-chan ai.StreamEvent
+	if len(req.Images) > 0 {
+		imageBlocks := make([]ai.ContentBlock, len(req.Images))
+		for i, img := range req.Images {
+			imageBlocks[i] = ai.ImageBlock(img.MediaType, img.Data)
+		}
+		msg := ai.MultimodalMessage(req.Message, imageBlocks)
+		approvalFn := func(toolName string, input json.RawMessage) provider.ApprovalResponse {
+			resp := make(chan provider.ApprovalResponse, 1)
+			select {
+			case approvalCh <- provider.ApprovalRequest{
+				ToolName: toolName,
+				Input:    input,
+				Response: resp,
+			}:
+			case <-r.Context().Done():
+				return provider.ApprovalResponse{Approved: false}
+			}
+			select {
+			case ar := <-resp:
+				return ar
+			case <-r.Context().Done():
+				return provider.ApprovalResponse{Approved: false}
+			}
+		}
+		events = session.SendMessage(r.Context(), msg, req.Message, approvalFn)
+	} else {
+		events = session.SendAsync(r.Context(), req.Message, approvalCh)
+	}
 
 	// resolvedCh is nil when no approval is pending; set during approval flow.
 	// A nil channel in select blocks forever (never fires), which is what we want.
