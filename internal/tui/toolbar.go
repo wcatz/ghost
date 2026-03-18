@@ -122,14 +122,14 @@ func (t toolbar) view() string {
 	if t.thinking && t.current == nil {
 		elapsed := time.Since(t.thinkingStart).Seconds()
 		tokens := formatTokens(t.thinkingTokens)
-		return fmt.Sprintf("  %s %s %s",
+		return fmt.Sprintf("   %s %s %s",
 			t.spinner.View(),
 			toolNameStyle.Render("thinking..."),
 			toolDurationStyle.Render(fmt.Sprintf("%.1fs (%s tokens)", elapsed, tokens)),
 		)
 	}
 	if t.current != nil {
-		line := fmt.Sprintf("  %s %s",
+		line := fmt.Sprintf("   %s %s",
 			t.spinner.View(),
 			toolNameStyle.Render(t.current.name),
 		)
