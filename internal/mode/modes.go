@@ -14,7 +14,7 @@ var Modes = map[string]Mode{
 	"chat": {
 		Name:           "chat",
 		MaxTokens:      8192,
-		ThinkingBudget: 0, // disabled — API 2023-06-01 requires budget_tokens field
+		ThinkingBudget: 0, // disabled — chat uses fast model (Sonnet), thinking not needed
 		UseQualityModel: false,
 		SystemHint:     "Conversational assistant. Brief answers unless asked to elaborate. Save important facts to memory.",
 	},

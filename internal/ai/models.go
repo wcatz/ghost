@@ -4,7 +4,7 @@ import "encoding/json"
 
 const (
 	APIURL     = "https://api.anthropic.com/v1/messages"
-	APIVersion = "2023-06-01"
+	APIVersion = "2025-04-14"
 
 	ModelSonnet46 = "claude-sonnet-4-5-20250929"
 	ModelHaiku45  = "claude-haiku-4-5-20251001"
