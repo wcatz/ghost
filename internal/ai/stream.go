@@ -2,7 +2,9 @@ package ai
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -143,6 +145,10 @@ func parseStream(r io.Reader, events chan<- StreamEvent) error {
 	}
 
 	if err := scanner.Err(); err != nil {
+		// Don't report errors from intentional context cancellation.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
 		return fmt.Errorf("read stream: %w", err)
 	}
 
