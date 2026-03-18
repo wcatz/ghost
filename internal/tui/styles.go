@@ -184,9 +184,6 @@ var (
 	headerGitBranchStyle = lipgloss.NewStyle().
 				Foreground(colorBright)
 
-	headerGhostStyle = lipgloss.NewStyle().
-				Foreground(colorGhost)
-
 	headerGhostYoloStyle = lipgloss.NewStyle().
 				Foreground(colorError).
 				Bold(true)
