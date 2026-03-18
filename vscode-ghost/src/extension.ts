@@ -1,6 +1,7 @@
 // Ghost VSCode Extension -- activation and command registration.
 
 import * as vscode from "vscode";
+import { ChildProcess, spawn } from "child_process";
 import { GhostClient } from "./ghost-client";
 import { ChatSidebarProvider, ChatEditorPanel } from "./chat-webview";
 import { MemoryPanelProvider } from "./memory-panel";
@@ -8,6 +9,7 @@ import { GhostStatusBar } from "./status-bar";
 
 let currentClient: GhostClient;
 let healthInterval: ReturnType<typeof setInterval> | undefined;
+let ghostProcess: ChildProcess | undefined;
 
 function createClient(): GhostClient {
   const config = vscode.workspace.getConfiguration("ghost");
@@ -74,6 +76,16 @@ export function activate(context: vscode.ExtensionContext): void {
   healthInterval = setInterval(checkHealth, 15000);
   checkHealth();
 
+  // Auto-start ghost serve if configured and not already running
+  const autoStart = vscode.workspace.getConfiguration("ghost").get<boolean>("autoStart", false);
+  if (autoStart) {
+    currentClient.isAvailable().then((available) => {
+      if (!available) {
+        startGhostServe(statusBar, chatProvider);
+      }
+    });
+  }
+
   // Config change handler -- updates client everywhere
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
@@ -103,4 +115,51 @@ export function deactivate(): void {
     clearInterval(healthInterval);
     healthInterval = undefined;
   }
+  if (ghostProcess) {
+    ghostProcess.kill();
+    ghostProcess = undefined;
+  }
+}
+
+function startGhostServe(statusBar: GhostStatusBar, chatProvider: ChatSidebarProvider): void {
+  const outputChannel = vscode.window.createOutputChannel("Ghost");
+  outputChannel.appendLine("Starting ghost serve...");
+
+  ghostProcess = spawn("ghost", ["serve"], {
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: false,
+  });
+
+  ghostProcess.stdout?.on("data", (data: Buffer) => {
+    outputChannel.appendLine(data.toString().trimEnd());
+  });
+
+  ghostProcess.stderr?.on("data", (data: Buffer) => {
+    outputChannel.appendLine(data.toString().trimEnd());
+  });
+
+  ghostProcess.on("error", (err) => {
+    outputChannel.appendLine(`Failed to start ghost: ${err.message}`);
+    vscode.window.showWarningMessage(
+      "Ghost: could not start 'ghost serve'. Is ghost installed and in PATH?"
+    );
+    ghostProcess = undefined;
+  });
+
+  ghostProcess.on("exit", (code) => {
+    outputChannel.appendLine(`ghost serve exited with code ${code}`);
+    ghostProcess = undefined;
+    statusBar.setConnected(false);
+    chatProvider.postMessage({ type: "status", connected: false });
+  });
+
+  // Give it a moment to start, then check health
+  setTimeout(async () => {
+    const available = await currentClient.isAvailable();
+    statusBar.setConnected(available);
+    chatProvider.postMessage({ type: "status", connected: available });
+    if (available) {
+      outputChannel.appendLine("ghost serve is ready");
+    }
+  }, 2000);
 }
