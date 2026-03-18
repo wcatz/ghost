@@ -254,3 +254,67 @@ func (tb *Bot) sendChatMessage(sessionID, message string) (string, error) {
 	}
 	return response.String(), nil
 }
+
+// createMemory POSTs a new memory to the Ghost server API.
+func (tb *Bot) createMemory(projectID, content string) (id string, merged bool, err error) {
+	payload, _ := json.Marshal(map[string]interface{}{
+		"project_id": projectID,
+		"category":   "fact",
+		"content":    content,
+		"source":     "telegram",
+		"importance": 0.7,
+	})
+	url := fmt.Sprintf("http://%s/api/v1/memories/", tb.serverAddr)
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return "", false, fmt.Errorf("create memory request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if tb.serverToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return "", false, fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
+	}
+
+	var result struct {
+		ID     string `json:"id"`
+		Merged bool   `json:"merged"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", false, err
+	}
+	return result.ID, result.Merged, nil
+}
+
+// deleteMemory sends a DELETE request to remove a memory by ID.
+func (tb *Bot) deleteMemory(memoryID string) error {
+	url := fmt.Sprintf("http://%s/api/v1/memories/%s", tb.serverAddr, memoryID)
+
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return fmt.Errorf("create delete request: %w", err)
+	}
+	if tb.serverToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
+	}
+	return nil
+}
