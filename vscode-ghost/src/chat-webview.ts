@@ -295,7 +295,11 @@ export class ChatWebview implements vscode.Disposable {
 
   private async ensureSession(): Promise<void> {
     try {
-      const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+      const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!workspacePath) {
+        this.postMessage({ type: "error", text: "No workspace folder open — Ghost needs a project to work with." });
+        return;
+      }
       const sessions = await this.client.listSessions();
       // Find a session that matches the current workspace.
       const match = sessions.find((s) => s.project_path === workspacePath);
