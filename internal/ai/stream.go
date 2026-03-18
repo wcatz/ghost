@@ -146,7 +146,12 @@ func parseStream(r io.Reader, events chan<- StreamEvent) error {
 
 	if err := scanner.Err(); err != nil {
 		// Don't report errors from intentional context cancellation.
+		// Check both errors.Is (handles wrapped errors) and string match
+		// (some HTTP transport errors wrap context.Canceled opaquely).
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
+		if strings.Contains(err.Error(), "context canceled") || strings.Contains(err.Error(), "deadline exceeded") {
 			return nil
 		}
 		return fmt.Errorf("read stream: %w", err)

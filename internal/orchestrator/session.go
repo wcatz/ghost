@@ -316,6 +316,10 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 
 			stream, err := s.client.ChatStream(ctx, msgs, system, tools, s.Model(), s.Mode.MaxTokens, s.Mode.ThinkingBudget)
 			if err != nil {
+				// Suppress context cancellation errors from user interrupt.
+				if ctx.Err() != nil {
+					return
+				}
 				events <- ai.StreamEvent{Type: "error", Error: err}
 				return
 			}

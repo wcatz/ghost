@@ -33,11 +33,12 @@ type thinkingTickMsg time.Time
 // App is the root bubbletea model.
 type App struct {
 	// Core references.
-	orch    *orchestrator.Orchestrator
-	session *orchestrator.Session
-	cfg     *config.Config
-	ctx     context.Context
-	cancel  context.CancelFunc
+	orch          *orchestrator.Orchestrator
+	session       *orchestrator.Session
+	cfg           *config.Config
+	ctx           context.Context
+	cancel        context.CancelFunc
+	daemonWarning string // non-empty when ghost serve is unreachable at startup
 
 	// Components.
 	chatView chatViewport
@@ -78,37 +79,48 @@ func NewApp(
 	orch *orchestrator.Orchestrator,
 	session *orchestrator.Session,
 	cfg *config.Config,
+	daemonWarning string,
 ) App {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	imgProto := parseImageProtocol(cfg.Display.ImageProtocol)
 
 	return App{
-		orch:        orch,
-		session:     session,
-		cfg:         cfg,
-		ctx:         ctx,
-		cancel:      cancel,
-		chatView:    newChatViewport(80, 20),
-		input:       newInputArea(),
-		toolbar:     newToolbar(),
-		status:      newStatusBar(&session.Cost, session.EstimateTokens, func() int { return ai.ContextForModel(session.Model()) }),
-		approval:    newApprovalDialog(),
-		palette:     newCommandPalette(),
-		currentView: viewMain,
-		imgProtocol: imgProto,
-		approvalCh:  make(chan provider.ApprovalRequest, 4),
+		orch:          orch,
+		session:       session,
+		cfg:           cfg,
+		ctx:           ctx,
+		cancel:        cancel,
+		daemonWarning: daemonWarning,
+		chatView:      newChatViewport(80, 20),
+		input:         newInputArea(),
+		toolbar:       newToolbar(),
+		status:        newStatusBar(&session.Cost, session.EstimateTokens, func() int { return ai.ContextForModel(session.Model()) }),
+		approval:      newApprovalDialog(),
+		palette:       newCommandPalette(),
+		currentView:   viewMain,
+		imgProtocol:   imgProto,
+		approvalCh:    make(chan provider.ApprovalRequest, 4),
 	}
 }
 
 // Init returns initial commands.
 func (a App) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		a.input.textarea.Focus(),
 		a.listenForApprovals(),
 		fetchGitInfo(a.session.ProjectPath),
-	)
+	}
+	if a.daemonWarning != "" {
+		cmds = append(cmds, func() tea.Msg {
+			return daemonWarningMsg(a.daemonWarning)
+		})
+	}
+	return tea.Batch(cmds...)
 }
+
+// daemonWarningMsg is a startup message injected when ghost serve is unreachable.
+type daemonWarningMsg string
 
 // Update processes messages.
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -117,6 +129,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case gitInfoMsg:
 		a.git = gitInfo(msg)
+		return a, nil
+
+	case daemonWarningMsg:
+		a.chatView.addMessage(chatMessage{kind: msgWarning, raw: string(msg)})
 		return a, nil
 
 	case tea.WindowSizeMsg:
@@ -1093,7 +1109,7 @@ func (a App) listenForApprovals() tea.Cmd {
 
 // RunApp starts the bubbletea TUI.
 func RunApp(orch *orchestrator.Orchestrator, cfg *config.Config, session *orchestrator.Session) error {
-	app := NewApp(orch, session, cfg)
+	app := NewApp(orch, session, cfg, "")
 
 	p := tea.NewProgram(app)
 
