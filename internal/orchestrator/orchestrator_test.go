@@ -26,7 +26,8 @@ func testOrchestrator(t *testing.T) (*Orchestrator, *memory.Store) {
 
 	cfg := &config.Config{}
 	cfg.Defaults.Mode = "chat"
-	cfg.API.ModelQuality = "claude-sonnet-4-5-20250929"
+	cfg.API.ModelQuality = "claude-opus-4-6-20250514"
+	cfg.API.ModelFast = "claude-sonnet-4-5-20250929"
 
 	o := New(nil, store, registry, cfg, logger)
 	return o, store
@@ -194,7 +195,8 @@ func TestOrchestrator_AutoApproveYolo(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Defaults.Mode = "chat"
 	cfg.Defaults.ApprovalMode = "yolo"
-	cfg.API.ModelQuality = "claude-sonnet-4-5-20250929"
+	cfg.API.ModelQuality = "claude-opus-4-6-20250514"
+	cfg.API.ModelFast = "claude-sonnet-4-5-20250929"
 
 	o := New(nil, store, registry, cfg, logger)
 

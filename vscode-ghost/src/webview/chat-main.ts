@@ -144,9 +144,14 @@ inputEl.addEventListener("input", autoResizeInput);
 autoApproveBtn.addEventListener("click", () => {
   autoApprove = !autoApprove;
   autoApproveBtn.setAttribute("aria-pressed", String(autoApprove));
-  autoApproveBtn.title = autoApprove ? "Auto-approve ON" : "Auto-approve OFF";
-  autoApproveBtn.textContent = autoApprove ? "\u{1F513}" : "\u{1F512}";
+  autoApproveBtn.title = autoApprove ? "YOLO — auto-approving all tools" : "Auto-approve off";
   autoApproveBtn.classList.toggle("active", autoApprove);
+  const icon = autoApproveBtn.querySelector(".ghost-btn-icon") as HTMLImageElement | null;
+  if (icon) {
+    icon.style.filter = autoApprove
+      ? "invert(27%) sepia(100%) saturate(7000%) hue-rotate(0deg) brightness(100%) contrast(100%)"
+      : "invert(73%) sepia(89%) saturate(400%) hue-rotate(140deg) brightness(100%) contrast(100%)";
+  }
   vscode.postMessage({ type: "set_auto_approve", enabled: autoApprove });
 });
 

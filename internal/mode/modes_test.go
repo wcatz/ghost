@@ -53,30 +53,6 @@ func TestGet_FallbackToDefault(t *testing.T) {
 	}
 }
 
-func TestNames(t *testing.T) {
-	names := Names()
-	if len(names) == 0 {
-		t.Fatal("Names() returned empty slice")
-	}
-	if len(names) != len(Modes) {
-		t.Errorf("Names() returned %d names, but Modes has %d entries", len(names), len(Modes))
-	}
-
-	// Verify each name maps to a valid mode.
-	nameSet := make(map[string]bool)
-	for _, n := range names {
-		nameSet[n] = true
-		if _, ok := Modes[n]; !ok {
-			t.Errorf("Names() returned %q which is not in Modes", n)
-		}
-	}
-
-	// Verify no duplicates.
-	if len(nameSet) != len(names) {
-		t.Errorf("Names() contains duplicates: %v", names)
-	}
-}
-
 func TestChatMode_Properties(t *testing.T) {
 	chat := Get("chat")
 	if chat.Name != "chat" {

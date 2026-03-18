@@ -56,9 +56,9 @@ func (c *Client) ChatStream(
 			BudgetTokens: thinkingBudget,
 		}
 	} else if thinkingBudget < 0 {
-		// Adaptive thinking — omit budget_tokens, Claude decides.
+		// Adaptive thinking — Claude auto-scales effort.
 		reqBody.Thinking = &ThinkingConfig{
-			Type: "enabled",
+			Type: "adaptive",
 		}
 	}
 
@@ -72,9 +72,7 @@ func (c *Client) ChatStream(
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
-	req.Header.Set("anthropic-version", APIVersion)
+	c.setHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -101,9 +99,7 @@ func (c *Client) ChatStream(
 				case <-time.After(retryAfter):
 				}
 				retryReq, _ := http.NewRequestWithContext(ctx, "POST", APIURL, bytes.NewReader(body))
-				retryReq.Header.Set("Content-Type", "application/json")
-				retryReq.Header.Set("x-api-key", c.apiKey)
-				retryReq.Header.Set("anthropic-version", APIVersion)
+				c.setHeaders(retryReq)
 				resp, err = c.httpClient.Do(retryReq)
 				if err != nil {
 					return nil, fmt.Errorf("retry request: %w", err)
@@ -157,9 +153,7 @@ func (c *Client) Reflect(ctx context.Context, prompt string) (string, TokenUsage
 	if err != nil {
 		return "", TokenUsage{}, fmt.Errorf("create reflect request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
-	req.Header.Set("anthropic-version", APIVersion)
+	c.setHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -200,6 +194,72 @@ func (c *Client) Reflect(ctx context.Context, prompt string) (string, TokenUsage
 	}
 
 	return text, usage, nil
+}
+
+// setHeaders applies common headers to an API request.
+func (c *Client) setHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("anthropic-version", APIVersion)
+	req.Header.Set("anthropic-beta", BetaInterleavedThinking)
+}
+
+// CountTokens calls the token counting endpoint for accurate context tracking.
+func (c *Client) CountTokens(
+	ctx context.Context,
+	messages []Message,
+	system []SystemBlock,
+	tools []ToolDefinition,
+	model string,
+	thinking *ThinkingConfig,
+) (int, error) {
+	reqBody := struct {
+		Model    string           `json:"model"`
+		Messages []Message        `json:"messages"`
+		System   []SystemBlock    `json:"system,omitempty"`
+		Tools    []ToolDefinition `json:"tools,omitempty"`
+		Thinking *ThinkingConfig  `json:"thinking,omitempty"`
+	}{
+		Model:    model,
+		Messages: messages,
+		System:   system,
+		Tools:    tools,
+		Thinking: thinking,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return 0, fmt.Errorf("marshal count_tokens: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", CountTokensURL, bytes.NewReader(body))
+	if err != nil {
+		return 0, fmt.Errorf("create count_tokens request: %w", err)
+	}
+	c.setHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("count_tokens call: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return 0, fmt.Errorf("read count_tokens response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, parseAPIError(resp.StatusCode, respBody)
+	}
+
+	var result struct {
+		InputTokens int `json:"input_tokens"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return 0, fmt.Errorf("unmarshal count_tokens: %w", err)
+	}
+	return result.InputTokens, nil
 }
 
 // parseAPIError extracts a user-friendly message from Claude API error responses.

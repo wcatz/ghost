@@ -69,6 +69,7 @@ func (o *Orchestrator) StartSession(projectPath string) (*Session, error) {
 		reflector,
 		o.logger,
 		o.cfg.API.ModelQuality,
+		o.cfg.API.ModelFast,
 		o.cfg.Defaults.Mode,
 	)
 

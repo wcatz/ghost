@@ -33,10 +33,10 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 
 	// Verify compiled defaults are applied.
-	if cfg.API.ModelQuality != "claude-sonnet-4-5-20250929" {
+	if cfg.API.ModelQuality != "claude-opus-4-6-20250514" {
 		t.Errorf("expected model_quality default, got %q", cfg.API.ModelQuality)
 	}
-	if cfg.API.ModelFast != "claude-haiku-4-5-20251001" {
+	if cfg.API.ModelFast != "claude-sonnet-4-5-20250929" {
 		t.Errorf("expected model_fast default, got %q", cfg.API.ModelFast)
 	}
 	if cfg.Defaults.Mode != "chat" {

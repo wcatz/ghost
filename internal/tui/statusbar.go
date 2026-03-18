@@ -9,23 +9,21 @@ import (
 	"github.com/wcatz/ghost/internal/ai"
 )
 
-// statusBar shows project, model, token counts, cost, and elapsed time.
+// statusBar shows cost, savings, cache rate, context window, and elapsed time.
 type statusBar struct {
-	projectName string
-	modeName    string
-	modelName   string
-	width       int
-
-	cost         *ai.CostTracker
-	isProcessing bool
-	requestStart time.Time
+	width          int
+	cost           *ai.CostTracker
+	estimateTokens func() int
+	maxTokens      func() int
+	isProcessing   bool
+	requestStart   time.Time
 }
 
-func newStatusBar(projectName, modelName string, cost *ai.CostTracker) statusBar {
+func newStatusBar(cost *ai.CostTracker, estimateTokens func() int, maxTokens func() int) statusBar {
 	return statusBar{
-		projectName: projectName,
-		modelName:   modelName,
-		cost:        cost,
+		cost:           cost,
+		estimateTokens: estimateTokens,
+		maxTokens:      maxTokens,
 	}
 }
 
@@ -43,52 +41,86 @@ func (s *statusBar) stopProcessing() {
 }
 
 func (s statusBar) view() string {
-	left := statusProjectStyle.Render(s.projectName)
-	if s.modelName != "" {
-		left += statusBarStyle.Render(" ") + statusModeStyle.Render(s.modelName)
-	}
+	var parts []string
 
-	var right string
 	if s.cost != nil {
 		cost := s.cost.Cost()
 		cacheRate := s.cost.CacheHitRate()
 		savings := s.cost.Savings()
 
 		if cost > 0 || cacheRate > 0 {
-			right = statusCostStyle.Render(fmt.Sprintf("$%.4f", cost))
+			parts = append(parts, statusCostStyle.Render(fmt.Sprintf("$%.4f", cost)))
 			if savings > 0.0001 {
-				right += statusBarStyle.Render(fmt.Sprintf(" (saved $%.2f)", savings))
+				parts = append(parts, statusBarStyle.Render(fmt.Sprintf("saved $%.2f", savings)))
 			}
 			if cacheRate > 0 {
-				right += statusBarStyle.Render(fmt.Sprintf(" cache:%.0f%%", cacheRate))
+				parts = append(parts, statusBarStyle.Render(fmt.Sprintf("cache:%.0f%%", cacheRate)))
 			}
+		}
+	}
+
+	// Context window progress bar.
+	if s.estimateTokens != nil && s.maxTokens != nil {
+		used := s.estimateTokens()
+		max := s.maxTokens()
+		pct := float64(used) / float64(max)
+		if pct > 0 {
+			bar := renderProgressBar(pct, 10)
+			parts = append(parts, bar+statusBarStyle.Render(fmt.Sprintf(" %.0f%%", pct*100)))
 		}
 	}
 
 	if s.isProcessing {
 		elapsed := time.Since(s.requestStart).Round(100 * time.Millisecond)
-		right += statusBarStyle.Render(fmt.Sprintf(" [%s]", elapsed))
+		parts = append(parts, statusBarStyle.Render(fmt.Sprintf("[%s]", elapsed)))
 	}
 
-	gap := s.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
+	if len(parts) == 0 {
+		return statusBarStyle.Render("")
+	}
+
+	content := strings.Join(parts, statusBarStyle.Render(" · "))
+	gap := s.width - lipgloss.Width(content) - 2
 	if gap < 1 {
 		gap = 1
 	}
+	padding := strings.Repeat(" ", gap)
+	return statusBarStyle.Render(padding + content)
+}
 
-	padding := ""
-	for i := 0; i < gap; i++ {
-		padding += " "
+// renderProgressBar renders a progress bar of barWidth chars using block characters.
+// pct is 0.0–1.0. Color shifts green→yellow→red at 0.50/0.75.
+func renderProgressBar(pct float64, barWidth int) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 1 {
+		pct = 1
+	}
+	filled := int(pct * float64(barWidth))
+
+	var filledStyle lipgloss.Style
+	switch {
+	case pct >= 0.75:
+		filledStyle = ctxBarFilledRedStyle
+	case pct >= 0.50:
+		filledStyle = ctxBarFilledYellowStyle
+	default:
+		filledStyle = ctxBarFilledGreenStyle
 	}
 
-	return statusBarStyle.Render(left + padding + right)
+	filledStr := filledStyle.Render(strings.Repeat("█", filled))
+	emptyStr := ctxBarEmptyStyle.Render(strings.Repeat("░", barWidth-filled))
+	return filledStr + emptyStr
 }
 
 // shortModelName extracts a readable model name from a full model ID.
-// e.g. "claude-sonnet-4-5-20250929" → "sonnet-4.5"
 func shortModelName(model string) string {
 	switch {
 	case strings.Contains(model, "opus-4-6"):
 		return "opus-4.6"
+	case strings.Contains(model, "sonnet-4-6"):
+		return "sonnet-4.6"
 	case strings.Contains(model, "sonnet-4-5"):
 		return "sonnet-4.5"
 	case strings.Contains(model, "haiku-4-5"):

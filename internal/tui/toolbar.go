@@ -66,16 +66,6 @@ func (t *toolbar) completeTool(id string) (string, time.Duration, bool) {
 	return name, dur, true
 }
 
-// denyTool marks the active tool as denied and returns info.
-func (t *toolbar) denyTool(id string) (string, bool) {
-	if t.current == nil || t.current.id != id {
-		return "", false
-	}
-	name := t.current.name
-	t.current = nil
-	return name, true
-}
-
 func (t *toolbar) setThinking(active bool) {
 	if active && !t.thinking {
 		t.thinkingStart = time.Now()

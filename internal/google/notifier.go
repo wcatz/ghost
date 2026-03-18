@@ -114,7 +114,11 @@ func (n *MeetingNotifier) formatAlert(ev Event, until time.Duration) string {
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "📅 *Meeting in %d min*\n", minutes)
-	fmt.Fprintf(&sb, "  %s\n", mdv2.Esc(ev.Summary))
+	title := mdv2.Esc(ev.Summary)
+	if ev.HtmlLink != "" {
+		title = fmt.Sprintf("[%s](%s)", mdv2.Esc(ev.Summary), ev.HtmlLink)
+	}
+	fmt.Fprintf(&sb, "  %s\n", title)
 	fmt.Fprintf(&sb, "  🕐 %s", mdv2.Esc(ev.Start.Local().Format("15:04")))
 	if !ev.End.IsZero() {
 		fmt.Fprintf(&sb, " – %s", mdv2.Esc(ev.End.Local().Format("15:04")))

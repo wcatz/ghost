@@ -61,11 +61,6 @@ func (s *Server) SetApprovalNotifier(n ApprovalNotifier) {
 	s.approvalNotifier = n
 }
 
-// ListenAddr returns the configured listen address.
-func (s *Server) ListenAddr() string {
-	return s.cfg.ListenAddr
-}
-
 // Run starts the HTTP server. Blocks until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
 	r := chi.NewRouter()

@@ -91,13 +91,25 @@ var (
 				Foreground(colorGhost)
 
 	toolDoneStyle = lipgloss.NewStyle().
-			Foreground(colorSuccess)
+			Foreground(colorSuccess).
+			Bold(true)
 
 	toolDeniedStyle = lipgloss.NewStyle().
-			Foreground(colorError)
+			Foreground(colorError).
+			Bold(true)
 
 	toolDurationStyle = lipgloss.NewStyle().
 				Foreground(colorDim)
+
+	toolBlockCollapsedStyle = lipgloss.NewStyle().
+					Foreground(colorSubtle).
+					PaddingLeft(2)
+
+	toolBlockExpandedStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorSubtle).
+				Padding(0, 1).
+				MarginLeft(2)
 )
 
 // Approval dialog styles.
@@ -155,6 +167,35 @@ var warningStyle = lipgloss.NewStyle().
 	Foreground(colorWarning).
 	Bold(true).
 	PaddingLeft(1)
+
+// Header component styles.
+var (
+	headerModeStyle = lipgloss.NewStyle().
+			Foreground(colorGhost).
+			Bold(true).
+			PaddingLeft(1)
+
+	headerModelStyle = lipgloss.NewStyle().
+				Foreground(colorSecondary)
+
+	headerGitStyle = lipgloss.NewStyle().
+			Foreground(colorDim)
+
+	headerGitBranchStyle = lipgloss.NewStyle().
+				Foreground(colorBright)
+
+	headerGhostYoloStyle = lipgloss.NewStyle().
+				Foreground(colorError).
+				Bold(true)
+)
+
+// Context progress bar styles.
+var (
+	ctxBarFilledGreenStyle  = lipgloss.NewStyle().Foreground(colorSuccess)
+	ctxBarFilledYellowStyle = lipgloss.NewStyle().Foreground(colorWarning)
+	ctxBarFilledRedStyle    = lipgloss.NewStyle().Foreground(colorError)
+	ctxBarEmptyStyle        = lipgloss.NewStyle().Foreground(colorSubtle)
+)
 
 // Input area styles.
 var (

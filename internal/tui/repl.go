@@ -86,13 +86,6 @@ func (r *REPL) Run(initialSession *orchestrator.Session) error {
 	return scanner.Err()
 }
 
-// RunOneShot sends a single message and exits.
-func (r *REPL) RunOneShot(session *orchestrator.Session, message string) error {
-	r.active = session
-	r.sendMessage(message)
-	return nil
-}
-
 func (r *REPL) sendMessage(input string) {
 	approvalFn := func(toolName string, toolInput json.RawMessage) provider.ApprovalResponse {
 		fmt.Printf("\n%s⚡ [%s]%s ", colorYellow, toolName, colorReset)

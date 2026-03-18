@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/orchestrator"
 	"github.com/wcatz/ghost/internal/provider"
 	"golang.org/x/term"
@@ -75,29 +74,4 @@ func RunOneShot(session *orchestrator.Session, message string, showCost bool) {
 // RunPipe reads all of stdin and sends it as a single one-shot message.
 func RunPipe(session *orchestrator.Session, input string, showCost bool) {
 	RunOneShot(session, strings.TrimSpace(input), showCost)
-}
-
-// sendStreamToStdout is a helper that drains a StreamEvent channel to stdout.
-// Used by the legacy REPL's sendMessage.
-func sendStreamToStdout(events <-chan ai.StreamEvent, showCost bool) {
-	for evt := range events {
-		switch evt.Type {
-		case "text":
-			fmt.Print(evt.Text)
-		case "tool_use_start":
-			if evt.ToolUse != nil {
-				fmt.Printf("\n%s⚙ [%s]%s ", colorGray, evt.ToolUse.Name, colorReset)
-			}
-		case "done":
-			fmt.Println()
-			if showCost && evt.Usage != nil {
-				fmt.Printf("%s[tokens: in=%d out=%d cache_create=%d cache_read=%d]%s\n",
-					colorGray, evt.Usage.InputTokens, evt.Usage.OutputTokens,
-					evt.Usage.CacheCreationInputTokens, evt.Usage.CacheReadInputTokens, colorReset,
-				)
-			}
-		case "error":
-			fmt.Printf("\n%serror: %v%s\n", colorRed, evt.Error, colorReset)
-		}
-	}
 }

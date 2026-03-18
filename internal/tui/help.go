@@ -16,6 +16,9 @@ func renderHelp(width int) string {
 	bindings := []struct{ key, desc string }{
 		{"enter", "send message"},
 		{"shift+enter", "new line"},
+		{"esc", "interrupt current request"},
+		{"ctrl+c", "interrupt or quit"},
+		{"ctrl+d", "force quit"},
 		{"ctrl+k", "command palette"},
 		{"ctrl+y", "copy last code block (OSC 52)"},
 		{"ctrl+j / ctrl+h", "next / prev tool"},
@@ -23,7 +26,6 @@ func renderHelp(width int) string {
 		{"alt+up / alt+down", "input history"},
 		{"pgup / pgdown", "scroll chat"},
 		{"ctrl+space", "push to talk"},
-		{"ctrl+c", "quit"},
 		{"?", "this help"},
 	}
 

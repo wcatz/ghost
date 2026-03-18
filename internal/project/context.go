@@ -109,15 +109,6 @@ func Detect(path string) (*Context, error) {
 	return ctx, nil
 }
 
-// safeJoin joins base and name, ensuring the result stays within base.
-func safeJoin(base, name string) string {
-	joined := filepath.Join(base, filepath.Clean(name))
-	if !strings.HasPrefix(joined, base+string(filepath.Separator)) && joined != base {
-		return ""
-	}
-	return joined
-}
-
 func detectLanguage(path string) string {
 	checks := []struct {
 		file string

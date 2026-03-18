@@ -20,6 +20,7 @@ type keyMap struct {
 	Approve      key.Binding
 	Deny         key.Binding
 	ApproveAll   key.Binding
+	Interrupt    key.Binding
 	Cancel       key.Binding
 	PushToTalk   key.Binding // Phase C — reserved
 	ToolNext     key.Binding
@@ -92,6 +93,10 @@ var keys = keyMap{
 	ApproveAll: key.NewBinding(
 		key.WithKeys("a"),
 		key.WithHelp("a", "approve all"),
+	),
+	Interrupt: key.NewBinding(
+		key.WithKeys("esc"),
+		key.WithHelp("esc", "interrupt"),
 	),
 	Cancel: key.NewBinding(
 		key.WithKeys("esc"),

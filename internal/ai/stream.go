@@ -2,7 +2,9 @@ package ai
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -75,6 +77,9 @@ func parseStream(r io.Reader, events chan<- StreamEvent) error {
 			switch delta.Type {
 			case "thinking_delta":
 				events <- StreamEvent{Type: "thinking", Text: delta.Thinking}
+			case "signature_delta":
+				// Signature for multi-turn thinking continuity — store but don't display.
+				// Could be used to pass thinking context across turns.
 			case "text_delta":
 				events <- StreamEvent{Type: "text", Text: delta.Text}
 			case "input_json_delta":
@@ -140,6 +145,15 @@ func parseStream(r io.Reader, events chan<- StreamEvent) error {
 	}
 
 	if err := scanner.Err(); err != nil {
+		// Don't report errors from intentional context cancellation.
+		// Check both errors.Is (handles wrapped errors) and string match
+		// (some HTTP transport errors wrap context.Canceled opaquely).
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
+		if strings.Contains(err.Error(), "context canceled") || strings.Contains(err.Error(), "deadline exceeded") {
+			return nil
+		}
 		return fmt.Errorf("read stream: %w", err)
 	}
 

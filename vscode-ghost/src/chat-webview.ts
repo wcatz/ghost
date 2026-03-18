@@ -281,6 +281,9 @@ export class ChatWebview implements vscode.Disposable {
     const scriptUri = this.webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, "out", "webview", "chat.js"),
     );
+    const ghostIconUri = this.webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, "media", "ghost-icon.svg"),
+    );
     const cspSource = this.webview.cspSource;
 
     return `<!DOCTYPE html>
@@ -301,7 +304,7 @@ export class ChatWebview implements vscode.Disposable {
       <span id="mode-badge" class="mode-badge" aria-label="Mode">chat</span>
     </div>
     <div id="header-right">
-      <button id="auto-approve-btn" class="header-btn" aria-label="Auto-approve off" aria-pressed="false" title="Auto-approve off">&#x1F512;</button>
+      <button id="auto-approve-btn" class="header-btn" aria-label="Auto-approve off" aria-pressed="false" title="Auto-approve off"><img src="${ghostIconUri}" class="ghost-btn-icon" alt="ghost" /></button>
       <span id="session-cost" role="status" aria-label="Session cost"></span>
     </div>
   </div>
@@ -408,6 +411,7 @@ export class ChatEditorPanel {
         localResourceRoots: [vscode.Uri.joinPath(extensionUri, "media"), vscode.Uri.joinPath(extensionUri, "out")],
       },
     );
+    panel.iconPath = vscode.Uri.joinPath(extensionUri, "media", "ghost-icon.svg");
     ChatEditorPanel.currentPanel = new ChatEditorPanel(panel, extensionUri, client, statusBar);
   }
 

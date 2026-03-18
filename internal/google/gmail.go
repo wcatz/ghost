@@ -18,16 +18,10 @@ type Email struct {
 
 // UnreadCount returns the number of unread emails in the inbox.
 func (c *Client) UnreadCount(ctx context.Context) (int, error) {
-	profile, err := c.Gmail.Users.GetProfile("me").Context(ctx).Do()
-	if err != nil {
-		return 0, fmt.Errorf("get gmail profile: %w", err)
-	}
-	// MessagesTotal is total, not unread. Use label instead.
 	label, err := c.Gmail.Users.Labels.Get("me", "INBOX").Context(ctx).Do()
 	if err != nil {
 		return 0, fmt.Errorf("get inbox label: %w", err)
 	}
-	_ = profile
 	return int(label.MessagesUnread), nil
 }
 

@@ -1,12 +1,74 @@
 package tui
 
 import (
+	"bytes"
+	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/provider"
 )
+
+// gitInfo holds the current git state for the project directory.
+type gitInfo struct {
+	branch string
+	dirty  bool
+	ahead  int
+	behind int
+	err    error
+}
+
+// gitInfoMsg carries a fetched gitInfo back to the Update loop.
+type gitInfoMsg gitInfo
+
+// fetchGitInfo returns a tea.Cmd that runs git queries non-blocking.
+func fetchGitInfo(projectPath string) tea.Cmd {
+	return func() tea.Msg {
+		branch, err := runGit(projectPath, "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			return gitInfoMsg{err: err}
+		}
+		info := gitInfo{branch: branch}
+
+		// Parse ahead/behind and dirty from `git status --porcelain=v1 -b`.
+		status, err := runGit(projectPath, "status", "--porcelain=v1", "-b")
+		if err != nil {
+			return gitInfoMsg{branch: branch}
+		}
+		for _, line := range strings.Split(status, "\n") {
+			if strings.HasPrefix(line, "## ") {
+				// e.g. "## main...origin/main [ahead 1, behind 2]"
+				if i := strings.Index(line, "["); i != -1 {
+					counts := line[i+1 : strings.Index(line, "]")]
+					for _, part := range strings.Split(counts, ", ") {
+						part = strings.TrimSpace(part)
+						if strings.HasPrefix(part, "ahead ") {
+							info.ahead, _ = strconv.Atoi(strings.TrimPrefix(part, "ahead "))
+						} else if strings.HasPrefix(part, "behind ") {
+							info.behind, _ = strconv.Atoi(strings.TrimPrefix(part, "behind "))
+						}
+					}
+				}
+			} else if len(line) >= 2 && line[0] != '?' {
+				info.dirty = true
+			}
+		}
+		return gitInfoMsg(info)
+	}
+}
+
+func runGit(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out.String()), nil
+}
 
 // completedToolInfo holds metadata for a tool that finished execution,
 // pending its tool_result event to be rendered inline in the viewport.

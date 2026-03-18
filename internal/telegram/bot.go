@@ -251,8 +251,12 @@ func (tb *Bot) handleNotifications(ctx context.Context, b *bot.Bot, update *mode
 	fmt.Fprintf(&sb, "*Unread Notifications* \\(%d\\)\n\n", len(notifs))
 	for _, n := range notifs {
 		emoji := priorityEmoji(n.Priority)
+		title := mdv2.Esc(n.SubjectTitle)
+		if webURL := ghAPIToHTML(n.SubjectURL, n.SubjectType); webURL != "" {
+			title = fmt.Sprintf("[%s](%s)", mdv2.Esc(n.SubjectTitle), webURL)
+		}
 		fmt.Fprintf(&sb, "%s *P%d* `%s`\n  %s\n  _%s_\n\n",
-			emoji, n.Priority, mdv2.Esc(n.RepoFullName), mdv2.Esc(n.SubjectTitle), mdv2.Esc(n.Reason))
+			emoji, n.Priority, mdv2.Esc(n.RepoFullName), title, mdv2.Esc(n.Reason))
 		if htmlURL := ghAPIToHTML(n.SubjectURL, n.SubjectType); htmlURL != "" {
 			label := fmt.Sprintf("%s %s", emoji, truncate(n.SubjectTitle, 30))
 			buttons = append(buttons, []models.InlineKeyboardButton{
@@ -469,13 +473,17 @@ func (tb *Bot) handleMeetings(ctx context.Context, b *bot.Bot, update *models.Up
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "*Today's Meetings* \\(%d\\)\n\n", len(events))
 	for _, e := range events {
+		title := mdv2.Esc(e.Summary)
+		if e.HtmlLink != "" {
+			title = fmt.Sprintf("[%s](%s)", mdv2.Esc(e.Summary), e.HtmlLink)
+		}
 		if e.AllDay {
-			fmt.Fprintf(&sb, "📅 %s \\(all day\\)\n", mdv2.Esc(e.Summary))
+			fmt.Fprintf(&sb, "📅 %s \\(all day\\)\n", title)
 		} else {
 			fmt.Fprintf(&sb, "🕐 %s – %s  *%s*\n",
 				mdv2.Esc(e.Start.Local().Format("15:04")),
 				mdv2.Esc(e.End.Local().Format("15:04")),
-				mdv2.Esc(e.Summary))
+				title)
 		}
 		if e.Location != "" {
 			fmt.Fprintf(&sb, "  📍 %s\n", mdv2.Esc(e.Location))
@@ -517,7 +525,12 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 	var buttons [][]models.InlineKeyboardButton
 	fmt.Fprintf(&sb, "*Unread Emails* \\(%d total\\)\n\n", count)
 	for _, e := range emails {
-		fmt.Fprintf(&sb, "📧 *%s*\n  From: %s\n", mdv2.Esc(e.Subject), mdv2.Esc(e.From))
+		gmailURL := fmt.Sprintf("https://mail.google.com/mail/u/0/#inbox/%s", e.ID)
+		subject := mdv2.Esc(e.Subject)
+		if e.ID != "" {
+			subject = fmt.Sprintf("[%s](%s)", mdv2.Esc(e.Subject), gmailURL)
+		}
+		fmt.Fprintf(&sb, "📧 *%s*\n  From: %s\n", subject, mdv2.Esc(e.From))
 		if e.Snippet != "" {
 			snippet := e.Snippet
 			if len(snippet) > 100 {
@@ -526,7 +539,6 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 			fmt.Fprintf(&sb, "  _%s_\n", mdv2.Esc(snippet))
 		}
 		sb.WriteString("\n")
-		gmailURL := fmt.Sprintf("https://mail.google.com/mail/u/0/#inbox/%s", e.ID)
 		label := truncate(e.Subject, 35)
 		if label == "" {
 			label = "Open email"
@@ -632,10 +644,14 @@ func (tb *Bot) replyText(ctx context.Context, b *bot.Bot, update *models.Update,
 // Includes the priority emoji, repo/title, reason, and an inline button linking to the PR/issue.
 func (tb *Bot) SendAlertToAll(ctx context.Context, n gh.Notification) {
 	emoji := priorityEmoji(n.Priority)
+	title := mdv2.Esc(n.SubjectTitle)
+	if webURL := ghAPIToHTML(n.SubjectURL, n.SubjectType); webURL != "" {
+		title = fmt.Sprintf("[%s](%s)", mdv2.Esc(n.SubjectTitle), webURL)
+	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s *P%d Alert*\n", emoji, n.Priority)
 	fmt.Fprintf(&sb, "`%s`\n", mdv2.Esc(n.RepoFullName))
-	fmt.Fprintf(&sb, "%s\n", mdv2.Esc(n.SubjectTitle))
+	fmt.Fprintf(&sb, "%s\n", title)
 	fmt.Fprintf(&sb, "_%s_", mdv2.Esc(n.Reason))
 	text := sb.String()
 

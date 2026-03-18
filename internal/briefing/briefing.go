@@ -81,7 +81,11 @@ func writeGitHub(ctx context.Context, sb *strings.Builder, mon *gh.Monitor) {
 	if len(urgent) > 0 {
 		sb.WriteString("\n")
 		for _, n := range urgent {
-			fmt.Fprintf(sb, "  %s `%s` — %s\n", priorityEmoji(n.Priority), mdv2.Esc(n.RepoFullName), mdv2.Esc(n.SubjectTitle))
+			fmt.Fprintf(sb, "  %s [%s](%s) — %s\n",
+				priorityEmoji(n.Priority),
+				mdv2.Esc(n.RepoFullName),
+				n.WebURL(),
+				mdv2.Esc(n.SubjectTitle))
 		}
 	}
 	sb.WriteString("\n")
@@ -157,17 +161,20 @@ func writeGoogleCalendar(ctx context.Context, sb *strings.Builder, g GoogleProvi
 
 	fmt.Fprintf(sb, "*Calendar* — %d events today\n", len(events))
 	for _, e := range events {
+		title := mdv2.Esc(e.Summary)
+		if e.HtmlLink != "" {
+			title = fmt.Sprintf("[%s](%s)", mdv2.Esc(e.Summary), e.HtmlLink)
+		}
 		if e.AllDay {
-			fmt.Fprintf(sb, "  📅 %s \\(all day\\)\n", mdv2.Esc(e.Summary))
+			fmt.Fprintf(sb, "  📅 %s \\(all day\\)\n", title)
 		} else {
 			fmt.Fprintf(sb, "  🕐 %s — %s\n",
-				mdv2.Esc(e.Start.Local().Format("15:04")), mdv2.Esc(e.Summary))
+				mdv2.Esc(e.Start.Local().Format("15:04")), title)
 		}
 		if e.Location != "" {
 			fmt.Fprintf(sb, "     📍 %s\n", mdv2.Esc(e.Location))
 		}
 		if e.MeetLink != "" {
-			// URL part of a MarkdownV2 link needs only ) and \ escaped — not all 18 chars.
 			fmt.Fprintf(sb, "     🔗 [Join Meet](%s)\n", e.MeetLink)
 		}
 	}
@@ -188,7 +195,12 @@ func writeGmail(ctx context.Context, sb *strings.Builder, g GoogleProvider) {
 	emails, err := g.RecentUnread(ctx, 5)
 	if err == nil {
 		for _, e := range emails {
-			fmt.Fprintf(sb, "  📧 %s — %s\n", mdv2.Esc(e.From), mdv2.Esc(e.Subject))
+			if e.ID != "" {
+				gmailURL := "https://mail.google.com/mail/u/0/#inbox/" + e.ID
+				fmt.Fprintf(sb, "  📧 %s — [%s](%s)\n", mdv2.Esc(e.From), mdv2.Esc(e.Subject), gmailURL)
+			} else {
+				fmt.Fprintf(sb, "  📧 %s — %s\n", mdv2.Esc(e.From), mdv2.Esc(e.Subject))
+			}
 		}
 	}
 	sb.WriteString("\n")

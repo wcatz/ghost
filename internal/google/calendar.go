@@ -15,6 +15,7 @@ type Event struct {
 	End        time.Time `json:"end"`
 	Location   string    `json:"location,omitempty"`
 	MeetLink   string    `json:"meet_link,omitempty"`
+	HtmlLink   string    `json:"html_link,omitempty"`
 	AllDay     bool      `json:"all_day"`
 	Attendees  []string  `json:"attendees,omitempty"`
 	Organizer  string    `json:"organizer,omitempty"`
@@ -54,6 +55,7 @@ func (c *Client) EventsInRange(ctx context.Context, start, end time.Time) ([]Eve
 		ev := Event{
 			Summary:  item.Summary,
 			Location: item.Location,
+			HtmlLink: item.HtmlLink,
 		}
 
 		// Parse start time.

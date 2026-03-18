@@ -1,17 +1,18 @@
-<img src="assets/ghost.png" alt="Ghost" width="200" align="right" />
-
 # Ghost
+
+<img src="assets/ghost.png" alt="Ghost" width="160" align="right" />
 
 [![CI](https://github.com/wcatz/ghost/actions/workflows/ci.yml/badge.svg)](https://github.com/wcatz/ghost/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/github/go-mod/go-version/wcatz/ghost)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-Ghost is a personal assistant daemon that remembers everything about your projects. Architecture decisions, conventions, gotchas, patterns — all persisted in SQLite with FTS5 search and local vector embeddings. It runs as a daemon with an HTTP API, MCP server, VSCode extension, Telegram bot, and terminal REPL.
+Ghost is a memory-first autonomous agent. It persists what it learns about your projects in SQLite — architecture decisions, patterns, conventions, gotchas — and carries that context into an agentic tool loop that can act on your behalf. It runs as a daemon with an HTTP API, MCP server, VSCode extension, Telegram bot, and terminal REPL.
 
 Pure Go. No CGO. Single binary.
 
 ## What It Does
 
+- **Agentic tool loop** — Claude's tool_use drives a read → act → reflect cycle; Ghost executes tools on your behalf with configurable approval gates
 - **Persistent memory** across sessions — Ghost knows what you worked on last week
 - **3-block prompt caching** — 90% savings on input tokens in agentic tool loops
 - **Multi-turn caching** — conversation turns cached across API calls
@@ -239,7 +240,7 @@ cmd/ghost/main.go          CLI + daemon bootstrap
 internal/
   ai/                      Claude API client, streaming, tool_use, cost tracking
   memory/                  SQLite + FTS5 + vector search + time-decay
-  tool/                    Tool registry + 10 built-in executors
+  tool/                    Tool registry + 9 built-in executors
   orchestrator/            Multi-project sessions, context compression, multi-turn caching
   reflection/              Haiku memory consolidation
   prompt/                  3-block cached system prompt

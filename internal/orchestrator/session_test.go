@@ -50,7 +50,8 @@ func testSession(t *testing.T) *Session {
 		builder,
 		nil, // reflector
 		logger,
-		"claude-sonnet-4-5-20250929",
+		"claude-opus-4-6-20250514",      // quality model
+		"claude-sonnet-4-5-20250929",    // fast model
 		"chat",
 	)
 }

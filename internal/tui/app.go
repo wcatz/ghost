@@ -33,11 +33,12 @@ type thinkingTickMsg time.Time
 // App is the root bubbletea model.
 type App struct {
 	// Core references.
-	orch    *orchestrator.Orchestrator
-	session *orchestrator.Session
-	cfg     *config.Config
-	ctx     context.Context
-	cancel  context.CancelFunc
+	orch          *orchestrator.Orchestrator
+	session       *orchestrator.Session
+	cfg           *config.Config
+	ctx           context.Context
+	cancel        context.CancelFunc
+	daemonWarning string // non-empty when ghost serve is unreachable at startup
 
 	// Components.
 	chatView chatViewport
@@ -53,6 +54,7 @@ type App struct {
 	height       int
 	isProcessing bool
 	imgProtocol  imageProtocol
+	git          gitInfo
 
 	// Inline block accumulators.
 	thinkingAccum string                        // accumulated thinking text for current turn
@@ -77,42 +79,62 @@ func NewApp(
 	orch *orchestrator.Orchestrator,
 	session *orchestrator.Session,
 	cfg *config.Config,
+	daemonWarning string,
 ) App {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	imgProto := parseImageProtocol(cfg.Display.ImageProtocol)
 
 	return App{
-		orch:        orch,
-		session:     session,
-		cfg:         cfg,
-		ctx:         ctx,
-		cancel:      cancel,
-		chatView:    newChatViewport(80, 20),
-		input:       newInputArea(),
-		toolbar:     newToolbar(),
-		status:      newStatusBar(session.ProjectName, shortModelName(session.Model()), &session.Cost),
-		approval:    newApprovalDialog(),
-		palette:     newCommandPalette(),
-		currentView: viewMain,
-		imgProtocol: imgProto,
-		approvalCh:  make(chan provider.ApprovalRequest, 4),
+		orch:          orch,
+		session:       session,
+		cfg:           cfg,
+		ctx:           ctx,
+		cancel:        cancel,
+		daemonWarning: daemonWarning,
+		chatView:      newChatViewport(80, 20),
+		input:         newInputArea(),
+		toolbar:       newToolbar(),
+		status:        newStatusBar(&session.Cost, session.EstimateTokens, func() int { return ai.ContextForModel(session.Model()) }),
+		approval:      newApprovalDialog(),
+		palette:       newCommandPalette(),
+		currentView:   viewMain,
+		imgProtocol:   imgProto,
+		approvalCh:    make(chan provider.ApprovalRequest, 4),
 	}
 }
 
 // Init returns initial commands.
 func (a App) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		a.input.textarea.Focus(),
 		a.listenForApprovals(),
-	)
+		fetchGitInfo(a.session.ProjectPath),
+	}
+	if a.daemonWarning != "" {
+		cmds = append(cmds, func() tea.Msg {
+			return daemonWarningMsg(a.daemonWarning)
+		})
+	}
+	return tea.Batch(cmds...)
 }
+
+// daemonWarningMsg is a startup message injected when ghost serve is unreachable.
+type daemonWarningMsg string
 
 // Update processes messages.
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case gitInfoMsg:
+		a.git = gitInfo(msg)
+		return a, nil
+
+	case daemonWarningMsg:
+		a.chatView.addMessage(chatMessage{kind: msgWarning, raw: string(msg)})
+		return a, nil
+
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
@@ -187,9 +209,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseClickMsg:
 		// Route clicks to viewport for expand/collapse on tool/thinking blocks.
 		if a.currentView == viewMain {
-			// The Y coordinate is relative to the terminal. Subtract header (1 line)
+			// The Y coordinate is relative to the terminal. Subtract header (2 lines)
 			// to get viewport-relative line.
-			viewportLine := msg.Y - 1
+			viewportLine := msg.Y - 2
 			if viewportLine >= 0 && viewportLine < a.chatView.height {
 				a.chatView.toggleBlockAtLine(viewportLine)
 			}
@@ -228,6 +250,63 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the entire TUI.
+// renderHeader builds the top status line:
+// mode · model · git:(branch*) ↑N ↓M · 👻
+func (a App) renderHeader() string {
+	divider := headerDividerStyle.Render(" · ")
+
+	mode := headerModeStyle.Render(a.session.Mode.Name)
+	model := headerModelStyle.Render(shortModelName(a.session.Model()))
+
+	var parts []string
+	parts = append(parts, mode)
+	parts = append(parts, model)
+
+	if a.git.err == nil && a.git.branch != "" {
+		branch := a.git.branch
+		if a.git.dirty {
+			branch += "*"
+		}
+		gitStr := headerGitStyle.Render("git:(") +
+			headerGitBranchStyle.Render(branch) +
+			headerGitStyle.Render(")")
+		if a.git.ahead > 0 || a.git.behind > 0 {
+			sync := ""
+			if a.git.ahead > 0 {
+				sync += fmt.Sprintf("↑%d", a.git.ahead)
+			}
+			if a.git.behind > 0 {
+				if sync != "" {
+					sync += " "
+				}
+				sync += fmt.Sprintf("↓%d", a.git.behind)
+			}
+			gitStr += " " + headerGitStyle.Render(sync)
+		}
+		parts = append(parts, gitStr)
+	}
+
+	if a.session.AutoApprove() {
+		parts = append(parts, headerGhostYoloStyle.Render("YOLO"))
+	}
+
+	result := ""
+	for i, p := range parts {
+		if i > 0 {
+			result += divider
+		}
+		result += p
+	}
+	
+	// Add a subtle separator line below the header
+	headerLine := headerStyle.Render(" ") + result
+	separator := lipgloss.NewStyle().
+		Foreground(colorSubtle).
+		Render(strings.Repeat("─", a.width))
+	
+	return headerLine + "\n" + separator
+}
+
 func (a App) View() tea.View {
 	var content string
 
@@ -235,13 +314,7 @@ func (a App) View() tea.View {
 		content = "Loading..."
 	} else {
 		// Header.
-		ghostLabel := headerStyle.Render("ghost")
-		divider := headerDividerStyle.Render(" · ")
-		projectInfo := statusProjectStyle.Render(a.session.ProjectName) +
-			headerDividerStyle.Render("/") +
-			statusModeStyle.Render(a.session.Mode.Name)
-		ver := headerDividerStyle.Render(version)
-		header := ghostLabel + divider + projectInfo + divider + ver
+		header := a.renderHeader()
 
 		// Main viewport.
 		viewport := a.chatView.view()
@@ -411,12 +484,16 @@ func (a App) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 
 // handleKey processes keyboard input.
 func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Global keys.
-	switch {
-	case key.Matches(msg, keys.Quit):
+	// Ctrl+C: interrupt if processing, quit if idle.
+	if key.Matches(msg, keys.Quit) {
+		if a.isProcessing {
+			return a.interruptStream()
+		}
 		a.cancel()
 		return a, tea.Quit
-	case key.Matches(msg, keys.ForceQuit):
+	}
+	// Ctrl+D always force-quits.
+	if key.Matches(msg, keys.ForceQuit) {
 		a.cancel()
 		return a, tea.Quit
 	}
@@ -448,6 +525,11 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Main view keys.
 	switch {
+	case key.Matches(msg, keys.Interrupt):
+		if a.isProcessing {
+			return a.interruptStream()
+		}
+
 	case key.Matches(msg, keys.Palette):
 		a.currentView = viewPalette
 		a.palette.open()
@@ -541,7 +623,6 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (a App) sendMessage(text string) (tea.Model, tea.Cmd) {
 	a.isProcessing = true
 	a.status.startProcessing()
-	a.status.modeName = a.session.Mode.Name
 
 	// Add user message to viewport.
 	a.chatView.addMessage(chatMessage{kind: msgUser, raw: text})
@@ -563,7 +644,6 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 	case "/mode":
 		if len(msg.Args) > 0 {
 			a.session.SetMode(msg.Args[0])
-			a.status.modeName = a.session.Mode.Name
 			a.chatView.addMessage(chatMessage{
 				kind: msgAssistant,
 				raw:  fmt.Sprintf("Mode switched to **%s**", a.session.Mode.Name),
@@ -574,16 +654,23 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 		if len(msg.Args) > 0 {
 			name := strings.ToLower(msg.Args[0])
 			var modelID string
+			var isQuality bool
 			switch {
 			case strings.Contains(name, "haiku"):
 				modelID = ai.ModelHaiku45
+				isQuality = false
 			case strings.Contains(name, "opus"):
 				modelID = ai.ModelOpus46
+				isQuality = true
 			default:
 				modelID = ai.ModelSonnet46
+				isQuality = false
 			}
-			a.session.SetModel(modelID)
-			a.status.modelName = shortModelName(modelID)
+			if isQuality {
+				a.session.SetQualityModel(modelID)
+			} else {
+				a.session.SetFastModel(modelID)
+			}
 			a.chatView.addMessage(chatMessage{
 				kind: msgAssistant,
 				raw:  fmt.Sprintf("Model switched to **%s**", shortModelName(modelID)),
@@ -591,7 +678,7 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 		} else {
 			a.chatView.addMessage(chatMessage{
 				kind: msgAssistant,
-				raw:  fmt.Sprintf("Current model: **%s**\nUsage: `/model sonnet` | `/model haiku` | `/model opus`", shortModelName(a.session.Model())),
+				raw:  fmt.Sprintf("Current model: **%s** (mode: %s)\nUsage: `/model sonnet` | `/model haiku` | `/model opus`", shortModelName(a.session.Model()), a.session.Mode.Name),
 			})
 		}
 
@@ -697,6 +784,7 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 			kind: msgAssistant,
 			raw:  "Reflection triggered.",
 		})
+		return a, fetchGitInfo(a.session.ProjectPath)
 
 	case "/briefing":
 		if a.isProcessing {
@@ -724,14 +812,11 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 			for _, s := range sessions {
 				if strings.EqualFold(s.ProjectName, msg.Args[0]) || s.ProjectPath == msg.Args[0] {
 					a.session = s
-					a.status.projectName = s.ProjectName
-					a.status.modeName = s.Mode.Name
-					a.status.modelName = shortModelName(s.Model())
 					a.chatView.addMessage(chatMessage{
 						kind: msgAssistant,
 						raw:  fmt.Sprintf("Switched to **%s**", s.ProjectName),
 					})
-					break
+					return a, fetchGitInfo(a.session.ProjectPath)
 				}
 			}
 		}
@@ -983,9 +1068,24 @@ func (a *App) toggleLastBlock() {
 	}
 }
 
+// interruptStream cancels the current processing and resets state.
+func (a App) interruptStream() (tea.Model, tea.Cmd) {
+	a.cancel()
+	// Create a new context for future requests.
+	a.ctx, a.cancel = context.WithCancel(context.Background())
+	a.flushThinking()
+	a.isProcessing = false
+	a.status.stopProcessing()
+	a.toolbar.clear()
+	a.completedTools = nil
+	a.activeStream = nil
+	a.chatView.addMessage(chatMessage{kind: msgWarning, raw: "Interrupted."})
+	return a, nil
+}
+
 // resize adjusts all component sizes.
 func (a *App) resize() {
-	headerH := 1
+	headerH := 2 // Header now has 2 lines (header + separator)
 	statusH := 1
 	inputH := 4
 	toolH := a.toolbar.height() // 0 when idle, 1 when active
@@ -1009,7 +1109,7 @@ func (a App) listenForApprovals() tea.Cmd {
 
 // RunApp starts the bubbletea TUI.
 func RunApp(orch *orchestrator.Orchestrator, cfg *config.Config, session *orchestrator.Session) error {
-	app := NewApp(orch, session, cfg)
+	app := NewApp(orch, session, cfg, "")
 
 	p := tea.NewProgram(app)
 
