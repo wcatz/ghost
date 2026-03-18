@@ -119,6 +119,28 @@ export class ChatWebview implements vscode.Disposable {
       emitter.on("tool_end", (data: Record<string, string>) => {
         this.postMessage({ type: "tool_end", id: data.id, name: data.name });
       });
+      emitter.on("tool_result", (data: Record<string, unknown>) => {
+        this.postMessage({
+          type: "tool_result",
+          id: (data.id as string) ?? "",
+          name: (data.name as string) ?? "",
+          output: (data.output as string) ?? "",
+          is_error: (data.is_error as boolean) ?? false,
+        });
+      });
+      emitter.on("tool_diff", (data: Record<string, string>) => {
+        // Render diffs as tool results so they appear in the chat
+        const diffText = data.diff || data.patch || "";
+        if (diffText) {
+          this.postMessage({
+            type: "tool_result",
+            id: data.id ?? "",
+            name: data.name ?? "file_edit",
+            output: diffText,
+            is_error: false,
+          });
+        }
+      });
       emitter.on("approval", (data: Record<string, unknown>) => {
         this.postMessage({
           type: "approval_required",
@@ -207,11 +229,18 @@ export class ChatWebview implements vscode.Disposable {
         }
         break;
       case "compact":
-        this.postMessage({ type: "system_message", text: "Compact not yet implemented" });
+        if (this.session) {
+          await this.handleSend("Summarize our conversation so far in a concise paragraph, then we can continue from that context.");
+        }
         break;
-      case "tokens":
-        this.postMessage({ type: "system_message", text: "Token info displayed in footer" });
+      case "tokens": {
+        const cost = this.statusBar.getCost();
+        this.postMessage({
+          type: "system_message",
+          text: cost ? `Session usage: ${cost}` : "No token data yet — send a message first.",
+        });
         break;
+      }
       case "cost":
         // Handled in webview directly
         break;
@@ -222,7 +251,7 @@ export class ChatWebview implements vscode.Disposable {
         // Handled in webview directly
         break;
       case "export":
-        this.postMessage({ type: "system_message", text: "Export not yet implemented" });
+        await this.handleExport();
         break;
       case "health": {
         const available = await this.client.isAvailable();
@@ -240,6 +269,27 @@ export class ChatWebview implements vscode.Disposable {
           await this.handleSetMode(args);
         }
         break;
+    }
+  }
+
+  private async handleExport(): Promise<void> {
+    if (!this.session) {
+      this.postMessage({ type: "system_message", text: "No active session" });
+      return;
+    }
+    try {
+      const history = await this.client.getHistory(this.session.id);
+      if (history.length === 0) {
+        this.postMessage({ type: "system_message", text: "No messages to export" });
+        return;
+      }
+      const markdown = history
+        .map((m) => `## ${m.role === "user" ? "You" : "Ghost"}\n\n${m.content}`)
+        .join("\n\n---\n\n");
+      await vscode.env.clipboard.writeText(markdown);
+      this.postMessage({ type: "system_message", text: `Exported ${history.length} messages to clipboard` });
+    } catch (err) {
+      this.postMessage({ type: "error", text: `Export failed: ${err}` });
     }
   }
 
