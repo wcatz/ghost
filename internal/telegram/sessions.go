@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/wcatz/ghost/internal/mdv2"
+	"github.com/wcatz/ghost/internal/mode"
 )
 
 type apiSession struct {
@@ -242,13 +244,26 @@ func (tb *Bot) sendChatMessage(sessionID, message string) (string, error) {
 			eventType = strings.TrimPrefix(line, "event: ")
 			continue
 		}
-		if strings.HasPrefix(line, "data: ") && eventType == "text" {
-			data := strings.TrimPrefix(line, "data: ")
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		switch eventType {
+		case "text":
 			var payload struct {
 				Text string `json:"text"`
 			}
 			if json.Unmarshal([]byte(data), &payload) == nil {
 				response.WriteString(payload.Text)
+			}
+		case "done":
+			var payload struct {
+				SessionCost string `json:"session_cost"`
+			}
+			if json.Unmarshal([]byte(data), &payload) == nil && payload.SessionCost != "" {
+				tb.mu.Lock()
+				tb.sessionCosts[sessionID] = payload.SessionCost
+				tb.mu.Unlock()
 			}
 		}
 	}
@@ -293,6 +308,189 @@ func (tb *Bot) createMemory(projectID, content string) (id string, merged bool, 
 		return "", false, err
 	}
 	return result.ID, result.Merged, nil
+}
+
+// resolveSessionID resolves a short session ID prefix to a full ID.
+func (tb *Bot) resolveSessionID(prefix string) (string, error) {
+	sessions, err := tb.fetchSessions()
+	if err != nil {
+		return "", err
+	}
+	for _, s := range sessions {
+		if strings.HasPrefix(s.ID, prefix) {
+			return s.ID, nil
+		}
+	}
+	return "", fmt.Errorf("session not found")
+}
+
+// setSessionMode calls the server API to change a session's mode.
+func (tb *Bot) setSessionMode(sessionID, modeName string) (string, error) {
+	payload, _ := json.Marshal(map[string]string{"mode": modeName})
+	url := fmt.Sprintf("http://%s/api/v1/sessions/%s/mode", tb.serverAddr, sessionID)
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return "", fmt.Errorf("create mode request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if tb.serverToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
+	}
+
+	var result struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	return result.Mode, nil
+}
+
+// handleMode lists available modes or switches a session's mode.
+func (tb *Bot) handleMode(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if tb.serverAddr == "" {
+		tb.reply(ctx, b, update, "Ghost server not configured\\.")
+		return
+	}
+
+	text := update.Message.Text
+	parts := strings.Fields(text)
+
+	// /mode — list available modes
+	if len(parts) == 1 {
+		tb.sendTyping(ctx, update)
+
+		// Show available modes with current session modes.
+		sessions, _ := tb.fetchSessions()
+		var sb strings.Builder
+		sb.WriteString("*Available Modes*\n\n")
+		names := make([]string, 0, len(mode.Modes))
+		for name := range mode.Modes {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			m := mode.Modes[name]
+			model := "Sonnet"
+			if m.UseQualityModel {
+				model = "Opus"
+			}
+			fmt.Fprintf(&sb, "• `%s` — %s\n", mdv2.Esc(name), mdv2.Esc(model))
+		}
+		if len(sessions) > 0 {
+			sb.WriteString("\n*Session Modes*\n\n")
+			for _, s := range sessions {
+				shortID := s.ID[:8]
+				fmt.Fprintf(&sb, "• `%s` %s → `%s`\n",
+					mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode))
+			}
+		}
+		sb.WriteString("\nSwitch: `/mode <session_id> <mode_name>`")
+		tb.reply(ctx, b, update, sb.String())
+		return
+	}
+
+	// /mode <session_id> <mode_name>
+	if len(parts) < 3 {
+		tb.reply(ctx, b, update, "Usage: `/mode <session_id> <mode_name>`")
+		return
+	}
+
+	sessionPrefix := parts[1]
+	modeName := parts[2]
+
+	tb.sendTyping(ctx, update)
+
+	fullID, err := tb.resolveSessionID(sessionPrefix)
+	if err != nil {
+		tb.reply(ctx, b, update, "Session not found\\. Use /sessions to list\\.")
+		return
+	}
+
+	newMode, err := tb.setSessionMode(fullID, modeName)
+	if err != nil {
+		tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
+		return
+	}
+
+	tb.reply(ctx, b, update, fmt.Sprintf("✅ Mode set to `%s`", mdv2.Esc(newMode)))
+}
+
+// handleCost shows the cumulative cost for a session.
+func (tb *Bot) handleCost(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if tb.serverAddr == "" {
+		tb.reply(ctx, b, update, "Ghost server not configured\\.")
+		return
+	}
+
+	text := update.Message.Text
+	parts := strings.Fields(text)
+
+	// /cost — show costs for all sessions
+	if len(parts) == 1 {
+		tb.sendTyping(ctx, update)
+
+		sessions, err := tb.fetchSessions()
+		if err != nil {
+			tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
+			return
+		}
+		if len(sessions) == 0 {
+			tb.reply(ctx, b, update, "No active sessions\\.")
+			return
+		}
+
+		var sb strings.Builder
+		sb.WriteString("*Session Costs*\n\n")
+		tb.mu.Lock()
+		for _, s := range sessions {
+			shortID := s.ID[:8]
+			cost, ok := tb.sessionCosts[s.ID]
+			if !ok {
+				cost = "no data yet"
+			}
+			fmt.Fprintf(&sb, "• `%s` %s — %s\n",
+				mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(cost))
+		}
+		tb.mu.Unlock()
+		sb.WriteString("\n_Costs update after each chat message\\._")
+		tb.reply(ctx, b, update, sb.String())
+		return
+	}
+
+	// /cost <session_id>
+	sessionPrefix := parts[1]
+
+	tb.sendTyping(ctx, update)
+
+	fullID, err := tb.resolveSessionID(sessionPrefix)
+	if err != nil {
+		tb.reply(ctx, b, update, "Session not found\\. Use /sessions to list\\.")
+		return
+	}
+
+	tb.mu.Lock()
+	cost, ok := tb.sessionCosts[fullID]
+	tb.mu.Unlock()
+
+	if !ok {
+		tb.reply(ctx, b, update, "No cost data yet\\. Send a /chat message first\\.")
+		return
+	}
+
+	shortID := fullID[:8]
+	tb.reply(ctx, b, update, fmt.Sprintf("💰 Session `%s`: %s", mdv2.Esc(shortID), mdv2.Esc(cost)))
 }
 
 // deleteMemory sends a DELETE request to remove a memory by ID.
