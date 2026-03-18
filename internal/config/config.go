@@ -163,8 +163,8 @@ type GitInfo struct {
 
 // defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{
-	"api.model_quality":          "claude-sonnet-4-5-20250929",
-	"api.model_fast":             "claude-haiku-4-5-20251001",
+	"api.model_quality":          "claude-opus-4-6-20250514",
+	"api.model_fast":             "claude-sonnet-4-5-20250929",
 	"defaults.mode":              "chat",
 	"defaults.reflection_interval": 10,
 	"defaults.max_conversation_turns": 50,

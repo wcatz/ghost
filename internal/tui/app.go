@@ -53,6 +53,7 @@ type App struct {
 	height       int
 	isProcessing bool
 	imgProtocol  imageProtocol
+	git          gitInfo
 
 	// Inline block accumulators.
 	thinkingAccum string                        // accumulated thinking text for current turn
@@ -91,7 +92,7 @@ func NewApp(
 		chatView:    newChatViewport(80, 20),
 		input:       newInputArea(),
 		toolbar:     newToolbar(),
-		status:      newStatusBar(session.ProjectName, shortModelName(session.Model()), &session.Cost),
+		status:      newStatusBar(&session.Cost, session.EstimateTokens, orchestrator.MaxContextTokens),
 		approval:    newApprovalDialog(),
 		palette:     newCommandPalette(),
 		currentView: viewMain,
@@ -105,6 +106,7 @@ func (a App) Init() tea.Cmd {
 	return tea.Batch(
 		a.input.textarea.Focus(),
 		a.listenForApprovals(),
+		fetchGitInfo(a.session.ProjectPath),
 	)
 }
 
@@ -113,6 +115,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case gitInfoMsg:
+		a.git = gitInfo(msg)
+		return a, nil
+
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
@@ -228,6 +234,60 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the entire TUI.
+// renderHeader builds the top status line:
+// mode · model · git:(branch*) ↑N ↓M · 👻
+func (a App) renderHeader() string {
+	divider := headerDividerStyle.Render(" · ")
+
+	mode := headerModeStyle.Render(a.session.Mode.Name)
+	model := headerModelStyle.Render(shortModelName(a.session.Model()))
+
+	var parts []string
+	parts = append(parts, mode)
+	parts = append(parts, model)
+
+	if a.git.err == nil && a.git.branch != "" {
+		branch := a.git.branch
+		if a.git.dirty {
+			branch += "*"
+		}
+		gitStr := headerGitStyle.Render("git:(") +
+			headerGitBranchStyle.Render(branch) +
+			headerGitStyle.Render(")")
+		if a.git.ahead > 0 || a.git.behind > 0 {
+			sync := ""
+			if a.git.ahead > 0 {
+				sync += fmt.Sprintf("↑%d", a.git.ahead)
+			}
+			if a.git.behind > 0 {
+				if sync != "" {
+					sync += " "
+				}
+				sync += fmt.Sprintf("↓%d", a.git.behind)
+			}
+			gitStr += " " + headerGitStyle.Render(sync)
+		}
+		parts = append(parts, gitStr)
+	}
+
+	var ghost string
+	if a.session.AutoApprove() {
+		ghost = headerGhostYoloStyle.Render("👻")
+	} else {
+		ghost = headerGhostStyle.Render("👻")
+	}
+	parts = append(parts, ghost)
+
+	result := ""
+	for i, p := range parts {
+		if i > 0 {
+			result += divider
+		}
+		result += p
+	}
+	return headerStyle.Render(" ") + result
+}
+
 func (a App) View() tea.View {
 	var content string
 
@@ -235,13 +295,7 @@ func (a App) View() tea.View {
 		content = "Loading..."
 	} else {
 		// Header.
-		ghostLabel := headerStyle.Render("ghost")
-		divider := headerDividerStyle.Render(" · ")
-		projectInfo := statusProjectStyle.Render(a.session.ProjectName) +
-			headerDividerStyle.Render("/") +
-			statusModeStyle.Render(a.session.Mode.Name)
-		ver := headerDividerStyle.Render(version)
-		header := ghostLabel + divider + projectInfo + divider + ver
+		header := a.renderHeader()
 
 		// Main viewport.
 		viewport := a.chatView.view()
@@ -541,7 +595,6 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (a App) sendMessage(text string) (tea.Model, tea.Cmd) {
 	a.isProcessing = true
 	a.status.startProcessing()
-	a.status.modeName = a.session.Mode.Name
 
 	// Add user message to viewport.
 	a.chatView.addMessage(chatMessage{kind: msgUser, raw: text})
@@ -563,7 +616,6 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 	case "/mode":
 		if len(msg.Args) > 0 {
 			a.session.SetMode(msg.Args[0])
-			a.status.modeName = a.session.Mode.Name
 			a.chatView.addMessage(chatMessage{
 				kind: msgAssistant,
 				raw:  fmt.Sprintf("Mode switched to **%s**", a.session.Mode.Name),
@@ -574,16 +626,23 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 		if len(msg.Args) > 0 {
 			name := strings.ToLower(msg.Args[0])
 			var modelID string
+			var isQuality bool
 			switch {
 			case strings.Contains(name, "haiku"):
 				modelID = ai.ModelHaiku45
+				isQuality = false
 			case strings.Contains(name, "opus"):
 				modelID = ai.ModelOpus46
+				isQuality = true
 			default:
 				modelID = ai.ModelSonnet46
+				isQuality = false
 			}
-			a.session.SetModel(modelID)
-			a.status.modelName = shortModelName(modelID)
+			if isQuality {
+				a.session.SetQualityModel(modelID)
+			} else {
+				a.session.SetFastModel(modelID)
+			}
 			a.chatView.addMessage(chatMessage{
 				kind: msgAssistant,
 				raw:  fmt.Sprintf("Model switched to **%s**", shortModelName(modelID)),
@@ -591,7 +650,7 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 		} else {
 			a.chatView.addMessage(chatMessage{
 				kind: msgAssistant,
-				raw:  fmt.Sprintf("Current model: **%s**\nUsage: `/model sonnet` | `/model haiku` | `/model opus`", shortModelName(a.session.Model())),
+				raw:  fmt.Sprintf("Current model: **%s** (mode: %s)\nUsage: `/model sonnet` | `/model haiku` | `/model opus`", shortModelName(a.session.Model()), a.session.Mode.Name),
 			})
 		}
 
@@ -697,6 +756,7 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 			kind: msgAssistant,
 			raw:  "Reflection triggered.",
 		})
+		return a, fetchGitInfo(a.session.ProjectPath)
 
 	case "/briefing":
 		if a.isProcessing {
@@ -724,14 +784,11 @@ func (a App) handleCommand(msg commandMsg) (tea.Model, tea.Cmd) {
 			for _, s := range sessions {
 				if strings.EqualFold(s.ProjectName, msg.Args[0]) || s.ProjectPath == msg.Args[0] {
 					a.session = s
-					a.status.projectName = s.ProjectName
-					a.status.modeName = s.Mode.Name
-					a.status.modelName = shortModelName(s.Model())
 					a.chatView.addMessage(chatMessage{
 						kind: msgAssistant,
 						raw:  fmt.Sprintf("Switched to **%s**", s.ProjectName),
 					})
-					break
+					return a, fetchGitInfo(a.session.ProjectPath)
 				}
 			}
 		}

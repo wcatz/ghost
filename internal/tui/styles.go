@@ -156,6 +156,38 @@ var warningStyle = lipgloss.NewStyle().
 	Bold(true).
 	PaddingLeft(1)
 
+// Header component styles.
+var (
+	headerModeStyle = lipgloss.NewStyle().
+			Foreground(colorGhost).
+			Bold(true).
+			PaddingLeft(1)
+
+	headerModelStyle = lipgloss.NewStyle().
+				Foreground(colorSecondary)
+
+	headerGitStyle = lipgloss.NewStyle().
+			Foreground(colorDim)
+
+	headerGitBranchStyle = lipgloss.NewStyle().
+				Foreground(colorBright)
+
+	headerGhostStyle = lipgloss.NewStyle().
+				Foreground(colorGhost)
+
+	headerGhostYoloStyle = lipgloss.NewStyle().
+				Foreground(colorError).
+				Bold(true)
+)
+
+// Context progress bar styles.
+var (
+	ctxBarFilledGreenStyle  = lipgloss.NewStyle().Foreground(colorSuccess)
+	ctxBarFilledYellowStyle = lipgloss.NewStyle().Foreground(colorWarning)
+	ctxBarFilledRedStyle    = lipgloss.NewStyle().Foreground(colorError)
+	ctxBarEmptyStyle        = lipgloss.NewStyle().Foreground(colorSubtle)
+)
+
 // Input area styles.
 var (
 	inputBorderStyle = lipgloss.NewStyle().

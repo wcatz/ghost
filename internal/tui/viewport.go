@@ -224,7 +224,7 @@ func (cv chatViewport) welcomeView() string {
 	title := lipgloss.NewStyle().
 		Foreground(colorGhost).
 		Bold(true).
-		Render("ghost")
+		Render("Ghost")
 
 	tagline := lipgloss.NewStyle().
 		Foreground(colorDim).

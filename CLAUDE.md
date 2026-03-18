@@ -10,7 +10,7 @@
 - `cmd/ghost/main.go` — CLI entrypoint
 - `internal/ai/` — Claude API client with streaming + tool_use
 - `internal/memory/` — SQLite CRUD, FTS5 search, time-decay scoring
-- `internal/tool/` — Tool registry + 10 built-in tools
+- `internal/tool/` — Tool registry + 9 built-in tools (file_read, file_write, file_edit, grep, glob, git, bash, memory_save, memory_search)
 - `internal/orchestrator/` — Multi-project session manager
 - `internal/reflection/` — Periodic memory consolidation (Haiku)
 - `internal/prompt/` — 3-block system prompt construction

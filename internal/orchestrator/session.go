@@ -36,15 +36,16 @@ type Session struct {
 	messages   []ai.Message
 	projectCtx *project.Context
 
-	client      provider.LLMProvider
-	store       provider.MemoryStore
-	registry    *tool.Registry
-	builder     *prompt.Builder
-	reflector   *reflection.Engine
-	logger      *slog.Logger
-	model       string
-	autoApprove bool
-	Cost        ai.CostTracker
+	client       provider.LLMProvider
+	store        provider.MemoryStore
+	registry     *tool.Registry
+	builder      *prompt.Builder
+	reflector    *reflection.Engine
+	logger       *slog.Logger
+	qualityModel string // Opus for code/engineering work
+	fastModel    string // Sonnet for chat
+	autoApprove  bool
+	Cost         ai.CostTracker
 }
 
 // NewSession creates a project session.
@@ -56,7 +57,8 @@ func NewSession(
 	builder *prompt.Builder,
 	reflector *reflection.Engine,
 	logger *slog.Logger,
-	model string,
+	qualityModel string,
+	fastModel string,
 	defaultMode string,
 ) *Session {
 	return &Session{
@@ -74,7 +76,8 @@ func NewSession(
 		builder:      builder,
 		reflector:    reflector,
 		logger:       logger,
-		model:        model,
+		qualityModel: qualityModel,
+		fastModel:    fastModel,
 	}
 }
 
@@ -311,7 +314,7 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 			msgs := s.windowedMessages()
 			s.mu.Unlock()
 
-			stream, err := s.client.ChatStream(ctx, msgs, system, tools, s.model, s.Mode.MaxTokens, s.Mode.ThinkingBudget)
+			stream, err := s.client.ChatStream(ctx, msgs, system, tools, s.Model(), s.Mode.MaxTokens, s.Mode.ThinkingBudget)
 			if err != nil {
 				events <- ai.StreamEvent{Type: "error", Error: err}
 				return
@@ -347,7 +350,7 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 				case "done":
 					stopReason = evt.StopReason
 					usage = evt.Usage
-					s.Cost.AddWithModel(usage, s.model)
+					s.Cost.AddWithModel(usage, s.Model())
 				case "error":
 					events <- evt
 					return
@@ -483,6 +486,13 @@ func (s *Session) SetAutoApprove(auto bool) {
 	s.autoApprove = auto
 }
 
+// AutoApprove returns whether auto-approval is enabled for this session.
+func (s *Session) AutoApprove() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.autoApprove
+}
+
 // Refresh re-scans the project context.
 func (s *Session) Refresh() error {
 	ctx, err := project.Detect(s.ProjectPath)
@@ -509,13 +519,13 @@ func (s *Session) MessageCount() int {
 	return len(s.messages)
 }
 
-// maxContextTokens is the target context budget. Messages are trimmed to stay
+// MaxContextTokens is the target context budget. Messages are trimmed to stay
 // under this when the conversation grows long. Memories and system prompt are
 // separate, so this covers only the messages array.
-const maxContextTokens = 180000
+const MaxContextTokens = 180000
 
 // compressionThreshold is the token count at which we start compressing.
-// Set lower than maxContextTokens to give room for the summary.
+// Set lower than MaxContextTokens to give room for the summary.
 const compressionThreshold = 150000
 
 // windowedMessages returns a copy of messages, compressing older exchanges
@@ -538,7 +548,7 @@ func (s *Session) windowedMessages() []ai.Message {
 	}
 
 	// Find the split point — keep the most recent messages that fit in half the budget.
-	keepTokens := maxContextTokens / 2
+	keepTokens := MaxContextTokens / 2
 	keepStart := len(msgs)
 	keepEst := 0
 	for keepStart > 0 {
@@ -740,16 +750,26 @@ func (s *Session) Store() provider.MemoryStore {
 	return s.store
 }
 
-// Model returns the model ID used for this session.
+// Model returns the model ID used for this session based on the current mode.
 func (s *Session) Model() string {
-	return s.model
+	if s.Mode.UseQualityModel {
+		return s.qualityModel
+	}
+	return s.fastModel
 }
 
-// SetModel changes the model for this session.
-func (s *Session) SetModel(model string) {
+// SetQualityModel changes the quality model (Opus) for this session.
+func (s *Session) SetQualityModel(model string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.model = model
+	s.qualityModel = model
+}
+
+// SetFastModel changes the fast model (Sonnet) for this session.
+func (s *Session) SetFastModel(model string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fastModel = model
 }
 
 // EstimateTokens returns the estimated token count for the current conversation.
