@@ -47,6 +47,7 @@ type Bot struct {
 	approval        approvalState // pending approval tracking
 	mu              sync.Mutex
 	pendingChat     map[int64]string // chatID → sessionID for reply routing
+	sessionCosts    map[string]string // sessionID → last known cost string
 }
 
 // GoogleProvider is the interface for Google Calendar/Gmail access.
@@ -72,7 +73,8 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 		logger:     logger,
 		token:      cfg.Token,
 		allowedIDs:  make(map[int64]bool, len(cfg.AllowedIDs)),
-		pendingChat: make(map[int64]string),
+		pendingChat:  make(map[int64]string),
+		sessionCosts: make(map[string]string),
 	}
 
 	for _, id := range cfg.AllowedIDs {
@@ -99,6 +101,8 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 	b.RegisterHandler(bot.HandlerTypeMessageText, "help", bot.MatchTypeCommand, tb.handleHelp)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "sessions", bot.MatchTypeCommand, tb.handleSessions)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "chat", bot.MatchTypeCommand, tb.handleChat)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "mode", bot.MatchTypeCommand, tb.handleMode)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "cost", bot.MatchTypeCommand, tb.handleCost)
 
 	// Callback query handlers.
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "approve:", bot.MatchTypePrefix, tb.handleApprovalCallback)
@@ -133,6 +137,8 @@ func (tb *Bot) registerCommands(ctx context.Context) {
 		{Command: "emails", Description: "Recent unread emails"},
 		{Command: "sessions", Description: "List active Ghost sessions"},
 		{Command: "chat", Description: "Chat with a session: /chat <id> <msg>"},
+		{Command: "mode", Description: "List or switch mode: /mode [name]"},
+		{Command: "cost", Description: "Show session cost: /cost <id>"},
 		{Command: "memory", Description: "Manage memories: search, add, delete"},
 		{Command: "remind", Description: "Set a reminder: /remind <message>"},
 		{Command: "briefing", Description: "Get your morning briefing"},
@@ -559,6 +565,8 @@ func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update
 /emails — Recent unread emails
 /sessions — List active Ghost sessions
 /chat — Chat with a session
+/mode — List modes or switch: /mode \<id\> \<name\>
+/cost — Show session cost: /cost \<id\>
 /memory — Search, add, or delete memories
 /remind — Set a reminder
 /briefing — Get your morning briefing
