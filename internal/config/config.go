@@ -128,39 +128,6 @@ type BriefingConfig struct {
 	Schedule string `koanf:"schedule"` // cron expression, e.g. "0 8 * * *"
 }
 
-// ProjectConfig holds per-project configuration from .ghost/config.yaml.
-type ProjectConfig struct {
-	Project     ProjectInfo     `koanf:"project"`
-	Conventions ConventionsInfo `koanf:"conventions"`
-	Context     ContextInfo     `koanf:"context"`
-	Git         GitInfo         `koanf:"git"`
-}
-
-// ProjectInfo holds project identity.
-type ProjectInfo struct {
-	Name string `koanf:"name"`
-}
-
-// ConventionsInfo holds project coding conventions.
-type ConventionsInfo struct {
-	Indent       string `koanf:"indent"`
-	TestCommand  string `koanf:"test_command"`
-	LintCommand  string `koanf:"lint_command"`
-	BuildCommand string `koanf:"build_command"`
-}
-
-// ContextInfo holds project context configuration.
-type ContextInfo struct {
-	IncludeFiles   []string `koanf:"include_files"`
-	IgnorePatterns []string `koanf:"ignore_patterns"`
-}
-
-// GitInfo holds git workflow preferences.
-type GitInfo struct {
-	BranchPrefix string `koanf:"branch_prefix"`
-	CommitStyle  string `koanf:"commit_style"`
-}
-
 // defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{
 	"api.model_quality":          "claude-opus-4-6-20250514",
@@ -243,36 +210,6 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{}
-	if err := k.Unmarshal("", cfg); err != nil {
-		return nil, err
-	}
-	return cfg, nil
-}
-
-// LoadProject reads per-project config from .ghost/config.yaml in the given directory.
-func LoadProject(projectPath string) (*ProjectConfig, error) {
-	k := koanf.New(".")
-
-	// Defaults.
-	if err := k.Load(confmap.Provider(map[string]interface{}{
-		"conventions.indent":       "tab",
-		"context.include_files":    []string{"CLAUDE.md", "README.md"},
-		"context.ignore_patterns":  []string{"vendor/", "node_modules/", ".git/", "dist/", "build/"},
-		"git.branch_prefix":        "feat/",
-		"git.commit_style":         "conventional",
-	}, "."), nil); err != nil {
-		return nil, err
-	}
-
-	parser := yaml.Parser()
-
-	// .ghost/config.yaml (checked in)
-	loadFileIfExists(k, filepath.Join(projectPath, ".ghost", "config.yaml"), parser)
-
-	// .ghost/config.local.yaml (gitignored)
-	loadFileIfExists(k, filepath.Join(projectPath, ".ghost", "config.local.yaml"), parser)
-
-	cfg := &ProjectConfig{}
 	if err := k.Unmarshal("", cfg); err != nil {
 		return nil, err
 	}

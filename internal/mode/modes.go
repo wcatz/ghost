@@ -67,12 +67,3 @@ func Get(name string) Mode {
 	}
 	return Modes[Default()]
 }
-
-// Names returns all available mode names.
-func Names() []string {
-	names := make([]string, 0, len(Modes))
-	for name := range Modes {
-		names = append(names, name)
-	}
-	return names
-}
