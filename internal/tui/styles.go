@@ -53,12 +53,22 @@ var (
 var (
 	userMsgStyle = lipgloss.NewStyle().
 			Foreground(colorText).
-			PaddingLeft(2)
+			PaddingLeft(1).
+			BorderLeft(true).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderForeground(colorAccent)
 
 	userLabelStyle = lipgloss.NewStyle().
 			Foreground(colorAccent).
 			Bold(true).
 			PaddingLeft(1)
+
+	assistantMsgStyle = lipgloss.NewStyle().
+				Foreground(colorText).
+				PaddingLeft(1).
+				BorderLeft(true).
+				BorderStyle(lipgloss.NormalBorder()).
+				BorderForeground(colorGhost)
 
 	assistantLabelStyle = lipgloss.NewStyle().
 				Foreground(colorGhost).

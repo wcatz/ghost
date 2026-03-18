@@ -111,17 +111,17 @@ func (mr *messageRenderer) renderUser(text string) string {
 func (mr *messageRenderer) renderAssistant(text string) string {
 	if mr.renderer == nil || text == "" {
 		return assistantLabelStyle.Render("ghost") + "\n" +
-			text + "\n"
+			assistantMsgStyle.Render(text) + "\n"
 	}
 
 	rendered, err := mr.renderer.Render(text)
 	if err != nil {
 		return assistantLabelStyle.Render("ghost") + "\n" +
-			text + "\n"
+			assistantMsgStyle.Render(text) + "\n"
 	}
 
 	return assistantLabelStyle.Render("ghost") + "\n" +
-		strings.TrimRight(rendered, "\n") + "\n"
+		assistantMsgStyle.Render(strings.TrimRight(rendered, "\n")) + "\n"
 }
 
 func (mr *messageRenderer) renderError(text string) string {
