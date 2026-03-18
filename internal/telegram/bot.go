@@ -133,7 +133,7 @@ func (tb *Bot) registerCommands(ctx context.Context) {
 		{Command: "emails", Description: "Recent unread emails"},
 		{Command: "sessions", Description: "List active Ghost sessions"},
 		{Command: "chat", Description: "Chat with a session: /chat <id> <msg>"},
-		{Command: "memory", Description: "Search memories: /memory search <project> <query>"},
+		{Command: "memory", Description: "Manage memories: search, add, delete"},
 		{Command: "remind", Description: "Set a reminder: /remind <message>"},
 		{Command: "briefing", Description: "Get your morning briefing"},
 		{Command: "help", Description: "Show available commands"},
@@ -266,23 +266,39 @@ func (tb *Bot) handleNotifications(ctx context.Context, b *bot.Bot, update *mode
 func (tb *Bot) handleMemory(ctx context.Context, b *bot.Bot, update *models.Update) {
 	text := update.Message.Text
 	parts := strings.Fields(text)
-	if len(parts) < 3 {
-		tb.reply(ctx, b, update, "Usage: `/memory search <project_id> <query>`")
+	if len(parts) < 2 {
+		tb.replyMemoryUsage(ctx, b, update)
 		return
 	}
 
 	sub := parts[1]
-	if sub != "search" {
+	switch sub {
+	case "search":
+		tb.handleMemorySearch(ctx, b, update, parts[2:])
+	case "add":
+		tb.handleMemoryAdd(ctx, b, update, parts[2:])
+	case "delete":
+		tb.handleMemoryDelete(ctx, b, update, parts[2:])
+	default:
+		tb.replyMemoryUsage(ctx, b, update)
+	}
+}
+
+func (tb *Bot) replyMemoryUsage(ctx context.Context, b *bot.Bot, update *models.Update) {
+	tb.reply(ctx, b, update, `*Usage:*
+/memory search <project\_id> <query>
+/memory add <project\_id> <content>
+/memory delete <memory\_id>`)
+}
+
+func (tb *Bot) handleMemorySearch(ctx context.Context, b *bot.Bot, update *models.Update, args []string) {
+	if len(args) < 2 {
 		tb.reply(ctx, b, update, "Usage: `/memory search <project_id> <query>`")
 		return
 	}
 
-	projectID := parts[2]
-	query := strings.Join(parts[3:], " ")
-	if query == "" {
-		tb.reply(ctx, b, update, "Please provide a search query\\.")
-		return
-	}
+	projectID := args[0]
+	query := strings.Join(args[1:], " ")
 	if len(query) > maxQueryLen {
 		query = query[:maxQueryLen]
 	}
@@ -306,6 +322,58 @@ func (tb *Bot) handleMemory(ctx context.Context, b *bot.Bot, update *models.Upda
 		fmt.Fprintf(&sb, "• \\[%s\\] %.1f — %s\n", mdv2.Esc(m.Category), m.Importance, mdv2.Esc(m.Content))
 	}
 	tb.reply(ctx, b, update, sb.String())
+}
+
+func (tb *Bot) handleMemoryAdd(ctx context.Context, b *bot.Bot, update *models.Update, args []string) {
+	if tb.serverAddr == "" {
+		tb.reply(ctx, b, update, "Ghost server not configured\\.")
+		return
+	}
+
+	if len(args) < 2 {
+		tb.reply(ctx, b, update, "Usage: `/memory add <project_id> <content>`")
+		return
+	}
+
+	projectID := args[0]
+	content := strings.Join(args[1:], " ")
+
+	tb.sendTyping(ctx, update)
+
+	id, merged, err := tb.createMemory(projectID, content)
+	if err != nil {
+		tb.reply(ctx, b, update, "Error creating memory: "+mdv2.Esc(err.Error()))
+		return
+	}
+
+	action := "Created"
+	if merged {
+		action = "Merged into existing"
+	}
+	tb.reply(ctx, b, update, fmt.Sprintf("✅ %s memory `%s`", action, mdv2.Esc(id[:8])))
+}
+
+func (tb *Bot) handleMemoryDelete(ctx context.Context, b *bot.Bot, update *models.Update, args []string) {
+	if tb.serverAddr == "" {
+		tb.reply(ctx, b, update, "Ghost server not configured\\.")
+		return
+	}
+
+	if len(args) < 1 {
+		tb.reply(ctx, b, update, "Usage: `/memory delete <memory_id>`")
+		return
+	}
+
+	memoryID := args[0]
+
+	tb.sendTyping(ctx, update)
+
+	if err := tb.deleteMemory(memoryID); err != nil {
+		tb.reply(ctx, b, update, "Error deleting memory: "+mdv2.Esc(err.Error()))
+		return
+	}
+
+	tb.reply(ctx, b, update, fmt.Sprintf("🗑 Deleted memory `%s`", mdv2.Esc(memoryID)))
 }
 
 func (tb *Bot) handleRemind(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -479,7 +547,7 @@ func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update
 /emails — Recent unread emails
 /sessions — List active Ghost sessions
 /chat — Chat with a session
-/memory search — Search memories
+/memory — Search, add, or delete memories
 /remind — Set a reminder
 /briefing — Get your morning briefing
 /help — This message`)
