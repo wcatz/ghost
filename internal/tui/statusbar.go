@@ -14,12 +14,12 @@ type statusBar struct {
 	width          int
 	cost           *ai.CostTracker
 	estimateTokens func() int
-	maxTokens      int
+	maxTokens      func() int
 	isProcessing   bool
 	requestStart   time.Time
 }
 
-func newStatusBar(cost *ai.CostTracker, estimateTokens func() int, maxTokens int) statusBar {
+func newStatusBar(cost *ai.CostTracker, estimateTokens func() int, maxTokens func() int) statusBar {
 	return statusBar{
 		cost:           cost,
 		estimateTokens: estimateTokens,
@@ -60,9 +60,10 @@ func (s statusBar) view() string {
 	}
 
 	// Context window progress bar.
-	if s.estimateTokens != nil && s.maxTokens > 0 {
+	if s.estimateTokens != nil && s.maxTokens != nil {
 		used := s.estimateTokens()
-		pct := float64(used) / float64(s.maxTokens)
+		max := s.maxTokens()
+		pct := float64(used) / float64(max)
 		if pct > 0 {
 			bar := renderProgressBar(pct, 10)
 			parts = append(parts, bar+statusBarStyle.Render(fmt.Sprintf(" %.0f%%", pct*100)))

@@ -91,13 +91,25 @@ var (
 				Foreground(colorGhost)
 
 	toolDoneStyle = lipgloss.NewStyle().
-			Foreground(colorSuccess)
+			Foreground(colorSuccess).
+			Bold(true)
 
 	toolDeniedStyle = lipgloss.NewStyle().
-			Foreground(colorError)
+			Foreground(colorError).
+			Bold(true)
 
 	toolDurationStyle = lipgloss.NewStyle().
 				Foreground(colorDim)
+
+	toolBlockCollapsedStyle = lipgloss.NewStyle().
+					Foreground(colorSubtle).
+					PaddingLeft(2)
+
+	toolBlockExpandedStyle = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorSubtle).
+				Padding(0, 1).
+				MarginLeft(2)
 )
 
 // Approval dialog styles.

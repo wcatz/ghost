@@ -92,7 +92,7 @@ func NewApp(
 		chatView:    newChatViewport(80, 20),
 		input:       newInputArea(),
 		toolbar:     newToolbar(),
-		status:      newStatusBar(&session.Cost, session.EstimateTokens, orchestrator.MaxContextTokens),
+		status:      newStatusBar(&session.Cost, session.EstimateTokens, func() int { return ai.ContextForModel(session.Model()) }),
 		approval:    newApprovalDialog(),
 		palette:     newCommandPalette(),
 		currentView: viewMain,
@@ -193,9 +193,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseClickMsg:
 		// Route clicks to viewport for expand/collapse on tool/thinking blocks.
 		if a.currentView == viewMain {
-			// The Y coordinate is relative to the terminal. Subtract header (1 line)
+			// The Y coordinate is relative to the terminal. Subtract header (2 lines)
 			// to get viewport-relative line.
-			viewportLine := msg.Y - 1
+			viewportLine := msg.Y - 2
 			if viewportLine >= 0 && viewportLine < a.chatView.height {
 				a.chatView.toggleBlockAtLine(viewportLine)
 			}
@@ -270,13 +270,9 @@ func (a App) renderHeader() string {
 		parts = append(parts, gitStr)
 	}
 
-	var ghost string
 	if a.session.AutoApprove() {
-		ghost = headerGhostYoloStyle.Render("👻")
-	} else {
-		ghost = headerGhostStyle.Render("👻")
+		parts = append(parts, headerGhostYoloStyle.Render("YOLO"))
 	}
-	parts = append(parts, ghost)
 
 	result := ""
 	for i, p := range parts {
@@ -285,7 +281,14 @@ func (a App) renderHeader() string {
 		}
 		result += p
 	}
-	return headerStyle.Render(" ") + result
+	
+	// Add a subtle separator line below the header
+	headerLine := headerStyle.Render(" ") + result
+	separator := lipgloss.NewStyle().
+		Foreground(colorSubtle).
+		Render(strings.Repeat("─", a.width))
+	
+	return headerLine + "\n" + separator
 }
 
 func (a App) View() tea.View {
@@ -465,12 +468,16 @@ func (a App) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 
 // handleKey processes keyboard input.
 func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	// Global keys.
-	switch {
-	case key.Matches(msg, keys.Quit):
+	// Ctrl+C: interrupt if processing, quit if idle.
+	if key.Matches(msg, keys.Quit) {
+		if a.isProcessing {
+			return a.interruptStream()
+		}
 		a.cancel()
 		return a, tea.Quit
-	case key.Matches(msg, keys.ForceQuit):
+	}
+	// Ctrl+D always force-quits.
+	if key.Matches(msg, keys.ForceQuit) {
 		a.cancel()
 		return a, tea.Quit
 	}
@@ -502,6 +509,11 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Main view keys.
 	switch {
+	case key.Matches(msg, keys.Interrupt):
+		if a.isProcessing {
+			return a.interruptStream()
+		}
+
 	case key.Matches(msg, keys.Palette):
 		a.currentView = viewPalette
 		a.palette.open()
@@ -1040,9 +1052,24 @@ func (a *App) toggleLastBlock() {
 	}
 }
 
+// interruptStream cancels the current processing and resets state.
+func (a App) interruptStream() (tea.Model, tea.Cmd) {
+	a.cancel()
+	// Create a new context for future requests.
+	a.ctx, a.cancel = context.WithCancel(context.Background())
+	a.flushThinking()
+	a.isProcessing = false
+	a.status.stopProcessing()
+	a.toolbar.clear()
+	a.completedTools = nil
+	a.activeStream = nil
+	a.chatView.addMessage(chatMessage{kind: msgWarning, raw: "Interrupted."})
+	return a, nil
+}
+
 // resize adjusts all component sizes.
 func (a *App) resize() {
-	headerH := 1
+	headerH := 2 // Header now has 2 lines (header + separator)
 	statusH := 1
 	inputH := 4
 	toolH := a.toolbar.height() // 0 when idle, 1 when active

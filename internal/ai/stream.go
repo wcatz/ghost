@@ -75,6 +75,9 @@ func parseStream(r io.Reader, events chan<- StreamEvent) error {
 			switch delta.Type {
 			case "thinking_delta":
 				events <- StreamEvent{Type: "thinking", Text: delta.Thinking}
+			case "signature_delta":
+				// Signature for multi-turn thinking continuity — store but don't display.
+				// Could be used to pass thinking context across turns.
 			case "text_delta":
 				events <- StreamEvent{Type: "text", Text: delta.Text}
 			case "input_json_delta":

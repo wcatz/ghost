@@ -1,14 +1,26 @@
 package ai
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 const (
-	APIURL     = "https://api.anthropic.com/v1/messages"
-	APIVersion = "2025-04-14"
+	APIURL          = "https://api.anthropic.com/v1/messages"
+	CountTokensURL  = "https://api.anthropic.com/v1/messages/count_tokens"
+	APIVersion      = "2023-06-01"
 
-	ModelSonnet46 = "claude-sonnet-4-5-20250929"
+	// Beta features enabled via anthropic-beta header (comma-separated).
+	BetaInterleavedThinking = "interleaved-thinking-2025-05-14"
+
+	ModelSonnet46 = "claude-sonnet-4-6"
 	ModelHaiku45  = "claude-haiku-4-5-20251001"
-	ModelOpus46   = "claude-opus-4-6-20250514"
+	ModelOpus46   = "claude-opus-4-6"
+
+	// Context window sizes by model family.
+	ContextOpus46   = 1_000_000
+	ContextSonnet46 = 1_000_000
+	ContextHaiku45  = 200_000
 )
 
 // SystemBlock is a system prompt block for the Claude API.
@@ -167,10 +179,11 @@ type ToolUseEvent struct {
 // --- internal request/response types ---
 
 // ThinkingConfig controls extended thinking (Claude's internal reasoning).
-// When BudgetTokens is 0, adaptive thinking is used (Claude auto-scales effort).
+// Type "enabled" + BudgetTokens for fixed budget.
+// Type "adaptive" for auto-scaling (Opus 4.6 preferred).
 type ThinkingConfig struct {
-	Type         string      `json:"type"`                    // "enabled" or "disabled"
-	BudgetTokens interface{} `json:"budget_tokens,omitempty"` // int for fixed, or omitted for adaptive
+	Type         string      `json:"type"`                    // "enabled", "adaptive", or "disabled"
+	BudgetTokens interface{} `json:"budget_tokens,omitempty"` // int for fixed budget; omitted for adaptive
 }
 
 type apiRequest struct {
@@ -210,6 +223,21 @@ type deltaRaw struct {
 	Type        string `json:"type"`
 	Text        string `json:"text,omitempty"`
 	Thinking    string `json:"thinking,omitempty"`    // for thinking_delta
+	Signature   string `json:"signature,omitempty"`   // for signature_delta (multi-turn thinking continuity)
 	PartialJSON string `json:"partial_json,omitempty"`
 	StopReason  string `json:"stop_reason,omitempty"`
+}
+
+// ContextForModel returns the context window size for a given model ID.
+func ContextForModel(model string) int {
+	switch {
+	case strings.Contains(model, "opus-4-6"):
+		return ContextOpus46
+	case strings.Contains(model, "sonnet-4-5"), strings.Contains(model, "sonnet-4-6"):
+		return ContextSonnet46
+	case strings.Contains(model, "haiku"):
+		return ContextHaiku45
+	default:
+		return 200_000
+	}
 }

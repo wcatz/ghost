@@ -331,7 +331,7 @@ func TestConstants(t *testing.T) {
 	if APIURL != "https://api.anthropic.com/v1/messages" {
 		t.Errorf("unexpected APIURL: %q", APIURL)
 	}
-	if APIVersion != "2025-04-14" {
+	if APIVersion != "2023-06-01" {
 		t.Errorf("unexpected APIVersion: %q", APIVersion)
 	}
 	if ModelSonnet46 == "" {

@@ -519,14 +519,12 @@ func (s *Session) MessageCount() int {
 	return len(s.messages)
 }
 
-// MaxContextTokens is the target context budget. Messages are trimmed to stay
-// under this when the conversation grows long. Memories and system prompt are
-// separate, so this covers only the messages array.
-const MaxContextTokens = 180000
+// MaxContextTokens is the default context budget for models without explicit sizing.
+// For model-aware context, use ai.ContextForModel().
+const MaxContextTokens = 200_000
 
-// compressionThreshold is the token count at which we start compressing.
-// Set lower than MaxContextTokens to give room for the summary.
-const compressionThreshold = 150000
+// compressionThreshold is the fraction of context at which we start compressing.
+const compressionRatio = 0.83 // compress at ~83% of context window
 
 // windowedMessages returns a copy of messages, compressing older exchanges
 // into a summary if the estimated token count exceeds compressionThreshold.
@@ -542,13 +540,16 @@ func (s *Session) windowedMessages() []ai.Message {
 	// This saves ~90% on input tokens for agentic tool loops.
 	msgs = addTurnCaching(msgs)
 
+	contextMax := ai.ContextForModel(s.Model())
+	threshold := int(float64(contextMax) * compressionRatio)
+
 	est := estimateTokens(msgs)
-	if est <= compressionThreshold {
+	if est <= threshold {
 		return msgs
 	}
 
 	// Find the split point — keep the most recent messages that fit in half the budget.
-	keepTokens := MaxContextTokens / 2
+	keepTokens := contextMax / 2
 	keepStart := len(msgs)
 	keepEst := 0
 	for keepStart > 0 {

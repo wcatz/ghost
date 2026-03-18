@@ -252,6 +252,22 @@ func toNotification(n *gh.Notification) Notification {
 	return notif
 }
 
+// WebURL converts a GitHub API URL to a web-browsable URL.
+// e.g. "https://api.github.com/repos/owner/repo/pulls/123" → "https://github.com/owner/repo/pull/123"
+func (n Notification) WebURL() string {
+	u := n.SubjectURL
+	if u == "" {
+		return "https://github.com/" + n.RepoFullName
+	}
+	// Strip API prefix.
+	u = strings.Replace(u, "https://api.github.com/repos/", "https://github.com/", 1)
+	// API uses "pulls" for PRs, web uses "pull".
+	u = strings.Replace(u, "/pulls/", "/pull/", 1)
+	// API uses "commits", web uses "commit".
+	u = strings.Replace(u, "/commits/", "/commit/", 1)
+	return u
+}
+
 func scorePriority(reason, subjectType string) int {
 	// P0: security alerts.
 	if reason == "security_alert" || strings.Contains(strings.ToLower(subjectType), "vulnerability") {

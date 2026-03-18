@@ -229,16 +229,22 @@ func (cv chatViewport) welcomeView() string {
 	tagline := lipgloss.NewStyle().
 		Foreground(colorDim).
 		Italic(true).
-		Render("your personal memory daemon")
+		Render("memory-first personal assistant")
+
+	sep := lipgloss.NewStyle().
+		Foreground(colorSubtle).
+		Render("───")
 
 	tips := lipgloss.NewStyle().
 		Foreground(colorSubtle).
-		Render("enter send · shift+enter newline · ctrl+k commands · ? help")
+		Render("esc interrupt · ctrl+k commands · ? help")
 
 	content := lipgloss.JoinVertical(lipgloss.Center,
-		title,
 		"",
+		title,
 		tagline,
+		"",
+		sep,
 		"",
 		tips,
 	)

@@ -104,23 +104,24 @@ func (mr *messageRenderer) setWidth(width int) {
 }
 
 func (mr *messageRenderer) renderUser(text string) string {
-	return userLabelStyle.Render("you") + "\n" +
-		userMsgStyle.Render(text) + "\n"
+	label := userLabelStyle.Render("you")
+	content := userMsgStyle.Render(text)
+	return label + "\n" + content + "\n"
 }
 
 func (mr *messageRenderer) renderAssistant(text string) string {
+	label := assistantLabelStyle.Render("Ghost")
+
 	if mr.renderer == nil || text == "" {
-		return assistantLabelStyle.Render("Ghost") + "\n" +
-			assistantMsgStyle.Render(text) + "\n"
+		return label + "\n" + assistantMsgStyle.Render(text) + "\n"
 	}
 
 	rendered, err := mr.renderer.Render(text)
 	if err != nil {
-		return assistantLabelStyle.Render("Ghost") + "\n" +
-			assistantMsgStyle.Render(text) + "\n"
+		return label + "\n" + assistantMsgStyle.Render(text) + "\n"
 	}
 
-	return assistantLabelStyle.Render("Ghost") + "\n" +
+	return label + "\n" +
 		assistantMsgStyle.Render(strings.TrimRight(rendered, "\n")) + "\n"
 }
 
@@ -159,21 +160,21 @@ func colorizeDiffLine(line string) string {
 }
 
 func (mr *messageRenderer) renderToolBlock(msg chatMessage) string {
-	arrow := "▶"
+	arrow := "▸"
 	if msg.toolExpanded {
-		arrow = "▼"
+		arrow = "▾"
 	}
 
-	var line string
+	var header string
 	if msg.toolDenied {
-		line = fmt.Sprintf("  %s %s %s",
+		header = fmt.Sprintf("%s %s %s",
 			arrow,
 			toolDeniedStyle.Render("✗ "+msg.toolName),
 			toolDeniedStyle.Render("denied"),
 		)
 	} else {
 		durStr := msg.toolDuration.Round(time.Millisecond).String()
-		line = fmt.Sprintf("  %s %s %s",
+		header = fmt.Sprintf("%s %s %s",
 			arrow,
 			toolDoneStyle.Render("✓ "+msg.toolName),
 			toolDurationStyle.Render(durStr),
@@ -181,10 +182,10 @@ func (mr *messageRenderer) renderToolBlock(msg chatMessage) string {
 	}
 
 	if !msg.toolExpanded || msg.toolOutput == "" {
-		return line
+		return toolBlockCollapsedStyle.Render(header)
 	}
 
-	// Render expanded output.
+	// Render expanded output with rounded border.
 	outputStyle := toolDurationStyle
 	if msg.toolIsError {
 		outputStyle = toolDeniedStyle
@@ -192,19 +193,19 @@ func (mr *messageRenderer) renderToolBlock(msg chatMessage) string {
 
 	diff := isDiffOutput(msg.toolOutput)
 
-	var b strings.Builder
-	b.WriteString(line)
+	var content strings.Builder
+	content.WriteString(header + "\n")
 
 	contentLines := strings.Split(strings.TrimSpace(msg.toolOutput), "\n")
 	maxLines := 15
 	for i, cLine := range contentLines {
 		if i >= maxLines {
-			b.WriteString("\n    " + toolDurationStyle.Render(
+			content.WriteString("\n" + toolDurationStyle.Render(
 				fmt.Sprintf("... (%d more lines)", len(contentLines)-maxLines)))
 			break
 		}
 		// Truncate very long lines to fit width.
-		maxWidth := mr.width - 6
+		maxWidth := mr.width - 10
 		if maxWidth < 40 {
 			maxWidth = 40
 		}
@@ -212,19 +213,19 @@ func (mr *messageRenderer) renderToolBlock(msg chatMessage) string {
 			cLine = cLine[:maxWidth] + "..."
 		}
 		if diff {
-			b.WriteString("\n    " + colorizeDiffLine(cLine))
+			content.WriteString("\n" + colorizeDiffLine(cLine))
 		} else {
-			b.WriteString("\n    " + outputStyle.Render(cLine))
+			content.WriteString("\n" + outputStyle.Render(cLine))
 		}
 	}
 
-	return b.String()
+	return toolBlockExpandedStyle.Render(content.String())
 }
 
 func (mr *messageRenderer) renderThinkingBlock(msg chatMessage) string {
-	arrow := "▶"
+	arrow := "▸"
 	if msg.thinkingExpanded {
-		arrow = "▼"
+		arrow = "▾"
 	}
 
 	thinkingLabel := lipgloss.NewStyle().
@@ -232,34 +233,34 @@ func (mr *messageRenderer) renderThinkingBlock(msg chatMessage) string {
 		Italic(true).
 		Render("thinking")
 
-	line := fmt.Sprintf("  %s %s", arrow, thinkingLabel)
+	header := fmt.Sprintf("%s %s", arrow, thinkingLabel)
 
 	if !msg.thinkingExpanded || msg.thinkingText == "" {
-		return line
+		return toolBlockCollapsedStyle.Render(header)
 	}
 
-	var b strings.Builder
-	b.WriteString(line)
+	var content strings.Builder
+	content.WriteString(header + "\n")
 
 	contentLines := strings.Split(strings.TrimSpace(msg.thinkingText), "\n")
 	maxLines := 20
 	for i, cLine := range contentLines {
 		if i >= maxLines {
-			b.WriteString("\n    " + toolDurationStyle.Render(
+			content.WriteString("\n" + toolDurationStyle.Render(
 				fmt.Sprintf("... (%d more lines)", len(contentLines)-maxLines)))
 			break
 		}
-		maxWidth := mr.width - 6
+		maxWidth := mr.width - 10
 		if maxWidth < 40 {
 			maxWidth = 40
 		}
 		if len(cLine) > maxWidth {
 			cLine = cLine[:maxWidth] + "..."
 		}
-		b.WriteString("\n    " + toolDurationStyle.Render(cLine))
+		content.WriteString("\n" + toolDurationStyle.Render(cLine))
 	}
 
-	return b.String()
+	return toolBlockExpandedStyle.Render(content.String())
 }
 
 func (mr *messageRenderer) renderWarning(text string) string {
