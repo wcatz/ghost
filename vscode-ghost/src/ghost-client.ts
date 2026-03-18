@@ -209,6 +209,12 @@ export class GhostClient extends EventEmitter {
                 case "tool_use_end":
                   emitter.emit("tool_end", data);
                   break;
+                case "tool_result":
+                  emitter.emit("tool_result", data);
+                  break;
+                case "tool_diff":
+                  emitter.emit("tool_diff", data);
+                  break;
                 case "approval_required":
                   emitter.emit("approval", data as ApprovalRequest);
                   break;

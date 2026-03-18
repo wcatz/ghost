@@ -31,6 +31,10 @@ export class GhostStatusBar {
     this.update();
   }
 
+  public getCost(): string {
+    return this.cost;
+  }
+
   public dispose(): void {
     this.item.dispose();
   }
