@@ -41,10 +41,12 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 
 	// Also save as a memory so it shows up in search and prompt context.
 	content := fmt.Sprintf("%s: %s. Rationale: %s", title, decision, rationale)
-	s.db.ExecContext(ctx, `
+	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags)
 		VALUES (?, 'decision', ?, 'decision_log', 0.9, ?)
-	`, projectID, content, string(tagJSON))
+	`, projectID, content, string(tagJSON)); err != nil {
+		return id, fmt.Errorf("record decision memory: %w", err)
+	}
 
 	if s.onSave != nil {
 		s.onSave(projectID)
