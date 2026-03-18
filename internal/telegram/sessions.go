@@ -10,12 +10,16 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/wcatz/ghost/internal/mdv2"
 	"github.com/wcatz/ghost/internal/mode"
 )
+
+// httpClient is used for all outbound API calls to the Ghost server.
+var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 type apiSession struct {
 	ID          string `json:"id"`
@@ -80,6 +84,9 @@ func (tb *Bot) handleChatCallback(ctx context.Context, b *bot.Bot, update *model
 	})
 
 	// Prompt the user to reply with a message.
+	if update.CallbackQuery.Message.Message == nil {
+		return
+	}
 	chatID := update.CallbackQuery.Message.Message.Chat.ID
 	shortID := sessionID[:8]
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
@@ -193,7 +200,7 @@ func (tb *Bot) fetchSessions() ([]apiSession, error) {
 	if tb.serverToken != "" {
 		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +230,7 @@ func (tb *Bot) sendChatMessage(sessionID, message string) (string, error) {
 	if tb.serverToken != "" {
 		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -267,6 +274,9 @@ func (tb *Bot) sendChatMessage(sessionID, message string) (string, error) {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return response.String(), fmt.Errorf("stream read: %w", err)
+	}
 	return response.String(), nil
 }
 
@@ -289,7 +299,7 @@ func (tb *Bot) createMemory(projectID, content string) (id string, merged bool, 
 	if tb.serverToken != "" {
 		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", false, err
 	}
@@ -337,7 +347,7 @@ func (tb *Bot) setSessionMode(sessionID, modeName string) (string, error) {
 	if tb.serverToken != "" {
 		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -504,7 +514,7 @@ func (tb *Bot) deleteMemory(memoryID string) error {
 	if tb.serverToken != "" {
 		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}

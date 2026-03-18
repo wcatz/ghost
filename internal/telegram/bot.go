@@ -438,18 +438,14 @@ func (tb *Bot) handleBriefing(ctx context.Context, b *bot.Bot, update *models.Up
 
 	msg := briefing.Generate(ctx, tb.briefingSources)
 
-	_, err = b.EditMessageText(ctx, &bot.EditMessageTextParams{
+	// Delete the "Loading..." placeholder before sending the actual briefing,
+	// since reply() handles splitting long messages into multiple sends.
+	_, _ = b.DeleteMessage(ctx, &bot.DeleteMessageParams{
 		ChatID:    chatID,
 		MessageID: sent.ID,
-		Text:      msg,
-		ParseMode: models.ParseModeMarkdown,
-		LinkPreviewOptions: &models.LinkPreviewOptions{
-			IsDisabled: bot.True(),
-		},
 	})
-	if err != nil {
-		tb.logger.Error("telegram edit", "error", err)
-	}
+
+	tb.reply(ctx, b, update, msg)
 }
 
 // SetBriefingSources configures the data sources for on-demand briefings.
@@ -674,6 +670,11 @@ func (tb *Bot) SendAlertToAll(ctx context.Context, n gh.Notification) {
 				{{Text: emoji + " " + label, URL: htmlURL}},
 			},
 		}
+	}
+
+	// Truncate if text exceeds Telegram's message limit (unlikely for alerts).
+	if len(text) > telegramMsgMax {
+		text = text[:telegramMsgMax-3] + "\\.\\.\\."
 	}
 
 	for id := range tb.allowedIDs {
