@@ -386,14 +386,14 @@ func (tb *Bot) handleMode(ctx context.Context, b *bot.Bot, update *models.Update
 			if m.UseQualityModel {
 				model = "Opus"
 			}
-			sb.WriteString(fmt.Sprintf("• `%s` — %s\n", mdv2.Esc(name), mdv2.Esc(model)))
+			fmt.Fprintf(&sb, "• `%s` — %s\n", mdv2.Esc(name), mdv2.Esc(model))
 		}
 		if len(sessions) > 0 {
 			sb.WriteString("\n*Session Modes*\n\n")
 			for _, s := range sessions {
 				shortID := s.ID[:8]
-				sb.WriteString(fmt.Sprintf("• `%s` %s → `%s`\n",
-					mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode)))
+				fmt.Fprintf(&sb, "• `%s` %s → `%s`\n",
+					mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode))
 			}
 		}
 		sb.WriteString("\nSwitch: `/mode <session_id> <mode_name>`")
@@ -460,8 +460,8 @@ func (tb *Bot) handleCost(ctx context.Context, b *bot.Bot, update *models.Update
 			if !ok {
 				cost = "no data yet"
 			}
-			sb.WriteString(fmt.Sprintf("• `%s` %s — %s\n",
-				mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(cost)))
+			fmt.Fprintf(&sb, "• `%s` %s — %s\n",
+				mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(cost))
 		}
 		tb.mu.Unlock()
 		sb.WriteString("\n_Costs update after each chat message\\._")
