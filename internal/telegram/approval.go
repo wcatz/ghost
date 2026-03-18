@@ -206,7 +206,7 @@ func (tb *Bot) callApproveAPI(sessionID string, approved bool, instructions stri
 	if tb.serverToken != "" {
 		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("approve API call: %w", err)
 	}

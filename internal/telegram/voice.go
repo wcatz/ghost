@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/wcatz/ghost/internal/mdv2"
 	"github.com/wcatz/ghost/internal/voice"
 )
 
@@ -107,7 +108,7 @@ func (tb *Bot) handleVoice(ctx context.Context, b *bot.Bot, update *models.Updat
 	// Reply with the transcription.
 	b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID: update.Message.Chat.ID,
-		Text:   fmt.Sprintf("🎤 *Transcription:*\n%s", text),
+		Text:   fmt.Sprintf("🎤 *Transcription:*\n%s", mdv2.Esc(text)),
 		ParseMode: models.ParseModeMarkdown,
 	})
 
