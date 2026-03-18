@@ -352,9 +352,9 @@ func TestSanitizeFTS(t *testing.T) {
 			want:  `"hello" OR "world"`,
 		},
 		{
-			name:  "strips short words",
+			name:  "keeps single-char words",
 			input: "a Go is great",
-			want:  `"Go" OR "is" OR "great"`,
+			want:  `"a" OR "Go" OR "is" OR "great"`,
 		},
 		{
 			name:  "strips punctuation from edges",

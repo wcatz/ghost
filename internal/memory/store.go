@@ -293,7 +293,7 @@ func (s *Store) GetByCategory(ctx context.Context, projectID, category string, l
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, created_at, updated_at
 		FROM memories
-		WHERE project_id = ? AND category = ?
+		WHERE (project_id = ? OR project_id = '_global') AND category = ?
 		ORDER BY importance DESC, created_at DESC
 		LIMIT ?
 	`, projectID, category, limit)
@@ -502,12 +502,14 @@ func (s *Store) GetRecentExchanges(ctx context.Context, projectID string, limit 
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT m.role, m.content
-		FROM messages m
-		JOIN conversations c ON c.id = m.conversation_id
-		WHERE c.project_id = ? AND m.role IN ('user', 'assistant')
-		ORDER BY m.created_at DESC
-		LIMIT ?
+		SELECT role, content FROM (
+			SELECT m.role, m.content, m.created_at
+			FROM messages m
+			JOIN conversations c ON c.id = m.conversation_id
+			WHERE c.project_id = ? AND m.role IN ('user', 'assistant')
+			ORDER BY m.created_at DESC
+			LIMIT ?
+		) ORDER BY created_at ASC
 	`, projectID, limit*2)
 	if err != nil {
 		return nil, err
@@ -521,11 +523,11 @@ func (s *Store) GetRecentExchanges(ctx context.Context, projectID string, limit 
 		if err := rows.Scan(&role, &content); err != nil {
 			return nil, err
 		}
-		if role == "assistant" {
-			current[1] = content
-		} else {
+		if role == "user" {
 			current[0] = content
-			if current[1] != "" {
+		} else {
+			current[1] = content
+			if current[0] != "" {
 				pairs = append(pairs, current)
 			}
 			current = [2]string{}
@@ -648,7 +650,7 @@ func sanitizeFTS(text string) string {
 		clean := strings.TrimFunc(word, func(r rune) bool {
 			return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
 		})
-		if len(clean) >= 2 {
+		if len(clean) >= 1 {
 			// Quote each word to treat as literal.
 			words = append(words, `"`+clean+`"`)
 		}
