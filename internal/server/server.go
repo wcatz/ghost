@@ -18,6 +18,7 @@ import (
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/orchestrator"
 	"github.com/wcatz/ghost/internal/provider"
+	"github.com/wcatz/ghost/internal/voice"
 )
 
 // ApprovalNotifier is called when a tool needs approval.
@@ -32,6 +33,7 @@ type Server struct {
 	cfg               *config.ServerConfig
 	orchestrator      *orchestrator.Orchestrator
 	approvalNotifier  ApprovalNotifier
+	assemblyAIKey     string // AssemblyAI API key for token proxy
 	logger            *slog.Logger
 	srv               *http.Server
 
@@ -61,6 +63,11 @@ func (s *Server) SetApprovalNotifier(n ApprovalNotifier) {
 	s.approvalNotifier = n
 }
 
+// SetAssemblyAIKey enables the /api/v1/transcribe/token endpoint.
+func (s *Server) SetAssemblyAIKey(key string) {
+	s.assemblyAIKey = key
+}
+
 // Run starts the HTTP server. Blocks until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
 	r := chi.NewRouter()
@@ -86,6 +93,11 @@ func (s *Server) Run(ctx context.Context) error {
 			r.Delete("/{memoryID}", s.handleDelete)
 		})
 		r.Get("/api/v1/projects", s.handleListProjects)
+
+		// Transcription token proxy (requires AssemblyAI key).
+		if s.assemblyAIKey != "" {
+			r.Get("/api/v1/transcribe/token", s.handleTranscribeToken)
+		}
 
 		// Chat streaming endpoints (requires orchestrator).
 		if s.orchestrator != nil {
@@ -277,6 +289,22 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, projects)
+}
+
+// handleTranscribeToken proxies a temporary AssemblyAI streaming token
+// for browser-direct real-time WebSocket transcription.
+func (s *Server) handleTranscribeToken(w http.ResponseWriter, r *http.Request) {
+	stt := voice.NewAssemblyAIStreamSTT(s.assemblyAIKey)
+	token, err := stt.CreateToken(r.Context())
+	if err != nil {
+		s.logger.Error("transcribe token", "error", err)
+		writeError(w, http.StatusBadGateway, "failed to create streaming token")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"token":  token,
+		"ws_url": voice.AssemblyAIStreamWSURL,
+	})
 }
 
 // --- Middleware ---

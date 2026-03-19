@@ -8,6 +8,7 @@ require (
 	charm.land/glamour/v2 v2.0.0
 	charm.land/lipgloss/v2 v2.0.2
 	github.com/BourgeoisBear/rasterm v1.1.2
+	github.com/coder/websocket v1.8.14
 	github.com/emersion/go-webdav v0.7.0
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/go-co-op/gocron/v2 v2.19.1

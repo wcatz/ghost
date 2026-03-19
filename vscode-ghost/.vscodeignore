@@ -1,0 +1,9 @@
+src/**
+node_modules/**
+**/*.map
+tsconfig.json
+tsconfig.webview.json
+esbuild.mjs
+.gitignore
+REGRESSION_CHECKLIST.md
+eslint.config.mjs

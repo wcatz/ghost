@@ -2,6 +2,7 @@
 // Used by both the sidebar panel and the editor panel.
 
 import * as vscode from "vscode";
+import { spawn, type ChildProcess } from "child_process";
 import { GhostClient } from "./ghost-client";
 import { GhostStatusBar } from "./status-bar";
 import { getNonce } from "./util";
@@ -11,6 +12,7 @@ import type {
   SessionInfo,
   ImageAttachment,
 } from "./protocol";
+import WebSocket from "ws";
 
 export class ChatWebview implements vscode.Disposable {
   private webview: vscode.Webview;
@@ -20,6 +22,16 @@ export class ChatWebview implements vscode.Disposable {
   private session?: SessionInfo;
   private abortFn?: () => void;
   private disposables: vscode.Disposable[] = [];
+  private onModeChanged?: (mode: string) => void;
+
+  // Voice capture state (runs in extension host, not webview).
+  private voiceProc?: ChildProcess;
+  private voiceWs?: WebSocket;
+  private triggerActive = false;
+  private triggerTimer?: ReturnType<typeof setTimeout>;
+  private static readonly TRIGGER_WORD = "ghost";
+  private static readonly TRIGGER_TIMEOUT_MS = 30_000;
+  private triggerRegex = new RegExp(ChatWebview.TRIGGER_WORD, "i");
 
   constructor(
     webview: vscode.Webview,
@@ -48,12 +60,17 @@ export class ChatWebview implements vscode.Disposable {
     this.client = client;
   }
 
+  setOnModeChanged(cb: (mode: string) => void): void {
+    this.onModeChanged = cb;
+  }
+
   postMessage(msg: ExtToWebviewMessage): void {
     this.webview.postMessage(msg);
   }
 
   dispose(): void {
     this.abortFn?.();
+    this.voiceStop();
     this.disposables.forEach((d) => d.dispose());
   }
 
@@ -85,6 +102,12 @@ export class ChatWebview implements vscode.Disposable {
         break;
       case "slash_command":
         await this.handleSlashCommand(msg.command, msg.args);
+        break;
+      case "voice_start":
+        await this.handleVoiceStart();
+        break;
+      case "voice_stop":
+        this.voiceStop();
         break;
     }
   }
@@ -125,7 +148,7 @@ export class ChatWebview implements vscode.Disposable {
           id: (data.id as string) ?? "",
           name: (data.name as string) ?? "",
           output: (data.output as string) ?? "",
-          is_error: (data.is_error as boolean) ?? false,
+          is_error: data.is_error === true || data.is_error === "true",
         });
       });
       emitter.on("tool_diff", (data: Record<string, string>) => {
@@ -160,8 +183,10 @@ export class ChatWebview implements vscode.Disposable {
           usage: (data.usage as ExtToWebviewMessage & { type: "done" })["usage"] ?? null,
           stop_reason: stopReason,
         });
-        this.postMessage({ type: "streaming", active: false });
-        // Update status bar cost
+        // Only mark streaming complete on final done, not mid-turn tool_use.
+        if (stopReason !== "tool_use") {
+          this.postMessage({ type: "streaming", active: false });
+        }
         if (sessionCost) {
           this.statusBar.setCost(sessionCost);
         }
@@ -194,6 +219,7 @@ export class ChatWebview implements vscode.Disposable {
       const result = await this.client.setMode(this.session.id, mode);
       this.statusBar.setMode(result.mode);
       this.postMessage({ type: "mode_changed", mode: result.mode });
+      this.onModeChanged?.(result.mode);
     } catch (err) {
       this.postMessage({ type: "error", text: `Set mode failed: ${err}` });
     }
@@ -272,6 +298,148 @@ export class ChatWebview implements vscode.Disposable {
     }
   }
 
+  private async handleVoiceStart(): Promise<void> {
+    // Guard against re-entry (double-click, keybinding race).
+    if (this.voiceProc) {
+      return;
+    }
+
+    // Voice capture runs entirely in the extension host (Node.js) via arecord (Linux/ALSA).
+    if (process.platform !== "linux") {
+      this.postMessage({ type: "voice_error", text: "Voice capture requires Linux with alsa-utils (arecord)." });
+      return;
+    }
+
+    try {
+      const result = await this.client.getTranscribeToken();
+
+      const proc = spawn("arecord", [
+        "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw", "-q", "-",
+      ]);
+
+      proc.on("error", (err) => {
+        this.postMessage({ type: "voice_error", text: `Mic capture failed: ${err.message}. Install alsa-utils.` });
+        this.voiceStop();
+      });
+
+      this.voiceProc = proc;
+
+      const wsUrl = `${result.ws_url}?token=${result.token}&sample_rate=16000&encoding=pcm_s16le`;
+      const ws = new WebSocket(wsUrl);
+      this.voiceWs = ws;
+
+      ws.on("open", () => {
+        this.postMessage({ type: "voice_started" });
+        proc.stdout.on("data", (chunk: Buffer) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(chunk);
+          }
+        });
+      });
+
+      ws.on("message", (data: Buffer | string) => {
+        try {
+          const msg = JSON.parse(data.toString());
+          if (msg.type === "Turn") {
+            const text: string = msg.transcript || "";
+
+            if (msg.end_of_turn && text.trim()) {
+              this.handleVoiceUtterance(text);
+            } else if (text) {
+              // Show partial — indicate trigger state.
+              if (this.triggerActive) {
+                this.postMessage({ type: "voice_partial", text });
+              } else if (this.triggerRegex.test(text)) {
+                this.postMessage({ type: "voice_partial", text: `[wake] ${text}` });
+              }
+            }
+          } else if (msg.type === "Termination") {
+            this.voiceStop();
+          } else if (msg.type === "Error") {
+            this.postMessage({ type: "voice_error", text: `AssemblyAI: ${JSON.stringify(msg)}` });
+            this.voiceStop();
+          }
+        } catch {
+          // Ignore unparseable messages.
+        }
+      });
+
+      ws.on("error", (err) => {
+        this.postMessage({ type: "voice_error", text: `WebSocket error: ${err.message}` });
+        this.voiceStop();
+      });
+
+      ws.on("close", () => {
+        this.voiceStop();
+      });
+
+      proc.on("close", () => {
+        if (this.voiceWs && this.voiceWs.readyState === WebSocket.OPEN) {
+          this.voiceWs.send(JSON.stringify({ type: "Terminate" }));
+        }
+      });
+
+    } catch (err) {
+      this.postMessage({ type: "voice_error", text: `Voice unavailable: ${err}` });
+      this.voiceStop();
+    }
+  }
+
+  private handleVoiceUtterance(text: string): void {
+    const hasTrigger = this.triggerRegex.test(text);
+
+    if (hasTrigger) {
+      this.activateTrigger();
+    }
+
+    if (!this.triggerActive) {
+      // Not activated — ignore utterance.
+      return;
+    }
+
+    // Strip the wake word and clean up leading punctuation/whitespace.
+    const cleanText = text.replace(this.triggerRegex, "").replace(/^[\s,.:!?]+/, "").trim();
+    if (!cleanText) {
+      // Wake word only — silently activate, don't send empty message.
+      return;
+    }
+
+    // Reset the trigger timer on each utterance (keeps session alive).
+    this.activateTrigger();
+
+    this.postMessage({ type: "voice_final", text: cleanText });
+    this.handleSend(cleanText).catch((err) => {
+      this.postMessage({ type: "error", text: `Voice send failed: ${err}` });
+    });
+  }
+
+  private activateTrigger(): void {
+    this.triggerActive = true;
+    clearTimeout(this.triggerTimer);
+    this.triggerTimer = setTimeout(() => {
+      this.triggerActive = false;
+      this.postMessage({ type: "system_message", text: "Voice session timed out — say \"ghost\" to reactivate" });
+    }, ChatWebview.TRIGGER_TIMEOUT_MS);
+    this.postMessage({ type: "voice_triggered" });
+  }
+
+  private voiceStop(): void {
+    if (this.voiceProc) {
+      this.voiceProc.kill();
+      this.voiceProc = undefined;
+    }
+    if (this.voiceWs) {
+      if (this.voiceWs.readyState === WebSocket.OPEN) {
+        this.voiceWs.send(JSON.stringify({ type: "Terminate" }));
+        this.voiceWs.close();
+      }
+      this.voiceWs = undefined;
+    }
+    this.triggerActive = false;
+    clearTimeout(this.triggerTimer);
+    this.postMessage({ type: "voice_stopped" });
+  }
+
   private async handleExport(): Promise<void> {
     if (!this.session) {
       this.postMessage({ type: "system_message", text: "No active session" });
@@ -311,6 +479,7 @@ export class ChatWebview implements vscode.Disposable {
       if (this.session) {
         this.postMessage({ type: "session", session: this.session });
         this.statusBar.setMode(this.session.mode);
+        this.onModeChanged?.(this.session.mode);
       }
     } catch {
       // Server not available -- will retry on next send
@@ -348,7 +517,7 @@ export class ChatWebview implements vscode.Disposable {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy"
-    content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data: ${cspSource};">
+    content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' blob:; img-src data: ${cspSource}; connect-src wss://streaming.assemblyai.com; worker-src blob: ${cspSource};">
   <link rel="stylesheet" href="${styleUri}">
   <title>Ghost Chat</title>
 </head>
@@ -394,6 +563,7 @@ export class ChatWebview implements vscode.Disposable {
     <textarea id="input" aria-label="Type a message" placeholder="Message Ghost... (/ for commands)" rows="1"></textarea>
     <div id="input-actions">
       <button id="attach-btn" class="icon-btn" aria-label="Attach image">&#x1F4CE;</button>
+      <button id="mic-btn" class="icon-btn" aria-label="Voice input">&#x1F3A4;</button>
       <button id="send-btn" class="icon-btn" aria-label="Send message">&#x27A4;</button>
       <button id="abort-btn" class="icon-btn hidden" aria-label="Stop response">&#x25A0;</button>
     </div>
@@ -446,6 +616,10 @@ export class ChatEditorPanel {
   private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, client: GhostClient, statusBar: GhostStatusBar) {
     this.panel = panel;
     this.chatWebview = new ChatWebview(panel.webview, extensionUri, client, statusBar);
+    this.chatWebview.setOnModeChanged((mode) => {
+      const label = mode.charAt(0).toUpperCase() + mode.slice(1);
+      panel.title = `Ghost ${label}`;
+    });
     panel.onDidDispose(() => {
       this.chatWebview.dispose();
       ChatEditorPanel.currentPanel = undefined;
@@ -467,7 +641,7 @@ export class ChatEditorPanel {
         localResourceRoots: [vscode.Uri.joinPath(extensionUri, "media"), vscode.Uri.joinPath(extensionUri, "out")],
       },
     );
-    panel.iconPath = vscode.Uri.joinPath(extensionUri, "media", "ghost-icon.svg");
+    panel.iconPath = vscode.Uri.joinPath(extensionUri, "media", "ghost-tab.png");
     ChatEditorPanel.currentPanel = new ChatEditorPanel(panel, extensionUri, client, statusBar);
   }
 

@@ -34,6 +34,8 @@ const removeImageBtn = document.getElementById("remove-image")!;
 const denyInstructionsInput = document.getElementById("deny-instructions") as HTMLInputElement;
 const denyWithBtn = document.getElementById("deny-with-btn")!;
 
+const micBtn = document.getElementById("mic-btn")!;
+
 // State
 let streaming = false;
 let autoApprove = false;
@@ -255,6 +257,20 @@ function ensureAssistantBubble(): HTMLElement {
   return currentAssistantBubble;
 }
 
+// Get or create the text content div inside the assistant bubble.
+// Tool indicators and results are siblings of this div, so innerHTML
+// replacement doesn't destroy them.
+function ensureTextDiv(): HTMLElement {
+  const bubble = ensureAssistantBubble();
+  let textDiv = bubble.querySelector<HTMLElement>(".assistant-text");
+  if (!textDiv) {
+    textDiv = document.createElement("div");
+    textDiv.className = "assistant-text";
+    bubble.appendChild(textDiv);
+  }
+  return textDiv;
+}
+
 function appendText(delta: string): void {
   accumulatedText += delta;
   scheduleRender();
@@ -264,8 +280,8 @@ function scheduleRender(): void {
   if (renderTimer !== null) return;
   renderTimer = window.setTimeout(() => {
     renderTimer = null;
-    const bubble = ensureAssistantBubble();
-    bubble.innerHTML = renderMarkdown(accumulatedText);
+    const textDiv = ensureTextDiv();
+    textDiv.innerHTML = renderMarkdown(accumulatedText);
     scrollToBottom();
   }, 50);
 }
@@ -287,8 +303,8 @@ function finalizeAssistant(): void {
 
   // Finalize assistant text
   if (accumulatedText) {
-    const bubble = ensureAssistantBubble();
-    bubble.innerHTML = renderMarkdown(accumulatedText);
+    const textDiv = ensureTextDiv();
+    textDiv.innerHTML = renderMarkdown(accumulatedText);
   }
   currentAssistantBubble = null;
   accumulatedText = "";
@@ -307,7 +323,7 @@ function addThinkingBlock(delta: string): void {
     const content = document.createElement("div");
     content.className = "thinking-content";
     currentThinkingBlock.appendChild(content);
-    messagesEl.appendChild(currentThinkingBlock);
+    ensureAssistantBubble().appendChild(currentThinkingBlock);
   }
   const contentEl = currentThinkingBlock.querySelector(".thinking-content");
   if (contentEl) {
@@ -324,7 +340,7 @@ function addToolIndicator(name: string, id: string): void {
   el.setAttribute("role", "status");
   el.setAttribute("aria-label", `Running tool: ${name}`);
   el.innerHTML = `<span class="spinner" aria-hidden="true"></span> <span class="tool-name">${escapeHtml(name)}</span>`;
-  messagesEl.appendChild(el);
+  ensureAssistantBubble().appendChild(el);
   scrollToBottom();
 }
 
@@ -352,7 +368,7 @@ function addToolResult(name: string, output: string, isError: boolean): void {
   content.className = "tool-result-content";
   content.innerHTML = renderToolOutput(output);
   el.appendChild(content);
-  messagesEl.appendChild(el);
+  ensureAssistantBubble().appendChild(el);
   scrollToBottom();
 }
 
@@ -483,8 +499,23 @@ window.addEventListener("message", (event) => {
       hideApproval();
       break;
     case "done":
-      finalizeAssistant();
-      setStreaming(false);
+      // Mid-turn "done" (stop_reason: "tool_use") means the agentic loop
+      // is about to execute tools and continue. Don't finalize the bubble —
+      // keep accumulating into the same assistant message.
+      if (msg.stop_reason === "tool_use") {
+        // Flush any pending text render, but keep the bubble alive.
+        if (renderTimer !== null) {
+          clearTimeout(renderTimer);
+          renderTimer = null;
+          if (accumulatedText) {
+            const textDiv = ensureTextDiv();
+            textDiv.innerHTML = renderMarkdown(accumulatedText);
+          }
+        }
+      } else {
+        finalizeAssistant();
+        setStreaming(false);
+      }
       if (msg.session_cost) {
         footerCost.textContent = msg.session_cost;
         sessionCostEl.textContent = msg.session_cost;
@@ -544,6 +575,32 @@ window.addEventListener("message", (event) => {
     case "send_from_command":
       inputEl.value = msg.text;
       send();
+      break;
+    case "voice_error":
+      addErrorMessage(msg.text);
+      voiceActive = false;
+      micBtn.classList.remove("voice-active");
+      micBtn.setAttribute("aria-label", "Voice input");
+      break;
+    case "voice_started":
+      voiceActive = true;
+      voiceUpdatePartial('Listening — say "ghost" to activate...');
+      break;
+    case "voice_stopped":
+      voiceActive = false;
+      voiceRemovePartial();
+      micBtn.classList.remove("voice-active", "voice-triggered");
+      micBtn.setAttribute("aria-label", "Voice input");
+      break;
+    case "voice_triggered":
+      micBtn.classList.add("voice-triggered");
+      voiceUpdatePartial("Activated — listening for your message...");
+      break;
+    case "voice_partial":
+      voiceUpdatePartial(msg.text);
+      break;
+    case "voice_final":
+      voiceRemovePartial();
       break;
   }
 });
@@ -667,6 +724,44 @@ slashMenu.addEventListener("click", (e) => {
         send();
       }
     }
+  }
+});
+
+// --- Voice Input ---
+// Mic capture and WebSocket streaming run in the extension host (Node.js).
+// The webview only sends start/stop signals and displays results.
+
+let voiceActive = false;
+let voicePartialEl: HTMLElement | null = null;
+
+// Update (or create) a single in-place partial transcript element.
+function voiceUpdatePartial(text: string): void {
+  if (!voicePartialEl) {
+    voicePartialEl = document.createElement("div");
+    voicePartialEl.className = "message system voice-partial";
+    voicePartialEl.setAttribute("role", "status");
+    messagesEl.appendChild(voicePartialEl);
+  }
+  voicePartialEl.textContent = text;
+  scrollToBottom();
+}
+
+function voiceRemovePartial(): void {
+  voicePartialEl?.remove();
+  voicePartialEl = null;
+}
+
+micBtn.addEventListener("click", () => {
+  if (voiceActive) {
+    vscode.postMessage({ type: "voice_stop" });
+    voiceActive = false;
+    micBtn.classList.remove("voice-active");
+    micBtn.setAttribute("aria-label", "Voice input");
+  } else {
+    addSystemMessage("Starting voice capture...");
+    micBtn.classList.add("voice-active");
+    micBtn.setAttribute("aria-label", "Stop voice input");
+    vscode.postMessage({ type: "voice_start" });
   }
 });
 

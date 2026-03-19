@@ -1,14 +1,30 @@
 {
   "name": "ghost",
   "displayName": "Ghost",
-  "description": "Memory daemon and personal assistant — chat, memories, and project context",
+  "description": "Memory-first personal assistant with persistent context, voice input, and agentic tool use",
   "version": "0.2.0",
   "publisher": "wcatz",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wcatz/ghost"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["AI", "Chat"],
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "ai",
+    "assistant",
+    "memory",
+    "claude",
+    "voice",
+    "chat"
+  ],
+  "icon": "assets/ghost.png",
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
@@ -64,8 +80,8 @@
     "keybindings": [
       {
         "command": "ghost.openEditor",
-        "key": "ctrl+shift+g",
-        "mac": "cmd+shift+g"
+        "key": "ctrl+shift+alt+g",
+        "mac": "cmd+shift+alt+g"
       }
     ],
     "configuration": {
@@ -98,14 +114,19 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "marked": "^15.0.0"
+    "highlight.js": "^11.11.1",
+    "marked": "^15.0.0",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.4",
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.18.1",
     "esbuild": "^0.24.0",
     "eslint": "^9.0.0",
     "typescript": "^5.7.0",
+    "typescript-eslint": "^8.57.1",
     "vitest": "^3.0.0"
   }
 }
