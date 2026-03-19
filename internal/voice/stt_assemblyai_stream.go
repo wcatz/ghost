@@ -76,15 +76,11 @@ func (s *AssemblyAIStreamSTT) Transcribe(ctx context.Context, audio []byte) (str
 		return "", fmt.Errorf("send terminate: %w", err)
 	}
 
-	// Step 5: Read Turn messages until we get end_of_turn or Termination.
+	// Step 5: Read messages until Termination.
 	var transcript string
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
-			// If we already have a transcript, a close after Terminate is expected.
-			if transcript != "" {
-				break
-			}
 			return "", fmt.Errorf("read message: %w", err)
 		}
 
@@ -96,10 +92,6 @@ func (s *AssemblyAIStreamSTT) Transcribe(ctx context.Context, audio []byte) (str
 		switch msg.Type {
 		case "Turn":
 			transcript = msg.Transcript
-			if msg.EndOfTurn {
-				_ = conn.Close(websocket.StatusNormalClosure, "done")
-				return transcript, nil
-			}
 		case "Termination":
 			_ = conn.Close(websocket.StatusNormalClosure, "terminated")
 			return transcript, nil
@@ -107,8 +99,6 @@ func (s *AssemblyAIStreamSTT) Transcribe(ctx context.Context, audio []byte) (str
 			return "", fmt.Errorf("assemblyai stream error: %s", string(data))
 		}
 	}
-
-	return transcript, nil
 }
 
 // CreateToken requests a temporary auth token for browser-direct WebSocket
@@ -130,7 +120,10 @@ func (s *AssemblyAIStreamSTT) createToken(ctx context.Context) (string, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return "", fmt.Errorf("read token response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("token request %d: %s", resp.StatusCode, body)
 	}

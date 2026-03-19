@@ -299,15 +299,17 @@ export class ChatWebview implements vscode.Disposable {
   }
 
   private async handleVoiceStart(): Promise<void> {
-    // Voice capture runs entirely in the extension host (Node.js).
-    // VSCode webviews cannot access navigator.mediaDevices.getUserMedia.
-    //
-    // Always-on listening with wake word ("ghost"):
-    //   - Mic stays open, continuously streaming to AssemblyAI
-    //   - Utterances containing the wake word activate a 30s session
-    //   - During the session, all utterances are sent as chat messages
-    //   - The wake word is stripped from the transcript before sending
-    //   - Session auto-deactivates after 30s of silence
+    // Guard against re-entry (double-click, keybinding race).
+    if (this.voiceProc) {
+      return;
+    }
+
+    // Voice capture runs entirely in the extension host (Node.js) via arecord (Linux/ALSA).
+    if (process.platform !== "linux") {
+      this.postMessage({ type: "voice_error", text: "Voice capture requires Linux with alsa-utils (arecord)." });
+      return;
+    }
+
     try {
       const result = await this.client.getTranscribeToken();
 
@@ -406,7 +408,9 @@ export class ChatWebview implements vscode.Disposable {
     this.activateTrigger();
 
     this.postMessage({ type: "voice_final", text: cleanText });
-    this.handleSend(cleanText);
+    this.handleSend(cleanText).catch((err) => {
+      this.postMessage({ type: "error", text: `Voice send failed: ${err}` });
+    });
   }
 
   private activateTrigger(): void {
@@ -506,9 +510,6 @@ export class ChatWebview implements vscode.Disposable {
       vscode.Uri.joinPath(this.extensionUri, "media", "ghost-icon.svg"),
     );
     const cspSource = this.webview.cspSource;
-    const pcmProcessorUri = this.webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, "media", "pcm-processor.js"),
-    );
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -562,7 +563,7 @@ export class ChatWebview implements vscode.Disposable {
     <textarea id="input" aria-label="Type a message" placeholder="Message Ghost... (/ for commands)" rows="1"></textarea>
     <div id="input-actions">
       <button id="attach-btn" class="icon-btn" aria-label="Attach image">&#x1F4CE;</button>
-      <button id="mic-btn" class="icon-btn" aria-label="Voice input" data-pcm-processor="${pcmProcessorUri}">&#x1F3A4;</button>
+      <button id="mic-btn" class="icon-btn" aria-label="Voice input">&#x1F3A4;</button>
       <button id="send-btn" class="icon-btn" aria-label="Send message">&#x27A4;</button>
       <button id="abort-btn" class="icon-btn hidden" aria-label="Stop response">&#x25A0;</button>
     </div>
