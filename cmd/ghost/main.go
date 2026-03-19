@@ -29,6 +29,7 @@ import (
 	"github.com/wcatz/ghost/internal/telegram"
 	"github.com/wcatz/ghost/internal/tool"
 	"github.com/wcatz/ghost/internal/tui"
+	"github.com/wcatz/ghost/internal/voice"
 )
 
 var version = "dev"
@@ -324,6 +325,21 @@ func runServe() {
 
 		go tgBot.Run(ctx)
 		logger.Info("telegram bot started", "allowed_users", len(allowedIDs))
+	}
+
+	// --- Voice STT for Telegram ---
+	if cfg.Voice.Enabled && tgBot != nil {
+		stt, err := voice.BuildSTT(voice.Options{
+			STTBackend:       cfg.Voice.STTBackend,
+			STTModel:         cfg.Voice.STTModel,
+			AssemblyAIAPIKey: cfg.Voice.AssemblyAIAPIKey,
+		})
+		if err != nil {
+			logger.Warn("stt unavailable for telegram", "error", err)
+		} else {
+			tgBot.SetSTT(stt)
+			logger.Info("telegram voice transcription enabled", "backend", cfg.Voice.STTBackend)
+		}
 	}
 
 	// --- Morning briefing cron ---

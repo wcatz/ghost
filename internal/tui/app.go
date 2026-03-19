@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/orchestrator"
 	"github.com/wcatz/ghost/internal/provider"
+	"github.com/wcatz/ghost/internal/voice"
 )
 
 // view modes for the TUI.
@@ -1110,6 +1112,43 @@ func (a App) listenForApprovals() tea.Cmd {
 // RunApp starts the bubbletea TUI.
 func RunApp(orch *orchestrator.Orchestrator, cfg *config.Config, session *orchestrator.Session) error {
 	app := NewApp(orch, session, cfg, "")
+
+	// Wire voice pipeline if enabled.
+	if cfg.Voice.Enabled {
+		opts := voice.Options{
+			STTBackend:        cfg.Voice.STTBackend,
+			STTModel:          cfg.Voice.STTModel,
+			TTSBackend:        cfg.Voice.TTSBackend,
+			TTSModel:          cfg.Voice.TTSModel,
+			TTSVoice:          cfg.Voice.TTSVoice,
+			TTSRate:           cfg.Voice.TTSRate,
+			SilenceMs:         cfg.Voice.SilenceMs,
+			SampleRate:        cfg.Voice.SampleRate,
+			InputDevice:       cfg.Voice.InputDevice,
+			AssemblyAIAPIKey:  cfg.Voice.AssemblyAIAPIKey,
+			ElevenLabsAPIKey:  cfg.Voice.ElevenLabsAPIKey,
+			ElevenLabsVoiceID: cfg.Voice.ElevenLabsVoiceID,
+			Logger:            slog.Default(),
+		}
+		respond := func(ctx context.Context, text string) (string, error) {
+			ch := session.SendAsync(ctx, text, nil)
+			var sb strings.Builder
+			for ev := range ch {
+				if ev.Type == "text" {
+					sb.WriteString(ev.Text)
+				}
+			}
+			return sb.String(), nil
+		}
+		pipeline, err := voice.New(opts, respond)
+		if err != nil {
+			slog.Default().Warn("voice pipeline unavailable", "error", err)
+		} else {
+			defer func() { _ = pipeline.Close() }()
+			app.SetVoice(pipeline.HandlePushToTalk)
+			slog.Default().Info("voice pipeline enabled", "stt", cfg.Voice.STTBackend)
+		}
+	}
 
 	p := tea.NewProgram(app)
 
