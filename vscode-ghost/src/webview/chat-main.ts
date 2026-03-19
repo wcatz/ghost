@@ -257,6 +257,20 @@ function ensureAssistantBubble(): HTMLElement {
   return currentAssistantBubble;
 }
 
+// Get or create the text content div inside the assistant bubble.
+// Tool indicators and results are siblings of this div, so innerHTML
+// replacement doesn't destroy them.
+function ensureTextDiv(): HTMLElement {
+  const bubble = ensureAssistantBubble();
+  let textDiv = bubble.querySelector<HTMLElement>(".assistant-text");
+  if (!textDiv) {
+    textDiv = document.createElement("div");
+    textDiv.className = "assistant-text";
+    bubble.appendChild(textDiv);
+  }
+  return textDiv;
+}
+
 function appendText(delta: string): void {
   accumulatedText += delta;
   scheduleRender();
@@ -266,8 +280,8 @@ function scheduleRender(): void {
   if (renderTimer !== null) return;
   renderTimer = window.setTimeout(() => {
     renderTimer = null;
-    const bubble = ensureAssistantBubble();
-    bubble.innerHTML = renderMarkdown(accumulatedText);
+    const textDiv = ensureTextDiv();
+    textDiv.innerHTML = renderMarkdown(accumulatedText);
     scrollToBottom();
   }, 50);
 }
@@ -289,8 +303,8 @@ function finalizeAssistant(): void {
 
   // Finalize assistant text
   if (accumulatedText) {
-    const bubble = ensureAssistantBubble();
-    bubble.innerHTML = renderMarkdown(accumulatedText);
+    const textDiv = ensureTextDiv();
+    textDiv.innerHTML = renderMarkdown(accumulatedText);
   }
   currentAssistantBubble = null;
   accumulatedText = "";
@@ -309,7 +323,7 @@ function addThinkingBlock(delta: string): void {
     const content = document.createElement("div");
     content.className = "thinking-content";
     currentThinkingBlock.appendChild(content);
-    messagesEl.appendChild(currentThinkingBlock);
+    ensureAssistantBubble().appendChild(currentThinkingBlock);
   }
   const contentEl = currentThinkingBlock.querySelector(".thinking-content");
   if (contentEl) {
@@ -326,7 +340,7 @@ function addToolIndicator(name: string, id: string): void {
   el.setAttribute("role", "status");
   el.setAttribute("aria-label", `Running tool: ${name}`);
   el.innerHTML = `<span class="spinner" aria-hidden="true"></span> <span class="tool-name">${escapeHtml(name)}</span>`;
-  messagesEl.appendChild(el);
+  ensureAssistantBubble().appendChild(el);
   scrollToBottom();
 }
 
@@ -354,7 +368,7 @@ function addToolResult(name: string, output: string, isError: boolean): void {
   content.className = "tool-result-content";
   content.innerHTML = renderToolOutput(output);
   el.appendChild(content);
-  messagesEl.appendChild(el);
+  ensureAssistantBubble().appendChild(el);
   scrollToBottom();
 }
 
@@ -485,8 +499,23 @@ window.addEventListener("message", (event) => {
       hideApproval();
       break;
     case "done":
-      finalizeAssistant();
-      setStreaming(false);
+      // Mid-turn "done" (stop_reason: "tool_use") means the agentic loop
+      // is about to execute tools and continue. Don't finalize the bubble —
+      // keep accumulating into the same assistant message.
+      if (msg.stop_reason === "tool_use") {
+        // Flush any pending text render, but keep the bubble alive.
+        if (renderTimer !== null) {
+          clearTimeout(renderTimer);
+          renderTimer = null;
+          if (accumulatedText) {
+            const textDiv = ensureTextDiv();
+            textDiv.innerHTML = renderMarkdown(accumulatedText);
+          }
+        }
+      } else {
+        finalizeAssistant();
+        setStreaming(false);
+      }
       if (msg.session_cost) {
         footerCost.textContent = msg.session_cost;
         sessionCostEl.textContent = msg.session_cost;
@@ -547,12 +576,31 @@ window.addEventListener("message", (event) => {
       inputEl.value = msg.text;
       send();
       break;
-    case "voice_token":
-      voiceConnect(msg.token, msg.ws_url);
-      break;
     case "voice_error":
       addErrorMessage(msg.text);
-      voiceCleanup();
+      voiceActive = false;
+      micBtn.classList.remove("voice-active");
+      micBtn.setAttribute("aria-label", "Voice input");
+      break;
+    case "voice_started":
+      voiceActive = true;
+      voiceUpdatePartial('Listening — say "ghost" to activate...');
+      break;
+    case "voice_stopped":
+      voiceActive = false;
+      voiceRemovePartial();
+      micBtn.classList.remove("voice-active", "voice-triggered");
+      micBtn.setAttribute("aria-label", "Voice input");
+      break;
+    case "voice_triggered":
+      micBtn.classList.add("voice-triggered");
+      voiceUpdatePartial("Activated — listening for your message...");
+      break;
+    case "voice_partial":
+      voiceUpdatePartial(msg.text);
+      break;
+    case "voice_final":
+      voiceRemovePartial();
       break;
   }
 });
@@ -680,150 +728,42 @@ slashMenu.addEventListener("click", (e) => {
 });
 
 // --- Voice Input ---
+// Mic capture and WebSocket streaming run in the extension host (Node.js).
+// The webview only sends start/stop signals and displays results.
 
 let voiceActive = false;
-let voiceSocket: WebSocket | null = null;
-let voiceAudioCtx: AudioContext | null = null;
-let voiceStream: MediaStream | null = null;
-let voiceWorklet: AudioWorkletNode | null = null;
-let voiceSource: MediaStreamAudioSourceNode | null = null;
-let voiceTranscript = "";
+let voicePartialEl: HTMLElement | null = null;
+
+// Update (or create) a single in-place partial transcript element.
+function voiceUpdatePartial(text: string): void {
+  if (!voicePartialEl) {
+    voicePartialEl = document.createElement("div");
+    voicePartialEl.className = "message system voice-partial";
+    voicePartialEl.setAttribute("role", "status");
+    messagesEl.appendChild(voicePartialEl);
+  }
+  voicePartialEl.textContent = text;
+  scrollToBottom();
+}
+
+function voiceRemovePartial(): void {
+  voicePartialEl?.remove();
+  voicePartialEl = null;
+}
 
 micBtn.addEventListener("click", () => {
   if (voiceActive) {
-    voiceStop();
+    vscode.postMessage({ type: "voice_stop" });
+    voiceActive = false;
+    micBtn.classList.remove("voice-active");
+    micBtn.setAttribute("aria-label", "Voice input");
   } else {
-    voiceStart();
+    addSystemMessage("Starting voice capture...");
+    micBtn.classList.add("voice-active");
+    micBtn.setAttribute("aria-label", "Stop voice input");
+    vscode.postMessage({ type: "voice_start" });
   }
 });
-
-function voiceStart(): void {
-  voiceTranscript = "";
-  micBtn.classList.add("voice-active");
-  micBtn.setAttribute("aria-label", "Stop voice input");
-  addSystemMessage("Requesting microphone...");
-  vscode.postMessage({ type: "voice_start" });
-}
-
-function voiceStop(): void {
-  if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
-    voiceSocket.send(JSON.stringify({ type: "Terminate" }));
-  }
-  voiceCleanup();
-}
-
-function voiceCleanup(): void {
-  voiceActive = false;
-  micBtn.classList.remove("voice-active");
-  micBtn.setAttribute("aria-label", "Voice input");
-  voiceWorklet?.disconnect();
-  voiceWorklet = null;
-  voiceSource?.disconnect();
-  voiceSource = null;
-  voiceStream?.getTracks().forEach((t) => t.stop());
-  voiceStream = null;
-  voiceAudioCtx?.close().catch(() => {});
-  voiceAudioCtx = null;
-  if (voiceSocket) {
-    voiceSocket.onclose = null;
-    voiceSocket.onerror = null;
-    voiceSocket.onmessage = null;
-    if (voiceSocket.readyState === WebSocket.OPEN || voiceSocket.readyState === WebSocket.CONNECTING) {
-      voiceSocket.close();
-    }
-    voiceSocket = null;
-  }
-}
-
-async function voiceConnect(token: string, wsUrl: string): Promise<void> {
-  try {
-    voiceStream = await navigator.mediaDevices.getUserMedia({
-      audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true },
-    });
-  } catch (err) {
-    addErrorMessage("Microphone access denied");
-    voiceCleanup();
-    return;
-  }
-
-  // Open WebSocket to AssemblyAI.
-  const url = `${wsUrl}?token=${token}&sample_rate=16000&encoding=pcm_s16le`;
-  voiceSocket = new WebSocket(url);
-  voiceSocket.binaryType = "arraybuffer";
-
-  voiceSocket.onopen = async () => {
-    voiceActive = true;
-    addSystemMessage("Listening...");
-
-    try {
-      voiceAudioCtx = new AudioContext({ sampleRate: 16000 });
-
-      // Load AudioWorklet from the extension's media folder.
-      const pcmProcessorUrl = micBtn.dataset.pcmProcessor;
-      if (!pcmProcessorUrl) throw new Error("pcm-processor URL not found");
-
-      // Fetch the processor script and create a blob URL since addModule
-      // with vscode-webview:// URIs may be blocked by some CSP configs.
-      const resp = await fetch(pcmProcessorUrl);
-      const scriptText = await resp.text();
-      const blob = new Blob([scriptText], { type: "application/javascript" });
-      const blobUrl = URL.createObjectURL(blob);
-      await voiceAudioCtx.audioWorklet.addModule(blobUrl);
-      URL.revokeObjectURL(blobUrl);
-
-      voiceSource = voiceAudioCtx.createMediaStreamSource(voiceStream!);
-      voiceWorklet = new AudioWorkletNode(voiceAudioCtx, "pcm-processor");
-
-      voiceWorklet.port.onmessage = (event: MessageEvent) => {
-        if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
-          voiceSocket.send(event.data as ArrayBuffer);
-        }
-      };
-
-      voiceSource.connect(voiceWorklet);
-      voiceWorklet.connect(voiceAudioCtx.destination);
-    } catch (err) {
-      addErrorMessage(`Audio setup failed: ${err}`);
-      voiceStop();
-    }
-  };
-
-  voiceSocket.onmessage = (event: MessageEvent) => {
-    try {
-      const msg = JSON.parse(event.data as string);
-      if (msg.type === "Turn") {
-        voiceTranscript = msg.transcript || "";
-        if (msg.end_of_turn && voiceTranscript.trim()) {
-          addSystemMessage(`You said: "${voiceTranscript}"`);
-          vscode.postMessage({ type: "voice_transcript", text: voiceTranscript });
-          voiceTranscript = "";
-        }
-      } else if (msg.type === "Termination") {
-        voiceCleanup();
-      } else if (msg.type === "Error") {
-        addErrorMessage(`Voice error: ${msg.error || "unknown"}`);
-        voiceCleanup();
-      }
-    } catch {
-      // Ignore non-JSON messages.
-    }
-  };
-
-  voiceSocket.onerror = () => {
-    addErrorMessage("Voice connection error");
-    voiceCleanup();
-  };
-
-  voiceSocket.onclose = () => {
-    if (voiceActive) {
-      // Unexpected close — send any pending transcript.
-      if (voiceTranscript.trim()) {
-        vscode.postMessage({ type: "voice_transcript", text: voiceTranscript });
-      }
-      voiceCleanup();
-    }
-  };
-}
 
 // Tell extension we're ready
 vscode.postMessage({ type: "ready" });

@@ -28,8 +28,12 @@ export type ExtToWebviewMessage =
   | { type: "send_from_command"; text: string }
   | { type: "system_message"; text: string }
   | { type: "mode_changed"; mode: string }
-  | { type: "voice_token"; token: string; ws_url: string }
-  | { type: "voice_error"; text: string };
+  | { type: "voice_error"; text: string }
+  | { type: "voice_started" }
+  | { type: "voice_stopped" }
+  | { type: "voice_triggered" }
+  | { type: "voice_partial"; text: string }
+  | { type: "voice_final"; text: string };
 
 // --- Webview -> Extension ---
 
