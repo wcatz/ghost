@@ -96,6 +96,8 @@ func ToolResultMessage(results []ToolResult) Message {
 type ContentBlock struct {
 	Type         string          `json:"type"`
 	Text         string          `json:"text,omitempty"`
+	Thinking     string          `json:"thinking,omitempty"`     // for type "thinking" — API requires this field name
+	Signature    string          `json:"signature,omitempty"`    // for type "thinking" — multi-turn continuity
 	ID           string          `json:"id,omitempty"`
 	Name         string          `json:"name,omitempty"`
 	Input        json.RawMessage `json:"input,omitempty"`
@@ -159,8 +161,9 @@ type TokenUsage struct {
 
 // StreamEvent is emitted during streaming for TUI rendering.
 type StreamEvent struct {
-	Type       string // "text", "thinking", "tool_use_start", "tool_input_delta", "tool_use_end", "tool_diff", "done", "error"
+	Type       string // "text", "thinking", "signature", "tool_use_start", "tool_input_delta", "tool_use_end", "tool_diff", "done", "error"
 	Text       string // for text deltas and thinking deltas
+	Signature  string // for signature_delta (thinking block continuity)
 	ToolUse    *ToolUseEvent
 	Usage      *TokenUsage
 	StopReason string            // on "done": "end_turn" or "tool_use"

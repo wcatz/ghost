@@ -327,6 +327,7 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 			// Collect response.
 			var textAccum string
 			var thinkingAccum string
+			var signatureAccum string
 			var toolCalls []ai.ContentBlock
 			var stopReason string
 			var usage *ai.TokenUsage
@@ -336,6 +337,8 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 				case "thinking":
 					thinkingAccum += evt.Text
 					events <- evt
+				case "signature":
+					signatureAccum += evt.Signature
 				case "text":
 					textAccum += evt.Text
 					events <- evt
@@ -366,7 +369,7 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 			// in message history when extended thinking is enabled.
 			var assistantBlocks []ai.ContentBlock
 			if thinkingAccum != "" {
-				assistantBlocks = append(assistantBlocks, ai.ContentBlock{Type: "thinking", Text: thinkingAccum})
+				assistantBlocks = append(assistantBlocks, ai.ContentBlock{Type: "thinking", Thinking: thinkingAccum, Signature: signatureAccum})
 			}
 			if textAccum != "" {
 				assistantBlocks = append(assistantBlocks, ai.ContentBlock{Type: "text", Text: textAccum})

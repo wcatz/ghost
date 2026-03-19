@@ -4,10 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/memory"
 )
+
+var memoryCategories = []string{
+	"architecture", "decision", "pattern", "convention",
+	"gotcha", "dependency", "preference", "fact",
+}
+
+var validCategories = func() map[string]bool {
+	m := make(map[string]bool, len(memoryCategories))
+	for _, c := range memoryCategories {
+		m[c] = true
+	}
+	return m
+}()
 
 type memorySaveInput struct {
 	Content    string   `json:"content"`
@@ -25,7 +39,7 @@ func registerMemorySave(r *Registry, store *memory.Store) {
 				"type": "object",
 				"properties": map[string]interface{}{
 					"content":    map[string]interface{}{"type": "string", "description": "Memory content (1-2 sentences, specific and actionable)"},
-					"category":   map[string]interface{}{"type": "string", "enum": []string{"architecture", "decision", "pattern", "convention", "gotcha", "dependency", "preference", "fact"}, "description": "Memory category"},
+					"category":   map[string]interface{}{"type": "string", "enum": memoryCategories, "description": "Memory category"},
 					"importance": map[string]interface{}{"type": "number", "description": "Importance score 0.0-1.0 (default: 0.5)"},
 					"tags":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "1-3 keyword tags"},
 				},
@@ -42,6 +56,10 @@ func makeMemorySaveExec(store *memory.Store) Executor {
 		var in memorySaveInput
 		if err := json.Unmarshal(input, &in); err != nil {
 			return Result{Content: fmt.Sprintf("invalid input: %v", err), IsError: true}
+		}
+
+		if !validCategories[in.Category] {
+			return Result{Content: fmt.Sprintf("invalid category %q: must be one of %s", in.Category, strings.Join(memoryCategories, ", ")), IsError: true}
 		}
 
 		if in.Importance <= 0 {

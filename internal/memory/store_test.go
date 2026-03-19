@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"os"
 	"strings"
@@ -505,5 +506,712 @@ func TestStoreTogglePin(t *testing.T) {
 	}
 	if all[0].Pinned {
 		t.Error("expected not pinned after TogglePin(false)")
+	}
+}
+
+func TestStoreGetTopMemories(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create memories with varying importance and categories.
+	mems := []Memory{
+		{Category: "fact", Content: "Low importance fact", Source: "reflection", Importance: 0.2, Tags: []string{}},
+		{Category: "preference", Content: "High importance preference", Source: "manual", Importance: 0.9, Tags: []string{}},
+		{Category: "pattern", Content: "Medium pattern", Source: "reflection", Importance: 0.5, Tags: []string{}},
+	}
+	for _, m := range mems {
+		if _, err := s.Create(ctx, testProject, m); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	// Get top 2 — should be ordered by composite score (importance * decay * pin boost).
+	top, err := s.GetTopMemories(ctx, testProject, 2)
+	if err != nil {
+		t.Fatalf("GetTopMemories: %v", err)
+	}
+	if len(top) != 2 {
+		t.Fatalf("expected 2 memories, got %d", len(top))
+	}
+	// Highest importance preference (no decay) should be first.
+	if top[0].Content != "High importance preference" {
+		t.Errorf("expected highest importance first, got %q", top[0].Content)
+	}
+}
+
+func TestStoreGetTopMemoriesIncludesGlobal(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create a global memory.
+	if err := s.EnsureProject(ctx, "_global", "/global", "global"); err != nil {
+		t.Fatalf("EnsureProject global: %v", err)
+	}
+	if _, err := s.Create(ctx, "_global", Memory{
+		Category: "fact", Content: "Global fact visible everywhere",
+		Source: "manual", Importance: 0.8, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create global: %v", err)
+	}
+
+	// Create a project-scoped memory.
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "Project-scoped fact",
+		Source: "manual", Importance: 0.7, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create project: %v", err)
+	}
+
+	top, err := s.GetTopMemories(ctx, testProject, 10)
+	if err != nil {
+		t.Fatalf("GetTopMemories: %v", err)
+	}
+	if len(top) != 2 {
+		t.Fatalf("expected 2 memories (global + project), got %d", len(top))
+	}
+}
+
+func TestStoreGetTopMemoriesPinnedBoost(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create two memories — lower importance but pinned should rank higher.
+	id1, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "Pinned low importance",
+		Source: "manual", Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "Unpinned higher importance",
+		Source: "manual", Importance: 0.6, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Pin the first one — 0.5 * 1.5 = 0.75 > 0.6.
+	if err := s.TogglePin(ctx, id1, true); err != nil {
+		t.Fatalf("TogglePin: %v", err)
+	}
+
+	top, err := s.GetTopMemories(ctx, testProject, 2)
+	if err != nil {
+		t.Fatalf("GetTopMemories: %v", err)
+	}
+	if top[0].Content != "Pinned low importance" {
+		t.Errorf("expected pinned memory first, got %q", top[0].Content)
+	}
+}
+
+func TestStoreGetByCategory(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create memories in different categories.
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "Watch out for nil maps",
+		Source: "manual", Importance: 0.7, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "Go uses goroutines",
+		Source: "manual", Importance: 0.5, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Query only gotchas.
+	results, err := s.GetByCategory(ctx, testProject, "gotcha", 10)
+	if err != nil {
+		t.Fatalf("GetByCategory: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 gotcha, got %d", len(results))
+	}
+	if results[0].Category != "gotcha" {
+		t.Errorf("expected category 'gotcha', got %q", results[0].Category)
+	}
+
+	// No results for unused category.
+	results, err = s.GetByCategory(ctx, testProject, "dependency", 10)
+	if err != nil {
+		t.Fatalf("GetByCategory empty: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected 0 results for 'dependency', got %d", len(results))
+	}
+}
+
+func TestStoreGetByCategoryIncludesGlobal(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if err := s.EnsureProject(ctx, "_global", "/global", "global"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if _, err := s.Create(ctx, "_global", Memory{
+		Category: "convention", Content: "Global convention",
+		Source: "manual", Importance: 0.8, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create global: %v", err)
+	}
+
+	results, err := s.GetByCategory(ctx, testProject, "convention", 10)
+	if err != nil {
+		t.Fatalf("GetByCategory: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 global convention, got %d", len(results))
+	}
+}
+
+func TestStoreSearchFTSAll(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create a second project.
+	if err := s.EnsureProject(ctx, "other-project", "/tmp/other", "other"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	// Create memories in different projects with a shared keyword.
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "Kubernetes uses etcd for storage",
+		Source: "manual", Importance: 0.5, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := s.Create(ctx, "other-project", Memory{
+		Category: "fact", Content: "Kubernetes clusters need networking",
+		Source: "manual", Importance: 0.5, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// SearchFTSAll should find both.
+	results, err := s.SearchFTSAll(ctx, "Kubernetes", 10)
+	if err != nil {
+		t.Fatalf("SearchFTSAll: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 cross-project results, got %d", len(results))
+	}
+}
+
+func TestStoreCountMemories(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	count, err := s.CountMemories(ctx, testProject)
+	if err != nil {
+		t.Fatalf("CountMemories: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 memories, got %d", count)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "memory number",
+			Source: "manual", Importance: 0.5, Tags: []string{},
+		}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	count, err = s.CountMemories(ctx, testProject)
+	if err != nil {
+		t.Fatalf("CountMemories: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("expected 3 memories, got %d", count)
+	}
+}
+
+func TestStoreListProjects(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// testStore already created one project.
+	projects, err := s.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(projects))
+	}
+	if projects[0].ID != testProject {
+		t.Errorf("expected project ID %q, got %q", testProject, projects[0].ID)
+	}
+	if projects[0].Name != "test" {
+		t.Errorf("expected project name 'test', got %q", projects[0].Name)
+	}
+
+	// Add another project.
+	if err := s.EnsureProject(ctx, "second", "/tmp/second", "alpha"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	projects, err = s.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if len(projects) != 2 {
+		t.Fatalf("expected 2 projects, got %d", len(projects))
+	}
+	// Ordered by name ASC — "alpha" before "test".
+	if projects[0].Name != "alpha" {
+		t.Errorf("expected 'alpha' first (sorted), got %q", projects[0].Name)
+	}
+}
+
+func TestStoreResolveProjectByName(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// testStore created project with name "test".
+	id, err := s.ResolveProjectByName(ctx, "test")
+	if err != nil {
+		t.Fatalf("ResolveProjectByName: %v", err)
+	}
+	if id != testProject {
+		t.Errorf("expected %q, got %q", testProject, id)
+	}
+
+	// Non-existent name returns empty string, no error.
+	id, err = s.ResolveProjectByName(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("ResolveProjectByName nonexistent: %v", err)
+	}
+	if id != "" {
+		t.Errorf("expected empty string for nonexistent, got %q", id)
+	}
+}
+
+func TestStoreIncrementInteraction(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// EnsureProject creates ghost_state row with interaction_count=0.
+	count, err := s.IncrementInteraction(ctx, testProject)
+	if err != nil {
+		t.Fatalf("IncrementInteraction: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected count 1, got %d", count)
+	}
+
+	count, err = s.IncrementInteraction(ctx, testProject)
+	if err != nil {
+		t.Fatalf("IncrementInteraction (2nd): %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected count 2, got %d", count)
+	}
+}
+
+func TestStoreLearnedContext(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Initially empty.
+	lc, err := s.GetLearnedContext(ctx, testProject)
+	if err != nil {
+		t.Fatalf("GetLearnedContext: %v", err)
+	}
+	if lc != "" {
+		t.Errorf("expected empty learned context, got %q", lc)
+	}
+
+	// Update it.
+	if err := s.UpdateLearnedContext(ctx, testProject, "Go project with SQLite", "consolidated summary"); err != nil {
+		t.Fatalf("UpdateLearnedContext: %v", err)
+	}
+
+	lc, err = s.GetLearnedContext(ctx, testProject)
+	if err != nil {
+		t.Fatalf("GetLearnedContext after update: %v", err)
+	}
+	if lc != "Go project with SQLite" {
+		t.Errorf("expected 'Go project with SQLite', got %q", lc)
+	}
+
+	// Non-existent project returns empty, no error.
+	lc, err = s.GetLearnedContext(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("GetLearnedContext nonexistent: %v", err)
+	}
+	if lc != "" {
+		t.Errorf("expected empty for nonexistent, got %q", lc)
+	}
+}
+
+func TestStoreConversations(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create a conversation.
+	convID, err := s.CreateConversation(ctx, testProject, "chat")
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	if convID == "" {
+		t.Fatal("CreateConversation returned empty ID")
+	}
+
+	// Append messages.
+	if err := s.AppendMessage(ctx, convID, "user", "Hello ghost"); err != nil {
+		t.Fatalf("AppendMessage user: %v", err)
+	}
+	if err := s.AppendMessage(ctx, convID, "assistant", "Hello! How can I help?"); err != nil {
+		t.Fatalf("AppendMessage assistant: %v", err)
+	}
+	if err := s.AppendMessage(ctx, convID, "user", "What is Go?"); err != nil {
+		t.Fatalf("AppendMessage user 2: %v", err)
+	}
+	if err := s.AppendMessage(ctx, convID, "assistant", "Go is a programming language."); err != nil {
+		t.Fatalf("AppendMessage assistant 2: %v", err)
+	}
+
+	// GetConversationMessages.
+	msgs, err := s.GetConversationMessages(ctx, convID)
+	if err != nil {
+		t.Fatalf("GetConversationMessages: %v", err)
+	}
+	if len(msgs) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(msgs))
+	}
+	if msgs[0].Role != "user" || msgs[0].Content != "Hello ghost" {
+		t.Errorf("unexpected first message: %+v", msgs[0])
+	}
+	if msgs[3].Role != "assistant" || msgs[3].Content != "Go is a programming language." {
+		t.Errorf("unexpected last message: %+v", msgs[3])
+	}
+
+	// GetLatestConversation.
+	latestID, err := s.GetLatestConversation(ctx, testProject)
+	if err != nil {
+		t.Fatalf("GetLatestConversation: %v", err)
+	}
+	if latestID != convID {
+		t.Errorf("expected latest conv %q, got %q", convID, latestID)
+	}
+
+	// GetLatestConversation for non-existent project.
+	_, err = s.GetLatestConversation(ctx, "nonexistent")
+	if err == nil {
+		t.Error("expected error for nonexistent project conversation")
+	}
+}
+
+func TestStoreGetRecentExchanges(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	convID, err := s.CreateConversation(ctx, testProject, "chat")
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+
+	// Insert 3 pairs of user/assistant messages with distinct timestamps.
+	// SQLite datetime('now') has only second precision, so we insert with
+	// explicit timestamps to guarantee ordering.
+	msgs := []struct {
+		role, content, ts string
+	}{
+		{"user", "first question", "2026-01-01 00:00:01"},
+		{"assistant", "first answer", "2026-01-01 00:00:02"},
+		{"user", "second question", "2026-01-01 00:00:03"},
+		{"assistant", "second answer", "2026-01-01 00:00:04"},
+		{"user", "third question", "2026-01-01 00:00:05"},
+		{"assistant", "third answer", "2026-01-01 00:00:06"},
+	}
+	for _, m := range msgs {
+		_, err := s.db.ExecContext(ctx,
+			`INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)`,
+			convID, m.role, m.content, m.ts)
+		if err != nil {
+			t.Fatalf("insert message: %v", err)
+		}
+	}
+
+	// Get last 2 exchanges.
+	pairs, err := s.GetRecentExchanges(ctx, testProject, 2)
+	if err != nil {
+		t.Fatalf("GetRecentExchanges: %v", err)
+	}
+	if len(pairs) != 2 {
+		t.Fatalf("expected 2 pairs, got %d", len(pairs))
+	}
+
+	// Should be the last 2, in chronological order.
+	if pairs[0][0] != "second question" || pairs[0][1] != "second answer" {
+		t.Errorf("expected second exchange first, got %v", pairs[0])
+	}
+	if pairs[1][0] != "third question" || pairs[1][1] != "third answer" {
+		t.Errorf("expected third exchange second, got %v", pairs[1])
+	}
+
+	// Get 0 exchanges.
+	pairs, err = s.GetRecentExchanges(ctx, testProject, 0)
+	if err != nil {
+		t.Fatalf("GetRecentExchanges(0): %v", err)
+	}
+	if len(pairs) != 0 {
+		t.Errorf("expected 0 pairs, got %d", len(pairs))
+	}
+}
+
+func TestStoreRecordUsage(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	usage := TokenUsage{
+		InputTokens:   1000,
+		OutputTokens:  500,
+		CacheCreation: 200,
+		CacheRead:     100,
+		CostUSD:       0.05,
+	}
+
+	if err := s.RecordUsage(ctx, testProject, "claude-opus-4-6", usage); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+
+	// Verify by reading directly from DB.
+	var inputTokens, outputTokens int
+	var costUSD float64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT input_tokens, output_tokens, cost_usd FROM token_usage
+		WHERE project_id = ? LIMIT 1
+	`, testProject).Scan(&inputTokens, &outputTokens, &costUSD)
+	if err != nil {
+		t.Fatalf("query token_usage: %v", err)
+	}
+	if inputTokens != 1000 {
+		t.Errorf("expected 1000 input tokens, got %d", inputTokens)
+	}
+	if outputTokens != 500 {
+		t.Errorf("expected 500 output tokens, got %d", outputTokens)
+	}
+	if costUSD != 0.05 {
+		t.Errorf("expected cost 0.05, got %f", costUSD)
+	}
+}
+
+func TestStoreSetOnSave(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	called := make(chan string, 1)
+	s.SetOnSave(func(projectID string) {
+		called <- projectID
+	})
+
+	// Create should trigger callback.
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "Callback test",
+		Source: "manual", Importance: 0.5, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	select {
+	case pid := <-called:
+		if pid != testProject {
+			t.Errorf("expected project %q, got %q", testProject, pid)
+		}
+	case <-time.After(time.Second):
+		t.Error("onSave callback not called after Create")
+	}
+}
+
+func TestStoreClose(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	s := NewStore(db, logger)
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// After close, operations should fail.
+	_, err = s.ListProjects(context.Background())
+	if err == nil {
+		t.Error("expected error after Close")
+	}
+}
+
+func TestStoreDecisions(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Record a decision.
+	id, err := s.RecordDecision(ctx, testProject,
+		"Use SQLite for storage",
+		"SQLite provides embedded persistence with FTS5",
+		"Simple, no external dependencies",
+		[]string{"PostgreSQL", "BoltDB"},
+		[]string{"storage", "database"},
+	)
+	if err != nil {
+		t.Fatalf("RecordDecision: %v", err)
+	}
+	if id == "" {
+		t.Fatal("RecordDecision returned empty ID")
+	}
+
+	// List decisions.
+	decisions, err := s.ListDecisions(ctx, testProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(decisions) != 1 {
+		t.Fatalf("expected 1 decision, got %d", len(decisions))
+	}
+
+	d := decisions[0]
+	if d.Title != "Use SQLite for storage" {
+		t.Errorf("expected title 'Use SQLite for storage', got %q", d.Title)
+	}
+	if d.Decision != "SQLite provides embedded persistence with FTS5" {
+		t.Errorf("unexpected decision text: %q", d.Decision)
+	}
+	if d.Rationale != "Simple, no external dependencies" {
+		t.Errorf("unexpected rationale: %q", d.Rationale)
+	}
+	if len(d.Alternatives) != 2 || d.Alternatives[0] != "PostgreSQL" {
+		t.Errorf("unexpected alternatives: %v", d.Alternatives)
+	}
+	if len(d.Tags) != 2 || d.Tags[0] != "storage" {
+		t.Errorf("unexpected tags: %v", d.Tags)
+	}
+	if d.Status != "active" {
+		t.Errorf("expected status 'active', got %q", d.Status)
+	}
+
+	// Filter by status.
+	active, err := s.ListDecisions(ctx, testProject, "active", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions active: %v", err)
+	}
+	if len(active) != 1 {
+		t.Errorf("expected 1 active decision, got %d", len(active))
+	}
+
+	superseded, err := s.ListDecisions(ctx, testProject, "superseded", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions superseded: %v", err)
+	}
+	if len(superseded) != 0 {
+		t.Errorf("expected 0 superseded decisions, got %d", len(superseded))
+	}
+
+	// RecordDecision also creates a memory — verify.
+	results, err := s.SearchFTS(ctx, testProject, "SQLite storage", 10)
+	if err != nil {
+		t.Fatalf("SearchFTS decision memory: %v", err)
+	}
+	foundDecisionMemory := false
+	for _, r := range results {
+		if r.Category == "decision" && strings.Contains(r.Content, "Use SQLite for storage") {
+			foundDecisionMemory = true
+		}
+	}
+	if !foundDecisionMemory {
+		t.Error("RecordDecision should also create a decision-category memory")
+	}
+}
+
+func TestStoreTasks(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Create tasks.
+	id1, err := s.CreateTask(ctx, testProject, "Fix bug", "Null pointer in handler", 1)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if id1 == "" {
+		t.Fatal("CreateTask returned empty ID")
+	}
+
+	id2, err := s.CreateTask(ctx, testProject, "Add feature", "New memory search", 2)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	// List all tasks.
+	tasks, err := s.ListTasks(ctx, testProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(tasks))
+	}
+	// Ordered by priority ASC — priority 1 first.
+	if tasks[0].Title != "Fix bug" {
+		t.Errorf("expected 'Fix bug' first (priority 1), got %q", tasks[0].Title)
+	}
+
+	// Filter by status — both should be "pending" (default).
+	pending, err := s.ListTasks(ctx, testProject, "pending", 10)
+	if err != nil {
+		t.Fatalf("ListTasks pending: %v", err)
+	}
+	if len(pending) != 2 {
+		t.Errorf("expected 2 pending tasks, got %d", len(pending))
+	}
+
+	// Complete a task.
+	if err := s.CompleteTask(ctx, id1, "Fixed in PR #42"); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	done, err := s.ListTasks(ctx, testProject, "done", 10)
+	if err != nil {
+		t.Fatalf("ListTasks done: %v", err)
+	}
+	if len(done) != 1 {
+		t.Fatalf("expected 1 done task, got %d", len(done))
+	}
+	if done[0].Notes != "Fixed in PR #42" {
+		t.Errorf("expected notes 'Fixed in PR #42', got %q", done[0].Notes)
+	}
+	if done[0].CompletedAt == "" {
+		t.Error("expected completed_at to be set")
+	}
+
+	// Update a task.
+	if err := s.UpdateTask(ctx, id2, "active", 1, "Updated description"); err != nil {
+		t.Fatalf("UpdateTask: %v", err)
+	}
+
+	active, err := s.ListTasks(ctx, testProject, "active", 10)
+	if err != nil {
+		t.Fatalf("ListTasks active: %v", err)
+	}
+	if len(active) != 1 {
+		t.Fatalf("expected 1 active task, got %d", len(active))
+	}
+	if active[0].Description != "Updated description" {
+		t.Errorf("expected updated description, got %q", active[0].Description)
+	}
+}
+
+func TestStoreGetLatestConversationNoRows(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	_, err := s.GetLatestConversation(ctx, testProject)
+	if err == nil {
+		t.Error("expected error for no conversations")
+	}
+	if err != sql.ErrNoRows {
+		t.Errorf("expected sql.ErrNoRows, got %v", err)
 	}
 }
