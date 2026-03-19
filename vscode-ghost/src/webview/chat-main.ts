@@ -34,6 +34,8 @@ const removeImageBtn = document.getElementById("remove-image")!;
 const denyInstructionsInput = document.getElementById("deny-instructions") as HTMLInputElement;
 const denyWithBtn = document.getElementById("deny-with-btn")!;
 
+const micBtn = document.getElementById("mic-btn")!;
+
 // State
 let streaming = false;
 let autoApprove = false;
@@ -545,6 +547,13 @@ window.addEventListener("message", (event) => {
       inputEl.value = msg.text;
       send();
       break;
+    case "voice_token":
+      voiceConnect(msg.token, msg.ws_url);
+      break;
+    case "voice_error":
+      addErrorMessage(msg.text);
+      voiceCleanup();
+      break;
   }
 });
 
@@ -669,6 +678,152 @@ slashMenu.addEventListener("click", (e) => {
     }
   }
 });
+
+// --- Voice Input ---
+
+let voiceActive = false;
+let voiceSocket: WebSocket | null = null;
+let voiceAudioCtx: AudioContext | null = null;
+let voiceStream: MediaStream | null = null;
+let voiceWorklet: AudioWorkletNode | null = null;
+let voiceSource: MediaStreamAudioSourceNode | null = null;
+let voiceTranscript = "";
+
+micBtn.addEventListener("click", () => {
+  if (voiceActive) {
+    voiceStop();
+  } else {
+    voiceStart();
+  }
+});
+
+function voiceStart(): void {
+  voiceTranscript = "";
+  micBtn.classList.add("voice-active");
+  micBtn.setAttribute("aria-label", "Stop voice input");
+  addSystemMessage("Requesting microphone...");
+  vscode.postMessage({ type: "voice_start" });
+}
+
+function voiceStop(): void {
+  if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
+    voiceSocket.send(JSON.stringify({ type: "Terminate" }));
+  }
+  voiceCleanup();
+}
+
+function voiceCleanup(): void {
+  voiceActive = false;
+  micBtn.classList.remove("voice-active");
+  micBtn.setAttribute("aria-label", "Voice input");
+  voiceWorklet?.disconnect();
+  voiceWorklet = null;
+  voiceSource?.disconnect();
+  voiceSource = null;
+  voiceStream?.getTracks().forEach((t) => t.stop());
+  voiceStream = null;
+  voiceAudioCtx?.close().catch(() => {});
+  voiceAudioCtx = null;
+  if (voiceSocket) {
+    voiceSocket.onclose = null;
+    voiceSocket.onerror = null;
+    voiceSocket.onmessage = null;
+    if (voiceSocket.readyState === WebSocket.OPEN || voiceSocket.readyState === WebSocket.CONNECTING) {
+      voiceSocket.close();
+    }
+    voiceSocket = null;
+  }
+}
+
+async function voiceConnect(token: string, wsUrl: string): Promise<void> {
+  try {
+    voiceStream = await navigator.mediaDevices.getUserMedia({
+      audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true },
+    });
+  } catch (err) {
+    addErrorMessage("Microphone access denied");
+    voiceCleanup();
+    return;
+  }
+
+  // Open WebSocket to AssemblyAI.
+  const url = `${wsUrl}?token=${token}&sample_rate=16000&encoding=pcm_s16le`;
+  voiceSocket = new WebSocket(url);
+  voiceSocket.binaryType = "arraybuffer";
+
+  voiceSocket.onopen = async () => {
+    voiceActive = true;
+    addSystemMessage("Listening...");
+
+    try {
+      voiceAudioCtx = new AudioContext({ sampleRate: 16000 });
+
+      // Load AudioWorklet from the extension's media folder.
+      const pcmProcessorUrl = micBtn.dataset.pcmProcessor;
+      if (!pcmProcessorUrl) throw new Error("pcm-processor URL not found");
+
+      // Fetch the processor script and create a blob URL since addModule
+      // with vscode-webview:// URIs may be blocked by some CSP configs.
+      const resp = await fetch(pcmProcessorUrl);
+      const scriptText = await resp.text();
+      const blob = new Blob([scriptText], { type: "application/javascript" });
+      const blobUrl = URL.createObjectURL(blob);
+      await voiceAudioCtx.audioWorklet.addModule(blobUrl);
+      URL.revokeObjectURL(blobUrl);
+
+      voiceSource = voiceAudioCtx.createMediaStreamSource(voiceStream!);
+      voiceWorklet = new AudioWorkletNode(voiceAudioCtx, "pcm-processor");
+
+      voiceWorklet.port.onmessage = (event: MessageEvent) => {
+        if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
+          voiceSocket.send(event.data as ArrayBuffer);
+        }
+      };
+
+      voiceSource.connect(voiceWorklet);
+      voiceWorklet.connect(voiceAudioCtx.destination);
+    } catch (err) {
+      addErrorMessage(`Audio setup failed: ${err}`);
+      voiceStop();
+    }
+  };
+
+  voiceSocket.onmessage = (event: MessageEvent) => {
+    try {
+      const msg = JSON.parse(event.data as string);
+      if (msg.type === "Turn") {
+        voiceTranscript = msg.transcript || "";
+        if (msg.end_of_turn && voiceTranscript.trim()) {
+          addSystemMessage(`You said: "${voiceTranscript}"`);
+          vscode.postMessage({ type: "voice_transcript", text: voiceTranscript });
+          voiceTranscript = "";
+        }
+      } else if (msg.type === "Termination") {
+        voiceCleanup();
+      } else if (msg.type === "Error") {
+        addErrorMessage(`Voice error: ${msg.error || "unknown"}`);
+        voiceCleanup();
+      }
+    } catch {
+      // Ignore non-JSON messages.
+    }
+  };
+
+  voiceSocket.onerror = () => {
+    addErrorMessage("Voice connection error");
+    voiceCleanup();
+  };
+
+  voiceSocket.onclose = () => {
+    if (voiceActive) {
+      // Unexpected close — send any pending transcript.
+      if (voiceTranscript.trim()) {
+        vscode.postMessage({ type: "voice_transcript", text: voiceTranscript });
+      }
+      voiceCleanup();
+    }
+  };
+}
 
 // Tell extension we're ready
 vscode.postMessage({ type: "ready" });

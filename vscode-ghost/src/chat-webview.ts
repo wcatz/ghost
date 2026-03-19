@@ -86,6 +86,17 @@ export class ChatWebview implements vscode.Disposable {
       case "slash_command":
         await this.handleSlashCommand(msg.command, msg.args);
         break;
+      case "voice_start":
+        await this.handleVoiceStart();
+        break;
+      case "voice_stop":
+        // Stop is handled entirely in the webview (closes WebSocket).
+        break;
+      case "voice_transcript":
+        if (msg.text.trim()) {
+          await this.handleSend(msg.text);
+        }
+        break;
     }
   }
 
@@ -272,6 +283,15 @@ export class ChatWebview implements vscode.Disposable {
     }
   }
 
+  private async handleVoiceStart(): Promise<void> {
+    try {
+      const result = await this.client.getTranscribeToken();
+      this.postMessage({ type: "voice_token", token: result.token, ws_url: result.ws_url });
+    } catch (err) {
+      this.postMessage({ type: "voice_error", text: `Voice unavailable: ${err}` });
+    }
+  }
+
   private async handleExport(): Promise<void> {
     if (!this.session) {
       this.postMessage({ type: "system_message", text: "No active session" });
@@ -341,6 +361,9 @@ export class ChatWebview implements vscode.Disposable {
       vscode.Uri.joinPath(this.extensionUri, "media", "ghost-icon.svg"),
     );
     const cspSource = this.webview.cspSource;
+    const pcmProcessorUri = this.webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, "media", "pcm-processor.js"),
+    );
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -348,7 +371,7 @@ export class ChatWebview implements vscode.Disposable {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy"
-    content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data: ${cspSource};">
+    content="default-src 'none'; style-src ${cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' blob:; img-src data: ${cspSource}; connect-src wss://streaming.assemblyai.com; worker-src blob: ${cspSource};">
   <link rel="stylesheet" href="${styleUri}">
   <title>Ghost Chat</title>
 </head>
@@ -394,6 +417,7 @@ export class ChatWebview implements vscode.Disposable {
     <textarea id="input" aria-label="Type a message" placeholder="Message Ghost... (/ for commands)" rows="1"></textarea>
     <div id="input-actions">
       <button id="attach-btn" class="icon-btn" aria-label="Attach image">&#x1F4CE;</button>
+      <button id="mic-btn" class="icon-btn" aria-label="Voice input" data-pcm-processor="${pcmProcessorUri}">&#x1F3A4;</button>
       <button id="send-btn" class="icon-btn" aria-label="Send message">&#x27A4;</button>
       <button id="abort-btn" class="icon-btn hidden" aria-label="Stop response">&#x25A0;</button>
     </div>

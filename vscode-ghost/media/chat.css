@@ -590,6 +590,13 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
 #abort-btn:hover { opacity: 0.9; }
 #attach-btn { background: none; color: var(--ghost-muted); border: 1px solid var(--ghost-border); }
 #attach-btn:hover { color: var(--ghost-fg); background: var(--ghost-hover); }
+#mic-btn { background: none; color: var(--ghost-muted); border: 1px solid var(--ghost-border); }
+#mic-btn:hover { color: var(--ghost-fg); background: var(--ghost-hover); }
+#mic-btn.voice-active { background: var(--ghost-error); color: #fff; border-color: var(--ghost-error); animation: pulse 1.5s ease-in-out infinite; }
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
 
 /* --- Footer --- */
 #footer {

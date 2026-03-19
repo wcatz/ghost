@@ -27,7 +27,9 @@ export type ExtToWebviewMessage =
   | { type: "history"; messages: HistoryMessage[] }
   | { type: "send_from_command"; text: string }
   | { type: "system_message"; text: string }
-  | { type: "mode_changed"; mode: string };
+  | { type: "mode_changed"; mode: string }
+  | { type: "voice_token"; token: string; ws_url: string }
+  | { type: "voice_error"; text: string };
 
 // --- Webview -> Extension ---
 
@@ -39,7 +41,10 @@ export type WebviewToExtMessage =
   | { type: "setMode"; mode: string }
   | { type: "set_auto_approve"; enabled: boolean }
   | { type: "attach_image" }
-  | { type: "slash_command"; command: string; args?: string };
+  | { type: "slash_command"; command: string; args?: string }
+  | { type: "voice_start" }
+  | { type: "voice_stop" }
+  | { type: "voice_transcript"; text: string };
 
 // --- Shared types ---
 

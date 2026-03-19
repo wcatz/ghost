@@ -308,6 +308,12 @@ export class GhostClient extends EventEmitter {
     return this.request("GET", "/api/v1/projects");
   }
 
+  // --- Transcription ---
+
+  async getTranscribeToken(): Promise<{ token: string; ws_url: string }> {
+    return this.request("GET", "/api/v1/transcribe/token");
+  }
+
   // --- Internal ---
 
   private authHeaders(): Record<string, string> {
