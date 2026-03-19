@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 )
 
 const (
@@ -57,7 +57,7 @@ func (s *AssemblyAIStreamSTT) Transcribe(ctx context.Context, audio []byte) (str
 	if err != nil {
 		return "", fmt.Errorf("websocket dial: %w", err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 
 	// Step 3: Send audio in chunks.
 	for offset := 0; offset < len(audio); offset += streamChunkBytes {
@@ -97,11 +97,11 @@ func (s *AssemblyAIStreamSTT) Transcribe(ctx context.Context, audio []byte) (str
 		case "Turn":
 			transcript = msg.Transcript
 			if msg.EndOfTurn {
-				conn.Close(websocket.StatusNormalClosure, "done")
+				_ = conn.Close(websocket.StatusNormalClosure, "done")
 				return transcript, nil
 			}
 		case "Termination":
-			conn.Close(websocket.StatusNormalClosure, "terminated")
+			_ = conn.Close(websocket.StatusNormalClosure, "terminated")
 			return transcript, nil
 		case "Error":
 			return "", fmt.Errorf("assemblyai stream error: %s", string(data))
@@ -128,7 +128,7 @@ func (s *AssemblyAIStreamSTT) createToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode != http.StatusOK {
