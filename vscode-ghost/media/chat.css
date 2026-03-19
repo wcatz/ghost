@@ -56,7 +56,7 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   flex-shrink: 0;
 }
 .dot.connected { background: var(--ghost-success); }
-.dot.disconnected { background: var(--ghost-error); }
+.dot.disconnected { background: var(--ghost-accent); }
 
 #session-info { color: var(--ghost-fg); font-weight: 500; }
 
@@ -127,17 +127,23 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* User messages — input-field style */
 .message.user {
-  align-self: flex-end;
-  background: var(--vscode-textBlockQuote-background, #2a2d2e);
-  border: 1px solid var(--ghost-border);
-  border-radius: 8px 8px 2px 8px;
+  align-self: flex-start;
+  background: var(--ghost-input-bg);
+  border: 1px solid var(--ghost-input-border);
+  border-radius: 6px;
+  padding: 8px 12px;
   white-space: pre-wrap;
+  font-weight: 400;
+  max-width: 100%;
+  color: var(--ghost-fg);
 }
 
 .message.assistant {
   align-self: flex-start;
   background: transparent;
+  max-width: 100%;
 }
 
 /* Markdown content inside assistant messages */
@@ -185,7 +191,6 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
 .message.error {
   color: var(--ghost-error);
   font-size: 0.9em;
-  border-left: 3px solid var(--ghost-error);
   border: 1px solid var(--ghost-error);
   border-radius: 6px;
   padding: 8px 12px;
@@ -195,7 +200,6 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
 .message.warning {
   color: var(--ghost-warning);
   font-size: 0.9em;
-  border-left: 3px solid var(--ghost-warning);
   border: 1px solid var(--ghost-warning);
   border-radius: 6px;
   padding: 8px 12px;
@@ -204,28 +208,41 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
 
 /* --- Thinking blocks (collapsible) --- */
 .thinking-block {
-  border-left: 2px solid var(--ghost-accent);
   margin: 4px 0;
+  border: 1px solid var(--ghost-border);
+  border-radius: 6px;
+  overflow: hidden;
   animation: fadeIn 0.15s ease-out;
 }
 
 .thinking-block summary {
-  font-size: 0.85em;
+  padding: 4px 10px;
+  font-size: 0.8em;
   color: var(--ghost-muted);
   cursor: pointer;
-  padding: 4px 10px;
   user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  list-style: none;
 }
+.thinking-block summary::-webkit-details-marker { display: none; }
+.thinking-block summary::before {
+  content: "\25B6";
+  font-size: 8px;
+  transition: transform 0.15s;
+}
+.thinking-block[open] summary::before { transform: rotate(90deg); }
 .thinking-block summary:hover { color: var(--ghost-fg); }
 
 .thinking-content {
-  font-size: 0.85em;
+  font-size: 0.8em;
   color: var(--ghost-muted);
-  font-style: italic;
-  padding: 4px 10px;
+  padding: 4px 10px 8px;
   white-space: pre-wrap;
-  max-height: 300px;
+  max-height: 200px;
   overflow-y: auto;
+  border-top: 1px solid var(--ghost-border);
 }
 
 /* --- Code blocks --- */
@@ -235,6 +252,7 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   border-radius: 6px;
   margin: 6px 0;
   overflow: hidden;
+  position: relative;
 }
 
 .code-header {
@@ -257,7 +275,10 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   padding: 1px 8px;
   cursor: pointer;
   font-size: 11px;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, background 0.15s;
 }
+.code-block:hover .copy-btn { opacity: 1; }
 .copy-btn:hover { color: var(--ghost-fg); background: var(--ghost-hover); }
 
 .code-block pre {
@@ -269,7 +290,62 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   line-height: 1.5;
 }
 
+/* Don't override highlight.js colors — set fallback only */
 .code-block code { color: var(--ghost-fg); }
+
+/* --- highlight.js VS2015 dark theme (scoped to .code-block) --- */
+.code-block .hljs { background: transparent; color: #DCDCDC; }
+.code-block .hljs-keyword,
+.code-block .hljs-literal,
+.code-block .hljs-symbol,
+.code-block .hljs-name { color: #569CD6; }
+.code-block .hljs-link { color: #569CD6; text-decoration: underline; }
+.code-block .hljs-built_in,
+.code-block .hljs-type { color: #4EC9B0; }
+.code-block .hljs-number,
+.code-block .hljs-class { color: #B8D7A3; }
+.code-block .hljs-string,
+.code-block .hljs-meta .hljs-string { color: #D69D85; }
+.code-block .hljs-regexp,
+.code-block .hljs-template-tag { color: #9A5334; }
+.code-block .hljs-subst,
+.code-block .hljs-function,
+.code-block .hljs-title,
+.code-block .hljs-params,
+.code-block .hljs-formula { color: #DCDCDC; }
+.code-block .hljs-comment,
+.code-block .hljs-quote { color: #57A64A; font-style: italic; }
+.code-block .hljs-doctag { color: #608B4E; }
+.code-block .hljs-meta,
+.code-block .hljs-meta .hljs-keyword,
+.code-block .hljs-tag { color: #9B9B9B; }
+.code-block .hljs-variable,
+.code-block .hljs-template-variable { color: #BD63C5; }
+.code-block .hljs-attr,
+.code-block .hljs-attribute { color: #9CDCFE; }
+.code-block .hljs-section { color: gold; }
+.code-block .hljs-emphasis { font-style: italic; }
+.code-block .hljs-strong { font-weight: bold; }
+.code-block .hljs-bullet,
+.code-block .hljs-selector-tag,
+.code-block .hljs-selector-id,
+.code-block .hljs-selector-class,
+.code-block .hljs-selector-attr,
+.code-block .hljs-selector-pseudo { color: #D7BA7D; }
+.code-block .hljs-addition { background-color: rgba(115,201,145,0.08); color: #73c991; }
+.code-block .hljs-deletion { background-color: rgba(244,71,71,0.08); color: #f44747; }
+
+/* Line numbers for code blocks */
+.code-line { display: block; }
+.code-line-num {
+  display: inline-block;
+  min-width: 32px;
+  padding-right: 12px;
+  text-align: right;
+  color: var(--ghost-muted);
+  opacity: 0.4;
+  user-select: none;
+}
 
 .inline-code {
   background: var(--vscode-textCodeBlock-background, #1a1a1a);
@@ -284,9 +360,10 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   font-size: 0.85em;
   padding: 4px 10px;
   color: var(--ghost-muted);
-  display: flex;
-  align-items: center;
+  display: grid;
+  grid-template-columns: 16px auto auto 1fr;
   gap: 6px;
+  align-items: center;
   animation: fadeIn 0.15s ease-out;
 }
 
@@ -311,25 +388,55 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
 /* --- Tool Result Blocks --- */
 .tool-result-block {
   margin: 4px 0;
+  border: 1px solid var(--ghost-border);
+  border-radius: 6px;
+  overflow: hidden;
   font-size: 0.85em;
   animation: fadeIn 0.15s ease-out;
 }
 
 .tool-result-block summary {
-  color: var(--ghost-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
   cursor: pointer;
-  padding: 2px 10px;
-  font-family: var(--vscode-editor-font-family, monospace);
   user-select: none;
+  color: var(--ghost-muted);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  list-style: none;
 }
-.tool-result-block summary:hover { color: var(--ghost-fg); }
+.tool-result-block summary::-webkit-details-marker { display: none; }
+.tool-result-block summary::before {
+  content: "\25B6";
+  font-size: 8px;
+  transition: transform 0.15s;
+}
+.tool-result-block[open] summary::before { transform: rotate(90deg); }
+.tool-result-block summary:hover { color: var(--ghost-fg); background: var(--ghost-hover); }
 
+.tool-result-block.tool-error { border-color: var(--ghost-error); }
 .tool-result-block.tool-error summary { color: var(--ghost-error); }
 
 .tool-result-content {
-  padding: 4px 10px;
   max-height: 300px;
   overflow-y: auto;
+  border-top: 1px solid var(--ghost-border);
+  position: relative;
+}
+
+/* Content clipping gradient at bottom */
+.tool-result-content::after {
+  content: "";
+  position: sticky;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 40px;
+  display: block;
+  background: linear-gradient(transparent, var(--ghost-bg));
+  pointer-events: none;
 }
 
 .tool-output {
@@ -340,9 +447,65 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
   word-break: break-all;
   color: var(--ghost-muted);
   margin: 0;
+  padding: 8px 10px;
 }
 
-/* --- Diff coloring --- */
+/* --- Enhanced Diff Rendering --- */
+.diff-container {
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  border: 1px solid var(--ghost-border);
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 6px 0;
+}
+
+.diff-file-header {
+  padding: 4px 10px;
+  background: rgba(255,255,255,0.03);
+  border-bottom: 1px solid var(--ghost-border);
+  color: var(--ghost-muted);
+  font-weight: 500;
+}
+
+.diff-hunk-header {
+  padding: 2px 10px;
+  color: var(--ghost-accent);
+  background: rgba(79,193,255,0.06);
+  font-style: italic;
+}
+
+.diff-line {
+  display: flex;
+  min-height: 20px;
+}
+
+.diff-line-num {
+  display: inline-block;
+  min-width: 40px;
+  padding: 0 8px;
+  text-align: right;
+  color: var(--ghost-muted);
+  opacity: 0.5;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.diff-line-content {
+  flex: 1;
+  padding: 0 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff-line.add { background: rgba(115,201,145,0.08); }
+.diff-line.add .diff-line-content { color: #73c991; }
+.diff-line.del { background: rgba(244,71,71,0.08); }
+.diff-line.del .diff-line-content { color: #f44747; }
+.diff-line.context .diff-line-content { color: var(--ghost-fg); }
+
+/* Legacy diff span classes (kept for backward compat) */
 .diff-add {
   color: #73c991;
   display: block;
@@ -592,7 +755,8 @@ body.drag-over { outline: 2px dashed var(--ghost-accent); outline-offset: -4px; 
 #attach-btn:hover { color: var(--ghost-fg); background: var(--ghost-hover); }
 #mic-btn { background: none; color: var(--ghost-muted); border: 1px solid var(--ghost-border); }
 #mic-btn:hover { color: var(--ghost-fg); background: var(--ghost-hover); }
-#mic-btn.voice-active { background: var(--ghost-error); color: #fff; border-color: var(--ghost-error); animation: pulse 1.5s ease-in-out infinite; }
+#mic-btn.voice-active { background: var(--ghost-muted); color: #fff; border-color: var(--ghost-muted); animation: pulse 1.5s ease-in-out infinite; }
+#mic-btn.voice-triggered { background: var(--ghost-accent); color: #fff; border-color: var(--ghost-accent); }
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.7; }

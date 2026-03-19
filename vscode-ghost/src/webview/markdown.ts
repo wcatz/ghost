@@ -1,16 +1,86 @@
-// Markdown rendering using the marked library.
+// Markdown rendering using the marked library + highlight.js syntax highlighting.
 // This runs in the webview (browser context).
 
 import { marked, type Tokens } from "marked";
+import hljs from "highlight.js/lib/core";
 
-// Configure marked for GFM with line breaks
+// Register only the languages we need to keep the bundle small.
+import typescript from "highlight.js/lib/languages/typescript";
+import javascript from "highlight.js/lib/languages/javascript";
+import go from "highlight.js/lib/languages/go";
+import python from "highlight.js/lib/languages/python";
+import bash from "highlight.js/lib/languages/bash";
+import json from "highlight.js/lib/languages/json";
+import yaml from "highlight.js/lib/languages/yaml";
+import xml from "highlight.js/lib/languages/xml";
+import css from "highlight.js/lib/languages/css";
+import sql from "highlight.js/lib/languages/sql";
+import rust from "highlight.js/lib/languages/rust";
+import diff from "highlight.js/lib/languages/diff";
+import markdown from "highlight.js/lib/languages/markdown";
+import dockerfile from "highlight.js/lib/languages/dockerfile";
+import c from "highlight.js/lib/languages/c";
+import cpp from "highlight.js/lib/languages/cpp";
+import java from "highlight.js/lib/languages/java";
+import ruby from "highlight.js/lib/languages/ruby";
+import php from "highlight.js/lib/languages/php";
+import swift from "highlight.js/lib/languages/swift";
+import kotlin from "highlight.js/lib/languages/kotlin";
+import lua from "highlight.js/lib/languages/lua";
+import shell from "highlight.js/lib/languages/shell";
+import makefile from "highlight.js/lib/languages/makefile";
+import ini from "highlight.js/lib/languages/ini";
+import nginx from "highlight.js/lib/languages/nginx";
+
+hljs.registerLanguage("typescript", typescript);
+hljs.registerLanguage("javascript", javascript);
+hljs.registerLanguage("go", go);
+hljs.registerLanguage("python", python);
+hljs.registerLanguage("bash", bash);
+hljs.registerLanguage("json", json);
+hljs.registerLanguage("yaml", yaml);
+hljs.registerLanguage("xml", xml);
+hljs.registerLanguage("html", xml);
+hljs.registerLanguage("css", css);
+hljs.registerLanguage("sql", sql);
+hljs.registerLanguage("rust", rust);
+hljs.registerLanguage("diff", diff);
+hljs.registerLanguage("markdown", markdown);
+hljs.registerLanguage("dockerfile", dockerfile);
+hljs.registerLanguage("c", c);
+hljs.registerLanguage("cpp", cpp);
+hljs.registerLanguage("java", java);
+hljs.registerLanguage("ruby", ruby);
+hljs.registerLanguage("php", php);
+hljs.registerLanguage("swift", swift);
+hljs.registerLanguage("kotlin", kotlin);
+hljs.registerLanguage("lua", lua);
+hljs.registerLanguage("shell", shell);
+hljs.registerLanguage("makefile", makefile);
+hljs.registerLanguage("ini", ini);
+hljs.registerLanguage("toml", ini);
+hljs.registerLanguage("nginx", nginx);
+
+// Aliases
+hljs.registerLanguage("ts", typescript);
+hljs.registerLanguage("js", javascript);
+hljs.registerLanguage("tsx", typescript);
+hljs.registerLanguage("jsx", javascript);
+hljs.registerLanguage("py", python);
+hljs.registerLanguage("sh", bash);
+hljs.registerLanguage("zsh", bash);
+hljs.registerLanguage("yml", yaml);
+hljs.registerLanguage("rb", ruby);
+hljs.registerLanguage("rs", rust);
+
+// --- Marked configuration ---
+
 marked.setOptions({
   breaks: true,
   gfm: true,
   async: false,
 });
 
-// Custom renderer for code blocks with copy button and syntax hints
 const renderer = new marked.Renderer();
 
 renderer.code = function (token: Tokens.Code): string {
@@ -21,13 +91,35 @@ renderer.code = function (token: Tokens.Code): string {
     ? `<span class="code-lang">${escapeHtml(lang)}</span>`
     : "";
 
-  // Apply git diff coloring if the language is diff or content looks like a diff
+  // Diff blocks get structured rendering.
   const isDiff = lang === "diff" || (lang === "" && looksLikeDiff(text));
-  const codeHtml = isDiff ? renderDiffLines(text) : escapeHtml(text);
+  if (isDiff) {
+    return renderDiff(text);
+  }
+
+  // Syntax highlight with highlight.js.
+  let codeHtml: string;
+  if (lang && hljs.getLanguage(lang)) {
+    codeHtml = hljs.highlight(text, { language: lang, ignoreIllegals: true }).value;
+  } else if (!lang) {
+    // Auto-detect for unlabeled blocks
+    const result = hljs.highlightAuto(text);
+    codeHtml = result.value;
+  } else {
+    codeHtml = escapeHtml(text);
+  }
+
+  // Add line numbers for blocks > 5 lines.
+  const lines = codeHtml.split("\n");
+  if (lines.length > 5) {
+    codeHtml = lines
+      .map((line, i) => `<span class="code-line"><span class="code-line-num">${i + 1}</span>${line}</span>`)
+      .join("\n");
+  }
 
   return `<div class="code-block">
     <div class="code-header">${langLabel}<button class="copy-btn" data-target="${id}" aria-label="Copy code">Copy</button></div>
-    <pre><code id="${id}" class="${lang ? "language-" + escapeHtml(lang) : ""}">${codeHtml}</code></pre>
+    <pre><code id="${id}" class="hljs${lang ? " language-" + escapeHtml(lang) : ""}">${codeHtml}</code></pre>
   </div>`;
 };
 
@@ -47,12 +139,11 @@ export function renderMarkdown(text: string): string {
 
 /**
  * Render tool output with diff detection.
- * If the output looks like a git diff, apply coloring.
  */
 export function renderToolOutput(output: string): string {
   if (!output) return "";
   if (looksLikeDiff(output)) {
-    return `<pre class="tool-output">${renderDiffLines(output)}</pre>`;
+    return renderDiff(output);
   }
   return `<pre class="tool-output">${escapeHtml(output)}</pre>`;
 }
@@ -69,20 +160,39 @@ function looksLikeDiff(text: string): boolean {
   return diffMarkers >= 3;
 }
 
-function renderDiffLines(text: string): string {
-  return text.split("\n").map((line) => {
-    const escaped = escapeHtml(line);
-    if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")) {
-      return `<span class="diff-meta">${escaped}</span>`;
+// --- Enhanced diff renderer with line numbers ---
+
+function renderDiff(text: string): string {
+  const lines = text.split("\n");
+  let html = '<div class="diff-container">';
+  let oldLine = 0;
+  let newLine = 0;
+
+  for (const line of lines) {
+    if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+      html += `<div class="diff-file-header">${escapeHtml(line)}</div>`;
+    } else if (line.startsWith("@@")) {
+      const match = line.match(/@@ -(\d+)(?:,\d+)? \+(\d+)/);
+      if (match) {
+        oldLine = parseInt(match[1]);
+        newLine = parseInt(match[2]);
+      }
+      html += `<div class="diff-hunk-header">${escapeHtml(line)}</div>`;
+    } else if (line.startsWith("+")) {
+      html += `<div class="diff-line add"><span class="diff-line-num"></span><span class="diff-line-num">${newLine}</span><span class="diff-line-content">${escapeHtml(line.slice(1))}</span></div>`;
+      newLine++;
+    } else if (line.startsWith("-")) {
+      html += `<div class="diff-line del"><span class="diff-line-num">${oldLine}</span><span class="diff-line-num"></span><span class="diff-line-content">${escapeHtml(line.slice(1))}</span></div>`;
+      oldLine++;
+    } else {
+      const content = line.startsWith(" ") ? line.slice(1) : line;
+      html += `<div class="diff-line context"><span class="diff-line-num">${oldLine || ""}</span><span class="diff-line-num">${newLine || ""}</span><span class="diff-line-content">${escapeHtml(content)}</span></div>`;
+      if (oldLine) oldLine++;
+      if (newLine) newLine++;
     }
-    if (line.startsWith("+")) {
-      return `<span class="diff-add">${escaped}</span>`;
-    }
-    if (line.startsWith("-")) {
-      return `<span class="diff-del">${escaped}</span>`;
-    }
-    return escaped;
-  }).join("\n");
+  }
+  html += "</div>";
+  return html;
 }
 
 export function escapeHtml(text: string): string {
@@ -94,7 +204,7 @@ export function escapeHtml(text: string): string {
     .replace(/'/g, "&#039;");
 }
 
-// Set up copy button handler via event delegation
+// Copy button handler via event delegation
 document.addEventListener("click", (e) => {
   const btn = (e.target as HTMLElement).closest(".copy-btn") as HTMLElement | null;
   if (!btn) return;
