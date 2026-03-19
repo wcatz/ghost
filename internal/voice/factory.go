@@ -10,7 +10,7 @@ import (
 
 // Options holds the configuration for building a voice pipeline.
 type Options struct {
-	STTBackend         string  // "whisper", "assemblyai"
+	STTBackend         string  // "whisper", "assemblyai", "assemblyai-batch"
 	STTModel           string  // model name or path (whisper)
 	TTSBackend         string  // "piper", "elevenlabs", "espeak", or "none"
 	TTSModel           string  // model path for piper
@@ -35,7 +35,7 @@ func New(opts Options, respond ResponseFunc) (*Pipeline, error) {
 	}
 
 	// Build STT.
-	stt, err := buildSTT(opts)
+	stt, err := BuildSTT(opts)
 	if err != nil {
 		return nil, fmt.Errorf("stt: %w", err)
 	}
@@ -66,12 +66,19 @@ func New(opts Options, respond ResponseFunc) (*Pipeline, error) {
 	return NewPipeline(stt, tts, source, sink, vad, respond, cfg, opts.Logger), nil
 }
 
-// buildSTT creates the STT backend.
-func buildSTT(opts Options) (STT, error) {
+// BuildSTT creates the STT backend from the given options.
+// Exported so callers (e.g. Telegram bot) can get an STT provider
+// without creating a full pipeline.
+func BuildSTT(opts Options) (STT, error) {
 	switch opts.STTBackend {
 	case "assemblyai":
 		if opts.AssemblyAIAPIKey == "" {
 			return nil, fmt.Errorf("assemblyai requires assemblyai_api_key")
+		}
+		return NewAssemblyAIStreamSTT(opts.AssemblyAIAPIKey), nil
+	case "assemblyai-batch":
+		if opts.AssemblyAIAPIKey == "" {
+			return nil, fmt.Errorf("assemblyai-batch requires assemblyai_api_key")
 		}
 		return NewAssemblyAISTT(opts.AssemblyAIAPIKey), nil
 	default: // "whisper" or empty

@@ -364,6 +364,10 @@ func runServe() {
 	// --- HTTP server (blocks) ---
 	srv := server.New(store, &cfg.Server, logger)
 	srv.SetOrchestrator(orch)
+	if cfg.Voice.AssemblyAIAPIKey != "" {
+		srv.SetAssemblyAIKey(cfg.Voice.AssemblyAIAPIKey)
+		logger.Info("transcribe token endpoint enabled")
+	}
 
 	// Wire Telegram bot as approval notifier + give it the server address.
 	if tgBot != nil {
