@@ -204,12 +204,27 @@ func Load() (*Config, error) {
 		}, "."), nil)
 	}
 
-	// Explicit env override for auth token (koanf's _ → . transformer would
-	// map GHOST_SERVER_AUTH_TOKEN to server.auth.token instead of server.auth_token).
-	if token := os.Getenv("GHOST_SERVER_AUTH_TOKEN"); token != "" {
-		_ = k.Load(confmap.Provider(map[string]interface{}{
-			"server.auth_token": token,
-		}, "."), nil)
+	// Explicit env overrides for keys with underscores in koanf tags.
+	// koanf's _ → . transformer would map e.g. GHOST_SERVER_AUTH_TOKEN
+	// to server.auth.token instead of server.auth_token.
+	envOverrides := map[string]string{
+		"GHOST_SERVER_AUTH_TOKEN":         "server.auth_token",
+		"GHOST_VOICE_ASSEMBLYAI_API_KEY": "voice.assemblyai_api_key",
+		"GHOST_VOICE_ELEVENLABS_API_KEY": "voice.elevenlabs_api_key",
+		"GHOST_VOICE_ELEVENLABS_VOICE_ID": "voice.elevenlabs_voice_id",
+		"GHOST_VOICE_STT_BACKEND":        "voice.stt_backend",
+		"GHOST_VOICE_PUSH_TO_TALK":       "voice.push_to_talk",
+		"GHOST_VOICE_WAKE_WORD":          "voice.wake_word",
+		"GHOST_VOICE_INPUT_DEVICE":       "voice.input_device",
+		"GHOST_VOICE_SAMPLE_RATE":        "voice.sample_rate",
+		"GHOST_VOICE_SILENCE_MS":         "voice.silence_ms",
+	}
+	for envKey, koanfKey := range envOverrides {
+		if val := os.Getenv(envKey); val != "" {
+			_ = k.Load(confmap.Provider(map[string]interface{}{
+				koanfKey: val,
+			}, "."), nil)
+		}
 	}
 
 	cfg := &Config{}

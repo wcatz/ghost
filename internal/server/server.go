@@ -303,7 +303,7 @@ func (s *Server) handleTranscribeToken(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"token":  token,
-		"ws_url": "wss://streaming.assemblyai.com/v3/ws",
+		"ws_url": voice.AssemblyAIStreamWSURL,
 	})
 }
 

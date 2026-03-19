@@ -13,7 +13,10 @@ import (
 
 const (
 	assemblyAIStreamTokenURL = "https://streaming.assemblyai.com/v3/token"
-	assemblyAIStreamWSURL    = "wss://streaming.assemblyai.com/v3/ws"
+
+	// AssemblyAIStreamWSURL is the WebSocket endpoint for real-time streaming.
+	// Exported so the server token proxy can return it as the single source of truth.
+	AssemblyAIStreamWSURL = "wss://streaming.assemblyai.com/v3/ws"
 
 	// Audio chunk size: 4096 Int16 samples = 8192 bytes (~256ms at 16kHz).
 	streamChunkBytes = 8192
@@ -49,7 +52,7 @@ func (s *AssemblyAIStreamSTT) Transcribe(ctx context.Context, audio []byte) (str
 	}
 
 	// Step 2: Dial WebSocket with streaming parameters.
-	wsURL := fmt.Sprintf("%s?token=%s&sample_rate=16000&encoding=pcm_s16le", assemblyAIStreamWSURL, token)
+	wsURL := fmt.Sprintf("%s?token=%s&sample_rate=16000&encoding=pcm_s16le", AssemblyAIStreamWSURL, token)
 	conn, _, err := websocket.Dial(ctx, wsURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("websocket dial: %w", err)

@@ -24,6 +24,7 @@ require (
 	golang.org/x/term v0.41.0
 	google.golang.org/api v0.271.0
 	modernc.org/sqlite v1.46.1
+	nhooyr.io/websocket v1.8.17
 )
 
 require (
@@ -98,5 +99,4 @@ require (
 	modernc.org/libc v1.67.6 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	nhooyr.io/websocket v1.8.17 // indirect
 )
