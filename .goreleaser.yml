@@ -42,6 +42,8 @@ dockers_v2:
       - "{{ .Version }}"
       - latest
     dockerfile: Dockerfile
+    build_args:
+      VERSION: "{{ .Version }}"
 
 homebrew_casks:
   - repository:
