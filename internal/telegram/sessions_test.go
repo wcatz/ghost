@@ -37,7 +37,7 @@ func TestFetchSessions_Success(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]apiSession{
+		_ = json.NewEncoder(w).Encode([]apiSession{
 			{ID: "session-abc-123", ProjectPath: "/home/user/proj", ProjectName: "proj", Mode: "chat", Active: true, Messages: 5},
 			{ID: "session-def-456", ProjectPath: "/home/user/other", ProjectName: "other", Mode: "code", Active: true, Messages: 12},
 		})
@@ -89,7 +89,7 @@ func TestFetchSessions_NoAuthToken(t *testing.T) {
 	var gotAuth string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
-		json.NewEncoder(w).Encode([]apiSession{})
+		_ = json.NewEncoder(w).Encode([]apiSession{})
 	}))
 	defer server.Close()
 
@@ -121,7 +121,10 @@ func TestSendChatMessage_SSE(t *testing.T) {
 
 		// Verify request body.
 		var body map[string]string
-		json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request body: %v", err)
+			return
+		}
 		if body["message"] != "hello ghost" {
 			t.Errorf("message = %q, want %q", body["message"], "hello ghost")
 		}
@@ -159,7 +162,7 @@ func TestSendChatMessage_SSE(t *testing.T) {
 func TestSendChatMessage_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("bad request"))
+		_, _ = w.Write([]byte("bad request"))
 	}))
 	defer server.Close()
 
@@ -211,7 +214,10 @@ func TestCreateMemory_Success(t *testing.T) {
 		}
 
 		var body map[string]interface{}
-		json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request body: %v", err)
+			return
+		}
 		if body["project_id"] != "proj-123" {
 			t.Errorf("project_id = %v, want %q", body["project_id"], "proj-123")
 		}
@@ -223,7 +229,7 @@ func TestCreateMemory_Success(t *testing.T) {
 		}
 
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":     "mem-abc",
 			"merged": false,
 		})
@@ -250,7 +256,7 @@ func TestCreateMemory_Success(t *testing.T) {
 func TestCreateMemory_Merged(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"id":     "mem-existing",
 			"merged": true,
 		})
@@ -274,7 +280,7 @@ func TestCreateMemory_Merged(t *testing.T) {
 func TestCreateMemory_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("db error"))
+		_, _ = w.Write([]byte("db error"))
 	}))
 	defer server.Close()
 
@@ -320,7 +326,7 @@ func TestDeleteMemory_Success(t *testing.T) {
 func TestDeleteMemory_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte("not found"))
+		_, _ = w.Write([]byte("not found"))
 	}))
 	defer server.Close()
 
@@ -339,7 +345,7 @@ func TestDeleteMemory_NotFound(t *testing.T) {
 
 func TestResolveSessionID_Found(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]apiSession{
+		_ = json.NewEncoder(w).Encode([]apiSession{
 			{ID: "abcdef01-1234-5678-9abc-def012345678", ProjectName: "ghost"},
 			{ID: "98765432-abcd-efgh-ijkl-mnopqrstuvwx", ProjectName: "other"},
 		})
@@ -362,7 +368,7 @@ func TestResolveSessionID_Found(t *testing.T) {
 
 func TestResolveSessionID_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]apiSession{
+		_ = json.NewEncoder(w).Encode([]apiSession{
 			{ID: "abcdef01-1234", ProjectName: "ghost"},
 		})
 	}))
@@ -394,12 +400,15 @@ func TestSetSessionMode_Success(t *testing.T) {
 		}
 
 		var body map[string]string
-		json.NewDecoder(r.Body).Decode(&body)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request body: %v", err)
+			return
+		}
 		if body["mode"] != "code" {
 			t.Errorf("mode = %q, want %q", body["mode"], "code")
 		}
 
-		json.NewEncoder(w).Encode(map[string]string{"mode": "code"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"mode": "code"})
 	}))
 	defer server.Close()
 
@@ -428,7 +437,9 @@ func TestCallApproveAPI_Approved(t *testing.T) {
 		if !strings.Contains(r.URL.Path, "/approve") {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		json.NewDecoder(r.Body).Decode(&receivedPayload)
+		if err := json.NewDecoder(r.Body).Decode(&receivedPayload); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
@@ -453,7 +464,9 @@ func TestCallApproveAPI_Approved(t *testing.T) {
 func TestCallApproveAPI_DeniedWithInstructions(t *testing.T) {
 	var receivedPayload map[string]interface{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewDecoder(r.Body).Decode(&receivedPayload)
+		if err := json.NewDecoder(r.Body).Decode(&receivedPayload); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
