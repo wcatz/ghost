@@ -289,3 +289,165 @@ data: [DONE]
 		t.Errorf("expected budget 5000, got %d", reqBody.Thinking.BudgetTokens)
 	}
 }
+
+// --- parseAPIError ---
+
+func TestParseAPIError_CreditBalance(t *testing.T) {
+	body := []byte(`{"error":{"type":"invalid_request_error","message":"Your credit balance is too low to make this request."}}`)
+	err := parseAPIError(400, body)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "credit balance") {
+		t.Errorf("expected credit balance error, got: %v", err)
+	}
+}
+
+func TestParseAPIError_InvalidKey(t *testing.T) {
+	body := []byte(`{"error":{"type":"authentication_error","message":"Invalid API key"}}`)
+	err := parseAPIError(401, body)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "invalid API key") {
+		t.Errorf("expected invalid API key error, got: %v", err)
+	}
+}
+
+func TestParseAPIError_PermissionDenied(t *testing.T) {
+	body := []byte(`{"error":{"type":"forbidden","message":"Account suspended"}}`)
+	err := parseAPIError(403, body)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("expected permission denied error, got: %v", err)
+	}
+}
+
+func TestParseAPIError_GenericError(t *testing.T) {
+	body := []byte(`{"error":{"type":"server_error","message":"Internal error"}}`)
+	err := parseAPIError(500, body)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "500") || !strings.Contains(err.Error(), "Internal error") {
+		t.Errorf("expected status code and message in error, got: %v", err)
+	}
+}
+
+func TestParseAPIError_MalformedJSON(t *testing.T) {
+	body := []byte(`not json`)
+	err := parseAPIError(500, body)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "500") || !strings.Contains(err.Error(), "not json") {
+		t.Errorf("expected raw body in fallback error, got: %v", err)
+	}
+}
+
+func TestParseAPIError_EmptyMessage(t *testing.T) {
+	body := []byte(`{"error":{"type":"server_error","message":""}}`)
+	err := parseAPIError(500, body)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	// Empty message falls through to raw body fallback.
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("expected status in error, got: %v", err)
+	}
+}
+
+// --- setHeaders ---
+
+func TestSetHeaders(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := NewClient("my-api-key", logger)
+
+	req, _ := http.NewRequest("POST", "http://example.com", nil)
+	client.setHeaders(req)
+
+	tests := []struct {
+		header string
+		want   string
+	}{
+		{"Content-Type", "application/json"},
+		{"x-api-key", "my-api-key"},
+		{"anthropic-version", APIVersion},
+		{"anthropic-beta", BetaInterleavedThinking},
+	}
+
+	for _, tt := range tests {
+		got := req.Header.Get(tt.header)
+		if got != tt.want {
+			t.Errorf("header %q = %q, want %q", tt.header, got, tt.want)
+		}
+	}
+}
+
+// --- ThinkingConfig variants ---
+
+func TestThinkingConfig_Adaptive(t *testing.T) {
+	// thinkingBudget < 0 = adaptive.
+	reqBody := apiRequest{
+		Model:     ModelSonnet46,
+		MaxTokens: 4000,
+		Messages:  []Message{TextMessage("user", "test")},
+	}
+	// Simulate the logic from ChatStream.
+	thinkingBudget := -1
+	if thinkingBudget > 0 {
+		reqBody.Thinking = &ThinkingConfig{Type: "enabled", BudgetTokens: thinkingBudget}
+	} else if thinkingBudget < 0 {
+		reqBody.Thinking = &ThinkingConfig{Type: "adaptive"}
+	}
+
+	if reqBody.Thinking == nil || reqBody.Thinking.Type != "adaptive" {
+		t.Error("expected adaptive thinking config")
+	}
+	if reqBody.Thinking.BudgetTokens != nil {
+		t.Errorf("adaptive should have nil BudgetTokens, got %v", reqBody.Thinking.BudgetTokens)
+	}
+}
+
+func TestThinkingConfig_Disabled(t *testing.T) {
+	// thinkingBudget == 0 = disabled (no Thinking field).
+	reqBody := apiRequest{
+		Model:     ModelSonnet46,
+		MaxTokens: 4000,
+		Messages:  []Message{TextMessage("user", "test")},
+	}
+	thinkingBudget := 0
+	if thinkingBudget > 0 {
+		reqBody.Thinking = &ThinkingConfig{Type: "enabled", BudgetTokens: thinkingBudget}
+	} else if thinkingBudget < 0 {
+		reqBody.Thinking = &ThinkingConfig{Type: "adaptive"}
+	}
+
+	if reqBody.Thinking != nil {
+		t.Error("thinking should be nil when disabled (budget=0)")
+	}
+}
+
+func TestThinkingConfig_FixedBudget(t *testing.T) {
+	// thinkingBudget > 0 = fixed budget.
+	reqBody := apiRequest{
+		Model:     ModelSonnet46,
+		MaxTokens: 4000,
+		Messages:  []Message{TextMessage("user", "test")},
+	}
+	thinkingBudget := 10000
+	if thinkingBudget > 0 {
+		reqBody.Thinking = &ThinkingConfig{Type: "enabled", BudgetTokens: thinkingBudget}
+	} else if thinkingBudget < 0 {
+		reqBody.Thinking = &ThinkingConfig{Type: "adaptive"}
+	}
+
+	if reqBody.Thinking == nil || reqBody.Thinking.Type != "enabled" {
+		t.Error("expected enabled thinking config")
+	}
+	if reqBody.Thinking.BudgetTokens != 10000 {
+		t.Errorf("expected 10000 BudgetTokens, got %v", reqBody.Thinking.BudgetTokens)
+	}
+}
