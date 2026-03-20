@@ -43,11 +43,6 @@ export interface TokenUsage {
   cache_read_input_tokens?: number;
 }
 
-export interface StreamEvent {
-  type: string;
-  data: Record<string, unknown>;
-}
-
 export interface ApprovalRequest {
   tool_name: string;
   input: Record<string, unknown>;
@@ -92,10 +87,6 @@ export class GhostClient extends EventEmitter {
 
   async listSessions(): Promise<Session[]> {
     return this.request("GET", "/api/v1/sessions");
-  }
-
-  async deleteSession(id: string): Promise<void> {
-    await this.request("DELETE", `/api/v1/sessions/${encodeURIComponent(id)}`);
   }
 
   async setMode(sessionId: string, mode: string): Promise<{ mode: string }> {
@@ -284,23 +275,6 @@ export class GhostClient extends EventEmitter {
       "GET",
       `/api/v1/memories/${encodeURIComponent(projectId)}`
     );
-  }
-
-  async createMemory(
-    projectId: string,
-    category: string,
-    content: string,
-    importance: number = 0.5,
-    tags: string[] = []
-  ): Promise<{ id: string; merged: boolean }> {
-    return this.request("POST", "/api/v1/memories", {
-      project_id: projectId,
-      category,
-      content,
-      source: "vscode",
-      importance,
-      tags,
-    });
   }
 
   async deleteMemory(memoryId: string): Promise<void> {
