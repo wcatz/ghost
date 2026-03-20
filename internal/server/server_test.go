@@ -222,7 +222,9 @@ func TestHandleCreate_InvalidCategory(t *testing.T) {
 	}
 
 	var resp map[string]string
-	json.NewDecoder(rr.Body).Decode(&resp)
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
 	if resp["error"] != "invalid category" {
 		t.Fatalf("expected 'invalid category' error, got %q", resp["error"])
 	}
@@ -420,7 +422,9 @@ func TestHandleSearch_HappyPath(t *testing.T) {
 	}
 
 	var results []memory.Memory
-	json.NewDecoder(rr.Body).Decode(&results)
+	if err := json.NewDecoder(rr.Body).Decode(&results); err != nil {
+		t.Fatal(err)
+	}
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -499,7 +503,9 @@ func TestHandleList_HappyPath(t *testing.T) {
 	}
 
 	var results []memory.Memory
-	json.NewDecoder(rr.Body).Decode(&results)
+	if err := json.NewDecoder(rr.Body).Decode(&results); err != nil {
+		t.Fatal(err)
+	}
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(results))
 	}
@@ -539,7 +545,9 @@ func TestHandleDelete_HappyPath(t *testing.T) {
 	}
 
 	var resp map[string]string
-	json.NewDecoder(rr.Body).Decode(&resp)
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
 	if resp["status"] != "deleted" {
 		t.Errorf("expected status=deleted, got %q", resp["status"])
 	}
@@ -597,7 +605,9 @@ func TestHandleMonthlyCost_HappyPath(t *testing.T) {
 	}
 
 	var mc memory.MonthlyCost
-	json.NewDecoder(rr.Body).Decode(&mc)
+	if err := json.NewDecoder(rr.Body).Decode(&mc); err != nil {
+		t.Fatal(err)
+	}
 	if mc.Year == 0 {
 		t.Error("expected non-zero year in monthly cost")
 	}
@@ -660,7 +670,9 @@ func TestHandleCreate_MergedResponse(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
 	if resp["merged"] != true {
 		t.Errorf("expected merged=true, got %v", resp["merged"])
 	}
@@ -721,7 +733,9 @@ func TestWriteJSON(t *testing.T) {
 	}
 
 	var resp map[string]string
-	json.NewDecoder(rr.Body).Decode(&resp)
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
 	if resp["key"] != "value" {
 		t.Errorf("response body unexpected: %v", resp)
 	}
@@ -736,7 +750,9 @@ func TestWriteError(t *testing.T) {
 	}
 
 	var resp map[string]string
-	json.NewDecoder(rr.Body).Decode(&resp)
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
 	if resp["error"] != "bad input" {
 		t.Errorf("error = %q, want %q", resp["error"], "bad input")
 	}

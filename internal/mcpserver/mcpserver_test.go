@@ -354,9 +354,15 @@ func TestListMemories_ByCategoryAndAll(t *testing.T) {
 	ctx := context.Background()
 
 	// Save memories in different categories with distinct content to avoid merge.
-	store.Upsert(ctx, "abc123", "fact", "Go compiles to static binaries with no runtime dependencies", "mcp", 0.5, []string{})
-	store.Upsert(ctx, "abc123", "decision", "Chi was chosen as HTTP router for its stdlib compatibility", "mcp", 0.7, []string{})
-	store.Upsert(ctx, "abc123", "fact", "Cardano uses Ouroboros Praos consensus protocol for block production", "mcp", 0.6, []string{})
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "Go compiles to static binaries with no runtime dependencies", "mcp", 0.5, []string{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Upsert(ctx, "abc123", "decision", "Chi was chosen as HTTP router for its stdlib compatibility", "mcp", 0.7, []string{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "Cardano uses Ouroboros Praos consensus protocol for block production", "mcp", 0.6, []string{}); err != nil {
+		t.Fatal(err)
+	}
 
 	// List by category.
 	facts, err := store.GetByCategory(ctx, "abc123", "fact", 30)
@@ -417,9 +423,15 @@ func TestSearchAll_CrossProject(t *testing.T) {
 	ctx := context.Background()
 
 	// Create second project.
-	store.EnsureProject(ctx, "def456", "/tmp/other", "other-project")
-	store.Upsert(ctx, "abc123", "fact", "ghost uses SQLite", "mcp", 0.5, []string{})
-	store.Upsert(ctx, "def456", "fact", "roller uses SQLite", "mcp", 0.5, []string{})
+	if err := store.EnsureProject(ctx, "def456", "/tmp/other", "other-project"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "ghost uses SQLite", "mcp", 0.5, []string{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Upsert(ctx, "def456", "fact", "roller uses SQLite", "mcp", 0.5, []string{}); err != nil {
+		t.Fatal(err)
+	}
 
 	// SearchFTSAll should find both.
 	results, err := store.SearchFTSAll(ctx, "SQLite", 10)
@@ -436,7 +448,9 @@ func TestSaveGlobal_EndToEnd(t *testing.T) {
 	ctx := context.Background()
 
 	// Ensure _global project.
-	store.EnsureProject(ctx, "_global", "_global", "global")
+	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatal(err)
+	}
 
 	id, _, err := store.Upsert(ctx, "_global", "preference", "always use nerdctl", "mcp", 0.8, []string{})
 	if err != nil {
@@ -525,8 +539,12 @@ func TestHealthOutput(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed memories with very distinct content to avoid Upsert merge.
-	store.Upsert(ctx, "abc123", "fact", "Ghost uses SQLite with FTS5 for full-text search capabilities", "mcp", 0.5, []string{})
-	store.Upsert(ctx, "abc123", "convention", "Kubernetes manifests use helmfile for declarative deployment management", "mcp", 0.6, []string{})
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "Ghost uses SQLite with FTS5 for full-text search capabilities", "mcp", 0.5, []string{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Upsert(ctx, "abc123", "convention", "Kubernetes manifests use helmfile for declarative deployment management", "mcp", 0.6, []string{}); err != nil {
+		t.Fatal(err)
+	}
 
 	// Count memories.
 	count, err := store.CountMemories(ctx, "abc123")
