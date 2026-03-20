@@ -1,4 +1,5 @@
--- Ghost: Memory-First Coding Agent — Initial Schema
+-- Ghost — Memory-First Personal Assistant — Initial Schema
+-- Reference copy. Runtime source of truth is internal/memory/schema.go:initSQL.
 
 CREATE TABLE IF NOT EXISTS projects (
     id          TEXT PRIMARY KEY,
@@ -21,7 +22,7 @@ CREATE TABLE IF NOT EXISTS memories (
     access_count  INTEGER NOT NULL DEFAULT 0,
     last_accessed TEXT,
     source        TEXT NOT NULL DEFAULT 'reflection'
-                  CHECK (source IN ('reflection', 'chat', 'manual', 'tool')),
+                  CHECK (source IN ('reflection', 'chat', 'manual', 'tool', 'mcp', 'onboarding', 'decision_log')),
     tags          TEXT DEFAULT '[]',
     pinned        INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
@@ -55,7 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_project_source ON memories(project_id, s
 CREATE TABLE IF NOT EXISTS conversations (
     id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    mode        TEXT NOT NULL DEFAULT 'code',
+    mode        TEXT NOT NULL DEFAULT 'chat',
     title       TEXT DEFAULT '',
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -96,3 +97,100 @@ CREATE TABLE IF NOT EXISTS token_usage (
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_project ON token_usage(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    timestamp   TEXT NOT NULL DEFAULT (datetime('now')),
+    action      TEXT NOT NULL,
+    project_id  TEXT,
+    user        TEXT DEFAULT '',
+    details     TEXT DEFAULT '{}',
+    tokens      INTEGER DEFAULT 0,
+    cost_usd    REAL DEFAULT 0,
+    duration_ms INTEGER DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_project ON audit_log(project_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action, timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS memory_embeddings (
+    memory_id   TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    embedding   BLOB NOT NULL,
+    model       TEXT NOT NULL DEFAULT 'nomic-embed-text',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+    id              TEXT PRIMARY KEY,
+    github_id       TEXT NOT NULL UNIQUE,
+    repo_full_name  TEXT NOT NULL,
+    subject_title   TEXT NOT NULL,
+    subject_type    TEXT NOT NULL,
+    subject_url     TEXT DEFAULT '',
+    reason          TEXT NOT NULL,
+    priority        INTEGER NOT NULL DEFAULT 4,
+    unread          INTEGER NOT NULL DEFAULT 1,
+    updated_at      TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    dismissed_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_notif_priority ON notifications(priority, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notif_repo ON notifications(repo_full_name, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notif_unread ON notifications(unread, priority);
+
+CREATE TABLE IF NOT EXISTS scheduled_jobs (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    name        TEXT NOT NULL,
+    schedule    TEXT NOT NULL,
+    payload     TEXT DEFAULT '{}',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    last_run    TEXT,
+    next_run    TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    message     TEXT NOT NULL,
+    due_at      TEXT NOT NULL,
+    fired       INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(fired, due_at);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title         TEXT NOT NULL,
+    description   TEXT DEFAULT '',
+    status        TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending', 'active', 'done', 'blocked')),
+    priority      INTEGER NOT NULL DEFAULT 2
+                  CHECK (priority BETWEEN 0 AND 4),
+    blocked_by    TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    branch        TEXT DEFAULT '',
+    pr_number     INTEGER,
+    notes         TEXT DEFAULT '',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_project_status ON tasks(project_id, status);
+
+CREATE TABLE IF NOT EXISTS decisions (
+    id                TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title             TEXT NOT NULL,
+    decision          TEXT NOT NULL,
+    alternatives      TEXT DEFAULT '[]',
+    rationale         TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'active'
+                      CHECK (status IN ('active', 'superseded', 'revisit')),
+    superseded_by     TEXT REFERENCES decisions(id) ON DELETE SET NULL,
+    tags              TEXT DEFAULT '[]',
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id, status);
