@@ -131,9 +131,9 @@ func TestSendChatMessage_SSE(t *testing.T) {
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "event: text\ndata: {\"text\":\"Hello \"}\n\n")
-		fmt.Fprint(w, "event: text\ndata: {\"text\":\"world!\"}\n\n")
-		fmt.Fprint(w, "event: done\ndata: {\"session_cost\":\"$0.12\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: text\ndata: {\"text\":\"Hello \"}\n\n")
+		_, _ = fmt.Fprint(w, "event: text\ndata: {\"text\":\"world!\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: done\ndata: {\"session_cost\":\"$0.12\"}\n\n")
 	}))
 	defer server.Close()
 
@@ -184,7 +184,7 @@ func TestSendChatMessage_EmptyResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "event: done\ndata: {}\n\n")
+		_, _ = fmt.Fprint(w, "event: done\ndata: {}\n\n")
 	}))
 	defer server.Close()
 
