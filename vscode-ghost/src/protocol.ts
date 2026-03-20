@@ -49,8 +49,7 @@ export type WebviewToExtMessage =
   | { type: "attach_image" }
   | { type: "slash_command"; command: string; args?: string }
   | { type: "voice_start" }
-  | { type: "voice_stop" }
-  | { type: "voice_transcript"; text: string };
+  | { type: "voice_stop" };
 
 // --- Shared types ---
 
