@@ -11,7 +11,9 @@ import (
 func TestFileEdit_SingleReplace(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "main.go")
-	os.WriteFile(file, []byte("fmt.Println(\"hello\")\n"), 0o644)
+	if err := os.WriteFile(file, []byte("fmt.Println(\"hello\")\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	input, _ := json.Marshal(fileEditInput{
 		Path:      file,
@@ -35,7 +37,9 @@ func TestFileEdit_SingleReplace(t *testing.T) {
 func TestFileEdit_ReplaceAll(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "main.go")
-	os.WriteFile(file, []byte("foo bar foo baz foo\n"), 0o644)
+	if err := os.WriteFile(file, []byte("foo bar foo baz foo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	input, _ := json.Marshal(fileEditInput{
 		Path:       file,
@@ -60,7 +64,9 @@ func TestFileEdit_ReplaceAll(t *testing.T) {
 func TestFileEdit_MultipleMatchesNoReplaceAll(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "main.go")
-	os.WriteFile(file, []byte("foo foo foo\n"), 0o644)
+	if err := os.WriteFile(file, []byte("foo foo foo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	input, _ := json.Marshal(fileEditInput{
 		Path:      file,
@@ -80,7 +86,9 @@ func TestFileEdit_MultipleMatchesNoReplaceAll(t *testing.T) {
 func TestFileEdit_OldStringNotFound(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "main.go")
-	os.WriteFile(file, []byte("hello world\n"), 0o644)
+	if err := os.WriteFile(file, []byte("hello world\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	input, _ := json.Marshal(fileEditInput{
 		Path:      file,
@@ -130,7 +138,9 @@ func TestFileEdit_PathEscape(t *testing.T) {
 func TestFileEdit_PreservesPermissions(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "script.sh")
-	os.WriteFile(file, []byte("#!/bin/bash\necho hello\n"), 0o755)
+	if err := os.WriteFile(file, []byte("#!/bin/bash\necho hello\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	// Read actual permissions (umask may modify them).
 	origInfo, _ := os.Stat(file)

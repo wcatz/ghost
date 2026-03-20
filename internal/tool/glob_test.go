@@ -10,11 +10,25 @@ import (
 	"time"
 )
 
+func writeFile(t *testing.T, path string, data []byte) {
+	t.Helper()
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mkdirAll(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGlob_MatchGoFiles(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644)
-	os.WriteFile(filepath.Join(dir, "util.go"), []byte("package main"), 0o644)
-	os.WriteFile(filepath.Join(dir, "readme.md"), []byte("# hi"), 0o644)
+	writeFile(t, filepath.Join(dir, "main.go"), []byte("package main"))
+	writeFile(t, filepath.Join(dir, "util.go"), []byte("package main"))
+	writeFile(t, filepath.Join(dir, "readme.md"), []byte("# hi"))
 
 	input, _ := json.Marshal(globInput{Pattern: "*.go"})
 	r := execGlob(context.Background(), dir, input)
@@ -32,9 +46,9 @@ func TestGlob_MatchGoFiles(t *testing.T) {
 func TestGlob_DoubleStarPattern(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "pkg", "sub")
-	os.MkdirAll(sub, 0o755)
-	os.WriteFile(filepath.Join(sub, "deep.go"), []byte("package sub"), 0o644)
-	os.WriteFile(filepath.Join(dir, "top.go"), []byte("package main"), 0o644)
+	mkdirAll(t, sub)
+	writeFile(t, filepath.Join(sub, "deep.go"), []byte("package sub"))
+	writeFile(t, filepath.Join(dir, "top.go"), []byte("package main"))
 
 	input, _ := json.Marshal(globInput{Pattern: "**/*.go"})
 	r := execGlob(context.Background(), dir, input)
@@ -52,9 +66,9 @@ func TestGlob_DoubleStarPattern(t *testing.T) {
 func TestGlob_SkipsGitDir(t *testing.T) {
 	dir := t.TempDir()
 	gitDir := filepath.Join(dir, ".git")
-	os.MkdirAll(gitDir, 0o755)
-	os.WriteFile(filepath.Join(gitDir, "config"), []byte("gitconfig"), 0o644)
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644)
+	mkdirAll(t, gitDir)
+	writeFile(t, filepath.Join(gitDir, "config"), []byte("gitconfig"))
+	writeFile(t, filepath.Join(dir, "main.go"), []byte("package main"))
 
 	input, _ := json.Marshal(globInput{Pattern: "*"})
 	r := execGlob(context.Background(), dir, input)
@@ -69,9 +83,9 @@ func TestGlob_SkipsGitDir(t *testing.T) {
 func TestGlob_SkipsNodeModules(t *testing.T) {
 	dir := t.TempDir()
 	nm := filepath.Join(dir, "node_modules", "pkg")
-	os.MkdirAll(nm, 0o755)
-	os.WriteFile(filepath.Join(nm, "index.js"), []byte("module.exports"), 0o644)
-	os.WriteFile(filepath.Join(dir, "app.js"), []byte("const x = 1"), 0o644)
+	mkdirAll(t, nm)
+	writeFile(t, filepath.Join(nm, "index.js"), []byte("module.exports"))
+	writeFile(t, filepath.Join(dir, "app.js"), []byte("const x = 1"))
 
 	input, _ := json.Marshal(globInput{Pattern: "*.js"})
 	r := execGlob(context.Background(), dir, input)
@@ -88,7 +102,7 @@ func TestGlob_SkipsNodeModules(t *testing.T) {
 
 func TestGlob_NoMatches(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("hi"), 0o644)
+	writeFile(t, filepath.Join(dir, "file.txt"), []byte("hi"))
 
 	input, _ := json.Marshal(globInput{Pattern: "*.xyz"})
 	r := execGlob(context.Background(), dir, input)
@@ -105,11 +119,13 @@ func TestGlob_SortByModTime(t *testing.T) {
 	older := filepath.Join(dir, "old.go")
 	newer := filepath.Join(dir, "new.go")
 
-	os.WriteFile(older, []byte("package old"), 0o644)
+	writeFile(t, older, []byte("package old"))
 	// Set older file to past time.
 	past := time.Now().Add(-1 * time.Hour)
-	os.Chtimes(older, past, past)
-	os.WriteFile(newer, []byte("package new"), 0o644)
+	if err := os.Chtimes(older, past, past); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, newer, []byte("package new"))
 
 	input, _ := json.Marshal(globInput{Pattern: "*.go"})
 	r := execGlob(context.Background(), dir, input)
@@ -133,9 +149,9 @@ func TestGlob_SortByModTime(t *testing.T) {
 func TestGlob_WithSubPath(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "src")
-	os.MkdirAll(sub, 0o755)
-	os.WriteFile(filepath.Join(sub, "app.go"), []byte("package src"), 0o644)
-	os.WriteFile(filepath.Join(dir, "root.go"), []byte("package main"), 0o644)
+	mkdirAll(t, sub)
+	writeFile(t, filepath.Join(sub, "app.go"), []byte("package src"))
+	writeFile(t, filepath.Join(dir, "root.go"), []byte("package main"))
 
 	input, _ := json.Marshal(globInput{Pattern: "*.go", Path: "src"})
 	r := execGlob(context.Background(), dir, input)

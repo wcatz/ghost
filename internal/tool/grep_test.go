@@ -11,7 +11,9 @@ import (
 
 func TestGrep_FindPattern(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc hello() {}\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\nfunc hello() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	input, _ := json.Marshal(grepInput{Pattern: "hello"})
 	r := execGrep(context.Background(), dir, input)
@@ -25,7 +27,9 @@ func TestGrep_FindPattern(t *testing.T) {
 
 func TestGrep_NoMatches(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	input, _ := json.Marshal(grepInput{Pattern: "nonexistent_xyz"})
 	r := execGrep(context.Background(), dir, input)
@@ -40,8 +44,12 @@ func TestGrep_NoMatches(t *testing.T) {
 
 func TestGrep_WithGlobFilter(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("func hello() {}\n"), 0o644)
-	os.WriteFile(filepath.Join(dir, "data.txt"), []byte("hello world\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("func hello() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data.txt"), []byte("hello world\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	input, _ := json.Marshal(grepInput{Pattern: "hello", Glob: "*.go"})
 	r := execGrep(context.Background(), dir, input)
@@ -74,7 +82,9 @@ func TestGrep_MaxResultsDefault(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		content.WriteString("match_line\n")
 	}
-	os.WriteFile(filepath.Join(dir, "data.txt"), []byte(content.String()), 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "data.txt"), []byte(content.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	input, _ := json.Marshal(grepInput{Pattern: "match_line"})
 	r := execGrep(context.Background(), dir, input)
@@ -90,7 +100,9 @@ func TestGrep_MaxResultsDefault(t *testing.T) {
 
 func TestGrep_WithContext(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte("line1\nline2\ntarget\nline4\nline5\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("line1\nline2\ntarget\nline4\nline5\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	input, _ := json.Marshal(grepInput{Pattern: "target", Context: 1})
 	r := execGrep(context.Background(), dir, input)
@@ -104,8 +116,12 @@ func TestGrep_WithContext(t *testing.T) {
 
 func TestGrep_SpecificFile(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("needle\n"), 0o644)
-	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("needle\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("needle\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	input, _ := json.Marshal(grepInput{Pattern: "needle", Path: "a.txt"})
 	r := execGrep(context.Background(), dir, input)

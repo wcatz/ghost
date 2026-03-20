@@ -37,7 +37,9 @@ func TestFileWrite_NewFile(t *testing.T) {
 func TestFileWrite_Overwrite(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "existing.txt")
-	os.WriteFile(file, []byte("old content"), 0o644)
+	if err := os.WriteFile(file, []byte("old content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	input, _ := json.Marshal(fileWriteInput{
 		Path:    file,
@@ -139,7 +141,9 @@ func TestFileWrite_InvalidJSON(t *testing.T) {
 func TestValidateAncestors_NoSymlinks(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "a", "b")
-	os.MkdirAll(sub, 0o755)
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	err := validateAncestors(dir, filepath.Join(sub, "file.txt"))
 	if err != nil {
