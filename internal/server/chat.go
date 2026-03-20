@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -34,8 +35,9 @@ type pendingApproval struct {
 
 // chatState holds per-session streaming state for HTTP clients.
 type chatState struct {
-	mu              sync.Mutex
-	pending         *pendingApproval
+	mu               sync.Mutex
+	cancel           context.CancelFunc
+	pending          *pendingApproval
 	approvalResolved chan struct{} // signals external approval to SSE stream
 }
 
@@ -148,15 +150,14 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject concurrent sends — only one stream per session.
-	// Must happen before writing SSE headers (can't send JSON error after SSE 200).
-	state := &chatState{}
+	// Supersede any active stream for this session.
 	s.chatMu.Lock()
-	if _, active := s.chatStates[id]; active {
-		s.chatMu.Unlock()
-		writeError(w, http.StatusConflict, "stream already active for this session")
-		return
+	if old, active := s.chatStates[id]; active {
+		old.cancel()
+		s.logger.Info("superseding active stream", "session", id)
 	}
+	ctx, cancel := context.WithCancel(r.Context())
+	state := &chatState{cancel: cancel}
 	s.chatStates[id] = state
 	s.chatMu.Unlock()
 
@@ -169,6 +170,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		cancel()
 		s.chatMu.Lock()
 		delete(s.chatStates, id)
 		s.chatMu.Unlock()
@@ -179,6 +181,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// Create approval channel for this request.
 	approvalCh := make(chan provider.ApprovalRequest, 1)
 	defer func() {
+		cancel()
 		s.chatMu.Lock()
 		// Only delete if we own the state (prevents race on cleanup).
 		if s.chatStates[id] == state {
@@ -203,19 +206,19 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				Input:    input,
 				Response: resp,
 			}:
-			case <-r.Context().Done():
+			case <-ctx.Done():
 				return provider.ApprovalResponse{Approved: false}
 			}
 			select {
 			case ar := <-resp:
 				return ar
-			case <-r.Context().Done():
+			case <-ctx.Done():
 				return provider.ApprovalResponse{Approved: false}
 			}
 		}
-		events = session.SendMessage(r.Context(), msg, req.Message, approvalFn)
+		events = session.SendMessage(ctx, msg, req.Message, approvalFn)
 	} else {
-		events = session.SendAsync(r.Context(), req.Message, approvalCh)
+		events = session.SendAsync(ctx, req.Message, approvalCh)
 	}
 
 	// resolvedCh is nil when no approval is pending; set during approval flow.
@@ -240,7 +243,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				select {
 				case v := <-respCh:
 					approval.Response <- v
-				case <-r.Context().Done():
+				case <-ctx.Done():
 				}
 			}()
 			resolvedCh = make(chan struct{}, 1)
@@ -271,7 +274,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			writeSSE(w, flusher, "approval_resolved", map[string]string{})
 			resolvedCh = nil
 
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return
 		}
 	}

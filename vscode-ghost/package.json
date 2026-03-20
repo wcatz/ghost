@@ -80,8 +80,8 @@
     "keybindings": [
       {
         "command": "ghost.openEditor",
-        "key": "ctrl+shift+alt+g",
-        "mac": "cmd+shift+alt+g"
+        "key": "alt+g",
+        "mac": "alt+g"
       }
     ],
     "configuration": {

@@ -121,6 +121,9 @@ export class ChatWebview implements vscode.Disposable {
       return;
     }
 
+    // Abort any in-flight stream — server handles the race, this minimizes waste.
+    this.abortFn?.();
+
     this.postMessage({ type: "streaming", active: true });
 
     try {
