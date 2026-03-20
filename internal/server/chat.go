@@ -286,9 +286,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 						projectLabel += ":" + branch
 					}
 				}
-				// Send silently if there's an active VSCode/SSE stream — user is at the keyboard.
-				silent := s.HasActiveStream(id)
-				go s.approvalNotifier.NotifyApproval(id, streamID, projectLabel, approval.ToolName, approval.Input, silent)
+				// This handler serves SSE clients (VSCode), so the user is at the
+				// keyboard — send Telegram notification silently.
+				go s.approvalNotifier.NotifyApproval(id, streamID, projectLabel, approval.ToolName, approval.Input, true)
 			}
 
 		case <-resolvedCh:

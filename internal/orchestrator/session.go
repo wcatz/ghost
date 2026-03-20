@@ -525,7 +525,8 @@ func (s *Session) Refresh() error {
 	return nil
 }
 
-// GitBranch returns the current git branch for the session's project.
+// GitBranch returns the git branch from the last project context refresh.
+// It may be stale if the user switched branches without triggering Refresh().
 func (s *Session) GitBranch() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
