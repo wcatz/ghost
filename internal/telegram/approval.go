@@ -16,9 +16,10 @@ import (
 
 // approvalState tracks which session has a pending approval for instruction replies.
 type approvalState struct {
-	mu        sync.Mutex
-	sessionID string // session with pending approval
-	toolName  string
+	mu         sync.Mutex
+	sessionID  string // session with pending approval
+	toolName   string
+	messageIDs map[int64]int // chatID → Telegram message ID for cleanup
 }
 
 // SetServerAddr configures the Ghost server address for API calls.
@@ -61,10 +62,11 @@ func (tb *Bot) NotifyApproval(sessionID, projectName, toolName string, input jso
 	tb.approval.mu.Lock()
 	tb.approval.sessionID = sessionID
 	tb.approval.toolName = toolName
+	tb.approval.messageIDs = make(map[int64]int)
 	tb.approval.mu.Unlock()
 
 	for id := range tb.allowedIDs {
-		_, err := tb.bot.SendMessage(context.Background(), &bot.SendMessageParams{
+		msg, err := tb.bot.SendMessage(context.Background(), &bot.SendMessageParams{
 			ChatID:    id,
 			Text:      text,
 			ParseMode: models.ParseModeMarkdown,
@@ -75,6 +77,10 @@ func (tb *Bot) NotifyApproval(sessionID, projectName, toolName string, input jso
 		})
 		if err != nil {
 			tb.logger.Error("telegram approval notify", "error", err, "user_id", id)
+		} else if msg != nil {
+			tb.approval.mu.Lock()
+			tb.approval.messageIDs[id] = msg.ID
+			tb.approval.mu.Unlock()
 		}
 	}
 }
@@ -111,7 +117,7 @@ func (tb *Bot) handleApprovalCallback(ctx context.Context, b *bot.Bot, update *m
 		return
 	}
 
-	// Answer callback and edit the message.
+	// Answer callback with toast.
 	action := "✅ Approved"
 	if !approved {
 		action = "❌ Denied"
@@ -122,15 +128,8 @@ func (tb *Bot) handleApprovalCallback(ctx context.Context, b *bot.Bot, update *m
 		Text:            action,
 	})
 
-	// Edit the approval message to show the result.
-	if update.CallbackQuery.Message.Message != nil {
-		_, _ = b.EditMessageText(ctx, &bot.EditMessageTextParams{
-			ChatID:    update.CallbackQuery.Message.Message.Chat.ID,
-			MessageID: update.CallbackQuery.Message.Message.ID,
-			Text:      update.CallbackQuery.Message.Message.Text + "\n\n" + action,
-			ParseMode: models.ParseModeMarkdown,
-		})
-	}
+	// Delete all approval messages (clean up chat).
+	tb.deleteApprovalMessages()
 
 	tb.approval.mu.Lock()
 	tb.approval.sessionID = ""
@@ -170,6 +169,8 @@ func (tb *Bot) handleInstructionReply(ctx context.Context, b *bot.Bot, update *m
 	} else {
 		tb.reply(ctx, b, update, fmt.Sprintf("❌ Denied with instructions:\n_%s_", mdv2.Esc(instructions)))
 	}
+
+	tb.deleteApprovalMessages()
 
 	tb.approval.mu.Lock()
 	tb.approval.sessionID = ""
@@ -216,6 +217,43 @@ func (tb *Bot) callApproveAPI(sessionID string, approved bool, instructions stri
 		return fmt.Errorf("approve API returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// deleteApprovalMessages removes all tracked approval messages from Telegram chats.
+func (tb *Bot) deleteApprovalMessages() {
+	tb.approval.mu.Lock()
+	msgs := tb.approval.messageIDs
+	tb.approval.messageIDs = nil
+	tb.approval.mu.Unlock()
+
+	for chatID, msgID := range msgs {
+		_, err := tb.bot.DeleteMessage(context.Background(), &bot.DeleteMessageParams{
+			ChatID: chatID,
+			MessageID: msgID,
+		})
+		if err != nil {
+			tb.logger.Warn("delete approval message", "error", err, "chat_id", chatID)
+		}
+	}
+}
+
+// ApprovalResolved is called by the server when an approval is resolved from
+// any client (VSCode, TUI, etc). Deletes the Telegram approval messages so
+// they don't pile up. Implements server.ApprovalNotifier.
+func (tb *Bot) ApprovalResolved(sessionID string, approved bool) {
+	tb.approval.mu.Lock()
+	if tb.approval.sessionID != sessionID {
+		tb.approval.mu.Unlock()
+		return
+	}
+	tb.approval.mu.Unlock()
+
+	tb.deleteApprovalMessages()
+
+	tb.approval.mu.Lock()
+	tb.approval.sessionID = ""
+	tb.approval.toolName = ""
+	tb.approval.mu.Unlock()
 }
 
 // formatToolInput extracts the most relevant info from tool input for display.

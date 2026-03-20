@@ -25,6 +25,15 @@ import (
 // The Telegram bot implements this to forward approvals to the user's phone.
 type ApprovalNotifier interface {
 	NotifyApproval(sessionID, projectName, toolName string, input json.RawMessage)
+	ApprovalResolved(sessionID string, approved bool)
+}
+
+// HasActiveStream reports whether a session currently has a live SSE stream.
+func (s *Server) HasActiveStream(sessionID string) bool {
+	s.chatMu.RLock()
+	_, ok := s.chatStates[sessionID]
+	s.chatMu.RUnlock()
+	return ok
 }
 
 // Server is the ghost HTTP daemon.

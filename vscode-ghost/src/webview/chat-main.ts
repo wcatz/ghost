@@ -528,7 +528,15 @@ window.addEventListener("message", (event) => {
       setStreaming(false);
       break;
     case "streaming":
+      if (msg.active) {
+        hideApproval(); // safety net: dismiss stale overlays on new stream
+      }
       setStreaming(msg.active);
+      break;
+    case "aborted":
+      addSystemMessage("Stream aborted: " + msg.reason);
+      hideApproval();
+      setStreaming(false);
       break;
     case "status":
       connectionDot.className = msg.connected ? "dot connected" : "dot disconnected";

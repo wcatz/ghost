@@ -13,8 +13,9 @@ export type ExtToWebviewMessage =
   | { type: "tool_delta"; id: string; delta: string }
   | { type: "tool_end"; id: string; name: string }
   | { type: "tool_result"; id: string; name: string; output: string; is_error: boolean }
-  | { type: "approval_required"; tool_name: string; input: unknown }
+  | { type: "approval_required"; stream_id: string; tool_name: string; input: unknown }
   | { type: "approval_resolved" }
+  | { type: "aborted"; reason: string }
   | {
       type: "done";
       session_cost: string | null;

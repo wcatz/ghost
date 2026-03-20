@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -36,9 +38,17 @@ type pendingApproval struct {
 // chatState holds per-session streaming state for HTTP clients.
 type chatState struct {
 	mu               sync.Mutex
+	streamID         string // unique per-stream, used to correlate approvals
 	cancel           context.CancelFunc
 	pending          *pendingApproval
 	approvalResolved chan struct{} // signals external approval to SSE stream
+}
+
+// newStreamID returns a short random hex string for stream correlation.
+func newStreamID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // --- Session Handlers ---
@@ -151,13 +161,14 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Supersede any active stream for this session.
+	streamID := newStreamID()
 	s.chatMu.Lock()
 	if old, active := s.chatStates[id]; active {
 		old.cancel()
-		s.logger.Info("superseding active stream", "session", id)
+		s.logger.Info("superseding active stream", "session", id, "old_stream", old.streamID, "new_stream", streamID)
 	}
 	ctx, cancel := context.WithCancel(r.Context())
-	state := &chatState{cancel: cancel}
+	state := &chatState{cancel: cancel, streamID: streamID}
 	s.chatStates[id] = state
 	s.chatMu.Unlock()
 
@@ -257,6 +268,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			state.mu.Unlock()
 
 			writeSSE(w, flusher, "approval_required", map[string]interface{}{
+				"stream_id": streamID,
 				"tool_name": approval.ToolName,
 				"input":     json.RawMessage(approval.Input),
 			})
@@ -275,6 +287,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			resolvedCh = nil
 
 		case <-ctx.Done():
+			writeSSE(w, flusher, "aborted", map[string]string{"reason": "superseded"})
 			return
 		}
 	}
@@ -358,6 +371,7 @@ func (s *Server) handleStreamEvent(w http.ResponseWriter, flusher http.Flusher, 
 type approvalResponse struct {
 	Approved     bool   `json:"approved"`
 	Instructions string `json:"instructions,omitempty"`
+	StreamID     string `json:"stream_id,omitempty"`
 }
 
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
@@ -375,6 +389,12 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 
 	if !ok {
 		writeError(w, http.StatusNotFound, "no active stream for session")
+		return
+	}
+
+	// Validate stream_id if provided — reject stale approvals from superseded streams.
+	if req.StreamID != "" && req.StreamID != state.streamID {
+		writeError(w, http.StatusConflict, "approval is for a superseded stream")
 		return
 	}
 
@@ -403,6 +423,11 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 		state.approvalResolved = nil
 	}
 	state.mu.Unlock()
+
+	// Notify external channels (Telegram) so they can clean up approval messages.
+	if s.approvalNotifier != nil {
+		go s.approvalNotifier.ApprovalResolved(id, req.Approved)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "responded"})
 }
