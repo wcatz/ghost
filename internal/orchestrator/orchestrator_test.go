@@ -213,3 +213,142 @@ func TestOrchestrator_AutoApproveYolo(t *testing.T) {
 		t.Error("session should have autoApprove=true with yolo approval mode")
 	}
 }
+
+func TestOrchestrator_ResumeSession(t *testing.T) {
+	o, _ := testOrchestrator(t)
+
+	// ResumeSession on a new project should create session and not error
+	// (no previous conversation = start fresh).
+	s, err := o.ResumeSession("/tmp")
+	if err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+	if s == nil {
+		t.Fatal("ResumeSession returned nil")
+	}
+	if !s.Active {
+		t.Error("session should be active")
+	}
+
+	// Calling again should return the same session (idempotent via StartSession).
+	s2, err := o.ResumeSession("/tmp")
+	if err != nil {
+		t.Fatalf("ResumeSession again: %v", err)
+	}
+	if s != s2 {
+		t.Error("ResumeSession should return same session")
+	}
+}
+
+func TestOrchestrator_GetSessionAfterStop(t *testing.T) {
+	o, _ := testOrchestrator(t)
+
+	_, err := o.StartSession("/tmp")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	o.StopSession("/tmp")
+
+	s := o.GetSession("/tmp")
+	if s != nil {
+		t.Error("GetSession after stop should return nil")
+	}
+}
+
+func TestOrchestrator_MultipleSessions(t *testing.T) {
+	o, _ := testOrchestrator(t)
+
+	// Start sessions for two different paths.
+	s1, err := o.StartSession("/tmp")
+	if err != nil {
+		t.Fatalf("StartSession /tmp: %v", err)
+	}
+
+	// Use the repo itself as a second valid project path.
+	s2, err := o.StartSession("/home")
+	if err != nil {
+		t.Fatalf("StartSession /home: %v", err)
+	}
+
+	if s1 == s2 {
+		t.Error("different paths should produce different sessions")
+	}
+
+	sessions := o.ListSessions()
+	if len(sessions) != 2 {
+		t.Errorf("expected 2 sessions, got %d", len(sessions))
+	}
+
+	// Stop one, verify the other remains.
+	o.StopSession("/tmp")
+	sessions = o.ListSessions()
+	if len(sessions) != 1 {
+		t.Errorf("expected 1 session after stopping one, got %d", len(sessions))
+	}
+}
+
+func TestOrchestrator_StopNonexistentSession(t *testing.T) {
+	o, _ := testOrchestrator(t)
+
+	// Stopping a session that doesn't exist should not error.
+	err := o.StopSession("/tmp")
+	if err != nil {
+		t.Errorf("StopSession on nonexistent should not error: %v", err)
+	}
+}
+
+func TestOrchestrator_ShutdownMultiple(t *testing.T) {
+	o, _ := testOrchestrator(t)
+
+	s1, _ := o.StartSession("/tmp")
+	s2, _ := o.StartSession("/home")
+
+	o.Shutdown(context.Background())
+
+	if s1.Active {
+		t.Error("session 1 should be inactive after shutdown")
+	}
+	if s2.Active {
+		t.Error("session 2 should be inactive after shutdown")
+	}
+	if len(o.ListSessions()) != 0 {
+		t.Error("all sessions should be cleared after shutdown")
+	}
+}
+
+func TestOrchestrator_SessionProjectInfo(t *testing.T) {
+	o, _ := testOrchestrator(t)
+
+	s, err := o.StartSession("/tmp")
+	if err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	// Verify session has project info populated.
+	if s.ProjectID == "" {
+		t.Error("ProjectID should be set")
+	}
+	if s.ProjectName == "" {
+		t.Error("ProjectName should be set")
+	}
+	if s.ProjectPath == "" {
+		t.Error("ProjectPath should be set")
+	}
+	if s.Mode.Name == "" {
+		t.Error("Mode should be set from config")
+	}
+}
+
+func TestOrchestrator_GetSessionByID_AfterStop(t *testing.T) {
+	o, _ := testOrchestrator(t)
+
+	s, _ := o.StartSession("/tmp")
+	id := s.ProjectID
+
+	o.StopSession("/tmp")
+
+	if o.GetSessionByID(id) != nil {
+		t.Error("GetSessionByID should return nil after stop")
+	}
+}
