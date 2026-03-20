@@ -349,6 +349,20 @@ func runServe() {
 		}
 	}
 
+	// --- Monthly cost report cron (reports previous month on 1st) ---
+	if cfg.CostReport.Enabled && tgBot != nil {
+		err := sched.AddCronJob(ctx, "monthly-cost-report", cfg.CostReport.Schedule, nil, func() {
+			report := generateCostReport(ctx, store, logger)
+			tgBot.SendToAll(ctx, report)
+			logger.Info("monthly cost report sent")
+		})
+		if err != nil {
+			logger.Error("failed to schedule cost report", "error", err)
+		} else {
+			logger.Info("monthly cost report scheduled", "cron", cfg.CostReport.Schedule)
+		}
+	}
+
 	// --- Orchestrator for chat API (optional — requires API key) ---
 	var orch *orchestrator.Orchestrator
 	if cfg.API.Key != "" {
@@ -443,6 +457,64 @@ func bootstrap() (*config.Config, *slog.Logger, *memory.Store, *sql.DB) {
 
 	store := memory.NewStore(db, logger)
 	return cfg, logger, store, db
+}
+
+// generateCostReport builds a Telegram-formatted monthly cost summary
+// comparing API spend against Claude subscription tiers.
+func generateCostReport(ctx context.Context, store *memory.Store, logger *slog.Logger) string {
+	// Report on previous month.
+	now := time.Now()
+	year, month := now.Year(), int(now.Month())-1
+	if month == 0 {
+		month = 12
+		year--
+	}
+
+	mc, err := store.GetMonthlyCost(ctx, year, month)
+	if err != nil {
+		logger.Error("cost report query failed", "error", err)
+		return fmt.Sprintf("Failed to generate cost report: %v", err)
+	}
+
+	monthName := time.Month(mc.Month).String()
+	noCacheCost := mc.TotalCost + mc.TotalSavings
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "📊 *Ghost Cost Report — %s %d*\n\n", monthName, mc.Year)
+	fmt.Fprintf(&b, "API Spend:      $%.2f\n", mc.TotalCost)
+	fmt.Fprintf(&b, "Without cache:  $%.2f\n", noCacheCost)
+	fmt.Fprintf(&b, "Cache savings:  $%.2f\n\n", mc.TotalSavings)
+
+	if len(mc.ByModel) > 0 {
+		b.WriteString("By model:\n")
+		for _, m := range mc.ByModel {
+			short := m.Model
+			if i := strings.LastIndex(short, "-"); i > 10 {
+				short = short[:i] // strip date suffix
+			}
+			fmt.Fprintf(&b, "  %s:  $%.2f\n", short, m.Cost)
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("vs Claude Subscription:\n")
+	tiers := []struct {
+		name  string
+		price float64
+	}{
+		{"Pro ($20/mo)", 20},
+		{"Max 5x ($100/mo)", 100},
+		{"Max 20x ($200/mo)", 200},
+	}
+	for _, t := range tiers {
+		if mc.TotalCost < t.price {
+			fmt.Fprintf(&b, "  %s:  API is cheaper ✓\n", t.name)
+		} else {
+			fmt.Fprintf(&b, "  %s:  subscription cheaper ✗\n", t.name)
+		}
+	}
+
+	return b.String()
 }
 
 // expandHome replaces a leading ~ with the user's home directory.

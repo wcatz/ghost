@@ -33,7 +33,8 @@ export type ExtToWebviewMessage =
   | { type: "voice_stopped" }
   | { type: "voice_triggered" }
   | { type: "voice_partial"; text: string }
-  | { type: "voice_final"; text: string };
+  | { type: "voice_final"; text: string }
+  | { type: "monthly_cost"; text: string };
 
 // --- Webview -> Extension ---
 

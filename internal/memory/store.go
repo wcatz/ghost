@@ -607,6 +607,85 @@ type TokenUsage struct {
 	CostUSD       float64
 }
 
+// ModelCost holds cost for a single model within a monthly summary.
+type ModelCost struct {
+	Model string  `json:"model"`
+	Cost  float64 `json:"cost"`
+}
+
+// MonthlyCost holds aggregated cost data for a calendar month.
+type MonthlyCost struct {
+	Year         int         `json:"year"`
+	Month        int         `json:"month"`
+	TotalCost    float64     `json:"total_cost"`
+	TotalSavings float64     `json:"total_savings"`
+	ByModel      []ModelCost `json:"by_model"`
+}
+
+// GetMonthlyCost returns aggregated cost data for the given month across all projects,
+// including per-model breakdown and cache savings.
+func (s *Store) GetMonthlyCost(ctx context.Context, year, month int) (MonthlyCost, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	start := fmt.Sprintf("%04d-%02d-01", year, month)
+	var end string
+	if month == 12 {
+		end = fmt.Sprintf("%04d-01-01", year+1)
+	} else {
+		end = fmt.Sprintf("%04d-%02d-01", year, month+1)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT model,
+		       COALESCE(SUM(cost_usd), 0),
+		       COALESCE(SUM(input_tokens), 0),
+		       COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(cache_creation), 0),
+		       COALESCE(SUM(cache_read), 0)
+		FROM token_usage
+		WHERE created_at >= ? AND created_at < ?
+		GROUP BY model
+	`, start, end)
+	if err != nil {
+		return MonthlyCost{}, err
+	}
+	defer rows.Close()
+
+	mc := MonthlyCost{Year: year, Month: month}
+	for rows.Next() {
+		var model string
+		var cost float64
+		var input, output, cacheWrite, cacheRead int
+		if err := rows.Scan(&model, &cost, &input, &output, &cacheWrite, &cacheRead); err != nil {
+			return MonthlyCost{}, err
+		}
+		mc.TotalCost += cost
+		mc.ByModel = append(mc.ByModel, ModelCost{Model: model, Cost: cost})
+
+		// Compute what cost would have been without caching for this model.
+		noCacheCost := noCacheCostForModel(model, input, output, cacheWrite, cacheRead)
+		mc.TotalSavings += noCacheCost - cost
+	}
+	return mc, rows.Err()
+}
+
+// noCacheCostForModel computes hypothetical cost if all cached tokens were charged at base input rate.
+func noCacheCostForModel(model string, input, output, cacheWrite, cacheRead int) float64 {
+	// Use simple model-family pricing lookup.
+	var inP, outP float64
+	switch {
+	case strings.Contains(model, "haiku"):
+		inP, outP = 1.00, 5.00
+	case strings.Contains(model, "opus"):
+		inP, outP = 5.00, 25.00
+	default:
+		inP, outP = 3.00, 15.00
+	}
+	allInput := input + cacheWrite + cacheRead
+	return float64(allInput)/1e6*inP + float64(output)/1e6*outP
+}
+
 func scanMemories(rows *sql.Rows) ([]Memory, error) {
 	var memories []Memory
 	for rows.Next() {

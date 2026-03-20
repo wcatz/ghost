@@ -37,8 +37,9 @@ type Config struct {
 	Telegram  TelegramConfig  `koanf:"telegram"`
 	Calendar  CalendarConfig  `koanf:"calendar"`
 	Google    GoogleConfig    `koanf:"google"`
-	Briefing  BriefingConfig  `koanf:"briefing"`
-	Voice     VoiceConfig     `koanf:"voice"`
+	Briefing   BriefingConfig   `koanf:"briefing"`
+	CostReport CostReportConfig `koanf:"cost_report"`
+	Voice      VoiceConfig      `koanf:"voice"`
 }
 
 // APIConfig holds Claude API settings.
@@ -131,6 +132,12 @@ type BriefingConfig struct {
 	Schedule string `koanf:"schedule"` // cron expression, e.g. "0 8 * * *"
 }
 
+// CostReportConfig holds monthly cost report settings.
+type CostReportConfig struct {
+	Enabled  bool   `koanf:"enabled"`
+	Schedule string `koanf:"schedule"` // cron expression, default "0 9 1 * *"
+}
+
 // defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{
 	"api.model_quality":          "claude-opus-4-6-20250514",
@@ -163,6 +170,8 @@ var defaults = map[string]interface{}{
 	"github.interval":            60,
 	"briefing.enabled":           false,
 	"briefing.schedule":          "0 8 * * 1-5",
+	"cost_report.enabled":        false,
+	"cost_report.schedule":       "0 9 1 * *",
 	"google.credentials_file":   "~/.config/ghost/google-credentials.json",
 	"google.token_file":          "~/.config/ghost/google-token.json",
 }

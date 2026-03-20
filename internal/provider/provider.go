@@ -93,6 +93,7 @@ type MemoryStore interface {
 
 	// Cost tracking
 	RecordUsage(ctx context.Context, projectID, model string, usage memory.TokenUsage) error
+	GetMonthlyCost(ctx context.Context, year, month int) (memory.MonthlyCost, error)
 
 	// Lifecycle
 	Close() error

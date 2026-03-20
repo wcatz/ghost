@@ -193,6 +193,7 @@ export class ChatWebview implements vscode.Disposable {
         if (sessionCost) {
           this.statusBar.setCost(sessionCost);
         }
+        this.refreshMonthlyCost();
       });
       emitter.on("error", (err: Error) => {
         this.postMessage({ type: "error", text: err.message ?? "Unknown error" });
@@ -483,9 +484,29 @@ export class ChatWebview implements vscode.Disposable {
         this.postMessage({ type: "session", session: this.session });
         this.statusBar.setMode(this.session.mode);
         this.onModeChanged?.(this.session.mode);
+        this.refreshMonthlyCost();
       }
     } catch {
       // Server not available -- will retry on next send
+    }
+  }
+
+  private async refreshMonthlyCost(): Promise<void> {
+    try {
+      const mc = await this.client.getMonthlyCost();
+      const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      const monthLabel = monthNames[mc.month - 1] ?? `M${mc.month}`;
+      let text = `${monthLabel}: $${mc.total_cost.toFixed(2)}`;
+      if (mc.by_model && mc.by_model.length > 0) {
+        const parts = mc.by_model.map((m) => {
+          const short = m.model.replace(/^claude-/, "").replace(/-\d{8}$/, "");
+          return `${short} $${m.cost.toFixed(2)}`;
+        });
+        text += ` (${parts.join(" · ")})`;
+      }
+      this.postMessage({ type: "monthly_cost", text });
+    } catch {
+      // Server may not support this endpoint yet
     }
   }
 

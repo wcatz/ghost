@@ -134,3 +134,25 @@ func (ct *CostTracker) Summary() string {
 	rate := ct.CacheHitRate()
 	return fmt.Sprintf("$%.2f (saved $%.2f, %.0f%% cache)", cost, savings, rate)
 }
+
+// CostForUsage computes the USD cost for a single usage entry with model-specific pricing.
+func CostForUsage(u *TokenUsage, model string) float64 {
+	if u == nil {
+		return 0
+	}
+	inP, outP, cwP, crP := modelPricing(model)
+	var total float64
+	total += float64(u.InputTokens) / 1e6 * inP
+	total += float64(u.OutputTokens) / 1e6 * outP
+	total += float64(u.CacheCreationInputTokens) / 1e6 * cwP
+	total += float64(u.CacheReadInputTokens) / 1e6 * crP
+	return total
+}
+
+// CostWithoutCacheForUsage computes what the cost would have been without caching
+// for the given raw token counts and model. Used for monthly savings calculations.
+func CostWithoutCacheForUsage(input, output, cacheWrite, cacheRead int, model string) float64 {
+	inP, outP, _, _ := modelPricing(model)
+	allInput := input + cacheWrite + cacheRead
+	return float64(allInput)/1e6*inP + float64(output)/1e6*outP
+}
