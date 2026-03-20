@@ -109,10 +109,14 @@ export class GhostClient extends EventEmitter {
     sessionId: string,
     approved: boolean,
     instructions?: string,
+    streamId?: string,
   ): Promise<{ status: string }> {
     const body: Record<string, unknown> = { approved };
     if (instructions) {
       body.instructions = instructions;
+    }
+    if (streamId) {
+      body.stream_id = streamId;
     }
     return this.request(
       "POST",
@@ -220,6 +224,9 @@ export class GhostClient extends EventEmitter {
                   break;
                 case "approval_resolved":
                   emitter.emit("approval_resolved", {});
+                  break;
+                case "aborted":
+                  emitter.emit("aborted", data);
                   break;
                 case "done":
                   emitter.emit("done", data);

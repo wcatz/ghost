@@ -21,6 +21,8 @@ export class ChatWebview implements vscode.Disposable {
   private statusBar: GhostStatusBar;
   private session?: SessionInfo;
   private abortFn?: () => void;
+  private currentStreamId?: string;
+  private streaming = false;
   private disposables: vscode.Disposable[] = [];
   private onModeChanged?: (mode: string) => void;
 
@@ -124,6 +126,11 @@ export class ChatWebview implements vscode.Disposable {
     // Abort any in-flight stream — server handles the race, this minimizes waste.
     this.abortFn?.();
 
+    // Dismiss any stale approval overlay from the previous stream.
+    this.postMessage({ type: "approval_resolved" });
+    this.currentStreamId = undefined;
+
+    this.streaming = true;
     this.postMessage({ type: "streaming", active: true });
 
     try {
@@ -168,14 +175,22 @@ export class ChatWebview implements vscode.Disposable {
         }
       });
       emitter.on("approval", (data: Record<string, unknown>) => {
+        this.currentStreamId = (data.stream_id as string) ?? undefined;
         this.postMessage({
           type: "approval_required",
+          stream_id: this.currentStreamId ?? "",
           tool_name: data.tool_name as string,
           input: data.input,
         });
       });
       emitter.on("approval_resolved", () => {
         this.postMessage({ type: "approval_resolved" });
+      });
+      emitter.on("aborted", (data: Record<string, string>) => {
+        this.postMessage({ type: "aborted", reason: data.reason ?? "unknown" });
+        this.postMessage({ type: "approval_resolved" }); // dismiss stale overlay
+        this.streaming = false;
+        this.postMessage({ type: "streaming", active: false });
       });
       emitter.on("done", (data: Record<string, unknown>) => {
         const sessionCost = (data.session_cost as string) ?? null;
@@ -188,6 +203,7 @@ export class ChatWebview implements vscode.Disposable {
         });
         // Only mark streaming complete on final done, not mid-turn tool_use.
         if (stopReason !== "tool_use") {
+          this.streaming = false;
           this.postMessage({ type: "streaming", active: false });
         }
         if (sessionCost) {
@@ -197,9 +213,11 @@ export class ChatWebview implements vscode.Disposable {
       });
       emitter.on("error", (err: Error) => {
         this.postMessage({ type: "error", text: err.message ?? "Unknown error" });
+        this.streaming = false;
         this.postMessage({ type: "streaming", active: false });
       });
       emitter.on("close", () => {
+        this.streaming = false;
         this.postMessage({ type: "streaming", active: false });
       });
     } catch (err) {
@@ -211,7 +229,7 @@ export class ChatWebview implements vscode.Disposable {
   private async handleApprove(approved: boolean, instructions?: string): Promise<void> {
     if (!this.session) return;
     try {
-      await this.client.approve(this.session.id, approved, instructions);
+      await this.client.approve(this.session.id, approved, instructions, this.currentStreamId);
     } catch (err) {
       this.postMessage({ type: "error", text: `Approval failed: ${err}` });
     }
@@ -412,6 +430,16 @@ export class ChatWebview implements vscode.Disposable {
     this.activateTrigger();
 
     this.postMessage({ type: "voice_final", text: cleanText });
+
+    // Guard: if a stream is already active, queue the message instead of superseding.
+    if (this.streaming) {
+      this.postMessage({ type: "system_message", text: "Queued voice message (waiting for current response)" });
+      // The webview's send() function already queues when streaming=true,
+      // so we send it as a user-initiated message which will be queued.
+      this.postMessage({ type: "send_from_command", text: cleanText });
+      return;
+    }
+
     this.handleSend(cleanText).catch((err) => {
       this.postMessage({ type: "error", text: `Voice send failed: ${err}` });
     });
