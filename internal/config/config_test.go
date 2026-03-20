@@ -6,26 +6,28 @@ import (
 	"testing"
 )
 
+// unsetEnvVars unsets the given env vars for the duration of the test,
+// restoring original values on cleanup.
+func unsetEnvVars(t *testing.T, keys []string) {
+	t.Helper()
+	for _, key := range keys {
+		if old, ok := os.LookupEnv(key); ok {
+			t.Setenv(key, old) // saves original, will restore on cleanup
+			if err := os.Unsetenv(key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 func TestLoad_Defaults(t *testing.T) {
 	// Isolate from real config files by pointing HOME/XDG to temp dir.
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
-	// Unset any env vars that could interfere. We save/restore manually
-	// because t.Setenv("X","") would set it to empty (not unset), and
-	// koanf's env provider treats empty as an override.
-	for _, key := range []string{
-		"GHOST_API_KEY",
-		"GHOST_DEFAULTS_MODE",
-		"GHOST_SERVER_LISTEN_ADDR",
-		"ANTHROPIC_API_KEY",
-	} {
-		if old, ok := os.LookupEnv(key); ok {
-			os.Unsetenv(key)
-			t.Cleanup(func() { os.Setenv(key, old) })
-		}
-	}
+	// Unset any env vars that could interfere.
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_DEFAULTS_MODE", "GHOST_SERVER_LISTEN_ADDR", "ANTHROPIC_API_KEY"})
 
 	cfg, err := Load()
 	if err != nil {
@@ -112,12 +114,7 @@ func TestLoad_GhostEnvOverrides(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear any interfering env vars.
-	for _, key := range []string{"GHOST_API_KEY", "GHOST_DEFAULTS_MODE", "ANTHROPIC_API_KEY"} {
-		if old, ok := os.LookupEnv(key); ok {
-			os.Unsetenv(key)
-			t.Cleanup(func() { os.Setenv(key, old) })
-		}
-	}
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_DEFAULTS_MODE", "ANTHROPIC_API_KEY"})
 
 	// Set GHOST_* overrides.
 	t.Setenv("GHOST_API_KEY", "sk-ghost-override")
@@ -142,12 +139,7 @@ func TestLoad_ExplicitEnvOverrides(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear interfering env vars.
-	for _, key := range []string{"GHOST_API_KEY", "GHOST_SERVER_AUTH_TOKEN", "ANTHROPIC_API_KEY"} {
-		if old, ok := os.LookupEnv(key); ok {
-			os.Unsetenv(key)
-			t.Cleanup(func() { os.Setenv(key, old) })
-		}
-	}
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_SERVER_AUTH_TOKEN", "ANTHROPIC_API_KEY"})
 
 	t.Setenv("GHOST_SERVER_AUTH_TOKEN", "my-secret-token")
 
@@ -167,15 +159,7 @@ func TestLoad_YAMLFileOverride(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear interfering env vars.
-	for _, key := range []string{
-		"GHOST_API_KEY", "GHOST_DEFAULTS_MODE", "GHOST_SERVER_LISTEN_ADDR",
-		"ANTHROPIC_API_KEY",
-	} {
-		if old, ok := os.LookupEnv(key); ok {
-			os.Unsetenv(key)
-			t.Cleanup(func() { os.Setenv(key, old) })
-		}
-	}
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_DEFAULTS_MODE", "GHOST_SERVER_LISTEN_ADDR", "ANTHROPIC_API_KEY"})
 
 	// Create a config file in the user config dir.
 	configDir := filepath.Join(tmpDir, "ghost")
@@ -230,12 +214,7 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear interfering env vars.
-	for _, key := range []string{"GHOST_API_KEY", "GHOST_DEFAULTS_MODE", "ANTHROPIC_API_KEY"} {
-		if old, ok := os.LookupEnv(key); ok {
-			os.Unsetenv(key)
-			t.Cleanup(func() { os.Setenv(key, old) })
-		}
-	}
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_DEFAULTS_MODE", "ANTHROPIC_API_KEY"})
 
 	// YAML file sets mode to "review".
 	configDir := filepath.Join(tmpDir, "ghost")
@@ -297,12 +276,7 @@ func TestLoad_DisplayDefaults(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
-	for _, key := range []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY"} {
-		if old, ok := os.LookupEnv(key); ok {
-			os.Unsetenv(key)
-			t.Cleanup(func() { os.Setenv(key, old) })
-		}
-	}
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY"})
 
 	cfg, err := Load()
 	if err != nil {
@@ -334,12 +308,7 @@ func TestLoad_VoiceDefaults(t *testing.T) {
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
-	for _, key := range []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY"} {
-		if old, ok := os.LookupEnv(key); ok {
-			os.Unsetenv(key)
-			t.Cleanup(func() { os.Setenv(key, old) })
-		}
-	}
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY"})
 
 	cfg, err := Load()
 	if err != nil {
@@ -369,7 +338,7 @@ func TestLoad_VoiceDefaults(t *testing.T) {
 func TestDataDir_DefaultFallback(t *testing.T) {
 	// Unset XDG_DATA_HOME to test the fallback to ~/.local/share.
 	t.Setenv("XDG_DATA_HOME", "")
-	os.Unsetenv("XDG_DATA_HOME")
+	unsetEnvVars(t, []string{"XDG_DATA_HOME"})
 
 	dir, err := DataDir()
 	if err != nil {

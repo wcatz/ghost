@@ -18,7 +18,7 @@ func testDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS notifications (
@@ -253,7 +253,9 @@ func TestGetUnread_Limit(t *testing.T) {
 			Unread:       true,
 			UpdatedAt:    now,
 		}
-		m.upsert(ctx, n)
+		if _, err := m.upsert(ctx, n); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
 	}
 
 	unread, err := m.GetUnread(ctx, 2)
@@ -279,7 +281,9 @@ func TestGetByPriority(t *testing.T) {
 		{GitHubID: "gh-23", RepoFullName: "r", SubjectTitle: "P3 sub", SubjectType: "Issue", Reason: "subscribed", Priority: P3, Unread: true, UpdatedAt: now},
 		{GitHubID: "gh-24", RepoFullName: "r", SubjectTitle: "P4 other", SubjectType: "Issue", Reason: "state_change", Priority: P4, Unread: true, UpdatedAt: now},
 	} {
-		m.upsert(ctx, n)
+		if _, err := m.upsert(ctx, n); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
 	}
 
 	// Get P0+P1 only.
@@ -317,11 +321,15 @@ func TestDismiss(t *testing.T) {
 		Unread:       true,
 		UpdatedAt:    time.Now().UTC().Format(time.RFC3339),
 	}
-	m.upsert(ctx, n)
+	if _, err := m.upsert(ctx, n); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
 
 	// Get the internal ID.
 	var id string
-	m.db.QueryRowContext(ctx, `SELECT id FROM notifications WHERE github_id = ?`, "gh-30").Scan(&id)
+	if err := m.db.QueryRowContext(ctx, `SELECT id FROM notifications WHERE github_id = ?`, "gh-30").Scan(&id); err != nil {
+		t.Fatalf("scan id: %v", err)
+	}
 
 	// Dismiss it.
 	if err := m.Dismiss(ctx, id); err != nil {
@@ -339,7 +347,9 @@ func TestDismiss(t *testing.T) {
 
 	// dismissed_at should be set.
 	var dismissedAt sql.NullString
-	m.db.QueryRowContext(ctx, `SELECT dismissed_at FROM notifications WHERE id = ?`, id).Scan(&dismissedAt)
+	if err = m.db.QueryRowContext(ctx, `SELECT dismissed_at FROM notifications WHERE id = ?`, id).Scan(&dismissedAt); err != nil {
+		t.Fatalf("scan dismissed_at: %v", err)
+	}
 	if !dismissedAt.Valid {
 		t.Error("dismissed_at should be set after dismiss")
 	}
@@ -358,7 +368,9 @@ func TestSummary(t *testing.T) {
 		{GitHubID: "gh-42", RepoFullName: "r", SubjectTitle: "c", SubjectType: "I", Reason: "review_requested", Priority: P1, Unread: true, UpdatedAt: now},
 		{GitHubID: "gh-43", RepoFullName: "r", SubjectTitle: "d", SubjectType: "I", Reason: "mention", Priority: P2, Unread: false, UpdatedAt: now}, // read
 	} {
-		m.upsert(ctx, n)
+		if _, err := m.upsert(ctx, n); err != nil {
+			t.Fatalf("upsert: %v", err)
+		}
 	}
 
 	summary, err := m.Summary(ctx)
