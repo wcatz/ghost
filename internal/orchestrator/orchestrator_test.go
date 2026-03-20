@@ -248,7 +248,9 @@ func TestOrchestrator_GetSessionAfterStop(t *testing.T) {
 		t.Fatalf("StartSession: %v", err)
 	}
 
-	o.StopSession("/tmp")
+	if err := o.StopSession("/tmp"); err != nil {
+		t.Fatalf("StopSession: %v", err)
+	}
 
 	s := o.GetSession("/tmp")
 	if s != nil {
@@ -281,7 +283,9 @@ func TestOrchestrator_MultipleSessions(t *testing.T) {
 	}
 
 	// Stop one, verify the other remains.
-	o.StopSession("/tmp")
+	if err := o.StopSession("/tmp"); err != nil {
+		t.Fatalf("StopSession: %v", err)
+	}
 	sessions = o.ListSessions()
 	if len(sessions) != 1 {
 		t.Errorf("expected 1 session after stopping one, got %d", len(sessions))
@@ -304,7 +308,9 @@ func TestOrchestrator_ShutdownMultiple(t *testing.T) {
 	s1, _ := o.StartSession("/tmp")
 	s2, _ := o.StartSession("/home")
 
-	o.Shutdown(context.Background())
+	if err := o.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
 
 	if s1.Active {
 		t.Error("session 1 should be inactive after shutdown")
@@ -346,7 +352,9 @@ func TestOrchestrator_GetSessionByID_AfterStop(t *testing.T) {
 	s, _ := o.StartSession("/tmp")
 	id := s.ProjectID
 
-	o.StopSession("/tmp")
+	if err := o.StopSession("/tmp"); err != nil {
+		t.Fatalf("StopSession: %v", err)
+	}
 
 	if o.GetSessionByID(id) != nil {
 		t.Error("GetSessionByID should return nil after stop")
