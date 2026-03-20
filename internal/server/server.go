@@ -93,6 +93,7 @@ func (s *Server) Run(ctx context.Context) error {
 			r.Delete("/{memoryID}", s.handleDelete)
 		})
 		r.Get("/api/v1/projects", s.handleListProjects)
+		r.Get("/api/v1/costs/monthly", s.handleMonthlyCost)
 
 		// Transcription token proxy (requires AssemblyAI key).
 		if s.assemblyAIKey != "" {
@@ -289,6 +290,17 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, projects)
+}
+
+func (s *Server) handleMonthlyCost(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	mc, err := s.store.GetMonthlyCost(r.Context(), now.Year(), int(now.Month()))
+	if err != nil {
+		s.logger.Error("monthly cost", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to get monthly cost")
+		return
+	}
+	writeJSON(w, http.StatusOK, mc)
 }
 
 // handleTranscribeToken proxies a temporary AssemblyAI streaming token

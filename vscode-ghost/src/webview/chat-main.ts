@@ -518,7 +518,6 @@ window.addEventListener("message", (event) => {
       }
       if (msg.session_cost) {
         footerCost.textContent = msg.session_cost;
-        sessionCostEl.textContent = msg.session_cost;
       }
       if (msg.stop_reason === "max_tokens") {
         addTruncationWarning();
@@ -539,6 +538,9 @@ window.addEventListener("message", (event) => {
       sessionInfoEl.textContent = msg.session.project_name;
       modeBadge.textContent = msg.session.mode;
       modeBadge.className = "mode-badge mode-" + msg.session.mode;
+      break;
+    case "monthly_cost":
+      sessionCostEl.textContent = msg.text;
       break;
     case "mode_changed":
       modeBadge.textContent = msg.mode;

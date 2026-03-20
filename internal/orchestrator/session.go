@@ -358,6 +358,19 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 					stopReason = evt.StopReason
 					usage = evt.Usage
 					s.Cost.AddWithModel(usage, s.Model())
+					// Persist usage to SQLite for historical cost tracking.
+					if usage != nil {
+						go func(u *ai.TokenUsage, model string) {
+							costUSD := ai.CostForUsage(u, model)
+							_ = s.store.RecordUsage(context.Background(), s.ProjectID, model, memory.TokenUsage{
+								InputTokens:   u.InputTokens,
+								OutputTokens:  u.OutputTokens,
+								CacheCreation: u.CacheCreationInputTokens,
+								CacheRead:     u.CacheReadInputTokens,
+								CostUSD:       costUSD,
+							})
+						}(usage, s.Model())
+					}
 				case "error":
 					events <- evt
 					return

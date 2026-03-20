@@ -308,6 +308,12 @@ export class GhostClient extends EventEmitter {
     return this.request("GET", "/api/v1/projects");
   }
 
+  // --- Costs ---
+
+  async getMonthlyCost(): Promise<{ year: number; month: number; total_cost: number; total_savings: number; by_model: { model: string; cost: number }[] }> {
+    return this.request("GET", "/api/v1/costs/monthly");
+  }
+
   // --- Transcription ---
 
   async getTranscribeToken(): Promise<{ token: string; ws_url: string }> {

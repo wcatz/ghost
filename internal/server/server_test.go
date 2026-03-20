@@ -119,6 +119,9 @@ func (m *mockStore) UpdateLearnedContext(_ context.Context, _, _, _ string) erro
 func (m *mockStore) RecordUsage(_ context.Context, _, _ string, _ memory.TokenUsage) error {
 	return nil
 }
+func (m *mockStore) GetMonthlyCost(_ context.Context, year, month int) (memory.MonthlyCost, error) {
+	return memory.MonthlyCost{Year: year, Month: month}, nil
+}
 func (m *mockStore) Close() error { return nil }
 
 // newTestServer creates a Server with a mock store and silent logger.
