@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -391,5 +392,352 @@ func TestAuthMiddleware_HealthNoAuthRequired(t *testing.T) {
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 for health without auth, got %d", rr.Code)
+	}
+}
+
+// --- handleSearch ---
+
+func TestHandleSearch_HappyPath(t *testing.T) {
+	store := &mockStore{
+		searchResult: []memory.Memory{
+			{ID: "m1", Category: "fact", Content: "Go uses goroutines", Importance: 0.8},
+		},
+	}
+	s := newTestServer(store)
+
+	r := chi.NewRouter()
+	r.Post("/api/v1/memories/search", s.handleSearch)
+
+	body := searchRequest{ProjectID: "proj-1", Query: "goroutines", Limit: 10}
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/memories/search", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+
+	var results []memory.Memory
+	json.NewDecoder(rr.Body).Decode(&results)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+}
+
+func TestHandleSearch_MissingFields(t *testing.T) {
+	s := newTestServer(&mockStore{})
+
+	r := chi.NewRouter()
+	r.Post("/api/v1/memories/search", s.handleSearch)
+
+	tests := []struct {
+		name string
+		body searchRequest
+	}{
+		{"missing project_id", searchRequest{Query: "test"}},
+		{"missing query", searchRequest{ProjectID: "proj-1"}},
+		{"both missing", searchRequest{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			b, _ := json.Marshal(tc.body)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/memories/search", bytes.NewReader(b))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d", rr.Code)
+			}
+		})
+	}
+}
+
+func TestHandleSearch_DefaultLimit(t *testing.T) {
+	store := &mockStore{searchResult: []memory.Memory{}}
+	s := newTestServer(store)
+
+	r := chi.NewRouter()
+	r.Post("/api/v1/memories/search", s.handleSearch)
+
+	// Limit=0 should default to 20, not fail.
+	body := searchRequest{ProjectID: "proj-1", Query: "test", Limit: 0}
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/memories/search", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+}
+
+// --- handleList ---
+
+func TestHandleList_HappyPath(t *testing.T) {
+	store := &mockStore{
+		topResult: []memory.Memory{
+			{ID: "m1", Category: "fact", Content: "test memory", Importance: 0.5},
+			{ID: "m2", Category: "decision", Content: "another memory", Importance: 0.7},
+		},
+	}
+	s := newTestServer(store)
+
+	r := chi.NewRouter()
+	r.Get("/api/v1/memories/{projectID}", s.handleList)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/memories/proj-1", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+
+	var results []memory.Memory
+	json.NewDecoder(rr.Body).Decode(&results)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+}
+
+func TestHandleList_EmptyResult(t *testing.T) {
+	store := &mockStore{topResult: []memory.Memory{}}
+	s := newTestServer(store)
+
+	r := chi.NewRouter()
+	r.Get("/api/v1/memories/{projectID}", s.handleList)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/memories/proj-1", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+}
+
+// --- handleDelete ---
+
+func TestHandleDelete_HappyPath(t *testing.T) {
+	store := &mockStore{}
+	s := newTestServer(store)
+
+	r := chi.NewRouter()
+	r.Delete("/api/v1/memories/{memoryID}", s.handleDelete)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/memories/mem-123", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["status"] != "deleted" {
+		t.Errorf("expected status=deleted, got %q", resp["status"])
+	}
+}
+
+func TestHandleDelete_StoreError(t *testing.T) {
+	store := &mockStore{deleteErr: fmt.Errorf("not found")}
+	s := newTestServer(store)
+
+	r := chi.NewRouter()
+	r.Delete("/api/v1/memories/{memoryID}", s.handleDelete)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/memories/mem-xyz", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rr.Code)
+	}
+}
+
+// --- handleListProjects ---
+
+func TestHandleListProjects_Empty(t *testing.T) {
+	store := &mockStore{}
+	s := newTestServer(store)
+
+	r := chi.NewRouter()
+	r.Get("/api/v1/projects", s.handleListProjects)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+}
+
+// --- handleMonthlyCost ---
+
+func TestHandleMonthlyCost_HappyPath(t *testing.T) {
+	store := &mockStore{}
+	s := newTestServer(store)
+
+	r := chi.NewRouter()
+	r.Get("/api/v1/costs/monthly", s.handleMonthlyCost)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/costs/monthly", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+
+	var mc memory.MonthlyCost
+	json.NewDecoder(rr.Body).Decode(&mc)
+	if mc.Year == 0 {
+		t.Error("expected non-zero year in monthly cost")
+	}
+}
+
+// --- handleCreate valid categories ---
+
+func TestHandleCreate_AllValidCategories(t *testing.T) {
+	categories := []string{
+		"architecture", "decision", "pattern", "convention",
+		"gotcha", "dependency", "preference", "fact",
+	}
+
+	for _, cat := range categories {
+		t.Run(cat, func(t *testing.T) {
+			store := &mockStore{upsertID: "mem-1"}
+			s := newTestServer(store)
+
+			r := chi.NewRouter()
+			r.Post("/api/v1/memories", s.handleCreate)
+
+			body := createRequest{
+				ProjectID: "proj-1",
+				Content:   "test content",
+				Category:  cat,
+			}
+			b, _ := json.Marshal(body)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/memories", bytes.NewReader(b))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusCreated {
+				t.Fatalf("expected 201 for category %q, got %d; body: %s", cat, rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandleCreate_MergedResponse(t *testing.T) {
+	store := &mockStore{upsertID: "mem-456", upsertMerged: true}
+	s := newTestServer(store)
+
+	r := chi.NewRouter()
+	r.Post("/api/v1/memories", s.handleCreate)
+
+	body := createRequest{
+		ProjectID: "proj-1",
+		Content:   "test content",
+		Category:  "fact",
+	}
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/memories", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rr.Code)
+	}
+
+	var resp map[string]interface{}
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["merged"] != true {
+		t.Errorf("expected merged=true, got %v", resp["merged"])
+	}
+}
+
+func TestHandleCreate_DefaultSource(t *testing.T) {
+	store := &mockStore{upsertID: "mem-789"}
+	s := newTestServer(store)
+
+	r := chi.NewRouter()
+	r.Post("/api/v1/memories", s.handleCreate)
+
+	// Source empty → should default to "manual" (no error).
+	body := createRequest{
+		ProjectID: "proj-1",
+		Content:   "test",
+	}
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/memories", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// --- HasActiveStream ---
+
+func TestHasActiveStream(t *testing.T) {
+	s := newTestServer(&mockStore{})
+
+	if s.HasActiveStream("session-1") {
+		t.Error("expected no active stream initially")
+	}
+
+	s.chatMu.Lock()
+	s.chatStates["session-1"] = &chatState{}
+	s.chatMu.Unlock()
+
+	if !s.HasActiveStream("session-1") {
+		t.Error("expected active stream after adding to map")
+	}
+}
+
+// --- writeJSON / writeError ---
+
+func TestWriteJSON(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeJSON(rr, http.StatusOK, map[string]string{"key": "value"})
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["key"] != "value" {
+		t.Errorf("response body unexpected: %v", resp)
+	}
+}
+
+func TestWriteError(t *testing.T) {
+	rr := httptest.NewRecorder()
+	writeError(rr, http.StatusBadRequest, "bad input")
+
+	if rr.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rr.Code)
+	}
+
+	var resp map[string]string
+	json.NewDecoder(rr.Body).Decode(&resp)
+	if resp["error"] != "bad input" {
+		t.Errorf("error = %q, want %q", resp["error"], "bad input")
 	}
 }
