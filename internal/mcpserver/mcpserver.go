@@ -564,11 +564,15 @@ func (s *Server) registerResources() {
 			return nil, fmt.Errorf("resource URI missing project_id: %s", req.Params.URI)
 		}
 		projectID := s.resolveProjectID(ctx, parts[0])
+		text, err := s.buildProjectContext(ctx, projectID)
+		if err != nil {
+			return nil, fmt.Errorf("reading project context %q: %w", projectID, err)
+		}
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{
 				URI:      req.Params.URI,
 				MIMEType: "text/plain",
-				Text:     s.buildProjectContext(ctx, projectID),
+				Text:     text,
 			}},
 		}, nil
 	})
@@ -581,7 +585,7 @@ func (s *Server) registerResources() {
 		Name:     "Ghost Global Memories",
 		URI:      "ghost://memories/global",
 		MIMEType: "text/plain",
-		Description: "Cross-project Ghost memories: personal preferences, global conventions, " +
+		Description: "Top 50 cross-project Ghost memories: personal preferences, global conventions, " +
 			"toolchain facts. These apply to all projects. " +
 			"Add entries via the ghost_save_global tool.",
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
@@ -608,25 +612,32 @@ func (s *Server) registerResources() {
 // buildProjectContext assembles the text body for a project context resource read.
 // Returns top 20 memories (project + global) plus any learned context summary.
 // Extracted from the resource handler for direct testability.
-func (s *Server) buildProjectContext(ctx context.Context, projectID string) string {
+// Returns an error if the memory store is unavailable.
+func (s *Server) buildProjectContext(ctx context.Context, projectID string) (string, error) {
 	var sb strings.Builder
 
 	memories, err := s.store.GetTopMemories(ctx, projectID, 20)
-	if err == nil && len(memories) > 0 {
+	if err != nil {
+		return "", fmt.Errorf("get memories for %q: %w", projectID, err)
+	}
+	if len(memories) > 0 {
 		sb.WriteString("## Memories\n\n")
 		sb.WriteString(formatMemories(memories))
 	}
 
 	learned, err := s.store.GetLearnedContext(ctx, projectID)
-	if err == nil && learned != "" {
+	if err != nil {
+		return "", fmt.Errorf("get learned context for %q: %w", projectID, err)
+	}
+	if learned != "" {
 		sb.WriteString("\n\n## Learned Context\n\n")
 		sb.WriteString(learned)
 	}
 
 	if sb.Len() == 0 {
-		return "No memories found for this project."
+		return "No memories found for this project.", nil
 	}
-	return sb.String()
+	return sb.String(), nil
 }
 
 func formatMemories(memories []memory.Memory) string {

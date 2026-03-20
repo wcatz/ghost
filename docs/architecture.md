@@ -75,7 +75,7 @@ internal/
     approval.go            Pending approval state
     sse.go                 SSE write helpers
   mcpserver/               MCP server
-    server.go              stdio transport, 13 tools + 2 resources
+    mcpserver.go           stdio transport, 13 tools + 2 resources
   telegram/                Telegram bot
     bot.go                 Commands, whitelist auth, alerts
     approval.go            Approval forwarding with inline keyboards
