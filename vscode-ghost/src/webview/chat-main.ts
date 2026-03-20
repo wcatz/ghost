@@ -534,6 +534,7 @@ window.addEventListener("message", (event) => {
       setStreaming(msg.active);
       break;
     case "aborted":
+      finalizeAssistant();
       addSystemMessage("Stream aborted: " + msg.reason);
       hideApproval();
       setStreaming(false);

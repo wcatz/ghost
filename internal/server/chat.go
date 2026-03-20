@@ -41,6 +41,7 @@ type chatState struct {
 	mu               sync.Mutex
 	streamID         string // unique per-stream, used to correlate approvals
 	cancel           context.CancelFunc
+	superseded       chan struct{}      // closed when this stream is replaced by a newer one
 	pending          *pendingApproval
 	approvalResolved chan struct{} // signals external approval to SSE stream
 }
@@ -167,11 +168,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	streamID := newStreamID()
 	s.chatMu.Lock()
 	if old, active := s.chatStates[id]; active {
+		close(old.superseded) // signal the old stream it was superseded
 		old.cancel()
 		s.logger.Info("superseding active stream", "session", id, "old_stream", old.streamID, "new_stream", streamID)
 	}
 	ctx, cancel := context.WithCancel(r.Context())
-	state := &chatState{cancel: cancel, streamID: streamID}
+	state := &chatState{cancel: cancel, streamID: streamID, superseded: make(chan struct{})}
 	s.chatStates[id] = state
 	s.chatMu.Unlock()
 
@@ -286,7 +288,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				}
 				// Send silently if there's an active VSCode/SSE stream — user is at the keyboard.
 				silent := s.HasActiveStream(id)
-				go s.approvalNotifier.NotifyApproval(id, projectLabel, approval.ToolName, approval.Input, silent)
+				go s.approvalNotifier.NotifyApproval(id, streamID, projectLabel, approval.ToolName, approval.Input, silent)
 			}
 
 		case <-resolvedCh:
@@ -295,7 +297,17 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			resolvedCh = nil
 
 		case <-ctx.Done():
-			writeSSE(w, flusher, "aborted", map[string]string{"reason": "superseded"})
+			// Determine why the context was cancelled.
+			reason := "client_disconnected"
+			select {
+			case <-state.superseded:
+				reason = "superseded"
+			default:
+				if ctx.Err() == context.DeadlineExceeded {
+					reason = "timeout"
+				}
+			}
+			writeSSE(w, flusher, "aborted", map[string]string{"reason": reason})
 			return
 		}
 	}

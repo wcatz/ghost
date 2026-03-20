@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wcatz/ghost/internal/ai"
 )
 
 // Memory represents a single discrete memory.
@@ -664,26 +666,10 @@ func (s *Store) GetMonthlyCost(ctx context.Context, year, month int) (MonthlyCos
 		mc.ByModel = append(mc.ByModel, ModelCost{Model: model, Cost: cost})
 
 		// Compute what cost would have been without caching for this model.
-		noCacheCost := noCacheCostForModel(model, input, output, cacheWrite, cacheRead)
+		noCacheCost := ai.CostWithoutCacheForUsage(input, output, cacheWrite, cacheRead, model)
 		mc.TotalSavings += noCacheCost - cost
 	}
 	return mc, rows.Err()
-}
-
-// noCacheCostForModel computes hypothetical cost if all cached tokens were charged at base input rate.
-func noCacheCostForModel(model string, input, output, cacheWrite, cacheRead int) float64 {
-	// Use simple model-family pricing lookup.
-	var inP, outP float64
-	switch {
-	case strings.Contains(model, "haiku"):
-		inP, outP = 1.00, 5.00
-	case strings.Contains(model, "opus"):
-		inP, outP = 5.00, 25.00
-	default:
-		inP, outP = 3.00, 15.00
-	}
-	allInput := input + cacheWrite + cacheRead
-	return float64(allInput)/1e6*inP + float64(output)/1e6*outP
 }
 
 func scanMemories(rows *sql.Rows) ([]Memory, error) {

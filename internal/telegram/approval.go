@@ -18,6 +18,7 @@ import (
 type approvalState struct {
 	mu         sync.Mutex
 	sessionID  string // session with pending approval
+	streamID   string // stream that owns this approval (detects supersession)
 	toolName   string
 	messageIDs map[int64]int // chatID → Telegram message ID for cleanup
 }
@@ -35,7 +36,11 @@ func (tb *Bot) SetServerToken(token string) {
 // NotifyApproval sends an approval request to all allowed Telegram users
 // with Allow / Deny inline buttons. When silent is true (VSCode has an active
 // stream), the notification is sent without sound. Implements server.ApprovalNotifier.
-func (tb *Bot) NotifyApproval(sessionID, projectName, toolName string, input json.RawMessage, silent bool) {
+func (tb *Bot) NotifyApproval(sessionID, streamID, projectName, toolName string, input json.RawMessage, silent bool) {
+	// Clean up any stale approval messages from a previous (superseded) approval
+	// before posting new ones. This prevents orphaned buttons in the chat.
+	tb.deleteApprovalMessages()
+
 	// Format the input for display.
 	inputStr := formatToolInput(toolName, input)
 
@@ -62,6 +67,7 @@ func (tb *Bot) NotifyApproval(sessionID, projectName, toolName string, input jso
 
 	tb.approval.mu.Lock()
 	tb.approval.sessionID = sessionID
+	tb.approval.streamID = streamID
 	tb.approval.toolName = toolName
 	tb.approval.messageIDs = make(map[int64]int)
 	tb.approval.mu.Unlock()
