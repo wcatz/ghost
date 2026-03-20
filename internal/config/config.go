@@ -227,6 +227,8 @@ func Load() (*Config, error) {
 		"GHOST_VOICE_INPUT_DEVICE":       "voice.input_device",
 		"GHOST_VOICE_SAMPLE_RATE":        "voice.sample_rate",
 		"GHOST_VOICE_SILENCE_MS":         "voice.silence_ms",
+		"GHOST_COST_REPORT_ENABLED":      "cost_report.enabled",
+		"GHOST_COST_REPORT_SCHEDULE":     "cost_report.schedule",
 	}
 	for envKey, koanfKey := range envOverrides {
 		if val := os.Getenv(envKey); val != "" {

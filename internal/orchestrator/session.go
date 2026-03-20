@@ -525,6 +525,17 @@ func (s *Session) Refresh() error {
 	return nil
 }
 
+// GitBranch returns the git branch from the last project context refresh.
+// It may be stale if the user switched branches without triggering Refresh().
+func (s *Session) GitBranch() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.projectCtx != nil {
+		return s.projectCtx.GitBranch
+	}
+	return ""
+}
+
 // ClearMessages resets the conversation (keeps memories).
 func (s *Session) ClearMessages() {
 	s.mu.Lock()

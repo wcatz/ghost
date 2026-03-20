@@ -177,6 +177,10 @@ func (s *Scheduler) AddCronJob(ctx context.Context, name, cronExpr string, paylo
 		return fmt.Errorf("generate id: %w", err)
 	}
 
+	// Remove any existing job with the same name to prevent row
+	// accumulation across daemon restarts.
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM scheduled_jobs WHERE name = ?`, name)
+
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO scheduled_jobs (id, name, schedule, payload) VALUES (?, ?, ?, ?)
 	`, id, name, cronExpr, string(payloadJSON))

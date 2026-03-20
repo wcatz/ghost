@@ -75,7 +75,7 @@ internal/
     approval.go            Pending approval state
     sse.go                 SSE write helpers
   mcpserver/               MCP server
-    mcpserver.go           stdio transport, 13 tools + 2 resources
+    mcpserver.go           stdio transport, 12 tools + 2 resources
   telegram/                Telegram bot
     bot.go                 Commands, whitelist auth, alerts
     approval.go            Approval forwarding with inline keyboards
@@ -150,7 +150,7 @@ Claude Code / Cursor → stdio JSON-RPC → mcpserver
                                  ghost_memory_save → store.Upsert()
                                  ghost_project_context → store.GetTopMemories()
                                  ghost_save_global → store.Upsert("_global")
-                                 ... 9 more tools
+                                 ... 8 more tools
                                           ↓
                           Resources (push-based, pinnable by client):
                                  ghost://project/{project_id}/context
