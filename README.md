@@ -12,19 +12,22 @@ Pure Go. No CGO. Single binary.
 
 ## What It Does
 
-- **Agentic tool loop** — Claude's tool_use drives a read → act → reflect cycle; Ghost executes tools on your behalf with configurable approval gates
+- **Agentic tool loop** — Claude's tool_use drives a read-act-reflect cycle with configurable approval gates
 - **Persistent memory** across sessions — Ghost knows what you worked on last week
-- **3-block prompt caching** — 90% savings on input tokens in agentic tool loops
-- **Multi-turn caching** — conversation turns cached across API calls
+- **3-block prompt caching** — 90%+ cache hit rates, ~76% savings on input tokens
 - **Hybrid search** — FTS5 keyword + vector cosine similarity via Reciprocal Rank Fusion
 - **Free embeddings** — `nomic-embed-text:v1.5` runs locally through Ollama, no API costs
 - **Time-decay scoring** — stale memories fade automatically by category half-life
+- **Cost tracking** — per-session and monthly cost aggregation with cache savings, API vs subscription comparison
 - **Google Calendar + Gmail** — meeting notifications, email summaries via OAuth2
-- **GitHub notifications** — priority-classified alerts forwarded to Telegram
-- **Tool approval forwarding** — approve Ghost's actions from your phone via Telegram
+- **CalDAV calendar** — alternative to Google (iCloud, Fastmail, etc.)
+- **GitHub notifications** — P0-P4 priority-classified alerts forwarded to Telegram
+- **Tool approval forwarding** — approve Ghost's actions from phone via Telegram, auto-cleanup on resolution
+- **Voice input** — push-to-talk with Whisper/AssemblyAI STT and Piper/ElevenLabs TTS
+- **Task management** — create, list, complete tasks via MCP; tracked in SQLite
+- **Decision records** — architectural decisions with alternatives and rationale via MCP
 - **Session resume** — conversations persist to SQLite, reload on restart
 - **Context compression** — Haiku summarizes older messages when context gets long
-- **Cost tracking** — real-time per-session and cumulative USD cost with cache savings
 
 ## Install
 
@@ -42,6 +45,24 @@ cd ghost
 make build
 ```
 
+### Pre-built binaries
+
+Download from [GitHub Releases](https://github.com/wcatz/ghost/releases) — available for linux, macOS, and Windows (amd64 + arm64).
+
+### Docker
+
+```bash
+docker run -e ANTHROPIC_API_KEY="sk-ant-..." ghcr.io/wcatz/ghost:latest serve
+```
+
+### VSCode Extension
+
+Download the `.vsix` from [GitHub Releases](https://github.com/wcatz/ghost/releases) and install:
+
+```bash
+code --install-extension ghost-*.vsix
+```
+
 ## Quick Start
 
 ```bash
@@ -54,6 +75,9 @@ ghost
 # One-shot query
 ghost "explain the authentication flow"
 
+# Pipe mode
+echo "explain this" | ghost
+
 # Start the daemon
 ghost serve
 
@@ -65,12 +89,6 @@ ghost mcp
 
 ### `ghost` — Interactive REPL
 
-```bash
-ghost                                    # REPL
-ghost "what does the auth middleware do"  # one-shot
-echo "explain this" | ghost              # pipe
-```
-
 | Flag | Description |
 |------|-------------|
 | `-mode` | `chat`, `code`, `debug`, `review`, `plan`, `refactor` |
@@ -78,19 +96,42 @@ echo "explain this" | ghost              # pipe
 | `-project` | Project path (repeatable) |
 | `-yolo` | Skip all tool approvals |
 | `-continue` | Resume last conversation |
+| `-no-memory` | Disable automatic memory extraction |
+| `-no-tui` | Force legacy REPL (no bubbletea) |
+| `-version` | Print version and exit |
 
-**REPL commands:**
+**Slash commands:**
 
-```
-/mode <name>       Switch mode
-/switch <project>  Switch project
-/memory search <q> Search memories
-/memory add <text> Manual memory
-/reflect           Force consolidation
-/cost              Token usage + spend
-/clear             Clear conversation
-/quit              Exit
-```
+| Command | Description |
+|---------|-------------|
+| `/model <name>` | Switch model (sonnet/haiku/opus) |
+| `/continue` | Continue from where left off |
+| `/compact` | Compress conversation history |
+| `/tokens` | Token estimates + cache stats |
+| `/export` | Export conversation as markdown |
+| `/sessions` | List sessions with counts |
+| `/new` | Start fresh session |
+| `/resume` | Resume last session |
+| `/memory` | List all memories |
+| `/memory search <q>` | Search memories |
+| `/memory add` | Add a manual memory |
+| `/cost` | Session cost breakdown |
+| `/context` | Show project context |
+| `/image <path>` | Send image to Claude |
+| `/reflect` | Force memory consolidation |
+| `/briefing` | Ask Ghost for a briefing |
+| `/voice` | Voice mode info |
+| `/health` | Memory, embeddings, cost |
+| `/history` | Conversation stats |
+| `/theme <name>` | Switch glamour theme |
+| `/remind <t> <msg>` | Set a reminder |
+| `/reminders` | List pending reminders |
+| `/switch <name>` | Switch project |
+| `/projects` | List project sessions |
+| `/clear` | Clear conversation |
+| `/quit` | Exit ghost |
+
+**Keybindings:** `ctrl+k` command palette, `ctrl+y` copy last code block, `ctrl+space` push-to-talk, `esc` interrupt, `?` help overlay.
 
 ### `ghost serve` — Daemon
 
@@ -106,6 +147,7 @@ Headless background service with HTTP API and all subsystems.
 | Google Calendar | Meeting alerts (10min + 5min) via Telegram |
 | Gmail | Unread email summaries |
 | Morning briefing | Cron-triggered daily summary |
+| Cost report | Monthly cost report to Telegram |
 
 ### `ghost mcp` — MCP Server
 
@@ -123,33 +165,66 @@ Connects Claude Code, Cursor, or any MCP client to Ghost's memory via stdio.
 }
 ```
 
-| MCP Tool | Description |
-|----------|-------------|
-| `ghost_memory_search` | FTS5 keyword search |
+**MCP Tools (12):**
+
+| Tool | Description |
+|------|-------------|
+| `ghost_memory_search` | FTS5 + vector hybrid search |
 | `ghost_memory_save` | Store with category, importance, tags |
 | `ghost_memories_list` | List with optional category filter |
 | `ghost_memory_delete` | Delete by ID |
 | `ghost_project_context` | Top memories ranked by importance + recency |
+| `ghost_search_all` | Cross-project memory search |
+| `ghost_save_global` | Save memory accessible to all projects |
+| `ghost_task_create` | Create a task with priority and status |
+| `ghost_task_list` | List tasks by project and status |
+| `ghost_task_complete` | Mark a task as done |
+| `ghost_decision_record` | Record an architectural decision with rationale |
+| `ghost_health` | System stats (memory count, embeddings, costs) |
+
+**MCP Resources:**
+
+| Resource | Description |
+|----------|-------------|
+| `ghost://project/{id}/context` | Push-based project context (memories + learned context) |
+| `ghost://memories/global` | Global memories accessible to all projects |
+
+## HTTP API
+
+All endpoints under `/api/v1/`, authenticated via Bearer token when `server.auth_token` is configured.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Health check |
+| POST | `/memories/search` | Search memories (FTS5) |
+| POST | `/memories/` | Create memory |
+| GET | `/memories/{projectID}` | List memories for project |
+| DELETE | `/memories/{memoryID}` | Delete memory |
+| GET | `/projects` | List all projects |
+| GET | `/costs/monthly` | Monthly cost aggregation by model |
+| GET | `/transcribe/token` | AssemblyAI temporary token |
+| POST | `/sessions/` | Create chat session |
+| GET | `/sessions/` | List sessions |
+| DELETE | `/sessions/{id}` | Delete session |
+| POST | `/sessions/{id}/send` | Send message (SSE stream) |
+| POST | `/sessions/{id}/approve` | Approve/deny pending tool |
+| POST | `/sessions/{id}/mode` | Change session mode |
+| POST | `/sessions/{id}/auto-approve` | Toggle auto-approve |
+| GET | `/sessions/{id}/history` | Get conversation history |
 
 ## VSCode Extension
 
-Chat interface directly in the editor.
+Chat interface directly in the editor. Open with `Alt+G`.
 
-```bash
-cd vscode-ghost && npm install && npm run compile
-npx @vscode/vsce package --allow-missing-repository
-code --install-extension ghost-0.1.0.vsix
-```
-
-- Editor tab chat (`Ctrl+Shift+G`) + sidebar panel
+- Sidebar chat panel + editor tab chat
 - SSE streaming with thinking, tool progress, inline diffs
 - Markdown rendering with syntax highlighting + copy buttons
-- Cost tracking with cache savings display
+- Cost tracking — monthly in header, session in footer
 - Auto-approve toggle (YOLO mode)
 - Image paste/attach support
 - Slash commands (`/mode`, `/clear`, `/cost`, `/auto-approve`)
 - Memory browser with search
-- Message queuing during streaming
+- Tool approval overlay with Allow/Deny
 - Session resume across restarts
 - `@file.ext` references to attach file contents
 
@@ -166,9 +241,11 @@ code --install-extension ghost-0.1.0.vsix
 | `/memory search` | Search memories |
 | `/remind <msg>` | Set a reminder |
 | `/briefing` | Daily briefing with progressive loading |
+| `/mode` | List or switch session mode |
+| `/cost` | Session cost and monthly summary |
 | `/help` | Commands list |
 
-Tool approvals forward to Telegram with Allow/Deny buttons. Reply with text to deny with instructions.
+Tool approvals forward to Telegram with Allow/Deny buttons. Approvals resolved from any client (VSCode, TUI) auto-delete the Telegram message. Notifications are silent when the user is active in VSCode.
 
 ## Google Integration
 
@@ -179,18 +256,20 @@ OAuth2 for Google Calendar + Gmail.
 3. Save to `~/.config/ghost/google-credentials.json`
 4. On first `ghost serve`, authorize via the printed URL
 
+CalDAV is also supported as an alternative calendar source (iCloud, Fastmail, etc.) — configure under `calendar:` in config.
+
 ## Memory System
 
 | Category | Decay | Purpose |
 |----------|-------|---------|
-| architecture | none | Codebase structure |
-| decision | 30-day | Why things were done |
-| pattern | 45-day | Recurring code patterns |
+| preference | none | Developer preferences |
 | convention | none | Style and naming |
+| fact | none | Durable project facts |
+| architecture | 45-day | Codebase structure |
+| pattern | 45-day | Recurring code patterns |
+| decision | 30-day | Why things were done |
 | gotcha | 30-day | Bugs and edge cases |
 | dependency | 30-day | Libraries and versions |
-| preference | none | Developer preferences |
-| fact | none | Durable project facts |
 
 ## Configuration
 
@@ -206,11 +285,17 @@ Config loads in layers (later overrides earlier):
 
 ```yaml
 api:
-  model_quality: "claude-sonnet-4-5-20250929"
-  model_fast: "claude-haiku-4-5-20251001"
+  model_quality: "claude-opus-4-6-20250514"
+  model_fast: "claude-sonnet-4-5-20250929"
 
 server:
   listen_addr: "127.0.0.1:2187"
+  auth_token: ""                     # generate: openssl rand -hex 32
+
+embedding:
+  enabled: true
+  ollama_url: "http://localhost:11434"
+  model: "nomic-embed-text:v1.5"
 
 github:
   token: "ghp_..."
@@ -220,18 +305,19 @@ telegram:
   token: "123456:ABC..."
   allowed_ids: "12345678"
 
-embedding:
-  enabled: true
-  ollama_url: "http://localhost:11434"
-  model: "nomic-embed-text:v1.5"
-
 google:
   credentials_file: "~/.config/ghost/google-credentials.json"
 
 briefing:
   enabled: true
   schedule: "0 8 * * 1-5"
+
+cost_report:
+  enabled: false
+  schedule: "0 9 1 * *"             # 9am on 1st of month
 ```
+
+See `internal/config/config.example.yaml` for all options including voice, display, and CalDAV.
 
 ## Architecture
 
@@ -242,24 +328,25 @@ internal/
   memory/                  SQLite + FTS5 + vector search + time-decay
   tool/                    Tool registry + 9 built-in executors
   orchestrator/            Multi-project sessions, context compression, multi-turn caching
-  reflection/              Haiku memory consolidation
+  reflection/              Haiku memory consolidation + auto-extraction
   prompt/                  3-block cached system prompt
-  mode/                    Operating modes
+  mode/                    Operating modes (chat, code, debug, review, plan, refactor)
   project/                 Auto-detection (language, tests, git)
   config/                  Layered YAML/env/flag config (koanf)
-  tui/                     Terminal REPL
+  tui/                     Terminal REPL (bubbletea)
   server/                  HTTP REST API (chi)
-  mcpserver/               MCP server (stdio)
+  mcpserver/               MCP server (stdio, 12 tools + resources)
   telegram/                Bot, approvals, session management
   google/                  Calendar + Gmail OAuth2
-  github/                  Notification monitor
+  calendar/                CalDAV client
+  github/                  Notification monitor (P0-P4 priority)
   scheduler/               Cron + reminders (gocron)
   briefing/                Daily briefing
   embedding/               Ollama async worker
-  mdv2/                    MarkdownV2 escaping
-  voice/                   Voice pipeline (WIP)
+  voice/                   STT/TTS pipeline (Whisper, AssemblyAI, Piper, ElevenLabs)
+  mdv2/                    MarkdownV2 escaping for Telegram
   provider/                Interface contracts
-migrations/                Embedded SQLite schema
+migrations/                Reference SQL schema (runtime: internal/memory/schema.go)
 vscode-ghost/              VSCode extension (TypeScript)
 ```
 
