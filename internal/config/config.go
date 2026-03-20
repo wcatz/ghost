@@ -70,20 +70,20 @@ type DisplayConfig struct {
 
 // VoiceConfig holds voice interface settings.
 type VoiceConfig struct {
-	Enabled     bool    `koanf:"enabled"`
-	STTBackend  string  `koanf:"stt_backend"`  // "whisper" or "subprocess"
-	STTModel    string  `koanf:"stt_model"`    // whisper model name/path
-	TTSBackend  string  `koanf:"tts_backend"`  // "piper", "espeak", or "none"
-	TTSModel    string  `koanf:"tts_model"`    // piper model path
-	TTSVoice    string  `koanf:"tts_voice"`    // voice name
-	TTSRate     float64 `koanf:"tts_rate"`     // speech rate multiplier
-	WakeWord    string  `koanf:"wake_word"`    // reserved for future use
-	PushToTalk  string  `koanf:"push_to_talk"` // keybind, e.g. "ctrl+space"
-	SilenceMs         int     `koanf:"silence_ms"`          // silence duration to end recording (ms)
-	SampleRate        int     `koanf:"sample_rate"`         // audio sample rate
-	InputDevice       string  `koanf:"input_device"`        // audio input device ("default" or device ID)
-	AssemblyAIAPIKey  string  `koanf:"assemblyai_api_key"`  // AssemblyAI API key (for STT)
-	ElevenLabsAPIKey  string  `koanf:"elevenlabs_api_key"`  // ElevenLabs API key (for TTS)
+	Enabled           bool    `koanf:"enabled"`
+	STTBackend        string  `koanf:"stt_backend"`        // "whisper" or "assemblyai"
+	STTModel          string  `koanf:"stt_model"`          // whisper model name/path
+	TTSBackend        string  `koanf:"tts_backend"`        // "piper", "elevenlabs", "espeak", or "none"
+	TTSModel          string  `koanf:"tts_model"`          // piper model path
+	TTSVoice          string  `koanf:"tts_voice"`          // voice name
+	TTSRate           float64 `koanf:"tts_rate"`           // speech rate multiplier
+	WakeWord          string  `koanf:"wake_word"`          // reserved for future use
+	PushToTalk        string  `koanf:"push_to_talk"`       // keybind, e.g. "ctrl+space"
+	SilenceMs         int     `koanf:"silence_ms"`         // silence duration to end recording (ms)
+	SampleRate        int     `koanf:"sample_rate"`        // audio sample rate
+	InputDevice       string  `koanf:"input_device"`       // audio input device ("default" or device ID)
+	AssemblyAIAPIKey  string  `koanf:"assemblyai_api_key"` // AssemblyAI API key (for STT)
+	ElevenLabsAPIKey  string  `koanf:"elevenlabs_api_key"` // ElevenLabs API key (for TTS)
 	ElevenLabsVoiceID string  `koanf:"elevenlabs_voice_id"` // ElevenLabs voice ID
 }
 
