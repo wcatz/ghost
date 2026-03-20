@@ -176,14 +176,16 @@ func TestResolveWhisperModel_FoundInLocalShare(t *testing.T) {
 
 	// Create a fake model file in the expected location.
 	modelDir := filepath.Join(tmpDir, ".local", "share", "whisper")
-	os.MkdirAll(modelDir, 0o700)
+	if err := os.MkdirAll(modelDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	modelPath := filepath.Join(modelDir, "ggml-tiny.bin")
-	os.WriteFile(modelPath, []byte("fake-model"), 0o644)
+	if err := os.WriteFile(modelPath, []byte("fake-model"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Override HOME so resolveWhisperModel finds it.
-	origHome := os.Getenv("HOME")
-	os.Setenv("HOME", tmpDir)
-	t.Cleanup(func() { os.Setenv("HOME", origHome) })
+	t.Setenv("HOME", tmpDir)
 
 	got := resolveWhisperModel("tiny")
 	if got != modelPath {

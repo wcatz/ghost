@@ -179,7 +179,9 @@ func TestLoad_YAMLFileOverride(t *testing.T) {
 
 	// Create a config file in the user config dir.
 	configDir := filepath.Join(tmpDir, "ghost")
-	os.MkdirAll(configDir, 0o700)
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	configFile := filepath.Join(configDir, "config.yaml")
 	yamlContent := `
 api:
@@ -191,7 +193,9 @@ defaults:
 server:
   listen_addr: "0.0.0.0:9999"
 `
-	os.WriteFile(configFile, []byte(yamlContent), 0o600)
+	if err := os.WriteFile(configFile, []byte(yamlContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg, err := Load()
 	if err != nil {
@@ -235,8 +239,12 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 
 	// YAML file sets mode to "review".
 	configDir := filepath.Join(tmpDir, "ghost")
-	os.MkdirAll(configDir, 0o700)
-	os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("defaults:\n  mode: review\n"), 0o600)
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("defaults:\n  mode: review\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// Env var overrides to "debug".
 	t.Setenv("GHOST_DEFAULTS_MODE", "debug")
