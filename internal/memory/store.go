@@ -650,7 +650,7 @@ func (s *Store) GetMonthlyCost(ctx context.Context, year, month int) (MonthlyCos
 	if err != nil {
 		return MonthlyCost{}, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	mc := MonthlyCost{Year: year, Month: month}
 	for rows.Next() {
