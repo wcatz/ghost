@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -45,6 +46,7 @@ func New(store provider.MemoryStore, logger *slog.Logger) *Server {
 	})
 
 	s.registerTools()
+	s.registerResources()
 	return s
 }
 
@@ -532,6 +534,99 @@ func (s *Server) registerTools() {
 			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
 		}, nil, nil
 	})
+}
+
+// registerResources registers MCP resources for push-based context delivery.
+// Unlike tools (which Claude must actively call), resources can be pinned by
+// MCP clients so their content is automatically included in every request —
+// surviving context compaction without relying on Claude's initiative.
+func (s *Server) registerResources() {
+	// Resource template: ghost://project/{project_id}/context
+	// project_id may be a project name (e.g. "dingo") or hash ID.
+	// Claude Code users should pin this resource at session start.
+	s.mcp.AddResourceTemplate(&mcp.ResourceTemplate{
+		Name:        "Ghost Project Context",
+		URITemplate: "ghost://project/{project_id}/context",
+		Description: "Accumulated Ghost memories and learned context for a project. " +
+			"Read at the start of every session to recall what Ghost knows. " +
+			"project_id may be a project name (e.g. 'dingo') or its hash ID. " +
+			"Includes global cross-project memories automatically.",
+		MIMEType: "text/plain",
+	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		// URI: ghost://project/{project_id}/context
+		// url.Parse → scheme="ghost", host="project", path="/{project_id}/context"
+		u, err := url.Parse(req.Params.URI)
+		if err != nil {
+			return nil, fmt.Errorf("invalid resource URI %q: %w", req.Params.URI, err)
+		}
+		parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
+		if len(parts) == 0 || parts[0] == "" {
+			return nil, fmt.Errorf("resource URI missing project_id: %s", req.Params.URI)
+		}
+		projectID := s.resolveProjectID(ctx, parts[0])
+		return &mcp.ReadResourceResult{
+			Contents: []*mcp.ResourceContents{{
+				URI:      req.Params.URI,
+				MIMEType: "text/plain",
+				Text:     s.buildProjectContext(ctx, projectID),
+			}},
+		}, nil
+	})
+
+	// Static resource: ghost://memories/global
+	// Cross-project preferences, conventions, and toolchain facts saved via
+	// ghost_save_global. Automatically included in ghost_project_context results,
+	// but also available here for direct inspection.
+	s.mcp.AddResource(&mcp.Resource{
+		Name:     "Ghost Global Memories",
+		URI:      "ghost://memories/global",
+		MIMEType: "text/plain",
+		Description: "Cross-project Ghost memories: personal preferences, global conventions, " +
+			"toolchain facts. These apply to all projects. " +
+			"Add entries via the ghost_save_global tool.",
+	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		memories, err := s.store.GetTopMemories(ctx, "_global", 50)
+		if err != nil {
+			return nil, fmt.Errorf("get global memories: %w", err)
+		}
+		var text string
+		if len(memories) == 0 {
+			text = "No global memories saved yet. Use ghost_save_global to add cross-project knowledge."
+		} else {
+			text = "## Ghost Global Memories\n\n" + formatMemories(memories)
+		}
+		return &mcp.ReadResourceResult{
+			Contents: []*mcp.ResourceContents{{
+				URI:      req.Params.URI,
+				MIMEType: "text/plain",
+				Text:     text,
+			}},
+		}, nil
+	})
+}
+
+// buildProjectContext assembles the text body for a project context resource read.
+// Returns top 20 memories (project + global) plus any learned context summary.
+// Extracted from the resource handler for direct testability.
+func (s *Server) buildProjectContext(ctx context.Context, projectID string) string {
+	var sb strings.Builder
+
+	memories, err := s.store.GetTopMemories(ctx, projectID, 20)
+	if err == nil && len(memories) > 0 {
+		sb.WriteString("## Memories\n\n")
+		sb.WriteString(formatMemories(memories))
+	}
+
+	learned, err := s.store.GetLearnedContext(ctx, projectID)
+	if err == nil && learned != "" {
+		sb.WriteString("\n\n## Learned Context\n\n")
+		sb.WriteString(learned)
+	}
+
+	if sb.Len() == 0 {
+		return "No memories found for this project."
+	}
+	return sb.String()
 }
 
 func formatMemories(memories []memory.Memory) string {

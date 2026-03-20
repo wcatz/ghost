@@ -75,7 +75,7 @@ internal/
     approval.go            Pending approval state
     sse.go                 SSE write helpers
   mcpserver/               MCP server
-    server.go              stdio transport, 5 memory tools
+    server.go              stdio transport, 13 tools + 2 resources
   telegram/                Telegram bot
     bot.go                 Commands, whitelist auth, alerts
     approval.go            Approval forwarding with inline keyboards
@@ -145,9 +145,19 @@ User input → textarea → Session.Send(ctx, msg, approvalCh)
 ```
 Claude Code / Cursor → stdio JSON-RPC → mcpserver
                                           ↓
+                          Tools (pull-based, Claude must call):
                                  ghost_memory_search → store.SearchFTS()
                                  ghost_memory_save → store.Upsert()
                                  ghost_project_context → store.GetTopMemories()
+                                 ghost_save_global → store.Upsert("_global")
+                                 ... 9 more tools
+                                          ↓
+                          Resources (push-based, pinnable by client):
+                                 ghost://project/{project_id}/context
+                                   → store.GetTopMemories() + GetLearnedContext()
+                                   → survives context compaction when pinned
+                                 ghost://memories/global
+                                   → store.GetTopMemories("_global")
                                           ↓
                                  SQLite query (no LLM calls)
 ```

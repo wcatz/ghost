@@ -170,3 +170,99 @@ type mockEmbedder struct{}
 func (m *mockEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
 	return []float32{0.1, 0.2, 0.3}, nil
 }
+
+// --- Resource tests ---
+
+func TestBuildProjectContext_WithMemories(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger)
+
+	ctx := context.Background()
+	// Seed a memory for the test project (ID "abc123").
+	if _, _, err := store.Upsert(ctx, "abc123", "convention", "use nerdctl on node-2 for builds", "manual", 1.0, []string{"nerdctl"}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	text := srv.buildProjectContext(ctx, "abc123")
+
+	if !strings.Contains(text, "## Memories") {
+		t.Errorf("expected '## Memories' header, got: %s", text)
+	}
+	if !strings.Contains(text, "nerdctl") {
+		t.Errorf("expected memory content in output, got: %s", text)
+	}
+}
+
+func TestBuildProjectContext_Empty(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger)
+
+	ctx := context.Background()
+	text := srv.buildProjectContext(ctx, "abc123")
+
+	if text != "No memories found for this project." {
+		t.Errorf("expected empty placeholder, got: %s", text)
+	}
+}
+
+func TestBuildProjectContext_IncludesGlobal(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger)
+
+	ctx := context.Background()
+	// Seed a global memory — must ensure _global project exists first.
+	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject _global: %v", err)
+	}
+	if _, _, err := store.Upsert(ctx, "_global", "preference", "always use nerdctl not docker", "manual", 1.0, []string{}); err != nil {
+		t.Fatalf("Upsert global: %v", err)
+	}
+
+	// buildProjectContext for abc123 should pull in _global memories too.
+	text := srv.buildProjectContext(ctx, "abc123")
+
+	if !strings.Contains(text, "nerdctl") {
+		t.Errorf("expected global memory in project context, got: %s", text)
+	}
+}
+
+func TestBuildProjectContext_IncludesLearnedContext(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger)
+
+	ctx := context.Background()
+	if err := store.UpdateLearnedContext(ctx, "abc123", "This is the learned summary.", ""); err != nil {
+		t.Fatalf("UpdateLearnedContext: %v", err)
+	}
+	// Need at least one memory for the memories block to appear — but learned context
+	// should appear even with no memories since it's added separately.
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "seed memory", "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	text := srv.buildProjectContext(ctx, "abc123")
+
+	if !strings.Contains(text, "## Learned Context") {
+		t.Errorf("expected '## Learned Context' section, got: %s", text)
+	}
+	if !strings.Contains(text, "learned summary") {
+		t.Errorf("expected learned context text, got: %s", text)
+	}
+}
+
+func TestNew_RegistersResources(t *testing.T) {
+	// Verify that New() doesn't panic when registering resources (panics on
+	// invalid URI templates or duplicate registrations).
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	// Should not panic.
+	srv := New(store, logger)
+	if srv == nil {
+		t.Fatal("New returned nil")
+	}
+}
