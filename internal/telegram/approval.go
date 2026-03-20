@@ -33,8 +33,9 @@ func (tb *Bot) SetServerToken(token string) {
 }
 
 // NotifyApproval sends an approval request to all allowed Telegram users
-// with Allow / Deny inline buttons. Implements server.ApprovalNotifier.
-func (tb *Bot) NotifyApproval(sessionID, projectName, toolName string, input json.RawMessage) {
+// with Allow / Deny inline buttons. When silent is true (VSCode has an active
+// stream), the notification is sent without sound. Implements server.ApprovalNotifier.
+func (tb *Bot) NotifyApproval(sessionID, projectName, toolName string, input json.RawMessage, silent bool) {
 	// Format the input for display.
 	inputStr := formatToolInput(toolName, input)
 
@@ -67,10 +68,11 @@ func (tb *Bot) NotifyApproval(sessionID, projectName, toolName string, input jso
 
 	for id := range tb.allowedIDs {
 		msg, err := tb.bot.SendMessage(context.Background(), &bot.SendMessageParams{
-			ChatID:    id,
-			Text:      text,
-			ParseMode: models.ParseModeMarkdown,
-			ReplyMarkup: keyboard,
+			ChatID:              id,
+			Text:                text,
+			ParseMode:           models.ParseModeMarkdown,
+			ReplyMarkup:         keyboard,
+			DisableNotification: silent,
 			LinkPreviewOptions: &models.LinkPreviewOptions{
 				IsDisabled: bot.True(),
 			},

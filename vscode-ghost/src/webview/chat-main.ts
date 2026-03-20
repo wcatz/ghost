@@ -542,11 +542,15 @@ window.addEventListener("message", (event) => {
       connectionDot.className = msg.connected ? "dot connected" : "dot disconnected";
       connectionDot.setAttribute("aria-label", msg.connected ? "Connected" : "Disconnected");
       break;
-    case "session":
-      sessionInfoEl.textContent = msg.session.project_name;
+    case "session": {
+      const branch = msg.session.git_branch;
+      sessionInfoEl.textContent = branch
+        ? `${msg.session.project_name}:${branch}`
+        : msg.session.project_name;
       modeBadge.textContent = msg.session.mode;
       modeBadge.className = "mode-badge mode-" + msg.session.mode;
       break;
+    }
     case "monthly_cost":
       sessionCostEl.textContent = msg.text;
       break;

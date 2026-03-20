@@ -21,6 +21,7 @@ type sessionInfo struct {
 	ID          string    `json:"id"`
 	ProjectPath string    `json:"project_path"`
 	ProjectName string    `json:"project_name"`
+	GitBranch   string    `json:"git_branch,omitempty"`
 	Mode        string    `json:"mode"`
 	Active      bool      `json:"active"`
 	Messages    int       `json:"messages"`
@@ -89,6 +90,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		ID:          session.ProjectID,
 		ProjectPath: session.ProjectPath,
 		ProjectName: session.ProjectName,
+		GitBranch:   session.GitBranch(),
 		Mode:        session.Mode.Name,
 		Active:      session.Active,
 		Messages:    session.MessageCount(),
@@ -105,6 +107,7 @@ func (s *Server) handleListSessions(w http.ResponseWriter, _ *http.Request) {
 			ID:          sess.ProjectID,
 			ProjectPath: sess.ProjectPath,
 			ProjectName: sess.ProjectName,
+			GitBranch:   sess.GitBranch(),
 			Mode:        sess.Mode.Name,
 			Active:      sess.Active,
 			Messages:    sess.MessageCount(),
@@ -274,11 +277,16 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			})
 
 			if s.approvalNotifier != nil {
-				projectName := ""
+				projectLabel := ""
 				if session != nil {
-					projectName = session.ProjectName
+					projectLabel = session.ProjectName
+					if branch := session.GitBranch(); branch != "" {
+						projectLabel += ":" + branch
+					}
 				}
-				go s.approvalNotifier.NotifyApproval(id, projectName, approval.ToolName, approval.Input)
+				// Send silently if there's an active VSCode/SSE stream — user is at the keyboard.
+				silent := s.HasActiveStream(id)
+				go s.approvalNotifier.NotifyApproval(id, projectLabel, approval.ToolName, approval.Input, silent)
 			}
 
 		case <-resolvedCh:

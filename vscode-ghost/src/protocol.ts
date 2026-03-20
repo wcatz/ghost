@@ -58,6 +58,7 @@ export interface SessionInfo {
   id: string;
   project_path: string;
   project_name: string;
+  git_branch?: string;
   mode: string;
   active: boolean;
   messages: number;

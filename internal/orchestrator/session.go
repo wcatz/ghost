@@ -525,6 +525,16 @@ func (s *Session) Refresh() error {
 	return nil
 }
 
+// GitBranch returns the current git branch for the session's project.
+func (s *Session) GitBranch() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.projectCtx != nil {
+		return s.projectCtx.GitBranch
+	}
+	return ""
+}
+
 // ClearMessages resets the conversation (keeps memories).
 func (s *Session) ClearMessages() {
 	s.mu.Lock()

@@ -24,7 +24,7 @@ import (
 // ApprovalNotifier is called when a tool needs approval.
 // The Telegram bot implements this to forward approvals to the user's phone.
 type ApprovalNotifier interface {
-	NotifyApproval(sessionID, projectName, toolName string, input json.RawMessage)
+	NotifyApproval(sessionID, projectName, toolName string, input json.RawMessage, silent bool)
 	ApprovalResolved(sessionID string, approved bool)
 }
 
