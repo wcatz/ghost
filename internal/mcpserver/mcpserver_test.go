@@ -287,3 +287,305 @@ func TestNew_RegistersResources(t *testing.T) {
 	// Empty is valid — just confirms the store call succeeds.
 	_ = globals
 }
+
+// --- Store-backed tool logic tests ---
+// These test the core logic paths that MCP tool handlers exercise,
+// using real in-memory SQLite to verify end-to-end behavior.
+
+func TestSaveAndSearch_EndToEnd(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	// Save a memory via store (simulating ghost_memory_save logic).
+	id, merged, err := store.Upsert(ctx, "abc123", "pattern", "use context.Background() in tests", "mcp", 0.7, []string{"testing"})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if id == "" {
+		t.Error("expected non-empty ID")
+	}
+	if merged {
+		t.Error("first save should not be merged")
+	}
+
+	// Search via FTS (simulating ghost_memory_search without embedder).
+	results, err := store.SearchHybrid(ctx, "abc123", "context Background", nil, 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid: %v", err)
+	}
+	if len(results) == 0 {
+		t.Error("expected at least one search result")
+	}
+}
+
+func TestSaveAndSearch_WithEmbedder(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger)
+
+	ch := make(chan string, 1)
+	srv.SetEmbedder(&mockEmbedder{}, ch)
+
+	ctx := context.Background()
+
+	// Save memory.
+	_, _, err := store.Upsert(ctx, "abc123", "fact", "Ghost uses SQLite with FTS5", "mcp", 0.8, []string{})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Embed + search (mock embedder returns [0.1, 0.2, 0.3]).
+	vec, err := srv.embedder.Embed(ctx, "SQLite FTS5")
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	results, err := store.SearchHybrid(ctx, "abc123", "SQLite", vec, 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid: %v", err)
+	}
+	// FTS should still find it even with dummy vector.
+	if len(results) == 0 {
+		t.Error("expected at least one search result")
+	}
+}
+
+func TestListMemories_ByCategoryAndAll(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	// Save memories in different categories with distinct content to avoid merge.
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "Go compiles to static binaries with no runtime dependencies", "mcp", 0.5, []string{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Upsert(ctx, "abc123", "decision", "Chi was chosen as HTTP router for its stdlib compatibility", "mcp", 0.7, []string{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "Cardano uses Ouroboros Praos consensus protocol for block production", "mcp", 0.6, []string{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// List by category.
+	facts, err := store.GetByCategory(ctx, "abc123", "fact", 30)
+	if err != nil {
+		t.Fatalf("GetByCategory: %v", err)
+	}
+	if len(facts) != 2 {
+		t.Errorf("expected 2 facts, got %d", len(facts))
+	}
+
+	// List all.
+	all, err := store.GetAll(ctx, "abc123", 30)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 3 {
+		t.Errorf("expected 3 memories, got %d", len(all))
+	}
+}
+
+func TestDeleteMemory_EndToEnd(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	id, _, err := store.Upsert(ctx, "abc123", "gotcha", "watch for nil pointers", "mcp", 0.5, []string{})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Verify it exists.
+	all, _ := store.GetAll(ctx, "abc123", 100)
+	found := false
+	for _, m := range all {
+		if m.ID == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("memory not found after upsert")
+	}
+
+	// Delete it.
+	if err := store.Delete(ctx, id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	// Verify gone.
+	all, _ = store.GetAll(ctx, "abc123", 100)
+	for _, m := range all {
+		if m.ID == id {
+			t.Error("memory should be deleted")
+		}
+	}
+}
+
+func TestSearchAll_CrossProject(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	// Create second project.
+	if err := store.EnsureProject(ctx, "def456", "/tmp/other", "other-project"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "ghost uses SQLite", "mcp", 0.5, []string{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Upsert(ctx, "def456", "fact", "roller uses SQLite", "mcp", 0.5, []string{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// SearchFTSAll should find both.
+	results, err := store.SearchFTSAll(ctx, "SQLite", 10)
+	if err != nil {
+		t.Fatalf("SearchFTSAll: %v", err)
+	}
+	if len(results) < 2 {
+		t.Errorf("expected at least 2 cross-project results, got %d", len(results))
+	}
+}
+
+func TestSaveGlobal_EndToEnd(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	// Ensure _global project.
+	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatal(err)
+	}
+
+	id, _, err := store.Upsert(ctx, "_global", "preference", "always use nerdctl", "mcp", 0.8, []string{})
+	if err != nil {
+		t.Fatalf("Upsert global: %v", err)
+	}
+	if id == "" {
+		t.Error("expected non-empty ID")
+	}
+
+	// Verify retrievable.
+	mems, err := store.GetTopMemories(ctx, "_global", 50)
+	if err != nil {
+		t.Fatalf("GetTopMemories: %v", err)
+	}
+	if len(mems) == 0 {
+		t.Error("expected at least one global memory")
+	}
+}
+
+func TestTaskLifecycle(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	// Create task.
+	id, err := store.CreateTask(ctx, "abc123", "Fix the bug", "Segfault in main.go", 1)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if id == "" {
+		t.Error("expected task ID")
+	}
+
+	// List tasks.
+	tasks, err := store.ListTasks(ctx, "abc123", "", 30)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	if tasks[0].Title != "Fix the bug" {
+		t.Errorf("title = %q", tasks[0].Title)
+	}
+
+	// Complete task.
+	if err := store.CompleteTask(ctx, id, "Fixed in commit abc"); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	// List done tasks.
+	done, err := store.ListTasks(ctx, "abc123", "done", 30)
+	if err != nil {
+		t.Fatalf("ListTasks done: %v", err)
+	}
+	if len(done) != 1 {
+		t.Errorf("expected 1 done task, got %d", len(done))
+	}
+}
+
+func TestDecisionRecord_EndToEnd(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	id, err := store.RecordDecision(ctx, "abc123", "Use SQLite", "Embedded DB for simplicity", "No CGO dependency", []string{"PostgreSQL", "MySQL"}, []string{"database"})
+	if err != nil {
+		t.Fatalf("RecordDecision: %v", err)
+	}
+	if id == "" {
+		t.Error("expected decision ID")
+	}
+
+	decisions, err := store.ListDecisions(ctx, "abc123", "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(decisions) != 1 {
+		t.Fatalf("expected 1 decision, got %d", len(decisions))
+	}
+	if decisions[0].Title != "Use SQLite" {
+		t.Errorf("title = %q", decisions[0].Title)
+	}
+}
+
+func TestHealthOutput(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	// Seed memories with very distinct content to avoid Upsert merge.
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "Ghost uses SQLite with FTS5 for full-text search capabilities", "mcp", 0.5, []string{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Upsert(ctx, "abc123", "convention", "Kubernetes manifests use helmfile for declarative deployment management", "mcp", 0.6, []string{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Count memories.
+	count, err := store.CountMemories(ctx, "abc123")
+	if err != nil {
+		t.Fatalf("CountMemories: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 memories, got %d", count)
+	}
+
+	// List projects.
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if len(projects) != 1 {
+		t.Errorf("expected 1 project, got %d", len(projects))
+	}
+}
+
+func TestFormatMemories_EdgeCases(t *testing.T) {
+	// Multiple memories with different features.
+	mems := []memory.Memory{
+		{Category: "fact", Importance: 0.5, Content: "plain memory"},
+		{Category: "decision", Importance: 1.0, Content: "critical decision", Pinned: true, Tags: []string{"arch"}},
+		{Category: "gotcha", Importance: 0.3, Content: "minor gotcha"},
+	}
+	result := formatMemories(mems)
+
+	if !strings.Contains(result, "[fact]") || !strings.Contains(result, "[decision]") || !strings.Contains(result, "[gotcha]") {
+		t.Errorf("expected all categories in output: %s", result)
+	}
+	if !strings.Contains(result, "[pinned]") {
+		t.Error("expected [pinned] marker")
+	}
+	if !strings.Contains(result, `tags:["arch"]`) {
+		t.Errorf("expected tags in output: %s", result)
+	}
+	// Each memory on its own line.
+	lines := strings.Split(strings.TrimSpace(result), "\n")
+	if len(lines) != 3 {
+		t.Errorf("expected 3 lines, got %d", len(lines))
+	}
+}
