@@ -15,8 +15,8 @@
 # --- Claude API ---
 # api:
 #   key: ""                          # or set ANTHROPIC_API_KEY env var
-#   model_quality: "claude-sonnet-4-5-20250929"
-#   model_fast: "claude-haiku-4-5-20251001"
+#   model_quality: "claude-opus-4-6-20250514"
+#   model_fast: "claude-sonnet-4-5-20250929"
 
 # --- Daemon defaults ---
 # defaults:
@@ -89,3 +89,8 @@
 # briefing:
 #   enabled: false
 #   schedule: "0 8 * * 1-5"         # cron: 8am weekdays
+
+# --- Monthly Cost Report ---
+# cost_report:
+#   enabled: false
+#   schedule: "0 9 1 * *"           # cron: 9am on 1st of month
