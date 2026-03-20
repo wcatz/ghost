@@ -36,20 +36,6 @@ changelog:
       - "^chore:"
       - "^ci:"
 
-dockers_v2:
-  - ids: ["ghost"]
-    images:
-      - "ghcr.io/wcatz/ghost"
-    platforms:
-      - linux/amd64
-      - linux/arm64
-    tags:
-      - "{{ .Version }}"
-      - latest
-    dockerfile: Dockerfile
-    build_args:
-      VERSION: "{{ .Version }}"
-
 homebrew_casks:
   - repository:
       owner: wcatz
