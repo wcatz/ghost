@@ -1215,3 +1215,108 @@ func TestStoreGetLatestConversationNoRows(t *testing.T) {
 		t.Errorf("expected sql.ErrNoRows, got %v", err)
 	}
 }
+
+func TestMergeProject(t *testing.T) {
+	s := testStore(t) // creates testProject ("test-project") at "/tmp/test"
+	ctx := context.Background()
+
+	// Create an MCP-style duplicate with name-as-ID.
+	if err := s.EnsureProject(ctx, "test", "test", "dup-project"); err != nil {
+		t.Fatalf("EnsureProject dup: %v", err)
+	}
+
+	// Seed data under the duplicate project.
+	memID, _, err := s.Upsert(ctx, "test", "fact", "MCP-created memory about deployment", "mcp", 0.7, []string{})
+	if err != nil {
+		t.Fatalf("Upsert under dup: %v", err)
+	}
+	_, err = s.CreateTask(ctx, "test", "Fix MCP task", "", 2)
+	if err != nil {
+		t.Fatalf("CreateTask under dup: %v", err)
+	}
+
+	// Merge old→new.
+	if err := s.MergeProject(ctx, "test", testProject); err != nil {
+		t.Fatalf("MergeProject: %v", err)
+	}
+
+	// Memory should now belong to testProject.
+	mems, err := s.GetByIDs(ctx, []string{memID})
+	if err != nil {
+		t.Fatalf("GetByIDs: %v", err)
+	}
+	if len(mems) != 1 || mems[0].ProjectID != testProject {
+		t.Errorf("expected memory reassigned to %q, got project_id=%q", testProject, mems[0].ProjectID)
+	}
+
+	// Old project should be gone.
+	projects, _ := s.ListProjects(ctx)
+	for _, p := range projects {
+		if p.ID == "test" {
+			t.Error("old project should be deleted after merge")
+		}
+	}
+
+	// Tasks should be reassigned.
+	tasks, _ := s.ListTasks(ctx, testProject, "", 30)
+	found := false
+	for _, task := range tasks {
+		if task.Title == "Fix MCP task" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("task not merged to new project")
+	}
+}
+
+func TestMergeProject_SameID(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if err := s.MergeProject(ctx, testProject, testProject); err != nil {
+		t.Fatalf("MergeProject same ID should be no-op: %v", err)
+	}
+}
+
+func TestEnsureProject_AutoMerge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Simulate MCP creating a project with name-as-ID.
+	if err := s.EnsureProject(ctx, "myproject", "myproject", "myproject"); err != nil {
+		t.Fatalf("EnsureProject MCP: %v", err)
+	}
+
+	// Save a memory under the MCP project.
+	_, _, err := s.Upsert(ctx, "myproject", "fact", "deployed on k8s cluster alpha-7", "mcp", 0.8, []string{})
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Simulate orchestrator creating the real project (abs path, hash ID).
+	hashID := "abc123def456" // deterministic fake hash
+	if err := s.EnsureProject(ctx, hashID, "/home/wayne/git/myproject", "myproject"); err != nil {
+		t.Fatalf("EnsureProject orchestrator: %v", err)
+	}
+
+	// The MCP project should have been auto-merged.
+	projects, _ := s.ListProjects(ctx)
+	for _, p := range projects {
+		if p.ID == "myproject" {
+			t.Error("MCP project should have been merged away")
+		}
+	}
+
+	// Memory should now be under the hash ID.
+	mems, _ := s.GetTopMemories(ctx, hashID, 10)
+	found := false
+	for _, m := range mems {
+		if strings.Contains(m.Content, "alpha-7") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected MCP memory to be reassigned to hash-ID project")
+	}
+}

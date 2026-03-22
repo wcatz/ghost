@@ -41,7 +41,21 @@ func New(store provider.MemoryStore, logger *slog.Logger) *Server {
 		Name:    "ghost",
 		Version: "0.1.0",
 	}, &mcp.ServerOptions{
-		Instructions: "Ghost is a persistent memory daemon. Use these tools to search, save, and manage project memories across sessions.",
+		Instructions: "Ghost is a persistent memory daemon that remembers project knowledge across sessions.\n\n" +
+			"## Workflow\n" +
+			"1. At session start, call ghost_list_projects to discover known projects.\n" +
+			"2. Call ghost_project_context with the project name to load accumulated knowledge.\n" +
+			"3. During work, save important discoveries with ghost_memory_save.\n" +
+			"4. Use ghost_memory_search to recall specific facts.\n\n" +
+			"## Memory Categories\n" +
+			"architecture (system design), decision (choices made), pattern (recurring approaches), " +
+			"convention (naming/formatting/workflow), gotcha (pitfalls/bugs), dependency (external requirements), " +
+			"preference (user preferences), fact (general knowledge).\n\n" +
+			"## Importance Scale\n" +
+			"1.0 critical (security, breaking changes) · 0.8 high (architectural decisions) · " +
+			"0.6 normal (useful patterns) · 0.4 low (minor observations). Default: 0.7.\n\n" +
+			"## Project IDs\n" +
+			"Pass the project name (e.g. \"ghost\", \"roller\") as project_id. Ghost resolves names to internal IDs automatically.",
 		Logger:       logger,
 	})
 
@@ -530,6 +544,32 @@ func (s *Server) registerTools() {
 			sb.WriteString("**Embeddings:** disabled\n")
 		}
 
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+		}, nil, nil
+	})
+
+	// ghost_list_projects — list all known projects.
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_list_projects",
+		Description: "List all projects Ghost knows about with their names, IDs, paths, and memory counts. Use at session start to find the project_id for the current codebase.",
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
+		projects, err := s.store.ListProjects(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list projects: %w", err)
+		}
+		if len(projects) == 0 {
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: "No projects registered yet."}},
+			}, nil, nil
+		}
+
+		var sb strings.Builder
+		sb.WriteString("## Ghost Projects\n\n")
+		for _, p := range projects {
+			count, _ := s.store.CountMemories(ctx, p.ID)
+			sb.WriteString(fmt.Sprintf("- **%s** (id: `%s`, path: `%s`) — %d memories\n", p.Name, p.ID, p.Path, count))
+		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
 		}, nil, nil
