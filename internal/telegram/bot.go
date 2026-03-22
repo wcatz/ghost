@@ -375,7 +375,7 @@ func (tb *Bot) handleMemoryAdd(ctx context.Context, b *bot.Bot, update *models.U
 	if merged {
 		action = "Merged into existing"
 	}
-	tb.reply(ctx, b, update, fmt.Sprintf("✅ %s memory `%s`", action, mdv2.Esc(id[:8])))
+	tb.reply(ctx, b, update, fmt.Sprintf("✅ %s memory `%s`", action, mdv2.Esc(shortID(id))))
 }
 
 func (tb *Bot) handleMemoryDelete(ctx context.Context, b *bot.Bot, update *models.Update, args []string) {
@@ -762,28 +762,6 @@ func (tb *Bot) reply(ctx context.Context, b *bot.Bot, update *models.Update, tex
 	}
 }
 
-// replyText sends plain text with no parse mode — safe for unescaped content such
-// as raw Claude responses that contain standard Markdown but are not MarkdownV2-escaped.
-func (tb *Bot) replyText(ctx context.Context, b *bot.Bot, update *models.Update, text string) {
-	if update.Message == nil {
-		return
-	}
-	chatID := update.Message.Chat.ID
-	for _, chunk := range mdv2.Split(text, telegramMsgMax) {
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: chatID,
-			Text:   chunk,
-			LinkPreviewOptions: &models.LinkPreviewOptions{
-				IsDisabled: bot.True(),
-			},
-		})
-		if err != nil {
-			tb.logger.Error("telegram send (plain)", "error", err, "chat_id", chatID)
-			return
-		}
-	}
-}
-
 // SendAlertToAll sends a formatted P0/P1 GitHub notification alert to all allowed users.
 // Includes the priority emoji, repo/title, reason, and an inline button linking to the PR/issue.
 func (tb *Bot) SendAlertToAll(ctx context.Context, n gh.Notification) {
@@ -883,6 +861,14 @@ func ghAPIToHTML(apiURL, subjectType string) string {
 		return "" // couldn't convert
 	}
 	return s
+}
+
+// shortID returns the first 8 chars of an ID, safe for any length.
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
 
 func truncate(s string, max int) string {

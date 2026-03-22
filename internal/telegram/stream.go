@@ -26,6 +26,7 @@ type streamEvent struct {
 
 // toolLogEntry tracks a tool's progress in the status message.
 type toolLogEntry struct {
+	ID       string // tool call ID for correlation
 	Name     string
 	Status   string // "running", "done", "error", "approval"
 	Duration string // e.g. "0.3s"
@@ -210,6 +211,7 @@ func (tb *Bot) handleStreamEvt(st *streamState, evt streamEvent) bool {
 		return true
 	case "tool_start":
 		st.tools = append(st.tools, toolLogEntry{
+			ID:     evt.ToolID,
 			Name:   evt.ToolName,
 			Status: "running",
 		})
@@ -219,9 +221,13 @@ func (tb *Bot) handleStreamEvt(st *streamState, evt streamEvent) bool {
 		}
 		return true
 	case "tool_result":
-		// Update the matching tool entry.
+		// Update the matching tool entry by ID (falls back to name if ID empty).
 		for i := len(st.tools) - 1; i >= 0; i-- {
-			if st.tools[i].Name == evt.ToolName && st.tools[i].Status == "running" {
+			match := evt.ToolID != "" && st.tools[i].ID == evt.ToolID
+			if !match {
+				match = st.tools[i].Name == evt.ToolName && st.tools[i].Status == "running"
+			}
+			if match {
 				if evt.IsError {
 					st.tools[i].Status = "error"
 				} else {
@@ -431,7 +437,7 @@ func (tb *Bot) handleUseCallback(ctx context.Context, b *bot.Bot, update *models
 		}
 	}
 	if projectName == "" {
-		projectName = sessionID[:8]
+		projectName = shortID(sessionID)
 	}
 
 	tb.mu.Lock()

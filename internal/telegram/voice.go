@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
-	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -57,14 +55,21 @@ func (tb *Bot) handleVoice(ctx context.Context, b *bot.Bot, update *models.Updat
 	file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: update.Message.Voice.FileID})
 	if err != nil {
 		tb.logger.Error("get voice file", "error", err)
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "Failed to retrieve voice file from Telegram.",
+		})
 		return
 	}
 
 	fileURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", tb.token, file.FilePath)
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(fileURL)
+	resp, err := httpClient.Get(fileURL)
 	if err != nil {
 		tb.logger.Error("download voice file", "error", err)
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "Failed to download voice message.",
+		})
 		return
 	}
 	defer resp.Body.Close()
@@ -72,6 +77,10 @@ func (tb *Bot) handleVoice(ctx context.Context, b *bot.Bot, update *models.Updat
 	oggData, err := io.ReadAll(io.LimitReader(resp.Body, 25*1024*1024)) // 25MB limit
 	if err != nil {
 		tb.logger.Error("read voice file", "error", err)
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "Failed to read voice file data.",
+		})
 		return
 	}
 

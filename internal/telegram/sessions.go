@@ -62,11 +62,11 @@ func (tb *Bot) handleSessions(ctx context.Context, b *bot.Bot, update *models.Up
 		if !s.Active {
 			status = "🔴"
 		}
-		shortID := s.ID[:8]
+		sid := shortID(s.ID)
 		fmt.Fprintf(&sb, "%s `%s`\n  %s \\| %s \\| %d msgs\n\n",
-			status, mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode), s.Messages)
+			status, mdv2.Esc(sid), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode), s.Messages)
 		rows = append(rows, []models.InlineKeyboardButton{
-			{Text: fmt.Sprintf("💬 %s (%s)", s.ProjectName, shortID), CallbackData: "chat:" + s.ID},
+			{Text: fmt.Sprintf("💬 %s (%s)", s.ProjectName, sid), CallbackData: "chat:" + s.ID},
 			{Text: "📌 Set active", CallbackData: "use:" + s.ID},
 		})
 	}
@@ -92,7 +92,7 @@ func (tb *Bot) handleChatCallback(ctx context.Context, b *bot.Bot, update *model
 		return
 	}
 	chatID := update.CallbackQuery.Message.Message.Chat.ID
-	shortID := sessionID[:8]
+	shortID := shortID(sessionID)
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
 		Text:      fmt.Sprintf("💬 Session `%s` selected.\nReply to this message with your prompt:", shortID),
@@ -170,7 +170,7 @@ func (tb *Bot) handlePendingChatReply(ctx context.Context, b *bot.Bot, update *m
 	}
 
 	// Look up project name for the session.
-	projectName := sessionID[:8]
+	projectName := shortID(sessionID)
 	if sessions, err := tb.fetchSessions(); err == nil {
 		for _, s := range sessions {
 			if s.ID == sessionID {
@@ -230,7 +230,7 @@ func (tb *Bot) streamChatMessage(ctx context.Context, sessionID, message string)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
 	}
@@ -298,7 +298,7 @@ func (tb *Bot) createMemory(projectID, content string) (id string, merged bool, 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", false, fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
 	}
 
@@ -346,7 +346,7 @@ func (tb *Bot) setSessionMode(sessionID, modeName string) (string, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
 	}
 
@@ -393,9 +393,9 @@ func (tb *Bot) handleMode(ctx context.Context, b *bot.Bot, update *models.Update
 		if len(sessions) > 0 {
 			sb.WriteString("\n*Session Modes*\n\n")
 			for _, s := range sessions {
-				shortID := s.ID[:8]
+				sid := shortID(s.ID)
 				fmt.Fprintf(&sb, "• `%s` %s → `%s`\n",
-					mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode))
+					mdv2.Esc(sid), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode))
 			}
 		}
 		sb.WriteString("\nSwitch: `/mode <session_id> <mode_name>`")
@@ -457,13 +457,13 @@ func (tb *Bot) handleCost(ctx context.Context, b *bot.Bot, update *models.Update
 		sb.WriteString("*Session Costs*\n\n")
 		tb.mu.Lock()
 		for _, s := range sessions {
-			shortID := s.ID[:8]
+			sid := shortID(s.ID)
 			cost, ok := tb.sessionCosts[s.ID]
 			if !ok {
 				cost = "no data yet"
 			}
 			fmt.Fprintf(&sb, "• `%s` %s — %s\n",
-				mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(cost))
+				mdv2.Esc(sid), mdv2.Esc(s.ProjectName), mdv2.Esc(cost))
 		}
 		tb.mu.Unlock()
 		sb.WriteString("\n_Costs update after each chat message\\._")
@@ -491,8 +491,8 @@ func (tb *Bot) handleCost(ctx context.Context, b *bot.Bot, update *models.Update
 		return
 	}
 
-	shortID := fullID[:8]
-	tb.reply(ctx, b, update, fmt.Sprintf("💰 Session `%s`: %s", mdv2.Esc(shortID), mdv2.Esc(cost)))
+	sid := shortID(fullID)
+	tb.reply(ctx, b, update, fmt.Sprintf("💰 Session `%s`: %s", mdv2.Esc(sid), mdv2.Esc(cost)))
 }
 
 // deleteMemory sends a DELETE request to remove a memory by ID.
@@ -513,7 +513,7 @@ func (tb *Bot) deleteMemory(memoryID string) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
 	}
 	return nil
