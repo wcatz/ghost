@@ -294,7 +294,7 @@ func runServe() {
 		tgBot, err = telegram.New(telegram.Config{
 			Token:      cfg.Telegram.Token,
 			AllowedIDs: allowedIDs,
-		}, store, ghMonitor, sched, db, logger)
+		}, store, ghMonitor, sched, logger)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: telegram bot: %v\n", err)
 			os.Exit(1)
