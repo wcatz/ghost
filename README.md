@@ -14,6 +14,7 @@ Pure Go. No CGO. Single binary.
 
 - **Agentic tool loop** — Claude's tool_use drives a read-act-reflect cycle with configurable approval gates
 - **Persistent memory** across sessions — Ghost knows what you worked on last week
+- **Claude Code memory import** — auto-imports Claude Code's memory files on first project contact, no manual migration
 - **3-block prompt caching** — 90%+ cache hit rates, ~76% savings on input tokens
 - **Hybrid search** — FTS5 keyword + vector cosine similarity via Reciprocal Rank Fusion
 - **Free embeddings** — `nomic-embed-text:v1.5` runs locally through Ollama, no API costs
@@ -165,7 +166,7 @@ Connects Claude Code, Cursor, or any MCP client to Ghost's memory via stdio.
 }
 ```
 
-**MCP Tools (12):**
+**MCP Tools (13):**
 
 | Tool | Description |
 |------|-------------|
@@ -174,6 +175,7 @@ Connects Claude Code, Cursor, or any MCP client to Ghost's memory via stdio.
 | `ghost_memories_list` | List with optional category filter |
 | `ghost_memory_delete` | Delete by ID |
 | `ghost_project_context` | Top memories ranked by importance + recency |
+| `ghost_list_projects` | Discover all known projects with memory counts |
 | `ghost_search_all` | Cross-project memory search |
 | `ghost_save_global` | Save memory accessible to all projects |
 | `ghost_task_create` | Create a task with priority and status |
@@ -181,6 +183,8 @@ Connects Claude Code, Cursor, or any MCP client to Ghost's memory via stdio.
 | `ghost_task_complete` | Mark a task as done |
 | `ghost_decision_record` | Record an architectural decision with rationale |
 | `ghost_health` | System stats (memory count, embeddings, costs) |
+
+The MCP server ships with comprehensive instructions that teach Claude when and how to save memories proactively, which categories to use, and how to leverage cross-project search. No CLAUDE.md configuration required.
 
 **MCP Resources:**
 
@@ -326,8 +330,9 @@ cmd/ghost/main.go          CLI + daemon bootstrap
 internal/
   ai/                      Claude API client, streaming, tool_use, cost tracking
   memory/                  SQLite + FTS5 + vector search + time-decay
-  tool/                    Tool registry + 9 built-in executors
+  tool/                    Tool registry + built-in executors (file, grep, glob, git, bash, memory)
   orchestrator/            Multi-project sessions, context compression, multi-turn caching
+  claudeimport/            Auto-import Claude Code memory files on first project contact
   reflection/              Haiku memory consolidation + auto-extraction
   prompt/                  3-block cached system prompt
   mode/                    Operating modes (chat, code, debug, review, plan, refactor)
@@ -335,7 +340,7 @@ internal/
   config/                  Layered YAML/env/flag config (koanf)
   tui/                     Terminal REPL (bubbletea)
   server/                  HTTP REST API (chi)
-  mcpserver/               MCP server (stdio, 12 tools + resources)
+  mcpserver/               MCP server (stdio, 13 tools + resources)
   telegram/                Bot, approvals, session management
   google/                  Calendar + Gmail OAuth2
   calendar/                CalDAV client
