@@ -568,7 +568,7 @@ func (s *Server) registerTools() {
 		sb.WriteString("## Ghost Projects\n\n")
 		for _, p := range projects {
 			count, _ := s.store.CountMemories(ctx, p.ID)
-			sb.WriteString(fmt.Sprintf("- **%s** (id: `%s`, path: `%s`) — %d memories\n", p.Name, p.ID, p.Path, count))
+			fmt.Fprintf(&sb, "- **%s** (id: `%s`, path: `%s`) — %d memories\n", p.Name, p.ID, p.Path, count)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
