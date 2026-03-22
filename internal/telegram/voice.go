@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
-	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -57,14 +55,21 @@ func (tb *Bot) handleVoice(ctx context.Context, b *bot.Bot, update *models.Updat
 	file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: update.Message.Voice.FileID})
 	if err != nil {
 		tb.logger.Error("get voice file", "error", err)
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "Failed to retrieve voice file from Telegram.",
+		})
 		return
 	}
 
 	fileURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", tb.token, file.FilePath)
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(fileURL)
+	resp, err := httpClient.Get(fileURL)
 	if err != nil {
 		tb.logger.Error("download voice file", "error", err)
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "Failed to download voice message.",
+		})
 		return
 	}
 	defer resp.Body.Close()
@@ -72,6 +77,10 @@ func (tb *Bot) handleVoice(ctx context.Context, b *bot.Bot, update *models.Updat
 	oggData, err := io.ReadAll(io.LimitReader(resp.Body, 25*1024*1024)) // 25MB limit
 	if err != nil {
 		tb.logger.Error("read voice file", "error", err)
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: update.Message.Chat.ID,
+			Text:   "Failed to read voice file data.",
+		})
 		return
 	}
 
@@ -105,12 +114,30 @@ func (tb *Bot) handleVoice(ctx context.Context, b *bot.Bot, update *models.Updat
 		return
 	}
 
-	// Reply with the transcription.
-	b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   fmt.Sprintf("🎤 *Transcription:*\n%s", mdv2.Esc(text)),
+	chatID := update.Message.Chat.ID
+	tb.logger.Info("voice message transcribed", "chars", len(text))
+
+	// If there's an active session, send the transcription to it.
+	tb.mu.Lock()
+	sessionID := tb.activeSession[chatID]
+	projectName := tb.activeName[chatID]
+	tb.mu.Unlock()
+
+	if sessionID != "" {
+		// Show transcript briefly, then stream to session.
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      fmt.Sprintf("🎤 %s", mdv2.Esc(text)),
+			ParseMode: models.ParseModeMarkdown,
+		})
+		tb.streamToSession(ctx, b, chatID, sessionID, projectName, text)
+		return
+	}
+
+	// No active session — just reply with the transcription.
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:    chatID,
+		Text:      fmt.Sprintf("🎤 *Transcription:*\n%s\n\n_Use /use \\<id\\> to set an active session for voice messages\\._", mdv2.Esc(text)),
 		ParseMode: models.ParseModeMarkdown,
 	})
-
-	tb.logger.Info("voice message transcribed", "chars", len(text))
 }

@@ -363,3 +363,18 @@ func TestContext_AllFieldsAccessible(t *testing.T) {
 		t.Error("LastCommits field not accessible")
 	}
 }
+
+func TestHashID(t *testing.T) {
+	id := HashID("/home/wayne/git/ghost")
+	if len(id) != 12 {
+		t.Errorf("expected 12-char ID, got len=%d: %q", len(id), id)
+	}
+	// Deterministic.
+	if id2 := HashID("/home/wayne/git/ghost"); id != id2 {
+		t.Errorf("not deterministic: %q vs %q", id, id2)
+	}
+	// Different inputs produce different IDs.
+	if id3 := HashID("/home/wayne/git/other"); id == id3 {
+		t.Error("different inputs produced same ID")
+	}
+}

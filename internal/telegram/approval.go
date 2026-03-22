@@ -25,11 +25,15 @@ type approvalState struct {
 
 // SetServerAddr configures the Ghost server address for API calls.
 func (tb *Bot) SetServerAddr(addr string) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
 	tb.serverAddr = addr
 }
 
 // SetServerToken configures the bearer token for Ghost server API auth.
 func (tb *Bot) SetServerToken(token string) {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
 	tb.serverToken = token
 }
 
