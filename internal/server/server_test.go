@@ -98,6 +98,7 @@ func (m *mockStore) ListDecisions(_ context.Context, _, _ string, _ int) ([]memo
 }
 func (m *mockStore) ListProjects(_ context.Context) ([]memory.Project, error) { return nil, nil }
 func (m *mockStore) EnsureProject(_ context.Context, _, _, _ string) error    { return nil }
+func (m *mockStore) MergeProject(_ context.Context, _, _ string) error        { return nil }
 func (m *mockStore) ResolveProjectByName(_ context.Context, _ string) (string, error) {
 	return "", nil
 }
