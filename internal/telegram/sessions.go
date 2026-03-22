@@ -18,8 +18,11 @@ import (
 	"github.com/wcatz/ghost/internal/mode"
 )
 
-// httpClient is used for all outbound API calls to the Ghost server.
+// httpClient is used for short API calls to the Ghost server.
 var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+// sseClient is used for SSE streams which can run for minutes during tool loops.
+var sseClient = &http.Client{Timeout: 10 * time.Minute}
 
 type apiSession struct {
 	ID          string `json:"id"`
@@ -59,11 +62,12 @@ func (tb *Bot) handleSessions(ctx context.Context, b *bot.Bot, update *models.Up
 		if !s.Active {
 			status = "🔴"
 		}
-		shortID := s.ID[:8]
+		sid := shortID(s.ID)
 		fmt.Fprintf(&sb, "%s `%s`\n  %s \\| %s \\| %d msgs\n\n",
-			status, mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode), s.Messages)
+			status, mdv2.Esc(sid), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode), s.Messages)
 		rows = append(rows, []models.InlineKeyboardButton{
-			{Text: fmt.Sprintf("💬 %s (%s)", s.ProjectName, shortID), CallbackData: "chat:" + s.ID},
+			{Text: fmt.Sprintf("💬 %s (%s)", s.ProjectName, sid), CallbackData: "chat:" + s.ID},
+			{Text: "📌 Set active", CallbackData: "use:" + s.ID},
 		})
 	}
 
@@ -88,7 +92,7 @@ func (tb *Bot) handleChatCallback(ctx context.Context, b *bot.Bot, update *model
 		return
 	}
 	chatID := update.CallbackQuery.Message.Message.Chat.ID
-	shortID := sessionID[:8]
+	shortID := shortID(sessionID)
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 		ChatID:    chatID,
 		Text:      fmt.Sprintf("💬 Session `%s` selected.\nReply to this message with your prompt:", shortID),
@@ -106,7 +110,7 @@ func (tb *Bot) handleChatCallback(ctx context.Context, b *bot.Bot, update *model
 	tb.mu.Unlock()
 }
 
-// handleChat sends a message to a specific Ghost session.
+// handleChat sends a message to a specific Ghost session with rich streaming.
 func (tb *Bot) handleChat(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if tb.serverAddr == "" {
 		tb.reply(ctx, b, update, "Ghost server not configured\\.")
@@ -130,10 +134,11 @@ func (tb *Bot) handleChat(ctx context.Context, b *bot.Bot, update *models.Update
 		return
 	}
 
-	fullID := ""
+	var fullID, projectName string
 	for _, s := range sessions {
 		if strings.HasPrefix(s.ID, sessionID) {
 			fullID = s.ID
+			projectName = s.ProjectName
 			break
 		}
 	}
@@ -142,19 +147,8 @@ func (tb *Bot) handleChat(ctx context.Context, b *bot.Bot, update *models.Update
 		return
 	}
 
-	tb.sendTyping(ctx, update)
-
-	response, err := tb.sendChatMessage(fullID, message)
-	if err != nil {
-		tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
-		return
-	}
-
-	if response == "" {
-		response = "(no response)"
-	}
-	// Claude's response is standard Markdown, not MarkdownV2-escaped — use plain text.
-	tb.replyText(ctx, b, update, response)
+	chatID := update.Message.Chat.ID
+	tb.streamToSession(ctx, b, chatID, fullID, projectName, message)
 }
 
 // handlePendingChatReply routes text replies to the pending chat session.
@@ -175,19 +169,18 @@ func (tb *Bot) handlePendingChatReply(ctx context.Context, b *bot.Bot, update *m
 		return false
 	}
 
-	tb.sendTyping(ctx, update)
-
-	response, err := tb.sendChatMessage(sessionID, message)
-	if err != nil {
-		tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
-		return true
+	// Look up project name for the session.
+	projectName := shortID(sessionID)
+	if sessions, err := tb.fetchSessions(); err == nil {
+		for _, s := range sessions {
+			if s.ID == sessionID {
+				projectName = s.ProjectName
+				break
+			}
+		}
 	}
 
-	if response == "" {
-		response = "(no response)"
-	}
-	// Claude's response is standard Markdown, not MarkdownV2-escaped — use plain text.
-	tb.replyText(ctx, b, update, response)
+	tb.streamToSession(ctx, b, chatID, sessionID, projectName, message)
 	return true
 }
 
@@ -217,67 +210,66 @@ func (tb *Bot) fetchSessions() ([]apiSession, error) {
 	return sessions, nil
 }
 
-// sendChatMessage sends a message to a Ghost session and collects the streamed response.
-func (tb *Bot) sendChatMessage(sessionID, message string) (string, error) {
+// streamChatMessage opens an SSE connection to a Ghost session and returns a channel
+// of parsed stream events. The channel is closed when the stream ends.
+func (tb *Bot) streamChatMessage(ctx context.Context, sessionID, message string) (<-chan streamEvent, error) {
 	payload, _ := json.Marshal(map[string]string{"message": message})
 	url := fmt.Sprintf("http://%s/api/v1/sessions/%s/send", tb.serverAddr, sessionID)
 
-	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(payload))
 	if err != nil {
-		return "", fmt.Errorf("create chat request: %w", err)
+		return nil, fmt.Errorf("create chat request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if tb.serverToken != "" {
 		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
 	}
-	resp, err := httpClient.Do(req)
+	resp, err := sseClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
 	}
 
-	// Parse SSE stream and collect assistant text.
-	var response strings.Builder
-	scanner := bufio.NewScanner(resp.Body)
-	var eventType string
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "event: ") {
-			eventType = strings.TrimPrefix(line, "event: ")
-			continue
+	ch := make(chan streamEvent, 64)
+	go func() {
+		defer close(ch)
+		defer func() { _ = resp.Body.Close() }()
+
+		scanner := bufio.NewScanner(resp.Body)
+		// Allow up to 1MB per SSE line (tool outputs can be large).
+		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		var eventType string
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "event: ") {
+				eventType = strings.TrimPrefix(line, "event: ")
+				continue
+			}
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := strings.TrimPrefix(line, "data: ")
+
+			// Skip events we don't display (tool_input_delta, tool_use_end).
+			switch eventType {
+			case "text", "thinking", "tool_use_start", "tool_result", "tool_diff", "done", "error":
+				evt := parseStreamData(eventType, data)
+				select {
+				case ch <- evt:
+				case <-ctx.Done():
+					return
+				}
+			}
 		}
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		data := strings.TrimPrefix(line, "data: ")
-		switch eventType {
-		case "text":
-			var payload struct {
-				Text string `json:"text"`
-			}
-			if json.Unmarshal([]byte(data), &payload) == nil {
-				response.WriteString(payload.Text)
-			}
-		case "done":
-			var payload struct {
-				SessionCost string `json:"session_cost"`
-			}
-			if json.Unmarshal([]byte(data), &payload) == nil && payload.SessionCost != "" {
-				tb.mu.Lock()
-				tb.sessionCosts[sessionID] = payload.SessionCost
-				tb.mu.Unlock()
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return response.String(), fmt.Errorf("stream read: %w", err)
-	}
-	return response.String(), nil
+	}()
+
+	return ch, nil
 }
 
 // createMemory POSTs a new memory to the Ghost server API.
@@ -306,7 +298,7 @@ func (tb *Bot) createMemory(projectID, content string) (id string, merged bool, 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", false, fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
 	}
 
@@ -354,7 +346,7 @@ func (tb *Bot) setSessionMode(sessionID, modeName string) (string, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
 	}
 
@@ -401,9 +393,9 @@ func (tb *Bot) handleMode(ctx context.Context, b *bot.Bot, update *models.Update
 		if len(sessions) > 0 {
 			sb.WriteString("\n*Session Modes*\n\n")
 			for _, s := range sessions {
-				shortID := s.ID[:8]
+				sid := shortID(s.ID)
 				fmt.Fprintf(&sb, "• `%s` %s → `%s`\n",
-					mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode))
+					mdv2.Esc(sid), mdv2.Esc(s.ProjectName), mdv2.Esc(s.Mode))
 			}
 		}
 		sb.WriteString("\nSwitch: `/mode <session_id> <mode_name>`")
@@ -465,13 +457,13 @@ func (tb *Bot) handleCost(ctx context.Context, b *bot.Bot, update *models.Update
 		sb.WriteString("*Session Costs*\n\n")
 		tb.mu.Lock()
 		for _, s := range sessions {
-			shortID := s.ID[:8]
+			sid := shortID(s.ID)
 			cost, ok := tb.sessionCosts[s.ID]
 			if !ok {
 				cost = "no data yet"
 			}
 			fmt.Fprintf(&sb, "• `%s` %s — %s\n",
-				mdv2.Esc(shortID), mdv2.Esc(s.ProjectName), mdv2.Esc(cost))
+				mdv2.Esc(sid), mdv2.Esc(s.ProjectName), mdv2.Esc(cost))
 		}
 		tb.mu.Unlock()
 		sb.WriteString("\n_Costs update after each chat message\\._")
@@ -499,8 +491,8 @@ func (tb *Bot) handleCost(ctx context.Context, b *bot.Bot, update *models.Update
 		return
 	}
 
-	shortID := fullID[:8]
-	tb.reply(ctx, b, update, fmt.Sprintf("💰 Session `%s`: %s", mdv2.Esc(shortID), mdv2.Esc(cost)))
+	sid := shortID(fullID)
+	tb.reply(ctx, b, update, fmt.Sprintf("💰 Session `%s`: %s", mdv2.Esc(sid), mdv2.Esc(cost)))
 }
 
 // deleteMemory sends a DELETE request to remove a memory by ID.
@@ -521,7 +513,7 @@ func (tb *Bot) deleteMemory(memoryID string) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
 	}
 	return nil
