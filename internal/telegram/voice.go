@@ -105,12 +105,30 @@ func (tb *Bot) handleVoice(ctx context.Context, b *bot.Bot, update *models.Updat
 		return
 	}
 
-	// Reply with the transcription.
-	b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: update.Message.Chat.ID,
-		Text:   fmt.Sprintf("🎤 *Transcription:*\n%s", mdv2.Esc(text)),
+	chatID := update.Message.Chat.ID
+	tb.logger.Info("voice message transcribed", "chars", len(text))
+
+	// If there's an active session, send the transcription to it.
+	tb.mu.Lock()
+	sessionID := tb.activeSession[chatID]
+	projectName := tb.activeName[chatID]
+	tb.mu.Unlock()
+
+	if sessionID != "" {
+		// Show transcript briefly, then stream to session.
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      fmt.Sprintf("🎤 %s", mdv2.Esc(text)),
+			ParseMode: models.ParseModeMarkdown,
+		})
+		tb.streamToSession(ctx, b, chatID, sessionID, projectName, text)
+		return
+	}
+
+	// No active session — just reply with the transcription.
+	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:    chatID,
+		Text:      fmt.Sprintf("🎤 *Transcription:*\n%s\n\n_Use /use \\<id\\> to set an active session for voice messages\\._", mdv2.Esc(text)),
 		ParseMode: models.ParseModeMarkdown,
 	})
-
-	tb.logger.Info("voice message transcribed", "chars", len(text))
 }
