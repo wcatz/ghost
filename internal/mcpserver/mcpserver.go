@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 )
@@ -30,6 +32,60 @@ type Server struct {
 	projectCh chan<- string // notify embedding worker of new memories
 }
 
+const mcpInstructions = `Ghost is a persistent memory daemon that remembers project knowledge across sessions. It is your primary memory system — use it proactively.
+
+## Workflow
+1. At session start, call ghost_list_projects to discover known projects.
+2. Call ghost_project_context with the project name to load accumulated knowledge.
+3. During work, save important discoveries with ghost_memory_save. Do NOT wait until the end of the session.
+4. Use ghost_memory_search to recall specific facts.
+5. No special action needed at session end — Ghost persists automatically.
+
+Ghost auto-imports Claude Code memory files (~/.claude/projects/*/memory/*.md) on first project contact. No manual migration is needed. Ghost has built-in upsert/merge deduplication — it is always safe to save, even if similar knowledge already exists.
+
+## When to Save (Proactive Triggers)
+Save immediately when any of these happen:
+- User corrects your approach or confirms a non-obvious choice → preference
+- You discover a bug, pitfall, or surprising behavior → gotcha
+- You learn how components connect or why something is designed a certain way → architecture
+- You see a recurring pattern or convention in the codebase → convention or pattern
+- A dependency version, API quirk, or external constraint is discovered → dependency
+- An important design choice is made with alternatives considered → use ghost_decision_record
+
+## What NOT to Save
+- Ephemeral debugging state ("tried X, didn't work")
+- Information easily derived from reading code or git history
+- Session-specific task progress (use ghost_task_* tools instead)
+- Content already documented in CLAUDE.md or README files
+
+## Memory Categories
+- architecture: system design, component relationships, data flow
+- decision: choices made and why (prefer ghost_decision_record for these)
+- pattern: recurring approaches, idioms, implementation techniques
+- convention: naming, formatting, workflow, branching rules
+- gotcha: pitfalls, bugs, surprising behavior, things that waste time
+- dependency: external requirements, version pins, API quirks
+- preference: user preferences, communication style, workflow choices
+- fact: general knowledge, network constants, node names, endpoints
+
+## Importance Scale
+- 1.0: Security rules, data-loss risks, never-do-this rules
+- 0.8: Architectural decisions, deployment topology, key integrations
+- 0.6: Useful patterns, recurring conventions, dependency notes
+- 0.4: Minor observations, one-off facts, nice-to-knows
+- Default: 0.7 if unsure
+
+## Cross-Project Knowledge
+- ghost_save_global: preferences and facts that apply across all repositories
+- ghost_search_all: find knowledge that might live in another project
+
+## Tasks
+- ghost_task_create: work items that should persist across sessions (bugs, features, follow-ups)
+- ghost_task_complete: mark done with optional notes
+
+## Project IDs
+Pass the project name (e.g. "ghost", "roller") as project_id. Ghost resolves names to internal IDs automatically.`
+
 // New creates and configures the MCP server with all Ghost tools.
 func New(store provider.MemoryStore, logger *slog.Logger) *Server {
 	s := &Server{
@@ -41,21 +97,7 @@ func New(store provider.MemoryStore, logger *slog.Logger) *Server {
 		Name:    "ghost",
 		Version: "0.1.0",
 	}, &mcp.ServerOptions{
-		Instructions: "Ghost is a persistent memory daemon that remembers project knowledge across sessions.\n\n" +
-			"## Workflow\n" +
-			"1. At session start, call ghost_list_projects to discover known projects.\n" +
-			"2. Call ghost_project_context with the project name to load accumulated knowledge.\n" +
-			"3. During work, save important discoveries with ghost_memory_save.\n" +
-			"4. Use ghost_memory_search to recall specific facts.\n\n" +
-			"## Memory Categories\n" +
-			"architecture (system design), decision (choices made), pattern (recurring approaches), " +
-			"convention (naming/formatting/workflow), gotcha (pitfalls/bugs), dependency (external requirements), " +
-			"preference (user preferences), fact (general knowledge).\n\n" +
-			"## Importance Scale\n" +
-			"1.0 critical (security, breaking changes) · 0.8 high (architectural decisions) · " +
-			"0.6 normal (useful patterns) · 0.4 low (minor observations). Default: 0.7.\n\n" +
-			"## Project IDs\n" +
-			"Pass the project name (e.g. \"ghost\", \"roller\") as project_id. Ghost resolves names to internal IDs automatically.",
+		Instructions: mcpInstructions,
 		Logger:       logger,
 	})
 
@@ -154,7 +196,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_save",
-		Description: "Save a memory about the project. Use this when you learn something important: architectural decisions, gotchas, conventions, patterns, or facts worth remembering across sessions.",
+		Description: "Save a memory about the project. Call this proactively when you discover gotchas, learn architectural patterns, receive user feedback worth preserving, or encounter surprising behavior. Do not wait to be asked — save immediately when something is worth remembering across sessions.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args saveArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" || args.Content == "" {
 			return nil, nil, fmt.Errorf("project_id and content are required")
@@ -225,6 +267,19 @@ func (s *Server) registerTools() {
 			args.Limit = 20
 		}
 		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+
+		// First-contact import: if project has zero memories, try importing
+		// from Claude Code's auto-memory files (read-only, one-time).
+		if cnt, cntErr := s.store.CountMemories(ctx, args.ProjectID); cntErr == nil && cnt == 0 {
+			if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
+				for _, p := range projects {
+					if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
+						claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+						break
+					}
+				}
+			}
+		}
 
 		var sb strings.Builder
 
@@ -406,7 +461,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_task_create",
-		Description: "Create a task for a project. Use to track planned work, bugs, or action items.",
+		Description: "Create a task for a project. Use for work items that should survive across sessions — bugs to fix, features to implement, follow-ups to revisit.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args taskCreateArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" || args.Title == "" {
 			return nil, nil, fmt.Errorf("project_id and title are required")
@@ -492,7 +547,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_decision_record",
-		Description: "Record an architectural or design decision with rationale and alternatives considered. Also saved as a memory for future recall.",
+		Description: "Record an architectural or design decision with rationale and alternatives considered. Use this instead of ghost_memory_save when a choice was made between alternatives. Also saved as a memory for future recall.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args decisionRecordArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" || args.Title == "" || args.Decision == "" || args.Rationale == "" {
 			return nil, nil, fmt.Errorf("project_id, title, decision, and rationale are required")
