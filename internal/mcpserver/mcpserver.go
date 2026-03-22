@@ -274,7 +274,7 @@ func (s *Server) registerTools() {
 			if projects, lErr := s.store.ListProjects(ctx); lErr == nil {
 				for _, p := range projects {
 					if p.ID == args.ProjectID && filepath.IsAbs(p.Path) {
-						claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
+						_, _ = claudeimport.Import(ctx, s.store, args.ProjectID, p.Path, s.logger)
 						break
 					}
 				}
