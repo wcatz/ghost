@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/project"
 	"github.com/wcatz/ghost/internal/prompt"
@@ -80,11 +81,19 @@ func (o *Orchestrator) StartSession(projectPath string) (*Session, error) {
 	o.sessions[projCtx.ID] = s
 	o.logger.Info("session started", "project", projCtx.Name, "path", projCtx.Path, "id", projCtx.ID)
 
-	// Cold-start onboarding: if this project has zero memories, extract seed
-	// memories from README, CLAUDE.md, file tree via a background Haiku call.
+	// Cold-start: import Claude Code memories first, fall back to LLM onboarding.
 	count, err := o.store.CountMemories(ctx, projCtx.ID)
 	if err == nil && count == 0 {
-		go onboardProject(context.Background(), o.client, o.store, projCtx, o.logger)
+		go func() {
+			bgCtx := context.Background()
+			imported, importErr := claudeimport.Import(bgCtx, o.store, projCtx.ID, projCtx.Path, o.logger)
+			if importErr != nil {
+				o.logger.Warn("claude memory import failed", "project", projCtx.Name, "error", importErr)
+			}
+			if imported == 0 && o.client != nil {
+				onboardProject(bgCtx, o.client, o.store, projCtx, o.logger)
+			}
+		}()
 	}
 
 	return s, nil

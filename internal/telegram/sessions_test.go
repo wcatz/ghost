@@ -15,10 +15,14 @@ func testBot(t *testing.T, serverURL string) *Bot {
 	t.Helper()
 	addr := strings.TrimPrefix(serverURL, "http://")
 	return &Bot{
-		serverAddr:   addr,
-		serverToken:  "test-token",
-		pendingChat:  make(map[int64]string),
-		sessionCosts: make(map[string]string),
+		serverAddr:    addr,
+		serverToken:   "test-token",
+		pendingChat:   make(map[int64]string),
+		sessionCosts:  make(map[string]string),
+		activeSession: make(map[int64]string),
+		activeName:    make(map[int64]string),
+		lastThinking:  make(map[int64]string),
+		lastDiffs:     make(map[int64][]map[string]string),
 	}
 }
 
@@ -108,9 +112,9 @@ func TestFetchSessions_NoAuthToken(t *testing.T) {
 	}
 }
 
-// --- sendChatMessage ---
+// --- streamChatMessage ---
 
-func TestSendChatMessage_SSE(t *testing.T) {
+func TestStreamChatMessage_SSE(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			t.Errorf("expected POST, got %s", r.Method)
@@ -132,46 +136,67 @@ func TestSendChatMessage_SSE(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprint(w, "event: text\ndata: {\"text\":\"Hello \"}\n\n")
+		_, _ = fmt.Fprint(w, "event: thinking\ndata: {\"text\":\"let me think...\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: tool_use_start\ndata: {\"id\":\"t1\",\"name\":\"file_read\"}\n\n")
+		_, _ = fmt.Fprint(w, "event: tool_result\ndata: {\"id\":\"t1\",\"name\":\"file_read\",\"output\":\"ok\",\"duration\":\"320ms\"}\n\n")
 		_, _ = fmt.Fprint(w, "event: text\ndata: {\"text\":\"world!\"}\n\n")
 		_, _ = fmt.Fprint(w, "event: done\ndata: {\"session_cost\":\"$0.12\"}\n\n")
 	}))
 	defer server.Close()
 
-	origClient := httpClient
-	httpClient = server.Client()
-	t.Cleanup(func() { httpClient = origClient })
+	origClient := sseClient
+	sseClient = server.Client()
+	t.Cleanup(func() { sseClient = origClient })
 
 	tb := testBot(t, server.URL)
-	response, err := tb.sendChatMessage("session-abc", "hello ghost")
+	ctx := t.Context()
+	ch, err := tb.streamChatMessage(ctx, "session-abc", "hello ghost")
 	if err != nil {
-		t.Fatalf("sendChatMessage: %v", err)
-	}
-	if response != "Hello world!" {
-		t.Errorf("response = %q, want %q", response, "Hello world!")
+		t.Fatalf("streamChatMessage: %v", err)
 	}
 
-	// Verify cost was tracked.
-	tb.mu.Lock()
-	cost := tb.sessionCosts["session-abc"]
-	tb.mu.Unlock()
-	if cost != "$0.12" {
-		t.Errorf("session cost = %q, want %q", cost, "$0.12")
+	var events []streamEvent
+	for evt := range ch {
+		events = append(events, evt)
+	}
+
+	// Expected: text, thinking, tool_start, tool_result, text, done = 6 events.
+	if len(events) != 6 {
+		t.Fatalf("got %d events, want 6", len(events))
+	}
+	if events[0].Type != "text" || events[0].Text != "Hello " {
+		t.Errorf("event[0] = %+v", events[0])
+	}
+	if events[1].Type != "thinking" || events[1].Text != "let me think..." {
+		t.Errorf("event[1] = %+v", events[1])
+	}
+	if events[2].Type != "tool_start" || events[2].ToolName != "file_read" {
+		t.Errorf("event[2] = %+v", events[2])
+	}
+	if events[3].Type != "tool_result" || events[3].Duration != "320ms" {
+		t.Errorf("event[3] = %+v", events[3])
+	}
+	if events[4].Type != "text" || events[4].Text != "world!" {
+		t.Errorf("event[4] = %+v", events[4])
+	}
+	if events[5].Type != "done" || events[5].Cost != "$0.12" {
+		t.Errorf("event[5] = %+v", events[5])
 	}
 }
 
-func TestSendChatMessage_ServerError(t *testing.T) {
+func TestStreamChatMessage_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte("bad request"))
 	}))
 	defer server.Close()
 
-	origClient := httpClient
-	httpClient = server.Client()
-	t.Cleanup(func() { httpClient = origClient })
+	origClient := sseClient
+	sseClient = server.Client()
+	t.Cleanup(func() { sseClient = origClient })
 
 	tb := testBot(t, server.URL)
-	_, err := tb.sendChatMessage("session-abc", "test")
+	_, err := tb.streamChatMessage(t.Context(), "session-abc", "test")
 	if err == nil {
 		t.Fatal("expected error for 400 response")
 	}
@@ -180,7 +205,7 @@ func TestSendChatMessage_ServerError(t *testing.T) {
 	}
 }
 
-func TestSendChatMessage_EmptyResponse(t *testing.T) {
+func TestStreamChatMessage_EmptyResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -188,17 +213,23 @@ func TestSendChatMessage_EmptyResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	origClient := httpClient
-	httpClient = server.Client()
-	t.Cleanup(func() { httpClient = origClient })
+	origClient := sseClient
+	sseClient = server.Client()
+	t.Cleanup(func() { sseClient = origClient })
 
 	tb := testBot(t, server.URL)
-	response, err := tb.sendChatMessage("session-abc", "test")
+	ch, err := tb.streamChatMessage(t.Context(), "session-abc", "test")
 	if err != nil {
-		t.Fatalf("sendChatMessage: %v", err)
+		t.Fatalf("streamChatMessage: %v", err)
 	}
-	if response != "" {
-		t.Errorf("expected empty response, got %q", response)
+
+	var events []streamEvent
+	for evt := range ch {
+		events = append(events, evt)
+	}
+
+	if len(events) != 1 || events[0].Type != "done" {
+		t.Errorf("expected single done event, got %v", events)
 	}
 }
 

@@ -26,6 +26,12 @@ type Context struct {
 	ReadmeSummary string // first 500 chars of README.md
 }
 
+// HashID returns a deterministic 12-hex-char ID for the given input string.
+func HashID(input string) string {
+	h := sha256.Sum256([]byte(input))
+	return fmt.Sprintf("%x", h[:6])
+}
+
 // Detect scans a project directory and builds context.
 func Detect(path string) (*Context, error) {
 	absPath, err := filepath.Abs(path)
@@ -48,9 +54,8 @@ func Detect(path string) (*Context, error) {
 		return nil, fmt.Errorf("not a directory: %s", absPath)
 	}
 
-	h := sha256.Sum256([]byte(absPath))
 	ctx := &Context{
-		ID:   fmt.Sprintf("%x", h[:6]),
+		ID:   HashID(absPath),
 		Name: filepath.Base(absPath),
 		Path: absPath,
 	}
