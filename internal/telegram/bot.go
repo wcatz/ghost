@@ -46,8 +46,12 @@ type Bot struct {
 	stt             STTProvider   // optional voice transcription
 	approval        approvalState // pending approval tracking
 	mu              sync.Mutex
-	pendingChat     map[int64]string // chatID → sessionID for reply routing
-	sessionCosts    map[string]string // sessionID → last known cost string
+	pendingChat     map[int64]string            // chatID → sessionID for reply routing
+	sessionCosts    map[string]string            // sessionID → last known cost string
+	activeSession   map[int64]string             // chatID → sessionID for free-text routing
+	activeName      map[int64]string             // chatID → project display name
+	lastThinking    map[int64]string             // chatID → last thinking text
+	lastDiffs       map[int64][]map[string]string // chatID → last file diffs
 }
 
 // GoogleProvider is the interface for Google Calendar/Gmail access.
@@ -73,8 +77,12 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 		logger:     logger,
 		token:      cfg.Token,
 		allowedIDs:  make(map[int64]bool, len(cfg.AllowedIDs)),
-		pendingChat:  make(map[int64]string),
-		sessionCosts: make(map[string]string),
+		pendingChat:   make(map[int64]string),
+		sessionCosts:  make(map[string]string),
+		activeSession: make(map[int64]string),
+		activeName:    make(map[int64]string),
+		lastThinking:  make(map[int64]string),
+		lastDiffs:     make(map[int64][]map[string]string),
 	}
 
 	for _, id := range cfg.AllowedIDs {
@@ -103,11 +111,16 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 	b.RegisterHandler(bot.HandlerTypeMessageText, "chat", bot.MatchTypeCommand, tb.handleChat)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "mode", bot.MatchTypeCommand, tb.handleMode)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "cost", bot.MatchTypeCommand, tb.handleCost)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "use", bot.MatchTypeCommand, tb.handleUse)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "detach", bot.MatchTypeCommand, tb.handleDetach)
 
 	// Callback query handlers.
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "approve:", bot.MatchTypePrefix, tb.handleApprovalCallback)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "deny:", bot.MatchTypePrefix, tb.handleApprovalCallback)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "chat:", bot.MatchTypePrefix, tb.handleChatCallback)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "use:", bot.MatchTypePrefix, tb.handleUseCallback)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "thinking:", bot.MatchTypePrefix, tb.handleThinkingCallback)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "diff:", bot.MatchTypePrefix, tb.handleDiffCallback)
 
 	return tb, nil
 }
@@ -137,6 +150,8 @@ func (tb *Bot) registerCommands(ctx context.Context) {
 		{Command: "emails", Description: "Recent unread emails"},
 		{Command: "sessions", Description: "List active Ghost sessions"},
 		{Command: "chat", Description: "Chat with a session: /chat <id> <msg>"},
+		{Command: "use", Description: "Set active session: /use <id>"},
+		{Command: "detach", Description: "Detach active session"},
 		{Command: "mode", Description: "List or switch mode: /mode [name]"},
 		{Command: "cost", Description: "Show session cost: /cost <id>"},
 		{Command: "memory", Description: "Manage memories: search, add, delete"},
@@ -360,7 +375,7 @@ func (tb *Bot) handleMemoryAdd(ctx context.Context, b *bot.Bot, update *models.U
 	if merged {
 		action = "Merged into existing"
 	}
-	tb.reply(ctx, b, update, fmt.Sprintf("✅ %s memory `%s`", action, mdv2.Esc(id[:8])))
+	tb.reply(ctx, b, update, fmt.Sprintf("✅ %s memory `%s`", action, mdv2.Esc(shortID(id))))
 }
 
 func (tb *Bot) handleMemoryDelete(ctx context.Context, b *bot.Bot, update *models.Update, args []string) {
@@ -555,18 +570,27 @@ func (tb *Bot) handleEmails(ctx context.Context, b *bot.Bot, update *models.Upda
 func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update) {
 	tb.reply(ctx, b, update, `*Ghost Commands*
 
+*Session Control*
+/sessions — List active Ghost sessions
+/chat — Chat with a session: /chat \<id\> \<msg\>
+/use — Set active session: /use \<id\>
+/detach — Detach active session
+/mode — List modes or switch: /mode \<id\> \<name\>
+/cost — Show session cost: /cost \<id\>
+
+*Notifications*
 /status — System status \+ notification summary
 /notifications — List unread GitHub notifications
 /meetings — Today's calendar with Meet links
 /emails — Recent unread emails
-/sessions — List active Ghost sessions
-/chat — Chat with a session
-/mode — List modes or switch: /mode \<id\> \<name\>
-/cost — Show session cost: /cost \<id\>
+
+*Other*
 /memory — Search, add, or delete memories
 /remind — Set a reminder
 /briefing — Get your morning briefing
-/help — This message`)
+/help — This message
+
+_When an active session is set, free\\-text and voice messages are sent directly to it\\._`)
 }
 
 func (tb *Bot) handleDefault(ctx context.Context, b *bot.Bot, update *models.Update) {
@@ -586,7 +610,123 @@ func (tb *Bot) handleDefault(ctx context.Context, b *bot.Bot, update *models.Upd
 	if tb.handlePendingChatReply(ctx, b, update) {
 		return
 	}
+	// Route free-text to active session if set.
+	if update.Message.Text != "" {
+		chatID := update.Message.Chat.ID
+		tb.mu.Lock()
+		sessionID := tb.activeSession[chatID]
+		projectName := tb.activeName[chatID]
+		tb.mu.Unlock()
+		if sessionID != "" {
+			tb.streamToSession(ctx, b, chatID, sessionID, projectName, update.Message.Text)
+			return
+		}
+	}
 	tb.reply(ctx, b, update, "Use /help to see available commands\\.")
+}
+
+// handleUse sets the active session for this chat.
+func (tb *Bot) handleUse(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if tb.serverAddr == "" {
+		tb.reply(ctx, b, update, "Ghost server not configured\\.")
+		return
+	}
+
+	parts := strings.Fields(update.Message.Text)
+	if len(parts) < 2 {
+		tb.reply(ctx, b, update, "Usage: `/use <session_id>`")
+		return
+	}
+
+	prefix := parts[1]
+	sessions, err := tb.fetchSessions()
+	if err != nil {
+		tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
+		return
+	}
+
+	var fullID, projectName string
+	for _, s := range sessions {
+		if strings.HasPrefix(s.ID, prefix) {
+			fullID = s.ID
+			projectName = s.ProjectName
+			break
+		}
+	}
+	if fullID == "" {
+		tb.reply(ctx, b, update, "Session not found\\. Use /sessions to list\\.")
+		return
+	}
+
+	chatID := update.Message.Chat.ID
+	tb.mu.Lock()
+	tb.activeSession[chatID] = fullID
+	tb.activeName[chatID] = projectName
+	tb.mu.Unlock()
+
+	tb.sendWithKeyboard(ctx, b, chatID,
+		fmt.Sprintf("✅ Active session: *%s*\nFree\\-text messages will be sent to this session\\.", mdv2.Esc(projectName)))
+}
+
+// handleDetach clears the active session for this chat.
+func (tb *Bot) handleDetach(ctx context.Context, b *bot.Bot, update *models.Update) {
+	chatID := update.Message.Chat.ID
+	tb.mu.Lock()
+	_, had := tb.activeSession[chatID]
+	delete(tb.activeSession, chatID)
+	delete(tb.activeName, chatID)
+	tb.mu.Unlock()
+
+	if had {
+		tb.sendWithKeyboard(ctx, b, chatID, "✅ Session detached\\. Free\\-text messages disabled\\.")
+	} else {
+		tb.reply(ctx, b, update, "No active session to detach\\.")
+	}
+}
+
+// mainKeyboard returns the persistent reply keyboard based on active session state.
+func (tb *Bot) mainKeyboard(chatID int64) *models.ReplyKeyboardMarkup {
+	tb.mu.Lock()
+	name := tb.activeName[chatID]
+	tb.mu.Unlock()
+
+	row1 := []models.KeyboardButton{
+		{Text: "/sessions"},
+		{Text: "/status"},
+		{Text: "/briefing"},
+	}
+
+	kb := &models.ReplyKeyboardMarkup{
+		Keyboard:       [][]models.KeyboardButton{row1},
+		ResizeKeyboard: true,
+	}
+
+	if name != "" {
+		activeRow := []models.KeyboardButton{
+			{Text: "/detach"},
+			{Text: "/mode"},
+			{Text: "/cost"},
+		}
+		kb.Keyboard = [][]models.KeyboardButton{activeRow, row1}
+	}
+
+	return kb
+}
+
+// sendWithKeyboard sends a MarkdownV2 message with the persistent reply keyboard attached.
+func (tb *Bot) sendWithKeyboard(ctx context.Context, b *bot.Bot, chatID int64, text string) {
+	_, err := b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID:      chatID,
+		Text:        text,
+		ParseMode:   models.ParseModeMarkdown,
+		ReplyMarkup: tb.mainKeyboard(chatID),
+		LinkPreviewOptions: &models.LinkPreviewOptions{
+			IsDisabled: bot.True(),
+		},
+	})
+	if err != nil {
+		tb.logger.Error("telegram send with keyboard", "error", err, "chat_id", chatID)
+	}
 }
 
 // --- Helpers ---
@@ -617,28 +757,6 @@ func (tb *Bot) reply(ctx context.Context, b *bot.Bot, update *models.Update, tex
 		})
 		if err != nil {
 			tb.logger.Error("telegram send", "error", err, "chat_id", chatID)
-			return
-		}
-	}
-}
-
-// replyText sends plain text with no parse mode — safe for unescaped content such
-// as raw Claude responses that contain standard Markdown but are not MarkdownV2-escaped.
-func (tb *Bot) replyText(ctx context.Context, b *bot.Bot, update *models.Update, text string) {
-	if update.Message == nil {
-		return
-	}
-	chatID := update.Message.Chat.ID
-	for _, chunk := range mdv2.Split(text, telegramMsgMax) {
-		_, err := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: chatID,
-			Text:   chunk,
-			LinkPreviewOptions: &models.LinkPreviewOptions{
-				IsDisabled: bot.True(),
-			},
-		})
-		if err != nil {
-			tb.logger.Error("telegram send (plain)", "error", err, "chat_id", chatID)
 			return
 		}
 	}
@@ -743,6 +861,14 @@ func ghAPIToHTML(apiURL, subjectType string) string {
 		return "" // couldn't convert
 	}
 	return s
+}
+
+// shortID returns the first 8 chars of an ID, safe for any length.
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
 
 func truncate(s string, max int) string {
