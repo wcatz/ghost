@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -89,6 +90,8 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 }
 
 // EnsureProject creates a project record if it doesn't exist.
+// When called with an absolute path, it auto-merges any same-name project
+// that was created with a non-absolute path (e.g., by MCP using name-as-ID).
 func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -105,7 +108,77 @@ func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error 
 	_, err = s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)
 	`, id)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Auto-merge: if this project has a real filesystem path, look for
+	// a same-name project created by MCP with a non-absolute path.
+	if path != id && filepath.IsAbs(path) {
+		var dupID string
+		scanErr := s.db.QueryRowContext(ctx,
+			`SELECT id FROM projects WHERE name = ? AND id != ? AND path NOT LIKE '/%' LIMIT 1`,
+			name, id).Scan(&dupID)
+		if scanErr == nil && dupID != "" {
+			if mergeErr := s.mergeProjectLocked(ctx, dupID, id); mergeErr != nil {
+				s.logger.Error("auto-merge failed", "old_id", dupID, "new_id", id, "error", mergeErr)
+			}
+		}
+	}
+
+	return nil
+}
+
+// MergeProject reassigns all child records from oldID to newID, then deletes
+// the old project row. Use this to unify duplicate project entries.
+func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.mergeProjectLocked(ctx, oldID, newID)
+}
+
+func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) error {
+	if oldID == newID {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin merge tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Reassign all child records from old project to new.
+	stmts := []string{
+		`UPDATE memories SET project_id = ? WHERE project_id = ?`,
+		`UPDATE conversations SET project_id = ? WHERE project_id = ?`,
+		`UPDATE tasks SET project_id = ? WHERE project_id = ?`,
+		`UPDATE decisions SET project_id = ? WHERE project_id = ?`,
+		`UPDATE token_usage SET project_id = ? WHERE project_id = ?`,
+		`UPDATE audit_log SET project_id = ? WHERE project_id = ?`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.ExecContext(ctx, stmt, newID, oldID); err != nil {
+			return fmt.Errorf("merge reassign: %w", err)
+		}
+	}
+
+	// Delete old project's ghost_state (newID already has its own).
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, oldID); err != nil {
+		return fmt.Errorf("merge delete ghost_state: %w", err)
+	}
+
+	// Delete the old project row.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, oldID); err != nil {
+		return fmt.Errorf("merge delete project: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("merge commit: %w", err)
+	}
+
+	s.logger.Info("merged duplicate project", "old_id", oldID, "new_id", newID)
+	return nil
 }
 
 // ResolveProjectByName looks up a project by name and returns its hash ID.
