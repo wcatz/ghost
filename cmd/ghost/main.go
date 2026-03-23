@@ -51,9 +51,15 @@ func main() {
 			runServe()
 			return
 		case "mcp":
-			if len(os.Args) > 2 && os.Args[2] == "init" {
-				runMCPInit()
-				return
+			if len(os.Args) > 2 {
+				switch os.Args[2] {
+				case "init":
+					runMCPInit()
+					return
+				case "status":
+					runMCPStatus()
+					return
+				}
 			}
 			runMCP()
 			return
@@ -448,7 +454,16 @@ func runMCP() {
 
 // runMCPInit configures Claude Code to use Ghost as its memory system.
 func runMCPInit() {
-	if err := mcpinit.Run(os.Stdout); err != nil {
+	dryRun := len(os.Args) > 3 && os.Args[3] == "--dry-run"
+	if err := mcpinit.Run(os.Stdout, dryRun); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runMCPStatus checks the health of the Ghost ↔ Claude Code integration.
+func runMCPStatus() {
+	if err := mcpinit.Status(os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
