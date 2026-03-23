@@ -14,6 +14,7 @@ import (
 func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 	_, _ = io.Copy(io.Discard, stdin) // drain stdin
 	fmt.Fprintln(stdout, "Ghost memory is active. Before starting work:")
-	fmt.Fprintln(stdout, "1. Call ghost_project_context with the project name")
-	fmt.Fprintln(stdout, "2. Save discoveries with ghost_memory_save during work")
+	fmt.Fprintln(stdout, "1. Call ghost_list_projects to discover known projects")
+	fmt.Fprintln(stdout, "2. Call ghost_project_context with the project name")
+	fmt.Fprintln(stdout, "3. Save discoveries with ghost_memory_save during work")
 }

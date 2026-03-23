@@ -13,6 +13,9 @@ func TestHandleSessionStartHook(t *testing.T) {
 	HandleSessionStartHook(strings.NewReader(`{"event":"SessionStart"}`), &out)
 
 	output := out.String()
+	if !strings.Contains(output, "ghost_list_projects") {
+		t.Error("hook output should mention ghost_list_projects")
+	}
 	if !strings.Contains(output, "ghost_project_context") {
 		t.Error("hook output should mention ghost_project_context")
 	}
