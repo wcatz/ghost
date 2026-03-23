@@ -122,6 +122,11 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 		return nil
 	}
 
+	// Remove stale registration before re-adding.
+	if alreadyRegistered {
+		_ = exec.Command(claudeBin, "mcp", "remove", "-s", "user", "ghost").Run()
+	}
+
 	// Register or update.
 	mcpConfig := map[string]any{
 		"type":    "stdio",
