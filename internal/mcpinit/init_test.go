@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +34,7 @@ func TestWriteRedirects_CreatesFile(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	writeRedirects(&out, projects)
+	writeRedirects(&out, projects, false)
 
 	encoded := strings.ReplaceAll("/home/test/git/myproject", "/", "-")
 	target := filepath.Join(home, ".claude", "projects", encoded, "memory", "MEMORY.md")
@@ -76,7 +77,7 @@ func TestWriteRedirects_SkipsExisting(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	writeRedirects(&out, projects)
+	writeRedirects(&out, projects, false)
 
 	output := out.String()
 	if !strings.Contains(output, "redirect exists") {
@@ -93,7 +94,7 @@ func TestWriteRedirects_SkipsRelativePath(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	writeRedirects(&out, projects)
+	writeRedirects(&out, projects, false)
 
 	// Should produce no output for relative paths.
 	if out.String() != "" {
@@ -121,7 +122,7 @@ func TestWriteRedirects_DoesNotClobber(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	writeRedirects(&out, projects)
+	writeRedirects(&out, projects, false)
 
 	// Verify it was NOT overwritten.
 	data, _ := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
@@ -132,6 +133,41 @@ func TestWriteRedirects_DoesNotClobber(t *testing.T) {
 	output := out.String()
 	if !strings.Contains(output, "not overwriting") {
 		t.Errorf("should say 'not overwriting', got: %s", output)
+	}
+}
+
+func TestWriteRedirects_DryRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	projects := []projectInfo{
+		{ID: "abc123", Path: "/home/test/git/myproject", Name: "myproject"},
+	}
+
+	var out bytes.Buffer
+	writeRedirects(&out, projects, true)
+
+	output := out.String()
+	if !strings.Contains(output, "would create redirect") {
+		t.Errorf("dry run should say 'would create redirect', got: %s", output)
+	}
+
+	// Verify no file was created.
+	encoded := strings.ReplaceAll("/home/test/git/myproject", "/", "-")
+	target := filepath.Join(home, ".claude", "projects", encoded, "memory", "MEMORY.md")
+	if _, err := os.Stat(target); err == nil {
+		t.Error("dry run should not create files")
+	}
+}
+
+func TestRetryHint(t *testing.T) {
+	err := retryHint(fmt.Errorf("something broke"))
+	msg := err.Error()
+	if !strings.Contains(msg, "something broke") {
+		t.Error("should preserve original error")
+	}
+	if !strings.Contains(msg, "ghost mcp init") {
+		t.Error("should include retry hint")
 	}
 }
 

@@ -17,51 +17,69 @@ import (
 )
 
 // Run executes the 6-step Claude Code integration setup.
-func Run(w io.Writer) error {
+// When dryRun is true, it reports what would change without modifying anything.
+func Run(w io.Writer, dryRun bool) error {
+	if dryRun {
+		fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
+	}
+
 	// Step 1: Prerequisites.
-	fmt.Fprintln(w, "\n[1/6] Checking prerequisites...")
+	fmt.Fprintln(w, "[1/6] Checking prerequisites...")
 	ghostBin, claudeBin, err := checkPrereqs(w)
 	if err != nil {
-		return err
+		return retryHint(err)
 	}
 
 	// Step 2: MCP server registration.
 	fmt.Fprintln(w, "\n[2/6] Registering MCP server...")
-	if err := registerMCP(w, ghostBin, claudeBin); err != nil {
-		return err
+	if err := registerMCP(w, ghostBin, claudeBin, dryRun); err != nil {
+		return retryHint(err)
 	}
 
 	// Step 3: Tool permissions.
 	fmt.Fprintln(w, "\n[3/6] Adding tool permissions...")
 	settingsFile, err := ensurePermissions(w)
 	if err != nil {
-		return err
+		return retryHint(err)
 	}
 
 	// Step 4: SessionStart hook.
 	fmt.Fprintln(w, "\n[4/6] Configuring SessionStart hook...")
 	if err := ensureHook(w, settingsFile, ghostBin); err != nil {
-		return err
+		return retryHint(err)
 	}
 
 	// Save settings (steps 3+4 both modify it).
-	if err := settingsFile.save(); err != nil {
-		return fmt.Errorf("save settings: %w", err)
+	if dryRun {
+		fmt.Fprintln(w, "\n  (skipping settings write — dry run)")
+	} else {
+		if err := settingsFile.save(); err != nil {
+			return retryHint(fmt.Errorf("save settings: %w", err))
+		}
 	}
 
 	// Step 5: Import Claude Code memories.
 	fmt.Fprintln(w, "\n[5/6] Importing Claude Code memories...")
-	projects, err := importMemories(w)
+	projects, err := importMemories(w, dryRun)
 	if err != nil {
 		fmt.Fprintf(w, "  ! import error: %v (continuing)\n", err)
 	}
 
 	// Step 6: Project memory redirects.
 	fmt.Fprintln(w, "\n[6/6] Writing project memory redirects...")
-	writeRedirects(w, projects)
+	writeRedirects(w, projects, dryRun)
 
-	fmt.Fprintln(w, "\nDone! Restart Claude Code to activate.")
+	if dryRun {
+		fmt.Fprintln(w, "\nNo changes made (dry run).")
+	} else {
+		fmt.Fprintln(w, "\nDone! Restart Claude Code to activate.")
+	}
 	return nil
+}
+
+// retryHint wraps an error with a re-run suggestion.
+func retryHint(err error) error {
+	return fmt.Errorf("%w\n  Re-run `ghost mcp init` to retry", err)
 }
 
 // checkPrereqs verifies that both ghost and claude binaries are on PATH.
@@ -82,7 +100,7 @@ func checkPrereqs(w io.Writer) (ghostBin, claudeBin string, err error) {
 }
 
 // registerMCP ensures the ghost MCP server is registered with claude.
-func registerMCP(w io.Writer, ghostBin, claudeBin string) error {
+func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 	// Check current registration.
 	out, err := exec.Command(claudeBin, "mcp", "get", "ghost").CombinedOutput()
 	currentOutput := string(out)
@@ -92,6 +110,15 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string) error {
 
 	if alreadyRegistered && correctPath {
 		fmt.Fprintln(w, "  ✓ ghost MCP server already registered")
+		return nil
+	}
+
+	if dryRun {
+		if alreadyRegistered {
+			fmt.Fprintf(w, "  ~ would update ghost MCP server (command: %s)\n", ghostBin)
+		} else {
+			fmt.Fprintf(w, "  ~ would register ghost MCP server (command: %s)\n", ghostBin)
+		}
 		return nil
 	}
 
@@ -186,7 +213,7 @@ type projectInfo struct {
 
 // importMemories opens the Ghost DB and imports Claude Code memory files
 // for all known projects.
-func importMemories(w io.Writer) ([]projectInfo, error) {
+func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return nil, fmt.Errorf("data dir: %w", err)
@@ -218,6 +245,11 @@ func importMemories(w io.Writer) ([]projectInfo, error) {
 		infos = append(infos, projectInfo{ID: p.ID, Path: p.Path, Name: p.Name})
 
 		if !filepath.IsAbs(p.Path) {
+			continue
+		}
+
+		if dryRun {
+			fmt.Fprintf(w, "  ~ %s — would scan for importable memories\n", p.Name)
 			continue
 		}
 
@@ -258,7 +290,7 @@ func sanitizeName(name string) string {
 
 // writeRedirects creates MEMORY.md redirect files in Claude's project memory
 // directories for each known Ghost project.
-func writeRedirects(w io.Writer, projects []projectInfo) {
+func writeRedirects(w io.Writer, projects []projectInfo, dryRun bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintf(w, "  ! cannot determine home directory: %v\n", err)
@@ -282,6 +314,11 @@ func writeRedirects(w io.Writer, projects []projectInfo) {
 			}
 			// File exists with other content — don't clobber.
 			fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", p.Name)
+			continue
+		}
+
+		if dryRun {
+			fmt.Fprintf(w, "  ~ %s — would create redirect\n", p.Name)
 			continue
 		}
 
