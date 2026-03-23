@@ -184,7 +184,24 @@ Connects Claude Code, Cursor, or any MCP client to Ghost's memory via stdio.
 | `ghost_decision_record` | Record an architectural decision with rationale |
 | `ghost_health` | System stats (memory count, embeddings, costs) |
 
-The MCP server ships with comprehensive instructions that teach Claude when and how to save memories proactively, which categories to use, and how to leverage cross-project search. No CLAUDE.md configuration required.
+The MCP server ships with comprehensive instructions that teach Claude when and how to save memories proactively, which categories to use, and how to leverage cross-project search.
+
+### `ghost mcp init` — Claude Code Setup
+
+One command to fully integrate Ghost with Claude Code:
+
+```bash
+ghost mcp init
+```
+
+This configures:
+1. **MCP server registration** — registers `ghost mcp` with the `claude` CLI
+2. **Tool permissions** — adds all 13 `mcp__ghost__*` tools to the allow list
+3. **SessionStart hook** — reminds Claude to load Ghost context at every session start
+4. **Memory import** — imports existing Claude Code memory files into Ghost (deduplicated)
+5. **Project redirects** — writes `MEMORY.md` files that point Claude to Ghost
+
+Idempotent — safe to re-run after updates. Requires both `ghost` and `claude` on PATH.
 
 **MCP Resources:**
 
