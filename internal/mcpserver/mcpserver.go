@@ -747,7 +747,7 @@ func formatMemories(memories []memory.Memory) string {
 			tagsJSON, _ := json.Marshal(m.Tags)
 			tags = " tags:" + string(tagsJSON)
 		}
-		sb.WriteString(fmt.Sprintf("- [%s] (%.1f%s%s) %s\n", m.Category, m.Importance, pin, tags, m.Content))
+		sb.WriteString(fmt.Sprintf("- [%s] `%s` (%.1f%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, m.Content))
 	}
 	return sb.String()
 }
