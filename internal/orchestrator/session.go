@@ -377,6 +377,13 @@ func (s *Session) SendMessage(ctx context.Context, userMessage ai.Message, userT
 				}
 			}
 
+			// If context was cancelled (user pressed ESC), don't append the
+			// incomplete assistant message — it would corrupt the conversation
+			// with orphaned tool_use blocks that cause API errors on next request.
+			if ctx.Err() != nil {
+				return
+			}
+
 			// Build assistant message from accumulated content.
 			// Thinking blocks must be preserved — the API requires them
 			// in message history when extended thinking is enabled.
