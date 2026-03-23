@@ -21,6 +21,7 @@ import (
 	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/github"
 	goog "github.com/wcatz/ghost/internal/google"
+	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/mcpserver"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/orchestrator"
@@ -50,7 +51,14 @@ func main() {
 			runServe()
 			return
 		case "mcp":
+			if len(os.Args) > 2 && os.Args[2] == "init" {
+				runMCPInit()
+				return
+			}
 			runMCP()
+			return
+		case "hook":
+			runHook()
 			return
 		}
 	}
@@ -435,6 +443,25 @@ func runMCP() {
 	if err := srv.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// runMCPInit configures Claude Code to use Ghost as its memory system.
+func runMCPInit() {
+	if err := mcpinit.Run(os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runHook dispatches Claude Code hook events.
+func runHook() {
+	if len(os.Args) < 3 {
+		os.Exit(0)
+	}
+	switch os.Args[2] {
+	case "session-start":
+		mcpinit.HandleSessionStartHook(os.Stdin, os.Stdout)
 	}
 }
 
