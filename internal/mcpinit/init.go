@@ -236,19 +236,22 @@ func importMemories(w io.Writer) ([]projectInfo, error) {
 	return infos, nil
 }
 
-// sanitizeName strips characters that could inject markdown directives or
-// newlines into MEMORY.md files loaded by Claude Code.
+// sanitizeName allowlists safe characters for project names interpolated into
+// MEMORY.md files that Claude Code auto-loads (prevents prompt injection).
 func sanitizeName(name string) string {
 	var sb strings.Builder
 	for _, r := range name {
-		if r == '\n' || r == '\r' || r == '`' {
-			continue
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_' || r == ' ' || r == '.' {
+			sb.WriteRune(r)
 		}
-		sb.WriteRune(r)
 	}
 	s := sb.String()
 	if len(s) > 64 {
 		s = s[:64]
+	}
+	if s == "" {
+		s = "unknown"
 	}
 	return s
 }

@@ -75,13 +75,17 @@ func loadSettings(path string) (*settingsFile, error) {
 	return s, nil
 }
 
-// save writes the settings back to disk, creating a .bak backup first.
+// save writes the settings back to disk atomically, creating a .bak backup first.
 func (s *settingsFile) save() error {
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create dir %s: %w", dir, err)
+	}
+
 	// Backup existing file.
-	if _, err := os.Stat(s.path); err == nil {
-		data, err := os.ReadFile(s.path)
-		if err == nil {
-			_ = os.WriteFile(s.path+".bak", data, 0600)
+	if data, err := os.ReadFile(s.path); err == nil {
+		if err := os.WriteFile(s.path+".bak", data, 0600); err != nil {
+			return fmt.Errorf("backup %s: %w", s.path+".bak", err)
 		}
 	}
 
@@ -91,11 +95,31 @@ func (s *settingsFile) save() error {
 	}
 	out = append(out, '\n')
 
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create dir %s: %w", dir, err)
+	// Atomic write: temp file + rename.
+	tmp, err := os.CreateTemp(dir, ".settings-*.json")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
 	}
-	return os.WriteFile(s.path, out, 0600)
+	tmpPath := tmp.Name()
+
+	if _, err := tmp.Write(out); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0600); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	if err := os.Rename(tmpPath, s.path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename temp file: %w", err)
+	}
+	return nil
 }
 
 // getPermissions extracts the permissions.allow string slice.
