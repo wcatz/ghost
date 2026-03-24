@@ -100,23 +100,23 @@ func TestFormatMemories(t *testing.T) {
 		{
 			name: "single memory",
 			memories: []memory.Memory{
-				{Category: "fact", Importance: 0.7, Content: "test content"},
+				{ID: "ABC123", Category: "fact", Importance: 0.7, Content: "test content"},
 			},
-			wantIn: []string{"[fact]", "0.7", "test content"},
+			wantIn: []string{"[fact]", "`ABC123`", "0.7", "test content"},
 		},
 		{
 			name: "pinned memory",
 			memories: []memory.Memory{
-				{Category: "decision", Importance: 0.9, Content: "important decision", Pinned: true},
+				{ID: "DEF456", Category: "decision", Importance: 0.9, Content: "important decision", Pinned: true},
 			},
-			wantIn: []string{"[pinned]", "decision", "important decision"},
+			wantIn: []string{"`DEF456`", "[pinned]", "decision", "important decision"},
 		},
 		{
 			name: "memory with tags",
 			memories: []memory.Memory{
-				{Category: "pattern", Importance: 0.5, Content: "tagged memory", Tags: []string{"go", "test"}},
+				{ID: "GHI789", Category: "pattern", Importance: 0.5, Content: "tagged memory", Tags: []string{"go", "test"}},
 			},
-			wantIn: []string{"tags:", "go", "test", "tagged memory"},
+			wantIn: []string{"`GHI789`", "tags:", "go", "test", "tagged memory"},
 		},
 	}
 
