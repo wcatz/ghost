@@ -8,7 +8,7 @@ import (
 )
 
 // Consolidator performs memory consolidation. Each tier implements this
-// differently: Haiku uses the Anthropic API, Ollama uses a local LLM,
+// differently: Haiku uses the Anthropic API for intelligent consolidation,
 // and SQLite uses Jaccard similarity for mechanical deduplication.
 type Consolidator interface {
 	Name() string
@@ -25,7 +25,7 @@ type TieredConsolidator struct {
 }
 
 // NewTieredConsolidator creates a consolidator that tries each tier in order.
-// Tiers should be ordered from highest quality to lowest (e.g. haiku, ollama, sqlite).
+// Tiers should be ordered from highest quality to lowest (e.g. haiku, sqlite).
 func NewTieredConsolidator(tiers []Consolidator, logger *slog.Logger) *TieredConsolidator {
 	return &TieredConsolidator{
 		tiers:  tiers,
@@ -62,6 +62,20 @@ func (t *TieredConsolidator) Consolidate(ctx context.Context, input ReflectionIn
 		if err != nil {
 			t.logger.Warn("consolidator failed, trying next tier", "tier", tier.Name(), "error", err)
 			lastErr = err
+			continue
+		}
+
+		// Quality gate: if there were enough input memories and the tier returned
+		// less than 30% of them, treat the result as garbage and fall through.
+		// The last tier (SQLite) is always accepted — it's the mechanical fallback.
+		inputCount := len(input.ExistingMemories)
+		if inputCount >= 6 && len(result.Memories) < inputCount*3/10 && i < len(t.tiers)-1 {
+			t.logger.Warn("consolidator returned too few memories, trying next tier",
+				"tier", tier.Name(),
+				"input", inputCount,
+				"output", len(result.Memories),
+			)
+			lastErr = fmt.Errorf("%s: quality gate failed (%d/%d memories)", tier.Name(), len(result.Memories), inputCount)
 			continue
 		}
 

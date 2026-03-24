@@ -96,8 +96,7 @@ type ServerConfig struct {
 
 // ReflectionConfig holds memory consolidation settings.
 type ReflectionConfig struct {
-	Backend     string `koanf:"backend"`      // "auto", "haiku", "ollama", "sqlite", "disabled"
-	OllamaModel string `koanf:"ollama_model"` // model for Ollama tier (default "qwen2.5:3b")
+	Backend string `koanf:"backend"` // "auto", "haiku", "sqlite", "disabled"
 }
 
 // EmbeddingConfig holds local embedding settings.
@@ -175,7 +174,6 @@ var defaults = map[string]interface{}{
 	"embedding.model":            "nomic-embed-text:v1.5",
 	"embedding.dimensions":       768,
 	"reflection.backend":         "auto",
-	"reflection.ollama_model":    "qwen2.5:3b",
 	"github.interval":            60,
 	"briefing.enabled":           false,
 	"briefing.schedule":          "0 8 * * 1-5",

@@ -243,6 +243,106 @@ func TestParseReflectionResponse_NormalizesScope(t *testing.T) {
 	}
 }
 
+func TestTieredConsolidator_QualityGateRejectsGarbage(t *testing.T) {
+	// Input has 10 memories. First tier returns only 2 (20% < 30% threshold).
+	// Should fall through to the second tier.
+	inputMems := make([]memory.Memory, 10)
+	for i := range inputMems {
+		inputMems[i] = memory.Memory{Category: "fact", Content: "memory", Importance: 0.7}
+	}
+
+	garbage := &stubConsolidator{
+		name:      "garbage",
+		available: true,
+		result: ReflectionResult{
+			LearnedContext: "garbage-ctx",
+			Memories: []ReflectMemory{
+				{Category: "fact", Content: "collapsed1", Importance: 0.5, Tags: []string{}},
+				{Category: "fact", Content: "collapsed2", Importance: 0.5, Tags: []string{}},
+			},
+		},
+	}
+
+	goodMems := make([]ReflectMemory, 8)
+	for i := range goodMems {
+		goodMems[i] = ReflectMemory{Category: "fact", Content: "good", Importance: 0.7, Tags: []string{}}
+	}
+	good := &stubConsolidator{
+		name:      "good",
+		available: true,
+		result:    ReflectionResult{LearnedContext: "good-ctx", Memories: goodMems},
+	}
+
+	tc := NewTieredConsolidator([]Consolidator{garbage, good}, slog.Default())
+	result, err := tc.Consolidate(context.Background(), ReflectionInput{ExistingMemories: inputMems})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LearnedContext != "good-ctx" {
+		t.Errorf("expected good tier result, got %q", result.LearnedContext)
+	}
+	if len(result.Memories) != 8 {
+		t.Errorf("expected 8 memories from good tier, got %d", len(result.Memories))
+	}
+}
+
+func TestTieredConsolidator_QualityGateAcceptsLastTier(t *testing.T) {
+	// Even if the last tier returns few memories, it's accepted (no fallback available).
+	inputMems := make([]memory.Memory, 10)
+	for i := range inputMems {
+		inputMems[i] = memory.Memory{Category: "fact", Content: "memory", Importance: 0.7}
+	}
+
+	sparse := &stubConsolidator{
+		name:      "sqlite",
+		available: true,
+		result: ReflectionResult{
+			LearnedContext: "sparse-ctx",
+			Memories: []ReflectMemory{
+				{Category: "fact", Content: "only-one", Importance: 0.5, Tags: []string{}},
+			},
+		},
+	}
+
+	tc := NewTieredConsolidator([]Consolidator{sparse}, slog.Default())
+	result, err := tc.Consolidate(context.Background(), ReflectionInput{ExistingMemories: inputMems})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LearnedContext != "sparse-ctx" {
+		t.Errorf("expected last tier accepted regardless, got %q", result.LearnedContext)
+	}
+}
+
+func TestTieredConsolidator_QualityGateSkipsSmallInput(t *testing.T) {
+	// Input has only 4 memories (< 6 threshold) — quality gate should not apply.
+	inputMems := make([]memory.Memory, 4)
+	for i := range inputMems {
+		inputMems[i] = memory.Memory{Category: "fact", Content: "memory", Importance: 0.7}
+	}
+
+	sparse := &stubConsolidator{
+		name:      "tier1",
+		available: true,
+		result: ReflectionResult{
+			LearnedContext: "sparse-ctx",
+			Memories: []ReflectMemory{
+				{Category: "fact", Content: "just-one", Importance: 0.5, Tags: []string{}},
+			},
+		},
+	}
+	fallback := &stubConsolidator{name: "tier2", available: true, result: ReflectionResult{LearnedContext: "fallback"}}
+
+	tc := NewTieredConsolidator([]Consolidator{sparse, fallback}, slog.Default())
+	result, err := tc.Consolidate(context.Background(), ReflectionInput{ExistingMemories: inputMems})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.LearnedContext != "sparse-ctx" {
+		t.Errorf("expected first tier accepted (small input), got %q", result.LearnedContext)
+	}
+}
+
 func TestHaikuConsolidator_NilClient(t *testing.T) {
 	h := NewHaikuConsolidator(nil)
 	if h.Available(context.Background()) {

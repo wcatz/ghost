@@ -196,8 +196,6 @@ func (o *Orchestrator) buildConsolidator() reflection.Consolidator {
 	switch backend {
 	case "haiku":
 		return reflection.NewHaikuConsolidator(o.client)
-	case "ollama":
-		return reflection.NewOllamaConsolidator(o.cfg.Embedding.OllamaURL, o.cfg.Reflection.OllamaModel)
 	case "sqlite":
 		return reflection.NewSQLiteConsolidator()
 	case "disabled":
@@ -206,9 +204,6 @@ func (o *Orchestrator) buildConsolidator() reflection.Consolidator {
 		var tiers []reflection.Consolidator
 		if o.client != nil {
 			tiers = append(tiers, reflection.NewHaikuConsolidator(o.client))
-		}
-		if o.cfg.Embedding.OllamaURL != "" {
-			tiers = append(tiers, reflection.NewOllamaConsolidator(o.cfg.Embedding.OllamaURL, o.cfg.Reflection.OllamaModel))
 		}
 		tiers = append(tiers, reflection.NewSQLiteConsolidator())
 		return reflection.NewTieredConsolidator(tiers, o.logger)
