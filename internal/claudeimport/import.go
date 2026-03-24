@@ -50,18 +50,27 @@ func EncodeProjectPath(projectPath string) string {
 }
 
 // ClaudeMemoryDir returns the path to Claude Code's memory directory for the
-// given absolute project path. Returns "" if the directory does not exist.
+// given absolute project path. Returns "" if the directory does not exist or
+// the resolved path escapes the expected base directory.
 func ClaudeMemoryDir(projectPath string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
+	baseDir := filepath.Join(home, ".claude", "projects")
 	encoded := EncodeProjectPath(projectPath)
-	dir := filepath.Join(home, ".claude", "projects", encoded, "memory")
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+	dir := filepath.Join(baseDir, encoded, "memory")
+
+	// Prevent path traversal — resolved path must stay under baseDir.
+	resolved, err := filepath.Abs(dir)
+	if err != nil || !strings.HasPrefix(resolved, filepath.Clean(baseDir)+string(os.PathSeparator)) {
 		return ""
 	}
-	return dir
+
+	if info, err := os.Stat(resolved); err != nil || !info.IsDir() {
+		return ""
+	}
+	return resolved
 }
 
 // skipFile returns true if the filename should not be imported.
@@ -91,7 +100,8 @@ func isStub(content string) bool {
 // Ghost category, and importance. Returns skip=true for files that should
 // not be imported.
 func ParseMemoryFile(path string) (content, category string, importance float32, skip bool, err error) {
-	data, err := os.ReadFile(path)
+	cleanPath := filepath.Clean(path)
+	data, err := os.ReadFile(cleanPath) // #nosec G304 — path is validated by caller via ClaudeMemoryDir
 	if err != nil {
 		return "", "", 0, false, err
 	}
@@ -209,7 +219,8 @@ func Import(ctx context.Context, store provider.MemoryStore, projectID, projectP
 
 // importFromDir imports all Claude Code memories from a specific directory.
 func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, dir string, logger *slog.Logger) (int, error) {
-	entries, err := os.ReadDir(dir)
+	cleanDir := filepath.Clean(dir)
+	entries, err := os.ReadDir(cleanDir)
 	if err != nil {
 		return 0, fmt.Errorf("read claude memory dir: %w", err)
 	}
@@ -220,7 +231,7 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 			continue
 		}
 
-		path := filepath.Join(dir, entry.Name())
+		path := filepath.Join(cleanDir, filepath.Base(entry.Name()))
 		content, category, importance, skip, err := ParseMemoryFile(path)
 		if err != nil {
 			logger.Warn("claude import: file read failed", "file", entry.Name(), "error", err)
