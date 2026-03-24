@@ -83,6 +83,7 @@ func (s *SQLiteConsolidator) Consolidate(_ context.Context, input ReflectionInpu
 			Content:    best.Content,
 			Importance: best.Importance,
 			Tags:       best.Tags,
+			Scope:      inferGlobalScope(best.Category, best.Content),
 		})
 	}
 
@@ -103,6 +104,37 @@ func tokenize(s string) map[string]bool {
 		}
 	}
 	return tokens
+}
+
+// inferGlobalScope uses keyword heuristics to detect memories that apply across
+// all repositories rather than being project-specific. Used by the SQLite tier
+// which cannot use LLM classification.
+func inferGlobalScope(category, content string) string {
+	// Preferences and certain facts are strong global signals.
+	if category == "preference" {
+		return "global"
+	}
+
+	lower := strings.ToLower(content)
+
+	// Cross-repo workflow indicators.
+	globalPatterns := []string{
+		"across all", "all repos", "all projects", "every repo", "every project",
+		"cross-repo", "cross-project", "from any repo",
+		"deploy to", "deploy from", "push to infra",
+		"ssh ", "ssh into", "hostname",
+		"always use", "never use", "prefer ",
+		"personal tool", "dev machine", "workstation",
+		"infrastructure topology", "cluster ",
+		"api key", "credential", "token ",
+	}
+	for _, p := range globalPatterns {
+		if strings.Contains(lower, p) {
+			return "global"
+		}
+	}
+
+	return "project"
 }
 
 // jaccard computes the Jaccard similarity coefficient between two token sets.

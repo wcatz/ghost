@@ -29,6 +29,7 @@ type ReflectMemory struct {
 	Content    string   `json:"content"`
 	Importance float32  `json:"importance"`
 	Tags       []string `json:"tags"`
+	Scope      string   `json:"scope,omitempty"` // "project" (default) or "global"
 }
 
 // BuildReflectionPrompt assembles the reflection prompt from project history.
@@ -92,8 +93,9 @@ Produce a JSON object with two fields:
    - Merge duplicates into one stronger memory (higher importance)
    - Keep identity facts (architecture, conventions) — never drop these
    - Drop stale situational memories (old gotchas that were fixed)
-   - Each memory: "category" (architecture/decision/pattern/convention/gotcha/dependency/preference/fact), "content" (1-2 sentences), "importance" (0.0-1.0), "tags" (1-3 keywords)
+   - Each memory: "category" (architecture/decision/pattern/convention/gotcha/dependency/preference/fact), "content" (1-2 sentences), "importance" (0.0-1.0), "tags" (1-3 keywords), "scope" ("project" or "global")
    - Aim for 10-25 high-quality memories, not 50 repetitive ones
+   - Scope: most memories are "project". Mark as "global" ONLY if the knowledge applies across ALL repositories — examples: user preferences, cross-repo workflows (deploying from one repo to another), personal tooling choices, SSH hosts, infrastructure topology. Project-specific architecture, patterns, or conventions are always "project".
 
 Return ONLY the JSON object, no other text.`)
 
