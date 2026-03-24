@@ -208,7 +208,7 @@ CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id, status
 CREATE TABLE IF NOT EXISTS memory_snapshots (
     id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     snapshot_id   TEXT NOT NULL,
-    project_id    TEXT NOT NULL,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     category      TEXT NOT NULL,
     content       TEXT NOT NULL,
     importance    REAL NOT NULL,
