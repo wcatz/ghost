@@ -510,7 +510,7 @@ func runReflect() {
 		fmt.Fprintln(os.Stderr, `Usage: ghost reflect <project> [flags]
 
 Flags:
-  --tier string   Consolidation tier: auto, haiku, ollama, sqlite (default "auto")
+  --tier string   Consolidation tier: auto, haiku, sqlite (default "auto")
   --apply         Save results (default is dry-run/preview only)
   --restore       Undo the last consolidation from snapshot`)
 		os.Exit(1)
@@ -553,12 +553,6 @@ Flags:
 		}
 		client := ai.NewClient(cfg.API.Key, logger)
 		consolidator = reflection.NewHaikuConsolidator(client)
-	case "ollama":
-		url := cfg.Embedding.OllamaURL
-		if url == "" {
-			url = "http://localhost:11434"
-		}
-		consolidator = reflection.NewOllamaConsolidator(url, cfg.Reflection.OllamaModel)
 	case "sqlite":
 		consolidator = reflection.NewSQLiteConsolidator()
 	default: // "auto"
@@ -566,9 +560,6 @@ Flags:
 		if cfg.API.Key != "" {
 			client := ai.NewClient(cfg.API.Key, logger)
 			tiers = append(tiers, reflection.NewHaikuConsolidator(client))
-		}
-		if cfg.Embedding.OllamaURL != "" {
-			tiers = append(tiers, reflection.NewOllamaConsolidator(cfg.Embedding.OllamaURL, cfg.Reflection.OllamaModel))
 		}
 		tiers = append(tiers, reflection.NewSQLiteConsolidator())
 		consolidator = reflection.NewTieredConsolidator(tiers, logger)
