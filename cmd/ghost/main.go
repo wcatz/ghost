@@ -26,6 +26,7 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/orchestrator"
 	"github.com/wcatz/ghost/internal/scheduler"
+	"github.com/wcatz/ghost/internal/selfupdate"
 	"github.com/wcatz/ghost/internal/server"
 	"github.com/wcatz/ghost/internal/telegram"
 	"github.com/wcatz/ghost/internal/tool"
@@ -44,9 +45,15 @@ func (s *stringSlice) Set(v string) error {
 }
 
 func main() {
-	// Check for subcommands before flag parsing.
+	// Check for subcommands and flags before flag parsing.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "-v", "--version", "version":
+			fmt.Printf("ghost %s\n", version)
+			return
+		case "help", "--help", "-h":
+			printUsage()
+			return
 		case "serve":
 			runServe()
 			return
@@ -66,26 +73,24 @@ func main() {
 		case "hook":
 			runHook()
 			return
+		case "upgrade":
+			runUpgrade()
+			return
 		}
 	}
 
 	var (
-		projects    stringSlice
-		modeFlag    = flag.String("mode", "", "Operating mode: chat, code, debug, review, plan, refactor")
+		projects stringSlice
+		modeFlag = flag.String("mode", "", "Operating mode: chat, code, debug, review, plan, refactor")
 		modelFlag   = flag.String("model", "", "Model override (e.g. claude-opus-4-6-20250514)")
 		yolo        = flag.Bool("yolo", false, "Skip all tool approval prompts")
 		noMemory    = flag.Bool("no-memory", false, "Disable memory extraction for this session")
 		noTUI       = flag.Bool("no-tui", false, "Force legacy REPL (no bubbletea)")
 		cont        = flag.Bool("continue", false, "Resume last conversation")
-		versionFlag = flag.Bool("version", false, "Print version and exit")
 	)
+	flag.Usage = printUsage
 	flag.Var(&projects, "project", "Project path (can be specified multiple times)")
 	flag.Parse()
-
-	if *versionFlag {
-		fmt.Printf("ghost %s\n", version)
-		os.Exit(0)
-	}
 
 	cfg, logger, store, _ := bootstrap()
 	defer store.Close()
@@ -428,6 +433,11 @@ func runServe() {
 
 // runMCP starts ghost as an MCP server on stdio.
 func runMCP() {
+	if tui.IsTerminal() {
+		fmt.Fprintln(os.Stderr, "Starting MCP server on stdio (this is meant to be called by Claude Code).")
+		fmt.Fprintln(os.Stderr, "If you meant to set up the integration, run: ghost mcp init")
+		fmt.Fprintln(os.Stderr, "")
+	}
 	cfg, logger, store, _ := bootstrap()
 	defer store.Close()
 
@@ -467,6 +477,90 @@ func runMCPStatus() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// printUsage displays the top-level help.
+func printUsage() {
+	fmt.Fprintf(os.Stderr, `ghost %s — memory-first AI assistant
+
+Usage:
+  ghost [flags] [message]     Start interactive session or send one-shot message
+  ghost <command>             Run a subcommand
+
+Commands:
+  serve                       Start HTTP daemon with all subsystems
+  mcp                         Start MCP server on stdio (used by Claude Code)
+  mcp init [--dry-run]        Configure Claude Code integration
+  mcp status                  Check Claude Code integration health
+  upgrade                     Update ghost to the latest release
+  version                     Print version
+
+Flags:
+  -mode string                Operating mode: chat, code, debug, review, plan, refactor
+  -model string               Model override (e.g. claude-opus-4-6-20250514)
+  -project path               Project path (repeatable)
+  -continue                   Resume last conversation
+  -yolo                       Skip all tool approval prompts
+  -no-memory                  Disable memory extraction for this session
+  -no-tui                     Force legacy REPL (no bubbletea)
+
+Environment:
+  ANTHROPIC_API_KEY           Required for AI features
+  GHOST_DEBUG                 Enable debug logging
+  GHOST_PLAIN                 Force plain REPL (no bubbletea)
+`, version)
+}
+
+// runUpgrade downloads and installs the latest ghost release.
+func runUpgrade() {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot determine binary path: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Current: ghost %s (%s)\n", version, exe)
+	fmt.Println("Checking for updates...")
+
+	rel, err := selfupdate.LatestRelease()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	latest := strings.TrimPrefix(rel.TagName, "v")
+	if latest == version {
+		fmt.Printf("Already up to date (%s).\n", version)
+		return
+	}
+
+	asset, err := selfupdate.FindAsset(rel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Downloading %s...\n", asset.Name)
+	body, err := selfupdate.Download(asset.BrowserDownloadURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer body.Close()
+
+	bin, err := selfupdate.ExtractBinary(body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Replacing %s...\n", exe)
+	if err := selfupdate.Replace(exe, bin); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Updated: ghost %s → %s\n", version, latest)
 }
 
 // runHook dispatches Claude Code hook events.

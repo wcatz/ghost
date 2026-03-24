@@ -50,6 +50,14 @@ make build
 
 Download from [GitHub Releases](https://github.com/wcatz/ghost/releases) — available for linux, macOS, and Windows (amd64 + arm64).
 
+### Update
+
+```bash
+ghost upgrade
+```
+
+Downloads the latest release from GitHub, replaces the running binary in-place (wherever it lives), and prints the version diff. No package manager required.
+
 ### Docker
 
 ```bash
@@ -84,6 +92,15 @@ ghost serve
 
 # MCP server for Claude Code / Cursor
 ghost mcp
+
+# Set up Claude Code integration
+ghost mcp init
+
+# Check integration health
+ghost mcp status
+
+# Self-update to latest release
+ghost upgrade
 ```
 
 ## Runtime Modes
@@ -99,7 +116,7 @@ ghost mcp
 | `-continue` | Resume last conversation |
 | `-no-memory` | Disable automatic memory extraction |
 | `-no-tui` | Force legacy REPL (no bubbletea) |
-| `-version` | Print version and exit |
+| `-v`, `version` | Print version and exit |
 
 **Slash commands:**
 
@@ -191,7 +208,9 @@ The MCP server ships with comprehensive instructions that teach Claude when and 
 One command to fully integrate Ghost with Claude Code:
 
 ```bash
-ghost mcp init
+ghost mcp init              # configure everything
+ghost mcp init --dry-run    # preview changes without modifying files
+ghost mcp status            # verify integration health
 ```
 
 This configures:
@@ -358,6 +377,8 @@ internal/
   tui/                     Terminal REPL (bubbletea)
   server/                  HTTP REST API (chi)
   mcpserver/               MCP server (stdio, 13 tools + resources)
+  mcpinit/                 Claude Code integration setup (init, status, hook)
+  selfupdate/              Self-update from GitHub releases
   telegram/                Bot, approvals, session management
   google/                  Calendar + Gmail OAuth2
   calendar/                CalDAV client
