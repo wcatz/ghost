@@ -73,35 +73,80 @@ Download the `.vsix` from [GitHub Releases](https://github.com/wcatz/ghost/relea
 code --install-extension ghost-*.vsix
 ```
 
-## Quick Start
+## Quick Start — Claude Code / Cursor
+
+Ghost's primary interface is as an MCP server. One command configures everything:
 
 ```bash
-# Set your API key
+ghost mcp init
+```
+
+```
+[1/5] Checking prerequisites...
+  ✓ claude CLI found at /home/you/.local/bin/claude
+  ✓ ghost binary at /home/you/.local/bin/ghost
+
+[2/5] Registering MCP server...
+  ✓ ghost MCP server registered (command: /home/you/.local/bin/ghost)
+
+[3/5] Adding tool permissions...
+  + 13 mcp__ghost__* tools added to allow list
+
+[4/5] Configuring SessionStart hook...
+  + ghost hook session-start — reminds Claude to load context
+
+[5/5] Importing Claude Code memories...
+  ✓ myproject — 8 memories imported
+  ✓ infra — 12 memories imported
+
+Done! Restart Claude Code to activate.
+```
+
+**What this does:**
+
+| Step | Effect |
+|------|--------|
+| MCP registration | Runs `claude mcp add` so Claude Code discovers Ghost's 13 tools |
+| Permissions | Pre-approves all `mcp__ghost__*` tools — no per-call prompts |
+| SessionStart hook | At every session start, Claude sees a reminder to call `ghost_project_context` |
+| Memory import | Reads Claude Code's `~/.claude/projects/*/memory/*.md` files into Ghost (deduplicated) |
+| Project redirects | Writes `MEMORY.md` files pointing Claude to Ghost instead of its built-in memory |
+
+After setup, Claude Code will automatically load your project context and save discoveries during work. No manual prompting needed.
+
+```bash
+ghost mcp status     # verify integration health
+ghost mcp init --dry-run  # preview changes without modifying files
+```
+
+Idempotent — safe to re-run after updates or installs.
+
+### Manual MCP setup (Cursor, other clients)
+
+If you're not using Claude Code, add Ghost to your MCP config directly:
+
+```json
+{
+  "mcpServers": {
+    "ghost": {
+      "type": "stdio",
+      "command": "ghost",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Standalone usage
+
+```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
 
-# Interactive REPL
-ghost
-
-# One-shot query
-ghost "explain the authentication flow"
-
-# Pipe mode
-echo "explain this" | ghost
-
-# Start the daemon
-ghost serve
-
-# MCP server for Claude Code / Cursor
-ghost mcp
-
-# Set up Claude Code integration
-ghost mcp init
-
-# Check integration health
-ghost mcp status
-
-# Self-update to latest release
-ghost upgrade
+ghost                                  # interactive REPL
+ghost "explain the authentication flow" # one-shot query
+echo "explain this" | ghost            # pipe mode
+ghost serve                            # daemon (HTTP API + all subsystems)
+ghost upgrade                          # self-update to latest release
 ```
 
 ## Runtime Modes
@@ -170,29 +215,17 @@ Headless background service with HTTP API and all subsystems.
 
 ### `ghost mcp` — MCP Server
 
-Connects Claude Code, Cursor, or any MCP client to Ghost's memory via stdio.
+Exposes Ghost's memory to any MCP client via stdio. See [Quick Start](#quick-start--claude-code--cursor) for setup.
 
-```json
-{
-  "mcpServers": {
-    "ghost": {
-      "type": "stdio",
-      "command": "ghost",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-**MCP Tools (13):**
+**Tools (13):**
 
 | Tool | Description |
 |------|-------------|
-| `ghost_memory_search` | FTS5 + vector hybrid search |
+| `ghost_project_context` | Load top memories ranked by importance + recency |
 | `ghost_memory_save` | Store with category, importance, tags |
+| `ghost_memory_search` | FTS5 + vector hybrid search |
 | `ghost_memories_list` | List with optional category filter |
 | `ghost_memory_delete` | Delete by ID |
-| `ghost_project_context` | Top memories ranked by importance + recency |
 | `ghost_list_projects` | Discover all known projects with memory counts |
 | `ghost_search_all` | Cross-project memory search |
 | `ghost_save_global` | Save memory accessible to all projects |
@@ -202,33 +235,14 @@ Connects Claude Code, Cursor, or any MCP client to Ghost's memory via stdio.
 | `ghost_decision_record` | Record an architectural decision with rationale |
 | `ghost_health` | System stats (memory count, embeddings, costs) |
 
-The MCP server ships with comprehensive instructions that teach Claude when and how to save memories proactively, which categories to use, and how to leverage cross-project search.
-
-### `ghost mcp init` — Claude Code Setup
-
-One command to fully integrate Ghost with Claude Code:
-
-```bash
-ghost mcp init              # configure everything
-ghost mcp init --dry-run    # preview changes without modifying files
-ghost mcp status            # verify integration health
-```
-
-This configures:
-1. **MCP server registration** — registers `ghost mcp` with the `claude` CLI
-2. **Tool permissions** — adds all 13 `mcp__ghost__*` tools to the allow list
-3. **SessionStart hook** — reminds Claude to load Ghost context at every session start
-4. **Memory import** — imports existing Claude Code memory files into Ghost (deduplicated)
-5. **Project redirects** — writes `MEMORY.md` files that point Claude to Ghost
-
-Idempotent — safe to re-run after updates. Requires both `ghost` and `claude` on PATH.
-
-**MCP Resources:**
+**Resources:**
 
 | Resource | Description |
 |----------|-------------|
 | `ghost://project/{id}/context` | Push-based project context (memories + learned context) |
 | `ghost://memories/global` | Global memories accessible to all projects |
+
+The MCP server ships with comprehensive instructions that teach Claude when and how to save memories proactively, which categories to use, and how to leverage cross-project search.
 
 ## HTTP API
 
