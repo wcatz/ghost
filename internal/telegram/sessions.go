@@ -267,6 +267,12 @@ func (tb *Bot) streamChatMessage(ctx context.Context, sessionID, message string)
 				}
 			}
 		}
+		if err := scanner.Err(); err != nil {
+			select {
+			case ch <- streamEvent{Type: "error", Text: "stream read error: " + err.Error()}:
+			case <-ctx.Done():
+			}
+		}
 	}()
 
 	return ch, nil
@@ -403,14 +409,25 @@ func (tb *Bot) handleMode(ctx context.Context, b *bot.Bot, update *models.Update
 		return
 	}
 
-	// /mode <session_id> <mode_name>
-	if len(parts) < 3 {
+	var sessionPrefix, modeName string
+	if len(parts) == 2 {
+		// /mode <mode_name> — use active session
+		tb.mu.Lock()
+		sid := tb.activeSession[update.Message.Chat.ID]
+		tb.mu.Unlock()
+		if sid == "" {
+			tb.reply(ctx, b, update, "Usage: `/mode <session_id> <mode_name>`\nOr set active session with /use first\\.")
+			return
+		}
+		sessionPrefix = shortID(sid)
+		modeName = parts[1]
+	} else if len(parts) >= 3 {
+		sessionPrefix = parts[1]
+		modeName = parts[2]
+	} else {
 		tb.reply(ctx, b, update, "Usage: `/mode <session_id> <mode_name>`")
 		return
 	}
-
-	sessionPrefix := parts[1]
-	modeName := parts[2]
 
 	tb.sendTyping(ctx, update)
 
@@ -493,6 +510,414 @@ func (tb *Bot) handleCost(ctx context.Context, b *bot.Bot, update *models.Update
 
 	sid := shortID(fullID)
 	tb.reply(ctx, b, update, fmt.Sprintf("💰 Session `%s`: %s", mdv2.Esc(sid), mdv2.Esc(cost)))
+}
+
+// --- API helpers for session lifecycle ---
+
+type apiProject struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
+	Name string `json:"name"`
+}
+
+type historyMsg struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// fetchProjects returns all known projects from the Ghost server.
+func (tb *Bot) fetchProjects() ([]apiProject, error) {
+	url := fmt.Sprintf("http://%s/api/v1/projects", tb.serverAddr)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if tb.serverToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
+	}
+	var projects []apiProject
+	if err := json.NewDecoder(resp.Body).Decode(&projects); err != nil {
+		return nil, fmt.Errorf("decode projects: %w", err)
+	}
+	return projects, nil
+}
+
+// createSession creates a new session on the Ghost server.
+func (tb *Bot) createSession(path string) (*apiSession, error) {
+	payload, _ := json.Marshal(map[string]string{"path": path})
+	url := fmt.Sprintf("http://%s/api/v1/sessions/", tb.serverAddr)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if tb.serverToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
+	}
+	var session apiSession
+	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
+		return nil, fmt.Errorf("decode session: %w", err)
+	}
+	return &session, nil
+}
+
+// deleteSession stops a session on the Ghost server.
+func (tb *Bot) deleteSession(sessionID string) error {
+	url := fmt.Sprintf("http://%s/api/v1/sessions/%s", tb.serverAddr, sessionID)
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+	if tb.serverToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
+	}
+	return nil
+}
+
+// setAutoApprove enables or disables auto-approve for a session.
+func (tb *Bot) setAutoApprove(sessionID string, enabled bool) error {
+	payload, _ := json.Marshal(map[string]bool{"enabled": enabled})
+	url := fmt.Sprintf("http://%s/api/v1/sessions/%s/auto-approve", tb.serverAddr, sessionID)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if tb.serverToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
+	}
+	return nil
+}
+
+// fetchHistory returns the conversation history for a session.
+func (tb *Bot) fetchHistory(sessionID string) ([]historyMsg, error) {
+	url := fmt.Sprintf("http://%s/api/v1/sessions/%s/history", tb.serverAddr, sessionID)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if tb.serverToken != "" {
+		req.Header.Set("Authorization", "Bearer "+tb.serverToken)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("server returned %d: %s", resp.StatusCode, body)
+	}
+	var msgs []historyMsg
+	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
+		return nil, fmt.Errorf("decode history: %w", err)
+	}
+	return msgs, nil
+}
+
+// --- Session lifecycle handlers ---
+
+// handleNew creates a new Ghost session.
+func (tb *Bot) handleNew(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if tb.serverAddr == "" {
+		tb.reply(ctx, b, update, "Ghost server not configured\\.")
+		return
+	}
+
+	parts := strings.Fields(update.Message.Text)
+
+	// /new — show project picker
+	if len(parts) == 1 {
+		tb.sendTyping(ctx, update)
+		projects, err := tb.fetchProjects()
+		if err != nil {
+			tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
+			return
+		}
+		if len(projects) == 0 {
+			tb.reply(ctx, b, update, "No projects found\\. Ghost needs at least one project with memories\\.")
+			return
+		}
+
+		var sb strings.Builder
+		sb.WriteString("*Start a new session*\n\n")
+		var buttons [][]models.InlineKeyboardButton
+		for _, p := range projects {
+			fmt.Fprintf(&sb, "• `%s` — %s\n", mdv2.Esc(p.Name), mdv2.Esc(p.Path))
+			buttons = append(buttons, []models.InlineKeyboardButton{
+				{Text: "▶ " + p.Name, CallbackData: "new:" + p.Path},
+			})
+		}
+		tb.replyWithKeyboard(ctx, b, update, sb.String(), buttons)
+		return
+	}
+
+	// /new <path> — create directly
+	path := parts[1]
+	tb.sendTyping(ctx, update)
+	session, err := tb.createSession(path)
+	if err != nil {
+		tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
+		return
+	}
+
+	chatID := update.Message.Chat.ID
+	tb.mu.Lock()
+	tb.activeSession[chatID] = session.ID
+	tb.activeName[chatID] = session.ProjectName
+	tb.mu.Unlock()
+
+	tb.sendWithKeyboard(ctx, b, chatID,
+		fmt.Sprintf("✅ Session started: *%s* \\(`%s`\\)\nSet as active — free\\-text messages go here\\.",
+			mdv2.Esc(session.ProjectName), mdv2.Esc(shortID(session.ID))))
+}
+
+// handleNewCallback handles the "new:" inline button to create a session.
+func (tb *Bot) handleNewCallback(ctx context.Context, b *bot.Bot, update *models.Update) {
+	cb := update.CallbackQuery
+	if cb == nil || cb.Message.Message == nil {
+		return
+	}
+	path := strings.TrimPrefix(cb.Data, "new:")
+
+	session, err := tb.createSession(path)
+	if err != nil {
+		_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+			CallbackQueryID: cb.ID,
+			Text:            "Error: " + err.Error(),
+			ShowAlert:       true,
+		})
+		return
+	}
+
+	chatID := cb.Message.Message.Chat.ID
+	tb.mu.Lock()
+	tb.activeSession[chatID] = session.ID
+	tb.activeName[chatID] = session.ProjectName
+	tb.mu.Unlock()
+
+	_, _ = b.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{
+		CallbackQueryID: cb.ID,
+		Text:            "Session started: " + session.ProjectName,
+	})
+
+	tb.sendWithKeyboard(ctx, b, chatID,
+		fmt.Sprintf("✅ Session started: *%s* \\(`%s`\\)\nSet as active — free\\-text messages go here\\.",
+			mdv2.Esc(session.ProjectName), mdv2.Esc(shortID(session.ID))))
+}
+
+// handleStop stops a Ghost session.
+func (tb *Bot) handleStop(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if tb.serverAddr == "" {
+		tb.reply(ctx, b, update, "Ghost server not configured\\.")
+		return
+	}
+
+	parts := strings.Fields(update.Message.Text)
+	chatID := update.Message.Chat.ID
+
+	var fullID string
+	if len(parts) >= 2 {
+		// /stop <id>
+		var err error
+		fullID, err = tb.resolveSessionID(parts[1])
+		if err != nil {
+			tb.reply(ctx, b, update, "Session not found\\. Use /sessions to list\\.")
+			return
+		}
+	} else {
+		// /stop — use active session
+		tb.mu.Lock()
+		fullID = tb.activeSession[chatID]
+		tb.mu.Unlock()
+		if fullID == "" {
+			tb.reply(ctx, b, update, "No active session\\. Use `/stop <id>` or set active with /use\\.")
+			return
+		}
+	}
+
+	tb.sendTyping(ctx, update)
+	if err := tb.deleteSession(fullID); err != nil {
+		tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
+		return
+	}
+
+	// Clean up local state.
+	tb.mu.Lock()
+	if tb.activeSession[chatID] == fullID {
+		delete(tb.activeSession, chatID)
+		delete(tb.activeName, chatID)
+	}
+	delete(tb.sessionCosts, fullID)
+	delete(tb.autoApprove, fullID)
+	tb.mu.Unlock()
+
+	tb.sendWithKeyboard(ctx, b, chatID,
+		fmt.Sprintf("✅ Session `%s` stopped\\.", mdv2.Esc(shortID(fullID))))
+}
+
+// handleYolo toggles auto-approve for a session.
+func (tb *Bot) handleYolo(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if tb.serverAddr == "" {
+		tb.reply(ctx, b, update, "Ghost server not configured\\.")
+		return
+	}
+
+	parts := strings.Fields(update.Message.Text)
+	chatID := update.Message.Chat.ID
+
+	var fullID string
+	if len(parts) >= 2 {
+		var err error
+		fullID, err = tb.resolveSessionID(parts[1])
+		if err != nil {
+			tb.reply(ctx, b, update, "Session not found\\. Use /sessions to list\\.")
+			return
+		}
+	} else {
+		tb.mu.Lock()
+		fullID = tb.activeSession[chatID]
+		tb.mu.Unlock()
+		if fullID == "" {
+			tb.reply(ctx, b, update, "No active session\\. Use `/yolo <id>` or set active with /use\\.")
+			return
+		}
+	}
+
+	tb.mu.Lock()
+	current := tb.autoApprove[fullID]
+	tb.mu.Unlock()
+	newState := !current
+
+	tb.sendTyping(ctx, update)
+	if err := tb.setAutoApprove(fullID, newState); err != nil {
+		tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
+		return
+	}
+
+	tb.mu.Lock()
+	tb.autoApprove[fullID] = newState
+	tb.mu.Unlock()
+
+	if newState {
+		tb.reply(ctx, b, update, "🔓 Auto\\-approve *enabled* — all tools run without confirmation\\.")
+	} else {
+		tb.reply(ctx, b, update, "🔒 Auto\\-approve *disabled* — tools require approval\\.")
+	}
+}
+
+// handleHistory shows conversation history for a session.
+func (tb *Bot) handleHistory(ctx context.Context, b *bot.Bot, update *models.Update) {
+	if tb.serverAddr == "" {
+		tb.reply(ctx, b, update, "Ghost server not configured\\.")
+		return
+	}
+
+	parts := strings.Fields(update.Message.Text)
+	chatID := update.Message.Chat.ID
+
+	var fullID string
+	if len(parts) >= 2 {
+		var err error
+		fullID, err = tb.resolveSessionID(parts[1])
+		if err != nil {
+			tb.reply(ctx, b, update, "Session not found\\. Use /sessions to list\\.")
+			return
+		}
+	} else {
+		tb.mu.Lock()
+		fullID = tb.activeSession[chatID]
+		tb.mu.Unlock()
+		if fullID == "" {
+			tb.reply(ctx, b, update, "No active session\\. Use `/history <id>` or set active with /use\\.")
+			return
+		}
+	}
+
+	tb.sendTyping(ctx, update)
+	msgs, err := tb.fetchHistory(fullID)
+	if err != nil {
+		tb.reply(ctx, b, update, "Error: "+mdv2.Esc(err.Error()))
+		return
+	}
+
+	if len(msgs) == 0 {
+		tb.reply(ctx, b, update, "No messages yet in this session\\.")
+		return
+	}
+
+	// Show last 10 messages.
+	start := 0
+	if len(msgs) > 10 {
+		start = len(msgs) - 10
+	}
+
+	var sb strings.Builder
+	for _, m := range msgs[start:] {
+		icon := "👤"
+		if m.Role == "assistant" {
+			icon = "🤖"
+		}
+		content := m.Content
+		if len(content) > 300 {
+			content = content[:300] + "..."
+		}
+		fmt.Fprintf(&sb, "%s %s\n\n", icon, content)
+	}
+
+	// Send as plain text — content may contain arbitrary characters.
+	text := sb.String()
+	if len(text) > telegramMsgMax {
+		text = text[:telegramMsgMax-3] + "..."
+	}
+	_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   text,
+	})
+	if err != nil {
+		tb.logger.Error("send history", "error", err, "chat_id", chatID)
+	}
 }
 
 // deleteMemory sends a DELETE request to remove a memory by ID.

@@ -13,10 +13,10 @@ import (
 
 func TestClaudeMemoryDir(t *testing.T) {
 	t.Run("encoding", func(t *testing.T) {
-		got := encodeProjectPath("/home/wayne/git/ghost")
+		got := EncodeProjectPath("/home/wayne/git/ghost")
 		want := "-home-wayne-git-ghost"
 		if got != want {
-			t.Errorf("encodeProjectPath = %q, want %q", got, want)
+			t.Errorf("EncodeProjectPath = %q, want %q", got, want)
 		}
 	})
 

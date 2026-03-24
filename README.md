@@ -18,6 +18,7 @@ Pure Go. No CGO. Single binary.
 - **3-block prompt caching** — 90%+ cache hit rates, ~76% savings on input tokens
 - **Hybrid search** — FTS5 keyword + vector cosine similarity via Reciprocal Rank Fusion
 - **Free embeddings** — `nomic-embed-text:v1.5` runs locally through Ollama, no API costs
+- **Tiered consolidation** — memory dedup via Haiku API, Ollama local LLM, or pure SQLite (works without API credits)
 - **Time-decay scoring** — stale memories fade automatically by category half-life
 - **Cost tracking** — per-session and monthly cost aggregation with cache savings, API vs subscription comparison
 - **Google Calendar + Gmail** — meeting notifications, email summaries via OAuth2
@@ -49,6 +50,14 @@ make build
 ### Pre-built binaries
 
 Download from [GitHub Releases](https://github.com/wcatz/ghost/releases) — available for linux, macOS, and Windows (amd64 + arm64).
+
+### Update
+
+```bash
+ghost upgrade
+```
+
+Downloads the latest release from GitHub, replaces the running binary in-place (wherever it lives), and prints the version diff. No package manager required.
 
 ### Docker
 
@@ -84,6 +93,15 @@ ghost serve
 
 # MCP server for Claude Code / Cursor
 ghost mcp
+
+# Set up Claude Code integration
+ghost mcp init
+
+# Check integration health
+ghost mcp status
+
+# Self-update to latest release
+ghost upgrade
 ```
 
 ## Runtime Modes
@@ -99,7 +117,7 @@ ghost mcp
 | `-continue` | Resume last conversation |
 | `-no-memory` | Disable automatic memory extraction |
 | `-no-tui` | Force legacy REPL (no bubbletea) |
-| `-version` | Print version and exit |
+| `-v`, `version` | Print version and exit |
 
 **Slash commands:**
 
@@ -184,7 +202,26 @@ Connects Claude Code, Cursor, or any MCP client to Ghost's memory via stdio.
 | `ghost_decision_record` | Record an architectural decision with rationale |
 | `ghost_health` | System stats (memory count, embeddings, costs) |
 
-The MCP server ships with comprehensive instructions that teach Claude when and how to save memories proactively, which categories to use, and how to leverage cross-project search. No CLAUDE.md configuration required.
+The MCP server ships with comprehensive instructions that teach Claude when and how to save memories proactively, which categories to use, and how to leverage cross-project search.
+
+### `ghost mcp init` — Claude Code Setup
+
+One command to fully integrate Ghost with Claude Code:
+
+```bash
+ghost mcp init              # configure everything
+ghost mcp init --dry-run    # preview changes without modifying files
+ghost mcp status            # verify integration health
+```
+
+This configures:
+1. **MCP server registration** — registers `ghost mcp` with the `claude` CLI
+2. **Tool permissions** — adds all 13 `mcp__ghost__*` tools to the allow list
+3. **SessionStart hook** — reminds Claude to load Ghost context at every session start
+4. **Memory import** — imports existing Claude Code memory files into Ghost (deduplicated)
+5. **Project redirects** — writes `MEMORY.md` files that point Claude to Ghost
+
+Idempotent — safe to re-run after updates. Requires both `ghost` and `claude` on PATH.
 
 **MCP Resources:**
 
@@ -275,6 +312,26 @@ CalDAV is also supported as an alternative calendar source (iCloud, Fastmail, et
 | gotcha | 30-day | Bugs and edge cases |
 | dependency | 30-day | Libraries and versions |
 
+### Tiered Consolidation
+
+Memory consolidation runs periodically to merge duplicates, prune stale entries, and maintain quality. Three tiers are available — Ghost tries the highest quality tier and falls back automatically:
+
+| Tier | Backend | Cost | Quality | Requirements |
+|------|---------|------|---------|-------------|
+| 2 | Haiku API | ~$0.001/run | Best | Anthropic API key |
+| 1 | Ollama (`qwen2.5:3b`) | Free | Good | Ollama running locally |
+| 0 | SQLite (Jaccard dedup) | Free | Mechanical | None (always available) |
+
+Default is `auto` — uses the best available tier. Configure explicitly:
+
+```yaml
+reflection:
+  backend: "auto"              # auto, haiku, ollama, sqlite, disabled
+  ollama_model: "qwen2.5:3b"  # model for Ollama tier
+```
+
+Users with a Claude subscription but no API credits: install [Ollama](https://ollama.com) and `ollama pull qwen2.5:3b` for free local consolidation.
+
 ## Configuration
 
 Config loads in layers (later overrides earlier):
@@ -300,6 +357,10 @@ embedding:
   enabled: true
   ollama_url: "http://localhost:11434"
   model: "nomic-embed-text:v1.5"
+
+reflection:
+  backend: "auto"                      # auto, haiku, ollama, sqlite, disabled
+  ollama_model: "qwen2.5:3b"
 
 github:
   token: "ghp_..."
@@ -333,7 +394,7 @@ internal/
   tool/                    Tool registry + built-in executors (file, grep, glob, git, bash, memory)
   orchestrator/            Multi-project sessions, context compression, multi-turn caching
   claudeimport/            Auto-import Claude Code memory files on first project contact
-  reflection/              Haiku memory consolidation + auto-extraction
+  reflection/              Tiered memory consolidation (Haiku → Ollama → SQLite) + auto-extraction
   prompt/                  3-block cached system prompt
   mode/                    Operating modes (chat, code, debug, review, plan, refactor)
   project/                 Auto-detection (language, tests, git)
@@ -341,6 +402,8 @@ internal/
   tui/                     Terminal REPL (bubbletea)
   server/                  HTTP REST API (chi)
   mcpserver/               MCP server (stdio, 13 tools + resources)
+  mcpinit/                 Claude Code integration setup (init, status, hook)
+  selfupdate/              Self-update from GitHub releases
   telegram/                Bot, approvals, session management
   google/                  Calendar + Gmail OAuth2
   calendar/                CalDAV client
