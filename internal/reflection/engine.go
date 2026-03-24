@@ -31,29 +31,30 @@ type memoryStore interface {
 
 // Engine manages periodic reflection for memory consolidation.
 type Engine struct {
-	client   reflector
-	store    memoryStore
-	logger   *slog.Logger
-	interval int
+	consolidator Consolidator
+	store        memoryStore
+	logger       *slog.Logger
+	interval     int
 }
 
-// NewEngine creates a reflection engine.
-func NewEngine(client reflector, store memoryStore, logger *slog.Logger, interval int) *Engine {
+// NewEngine creates a reflection engine with a consolidator.
+// If consolidator is nil, consolidation is disabled (MaybeReflect becomes a no-op).
+func NewEngine(consolidator Consolidator, store memoryStore, logger *slog.Logger, interval int) *Engine {
 	if interval <= 0 {
 		interval = 10
 	}
 	return &Engine{
-		client:   client,
-		store:    store,
-		logger:   logger,
-		interval: interval,
+		consolidator: consolidator,
+		store:        store,
+		logger:       logger,
+		interval:     interval,
 	}
 }
 
 // MaybeReflect increments the interaction count and triggers reflection
 // when the count hits the interval. Safe to call from a goroutine.
 func (e *Engine) MaybeReflect(ctx context.Context, projectID string, projCtx *project.Context) {
-	if e.client == nil || e.store == nil {
+	if e.consolidator == nil || e.store == nil {
 		return
 	}
 
@@ -95,14 +96,11 @@ func (e *Engine) MaybeReflect(ctx context.Context, projectID string, projCtx *pr
 		ProjectName:      projCtx.Name,
 	}
 
-	prompt := BuildReflectionPrompt(input)
-	responseText, _, err := e.client.Reflect(reflectCtx, prompt)
+	result, err := e.consolidator.Consolidate(reflectCtx, input)
 	if err != nil {
-		e.logger.Error("reflection failed", "error", err, "project_id", projectID)
+		e.logger.Error("consolidation failed", "error", err, "project_id", projectID, "tier", e.consolidator.Name())
 		return
 	}
-
-	result := parseReflectionResponse(responseText)
 
 	// Filter out empty-content memories before processing.
 	var validMemories []ReflectMemory

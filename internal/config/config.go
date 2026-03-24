@@ -28,15 +28,16 @@ var exampleConfig []byte
 
 // Config holds the global ghost configuration.
 type Config struct {
-	API       APIConfig       `koanf:"api"`
-	Defaults  DefaultsConfig  `koanf:"defaults"`
-	Display   DisplayConfig   `koanf:"display"`
-	Server    ServerConfig    `koanf:"server"`
-	Embedding EmbeddingConfig `koanf:"embedding"`
-	GitHub    GitHubConfig    `koanf:"github"`
-	Telegram  TelegramConfig  `koanf:"telegram"`
-	Calendar  CalendarConfig  `koanf:"calendar"`
-	Google    GoogleConfig    `koanf:"google"`
+	API        APIConfig        `koanf:"api"`
+	Defaults   DefaultsConfig   `koanf:"defaults"`
+	Display    DisplayConfig    `koanf:"display"`
+	Server     ServerConfig     `koanf:"server"`
+	Embedding  EmbeddingConfig  `koanf:"embedding"`
+	Reflection ReflectionConfig `koanf:"reflection"`
+	GitHub     GitHubConfig     `koanf:"github"`
+	Telegram   TelegramConfig   `koanf:"telegram"`
+	Calendar   CalendarConfig   `koanf:"calendar"`
+	Google     GoogleConfig     `koanf:"google"`
 	Briefing   BriefingConfig   `koanf:"briefing"`
 	CostReport CostReportConfig `koanf:"cost_report"`
 	Voice      VoiceConfig      `koanf:"voice"`
@@ -91,6 +92,12 @@ type VoiceConfig struct {
 type ServerConfig struct {
 	ListenAddr string `koanf:"listen_addr"`
 	AuthToken  string `koanf:"auth_token"`
+}
+
+// ReflectionConfig holds memory consolidation settings.
+type ReflectionConfig struct {
+	Backend     string `koanf:"backend"`      // "auto", "haiku", "ollama", "sqlite", "disabled"
+	OllamaModel string `koanf:"ollama_model"` // model for Ollama tier (default "qwen2.5:3b")
 }
 
 // EmbeddingConfig holds local embedding settings.
@@ -167,6 +174,8 @@ var defaults = map[string]interface{}{
 	"embedding.ollama_url":       "http://localhost:11434",
 	"embedding.model":            "nomic-embed-text:v1.5",
 	"embedding.dimensions":       768,
+	"reflection.backend":         "auto",
+	"reflection.ollama_model":    "qwen2.5:3b",
 	"github.interval":            60,
 	"briefing.enabled":           false,
 	"briefing.schedule":          "0 8 * * 1-5",

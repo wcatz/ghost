@@ -6,18 +6,19 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/project"
 )
 
-// mockReflector implements the reflector interface for testing.
-type mockReflector struct {
+// mockConsolidator implements the Consolidator interface for testing.
+type mockConsolidator struct {
 	response string
 }
 
-func (m *mockReflector) Reflect(_ context.Context, _ string) (string, ai.TokenUsage, error) {
-	return m.response, ai.TokenUsage{}, nil
+func (m *mockConsolidator) Name() string                          { return "mock" }
+func (m *mockConsolidator) Available(_ context.Context) bool      { return true }
+func (m *mockConsolidator) Consolidate(_ context.Context, _ ReflectionInput) (ReflectionResult, error) {
+	return parseReflectionResponse(m.response), nil
 }
 
 // mockMemStore implements the memoryStore interface for testing.
@@ -86,7 +87,7 @@ func TestEngineFiltersEmptyContent(t *testing.T) {
 		},
 	}
 
-	client := &mockReflector{
+	client := &mockConsolidator{
 		response: `{"learned_context":"ctx","memories":[
 			{"category":"fact","content":"valid","importance":0.8,"tags":["go"]},
 			{"category":"fact","content":"","importance":0.5,"tags":[]},
@@ -122,7 +123,7 @@ func TestEnginePreventsDataLoss(t *testing.T) {
 		existingMemories: existing,
 	}
 
-	client := &mockReflector{
+	client := &mockConsolidator{
 		response: `{"learned_context":"ctx","memories":[
 			{"category":"fact","content":"only one","importance":0.8,"tags":[]},
 			{"category":"fact","content":"only two","importance":0.7,"tags":[]}
@@ -155,7 +156,7 @@ func TestEngineAllowsReasonableConsolidation(t *testing.T) {
 	}
 	response := mustJSON(t, ReflectionResult{LearnedContext: "ctx", Memories: memories})
 
-	client := &mockReflector{response: response}
+	client := &mockConsolidator{response: response}
 
 	e := NewEngine(client, store, testLogger(), 10)
 	e.MaybeReflect(context.Background(), "proj1", testProjectCtx())
@@ -180,7 +181,7 @@ func TestEngineSkipsGuardForSmallSets(t *testing.T) {
 		existingMemories: existing,
 	}
 
-	client := &mockReflector{
+	client := &mockConsolidator{
 		response: `{"learned_context":"ctx","memories":[
 			{"category":"fact","content":"the only one","importance":0.9,"tags":[]}
 		]}`,
@@ -209,7 +210,7 @@ func TestEngineCountsOnlyNonManual(t *testing.T) {
 		existingMemories: existing,
 	}
 
-	client := &mockReflector{
+	client := &mockConsolidator{
 		response: `{"learned_context":"ctx","memories":[
 			{"category":"fact","content":"consolidated","importance":0.9,"tags":[]}
 		]}`,

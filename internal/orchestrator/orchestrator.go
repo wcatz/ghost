@@ -59,7 +59,8 @@ func (o *Orchestrator) StartSession(projectPath string) (*Session, error) {
 	}
 
 	builder := prompt.NewBuilder(o.store)
-	reflector := reflection.NewEngine(o.client, o.store, o.logger, o.cfg.Defaults.ReflectionInterval)
+	consolidator := o.buildConsolidator()
+	reflector := reflection.NewEngine(consolidator, o.store, o.logger, o.cfg.Defaults.ReflectionInterval)
 
 	s := NewSession(
 		projCtx,
@@ -183,4 +184,33 @@ func (o *Orchestrator) Shutdown(_ context.Context) error {
 		s.mu.Unlock()
 	}
 	return nil
+}
+
+// buildConsolidator creates the appropriate memory consolidator based on config.
+func (o *Orchestrator) buildConsolidator() reflection.Consolidator {
+	backend := o.cfg.Reflection.Backend
+	if backend == "" {
+		backend = "auto"
+	}
+
+	switch backend {
+	case "haiku":
+		return reflection.NewHaikuConsolidator(o.client)
+	case "ollama":
+		return reflection.NewOllamaConsolidator(o.cfg.Embedding.OllamaURL, o.cfg.Reflection.OllamaModel)
+	case "sqlite":
+		return reflection.NewSQLiteConsolidator()
+	case "disabled":
+		return nil
+	default: // "auto"
+		var tiers []reflection.Consolidator
+		if o.client != nil {
+			tiers = append(tiers, reflection.NewHaikuConsolidator(o.client))
+		}
+		if o.cfg.Embedding.OllamaURL != "" {
+			tiers = append(tiers, reflection.NewOllamaConsolidator(o.cfg.Embedding.OllamaURL, o.cfg.Reflection.OllamaModel))
+		}
+		tiers = append(tiers, reflection.NewSQLiteConsolidator())
+		return reflection.NewTieredConsolidator(tiers, o.logger)
+	}
 }
