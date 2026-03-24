@@ -100,23 +100,23 @@ func TestFormatMemories(t *testing.T) {
 		{
 			name: "single memory",
 			memories: []memory.Memory{
-				{Category: "fact", Importance: 0.7, Content: "test content"},
+				{ID: "ABC123", Category: "fact", Importance: 0.7, Content: "test content"},
 			},
-			wantIn: []string{"[fact]", "0.7", "test content"},
+			wantIn: []string{"[fact]", "`ABC123`", "0.7", "test content"},
 		},
 		{
 			name: "pinned memory",
 			memories: []memory.Memory{
-				{Category: "decision", Importance: 0.9, Content: "important decision", Pinned: true},
+				{ID: "DEF456", Category: "decision", Importance: 0.9, Content: "important decision", Pinned: true},
 			},
-			wantIn: []string{"[pinned]", "decision", "important decision"},
+			wantIn: []string{"`DEF456`", "[pinned]", "decision", "important decision"},
 		},
 		{
 			name: "memory with tags",
 			memories: []memory.Memory{
-				{Category: "pattern", Importance: 0.5, Content: "tagged memory", Tags: []string{"go", "test"}},
+				{ID: "GHI789", Category: "pattern", Importance: 0.5, Content: "tagged memory", Tags: []string{"go", "test"}},
 			},
-			wantIn: []string{"tags:", "go", "test", "tagged memory"},
+			wantIn: []string{"`GHI789`", "tags:", "go", "test", "tagged memory"},
 		},
 	}
 
@@ -587,5 +587,58 @@ func TestFormatMemories_EdgeCases(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(result), "\n")
 	if len(lines) != 3 {
 		t.Errorf("expected 3 lines, got %d", len(lines))
+	}
+}
+
+func TestValidateTags(t *testing.T) {
+	tests := []struct {
+		name     string
+		tags     []string
+		wantLen  int
+		wantLast string
+	}{
+		{"nil", nil, 0, ""},
+		{"empty", []string{}, 0, ""},
+		{"under limit", []string{"a", "b", "c"}, 3, "c"},
+		{"at limit", make([]string, 10), 10, ""},
+		{"over limit", make([]string, 15), 10, ""},
+		{"long tag", []string{strings.Repeat("x", 100)}, 1, strings.Repeat("x", 64)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validateTags(tt.tags)
+			if len(got) != tt.wantLen {
+				t.Errorf("len = %d, want %d", len(got), tt.wantLen)
+			}
+			if tt.wantLast != "" && len(got) > 0 && got[len(got)-1] != tt.wantLast {
+				t.Errorf("last = %q, want %q", got[len(got)-1], tt.wantLast)
+			}
+		})
+	}
+}
+
+func TestDefaultImportance(t *testing.T) {
+	f := func(v float32) *float32 { return &v }
+
+	tests := []struct {
+		name     string
+		p        *float32
+		fallback float32
+		want     float32
+	}{
+		{"nil defaults", nil, 0.7, 0.7},
+		{"explicit zero", f(0), 0.7, 0},
+		{"normal value", f(0.5), 0.7, 0.5},
+		{"clamp high", f(2.0), 0.7, 1.0},
+		{"clamp negative", f(-1), 0.7, 0},
+		{"max value", f(1.0), 0.7, 1.0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := defaultImportance(tt.p, tt.fallback)
+			if got != tt.want {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

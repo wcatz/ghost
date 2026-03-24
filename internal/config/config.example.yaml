@@ -46,6 +46,12 @@
 #   model: "nomic-embed-text:v1.5"   # 274MB, runs fine on CPU
 #   dimensions: 768
 
+# --- Memory Consolidation ---
+# reflection:
+#   backend: "auto"                  # "auto", "haiku", "ollama", "sqlite", "disabled"
+#                                    # auto: tries haiku → ollama → sqlite
+#   ollama_model: "qwen2.5:3b"      # model for Ollama tier (runs locally, no API cost)
+
 # --- GitHub Notifications ---
 # github:
 #   token: ""                        # PAT with notifications scope

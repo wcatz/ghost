@@ -27,33 +27,35 @@ type memoryStore interface {
 	ReplaceNonManual(ctx context.Context, projectID string, memories []memory.Memory) error
 	UpdateLearnedContext(ctx context.Context, projectID, learnedContext, summary string) error
 	Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (string, bool, error)
+	EnsureProject(ctx context.Context, id, path, name string) error
 }
 
 // Engine manages periodic reflection for memory consolidation.
 type Engine struct {
-	client   reflector
-	store    memoryStore
-	logger   *slog.Logger
-	interval int
+	consolidator Consolidator
+	store        memoryStore
+	logger       *slog.Logger
+	interval     int
 }
 
-// NewEngine creates a reflection engine.
-func NewEngine(client reflector, store memoryStore, logger *slog.Logger, interval int) *Engine {
+// NewEngine creates a reflection engine with a consolidator.
+// If consolidator is nil, consolidation is disabled (MaybeReflect becomes a no-op).
+func NewEngine(consolidator Consolidator, store memoryStore, logger *slog.Logger, interval int) *Engine {
 	if interval <= 0 {
 		interval = 10
 	}
 	return &Engine{
-		client:   client,
-		store:    store,
-		logger:   logger,
-		interval: interval,
+		consolidator: consolidator,
+		store:        store,
+		logger:       logger,
+		interval:     interval,
 	}
 }
 
 // MaybeReflect increments the interaction count and triggers reflection
 // when the count hits the interval. Safe to call from a goroutine.
 func (e *Engine) MaybeReflect(ctx context.Context, projectID string, projCtx *project.Context) {
-	if e.client == nil || e.store == nil {
+	if e.consolidator == nil || e.store == nil {
 		return
 	}
 
@@ -95,14 +97,11 @@ func (e *Engine) MaybeReflect(ctx context.Context, projectID string, projCtx *pr
 		ProjectName:      projCtx.Name,
 	}
 
-	prompt := BuildReflectionPrompt(input)
-	responseText, _, err := e.client.Reflect(reflectCtx, prompt)
+	result, err := e.consolidator.Consolidate(reflectCtx, input)
 	if err != nil {
-		e.logger.Error("reflection failed", "error", err, "project_id", projectID)
+		e.logger.Error("consolidation failed", "error", err, "project_id", projectID, "tier", e.consolidator.Name())
 		return
 	}
-
-	result := parseReflectionResponse(responseText)
 
 	// Filter out empty-content memories before processing.
 	var validMemories []ReflectMemory
@@ -114,6 +113,31 @@ func (e *Engine) MaybeReflect(ctx context.Context, projectID string, projCtx *pr
 	result.Memories = validMemories
 
 	if len(result.Memories) > 0 {
+		// Split memories by scope: project-scoped stay here, global-scoped go to _global.
+		var projectMemories []ReflectMemory
+		var globalMemories []ReflectMemory
+		for _, m := range result.Memories {
+			if m.Scope == "global" {
+				globalMemories = append(globalMemories, m)
+			} else {
+				projectMemories = append(projectMemories, m)
+			}
+		}
+
+		// Upsert global memories into _global project (additive, not replacing).
+		if len(globalMemories) > 0 {
+			if err := e.store.EnsureProject(reflectCtx, "_global", "_global", "global"); err != nil {
+				e.logger.Error("ensure _global project", "error", err)
+			}
+			for _, m := range globalMemories {
+				_, _, err := e.store.Upsert(reflectCtx, "_global", m.Category, m.Content, "reflection", m.Importance, m.Tags)
+				if err != nil {
+					e.logger.Error("upsert global memory", "error", err, "content", m.Content)
+				}
+			}
+			e.logger.Info("global memories upserted", "project_id", projectID, "count", len(globalMemories))
+		}
+
 		// Guard against dramatic reduction — count existing non-manual memories.
 		var existingNonManual int
 		for _, m := range existingMemories {
@@ -121,43 +145,49 @@ func (e *Engine) MaybeReflect(ctx context.Context, projectID string, projCtx *pr
 				existingNonManual++
 			}
 		}
-		if existingNonManual >= 6 && len(result.Memories) < existingNonManual/2 {
+		if existingNonManual >= 6 && len(projectMemories) < existingNonManual/2 {
 			e.logger.Warn("reflection returned too few memories — skipping replace to prevent data loss",
 				"project_id", projectID,
 				"existing_non_manual", existingNonManual,
-				"reflection_returned", len(result.Memories),
+				"reflection_returned", len(projectMemories),
+				"global_extracted", len(globalMemories),
 			)
 			return
 		}
 
-		dbMemories := make([]memory.Memory, len(result.Memories))
-		for i, m := range result.Memories {
-			dbMemories[i] = memory.Memory{
-				ProjectID:  projectID,
-				Category:   m.Category,
-				Content:    m.Content,
-				Importance: m.Importance,
-				Source:     "reflection",
-				Tags:       m.Tags,
+		if len(projectMemories) > 0 {
+			dbMemories := make([]memory.Memory, len(projectMemories))
+			for i, m := range projectMemories {
+				dbMemories[i] = memory.Memory{
+					ProjectID:  projectID,
+					Category:   m.Category,
+					Content:    m.Content,
+					Importance: m.Importance,
+					Source:     "reflection",
+					Tags:       m.Tags,
+				}
 			}
-		}
-		if err := e.store.ReplaceNonManual(reflectCtx, projectID, dbMemories); err != nil {
-			e.logger.Error("save ghost memories", "error", err, "project_id", projectID)
-		} else {
-			e.logger.Info("ghost memories updated", "project_id", projectID, "count", len(dbMemories))
+			if err := e.store.ReplaceNonManual(reflectCtx, projectID, dbMemories); err != nil {
+				e.logger.Error("save ghost memories", "error", err, "project_id", projectID)
+			} else {
+				e.logger.Info("ghost memories updated", "project_id", projectID, "count", len(dbMemories))
 
-			// Build summary.
-			catCounts := make(map[string]int)
-			for _, m := range dbMemories {
-				catCounts[m.Category]++
-			}
-			var parts []string
-			for cat, n := range catCounts {
-				parts = append(parts, fmt.Sprintf("%d %s", n, cat))
-			}
-			summary := fmt.Sprintf("%d memories consolidated (%s)", len(dbMemories), strings.Join(parts, ", "))
-			if err := e.store.UpdateLearnedContext(reflectCtx, projectID, result.LearnedContext, summary); err != nil {
-				e.logger.Error("save learned context", "error", err, "project_id", projectID)
+				// Build summary.
+				catCounts := make(map[string]int)
+				for _, m := range dbMemories {
+					catCounts[m.Category]++
+				}
+				var parts []string
+				for cat, n := range catCounts {
+					parts = append(parts, fmt.Sprintf("%d %s", n, cat))
+				}
+				summary := fmt.Sprintf("%d memories consolidated (%s)", len(dbMemories), strings.Join(parts, ", "))
+				if len(globalMemories) > 0 {
+					summary += fmt.Sprintf(", %d promoted to global", len(globalMemories))
+				}
+				if err := e.store.UpdateLearnedContext(reflectCtx, projectID, result.LearnedContext, summary); err != nil {
+					e.logger.Error("save learned context", "error", err, "project_id", projectID)
+				}
 			}
 		}
 	} else if result.LearnedContext != "" {
@@ -189,7 +219,7 @@ func parseReflectionResponse(text string) ReflectionResult {
 		return ReflectionResult{LearnedContext: text}
 	}
 
-	// Validate importance ranges.
+	// Validate importance ranges and scope.
 	for i := range result.Memories {
 		if result.Memories[i].Importance < 0 {
 			result.Memories[i].Importance = 0
@@ -199,6 +229,9 @@ func parseReflectionResponse(text string) ReflectionResult {
 		}
 		if result.Memories[i].Tags == nil {
 			result.Memories[i].Tags = []string{}
+		}
+		if result.Memories[i].Scope != "global" {
+			result.Memories[i].Scope = "project"
 		}
 	}
 

@@ -43,9 +43,9 @@ var importanceMap = map[string]float32{
 
 const defaultImportance float32 = 0.7
 
-// encodeProjectPath converts an absolute path to Claude's directory name format.
+// EncodeProjectPath converts an absolute path to Claude's directory name format.
 // E.g., "/home/wayne/git/ghost" → "-home-wayne-git-ghost".
-func encodeProjectPath(projectPath string) string {
+func EncodeProjectPath(projectPath string) string {
 	return strings.ReplaceAll(projectPath, "/", "-")
 }
 
@@ -56,7 +56,7 @@ func ClaudeMemoryDir(projectPath string) string {
 	if err != nil {
 		return ""
 	}
-	encoded := encodeProjectPath(projectPath)
+	encoded := EncodeProjectPath(projectPath)
 	dir := filepath.Join(home, ".claude", "projects", encoded, "memory")
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return ""

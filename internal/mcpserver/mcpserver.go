@@ -23,6 +23,36 @@ type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 }
 
+func boolPtr(b bool) *bool { return &b }
+
+// validateTags enforces tag limits: max 10 tags, max 64 chars each.
+func validateTags(tags []string) []string {
+	if len(tags) > 10 {
+		tags = tags[:10]
+	}
+	for i, t := range tags {
+		if len(t) > 64 {
+			tags[i] = t[:64]
+		}
+	}
+	return tags
+}
+
+// defaultImportance returns the importance value, defaulting to fallback when nil.
+func defaultImportance(p *float32, fallback float32) float32 {
+	if p == nil {
+		return fallback
+	}
+	v := *p
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
 // Server wraps the MCP server with Ghost's memory store.
 type Server struct {
 	store     provider.MemoryStore
@@ -153,6 +183,10 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_search",
 		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use this to recall things learned in previous sessions.",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:  true,
+			OpenWorldHint: boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args searchArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" || args.Query == "" {
 			return nil, nil, fmt.Errorf("project_id and query are required")
@@ -190,13 +224,18 @@ func (s *Server) registerTools() {
 		ProjectID  string   `json:"project_id" jsonschema:"Project ID to save the memory under"`
 		Content    string   `json:"content" jsonschema:"The memory content to save"`
 		Category   string   `json:"category,omitempty" jsonschema:"Category: architecture, decision, pattern, convention, gotcha, dependency, preference, fact"`
-		Importance float32  `json:"importance,omitempty" jsonschema:"Importance score 0.0-1.0 (default 0.7)"`
+		Importance *float32 `json:"importance,omitempty" jsonschema:"Importance score 0.0-1.0 (default 0.7)"`
 		Tags       []string `json:"tags,omitempty" jsonschema:"Optional tags for categorization"`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_save",
 		Description: "Save a memory about the project. Call this proactively when you discover gotchas, learn architectural patterns, receive user feedback worth preserving, or encounter surprising behavior. Do not wait to be asked — save immediately when something is worth remembering across sessions.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args saveArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" || args.Content == "" {
 			return nil, nil, fmt.Errorf("project_id and content are required")
@@ -211,22 +250,18 @@ func (s *Server) registerTools() {
 		if !validCategories[args.Category] {
 			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
 		}
-		if args.Importance <= 0 {
-			args.Importance = 0.7
-		}
-		if args.Importance > 1 {
-			args.Importance = 1
-		}
+		importance := defaultImportance(args.Importance, 0.7)
 		if args.Tags == nil {
 			args.Tags = []string{}
 		}
+		args.Tags = validateTags(args.Tags)
 		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
 
 		if err := s.store.EnsureProject(ctx, args.ProjectID, args.ProjectID, args.ProjectID); err != nil {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
 
-		id, merged, err := s.store.Upsert(ctx, args.ProjectID, args.Category, args.Content, "mcp", args.Importance, args.Tags)
+		id, merged, err := s.store.Upsert(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, args.Tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -259,6 +294,10 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_project_context",
 		Description: "Get Ghost's accumulated knowledge about a project: top memories ranked by importance and recency, plus any learned context summaries. Use this at the start of a session to recall what Ghost knows.",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:  true,
+			OpenWorldHint: boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args contextArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" {
 			return nil, nil, fmt.Errorf("project_id is required")
@@ -321,6 +360,10 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memories_list",
 		Description: "List Ghost memories for a project, optionally filtered by category.",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:  true,
+			OpenWorldHint: boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args listArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" {
 			return nil, nil, fmt.Errorf("project_id is required")
@@ -361,6 +404,10 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_delete",
 		Description: "Delete a specific memory by its ID.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(true),
+			OpenWorldHint:   boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args deleteArgs) (*mcp.CallToolResult, any, error) {
 		if args.MemoryID == "" {
 			return nil, nil, fmt.Errorf("memory_id is required")
@@ -384,6 +431,10 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_search_all",
 		Description: "Search Ghost memories across ALL projects. Use when looking for cross-project patterns or when unsure which project a memory belongs to.",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:  true,
+			OpenWorldHint: boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args searchAllArgs) (*mcp.CallToolResult, any, error) {
 		if args.Query == "" {
 			return nil, nil, fmt.Errorf("query is required")
@@ -409,13 +460,18 @@ func (s *Server) registerTools() {
 	type saveGlobalArgs struct {
 		Content    string   `json:"content" jsonschema:"The memory content to save"`
 		Category   string   `json:"category,omitempty" jsonschema:"Category (default: fact)"`
-		Importance float32  `json:"importance,omitempty" jsonschema:"Importance 0.0-1.0 (default 0.8)"`
+		Importance *float32 `json:"importance,omitempty" jsonschema:"Importance 0.0-1.0 (default 0.8)"`
 		Tags       []string `json:"tags,omitempty" jsonschema:"Optional tags"`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_save_global",
 		Description: "Save a memory that applies across all projects: personal preferences, coding conventions, toolchain facts, cross-repo relationships.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args saveGlobalArgs) (*mcp.CallToolResult, any, error) {
 		if args.Content == "" {
 			return nil, nil, fmt.Errorf("content is required")
@@ -423,20 +479,16 @@ func (s *Server) registerTools() {
 		if args.Category == "" {
 			args.Category = "fact"
 		}
-		if args.Importance <= 0 {
-			args.Importance = 0.8
-		}
-		if args.Importance > 1 {
-			args.Importance = 1
-		}
+		importance := defaultImportance(args.Importance, 0.8)
 		if args.Tags == nil {
 			args.Tags = []string{}
 		}
+		args.Tags = validateTags(args.Tags)
 
 		if err := s.store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
 			return nil, nil, fmt.Errorf("ensure global project: %w", err)
 		}
-		id, merged, err := s.store.Upsert(ctx, "_global", args.Category, args.Content, "mcp", args.Importance, args.Tags)
+		id, merged, err := s.store.Upsert(ctx, "_global", args.Category, args.Content, "mcp", importance, args.Tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -462,6 +514,10 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_task_create",
 		Description: "Create a task for a project. Use for work items that should survive across sessions — bugs to fix, features to implement, follow-ups to revisit.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(false),
+			OpenWorldHint:   boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args taskCreateArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" || args.Title == "" {
 			return nil, nil, fmt.Errorf("project_id and title are required")
@@ -488,6 +544,10 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_task_list",
 		Description: "List tasks for a project, optionally filtered by status.",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:  true,
+			OpenWorldHint: boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args taskListArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" {
 			return nil, nil, fmt.Errorf("project_id is required")
@@ -504,9 +564,9 @@ func (s *Server) registerTools() {
 		}
 		var sb strings.Builder
 		for _, t := range tasks {
-			sb.WriteString(fmt.Sprintf("- [%s] P%d `%s` %s\n", t.Status, t.Priority, t.ID[:8], t.Title))
+			fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority, t.ID[:8], t.Title)
 			if t.Description != "" {
-				sb.WriteString(fmt.Sprintf("  %s\n", t.Description))
+				fmt.Fprintf(&sb, "  %s\n", t.Description)
 			}
 		}
 		return &mcp.CallToolResult{
@@ -523,6 +583,11 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_task_complete",
 		Description: "Mark a task as done with optional completion notes.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args taskCompleteArgs) (*mcp.CallToolResult, any, error) {
 		if args.TaskID == "" {
 			return nil, nil, fmt.Errorf("task_id is required")
@@ -548,6 +613,10 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_decision_record",
 		Description: "Record an architectural or design decision with rationale and alternatives considered. Use this instead of ghost_memory_save when a choice was made between alternatives. Also saved as a memory for future recall.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(false),
+			OpenWorldHint:   boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args decisionRecordArgs) (*mcp.CallToolResult, any, error) {
 		if args.ProjectID == "" || args.Title == "" || args.Decision == "" || args.Rationale == "" {
 			return nil, nil, fmt.Errorf("project_id, title, decision, and rationale are required")
@@ -559,6 +628,7 @@ func (s *Server) registerTools() {
 		if args.Tags == nil {
 			args.Tags = []string{}
 		}
+		args.Tags = validateTags(args.Tags)
 		id, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, args.Alternatives, args.Tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
@@ -572,6 +642,10 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_health",
 		Description: "Get Ghost system health: project count, memory counts, embedding status.",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:  true,
+			OpenWorldHint: boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
 		projects, err := s.store.ListProjects(ctx)
 		if err != nil {
@@ -580,7 +654,7 @@ func (s *Server) registerTools() {
 
 		var sb strings.Builder
 		sb.WriteString("## Ghost Health\n\n")
-		sb.WriteString(fmt.Sprintf("**Projects:** %d\n\n", len(projects)))
+		fmt.Fprintf(&sb, "**Projects:** %d\n\n", len(projects))
 
 		totalMemories := 0
 		for _, p := range projects {
@@ -589,9 +663,9 @@ func (s *Server) registerTools() {
 				continue
 			}
 			totalMemories += count
-			sb.WriteString(fmt.Sprintf("- **%s** (%s): %d memories\n", p.Name, p.ID[:8], count))
+			fmt.Fprintf(&sb, "- **%s** (%s): %d memories\n", p.Name, p.ID[:8], count)
 		}
-		sb.WriteString(fmt.Sprintf("\n**Total memories:** %d\n", totalMemories))
+		fmt.Fprintf(&sb, "\n**Total memories:** %d\n", totalMemories)
 
 		if s.embedder != nil {
 			sb.WriteString("**Embeddings:** enabled\n")
@@ -608,6 +682,10 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_list_projects",
 		Description: "List all projects Ghost knows about with their names, IDs, paths, and memory counts. Use at session start to find the project_id for the current codebase.",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:  true,
+			OpenWorldHint: boolPtr(false),
+		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args struct{}) (*mcp.CallToolResult, any, error) {
 		projects, err := s.store.ListProjects(ctx)
 		if err != nil {
@@ -747,7 +825,7 @@ func formatMemories(memories []memory.Memory) string {
 			tagsJSON, _ := json.Marshal(m.Tags)
 			tags = " tags:" + string(tagsJSON)
 		}
-		sb.WriteString(fmt.Sprintf("- [%s] (%.1f%s%s) %s\n", m.Category, m.Importance, pin, tags, m.Content))
+		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, m.Content)
 	}
 	return sb.String()
 }
