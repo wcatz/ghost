@@ -472,6 +472,17 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 	defer tx.Rollback()
 
+	// Snapshot existing non-manual memories before deleting.
+	snapshotID := fmt.Sprintf("%s-%d", projectID, time.Now().Unix())
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags)
+		SELECT ?, project_id, category, content, importance, source, tags
+		FROM memories WHERE project_id = ? AND source != 'manual'
+	`, snapshotID, projectID)
+	if err != nil {
+		return fmt.Errorf("snapshot memories: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual'`, projectID)
 	if err != nil {
 		return fmt.Errorf("delete old memories: %w", err)
@@ -488,7 +499,63 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 	}
 
+	s.logger.Info("memories snapshotted before replace", "project_id", projectID, "snapshot_id", snapshotID)
 	return tx.Commit()
+}
+
+// RestoreSnapshot restores memories from the most recent snapshot for a project.
+// Returns the number of memories restored.
+func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Find the latest snapshot.
+	var snapshotID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT snapshot_id FROM memory_snapshots
+		WHERE project_id = ?
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, projectID).Scan(&snapshotID)
+	if err == sql.ErrNoRows {
+		return 0, fmt.Errorf("no snapshots found for project %s", projectID)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("find snapshot: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Delete current non-manual memories.
+	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual'`, projectID)
+	if err != nil {
+		return 0, fmt.Errorf("delete current: %w", err)
+	}
+
+	// Restore from snapshot.
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO memories (project_id, category, content, source, importance, tags)
+		SELECT project_id, category, content, source, importance, tags
+		FROM memory_snapshots WHERE snapshot_id = ?
+	`, snapshotID)
+	if err != nil {
+		return 0, fmt.Errorf("restore snapshot: %w", err)
+	}
+
+	// Clean up the used snapshot.
+	_, _ = tx.ExecContext(ctx, `DELETE FROM memory_snapshots WHERE snapshot_id = ?`, snapshotID)
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+
+	n, _ := res.RowsAffected()
+	s.logger.Info("memories restored from snapshot", "project_id", projectID, "snapshot_id", snapshotID, "count", n)
+	return int(n), nil
 }
 
 // CountMemories returns the total number of memories for a project.
