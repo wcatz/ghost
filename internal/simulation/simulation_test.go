@@ -295,7 +295,7 @@ func TestSimulateMonthOfUsage(t *testing.T) {
 		found := len(results) > 0
 		status := "PASS"
 		if found != st.wantHits {
-			status := "FAIL"
+			status = "FAIL"
 			t.Errorf("    [%s] %s: query=%q found=%d want_hits=%v", status, st.desc, st.query, len(results), st.wantHits)
 		} else {
 			searchPass++
