@@ -157,7 +157,7 @@ func TestSimulateMonthOfUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	store := memory.NewStore(db, logger)
@@ -310,7 +310,9 @@ func TestSimulateMonthOfUsage(t *testing.T) {
 
 	// Snapshot health
 	var snapCount int
-	db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT snapshot_id) FROM memory_snapshots WHERE project_id = ?`, projectID).Scan(&snapCount)
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT snapshot_id) FROM memory_snapshots WHERE project_id = ?`, projectID).Scan(&snapCount); err != nil {
+		t.Logf("  snapshot count query: %v", err)
+	}
 	t.Logf("\n  Snapshots retained: %d (max 3)", snapCount)
 
 	// ── Assertions ─────────────────────────────────────────────────────────
