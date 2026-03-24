@@ -528,7 +528,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer tx.Rollback() //nolint:errcheck
 
 	// Delete current non-manual memories.
 	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual'`, projectID)

@@ -517,7 +517,7 @@ Flags:
 	}
 
 	cfg, logger, store, _ := bootstrap()
-	defer store.Close()
+	defer store.Close() //nolint:errcheck
 
 	ctx := context.Background()
 
@@ -637,15 +637,12 @@ Flags:
 	fmt.Println()
 
 	// Show each memory.
-	for i, m := range result.Memories {
+	for _, m := range result.Memories {
 		truncated := m.Content
 		if len(truncated) > 120 {
 			truncated = truncated[:120] + "..."
 		}
 		fmt.Printf("  [%s] (%.1f) %s\n", m.Category, m.Importance, truncated)
-		if i < len(result.Memories)-1 {
-			// space between entries for readability
-		}
 	}
 	fmt.Println()
 
