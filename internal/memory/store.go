@@ -470,7 +470,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer tx.Rollback() //nolint:errcheck
 
 	// Snapshot existing non-manual memories before deleting.
 	snapshotID := fmt.Sprintf("%s-%d", projectID, time.Now().Unix())
@@ -497,6 +497,20 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		if err != nil {
 			return fmt.Errorf("insert memory: %w", err)
 		}
+	}
+
+	// Prune old snapshots — keep only the 3 most recent per project.
+	_, err = tx.ExecContext(ctx, `
+		DELETE FROM memory_snapshots
+		WHERE project_id = ? AND snapshot_id NOT IN (
+			SELECT DISTINCT snapshot_id FROM memory_snapshots
+			WHERE project_id = ?
+			ORDER BY created_at DESC
+			LIMIT 3
+		)
+	`, projectID, projectID)
+	if err != nil {
+		s.logger.Warn("prune old snapshots", "error", err, "project_id", projectID)
 	}
 
 	s.logger.Info("memories snapshotted before replace", "project_id", projectID, "snapshot_id", snapshotID)
@@ -547,7 +561,9 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	}
 
 	// Clean up the used snapshot.
-	_, _ = tx.ExecContext(ctx, `DELETE FROM memory_snapshots WHERE snapshot_id = ?`, snapshotID)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_snapshots WHERE snapshot_id = ?`, snapshotID); err != nil {
+		s.logger.Warn("failed to delete used snapshot", "snapshot_id", snapshotID, "error", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit: %w", err)
