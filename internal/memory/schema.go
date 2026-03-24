@@ -204,6 +204,19 @@ CREATE TABLE IF NOT EXISTS decisions (
     updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id, status);
+
+CREATE TABLE IF NOT EXISTS memory_snapshots (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    snapshot_id   TEXT NOT NULL,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL,
+    source        TEXT NOT NULL,
+    tags          TEXT DEFAULT '[]',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_project ON memory_snapshots(project_id, snapshot_id);
 `
 
 // OpenDB opens or creates the SQLite database and runs migrations.

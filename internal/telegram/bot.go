@@ -5,7 +5,6 @@ package telegram
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -37,7 +36,6 @@ type Bot struct {
 	sched           *scheduler.Scheduler
 	google          GoogleProvider
 	briefingSources briefing.Sources
-	db              *sql.DB
 	logger          *slog.Logger
 	allowedIDs      map[int64]bool
 	serverAddr      string // Ghost serve address for API calls
@@ -52,6 +50,7 @@ type Bot struct {
 	activeName      map[int64]string             // chatID → project display name
 	lastThinking    map[int64]string             // chatID → last thinking text
 	lastDiffs       map[int64][]map[string]string // chatID → last file diffs
+	autoApprove     map[string]bool              // sessionID → auto-approve state
 }
 
 // GoogleProvider is the interface for Google Calendar/Gmail access.
@@ -68,12 +67,11 @@ type Config struct {
 }
 
 // New creates and configures the Telegram bot.
-func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *scheduler.Scheduler, db *sql.DB, logger *slog.Logger) (*Bot, error) {
+func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *scheduler.Scheduler, logger *slog.Logger) (*Bot, error) {
 	tb := &Bot{
 		store:      store,
 		ghMonitor:  ghMonitor,
 		sched:      sched,
-		db:         db,
 		logger:     logger,
 		token:      cfg.Token,
 		allowedIDs:  make(map[int64]bool, len(cfg.AllowedIDs)),
@@ -83,6 +81,7 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 		activeName:    make(map[int64]string),
 		lastThinking:  make(map[int64]string),
 		lastDiffs:     make(map[int64][]map[string]string),
+		autoApprove:   make(map[string]bool),
 	}
 
 	for _, id := range cfg.AllowedIDs {
@@ -113,6 +112,10 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 	b.RegisterHandler(bot.HandlerTypeMessageText, "cost", bot.MatchTypeCommand, tb.handleCost)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "use", bot.MatchTypeCommand, tb.handleUse)
 	b.RegisterHandler(bot.HandlerTypeMessageText, "detach", bot.MatchTypeCommand, tb.handleDetach)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "new", bot.MatchTypeCommand, tb.handleNew)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "stop", bot.MatchTypeCommand, tb.handleStop)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "yolo", bot.MatchTypeCommand, tb.handleYolo)
+	b.RegisterHandler(bot.HandlerTypeMessageText, "history", bot.MatchTypeCommand, tb.handleHistory)
 
 	// Callback query handlers.
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "approve:", bot.MatchTypePrefix, tb.handleApprovalCallback)
@@ -121,6 +124,7 @@ func New(cfg Config, store provider.MemoryStore, ghMonitor *gh.Monitor, sched *s
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "use:", bot.MatchTypePrefix, tb.handleUseCallback)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "thinking:", bot.MatchTypePrefix, tb.handleThinkingCallback)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "diff:", bot.MatchTypePrefix, tb.handleDiffCallback)
+	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "new:", bot.MatchTypePrefix, tb.handleNewCallback)
 
 	return tb, nil
 }
@@ -149,11 +153,15 @@ func (tb *Bot) registerCommands(ctx context.Context) {
 		{Command: "meetings", Description: "Today's calendar with Meet links"},
 		{Command: "emails", Description: "Recent unread emails"},
 		{Command: "sessions", Description: "List active Ghost sessions"},
+		{Command: "new", Description: "Create new session"},
+		{Command: "stop", Description: "Stop a session"},
 		{Command: "chat", Description: "Chat with a session: /chat <id> <msg>"},
 		{Command: "use", Description: "Set active session: /use <id>"},
 		{Command: "detach", Description: "Detach active session"},
 		{Command: "mode", Description: "List or switch mode: /mode [name]"},
 		{Command: "cost", Description: "Show session cost: /cost <id>"},
+		{Command: "yolo", Description: "Toggle auto-approve"},
+		{Command: "history", Description: "Show conversation history"},
 		{Command: "memory", Description: "Manage memories: search, add, delete"},
 		{Command: "remind", Description: "Set a reminder: /remind <message>"},
 		{Command: "briefing", Description: "Get your morning briefing"},
@@ -572,11 +580,15 @@ func (tb *Bot) handleHelp(ctx context.Context, b *bot.Bot, update *models.Update
 
 *Session Control*
 /sessions — List active Ghost sessions
+/new — Create new session: /new \[path\]
+/stop — Stop a session: /stop \[id\]
 /chat — Chat with a session: /chat \<id\> \<msg\>
 /use — Set active session: /use \<id\>
 /detach — Detach active session
-/mode — List modes or switch: /mode \<id\> \<name\>
-/cost — Show session cost: /cost \<id\>
+/mode — List modes or switch: /mode \[name\]
+/cost — Show session cost: /cost \[id\]
+/yolo — Toggle auto\\-approve: /yolo \[id\]
+/history — Show conversation: /history \[id\]
 
 *Notifications*
 /status — System status \+ notification summary
@@ -692,22 +704,26 @@ func (tb *Bot) mainKeyboard(chatID int64) *models.ReplyKeyboardMarkup {
 
 	row1 := []models.KeyboardButton{
 		{Text: "/sessions"},
+		{Text: "/new"},
 		{Text: "/status"},
+	}
+	row2 := []models.KeyboardButton{
 		{Text: "/briefing"},
 	}
 
 	kb := &models.ReplyKeyboardMarkup{
-		Keyboard:       [][]models.KeyboardButton{row1},
+		Keyboard:       [][]models.KeyboardButton{row1, row2},
 		ResizeKeyboard: true,
 	}
 
 	if name != "" {
 		activeRow := []models.KeyboardButton{
 			{Text: "/detach"},
+			{Text: "/yolo"},
 			{Text: "/mode"},
 			{Text: "/cost"},
 		}
-		kb.Keyboard = [][]models.KeyboardButton{activeRow, row1}
+		kb.Keyboard = [][]models.KeyboardButton{activeRow, row1, row2}
 	}
 
 	return kb

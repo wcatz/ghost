@@ -21,10 +21,13 @@ import (
 	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/github"
 	goog "github.com/wcatz/ghost/internal/google"
+	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/mcpserver"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/orchestrator"
+	"github.com/wcatz/ghost/internal/reflection"
 	"github.com/wcatz/ghost/internal/scheduler"
+	"github.com/wcatz/ghost/internal/selfupdate"
 	"github.com/wcatz/ghost/internal/server"
 	"github.com/wcatz/ghost/internal/telegram"
 	"github.com/wcatz/ghost/internal/tool"
@@ -43,35 +46,55 @@ func (s *stringSlice) Set(v string) error {
 }
 
 func main() {
-	// Check for subcommands before flag parsing.
+	// Check for subcommands and flags before flag parsing.
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "-v", "--version", "version":
+			fmt.Printf("ghost %s\n", version)
+			return
+		case "help", "--help", "-h":
+			printUsage()
+			return
 		case "serve":
 			runServe()
 			return
 		case "mcp":
+			if len(os.Args) > 2 {
+				switch os.Args[2] {
+				case "init":
+					runMCPInit()
+					return
+				case "status":
+					runMCPStatus()
+					return
+				}
+			}
 			runMCP()
+			return
+		case "hook":
+			runHook()
+			return
+		case "reflect":
+			runReflect()
+			return
+		case "upgrade":
+			runUpgrade()
 			return
 		}
 	}
 
 	var (
-		projects    stringSlice
-		modeFlag    = flag.String("mode", "", "Operating mode: chat, code, debug, review, plan, refactor")
+		projects stringSlice
+		modeFlag = flag.String("mode", "", "Operating mode: chat, code, debug, review, plan, refactor")
 		modelFlag   = flag.String("model", "", "Model override (e.g. claude-opus-4-6-20250514)")
 		yolo        = flag.Bool("yolo", false, "Skip all tool approval prompts")
 		noMemory    = flag.Bool("no-memory", false, "Disable memory extraction for this session")
 		noTUI       = flag.Bool("no-tui", false, "Force legacy REPL (no bubbletea)")
 		cont        = flag.Bool("continue", false, "Resume last conversation")
-		versionFlag = flag.Bool("version", false, "Print version and exit")
 	)
+	flag.Usage = printUsage
 	flag.Var(&projects, "project", "Project path (can be specified multiple times)")
 	flag.Parse()
-
-	if *versionFlag {
-		fmt.Printf("ghost %s\n", version)
-		os.Exit(0)
-	}
 
 	cfg, logger, store, _ := bootstrap()
 	defer store.Close()
@@ -294,7 +317,7 @@ func runServe() {
 		tgBot, err = telegram.New(telegram.Config{
 			Token:      cfg.Telegram.Token,
 			AllowedIDs: allowedIDs,
-		}, store, ghMonitor, sched, db, logger)
+		}, store, ghMonitor, sched, logger)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: telegram bot: %v\n", err)
 			os.Exit(1)
@@ -414,6 +437,11 @@ func runServe() {
 
 // runMCP starts ghost as an MCP server on stdio.
 func runMCP() {
+	if tui.IsTerminal() {
+		fmt.Fprintln(os.Stderr, "Starting MCP server on stdio (this is meant to be called by Claude Code).")
+		fmt.Fprintln(os.Stderr, "If you meant to set up the integration, run: ghost mcp init")
+		fmt.Fprintln(os.Stderr, "")
+	}
 	cfg, logger, store, _ := bootstrap()
 	defer store.Close()
 
@@ -435,6 +463,333 @@ func runMCP() {
 	if err := srv.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// runMCPInit configures Claude Code to use Ghost as its memory system.
+func runMCPInit() {
+	dryRun := len(os.Args) > 3 && os.Args[3] == "--dry-run"
+	if err := mcpinit.Run(os.Stdout, dryRun); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runMCPStatus checks the health of the Ghost ↔ Claude Code integration.
+func runMCPStatus() {
+	if err := mcpinit.Status(os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runReflect manually triggers memory consolidation for a project.
+// Defaults to dry-run (preview only). Use --apply to save results.
+// Use --restore to undo the last consolidation from snapshot.
+func runReflect() {
+	// Extract project name and flags from args (allow flags before or after project name).
+	var projectName, tierValue string
+	var apply, restore bool
+	tierValue = "auto"
+	for i := 2; i < len(os.Args); i++ {
+		switch {
+		case os.Args[i] == "--tier" && i+1 < len(os.Args):
+			tierValue = os.Args[i+1]
+			i++ // skip value
+		case strings.HasPrefix(os.Args[i], "--tier="):
+			tierValue = strings.TrimPrefix(os.Args[i], "--tier=")
+		case os.Args[i] == "--apply":
+			apply = true
+		case os.Args[i] == "--restore":
+			restore = true
+		case !strings.HasPrefix(os.Args[i], "-"):
+			projectName = os.Args[i]
+		}
+	}
+	if projectName == "" {
+		fmt.Fprintln(os.Stderr, `Usage: ghost reflect <project> [flags]
+
+Flags:
+  --tier string   Consolidation tier: auto, haiku, ollama, sqlite (default "auto")
+  --apply         Save results (default is dry-run/preview only)
+  --restore       Undo the last consolidation from snapshot`)
+		os.Exit(1)
+	}
+
+	cfg, logger, store, _ := bootstrap()
+	defer store.Close() //nolint:errcheck
+
+	ctx := context.Background()
+
+	// Resolve project name to ID.
+	projectID, err := store.ResolveProjectByName(ctx, projectName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if projectID == "" {
+		fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
+		os.Exit(1)
+	}
+
+	// Handle --restore.
+	if restore {
+		n, err := store.RestoreSnapshot(ctx, projectID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Restored %d memories from snapshot for %s\n", n, projectName)
+		return
+	}
+
+	// Build consolidator for the requested tier.
+	var consolidator reflection.Consolidator
+	switch tierValue {
+	case "haiku":
+		if cfg.API.Key == "" {
+			fmt.Fprintln(os.Stderr, "error: haiku tier requires ANTHROPIC_API_KEY")
+			os.Exit(1)
+		}
+		client := ai.NewClient(cfg.API.Key, logger)
+		consolidator = reflection.NewHaikuConsolidator(client)
+	case "ollama":
+		url := cfg.Embedding.OllamaURL
+		if url == "" {
+			url = "http://localhost:11434"
+		}
+		consolidator = reflection.NewOllamaConsolidator(url, cfg.Reflection.OllamaModel)
+	case "sqlite":
+		consolidator = reflection.NewSQLiteConsolidator()
+	default: // "auto"
+		var tiers []reflection.Consolidator
+		if cfg.API.Key != "" {
+			client := ai.NewClient(cfg.API.Key, logger)
+			tiers = append(tiers, reflection.NewHaikuConsolidator(client))
+		}
+		if cfg.Embedding.OllamaURL != "" {
+			tiers = append(tiers, reflection.NewOllamaConsolidator(cfg.Embedding.OllamaURL, cfg.Reflection.OllamaModel))
+		}
+		tiers = append(tiers, reflection.NewSQLiteConsolidator())
+		consolidator = reflection.NewTieredConsolidator(tiers, logger)
+	}
+
+	// Check availability.
+	if !consolidator.Available(ctx) {
+		fmt.Fprintf(os.Stderr, "error: consolidator %q is not available\n", consolidator.Name())
+		os.Exit(1)
+	}
+
+	if !apply {
+		fmt.Println("DRY RUN (use --apply to save results)")
+		fmt.Println()
+	}
+	fmt.Printf("Project:      %s (%s)\n", projectName, projectID)
+	fmt.Printf("Consolidator: %s\n", consolidator.Name())
+
+	// Gather input.
+	existingMemories, err := store.GetAll(ctx, projectID, 200)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: get memories: %v\n", err)
+		os.Exit(1)
+	}
+	currentContext, _ := store.GetLearnedContext(ctx, projectID)
+	exchanges, _ := store.GetRecentExchanges(ctx, projectID, 15)
+
+	fmt.Printf("Memories:     %d existing\n", len(existingMemories))
+	fmt.Println("Running consolidation...")
+
+	input := reflection.ReflectionInput{
+		RecentExchanges:  exchanges,
+		ExistingMemories: existingMemories,
+		CurrentContext:   currentContext,
+		ProjectName:      projectName,
+	}
+
+	consolidateCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+
+	result, err := consolidator.Consolidate(consolidateCtx, input)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: consolidation failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Filter empty-content memories.
+	var validMemories []reflection.ReflectMemory
+	for _, m := range result.Memories {
+		if strings.TrimSpace(m.Content) != "" {
+			validMemories = append(validMemories, m)
+		}
+	}
+	result.Memories = validMemories
+
+	// Summary.
+	catCounts := make(map[string]int)
+	for _, m := range result.Memories {
+		catCounts[m.Category]++
+	}
+	var parts []string
+	for cat, n := range catCounts {
+		parts = append(parts, fmt.Sprintf("%d %s", n, cat))
+	}
+	fmt.Printf("Result:       %d memories (%s)\n", len(result.Memories), strings.Join(parts, ", "))
+	fmt.Println()
+
+	// Show each memory.
+	for _, m := range result.Memories {
+		truncated := m.Content
+		if len(truncated) > 120 {
+			truncated = truncated[:120] + "..."
+		}
+		fmt.Printf("  [%s] (%.1f) %s\n", m.Category, m.Importance, truncated)
+	}
+	fmt.Println()
+
+	if len(result.Memories) == 0 {
+		fmt.Println("No memories returned from consolidation.")
+		return
+	}
+
+	// Empty-set guard.
+	var existingNonManual int
+	for _, m := range existingMemories {
+		if m.Source != "manual" {
+			existingNonManual++
+		}
+	}
+	if existingNonManual >= 6 && len(result.Memories) < existingNonManual/2 {
+		fmt.Fprintf(os.Stderr, "WARNING: consolidation returned %d memories vs %d existing non-manual (>50%% reduction)\n",
+			len(result.Memories), existingNonManual)
+	}
+
+	if !apply {
+		fmt.Println("Dry run complete. Re-run with --apply to save these results.")
+		return
+	}
+
+	// Apply results.
+	dbMemories := make([]memory.Memory, len(result.Memories))
+	for i, m := range result.Memories {
+		dbMemories[i] = memory.Memory{
+			ProjectID:  projectID,
+			Category:   m.Category,
+			Content:    m.Content,
+			Importance: m.Importance,
+			Source:     "reflection",
+			Tags:       m.Tags,
+		}
+	}
+
+	if err := store.ReplaceNonManual(ctx, projectID, dbMemories); err != nil {
+		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
+		os.Exit(1)
+	}
+
+	summary := fmt.Sprintf("%d memories consolidated (%s)", len(dbMemories), strings.Join(parts, ", "))
+	fmt.Printf("Applied: %s\n", summary)
+	fmt.Println("(use --restore to undo)")
+
+	if result.LearnedContext != "" {
+		if err := store.UpdateLearnedContext(ctx, projectID, result.LearnedContext, summary); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: update learned context: %v\n", err)
+		}
+	}
+}
+
+// printUsage displays the top-level help.
+func printUsage() {
+	fmt.Fprintf(os.Stderr, `ghost %s — memory-first AI assistant
+
+Usage:
+  ghost [flags] [message]     Start interactive session or send one-shot message
+  ghost <command>             Run a subcommand
+
+Commands:
+  serve                       Start HTTP daemon with all subsystems
+  mcp                         Start MCP server on stdio (used by Claude Code)
+  mcp init [--dry-run]        Configure Claude Code integration
+  mcp status                  Check Claude Code integration health
+  reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
+  upgrade                     Update ghost to the latest release
+  version                     Print version
+
+Flags:
+  -mode string                Operating mode: chat, code, debug, review, plan, refactor
+  -model string               Model override (e.g. claude-opus-4-6-20250514)
+  -project path               Project path (repeatable)
+  -continue                   Resume last conversation
+  -yolo                       Skip all tool approval prompts
+  -no-memory                  Disable memory extraction for this session
+  -no-tui                     Force legacy REPL (no bubbletea)
+
+Environment:
+  ANTHROPIC_API_KEY           Required for AI features
+  GHOST_DEBUG                 Enable debug logging
+  GHOST_PLAIN                 Force plain REPL (no bubbletea)
+`, version)
+}
+
+// runUpgrade downloads and installs the latest ghost release.
+func runUpgrade() {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: cannot determine binary path: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Current: ghost %s (%s)\n", version, exe)
+	fmt.Println("Checking for updates...")
+
+	rel, err := selfupdate.LatestRelease()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	latest := strings.TrimPrefix(rel.TagName, "v")
+	if latest == version {
+		fmt.Printf("Already up to date (%s).\n", version)
+		return
+	}
+
+	asset, err := selfupdate.FindAsset(rel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Downloading %s...\n", asset.Name)
+	body, err := selfupdate.Download(asset.BrowserDownloadURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	defer body.Close()
+
+	bin, err := selfupdate.ExtractBinary(body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Replacing %s...\n", exe)
+	if err := selfupdate.Replace(exe, bin); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Updated: ghost %s → %s\n", version, latest)
+}
+
+// runHook dispatches Claude Code hook events.
+func runHook() {
+	if len(os.Args) < 3 {
+		os.Exit(0)
+	}
+	switch os.Args[2] {
+	case "session-start":
+		mcpinit.HandleSessionStartHook(os.Stdin, os.Stdout)
 	}
 }
 
