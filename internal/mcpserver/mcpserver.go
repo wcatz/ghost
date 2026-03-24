@@ -564,9 +564,9 @@ func (s *Server) registerTools() {
 		}
 		var sb strings.Builder
 		for _, t := range tasks {
-			sb.WriteString(fmt.Sprintf("- [%s] P%d `%s` %s\n", t.Status, t.Priority, t.ID[:8], t.Title))
+			fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority, t.ID[:8], t.Title)
 			if t.Description != "" {
-				sb.WriteString(fmt.Sprintf("  %s\n", t.Description))
+				fmt.Fprintf(&sb, "  %s\n", t.Description)
 			}
 		}
 		return &mcp.CallToolResult{
@@ -654,7 +654,7 @@ func (s *Server) registerTools() {
 
 		var sb strings.Builder
 		sb.WriteString("## Ghost Health\n\n")
-		sb.WriteString(fmt.Sprintf("**Projects:** %d\n\n", len(projects)))
+		fmt.Fprintf(&sb, "**Projects:** %d\n\n", len(projects))
 
 		totalMemories := 0
 		for _, p := range projects {
@@ -663,9 +663,9 @@ func (s *Server) registerTools() {
 				continue
 			}
 			totalMemories += count
-			sb.WriteString(fmt.Sprintf("- **%s** (%s): %d memories\n", p.Name, p.ID[:8], count))
+			fmt.Fprintf(&sb, "- **%s** (%s): %d memories\n", p.Name, p.ID[:8], count)
 		}
-		sb.WriteString(fmt.Sprintf("\n**Total memories:** %d\n", totalMemories))
+		fmt.Fprintf(&sb, "\n**Total memories:** %d\n", totalMemories)
 
 		if s.embedder != nil {
 			sb.WriteString("**Embeddings:** enabled\n")
@@ -825,7 +825,7 @@ func formatMemories(memories []memory.Memory) string {
 			tagsJSON, _ := json.Marshal(m.Tags)
 			tags = " tags:" + string(tagsJSON)
 		}
-		sb.WriteString(fmt.Sprintf("- [%s] `%s` (%.1f%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, m.Content))
+		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, m.Content)
 	}
 	return sb.String()
 }
