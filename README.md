@@ -18,6 +18,7 @@ Pure Go. No CGO. Single binary.
 - **3-block prompt caching** — 90%+ cache hit rates, ~76% savings on input tokens
 - **Hybrid search** — FTS5 keyword + vector cosine similarity via Reciprocal Rank Fusion
 - **Free embeddings** — `nomic-embed-text:v1.5` runs locally through Ollama, no API costs
+- **Tiered consolidation** — memory dedup via Haiku API, Ollama local LLM, or pure SQLite (works without API credits)
 - **Time-decay scoring** — stale memories fade automatically by category half-life
 - **Cost tracking** — per-session and monthly cost aggregation with cache savings, API vs subscription comparison
 - **Google Calendar + Gmail** — meeting notifications, email summaries via OAuth2
@@ -311,6 +312,26 @@ CalDAV is also supported as an alternative calendar source (iCloud, Fastmail, et
 | gotcha | 30-day | Bugs and edge cases |
 | dependency | 30-day | Libraries and versions |
 
+### Tiered Consolidation
+
+Memory consolidation runs periodically to merge duplicates, prune stale entries, and maintain quality. Three tiers are available — Ghost tries the highest quality tier and falls back automatically:
+
+| Tier | Backend | Cost | Quality | Requirements |
+|------|---------|------|---------|-------------|
+| 2 | Haiku API | ~$0.001/run | Best | Anthropic API key |
+| 1 | Ollama (`qwen2.5:3b`) | Free | Good | Ollama running locally |
+| 0 | SQLite (Jaccard dedup) | Free | Mechanical | None (always available) |
+
+Default is `auto` — uses the best available tier. Configure explicitly:
+
+```yaml
+reflection:
+  backend: "auto"              # auto, haiku, ollama, sqlite, disabled
+  ollama_model: "qwen2.5:3b"  # model for Ollama tier
+```
+
+Users with a Claude subscription but no API credits: install [Ollama](https://ollama.com) and `ollama pull qwen2.5:3b` for free local consolidation.
+
 ## Configuration
 
 Config loads in layers (later overrides earlier):
@@ -336,6 +357,10 @@ embedding:
   enabled: true
   ollama_url: "http://localhost:11434"
   model: "nomic-embed-text:v1.5"
+
+reflection:
+  backend: "auto"                      # auto, haiku, ollama, sqlite, disabled
+  ollama_model: "qwen2.5:3b"
 
 github:
   token: "ghp_..."
@@ -369,7 +394,7 @@ internal/
   tool/                    Tool registry + built-in executors (file, grep, glob, git, bash, memory)
   orchestrator/            Multi-project sessions, context compression, multi-turn caching
   claudeimport/            Auto-import Claude Code memory files on first project contact
-  reflection/              Haiku memory consolidation + auto-extraction
+  reflection/              Tiered memory consolidation (Haiku → Ollama → SQLite) + auto-extraction
   prompt/                  3-block cached system prompt
   mode/                    Operating modes (chat, code, debug, review, plan, refactor)
   project/                 Auto-detection (language, tests, git)
