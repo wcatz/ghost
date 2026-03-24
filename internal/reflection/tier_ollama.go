@@ -74,9 +74,10 @@ var reflectionSchema = json.RawMessage(`{
 					"category": {"type": "string", "enum": ["architecture","decision","pattern","convention","gotcha","dependency","preference","fact"]},
 					"content": {"type": "string"},
 					"importance": {"type": "number"},
-					"tags": {"type": "array", "items": {"type": "string"}}
+					"tags": {"type": "array", "items": {"type": "string"}},
+					"scope": {"type": "string", "enum": ["project","global"]}
 				},
-				"required": ["category", "content", "importance", "tags"]
+				"required": ["category", "content", "importance", "tags", "scope"]
 			}
 		}
 	},
