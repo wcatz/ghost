@@ -6,18 +6,19 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/project"
 )
 
-// mockReflector implements the reflector interface for testing.
-type mockReflector struct {
+// mockConsolidator implements the Consolidator interface for testing.
+type mockConsolidator struct {
 	response string
 }
 
-func (m *mockReflector) Reflect(_ context.Context, _ string) (string, ai.TokenUsage, error) {
-	return m.response, ai.TokenUsage{}, nil
+func (m *mockConsolidator) Name() string                          { return "mock" }
+func (m *mockConsolidator) Available(_ context.Context) bool      { return true }
+func (m *mockConsolidator) Consolidate(_ context.Context, _ ReflectionInput) (ReflectionResult, error) {
+	return parseReflectionResponse(m.response), nil
 }
 
 // mockMemStore implements the memoryStore interface for testing.
@@ -26,6 +27,8 @@ type mockMemStore struct {
 	existingMemories []memory.Memory
 	replacedWith     []memory.Memory // captures what was passed to ReplaceNonManual
 	replaceCalled    bool
+	upsertedGlobals  []memory.Memory // captures global upserts
+	ensuredProjects  []string        // captures EnsureProject calls
 }
 
 func (m *mockMemStore) IncrementInteraction(_ context.Context, _ string) (int, error) {
@@ -55,8 +58,23 @@ func (m *mockMemStore) UpdateLearnedContext(_ context.Context, _, _, _ string) e
 	return nil
 }
 
-func (m *mockMemStore) Upsert(_ context.Context, _, _, _, _ string, _ float32, _ []string) (string, bool, error) {
+func (m *mockMemStore) Upsert(_ context.Context, projectID, category, content, source string, importance float32, tags []string) (string, bool, error) {
+	if projectID == "_global" {
+		m.upsertedGlobals = append(m.upsertedGlobals, memory.Memory{
+			ProjectID:  projectID,
+			Category:   category,
+			Content:    content,
+			Source:     source,
+			Importance: importance,
+			Tags:       tags,
+		})
+	}
 	return "id", false, nil
+}
+
+func (m *mockMemStore) EnsureProject(_ context.Context, id, _, _ string) error {
+	m.ensuredProjects = append(m.ensuredProjects, id)
+	return nil
 }
 
 func TestParseReflectionResponse_FiltersEmptyContent(t *testing.T) {
@@ -86,7 +104,7 @@ func TestEngineFiltersEmptyContent(t *testing.T) {
 		},
 	}
 
-	client := &mockReflector{
+	client := &mockConsolidator{
 		response: `{"learned_context":"ctx","memories":[
 			{"category":"fact","content":"valid","importance":0.8,"tags":["go"]},
 			{"category":"fact","content":"","importance":0.5,"tags":[]},
@@ -122,7 +140,7 @@ func TestEnginePreventsDataLoss(t *testing.T) {
 		existingMemories: existing,
 	}
 
-	client := &mockReflector{
+	client := &mockConsolidator{
 		response: `{"learned_context":"ctx","memories":[
 			{"category":"fact","content":"only one","importance":0.8,"tags":[]},
 			{"category":"fact","content":"only two","importance":0.7,"tags":[]}
@@ -155,7 +173,7 @@ func TestEngineAllowsReasonableConsolidation(t *testing.T) {
 	}
 	response := mustJSON(t, ReflectionResult{LearnedContext: "ctx", Memories: memories})
 
-	client := &mockReflector{response: response}
+	client := &mockConsolidator{response: response}
 
 	e := NewEngine(client, store, testLogger(), 10)
 	e.MaybeReflect(context.Background(), "proj1", testProjectCtx())
@@ -180,7 +198,7 @@ func TestEngineSkipsGuardForSmallSets(t *testing.T) {
 		existingMemories: existing,
 	}
 
-	client := &mockReflector{
+	client := &mockConsolidator{
 		response: `{"learned_context":"ctx","memories":[
 			{"category":"fact","content":"the only one","importance":0.9,"tags":[]}
 		]}`,
@@ -209,7 +227,7 @@ func TestEngineCountsOnlyNonManual(t *testing.T) {
 		existingMemories: existing,
 	}
 
-	client := &mockReflector{
+	client := &mockConsolidator{
 		response: `{"learned_context":"ctx","memories":[
 			{"category":"fact","content":"consolidated","importance":0.9,"tags":[]}
 		]}`,
@@ -220,6 +238,98 @@ func TestEngineCountsOnlyNonManual(t *testing.T) {
 
 	if !store.replaceCalled {
 		t.Fatal("ReplaceNonManual should be called — only 2 non-manual, threshold not met")
+	}
+}
+
+func TestEngineRoutesGlobalMemories(t *testing.T) {
+	// Consolidator returns 3 project + 2 global memories.
+	store := &mockMemStore{
+		interactionCount: 9,
+		existingMemories: []memory.Memory{
+			{Source: "reflection", Content: "existing"},
+		},
+	}
+
+	response := mustJSON(t, ReflectionResult{
+		LearnedContext: "ctx",
+		Memories: []ReflectMemory{
+			{Category: "architecture", Content: "ghost uses SQLite", Importance: 0.8, Tags: []string{"db"}, Scope: "project"},
+			{Category: "pattern", Content: "always run go vet", Importance: 0.7, Tags: []string{"go"}, Scope: "project"},
+			{Category: "convention", Content: "commit prefix feat/fix", Importance: 0.6, Tags: []string{"git"}, Scope: "project"},
+			{Category: "preference", Content: "always use nerdctl not docker", Importance: 0.9, Tags: []string{"containers"}, Scope: "global"},
+			{Category: "fact", Content: "deploy infra from any repo", Importance: 0.8, Tags: []string{"deploy"}, Scope: "global"},
+		},
+	})
+
+	client := &mockConsolidator{response: response}
+	e := NewEngine(client, store, testLogger(), 10)
+	e.MaybeReflect(context.Background(), "proj1", testProjectCtx())
+
+	// Project memories should be replaced (3 project-scoped).
+	if !store.replaceCalled {
+		t.Fatal("expected ReplaceNonManual to be called for project memories")
+	}
+	if len(store.replacedWith) != 3 {
+		t.Fatalf("expected 3 project memories, got %d", len(store.replacedWith))
+	}
+
+	// Global memories should be upserted to _global.
+	if len(store.upsertedGlobals) != 2 {
+		t.Fatalf("expected 2 global upserts, got %d", len(store.upsertedGlobals))
+	}
+	if store.upsertedGlobals[0].Content != "always use nerdctl not docker" {
+		t.Errorf("unexpected global content: %s", store.upsertedGlobals[0].Content)
+	}
+
+	// EnsureProject should have been called for _global.
+	found := false
+	for _, p := range store.ensuredProjects {
+		if p == "_global" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected EnsureProject to be called for _global")
+	}
+}
+
+func TestEngineDataLossGuardAccountsForGlobalSplit(t *testing.T) {
+	// 10 existing non-manual. Consolidator returns 3 project + 6 global = 9 total.
+	// But only 3 project-scoped < 10/2=5 → should block replace.
+	existing := make([]memory.Memory, 10)
+	for i := range existing {
+		existing[i] = memory.Memory{Source: "reflection", Content: "memory"}
+	}
+
+	store := &mockMemStore{
+		interactionCount: 9,
+		existingMemories: existing,
+	}
+
+	mems := []ReflectMemory{
+		{Category: "fact", Content: "p1", Importance: 0.8, Tags: []string{}, Scope: "project"},
+		{Category: "fact", Content: "p2", Importance: 0.7, Tags: []string{}, Scope: "project"},
+		{Category: "fact", Content: "p3", Importance: 0.6, Tags: []string{}, Scope: "project"},
+		{Category: "preference", Content: "g1", Importance: 0.9, Tags: []string{}, Scope: "global"},
+		{Category: "preference", Content: "g2", Importance: 0.8, Tags: []string{}, Scope: "global"},
+		{Category: "preference", Content: "g3", Importance: 0.7, Tags: []string{}, Scope: "global"},
+		{Category: "preference", Content: "g4", Importance: 0.6, Tags: []string{}, Scope: "global"},
+		{Category: "preference", Content: "g5", Importance: 0.5, Tags: []string{}, Scope: "global"},
+		{Category: "preference", Content: "g6", Importance: 0.4, Tags: []string{}, Scope: "global"},
+	}
+	response := mustJSON(t, ReflectionResult{LearnedContext: "ctx", Memories: mems})
+
+	client := &mockConsolidator{response: response}
+	e := NewEngine(client, store, testLogger(), 10)
+	e.MaybeReflect(context.Background(), "proj1", testProjectCtx())
+
+	if store.replaceCalled {
+		t.Fatal("ReplaceNonManual should NOT be called — 3 project < 10/2 guard")
+	}
+
+	// Global memories should still be upserted even when project replace is blocked.
+	if len(store.upsertedGlobals) != 6 {
+		t.Fatalf("expected 6 global upserts even with blocked replace, got %d", len(store.upsertedGlobals))
 	}
 }
 

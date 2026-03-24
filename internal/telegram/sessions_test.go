@@ -23,6 +23,7 @@ func testBot(t *testing.T, serverURL string) *Bot {
 		activeName:    make(map[int64]string),
 		lastThinking:  make(map[int64]string),
 		lastDiffs:     make(map[int64][]map[string]string),
+		autoApprove:   make(map[string]bool),
 	}
 }
 
@@ -630,5 +631,251 @@ func TestPendingChat_ConcurrentAccess(t *testing.T) {
 
 	if len(tb.pendingChat) != 50 {
 		t.Errorf("expected 50 pending chats, got %d", len(tb.pendingChat))
+	}
+}
+
+// --- fetchProjects ---
+
+func TestFetchProjects_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/projects" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != "GET" {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		_ = json.NewEncoder(w).Encode([]apiProject{
+			{ID: "p1", Path: "/home/user/ghost", Name: "ghost"},
+			{ID: "p2", Path: "/home/user/roller", Name: "roller"},
+		})
+	}))
+	defer server.Close()
+
+	origClient := httpClient
+	httpClient = server.Client()
+	t.Cleanup(func() { httpClient = origClient })
+
+	tb := testBot(t, server.URL)
+	projects, err := tb.fetchProjects()
+	if err != nil {
+		t.Fatalf("fetchProjects: %v", err)
+	}
+	if len(projects) != 2 {
+		t.Fatalf("expected 2 projects, got %d", len(projects))
+	}
+	if projects[0].Name != "ghost" {
+		t.Errorf("first project name = %q, want %q", projects[0].Name, "ghost")
+	}
+}
+
+func TestFetchProjects_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	origClient := httpClient
+	httpClient = server.Client()
+	t.Cleanup(func() { httpClient = origClient })
+
+	tb := testBot(t, server.URL)
+	_, err := tb.fetchProjects()
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+}
+
+// --- createSession ---
+
+func TestCreateSession_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.URL.Path != "/api/v1/sessions/" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+			return
+		}
+		if body["path"] != "/home/user/ghost" {
+			t.Errorf("path = %q", body["path"])
+		}
+
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(apiSession{
+			ID: "new-session-id", ProjectPath: "/home/user/ghost",
+			ProjectName: "ghost", Mode: "chat", Active: true,
+		})
+	}))
+	defer server.Close()
+
+	origClient := httpClient
+	httpClient = server.Client()
+	t.Cleanup(func() { httpClient = origClient })
+
+	tb := testBot(t, server.URL)
+	session, err := tb.createSession("/home/user/ghost")
+	if err != nil {
+		t.Fatalf("createSession: %v", err)
+	}
+	if session.ID != "new-session-id" {
+		t.Errorf("session ID = %q", session.ID)
+	}
+	if session.ProjectName != "ghost" {
+		t.Errorf("project name = %q", session.ProjectName)
+	}
+}
+
+func TestCreateSession_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("failed"))
+	}))
+	defer server.Close()
+
+	origClient := httpClient
+	httpClient = server.Client()
+	t.Cleanup(func() { httpClient = origClient })
+
+	tb := testBot(t, server.URL)
+	_, err := tb.createSession("/bad/path")
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+}
+
+// --- deleteSession ---
+
+func TestDeleteSession_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" {
+			t.Errorf("expected DELETE, got %s", r.Method)
+		}
+		if !strings.HasSuffix(r.URL.Path, "/session-abc") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "stopped"})
+	}))
+	defer server.Close()
+
+	origClient := httpClient
+	httpClient = server.Client()
+	t.Cleanup(func() { httpClient = origClient })
+
+	tb := testBot(t, server.URL)
+	if err := tb.deleteSession("session-abc"); err != nil {
+		t.Fatalf("deleteSession: %v", err)
+	}
+}
+
+func TestDeleteSession_NotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("not found"))
+	}))
+	defer server.Close()
+
+	origClient := httpClient
+	httpClient = server.Client()
+	t.Cleanup(func() { httpClient = origClient })
+
+	tb := testBot(t, server.URL)
+	err := tb.deleteSession("nonexistent")
+	if err == nil {
+		t.Fatal("expected error for 404 response")
+	}
+}
+
+// --- setAutoApprove ---
+
+func TestSetAutoApprove_Success(t *testing.T) {
+	var receivedEnabled bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if !strings.Contains(r.URL.Path, "/auto-approve") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		var body map[string]bool
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+			return
+		}
+		receivedEnabled = body["enabled"]
+		_ = json.NewEncoder(w).Encode(map[string]bool{"auto_approve": body["enabled"]})
+	}))
+	defer server.Close()
+
+	origClient := httpClient
+	httpClient = server.Client()
+	t.Cleanup(func() { httpClient = origClient })
+
+	tb := testBot(t, server.URL)
+	if err := tb.setAutoApprove("session-abc", true); err != nil {
+		t.Fatalf("setAutoApprove: %v", err)
+	}
+	if !receivedEnabled {
+		t.Error("expected enabled=true to be sent")
+	}
+}
+
+// --- fetchHistory ---
+
+func TestFetchHistory_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		if !strings.Contains(r.URL.Path, "/history") {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode([]historyMsg{
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: "hi there"},
+		})
+	}))
+	defer server.Close()
+
+	origClient := httpClient
+	httpClient = server.Client()
+	t.Cleanup(func() { httpClient = origClient })
+
+	tb := testBot(t, server.URL)
+	msgs, err := tb.fetchHistory("session-abc")
+	if err != nil {
+		t.Fatalf("fetchHistory: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[0].Role != "user" || msgs[0].Content != "hello" {
+		t.Errorf("msg[0] = %+v", msgs[0])
+	}
+	if msgs[1].Role != "assistant" || msgs[1].Content != "hi there" {
+		t.Errorf("msg[1] = %+v", msgs[1])
+	}
+}
+
+func TestFetchHistory_Empty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]historyMsg{})
+	}))
+	defer server.Close()
+
+	origClient := httpClient
+	httpClient = server.Client()
+	t.Cleanup(func() { httpClient = origClient })
+
+	tb := testBot(t, server.URL)
+	msgs, err := tb.fetchHistory("session-abc")
+	if err != nil {
+		t.Fatalf("fetchHistory: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Errorf("expected 0 messages, got %d", len(msgs))
 	}
 }

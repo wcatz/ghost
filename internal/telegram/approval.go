@@ -258,14 +258,23 @@ func (tb *Bot) ApprovalResolved(sessionID string, approved bool) {
 		tb.approval.mu.Unlock()
 		return
 	}
-	tb.approval.mu.Unlock()
-
-	tb.deleteApprovalMessages()
-
-	tb.approval.mu.Lock()
+	// Grab and clear state in one critical section.
+	msgs := tb.approval.messageIDs
+	tb.approval.messageIDs = nil
 	tb.approval.sessionID = ""
 	tb.approval.toolName = ""
 	tb.approval.mu.Unlock()
+
+	// Delete messages outside lock (Telegram API calls).
+	for chatID, msgID := range msgs {
+		_, err := tb.bot.DeleteMessage(context.Background(), &bot.DeleteMessageParams{
+			ChatID:    chatID,
+			MessageID: msgID,
+		})
+		if err != nil {
+			tb.logger.Warn("delete approval message", "error", err, "chat_id", chatID)
+		}
+	}
 }
 
 // formatToolInput extracts the most relevant info from tool input for display.
