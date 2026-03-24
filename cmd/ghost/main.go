@@ -636,13 +636,36 @@ Flags:
 	fmt.Printf("Result:       %d memories (%s)\n", len(result.Memories), strings.Join(parts, ", "))
 	fmt.Println()
 
-	// Show each memory.
+	// Split by scope.
+	var projectMems, globalMems []reflection.ReflectMemory
 	for _, m := range result.Memories {
-		truncated := m.Content
-		if len(truncated) > 120 {
-			truncated = truncated[:120] + "..."
+		if m.Scope == "global" {
+			globalMems = append(globalMems, m)
+		} else {
+			projectMems = append(projectMems, m)
 		}
-		fmt.Printf("  [%s] (%.1f) %s\n", m.Category, m.Importance, truncated)
+	}
+
+	// Show each memory.
+	if len(projectMems) > 0 {
+		fmt.Printf("  Project-scoped (%d):\n", len(projectMems))
+		for _, m := range projectMems {
+			truncated := m.Content
+			if len(truncated) > 120 {
+				truncated = truncated[:120] + "..."
+			}
+			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, truncated)
+		}
+	}
+	if len(globalMems) > 0 {
+		fmt.Printf("  Global-scoped (%d):\n", len(globalMems))
+		for _, m := range globalMems {
+			truncated := m.Content
+			if len(truncated) > 120 {
+				truncated = truncated[:120] + "..."
+			}
+			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, truncated)
+		}
 	}
 	fmt.Println()
 
@@ -651,16 +674,19 @@ Flags:
 		return
 	}
 
-	// Empty-set guard.
+	// Empty-set guard (based on project-scoped only).
 	var existingNonManual int
 	for _, m := range existingMemories {
 		if m.Source != "manual" {
 			existingNonManual++
 		}
 	}
-	if existingNonManual >= 6 && len(result.Memories) < existingNonManual/2 {
-		fmt.Fprintf(os.Stderr, "WARNING: consolidation returned %d memories vs %d existing non-manual (>50%% reduction)\n",
-			len(result.Memories), existingNonManual)
+	if existingNonManual >= 6 && len(projectMems) < existingNonManual/2 {
+		fmt.Fprintf(os.Stderr, "WARNING: consolidation returned %d project memories vs %d existing non-manual (>50%% reduction)\n",
+			len(projectMems), existingNonManual)
+		if len(globalMems) > 0 {
+			fmt.Fprintf(os.Stderr, "  (%d memories classified as global — check scope accuracy)\n", len(globalMems))
+		}
 	}
 
 	if !apply {
@@ -668,31 +694,50 @@ Flags:
 		return
 	}
 
-	// Apply results.
-	dbMemories := make([]memory.Memory, len(result.Memories))
-	for i, m := range result.Memories {
-		dbMemories[i] = memory.Memory{
-			ProjectID:  projectID,
-			Category:   m.Category,
-			Content:    m.Content,
-			Importance: m.Importance,
-			Source:     "reflection",
-			Tags:       m.Tags,
+	// Apply global memories via upsert.
+	if len(globalMems) > 0 {
+		if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: ensure _global project: %v\n", err)
 		}
+		for _, m := range globalMems {
+			_, _, err := store.Upsert(ctx, "_global", m.Category, m.Content, "reflection", m.Importance, m.Tags)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: upsert global memory: %v\n", err)
+			}
+		}
+		fmt.Printf("Upserted %d global memories\n", len(globalMems))
 	}
 
-	if err := store.ReplaceNonManual(ctx, projectID, dbMemories); err != nil {
-		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
-		os.Exit(1)
-	}
+	// Apply project memories via replace.
+	if len(projectMems) > 0 {
+		dbMemories := make([]memory.Memory, len(projectMems))
+		for i, m := range projectMems {
+			dbMemories[i] = memory.Memory{
+				ProjectID:  projectID,
+				Category:   m.Category,
+				Content:    m.Content,
+				Importance: m.Importance,
+				Source:     "reflection",
+				Tags:       m.Tags,
+			}
+		}
 
-	summary := fmt.Sprintf("%d memories consolidated (%s)", len(dbMemories), strings.Join(parts, ", "))
-	fmt.Printf("Applied: %s\n", summary)
-	fmt.Println("(use --restore to undo)")
+		if err := store.ReplaceNonManual(ctx, projectID, dbMemories); err != nil {
+			fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
+			os.Exit(1)
+		}
 
-	if result.LearnedContext != "" {
-		if err := store.UpdateLearnedContext(ctx, projectID, result.LearnedContext, summary); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: update learned context: %v\n", err)
+		summary := fmt.Sprintf("%d memories consolidated (%s)", len(dbMemories), strings.Join(parts, ", "))
+		if len(globalMems) > 0 {
+			summary += fmt.Sprintf(", %d promoted to global", len(globalMems))
+		}
+		fmt.Printf("Applied: %s\n", summary)
+		fmt.Println("(use --restore to undo)")
+
+		if result.LearnedContext != "" {
+			if err := store.UpdateLearnedContext(ctx, projectID, result.LearnedContext, summary); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: update learned context: %v\n", err)
+			}
 		}
 	}
 }

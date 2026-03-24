@@ -172,6 +172,77 @@ func TestTokenize(t *testing.T) {
 	}
 }
 
+func TestInferGlobalScope(t *testing.T) {
+	tests := []struct {
+		name     string
+		category string
+		content  string
+		want     string
+	}{
+		{"preference always global", "preference", "use tabs not spaces", "global"},
+		{"architecture is project", "architecture", "ghost uses 3-block prompt caching", "project"},
+		{"cross-repo workflow", "fact", "deploy to infra cluster from any repo", "global"},
+		{"ssh host", "fact", "SSH into node3 via bastion", "global"},
+		{"always use pattern", "convention", "always use nerdctl not docker", "global"},
+		{"project convention", "convention", "commit messages use feat/fix prefix", "project"},
+		{"all repos", "pattern", "run go vet across all repos before release", "global"},
+		{"dev machine", "fact", "dev machine runs Asahi Fedora on Apple Silicon", "global"},
+		{"plain project fact", "fact", "FTS5 uses porter stemmer tokenizer", "project"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := inferGlobalScope(tt.category, tt.content)
+			if got != tt.want {
+				t.Errorf("inferGlobalScope(%q, %q) = %q, want %q", tt.category, tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSQLiteConsolidator_SetsScope(t *testing.T) {
+	sc := NewSQLiteConsolidator()
+
+	input := ReflectionInput{
+		ExistingMemories: []memory.Memory{
+			{Category: "preference", Content: "use nerdctl not docker", Importance: 0.9, Tags: []string{}},
+			{Category: "architecture", Content: "ghost uses SQLite with FTS5", Importance: 0.8, Tags: []string{}},
+		},
+	}
+
+	result, err := sc.Consolidate(context.Background(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, m := range result.Memories {
+		if m.Category == "preference" && m.Scope != "global" {
+			t.Errorf("preference should be global, got %q", m.Scope)
+		}
+		if m.Category == "architecture" && m.Scope != "project" {
+			t.Errorf("architecture should be project, got %q", m.Scope)
+		}
+	}
+}
+
+func TestParseReflectionResponse_NormalizesScope(t *testing.T) {
+	input := `{"learned_context":"ctx","memories":[
+		{"category":"fact","content":"with scope","importance":0.8,"tags":[],"scope":"global"},
+		{"category":"fact","content":"no scope","importance":0.7,"tags":[]},
+		{"category":"fact","content":"bad scope","importance":0.6,"tags":[],"scope":"invalid"}
+	]}`
+
+	result := parseReflectionResponse(input)
+	if result.Memories[0].Scope != "global" {
+		t.Errorf("expected global scope preserved, got %q", result.Memories[0].Scope)
+	}
+	if result.Memories[1].Scope != "project" {
+		t.Errorf("expected missing scope normalized to project, got %q", result.Memories[1].Scope)
+	}
+	if result.Memories[2].Scope != "project" {
+		t.Errorf("expected invalid scope normalized to project, got %q", result.Memories[2].Scope)
+	}
+}
+
 func TestHaikuConsolidator_NilClient(t *testing.T) {
 	h := NewHaikuConsolidator(nil)
 	if h.Available(context.Background()) {
