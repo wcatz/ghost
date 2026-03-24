@@ -22,7 +22,7 @@ func NewOllamaConsolidator(baseURL, model string) *OllamaConsolidator {
 	return &OllamaConsolidator{
 		baseURL: baseURL,
 		model:   model,
-		client:  &http.Client{Timeout: 90 * time.Second},
+		client:  &http.Client{}, // timeout controlled by context
 	}
 }
 
