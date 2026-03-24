@@ -60,6 +60,67 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 	return &Store{db: db, logger: logger}
 }
 
+// seedGlobalMemory defines a memory that Ghost ships with out of the box.
+// These are inserted as source='manual', pinned=1, so consolidation never
+// touches them.
+type seedGlobalMemory struct {
+	Category   string
+	Content    string
+	Importance float32
+	Tags       []string
+}
+
+// defaultSeedMemories are baked into every Ghost installation.
+var defaultSeedMemories = []seedGlobalMemory{
+	{
+		Category:   "preference",
+		Content:    "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.",
+		Importance: 1.0,
+		Tags:       []string{"git", "commits", "non-negotiable"},
+	},
+}
+
+// SeedGlobalMemories ensures the _global project exists and inserts any
+// missing seed memories. Seeds are pinned and source='manual' so they
+// survive consolidation. Idempotent — skips memories whose content already
+// exists.
+func (s *Store) SeedGlobalMemories(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Ensure _global project.
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')
+		ON CONFLICT(id) DO NOTHING
+	`)
+	if err != nil {
+		return fmt.Errorf("ensure _global project: %w", err)
+	}
+	_, _ = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`)
+
+	for _, seed := range defaultSeedMemories {
+		// Skip if content already exists in _global (exact match).
+		var exists int
+		err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM memories WHERE project_id = '_global' AND content = ?`,
+			seed.Content).Scan(&exists)
+		if err == nil && exists > 0 {
+			continue
+		}
+
+		tags, _ := json.Marshal(seed.Tags)
+		_, err = s.db.ExecContext(ctx, `
+			INSERT INTO memories (project_id, category, content, source, importance, tags, pinned)
+			VALUES ('_global', ?, ?, 'manual', ?, ?, 1)
+		`, seed.Category, seed.Content, seed.Importance, string(tags))
+		if err != nil {
+			s.logger.Warn("seed memory insert failed", "content", seed.Content, "error", err)
+		}
+	}
+
+	return nil
+}
+
 // Close closes the underlying database.
 func (s *Store) Close() error {
 	return s.db.Close()

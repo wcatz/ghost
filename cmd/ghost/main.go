@@ -863,6 +863,12 @@ func bootstrap() (*config.Config, *slog.Logger, *memory.Store, *sql.DB) {
 	}
 
 	store := memory.NewStore(db, logger)
+
+	// Ensure seed global memories exist (pinned, manual source — consolidation-proof).
+	if err := store.SeedGlobalMemories(context.Background()); err != nil {
+		logger.Warn("seed global memories", "error", err)
+	}
+
 	return cfg, logger, store, db
 }
 

@@ -1279,6 +1279,84 @@ func TestMergeProject_SameID(t *testing.T) {
 	}
 }
 
+func TestSeedGlobalMemories(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Seed should create _global project and insert seed memories.
+	if err := s.SeedGlobalMemories(ctx); err != nil {
+		t.Fatalf("SeedGlobalMemories: %v", err)
+	}
+
+	// Verify _global project exists.
+	projects, _ := s.ListProjects(ctx)
+	found := false
+	for _, p := range projects {
+		if p.ID == "_global" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("_global project not created")
+	}
+
+	// Verify seed memories are present, pinned, and manual source.
+	mems, err := s.GetAll(ctx, "_global", 50)
+	if err != nil {
+		t.Fatalf("GetAll _global: %v", err)
+	}
+	if len(mems) == 0 {
+		t.Fatal("no seed memories found")
+	}
+
+	var coAuthorFound bool
+	for _, m := range mems {
+		if strings.Contains(m.Content, "Co-Authored-By") {
+			coAuthorFound = true
+			if m.Source != "manual" {
+				t.Errorf("seed memory source = %q, want 'manual'", m.Source)
+			}
+			if !m.Pinned {
+				t.Error("seed memory should be pinned")
+			}
+			if m.Importance != 1.0 {
+				t.Errorf("seed memory importance = %v, want 1.0", m.Importance)
+			}
+		}
+	}
+	if !coAuthorFound {
+		t.Error("Co-Authored-By seed memory not found")
+	}
+
+	// Run again — should be idempotent (no duplicates).
+	if err := s.SeedGlobalMemories(ctx); err != nil {
+		t.Fatalf("SeedGlobalMemories (2nd call): %v", err)
+	}
+	mems2, _ := s.GetAll(ctx, "_global", 50)
+	if len(mems2) != len(mems) {
+		t.Errorf("idempotency broken: %d memories after 2nd seed (was %d)", len(mems2), len(mems))
+	}
+
+	// Verify consolidation cannot remove it: ReplaceNonManual skips manual source.
+	replaceMems := []Memory{
+		{ProjectID: "_global", Category: "fact", Content: "some new fact", Source: "reflection", Importance: 0.5},
+	}
+	if err := s.ReplaceNonManual(ctx, "_global", replaceMems); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	memsAfter, _ := s.GetAll(ctx, "_global", 50)
+	var seedSurvived bool
+	for _, m := range memsAfter {
+		if strings.Contains(m.Content, "Co-Authored-By") {
+			seedSurvived = true
+		}
+	}
+	if !seedSurvived {
+		t.Error("seed memory was deleted by ReplaceNonManual — consolidation protection broken")
+	}
+}
+
 func TestEnsureProject_AutoMerge(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
