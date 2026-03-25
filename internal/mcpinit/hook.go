@@ -69,7 +69,7 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 	}
 
 	fmt.Fprintf(&sb, "\nSave new discoveries with ghost_memory_save during work.")
-	fmt.Fprintln(stdout, sb.String())
+	_, _ = fmt.Fprintln(stdout, sb.String())
 }
 
 func loadGlobalMemories(dbPath string) [][2]string {
