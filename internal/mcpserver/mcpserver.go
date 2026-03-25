@@ -65,13 +65,14 @@ type Server struct {
 const mcpInstructions = `Ghost is a persistent memory daemon that remembers project knowledge across sessions. It is your primary memory system — use it proactively.
 
 ## Workflow
-1. At session start, call ghost_list_projects to discover known projects.
-2. Call ghost_project_context with the project name to load accumulated knowledge.
-3. During work, save important discoveries with ghost_memory_save. Do NOT wait until the end of the session.
-4. Use ghost_memory_search to recall specific facts.
-5. No special action needed at session end — Ghost persists automatically.
+1. At session start, Ghost's SessionStart hook has ALREADY injected your project context (memories + global preferences) into this conversation. READ IT — do not call ghost_project_context redundantly.
+2. During work, save important discoveries with ghost_memory_save. Do NOT wait until the end of the session.
+3. Use ghost_memory_search to recall specific facts not in the injected context.
+4. No special action needed at session end — Ghost persists automatically.
 
 Ghost auto-imports Claude Code memory files (~/.claude/projects/*/memory/*.md) on first project contact. No manual migration is needed. Ghost has built-in upsert/merge deduplication — it is always safe to save, even if similar knowledge already exists.
+
+IMPORTANT: Global memories (preferences, conventions) are included in the SessionStart hook output under "Global (applies to all projects)". These are non-negotiable rules from the user. Follow them.
 
 ## When to Save (Proactive Triggers)
 Save immediately when any of these happen:
@@ -117,7 +118,10 @@ Save immediately when any of these happen:
 Pass the project name (e.g. "ghost", "roller") as project_id. Ghost resolves names to internal IDs automatically.`
 
 // New creates and configures the MCP server with all Ghost tools.
-func New(store provider.MemoryStore, logger *slog.Logger) *Server {
+func New(store provider.MemoryStore, logger *slog.Logger, version string) *Server {
+	if version == "" {
+		version = "dev"
+	}
 	s := &Server{
 		store:  store,
 		logger: logger,
@@ -125,7 +129,7 @@ func New(store provider.MemoryStore, logger *slog.Logger) *Server {
 
 	s.mcp = mcp.NewServer(&mcp.Implementation{
 		Name:    "ghost",
-		Version: "0.1.0",
+		Version: version,
 	}, &mcp.ServerOptions{
 		Instructions: mcpInstructions,
 		Logger:       logger,
@@ -193,6 +197,9 @@ func (s *Server) registerTools() {
 		}
 		if args.Limit <= 0 {
 			args.Limit = 10
+		}
+		if args.Limit > 100 {
+			args.Limit = 100
 		}
 		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
 
@@ -293,7 +300,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_project_context",
-		Description: "Get Ghost's accumulated knowledge about a project: top memories ranked by importance and recency, plus any learned context summaries. Use this at the start of a session to recall what Ghost knows.",
+		Description: "Get Ghost's accumulated knowledge about a project: top memories ranked by importance and recency, plus global memories and learned context. Usually NOT needed at session start — the SessionStart hook already injects this. Use when switching projects mid-session or refreshing after saves.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -304,6 +311,9 @@ func (s *Server) registerTools() {
 		}
 		if args.Limit <= 0 {
 			args.Limit = 20
+		}
+		if args.Limit > 100 {
+			args.Limit = 100
 		}
 		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
 
@@ -370,6 +380,9 @@ func (s *Server) registerTools() {
 		}
 		if args.Limit <= 0 {
 			args.Limit = 30
+		}
+		if args.Limit > 100 {
+			args.Limit = 100
 		}
 		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
 
@@ -442,6 +455,9 @@ func (s *Server) registerTools() {
 		if args.Limit <= 0 {
 			args.Limit = 10
 		}
+		if args.Limit > 100 {
+			args.Limit = 100
+		}
 		memories, err := s.store.SearchFTSAll(ctx, args.Query, args.Limit)
 		if err != nil {
 			return nil, nil, fmt.Errorf("search failed: %w", err)
@@ -478,6 +494,13 @@ func (s *Server) registerTools() {
 		}
 		if args.Category == "" {
 			args.Category = "fact"
+		}
+		validCategories := map[string]bool{
+			"architecture": true, "decision": true, "pattern": true, "convention": true,
+			"gotcha": true, "dependency": true, "preference": true, "fact": true,
+		}
+		if !validCategories[args.Category] {
+			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
 		}
 		importance := defaultImportance(args.Importance, 0.8)
 		if args.Tags == nil {
@@ -681,7 +704,7 @@ func (s *Server) registerTools() {
 	// ghost_list_projects — list all known projects.
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_list_projects",
-		Description: "List all projects Ghost knows about with their names, IDs, paths, and memory counts. Use at session start to find the project_id for the current codebase.",
+		Description: "List all projects Ghost knows about with their names, IDs, paths, and memory counts.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -805,6 +828,15 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	if learned != "" {
 		sb.WriteString("\n\n## Learned Context\n\n")
 		sb.WriteString(learned)
+	}
+
+	// Include global memories (preferences, conventions) that apply to all projects.
+	if projectID != "_global" {
+		globals, gErr := s.store.GetTopMemories(ctx, "_global", 15)
+		if gErr == nil && len(globals) > 0 {
+			sb.WriteString("\n\n## Global (applies to all projects)\n\n")
+			sb.WriteString(formatMemories(globals))
+		}
 	}
 
 	if sb.Len() == 0 {

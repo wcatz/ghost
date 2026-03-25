@@ -56,7 +56,7 @@ ghost mcp init
   + 13 mcp__ghost__* tools added to allow list
 
 [4/6] Configuring SessionStart hook...
-  + ghost hook session-start — reminds Claude to load context
+  + ghost hook session-start — injects project context at startup
 
 [5/6] Importing Claude Code memories...
   ✓ myproject — 8 memories imported
@@ -74,7 +74,7 @@ Done! Restart Claude Code to activate.
 | Prerequisites | Finds `ghost` and `claude` binaries on your PATH |
 | MCP registration | `claude mcp add ghost` — Claude Code discovers Ghost's 13 tools |
 | Permissions | Pre-approves all `mcp__ghost__*` tools — no per-call prompts |
-| SessionStart hook | Every session, Claude sees a reminder to call `ghost_project_context` |
+| SessionStart hook | Injects project memories + global preferences directly into Claude's context |
 | Memory import | Migrates Claude Code's `~/.claude/projects/*/memory/*.md` into Ghost (deduplicated) |
 | Project redirects | Writes `MEMORY.md` pointing Claude to Ghost instead of its built-in memory |
 
