@@ -1,14 +1,12 @@
 # Ghost
 
-<img src="assets/ghost.png" alt="Ghost" width="160" align="right" />
+<img src="assets/ghost.png" alt="Ghost" width="120" align="right" />
 
 [![CI](https://github.com/wcatz/ghost/actions/workflows/ci.yml/badge.svg)](https://github.com/wcatz/ghost/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/github/go-mod/go-version/wcatz/ghost)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 MCP memory server for Claude Code, Cursor, and any MCP client. Pure Go. Single binary. No external services required.
-
-<br clear="right"/>
 
 ## Why Ghost?
 
