@@ -8,6 +8,8 @@
 
 MCP memory server for Claude Code, Cursor, and any MCP client. Pure Go. Single binary. No external services required.
 
+<br clear="right"/>
+
 ## Why Ghost?
 
 Claude Code's built-in memory is a markdown file with a **200-line cap**. No search. No categories. No importance ranking. Every project is siloed. After ten sessions the file is 30% redundant, and the architecture decision you saved last week gets silently truncated because it landed on line 201.
