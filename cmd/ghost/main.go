@@ -448,7 +448,7 @@ func runMCP() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	srv := mcpserver.New(store, logger)
+	srv := mcpserver.New(store, logger, version)
 
 	// Wire embedding for hybrid search if configured.
 	if cfg.Embedding.Enabled {

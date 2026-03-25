@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/config"
 	_ "modernc.org/sqlite"
@@ -34,14 +35,16 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
+	// Resolve symlinks so cwd matches the canonical path stored in the DB.
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
+	}
 
 	project, memories, learned := loadSessionContext(cwd)
 	if project == "" {
-		// No matching project — fall back to static reminder
-		_, _ = fmt.Fprintln(stdout, "Ghost memory is active. Before starting work:")
-		_, _ = fmt.Fprintln(stdout, "1. Call ghost_list_projects to discover known projects")
-		_, _ = fmt.Fprintln(stdout, "2. Call ghost_project_context with the project name")
-		_, _ = fmt.Fprintln(stdout, "3. Save discoveries with ghost_memory_save during work")
+		// No matching project — tell Claude context is available via tools
+		_, _ = fmt.Fprintln(stdout, "Ghost memory is active but no project matched this directory.")
+		_, _ = fmt.Fprintln(stdout, "Save discoveries with ghost_memory_save during work.")
 		return
 	}
 
@@ -96,9 +99,7 @@ func loadGlobalMemories(dbPath string) [][2]string {
 		if err := rows.Scan(&cat, &content); err != nil {
 			continue
 		}
-		if len(content) > 300 {
-			content = content[:300] + "…"
-		}
+		content = truncateUTF8(content, 300)
 		out = append(out, [2]string{cat, content})
 	}
 	return out
@@ -152,10 +153,21 @@ func loadSessionContext(cwd string) (project string, memories [][2]string, learn
 			continue
 		}
 		// Truncate very long memories to keep the hook output manageable
-		if len(content) > 300 {
-			content = content[:300] + "…"
-		}
+		content = truncateUTF8(content, 300)
 		memories = append(memories, [2]string{cat, content})
 	}
 	return
+}
+
+// truncateUTF8 truncates s to at most maxBytes bytes without breaking
+// multi-byte UTF-8 characters, appending "…" if truncated.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	// Walk backward from maxBytes to find a valid rune boundary.
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes] + "…"
 }

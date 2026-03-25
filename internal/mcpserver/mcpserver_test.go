@@ -136,7 +136,7 @@ func TestNew_CreatesServer(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	srv := New(store, logger)
+	srv := New(store, logger, "test")
 	if srv == nil {
 		t.Fatal("New returned nil")
 	}
@@ -151,7 +151,7 @@ func TestNew_CreatesServer(t *testing.T) {
 func TestSetEmbedder(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	srv := New(store, logger)
+	srv := New(store, logger, "test")
 
 	ch := make(chan string, 1)
 	mockEmbed := &mockEmbedder{}
@@ -176,7 +176,7 @@ func (m *mockEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
 func TestBuildProjectContext_WithMemories(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	srv := New(store, logger)
+	srv := New(store, logger, "test")
 
 	ctx := context.Background()
 	// Seed a memory for the test project (ID "abc123").
@@ -199,7 +199,7 @@ func TestBuildProjectContext_WithMemories(t *testing.T) {
 func TestBuildProjectContext_Empty(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	srv := New(store, logger)
+	srv := New(store, logger, "test")
 
 	ctx := context.Background()
 	text, err := srv.buildProjectContext(ctx, "abc123")
@@ -214,7 +214,7 @@ func TestBuildProjectContext_Empty(t *testing.T) {
 func TestBuildProjectContext_IncludesGlobal(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	srv := New(store, logger)
+	srv := New(store, logger, "test")
 
 	ctx := context.Background()
 	// Seed a global memory — must ensure _global project exists first.
@@ -238,7 +238,7 @@ func TestBuildProjectContext_IncludesGlobal(t *testing.T) {
 func TestBuildProjectContext_IncludesLearnedContext(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	srv := New(store, logger)
+	srv := New(store, logger, "test")
 
 	ctx := context.Background()
 	if err := store.UpdateLearnedContext(ctx, "abc123", "This is the learned summary.", ""); err != nil {
@@ -263,7 +263,7 @@ func TestBuildProjectContext_IncludesLearnedContext(t *testing.T) {
 func TestNew_RegistersResources(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	srv := New(store, logger)
+	srv := New(store, logger, "test")
 
 	ctx := context.Background()
 
@@ -321,7 +321,7 @@ func TestSaveAndSearch_EndToEnd(t *testing.T) {
 func TestSaveAndSearch_WithEmbedder(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	srv := New(store, logger)
+	srv := New(store, logger, "test")
 
 	ch := make(chan string, 1)
 	srv.SetEmbedder(&mockEmbedder{}, ch)
