@@ -38,10 +38,10 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 	project, memories, learned := loadSessionContext(cwd)
 	if project == "" {
 		// No matching project — fall back to static reminder
-		fmt.Fprintln(stdout, "Ghost memory is active. Before starting work:")
-		fmt.Fprintln(stdout, "1. Call ghost_list_projects to discover known projects")
-		fmt.Fprintln(stdout, "2. Call ghost_project_context with the project name")
-		fmt.Fprintln(stdout, "3. Save discoveries with ghost_memory_save during work")
+		_, _ = fmt.Fprintln(stdout, "Ghost memory is active. Before starting work:")
+		_, _ = fmt.Fprintln(stdout, "1. Call ghost_list_projects to discover known projects")
+		_, _ = fmt.Fprintln(stdout, "2. Call ghost_project_context with the project name")
+		_, _ = fmt.Fprintln(stdout, "3. Save discoveries with ghost_memory_save during work")
 		return
 	}
 
@@ -114,7 +114,7 @@ func loadSessionContext(cwd string) (project string, memories [][2]string, learn
 	if err != nil {
 		return
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck
 
 	// Find matching project: try full path prefix first, then cwd basename name match
 	cwdBase := filepath.Base(cwd)
@@ -144,7 +144,7 @@ func loadSessionContext(cwd string) (project string, memories [][2]string, learn
 	if err != nil {
 		return
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	for rows.Next() {
 		var cat, content string

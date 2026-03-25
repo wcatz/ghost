@@ -320,7 +320,7 @@ func writeRedirects(w io.Writer, projects []projectInfo, dryRun bool) {
 			}
 			if !strings.Contains(content, "stored in Ghost") {
 				// File exists with other content — don't clobber.
-				fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", p.Name)
+				_, _ = fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", p.Name)
 				continue
 			}
 			// Old Ghost redirect with stale tool-call instructions — update it.
