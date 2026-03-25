@@ -6,45 +6,75 @@
 [![Go](https://img.shields.io/github/go-mod/go-version/wcatz/ghost)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-MCP memory server for Claude Code, Cursor, and any MCP client. Ghost gives your AI assistant persistent, structured memory across sessions — it remembers architecture decisions, patterns, conventions, and gotchas so you don't have to repeat yourself.
+MCP memory server for Claude Code, Cursor, and any MCP client. Pure Go. Single binary. No external services required.
 
-Pure Go. No CGO. Single binary. No external services required.
+## Why Ghost?
+
+Claude Code's built-in memory is a markdown file with a **200-line cap**. No search. No categories. No importance ranking. Every project is siloed. After ten sessions the file is 30% redundant, and the architecture decision you saved last week gets silently truncated because it landed on line 201.
+
+Ghost replaces that with a real memory system:
+
+| | Claude Code built-in | Ghost |
+|---|---|---|
+| Storage | Flat `.md` files, 200-line cap | SQLite + FTS5, unlimited |
+| Search | None (linear load) | Full-text search + optional vector similarity |
+| Categorization | None | 8 categories with importance scores (0.0–1.0) |
+| Dedup | None (appends forever) | FTS-based upsert — merges on save |
+| Consolidation | None | Haiku LLM or local Jaccard similarity |
+| Time decay | None (stale facts persist equally) | Category-aware: conventions never decay, gotchas fade at 30 days |
+| Cross-project | None (siloed per directory) | `ghost_search_all` + `_global` project |
+| Migration | N/A | `ghost mcp init` imports your existing memories |
+| Clients | Claude Code only | Any MCP client (Claude Code, Cursor, Goose, etc.) |
+
+One command migrates your existing Claude Code memories into Ghost. Nothing is lost.
 
 ## Quick Start
 
+### 1. Install
+
 ```bash
 go install github.com/wcatz/ghost/cmd/ghost@latest
+```
+
+This puts the binary in your `$GOBIN` (default `~/go/bin/`). Make sure it's on your `$PATH`. Or download a pre-built binary from [Releases](https://github.com/wcatz/ghost/releases) and put it wherever you want.
+
+### 2. Connect to Claude Code
+
+```bash
 ghost mcp init
 ```
 
-That's it. Restart Claude Code and Ghost is active. Here's what `ghost mcp init` does:
-
 ```
-[1/5] Checking prerequisites...
-  ✓ claude CLI found at /home/you/.local/bin/claude
-  ✓ ghost binary at /home/you/.local/bin/ghost
+[1/6] Checking prerequisites...
+  ✓ ghost binary at ~/go/bin/ghost
+  ✓ claude CLI at ~/.local/bin/claude
 
-[2/5] Registering MCP server...
-  ✓ ghost MCP server registered (command: /home/you/.local/bin/ghost)
+[2/6] Registering MCP server...
+  ✓ ghost MCP server registered
 
-[3/5] Adding tool permissions...
+[3/6] Adding tool permissions...
   + 13 mcp__ghost__* tools added to allow list
 
-[4/5] Configuring SessionStart hook...
+[4/6] Configuring SessionStart hook...
   + ghost hook session-start — reminds Claude to load context
 
-[5/5] Importing Claude Code memories...
+[5/6] Importing Claude Code memories...
   ✓ myproject — 8 memories imported
   ✓ infra — 12 memories imported
+
+[6/6] Writing project memory redirects...
+  ✓ myproject — redirect written
+  ✓ infra — redirect written
 
 Done! Restart Claude Code to activate.
 ```
 
 | Step | What happens |
 |------|-------------|
+| Prerequisites | Finds `ghost` and `claude` binaries on your PATH |
 | MCP registration | `claude mcp add ghost` — Claude Code discovers Ghost's 13 tools |
 | Permissions | Pre-approves all `mcp__ghost__*` tools — no per-call prompts |
-| SessionStart hook | Every session, Claude is reminded to call `ghost_project_context` |
+| SessionStart hook | Every session, Claude sees a reminder to call `ghost_project_context` |
 | Memory import | Migrates Claude Code's `~/.claude/projects/*/memory/*.md` into Ghost (deduplicated) |
 | Project redirects | Writes `MEMORY.md` pointing Claude to Ghost instead of its built-in memory |
 
