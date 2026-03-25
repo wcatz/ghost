@@ -311,15 +311,19 @@ func writeRedirects(w io.Writer, projects []projectInfo, dryRun bool) {
 		dir := filepath.Join(home, ".claude", "projects", encoded, "memory")
 		target := filepath.Join(dir, "MEMORY.md")
 
-		// Check if redirect already exists.
+		// Check if redirect already exists and is current.
 		if data, err := os.ReadFile(target); err == nil {
-			if strings.Contains(string(data), "stored in Ghost") {
+			content := string(data)
+			if strings.Contains(content, "stored in Ghost") && !strings.Contains(content, "ghost_list_projects") {
 				fmt.Fprintf(w, "  ✓ %s — redirect exists\n", p.Name)
 				continue
 			}
-			// File exists with other content — don't clobber.
-			fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", p.Name)
-			continue
+			if !strings.Contains(content, "stored in Ghost") {
+				// File exists with other content — don't clobber.
+				_, _ = fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", p.Name)
+				continue
+			}
+			// Old Ghost redirect with stale tool-call instructions — update it.
 		}
 
 		if dryRun {
@@ -335,10 +339,12 @@ func writeRedirects(w io.Writer, projects []projectInfo, dryRun bool) {
 		safeName := sanitizeName(p.Name)
 		content := fmt.Sprintf(`# %s Project Memory
 
-All project knowledge is stored in Ghost. At session start, run:
-1. `+"`ghost_list_projects`"+` to discover projects
-2. `+"`ghost_project_context`"+` with project_id "%s" to load accumulated knowledge
-`, safeName, safeName)
+All project knowledge is stored in Ghost and injected automatically at session start via the SessionStart hook.
+Project context (memories + summary) is already in your system prompt — no tool calls needed to load it.
+
+Use `+"`ghost_memory_save`"+` to save new discoveries during work.
+Use `+"`ghost_memory_search`"+` to search for specific facts.
+`, safeName)
 
 		if err := os.WriteFile(target, []byte(content), 0644); err != nil {
 			fmt.Fprintf(w, "  ! %s — write error: %v\n", p.Name, err)
