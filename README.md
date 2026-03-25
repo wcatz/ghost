@@ -56,7 +56,7 @@ ghost mcp init
   + 13 mcp__ghost__* tools added to allow list
 
 [4/6] Configuring SessionStart hook...
-  + ghost hook session-start — reminds Claude to load context
+  + ghost hook session-start — injects project context at startup
 
 [5/6] Importing Claude Code memories...
   ✓ myproject — 8 memories imported
