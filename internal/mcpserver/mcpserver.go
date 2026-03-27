@@ -38,6 +38,20 @@ func validateTags(tags []string) []string {
 	return tags
 }
 
+var validCategories = map[string]bool{
+	"architecture": true, "decision": true, "pattern": true, "convention": true,
+	"gotcha": true, "dependency": true, "preference": true, "fact": true,
+}
+
+// normalizeCategory returns the category if valid, otherwise falls back to "fact"
+// and returns a warning string for the caller to include in the response.
+func normalizeCategory(cat string) (string, string) {
+	if validCategories[cat] {
+		return cat, ""
+	}
+	return "fact", fmt.Sprintf(" (warning: unknown category %q, saved as \"fact\")", cat)
+}
+
 // defaultImportance returns the importance value, defaulting to fallback when nil.
 func defaultImportance(p *float32, fallback float32) float32 {
 	if p == nil {
@@ -250,13 +264,8 @@ func (s *Server) registerTools() {
 		if args.Category == "" {
 			args.Category = "fact"
 		}
-		validCategories := map[string]bool{
-			"architecture": true, "decision": true, "pattern": true, "convention": true,
-			"gotcha": true, "dependency": true, "preference": true, "fact": true,
-		}
-		if !validCategories[args.Category] {
-			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
-		}
+		var catWarn string
+		args.Category, catWarn = normalizeCategory(args.Category)
 		importance := defaultImportance(args.Importance, 0.7)
 		if args.Tags == nil {
 			args.Tags = []string{}
@@ -287,7 +296,7 @@ func (s *Server) registerTools() {
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{
-				Text: fmt.Sprintf("Memory %s (id: %s)", action, id),
+				Text: fmt.Sprintf("Memory %s (id: %s)%s", action, id, catWarn),
 			}},
 		}, nil, nil
 	})
@@ -495,13 +504,8 @@ func (s *Server) registerTools() {
 		if args.Category == "" {
 			args.Category = "fact"
 		}
-		validCategories := map[string]bool{
-			"architecture": true, "decision": true, "pattern": true, "convention": true,
-			"gotcha": true, "dependency": true, "preference": true, "fact": true,
-		}
-		if !validCategories[args.Category] {
-			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
-		}
+		var catWarn string
+		args.Category, catWarn = normalizeCategory(args.Category)
 		importance := defaultImportance(args.Importance, 0.8)
 		if args.Tags == nil {
 			args.Tags = []string{}
@@ -521,7 +525,7 @@ func (s *Server) registerTools() {
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{
-				Text: fmt.Sprintf("Global memory %s (id: %s)", action, id),
+				Text: fmt.Sprintf("Global memory %s (id: %s)%s", action, id, catWarn),
 			}},
 		}, nil, nil
 	})
