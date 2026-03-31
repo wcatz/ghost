@@ -53,7 +53,7 @@ ghost mcp init
   ✓ ghost MCP server registered
 
 [3/6] Adding tool permissions...
-  + 13 mcp__ghost__* tools added to allow list
+  + 16 mcp__ghost__* tools added to allow list
 
 [4/6] Configuring SessionStart hook...
   + ghost hook session-start — injects project context at startup
@@ -72,9 +72,9 @@ Done! Restart Claude Code to activate.
 | Step | What happens |
 |------|-------------|
 | Prerequisites | Finds `ghost` and `claude` binaries on your PATH |
-| MCP registration | `claude mcp add ghost` — Claude Code discovers Ghost's 13 tools |
+| MCP registration | `claude mcp add ghost` — Claude Code discovers Ghost's 16 tools |
 | Permissions | Pre-approves all `mcp__ghost__*` tools — no per-call prompts |
-| SessionStart hook | Injects project memories + global preferences directly into Claude's context |
+| SessionStart hook | Injects project memories, tasks, decisions, globals, and session count into Claude's context |
 | Memory import | Migrates Claude Code's `~/.claude/projects/*/memory/*.md` into Ghost (deduplicated) |
 | Project redirects | Writes `MEMORY.md` pointing Claude to Ghost instead of its built-in memory |
 
@@ -85,7 +85,7 @@ ghost mcp status          # verify integration health
 ghost mcp init --dry-run  # preview changes without writing
 ```
 
-Idempotent — safe to re-run after updates.
+Idempotent and non-destructive — safe to re-run after updates. Existing Claude Code `MEMORY.md` files with user content are never overwritten. Permissions and hooks are added, never removed. Use `--dry-run` to preview before committing.
 
 ### Other MCP clients (Cursor, Goose, etc.)
 
@@ -139,29 +139,34 @@ A quality gate rejects garbage output (< 30% of input) and falls through to the 
 
 ## MCP Tools
 
-Ghost exposes 13 tools to any MCP client:
+Ghost exposes 16 tools to any MCP client:
 
 | Tool | What it does |
 |------|-------------|
 | `ghost_project_context` | Load top memories ranked by importance + time decay |
 | `ghost_memory_save` | Store a memory with category, importance, tags (upserts) |
-| `ghost_memory_search` | FTS5 + vector hybrid search |
+| `ghost_memory_search` | FTS5 + vector hybrid search, optional category filter |
 | `ghost_memories_list` | List memories, optionally filtered by category |
 | `ghost_memory_delete` | Delete by ID |
+| `ghost_memory_pin` | Pin/unpin — pinned memories stay at top and survive pruning |
 | `ghost_list_projects` | All known projects with memory counts |
 | `ghost_search_all` | Cross-project memory search |
 | `ghost_save_global` | Save a memory that applies to all projects |
 | `ghost_task_create` | Track bugs, features, follow-ups |
 | `ghost_task_list` | List tasks by project and status |
+| `ghost_task_update` | Update task status, priority, or description |
 | `ghost_task_complete` | Mark done with optional notes |
 | `ghost_decision_record` | Architectural decision with rationale and alternatives |
+| `ghost_decisions_list` | List decisions with rationale, alternatives, status |
 | `ghost_health` | System health (memory count, embedding status, costs) |
 
-**Resources:**
+**Resources (4):**
 
 | Resource | Description |
 |----------|-------------|
-| `ghost://project/{id}/context` | Project context (memories + learned context) |
+| `ghost://project/{id}/context` | Project context (memories + learned context + globals) |
+| `ghost://project/{id}/decisions` | Active decisions — pin to survive context compaction |
+| `ghost://project/{id}/tasks` | Open tasks — pin to survive context compaction |
 | `ghost://memories/global` | Global memories accessible to all projects |
 
 The MCP server ships with embedded instructions that teach Claude when to save, which categories to use, and how to leverage cross-project search — so it works proactively without configuration.
@@ -371,7 +376,7 @@ cmd/ghost/main.go          CLI + daemon bootstrap
 internal/
   memory/                  SQLite + FTS5 + vector search + time-decay scoring
   reflection/              Tiered consolidation (Haiku → SQLite) + auto-extraction
-  mcpserver/               MCP server (stdio, 13 tools + 2 resources)
+  mcpserver/               MCP server (stdio, 16 tools + 4 resources)
   mcpinit/                 Claude Code integration setup (init, status, hook)
   claudeimport/            Auto-import Claude Code memory files
   ai/                      Claude API client, streaming, tool_use, cost tracking
