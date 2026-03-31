@@ -40,7 +40,7 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 		cwd = resolved
 	}
 
-	project, memories, learned := loadSessionContext(cwd)
+	project, memories, learned, tasks, decisions, interactionCount := loadSessionContext(cwd)
 	if project == "" {
 		// No matching project — tell Claude context is available via tools
 		_, _ = fmt.Fprintln(stdout, "Ghost memory is active but no project matched this directory.")
@@ -62,6 +62,23 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 		}
 	}
 
+	if len(tasks) > 0 {
+		fmt.Fprintf(&sb, "\n**Open Tasks:**\n")
+		for _, t := range tasks {
+			fmt.Fprintf(&sb, "- [%s] %s\n", t[0], t[1])
+			if t[2] != "" {
+				fmt.Fprintf(&sb, "  %s\n", t[2])
+			}
+		}
+	}
+
+	if len(decisions) > 0 {
+		fmt.Fprintf(&sb, "\n**Recent Decisions:**\n")
+		for _, d := range decisions {
+			fmt.Fprintf(&sb, "- **%s**: %s\n", d[0], d[1])
+		}
+	}
+
 	if dataDir, err2 := config.DataDir(); err2 == nil {
 		if globals := loadGlobalMemories(filepath.Join(dataDir, "ghost.db")); len(globals) > 0 {
 			fmt.Fprintf(&sb, "\n**Global (applies to all projects):**\n")
@@ -69,6 +86,10 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 				fmt.Fprintf(&sb, "- [%s] %s\n", m[0], m[1])
 			}
 		}
+	}
+
+	if interactionCount > 0 {
+		fmt.Fprintf(&sb, "\n**Session #%d** with this project.\n", interactionCount)
 	}
 
 	fmt.Fprintf(&sb, "\nSave new discoveries with ghost_memory_save during work.")
@@ -105,7 +126,7 @@ func loadGlobalMemories(dbPath string) [][2]string {
 	return out
 }
 
-func loadSessionContext(cwd string) (project string, memories [][2]string, learned string) {
+func loadSessionContext(cwd string) (project string, memories [][2]string, learned string, tasks [][3]string, decisions [][2]string, interactionCount int) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
@@ -156,6 +177,51 @@ func loadSessionContext(cwd string) (project string, memories [][2]string, learn
 		content = truncateUTF8(content, 300)
 		memories = append(memories, [2]string{cat, content})
 	}
+
+	// Get open tasks
+	taskRows, err := db.Query(`
+		SELECT status, priority, title, COALESCE(description, '')
+		FROM tasks
+		WHERE project_id = ? AND status IN ('pending', 'active', 'blocked')
+		ORDER BY priority ASC, created_at DESC
+		LIMIT 10
+	`, projectID)
+	if err == nil {
+		defer taskRows.Close() //nolint:errcheck
+		for taskRows.Next() {
+			var status, title, desc string
+			var priority int
+			if err := taskRows.Scan(&status, &priority, &title, &desc); err != nil {
+				continue
+			}
+			label := fmt.Sprintf("P%d %s", priority, title)
+			tasks = append(tasks, [3]string{status, label, truncateUTF8(desc, 200)})
+		}
+	}
+
+	// Get active decisions
+	decRows, err := db.Query(`
+		SELECT title, decision FROM decisions
+		WHERE project_id = ? AND status = 'active'
+		ORDER BY created_at DESC
+		LIMIT 5
+	`, projectID)
+	if err == nil {
+		defer decRows.Close() //nolint:errcheck
+		for decRows.Next() {
+			var title, decision string
+			if err := decRows.Scan(&title, &decision); err != nil {
+				continue
+			}
+			decisions = append(decisions, [2]string{title, truncateUTF8(decision, 200)})
+		}
+	}
+
+	// Get interaction count
+	_ = db.QueryRow(
+		`SELECT interaction_count FROM ghost_state WHERE project_id = ?`, projectID,
+	).Scan(&interactionCount)
+
 	return
 }
 

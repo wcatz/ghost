@@ -170,8 +170,8 @@ func TestRetryHint(t *testing.T) {
 
 func TestGhostPermissions_Complete(t *testing.T) {
 	// Verify the canonical list has the expected count.
-	if len(ghostPermissions) != 13 {
-		t.Errorf("expected 13 ghost permissions, got %d", len(ghostPermissions))
+	if len(ghostPermissions) != 16 {
+		t.Errorf("expected 16 ghost permissions, got %d", len(ghostPermissions))
 	}
 
 	// All should start with the correct prefix.
