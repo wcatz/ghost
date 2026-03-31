@@ -231,6 +231,9 @@ func (s *Server) registerTools() {
 					filtered = append(filtered, m)
 				}
 			}
+			if len(filtered) > args.Limit {
+				filtered = filtered[:args.Limit]
+			}
 			memories = filtered
 		}
 
