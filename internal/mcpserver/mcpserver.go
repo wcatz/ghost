@@ -181,6 +181,7 @@ func (s *Server) registerTools() {
 	type searchArgs struct {
 		ProjectID string `json:"project_id" jsonschema:"Project ID to search within"`
 		Query     string `json:"query" jsonschema:"Search query (supports FTS5 syntax)"`
+		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
 	}
 
@@ -210,9 +211,30 @@ func (s *Server) registerTools() {
 				queryVec = vec
 			}
 		}
-		memories, err := s.store.SearchHybrid(ctx, args.ProjectID, args.Query, queryVec, args.Limit)
+		searchLimit := args.Limit
+		if args.Category != "" {
+			searchLimit = args.Limit * 3
+			if searchLimit > 100 {
+				searchLimit = 100
+			}
+		}
+		memories, err := s.store.SearchHybrid(ctx, args.ProjectID, args.Query, queryVec, searchLimit)
 		if err != nil {
 			return nil, nil, fmt.Errorf("search failed: %w", err)
+		}
+
+		// Post-filter by category if specified.
+		if args.Category != "" {
+			filtered := memories[:0]
+			for _, m := range memories {
+				if m.Category == args.Category {
+					filtered = append(filtered, m)
+				}
+			}
+			if len(filtered) > args.Limit {
+				filtered = filtered[:args.Limit]
+			}
+			memories = filtered
 		}
 
 		if len(memories) == 0 {
@@ -730,6 +752,127 @@ func (s *Server) registerTools() {
 			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
 		}, nil, nil
 	})
+
+	// ghost_memory_pin — pin or unpin a memory.
+	type pinArgs struct {
+		MemoryID string `json:"memory_id" jsonschema:"ID of the memory to pin/unpin"`
+		Pinned   bool   `json:"pinned" jsonschema:"true to pin, false to unpin"`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_memory_pin",
+		Description: "Pin or unpin a memory. Pinned memories always appear at the top of project context and survive reflection pruning.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   boolPtr(false),
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args pinArgs) (*mcp.CallToolResult, any, error) {
+		if args.MemoryID == "" {
+			return nil, nil, fmt.Errorf("memory_id is required")
+		}
+		if err := s.store.TogglePin(ctx, args.MemoryID, args.Pinned); err != nil {
+			return nil, nil, fmt.Errorf("toggle pin: %w", err)
+		}
+		action := "pinned"
+		if !args.Pinned {
+			action = "unpinned"
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Memory %s.", action)}},
+		}, nil, nil
+	})
+
+	// ghost_task_update — update a task's status, priority, or description.
+	type taskUpdateArgs struct {
+		TaskID      string `json:"task_id" jsonschema:"Task ID to update"`
+		Status      string `json:"status" jsonschema:"New status: pending, active, blocked, done"`
+		Priority    int    `json:"priority,omitempty" jsonschema:"Priority 0-4 (0=critical, 2=normal, 4=low)"`
+		Description string `json:"description,omitempty" jsonschema:"Updated description"`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_task_update",
+		Description: "Update a task's status, priority, or description. Use to change status to active/blocked, reprioritize, or refine the description.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(false),
+			IdempotentHint:  true,
+			OpenWorldHint:   boolPtr(false),
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args taskUpdateArgs) (*mcp.CallToolResult, any, error) {
+		if args.TaskID == "" {
+			return nil, nil, fmt.Errorf("task_id is required")
+		}
+		if args.Status == "" {
+			return nil, nil, fmt.Errorf("status is required (pending, active, blocked, done)")
+		}
+		validStatuses := map[string]bool{
+			"pending": true, "active": true, "blocked": true, "done": true,
+		}
+		if !validStatuses[args.Status] {
+			return nil, nil, fmt.Errorf("invalid status %q — must be one of: pending, active, blocked, done", args.Status)
+		}
+		if args.Priority < 0 || args.Priority > 4 {
+			args.Priority = 2
+		}
+		if err := s.store.UpdateTask(ctx, args.TaskID, args.Status, args.Priority, args.Description); err != nil {
+			return nil, nil, fmt.Errorf("update task: %w", err)
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "Task updated."}},
+		}, nil, nil
+	})
+
+	// ghost_decisions_list — list recorded decisions for a project.
+	type decisionsListArgs struct {
+		ProjectID string `json:"project_id" jsonschema:"Project ID or name"`
+		Status    string `json:"status,omitempty" jsonschema:"Filter by status: active, superseded, revisit (default: all)"`
+		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 20)"`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_decisions_list",
+		Description: "List recorded decisions for a project. Use to review past architectural and design choices, their rationale, and alternatives that were considered.",
+		Annotations: &mcp.ToolAnnotations{
+			ReadOnlyHint:  true,
+			OpenWorldHint: boolPtr(false),
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args decisionsListArgs) (*mcp.CallToolResult, any, error) {
+		if args.ProjectID == "" {
+			return nil, nil, fmt.Errorf("project_id is required")
+		}
+		if args.Limit <= 0 {
+			args.Limit = 20
+		}
+		if args.Limit > 100 {
+			args.Limit = 100
+		}
+		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+
+		decisions, err := s.store.ListDecisions(ctx, args.ProjectID, args.Status, args.Limit)
+		if err != nil {
+			return nil, nil, fmt.Errorf("list decisions: %w", err)
+		}
+		if len(decisions) == 0 {
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: "No decisions found."}},
+			}, nil, nil
+		}
+
+		var sb strings.Builder
+		for _, d := range decisions {
+			fmt.Fprintf(&sb, "### %s\n", d.Title)
+			fmt.Fprintf(&sb, "**Decision:** %s\n", d.Decision)
+			fmt.Fprintf(&sb, "**Rationale:** %s\n", d.Rationale)
+			if len(d.Alternatives) > 0 {
+				fmt.Fprintf(&sb, "**Alternatives rejected:** %s\n", strings.Join(d.Alternatives, ", "))
+			}
+			fmt.Fprintf(&sb, "**Status:** %s | **ID:** `%s`\n\n", d.Status, d.ID)
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}},
+		}, nil, nil
+	})
 }
 
 // registerResources registers MCP resources for push-based context delivery.
@@ -795,6 +938,102 @@ func (s *Server) registerResources() {
 		} else {
 			text = "## Ghost Global Memories\n\n" + formatMemories(memories)
 		}
+		return &mcp.ReadResourceResult{
+			Contents: []*mcp.ResourceContents{{
+				URI:      req.Params.URI,
+				MIMEType: "text/plain",
+				Text:     text,
+			}},
+		}, nil
+	})
+
+	// Resource template: ghost://project/{project_id}/decisions
+	s.mcp.AddResourceTemplate(&mcp.ResourceTemplate{
+		Name:        "Ghost Project Decisions",
+		URITemplate: "ghost://project/{project_id}/decisions",
+		Description: "Active architectural and design decisions for a project. " +
+			"Pin this resource to keep decision context visible across compaction.",
+		MIMEType: "text/plain",
+	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		u, err := url.Parse(req.Params.URI)
+		if err != nil {
+			return nil, fmt.Errorf("invalid resource URI %q: %w", req.Params.URI, err)
+		}
+		parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
+		if len(parts) == 0 || parts[0] == "" {
+			return nil, fmt.Errorf("resource URI missing project_id: %s", req.Params.URI)
+		}
+		projectID := s.resolveProjectID(ctx, parts[0])
+
+		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 20)
+		if err != nil {
+			return nil, fmt.Errorf("list decisions for %q: %w", projectID, err)
+		}
+
+		var text string
+		if len(decisions) == 0 {
+			text = "No active decisions for this project."
+		} else {
+			var sb strings.Builder
+			sb.WriteString("## Active Decisions\n\n")
+			for _, d := range decisions {
+				fmt.Fprintf(&sb, "- **%s**: %s (rationale: %s)\n", d.Title, d.Decision, d.Rationale)
+			}
+			text = sb.String()
+		}
+
+		return &mcp.ReadResourceResult{
+			Contents: []*mcp.ResourceContents{{
+				URI:      req.Params.URI,
+				MIMEType: "text/plain",
+				Text:     text,
+			}},
+		}, nil
+	})
+
+	// Resource template: ghost://project/{project_id}/tasks
+	s.mcp.AddResourceTemplate(&mcp.ResourceTemplate{
+		Name:        "Ghost Project Tasks",
+		URITemplate: "ghost://project/{project_id}/tasks",
+		Description: "Open tasks (pending, active, blocked) for a project. " +
+			"Pin this resource to keep task context visible across compaction.",
+		MIMEType: "text/plain",
+	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
+		u, err := url.Parse(req.Params.URI)
+		if err != nil {
+			return nil, fmt.Errorf("invalid resource URI %q: %w", req.Params.URI, err)
+		}
+		parts := strings.SplitN(strings.TrimPrefix(u.Path, "/"), "/", 2)
+		if len(parts) == 0 || parts[0] == "" {
+			return nil, fmt.Errorf("resource URI missing project_id: %s", req.Params.URI)
+		}
+		projectID := s.resolveProjectID(ctx, parts[0])
+
+		var sb strings.Builder
+		sb.WriteString("## Open Tasks\n\n")
+		hasContent := false
+
+		for _, status := range []string{"active", "blocked", "pending"} {
+			tasks, err := s.store.ListTasks(ctx, projectID, status, 15)
+			if err != nil {
+				continue
+			}
+			for _, t := range tasks {
+				hasContent = true
+				fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority, t.ID[:8], t.Title)
+				if t.Description != "" {
+					fmt.Fprintf(&sb, "  %s\n", t.Description)
+				}
+			}
+		}
+
+		var text string
+		if !hasContent {
+			text = "No open tasks for this project."
+		} else {
+			text = sb.String()
+		}
+
 		return &mcp.ReadResourceResult{
 			Contents: []*mcp.ResourceContents{{
 				URI:      req.Params.URI,

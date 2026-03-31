@@ -12,10 +12,12 @@ import (
 // ghostPermissions is the canonical list of MCP tool permissions to allow.
 var ghostPermissions = []string{
 	"mcp__ghost__ghost_decision_record",
+	"mcp__ghost__ghost_decisions_list",
 	"mcp__ghost__ghost_health",
 	"mcp__ghost__ghost_list_projects",
 	"mcp__ghost__ghost_memories_list",
 	"mcp__ghost__ghost_memory_delete",
+	"mcp__ghost__ghost_memory_pin",
 	"mcp__ghost__ghost_memory_save",
 	"mcp__ghost__ghost_memory_search",
 	"mcp__ghost__ghost_project_context",
@@ -24,6 +26,7 @@ var ghostPermissions = []string{
 	"mcp__ghost__ghost_task_complete",
 	"mcp__ghost__ghost_task_create",
 	"mcp__ghost__ghost_task_list",
+	"mcp__ghost__ghost_task_update",
 }
 
 // hookEntry represents one matcher+hooks pair in settings.json.
