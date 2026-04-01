@@ -157,19 +157,30 @@ func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Check if another project already owns this path. If so, redirect
-	// to the existing project rather than creating a duplicate. This handles
-	// the case where MCP passes a raw filesystem path that already has a
-	// hash-ID project.
+	// Check if another project already owns this path. If so, merge
+	// any orphaned child records into the canonical project and skip
+	// creating a duplicate. This self-heals duplicates caused by MCP
+	// passing raw filesystem paths as project IDs.
 	if filepath.IsAbs(path) && path != id {
 		var existingID string
 		scanErr := s.db.QueryRowContext(ctx,
 			`SELECT id FROM projects WHERE path = ? AND id != ? LIMIT 1`,
 			path, id).Scan(&existingID)
 		if scanErr == nil && existingID != "" {
-			// Project already exists with this path under a different ID.
-			// Just return — the caller will use resolveProjectID to find the right one.
-			s.logger.Info("skipping duplicate project creation", "incoming_id", id, "existing_id", existingID, "path", path)
+			// Merge any child records from the incoming ID into the canonical project.
+			for _, stmt := range []string{
+				`UPDATE memories SET project_id = ? WHERE project_id = ?`,
+				`UPDATE conversations SET project_id = ? WHERE project_id = ?`,
+				`UPDATE tasks SET project_id = ? WHERE project_id = ?`,
+				`UPDATE decisions SET project_id = ? WHERE project_id = ?`,
+				`UPDATE token_usage SET project_id = ? WHERE project_id = ?`,
+				`UPDATE audit_log SET project_id = ? WHERE project_id = ?`,
+			} {
+				_, _ = s.db.ExecContext(ctx, stmt, existingID, id)
+			}
+			_, _ = s.db.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, id)
+			_, _ = s.db.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, id)
+			s.logger.Info("auto-merged path duplicate", "old_id", id, "canonical_id", existingID, "path", path)
 			return nil
 		}
 	}
