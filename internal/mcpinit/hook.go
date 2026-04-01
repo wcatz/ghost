@@ -59,7 +59,7 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 	if len(memories) > 0 {
 		fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
 		for _, m := range memories {
-			fmt.Fprintf(&sb, "- [%s] `%s` %s\n", m[1], m[0][:8], m[2])
+			fmt.Fprintf(&sb, "- [%s] `%s` %s\n", m[1], shortID(m[0]), m[2])
 		}
 	}
 
@@ -195,7 +195,7 @@ func loadSessionContext(cwd string) (project string, memories [][3]string, learn
 				continue
 			}
 			label := fmt.Sprintf("P%d %s", priority, title)
-			tasks = append(tasks, [4]string{id[:8], status, label, truncateUTF8(desc, 200)})
+			tasks = append(tasks, [4]string{shortID(id), status, label, truncateUTF8(desc, 200)})
 		}
 	}
 
@@ -223,6 +223,14 @@ func loadSessionContext(cwd string) (project string, memories [][3]string, learn
 	).Scan(&interactionCount)
 
 	return
+}
+
+// shortID returns the first 8 characters of an ID, or the full ID if shorter.
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
 
 // truncateUTF8 truncates s to at most maxBytes bytes without breaking
