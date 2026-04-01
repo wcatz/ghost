@@ -163,12 +163,22 @@ func (s *Server) resolveProjectID(ctx context.Context, input string) string {
 		return resolved
 	}
 
-	// Fall back to direct ID match.
+	// Fall back to direct ID match, then path match.
 	projects, err := s.store.ListProjects(ctx)
 	if err == nil {
 		for _, p := range projects {
 			if p.ID == input {
 				return input
+			}
+		}
+		// If input looks like an absolute path, match against project paths.
+		// This prevents creating duplicate projects when Claude passes a raw
+		// filesystem path instead of a project name or hash ID.
+		if filepath.IsAbs(input) {
+			for _, p := range projects {
+				if p.Path == input {
+					return p.ID
+				}
 			}
 		}
 	}
