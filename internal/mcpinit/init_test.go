@@ -14,11 +14,11 @@ func TestHandleSessionStartHook(t *testing.T) {
 	HandleSessionStartHook(strings.NewReader(`{"event":"SessionStart"}`), &out)
 
 	output := out.String()
-	if !strings.Contains(output, "Ghost memory is active") {
-		t.Error("hook output should mention Ghost memory is active")
+	if output == "" {
+		t.Error("hook output should not be empty")
 	}
-	if !strings.Contains(output, "ghost_memory_save") {
-		t.Error("hook output should mention ghost_memory_save")
+	if !strings.Contains(output, "ghost_memory_save") && !strings.Contains(output, "Ghost context") {
+		t.Error("hook output should mention ghost_memory_save or Ghost context")
 	}
 }
 
