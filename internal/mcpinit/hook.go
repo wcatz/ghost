@@ -49,25 +49,26 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "## Ghost context: %s\n\n", project)
+	fmt.Fprintf(&sb, "## Ghost context: %s\n", project)
+	fmt.Fprintf(&sb, "Use project_id: \"%s\" for all ghost_* tool calls.\n\n", project)
 
 	if learned != "" {
 		fmt.Fprintf(&sb, "**Summary:** %s\n\n", learned)
 	}
 
 	if len(memories) > 0 {
-		fmt.Fprintf(&sb, "**Memories:**\n")
+		fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
 		for _, m := range memories {
-			fmt.Fprintf(&sb, "- [%s] %s\n", m[0], m[1])
+			fmt.Fprintf(&sb, "- [%s] `%s` %s\n", m[1], m[0][:8], m[2])
 		}
 	}
 
 	if len(tasks) > 0 {
 		fmt.Fprintf(&sb, "\n**Open Tasks:**\n")
 		for _, t := range tasks {
-			fmt.Fprintf(&sb, "- [%s] %s\n", t[0], t[1])
-			if t[2] != "" {
-				fmt.Fprintf(&sb, "  %s\n", t[2])
+			fmt.Fprintf(&sb, "- [%s] `%s` %s\n", t[1], t[0], t[2])
+			if t[3] != "" {
+				fmt.Fprintf(&sb, "  %s\n", t[3])
 			}
 		}
 	}
@@ -126,7 +127,7 @@ func loadGlobalMemories(dbPath string) [][2]string {
 	return out
 }
 
-func loadSessionContext(cwd string) (project string, memories [][2]string, learned string, tasks [][3]string, decisions [][2]string, interactionCount int) {
+func loadSessionContext(cwd string) (project string, memories [][3]string, learned string, tasks [][4]string, decisions [][2]string, interactionCount int) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
@@ -158,7 +159,7 @@ func loadSessionContext(cwd string) (project string, memories [][2]string, learn
 
 	// Get top memories: pinned first, then by importance
 	rows, err := db.Query(`
-		SELECT category, content FROM memories
+		SELECT id, category, content FROM memories
 		WHERE project_id = ?
 		ORDER BY pinned DESC, importance DESC, updated_at DESC
 		LIMIT 25
@@ -169,18 +170,17 @@ func loadSessionContext(cwd string) (project string, memories [][2]string, learn
 	defer rows.Close() //nolint:errcheck
 
 	for rows.Next() {
-		var cat, content string
-		if err := rows.Scan(&cat, &content); err != nil {
+		var id, cat, content string
+		if err := rows.Scan(&id, &cat, &content); err != nil {
 			continue
 		}
-		// Truncate very long memories to keep the hook output manageable
 		content = truncateUTF8(content, 300)
-		memories = append(memories, [2]string{cat, content})
+		memories = append(memories, [3]string{id, cat, content})
 	}
 
 	// Get open tasks
 	taskRows, err := db.Query(`
-		SELECT status, priority, title, COALESCE(description, '')
+		SELECT id, status, priority, title, COALESCE(description, '')
 		FROM tasks
 		WHERE project_id = ? AND status IN ('pending', 'active', 'blocked')
 		ORDER BY priority ASC, created_at DESC
@@ -189,13 +189,13 @@ func loadSessionContext(cwd string) (project string, memories [][2]string, learn
 	if err == nil {
 		defer taskRows.Close() //nolint:errcheck
 		for taskRows.Next() {
-			var status, title, desc string
+			var id, status, title, desc string
 			var priority int
-			if err := taskRows.Scan(&status, &priority, &title, &desc); err != nil {
+			if err := taskRows.Scan(&id, &status, &priority, &title, &desc); err != nil {
 				continue
 			}
 			label := fmt.Sprintf("P%d %s", priority, title)
-			tasks = append(tasks, [3]string{status, label, truncateUTF8(desc, 200)})
+			tasks = append(tasks, [4]string{id[:8], status, label, truncateUTF8(desc, 200)})
 		}
 	}
 

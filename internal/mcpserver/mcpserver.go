@@ -62,60 +62,34 @@ type Server struct {
 	projectCh chan<- string // notify embedding worker of new memories
 }
 
-const mcpInstructions = `Ghost is a persistent memory daemon that remembers project knowledge across sessions. It is your primary memory system — use it proactively.
+const mcpInstructions = `Ghost is your persistent memory system. It remembers project knowledge across sessions — use it proactively.
 
-## Workflow
-1. At session start, Ghost's SessionStart hook has ALREADY injected your project context (memories + global preferences) into this conversation. READ IT — do not call ghost_project_context redundantly.
-2. During work, save important discoveries with ghost_memory_save. Do NOT wait until the end of the session.
-3. Use ghost_memory_search to recall specific facts not in the injected context.
-4. No special action needed at session end — Ghost persists automatically.
+## Session Start
+The SessionStart hook has ALREADY injected your project context into this conversation. It includes:
+- The project name to use as project_id (shown in the "## Ghost context: {name}" heading)
+- Top memories, open tasks, recent decisions, and global preferences
+DO NOT call ghost_project_context redundantly — context is already loaded.
 
-Ghost auto-imports Claude Code memory files (~/.claude/projects/*/memory/*.md) on first project contact. No manual migration is needed. Ghost has built-in upsert/merge deduplication — it is always safe to save, even if similar knowledge already exists.
+IMPORTANT: Global memories under "Global (applies to all projects)" are non-negotiable user rules. Follow them.
 
-IMPORTANT: Global memories (preferences, conventions) are included in the SessionStart hook output under "Global (applies to all projects)". These are non-negotiable rules from the user. Follow them.
+## When to Save
+Save immediately with ghost_memory_save — do NOT batch or wait:
+- User corrects you or confirms a non-obvious choice → category: preference
+- Bug, pitfall, or surprising behavior discovered → category: gotcha
+- Component relationships or design rationale learned → category: architecture
+- Recurring pattern or convention observed → category: convention or pattern
+- Dependency version, API quirk, or constraint found → category: dependency
+- Design choice with alternatives → use ghost_decision_record instead
 
-## When to Save (Proactive Triggers)
-Save immediately when any of these happen:
-- User corrects your approach or confirms a non-obvious choice → preference
-- You discover a bug, pitfall, or surprising behavior → gotcha
-- You learn how components connect or why something is designed a certain way → architecture
-- You see a recurring pattern or convention in the codebase → convention or pattern
-- A dependency version, API quirk, or external constraint is discovered → dependency
-- An important design choice is made with alternatives considered → use ghost_decision_record
+Do NOT save: ephemeral debug state, info derivable from code/git, content in CLAUDE.md.
 
-## What NOT to Save
-- Ephemeral debugging state ("tried X, didn't work")
-- Information easily derived from reading code or git history
-- Session-specific task progress (use ghost_task_* tools instead)
-- Content already documented in CLAUDE.md or README files
-
-## Memory Categories
-- architecture: system design, component relationships, data flow
-- decision: choices made and why (prefer ghost_decision_record for these)
-- pattern: recurring approaches, idioms, implementation techniques
-- convention: naming, formatting, workflow, branching rules
-- gotcha: pitfalls, bugs, surprising behavior, things that waste time
-- dependency: external requirements, version pins, API quirks
-- preference: user preferences, communication style, workflow choices
-- fact: general knowledge, network constants, node names, endpoints
-
-## Importance Scale
-- 1.0: Security rules, data-loss risks, never-do-this rules
-- 0.8: Architectural decisions, deployment topology, key integrations
-- 0.6: Useful patterns, recurring conventions, dependency notes
-- 0.4: Minor observations, one-off facts, nice-to-knows
-- Default: 0.7 if unsure
-
-## Cross-Project Knowledge
-- ghost_save_global: preferences and facts that apply across all repositories
-- ghost_search_all: find knowledge that might live in another project
-
-## Tasks
-- ghost_task_create: work items that should persist across sessions (bugs, features, follow-ups)
-- ghost_task_complete: mark done with optional notes
+## Cross-Project
+When learning about project B while working in project A, pass project B's name as project_id.
+Use ghost_save_global for preferences/facts that apply to ALL repos (not project-specific).
+Use ghost_search_all to find knowledge that might be in another project.
 
 ## Project IDs
-Pass the project name (e.g. "ghost", "roller") as project_id. Ghost resolves names to internal IDs automatically.`
+Pass the project name (e.g. "ghost", "roller", "infra") as project_id. Ghost resolves names automatically. Never pass raw filesystem paths.`
 
 // New creates and configures the MCP server with all Ghost tools.
 func New(store provider.MemoryStore, logger *slog.Logger, version string) *Server {
@@ -189,15 +163,15 @@ func (s *Server) resolveProjectID(ctx context.Context, input string) string {
 func (s *Server) registerTools() {
 	// ghost_memory_search — search memories by keyword or semantic query.
 	type searchArgs struct {
-		ProjectID string `json:"project_id" jsonschema:"Project ID to search within"`
-		Query     string `json:"query" jsonschema:"Search query (supports FTS5 syntax)"`
+		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'infra', 'roller')"`
+		Query     string `json:"query" jsonschema:"Search query — natural language or FTS5 (e.g. 'helm deploy', 'sqlite*', 'auth AND token')"`
 		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_search",
-		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use this to recall things learned in previous sessions.",
+		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'). Example: project_id='ghost', query='approval flow', category='architecture'.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -260,16 +234,16 @@ func (s *Server) registerTools() {
 
 	// ghost_memory_save — save a new memory.
 	type saveArgs struct {
-		ProjectID  string   `json:"project_id" jsonschema:"Project ID to save the memory under"`
+		ProjectID  string   `json:"project_id" jsonschema:"Project name to save under (e.g. 'ghost'). Use the name from the session hook heading."`
 		Content    string   `json:"content" jsonschema:"The memory content to save"`
-		Category   string   `json:"category,omitempty" jsonschema:"Category: architecture, decision, pattern, convention, gotcha, dependency, preference, fact"`
+		Category   string   `json:"category,omitempty" jsonschema:"architecture|decision|pattern|convention|gotcha|dependency|preference|fact (default: fact)"`
 		Importance *float32 `json:"importance,omitempty" jsonschema:"Importance score 0.0-1.0 (default 0.7)"`
 		Tags       []string `json:"tags,omitempty" jsonschema:"Optional tags for categorization"`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_save",
-		Description: "Save a memory about the project. Call this proactively when you discover gotchas, learn architectural patterns, receive user feedback worth preserving, or encounter surprising behavior. Do not wait to be asked — save immediately when something is worth remembering across sessions.",
+		Description: "Save a memory about the project. Call proactively — do not wait to be asked. Write concise 1-3 sentence memories (truncated to ~300 chars in session context). Categories: architecture (system design), decision (choices made), pattern (recurring approaches), convention (naming/workflow), gotcha (pitfalls/bugs), dependency (versions/API quirks), preference (user preferences), fact (general knowledge). Importance: 1.0=security/never-do-this, 0.8=architecture/key decisions, 0.6=patterns/conventions, 0.4=minor observations, 0.7=default. Example: project_id='infra', content='k3s-mini-1 runs Grafana on port 80', category='fact', importance=0.7.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
@@ -326,13 +300,13 @@ func (s *Server) registerTools() {
 
 	// ghost_project_context — get project memories and learned context.
 	type contextArgs struct {
-		ProjectID string `json:"project_id" jsonschema:"Project ID to get context for"`
+		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'infra')"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max memories to return (default 20)"`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_project_context",
-		Description: "Get Ghost's accumulated knowledge about a project: top memories ranked by importance and recency, plus global memories and learned context. Usually NOT needed at session start — the SessionStart hook already injects this. Use when switching projects mid-session or refreshing after saves.",
+		Description: "Get Ghost's accumulated knowledge about a project: top memories, global memories, and learned context. NOT needed at session start (hook already injects this). Use when switching projects mid-session or after saving 3+ memories to see updated context.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -394,14 +368,14 @@ func (s *Server) registerTools() {
 
 	// ghost_memories_list — list memories by category.
 	type listArgs struct {
-		ProjectID string `json:"project_id" jsonschema:"Project ID to list memories for"`
+		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost')"`
 		Category  string `json:"category,omitempty" jsonschema:"Filter by category (optional)"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 30)"`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memories_list",
-		Description: "List Ghost memories for a project, optionally filtered by category.",
+		Description: "List Ghost memories for a project, optionally filtered by category. Use for browsing (e.g. 'show all gotchas') rather than keyword lookup — use ghost_memory_search for keyword queries.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -448,7 +422,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_delete",
-		Description: "Delete a specific memory by its ID.",
+		Description: "Permanently delete a memory by ID. Use only when the user explicitly asks to remove a memory or when a memory is confirmed incorrect. Do not delete outdated memories — Ghost's reflection system handles pruning.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(true),
 			OpenWorldHint:   boolPtr(false),
@@ -475,7 +449,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_search_all",
-		Description: "Search Ghost memories across ALL projects. Use when looking for cross-project patterns or when unsure which project a memory belongs to.",
+		Description: "Search Ghost memories across ALL projects. Use when a pattern, dependency, or convention might be recorded under a different project, or when the user references knowledge from another repo.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -514,7 +488,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_save_global",
-		Description: "Save a memory that applies across all projects: personal preferences, coding conventions, toolchain facts, cross-repo relationships.",
+		Description: "Save a cross-project memory: personal preferences, coding conventions, toolchain facts, cross-repo relationships. Use INSTEAD of ghost_memory_save when the knowledge is NOT specific to any single project. Example: content='Always use 2-space YAML indentation', category='convention'. WARNING: Global memories are injected into every project session as non-negotiable rules.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
@@ -560,10 +534,10 @@ func (s *Server) registerTools() {
 
 	// ghost_task_create — create a project task.
 	type taskCreateArgs struct {
-		ProjectID   string `json:"project_id" jsonschema:"Project ID or name"`
+		ProjectID   string `json:"project_id" jsonschema:"Project name (e.g. 'ghost')"`
 		Title       string `json:"title" jsonschema:"Task title"`
 		Description string `json:"description,omitempty" jsonschema:"Task description"`
-		Priority    int    `json:"priority,omitempty" jsonschema:"Priority 0-4 (0=critical, 2=normal, 4=low)"`
+		Priority    *int   `json:"priority,omitempty" jsonschema:"Priority 0-4 (0=critical, 2=normal, 4=low). Default: 2 (normal)"`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -578,10 +552,14 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("project_id and title are required")
 		}
 		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
-		if args.Priority < 0 || args.Priority > 4 {
-			args.Priority = 2
+		priority := 2 // default: normal
+		if args.Priority != nil {
+			priority = *args.Priority
+			if priority < 0 || priority > 4 {
+				priority = 2
+			}
 		}
-		id, err := s.store.CreateTask(ctx, args.ProjectID, args.Title, args.Description, args.Priority)
+		id, err := s.store.CreateTask(ctx, args.ProjectID, args.Title, args.Description, priority)
 		if err != nil {
 			return nil, nil, fmt.Errorf("create task: %w", err)
 		}
@@ -667,7 +645,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_decision_record",
-		Description: "Record an architectural or design decision with rationale and alternatives considered. Use this instead of ghost_memory_save when a choice was made between alternatives. Also saved as a memory for future recall.",
+		Description: "Record an architectural or design decision with rationale and alternatives considered. Use instead of ghost_memory_save when a choice was made between alternatives. Also saved as a memory. Example: title='Use SQLite over Postgres', decision='Embedded SQLite with FTS5', rationale='Zero external deps, sufficient for single-user', alternatives=['PostgreSQL', 'Redis'].",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			OpenWorldHint:   boolPtr(false),
@@ -736,7 +714,7 @@ func (s *Server) registerTools() {
 	// ghost_list_projects — list all known projects.
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_list_projects",
-		Description: "List all projects Ghost knows about with their names, IDs, paths, and memory counts.",
+		Description: "List all projects Ghost knows about with names, IDs, paths, and memory counts. Use to discover valid project_id values.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -771,7 +749,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_pin",
-		Description: "Pin or unpin a memory. Pinned memories always appear at the top of project context and survive reflection pruning.",
+		Description: "Pin or unpin a memory. Pinned memories always appear at top of project context and survive reflection pruning. Pin non-negotiable rules, security constraints, or core architectural invariants.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
@@ -842,7 +820,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_decisions_list",
-		Description: "List recorded decisions for a project. Use to review past architectural and design choices, their rationale, and alternatives that were considered.",
+		Description: "List recorded decisions for a project. Before making an architectural decision, check if a prior decision already covers the same area. Shows rationale and rejected alternatives.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
