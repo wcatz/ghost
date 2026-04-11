@@ -22,7 +22,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/olebedev/when v1.1.0
 	golang.org/x/oauth2 v0.36.0
-	golang.org/x/term v0.41.0
+	golang.org/x/term v0.42.0
 	google.golang.org/api v0.272.0
 	modernc.org/sqlite v1.46.1
 )
@@ -91,7 +91,7 @@ require (
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/net v0.52.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260311181403-84a4fc48630c // indirect
 	google.golang.org/grpc v1.79.2 // indirect
