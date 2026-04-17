@@ -23,7 +23,7 @@ require (
 	github.com/olebedev/when v1.1.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/term v0.42.0
-	google.golang.org/api v0.272.0
+	google.golang.org/api v0.274.0
 	modernc.org/sqlite v1.48.2
 )
 
