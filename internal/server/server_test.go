@@ -56,6 +56,9 @@ func (m *mockStore) Create(_ context.Context, _ string, _ memory.Memory) (string
 func (m *mockStore) SearchHybrid(_ context.Context, _, _ string, _ []float32, _ int) ([]memory.Memory, error) {
 	return nil, nil
 }
+func (m *mockStore) SearchHybridAll(_ context.Context, _ string, _ []float32, _ int) ([]memory.Memory, error) {
+	return nil, nil
+}
 func (m *mockStore) SearchVector(_ context.Context, _ string, _ []float32, _ int) ([]memory.ScoredMemory, error) {
 	return nil, nil
 }
@@ -88,7 +91,10 @@ func (m *mockStore) CreateTask(_ context.Context, _, _, _ string, _ int) (string
 func (m *mockStore) ListTasks(_ context.Context, _, _ string, _ int) ([]memory.Task, error) {
 	return nil, nil
 }
-func (m *mockStore) CompleteTask(_ context.Context, _, _ string) error { return nil }
+func (m *mockStore) GetTask(_ context.Context, _ string) (memory.Task, error) {
+	return memory.Task{}, nil
+}
+func (m *mockStore) CompleteTask(_ context.Context, _, _ string) error                        { return nil }
 func (m *mockStore) UpdateTask(_ context.Context, _, _ string, _ int, _ string) error { return nil }
 func (m *mockStore) RecordDecision(_ context.Context, _, _, _, _ string, _, _ []string) (string, error) {
 	return "dec1", nil
