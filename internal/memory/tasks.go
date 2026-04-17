@@ -91,6 +91,28 @@ func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) error {
 	return nil
 }
 
+// GetTask returns a single task by ID.
+func (s *Store) GetTask(ctx context.Context, taskID string) (Task, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var t Task
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, project_id, title, description, status, priority,
+		       COALESCE(blocked_by, ''), COALESCE(branch, ''), COALESCE(pr_number, 0),
+		       COALESCE(notes, ''), created_at, updated_at, COALESCE(completed_at, '')
+		FROM tasks WHERE id = ?
+	`, taskID).Scan(
+		&t.ID, &t.ProjectID, &t.Title, &t.Description, &t.Status,
+		&t.Priority, &t.BlockedBy, &t.Branch, &t.PRNumber, &t.Notes,
+		&t.CreatedAt, &t.UpdatedAt, &t.CompletedAt,
+	)
+	if err != nil {
+		return Task{}, fmt.Errorf("get task: %w", err)
+	}
+	return t, nil
+}
+
 // UpdateTask updates a task's status, priority, or description.
 func (s *Store) UpdateTask(ctx context.Context, taskID, status string, priority int, description string) error {
 	s.mu.Lock()

@@ -45,6 +45,7 @@ type MemoryStore interface {
 	SearchFTS(ctx context.Context, projectID, query string, limit int) ([]memory.Memory, error)
 	SearchFTSAll(ctx context.Context, query string, limit int) ([]memory.Memory, error)
 	SearchHybrid(ctx context.Context, projectID, query string, queryVec []float32, limit int) ([]memory.Memory, error)
+	SearchHybridAll(ctx context.Context, query string, queryVec []float32, limit int) ([]memory.Memory, error)
 	SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]memory.ScoredMemory, error)
 	GetByCategory(ctx context.Context, projectID, category string, limit int) ([]memory.Memory, error)
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
@@ -66,6 +67,7 @@ type MemoryStore interface {
 
 	// Tasks
 	CreateTask(ctx context.Context, projectID, title, description string, priority int) (string, error)
+	GetTask(ctx context.Context, taskID string) (memory.Task, error)
 	ListTasks(ctx context.Context, projectID, status string, limit int) ([]memory.Task, error)
 	CompleteTask(ctx context.Context, taskID, notes string) error
 	UpdateTask(ctx context.Context, taskID, status string, priority int, description string) error
