@@ -203,6 +203,68 @@ docker run -v ghost-data:/data ghcr.io/wcatz/ghost:latest mcp
 
 ---
 
+## With Superpowers
+
+[Superpowers](https://github.com/obra/superpowers) is a skills framework for AI coding agents — it enforces brainstorm-first planning, mandatory TDD, and subagent-driven execution. Ghost and Superpowers are built to complement each other: Superpowers structures _how_ work gets done, Ghost remembers _what was learned_.
+
+### The workflow
+
+```
+Session start
+  └── Ghost SessionStart hook → injects project context (memories, tasks, decisions)
+  
+User asks for a new feature
+  └── Superpowers brainstorm skill → clarifies requirements
+  └── Superpowers calls ghost_project_context → loads codebase history and past decisions
+  └── Superpowers writes a plan informed by Ghost's memory of conventions and gotchas
+
+Subagents execute the plan
+  └── Each phase ends with ghost_memory_save → persists what was learned
+  └── Architectural choices go through ghost_decision_record
+  └── Bugs found along the way → category: gotcha, importance: 0.9
+
+Next session
+  └── Ghost hook fires → top memories already in context
+  └── No re-explaining the codebase, conventions, or past decisions
+```
+
+Ghost's 3-block prompt caching pairs well with Superpowers' subagent chunking: smaller, focused tasks mean fewer tokens burned re-establishing context between turns.
+
+### Install Superpowers for Claude Code
+
+In any Claude Code session, run:
+
+```
+/plugin install superpowers@claude-plugins-official
+```
+
+No additional configuration needed — skills trigger automatically based on what you ask for.
+
+### Add a Go testing skill
+
+Superpowers ships with TDD skills, but you can add a project-aware Go skill that encodes Ghost-specific conventions. Create `~/.config/superpowers/skills/go-testing/SKILL.md`:
+
+```yaml
+---
+name: go-testing
+description: "Use when writing Go tests, running go test, implementing table-driven tests, or adding test coverage to Go packages."
+---
+```
+
+A complete skill file (table-driven pattern, Ghost store helpers, vet/test conventions) is included in this repo's [Ghost memory system](https://github.com/wcatz/ghost) and written to `~/.config/superpowers/skills/go-testing/SKILL.md` by `ghost mcp init`.
+
+### Ghost MCP tools Superpowers uses
+
+| Tool | When Superpowers calls it |
+|------|--------------------------|
+| `ghost_project_context` | Brainstorm phase — loads codebase history before planning |
+| `ghost_memory_search` | Before touching any component — checks for known gotchas |
+| `ghost_decision_record` | When an architectural choice is made |
+| `ghost_memory_save` | After each subagent phase completes |
+| `ghost_task_create` | To track discovered follow-ups across sessions |
+
+---
+
 ## Beyond MCP — Optional Features
 
 Everything below is optional. Ghost works as a pure MCP memory server with zero configuration beyond `ghost mcp init`. These features activate when you run `ghost serve` as a daemon.
