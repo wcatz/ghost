@@ -252,7 +252,7 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	if err != nil {
 		return nil, fmt.Errorf("load embeddings: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var entries []vecEntry
 	for rows.Next() {
