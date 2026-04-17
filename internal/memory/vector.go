@@ -241,6 +241,114 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 	return scanMemories(rows)
 }
 
+// SearchVectorAll performs brute-force cosine similarity search across ALL projects.
+func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit int) ([]ScoredMemory, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT memory_id, embedding FROM memory_embeddings
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("load embeddings: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []vecEntry
+	for rows.Next() {
+		var id string
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			return nil, err
+		}
+		vec := bytesToFloat32s(blob)
+		if len(vec) == len(queryVec) {
+			entries = append(entries, vecEntry{memoryID: id, embedding: vec})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	scored := make([]ScoredMemory, len(entries))
+	for i, e := range entries {
+		scored[i] = ScoredMemory{MemoryID: e.memoryID, Score: cosineSimilarity(queryVec, e.embedding)}
+	}
+	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+	return scored, nil
+}
+
+// SearchHybridAll combines FTS5 and vector search across ALL projects using RRF.
+// Falls back to FTS-only when queryVec is nil.
+func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []float32, limit int) ([]Memory, error) {
+	const k = 60
+
+	ftsResults, err := s.SearchFTSAll(ctx, query, limit*2)
+	if err != nil {
+		ftsResults = nil
+	}
+
+	if queryVec == nil {
+		if len(ftsResults) > limit {
+			ftsResults = ftsResults[:limit]
+		}
+		return ftsResults, nil
+	}
+
+	vecResults, err := s.SearchVectorAll(ctx, queryVec, limit*2)
+	if err != nil {
+		vecResults = nil
+	}
+
+	if len(vecResults) == 0 {
+		if len(ftsResults) > limit {
+			ftsResults = ftsResults[:limit]
+		}
+		return ftsResults, nil
+	}
+
+	scores := make(map[string]float64)
+	idSet := make(map[string]bool)
+	for rank, m := range ftsResults {
+		scores[m.ID] += 0.3 / float64(k+rank+1)
+		idSet[m.ID] = true
+	}
+	for rank, sm := range vecResults {
+		scores[sm.MemoryID] += 0.7 / float64(k+rank+1)
+		idSet[sm.MemoryID] = true
+	}
+
+	type idScore struct {
+		id    string
+		score float64
+	}
+	ranked := make([]idScore, 0, len(idSet))
+	for id := range idSet {
+		ranked = append(ranked, idScore{id: id, score: scores[id]})
+	}
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+
+	ids := make([]string, len(ranked))
+	for i, r := range ranked {
+		ids[i] = r.id
+	}
+	memories, err := s.GetByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	scoreMap := scores
+	sort.Slice(memories, func(i, j int) bool {
+		return scoreMap[memories[i].ID] > scoreMap[memories[j].ID]
+	})
+	return memories, nil
+}
+
 func float32sToBytes(fs []float32) []byte {
 	buf := make([]byte, len(fs)*4)
 	for i, f := range fs {
