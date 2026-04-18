@@ -590,6 +590,89 @@ func TestFormatMemories_EdgeCases(t *testing.T) {
 	}
 }
 
+func TestTaskUpdate_EmptyStatusPreservesCurrentStatus(t *testing.T) {
+	store := testStore(t)
+	ctx := context.Background()
+
+	id, err := store.CreateTask(ctx, "abc123", "Refactor auth", "needs cleanup", 2)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	// Default status is "pending". Update priority only (no status change).
+	// The fixed handler fetches current task and uses current.Status when args.Status == "".
+	current, err := store.GetTask(ctx, id)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if current.Status != "pending" {
+		t.Fatalf("expected initial status=pending, got %q", current.Status)
+	}
+
+	// Simulate what the fixed ghost_task_update handler does: use current status.
+	if err := store.UpdateTask(ctx, id, current.Status, 1, current.Description); err != nil {
+		t.Fatalf("UpdateTask: %v", err)
+	}
+
+	after, err := store.GetTask(ctx, id)
+	if err != nil {
+		t.Fatalf("GetTask after update: %v", err)
+	}
+	if after.Status != "pending" {
+		t.Errorf("status should remain pending, got %q", after.Status)
+	}
+	if after.Priority != 1 {
+		t.Errorf("priority should be updated to 1, got %d", after.Priority)
+	}
+}
+
+func TestParseProjectIDFromURI(t *testing.T) {
+	tests := []struct {
+		name    string
+		uri     string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "plain name",
+			uri:  "ghost://project/ghost/context",
+			want: "ghost",
+		},
+		{
+			name: "URL-encoded space",
+			uri:  "ghost://project/my%20project/context",
+			want: "my project",
+		},
+		{
+			name: "decisions resource",
+			uri:  "ghost://project/infra/decisions",
+			want: "infra",
+		},
+		{
+			name:    "missing project_id",
+			uri:     "ghost://project//context",
+			wantErr: true,
+		},
+		{
+			name:    "invalid URI",
+			uri:     "://bad",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseProjectIDFromURI(tc.uri)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err=%v, wantErr=%v", err, tc.wantErr)
+			}
+			if !tc.wantErr && got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateTags(t *testing.T) {
 	tests := []struct {
 		name     string
