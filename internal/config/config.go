@@ -34,13 +34,6 @@ type Config struct {
 	Server     ServerConfig     `koanf:"server"`
 	Embedding  EmbeddingConfig  `koanf:"embedding"`
 	Reflection ReflectionConfig `koanf:"reflection"`
-	GitHub     GitHubConfig     `koanf:"github"`
-	Telegram   TelegramConfig   `koanf:"telegram"`
-	Calendar   CalendarConfig   `koanf:"calendar"`
-	Google     GoogleConfig     `koanf:"google"`
-	Briefing   BriefingConfig   `koanf:"briefing"`
-	CostReport CostReportConfig `koanf:"cost_report"`
-	Voice      VoiceConfig      `koanf:"voice"`
 }
 
 // APIConfig holds Claude API settings.
@@ -69,24 +62,6 @@ type DisplayConfig struct {
 	PlainMode        bool   `koanf:"plain_mode"`      // force legacy REPL (no bubbletea)
 }
 
-// VoiceConfig holds voice interface settings.
-type VoiceConfig struct {
-	Enabled           bool    `koanf:"enabled"`
-	STTBackend        string  `koanf:"stt_backend"`        // "whisper" or "assemblyai"
-	STTModel          string  `koanf:"stt_model"`          // whisper model name/path
-	TTSBackend        string  `koanf:"tts_backend"`        // "piper", "elevenlabs", "espeak", or "none"
-	TTSModel          string  `koanf:"tts_model"`          // piper model path
-	TTSVoice          string  `koanf:"tts_voice"`          // voice name
-	TTSRate           float64 `koanf:"tts_rate"`           // speech rate multiplier
-	WakeWord          string  `koanf:"wake_word"`          // reserved for future use
-	PushToTalk        string  `koanf:"push_to_talk"`       // keybind, e.g. "ctrl+space"
-	SilenceMs         int     `koanf:"silence_ms"`         // silence duration to end recording (ms)
-	SampleRate        int     `koanf:"sample_rate"`        // audio sample rate
-	InputDevice       string  `koanf:"input_device"`       // audio input device ("default" or device ID)
-	AssemblyAIAPIKey  string  `koanf:"assemblyai_api_key"` // AssemblyAI API key (for STT)
-	ElevenLabsAPIKey  string  `koanf:"elevenlabs_api_key"` // ElevenLabs API key (for TTS)
-	ElevenLabsVoiceID string  `koanf:"elevenlabs_voice_id"` // ElevenLabs voice ID
-}
 
 // ServerConfig holds ghost serve settings.
 type ServerConfig struct {
@@ -107,42 +82,6 @@ type EmbeddingConfig struct {
 	Dimensions int    `koanf:"dimensions"`
 }
 
-// GitHubConfig holds GitHub notification monitor settings.
-type GitHubConfig struct {
-	Token    string `koanf:"token"`
-	Interval int    `koanf:"interval"` // poll interval in seconds
-}
-
-// TelegramConfig holds Telegram bot settings.
-type TelegramConfig struct {
-	Token      string `koanf:"token"`
-	AllowedIDs string `koanf:"allowed_ids"` // comma-separated user IDs
-}
-
-// CalendarConfig holds CalDAV calendar settings.
-type CalendarConfig struct {
-	URL      string `koanf:"url"`
-	Username string `koanf:"username"`
-	Password string `koanf:"password"`
-}
-
-// GoogleConfig holds Google OAuth2 API settings.
-type GoogleConfig struct {
-	CredentialsFile string `koanf:"credentials_file"`
-	TokenFile       string `koanf:"token_file"`
-}
-
-// BriefingConfig holds morning briefing schedule settings.
-type BriefingConfig struct {
-	Enabled  bool   `koanf:"enabled"`
-	Schedule string `koanf:"schedule"` // cron expression, e.g. "0 8 * * *"
-}
-
-// CostReportConfig holds monthly cost report settings.
-type CostReportConfig struct {
-	Enabled  bool   `koanf:"enabled"`
-	Schedule string `koanf:"schedule"` // cron expression, default "0 9 1 * *"
-}
 
 // defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{
@@ -159,28 +98,12 @@ var defaults = map[string]interface{}{
 	"display.theme":              "auto",
 	"display.image_protocol":     "auto",
 	"display.plain_mode":         false,
-	"voice.enabled":              false,
-	"voice.stt_backend":          "whisper",
-	"voice.stt_model":            "base",
-	"voice.tts_backend":          "piper",
-	"voice.tts_rate":             1.0,
-	"voice.push_to_talk":         "ctrl+space",
-	"voice.silence_ms":           800,
-	"voice.sample_rate":          16000,
-	"voice.input_device":         "default",
 	"server.listen_addr":         "127.0.0.1:2187",
 	"embedding.enabled":          true,
 	"embedding.ollama_url":       "http://localhost:11434",
 	"embedding.model":            "nomic-embed-text:v1.5",
 	"embedding.dimensions":       768,
 	"reflection.backend":         "auto",
-	"github.interval":            60,
-	"briefing.enabled":           false,
-	"briefing.schedule":          "0 8 * * 1-5",
-	"cost_report.enabled":        false,
-	"cost_report.schedule":       "0 9 1 * *",
-	"google.credentials_file":   "~/.config/ghost/google-credentials.json",
-	"google.token_file":          "~/.config/ghost/google-token.json",
 }
 
 // Load reads configuration with layered precedence.
@@ -224,18 +147,7 @@ func Load() (*Config, error) {
 	// koanf's _ → . transformer would map e.g. GHOST_SERVER_AUTH_TOKEN
 	// to server.auth.token instead of server.auth_token.
 	envOverrides := map[string]string{
-		"GHOST_SERVER_AUTH_TOKEN":         "server.auth_token",
-		"GHOST_VOICE_ASSEMBLYAI_API_KEY": "voice.assemblyai_api_key",
-		"GHOST_VOICE_ELEVENLABS_API_KEY": "voice.elevenlabs_api_key",
-		"GHOST_VOICE_ELEVENLABS_VOICE_ID": "voice.elevenlabs_voice_id",
-		"GHOST_VOICE_STT_BACKEND":        "voice.stt_backend",
-		"GHOST_VOICE_PUSH_TO_TALK":       "voice.push_to_talk",
-		"GHOST_VOICE_WAKE_WORD":          "voice.wake_word",
-		"GHOST_VOICE_INPUT_DEVICE":       "voice.input_device",
-		"GHOST_VOICE_SAMPLE_RATE":        "voice.sample_rate",
-		"GHOST_VOICE_SILENCE_MS":         "voice.silence_ms",
-		"GHOST_COST_REPORT_ENABLED":      "cost_report.enabled",
-		"GHOST_COST_REPORT_SCHEDULE":     "cost_report.schedule",
+		"GHOST_SERVER_AUTH_TOKEN": "server.auth_token",
 	}
 	for envKey, koanfKey := range envOverrides {
 		if val := os.Getenv(envKey); val != "" {

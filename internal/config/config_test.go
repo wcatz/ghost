@@ -303,38 +303,6 @@ func TestLoad_DisplayDefaults(t *testing.T) {
 	}
 }
 
-func TestLoad_VoiceDefaults(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY"})
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-
-	if cfg.Voice.Enabled {
-		t.Error("expected voice.enabled=false")
-	}
-	if cfg.Voice.STTBackend != "whisper" {
-		t.Errorf("expected stt_backend=whisper, got %q", cfg.Voice.STTBackend)
-	}
-	if cfg.Voice.TTSBackend != "piper" {
-		t.Errorf("expected tts_backend=piper, got %q", cfg.Voice.TTSBackend)
-	}
-	if cfg.Voice.SilenceMs != 800 {
-		t.Errorf("expected silence_ms=800, got %d", cfg.Voice.SilenceMs)
-	}
-	if cfg.Voice.SampleRate != 16000 {
-		t.Errorf("expected sample_rate=16000, got %d", cfg.Voice.SampleRate)
-	}
-	if cfg.Voice.InputDevice != "default" {
-		t.Errorf("expected input_device=default, got %q", cfg.Voice.InputDevice)
-	}
-}
-
 func TestDataDir_DefaultFallback(t *testing.T) {
 	// Unset XDG_DATA_HOME to test the fallback to ~/.local/share.
 	t.Setenv("XDG_DATA_HOME", "")
