@@ -168,6 +168,28 @@ func TestRetryHint(t *testing.T) {
 	}
 }
 
+func TestShellQuote(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"ghost", "'ghost'"},
+		{"/usr/local/bin/ghost", "'/usr/local/bin/ghost'"},
+		{"/path with spaces/ghost", "'/path with spaces/ghost'"},
+		{"/path/with$dollar/ghost", "'/path/with$dollar/ghost'"},
+		{"/path/with`backtick`/ghost", "'/path/with`backtick`/ghost'"},
+		{"/path/it's/ghost", "'/path/it'\\''s/ghost'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := shellQuote(tt.input)
+			if got != tt.want {
+				t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGhostPermissions_Complete(t *testing.T) {
 	// Verify the canonical list has the expected count.
 	if len(ghostPermissions) != 16 {
