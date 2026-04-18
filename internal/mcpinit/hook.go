@@ -140,15 +140,9 @@ func loadSessionContext(cwd string) (project string, memories [][3]string, learn
 	defer db.Close() //nolint:errcheck
 
 	// Find matching project: try full path prefix first, then cwd basename name match
-	cwdBase := filepath.Base(cwd)
 	var projectID string
-	row := db.QueryRow(`
-		SELECT id, name FROM projects
-		WHERE (? LIKE path || '%' AND LENGTH(path) > 10)
-		   OR name = ?
-		ORDER BY LENGTH(path) DESC LIMIT 1
-	`, cwd, cwdBase)
-	if err := row.Scan(&projectID, &project); err != nil {
+	projectID, project = lookupProject(db, cwd)
+	if projectID == "" {
 		return
 	}
 
@@ -223,6 +217,25 @@ func loadSessionContext(cwd string) (project string, memories [][3]string, learn
 	).Scan(&interactionCount)
 
 	return
+}
+
+// lookupProject finds the project ID and name for the given cwd.
+// It checks for an exact path match or a proper subdirectory match first
+// (using path || '/' prefix to avoid false-matching sibling directories),
+// then falls back to matching on the basename of cwd against project names.
+// Returns ("", "") when no project matches.
+func lookupProject(db *sql.DB, cwd string) (id, name string) {
+	cwdBase := filepath.Base(cwd)
+	row := db.QueryRow(`
+		SELECT id, name FROM projects
+		WHERE ((? = path OR ? LIKE path || '/%') AND LENGTH(path) > 10)
+		   OR name = ?
+		ORDER BY LENGTH(path) DESC LIMIT 1
+	`, cwd, cwd, cwdBase)
+	if err := row.Scan(&id, &name); err != nil {
+		return "", ""
+	}
+	return id, name
 }
 
 // shortID returns the first 8 characters of an ID, or the full ID if shorter.

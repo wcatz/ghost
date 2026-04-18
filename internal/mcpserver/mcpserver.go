@@ -822,14 +822,14 @@ func (s *Server) registerTools() {
 	// Priority and description are optional — omitting them preserves current values.
 	type taskUpdateArgs struct {
 		TaskID      string  `json:"task_id" jsonschema:"Task ID to update"`
-		Status      string  `json:"status" jsonschema:"New status: pending, active, blocked, done"`
+		Status      string  `json:"status,omitempty" jsonschema:"New status: pending, active, blocked, done (omit to preserve current)"`
 		Priority    *int    `json:"priority,omitempty" jsonschema:"Priority 0-4 (0=critical, 2=normal, 4=low). Omit to keep current value."`
 		Description *string `json:"description,omitempty" jsonschema:"Updated description. Omit to keep current value."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_task_update",
-		Description: "Update a task's status, and optionally its priority or description. Omitting priority or description preserves the current values — only pass fields you want to change.",
+		Description: "Update a task's status, priority, or description. All fields are optional — omit any field to preserve its current value. Only pass what you want to change.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
@@ -839,21 +839,25 @@ func (s *Server) registerTools() {
 		if args.TaskID == "" {
 			return nil, nil, fmt.Errorf("task_id is required")
 		}
-		if args.Status == "" {
-			return nil, nil, fmt.Errorf("status is required (pending, active, blocked, done)")
-		}
-		validStatuses := map[string]bool{
-			"pending": true, "active": true, "blocked": true, "done": true,
-		}
-		if !validStatuses[args.Status] {
-			return nil, nil, fmt.Errorf("invalid status %q — must be one of: pending, active, blocked, done", args.Status)
-		}
 
 		// Fetch current task to fill in omitted fields (prevents zero-value clobber).
 		current, err := s.store.GetTask(ctx, args.TaskID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("task not found: %w", err)
 		}
+
+		// status is optional — omitting it preserves the current value.
+		status := current.Status
+		if args.Status != "" {
+			validStatuses := map[string]bool{
+				"pending": true, "active": true, "blocked": true, "done": true,
+			}
+			if !validStatuses[args.Status] {
+				return nil, nil, fmt.Errorf("invalid status %q — must be one of: pending, active, blocked, done", args.Status)
+			}
+			status = args.Status
+		}
+
 		priority := current.Priority
 		if args.Priority != nil {
 			priority = *args.Priority
@@ -866,7 +870,7 @@ func (s *Server) registerTools() {
 			description = *args.Description
 		}
 
-		if err := s.store.UpdateTask(ctx, args.TaskID, args.Status, priority, description); err != nil {
+		if err := s.store.UpdateTask(ctx, args.TaskID, status, priority, description); err != nil {
 			return nil, nil, fmt.Errorf("update task: %w", err)
 		}
 		return &mcp.CallToolResult{
@@ -973,7 +977,7 @@ func (s *Server) registerResources() {
 			"toolchain facts. These apply to all projects. " +
 			"Add entries via the ghost_save_global tool.",
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-		memories, err := s.store.GetTopMemories(ctx, "_global", 50)
+		memories, err := s.store.GetTopMemories(ctx, "_global", 15)
 		if err != nil {
 			return nil, fmt.Errorf("get global memories: %w", err)
 		}
