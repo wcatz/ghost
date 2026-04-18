@@ -182,16 +182,16 @@ func ensurePermissions(w io.Writer) (*settingsFile, error) {
 	return sf, nil
 }
 
+// shellQuote wraps s in POSIX single quotes, escaping any single quotes within.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // ensureHook adds a SessionStart hook if not already present.
 func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
-	// Quote the binary path if it contains spaces.
-	bin := ghostBin
-	if strings.Contains(bin, " ") {
-		bin = `"` + bin + `"`
-	}
-	hookCmd := bin + " hook session-start"
+	hookCmd := shellQuote(ghostBin) + " hook session-start"
 
-	if sf.hasHook("SessionStart", "ghost hook session-start") {
+	if sf.hasHook("SessionStart", "hook session-start") {
 		fmt.Fprintln(w, "  ✓ SessionStart hook already configured")
 		return nil
 	}

@@ -1,248 +1,160 @@
 # Ghost Architecture
 
-## Runtime Modes
+## Runtime
+
+Ghost runs as a single binary with one primary mode:
 
 ```
-ghost              Interactive bubbletea TUI (default)
-ghost "query"      One-shot mode (no TUI)
-echo ... | ghost   Pipe mode (stdin)
-ghost serve        HTTP daemon + subsystems
-ghost mcp          MCP server (stdio)
+ghost mcp              MCP server on stdio (used by Claude Code, Cursor, Goose)
+ghost mcp init         Configure Claude Code integration
+ghost mcp status       Health check
+ghost hook session-start   SessionStart hook (called by Claude Code)
+ghost reflect <project>    Manual memory consolidation
+ghost upgrade          Self-update from GitHub Releases
+ghost version          Print version
 ```
 
 ## Package Map
 
 ```
-cmd/ghost/main.go          CLI entrypoint, mode selection, daemon bootstrap
+cmd/ghost/main.go          CLI entrypoint + subcommand dispatch
 internal/
-  ai/                      Claude API client
+  ai/                      Claude API client (used by reflection only)
     client.go              HTTP client, ChatStream(), Reflect()
     stream.go              SSE parser, StreamEvent channel
     models.go              Message, ContentBlock, SystemBlock, TokenUsage
+    cost.go                Per-model pricing, CostForUsage()
   config/                  Layered configuration (koanf)
     config.go              Config struct, Load(), EnsureConfigFile()
     config.example.yaml    Annotated defaults
   embedding/               Local vector embeddings
     client.go              Ollama HTTP client (/api/embed)
-    worker.go              Async batch embedder (50/cycle)
+    worker.go              Async batch embedder
   memory/                  Persistence layer
-    store.go               SQLite CRUD, FTS5 search, token tracking
-    schema.go              DDL (13 tables, embedded via const)
+    store.go               SQLite CRUD, FTS5 search, time-decay scoring
+    schema.go              DDL (embedded via go:embed)
     vector.go              Cosine similarity, hybrid RRF search
-    store_test.go          Table-driven tests
-    vector_test.go         Embedding tests
-  orchestrator/            Session management
-    orchestrator.go        Multi-project session map
-    session.go             Agentic loop: Send() → tool_use → execute → repeat
-  provider/                Interface contracts
-    provider.go            LLMProvider, MemoryStore, Frontend, ApprovalRequest
-  prompt/                  System prompt construction
-    builder.go             3-block caching (static, project, memories)
+  mcpserver/               MCP server (stdio transport)
+    mcpserver.go           16 tools + 4 resources via go-sdk
+  mcpinit/                 Claude Code integration setup
+    init.go                ghost mcp init — registers server, imports memories, writes redirects
+    status.go              ghost mcp status — health check
+    hook.go                ghost hook session-start — injects project context
+  claudeimport/            One-time import of Claude Code auto-memory files
+    import.go              Scans ~/.claude/projects/*/memory/*.md, upserts into Ghost
   reflection/              Memory consolidation
-    engine.go              Haiku-based periodic reflection
-    extractor.go           Extract memories from conversation
-    reflection_test.go     Tests
-  tool/                    Tool execution
-    registry.go            Register, Execute, approval levels
-    bash.go                Shell execution (blocked patterns)
-    file_*.go              Read, write, edit
-    git.go                 Git operations (blocked: force-push, reset --hard)
-    glob.go                File pattern matching
-    grep.go                Content search
-    memory_*.go            Memory save/search tools
-  mode/                    Operating modes
-    modes.go               chat, code, debug, review, plan, refactor
-  project/                 Project detection
-    context.go             Language, git, test/lint commands, CLAUDE.md
-  tui/                     Terminal UI
-    app.go                 Bubbletea root model (MVU)
-    bridge.go              StreamEvent/approval → tea.Msg adapters
-    messages.go            Glamour markdown rendering
-    input.go               Multi-line textarea with history
-    viewport.go            Scrollable message history
-    statusbar.go           Project, mode, tokens, cost
-    toolbar.go             Tool progress spinners
-    approval.go            Non-blocking approval overlay
-    palette.go             Ctrl+K command palette
-    images.go              Terminal image rendering (sixel/kitty/iTerm2)
-    styles.go              Lipgloss style definitions
-    keys.go                Key bindings
-    oneshot.go             Pipe/one-shot mode (no bubbletea)
-    repl.go                Legacy REPL fallback (dumb terminals)
-  server/                  HTTP API
-    server.go              chi router, middleware, routes
-    chat.go                Session + SSE streaming endpoints
-    approval.go            Pending approval state
-    sse.go                 SSE write helpers
-  mcpserver/               MCP server
-    mcpserver.go           stdio transport, 12 tools + 2 resources
-  telegram/                Telegram bot
-    bot.go                 Commands, whitelist auth, alerts
-    approval.go            Approval forwarding with inline keyboards
-    sessions.go            /sessions, /chat, inline session picker
-  google/                  Google Workspace integration
-    auth.go                OAuth2 flow with token persistence
-    calendar.go            Google Calendar API client
-    gmail.go               Gmail API client (unread emails)
-    notifier.go            Meeting alerts (10min + 5min via Telegram)
-  github/                  GitHub monitor
-    monitor.go             Notification polling, P0-P4 priority
-    types.go               Notification types
-  scheduler/               Job scheduling
-    scheduler.go           gocron + NLP date parsing (when)
-  briefing/                Daily briefing
-    briefing.go            Aggregate GitHub + calendar + Gmail + reminders
-  calendar/                CalDAV client (legacy, replaced by google/)
-    client.go              Read-only event fetching
-  mdv2/                    MarkdownV2 utilities
-    escape.go              Shared escaper for Telegram formatting
-  voice/                   Voice pipeline (WIP)
-    voice.go               STT, TTS, AudioSource, AudioSink, VAD interfaces
-    pipeline.go            Push-to-talk orchestrator
-  audit/                   Logging
-    audit.go               Per-action cost + token tracking
+    consolidator.go        Consolidator interface + TieredConsolidator
+    tier_haiku.go          Haiku LLM consolidation (requires ANTHROPIC_API_KEY)
+    tier_sqlite.go         Local Jaccard similarity consolidation (free, always available)
+    prompt.go              BuildReflectionPrompt()
   provider/                Interface contracts
-    provider.go            LLMProvider, MemoryStore, Frontend, ApprovalRequest
-vscode-ghost/              VSCode extension
-  src/extension.ts         Activation, commands, health polling
-  src/ghost-client.ts      HTTP + SSE client for all API endpoints
-  src/chat-panel.ts        Sidebar chat webview provider
-  src/chat-editor.ts       Full editor tab chat panel
-  src/memory-panel.ts      Memory browser with FTS search
-  src/webview-html.ts      Shared HTML/CSS/JS for chat webviews
-  src/status-bar.ts        Connection + mode + token status bar
-  media/chat.css           Polished dark theme with animations
-  media/ghost-icon.svg     Activity bar icon
-migrations/
-  001_init.sql             Schema reference (actual DDL in schema.go)
+    provider.go            LLMProvider, MemoryStore
+  selfupdate/              Self-update from GitHub releases
+    selfupdate.go          LatestRelease, Download, ExtractBinary, Replace
 ```
 
 ## Data Flow
 
-### Interactive TUI
-```
-User input → textarea → Session.Send(ctx, msg, approvalCh)
-                          ↓
-                 prompt.Builder.BuildSystemBlocks()
-                 [Block 1: personality, cached]
-                 [Block 2: project ctx, cached]
-                 [Block 3: memories, dynamic]
-                          ↓
-                 ai.Client.ChatStream() → Claude API (SSE)
-                          ↓
-                 <-chan StreamEvent → bridge → tea.Msg
-                          ↓
-                 text → glamour → viewport
-                 tool_use → toolbar spinner → registry.Execute()
-                 approval → overlay dialog → response channel
-                 done → statusbar update (tokens, cost)
-                          ↓
-                 If StopReason == "tool_use": loop back to ChatStream
-                 If StopReason == "end_turn": done
-```
-
-### MCP Server
+### MCP Server (primary mode)
 ```
 Claude Code / Cursor → stdio JSON-RPC → mcpserver
                                           ↓
-                          Tools (pull-based, Claude must call):
-                                 ghost_memory_search → store.SearchFTS()
-                                 ghost_memory_save → store.Upsert()
-                                 ghost_project_context → store.GetTopMemories()
-                                 ghost_save_global → store.Upsert("_global")
-                                 ... 8 more tools
+                        Tools (pull-based, Claude must call):
+                          ghost_memory_search → store.SearchHybrid() or SearchFTS()
+                          ghost_memory_save   → store.Upsert()
+                          ghost_project_context → store.GetTopMemories()
+                          ghost_save_global   → store.Upsert("_global")
+                          ghost_task_create/update/complete → store.CreateTask()...
+                          ghost_decision_record → store.RecordDecision()
+                          ghost_health        → store metadata query
+                          ... 16 tools total
                                           ↓
-                          Resources (push-based, pinnable by client):
-                                 ghost://project/{project_id}/context
-                                   → store.GetTopMemories() + GetLearnedContext()
-                                   → survives context compaction when pinned
-                                 ghost://memories/global
-                                   → store.GetTopMemories("_global")
+                        Resources (pinnable, survive context compaction):
+                          ghost://project/{id}/context   → GetTopMemories + GetLearnedContext
+                          ghost://project/{id}/decisions → ListDecisions
+                          ghost://project/{id}/tasks     → ListTasks
+                          ghost://memories/global        → GetTopMemories("_global")
                                           ↓
-                                 SQLite query (no LLM calls)
+                               SQLite (no LLM calls in hot path)
 ```
 
-### HTTP API (for VSCode extension)
+### SessionStart Hook
 ```
-VSCode extension → POST /api/v1/sessions/{id}/send
-                          ↓
-                 Session.Send() → SSE stream back to client
-                          ↓
-                 data: {"type":"text","text":"..."}
-                 data: {"type":"approval_required",...}
-                          ↓
-                 POST /api/v1/sessions/{id}/approve → response channel
+Claude Code session opens
+  → ghost hook session-start (stdin: JSON with cwd + projectPath)
+  → lookupProject(db, cwd)           # path-prefix match OR name fallback
+  → buildProjectContext(store, id)   # top memories + tasks + decisions + globals
+  → writes markdown to stdout
+  → Claude Code injects into system prompt
 ```
 
-## Cost Optimization
-
-### Prompt Caching
-- Blocks 1+2 marked `cache_control: {"type": "ephemeral"}` (5min TTL)
-- First request: 1.25x cost (cache write premium)
-- Subsequent requests: 0.1x cost on cached blocks (~90% savings)
-- In a 10-call agentic loop: 9 cache hits × ~2000 tokens = 18,000 tokens at 90% off
-
-### Local Embeddings
-- `nomic-embed-text:v1.5` via Ollama (274MB, CPU)
-- Hybrid search: 70% vector + 30% FTS5, Reciprocal Rank Fusion (k=60)
-- Falls back to FTS5-only if Ollama offline
-
-### Cost Tracking
-- `token_usage` table: per-request input/output/cache_create/cache_read/cost_usd
-- `audit_log` table: per-action cost attribution
-- Status bar shows cumulative session cost
-
-## Configuration Layers
-
+### Memory Consolidation (ghost reflect)
 ```
-1. Compiled defaults
-2. /etc/ghost/config.yaml
-3. ~/.config/ghost/config.yaml
-4. .ghost/config.yaml (per-project, checked in)
-5. .ghost/config.local.yaml (per-project, gitignored)
-6. GHOST_* environment variables
-7. CLI flags
+ghost reflect <project> --apply
+  → store.GetAll()           # existing memories
+  → store.GetRecentExchanges() # recent conversation history
+  → TieredConsolidator.Consolidate()
+      → HaikuConsolidator (if ANTHROPIC_API_KEY set)
+          → Anthropic API (haiku model)
+      → SQLiteConsolidator (fallback)
+          → Jaccard token similarity, merge >50% overlap
+  → quality gate: reject if < 30% of existing memories returned
+  → store.ReplaceNonManual()  # atomic replace of non-manual memories
+  → store.UpdateLearnedContext()
 ```
 
-## Build
+## Embedding (optional, Ollama)
 
-```bash
-# Pure Go — no CGO required (modernc.org/sqlite with FTS5 built-in)
-go build -o ghost ./cmd/ghost
-
-# Release (goreleaser)
-# Targets: linux/{amd64,arm64}, darwin/{amd64,arm64}
-# ldflags: -s -w -X main.version={{.Version}}
+```
+embedding.Worker goroutine:
+  every 2min → store.UnembeddedMemoryIDs()
+             → embedding.Client.Embed(content)  # Ollama /api/embed
+             → store.StoreEmbedding(id, vec)
+             
+Search with embeddings enabled:
+  store.SearchHybrid() → 70% vector (cosine) + 30% FTS5, RRF fusion (k=60)
+  
+Search without embeddings:
+  store.SearchFTS() → FTS5 only (porter unicode61 tokenizer)
 ```
 
-## SQLite Schema (13 tables)
+## SQLite Schema
 
 | Table | Purpose |
 |-------|---------|
 | `projects` | Project registry (id, path, name) |
-| `memories` | Core memory store (category, content, importance, tags) |
+| `memories` | Core store (category, content, importance, tags, source, pinned) |
 | `memories_fts` | FTS5 virtual table (porter unicode61 tokenizer) |
 | `memory_embeddings` | Vector embeddings (float32 blob) |
-| `conversations` | Conversation sessions |
-| `messages` | Conversation messages (role, content, tool metadata) |
+| `conversations` | Conversation sessions (project, mode, timestamps) |
+| `messages` | Conversation messages (role, content) |
 | `ghost_state` | Per-project state (interaction count, learned context) |
 | `token_usage` | Per-request token + cost tracking |
-| `audit_log` | Action audit trail |
-| `notifications` | GitHub notifications (priority P0-P4) |
+| `tasks` | Task tracker (title, status, priority, description) |
+| `decisions` | Architectural decisions (rationale, alternatives, status) |
+| `notifications` | GitHub notifications (P0-P4 priority) |
 | `scheduled_jobs` | Persistent cron jobs |
-| `reminders` | One-shot reminders with due_at |
+| `reminders` | One-shot reminders |
 
-## Voice Integration Points (Phase C, designed not implemented)
+## Time-Decay Scoring
 
-```
-InputSource interface:  Text() <-chan string, State() InputState
-OutputSink interface:   Receive(text string), Flush()
+Memories are scored by `importance × decay_factor` where:
 
-Textarea → InputSource
-Mic + whisper.cpp → InputSource
-Viewport → OutputSink
-Kokoro TTS → OutputSink
+| Category | Half-life |
+|----------|-----------|
+| preference, convention, fact | none (no decay) |
+| architecture, pattern | 45-day |
+| decision, gotcha, dependency | 30-day |
 
-Push-to-talk: Ctrl+Space (reserved in keys.go)
-Status bar: mic state indicator (idle/listening/speaking)
+Pinned memories bypass decay entirely and always rank first.
+
+## Build
+
+```bash
+# Pure Go — no CGO (modernc.org/sqlite with FTS5 built-in)
+go build -o ghost ./cmd/ghost
+
+# Release (goreleaser — triggered by git tag)
+# Targets: linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/{amd64,arm64}
+# ldflags: -s -w -X main.version={{.Version}}
 ```
