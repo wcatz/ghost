@@ -1,4 +1,4 @@
-# Ghost — Personal Assistant Daemon Configuration
+# Ghost — MCP Memory Server Configuration
 # ~/.config/ghost/config.yaml
 #
 # Loading order (later overrides earlier):
@@ -8,38 +8,16 @@
 #   4. .ghost/config.yaml           (per-project)
 #   5. .ghost/config.local.yaml     (per-project, gitignored)
 #   6. GHOST_* environment variables
-#
-# All settings can also be set via env vars:
-#   GHOST_API_KEY, GHOST_SERVER_LISTEN_ADDR, etc.
 
 # --- Claude API ---
+# Required only for memory consolidation (ghost reflect --tier haiku).
+# Not needed for basic MCP usage.
 # api:
 #   key: ""                          # or set ANTHROPIC_API_KEY env var
-#   model_quality: "claude-opus-4-6-20250514"
-#   model_fast: "claude-sonnet-4-5-20250929"
-
-# --- Daemon defaults ---
-# defaults:
-#   mode: "chat"
-#   reflection_interval: 10          # conversations between reflection passes
-#   max_conversation_turns: 50
-#   auto_memory: true
-#   approval_mode: "normal"          # normal or yolo
-
-# --- Display (REPL only) ---
-# display:
-#   show_token_usage: true
-#   show_cost: true
-#   stream_tool_output: true
-#   plain_mode: false                # force legacy REPL (no bubbletea)
-
-# --- HTTP Server (ghost serve) ---
-# server:
-#   listen_addr: "127.0.0.1:2187"
-#   auth_token: ""                   # bearer token for API auth
-                                     # generate with: openssl rand -hex 32
 
 # --- Local Embeddings (Ollama) ---
+# Enables hybrid FTS5 + vector search. Requires Ollama running locally.
+# Without this, Ghost uses FTS5 full-text search only (still very good).
 # embedding:
 #   enabled: true
 #   ollama_url: "http://localhost:11434"
@@ -47,55 +25,7 @@
 #   dimensions: 768
 
 # --- Memory Consolidation ---
+# Controls the default tier for ghost reflect.
+# auto: tries haiku (if ANTHROPIC_API_KEY set) → sqlite (free, always available)
 # reflection:
-#   backend: "auto"                  # "auto", "haiku", "sqlite", "disabled"
-#                                    # auto: tries haiku → sqlite
-
-# --- GitHub Notifications ---
-# github:
-#   token: ""                        # PAT with notifications scope
-#   interval: 60                     # poll interval in seconds
-
-# --- Telegram Bot ---
-# telegram:
-#   token: ""                        # BotFather token
-#   allowed_ids: ""                  # comma-separated numeric user IDs
-
-# --- Google Calendar + Gmail (OAuth2) ---
-# google:
-#   credentials_file: "~/.config/ghost/google-credentials.json"
-#   token_file: "~/.config/ghost/google-token.json"
-
-# --- CalDAV Calendar (legacy — use Google OAuth instead) ---
-# calendar:
-#   url: ""                          # CalDAV server URL (iCloud, Fastmail, etc.)
-#   username: ""
-#   password: ""                     # app-specific password recommended
-
-# --- Voice Pipeline ---
-# voice:
-#   enabled: false
-#   stt_backend: "whisper"           # "whisper", "assemblyai"
-#   stt_model: "base"               # whisper model name or path
-#   tts_backend: "piper"            # "piper", "elevenlabs", "espeak", "none"
-#   tts_model: ""                   # piper .onnx model path
-#   tts_voice: ""                   # voice name or ElevenLabs voice ID
-#   tts_rate: 1.0                   # speech rate multiplier
-#   push_to_talk: "ctrl+space"      # keybind for push-to-talk
-#   trigger_word: "ghost"           # wake word for voice activation
-#   silence_ms: 800                 # ms of silence to end recording
-#   sample_rate: 16000              # audio sample rate
-#   input_device: "default"         # ALSA device name
-#   elevenlabs_api_key: ""          # ElevenLabs API key (for TTS)
-#   elevenlabs_voice_id: ""         # ElevenLabs voice ID
-#   assemblyai_api_key: ""          # AssemblyAI API key (for STT)
-
-# --- Morning Briefing ---
-# briefing:
-#   enabled: false
-#   schedule: "0 8 * * 1-5"         # cron: 8am weekdays
-
-# --- Monthly Cost Report ---
-# cost_report:
-#   enabled: false
-#   schedule: "0 9 1 * *"           # cron: 9am on 1st of month
+#   backend: "auto"                  # "auto", "haiku", "sqlite"
