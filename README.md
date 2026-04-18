@@ -160,7 +160,7 @@ Ghost exposes 16 tools to any MCP client:
 | `ghost_decisions_list` | List decisions with rationale, alternatives, status |
 | `ghost_health` | System health (memory count, embedding status, costs) |
 
-**Task statuses:** `pending` → `active` → `done`. Tasks can also be set to `blocked` from any non-done state and return to `active` when unblocked. `done` is terminal — use `ghost_task_create` to re-open as a new task.
+**Task statuses:** `pending` → `active` → `done`. Tasks can also be set to `blocked` from any non-done state and return to `active` when unblocked. `done` tasks are conventionally closed — prefer creating a new task over re-opening a completed one.
 
 **Resources (4):**
 

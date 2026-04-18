@@ -62,7 +62,6 @@ type DisplayConfig struct {
 	PlainMode        bool   `koanf:"plain_mode"`      // force legacy REPL (no bubbletea)
 }
 
-
 // ServerConfig holds ghost serve settings.
 type ServerConfig struct {
 	ListenAddr string `koanf:"listen_addr"`
@@ -81,7 +80,6 @@ type EmbeddingConfig struct {
 	Model      string `koanf:"model"`
 	Dimensions int    `koanf:"dimensions"`
 }
-
 
 // defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{

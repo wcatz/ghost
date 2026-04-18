@@ -191,7 +191,7 @@ func shellQuote(s string) string {
 func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 	hookCmd := shellQuote(ghostBin) + " hook session-start"
 
-	if sf.hasHook("SessionStart", "ghost hook session-start") {
+	if sf.hasHook("SessionStart", "hook session-start") {
 		fmt.Fprintln(w, "  ✓ SessionStart hook already configured")
 		return nil
 	}
