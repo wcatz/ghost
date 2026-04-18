@@ -37,3 +37,4 @@ vendor/
 # Environment
 .env
 .env.*
+.worktrees/
