@@ -171,6 +171,20 @@ Ghost exposes 16 tools to any MCP client:
 
 The MCP server ships with embedded instructions that teach Claude when to save, which categories to use, and how to leverage cross-project search — so it works proactively without configuration.
 
+## CLI
+
+```
+ghost mcp                    # Run MCP server on stdio (used by Claude Code)
+ghost mcp init [--dry-run]   # Configure Claude Code integration
+ghost mcp status             # Check integration health
+ghost hook session-start     # SessionStart hook (called by Claude Code)
+ghost reflect <project>      # Manual memory consolidation (dry-run by default)
+ghost upgrade                # Self-update from GitHub Releases
+ghost version                # Print version
+```
+
+`ghost reflect` flags: `--apply` to save, `--restore` to undo, `--tier haiku|sqlite|auto`.
+
 ## Install
 
 Requires Go 1.25+.
@@ -198,7 +212,7 @@ ghost upgrade    # self-update from GitHub Releases
 ### Docker
 
 ```bash
-docker run -v ghost-data:/data ghcr.io/wcatz/ghost:latest mcp
+docker run -v ghost-data:/data ghcr.io/wcatz/ghost:latest
 ```
 
 ---
@@ -228,8 +242,6 @@ Next session
   └── No re-explaining the codebase, conventions, or past decisions
 ```
 
-Ghost's 3-block prompt caching pairs well with Superpowers' subagent chunking: smaller, focused tasks mean fewer tokens burned re-establishing context between turns.
-
 ### Install Superpowers for Claude Code
 
 In any Claude Code session, run:
@@ -239,19 +251,6 @@ In any Claude Code session, run:
 ```
 
 No additional configuration needed — skills trigger automatically based on what you ask for.
-
-### Add a Go testing skill
-
-Superpowers ships with TDD skills, but you can add a project-aware Go skill that encodes Ghost-specific conventions. Create `~/.config/superpowers/skills/go-testing/SKILL.md`:
-
-```yaml
----
-name: go-testing
-description: "Use when writing Go tests, running go test, implementing table-driven tests, or adding test coverage to Go packages."
----
-```
-
-A complete skill file (table-driven pattern, Ghost store helpers, vet/test conventions) is included in this repo's [Ghost memory system](https://github.com/wcatz/ghost) and written to `~/.config/superpowers/skills/go-testing/SKILL.md` by `ghost mcp init`.
 
 ### Ghost MCP tools Superpowers uses
 
@@ -265,119 +264,6 @@ A complete skill file (table-driven pattern, Ghost store helpers, vet/test conve
 
 ---
 
-## Beyond MCP — Optional Features
-
-Everything below is optional. Ghost works as a pure MCP memory server with zero configuration beyond `ghost mcp init`. These features activate when you run `ghost serve` as a daemon.
-
-### HTTP API
-
-REST API on `127.0.0.1:2187`, authenticated via Bearer token when configured.
-
-**Memory endpoints:**
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/memories/search` | Search memories (FTS5) |
-| POST | `/api/v1/memories/` | Create/upsert memory |
-| GET | `/api/v1/memories/{projectID}` | List project memories |
-| DELETE | `/api/v1/memories/{memoryID}` | Delete memory |
-| GET | `/api/v1/projects` | List all projects |
-
-**Session endpoints (requires `ANTHROPIC_API_KEY`):**
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/v1/sessions/` | Create chat session |
-| POST | `/api/v1/sessions/{id}/send` | Send message (SSE streaming) |
-| POST | `/api/v1/sessions/{id}/approve` | Approve/deny pending tool |
-| POST | `/api/v1/sessions/{id}/mode` | Change operating mode |
-| POST | `/api/v1/sessions/{id}/auto-approve` | Toggle auto-approve |
-| GET | `/api/v1/sessions/{id}/history` | Conversation history |
-| GET | `/api/v1/sessions/` | List active sessions |
-| DELETE | `/api/v1/sessions/{id}` | Delete session |
-| GET | `/api/v1/health` | Health check |
-| GET | `/api/v1/costs/monthly` | Monthly cost by model |
-
-**SSE stream events:**
-
-| Event | Description |
-|-------|-------------|
-| `text` | Assistant text response |
-| `thinking` | Extended thinking output |
-| `tool_use_start` / `tool_use_end` | Tool invocation lifecycle |
-| `tool_result` | Execution result with duration |
-| `tool_diff` | File diff output |
-| `approval_required` | Tool needs approval (from any client) |
-| `approval_resolved` | Approval handled |
-| `done` | Stream complete with usage stats |
-
-### Telegram Bot
-
-Remote access to Ghost from your phone. Run `ghost serve` with `telegram.token` configured.
-
-| Command | Description |
-|---------|-------------|
-| `/sessions` | Active sessions with inline picker |
-| `/chat <id> <msg>` | Chat with a Ghost session (streamed) |
-| `/new` | Create new session |
-| `/yolo` | Toggle auto-approve for a session |
-| `/memory search <q>` | Search memories |
-| `/notifications` | GitHub notifications (P0-P4 priority) |
-| `/meetings` | Today's calendar with Meet links |
-| `/emails` | Unread Gmail summaries |
-| `/briefing` | Daily briefing |
-| `/cost` | Session and monthly cost |
-| `/remind <msg>` | Set a reminder |
-
-**Tool approval forwarding** — when Ghost needs permission to run a tool (bash, file writes, git), it sends an approval request to Telegram with Allow/Deny buttons. Tap to approve from your phone. Approvals resolved from any client (VSCode, TUI, Telegram) auto-delete the message on other clients.
-
-### VSCode Extension
-
-Chat interface in the editor. Download `.vsix` from [Releases](https://github.com/wcatz/ghost/releases), open with `Alt+G`.
-
-- SSE streaming with thinking blocks, tool progress, inline diffs
-- Tool approval overlay (Allow/Deny)
-- Memory browser with search
-- Cost tracking (monthly + session)
-- Auto-approve toggle, image paste, `@file.ext` references
-- Session resume across restarts
-
-### Interactive REPL
-
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-ghost                    # interactive TUI
-ghost "question"         # one-shot
-echo "question" | ghost  # pipe mode
-```
-
-| Flag | Description |
-|------|-------------|
-| `-mode` | `chat`, `code`, `debug`, `review`, `plan`, `refactor` |
-| `-model` | Model override |
-| `-project` | Project path (repeatable) |
-| `-yolo` | Skip all tool approvals |
-| `-continue` | Resume last conversation |
-
-**Keybindings:** `ctrl+k` command palette, `ctrl+y` copy last code block, `ctrl+space` push-to-talk, `esc` interrupt.
-
-### Daemon Subsystems
-
-`ghost serve` runs all subsystems:
-
-| Subsystem | What it does | Requires |
-|-----------|-------------|----------|
-| HTTP API | REST + SSE on `:2187` | nothing |
-| Embedding worker | Vectorizes memories locally | Ollama |
-| Telegram bot | Remote access + approvals | `telegram.token` |
-| GitHub monitor | P0-P4 notification alerts | `github.token` |
-| Google Calendar | Meeting alerts via Telegram | OAuth2 credentials |
-| Gmail | Email summaries | OAuth2 credentials |
-| CalDAV | Alternative calendar (iCloud, etc.) | `calendar.url` |
-| Scheduler | Cron jobs + reminders | nothing |
-| Morning briefing | Daily summary to Telegram | `briefing.enabled` |
-| Voice | STT/TTS (Whisper/AssemblyAI + Piper/ElevenLabs) | provider config |
-
 ## Configuration
 
 Config loads in layers (later overrides earlier):
@@ -388,79 +274,46 @@ Config loads in layers (later overrides earlier):
 4. `.ghost/config.yaml` (per-project)
 5. `.ghost/config.local.yaml` (gitignored)
 6. `GHOST_*` environment variables
-7. CLI flags
 
-**Minimal config (MCP only — no daemon features):**
+**Minimal config (no file needed):**
 
-No config file needed. Ghost stores memories in `~/.local/share/ghost/ghost.db`.
+Ghost stores memories in `~/.local/share/ghost/ghost.db`. No configuration required for basic MCP usage.
 
-**Full config (daemon with all subsystems):**
+**Optional embedding (vector search):**
 
 ```yaml
-api:
-  model_quality: "claude-opus-4-6-20250514"
-  model_fast: "claude-sonnet-4-5-20250929"
-
-server:
-  listen_addr: "127.0.0.1:2187"
-  auth_token: ""                     # openssl rand -hex 32
-
 embedding:
   enabled: true
   ollama_url: "http://localhost:11434"
   model: "nomic-embed-text:v1.5"
-
-reflection:
-  backend: "auto"                    # auto, haiku, sqlite, disabled
-
-telegram:
-  token: "123456:ABC..."
-  allowed_ids: "12345678"
-
-github:
-  token: "ghp_..."
-  interval: 60
-
-google:
-  credentials_file: "~/.config/ghost/google-credentials.json"
-
-briefing:
-  enabled: true
-  schedule: "0 8 * * 1-5"
 ```
 
-See `internal/config/config.example.yaml` for all options including voice, display, and CalDAV.
+Requires [Ollama](https://ollama.ai) running locally. Enables hybrid FTS5 + vector search.
+
+**Optional reflection (memory consolidation with Haiku):**
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+ghost reflect myproject --apply
+```
+
+Without an API key, Ghost falls back to the free SQLite-based Jaccard consolidator.
 
 ## Architecture
 
 ```
-cmd/ghost/main.go          CLI + daemon bootstrap
+cmd/ghost/main.go          CLI bootstrap
 internal/
   memory/                  SQLite + FTS5 + vector search + time-decay scoring
-  reflection/              Tiered consolidation (Haiku → SQLite) + auto-extraction
+  reflection/              Tiered consolidation (Haiku → SQLite)
   mcpserver/               MCP server (stdio, 16 tools + 4 resources)
   mcpinit/                 Claude Code integration setup (init, status, hook)
   claudeimport/            Auto-import Claude Code memory files
-  ai/                      Claude API client, streaming, tool_use, cost tracking
-  tool/                    Tool registry + executors (file, grep, glob, git, bash, memory)
-  orchestrator/            Multi-project sessions, context compression, caching
-  prompt/                  3-block cached system prompt
-  mode/                    Operating modes (chat, code, debug, review, plan, refactor)
-  project/                 Auto-detection (language, tests, git)
-  config/                  Layered YAML/env/flag config (koanf)
-  server/                  HTTP REST API + SSE streaming (chi)
-  tui/                     Terminal REPL (bubbletea)
-  telegram/                Bot, session management, approval forwarding
-  google/                  Calendar + Gmail OAuth2
-  github/                  Notification monitor (P0-P4 priority)
-  scheduler/               Cron + reminders (gocron)
-  briefing/                Daily briefing generator
+  ai/                      Claude API client (used by reflection only)
   embedding/               Ollama async vectorization worker
-  voice/                   STT/TTS pipeline (Whisper, AssemblyAI, Piper, ElevenLabs)
+  config/                  Layered YAML/env config (koanf)
   selfupdate/              Self-update from GitHub releases
-  provider/                Interface contracts
-  mdv2/                    MarkdownV2 escaping for Telegram
-vscode-ghost/              VSCode extension (TypeScript)
+  provider/                Interface contracts (MemoryStore, LLMProvider)
 ```
 
 ## License
