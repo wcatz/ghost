@@ -1127,6 +1127,36 @@ func TestStoreDecisions(t *testing.T) {
 	}
 }
 
+func TestRecordDecisionPersistsMemoryRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, err := s.RecordDecision(ctx, testProject,
+		"Use SQLite", "SQLite for persistence", "Simple and embedded",
+		[]string{"postgres"}, []string{"db"})
+	if err != nil {
+		t.Fatalf("RecordDecision: %v", err)
+	}
+	if id == "" {
+		t.Fatal("expected non-empty decision ID")
+	}
+
+	// The memory row must exist — verify search finds it.
+	results, err := s.SearchFTS(ctx, testProject, "SQLite persistence", 10)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	found := false
+	for _, m := range results {
+		if m.Category == "decision" && strings.Contains(m.Content, "SQLite") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("RecordDecision: memory row missing from search after commit")
+	}
+}
+
 func TestStoreTasks(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

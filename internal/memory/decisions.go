@@ -22,6 +22,7 @@ type Decision struct {
 }
 
 // RecordDecision creates a decision and also saves it as a memory.
+// Both writes are atomic — if either fails, neither is committed.
 func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -29,8 +30,14 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 	altJSON, _ := json.Marshal(alternatives)
 	tagJSON, _ := json.Marshal(tags)
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("record decision: begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // intentional no-op after Commit
+
 	var id string
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO decisions (project_id, title, decision, alternatives, rationale, tags)
 		VALUES (?, ?, ?, ?, ?, ?)
 		RETURNING id
@@ -39,13 +46,16 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 		return "", fmt.Errorf("record decision: %w", err)
 	}
 
-	// Also save as a memory so it shows up in search and prompt context.
 	content := fmt.Sprintf("%s: %s. Rationale: %s", title, decision, rationale)
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags)
 		VALUES (?, 'decision', ?, 'decision_log', 0.9, ?)
 	`, projectID, content, string(tagJSON)); err != nil {
-		return id, fmt.Errorf("record decision memory: %w", err)
+		return "", fmt.Errorf("record decision memory: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("record decision: commit: %w", err)
 	}
 
 	if s.onSave != nil {
