@@ -981,6 +981,9 @@ func sanitizeFTS(text string) string {
 	}
 	// Limit to first 10 words to keep the query reasonable.
 	if len(words) > 10 {
+		slog.Warn("fts query truncated",
+			"original_terms", len(words),
+			"limit", 10)
 		words = words[:10]
 	}
 	return strings.Join(words, " OR ")
