@@ -1387,6 +1387,44 @@ func TestSeedGlobalMemories(t *testing.T) {
 	}
 }
 
+func TestEnsureProject_EmptyPath_NoUniqueConflict(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Simulate MCP calling EnsureProject with empty path for two different projects.
+	// Before the fix, passing path="" caused a UNIQUE constraint violation on
+	// projects.path when the second project was saved (both would have path="").
+	if err := s.EnsureProject(ctx, "a7293a04b38a", "", "dingo"); err != nil {
+		t.Fatalf("EnsureProject dingo: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "b1234567890c", "", "roller"); err != nil {
+		t.Fatalf("EnsureProject roller: %v", err)
+	}
+
+	// Calling EnsureProject again for the same project must also be idempotent.
+	if err := s.EnsureProject(ctx, "a7293a04b38a", "", "dingo"); err != nil {
+		t.Fatalf("EnsureProject dingo (repeat): %v", err)
+	}
+
+	projects, err := s.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	found := 0
+	for _, p := range projects {
+		if p.ID == "a7293a04b38a" || p.ID == "b1234567890c" {
+			// path must equal id for non-filesystem projects.
+			if p.Path != p.ID {
+				t.Errorf("project %s: expected path == id, got path=%q", p.ID, p.Path)
+			}
+			found++
+		}
+	}
+	if found != 2 {
+		t.Errorf("expected 2 projects, found %d", found)
+	}
+}
+
 func TestEnsureProject_AutoMerge(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

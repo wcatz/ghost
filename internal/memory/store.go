@@ -157,6 +157,14 @@ func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Normalize empty path to id. MCP callers pass path="" because they
+	// don't know the filesystem path; using "" as path would collide across
+	// projects since projects.path has a UNIQUE constraint. Using id as path
+	// preserves the invariant already on disk for name-as-ID projects.
+	if path == "" {
+		path = id
+	}
+
 	// Check if another project already owns this path. If so, merge
 	// any orphaned child records into the canonical project and skip
 	// creating a duplicate. This self-heals duplicates caused by MCP
@@ -187,7 +195,9 @@ func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error 
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO projects (id, path, name) VALUES (?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET path = excluded.path, updated_at = datetime('now')
+		ON CONFLICT(id) DO UPDATE SET
+			path = CASE WHEN excluded.path = excluded.id THEN projects.path ELSE excluded.path END,
+			updated_at = datetime('now')
 	`, id, path, name)
 	if err != nil {
 		return fmt.Errorf("ensure project: %w", err)
