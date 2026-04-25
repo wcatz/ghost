@@ -44,20 +44,20 @@ func Run(w io.Writer, dryRun bool) error {
 	}
 
 	// Step 4: SessionStart hook.
-	fmt.Fprintln(w, "\n[4/7] Configuring SessionStart hook...")
+	_, _ = fmt.Fprintln(w, "\n[4/7] Configuring SessionStart hook...")
 	if err := ensureHook(w, settingsFile, ghostBin); err != nil {
 		return retryHint(err)
 	}
 
 	// Step 5: Disable Claude Code's built-in file memory.
-	fmt.Fprintln(w, "\n[5/7] Disabling Claude Code built-in memory...")
+	_, _ = fmt.Fprintln(w, "\n[5/7] Disabling Claude Code built-in memory...")
 	if err := ensureAutoMemoryDisabled(w, settingsFile, dryRun); err != nil {
 		return retryHint(err)
 	}
 
 	// Save settings (steps 3+4+5 all modify it).
 	if dryRun {
-		fmt.Fprintln(w, "\n  (skipping settings write — dry run)")
+		_, _ = fmt.Fprintln(w, "\n  (skipping settings write — dry run)")
 	} else {
 		if err := settingsFile.save(); err != nil {
 			return retryHint(fmt.Errorf("save settings: %w", err))
@@ -65,20 +65,20 @@ func Run(w io.Writer, dryRun bool) error {
 	}
 
 	// Step 6: Import Claude Code memories.
-	fmt.Fprintln(w, "\n[6/7] Importing Claude Code memories...")
+	_, _ = fmt.Fprintln(w, "\n[6/7] Importing Claude Code memories...")
 	projects, err := importMemories(w, dryRun)
 	if err != nil {
 		fmt.Fprintf(w, "  ! import error: %v (continuing)\n", err)
 	}
 
 	// Step 7: Project memory redirects.
-	fmt.Fprintln(w, "\n[7/7] Writing project memory redirects...")
+	_, _ = fmt.Fprintln(w, "\n[7/7] Writing project memory redirects...")
 	writeRedirects(w, projects, dryRun)
 
 	if dryRun {
-		fmt.Fprintln(w, "\nNo changes made (dry run).")
+		_, _ = fmt.Fprintln(w, "\nNo changes made (dry run).")
 	} else {
-		fmt.Fprintln(w, "\nDone! Restart Claude Code to activate.")
+		_, _ = fmt.Fprintln(w, "\nDone! Restart Claude Code to activate.")
 	}
 	return nil
 }
@@ -115,7 +115,7 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 	correctPath := strings.Contains(currentOutput, ghostBin)
 
 	if alreadyRegistered && correctPath {
-		fmt.Fprintln(w, "  ✓ ghost MCP server already registered")
+		_, _ = fmt.Fprintln(w, "  ✓ ghost MCP server already registered")
 		return nil
 	}
 
@@ -198,7 +198,7 @@ func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 	hookCmd := shellQuote(ghostBin) + " hook session-start"
 
 	if sf.hasHook("SessionStart", "hook session-start") {
-		fmt.Fprintln(w, "  ✓ SessionStart hook already configured")
+		_, _ = fmt.Fprintln(w, "  ✓ SessionStart hook already configured")
 		return nil
 	}
 
@@ -229,9 +229,9 @@ func ensureAutoMemoryDisabled(w io.Writer, sf *settingsFile, dryRun bool) error 
 	if dryRun {
 		v, present := sf.getAutoMemoryEnabled()
 		if !present || v {
-			fmt.Fprintln(w, "  ~ would set autoMemoryEnabled: false")
+			_, _ = fmt.Fprintln(w, "  ~ would set autoMemoryEnabled: false")
 		} else {
-			fmt.Fprintln(w, "  ✓ autoMemoryEnabled already false")
+			_, _ = fmt.Fprintln(w, "  ✓ autoMemoryEnabled already false")
 		}
 		return nil
 	}
@@ -241,9 +241,9 @@ func ensureAutoMemoryDisabled(w io.Writer, sf *settingsFile, dryRun bool) error 
 		return fmt.Errorf("set autoMemoryEnabled: %w", err)
 	}
 	if changed {
-		fmt.Fprintln(w, "  + set autoMemoryEnabled: false (disables competing file-memory)")
+		_, _ = fmt.Fprintln(w, "  + set autoMemoryEnabled: false (disables competing file-memory)")
 	} else {
-		fmt.Fprintln(w, "  ✓ autoMemoryEnabled already false")
+		_, _ = fmt.Fprintln(w, "  ✓ autoMemoryEnabled already false")
 	}
 	return nil
 }
@@ -264,7 +264,7 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 	dbPath := filepath.Join(dataDir, "ghost.db")
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		fmt.Fprintln(w, "  - no Ghost database found (run ghost serve first)")
+		_, _ = fmt.Fprintln(w, "  - no Ghost database found (run ghost serve first)")
 		return nil, nil
 	}
 
