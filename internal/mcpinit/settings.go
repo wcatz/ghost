@@ -190,6 +190,40 @@ func (s *settingsFile) addPermissions(perms []string) ([]string, error) {
 	return added, nil
 }
 
+// setAutoMemoryEnabled sets the "autoMemoryEnabled" key in settings.json.
+// It returns changed=true when the value was absent or different from v.
+// Idempotent: calling it again with the same value is a no-op.
+func (s *settingsFile) setAutoMemoryEnabled(v bool) (changed bool, err error) {
+	desired, err := json.Marshal(v)
+	if err != nil {
+		return false, err
+	}
+
+	if existing, ok := s.raw["autoMemoryEnabled"]; ok {
+		// Already present — compare raw bytes (true vs false).
+		if string(existing) == string(desired) {
+			return false, nil
+		}
+	}
+
+	s.raw["autoMemoryEnabled"] = desired
+	return true, nil
+}
+
+// getAutoMemoryEnabled returns the current value of "autoMemoryEnabled".
+// Returns (false, false) when the key is absent (not set).
+func (s *settingsFile) getAutoMemoryEnabled() (value, present bool) {
+	raw, ok := s.raw["autoMemoryEnabled"]
+	if !ok {
+		return false, false
+	}
+	var v bool
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return false, false
+	}
+	return v, true
+}
+
 // hasHook checks if a SessionStart hook containing cmdSubstr already exists.
 func (s *settingsFile) hasHook(event, cmdSubstr string) bool {
 	hooksRaw, ok := s.raw["hooks"]

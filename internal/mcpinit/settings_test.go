@@ -161,6 +161,135 @@ func TestAddHook_PreservesExisting(t *testing.T) {
 	}
 }
 
+func TestSetAutoMemoryEnabled_FromAbsent(t *testing.T) {
+	path := tempSettings(t, `{}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := sf.setAutoMemoryEnabled(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Error("expected changed=true when key was absent")
+	}
+
+	v, present := sf.getAutoMemoryEnabled()
+	if !present {
+		t.Error("expected key to be present after set")
+	}
+	if v {
+		t.Error("expected value to be false")
+	}
+}
+
+func TestSetAutoMemoryEnabled_Idempotent(t *testing.T) {
+	path := tempSettings(t, `{"autoMemoryEnabled":false}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := sf.setAutoMemoryEnabled(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Error("expected changed=false when value is already false (idempotent)")
+	}
+}
+
+func TestSetAutoMemoryEnabled_OverridesTrue(t *testing.T) {
+	path := tempSettings(t, `{"autoMemoryEnabled":true}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := sf.setAutoMemoryEnabled(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Error("expected changed=true when overriding true→false")
+	}
+
+	v, present := sf.getAutoMemoryEnabled()
+	if !present || v {
+		t.Errorf("expected autoMemoryEnabled=false, got present=%v value=%v", present, v)
+	}
+}
+
+func TestSetAutoMemoryEnabled_PreservesOtherKeys(t *testing.T) {
+	path := tempSettings(t, `{"permissions":{"allow":["Bash"]},"effortLevel":"high"}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := sf.setAutoMemoryEnabled(false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Other keys must still be present.
+	if _, ok := sf.raw["permissions"]; !ok {
+		t.Error("permissions key was lost")
+	}
+	if _, ok := sf.raw["effortLevel"]; !ok {
+		t.Error("effortLevel key was lost")
+	}
+
+	v, present := sf.getAutoMemoryEnabled()
+	if !present || v {
+		t.Errorf("expected autoMemoryEnabled=false, got present=%v value=%v", present, v)
+	}
+}
+
+func TestSetAutoMemoryEnabled_RoundTrip(t *testing.T) {
+	path := tempSettings(t, `{"effortLevel":"high"}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := sf.setAutoMemoryEnabled(false); err != nil {
+		t.Fatal(err)
+	}
+	if err := sf.save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-read and verify.
+	sf2, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := sf2.raw["effortLevel"]; !ok {
+		t.Error("effortLevel was lost during save")
+	}
+
+	v, present := sf2.getAutoMemoryEnabled()
+	if !present || v {
+		t.Errorf("expected autoMemoryEnabled=false after round-trip, got present=%v value=%v", present, v)
+	}
+}
+
+func TestGetAutoMemoryEnabled_Absent(t *testing.T) {
+	path := tempSettings(t, `{}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v, present := sf.getAutoMemoryEnabled()
+	if present {
+		t.Errorf("expected present=false for absent key, got present=true value=%v", v)
+	}
+}
+
 func TestSave_RoundTrip(t *testing.T) {
 	path := tempSettings(t, `{"permissions":{"allow":["Bash"]},"effortLevel":"high"}`)
 	sf, err := loadSettings(path)

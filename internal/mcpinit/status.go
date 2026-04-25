@@ -48,7 +48,7 @@ func Status(w io.Writer) error {
 		check(registered, "MCP server registered", "MCP server not registered")
 	}
 
-	// 4-5. Settings: permissions + hook.
+	// 4-6. Settings: permissions, hook, autoMemoryEnabled.
 	path, err := settingsPath()
 	if err == nil {
 		sf, err := loadSettings(path)
@@ -72,6 +72,13 @@ func Status(w io.Writer) error {
 			// Hook.
 			hasHk := sf.hasHook("SessionStart", "ghost hook session-start")
 			check(hasHk, "SessionStart hook configured", "SessionStart hook missing")
+
+			// autoMemoryEnabled must be false to prevent competing file-memory.
+			autoMemVal, autoMemSet := sf.getAutoMemoryEnabled()
+			autoMemOff := autoMemSet && !autoMemVal
+			check(autoMemOff,
+				"autoMemoryEnabled: false (built-in file-memory disabled)",
+				"autoMemoryEnabled not set to false — run ghost mcp init")
 		} else {
 			fmt.Fprintf(w, "  ✗ cannot read settings: %v\n", err)
 			healthy = false

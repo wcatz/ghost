@@ -16,7 +16,7 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// Run executes the 6-step Claude Code integration setup.
+// Run executes the 7-step Claude Code integration setup.
 // When dryRun is true, it reports what would change without modifying anything.
 func Run(w io.Writer, dryRun bool) error {
 	if dryRun {
@@ -24,55 +24,61 @@ func Run(w io.Writer, dryRun bool) error {
 	}
 
 	// Step 1: Prerequisites.
-	fmt.Fprintln(w, "[1/6] Checking prerequisites...")
+	_, _ = fmt.Fprintln(w, "[1/7] Checking prerequisites...")
 	ghostBin, claudeBin, err := checkPrereqs(w)
 	if err != nil {
 		return retryHint(err)
 	}
 
 	// Step 2: MCP server registration.
-	fmt.Fprintln(w, "\n[2/6] Registering MCP server...")
+	_, _ = fmt.Fprintln(w, "\n[2/7] Registering MCP server...")
 	if err := registerMCP(w, ghostBin, claudeBin, dryRun); err != nil {
 		return retryHint(err)
 	}
 
 	// Step 3: Tool permissions.
-	fmt.Fprintln(w, "\n[3/6] Adding tool permissions...")
+	_, _ = fmt.Fprintln(w, "\n[3/7] Adding tool permissions...")
 	settingsFile, err := ensurePermissions(w)
 	if err != nil {
 		return retryHint(err)
 	}
 
 	// Step 4: SessionStart hook.
-	fmt.Fprintln(w, "\n[4/6] Configuring SessionStart hook...")
+	_, _ = fmt.Fprintln(w, "\n[4/7] Configuring SessionStart hook...")
 	if err := ensureHook(w, settingsFile, ghostBin); err != nil {
 		return retryHint(err)
 	}
 
-	// Save settings (steps 3+4 both modify it).
+	// Step 5: Disable Claude Code's built-in file memory.
+	_, _ = fmt.Fprintln(w, "\n[5/7] Disabling Claude Code built-in memory...")
+	if err := ensureAutoMemoryDisabled(w, settingsFile, dryRun); err != nil {
+		return retryHint(err)
+	}
+
+	// Save settings (steps 3+4+5 all modify it).
 	if dryRun {
-		fmt.Fprintln(w, "\n  (skipping settings write — dry run)")
+		_, _ = fmt.Fprintln(w, "\n  (skipping settings write — dry run)")
 	} else {
 		if err := settingsFile.save(); err != nil {
 			return retryHint(fmt.Errorf("save settings: %w", err))
 		}
 	}
 
-	// Step 5: Import Claude Code memories.
-	fmt.Fprintln(w, "\n[5/6] Importing Claude Code memories...")
+	// Step 6: Import Claude Code memories.
+	_, _ = fmt.Fprintln(w, "\n[6/7] Importing Claude Code memories...")
 	projects, err := importMemories(w, dryRun)
 	if err != nil {
 		fmt.Fprintf(w, "  ! import error: %v (continuing)\n", err)
 	}
 
-	// Step 6: Project memory redirects.
-	fmt.Fprintln(w, "\n[6/6] Writing project memory redirects...")
+	// Step 7: Project memory redirects.
+	_, _ = fmt.Fprintln(w, "\n[7/7] Writing project memory redirects...")
 	writeRedirects(w, projects, dryRun)
 
 	if dryRun {
-		fmt.Fprintln(w, "\nNo changes made (dry run).")
+		_, _ = fmt.Fprintln(w, "\nNo changes made (dry run).")
 	} else {
-		fmt.Fprintln(w, "\nDone! Restart Claude Code to activate.")
+		_, _ = fmt.Fprintln(w, "\nDone! Restart Claude Code to activate.")
 	}
 	return nil
 }
@@ -109,7 +115,7 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 	correctPath := strings.Contains(currentOutput, ghostBin)
 
 	if alreadyRegistered && correctPath {
-		fmt.Fprintln(w, "  ✓ ghost MCP server already registered")
+		_, _ = fmt.Fprintln(w, "  ✓ ghost MCP server already registered")
 		return nil
 	}
 
@@ -192,7 +198,7 @@ func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 	hookCmd := shellQuote(ghostBin) + " hook session-start"
 
 	if sf.hasHook("SessionStart", "hook session-start") {
-		fmt.Fprintln(w, "  ✓ SessionStart hook already configured")
+		_, _ = fmt.Fprintln(w, "  ✓ SessionStart hook already configured")
 		return nil
 	}
 
@@ -207,6 +213,38 @@ func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 	}
 
 	fmt.Fprintf(w, "  + added SessionStart hook: %s\n", hookCmd)
+	return nil
+}
+
+// ensureAutoMemoryDisabled sets "autoMemoryEnabled": false in settings.json so
+// Claude Code stops writing its own flat-file memory.  Without this flag,
+// Claude Code maintains ~/.claude/projects/*/memory/ markdown files that
+// conflict with Ghost: they inject stale or duplicate context at session start
+// and cause Claude to consult file memory before Ghost's richer store.
+//
+// The operation is idempotent — re-running init when the flag is already false
+// is a no-op.  The flag only suppresses Claude Code's built-in file-memory
+// writes; Ghost's own SessionStart hook and MCP tools are unaffected.
+func ensureAutoMemoryDisabled(w io.Writer, sf *settingsFile, dryRun bool) error {
+	if dryRun {
+		v, present := sf.getAutoMemoryEnabled()
+		if !present || v {
+			_, _ = fmt.Fprintln(w, "  ~ would set autoMemoryEnabled: false")
+		} else {
+			_, _ = fmt.Fprintln(w, "  ✓ autoMemoryEnabled already false")
+		}
+		return nil
+	}
+
+	changed, err := sf.setAutoMemoryEnabled(false)
+	if err != nil {
+		return fmt.Errorf("set autoMemoryEnabled: %w", err)
+	}
+	if changed {
+		_, _ = fmt.Fprintln(w, "  + set autoMemoryEnabled: false (disables competing file-memory)")
+	} else {
+		_, _ = fmt.Fprintln(w, "  ✓ autoMemoryEnabled already false")
+	}
 	return nil
 }
 
@@ -226,7 +264,7 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 	dbPath := filepath.Join(dataDir, "ghost.db")
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		fmt.Fprintln(w, "  - no Ghost database found (run ghost serve first)")
+		_, _ = fmt.Fprintln(w, "  - no Ghost database found (run ghost serve first)")
 		return nil, nil
 	}
 

@@ -157,6 +157,101 @@ func TestWriteRedirects_DryRun(t *testing.T) {
 	}
 }
 
+func TestEnsureAutoMemoryDisabled_SetsFlag(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	path := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := ensureAutoMemoryDisabled(&out, sf, false); err != nil {
+		t.Fatalf("ensureAutoMemoryDisabled: %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "set autoMemoryEnabled: false") {
+		t.Errorf("expected 'set autoMemoryEnabled: false' in output, got: %s", output)
+	}
+
+	v, present := sf.getAutoMemoryEnabled()
+	if !present || v {
+		t.Errorf("expected autoMemoryEnabled=false, got present=%v value=%v", present, v)
+	}
+}
+
+func TestEnsureAutoMemoryDisabled_Idempotent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	path := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"autoMemoryEnabled":false}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := ensureAutoMemoryDisabled(&out, sf, false); err != nil {
+		t.Fatalf("ensureAutoMemoryDisabled: %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "already false") {
+		t.Errorf("expected 'already false' in output, got: %s", output)
+	}
+}
+
+func TestEnsureAutoMemoryDisabled_DryRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	path := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := ensureAutoMemoryDisabled(&out, sf, true); err != nil {
+		t.Fatalf("ensureAutoMemoryDisabled dry run: %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "would set autoMemoryEnabled: false") {
+		t.Errorf("expected 'would set autoMemoryEnabled: false' in output, got: %s", output)
+	}
+
+	// In dry run, the in-memory state should not be modified.
+	_, present := sf.getAutoMemoryEnabled()
+	if present {
+		t.Error("dry run should not modify settings in memory")
+	}
+}
+
 func TestRetryHint(t *testing.T) {
 	err := retryHint(fmt.Errorf("something broke"))
 	msg := err.Error()
