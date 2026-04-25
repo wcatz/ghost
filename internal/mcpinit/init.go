@@ -24,20 +24,20 @@ func Run(w io.Writer, dryRun bool) error {
 	}
 
 	// Step 1: Prerequisites.
-	fmt.Fprintln(w, "[1/7] Checking prerequisites...")
+	_, _ = fmt.Fprintln(w, "[1/7] Checking prerequisites...")
 	ghostBin, claudeBin, err := checkPrereqs(w)
 	if err != nil {
 		return retryHint(err)
 	}
 
 	// Step 2: MCP server registration.
-	fmt.Fprintln(w, "\n[2/7] Registering MCP server...")
+	_, _ = fmt.Fprintln(w, "\n[2/7] Registering MCP server...")
 	if err := registerMCP(w, ghostBin, claudeBin, dryRun); err != nil {
 		return retryHint(err)
 	}
 
 	// Step 3: Tool permissions.
-	fmt.Fprintln(w, "\n[3/7] Adding tool permissions...")
+	_, _ = fmt.Fprintln(w, "\n[3/7] Adding tool permissions...")
 	settingsFile, err := ensurePermissions(w)
 	if err != nil {
 		return retryHint(err)
