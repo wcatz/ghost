@@ -41,10 +41,27 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 	}
 
 	project, memories, learned, tasks, decisions, interactionCount := loadSessionContext(cwd)
+
+	// Load globals unconditionally — they apply to every session regardless of project match.
+	var globalSection string
+	if dataDir, err2 := config.DataDir(); err2 == nil {
+		if globals := loadGlobalMemories(filepath.Join(dataDir, "ghost.db")); len(globals) > 0 {
+			var gsb strings.Builder
+			fmt.Fprintf(&gsb, "\n**Global (applies to all projects):**\n")
+			for _, m := range globals {
+				fmt.Fprintf(&gsb, "- [%s] %s\n", m[0], m[1])
+			}
+			globalSection = gsb.String()
+		}
+	}
+
 	if project == "" {
 		// No matching project — tell Claude context is available via tools
 		_, _ = fmt.Fprintln(stdout, "Ghost memory is active but no project matched this directory.")
 		_, _ = fmt.Fprintln(stdout, "Save discoveries with ghost_memory_save during work.")
+		if globalSection != "" {
+			_, _ = fmt.Fprintln(stdout, globalSection)
+		}
 		return
 	}
 
@@ -80,14 +97,7 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 		}
 	}
 
-	if dataDir, err2 := config.DataDir(); err2 == nil {
-		if globals := loadGlobalMemories(filepath.Join(dataDir, "ghost.db")); len(globals) > 0 {
-			fmt.Fprintf(&sb, "\n**Global (applies to all projects):**\n")
-			for _, m := range globals {
-				fmt.Fprintf(&sb, "- [%s] %s\n", m[0], m[1])
-			}
-		}
-	}
+	fmt.Fprint(&sb, globalSection)
 
 	if interactionCount > 0 {
 		fmt.Fprintf(&sb, "\n**Session #%d** with this project.\n", interactionCount)
