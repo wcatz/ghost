@@ -2,7 +2,10 @@ package mcpinit
 
 import (
 	"database/sql"
+	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -93,5 +96,85 @@ func TestLookupProject_NoMatch(t *testing.T) {
 	id, name := lookupProject(db, "/home/user/other-project")
 	if id != "" || name != "" {
 		t.Errorf("no match: expected empty, got id=%q name=%q", id, name)
+	}
+}
+
+// openFileTestDB creates a real on-disk SQLite DB (needed for mode=ro callers like loadGlobalMemories).
+func openFileTestDB(t *testing.T) (db *sql.DB, path string) {
+	t.Helper()
+	dir := t.TempDir()
+	path = filepath.Join(dir, "ghost.db")
+	db, err := memory.OpenDB(path)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db, path
+}
+
+func TestLoadGlobalMemories(t *testing.T) {
+	db, dbPath := openFileTestDB(t)
+
+	// Seed the _global project row (FK required by memories table).
+	_, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`)
+	if err != nil {
+		t.Fatalf("insert _global project: %v", err)
+	}
+	_, err = db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES ('testid01', '_global', 'preference', 'never push to main', 'manual')`,
+	)
+	if err != nil {
+		t.Fatalf("insert global memory: %v", err)
+	}
+
+	globals := loadGlobalMemories(dbPath)
+	if len(globals) != 1 {
+		t.Fatalf("expected 1 global memory, got %d", len(globals))
+	}
+	if globals[0][0] != "preference" {
+		t.Errorf("category: got %q, want preference", globals[0][0])
+	}
+	if globals[0][1] != "never push to main" {
+		t.Errorf("content: got %q, want 'never push to main'", globals[0][1])
+	}
+}
+
+func TestHandleSessionStartHook_GlobalsOnNoMatch(t *testing.T) {
+	// config.DataDir() returns XDG_DATA_HOME/ghost — build that structure explicitly.
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir ghostDir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`)
+	if err != nil {
+		t.Fatalf("insert _global project: %v", err)
+	}
+	_, err = db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES ('testid02', '_global', 'convention', 'sign all commits with DCO', 'manual')`,
+	)
+	if err != nil {
+		t.Fatalf("insert global memory: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": "/tmp/no-project-here"})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+
+	result := out.String()
+	if !strings.Contains(result, "Global (applies to all projects)") {
+		t.Errorf("globals section missing from no-match output; got:\n%s", result)
+	}
+	if !strings.Contains(result, "sign all commits with DCO") {
+		t.Errorf("global memory content missing from no-match output; got:\n%s", result)
 	}
 }
