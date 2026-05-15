@@ -77,7 +77,7 @@ Done! Restart Claude Code to activate.
 | Prerequisites | Finds `ghost` and `claude` binaries on your PATH |
 | MCP registration | `claude mcp add ghost` — Claude Code discovers Ghost's 16 tools |
 | Permissions | Pre-approves all `mcp__ghost__*` tools — no per-call prompts |
-| SessionStart hook | Injects project memories, tasks, decisions, globals, and session count into Claude's context |
+| SessionStart hook | Injects project memories, tasks, decisions, globals, and session count into Claude's context. Global memories are injected even when the cwd matches no known project. |
 | Disable built-in memory | Sets `autoMemoryEnabled: false` in `~/.claude/settings.json` — stops Claude Code writing its own flat-file memory that would compete with Ghost |
 | Memory import | Migrates Claude Code's `~/.claude/projects/*/memory/*.md` into Ghost (deduplicated) |
 | Project redirects | Writes `MEMORY.md` pointing Claude to Ghost instead of its built-in memory |
@@ -193,7 +193,7 @@ ghost version                # Print version
 
 The `ghost hook session-start` command reads `{"cwd": "<path>"}` from stdin and writes a Markdown system-reminder to stdout containing top memories, open tasks, active decisions, and global memories — injected into the session before any MCP tools are available.
 
-`ghost reflect` flags: `--apply` to save, `--restore` to undo, `--tier haiku|sqlite|auto`.
+`ghost reflect` is **dry-run by default** — it shows what would change without writing anything. Pass `--apply` to save, `--restore` to revert the last apply, `--tier haiku|sqlite|auto` to select the consolidation backend.
 
 ## Install
 
@@ -223,6 +223,12 @@ ghost upgrade    # self-update from GitHub Releases
 
 ```bash
 docker run -v ghost-data:/data ghcr.io/wcatz/ghost:latest
+```
+
+The `/data` volume is where `ghost.db` lives — mount it to persist memories across container restarts. For reflection (memory consolidation), pass your API key:
+
+```bash
+docker run -v ghost-data:/data -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/wcatz/ghost:latest
 ```
 
 ---
