@@ -322,3 +322,16 @@ func TestDataDir_DefaultFallback(t *testing.T) {
 		t.Errorf("expected %q, got %q", expected, dir)
 	}
 }
+
+func TestLinkingDefaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.Linking.Enabled {
+		t.Error("expected linking.enabled=true by default")
+	}
+	if cfg.Linking.Threshold != 0.70 {
+		t.Errorf("expected linking.threshold=0.70, got %f", cfg.Linking.Threshold)
+	}
+}

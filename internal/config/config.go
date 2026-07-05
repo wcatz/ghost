@@ -34,6 +34,7 @@ type Config struct {
 	Server     ServerConfig     `koanf:"server"`
 	Embedding  EmbeddingConfig  `koanf:"embedding"`
 	Reflection ReflectionConfig `koanf:"reflection"`
+	Linking    LinkingConfig    `koanf:"linking"`
 }
 
 // APIConfig holds Claude API settings.
@@ -81,6 +82,13 @@ type EmbeddingConfig struct {
 	Dimensions int    `koanf:"dimensions"`
 }
 
+// LinkingConfig controls the memory auto-linking worker. Linking requires
+// embeddings, so it is only active when embedding is also enabled.
+type LinkingConfig struct {
+	Enabled   bool    `koanf:"enabled"`
+	Threshold float64 `koanf:"threshold"`
+}
+
 // defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{
 	"api.model_quality":          "claude-opus-4-6-20250514",
@@ -102,6 +110,8 @@ var defaults = map[string]interface{}{
 	"embedding.model":            "nomic-embed-text:v1.5",
 	"embedding.dimensions":       768,
 	"reflection.backend":         "auto",
+	"linking.enabled":            true,
+	"linking.threshold":          0.70,
 }
 
 // Load reads configuration with layered precedence.

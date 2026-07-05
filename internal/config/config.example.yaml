@@ -24,6 +24,13 @@
 #   model: "nomic-embed-text:v1.5"   # 274MB, runs fine on CPU
 #   dimensions: 768
 
+# --- Memory Linking (requires embedding) ---
+# Background worker that links similar memories into a graph; hybrid search
+# expands over links for better multi-hop recall. On by default.
+# linking:
+#   enabled: true
+#   threshold: 0.70   # min cosine similarity to create a link
+
 # --- Memory Consolidation ---
 # Controls the default tier for ghost reflect.
 # auto: tries haiku (if ANTHROPIC_API_KEY set) → sqlite (free, always available)

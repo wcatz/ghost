@@ -14,6 +14,7 @@
 - `internal/mcpinit/` — `ghost mcp init`, `ghost mcp status`, `ghost hook session-start`
 - `internal/claudeimport/` — One-time import of Claude Code auto-memory on first contact
 - `internal/embedding/` — Ollama async vectorization worker
+- `internal/linking/` — Background worker linking similar memories into a graph
 - `internal/reflection/` — Memory consolidation: HaikuConsolidator + SQLiteConsolidator
 - `internal/provider/` — Interface contracts: LLMProvider, MemoryStore
 - `internal/config/` — Layered YAML + env config (koanf)
@@ -26,6 +27,7 @@
 - Project lookup: path-prefix match (longest wins) OR basename name fallback
 - Global memories: `_global` project, included in every project's context
 - Hybrid search: 70% vector (cosine, Ollama) + 30% FTS5, RRF fusion — falls back to FTS5-only
+- Memory links: `memory_links` edge table auto-populated by cosine similarity (internal/linking worker); links cascade-delete with memories and self-heal after reflection; hybrid search adds an additive graph-expansion bonus from top seeds
 
 ## Critical Rules
 - Always `go vet ./...` before committing

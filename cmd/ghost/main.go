@@ -14,6 +14,7 @@ import (
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/embedding"
+	"github.com/wcatz/ghost/internal/linking"
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/mcpserver"
 	"github.com/wcatz/ghost/internal/memory"
@@ -81,6 +82,12 @@ func runMCP() {
 		go embedWorker.Run(ctx, projectCh)
 		srv.SetEmbedder(embedClient, projectCh)
 		logger.Info("mcp: embedding enabled", "model", cfg.Embedding.Model)
+
+		if cfg.Linking.Enabled {
+			linkWorker := linking.NewWorker(store, logger, 2*time.Minute, float32(cfg.Linking.Threshold))
+			go linkWorker.Run(ctx)
+			logger.Info("mcp: memory linking enabled", "threshold", cfg.Linking.Threshold)
+		}
 	}
 
 	if err := srv.Run(ctx); err != nil {
