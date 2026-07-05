@@ -97,3 +97,78 @@ func TestLinksCascadeOnMemoryDelete(t *testing.T) {
 		t.Fatalf("got %d links after cascade delete, want 0", len(links))
 	}
 }
+
+func TestInvalidateLinkHidesFromGetLinks(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a := makeMemory(t, s, "alpha invalidation test")
+	b := makeMemory(t, s, "beta invalidation test")
+
+	if err := s.CreateLink(ctx, a, b, "related", 0.8, "auto"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	// Invalidate using reversed order — normalization must still find it.
+	if err := s.InvalidateLink(ctx, b, a, "related"); err != nil {
+		t.Fatalf("InvalidateLink: %v", err)
+	}
+	links, err := s.GetLinks(ctx, a)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	if len(links) != 0 {
+		t.Fatalf("got %d links after invalidation, want 0", len(links))
+	}
+	// Re-creating the link revives it.
+	if err := s.CreateLink(ctx, a, b, "related", 0.9, "auto"); err != nil {
+		t.Fatalf("CreateLink revive: %v", err)
+	}
+	links, _ = s.GetLinks(ctx, a)
+	if len(links) != 1 {
+		t.Fatalf("got %d links after revive, want 1", len(links))
+	}
+}
+
+func TestUnscannedEmbeddedMemoryIDs(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a := makeMemory(t, s, "embedded and unscanned")
+	b := makeMemory(t, s, "embedded and scanned")
+	_ = makeMemory(t, s, "not embedded")
+
+	vec := []float32{1, 0, 0}
+	if err := s.StoreEmbedding(ctx, a, vec, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	if err := s.StoreEmbedding(ctx, b, vec, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	if err := s.MarkLinkScanned(ctx, b); err != nil {
+		t.Fatalf("MarkLinkScanned: %v", err)
+	}
+
+	ids, err := s.UnscannedEmbeddedMemoryIDs(ctx, testProject, 10)
+	if err != nil {
+		t.Fatalf("UnscannedEmbeddedMemoryIDs: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != a {
+		t.Fatalf("got %v, want [%s] (embedded, unscanned only)", ids, a)
+	}
+}
+
+func TestGetEmbedding(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a := makeMemory(t, s, "embedding roundtrip")
+
+	want := []float32{0.1, 0.2, 0.3}
+	if err := s.StoreEmbedding(ctx, a, want, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	got, err := s.GetEmbedding(ctx, a)
+	if err != nil {
+		t.Fatalf("GetEmbedding: %v", err)
+	}
+	if len(got) != 3 || got[0] != 0.1 || got[1] != 0.2 || got[2] != 0.3 {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}

@@ -77,6 +77,69 @@ func (s *Store) GetLinks(ctx context.Context, memoryID string) ([]Link, error) {
 	return links, rows.Err()
 }
 
+// MarkLinkScanned records that the linking worker has processed this memory.
+// Rows cascade-delete with the memory, so reflection churn resets scans
+// automatically and the worker self-heals.
+func (s *Store) MarkLinkScanned(ctx context.Context, memoryID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO link_scans (memory_id) VALUES (?)
+		ON CONFLICT(memory_id) DO UPDATE SET scanned_at = datetime('now')
+	`, memoryID)
+	if err != nil {
+		return fmt.Errorf("mark link scanned: %w", err)
+	}
+	return nil
+}
+
+// UnscannedEmbeddedMemoryIDs returns memories that have an embedding but have
+// not yet been processed by the linking worker.
+func (s *Store) UnscannedEmbeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT m.id
+		FROM memories m
+		JOIN memory_embeddings e ON e.memory_id = m.id
+		LEFT JOIN link_scans ls ON ls.memory_id = m.id
+		WHERE m.project_id = ? AND ls.memory_id IS NULL
+		ORDER BY m.created_at DESC
+		LIMIT ?
+	`, projectID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("unscanned embedded memories: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// GetEmbedding returns the stored embedding vector for a memory.
+func (s *Store) GetEmbedding(ctx context.Context, memoryID string) ([]float32, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var blob []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT embedding FROM memory_embeddings WHERE memory_id = ?
+	`, memoryID).Scan(&blob)
+	if err != nil {
+		return nil, fmt.Errorf("get embedding: %w", err)
+	}
+	return bytesToFloat32s(blob), nil
+}
+
 // InvalidateLink soft-invalidates a link (Zep-style: never delete, mark
 // invalid with a timestamp so history is preserved).
 func (s *Store) InvalidateLink(ctx context.Context, sourceID, targetID, relation string) error {
