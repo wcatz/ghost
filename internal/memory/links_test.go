@@ -172,3 +172,80 @@ func TestGetEmbedding(t *testing.T) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 }
+
+func TestGraphNeighborsTwoHops(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	// Chain: a — b — c, plus d unlinked.
+	a := makeMemory(t, s, "graph node a")
+	b := makeMemory(t, s, "graph node b")
+	c := makeMemory(t, s, "graph node c")
+	_ = makeMemory(t, s, "graph node d unlinked")
+
+	if err := s.CreateLink(ctx, a, b, "related", 0.9, "auto"); err != nil {
+		t.Fatalf("CreateLink a-b: %v", err)
+	}
+	if err := s.CreateLink(ctx, b, c, "related", 0.8, "auto"); err != nil {
+		t.Fatalf("CreateLink b-c: %v", err)
+	}
+
+	// From seed a with 2 hops: b at depth 1 (strength 0.9), c at depth 2 (0.9*0.8=0.72).
+	neighbors, err := s.GraphNeighbors(ctx, testProject, []string{a}, 2, 10)
+	if err != nil {
+		t.Fatalf("GraphNeighbors: %v", err)
+	}
+	if len(neighbors) != 2 {
+		t.Fatalf("got %d neighbors, want 2: %+v", len(neighbors), neighbors)
+	}
+	if neighbors[0].MemoryID != b || neighbors[0].Depth != 1 {
+		t.Errorf("first neighbor = %+v, want id=%s depth=1", neighbors[0], b)
+	}
+	if neighbors[1].MemoryID != c || neighbors[1].Depth != 2 {
+		t.Errorf("second neighbor = %+v, want id=%s depth=2", neighbors[1], c)
+	}
+	if diff := neighbors[1].Strength - 0.72; diff > 0.001 || diff < -0.001 {
+		t.Errorf("c strength = %f, want ~0.72", neighbors[1].Strength)
+	}
+
+	// With 1 hop, only b is reachable.
+	neighbors, err = s.GraphNeighbors(ctx, testProject, []string{a}, 1, 10)
+	if err != nil {
+		t.Fatalf("GraphNeighbors 1hop: %v", err)
+	}
+	if len(neighbors) != 1 || neighbors[0].MemoryID != b {
+		t.Fatalf("1-hop got %+v, want only %s", neighbors, b)
+	}
+}
+
+func TestGraphNeighborsExcludesSeedsAndCycles(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	// Triangle: a — b — c — a. Seeds {a, b}: only c should be returned.
+	a := makeMemory(t, s, "cycle node a")
+	b := makeMemory(t, s, "cycle node b")
+	c := makeMemory(t, s, "cycle node c")
+
+	for _, pair := range [][2]string{{a, b}, {b, c}, {c, a}} {
+		if err := s.CreateLink(ctx, pair[0], pair[1], "related", 0.9, "auto"); err != nil {
+			t.Fatalf("CreateLink: %v", err)
+		}
+	}
+	neighbors, err := s.GraphNeighbors(ctx, testProject, []string{a, b}, 2, 10)
+	if err != nil {
+		t.Fatalf("GraphNeighbors: %v", err)
+	}
+	if len(neighbors) != 1 || neighbors[0].MemoryID != c {
+		t.Fatalf("got %+v, want only %s (seeds excluded, no cycle blowup)", neighbors, c)
+	}
+}
+
+func TestGraphNeighborsEmptySeeds(t *testing.T) {
+	s := testStore(t)
+	neighbors, err := s.GraphNeighbors(context.Background(), testProject, nil, 2, 10)
+	if err != nil {
+		t.Fatalf("GraphNeighbors(nil): %v", err)
+	}
+	if len(neighbors) != 0 {
+		t.Fatalf("got %d neighbors for empty seeds, want 0", len(neighbors))
+	}
+}

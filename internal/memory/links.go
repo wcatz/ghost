@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // Link is an edge between two memories. 'related' links are symmetric and
@@ -138,6 +139,73 @@ func (s *Store) GetEmbedding(ctx context.Context, memoryID string) ([]float32, e
 		return nil, fmt.Errorf("get embedding: %w", err)
 	}
 	return bytesToFloat32s(blob), nil
+}
+
+// GraphNeighbor is a memory reached by traversing links from seed memories.
+type GraphNeighbor struct {
+	MemoryID string
+	Depth    int
+	Strength float32 // product of link strengths along the strongest path
+}
+
+// GraphNeighbors walks the link graph outward from seed memory IDs up to
+// maxHops, returning reachable memories (excluding the seeds themselves)
+// ordered by path strength. Traversal is bidirectional and only follows
+// valid (non-invalidated) links. Results are scoped to projectID plus
+// '_global'; pass projectID "" to search all projects.
+func (s *Store) GraphNeighbors(ctx context.Context, projectID string, seedIDs []string, maxHops, limit int) ([]GraphNeighbor, error) {
+	if len(seedIDs) == 0 {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	placeholders := make([]string, len(seedIDs))
+	args := make([]interface{}, 0, len(seedIDs)+4)
+	for i, id := range seedIDs {
+		placeholders[i] = "(?)"
+		args = append(args, id)
+	}
+	args = append(args, maxHops, projectID, projectID, limit)
+
+	query := fmt.Sprintf(`
+		WITH RECURSIVE seeds(id) AS (VALUES %s),
+		walk(id, depth, strength) AS (
+			SELECT id, 0, 1.0 FROM seeds
+			UNION
+			SELECT CASE WHEN l.source_id = w.id THEN l.target_id ELSE l.source_id END,
+			       w.depth + 1,
+			       w.strength * l.strength
+			FROM memory_links l
+			JOIN walk w ON w.id IN (l.source_id, l.target_id)
+			WHERE w.depth < ? AND l.invalidated_at IS NULL
+		)
+		SELECT w.id, MIN(w.depth) AS depth, MAX(w.strength) AS strength
+		FROM walk w
+		JOIN memories m ON m.id = w.id
+		WHERE w.depth > 0
+		  AND w.id NOT IN (SELECT id FROM seeds)
+		  AND (? = '' OR m.project_id = ? OR m.project_id = '_global')
+		GROUP BY w.id
+		ORDER BY strength DESC
+		LIMIT ?
+	`, strings.Join(placeholders, ","))
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("graph neighbors: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var neighbors []GraphNeighbor
+	for rows.Next() {
+		var n GraphNeighbor
+		if err := rows.Scan(&n.MemoryID, &n.Depth, &n.Strength); err != nil {
+			return nil, err
+		}
+		neighbors = append(neighbors, n)
+	}
+	return neighbors, rows.Err()
 }
 
 // InvalidateLink soft-invalidates a link (Zep-style: never delete, mark
