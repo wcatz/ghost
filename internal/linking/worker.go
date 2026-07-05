@@ -112,6 +112,8 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 		}
 	}
 	if linked > 0 {
-		w.logger.Info("linking: batch complete", "project_id", projectID, "scanned", len(ids), "links", linked)
+		// linked counts CreateLink writes; symmetric pairs normalize to one
+		// row, so the distinct edge count can be lower.
+		w.logger.Info("linking: batch complete", "project_id", projectID, "scanned", len(ids), "link_writes", linked)
 	}
 }
