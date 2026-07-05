@@ -161,31 +161,31 @@ func (s *Store) GraphNeighbors(ctx context.Context, projectID string, seedIDs []
 	defer s.mu.RUnlock()
 
 	placeholders := make([]string, len(seedIDs))
-	args := make([]interface{}, 0, len(seedIDs)+4)
+	args := make([]interface{}, 0, len(seedIDs)+5)
 	for i, id := range seedIDs {
 		placeholders[i] = "(?)"
 		args = append(args, id)
 	}
 	args = append(args, maxHops, projectID, projectID, limit)
 
+	// The project predicate is applied at every hop (not just on final
+	// rows) so traversal never routes through another project's memories.
 	query := fmt.Sprintf(`
 		WITH RECURSIVE seeds(id) AS (VALUES %s),
 		walk(id, depth, strength) AS (
 			SELECT id, 0, 1.0 FROM seeds
 			UNION
-			SELECT CASE WHEN l.source_id = w.id THEN l.target_id ELSE l.source_id END,
-			       w.depth + 1,
-			       w.strength * l.strength
+			SELECT n.id, w.depth + 1, w.strength * l.strength
 			FROM memory_links l
 			JOIN walk w ON w.id IN (l.source_id, l.target_id)
+			JOIN memories n ON n.id = CASE WHEN l.source_id = w.id THEN l.target_id ELSE l.source_id END
 			WHERE w.depth < ? AND l.invalidated_at IS NULL
+			  AND (? = '' OR n.project_id = ? OR n.project_id = '_global')
 		)
 		SELECT w.id, MIN(w.depth) AS depth, MAX(w.strength) AS strength
 		FROM walk w
-		JOIN memories m ON m.id = w.id
 		WHERE w.depth > 0
 		  AND w.id NOT IN (SELECT id FROM seeds)
-		  AND (? = '' OR m.project_id = ? OR m.project_id = '_global')
 		GROUP BY w.id
 		ORDER BY strength DESC
 		LIMIT ?

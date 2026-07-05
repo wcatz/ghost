@@ -88,6 +88,8 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 		}
 		vec, err := w.store.GetEmbedding(ctx, id)
 		if err != nil {
+			// Leave unscanned so the next sweep retries; errors here are
+			// transient (deleted memories cascade out of the scan queue).
 			w.logger.Debug("linking: get embedding", "error", err, "memory_id", id)
 			continue
 		}
@@ -97,15 +99,22 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			w.logger.Debug("linking: search", "error", err, "memory_id", id)
 			continue
 		}
+		failed := false
 		for _, cand := range candidates {
 			if cand.MemoryID == id || cand.Score < w.threshold {
 				continue
 			}
 			if err := w.store.CreateLink(ctx, id, cand.MemoryID, "related", cand.Score, "auto"); err != nil {
 				w.logger.Debug("linking: create link", "error", err, "memory_id", id)
+				failed = true
 				continue
 			}
 			linked++
+		}
+		// Only mark scanned when every link write succeeded, so missing
+		// edges are retried on the next sweep.
+		if failed {
+			continue
 		}
 		if err := w.store.MarkLinkScanned(ctx, id); err != nil {
 			w.logger.Error("linking: mark scanned", "error", err, "memory_id", id)

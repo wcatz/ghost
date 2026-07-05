@@ -249,3 +249,75 @@ func TestGraphNeighborsEmptySeeds(t *testing.T) {
 		t.Fatalf("got %d neighbors for empty seeds, want 0", len(neighbors))
 	}
 }
+
+func TestGraphNeighborsDoesNotRouteThroughOtherProjects(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "other-project", "/tmp/other", "other"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	// x and z in testProject; y in other-project bridges them: x — y — z.
+	x := makeMemory(t, s, "in-project node x")
+	y, err := s.Create(ctx, "other-project", Memory{Category: "fact", Content: "foreign bridge node", Source: "manual", Importance: 0.7})
+	if err != nil {
+		t.Fatalf("Create y: %v", err)
+	}
+	z := makeMemory(t, s, "in-project node z")
+
+	if err := s.CreateLink(ctx, x, y, "related", 0.9, "manual"); err != nil {
+		t.Fatalf("CreateLink x-y: %v", err)
+	}
+	if err := s.CreateLink(ctx, y, z, "related", 0.9, "manual"); err != nil {
+		t.Fatalf("CreateLink y-z: %v", err)
+	}
+
+	// Project-scoped walk from x must not reach z via the foreign bridge y.
+	neighbors, err := s.GraphNeighbors(ctx, testProject, []string{x}, 2, 10)
+	if err != nil {
+		t.Fatalf("GraphNeighbors: %v", err)
+	}
+	if len(neighbors) != 0 {
+		t.Fatalf("got %+v, want none (foreign intermediate must block the path)", neighbors)
+	}
+
+	// Unscoped walk (projectID "") still traverses the full graph.
+	neighbors, err = s.GraphNeighbors(ctx, "", []string{x}, 2, 10)
+	if err != nil {
+		t.Fatalf("GraphNeighbors all: %v", err)
+	}
+	if len(neighbors) != 2 {
+		t.Fatalf("unscoped got %+v, want y and z", neighbors)
+	}
+}
+
+func TestGraphNeighborsTraversesGlobalBridge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// _global memories are shared context: x — g(_global) — z must work.
+	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject _global: %v", err)
+	}
+	x := makeMemory(t, s, "project node x")
+	g, err := s.Create(ctx, "_global", Memory{Category: "fact", Content: "global bridge", Source: "manual", Importance: 0.7})
+	if err != nil {
+		t.Fatalf("Create global: %v", err)
+	}
+	z := makeMemory(t, s, "project node z")
+
+	if err := s.CreateLink(ctx, x, g, "related", 0.9, "manual"); err != nil {
+		t.Fatalf("CreateLink x-g: %v", err)
+	}
+	if err := s.CreateLink(ctx, g, z, "related", 0.9, "manual"); err != nil {
+		t.Fatalf("CreateLink g-z: %v", err)
+	}
+
+	neighbors, err := s.GraphNeighbors(ctx, testProject, []string{x}, 2, 10)
+	if err != nil {
+		t.Fatalf("GraphNeighbors: %v", err)
+	}
+	if len(neighbors) != 2 {
+		t.Fatalf("got %+v, want g and z (global bridge traversable)", neighbors)
+	}
+}

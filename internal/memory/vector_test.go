@@ -633,9 +633,18 @@ func TestSearchHybridGraphBonus(t *testing.T) {
 
 	// a matches the query vector exactly; c is textually and vectorially
 	// unrelated but linked to a; d is an unlinked distractor like c.
-	a, _ := s.Create(ctx, testProject, Memory{Category: "fact", Content: "kubernetes ingress routing", Source: "manual", Importance: 0.7})
-	c, _ := s.Create(ctx, testProject, Memory{Category: "fact", Content: "zzz unrelated cooking recipe", Source: "manual", Importance: 0.7})
-	d, _ := s.Create(ctx, testProject, Memory{Category: "fact", Content: "zzz unrelated gardening tips", Source: "manual", Importance: 0.7})
+	a, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "kubernetes ingress routing", Source: "manual", Importance: 0.7})
+	if err != nil {
+		t.Fatalf("Create a: %v", err)
+	}
+	c, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "zzz unrelated cooking recipe", Source: "manual", Importance: 0.7})
+	if err != nil {
+		t.Fatalf("Create c: %v", err)
+	}
+	d, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "zzz unrelated gardening tips", Source: "manual", Importance: 0.7})
+	if err != nil {
+		t.Fatalf("Create d: %v", err)
+	}
 
 	queryVec := []float32{1, 0, 0}
 	if err := s.StoreEmbedding(ctx, a, []float32{1, 0, 0}, "test"); err != nil {
