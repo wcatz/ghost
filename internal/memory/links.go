@@ -141,6 +141,36 @@ func (s *Store) GetEmbedding(ctx context.Context, memoryID string) ([]float32, e
 	return bytesToFloat32s(blob), nil
 }
 
+// EmbeddingStats returns how many memories have embeddings versus the total
+// memory count, across all projects. Used by health/status diagnostics.
+func (s *Store) EmbeddingStats(ctx context.Context) (embedded, total int, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_embeddings`).Scan(&embedded); err != nil {
+		return 0, 0, fmt.Errorf("count embeddings: %w", err)
+	}
+	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories`).Scan(&total); err != nil {
+		return 0, 0, fmt.Errorf("count memories: %w", err)
+	}
+	return embedded, total, nil
+}
+
+// LinkStats returns the number of valid links and link-scanned memories
+// across all projects. Used by health/status diagnostics.
+func (s *Store) LinkStats(ctx context.Context) (links, scans int, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_links WHERE invalidated_at IS NULL`).Scan(&links); err != nil {
+		return 0, 0, fmt.Errorf("count links: %w", err)
+	}
+	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM link_scans`).Scan(&scans); err != nil {
+		return 0, 0, fmt.Errorf("count link scans: %w", err)
+	}
+	return links, scans, nil
+}
+
 // GraphNeighbor is a memory reached by traversing links from seed memories.
 type GraphNeighbor struct {
 	MemoryID string
