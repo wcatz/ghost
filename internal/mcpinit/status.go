@@ -120,7 +120,7 @@ func Status(w io.Writer) error {
 				// leave vector search and memory linking inactive.
 				if cfg, cfgErr := config.Load(); cfgErr == nil {
 					if !cfg.Embedding.Enabled {
-						fmt.Fprintln(w, "  - embedding disabled in config (FTS-only search)")
+						_, _ = fmt.Fprintln(w, "  - embedding disabled in config (FTS-only search)")
 					} else {
 						client := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
 						ctx := context.Background()
@@ -138,7 +138,7 @@ func Status(w io.Writer) error {
 								fmt.Sprintf("embeddings: %d/%d memories — vector search and linking inactive", embedded, total))
 						}
 						if links, scans, lErr := store.LinkStats(ctx); lErr == nil {
-							fmt.Fprintf(w, "  - memory links: %d links, %d memories scanned\n", links, scans)
+							_, _ = fmt.Fprintf(w, "  - memory links: %d links, %d memories scanned\n", links, scans)
 						}
 					}
 				}
