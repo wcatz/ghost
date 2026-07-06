@@ -217,6 +217,26 @@ CREATE TABLE IF NOT EXISTS memory_snapshots (
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_project ON memory_snapshots(project_id, snapshot_id);
+
+CREATE TABLE IF NOT EXISTS memory_links (
+    source_id      TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    target_id      TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    relation       TEXT NOT NULL DEFAULT 'related'
+                   CHECK (relation IN ('related', 'supersedes', 'contradicts', 'elaborates', 'causes')),
+    strength       REAL NOT NULL DEFAULT 0.5,
+    source         TEXT NOT NULL DEFAULT 'auto'
+                   CHECK (source IN ('auto', 'llm', 'manual')),
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    invalidated_at TEXT,
+    PRIMARY KEY (source_id, target_id, relation)
+);
+CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id) WHERE invalidated_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id) WHERE invalidated_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS link_scans (
+    memory_id  TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `
 
 // OpenDB opens or creates the SQLite database and runs migrations.

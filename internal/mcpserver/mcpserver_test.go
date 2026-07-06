@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"unicode/utf8"
 	"context"
 	"log/slog"
 	"os"
@@ -723,5 +724,29 @@ func TestDefaultImportance(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestTruncateUTF8(t *testing.T) {
+	tests := []struct {
+		in       string
+		maxBytes int
+		want     string
+	}{
+		{"hello", 10, "hello"},
+		{"hello", 4, "hell"},
+		{"héllo", 2, "h"},      // é is 2 bytes starting at index 1 — must not split
+		{"日本語", 4, "日"},       // each rune is 3 bytes
+		{"日本語", 6, "日本"},
+		{"", 5, ""},
+	}
+	for _, tc := range tests {
+		got := truncateUTF8(tc.in, tc.maxBytes)
+		if got != tc.want {
+			t.Errorf("truncateUTF8(%q, %d) = %q, want %q", tc.in, tc.maxBytes, got, tc.want)
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("truncateUTF8(%q, %d) produced invalid UTF-8: %q", tc.in, tc.maxBytes, got)
+		}
 	}
 }

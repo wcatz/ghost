@@ -23,6 +23,7 @@ Ghost replaces that with a real memory system:
 | Consolidation | None | Haiku LLM or local Jaccard similarity |
 | Time decay | None (stale facts persist equally) | Category-aware: conventions never decay, gotchas fade at 30 days |
 | Cross-project | None (siloed per directory) | `ghost_search_all` + `_global` project |
+| Memory graph | None | Auto-linked related memories, graph-aware search |
 | Migration | N/A | `ghost mcp init` imports your existing memories |
 | Clients | Claude Code only | Any MCP client (Claude Code, Cursor, Goose, etc.) |
 
@@ -109,15 +110,19 @@ Add Ghost to your MCP config:
 
 ## How It Works
 
-Ghost is a memory pipeline with four stages:
+Ghost is a memory pipeline with six stages:
 
 ```
-Save → Search → Consolidate → Decay
+Save → Embed → Link → Search → Consolidate → Decay
 ```
 
 **Save** — Claude (or you) saves memories via MCP tools. Each memory has a category, importance score (0.0-1.0), and tags. FTS-based upsert deduplicates on save — if a similar memory already exists in the same category, it strengthens instead of creating a duplicate.
 
-**Search** — FTS5 full-text search with optional vector similarity (Ollama embeddings). Cross-project search finds knowledge from other repos. Global memories (`_global`) are included in every project's context.
+**Embed** — When Ollama is available, a background worker vectorizes each memory for semantic search. Fully optional: without it, Ghost is FTS-only.
+
+**Link** — A background worker connects related memories by embedding similarity (cosine ≥ 0.70) into a memory graph. Links self-heal after consolidation rewrites memories.
+
+**Search** — FTS5 full-text search with optional vector similarity (Ollama embeddings), plus a graph-expansion signal: memories linked to your top hits get boosted, surfacing related knowledge a keyword match would miss. Cross-project search finds knowledge from other repos. Global memories (`_global`) are included in every project's context.
 
 **Consolidate** — Periodic reflection merges duplicates, prunes noise, and promotes cross-project knowledge to global scope. Two tiers:
 
@@ -304,7 +309,15 @@ embedding:
   model: "nomic-embed-text:v1.5"
 ```
 
-Requires [Ollama](https://ollama.ai) running locally. Enables hybrid FTS5 + vector search.
+Requires [Ollama](https://ollama.ai) running locally (`ollama pull nomic-embed-text:v1.5`). Enables hybrid FTS5 + vector search and automatic memory linking:
+
+```yaml
+linking:
+  enabled: true      # on by default when embedding is enabled
+  threshold: 0.70    # min cosine similarity to auto-link memories
+```
+
+Verify the embedding pipeline anytime with `ghost mcp status`.
 
 **Optional reflection (memory consolidation with Haiku):**
 
@@ -327,6 +340,7 @@ internal/
   claudeimport/            Auto-import Claude Code memory files
   ai/                      Claude API client (used by reflection only)
   embedding/               Ollama async vectorization worker
+  linking/                 Auto-links similar memories into a graph
   config/                  Layered YAML/env config (koanf)
   selfupdate/              Self-update from GitHub releases
   provider/                Interface contracts (MemoryStore, LLMProvider)

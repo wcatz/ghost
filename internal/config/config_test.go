@@ -27,7 +27,7 @@ func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Unset any env vars that could interfere.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_DEFAULTS_MODE", "GHOST_SERVER_LISTEN_ADDR", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_EMBEDDING_ENABLED", "ANTHROPIC_API_KEY"})
 
 	cfg, err := Load()
 	if err != nil {
@@ -35,30 +35,6 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 
 	// Verify compiled defaults are applied.
-	if cfg.API.ModelQuality != "claude-opus-4-6-20250514" {
-		t.Errorf("expected model_quality default, got %q", cfg.API.ModelQuality)
-	}
-	if cfg.API.ModelFast != "claude-sonnet-4-5-20250929" {
-		t.Errorf("expected model_fast default, got %q", cfg.API.ModelFast)
-	}
-	if cfg.Defaults.Mode != "chat" {
-		t.Errorf("expected defaults.mode=chat, got %q", cfg.Defaults.Mode)
-	}
-	if cfg.Defaults.ReflectionInterval != 10 {
-		t.Errorf("expected reflection_interval=10, got %d", cfg.Defaults.ReflectionInterval)
-	}
-	if cfg.Defaults.MaxConvTurns != 50 {
-		t.Errorf("expected max_conversation_turns=50, got %d", cfg.Defaults.MaxConvTurns)
-	}
-	if !cfg.Defaults.AutoMemory {
-		t.Error("expected auto_memory=true")
-	}
-	if cfg.Defaults.ApprovalMode != "normal" {
-		t.Errorf("expected approval_mode=normal, got %q", cfg.Defaults.ApprovalMode)
-	}
-	if cfg.Server.ListenAddr != "127.0.0.1:2187" {
-		t.Errorf("expected listen_addr=127.0.0.1:2187, got %q", cfg.Server.ListenAddr)
-	}
 	if !cfg.Embedding.Enabled {
 		t.Error("expected embedding.enabled=true")
 	}
@@ -114,11 +90,11 @@ func TestLoad_GhostEnvOverrides(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear any interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_DEFAULTS_MODE", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_REFLECTION_BACKEND", "ANTHROPIC_API_KEY"})
 
 	// Set GHOST_* overrides.
 	t.Setenv("GHOST_API_KEY", "sk-ghost-override")
-	t.Setenv("GHOST_DEFAULTS_MODE", "code")
+	t.Setenv("GHOST_REFLECTION_BACKEND", "sqlite")
 
 	cfg, err := Load()
 	if err != nil {
@@ -128,8 +104,8 @@ func TestLoad_GhostEnvOverrides(t *testing.T) {
 	if cfg.API.Key != "sk-ghost-override" {
 		t.Errorf("expected api.key from GHOST_API_KEY, got %q", cfg.API.Key)
 	}
-	if cfg.Defaults.Mode != "code" {
-		t.Errorf("expected defaults.mode=code from env, got %q", cfg.Defaults.Mode)
+	if cfg.Reflection.Backend != "sqlite" {
+		t.Errorf("expected reflection.backend=sqlite from env, got %q", cfg.Reflection.Backend)
 	}
 }
 
@@ -139,17 +115,17 @@ func TestLoad_ExplicitEnvOverrides(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_SERVER_AUTH_TOKEN", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_LINKING_ENABLED", "ANTHROPIC_API_KEY"})
 
-	t.Setenv("GHOST_SERVER_AUTH_TOKEN", "my-secret-token")
+	t.Setenv("GHOST_LINKING_ENABLED", "false")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	if cfg.Server.AuthToken != "my-secret-token" {
-		t.Errorf("expected server.auth_token from env, got %q", cfg.Server.AuthToken)
+	if cfg.Linking.Enabled {
+		t.Error("expected linking.enabled=false from env override")
 	}
 }
 
@@ -159,7 +135,7 @@ func TestLoad_YAMLFileOverride(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_DEFAULTS_MODE", "GHOST_SERVER_LISTEN_ADDR", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_REFLECTION_BACKEND", "ANTHROPIC_API_KEY"})
 
 	// Create a config file in the user config dir.
 	configDir := filepath.Join(tmpDir, "ghost")
@@ -169,13 +145,13 @@ func TestLoad_YAMLFileOverride(t *testing.T) {
 	configFile := filepath.Join(configDir, "config.yaml")
 	yamlContent := `
 api:
-  model_quality: "custom-model-quality"
-  model_fast: "custom-model-fast"
-defaults:
-  mode: "review"
-  reflection_interval: 20
-server:
-  listen_addr: "0.0.0.0:9999"
+  key: "sk-from-yaml"
+embedding:
+  model: "custom-embed-model"
+linking:
+  threshold: 0.85
+reflection:
+  backend: "sqlite"
 `
 	if err := os.WriteFile(configFile, []byte(yamlContent), 0o600); err != nil {
 		t.Fatal(err)
@@ -186,25 +162,22 @@ server:
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	if cfg.API.ModelQuality != "custom-model-quality" {
-		t.Errorf("model_quality = %q, want %q", cfg.API.ModelQuality, "custom-model-quality")
+	if cfg.API.Key != "sk-from-yaml" {
+		t.Errorf("api.key = %q, want %q", cfg.API.Key, "sk-from-yaml")
 	}
-	if cfg.API.ModelFast != "custom-model-fast" {
-		t.Errorf("model_fast = %q, want %q", cfg.API.ModelFast, "custom-model-fast")
+	if cfg.Embedding.Model != "custom-embed-model" {
+		t.Errorf("embedding.model = %q, want %q", cfg.Embedding.Model, "custom-embed-model")
 	}
-	if cfg.Defaults.Mode != "review" {
-		t.Errorf("mode = %q, want %q", cfg.Defaults.Mode, "review")
+	if cfg.Linking.Threshold != 0.85 {
+		t.Errorf("linking.threshold = %f, want 0.85", cfg.Linking.Threshold)
 	}
-	if cfg.Defaults.ReflectionInterval != 20 {
-		t.Errorf("reflection_interval = %d, want 20", cfg.Defaults.ReflectionInterval)
-	}
-	if cfg.Server.ListenAddr != "0.0.0.0:9999" {
-		t.Errorf("listen_addr = %q, want %q", cfg.Server.ListenAddr, "0.0.0.0:9999")
+	if cfg.Reflection.Backend != "sqlite" {
+		t.Errorf("reflection.backend = %q, want %q", cfg.Reflection.Backend, "sqlite")
 	}
 
 	// Unaffected defaults should remain.
-	if !cfg.Defaults.AutoMemory {
-		t.Error("auto_memory should still be true (default)")
+	if !cfg.Embedding.Enabled {
+		t.Error("embedding.enabled should still be true (default)")
 	}
 }
 
@@ -214,19 +187,19 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_DEFAULTS_MODE", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_REFLECTION_BACKEND", "ANTHROPIC_API_KEY"})
 
-	// YAML file sets mode to "review".
+	// YAML file sets backend to "haiku".
 	configDir := filepath.Join(tmpDir, "ghost")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("defaults:\n  mode: review\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("reflection:\n  backend: haiku\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	// Env var overrides to "debug".
-	t.Setenv("GHOST_DEFAULTS_MODE", "debug")
+	// Env var overrides to "sqlite".
+	t.Setenv("GHOST_REFLECTION_BACKEND", "sqlite")
 
 	cfg, err := Load()
 	if err != nil {
@@ -234,8 +207,8 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	}
 
 	// Env should take precedence over YAML.
-	if cfg.Defaults.Mode != "debug" {
-		t.Errorf("mode = %q, want %q (env should override yaml)", cfg.Defaults.Mode, "debug")
+	if cfg.Reflection.Backend != "sqlite" {
+		t.Errorf("backend = %q, want %q (env should override yaml)", cfg.Reflection.Backend, "sqlite")
 	}
 }
 
@@ -271,38 +244,6 @@ func TestEnsureConfigFile(t *testing.T) {
 	}
 }
 
-func TestLoad_DisplayDefaults(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
-	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY"})
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-
-	if !cfg.Display.ShowTokenUsage {
-		t.Error("expected show_token_usage=true")
-	}
-	if !cfg.Display.ShowCost {
-		t.Error("expected show_cost=true")
-	}
-	if !cfg.Display.StreamToolOutput {
-		t.Error("expected stream_tool_output=true")
-	}
-	if cfg.Display.Theme != "auto" {
-		t.Errorf("expected theme=auto, got %q", cfg.Display.Theme)
-	}
-	if cfg.Display.ImageProtocol != "auto" {
-		t.Errorf("expected image_protocol=auto, got %q", cfg.Display.ImageProtocol)
-	}
-	if cfg.Display.PlainMode {
-		t.Error("expected plain_mode=false")
-	}
-}
-
 func TestDataDir_DefaultFallback(t *testing.T) {
 	// Unset XDG_DATA_HOME to test the fallback to ~/.local/share.
 	t.Setenv("XDG_DATA_HOME", "")
@@ -320,5 +261,18 @@ func TestDataDir_DefaultFallback(t *testing.T) {
 	expected := filepath.Join(home, ".local", "share", "ghost")
 	if dir != expected {
 		t.Errorf("expected %q, got %q", expected, dir)
+	}
+}
+
+func TestLinkingDefaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.Linking.Enabled {
+		t.Error("expected linking.enabled=true by default")
+	}
+	if cfg.Linking.Threshold != 0.70 {
+		t.Errorf("expected linking.threshold=0.70, got %f", cfg.Linking.Threshold)
 	}
 }

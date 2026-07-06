@@ -29,43 +29,14 @@ var exampleConfig []byte
 // Config holds the global ghost configuration.
 type Config struct {
 	API        APIConfig        `koanf:"api"`
-	Defaults   DefaultsConfig   `koanf:"defaults"`
-	Display    DisplayConfig    `koanf:"display"`
-	Server     ServerConfig     `koanf:"server"`
 	Embedding  EmbeddingConfig  `koanf:"embedding"`
 	Reflection ReflectionConfig `koanf:"reflection"`
+	Linking    LinkingConfig    `koanf:"linking"`
 }
 
-// APIConfig holds Claude API settings.
+// APIConfig holds Claude API settings (used by reflection only).
 type APIConfig struct {
-	Key          string `koanf:"key"`
-	ModelQuality string `koanf:"model_quality"`
-	ModelFast    string `koanf:"model_fast"`
-}
-
-// DefaultsConfig holds default behavior settings.
-type DefaultsConfig struct {
-	Mode               string `koanf:"mode"`
-	ReflectionInterval int    `koanf:"reflection_interval"`
-	MaxConvTurns       int    `koanf:"max_conversation_turns"`
-	AutoMemory         bool   `koanf:"auto_memory"`
-	ApprovalMode       string `koanf:"approval_mode"`
-}
-
-// DisplayConfig holds display preferences.
-type DisplayConfig struct {
-	ShowTokenUsage   bool   `koanf:"show_token_usage"`
-	ShowCost         bool   `koanf:"show_cost"`
-	StreamToolOutput bool   `koanf:"stream_tool_output"`
-	Theme            string `koanf:"theme"`           // "dark", "light", "auto"
-	ImageProtocol    string `koanf:"image_protocol"`  // "auto", "sixel", "kitty", "iterm2", "none"
-	PlainMode        bool   `koanf:"plain_mode"`      // force legacy REPL (no bubbletea)
-}
-
-// ServerConfig holds ghost serve settings.
-type ServerConfig struct {
-	ListenAddr string `koanf:"listen_addr"`
-	AuthToken  string `koanf:"auth_token"`
+	Key string `koanf:"key"`
 }
 
 // ReflectionConfig holds memory consolidation settings.
@@ -81,27 +52,22 @@ type EmbeddingConfig struct {
 	Dimensions int    `koanf:"dimensions"`
 }
 
+// LinkingConfig controls the memory auto-linking worker. Linking requires
+// embeddings, so it is only active when embedding is also enabled.
+type LinkingConfig struct {
+	Enabled   bool    `koanf:"enabled"`
+	Threshold float64 `koanf:"threshold"`
+}
+
 // defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{
-	"api.model_quality":          "claude-opus-4-6-20250514",
-	"api.model_fast":             "claude-sonnet-4-5-20250929",
-	"defaults.mode":              "chat",
-	"defaults.reflection_interval": 10,
-	"defaults.max_conversation_turns": 50,
-	"defaults.auto_memory":       true,
-	"defaults.approval_mode":     "normal",
-	"display.show_token_usage":   true,
-	"display.show_cost":          true,
-	"display.stream_tool_output": true,
-	"display.theme":              "auto",
-	"display.image_protocol":     "auto",
-	"display.plain_mode":         false,
-	"server.listen_addr":         "127.0.0.1:2187",
 	"embedding.enabled":          true,
 	"embedding.ollama_url":       "http://localhost:11434",
 	"embedding.model":            "nomic-embed-text:v1.5",
 	"embedding.dimensions":       768,
 	"reflection.backend":         "auto",
+	"linking.enabled":            true,
+	"linking.threshold":          0.70,
 }
 
 // Load reads configuration with layered precedence.

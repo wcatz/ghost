@@ -626,3 +626,73 @@ func TestVectorSearchHybrid_NoResults(t *testing.T) {
 		t.Fatalf("expected 0 results, got %d", len(results))
 	}
 }
+
+func TestSearchHybridGraphBonus(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// a matches the query vector exactly; c is textually and vectorially
+	// unrelated but linked to a; d is an unlinked distractor like c.
+	a, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "kubernetes ingress routing", Source: "manual", Importance: 0.7})
+	if err != nil {
+		t.Fatalf("Create a: %v", err)
+	}
+	c, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "zzz unrelated cooking recipe", Source: "manual", Importance: 0.7})
+	if err != nil {
+		t.Fatalf("Create c: %v", err)
+	}
+	d, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "zzz unrelated gardening tips", Source: "manual", Importance: 0.7})
+	if err != nil {
+		t.Fatalf("Create d: %v", err)
+	}
+
+	queryVec := []float32{1, 0, 0}
+	if err := s.StoreEmbedding(ctx, a, []float32{1, 0, 0}, "test"); err != nil {
+		t.Fatalf("StoreEmbedding a: %v", err)
+	}
+	if err := s.StoreEmbedding(ctx, c, []float32{0, 1, 0}, "test"); err != nil {
+		t.Fatalf("StoreEmbedding c: %v", err)
+	}
+	// d gets a strictly better vector score than c, so without the graph
+	// bonus d always outranks c — only a real link signal can flip them.
+	if err := s.StoreEmbedding(ctx, d, []float32{0.1, 1, 0}, "test"); err != nil {
+		t.Fatalf("StoreEmbedding d: %v", err)
+	}
+
+	rank := func(memories []Memory, id string) int {
+		for i, m := range memories {
+			if m.ID == id {
+				return i
+			}
+		}
+		return -1
+	}
+
+	// Without links: a ranks first, and d strictly outranks c.
+	before, err := s.SearchHybrid(ctx, testProject, "kubernetes ingress", queryVec, 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid before: %v", err)
+	}
+	if rank(before, a) != 0 {
+		t.Fatalf("a should rank first, got order %v", before)
+	}
+	if rc, rd := rank(before, c), rank(before, d); rd == -1 || rc == -1 || rd >= rc {
+		t.Fatalf("precondition failed: d (rank %d) should outrank c (rank %d) without links", rd, rc)
+	}
+
+	// Link a—c. Now c must outrank the symmetric distractor d.
+	if err := s.CreateLink(ctx, a, c, "related", 0.9, "auto"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	after, err := s.SearchHybrid(ctx, testProject, "kubernetes ingress", queryVec, 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid after: %v", err)
+	}
+	if rank(after, a) != 0 {
+		t.Fatalf("a should still rank first, got order %v", after)
+	}
+	rc, rd := rank(after, c), rank(after, d)
+	if rc == -1 || rd == -1 || rc >= rd {
+		t.Fatalf("linked c (rank %d) should outrank unlinked d (rank %d): %v", rc, rd, after)
+	}
+}
