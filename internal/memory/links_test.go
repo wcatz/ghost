@@ -321,3 +321,41 @@ func TestGraphNeighborsTraversesGlobalBridge(t *testing.T) {
 		t.Fatalf("got %+v, want g and z (global bridge traversable)", neighbors)
 	}
 }
+
+func TestEmbeddingAndLinkStats(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a := makeMemory(t, s, "stats memory one")
+	b := makeMemory(t, s, "stats memory two")
+	_ = makeMemory(t, s, "stats memory three unembedded")
+
+	if err := s.StoreEmbedding(ctx, a, []float32{1, 0}, "test"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	if err := s.StoreEmbedding(ctx, b, []float32{0, 1}, "test"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	if err := s.CreateLink(ctx, a, b, "related", 0.9, "auto"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	if err := s.MarkLinkScanned(ctx, a); err != nil {
+		t.Fatalf("MarkLinkScanned: %v", err)
+	}
+
+	embedded, total, err := s.EmbeddingStats(ctx)
+	if err != nil {
+		t.Fatalf("EmbeddingStats: %v", err)
+	}
+	if embedded != 2 || total != 3 {
+		t.Errorf("EmbeddingStats = %d/%d, want 2/3", embedded, total)
+	}
+
+	links, scans, err := s.LinkStats(ctx)
+	if err != nil {
+		t.Fatalf("LinkStats: %v", err)
+	}
+	if links != 1 || scans != 1 {
+		t.Errorf("LinkStats = links %d scans %d, want 1 and 1", links, scans)
+	}
+}

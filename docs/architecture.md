@@ -30,10 +30,13 @@ internal/
   embedding/               Local vector embeddings
     client.go              Ollama HTTP client (/api/embed)
     worker.go              Async batch embedder
+  linking/                 Memory auto-linking
+    worker.go              Sweeps embedded memories, links cosine neighbors ≥ threshold
   memory/                  Persistence layer
     store.go               SQLite CRUD, FTS5 search, time-decay scoring
-    schema.go              DDL (embedded via go:embed)
+    schema.go              DDL (Go string constant; migrations/001_init.sql is the reference copy)
     vector.go              Cosine similarity, hybrid RRF search
+    links.go               Memory links: edge CRUD, recursive-CTE graph traversal
   mcpserver/               MCP server (stdio transport)
     mcpserver.go           16 tools + 4 resources via go-sdk
   mcpinit/                 Claude Code integration setup
@@ -113,9 +116,18 @@ embedding.Worker goroutine:
              
 Search with embeddings enabled:
   store.SearchHybrid() → 70% vector (cosine) + 30% FTS5, RRF fusion (k=60)
-  
+                       + additive graph bonus: 2-hop link expansion from top-3 seeds
+
 Search without embeddings:
   store.SearchFTS() → FTS5 only (porter unicode61 tokenizer)
+
+linking.Worker goroutine:
+  every 2min → store.UnscannedEmbeddedMemoryIDs()
+             → store.SearchVector(own embedding)   # top cosine neighbors
+             → store.CreateLink(≥ threshold, 'related')
+             → store.MarkLinkScanned()
+  Links cascade-delete with memories and are rebuilt after reflection
+  rewrites them — same self-healing lifecycle as embeddings.
 ```
 
 ## SQLite Schema

@@ -49,6 +49,10 @@ type MemoryStore interface {
 	DeleteEmbedding(ctx context.Context, memoryID string) error
 	UnembeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error)
 	GetMemoryContent(ctx context.Context, id string) (string, error)
+	EmbeddingStats(ctx context.Context) (embedded, total int, err error)
+
+	// Links
+	LinkStats(ctx context.Context) (links, scans int, err error)
 
 	// Access tracking
 	Touch(ctx context.Context, ids []string) error

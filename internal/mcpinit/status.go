@@ -12,6 +12,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -113,6 +114,33 @@ func Status(w io.Writer) error {
 					check(redirected == total,
 						fmt.Sprintf("project redirects: %d/%d", redirected, total),
 						fmt.Sprintf("project redirects: %d/%d", redirected, total))
+				}
+
+				// 7. Embedding & linking health — silent embed failures
+				// leave vector search and memory linking inactive.
+				if cfg, cfgErr := config.Load(); cfgErr == nil {
+					if !cfg.Embedding.Enabled {
+						_, _ = fmt.Fprintln(w, "  - embedding disabled in config (FTS-only search)")
+					} else {
+						client := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
+						ctx := context.Background()
+						if !client.Alive(ctx) {
+							check(false, "", fmt.Sprintf("Ollama unreachable at %s — embeddings paused", cfg.Embedding.OllamaURL))
+						} else {
+							present, mErr := client.HasModel(ctx)
+							check(mErr == nil && present,
+								fmt.Sprintf("Ollama model %s installed", cfg.Embedding.Model),
+								fmt.Sprintf("Ollama model %s missing — run: ollama pull %s", cfg.Embedding.Model, cfg.Embedding.Model))
+						}
+						if embedded, total, sErr := store.EmbeddingStats(ctx); sErr == nil {
+							check(total == 0 || embedded > 0,
+								fmt.Sprintf("embeddings: %d/%d memories", embedded, total),
+								fmt.Sprintf("embeddings: %d/%d memories — vector search and linking inactive", embedded, total))
+						}
+						if links, scans, lErr := store.LinkStats(ctx); lErr == nil {
+							_, _ = fmt.Fprintf(w, "  - memory links: %d links, %d memories scanned\n", links, scans)
+						}
+					}
 				}
 			}
 		} else {

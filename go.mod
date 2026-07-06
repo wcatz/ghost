@@ -1,6 +1,6 @@
 module github.com/wcatz/ghost
 
-go 1.25.8
+go 1.26.4
 
 require (
 	github.com/knadh/koanf/parsers/yaml v1.1.0
