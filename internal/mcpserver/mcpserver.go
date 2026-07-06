@@ -769,7 +769,9 @@ func (s *Server) registerTools() {
 			if d, ok := s.embedder.(embedderDiagnostics); ok {
 				if !d.Alive(ctx) {
 					sb.WriteString("  ⚠ Ollama unreachable\n")
-				} else if present, err := d.HasModel(ctx); err == nil && !present {
+				} else if present, err := d.HasModel(ctx); err != nil {
+					fmt.Fprintf(&sb, "  ⚠ could not check Ollama model %q: %v\n", d.Model(), err)
+				} else if !present {
 					fmt.Fprintf(&sb, "  ⚠ model %q not installed in Ollama — run: ollama pull %s\n", d.Model(), d.Model())
 				}
 			}
