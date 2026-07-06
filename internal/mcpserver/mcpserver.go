@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/claudeimport"
@@ -21,6 +22,14 @@ import (
 // Embedder generates vector embeddings for text. Optional — when nil, search falls back to FTS only.
 type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
+}
+
+// embedderDiagnostics is optionally implemented by embedders that can report
+// backend health (the Ollama client does). Used by ghost_health.
+type embedderDiagnostics interface {
+	Alive(ctx context.Context) bool
+	HasModel(ctx context.Context) (bool, error)
+	Model() string
 }
 
 func boolPtr(b bool) *bool { return &b }
@@ -273,7 +282,7 @@ func (s *Server) registerTools() {
 		const maxContentLen = 2000
 		truncated := false
 		if len(args.Content) > maxContentLen {
-			args.Content = args.Content[:maxContentLen]
+			args.Content = truncateUTF8(args.Content, maxContentLen)
 			truncated = true
 		}
 
@@ -548,7 +557,7 @@ func (s *Server) registerTools() {
 		const maxGlobalContentLen = 2000
 		globalTruncated := false
 		if len(args.Content) > maxGlobalContentLen {
-			args.Content = args.Content[:maxGlobalContentLen]
+			args.Content = truncateUTF8(args.Content, maxGlobalContentLen)
 			globalTruncated = true
 		}
 
@@ -721,7 +730,7 @@ func (s *Server) registerTools() {
 	// ghost_health — system health and stats.
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_health",
-		Description: "Get Ghost system health: project count, memory counts, embedding status.",
+		Description: "Get Ghost system health: project count, memory counts, embedding coverage (Ollama reachability, model presence), and memory-link stats. Use when search results seem incomplete or memory features appear inactive.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -748,9 +757,28 @@ func (s *Server) registerTools() {
 		fmt.Fprintf(&sb, "\n**Total memories:** %d\n", totalMemories)
 
 		if s.embedder != nil {
-			sb.WriteString("**Embeddings:** enabled\n")
+			if embedded, total, err := s.store.EmbeddingStats(ctx); err == nil {
+				fmt.Fprintf(&sb, "**Embeddings:** enabled — %d/%d memories embedded\n", embedded, total)
+				if embedded == 0 && total > 0 {
+					sb.WriteString("  ⚠ no memories are embedded — vector search and memory linking are inactive\n")
+				}
+			} else {
+				sb.WriteString("**Embeddings:** enabled\n")
+			}
+			// Diagnose the Ollama side when the embedder supports it.
+			if d, ok := s.embedder.(embedderDiagnostics); ok {
+				if !d.Alive(ctx) {
+					sb.WriteString("  ⚠ Ollama unreachable\n")
+				} else if present, err := d.HasModel(ctx); err == nil && !present {
+					fmt.Fprintf(&sb, "  ⚠ model %q not installed in Ollama — run: ollama pull %s\n", d.Model(), d.Model())
+				}
+			}
 		} else {
 			sb.WriteString("**Embeddings:** disabled\n")
+		}
+
+		if links, scans, err := s.store.LinkStats(ctx); err == nil {
+			fmt.Fprintf(&sb, "**Memory links:** %d links, %d memories scanned\n", links, scans)
 		}
 
 		return &mcp.CallToolResult{
@@ -1141,6 +1169,18 @@ func parseProjectIDFromURI(rawURI string) (string, error) {
 		return "", fmt.Errorf("invalid project_id encoding in URI %q: %w", rawURI, err)
 	}
 	return projectID, nil
+}
+
+// truncateUTF8 cuts s to at most maxBytes bytes without splitting a
+// multi-byte UTF-8 character.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
 }
 
 func formatMemories(memories []memory.Memory) string {
