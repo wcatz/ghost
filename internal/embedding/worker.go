@@ -4,10 +4,13 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // memoryStore is the subset of provider.MemoryStore needed by the worker.
 type memoryStore interface {
+	ListProjects(ctx context.Context) ([]memory.Project, error)
 	UnembeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error)
 	GetMemoryContent(ctx context.Context, id string) (string, error)
 	StoreEmbedding(ctx context.Context, memoryID string, vec []float32, model string) error
@@ -32,14 +35,12 @@ func NewWorker(client *Client, store memoryStore, logger *slog.Logger, interval 
 }
 
 // Run starts the worker loop. Blocks until ctx is cancelled.
+// Project IDs sent on the channel are processed immediately (new saves);
+// the periodic sweep covers ALL projects so pre-existing memories backfill
+// even when nothing is saved in the current session.
 func (w *Worker) Run(ctx context.Context, projectIDs <-chan string) {
-	// Process any project ID sent to us immediately.
-	// Also run a periodic sweep.
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
-
-	// Track active projects for periodic sweeps.
-	projects := make(map[string]bool)
 
 	for {
 		select {
@@ -50,14 +51,29 @@ func (w *Worker) Run(ctx context.Context, projectIDs <-chan string) {
 			if !ok {
 				return
 			}
-			projects[pid] = true
 			w.processProject(ctx, pid)
 
 		case <-ticker.C:
-			for pid := range projects {
-				w.processProject(ctx, pid)
-			}
+			w.SweepOnce(ctx)
 		}
+	}
+}
+
+// SweepOnce embeds unembedded memories across all projects.
+func (w *Worker) SweepOnce(ctx context.Context) {
+	if !w.client.Alive(ctx) {
+		return
+	}
+	projects, err := w.store.ListProjects(ctx)
+	if err != nil {
+		w.logger.Error("embed: list projects", "error", err)
+		return
+	}
+	for _, p := range projects {
+		if ctx.Err() != nil {
+			return
+		}
+		w.processProject(ctx, p.ID)
 	}
 }
 
