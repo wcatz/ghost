@@ -98,7 +98,8 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 
 	w.logger.Info("embedding memories", "project_id", projectID, "count", len(ids))
 
-	embedded := 0
+	embedded, failed := 0, 0
+	var lastErr error
 	for _, id := range ids {
 		if ctx.Err() != nil {
 			return
@@ -112,6 +113,8 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 
 		vec, err := w.client.Embed(ctx, content)
 		if err != nil {
+			failed++
+			lastErr = err
 			w.logger.Debug("embed: ollama", "error", err, "memory_id", id)
 			// If Ollama went down mid-batch, stop.
 			if !w.client.Alive(ctx) {
@@ -126,6 +129,13 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			continue
 		}
 		embedded++
+	}
+
+	// Surface persistent embed failures once per sweep — a missing Ollama
+	// model otherwise fails silently at debug level forever.
+	if failed > 0 {
+		w.logger.Warn("embedding failures this sweep — check `ghost mcp status`",
+			"project_id", projectID, "failed", failed, "embedded", embedded, "last_error", lastErr)
 	}
 
 	if embedded > 0 {

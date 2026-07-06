@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -102,6 +103,55 @@ func (c *Client) Alive(ctx context.Context) bool {
 	}
 	resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
+}
+
+// tagsResponse is the Ollama /api/tags response.
+type tagsResponse struct {
+	Models []struct {
+		Name string `json:"name"`
+	} `json:"models"`
+}
+
+// HasModel reports whether the configured model is installed in Ollama.
+// A model name without a tag matches its ":latest" variant, mirroring
+// Ollama's own resolution.
+func (c *Client) HasModel(ctx context.Context) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/tags", nil)
+	if err != nil {
+		return false, fmt.Errorf("create request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("ollama tags: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("ollama tags: status %d", resp.StatusCode)
+	}
+	var tags tagsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return false, fmt.Errorf("decode tags: %w", err)
+	}
+
+	want := c.model
+	if !strings.Contains(want, ":") {
+		want += ":latest"
+	}
+	for _, m := range tags.Models {
+		if m.Name == want {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// Model returns the configured model name.
+func (c *Client) Model() string {
+	return c.model
 }
 
 // Dimensions returns the expected embedding dimensionality.
