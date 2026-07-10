@@ -66,3 +66,34 @@ Embedding backfill bug: ticker only swept seen projects.
 		t.Errorf("missing target should render short ID without wikilink:\n%s", got2)
 	}
 }
+
+func TestRenderDecision(t *testing.T) {
+	d := memory.Decision{
+		ID: "dec0000011223344", ProjectID: "ghost", Title: "Use SQLite",
+		Decision: "SQLite over Postgres.", Rationale: "Zero infra.",
+		Alternatives: []string{"Postgres", "BoltDB"}, Status: "active",
+		Tags: []string{"storage"}, CreatedAt: "2026-07-01 08:00:00", UpdatedAt: "2026-07-01 08:00:00",
+	}
+	got := renderDecision(d)
+	for _, want := range []string{"ghost_id: dec0000011223344", "type: decision", "status: active",
+		"# Use SQLite", "SQLite over Postgres.", "## Rationale", "Zero infra.", "## Alternatives", "- Postgres"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("renderDecision missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderTask(t *testing.T) {
+	tk := memory.Task{
+		ID: "task000011223344", ProjectID: "ghost", Title: "Ship mirror",
+		Description: "Build it.", Status: "active", Priority: 2,
+		CreatedAt: "2026-07-10 10:00:00", UpdatedAt: "2026-07-10 10:00:00",
+	}
+	got := renderTask(tk)
+	for _, want := range []string{"ghost_id: task000011223344", "type: task", "status: active",
+		"priority: 2", "# Ship mirror", "Build it."} {
+		if !strings.Contains(got, want) {
+			t.Errorf("renderTask missing %q in:\n%s", want, got)
+		}
+	}
+}

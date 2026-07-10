@@ -96,3 +96,53 @@ func renderMemory(m memory.Memory, links []memory.Link, fileFor map[string]strin
 	}
 	return b.String()
 }
+
+// fileNameFor derives a filename for a decision or task from its title.
+func fileNameFor(title, id string) string { return slug(title) + "-" + id8(id) + ".md" }
+
+func renderDecision(d memory.Decision) string {
+	var b strings.Builder
+	b.WriteString("---\n")
+	fm(&b, "ghost_id", d.ID)
+	fm(&b, "type", "decision")
+	fm(&b, "status", d.Status)
+	fm(&b, "project", d.ProjectID)
+	fm(&b, "tags", "["+strings.Join(d.Tags, ", ")+"]")
+	fm(&b, "created", date(d.CreatedAt))
+	fm(&b, "updated", date(d.UpdatedAt))
+	b.WriteString("---\n")
+	b.WriteString(banner)
+	fmt.Fprintf(&b, "\n# %s\n\n%s\n", d.Title, strings.TrimRight(d.Decision, "\n"))
+	if d.Rationale != "" {
+		fmt.Fprintf(&b, "\n## Rationale\n\n%s\n", strings.TrimRight(d.Rationale, "\n"))
+	}
+	if len(d.Alternatives) > 0 {
+		b.WriteString("\n## Alternatives\n\n")
+		for _, a := range d.Alternatives {
+			fmt.Fprintf(&b, "- %s\n", a)
+		}
+	}
+	return b.String()
+}
+
+func renderTask(t memory.Task) string {
+	var b strings.Builder
+	b.WriteString("---\n")
+	fm(&b, "ghost_id", t.ID)
+	fm(&b, "type", "task")
+	fm(&b, "status", t.Status)
+	fm(&b, "priority", fmt.Sprintf("%d", t.Priority))
+	fm(&b, "project", t.ProjectID)
+	fm(&b, "created", date(t.CreatedAt))
+	fm(&b, "updated", date(t.UpdatedAt))
+	b.WriteString("---\n")
+	b.WriteString(banner)
+	fmt.Fprintf(&b, "\n# %s\n", t.Title)
+	if t.Description != "" {
+		fmt.Fprintf(&b, "\n%s\n", strings.TrimRight(t.Description, "\n"))
+	}
+	if t.Notes != "" {
+		fmt.Fprintf(&b, "\n## Notes\n\n%s\n", strings.TrimRight(t.Notes, "\n"))
+	}
+	return b.String()
+}
