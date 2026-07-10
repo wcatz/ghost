@@ -2,343 +2,239 @@
 
 <img src="assets/ghost.png" alt="Ghost" width="120" align="right" />
 
+**MCP memory server for Claude Code, Cursor, and any MCP client. Pure Go. Single binary. No external services required.**
+
+Your agent's memory, on your disk — no cloud, no accounts, no subscription. One SQLite file you own.
+
 [![CI](https://github.com/wcatz/ghost/actions/workflows/ci.yml/badge.svg)](https://github.com/wcatz/ghost/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/wcatz/ghost)](https://github.com/wcatz/ghost/releases/latest)
 [![Go](https://img.shields.io/github/go-mod/go-version/wcatz/ghost)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-MCP memory server for Claude Code, Cursor, and any MCP client. Pure Go. Single binary. No external services required.
+<!-- TODO: asciinema demo — `ghost mcp init` + a session-start context injection -->
 
-## Why Ghost?
+---
 
-Claude Code's built-in memory is a markdown file with a **200-line cap**. No search. No categories. No importance ranking. Every project is siloed. After ten sessions the file is 30% redundant, and the architecture decision you saved last week gets silently truncated because it landed on line 201.
+## Quick start
 
-Ghost replaces that with a real memory system:
-
-| | Claude Code built-in | Ghost |
-|---|---|---|
-| Storage | Flat `.md` files, 200-line cap | SQLite + FTS5, unlimited |
-| Search | None (linear load) | Full-text search + optional vector similarity |
-| Categorization | None | 8 categories with importance scores (0.0–1.0) |
-| Dedup | None (appends forever) | FTS-based upsert — merges on save |
-| Consolidation | None | Haiku LLM or local Jaccard similarity |
-| Time decay | None (stale facts persist equally) | Category-aware: conventions never decay, gotchas fade at 30 days |
-| Cross-project | None (siloed per directory) | `ghost_search_all` + `_global` project |
-| Memory graph | None | Auto-linked related memories, graph-aware search |
-| Migration | N/A | `ghost mcp init` imports your existing memories |
-| Clients | Claude Code only | Any MCP client (Claude Code, Cursor, Goose, etc.) |
-
-One command migrates your existing Claude Code memories into Ghost. Nothing is lost.
-
-## Quick Start
-
-### 1. Install
+Two commands. No accounts, no keys, no docker-compose, no vector database.
 
 ```bash
 go install github.com/wcatz/ghost/cmd/ghost@latest
-```
-
-This puts the binary in your `$GOBIN` (default `~/go/bin/`). Make sure it's on your `$PATH`. Or download a pre-built binary from [Releases](https://github.com/wcatz/ghost/releases) and put it wherever you want.
-
-### 2. Connect to Claude Code
-
-```bash
 ghost mcp init
 ```
 
-```
-[1/7] Checking prerequisites...
-  ✓ ghost binary at ~/go/bin/ghost
-  ✓ claude CLI at ~/.local/bin/claude
+`ghost mcp init` registers Ghost as an MCP server, installs the session-start hook, **migrates your existing Claude Code memories** — projects Ghost already knows are imported at init, the rest auto-import on first contact (read-only, nothing is lost) — and disables the built-in file memory so the two don't fight. It's idempotent and non-destructive — safe to re-run anytime, and `--dry-run` previews every change.
 
-[2/7] Registering MCP server...
-  ✓ ghost MCP server registered
+Then start a session. Ghost injects your project's context automatically and starts remembering.
 
-[3/7] Adding tool permissions...
-  + 16 mcp__ghost__* tools added to allow list
+No Go toolchain? Grab a prebuilt binary from [Releases](https://github.com/wcatz/ghost/releases/latest) — linux, macOS, and Windows, amd64 and arm64, with `checksums.txt`. Building from source needs Go 1.26+ (older toolchains fetch it automatically via `GOTOOLCHAIN=auto`).
 
-[4/7] Configuring SessionStart hook...
-  + ghost hook session-start — injects project context at startup
-
-[5/7] Disabling Claude Code built-in memory...
-  + set autoMemoryEnabled: false (disables competing file-memory)
-
-[6/7] Importing Claude Code memories...
-  ✓ myproject — 8 memories imported
-  ✓ infra — 12 memories imported
-
-[7/7] Writing project memory redirects...
-  ✓ myproject — redirect written
-  ✓ infra — redirect written
-
-Done! Restart Claude Code to activate.
-```
-
-| Step | What happens |
-|------|-------------|
-| Prerequisites | Finds `ghost` and `claude` binaries on your PATH |
-| MCP registration | `claude mcp add ghost` — Claude Code discovers Ghost's 16 tools |
-| Permissions | Pre-approves all `mcp__ghost__*` tools — no per-call prompts |
-| SessionStart hook | Injects project memories, tasks, decisions, globals, and session count into Claude's context |
-| Disable built-in memory | Sets `autoMemoryEnabled: false` in `~/.claude/settings.json` — stops Claude Code writing its own flat-file memory that would compete with Ghost |
-| Memory import | Migrates Claude Code's `~/.claude/projects/*/memory/*.md` into Ghost (deduplicated) |
-| Project redirects | Writes `MEMORY.md` pointing Claude to Ghost instead of its built-in memory |
-
-After setup, Claude automatically loads your project context at session start and saves discoveries during work. No manual prompting needed.
-
-```bash
-ghost mcp status          # verify integration health
-ghost mcp init --dry-run  # preview changes without writing
-```
-
-Idempotent and non-destructive — safe to re-run after updates. Existing Claude Code `MEMORY.md` files with user content are never overwritten. Permissions and hooks are added, never removed. Use `--dry-run` to preview before committing.
-
-### Other MCP clients (Cursor, Goose, etc.)
-
-Add Ghost to your MCP config:
+**Using Cursor, Goose, or another MCP client?** Ghost speaks standard MCP over stdio — point any client at the binary:
 
 ```json
-{
-  "mcpServers": {
-    "ghost": {
-      "type": "stdio",
-      "command": "ghost",
-      "args": ["mcp"]
-    }
-  }
-}
+{ "mcpServers": { "ghost": { "type": "stdio", "command": "ghost", "args": ["mcp"] } } }
 ```
 
-## How It Works
+**Docker** (multi-arch, amd64 + arm64):
 
-Ghost is a memory pipeline with six stages:
-
-```
-Save → Embed → Link → Search → Consolidate → Decay
+```bash
+docker run -i -e XDG_DATA_HOME=/data -v ghost-data:/data ghcr.io/wcatz/ghost:latest
 ```
 
-**Save** — Claude (or you) saves memories via MCP tools. Each memory has a category, importance score (0.0-1.0), and tags. FTS-based upsert deduplicates on save — if a similar memory already exists in the same category, it strengthens instead of creating a duplicate.
+`-i` matters — MCP speaks over stdio.
 
-**Embed** — When Ollama is available, a background worker vectorizes each memory for semantic search. Fully optional: without it, Ghost is FTS-only.
+## Why Ghost?
 
-**Link** — A background worker connects related memories by embedding similarity (cosine ≥ 0.70) into a memory graph. Links self-heal after consolidation rewrites memories.
+Coding agents forget everything between sessions. You re-explain your architecture, your conventions, and that one gotcha with the staging database — every single day.
 
-**Search** — FTS5 full-text search with optional vector similarity (Ollama embeddings), plus a graph-expansion signal: memories linked to your top hits get boosted, surfacing related knowledge a keyword match would miss. Cross-project search finds knowledge from other repos. Global memories (`_global`) are included in every project's context.
+Claude Code's built-in memory is a markdown file with a limited load window ([~200 lines](https://code.claude.com/docs/en/memory)). No search, no categories, no dedup, and memory is siloed per repository. Ghost replaces it with a real memory system:
 
-**Consolidate** — Periodic reflection merges duplicates, prunes noise, and promotes cross-project knowledge to global scope. Two tiers:
+| | Claude Code built-in | Ghost |
+|---|---|---|
+| Storage | Flat `.md` files, limited load window | SQLite + FTS5, unlimited |
+| Search | None (linear load) | Full-text + optional local vector search |
+| Categorization | None | 8 categories with importance scores |
+| Dedup | None (appends forever) | FTS-based upsert — merges on save |
+| Consolidation | None | Haiku LLM or local Jaccard tier |
+| Time decay | None (stale facts persist equally) | Category-aware: conventions never decay, gotchas fade |
+| Cross-project | None (siloed per repository) | `ghost_search_all` + `_global` project |
+| Memory graph | None | Auto-linked related memories, graph-aware search |
+| Clients | Claude Code only | Any MCP client |
 
-| Tier | Backend | Cost | How it works |
-|------|---------|------|-------------|
-| Haiku | Anthropic API | ~$0.001/run | LLM reads all memories + recent conversations, outputs consolidated set |
-| SQLite | Local | Free | Jaccard token similarity, merges >50% overlap, always available |
+Switching migrates your existing Claude Code memories into Ghost — at init or on first contact. Nothing is lost.
 
-A quality gate rejects garbage output (< 30% of input) and falls through to the next tier.
+## How it stacks up
 
-**Decay** — Time-based scoring fades stale memories by category:
+Ghost's bet: a memory system should be *smaller* than the thing it remembers. The alternatives make you choose between cloud memory services (your codebase's context on someone else's server, metered per request) and self-hosted stacks (Postgres plus a vector DB before you've saved a single memory).
 
-| Category | Decay | What it captures |
-|----------|-------|---------|
-| preference | none | How you like to work |
-| convention | none | Naming, formatting, workflow rules |
-| fact | none | Endpoints, ports, credentials, constants |
-| architecture | 45-day | System design, component relationships |
-| pattern | 45-day | Recurring approaches, idioms |
-| decision | 30-day | Choices made and why |
-| gotcha | 30-day | Bugs, edge cases, surprises |
-| dependency | 30-day | Library versions, API quirks |
+As far as we know, Ghost is the only memory system that packs local hybrid vector + full-text search, automatic consolidation, time-decay scoring, and a memory graph into a single zero-infrastructure binary. The field as of July 2026 — corrections welcome, [open an issue](https://github.com/wcatz/ghost/issues):
 
-## MCP Tools
+| | What you install | Vector search | Consolidation | Time decay | Memory graph | Any MCP client |
+|---|---|---|---|---|---|---|
+| **Ghost** | one static Go binary | local (Ollama, optional) | yes | yes | yes | yes |
+| Engram | one Go binary | no (FTS only) | no | no | no | yes |
+| claude-mem | npm package | yes | yes | no | no | Claude Code only |
+| Mem0 (self-hosted) | FastAPI + Postgres + Qdrant/Neo4j | server-side | yes | no | graph variant | via OpenMemory (Docker) |
+| basic-memory | Python (AGPL) | yes | manual capture | no | wikilinks | yes |
 
-Ghost exposes 16 tools to any MCP client:
+Mem0, Zep, and supermemory are excellent hosted products — but self-hosting them means running a service stack. If all you want is full-text search in a single binary, Engram is a fine, simpler choice.
 
-| Tool | What it does |
-|------|-------------|
-| `ghost_project_context` | Load top memories ranked by importance + time decay |
-| `ghost_memory_save` | Store a memory with category, importance, tags (upserts) |
-| `ghost_memory_search` | FTS5 + vector hybrid search, optional category filter |
-| `ghost_memories_list` | List memories, optionally filtered by category |
-| `ghost_memory_delete` | Delete by ID |
-| `ghost_memory_pin` | Pin/unpin — pinned memories stay at top and survive pruning |
-| `ghost_list_projects` | All known projects with memory counts |
-| `ghost_search_all` | Cross-project memory search |
-| `ghost_save_global` | Save a memory that applies to all projects |
-| `ghost_task_create` | Track bugs, features, follow-ups |
-| `ghost_task_list` | List tasks by project and status |
-| `ghost_task_update` | Update task status, priority, or description |
-| `ghost_task_complete` | Mark done with optional notes |
-| `ghost_decision_record` | Architectural decision with rationale and alternatives |
-| `ghost_decisions_list` | List decisions with rationale, alternatives, status |
-| `ghost_health` | System health (memory count, embedding status, costs) |
+## The questions you should be asking
 
-**Task statuses:** `pending` → `active` → `done`. Tasks can also be set to `blocked` from any non-done state and return to `active` when unblocked. `done` tasks are conventionally closed — prefer creating a new task over re-opening a completed one.
+### Where does my data go?
 
-**Resources (4):**
+One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`). Ghost makes no network calls in normal operation, with three exceptions you control: **localhost** Ollama for embeddings (optional), the Claude API *only if* you run `ghost reflect` with the Haiku tier (needs `ANTHROPIC_API_KEY`; the SQLite tier is fully offline), and the GitHub API *only if* you run `ghost upgrade`. That's the complete list.
 
-| Resource | Description |
-|----------|-------------|
-| `ghost://project/{id}/context` | Project context (memories + learned context + globals) |
-| `ghost://project/{id}/decisions` | Active decisions — pin to survive context compaction |
-| `ghost://project/{id}/tasks` | Open tasks — pin to survive context compaction |
-| `ghost://memories/global` | Global memories accessible to all projects |
+### What exactly gets injected into my agent's context?
 
-**Learned context** is a prose summary of the project generated by `ghost reflect`. It captures patterns and decisions that individual memories may not convey. Ghost injects it alongside top memories in every session; it is only updated during a manual `ghost reflect` run, never during normal MCP usage.
+A bounded digest, and you can inspect it yourself. The session-start hook emits: project name, top memories, learned context, open tasks, and active decisions. See precisely what your agent sees:
 
-The MCP server ships with embedded instructions that teach Claude when to save, which categories to use, and how to leverage cross-project search — so it works proactively without configuration.
+```bash
+echo '{"cwd":"'"$PWD"'"}' | ghost hook session-start
+```
+
+No mystery blob in your system prompt. Save-time dedup keeps the digest from bloating, and time-decay scoring weights `ghost_project_context` and resource reads toward what's still true.
+
+### What's the exit story?
+
+Your memories are a plain SQLite database in one file. Open it with `sqlite3`, query it with any tool, back it up with `cp`. No proprietary format, no export request form. The schema is a readable Go string constant in [`internal/memory/schema.go`](internal/memory/schema.go). If you stop using Ghost tomorrow, your memories are sitting there in a format that will outlive all of us.
+
+Switching *in* is just as easy: `ghost mcp init` imports Claude Code memories, and even without running init, Ghost auto-imports (read-only) on the first `ghost_project_context` call for a project with zero memories.
+
+### Where's the off switch?
+
+- **Per client:** remove the `ghost` entry from your MCP config. Ghost only runs when your client spawns it over stdio — there is no daemon.
+- **Embeddings:** set `embedding.enabled: false` in `~/.config/ghost/config.yaml`.
+- **Consolidation:** never runs unless you invoke `ghost reflect` — and that's a dry run unless you pass `--apply`.
+- **Everything:** delete one directory (`~/.local/share/ghost`). There is nothing else.
+
+### What does it cost to run?
+
+$0/month. No metered API in the hot path. The only paid call in the entire codebase is the optional Haiku consolidation tier — and it has a free offline fallback.
+
+## How it works
+
+Ghost is a memory pipeline: **Save → Embed → Link → Search → Consolidate → Decay**.
+
+### 8 memory categories
+
+`architecture` · `decision` · `pattern` · `convention` · `gotcha` · `dependency` · `preference` · `fact` — enforced by a SQLite CHECK constraint, not vibes. Saving a near-duplicate strengthens the existing memory instead of piling up copies (FTS-overlap dedup, same category).
+
+### Hybrid search
+
+Full-text (FTS5) and vector results are fused with Reciprocal Rank Fusion (k=60), weighted 70% vector / 30% FTS. A background worker links similar memories (cosine ≥ 0.70) into a graph; search adds an additive graph-expansion bonus (weight 0.15, up to 3 seeds, 2 hops) so related memories surface together. Links self-heal after consolidation rewrites memories.
+
+Vectors come from a local Ollama instance (`nomic-embed-text:v1.5`, 768 dims) if one is running. **No Ollama? No error, no setup step** — Ghost is fully functional with FTS5-only search and quietly upgrades to hybrid the moment Ollama appears:
+
+```bash
+ollama pull nomic-embed-text:v1.5
+```
+
+### Time-decay scoring
+
+Facts about your stack shouldn't expire. Last month's debugging detour should. The score multiplier is `max(floor, 1 / (1 + age_days / scale))`:
+
+| Category | Decay | Floor |
+|---|---|---|
+| `preference`, `convention`, `fact` | never | — |
+| `architecture`, `pattern` | 45-day scale | 0.3 |
+| `decision`, `gotcha`, `dependency` | 30-day scale | 0.15 |
+
+Pinned memories get a 1.5× boost on top.
+
+### Consolidation you can undo
+
+`ghost reflect` merges duplicates, prunes noise, and promotes cross-project knowledge to global scope. Tiered: Claude Haiku first (needs an API key; roughly $0.001/run — an estimate from Haiku 4.5 pricing, not a measurement), falling back to a fully offline SQLite tier (Jaccard ≥ 0.5, same-category merges). Because an LLM rewriting your memory store is scary, the guardrails are layered:
+
+- **Dry run by default** — see the diff before `--apply`
+- **Auto-snapshot before every replace**, keeping the 3 most recent per project; `ghost reflect --restore` is the undo button
+- **Empty-set refusal** — the store layer will not replace your memories with nothing, ever
+- **Quality gate** — in auto mode, output shrinking below 30% of input is rejected and the next tier is tried (when input ≥ 6 memories)
+- **Manually saved memories are always preserved**
+
+### Tasks, decisions, and global memory
+
+Beyond memories: tasks (`pending`/`active`/`done`/`blocked`), decision records with rationale and alternatives (`active`/`superseded`/`revisit`), and a `_global` project whose memories are included in every project's context. Projects resolve by longest path-prefix match with a basename fallback, so worktrees and moved checkouts still find their memory.
+
+## MCP surface
+
+16 tools, 4 resources:
+
+| Group | Tools |
+|---|---|
+| Memory | `ghost_memory_save` `ghost_memory_search` `ghost_search_all` `ghost_memories_list` `ghost_memory_delete` `ghost_memory_pin` `ghost_save_global` |
+| Context | `ghost_project_context` `ghost_list_projects` `ghost_health` |
+| Tasks | `ghost_task_create` `ghost_task_list` `ghost_task_update` `ghost_task_complete` |
+| Decisions | `ghost_decision_record` `ghost_decisions_list` |
+
+Resources: project context, global memories, project decisions, project tasks — pin them in clients that support it to survive context compaction.
+
+The server ships with embedded instructions that teach the agent when to save, which categories to use, and how to leverage cross-project search — it works proactively without configuration. Full architecture notes in [docs/architecture.md](docs/architecture.md).
 
 ## CLI
 
 ```
-ghost mcp                    # Run MCP server on stdio (used by Claude Code)
+ghost mcp                    # Run MCP server on stdio (used by your MCP client)
 ghost mcp init [--dry-run]   # Configure Claude Code integration
-ghost mcp status             # Check integration health
-ghost hook session-start     # SessionStart hook (called by Claude Code)
-ghost reflect <project>      # Manual memory consolidation (dry-run by default)
-ghost upgrade                # Self-update from GitHub Releases
+ghost mcp status             # Deep health checks (incl. Ollama reachability, model presence)
+ghost hook session-start     # SessionStart hook — prints exactly what gets injected
+ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
+ghost upgrade                # Self-update from GitHub Releases (linux/macOS; Windows: re-download)
 ghost version                # Print version
 ```
 
-The `ghost hook session-start` command reads `{"cwd": "<path>"}` from stdin and writes a Markdown system-reminder to stdout containing top memories, open tasks, active decisions, and global memories — injected into the session before any MCP tools are available.
-
-`ghost reflect` flags: `--apply` to save, `--restore` to undo, `--tier haiku|sqlite|auto`.
-
-## Install
-
-Requires Go 1.25+.
-
-```bash
-go install github.com/wcatz/ghost/cmd/ghost@latest
-```
-
-Or build from source:
-
-```bash
-git clone https://github.com/wcatz/ghost.git && cd ghost && make build
-```
-
-### Pre-built binaries
-
-Download from [GitHub Releases](https://github.com/wcatz/ghost/releases) — linux, macOS, Windows (amd64 + arm64).
-
-### Update
-
-```bash
-ghost upgrade    # self-update from GitHub Releases
-```
-
-### Docker
-
-```bash
-docker run -v ghost-data:/data ghcr.io/wcatz/ghost:latest
-```
-
----
-
-## With Superpowers
-
-[Superpowers](https://github.com/obra/superpowers) is a skills framework for AI coding agents — it enforces brainstorm-first planning, mandatory TDD, and subagent-driven execution. Ghost and Superpowers are built to complement each other: Superpowers structures _how_ work gets done, Ghost remembers _what was learned_.
-
-### The workflow
-
-```
-Session start
-  └── Ghost SessionStart hook → injects project context (memories, tasks, decisions)
-  
-User asks for a new feature
-  └── Superpowers brainstorm skill → clarifies requirements
-  └── Superpowers calls ghost_project_context → loads codebase history and past decisions
-  └── Superpowers writes a plan informed by Ghost's memory of conventions and gotchas
-
-Subagents execute the plan
-  └── Each phase ends with ghost_memory_save → persists what was learned
-  └── Architectural choices go through ghost_decision_record
-  └── Bugs found along the way → category: gotcha, importance: 0.9
-
-Next session
-  └── Ghost hook fires → top memories already in context
-  └── No re-explaining the codebase, conventions, or past decisions
-```
-
-### Install Superpowers for Claude Code
-
-In any Claude Code session, run:
-
-```
-/plugin install superpowers@claude-plugins-official
-```
-
-No additional configuration needed — skills trigger automatically based on what you ask for.
-
-### Ghost MCP tools Superpowers uses
-
-| Tool | When Superpowers calls it |
-|------|--------------------------|
-| `ghost_project_context` | Brainstorm phase — loads codebase history before planning |
-| `ghost_memory_search` | Before touching any component — checks for known gotchas |
-| `ghost_decision_record` | When an architectural choice is made |
-| `ghost_memory_save` | After each subagent phase completes |
-| `ghost_task_create` | To track discovered follow-ups across sessions |
-
----
-
 ## Configuration
 
-Config loads in layers (later overrides earlier):
+Ghost works with zero config. When you want to change something, layers are (later wins):
 
 1. Compiled defaults
 2. `/etc/ghost/config.yaml`
 3. `~/.config/ghost/config.yaml`
-4. `.ghost/config.yaml` (per-project)
-5. `.ghost/config.local.yaml` (gitignored)
-6. `GHOST_*` environment variables
-
-**Minimal config (no file needed):**
-
-Ghost stores memories in `~/.local/share/ghost/ghost.db`. No configuration required for basic MCP usage.
-
-**Optional embedding (vector search):**
+4. `GHOST_*` environment variables, plus `ANTHROPIC_API_KEY` for the Haiku reflection tier
 
 ```yaml
 embedding:
-  enabled: true
+  enabled: true                          # default; degrades gracefully without Ollama
   ollama_url: "http://localhost:11434"
   model: "nomic-embed-text:v1.5"
-```
-
-Requires [Ollama](https://ollama.ai) running locally (`ollama pull nomic-embed-text:v1.5`). Enables hybrid FTS5 + vector search and automatic memory linking:
-
-```yaml
 linking:
-  enabled: true      # on by default when embedding is enabled
-  threshold: 0.70    # min cosine similarity to auto-link memories
+  enabled: true                          # on by default when embedding is enabled
+  threshold: 0.70                        # min cosine similarity to auto-link memories
 ```
 
-Verify the embedding pipeline anytime with `ghost mcp status`.
+Note: env-var names map underscores to config dots, so keys that themselves contain underscores (e.g. `embedding.ollama_url`) must be set in a config file, not via env.
 
-**Optional reflection (memory consolidation with Haiku):**
+## Benchmarks
 
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-ghost reflect myproject --apply
-```
+**None published yet — and we won't fake them.** Several popular memory benchmarks have known problems (LOCOMO's answer key and judge have been publicly audited as unreliable), so we're not rushing to publish a big green number. What's planned, in order — full methodology in [docs/benchmarks.md](docs/benchmarks.md):
 
-Without an API key, Ghost falls back to the free SQLite-based Jaccard consolidator.
+1. **LongMemEval-S retrieval metrics** — session-level Recall@k / NDCG@k against the dataset's official evidence labels. No LLM judge, $0 API cost, fully reproducible.
+2. **Ablations** — FTS5-only vs vector-only vs hybrid vs hybrid+graph, to prove (or disprove) that each piece of the search stack earns its keep.
+3. **A deterministic staleness suite** — "prod ran Postgres 14, we migrated to 16": does search rank the fresh fact first? Runs in CI, no judge.
+4. **End-to-end LongMemEval-S** with the official GPT-4o judge, for leaderboard-comparable numbers.
 
-## Architecture
+When numbers land, they ship with the harness, fixed seeds, and per-question logs so you can re-run them yourself.
 
-```
-cmd/ghost/main.go          CLI bootstrap
-internal/
-  memory/                  SQLite + FTS5 + vector search + time-decay scoring
-  reflection/              Tiered consolidation (Haiku → SQLite)
-  mcpserver/               MCP server (stdio, 16 tools + 4 resources)
-  mcpinit/                 Claude Code integration setup (init, status, hook)
-  claudeimport/            Auto-import Claude Code memory files
-  ai/                      Claude API client (used by reflection only)
-  embedding/               Ollama async vectorization worker
-  linking/                 Auto-links similar memories into a graph
-  config/                  Layered YAML/env config (koanf)
-  selfupdate/              Self-update from GitHub releases
-  provider/                Interface contracts (MemoryStore, LLMProvider)
-```
+What exists today and is measurable: ~1:1 test-to-code ratio, race-enabled CI (`go vet` + `golangci-lint` + `go test -race`), and releases for 6 OS/arch targets.
+
+## Works well with Superpowers
+
+[Superpowers](https://github.com/obra/superpowers) structures *how* agent work gets done (brainstorm-first planning, TDD, subagent execution); Ghost remembers *what was learned*. A workflow pattern that works well: load `ghost_project_context` before planning, `ghost_memory_search` before touching a component, `ghost_decision_record` when an architectural choice is made, `ghost_memory_save` when a phase completes.
+
+## Project status
+
+Ghost is a solo project, built because I wanted my own agents to stop forgetting, and used daily on real infrastructure work. What you can verify rather than trust:
+
+- Pure Go, `CGO_ENABLED=0`, 7 direct dependencies (SQLite via `modernc.org/sqlite` — no C toolchain anywhere); a static binary around 12.5 MB
+- ~1:1 test-to-code ratio; CI runs `go vet`, `golangci-lint`, and race-enabled tests on every PR and push to main
+- Releases for 6 OS/arch targets built by GoReleaser with checksums, plus a multi-arch Docker image
+
+Small enough to read the whole thing in an afternoon. That's on purpose — and because the exit story is one SQLite file, the cost of trying Ghost and walking away is a `go install` and an `rm`.
+
+## Contributing
+
+Issues and PRs welcome. `go test ./...` and `go vet ./...` must pass; feature branches only.
 
 ## License
 
