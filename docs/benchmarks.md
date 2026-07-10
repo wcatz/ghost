@@ -4,7 +4,7 @@ Ghost publishes no retrieval-quality numbers yet. This document is the methodolo
 
 ## Why these benchmarks and not others
 
-- **LongMemEval** ([arXiv 2410.10813](https://arxiv.org/abs/2410.10813), ICLR 2025) is the consensus long-term-memory benchmark as of mid-2026: 500 questions, each with a haystack of chat sessions, labeled with the evidence sessions (`answer_session_ids`) that answer them. Crucially it supports a **retrieval-only evaluation** using its own evidence labels — no LLM judge, no API cost, fully deterministic.
+- **LongMemEval** ([arXiv 2410.10813](https://arxiv.org/abs/2410.10813), ICLR 2025) is the consensus long-term-memory benchmark as of mid-2026: 500 questions, each with a haystack of chat sessions. The 470 answerable questions carry official evidence labels (`answer_session_ids`); the remaining 30 are abstention cases with no evidence labels, excluded from retrieval scoring. Crucially it supports a **retrieval-only evaluation** using those labels — no LLM judge, no API cost, fully deterministic.
 - **LOCOMO** is skipped deliberately. Public audits found ~6.4% of its answer key wrong, its standard judge accepts a majority of intentionally wrong answers, and trivial baselines (full-context, even filesystem+grep) beat specialized memory systems on it. A 2026 reader discounts LOCOMO numbers; we won't publish one.
 - **Zep's DMR** is skipped — 60-message conversations that fit trivially in any context window; Zep itself moved on from it.
 
@@ -38,13 +38,13 @@ Deterministic scenarios for the failure users actually complain about: agents ac
 - Deletion regressions: reflection must never drop pinned or manual memories (codifies the existing empty-set guard and snapshot behavior).
 - Runs in CI in seconds. No LLM judge.
 
-This suite is expected to *fail* in places at first — current search has no recency signal in ranking (decay applies to project-context reads via `GetTopMemories`, not to `SearchHybrid` or the session hook), and `supersedes` links exist in the schema but nothing creates them yet. That's the point: the suite specifies the desired behavior before those features ship, and documents progress honestly.
+This suite is expected to *fail* in places at first — current search has no recency signal in ranking (decay applies to project-context reads via `GetTopMemories`, not to `SearchHybrid` or the session hook), and `supersedes` links exist in the schema but nothing creates them yet. That's the point: the suite specifies the desired behavior before those features ship, and documents progress honestly. It lands in CI as **report-only** (results printed, never failing the build); individual scenarios graduate to enforced assertions as the features they specify ship.
 
 ## Phase 4 — end-to-end LongMemEval-S (leaderboard-comparable)
 
 Only after phases 1–3: the official harness (`evaluate_qa.py`) with the **standard GPT-4o judge** — substituting a different judge makes numbers non-comparable, which is a known problem with some published scores. Fixed generator model, temperature 0, single deterministic run, per-case results JSON and full logs committed, an explicit note proving the memory system never saw oracle context, and generator model stated prominently (it dominates the score). Estimated cost: ~$30–80 in API calls.
 
-Reference points published under this methodology: Zep 71.2%, full-context GPT-4o 60.2%, Mastra 94.87%, agentmemory 96.2%.
+Reference points, all judged with the official GPT-4o harness but with **different generators** (which dominate the score — compare within-generator only): Zep 71.2% and full-context 60.2% (GPT-4o generator); Mastra 94.87% (gpt-5-mini generator; 84.23% with GPT-4o); agentmemory 96.2% (Claude Opus 4.6 generator, temperature 0).
 
 ## Reporting rules (all phases)
 

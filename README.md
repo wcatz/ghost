@@ -24,7 +24,7 @@ go install github.com/wcatz/ghost/cmd/ghost@latest
 ghost mcp init
 ```
 
-`ghost mcp init` registers Ghost as an MCP server, installs the session-start hook, **migrates your existing Claude Code memories** — projects Ghost already knows are imported at init, the rest auto-import on first contact (read-only, nothing is lost) — and disables the built-in file memory so the two don't fight. It's idempotent and non-destructive — safe to re-run anytime, and `--dry-run` previews every change.
+`ghost mcp init` registers Ghost as an MCP server, installs the session-start hook, **migrates your existing Claude Code memories** — projects Ghost already knows are imported at init, the rest auto-import on their first `ghost_project_context` call (read-only, nothing is lost) — and disables the built-in file memory so the two don't fight. It's idempotent and non-destructive — safe to re-run anytime, and `--dry-run` previews every change.
 
 Then start a session. Ghost injects your project's context automatically and starts remembering.
 
@@ -42,7 +42,12 @@ No Go toolchain? Grab a prebuilt binary from [Releases](https://github.com/wcatz
 docker run -i -e XDG_DATA_HOME=/data -v ghost-data:/data ghcr.io/wcatz/ghost:latest
 ```
 
-`-i` matters — MCP speaks over stdio.
+`-i` matters — MCP speaks over stdio, and `XDG_DATA_HOME=/data` is what makes the volume actually hold `ghost.db`. For consolidation, run `reflect` against the same volume (the MCP server itself never uses the API key):
+
+```bash
+docker run -i -e XDG_DATA_HOME=/data -v ghost-data:/data \
+  -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/wcatz/ghost:latest reflect myproject --apply
+```
 
 ## Why Ghost?
 
@@ -88,7 +93,7 @@ One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`). Ghost 
 
 ### What exactly gets injected into my agent's context?
 
-A bounded digest, and you can inspect it yourself. The session-start hook emits: project name, top memories, learned context, open tasks, and active decisions. See precisely what your agent sees:
+A bounded digest, and you can inspect it yourself. The session-start hook emits: project name, top memories, learned context, open tasks, and active decisions. Global memories (the `_global` project) are injected even when the cwd matches no known project. See precisely what your agent sees:
 
 ```bash
 echo '{"cwd":"'"$PWD"'"}' | ghost hook session-start
@@ -107,7 +112,7 @@ Switching *in* is just as easy: `ghost mcp init` imports Claude Code memories, a
 - **Per client:** remove the `ghost` entry from your MCP config. Ghost only runs when your client spawns it over stdio — there is no daemon.
 - **Embeddings:** set `embedding.enabled: false` in `~/.config/ghost/config.yaml`.
 - **Consolidation:** never runs unless you invoke `ghost reflect` — and that's a dry run unless you pass `--apply`.
-- **Everything:** delete one directory (`~/.local/share/ghost`). There is nothing else.
+- **Everything:** delete `$XDG_DATA_HOME/ghost`, or `~/.local/share/ghost` when `XDG_DATA_HOME` is unset. There is nothing else.
 
 ### What does it cost to run?
 
@@ -145,7 +150,7 @@ Pinned memories get a 1.5× boost on top.
 
 ### Consolidation you can undo
 
-`ghost reflect` merges duplicates, prunes noise, and promotes cross-project knowledge to global scope. Tiered: Claude Haiku first (needs an API key; roughly $0.001/run — an estimate from Haiku 4.5 pricing, not a measurement), falling back to a fully offline SQLite tier (Jaccard ≥ 0.5, same-category merges). Because an LLM rewriting your memory store is scary, the guardrails are layered:
+`ghost reflect` merges duplicates, prunes noise, and promotes cross-project knowledge to global scope. Tiered: Claude Haiku first (needs an API key; cost scales with memory count — roughly $0.001 for a typical project, an estimate from Haiku 4.5's per-token pricing, not a measurement), falling back to a fully offline SQLite tier (Jaccard ≥ 0.5, same-category merges). Because an LLM rewriting your memory store is scary, the guardrails are layered:
 
 - **Dry run by default** — see the diff before `--apply`
 - **Auto-snapshot before every replace**, keeping the 3 most recent per project; `ghost reflect --restore` is the undo button
@@ -174,7 +179,7 @@ The server ships with embedded instructions that teach the agent when to save, w
 
 ## CLI
 
-```
+```text
 ghost mcp                    # Run MCP server on stdio (used by your MCP client)
 ghost mcp init [--dry-run]   # Configure Claude Code integration
 ghost mcp status             # Deep health checks (incl. Ollama reachability, model presence)
@@ -209,8 +214,8 @@ Note: env-var names map underscores to config dots, so keys that themselves cont
 
 **None published yet — and we won't fake them.** Several popular memory benchmarks have known problems (LOCOMO's answer key and judge have been publicly audited as unreliable), so we're not rushing to publish a big green number. What's planned, in order — full methodology in [docs/benchmarks.md](docs/benchmarks.md):
 
-1. **LongMemEval-S retrieval metrics** — session-level Recall@k / NDCG@k against the dataset's official evidence labels. No LLM judge, $0 API cost, fully reproducible.
-2. **Ablations** — FTS5-only vs vector-only vs hybrid vs hybrid+graph, to prove (or disprove) that each piece of the search stack earns its keep.
+1. **LongMemEval-S retrieval metrics** — session-level Recall@k / NDCG@k against the dataset's official evidence labels, with ablations (FTS5-only vs vector-only vs hybrid vs hybrid+graph) to prove each piece of the search stack earns its keep. No LLM judge, $0 API cost, fully reproducible.
+2. **`ghost bench`** — an in-repo graded dataset with committed embedding fixtures, asserting retrieval-quality floors in CI on every PR.
 3. **A deterministic staleness suite** — "prod ran Postgres 14, we migrated to 16": does search rank the fresh fact first? Runs in CI, no judge.
 4. **End-to-end LongMemEval-S** with the official GPT-4o judge, for leaderboard-comparable numbers.
 
