@@ -77,10 +77,19 @@ func prune(root string, subtrees []string, keep map[string]bool) error {
 		return fmt.Errorf("refusing to prune: %s marker not found in %s", markerName, root)
 	}
 	for _, sub := range subtrees {
+		if !filepath.IsLocal(sub) {
+			return fmt.Errorf("refusing to prune: subtree %q escapes vault root", sub)
+		}
 		base := filepath.Join(root, sub)
 		err := filepath.WalkDir(base, func(path string, d os.DirEntry, err error) error {
-			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".md") {
-				return nil //nolint:nilerr // missing subtree is fine
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil // missing subtree is fine
+				}
+				return err
+			}
+			if d.IsDir() || !strings.HasSuffix(path, ".md") {
+				return nil
 			}
 			if id, ok := hasGhostID(path); ok && !keep[id] {
 				return os.Remove(path)
