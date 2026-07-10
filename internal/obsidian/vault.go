@@ -72,6 +72,8 @@ func hasGhostID(path string) (string, bool) {
 
 // prune deletes Ghost-managed .md files under the given vault subtrees whose
 // ghost_id is not in keep. All three guards from the spec are enforced.
+// Orphaned *.ghost-tmp files (left by a crashed writeIfChanged) are also
+// reclaimed — but only inside the managed subtrees, behind the marker guard.
 func prune(root string, subtrees []string, keep map[string]bool) error {
 	if _, err := os.Stat(filepath.Join(root, markerName)); err != nil {
 		return fmt.Errorf("refusing to prune: %s marker not found in %s", markerName, root)
@@ -88,7 +90,13 @@ func prune(root string, subtrees []string, keep map[string]bool) error {
 				}
 				return err
 			}
-			if d.IsDir() || !strings.HasSuffix(path, ".md") {
+			if d.IsDir() {
+				return nil
+			}
+			if strings.HasSuffix(path, ".ghost-tmp") {
+				return os.Remove(path) // orphan from a crashed write
+			}
+			if !strings.HasSuffix(path, ".md") {
 				return nil
 			}
 			if id, ok := hasGhostID(path); ok && !keep[id] {

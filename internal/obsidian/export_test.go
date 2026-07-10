@@ -152,3 +152,58 @@ func TestExportProjectFilter(t *testing.T) {
 		t.Error("expected error for unmatched project filter")
 	}
 }
+
+func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	if _, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "Some fact", Importance: 0.8, Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a crashed write: orphaned tmp inside a managed subtree.
+	stray := filepath.Join(vault, "ghost", "Memories", "foo.md.ghost-tmp")
+	if err := os.WriteFile(stray, []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A tmp file outside managed subtrees is none of our business.
+	outside := filepath.Join(vault, "user-notes", "bar.md.ghost-tmp")
+	if err := os.MkdirAll(filepath.Dir(outside), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stray); !os.IsNotExist(err) {
+		t.Errorf("orphaned tmp in managed subtree should be reclaimed: %v", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("tmp file outside managed subtrees must survive: %v", err)
+	}
+}
+
+func TestFolderNamesCaseCollision(t *testing.T) {
+	ps := []memory.Project{
+		{ID: "aaaaaaaa-0000-0000-0000-000000000000", Name: "Foo"},
+		{ID: "bbbbbbbb-0000-0000-0000-000000000000", Name: "foo"},
+	}
+	got := folderNames(ps)
+	if got[ps[0].ID] != "Foo" {
+		t.Errorf("first project keeps its plain folder, got %q", got[ps[0].ID])
+	}
+	if got[ps[1].ID] != "foo-bbbbbbbb" {
+		t.Errorf("later case-colliding project gets -id8 suffix, got %q", got[ps[1].ID])
+	}
+	if strings.EqualFold(got[ps[0].ID], got[ps[1].ID]) {
+		t.Errorf("folders still collide case-insensitively: %q vs %q", got[ps[0].ID], got[ps[1].ID])
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -43,6 +44,7 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 	if projectFilter != "" && !matched {
 		return fmt.Errorf("no project matches %q", projectFilter)
 	}
+	folders := folderNames(selected)
 
 	// Pass 1: load all memories, build the global id → filename map for wikilinks.
 	type projData struct {
@@ -57,11 +59,10 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		if err != nil {
 			return fmt.Errorf("load memories for %s: %w", p.ID, err)
 		}
-		folder := folderName(p)
 		for _, m := range mems {
 			fileFor[m.ID] = fileName(m)
 		}
-		data = append(data, projData{p: p, folder: folder, memories: mems})
+		data = append(data, projData{p: p, folder: folders[p.ID], memories: mems})
 	}
 
 	// Pass 2: render + diff-write + collect keep-set, then prune.
@@ -142,4 +143,23 @@ func folderName(p memory.Project) string {
 		}
 	}
 	return string(b)
+}
+
+// folderNames maps each project ID to a distinct vault folder. Folders that
+// collide case-insensitively (APFS/NTFS would silently merge "Foo" and
+// "foo") are disambiguated: the first keeps its plain name, later collisions
+// get "-" + the first 8 chars of the project ID appended. Input order is
+// deterministic (ListProjects sorts by name), so folder assignment is too.
+func folderNames(projects []memory.Project) map[string]string {
+	folders := make(map[string]string, len(projects))
+	seen := make(map[string]bool, len(projects))
+	for _, p := range projects {
+		f := folderName(p)
+		if seen[strings.ToLower(f)] {
+			f += "-" + id8(p.ID)
+		}
+		seen[strings.ToLower(f)] = true
+		folders[p.ID] = f
+	}
+	return folders
 }
