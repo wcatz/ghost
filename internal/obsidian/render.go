@@ -13,6 +13,8 @@ const banner = "> [!info] Mirrored from Ghost — edits here are not synced back
 
 // slug derives a stable-ish, readable filename prefix from the first ~6
 // content words: lowercase, alnum-only, dash-joined, max 40 chars.
+// Entirely non-ASCII content degrades to "note"; identity is preserved by
+// the id8 suffix in the filename.
 func slug(content string) string {
 	var words []string
 	for _, w := range strings.Fields(strings.ToLower(content)) {
@@ -58,6 +60,10 @@ func date(ts string) string {
 }
 
 // fm writes one frontmatter line.
+//
+// Invariant for every renderer: ghost_id must be the first frontmatter key;
+// values written before it must never contain newlines — prune's hasGhostID
+// scan depends on it.
 func fm(b *strings.Builder, key, val string) {
 	fmt.Fprintf(b, "%s: %s\n", key, val)
 }

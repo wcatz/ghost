@@ -13,6 +13,9 @@ func TestSlug(t *testing.T) {
 		{"???", "note"},
 		{"", "note"},
 		{"UPPER case Words here now okay more words ignored", "upper-case-words-here-now-okay"},
+		// Join exceeds 40 chars and the cut lands on a dash: truncate, then
+		// trim the trailing dash (result is 39 chars).
+		{"abcdefghi abcdefghi abcdefghi abcdefghi abcdefghi", "abcdefghi-abcdefghi-abcdefghi-abcdefghi"},
 	}
 	for _, c := range cases {
 		if got := slug(c.in); got != c.want {
@@ -75,6 +78,10 @@ func TestRenderDecision(t *testing.T) {
 		Tags: []string{"storage"}, CreatedAt: "2026-07-01 08:00:00", UpdatedAt: "2026-07-01 08:00:00",
 	}
 	got := renderDecision(d)
+	// ghost_id must be the first frontmatter key — prune's hasGhostID depends on it.
+	if !strings.HasPrefix(got, "---\nghost_id: dec0000011223344\n") {
+		t.Errorf("renderDecision must open with ghost_id-first frontmatter:\n%s", got)
+	}
 	for _, want := range []string{"ghost_id: dec0000011223344", "type: decision", "status: active",
 		"# Use SQLite", "SQLite over Postgres.", "## Rationale", "Zero infra.", "## Alternatives", "- Postgres"} {
 		if !strings.Contains(got, want) {
@@ -90,6 +97,10 @@ func TestRenderTask(t *testing.T) {
 		CreatedAt: "2026-07-10 10:00:00", UpdatedAt: "2026-07-10 10:00:00",
 	}
 	got := renderTask(tk)
+	// ghost_id must be the first frontmatter key — prune's hasGhostID depends on it.
+	if !strings.HasPrefix(got, "---\nghost_id: task000011223344\n") {
+		t.Errorf("renderTask must open with ghost_id-first frontmatter:\n%s", got)
+	}
 	for _, want := range []string{"ghost_id: task000011223344", "type: task", "status: active",
 		"priority: 2", "# Ship mirror", "Build it."} {
 		if !strings.Contains(got, want) {
