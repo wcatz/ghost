@@ -276,3 +276,16 @@ func TestLinkingDefaults(t *testing.T) {
 		t.Errorf("expected linking.threshold=0.70, got %f", cfg.Linking.Threshold)
 	}
 }
+
+func TestObsidianDefaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Obsidian.VaultDir != "" {
+		t.Errorf("VaultDir default = %q, want empty (resolved at use time)", cfg.Obsidian.VaultDir)
+	}
+	if cfg.Obsidian.Interval != "30s" {
+		t.Errorf("Interval default = %q, want 30s", cfg.Obsidian.Interval)
+	}
+}
