@@ -191,6 +191,56 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 	}
 }
 
+func TestFolderNamesContainment(t *testing.T) {
+	ps := []memory.Project{
+		{ID: "aaaaaaaa-0000-0000-0000-000000000000", Name: ".."},
+		{ID: "bbbbbbbb-0000-0000-0000-000000000000", Name: "."},
+	}
+	got := folderNames(ps)
+	if got[ps[0].ID] != "project-aaaaaaaa" {
+		t.Errorf("'..' project must map to project-<id8>, got %q", got[ps[0].ID])
+	}
+	if got[ps[1].ID] != "project-bbbbbbbb" {
+		t.Errorf("'.' project must map to project-<id8>, got %q", got[ps[1].ID])
+	}
+}
+
+func TestExportContainsPathologicalProjectNames(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "dotdot", "/tmp/dotdot", ".."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(ctx, "dotdot", memory.Memory{Category: "fact", Content: "Escape attempt fact", Importance: 0.8, Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	parent := t.TempDir()
+	vault := filepath.Join(parent, "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+
+	// Nothing may land outside the vault root.
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "vault" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("vault parent gained entries beyond the vault itself: %v", names)
+	}
+	// The pathological project lands in a contained project-<id8> folder.
+	notes, _ := filepath.Glob(filepath.Join(vault, "project-dotdot", "Memories", "*.md"))
+	if len(notes) != 1 {
+		t.Fatalf("want 1 note under project-dotdot/Memories, got %d", len(notes))
+	}
+}
+
 func TestFolderNamesCaseCollision(t *testing.T) {
 	ps := []memory.Project{
 		{ID: "aaaaaaaa-0000-0000-0000-000000000000", Name: "Foo"},

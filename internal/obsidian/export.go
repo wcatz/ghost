@@ -150,6 +150,11 @@ func folderName(p memory.Project) string {
 // "foo") are disambiguated: the first keeps its plain name, later collisions
 // get "-" + the first 8 chars of the project ID appended. Input order is
 // deterministic (ListProjects sorts by name), so folder assignment is too.
+//
+// Containment: a computed folder of ".", "..", "", or anything failing
+// filepath.IsLocal is replaced with "project-" + id8 — the write path must
+// stay under the vault root no matter what the projects table holds, just
+// like prune's subtree guard on the delete path.
 func folderNames(projects []memory.Project) map[string]string {
 	folders := make(map[string]string, len(projects))
 	seen := make(map[string]bool, len(projects))
@@ -157,6 +162,9 @@ func folderNames(projects []memory.Project) map[string]string {
 		f := folderName(p)
 		if seen[strings.ToLower(f)] {
 			f += "-" + id8(p.ID)
+		}
+		if f == "." || f == ".." || f == "" || !filepath.IsLocal(f) {
+			f = "project-" + id8(p.ID)
 		}
 		seen[strings.ToLower(f)] = true
 		folders[p.ID] = f
