@@ -173,8 +173,8 @@ func folderName(p memory.Project) string {
 	}
 	var b []rune
 	for _, r := range name {
-		switch {
-		case r == '/' || r == '\\' || r == ':' || r == 0:
+		switch r {
+		case '/', '\\', ':', 0:
 			b = append(b, '-')
 		default:
 			b = append(b, r)

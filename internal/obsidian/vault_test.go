@@ -6,6 +6,22 @@ import (
 	"testing"
 )
 
+// mustWrite / mustMkdirAll fail the test on setup errors instead of
+// silently proceeding against a half-built fixture.
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustMkdirAll(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEnsureVault(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "vault")
 	if err := ensureVault(dir); err != nil { // fresh dir: created + marker
@@ -19,7 +35,7 @@ func TestEnsureVault(t *testing.T) {
 	}
 	// Existing non-empty dir WITHOUT marker → refuse.
 	dirty := t.TempDir()
-	os.WriteFile(filepath.Join(dirty, "keep.md"), []byte("user file"), 0o644)
+	mustWrite(t, filepath.Join(dirty, "keep.md"), "user file")
 	if err := ensureVault(dirty); err == nil {
 		t.Fatal("expected refusal for unmarked non-empty dir")
 	}
@@ -43,12 +59,12 @@ func TestWriteIfChanged(t *testing.T) {
 
 func TestPrune(t *testing.T) {
 	root := t.TempDir()
-	os.WriteFile(filepath.Join(root, markerName), []byte(`{"schema_version":1}`), 0o644)
+	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
 	sub := filepath.Join(root, "proj", "Memories")
-	os.MkdirAll(sub, 0o755)
+	mustMkdirAll(t, sub)
 	ghostNote := "---\nghost_id: dead0000\ntype: memory\n---\nbody\n"
-	os.WriteFile(filepath.Join(sub, "stale-dead0000.md"), []byte(ghostNote), 0o644)
-	os.WriteFile(filepath.Join(sub, "user-note.md"), []byte("no frontmatter"), 0o644)
+	mustWrite(t, filepath.Join(sub, "stale-dead0000.md"), ghostNote)
+	mustWrite(t, filepath.Join(sub, "user-note.md"), "no frontmatter")
 
 	if err := prune(root, []string{"proj"}, map[string]bool{}); err != nil {
 		t.Fatalf("prune: %v", err)
@@ -60,8 +76,10 @@ func TestPrune(t *testing.T) {
 		t.Fatal("user note must survive")
 	}
 	// No marker → prune must refuse to delete anything.
-	os.Remove(filepath.Join(root, markerName))
-	os.WriteFile(filepath.Join(sub, "stale2-beef0000.md"), []byte(ghostNote), 0o644)
+	if err := os.Remove(filepath.Join(root, markerName)); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(sub, "stale2-beef0000.md"), ghostNote)
 	if err := prune(root, []string{"proj"}, map[string]bool{}); err == nil {
 		t.Fatal("prune without marker must error")
 	}
@@ -69,21 +87,21 @@ func TestPrune(t *testing.T) {
 
 func TestPruneGuards(t *testing.T) {
 	root := t.TempDir()
-	os.WriteFile(filepath.Join(root, markerName), []byte(`{"schema_version":1}`), 0o644)
+	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
 	sub := filepath.Join(root, "proj", "Memories")
-	os.MkdirAll(sub, 0o755)
+	mustMkdirAll(t, sub)
 
 	// (a) keep-set retention: ghost_id in keep must survive.
 	keptNote := "---\nghost_id: cafe0000\ntype: memory\n---\nbody\n"
-	os.WriteFile(filepath.Join(sub, "kept-cafe0000.md"), []byte(keptNote), 0o644)
+	mustWrite(t, filepath.Join(sub, "kept-cafe0000.md"), keptNote)
 	// (b) subtree scoping: ghost note outside the pruned subtrees must survive.
 	other := filepath.Join(root, "otherproj", "Memories")
-	os.MkdirAll(other, 0o755)
+	mustMkdirAll(t, other)
 	staleNote := "---\nghost_id: dead0000\ntype: memory\n---\nbody\n"
-	os.WriteFile(filepath.Join(other, "stale-dead0000.md"), []byte(staleNote), 0o644)
+	mustWrite(t, filepath.Join(other, "stale-dead0000.md"), staleNote)
 	// (c) body-only ghost_id: no frontmatter, ghost_id appears after a --- in the body.
 	bodyOnly := "just a user note\n\n---\nghost_id: feed0000\n"
-	os.WriteFile(filepath.Join(sub, "body-only.md"), []byte(bodyOnly), 0o644)
+	mustWrite(t, filepath.Join(sub, "body-only.md"), bodyOnly)
 
 	if err := prune(root, []string{"proj"}, map[string]bool{"cafe0000": true}); err != nil {
 		t.Fatalf("prune: %v", err)
@@ -102,13 +120,13 @@ func TestPruneGuards(t *testing.T) {
 func TestPruneRefusesEscapingSubtree(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "vault")
-	os.MkdirAll(root, 0o755)
-	os.WriteFile(filepath.Join(root, markerName), []byte(`{"schema_version":1}`), 0o644)
+	mustMkdirAll(t, root)
+	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
 	// Sibling dir outside the vault holding a ghost-looking note.
 	escape := filepath.Join(parent, "escape")
-	os.MkdirAll(escape, 0o755)
+	mustMkdirAll(t, escape)
 	victim := filepath.Join(escape, "victim-dead0000.md")
-	os.WriteFile(victim, []byte("---\nghost_id: dead0000\ntype: memory\n---\nbody\n"), 0o644)
+	mustWrite(t, victim, "---\nghost_id: dead0000\ntype: memory\n---\nbody\n")
 
 	if err := prune(root, []string{"../escape"}, map[string]bool{}); err == nil {
 		t.Fatal("prune with escaping subtree must error")

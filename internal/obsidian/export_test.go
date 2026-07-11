@@ -18,7 +18,7 @@ func seedStore(t *testing.T) *memory.Store {
 		t.Fatal(err)
 	}
 	store := memory.NewStore(db, slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	ctx := context.Background()
 	if err := store.EnsureProject(ctx, "ghost", "/tmp/ghost", "ghost"); err != nil {
 		t.Fatal(err)
@@ -34,8 +34,12 @@ func TestExport(t *testing.T) {
 	if err := store.CreateLink(ctx, id1, id2, "related", 0.83, "auto"); err != nil {
 		t.Fatal(err)
 	}
-	store.RecordDecision(ctx, "ghost", "Use SQLite", "SQLite it is", "zero infra", []string{"Postgres"}, nil)
-	store.CreateTask(ctx, "ghost", "Ship mirror", "Build it", 2)
+	if _, err := store.RecordDecision(ctx, "ghost", "Use SQLite", "SQLite it is", "zero infra", []string{"Postgres"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateTask(ctx, "ghost", "Ship mirror", "Build it", 2); err != nil {
+		t.Fatal(err)
+	}
 	// A registered project with no entities must not produce a vault folder.
 	if err := store.EnsureProject(ctx, "empty", "/tmp/empty", "empty"); err != nil {
 		t.Fatal(err)
