@@ -162,6 +162,15 @@ Pinned memories get a 1.5× boost on top.
 
 Beyond memories: tasks (`pending`/`active`/`done`/`blocked`), decision records with rationale and alternatives (`active`/`superseded`/`revisit`), and a `_global` project whose memories are included in every project's context. Projects resolve by longest path-prefix match with a basename fallback, so worktrees and moved checkouts still find their memory.
 
+### Obsidian vault mirror
+
+Your memories are yours to browse. `ghost obsidian export` mirrors memories, decisions, and tasks into plain Markdown notes — one folder per project — that Obsidian opens as a vault, with memory links rendered as wikilinks so the graph view maps your knowledge. `ghost obsidian sync` keeps the mirror fresh by polling for database changes; `--project` scopes the mirror to a single project (plus Global). The mirror is strictly one-way: it reads the database read-only (safe alongside a live MCP server), and it only ever prunes stale notes inside a directory carrying the `.ghost-vault` marker — backing off entirely when a listing might be incomplete, so stale extras beat silent deletions.
+
+```bash
+ghost obsidian export --out ~/Documents/GhostVault   # one-shot mirror
+ghost obsidian sync --interval 30s                   # keep it fresh
+```
+
 ## MCP surface
 
 16 tools, 4 resources:
@@ -185,6 +194,8 @@ ghost mcp init [--dry-run]   # Configure Claude Code integration
 ghost mcp status             # Deep health checks (incl. Ollama reachability, model presence)
 ghost hook session-start     # SessionStart hook — prints exactly what gets injected
 ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
+ghost obsidian export        # Mirror memories to an Obsidian vault (one-way; --out, --project)
+ghost obsidian sync          # Keep the vault mirror fresh (--interval; polls for DB changes)
 ghost upgrade                # Self-update from GitHub Releases (linux/macOS; Windows: re-download)
 ghost version                # Print version
 ```
