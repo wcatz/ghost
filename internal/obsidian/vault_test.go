@@ -66,7 +66,7 @@ func TestPrune(t *testing.T) {
 	mustWrite(t, filepath.Join(sub, "stale-dead0000.md"), ghostNote)
 	mustWrite(t, filepath.Join(sub, "user-note.md"), "no frontmatter")
 
-	if err := prune(root, []string{"proj"}, map[string]bool{}); err != nil {
+	if err := prune(root, []string{"proj"}, map[string]string{}); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(sub, "stale-dead0000.md")); !os.IsNotExist(err) {
@@ -80,7 +80,7 @@ func TestPrune(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustWrite(t, filepath.Join(sub, "stale2-beef0000.md"), ghostNote)
-	if err := prune(root, []string{"proj"}, map[string]bool{}); err == nil {
+	if err := prune(root, []string{"proj"}, map[string]string{}); err == nil {
 		t.Fatal("prune without marker must error")
 	}
 }
@@ -102,12 +102,18 @@ func TestPruneGuards(t *testing.T) {
 	// (c) body-only ghost_id: no frontmatter, ghost_id appears after a --- in the body.
 	bodyOnly := "just a user note\n\n---\nghost_id: feed0000\n"
 	mustWrite(t, filepath.Join(sub, "body-only.md"), bodyOnly)
+	// (d) slug rename: same live ghost_id under a non-canonical basename is stale.
+	renamed := "---\nghost_id: cafe0000\ntype: memory\n---\nbody\n"
+	mustWrite(t, filepath.Join(sub, "old-slug-cafe0000.md"), renamed)
 
-	if err := prune(root, []string{"proj"}, map[string]bool{"cafe0000": true}); err != nil {
+	if err := prune(root, []string{"proj"}, map[string]string{"cafe0000": "kept-cafe0000.md"}); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(sub, "kept-cafe0000.md")); err != nil {
 		t.Fatal("note with ghost_id in keep must survive")
+	}
+	if _, err := os.Stat(filepath.Join(sub, "old-slug-cafe0000.md")); !os.IsNotExist(err) {
+		t.Fatal("live ghost_id under a stale (renamed) basename must be pruned")
 	}
 	if _, err := os.Stat(filepath.Join(other, "stale-dead0000.md")); err != nil {
 		t.Fatal("ghost note outside the pruned subtrees must survive")
@@ -128,14 +134,14 @@ func TestPruneRefusesEscapingSubtree(t *testing.T) {
 	victim := filepath.Join(escape, "victim-dead0000.md")
 	mustWrite(t, victim, "---\nghost_id: dead0000\ntype: memory\n---\nbody\n")
 
-	if err := prune(root, []string{"../escape"}, map[string]bool{}); err == nil {
+	if err := prune(root, []string{"../escape"}, map[string]string{}); err == nil {
 		t.Fatal("prune with escaping subtree must error")
 	}
 	if _, err := os.Stat(victim); err != nil {
 		t.Fatal("file outside the vault root must survive an escaping-subtree prune attempt")
 	}
 	// Absolute paths must be refused too.
-	if err := prune(root, []string{escape}, map[string]bool{}); err == nil {
+	if err := prune(root, []string{escape}, map[string]string{}); err == nil {
 		t.Fatal("prune with absolute subtree must error")
 	}
 	if _, err := os.Stat(victim); err != nil {

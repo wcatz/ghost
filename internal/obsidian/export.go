@@ -90,8 +90,11 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		data = append(data, projData{p: p, folder: folders[p.ID], memories: mems, trunc: trunc})
 	}
 
-	// Pass 2: render + diff-write + collect keep-set, then prune.
-	keep := make(map[string]bool)
+	// Pass 2: render + diff-write + collect keep-set, then prune. keep maps
+	// each entity's ghost_id to its canonical basename this pass: content
+	// edits rewrite a memory in place (same ID, new slug), so prune must
+	// drop old-slug files even though their ghost_id is still live.
+	keep := make(map[string]string)
 	var subtrees []string
 	written, skipped := 0, 0
 	for _, d := range data {
@@ -100,7 +103,7 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 			if err != nil {
 				return fmt.Errorf("links for %s: %w", m.ID, err)
 			}
-			keep[m.ID] = true
+			keep[m.ID] = fileFor[m.ID]
 			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Memories", fileFor[m.ID]), renderMemory(m, links, fileFor))
 			if err != nil {
 				return err
@@ -116,8 +119,9 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 			d.trunc = true
 		}
 		for _, dec := range decisions {
-			keep[dec.ID] = true
-			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Decisions", fileNameFor(dec.Title, dec.ID)), renderDecision(dec))
+			name := fileNameFor(dec.Title, dec.ID)
+			keep[dec.ID] = name
+			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Decisions", name), renderDecision(dec))
 			if err != nil {
 				return err
 			}
@@ -132,8 +136,9 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 			d.trunc = true
 		}
 		for _, tk := range tasks {
-			keep[tk.ID] = true
-			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Tasks", fileNameFor(tk.Title, tk.ID)), renderTask(tk))
+			name := fileNameFor(tk.Title, tk.ID)
+			keep[tk.ID] = name
+			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Tasks", name), renderTask(tk))
 			if err != nil {
 				return err
 			}

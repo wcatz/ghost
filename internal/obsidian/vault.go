@@ -71,10 +71,13 @@ func hasGhostID(path string) (string, bool) {
 }
 
 // prune deletes Ghost-managed .md files under the given vault subtrees whose
-// ghost_id is not in keep. All three guards from the spec are enforced.
-// Orphaned *.ghost-tmp files (left by a crashed writeIfChanged) are also
-// reclaimed — but only inside the managed subtrees, behind the marker guard.
-func prune(root string, subtrees []string, keep map[string]bool) error {
+// ghost_id is not in keep, or whose basename is not the canonical one for
+// that ghost_id (a content edit renamed the slug — the old-slug file is
+// stale even though its ID is still live). All three guards from the spec
+// are enforced. Orphaned *.ghost-tmp files (left by a crashed writeIfChanged)
+// are also reclaimed — but only inside the managed subtrees, behind the
+// marker guard.
+func prune(root string, subtrees []string, keep map[string]string) error {
 	if _, err := os.Stat(filepath.Join(root, markerName)); err != nil {
 		return fmt.Errorf("refusing to prune: %s marker not found in %s", markerName, root)
 	}
@@ -99,8 +102,10 @@ func prune(root string, subtrees []string, keep map[string]bool) error {
 			if !strings.HasSuffix(path, ".md") {
 				return nil
 			}
-			if id, ok := hasGhostID(path); ok && !keep[id] {
-				return os.Remove(path)
+			if id, ok := hasGhostID(path); ok {
+				if canonical, kept := keep[id]; !kept || canonical != filepath.Base(path) {
+					return os.Remove(path)
+				}
 			}
 			return nil
 		})

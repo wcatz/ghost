@@ -102,6 +102,59 @@ func TestExport(t *testing.T) {
 	}
 }
 
+// TestExportPrunesRenamedSlug: Upsert strengthens a memory by rewriting its
+// content in place (same ID) — when the leading words change, the next export
+// writes the note under a new slug. The old-slug file carries the same
+// ghost_id, so a keep-set of bare IDs would retain it forever; prune must
+// also match the canonical basename.
+func TestExportPrunesRenamedSlug(t *testing.T) {
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := memory.NewStore(db, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "ghost", "/tmp/ghost", "ghost"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "original opening words drive the slug", Importance: 0.8, Source: "mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	old := filepath.Join(vault, "ghost", "Memories", "original-opening-words-drive-the-slug-"+id[:8]+".md")
+	if _, err := os.Stat(old); err != nil {
+		t.Fatalf("expected note at old slug: %v", err)
+	}
+
+	// In-place content rewrite, same ID — the direct-SQL equivalent of
+	// Upsert's strengthen path (store.go: UPDATE memories SET content ...).
+	if _, err := db.ExecContext(ctx, `UPDATE memories SET content = ? WHERE id = ?`, "different phrasing appears here", id); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("second export: %v", err)
+	}
+
+	notes, _ := filepath.Glob(filepath.Join(vault, "ghost", "Memories", "*.md"))
+	if len(notes) != 1 {
+		t.Fatalf("renamed memory must leave exactly 1 note, got %d: %v", len(notes), notes)
+	}
+	want := "different-phrasing-appears-here-" + id[:8] + ".md"
+	if filepath.Base(notes[0]) != want {
+		t.Errorf("surviving note = %s, want %s", filepath.Base(notes[0]), want)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("old-slug note must be pruned after rename: %v", err)
+	}
+}
+
 func TestExportProjectFilter(t *testing.T) {
 	store := seedStore(t)
 	ctx := context.Background()
