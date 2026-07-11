@@ -417,6 +417,14 @@ func runUpgrade() {
 	fmt.Printf("Updated: ghost %s → %s\n", version, latest)
 }
 
+// roDSN builds a read-only DSN for the given database path. The file: URI
+// form is required: modernc.org/sqlite honors mode=ro only on URI DSNs — a
+// bare path opens silently read-write (verified against v1.53.0; the _pragma
+// params, by contrast, apply either way).
+func roDSN(dbPath string) string {
+	return "file:" + dbPath + "?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(1000)"
+}
+
 // runObsidian implements `ghost obsidian export|sync` — a one-way mirror of
 // the store into an Obsidian-readable Markdown vault.
 func runObsidian() {
@@ -481,8 +489,8 @@ Flags:
 		fmt.Fprintf(os.Stderr, "error: no database at %s — run ghost mcp init or start a session first\n", dbPath)
 		os.Exit(1)
 	}
-	// Read-only: safe alongside a live MCP server (same pattern as the session hook).
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(1000)")
+	// Read-only: safe alongside a live MCP server.
+	db, err := sql.Open("sqlite", roDSN(dbPath))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: open %s: %v\n", dbPath, err)
 		os.Exit(1)
@@ -508,6 +516,10 @@ Flags:
 	d, err := time.ParseDuration(interval)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: bad --interval %q: %v\n", interval, err)
+		os.Exit(1)
+	}
+	if d <= 0 {
+		fmt.Fprintf(os.Stderr, "error: --interval must be positive, got %s\n", d)
 		os.Exit(1)
 	}
 	fmt.Printf("Syncing to %s every %s (Ctrl-C to stop)\n", out, d)
