@@ -61,11 +61,35 @@ func date(ts string) string {
 
 // fm writes one frontmatter line.
 //
-// Invariant for every renderer: ghost_id must be the first frontmatter key;
-// values written before it must never contain newlines — prune's hasGhostID
-// scan depends on it.
+// Invariant for every renderer: ghost_id must be the first frontmatter key
+// and every value must occupy exactly one line — prune's hasGhostID scan
+// depends on it. Newlines are therefore flattened to spaces unconditionally,
+// and a value that could change its line's YAML shape (mapping separator,
+// flow/comment/quote characters) is double-quoted with escaping. Fixed-
+// vocabulary values — category, source, and task/decision status are all
+// CHECK-constrained in memory/schema.go — plus type, numerics, bools, and
+// dates never trip the quoting and are emitted plain, byte-identical to
+// before this hardening.
 func fm(b *strings.Builder, key, val string) {
+	val = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(val)
+	if strings.Contains(val, ": ") || strings.Contains(val, `"`) || strings.Contains(val, "#") ||
+		strings.HasPrefix(val, "[") || strings.HasPrefix(val, "{") {
+		val = `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(val) + `"`
+	}
 	fmt.Fprintf(b, "%s: %s\n", key, val)
+}
+
+// fmTags writes the tags flow list. Each tag is sanitized — structural flow
+// characters and newlines stripped — so the composed [a, b] value is safe to
+// emit plain; routing it through fm would quote the leading '[' and Obsidian
+// would stop reading it as a list.
+func fmTags(b *strings.Builder, tags []string) {
+	clean := make([]string, 0, len(tags))
+	tagSanitizer := strings.NewReplacer("[", "", "]", "", ",", "", `"`, "", "\r", " ", "\n", " ")
+	for _, tag := range tags {
+		clean = append(clean, tagSanitizer.Replace(tag))
+	}
+	fmt.Fprintf(b, "tags: [%s]\n", strings.Join(clean, ", "))
 }
 
 func renderMemory(m memory.Memory, links []memory.Link, fileFor map[string]string) string {
@@ -77,7 +101,7 @@ func renderMemory(m memory.Memory, links []memory.Link, fileFor map[string]strin
 	fm(&b, "importance", strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", m.Importance), "0"), "."))
 	fm(&b, "pinned", fmt.Sprintf("%v", m.Pinned))
 	fm(&b, "project", m.ProjectID)
-	fm(&b, "tags", "["+strings.Join(m.Tags, ", ")+"]")
+	fmTags(&b, m.Tags)
 	fm(&b, "created", date(m.CreatedAt))
 	fm(&b, "updated", date(m.UpdatedAt))
 	fm(&b, "source", m.Source)
@@ -113,7 +137,7 @@ func renderDecision(d memory.Decision) string {
 	fm(&b, "type", "decision")
 	fm(&b, "status", d.Status)
 	fm(&b, "project", d.ProjectID)
-	fm(&b, "tags", "["+strings.Join(d.Tags, ", ")+"]")
+	fmTags(&b, d.Tags)
 	fm(&b, "created", date(d.CreatedAt))
 	fm(&b, "updated", date(d.UpdatedAt))
 	b.WriteString("---\n")

@@ -70,6 +70,53 @@ Embedding backfill bug: ticker only swept seen projects.
 	}
 }
 
+// TestRenderHostileFrontmatter: frontmatter values must occupy exactly one
+// line per key (the ghost_id-first invariant prune depends on) and must not
+// change the YAML shape of their line, whatever the store holds. The note
+// body is not frontmatter and stays verbatim.
+func TestRenderHostileFrontmatter(t *testing.T) {
+	m := memory.Memory{
+		ID: "bad0000011223344", ProjectID: "evil: proj\nect", Category: "fact",
+		Content:    "Body content: stays verbatim, even with colons\nand newlines.",
+		Importance: 0.7, Source: "mcp",
+		Tags:      []string{"a,b", "x[0]", `quo"te`},
+		CreatedAt: "2026-07-10 10:00:00", UpdatedAt: "2026-07-10 10:00:00",
+	}
+	got := renderMemory(m, nil, nil)
+
+	if !strings.HasPrefix(got, "---\nghost_id: bad0000011223344\n") {
+		t.Errorf("ghost_id must stay the first frontmatter line:\n%s", got)
+	}
+	// Newline flattened to a space, then quoted because of ": ".
+	if !strings.Contains(got, "project: \"evil: proj ect\"\n") {
+		t.Errorf("hostile project value must be flattened and quoted:\n%s", got)
+	}
+	// Tags: structural flow characters stripped before the join.
+	if !strings.Contains(got, "tags: [ab, x0, quote]\n") {
+		t.Errorf("hostile tags must be sanitized:\n%s", got)
+	}
+	// Body is untouched.
+	if !strings.Contains(got, "Body content: stays verbatim, even with colons\nand newlines.") {
+		t.Errorf("note body must stay verbatim:\n%s", got)
+	}
+	// Block integrity: exactly the 10 emitted keys between the fences, one
+	// line each — nothing injected a stray line.
+	rest := strings.TrimPrefix(got, "---\n")
+	end := strings.Index(rest, "\n---\n")
+	if end < 0 {
+		t.Fatalf("no closing frontmatter fence:\n%s", got)
+	}
+	lines := strings.Split(rest[:end], "\n")
+	if len(lines) != 10 {
+		t.Errorf("frontmatter must hold exactly 10 single-line keys, got %d:\n%s", len(lines), rest[:end])
+	}
+	for _, line := range lines {
+		if !strings.Contains(line, ": ") {
+			t.Errorf("frontmatter line lost its key-value shape: %q", line)
+		}
+	}
+}
+
 func TestRenderDecision(t *testing.T) {
 	d := memory.Decision{
 		ID: "dec0000011223344", ProjectID: "ghost", Title: "Use SQLite",

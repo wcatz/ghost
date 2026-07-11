@@ -300,6 +300,20 @@ func TestLinkingDefaults(t *testing.T) {
 }
 
 func TestObsidianDefaults(t *testing.T) {
+	// Isolate from the host: a real ~/.config/ghost/config.yaml or a
+	// GHOST_OBSIDIAN_* var in the environment would otherwise skew defaults.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	// t.Setenv can't unset, and the env provider has no empty-value guard, so
+	// clearing to "" would itself override the default. Save and restore.
+	for _, key := range []string{"GHOST_OBSIDIAN_VAULT_DIR", "GHOST_OBSIDIAN_INTERVAL"} {
+		if old, ok := os.LookupEnv(key); ok {
+			_ = os.Unsetenv(key)
+			t.Cleanup(func() { _ = os.Setenv(key, old) })
+		}
+	}
+
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
