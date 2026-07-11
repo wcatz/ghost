@@ -153,6 +153,37 @@ func TestExportProjectFilter(t *testing.T) {
 	}
 }
 
+func TestExportFilterInvariantFolders(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	// Two projects whose names collide case-insensitively. ListProjects
+	// orders by name ("Foo" < "foo" in BINARY), so unfiltered folder
+	// assignment is Foo -> "Foo", foo -> "foo-bbbb-foo".
+	if err := store.EnsureProject(ctx, "aaaa-foo-upper", "/tmp/Foo", "Foo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureProject(ctx, "bbbb-foo-lower", "/tmp/foo", "foo"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(ctx, "bbbb-foo-lower", memory.Memory{Category: "fact", Content: "Lowercase foo fact", Importance: 0.8, Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A filtered run must place notes in the SAME folder as an unfiltered
+	// run: folder assignment is computed over all projects, not the
+	// filtered subset, so case-collision suffixes do not flip with --project.
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, "foo"); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	notes, _ := filepath.Glob(filepath.Join(vault, "foo-bbbb-foo", "Memories", "*.md"))
+	if len(notes) != 1 {
+		got, _ := filepath.Glob(filepath.Join(vault, "*", "Memories", "*.md"))
+		t.Fatalf("filtered export must use the filter-invariant folder foo-bbbb-foo, notes found at %v", got)
+	}
+}
+
 func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 	store := seedStore(t)
 	ctx := context.Background()
@@ -188,6 +219,58 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Errorf("tmp file outside managed subtrees must survive: %v", err)
+	}
+}
+
+func TestTruncated(t *testing.T) {
+	for _, tc := range []struct {
+		n, limit int
+		want     bool
+	}{
+		{0, 100000, false},
+		{99999, 100000, false},
+		{100000, 100000, true},
+	} {
+		if got := truncated(tc.n, tc.limit); got != tc.want {
+			t.Errorf("truncated(%d, %d) = %v, want %v", tc.n, tc.limit, got, tc.want)
+		}
+	}
+}
+
+func TestExportSkipsPruneOnTruncatedList(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	for _, m := range []memory.Memory{
+		{Category: "fact", Content: "Highest importance fact", Importance: 0.9, Source: "mcp"},
+		{Category: "fact", Content: "Middle importance fact", Importance: 0.8, Source: "mcp"},
+		{Category: "fact", Content: "Lowest importance fact", Importance: 0.7, Source: "mcp"},
+	} {
+		if _, err := store.Create(ctx, "ghost", m); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	notes, _ := filepath.Glob(filepath.Join(vault, "ghost", "Memories", "*.md"))
+	if len(notes) != 3 {
+		t.Fatalf("want 3 notes after full export, got %d", len(notes))
+	}
+
+	// With the list limit squeezed below the row count, GetAll returns
+	// exactly limit rows — the export must treat the project as possibly
+	// truncated and skip pruning its folder: the third note survives even
+	// though it is absent from the keep-set (stale beats deleted).
+	limited := &Exporter{Store: store, Logger: slog.Default(), listLimit: 2}
+	if err := limited.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("limited export: %v", err)
+	}
+	notes, _ = filepath.Glob(filepath.Join(vault, "ghost", "Memories", "*.md"))
+	if len(notes) != 3 {
+		t.Fatalf("truncated export must not prune: want 3 surviving notes, got %d", len(notes))
 	}
 }
 

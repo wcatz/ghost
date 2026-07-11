@@ -77,7 +77,7 @@ source: mcp
 
 ## Filenames and idempotence
 
-`<slug>-<id8>.md` — slug from the first ~6 content words, 8-char ID suffix guarantees uniqueness and stability of identity. Export is a deterministic full regeneration (sorted by ID), but a file is only rewritten when rendered content differs — no mtime churn for Obsidian's indexer or file-sync tools. Content edits after consolidation may change the slug (a rename); all wikilinks are regenerated in the same pass, so the vault stays internally consistent.
+`<slug>-<id8>.md` — slug from the first ~6 content words, 8-char ID suffix guarantees uniqueness and stability of identity. Export is a deterministic full regeneration: each entity renders to its own file, the backing queries are explicitly ordered (importance/created_at), and the output bytes are independent of iteration order. A file is only rewritten when rendered content differs — no mtime churn for Obsidian's indexer or file-sync tools. Content edits after consolidation may change the slug (a rename); all wikilinks are regenerated in the same pass, so the vault stays internally consistent.
 
 ## Pruning safety (the load-bearing part)
 
@@ -88,6 +88,11 @@ A file is deleted only when **all** hold:
 3. The file's own frontmatter contains a `ghost_id` key (parsed before deletion).
 
 User-created files are never touched. First export into an existing non-empty directory **without** the marker is refused (no `--force` in v1 — create a fresh dir or add the marker manually). The banner callout in every note states the mirror is one-way.
+
+## Known limitations (v1)
+
+- Renamed or merged projects can leave orphaned folders in the vault: prune only walks the **current** run's managed subtrees by design, so a folder that no longer maps to any project is never revisited. Recovery is trivial — delete the vault directory and re-export; the mirror is fully regenerable from the store.
+- Per-project list queries are capped at 100,000 entries. A list that hits the cap may be silently truncated by the store, so the export logs a warning and skips pruning that project's folder for the run (stale extra notes beat silently deleted ones).
 
 ## Configuration
 
