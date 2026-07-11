@@ -477,6 +477,10 @@ Flags:
 		os.Exit(1)
 	}
 	dbPath := filepath.Join(dataDir, "ghost.db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "error: no database at %s — run ghost mcp init or start a session first\n", dbPath)
+		os.Exit(1)
+	}
 	// Read-only: safe alongside a live MCP server (same pattern as the session hook).
 	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(1000)")
 	if err != nil {

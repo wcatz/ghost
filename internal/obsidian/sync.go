@@ -35,10 +35,13 @@ func Sync(ctx context.Context, ex *Exporter, db *sql.DB, vaultDir, projectFilter
 			if v == last {
 				continue
 			}
-			last = v
 			if err := ex.Export(ctx, vaultDir, projectFilter); err != nil {
-				ex.Logger.Warn("obsidian sync: export failed, will retry next change", "error", err)
+				// Baseline stays put: the version delta persists, so the
+				// next tick retries without needing another commit.
+				ex.Logger.Warn("obsidian sync: export failed, will retry next tick", "error", err)
+				continue
 			}
+			last = v
 		}
 	}
 }
