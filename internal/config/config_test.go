@@ -129,6 +129,28 @@ func TestLoad_ExplicitEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestLoad_ObsidianVaultDirEnvOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	// Clear interfering env vars.
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY"})
+
+	// The generic _ → . transformer would map this to obsidian.vault.dir,
+	// missing the obsidian.vault_dir key — the explicit override must catch it.
+	t.Setenv("GHOST_OBSIDIAN_VAULT_DIR", "/vaults/ghost")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Obsidian.VaultDir != "/vaults/ghost" {
+		t.Errorf("obsidian.vault_dir = %q, want %q (explicit env override)", cfg.Obsidian.VaultDir, "/vaults/ghost")
+	}
+}
+
 func TestLoad_YAMLFileOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)

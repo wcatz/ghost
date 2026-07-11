@@ -120,7 +120,8 @@ func Load() (*Config, error) {
 	// koanf's _ → . transformer would map e.g. GHOST_SERVER_AUTH_TOKEN
 	// to server.auth.token instead of server.auth_token.
 	envOverrides := map[string]string{
-		"GHOST_SERVER_AUTH_TOKEN": "server.auth_token",
+		"GHOST_SERVER_AUTH_TOKEN":  "server.auth_token",
+		"GHOST_OBSIDIAN_VAULT_DIR": "obsidian.vault_dir",
 	}
 	for envKey, koanfKey := range envOverrides {
 		if val := os.Getenv(envKey); val != "" {
