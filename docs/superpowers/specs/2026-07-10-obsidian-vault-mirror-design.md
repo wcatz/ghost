@@ -93,6 +93,7 @@ User-created files are never touched. First export into an existing non-empty di
 
 - Renamed or merged projects can leave orphaned folders in the vault: prune only walks the **current** run's managed subtrees by design, so a folder that no longer maps to any project is never revisited. Recovery is trivial — delete the vault directory and re-export; the mirror is fully regenerable from the store.
 - Per-project list queries are capped at 100,000 entries. A list that hits the cap may be silently truncated by the store, so the export logs a warning and skips pruning that project's folder for the run (stale extra notes beat silently deleted ones).
+- With `--project`, links into filtered-out projects render as plain short IDs rather than wikilinks, so alternating filtered and unfiltered runs rewrite those notes each time the link's rendering flips.
 
 ## Configuration
 
@@ -118,7 +119,7 @@ Two new keys in the compiled defaults (`internal/config/config.go`); CLI flags o
 - Missing/unreachable DB: same error path as `hook.go` (clear message, non-zero exit).
 - Unwritable `vault_dir`: fail the export with the path in the error; sync logs and retries next tick.
 - Partial-write safety: write to temp file + rename (atomic per note).
-- A project with unsanitizable/colliding names: sanitize with the existing `sanitizeName` approach from `mcpinit`; collisions get ID suffixes.
+- A project with unsanitizable/colliding names: as built, `folderName` sanitizes separators and enforces `filepath.IsLocal` containment (strictly stronger than reusing `sanitizeName` from `mcpinit`); case-insensitive collisions and non-local results get ID-suffixed `project-<id8>` folders.
 
 ## Testing
 
