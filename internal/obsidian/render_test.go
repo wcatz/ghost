@@ -91,9 +91,10 @@ func TestRenderHostileFrontmatter(t *testing.T) {
 	if !strings.Contains(got, "project: \"evil: proj ect\"\n") {
 		t.Errorf("hostile project value must be flattened and quoted:\n%s", got)
 	}
-	// Tags: structural flow characters stripped before the join.
-	if !strings.Contains(got, "tags: [ab, x0, quote]\n") {
-		t.Errorf("hostile tags must be sanitized:\n%s", got)
+	// Tags: flow-structural characters force per-item quoting, preserving the
+	// tag content rather than stripping it.
+	if !strings.Contains(got, `tags: ["a,b", "x[0]", "quo\"te"]`+"\n") {
+		t.Errorf("hostile tags must be quoted, not stripped:\n%s", got)
 	}
 	// Body is untouched.
 	if !strings.Contains(got, "Body content: stays verbatim, even with colons\nand newlines.") {
@@ -114,6 +115,55 @@ func TestRenderHostileFrontmatter(t *testing.T) {
 		if !strings.Contains(line, ": ") {
 			t.Errorf("frontmatter line lost its key-value shape: %q", line)
 		}
+	}
+}
+
+// TestRenderFrontmatterYAMLIndicators covers the value shapes the first
+// hardening pass missed: Obsidian-idiomatic '#' tags, a ':'-bearing tag, and
+// project values that open with a YAML indicator or end with a colon.
+func TestRenderFrontmatterYAMLIndicators(t *testing.T) {
+	cases := []struct {
+		name        string
+		projectID   string
+		tags        []string
+		wantProject string // exact "project: ..." line, without trailing newline
+		wantTags    string // exact "tags: ..." line, without trailing newline
+	}{
+		{
+			name:     "obsidian hash tags and colon tag",
+			tags:     []string{"#urgent", "status: open"},
+			wantTags: `tags: ["#urgent", "status: open"]`,
+		},
+		{
+			name:        "npm-scope project name",
+			projectID:   "@org/app",
+			wantProject: `project: "@org/app"`,
+		},
+		{
+			name:        "trailing colon project",
+			projectID:   "wip:",
+			wantProject: `project: "wip:"`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pid := c.projectID
+			if pid == "" {
+				pid = "ghost"
+			}
+			m := memory.Memory{
+				ID: "cafe000011223344", ProjectID: pid, Category: "fact",
+				Content: "body", Importance: 0.5, Source: "mcp", Tags: c.tags,
+				CreatedAt: "2026-07-10 10:00:00", UpdatedAt: "2026-07-10 10:00:00",
+			}
+			got := renderMemory(m, nil, nil)
+			if c.wantProject != "" && !strings.Contains(got, c.wantProject+"\n") {
+				t.Errorf("want %q in:\n%s", c.wantProject, got)
+			}
+			if c.wantTags != "" && !strings.Contains(got, c.wantTags+"\n") {
+				t.Errorf("want %q in:\n%s", c.wantTags, got)
+			}
+		})
 	}
 }
 
