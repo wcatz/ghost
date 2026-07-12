@@ -144,6 +144,11 @@ func TestRenderFrontmatterYAMLIndicators(t *testing.T) {
 			projectID:   "wip:",
 			wantProject: `project: "wip:"`,
 		},
+		{
+			name:     "boolean-like tags stay strings",
+			tags:     []string{"no", "on"},
+			wantTags: `tags: ["no", "on"]`,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

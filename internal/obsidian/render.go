@@ -88,8 +88,18 @@ func needsYAMLQuote(s string, flow bool) bool {
 	if strings.HasSuffix(s, ":") || strings.Contains(s, ": ") || strings.Contains(s, " #") || strings.Contains(s, `"`) {
 		return true
 	}
-	if flow && strings.ContainsAny(s, ",[]{}") {
-		return true
+	if flow {
+		if strings.ContainsAny(s, ",[]{}") {
+			return true
+		}
+		// Tags are always strings; quote reserved scalars so a tag like "no" or
+		// "on" stays a string rather than coercing to a bool/null. Scalar fields
+		// are not checked here: pinned/importance/dates are trusted YAML
+		// literals emitted by their renderers and must stay bare.
+		switch strings.ToLower(s) {
+		case "~", "null", "true", "false", "yes", "no", "on", "off":
+			return true
+		}
 	}
 	return false
 }

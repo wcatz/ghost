@@ -538,6 +538,10 @@ Flags:
 	defer stop()
 	if mode == "export" {
 		if err := ex.Export(ctx, out, project); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				fmt.Println("Stopped.")
+				return
+			}
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
