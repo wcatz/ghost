@@ -98,7 +98,7 @@ func Load() (*Config, error) {
 		loadFileIfExists(k, filepath.Join(configDir, "ghost", "config.yaml"), parser)
 	}
 
-	// Layer 6: GHOST_* environment variables.
+	// Layer 4: GHOST_* environment variables.
 	// e.g. GHOST_API_KEY → api.key, GHOST_DEFAULTS_MODE → defaults.mode
 	if err := k.Load(env.Provider("GHOST_", ".", func(s string) string {
 		return strings.ToLower(strings.Replace(
