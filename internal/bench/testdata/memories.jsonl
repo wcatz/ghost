@@ -1,0 +1,24 @@
+# Ghost retrieval benchmark dataset v1 (starter). Domain: Cardano stake-pool
+# infra + Ghost internals. Keys are stable; embeddings.json is keyed by these
+# keys (and by query names in queries.jsonl). Regenerate embeddings.json with
+# the gen-embeddings script when this file changes. See docs/benchmarks.md.
+{"key":"node_port","category":"fact","content":"The mainnet cardano-node listens for peer connections on TCP port 3001.","importance":0.7,"tags":["cardano","node","network"]}
+{"key":"relay_topology","category":"architecture","content":"Relay nodes connect to the block producer over a private topology; the block producer only peers with our own relays, never public peers.","importance":0.8,"tags":["cardano","topology","relay"]}
+{"key":"kes_rotation","category":"gotcha","content":"KES keys expire every 90 days on mainnet; rotate the operational certificate before the KES period lapses or the block producer stops forging blocks.","importance":0.9,"tags":["cardano","kes","keys"]}
+{"key":"ogmios_port","category":"fact","content":"Ogmios exposes its WebSocket JSON-RPC bridge to cardano-node on port 1337.","importance":0.6,"tags":["cardano","ogmios","network"]}
+{"key":"db_sync_pg","category":"dependency","content":"cardano-db-sync requires PostgreSQL 14 or newer and writes the full chain history into the cexplorer database.","importance":0.7,"tags":["cardano","db-sync","postgres"]}
+{"key":"pledge","category":"convention","content":"Keep the pool pledge fully funded in the registered reward address; an unmet pledge zeroes out pool rewards for that epoch.","importance":0.8,"tags":["cardano","pledge","rewards"]}
+{"key":"helmfile_diff","category":"convention","content":"Always run helmfile diff before helmfile apply so infrastructure changes are reviewed before they hit the production cluster.","importance":0.9,"tags":["infra","helmfile","workflow"]}
+{"key":"sops_age","category":"fact","content":"Secrets in the infra repo are encrypted with SOPS using an Age key; never commit an unencrypted secret.","importance":0.9,"tags":["infra","sops","secrets"]}
+{"key":"k3s_tailscale","category":"architecture","content":"The K3s cluster uses native Tailscale VPN auth mode so nodes join over the tailnet rather than a public network.","importance":0.7,"tags":["infra","k3s","tailscale"]}
+{"key":"arc_runners","category":"architecture","content":"CI runs on self-hosted GitHub Actions Runner Controller (ARC) pods inside the K3s cluster, not on GitHub-hosted runners.","importance":0.6,"tags":["infra","ci","arc"]}
+{"key":"no_main_push","category":"preference","content":"Never push directly to main; every change goes through a feature branch and a pull request, no matter how small.","importance":1.0,"tags":["workflow","git","policy"]}
+{"key":"yaml_indent","category":"convention","content":"YAML files use two-space indentation everywhere; never change the indentation width.","importance":0.6,"tags":["convention","yaml","style"]}
+{"key":"ghost_hybrid","category":"architecture","content":"Ghost hybrid search fuses FTS5 and vector results with reciprocal rank fusion, weighting the vector leg 70 percent and the full-text leg 30 percent.","importance":0.8,"tags":["ghost","search","rrf"]}
+{"key":"ghost_decay","category":"pattern","content":"Ghost time-decay scoring never decays preference, convention, or fact memories, while gotchas and decisions fade on a 30-day scale.","importance":0.7,"tags":["ghost","decay","scoring"]}
+{"key":"ghost_sqlite","category":"dependency","content":"Ghost stores everything in a single SQLite database using the pure-Go modernc driver, so builds need no CGO and no C toolchain.","importance":0.8,"tags":["ghost","sqlite","go"]}
+{"key":"ghost_reflect","category":"pattern","content":"Ghost reflection is dry-run by default; you must pass --apply to actually consolidate a project's memories, and --restore undoes the last run from a snapshot.","importance":0.7,"tags":["ghost","reflection","cli"]}
+{"key":"ghost_ollama","category":"dependency","content":"Ghost computes embeddings locally with Ollama running nomic-embed-text; without Ollama it degrades gracefully to full-text-only search.","importance":0.7,"tags":["ghost","ollama","embeddings"]}
+{"key":"ghost_global","category":"convention","content":"Ghost injects memories from the _global project into every project's session context, so cross-cutting rules are always visible.","importance":0.6,"tags":["ghost","global","context"]}
+{"key":"grafana_port","category":"fact","content":"The Grafana dashboard on the monitoring host is served on port 80 behind the ingress.","importance":0.5,"tags":["infra","grafana","monitoring"]}
+{"key":"prom_stack","category":"architecture","content":"Cluster monitoring uses the kube-prometheus-stack Helm chart for Prometheus, Alertmanager, and Grafana.","importance":0.6,"tags":["infra","prometheus","monitoring"]}

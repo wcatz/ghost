@@ -1,0 +1,15 @@
+# Graded queries over memories.jsonl. rel maps memory key -> relevance gain
+# (higher = more relevant). Queries are phrased as a user/agent would ask, not
+# as keyword echoes, so the vector leg has to earn its recall.
+{"name":"q_kes","text":"how often do I need to rotate the block producer signing keys","rel":{"kes_rotation":3}}
+{"name":"q_node_port","text":"which port does the cardano node use for peers","rel":{"node_port":3,"ogmios_port":1}}
+{"name":"q_secrets","text":"how are secrets encrypted in the infrastructure repo","rel":{"sops_age":3}}
+{"name":"q_deploy_safety","text":"what should I check before deploying to the production cluster","rel":{"helmfile_diff":3,"no_main_push":1}}
+{"name":"q_pledge","text":"why did the pool earn no rewards this epoch","rel":{"pledge":3}}
+{"name":"q_hybrid_search","text":"how does Ghost combine keyword and semantic search","rel":{"ghost_hybrid":3}}
+{"name":"q_no_cgo","text":"does building Ghost require a C compiler","rel":{"ghost_sqlite":3}}
+{"name":"q_local_embeddings","text":"what runs the embedding model for Ghost","rel":{"ghost_ollama":3}}
+{"name":"q_dbsync_db","text":"what database does cardano-db-sync need","rel":{"db_sync_pg":3}}
+{"name":"q_consolidate","text":"how do I consolidate memories without losing data","rel":{"ghost_reflect":3}}
+{"name":"q_monitoring","text":"what do we use to monitor the kubernetes cluster","rel":{"prom_stack":3,"grafana_port":1}}
+{"name":"q_git_policy","text":"can I commit a one line fix straight to the main branch","rel":{"no_main_push":3}}
