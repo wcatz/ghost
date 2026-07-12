@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/ai"
+	"github.com/wcatz/ghost/internal/bench"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/linking"
@@ -61,6 +63,9 @@ func main() {
 			return
 		case "obsidian":
 			runObsidian()
+			return
+		case "bench":
+			runBench()
 			return
 		}
 	}
@@ -582,6 +587,7 @@ Commands:
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
   obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
+  bench                       Run the retrieval-quality benchmark (built-in dataset)
   upgrade                     Update ghost to the latest release
   version                     Print version
 
@@ -597,6 +603,46 @@ Environment:
 }
 
 // bootstrap loads config, sets up logging, and opens the database.
+// runBench implements `ghost bench` — runs the built-in retrieval-quality
+// benchmark (four ablations over the embedded dataset) and prints the metric
+// table. Judge-free, deterministic, no network. See docs/benchmarks.md.
+func runBench() {
+	ds, vecs, err := bench.BuiltinDataset()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	threshold := float32(0.70)
+	if cfg, err := config.Load(); err == nil {
+		threshold = float32(cfg.Linking.Threshold)
+	}
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Silence internal search diagnostics (e.g. FTS term-cap warnings that go
+	// through the package-level default) so the benchmark table is the only
+	// output; the table is on stdout, so `ghost bench` stays pipeable.
+	slog.SetDefault(logger)
+	store := memory.NewStore(db, logger)
+	defer store.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	queries, err := bench.Seed(ctx, store, ds, vecs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	results, err := bench.Run(ctx, store, queries, threshold)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Print(bench.FormatResults(results))
+}
+
 func bootstrap() (*config.Config, *slog.Logger, *memory.Store) {
 	configPath, created, err := config.EnsureConfigFile()
 	if err != nil {
