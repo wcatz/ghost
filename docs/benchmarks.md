@@ -1,6 +1,8 @@
 # Benchmark plan
 
-Ghost publishes no retrieval-quality numbers yet. This document is the methodology for changing that honestly. The guiding rule: **a score only exists if anyone can re-run the harness with one command** — fixed seeds, published judge prompts (where a judge is used at all), and per-question logs.
+This document is the methodology for publishing retrieval-quality numbers honestly. The guiding rule: **a score only exists if anyone can re-run the harness with one command** — fixed seeds, published judge prompts (where a judge is used at all), and per-question logs.
+
+**Status:** Phase 2 (`ghost bench`) has shipped — run `ghost bench` for the current numbers. Phase 1 (LongMemEval-S) is next.
 
 ## Why these benchmarks and not others
 
@@ -21,14 +23,26 @@ The first published numbers. A Go harness that, per question, ingests the haysta
 - **Cost:** $0 API. Wall-clock is dominated by locally embedding the haystack through Ollama (`nomic-embed-text:v1.5`); the FTS5-only ablation runs in minutes.
 - **Published anchors for context:** the LongMemEval paper's flat-index baseline (session-level Recall@5 ≈ 0.64 on the -M variant) and reported ~95% Recall@5 hybrid results on -S.
 
-## Phase 2 — `ghost bench`: an in-repo dataset + CI regression floors
+## Phase 2 — `ghost bench`: an in-repo dataset + CI regression floors — SHIPPED
 
-A `ghost bench` subcommand over a small self-authored dataset (~150 memories across Ghost's 8 categories, ~40 graded queries), with committed real `nomic-embed-text:v1.5` embedding fixtures so CI needs no Ollama.
+`ghost bench` runs a self-authored graded dataset (in `internal/bench/testdata/`) with a committed real `nomic-embed-text:v1.5` embedding fixture, so CI runs the vector/hybrid conditions with no Ollama. The harness (`internal/bench/`) drives Ghost's production `SearchFTS`/`SearchVector`/`SearchHybrid` over a fresh in-memory store and scores judge-free IR metrics.
 
-- Ghost's search entrypoint (`SearchHybrid`) takes the query vector as a parameter, so the harness drives the exact production FTS/hybrid/graph code paths deterministically.
-- Regression tests assert **metric floors** (e.g. NDCG@10 ≥ target per ablation), not exact rankings — RRF fused scores tie easily and exact goldens would be brittle.
-- Every published table states dataset size, embedding model, and commit hash.
-- A follow-up refactor extracts the RRF fusion into a parameterized function, enabling `ghost bench --sweep` — an empirical basis for the currently hand-tuned knobs (70/30 fusion weights, graph bonus 0.15, cosine link threshold 0.70).
+Current numbers (v1 dataset: 20 memories across the 8 categories, 12 graded queries; retrieval-only, no LLM judge; fully deterministic):
+
+```
+condition          R@1     R@5    R@10   MRR@10  NDCG@10
+fts-only         0.792   0.958   1.000    0.944    0.948
+vector-only      0.875   0.917   0.958    1.000    0.979
+hybrid           0.875   0.958   1.000    1.000    0.987
+hybrid+graph     0.542   0.958   1.000    0.806    0.842
+```
+
+Two findings, both honest:
+
+- **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.987) beats both single legs (FTS 0.948, vector 0.979) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI.
+- **The graph-expansion bonus currently hurts.** `hybrid+graph` is *worse* than plain hybrid (NDCG 0.842, R@1 0.542) — the additive bonus (weight 0.15) lifts semantically-adjacent neighbors above exact matches. The regression test documents this rather than flooring it; the 0.15 weight has no empirical basis and needs retuning.
+
+The dataset is deliberately a v1 starter; growing it toward ~150 memories / ~40 graded queries is planned. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie. A follow-up refactor extracts the RRF fusion into a parameterized function, enabling `ghost bench --sweep` to find empirically-grounded values for the currently hand-tuned knobs (70/30 weights, graph bonus 0.15, cosine link threshold 0.70) — with the graph-bonus regression above as the first thing to fix.
 
 ## Phase 3 — staleness suite (the flagship)
 
