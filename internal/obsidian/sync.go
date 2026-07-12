@@ -13,11 +13,17 @@ import (
 // connection (SetMaxOpenConns(1) — memory.OpenDB does this) for polls to
 // compare against a stable baseline.
 func Sync(ctx context.Context, ex *Exporter, db *sql.DB, vaultDir, projectFilter string, interval time.Duration) error {
-	if err := ex.Export(ctx, vaultDir, projectFilter); err != nil {
-		return err
-	}
+	// Capture the baseline BEFORE the initial export, mirroring the loop's
+	// read-before-export order. Export is a sequence of independent autocommit
+	// reads, not one snapshot; a commit that lands mid-export would otherwise
+	// be baked into `last` here and never re-exported until an unrelated later
+	// commit. Reading first makes the worst case one redundant re-export on the
+	// first tick instead of a silently dropped change.
 	last, err := dataVersion(ctx, db)
 	if err != nil {
+		return err
+	}
+	if err := ex.Export(ctx, vaultDir, projectFilter); err != nil {
 		return err
 	}
 	ticker := time.NewTicker(interval)

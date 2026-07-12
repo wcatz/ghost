@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,20 @@ import (
 	"github.com/wcatz/ghost/internal/config"
 	_ "modernc.org/sqlite"
 )
+
+// roDSN builds a read-only DSN for dbPath. The file: URI form is required —
+// modernc.org/sqlite honors mode=ro only on URI DSNs; a bare path opens
+// read-write and would create a phantom empty ghost.db on first read. The path
+// is URI-escaped so a '?' or '#' in it can't corrupt the query, and no
+// journal_mode pragma is set (a read-only connection cannot write the header).
+func roDSN(dbPath string) string {
+	u := url.URL{
+		Scheme:   "file",
+		Opaque:   (&url.URL{Path: dbPath}).EscapedPath(),
+		RawQuery: "mode=ro&_pragma=busy_timeout(1000)",
+	}
+	return u.String()
+}
 
 type sessionStartInput struct {
 	CWD    string `json:"cwd"`
@@ -108,7 +123,10 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 }
 
 func loadGlobalMemories(dbPath string) [][2]string {
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(1000)")
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil // no store yet — never create a phantom empty DB
+	}
+	db, err := sql.Open("sqlite", roDSN(dbPath))
 	if err != nil {
 		return nil
 	}
@@ -143,7 +161,10 @@ func loadSessionContext(cwd string) (project string, memories [][3]string, learn
 		return
 	}
 	dbPath := filepath.Join(dataDir, "ghost.db")
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(1000)")
+	if _, err := os.Stat(dbPath); err != nil {
+		return // no store yet — never create a phantom empty DB
+	}
+	db, err := sql.Open("sqlite", roDSN(dbPath))
 	if err != nil {
 		return
 	}

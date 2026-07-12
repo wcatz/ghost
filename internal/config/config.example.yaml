@@ -5,9 +5,7 @@
 #   1. Compiled defaults
 #   2. /etc/ghost/config.yaml
 #   3. ~/.config/ghost/config.yaml  (this file)
-#   4. .ghost/config.yaml           (per-project)
-#   5. .ghost/config.local.yaml     (per-project, gitignored)
-#   6. GHOST_* environment variables
+#   4. GHOST_* environment variables (plus ANTHROPIC_API_KEY)
 
 # --- Claude API ---
 # Required only for memory consolidation (ghost reflect --tier haiku).

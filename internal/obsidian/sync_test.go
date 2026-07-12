@@ -155,12 +155,17 @@ func (l *logBuffer) String() string {
 
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	// Generous deadline: these tests drive a real 50ms ticker, and under
+	// `go test -race ./...` scheduler contention can delay a tick well past a
+	// tight bound. A passing condition is met in well under a second; the
+	// headroom only guards against false failures under load.
+	const deadline = 30 * time.Second
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
 		if cond() {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatal("condition not met within 5s")
+	t.Fatalf("condition not met within %s", deadline)
 }

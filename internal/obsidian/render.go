@@ -59,37 +59,75 @@ func date(ts string) string {
 	return ts
 }
 
+// yamlScalar renders s as a single-line YAML scalar. Newlines and tabs are
+// flattened to spaces — the ghost_id-first, one-line-per-key invariant that
+// prune's hasGhostID scan depends on — and the value is double-quoted with
+// escaping whenever plain emission could change the line's YAML meaning. When
+// flow is true the value is a flow-sequence item (a tag), so the structural
+// characters , [ ] { } force quoting anywhere in the string, not just at the
+// start. Well-formed values (hex ids, plain project names and tags) take the
+// plain path and render byte-identically to an unescaped emission.
+func yamlScalar(s string, flow bool) string {
+	s = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ").Replace(s)
+	if needsYAMLQuote(s, flow) {
+		return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+	}
+	return s
+}
+
+// needsYAMLQuote reports whether s must be double-quoted to survive as a
+// single-line YAML scalar (see yamlScalar). s is assumed already flattened.
+func needsYAMLQuote(s string, flow bool) bool {
+	if s == "" || strings.TrimSpace(s) != s { // empty, or leading/trailing space
+		return true
+	}
+	switch s[0] { // leading YAML indicator characters
+	case '!', '&', '*', '?', '|', '>', '%', '@', '`', '"', '\'', '#', ',', '[', ']', '{', '}', '-', ':', ' ':
+		return true
+	}
+	if strings.HasSuffix(s, ":") || strings.Contains(s, ": ") || strings.Contains(s, " #") || strings.Contains(s, `"`) {
+		return true
+	}
+	if flow {
+		if strings.ContainsAny(s, ",[]{}") {
+			return true
+		}
+		// Tags are always strings; quote reserved scalars so a tag like "no" or
+		// "on" stays a string rather than coercing to a bool/null. Scalar fields
+		// are not checked here: pinned/importance/dates are trusted YAML
+		// literals emitted by their renderers and must stay bare.
+		switch strings.ToLower(s) {
+		case "~", "null", "true", "false", "yes", "no", "on", "off":
+			return true
+		}
+	}
+	return false
+}
+
 // fm writes one frontmatter line.
 //
 // Invariant for every renderer: ghost_id must be the first frontmatter key
 // and every value must occupy exactly one line — prune's hasGhostID scan
-// depends on it. Newlines are therefore flattened to spaces unconditionally,
-// and a value that could change its line's YAML shape (mapping separator,
-// flow/comment/quote characters) is double-quoted with escaping. Fixed-
-// vocabulary values — category, source, and task/decision status are all
-// CHECK-constrained in memory/schema.go — plus type, numerics, bools, and
-// dates never trip the quoting and are emitted plain, byte-identical to
-// before this hardening.
+// depends on it. Values are rendered through yamlScalar, which flattens
+// newlines and quotes anything that would break YAML. Fixed-vocabulary values
+// — category, source, and task/decision status are all CHECK-constrained in
+// memory/schema.go — plus type, numerics, bools, and dates take yamlScalar's
+// plain path and emit unquoted.
 func fm(b *strings.Builder, key, val string) {
-	val = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(val)
-	if strings.Contains(val, ": ") || strings.Contains(val, `"`) || strings.Contains(val, "#") ||
-		strings.HasPrefix(val, "[") || strings.HasPrefix(val, "{") {
-		val = `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(val) + `"`
-	}
-	fmt.Fprintf(b, "%s: %s\n", key, val)
+	fmt.Fprintf(b, "%s: %s\n", key, yamlScalar(val, false))
 }
 
-// fmTags writes the tags flow list. Each tag is sanitized — structural flow
-// characters and newlines stripped — so the composed [a, b] value is safe to
-// emit plain; routing it through fm would quote the leading '[' and Obsidian
-// would stop reading it as a list.
+// fmTags writes the tags flow list. Each tag is rendered as a flow-sequence
+// item via yamlScalar (flow=true), which quotes any tag containing flow-
+// structural characters or a YAML indicator so the composed [a, b] list always
+// parses — '#urgent' and 'status: open' survive intact rather than corrupting
+// the note's whole frontmatter.
 func fmTags(b *strings.Builder, tags []string) {
-	clean := make([]string, 0, len(tags))
-	tagSanitizer := strings.NewReplacer("[", "", "]", "", ",", "", `"`, "", "\r", " ", "\n", " ")
+	items := make([]string, 0, len(tags))
 	for _, tag := range tags {
-		clean = append(clean, tagSanitizer.Replace(tag))
+		items = append(items, yamlScalar(tag, true))
 	}
-	fmt.Fprintf(b, "tags: [%s]\n", strings.Join(clean, ", "))
+	fmt.Fprintf(b, "tags: [%s]\n", strings.Join(items, ", "))
 }
 
 func renderMemory(m memory.Memory, links []memory.Link, fileFor map[string]string) string {

@@ -4,10 +4,8 @@
 //  1. Compiled defaults
 //  2. /etc/ghost/config.yaml          (system-wide)
 //  3. ~/.config/ghost/config.yaml     (user-global)
-//  4. .ghost/config.yaml              (project, checked in)
-//  5. .ghost/config.local.yaml        (project, gitignored)
-//  6. GHOST_* environment variables
-//  7. CLI flag overrides (applied by caller after Load)
+//  4. GHOST_* environment variables (plus ANTHROPIC_API_KEY)
+//  5. CLI flag overrides (applied by caller after Load)
 package config
 
 import (
@@ -100,7 +98,7 @@ func Load() (*Config, error) {
 		loadFileIfExists(k, filepath.Join(configDir, "ghost", "config.yaml"), parser)
 	}
 
-	// Layer 6: GHOST_* environment variables.
+	// Layer 4: GHOST_* environment variables.
 	// e.g. GHOST_API_KEY → api.key, GHOST_DEFAULTS_MODE → defaults.mode
 	if err := k.Load(env.Provider("GHOST_", ".", func(s string) string {
 		return strings.ToLower(strings.Replace(

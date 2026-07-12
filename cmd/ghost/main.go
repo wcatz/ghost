@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -417,12 +419,55 @@ func runUpgrade() {
 	fmt.Printf("Updated: ghost %s → %s\n", version, latest)
 }
 
+// parseObsidianFlags parses the flags following `ghost obsidian <mode>`. It
+// errors on an unknown flag or a value flag missing its argument rather than
+// silently falling back to defaults (a misspelled --intervl would otherwise
+// leave the user believing a cadence that isn't in effect).
+func parseObsidianFlags(args []string) (out, project, interval string, err error) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--out", arg == "--project", arg == "--interval":
+			if i+1 >= len(args) {
+				return "", "", "", fmt.Errorf("flag %s needs a value", arg)
+			}
+			i++
+			switch arg {
+			case "--out":
+				out = args[i]
+			case "--project":
+				project = args[i]
+			case "--interval":
+				interval = args[i]
+			}
+		case strings.HasPrefix(arg, "--out="):
+			out = strings.TrimPrefix(arg, "--out=")
+		case strings.HasPrefix(arg, "--project="):
+			project = strings.TrimPrefix(arg, "--project=")
+		case strings.HasPrefix(arg, "--interval="):
+			interval = strings.TrimPrefix(arg, "--interval=")
+		default:
+			return "", "", "", fmt.Errorf("unknown or malformed flag %q", arg)
+		}
+	}
+	return out, project, interval, nil
+}
+
 // roDSN builds a read-only DSN for the given database path. The file: URI
 // form is required: modernc.org/sqlite honors mode=ro only on URI DSNs — a
-// bare path opens silently read-write (verified against v1.53.0; the _pragma
-// params, by contrast, apply either way).
+// bare path opens silently read-write (verified against v1.53.0). The path is
+// URI-escaped so a '?' or '#' in $XDG_DATA_HOME/$HOME can't be parsed as the
+// query separator or a fragment (which would drop mode=ro or open the wrong
+// file). No journal_mode pragma: setting it writes the DB header, which a
+// read-only connection cannot do — it would fail against a non-WAL database
+// and is a pure no-op against a WAL one.
 func roDSN(dbPath string) string {
-	return "file:" + dbPath + "?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(1000)"
+	u := url.URL{
+		Scheme:   "file",
+		Opaque:   (&url.URL{Path: dbPath}).EscapedPath(),
+		RawQuery: "mode=ro&_pragma=busy_timeout(1000)",
+	}
+	return u.String()
 }
 
 // runObsidian implements `ghost obsidian export|sync` — a one-way mirror of
@@ -438,25 +483,10 @@ Flags:
 		os.Exit(1)
 	}
 	mode := os.Args[2]
-	var out, project, interval string
-	for i := 3; i < len(os.Args); i++ {
-		switch {
-		case os.Args[i] == "--out" && i+1 < len(os.Args):
-			out = os.Args[i+1]
-			i++
-		case strings.HasPrefix(os.Args[i], "--out="):
-			out = strings.TrimPrefix(os.Args[i], "--out=")
-		case os.Args[i] == "--project" && i+1 < len(os.Args):
-			project = os.Args[i+1]
-			i++
-		case strings.HasPrefix(os.Args[i], "--project="):
-			project = strings.TrimPrefix(os.Args[i], "--project=")
-		case os.Args[i] == "--interval" && i+1 < len(os.Args):
-			interval = os.Args[i+1]
-			i++
-		case strings.HasPrefix(os.Args[i], "--interval="):
-			interval = strings.TrimPrefix(os.Args[i], "--interval=")
-		}
+	out, project, interval, err := parseObsidianFlags(os.Args[3:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	cfg, err := config.Load()
@@ -504,9 +534,14 @@ Flags:
 	defer store.Close() //nolint:errcheck
 
 	ex := &obsidian.Exporter{Store: store, Logger: logger}
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	if mode == "export" {
 		if err := ex.Export(ctx, out, project); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				fmt.Println("Stopped.")
+				return
+			}
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
@@ -524,6 +559,10 @@ Flags:
 	}
 	fmt.Printf("Syncing to %s every %s (Ctrl-C to stop)\n", out, d)
 	if err := obsidian.Sync(ctx, ex, db, out, project, d); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			fmt.Println("Stopped.")
+			return
+		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
