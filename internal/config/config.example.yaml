@@ -36,3 +36,10 @@
 # auto: tries haiku (if ANTHROPIC_API_KEY set) → sqlite (free, always available)
 # reflection:
 #   backend: "auto"                  # "auto", "haiku", "sqlite"
+
+# --- Obsidian Vault Mirror ---
+# One-way Markdown mirror of memories, decisions, and tasks
+# (ghost obsidian export|sync). Empty vault_dir means ~/Documents/GhostVault.
+# obsidian:
+#   vault_dir: ""                    # or set GHOST_OBSIDIAN_VAULT_DIR
+#   interval: "30s"                  # sync poll cadence (Go duration, e.g. "1m")

@@ -129,6 +129,28 @@ func TestLoad_ExplicitEnvOverrides(t *testing.T) {
 	}
 }
 
+func TestLoad_ObsidianVaultDirEnvOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	// Clear interfering env vars.
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY"})
+
+	// The generic _ → . transformer would map this to obsidian.vault.dir,
+	// missing the obsidian.vault_dir key — the explicit override must catch it.
+	t.Setenv("GHOST_OBSIDIAN_VAULT_DIR", "/vaults/ghost")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Obsidian.VaultDir != "/vaults/ghost" {
+		t.Errorf("obsidian.vault_dir = %q, want %q (explicit env override)", cfg.Obsidian.VaultDir, "/vaults/ghost")
+	}
+}
+
 func TestLoad_YAMLFileOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
@@ -274,5 +296,32 @@ func TestLinkingDefaults(t *testing.T) {
 	}
 	if cfg.Linking.Threshold != 0.70 {
 		t.Errorf("expected linking.threshold=0.70, got %f", cfg.Linking.Threshold)
+	}
+}
+
+func TestObsidianDefaults(t *testing.T) {
+	// Isolate from the host: a real ~/.config/ghost/config.yaml or a
+	// GHOST_OBSIDIAN_* var in the environment would otherwise skew defaults.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	// t.Setenv can't unset, and the env provider has no empty-value guard, so
+	// clearing to "" would itself override the default. Save and restore.
+	for _, key := range []string{"GHOST_OBSIDIAN_VAULT_DIR", "GHOST_OBSIDIAN_INTERVAL"} {
+		if old, ok := os.LookupEnv(key); ok {
+			_ = os.Unsetenv(key)
+			t.Cleanup(func() { _ = os.Setenv(key, old) })
+		}
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Obsidian.VaultDir != "" {
+		t.Errorf("VaultDir default = %q, want empty (resolved at use time)", cfg.Obsidian.VaultDir)
+	}
+	if cfg.Obsidian.Interval != "30s" {
+		t.Errorf("Interval default = %q, want 30s", cfg.Obsidian.Interval)
 	}
 }

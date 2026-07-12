@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/mcpserver"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/obsidian"
 	"github.com/wcatz/ghost/internal/reflection"
 	"github.com/wcatz/ghost/internal/selfupdate"
 )
@@ -54,6 +56,9 @@ func main() {
 			return
 		case "upgrade":
 			runUpgrade()
+			return
+		case "obsidian":
+			runObsidian()
 			return
 		}
 	}
@@ -412,6 +417,118 @@ func runUpgrade() {
 	fmt.Printf("Updated: ghost %s → %s\n", version, latest)
 }
 
+// roDSN builds a read-only DSN for the given database path. The file: URI
+// form is required: modernc.org/sqlite honors mode=ro only on URI DSNs — a
+// bare path opens silently read-write (verified against v1.53.0; the _pragma
+// params, by contrast, apply either way).
+func roDSN(dbPath string) string {
+	return "file:" + dbPath + "?mode=ro&_pragma=journal_mode(WAL)&_pragma=busy_timeout(1000)"
+}
+
+// runObsidian implements `ghost obsidian export|sync` — a one-way mirror of
+// the store into an Obsidian-readable Markdown vault.
+func runObsidian() {
+	if len(os.Args) < 3 || (os.Args[2] != "export" && os.Args[2] != "sync") {
+		fmt.Fprintln(os.Stderr, `Usage: ghost obsidian <export|sync> [flags]
+
+Flags:
+  --out string       Vault directory (default ~/Documents/GhostVault or obsidian.vault_dir)
+  --project string   Mirror a single project (plus Global)
+  --interval string  sync only: poll cadence (default 30s or obsidian.interval)`)
+		os.Exit(1)
+	}
+	mode := os.Args[2]
+	var out, project, interval string
+	for i := 3; i < len(os.Args); i++ {
+		switch {
+		case os.Args[i] == "--out" && i+1 < len(os.Args):
+			out = os.Args[i+1]
+			i++
+		case strings.HasPrefix(os.Args[i], "--out="):
+			out = strings.TrimPrefix(os.Args[i], "--out=")
+		case os.Args[i] == "--project" && i+1 < len(os.Args):
+			project = os.Args[i+1]
+			i++
+		case strings.HasPrefix(os.Args[i], "--project="):
+			project = strings.TrimPrefix(os.Args[i], "--project=")
+		case os.Args[i] == "--interval" && i+1 < len(os.Args):
+			interval = os.Args[i+1]
+			i++
+		case strings.HasPrefix(os.Args[i], "--interval="):
+			interval = strings.TrimPrefix(os.Args[i], "--interval=")
+		}
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if out == "" {
+		out = cfg.Obsidian.VaultDir
+	}
+	if out == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: cannot resolve home dir: %v\n", err)
+			os.Exit(1)
+		}
+		out = filepath.Join(home, "Documents", "GhostVault")
+	}
+	if interval == "" {
+		interval = cfg.Obsidian.Interval
+	}
+
+	dataDir, err := config.DataDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	dbPath := filepath.Join(dataDir, "ghost.db")
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "error: no database at %s — run ghost mcp init or start a session first\n", dbPath)
+		os.Exit(1)
+	}
+	// Read-only: safe alongside a live MCP server.
+	db, err := sql.Open("sqlite", roDSN(dbPath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: open %s: %v\n", dbPath, err)
+		os.Exit(1)
+	}
+	// PRAGMA data_version (sync mode) is per-connection; pin the pool to one
+	// connection so polls compare against a stable baseline. memory.OpenDB does
+	// this for read-write opens — raw sql.Open here needs it explicitly.
+	db.SetMaxOpenConns(1)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	store := memory.NewStore(db, logger)
+	defer store.Close() //nolint:errcheck
+
+	ex := &obsidian.Exporter{Store: store, Logger: logger}
+	ctx := context.Background()
+	if mode == "export" {
+		if err := ex.Export(ctx, out, project); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Mirrored to %s\n", out)
+		return
+	}
+	d, err := time.ParseDuration(interval)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: bad --interval %q: %v\n", interval, err)
+		os.Exit(1)
+	}
+	if d <= 0 {
+		fmt.Fprintf(os.Stderr, "error: --interval must be positive, got %s\n", d)
+		os.Exit(1)
+	}
+	fmt.Printf("Syncing to %s every %s (Ctrl-C to stop)\n", out, d)
+	if err := obsidian.Sync(ctx, ex, db, out, project, d); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 // printUsage displays the top-level help.
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `ghost %s — MCP memory server for Claude Code
@@ -424,6 +541,8 @@ Commands:
   mcp init [--dry-run]        Configure Claude Code integration
   mcp status                  Check Claude Code integration health
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
+  obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
+  obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
   upgrade                     Update ghost to the latest release
   version                     Print version
 

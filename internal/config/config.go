@@ -32,6 +32,7 @@ type Config struct {
 	Embedding  EmbeddingConfig  `koanf:"embedding"`
 	Reflection ReflectionConfig `koanf:"reflection"`
 	Linking    LinkingConfig    `koanf:"linking"`
+	Obsidian   ObsidianConfig   `koanf:"obsidian"`
 }
 
 // APIConfig holds Claude API settings (used by reflection only).
@@ -59,15 +60,23 @@ type LinkingConfig struct {
 	Threshold float64 `koanf:"threshold"`
 }
 
+// ObsidianConfig controls the Obsidian vault mirror (ghost obsidian export|sync).
+type ObsidianConfig struct {
+	VaultDir string `koanf:"vault_dir"` // empty = ~/Documents/GhostVault, resolved by the CLI
+	Interval string `koanf:"interval"`  // sync poll cadence, time.ParseDuration format
+}
+
 // defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{
-	"embedding.enabled":          true,
-	"embedding.ollama_url":       "http://localhost:11434",
-	"embedding.model":            "nomic-embed-text:v1.5",
-	"embedding.dimensions":       768,
-	"reflection.backend":         "auto",
-	"linking.enabled":            true,
-	"linking.threshold":          0.70,
+	"embedding.enabled":    true,
+	"embedding.ollama_url": "http://localhost:11434",
+	"embedding.model":      "nomic-embed-text:v1.5",
+	"embedding.dimensions": 768,
+	"reflection.backend":   "auto",
+	"linking.enabled":      true,
+	"linking.threshold":    0.70,
+	"obsidian.vault_dir":   "",
+	"obsidian.interval":    "30s",
 }
 
 // Load reads configuration with layered precedence.
@@ -111,7 +120,8 @@ func Load() (*Config, error) {
 	// koanf's _ → . transformer would map e.g. GHOST_SERVER_AUTH_TOKEN
 	// to server.auth.token instead of server.auth_token.
 	envOverrides := map[string]string{
-		"GHOST_SERVER_AUTH_TOKEN": "server.auth_token",
+		"GHOST_SERVER_AUTH_TOKEN":  "server.auth_token",
+		"GHOST_OBSIDIAN_VAULT_DIR": "obsidian.vault_dir",
 	}
 	for envKey, koanfKey := range envOverrides {
 		if val := os.Getenv(envKey); val != "" {

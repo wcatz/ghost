@@ -7,7 +7,7 @@
 - MCP server via modelcontextprotocol/go-sdk (stdio transport)
 
 ## Architecture
-- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, upgrade, version
+- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, obsidian, upgrade, version
 - `internal/ai/` — Claude API client with streaming (Reflect method for consolidation)
 - `internal/memory/` — SQLite CRUD, FTS5 search, vector search, time-decay scoring
 - `internal/mcpserver/` — MCP server: 16 tools + 4 resources
@@ -15,6 +15,7 @@
 - `internal/claudeimport/` — One-time import of Claude Code auto-memory on first contact
 - `internal/embedding/` — Ollama async vectorization worker
 - `internal/linking/` — Background worker linking similar memories into a graph
+- `internal/obsidian/` — One-way Markdown vault mirror (`ghost obsidian export|sync`)
 - `internal/reflection/` — Memory consolidation: HaikuConsolidator + SQLiteConsolidator
 - `internal/provider/` — Interface contracts: LLMProvider, MemoryStore
 - `internal/config/` — Layered YAML + env config (koanf)
