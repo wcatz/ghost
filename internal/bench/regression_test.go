@@ -18,7 +18,7 @@ func byCondition(results []Result) map[string]Result {
 func TestBenchRegressionFloors(t *testing.T) {
 	r := byCondition(runTestdata(t))
 
-	const wantQueries = 12
+	const wantQueries = 14
 	for cond, res := range r {
 		if res.Queries != wantQueries {
 			t.Errorf("%s: scored %d queries, want %d", cond, res.Queries, wantQueries)
@@ -29,8 +29,8 @@ func TestBenchRegressionFloors(t *testing.T) {
 		cond           string
 		ndcg, recall10 float64
 	}{
-		{CondFTS, 0.90, 0.95},
-		{CondVector, 0.93, 0.92},
+		{CondFTS, 0.92, 0.95},
+		{CondVector, 0.90, 0.90},
 		{CondHybrid, 0.95, 0.95},
 	}
 	for _, f := range floors {

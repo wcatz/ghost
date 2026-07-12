@@ -13,3 +13,5 @@
 {"name":"q_consolidate","text":"how do I consolidate memories without losing data","rel":{"ghost_reflect":3}}
 {"name":"q_monitoring","text":"what do we use to monitor the kubernetes cluster","rel":{"prom_stack":3,"grafana_port":1}}
 {"name":"q_git_policy","text":"can I commit a one line fix straight to the main branch","rel":{"no_main_push":3}}
+{"name":"q_why_sqlite","text":"why does Ghost use SQLite instead of a database server","rel":{"decision_sqlite":3,"ghost_sqlite":1}}
+{"name":"q_graph_choice","text":"why did Ghost not use an entity knowledge graph for memory links","rel":{"decision_links":3}}

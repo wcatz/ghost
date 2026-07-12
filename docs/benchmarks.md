@@ -27,22 +27,22 @@ The first published numbers. A Go harness that, per question, ingests the haysta
 
 `ghost bench` runs a self-authored graded dataset (in `internal/bench/testdata/`) with a committed real `nomic-embed-text:v1.5` embedding fixture, so CI runs the vector/hybrid conditions with no Ollama. The harness (`internal/bench/`) drives Ghost's production `SearchFTS`/`SearchVector`/`SearchHybrid` over a fresh in-memory store and scores judge-free IR metrics.
 
-Current numbers (v1 dataset: 20 memories across the 8 categories, 12 graded queries; retrieval-only, no LLM judge; fully deterministic):
+Current numbers (v1 dataset: 22 memories spanning all 8 categories, 14 graded queries; retrieval-only, no LLM judge; fully deterministic — reproduce with `ghost bench`):
 
 ```
 condition          R@1     R@5    R@10   MRR@10  NDCG@10
-fts-only         0.792   0.958   1.000    0.944    0.948
-vector-only      0.875   0.917   0.958    1.000    0.979
-hybrid           0.875   0.958   1.000    1.000    0.987
-hybrid+graph     0.542   0.958   1.000    0.806    0.842
+fts-only         0.786   0.964   1.000    0.964    0.965
+vector-only      0.786   0.929   0.964    0.952    0.946
+hybrid           0.857   0.964   1.000    1.000    0.989
+hybrid+graph     0.500   0.964   1.000    0.780    0.824
 ```
 
 Two findings, both honest:
 
-- **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.987) beats both single legs (FTS 0.948, vector 0.979) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI.
-- **The graph-expansion bonus currently hurts.** `hybrid+graph` is *worse* than plain hybrid (NDCG 0.842, R@1 0.542) — the additive bonus (weight 0.15) lifts semantically-adjacent neighbors above exact matches. The regression test documents this rather than flooring it; the 0.15 weight has no empirical basis and needs retuning.
+- **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.989) beats both single legs (FTS 0.965, vector 0.946) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI.
+- **The graph-expansion bonus currently hurts.** `hybrid+graph` is *worse* than plain hybrid (NDCG 0.824, R@1 0.500) — the additive bonus (weight 0.15) lifts semantically-adjacent neighbors above exact matches. The regression test documents this rather than flooring it; the 0.15 weight has no empirical basis and needs retuning.
 
-The dataset is deliberately a v1 starter; growing it toward ~150 memories / ~40 graded queries is planned. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie. A follow-up refactor extracts the RRF fusion into a parameterized function, enabling `ghost bench --sweep` to find empirically-grounded values for the currently hand-tuned knobs (70/30 weights, graph bonus 0.15, cosine link threshold 0.70) — with the graph-bonus regression above as the first thing to fix.
+The dataset is deliberately a v1 starter (all 8 categories represented); growing it toward ~150 memories / ~40 graded queries is planned. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie. A follow-up refactor extracts the RRF fusion into a parameterized function, enabling `ghost bench --sweep` to find empirically-grounded values for the currently hand-tuned knobs (70/30 weights, graph bonus 0.15, cosine link threshold 0.70) — with the graph-bonus regression above as the first thing to fix.
 
 ## Phase 3 — staleness suite (the flagship)
 

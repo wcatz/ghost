@@ -135,6 +135,16 @@ func Seed(ctx context.Context, store *memory.Store, ds Dataset, vecs Vectors) ([
 	if err := store.EnsureProject(ctx, ds.Project, "/bench/"+ds.Project, ds.Project); err != nil {
 		return nil, fmt.Errorf("ensure project: %w", err)
 	}
+	dim := 0 // shared embedding dimension; a mixed fixture is a hard error
+	checkDim := func(what string, v []float32) error {
+		if dim == 0 {
+			dim = len(v)
+		} else if len(v) != dim {
+			return fmt.Errorf("%s has %d-dim vector, expected %d (regenerate embeddings)", what, len(v), dim)
+		}
+		return nil
+	}
+
 	keyToID := make(map[string]string, len(ds.Memories))
 	for _, m := range ds.Memories {
 		if m.Key == "" {
@@ -146,6 +156,9 @@ func Seed(ctx context.Context, store *memory.Store, ds Dataset, vecs Vectors) ([
 		vec, ok := vecs[m.Key]
 		if !ok {
 			return nil, fmt.Errorf("no fixture vector for memory key %q (regenerate embeddings)", m.Key)
+		}
+		if err := checkDim("memory "+m.Key, vec); err != nil {
+			return nil, err
 		}
 		id, err := store.Create(ctx, ds.Project, memory.Memory{
 			Category: m.Category, Content: m.Content, Importance: m.Importance,
@@ -165,6 +178,9 @@ func Seed(ctx context.Context, store *memory.Store, ds Dataset, vecs Vectors) ([
 		vec, ok := vecs[q.Name]
 		if !ok {
 			return nil, fmt.Errorf("no fixture vector for query %q (regenerate embeddings)", q.Name)
+		}
+		if err := checkDim("query "+q.Name, vec); err != nil {
+			return nil, err
 		}
 		rel := make(Relevance, len(q.Rel))
 		for key, gain := range q.Rel {
