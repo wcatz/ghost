@@ -139,6 +139,19 @@ func TestLoadGlobalMemories(t *testing.T) {
 	}
 }
 
+// TestLoadGlobalMemories_MissingDBNoPhantom verifies the session hook never
+// creates an empty ghost.db when none exists (the bare-path mode=ro DSN used
+// to open read-write and materialize a phantom file on first read).
+func TestLoadGlobalMemories_MissingDBNoPhantom(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	if globals := loadGlobalMemories(dbPath); globals != nil {
+		t.Errorf("missing DB should yield no globals, got %v", globals)
+	}
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Errorf("loadGlobalMemories must not create %s (err=%v)", dbPath, err)
+	}
+}
+
 func TestHandleSessionStartHook_GlobalsOnNoMatch(t *testing.T) {
 	// config.DataDir() returns XDG_DATA_HOME/ghost — build that structure explicitly.
 	xdgHome := t.TempDir()
