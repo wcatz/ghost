@@ -223,16 +223,26 @@ Note: env-var names map underscores to config dots, so keys that themselves cont
 
 ## Benchmarks
 
-**None published yet — and we won't fake them.** Several popular memory benchmarks have known problems (LOCOMO's answer key and judge have been publicly audited as unreliable), so we're not rushing to publish a big green number. What's planned, in order — full methodology in [docs/benchmarks.md](docs/benchmarks.md):
+Ghost ships a retrieval-quality benchmark you can run yourself in seconds — `ghost bench` — and every number below is deterministic, judge-free, and regression-guarded in CI. Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
 
-1. **LongMemEval-S retrieval metrics** — session-level Recall@k / NDCG@k against the dataset's official evidence labels, with ablations (FTS5-only vs vector-only vs hybrid vs hybrid+graph) to prove each piece of the search stack earns its keep. No LLM judge, $0 API cost, fully reproducible.
-2. **`ghost bench`** — an in-repo graded dataset with committed embedding fixtures, asserting retrieval-quality floors in CI on every PR.
-3. **A deterministic staleness suite** — "prod ran Postgres 14, we migrated to 16": does search rank the fresh fact first? Runs in CI, no judge.
-4. **End-to-end LongMemEval-S** with the official GPT-4o judge, for leaderboard-comparable numbers.
+```text
+$ ghost bench
+condition          R@1     R@5    R@10   MRR@10  NDCG@10
+fts-only         0.786   0.964   1.000    0.964    0.965
+vector-only      0.786   0.929   0.964    0.952    0.946
+hybrid           0.857   0.964   1.000    1.000    0.989
+hybrid+graph     0.500   0.964   1.000    0.780    0.824
 
-When numbers land, they ship with the harness, fixed seeds, and per-question logs so you can re-run them yourself.
+14 graded queries, 22 memories. Retrieval-only, no LLM judge.
+```
 
-What exists today and is measurable: ~1:1 test-to-code ratio, race-enabled CI (`go vet` + `golangci-lint` + `go test -race`), and releases for 6 OS/arch targets.
+What this shows, honestly stated:
+
+- **Hybrid fusion earns its keep** — it beats both single legs (NDCG@10 0.989 vs 0.965 full-text, 0.946 vector), and CI asserts that relationship on every PR.
+- **We ran the ablations, found our own regression, and fixed it.** The graph-expansion ranking bonus *hurt* retrieval (`hybrid+graph`, NDCG 0.824), so it now ships disabled — the table keeps measuring it so a redesign has a bar to clear. `ghost bench --sweep` grid-searches the fusion parameters if you want to check our tuning.
+- **Scope caveat:** this is a self-authored 22-memory / 14-query graded dataset exercising Ghost's real search code paths — a regression guard and tuning instrument, not a leaderboard. It is not comparable to other systems' LOCOMO/LongMemEval scores.
+
+For external comparability (in progress, in order): **LongMemEval-S retrieval metrics** — session-level Recall@k/NDCG@k against the dataset's official evidence labels, no LLM judge; a **deterministic staleness suite** ("prod ran Postgres 14, we migrated to 16" — does search rank the fresh fact first?); then **end-to-end LongMemEval-S** with the official GPT-4o judge. Several popular memory benchmarks have known problems (LOCOMO's answer key and judge have been publicly audited as unreliable), so numbers land here only with the harness, fixed seeds, and per-question logs to re-run them yourself.
 
 ## Works well with Superpowers
 
