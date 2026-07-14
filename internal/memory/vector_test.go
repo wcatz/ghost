@@ -668,10 +668,16 @@ func TestSearchHybridGraphBonus(t *testing.T) {
 		return -1
 	}
 
+	// The graph MECHANISM is tested with an explicit non-zero weight —
+	// production defaults ship with GraphWeight 0 (see DefaultSearchParams),
+	// so the bonus only participates when a caller opts in.
+	pGraph := DefaultSearchParams()
+	pGraph.GraphWeight = 0.15
+
 	// Without links: a ranks first, and d strictly outranks c.
-	before, err := s.SearchHybrid(ctx, testProject, "kubernetes ingress", queryVec, 10)
+	before, err := s.SearchHybridParams(ctx, testProject, "kubernetes ingress", queryVec, 10, pGraph)
 	if err != nil {
-		t.Fatalf("SearchHybrid before: %v", err)
+		t.Fatalf("SearchHybridParams before: %v", err)
 	}
 	if rank(before, a) != 0 {
 		t.Fatalf("a should rank first, got order %v", before)
@@ -684,9 +690,9 @@ func TestSearchHybridGraphBonus(t *testing.T) {
 	if err := s.CreateLink(ctx, a, c, "related", 0.9, "auto"); err != nil {
 		t.Fatalf("CreateLink: %v", err)
 	}
-	after, err := s.SearchHybrid(ctx, testProject, "kubernetes ingress", queryVec, 10)
+	after, err := s.SearchHybridParams(ctx, testProject, "kubernetes ingress", queryVec, 10, pGraph)
 	if err != nil {
-		t.Fatalf("SearchHybrid after: %v", err)
+		t.Fatalf("SearchHybridParams after: %v", err)
 	}
 	if rank(after, a) != 0 {
 		t.Fatalf("a should still rank first, got order %v", after)
@@ -695,4 +701,73 @@ func TestSearchHybridGraphBonus(t *testing.T) {
 	if rc == -1 || rd == -1 || rc >= rd {
 		t.Fatalf("linked c (rank %d) should outrank unlinked d (rank %d): %v", rc, rd, after)
 	}
+
+	// And with production defaults (GraphWeight 0), the link must NOT reorder:
+	// d keeps its strictly-better vector rank over linked c.
+	defAfter, err := s.SearchHybrid(ctx, testProject, "kubernetes ingress", queryVec, 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid default after link: %v", err)
+	}
+	if rc, rd := rank(defAfter, c), rank(defAfter, d); rd == -1 || rc == -1 || rd >= rc {
+		t.Fatalf("default params must ignore links: d (rank %d) should outrank c (rank %d): %v", rd, rc, defAfter)
+	}
+}
+
+// TestSearchHybridParams: the parameterized entrypoint must (a) reproduce
+// SearchHybrid exactly under DefaultSearchParams, (b) honor leg weights — an
+// all-vector weighting ranks the vector match first and an all-FTS weighting
+// ranks the keyword match first on the same store, (c) skip the graph pass
+// entirely when GraphWeight is 0.
+func TestSearchHybridParams(t *testing.T) {
+	store, ctx := setupTestStore(t)
+
+	// kw matches the FTS query; vec matches the query vector. Cross-wired
+	// embeddings so the two legs disagree about the winner.
+	kw := createTestMemory(t, store, ctx, "goroutines scheduler internals")
+	vec := createTestMemory(t, store, ctx, "python event loop design")
+	if err := store.StoreEmbedding(ctx, kw, []float32{0, 1}, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	if err := store.StoreEmbedding(ctx, vec, []float32{1, 0}, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	queryVec := []float32{1, 0}
+
+	// (a) Defaults reproduce SearchHybrid ranking exactly.
+	want, err := store.SearchHybrid(ctx, "test-proj", "goroutines", queryVec, 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid: %v", err)
+	}
+	got, err := store.SearchHybridParams(ctx, "test-proj", "goroutines", queryVec, 10, DefaultSearchParams())
+	if err != nil {
+		t.Fatalf("SearchHybridParams: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("defaults mismatch: got %d results, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].ID != want[i].ID {
+			t.Errorf("defaults mismatch at rank %d: got %s, want %s", i, got[i].ID, want[i].ID)
+		}
+	}
+
+	// (b) All-vector weighting: vec first. All-FTS weighting: kw first.
+	p := DefaultSearchParams()
+	p.FTSWeight, p.VecWeight = 0, 1
+	if rs, err := store.SearchHybridParams(ctx, "test-proj", "goroutines", queryVec, 10, p); err != nil || len(rs) == 0 || rs[0].ID != vec {
+		t.Errorf("all-vector weighting should rank vector match first (err=%v, results=%v)", err, ids(rs))
+	}
+	p.FTSWeight, p.VecWeight = 1, 0
+	if rs, err := store.SearchHybridParams(ctx, "test-proj", "goroutines", queryVec, 10, p); err != nil || len(rs) == 0 || rs[0].ID != kw {
+		t.Errorf("all-FTS weighting should rank keyword match first (err=%v, results=%v)", err, ids(rs))
+	}
+}
+
+// ids extracts memory IDs for readable test failure output.
+func ids(ms []Memory) []string {
+	out := make([]string, len(ms))
+	for i, m := range ms {
+		out[i] = m.ID
+	}
+	return out
 }

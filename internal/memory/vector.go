@@ -128,44 +128,143 @@ type ScoredMemory struct {
 	Score    float32
 }
 
+// SearchParams parameterizes hybrid-search fusion. The zero value disables
+// every signal — use DefaultSearchParams for production behavior. The bench
+// harness (ghost bench --sweep) grid-searches these knobs against the graded
+// dataset; defaults should only change on the strength of those numbers.
+type SearchParams struct {
+	FTSWeight   float64 // RRF weight of the full-text leg
+	VecWeight   float64 // RRF weight of the vector leg
+	RRFK        int     // RRF smoothing constant (Cormack & Clarke use 60)
+	GraphWeight float64 // additive link-graph bonus weight; 0 skips the graph pass
+	GraphSeeds  int     // top-ranked results used as graph-expansion seeds
+	GraphHops   int     // link-traversal depth from each seed
+}
+
+// DefaultSearchParams returns the production fusion parameters.
+//
+// GraphWeight ships at 0: the ghost bench --sweep grid showed the additive
+// graph bonus degrades ranking monotonically at every effective weight on the
+// graded dataset (the former 0.15 default demoted exact matches below
+// semantically-adjacent neighbors — see docs/benchmarks.md). The link graph
+// itself is still built and traversable; a redesigned bonus must beat
+// GraphWeight 0 in the sweep before it ships. GraphSeeds/GraphHops keep their
+// tuned values so an explicit non-zero GraphWeight behaves as before.
+func DefaultSearchParams() SearchParams {
+	return SearchParams{
+		FTSWeight:   0.3,
+		VecWeight:   0.7,
+		RRFK:        60,
+		GraphWeight: 0,
+		GraphSeeds:  3,
+		GraphHops:   2,
+	}
+}
+
 // applyGraphBonus adds an additive RRF-style bonus to scores for memories
 // reachable via links from the top-ranked seed IDs. Additive-only: when no
 // links exist, scores are unchanged. Errors are non-fatal (the graph signal
 // is best-effort, like the FTS and vector legs). Pass projectID "" to span
 // all projects.
-func (s *Store) applyGraphBonus(ctx context.Context, projectID string, scores map[string]float64, idSet map[string]bool, ranked []string, limit int) {
-	const k = 60
-	const graphWeight = 0.15
-	const maxSeeds = 3
-	const maxHops = 2
-
+func (s *Store) applyGraphBonus(ctx context.Context, projectID string, scores map[string]float64, idSet map[string]bool, ranked []string, limit int, p SearchParams) {
 	seeds := ranked
-	if len(seeds) > maxSeeds {
-		seeds = seeds[:maxSeeds]
+	if len(seeds) > p.GraphSeeds {
+		seeds = seeds[:p.GraphSeeds]
 	}
 
 	// Walk from each seed separately so a seed is only excluded from its own
 	// expansion — a lower-ranked candidate linked to the top hit still gets
 	// the bonus. The bonus decays with seed rank.
 	for seedRank, seed := range seeds {
-		neighbors, err := s.GraphNeighbors(ctx, projectID, []string{seed}, maxHops, limit)
+		neighbors, err := s.GraphNeighbors(ctx, projectID, []string{seed}, p.GraphHops, limit)
 		if err != nil {
 			s.logger.Debug("graph bonus: traversal failed", "error", err, "seed", seed)
 			return
 		}
 		for _, n := range neighbors {
-			scores[n.MemoryID] += graphWeight * float64(n.Strength) / float64(k+seedRank+1)
+			scores[n.MemoryID] += p.GraphWeight * float64(n.Strength) / float64(p.RRFK+seedRank+1)
 			idSet[n.MemoryID] = true
 		}
 	}
+}
+
+// fuseAndRank runs the shared hybrid pipeline: RRF-fuse the two result legs,
+// optionally apply the link-graph bonus, then rank, truncate, and hydrate.
+// projectID scopes the graph traversal; "" spans all projects.
+func (s *Store) fuseAndRank(ctx context.Context, projectID string, ftsResults []Memory, vecResults []ScoredMemory, limit int, p SearchParams) ([]Memory, error) {
+	scores := make(map[string]float64)
+	idSet := make(map[string]bool)
+	for rank, m := range ftsResults {
+		scores[m.ID] += p.FTSWeight / float64(p.RRFK+rank+1)
+		idSet[m.ID] = true
+	}
+	for rank, sm := range vecResults {
+		scores[sm.MemoryID] += p.VecWeight / float64(p.RRFK+rank+1)
+		idSet[sm.MemoryID] = true
+	}
+
+	// Ranking sorts break score ties by ID so identical searches return
+	// identical orderings (and pick identical graph seeds) — the candidate
+	// sets come from map iteration, which would otherwise make tie order
+	// random per call.
+	byScoreThenID := func(ids []string) {
+		sort.Slice(ids, func(i, j int) bool {
+			si, sj := scores[ids[i]], scores[ids[j]]
+			if si != sj {
+				return si > sj
+			}
+			return ids[i] < ids[j]
+		})
+	}
+
+	if p.GraphWeight > 0 && p.GraphSeeds > 0 {
+		// Preliminary ranking to pick graph seeds.
+		prelim := make([]string, 0, len(idSet))
+		for id := range idSet {
+			prelim = append(prelim, id)
+		}
+		byScoreThenID(prelim)
+
+		// Third signal: link-graph expansion from top seeds (additive-only).
+		s.applyGraphBonus(ctx, projectID, scores, idSet, prelim, limit, p)
+	}
+
+	// Sort by fused score, truncate, and hydrate.
+	ranked := make([]string, 0, len(idSet))
+	for id := range idSet {
+		ranked = append(ranked, id)
+	}
+	byScoreThenID(ranked)
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+
+	memories, err := s.GetByIDs(ctx, ranked)
+	if err != nil {
+		return nil, err
+	}
+	// Re-sort by fused score (GetByIDs doesn't preserve order), same
+	// tie-breaking as the ID ranking above.
+	sort.Slice(memories, func(i, j int) bool {
+		si, sj := scores[memories[i].ID], scores[memories[j].ID]
+		if si != sj {
+			return si > sj
+		}
+		return memories[i].ID < memories[j].ID
+	})
+	return memories, nil
 }
 
 // SearchHybrid combines FTS5 keyword search with vector similarity using
 // Reciprocal Rank Fusion (RRF), plus an additive link-graph expansion bonus.
 // Falls back to FTS-only if queryVec is nil.
 func (s *Store) SearchHybrid(ctx context.Context, projectID, query string, queryVec []float32, limit int) ([]Memory, error) {
-	const k = 60 // RRF smoothing constant
+	return s.SearchHybridParams(ctx, projectID, query, queryVec, limit, DefaultSearchParams())
+}
 
+// SearchHybridParams is SearchHybrid with explicit fusion parameters. It
+// exists for the benchmark harness; production callers use SearchHybrid.
+func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string, queryVec []float32, limit int, p SearchParams) ([]Memory, error) {
 	// FTS results.
 	ftsResults, err := s.SearchFTS(ctx, projectID, query, limit*2)
 	if err != nil {
@@ -194,64 +293,7 @@ func (s *Store) SearchHybrid(ctx context.Context, projectID, query string, query
 		return ftsResults, nil
 	}
 
-	// RRF fusion: score = 0.3/(k+fts_rank) + 0.7/(k+vec_rank)
-	scores := make(map[string]float64)
-	idSet := make(map[string]bool)
-
-	for rank, m := range ftsResults {
-		scores[m.ID] += 0.3 / float64(k+rank+1)
-		idSet[m.ID] = true
-	}
-	for rank, sm := range vecResults {
-		scores[sm.MemoryID] += 0.7 / float64(k+rank+1)
-		idSet[sm.MemoryID] = true
-	}
-
-	// Preliminary ranking to pick graph seeds.
-	prelim := make([]string, 0, len(idSet))
-	for id := range idSet {
-		prelim = append(prelim, id)
-	}
-	sort.Slice(prelim, func(i, j int) bool { return scores[prelim[i]] > scores[prelim[j]] })
-
-	// Third signal: link-graph expansion from top seeds (additive-only).
-	s.applyGraphBonus(ctx, projectID, scores, idSet, prelim, limit)
-
-	// Sort by fused score.
-	type idScore struct {
-		id    string
-		score float64
-	}
-	ranked := make([]idScore, 0, len(idSet))
-	for id := range idSet {
-		ranked = append(ranked, idScore{id: id, score: scores[id]})
-	}
-	sort.Slice(ranked, func(i, j int) bool {
-		return ranked[i].score > ranked[j].score
-	})
-
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
-	}
-
-	// Build ID list for batch fetch.
-	ids := make([]string, len(ranked))
-	for i, r := range ranked {
-		ids[i] = r.id
-	}
-
-	memories, err := s.GetByIDs(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-
-	// Re-sort by fused score (GetByIDs doesn't preserve order).
-	scoreMap := scores
-	sort.Slice(memories, func(i, j int) bool {
-		return scoreMap[memories[i].ID] > scoreMap[memories[j].ID]
-	})
-
-	return memories, nil
+	return s.fuseAndRank(ctx, projectID, ftsResults, vecResults, limit, p)
 }
 
 // GetByIDs fetches memories by a list of IDs.
@@ -327,8 +369,6 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 // SearchHybridAll combines FTS5 and vector search across ALL projects using RRF.
 // Falls back to FTS-only when queryVec is nil.
 func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []float32, limit int) ([]Memory, error) {
-	const k = 60
-
 	ftsResults, err := s.SearchFTSAll(ctx, query, limit*2)
 	if err != nil {
 		ftsResults = nil
@@ -353,53 +393,7 @@ func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []fl
 		return ftsResults, nil
 	}
 
-	scores := make(map[string]float64)
-	idSet := make(map[string]bool)
-	for rank, m := range ftsResults {
-		scores[m.ID] += 0.3 / float64(k+rank+1)
-		idSet[m.ID] = true
-	}
-	for rank, sm := range vecResults {
-		scores[sm.MemoryID] += 0.7 / float64(k+rank+1)
-		idSet[sm.MemoryID] = true
-	}
-
-	// Preliminary ranking to pick graph seeds.
-	prelim := make([]string, 0, len(idSet))
-	for id := range idSet {
-		prelim = append(prelim, id)
-	}
-	sort.Slice(prelim, func(i, j int) bool { return scores[prelim[i]] > scores[prelim[j]] })
-
-	// Third signal: link-graph expansion from top seeds (additive-only).
-	s.applyGraphBonus(ctx, "", scores, idSet, prelim, limit)
-
-	type idScore struct {
-		id    string
-		score float64
-	}
-	ranked := make([]idScore, 0, len(idSet))
-	for id := range idSet {
-		ranked = append(ranked, idScore{id: id, score: scores[id]})
-	}
-	sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
-	}
-
-	ids := make([]string, len(ranked))
-	for i, r := range ranked {
-		ids[i] = r.id
-	}
-	memories, err := s.GetByIDs(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	scoreMap := scores
-	sort.Slice(memories, func(i, j int) bool {
-		return scoreMap[memories[i].ID] > scoreMap[memories[j].ID]
-	})
-	return memories, nil
+	return s.fuseAndRank(ctx, "", ftsResults, vecResults, limit, DefaultSearchParams())
 }
 
 func float32sToBytes(fs []float32) []byte {

@@ -64,7 +64,7 @@ Claude Code's built-in memory is a markdown file with a limited load window ([~2
 | Consolidation | None | Haiku LLM or local Jaccard tier |
 | Time decay | None (stale facts persist equally) | Category-aware: conventions never decay, gotchas fade |
 | Cross-project | None (siloed per repository) | `ghost_search_all` + `_global` project |
-| Memory graph | None | Auto-linked related memories, graph-aware search |
+| Memory graph | None | Auto-linked related memories, graph view in Obsidian |
 | Clients | Claude Code only | Any MCP client |
 
 Switching migrates your existing Claude Code memories into Ghost — at init or on first contact. Nothing is lost.
@@ -128,7 +128,7 @@ Ghost is a memory pipeline: **Save → Embed → Link → Search → Consolidate
 
 ### Hybrid search
 
-Full-text (FTS5) and vector results are fused with Reciprocal Rank Fusion (k=60), weighted 70% vector / 30% FTS. A background worker links similar memories (cosine ≥ 0.70) into a graph; search adds an additive graph-expansion bonus (weight 0.15, up to 3 seeds, 2 hops) so related memories surface together. Links self-heal after consolidation rewrites memories.
+Full-text (FTS5) and vector results are fused with Reciprocal Rank Fusion (k=60), weighted 70% vector / 30% FTS. A background worker links similar memories (cosine ≥ 0.70) into a graph, which powers the Obsidian mirror's graph view and future link-aware features; links self-heal after consolidation rewrites memories. An experimental graph-expansion ranking bonus exists but ships disabled — our own benchmark sweep (`ghost bench --sweep`) showed it demoting exact matches, so it stays off until a redesign beats that measurement ([methodology](docs/benchmarks.md)).
 
 Vectors come from a local Ollama instance (`nomic-embed-text:v1.5`, 768 dims) if one is running. **No Ollama? No error, no setup step** — Ghost is fully functional with FTS5-only search and quietly upgrades to hybrid the moment Ollama appears:
 

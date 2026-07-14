@@ -44,6 +44,12 @@ const (
 	CondHybridGraph = "hybrid+graph"
 )
 
+// candidateGraphWeight is the graph-bonus weight the hybrid+graph ablation
+// opts into. It is the former production default, kept under measurement
+// after the sweep showed it degrades ranking; production defaults now ship
+// with GraphWeight 0.
+const candidateGraphWeight = 0.15
+
 // Run evaluates all four ablations over the seeded store and query set. The
 // graph condition is run last: it first builds the memory-link graph (the same
 // linking worker production uses, at the given cosine threshold), which
@@ -69,11 +75,17 @@ func Run(ctx context.Context, store *memory.Store, queries []Query, linkThreshol
 		return nil, err
 	}
 
-	// Build the link graph, then re-run hybrid so the graph-expansion bonus
-	// participates. SweepOnce does a single pass; the interval is irrelevant.
+	// Build the link graph, then re-run hybrid with the CANDIDATE graph weight
+	// so the graph-expansion bonus participates. Production defaults ship with
+	// GraphWeight 0 (the sweep showed the bonus degrades ranking — see
+	// docs/benchmarks.md), so this ablation deliberately opts in: it keeps
+	// measuring the signal a redesign must improve. SweepOnce does a single
+	// pass; the interval is irrelevant.
 	linking.NewWorker(store, slog.New(slog.NewTextHandler(discard{}, nil)), time.Hour, linkThreshold).SweepOnce(ctx)
+	pGraph := memory.DefaultSearchParams()
+	pGraph.GraphWeight = candidateGraphWeight
 	hybridGraph, err := runCondition(ctx, CondHybridGraph, queries, func(q Query) ([]string, error) {
-		return idsFromMemories(store.SearchHybrid(ctx, q.ProjectID, q.Text, q.Vector, scoreK))
+		return idsFromMemories(store.SearchHybridParams(ctx, q.ProjectID, q.Text, q.Vector, scoreK, pGraph))
 	})
 	if err != nil {
 		return nil, err
