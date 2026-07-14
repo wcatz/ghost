@@ -31,7 +31,9 @@ jobs:
 
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          # Pinned to the version verified locally against .golangci.yml —
+          # 'latest' can break CI without a code change on a major bump.
+          version: v2.12.2
           args: --new-from-rev=origin/main
 
       - name: Test
