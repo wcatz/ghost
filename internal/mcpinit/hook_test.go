@@ -191,3 +191,61 @@ func TestHandleSessionStartHook_GlobalsOnNoMatch(t *testing.T) {
 		t.Errorf("global memory content missing from no-match output; got:\n%s", result)
 	}
 }
+
+// TestSessionCounterIncrements: each hook invocation bumps the project's
+// session counter — the one deliberate write the hook makes — and the emitted
+// "Session #N" reflects the post-increment count.
+func TestSessionCounterIncrements(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	// EvalSymlinks in the hook canonicalizes cwd; store the canonical path.
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	run := func() string {
+		input, _ := json.Marshal(map[string]string{"cwd": projDir})
+		var out strings.Builder
+		HandleSessionStartHook(strings.NewReader(string(input)), &out)
+		return out.String()
+	}
+	if got := run(); !strings.Contains(got, "Session #1") {
+		t.Errorf("first run should show Session #1; got:\n%s", got)
+	}
+	if got := run(); !strings.Contains(got, "Session #2") {
+		t.Errorf("second run should show Session #2; got:\n%s", got)
+	}
+}
+
+// TestBumpSessionCountNoPhantomDB: the counter write path must never create a
+// database that isn't there.
+func TestBumpSessionCountNoPhantomDB(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	if n := bumpSessionCount(dbPath, "p1"); n != 0 {
+		t.Errorf("bump on missing DB returned %d, want 0", n)
+	}
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Errorf("bumpSessionCount must not create %s", dbPath)
+	}
+}

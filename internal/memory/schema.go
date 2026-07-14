@@ -3,6 +3,7 @@ package memory
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 
 	_ "modernc.org/sqlite"
 )
@@ -212,7 +213,17 @@ CREATE TABLE IF NOT EXISTS link_scans (
 
 // OpenDB opens or creates the SQLite database and runs migrations.
 func OpenDB(dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
+	// File paths go through the file: URI form with the path percent-encoded —
+	// a '?' or '#' in the data-dir path (legal in $XDG_DATA_HOME/$HOME) would
+	// otherwise be parsed as the query/fragment separator, silently opening a
+	// truncated path. ":memory:" stays bare: the file::memory: URI form has
+	// different sharing semantics.
+	dsn := dbPath
+	if dbPath != ":memory:" {
+		u := url.URL{Scheme: "file", Opaque: (&url.URL{Path: dbPath}).EscapedPath()}
+		dsn = u.String()
+	}
+	db, err := sql.Open("sqlite", dsn+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
