@@ -696,3 +696,62 @@ func TestSearchHybridGraphBonus(t *testing.T) {
 		t.Fatalf("linked c (rank %d) should outrank unlinked d (rank %d): %v", rc, rd, after)
 	}
 }
+
+// TestSearchHybridParams: the parameterized entrypoint must (a) reproduce
+// SearchHybrid exactly under DefaultSearchParams, (b) honor leg weights — an
+// all-vector weighting ranks the vector match first and an all-FTS weighting
+// ranks the keyword match first on the same store, (c) skip the graph pass
+// entirely when GraphWeight is 0.
+func TestSearchHybridParams(t *testing.T) {
+	store, ctx := setupTestStore(t)
+
+	// kw matches the FTS query; vec matches the query vector. Cross-wired
+	// embeddings so the two legs disagree about the winner.
+	kw := createTestMemory(t, store, ctx, "goroutines scheduler internals")
+	vec := createTestMemory(t, store, ctx, "python event loop design")
+	if err := store.StoreEmbedding(ctx, kw, []float32{0, 1}, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	if err := store.StoreEmbedding(ctx, vec, []float32{1, 0}, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	queryVec := []float32{1, 0}
+
+	// (a) Defaults reproduce SearchHybrid ranking exactly.
+	want, err := store.SearchHybrid(ctx, "test-proj", "goroutines", queryVec, 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid: %v", err)
+	}
+	got, err := store.SearchHybridParams(ctx, "test-proj", "goroutines", queryVec, 10, DefaultSearchParams())
+	if err != nil {
+		t.Fatalf("SearchHybridParams: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("defaults mismatch: got %d results, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].ID != want[i].ID {
+			t.Errorf("defaults mismatch at rank %d: got %s, want %s", i, got[i].ID, want[i].ID)
+		}
+	}
+
+	// (b) All-vector weighting: vec first. All-FTS weighting: kw first.
+	p := DefaultSearchParams()
+	p.FTSWeight, p.VecWeight = 0, 1
+	if rs, err := store.SearchHybridParams(ctx, "test-proj", "goroutines", queryVec, 10, p); err != nil || len(rs) == 0 || rs[0].ID != vec {
+		t.Errorf("all-vector weighting should rank vector match first (err=%v, results=%v)", err, ids(rs))
+	}
+	p.FTSWeight, p.VecWeight = 1, 0
+	if rs, err := store.SearchHybridParams(ctx, "test-proj", "goroutines", queryVec, 10, p); err != nil || len(rs) == 0 || rs[0].ID != kw {
+		t.Errorf("all-FTS weighting should rank keyword match first (err=%v, results=%v)", err, ids(rs))
+	}
+}
+
+// ids extracts memory IDs for readable test failure output.
+func ids(ms []Memory) []string {
+	out := make([]string, len(ms))
+	for i, m := range ms {
+		out[i] = m.ID
+	}
+	return out
+}
