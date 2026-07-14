@@ -47,7 +47,6 @@ func SweepGrid() []memory.SearchParams {
 func Sweep(ctx context.Context, store *memory.Store, queries []Query, grid []memory.SearchParams) ([]SweepPoint, error) {
 	points := make([]SweepPoint, 0, len(grid))
 	for _, p := range grid {
-		p := p
 		cond := fmt.Sprintf("vec=%.2f graph=%.2f", p.VecWeight, p.GraphWeight)
 		res, err := runCondition(ctx, cond, queries, func(q Query) ([]string, error) {
 			return idsFromMemories(store.SearchHybridParams(ctx, q.ProjectID, q.Text, q.Vector, scoreK, p))

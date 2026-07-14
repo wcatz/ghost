@@ -52,11 +52,13 @@ func TestBenchRegressionFloors(t *testing.T) {
 		t.Errorf("hybrid NDCG@10 %.3f must be >= vector-only %.3f", r[CondHybrid].NDCG10, r[CondVector].NDCG10)
 	}
 
-	// Known regression, documented not asserted: the graph-expansion bonus
-	// currently HURTS precision (its 0.15 weight has no empirical basis), so
-	// hybrid+graph underperforms plain hybrid. We log the gap rather than
-	// floor it; when the weight is retuned this should shrink or invert.
+	// Tracked, not asserted: the hybrid+graph ablation opts into the candidate
+	// graph weight (the former default — production now ships GraphWeight 0
+	// after the sweep measured the bonus degrading ranking monotonically).
+	// The gap is logged so redesign progress is visible; a graph redesign
+	// ships when this inverts, i.e. it beats plain hybrid here and in the
+	// sweep (see docs/benchmarks.md).
 	if g, h := r[CondHybridGraph].NDCG10, r[CondHybrid].NDCG10; g < h {
-		t.Logf("note: hybrid+graph NDCG@10 %.3f < hybrid %.3f — graph bonus needs tuning (see docs/benchmarks.md)", g, h)
+		t.Logf("note: hybrid+graph (candidate weight %.2f) NDCG@10 %.3f < hybrid %.3f — graph bonus disabled in production defaults (see docs/benchmarks.md)", candidateGraphWeight, g, h)
 	}
 }

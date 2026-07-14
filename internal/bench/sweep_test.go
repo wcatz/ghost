@@ -30,11 +30,12 @@ func TestSweep(t *testing.T) {
 	store, queries := sweepFixture(t)
 	ctx := context.Background()
 
-	// A tiny grid containing the production default and graph-off.
+	// A tiny grid containing the production default (graph off) and the
+	// candidate graph weight the ablation runner tracks.
 	def := memory.DefaultSearchParams()
-	off := def
-	off.GraphWeight = 0
-	points, err := Sweep(ctx, store, queries, []memory.SearchParams{def, off})
+	graph := def
+	graph.GraphWeight = candidateGraphWeight
+	points, err := Sweep(ctx, store, queries, []memory.SearchParams{def, graph})
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
@@ -47,11 +48,12 @@ func TestSweep(t *testing.T) {
 		t.Errorf("points not sorted by NDCG: %.3f then %.3f", points[0].Result.NDCG10, points[1].Result.NDCG10)
 	}
 
-	// Cross-check both points against the ablation runner: default params ==
-	// hybrid+graph, graph-off == hybrid. The ablation runner MUST start from a
+	// Cross-check both points against the ablation runner: default params
+	// (graph off) == the hybrid ablation, and the candidate graph weight ==
+	// the hybrid+graph ablation. The ablation runner MUST start from a
 	// link-free store (it builds the graph itself between conditions — a
-	// pre-linked store would contaminate its plain-hybrid condition with the
-	// graph bonus), so use runTestdata, not sweepFixture.
+	// pre-linked store would contaminate its plain-hybrid condition if a
+	// caller opted into a graph weight), so use runTestdata, not sweepFixture.
 	byCond := byCondition(runTestdata(t))
 	find := func(p memory.SearchParams) Result {
 		for _, pt := range points {
@@ -62,11 +64,11 @@ func TestSweep(t *testing.T) {
 		t.Fatalf("sweep point not found for %+v", p)
 		return Result{}
 	}
-	if got, want := find(def).NDCG10, byCond[CondHybridGraph].NDCG10; got != want {
-		t.Errorf("default sweep point NDCG %.6f != hybrid+graph ablation %.6f", got, want)
+	if got, want := find(def).NDCG10, byCond[CondHybrid].NDCG10; got != want {
+		t.Errorf("default (graph-off) sweep point NDCG %.6f != hybrid ablation %.6f", got, want)
 	}
-	if got, want := find(off).NDCG10, byCond[CondHybrid].NDCG10; got != want {
-		t.Errorf("graph-off sweep point NDCG %.6f != hybrid ablation %.6f", got, want)
+	if got, want := find(graph).NDCG10, byCond[CondHybridGraph].NDCG10; got != want {
+		t.Errorf("candidate-graph sweep point NDCG %.6f != hybrid+graph ablation %.6f", got, want)
 	}
 }
 

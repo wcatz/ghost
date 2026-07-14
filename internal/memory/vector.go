@@ -142,12 +142,20 @@ type SearchParams struct {
 }
 
 // DefaultSearchParams returns the production fusion parameters.
+//
+// GraphWeight ships at 0: the ghost bench --sweep grid showed the additive
+// graph bonus degrades ranking monotonically at every effective weight on the
+// graded dataset (the former 0.15 default demoted exact matches below
+// semantically-adjacent neighbors — see docs/benchmarks.md). The link graph
+// itself is still built and traversable; a redesigned bonus must beat
+// GraphWeight 0 in the sweep before it ships. GraphSeeds/GraphHops keep their
+// tuned values so an explicit non-zero GraphWeight behaves as before.
 func DefaultSearchParams() SearchParams {
 	return SearchParams{
 		FTSWeight:   0.3,
 		VecWeight:   0.7,
 		RRFK:        60,
-		GraphWeight: 0.15,
+		GraphWeight: 0,
 		GraphSeeds:  3,
 		GraphHops:   2,
 	}

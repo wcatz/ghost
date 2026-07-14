@@ -19,7 +19,7 @@ The first published numbers. A Go harness that, per question, ingests the haysta
   1. FTS5-only (no embeddings)
   2. vector-only
   3. hybrid RRF (the shipped 70/30 fusion, k=60)
-  4. hybrid + graph-expansion bonus (weight 0.15, after the linking worker runs)
+  4. hybrid + graph-expansion bonus (candidate weight 0.15 — disabled in production defaults; the ablation opts in to keep measuring it)
 - **Cost:** $0 API. Wall-clock is dominated by locally embedding the haystack through Ollama (`nomic-embed-text:v1.5`); the FTS5-only ablation runs in minutes.
 - **Published anchors for context:** the LongMemEval paper's flat-index baseline (session-level Recall@5 ≈ 0.64 on the -M variant) and reported ~95% Recall@5 hybrid results on -S.
 
@@ -40,7 +40,7 @@ hybrid+graph     0.500   0.964   1.000    0.780    0.824
 Two findings, both honest:
 
 - **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.989) beats both single legs (FTS 0.965, vector 0.946) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI.
-- **The graph-expansion bonus currently hurts.** `hybrid+graph` is *worse* than plain hybrid (NDCG 0.824, R@1 0.500) — the additive bonus (weight 0.15) lifts semantically-adjacent neighbors above exact matches. The regression test documents this rather than flooring it; the 0.15 weight has no empirical basis and needs retuning.
+- **The graph-expansion bonus hurts, so it now ships disabled.** `hybrid+graph` is *worse* than plain hybrid (NDCG 0.824, R@1 0.500) — the additive bonus at its former 0.15 default lifts semantically-adjacent neighbors above exact matches. Following the parameter sweep below, production defaults ship with `GraphWeight 0`; the ablation opts into the candidate 0.15 weight so the signal stays under measurement.
 
 The dataset is deliberately a v1 starter (all 8 categories represented); growing it toward ~150 memories / ~40 graded queries is planned. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie.
 
@@ -48,9 +48,9 @@ The dataset is deliberately a v1 starter (all 8 categories represented); growing
 
 The RRF fusion is parameterized (`memory.SearchParams`), and `ghost bench --sweep` grid-searches the vector-leg weight (FTS = complement) × the graph-bonus weight — 36 combinations over the same dataset, one prepared store, link graph built once. Findings from the first sweep (full table: run `ghost bench --sweep`):
 
-- **The graph bonus degrades retrieval monotonically.** `graph=0` and `graph=0.02` tie for best at every leg weighting (0.02 is too small to reorder anything — effectively off); `0.05` costs ~2.5 NDCG points; `0.10` costs ~9; the shipped default `0.15` puts the production configuration (NDCG 0.824) in the **bottom third of all 36 combinations**. The additive strength-scaled bonus, at any effective magnitude, lifts semantically-adjacent neighbors above exact matches on this dataset.
+- **The graph bonus degrades retrieval monotonically.** `graph=0` and `graph=0.02` tie for best at every leg weighting (0.02 is too small to reorder anything — effectively off); at vec 0.3–0.7, `0.05` costs ~2.5 NDCG points and `0.10` costs ~9 (worse still at vec ≥ 0.8); the former `0.15` default put the production configuration (NDCG 0.824, rank 24 of 36, in a display tie spilling into the bottom third) far below every graph-off point. The additive strength-scaled bonus, at any effective magnitude, lifts semantically-adjacent neighbors above exact matches on this dataset.
 - **Leg weights are robust.** With the graph off, vec 0.3–0.7 all land within 0.989–0.992 NDCG; only vec ≥ 0.8 degrades. The shipped 70/30 weighting is fine; there is no evidence for changing it from a 14-query dataset.
-- **Implication:** the graph bonus as designed is not a precision signal. Either its default weight should be 0 (off until a better design — e.g. relation-aware or seed-confidence-gated expansion — proves itself here), or it should be reframed as a recall/context feature and kept out of top-k ranking. Tracked as a follow-up decision; the sweep is the gate any redesign must pass.
+- **Outcome: production defaults now ship with `GraphWeight 0`.** The link graph is still built (it powers the Obsidian mirror's graph view and future link-aware features), and the bonus mechanism remains behind `SearchHybridParams`. A redesign — e.g. relation-aware or seed-confidence-gated expansion — ships only when it beats `graph=0` in this sweep.
 
 ## Phase 3 — staleness suite (the flagship)
 

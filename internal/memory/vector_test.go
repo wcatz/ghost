@@ -668,10 +668,16 @@ func TestSearchHybridGraphBonus(t *testing.T) {
 		return -1
 	}
 
+	// The graph MECHANISM is tested with an explicit non-zero weight —
+	// production defaults ship with GraphWeight 0 (see DefaultSearchParams),
+	// so the bonus only participates when a caller opts in.
+	pGraph := DefaultSearchParams()
+	pGraph.GraphWeight = 0.15
+
 	// Without links: a ranks first, and d strictly outranks c.
-	before, err := s.SearchHybrid(ctx, testProject, "kubernetes ingress", queryVec, 10)
+	before, err := s.SearchHybridParams(ctx, testProject, "kubernetes ingress", queryVec, 10, pGraph)
 	if err != nil {
-		t.Fatalf("SearchHybrid before: %v", err)
+		t.Fatalf("SearchHybridParams before: %v", err)
 	}
 	if rank(before, a) != 0 {
 		t.Fatalf("a should rank first, got order %v", before)
@@ -684,9 +690,9 @@ func TestSearchHybridGraphBonus(t *testing.T) {
 	if err := s.CreateLink(ctx, a, c, "related", 0.9, "auto"); err != nil {
 		t.Fatalf("CreateLink: %v", err)
 	}
-	after, err := s.SearchHybrid(ctx, testProject, "kubernetes ingress", queryVec, 10)
+	after, err := s.SearchHybridParams(ctx, testProject, "kubernetes ingress", queryVec, 10, pGraph)
 	if err != nil {
-		t.Fatalf("SearchHybrid after: %v", err)
+		t.Fatalf("SearchHybridParams after: %v", err)
 	}
 	if rank(after, a) != 0 {
 		t.Fatalf("a should still rank first, got order %v", after)
@@ -694,6 +700,16 @@ func TestSearchHybridGraphBonus(t *testing.T) {
 	rc, rd := rank(after, c), rank(after, d)
 	if rc == -1 || rd == -1 || rc >= rd {
 		t.Fatalf("linked c (rank %d) should outrank unlinked d (rank %d): %v", rc, rd, after)
+	}
+
+	// And with production defaults (GraphWeight 0), the link must NOT reorder:
+	// d keeps its strictly-better vector rank over linked c.
+	defAfter, err := s.SearchHybrid(ctx, testProject, "kubernetes ingress", queryVec, 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid default after link: %v", err)
+	}
+	if rc, rd := rank(defAfter, c), rank(defAfter, d); rd == -1 || rc == -1 || rd >= rc {
+		t.Fatalf("default params must ignore links: d (rank %d) should outrank c (rank %d): %v", rd, rc, defAfter)
 	}
 }
 
