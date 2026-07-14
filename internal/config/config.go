@@ -101,8 +101,8 @@ func Load() (*Config, error) {
 	// Layer 4: GHOST_* environment variables.
 	// e.g. GHOST_API_KEY → api.key, GHOST_DEFAULTS_MODE → defaults.mode
 	if err := k.Load(env.Provider("GHOST_", ".", func(s string) string {
-		return strings.ToLower(strings.Replace(
-			strings.TrimPrefix(s, "GHOST_"), "_", ".", -1))
+		return strings.ToLower(strings.ReplaceAll(
+			strings.TrimPrefix(s, "GHOST_"), "_", "."))
 	}), nil); err != nil {
 		return nil, err
 	}
@@ -115,10 +115,9 @@ func Load() (*Config, error) {
 	}
 
 	// Explicit env overrides for keys with underscores in koanf tags.
-	// koanf's _ → . transformer would map e.g. GHOST_SERVER_AUTH_TOKEN
-	// to server.auth.token instead of server.auth_token.
+	// koanf's _ → . transformer would map e.g. GHOST_OBSIDIAN_VAULT_DIR
+	// to obsidian.vault.dir instead of obsidian.vault_dir.
 	envOverrides := map[string]string{
-		"GHOST_SERVER_AUTH_TOKEN":  "server.auth_token",
 		"GHOST_OBSIDIAN_VAULT_DIR": "obsidian.vault_dir",
 	}
 	for envKey, koanfKey := range envOverrides {

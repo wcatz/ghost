@@ -44,7 +44,7 @@ func (s *Store) UnembeddedMemoryIDs(ctx context.Context, projectID string, limit
 	if err != nil {
 		return nil, fmt.Errorf("unembedded memories: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var ids []string
 	for rows.Next() {
@@ -85,7 +85,7 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 	if err != nil {
 		return nil, fmt.Errorf("load embeddings: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var entries []vecEntry
 	for rows.Next() {
@@ -322,7 +322,7 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 	if err != nil {
 		return nil, fmt.Errorf("get by ids: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	return scanMemories(rows)
 }
 

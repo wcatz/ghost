@@ -130,25 +130,6 @@ CREATE TABLE IF NOT EXISTS memory_embeddings (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE IF NOT EXISTS notifications (
-    id              TEXT PRIMARY KEY,
-    github_id       TEXT NOT NULL UNIQUE,
-    repo_full_name  TEXT NOT NULL,
-    subject_title   TEXT NOT NULL,
-    subject_type    TEXT NOT NULL,
-    subject_url     TEXT DEFAULT '',
-    reason          TEXT NOT NULL,
-    priority        INTEGER NOT NULL DEFAULT 4,
-    unread          INTEGER NOT NULL DEFAULT 1,
-    updated_at      TEXT NOT NULL,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    dismissed_at    TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_notif_priority ON notifications(priority, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_notif_repo ON notifications(repo_full_name, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_notif_unread ON notifications(unread, priority);
-
 CREATE TABLE IF NOT EXISTS scheduled_jobs (
     id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     name        TEXT NOT NULL,
@@ -159,16 +140,6 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     next_run    TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
-
-CREATE TABLE IF NOT EXISTS reminders (
-    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    message     TEXT NOT NULL,
-    due_at      TEXT NOT NULL,
-    fired       INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(fired, due_at);
 
 CREATE TABLE IF NOT EXISTS tasks (
     id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
@@ -248,7 +219,7 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 
 	db.SetMaxOpenConns(1) // SQLite is single-writer; prevent connection pool contention
 	if _, err := db.Exec(initSQL); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 

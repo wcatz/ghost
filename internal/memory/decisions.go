@@ -86,7 +86,7 @@ func (s *Store) ListDecisions(ctx context.Context, projectID, status string, lim
 	if err != nil {
 		return nil, fmt.Errorf("list decisions: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var decisions []Decision
 	for rows.Next() {
@@ -96,8 +96,8 @@ func (s *Store) ListDecisions(ctx context.Context, projectID, status string, lim
 			&d.Rationale, &d.Status, &d.SupersededBy, &tagJSON, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, err
 		}
-		json.Unmarshal([]byte(altJSON), &d.Alternatives)
-		json.Unmarshal([]byte(tagJSON), &d.Tags)
+		_ = json.Unmarshal([]byte(altJSON), &d.Alternatives)
+		_ = json.Unmarshal([]byte(tagJSON), &d.Tags)
 		decisions = append(decisions, d)
 	}
 	return decisions, rows.Err()

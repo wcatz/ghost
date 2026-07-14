@@ -19,8 +19,8 @@ type ReflectionInput struct {
 
 // ReflectionResult holds the parsed output from a reflection call.
 type ReflectionResult struct {
-	LearnedContext string            `json:"learned_context"`
-	Memories       []ReflectMemory   `json:"memories"`
+	LearnedContext string          `json:"learned_context"`
+	Memories       []ReflectMemory `json:"memories"`
 }
 
 // ReflectMemory is a discrete memory extracted during reflection.
@@ -38,7 +38,7 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 
 	// Recent code exchanges.
 	if len(input.RecentExchanges) > 0 {
-		sb.WriteString(fmt.Sprintf("## Recent Exchanges (last %d)\n", len(input.RecentExchanges)))
+		_, _ = fmt.Fprintf(&sb, "## Recent Exchanges (last %d)\n", len(input.RecentExchanges))
 		for _, e := range input.RecentExchanges {
 			userMsg := e[0]
 			if len(userMsg) > 500 {
@@ -48,20 +48,20 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 			if len(assistantMsg) > 500 {
 				assistantMsg = assistantMsg[:500] + "..."
 			}
-			sb.WriteString(fmt.Sprintf("- User: %q -> Ghost: %q\n", userMsg, assistantMsg))
+			_, _ = fmt.Fprintf(&sb, "- User: %q -> Ghost: %q\n", userMsg, assistantMsg)
 		}
 	}
 
 	// Recent git activity.
 	if len(input.LastCommits) > 0 {
-		sb.WriteString(fmt.Sprintf("\n## Recent Git Activity (%d commits)\n", len(input.LastCommits)))
+		_, _ = fmt.Fprintf(&sb, "\n## Recent Git Activity (%d commits)\n", len(input.LastCommits))
 		for _, c := range input.LastCommits {
-			sb.WriteString(fmt.Sprintf("- %s\n", c))
+			_, _ = fmt.Fprintf(&sb, "- %s\n", c)
 		}
 	}
 
 	// Project info.
-	sb.WriteString(fmt.Sprintf("\n## Project\n- Name: %s\n- Language: %s\n", input.ProjectName, input.ProjectLanguage))
+	_, _ = fmt.Fprintf(&sb, "\n## Project\n- Name: %s\n- Language: %s\n", input.ProjectName, input.ProjectLanguage)
 
 	// Current learned context.
 	sb.WriteString("\n## Current Learned Context\n")
@@ -73,7 +73,7 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 
 	// Existing memories for consolidation.
 	if len(input.ExistingMemories) > 0 {
-		sb.WriteString(fmt.Sprintf("\n\n## Existing Memories (%d total) — CONSOLIDATE THESE\n", len(input.ExistingMemories)))
+		_, _ = fmt.Fprintf(&sb, "\n\n## Existing Memories (%d total) — CONSOLIDATE THESE\n", len(input.ExistingMemories))
 		sb.WriteString("Review each memory. Merge duplicates, combine similar items into one stronger memory, drop stale/irrelevant ones, and keep confirmed facts.\n")
 		for _, m := range input.ExistingMemories {
 			line := fmt.Sprintf("- [%s] (imp:%.1f, src:%s", m.Category, m.Importance, m.Source)

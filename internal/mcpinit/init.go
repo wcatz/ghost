@@ -20,7 +20,7 @@ import (
 // When dryRun is true, it reports what would change without modifying anything.
 func Run(w io.Writer, dryRun bool) error {
 	if dryRun {
-		fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
+		_, _ = fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
 	}
 
 	// Step 1: Prerequisites.
@@ -68,7 +68,7 @@ func Run(w io.Writer, dryRun bool) error {
 	_, _ = fmt.Fprintln(w, "\n[6/7] Importing Claude Code memories...")
 	projects, err := importMemories(w, dryRun)
 	if err != nil {
-		fmt.Fprintf(w, "  ! import error: %v (continuing)\n", err)
+		_, _ = fmt.Fprintf(w, "  ! import error: %v (continuing)\n", err)
 	}
 
 	// Step 7: Project memory redirects.
@@ -94,13 +94,13 @@ func checkPrereqs(w io.Writer) (ghostBin, claudeBin string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("ghost binary not found in PATH — install it first")
 	}
-	fmt.Fprintf(w, "  ✓ ghost binary at %s\n", ghostBin)
+	_, _ = fmt.Fprintf(w, "  ✓ ghost binary at %s\n", ghostBin)
 
 	claudeBin, err = exec.LookPath("claude")
 	if err != nil {
 		return "", "", fmt.Errorf("claude CLI not found in PATH — install Claude Code first")
 	}
-	fmt.Fprintf(w, "  ✓ claude CLI at %s\n", claudeBin)
+	_, _ = fmt.Fprintf(w, "  ✓ claude CLI at %s\n", claudeBin)
 
 	return ghostBin, claudeBin, nil
 }
@@ -121,9 +121,9 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 
 	if dryRun {
 		if alreadyRegistered {
-			fmt.Fprintf(w, "  ~ would update ghost MCP server (command: %s)\n", ghostBin)
+			_, _ = fmt.Fprintf(w, "  ~ would update ghost MCP server (command: %s)\n", ghostBin)
 		} else {
-			fmt.Fprintf(w, "  ~ would register ghost MCP server (command: %s)\n", ghostBin)
+			_, _ = fmt.Fprintf(w, "  ~ would register ghost MCP server (command: %s)\n", ghostBin)
 		}
 		return nil
 	}
@@ -150,9 +150,9 @@ func registerMCP(w io.Writer, ghostBin, claudeBin string, dryRun bool) error {
 	}
 
 	if alreadyRegistered {
-		fmt.Fprintf(w, "  ✓ updated ghost MCP server (command: %s)\n", ghostBin)
+		_, _ = fmt.Fprintf(w, "  ✓ updated ghost MCP server (command: %s)\n", ghostBin)
 	} else {
-		fmt.Fprintf(w, "  + registered ghost MCP server (command: %s)\n", ghostBin)
+		_, _ = fmt.Fprintf(w, "  + registered ghost MCP server (command: %s)\n", ghostBin)
 	}
 	return nil
 }
@@ -176,13 +176,13 @@ func ensurePermissions(w io.Writer) (*settingsFile, error) {
 
 	existing := len(ghostPermissions) - len(added)
 	if existing > 0 {
-		fmt.Fprintf(w, "  ✓ %d permissions already present\n", existing)
+		_, _ = fmt.Fprintf(w, "  ✓ %d permissions already present\n", existing)
 	}
 	for _, p := range added {
-		fmt.Fprintf(w, "  + %s\n", p)
+		_, _ = fmt.Fprintf(w, "  + %s\n", p)
 	}
 	if len(added) == 0 {
-		fmt.Fprintf(w, "  ✓ all %d ghost permissions configured\n", len(ghostPermissions))
+		_, _ = fmt.Fprintf(w, "  ✓ all %d ghost permissions configured\n", len(ghostPermissions))
 	}
 
 	return sf, nil
@@ -212,7 +212,7 @@ func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 		return fmt.Errorf("add hook: %w", err)
 	}
 
-	fmt.Fprintf(w, "  + added SessionStart hook: %s\n", hookCmd)
+	_, _ = fmt.Fprintf(w, "  + added SessionStart hook: %s\n", hookCmd)
 	return nil
 }
 
@@ -264,7 +264,7 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 	dbPath := filepath.Join(dataDir, "ghost.db")
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		_, _ = fmt.Fprintln(w, "  - no Ghost database found (run ghost serve first)")
+		_, _ = fmt.Fprintln(w, "  - no Ghost database found (memories import automatically on first session)")
 		return nil, nil
 	}
 
@@ -272,7 +272,7 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := memory.NewStore(db, logger)
@@ -292,19 +292,19 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 		}
 
 		if dryRun {
-			fmt.Fprintf(w, "  ~ %s — would scan for importable memories\n", p.Name)
+			_, _ = fmt.Fprintf(w, "  ~ %s — would scan for importable memories\n", p.Name)
 			continue
 		}
 
 		n, err := claudeimport.Import(ctx, store, p.ID, p.Path, logger)
 		if err != nil {
-			fmt.Fprintf(w, "  ! %s — import error: %v\n", p.Name, err)
+			_, _ = fmt.Fprintf(w, "  ! %s — import error: %v\n", p.Name, err)
 			continue
 		}
 		if n > 0 {
-			fmt.Fprintf(w, "  ✓ %s — %d memories imported\n", p.Name, n)
+			_, _ = fmt.Fprintf(w, "  ✓ %s — %d memories imported\n", p.Name, n)
 		} else {
-			fmt.Fprintf(w, "  - %s — no new memories\n", p.Name)
+			_, _ = fmt.Fprintf(w, "  - %s — no new memories\n", p.Name)
 		}
 	}
 
@@ -336,7 +336,7 @@ func sanitizeName(name string) string {
 func writeRedirects(w io.Writer, projects []projectInfo, dryRun bool) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Fprintf(w, "  ! cannot determine home directory: %v\n", err)
+		_, _ = fmt.Fprintf(w, "  ! cannot determine home directory: %v\n", err)
 		return
 	}
 
@@ -353,7 +353,7 @@ func writeRedirects(w io.Writer, projects []projectInfo, dryRun bool) {
 		if data, err := os.ReadFile(target); err == nil {
 			content := string(data)
 			if strings.Contains(content, "stored in Ghost") && !strings.Contains(content, "ghost_list_projects") {
-				fmt.Fprintf(w, "  ✓ %s — redirect exists\n", p.Name)
+				_, _ = fmt.Fprintf(w, "  ✓ %s — redirect exists\n", p.Name)
 				continue
 			}
 			if !strings.Contains(content, "stored in Ghost") {
@@ -365,12 +365,12 @@ func writeRedirects(w io.Writer, projects []projectInfo, dryRun bool) {
 		}
 
 		if dryRun {
-			fmt.Fprintf(w, "  ~ %s — would create redirect\n", p.Name)
+			_, _ = fmt.Fprintf(w, "  ~ %s — would create redirect\n", p.Name)
 			continue
 		}
 
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			fmt.Fprintf(w, "  ! %s — mkdir error: %v\n", p.Name, err)
+			_, _ = fmt.Fprintf(w, "  ! %s — mkdir error: %v\n", p.Name, err)
 			continue
 		}
 
@@ -385,9 +385,9 @@ Use `+"`ghost_memory_search`"+` to search for specific facts.
 `, safeName)
 
 		if err := os.WriteFile(target, []byte(content), 0644); err != nil {
-			fmt.Fprintf(w, "  ! %s — write error: %v\n", p.Name, err)
+			_, _ = fmt.Fprintf(w, "  ! %s — write error: %v\n", p.Name, err)
 			continue
 		}
-		fmt.Fprintf(w, "  + %s — created redirect\n", p.Name)
+		_, _ = fmt.Fprintf(w, "  + %s — created redirect\n", p.Name)
 	}
 }

@@ -168,7 +168,7 @@ func setupTestStore(t *testing.T) (*Store, context.Context) {
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	store := NewStore(db, nil)
 	ctx := context.Background()

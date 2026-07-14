@@ -64,7 +64,7 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ollama request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -101,7 +101,7 @@ func (c *Client) Alive(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
 }
 
@@ -158,4 +158,3 @@ func (c *Client) Model() string {
 func (c *Client) Dimensions() int {
 	return c.dimensions
 }
-

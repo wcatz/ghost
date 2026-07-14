@@ -18,14 +18,14 @@ import (
 
 // Status checks the health of the Ghost ↔ Claude Code integration.
 func Status(w io.Writer) error {
-	fmt.Fprintf(w, "\nGhost ↔ Claude Code integration status:\n\n")
+	_, _ = fmt.Fprintf(w, "\nGhost ↔ Claude Code integration status:\n\n")
 
 	healthy := true
 	check := func(ok bool, pass, fail string) {
 		if ok {
-			fmt.Fprintf(w, "  ✓ %s\n", pass)
+			_, _ = fmt.Fprintf(w, "  ✓ %s\n", pass)
 		} else {
-			fmt.Fprintf(w, "  ✗ %s\n", fail)
+			_, _ = fmt.Fprintf(w, "  ✗ %s\n", fail)
 			healthy = false
 		}
 	}
@@ -81,7 +81,7 @@ func Status(w io.Writer) error {
 				"autoMemoryEnabled: false (built-in file-memory disabled)",
 				"autoMemoryEnabled not set to false — run ghost mcp init")
 		} else {
-			fmt.Fprintf(w, "  ✗ cannot read settings: %v\n", err)
+			_, _ = fmt.Fprintf(w, "  ✗ cannot read settings: %v\n", err)
 			healthy = false
 		}
 	}
@@ -93,7 +93,7 @@ func Status(w io.Writer) error {
 		if _, err := os.Stat(dbPath); err == nil {
 			db, err := memory.OpenDB(dbPath)
 			if err == nil {
-				defer db.Close()
+				defer db.Close() //nolint:errcheck
 				logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 				store := memory.NewStore(db, logger)
 				projects, err := store.ListProjects(context.Background())
@@ -144,15 +144,15 @@ func Status(w io.Writer) error {
 				}
 			}
 		} else {
-			fmt.Fprintln(w, "  - no Ghost database (run ghost first)")
+			_, _ = fmt.Fprintln(w, "  - no Ghost database (run ghost first)")
 		}
 	}
 
 	fmt.Println()
 	if healthy {
-		fmt.Fprintln(w, "All checks passed.")
+		_, _ = fmt.Fprintln(w, "All checks passed.")
 	} else {
-		fmt.Fprintln(w, "Run `ghost mcp init` to fix issues.")
+		_, _ = fmt.Fprintln(w, "Run `ghost mcp init` to fix issues.")
 	}
 	return nil
 }

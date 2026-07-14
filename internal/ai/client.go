@@ -29,107 +29,6 @@ func NewClient(apiKey string, logger *slog.Logger) *Client {
 	}
 }
 
-// ChatStream sends a request and streams events through the returned channel.
-// The channel is closed when the response is complete or an error occurs.
-// thinkingBudget > 0 enables extended thinking with the given token budget.
-func (c *Client) ChatStream(
-	ctx context.Context,
-	messages []Message,
-	system []SystemBlock,
-	tools []ToolDefinition,
-	model string,
-	maxTokens int,
-	thinkingBudget int,
-) (<-chan StreamEvent, error) {
-	reqBody := apiRequest{
-		Model:     model,
-		MaxTokens: maxTokens,
-		System:    system,
-		Stream:    true,
-		Messages:  messages,
-		Tools:     tools,
-	}
-	// thinkingBudget: -1 = adaptive (Claude auto-scales), >0 = fixed budget, 0 = disabled
-	if thinkingBudget > 0 {
-		reqBody.Thinking = &ThinkingConfig{
-			Type:         "enabled",
-			BudgetTokens: thinkingBudget,
-		}
-	} else if thinkingBudget < 0 {
-		// Adaptive thinking — Claude auto-scales effort.
-		reqBody.Thinking = &ThinkingConfig{
-			Type: "adaptive",
-		}
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", APIURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-
-	c.setHeaders(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-
-		// Retry on rate limit (429) and overloaded (529) with exponential backoff.
-		if resp.StatusCode == 429 || resp.StatusCode == 529 {
-			retryAfter := 2 * time.Second
-			if ra := resp.Header.Get("Retry-After"); ra != "" {
-				if d, err := time.ParseDuration(ra + "s"); err == nil {
-					retryAfter = d
-				}
-			}
-			for attempt := 0; attempt < 3; attempt++ {
-				c.logger.Warn("API rate limited, retrying", "status", resp.StatusCode, "attempt", attempt+1, "wait", retryAfter)
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(retryAfter):
-				}
-				retryReq, _ := http.NewRequestWithContext(ctx, "POST", APIURL, bytes.NewReader(body))
-				c.setHeaders(retryReq)
-				resp, err = c.httpClient.Do(retryReq)
-				if err != nil {
-					return nil, fmt.Errorf("retry request: %w", err)
-				}
-				if resp.StatusCode == http.StatusOK {
-					break
-				}
-				_ = resp.Body.Close()
-				retryAfter *= 2
-			}
-			if resp.StatusCode != http.StatusOK {
-				return nil, fmt.Errorf("API rate limited after 3 retries (status %d)", resp.StatusCode)
-			}
-		} else {
-			return nil, parseAPIError(resp.StatusCode, respBody)
-		}
-	}
-
-	events := make(chan StreamEvent, 64)
-	go func() {
-		defer close(events)
-		defer resp.Body.Close()
-		if err := parseStream(resp.Body, events); err != nil {
-			events <- StreamEvent{Type: "error", Error: err}
-		}
-	}()
-
-	return events, nil
-}
-
 // Reflect calls Haiku (non-streaming) for memory extraction/reflection.
 func (c *Client) Reflect(ctx context.Context, prompt string) (string, TokenUsage, error) {
 	reqBody := apiRequest{
@@ -159,7 +58,7 @@ func (c *Client) Reflect(ctx context.Context, prompt string) (string, TokenUsage
 	if err != nil {
 		return "", TokenUsage{}, fmt.Errorf("reflect API call: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
 	if err != nil {
@@ -202,64 +101,6 @@ func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("x-api-key", c.apiKey)
 	req.Header.Set("anthropic-version", APIVersion)
 	req.Header.Set("anthropic-beta", BetaInterleavedThinking)
-}
-
-// CountTokens calls the token counting endpoint for accurate context tracking.
-func (c *Client) CountTokens(
-	ctx context.Context,
-	messages []Message,
-	system []SystemBlock,
-	tools []ToolDefinition,
-	model string,
-	thinking *ThinkingConfig,
-) (int, error) {
-	reqBody := struct {
-		Model    string           `json:"model"`
-		Messages []Message        `json:"messages"`
-		System   []SystemBlock    `json:"system,omitempty"`
-		Tools    []ToolDefinition `json:"tools,omitempty"`
-		Thinking *ThinkingConfig  `json:"thinking,omitempty"`
-	}{
-		Model:    model,
-		Messages: messages,
-		System:   system,
-		Tools:    tools,
-		Thinking: thinking,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return 0, fmt.Errorf("marshal count_tokens: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", CountTokensURL, bytes.NewReader(body))
-	if err != nil {
-		return 0, fmt.Errorf("create count_tokens request: %w", err)
-	}
-	c.setHeaders(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("count_tokens call: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if err != nil {
-		return 0, fmt.Errorf("read count_tokens response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, parseAPIError(resp.StatusCode, respBody)
-	}
-
-	var result struct {
-		InputTokens int `json:"input_tokens"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return 0, fmt.Errorf("unmarshal count_tokens: %w", err)
-	}
-	return result.InputTokens, nil
 }
 
 // parseAPIError extracts a user-friendly message from Claude API error responses.

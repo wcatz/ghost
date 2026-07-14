@@ -39,9 +39,3 @@ jobs:
 
       - name: Build
         run: go build -o /dev/null ./cmd/ghost
-
-  extension:
-    runs-on: ubuntu-latest
-    steps:
-      - name: VSCode extension removed in v0.8.0
-        run: echo "Ghost is now MCP-only. VSCode extension has been removed."
