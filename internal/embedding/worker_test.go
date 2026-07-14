@@ -78,16 +78,6 @@ func (m *mockStore) StoreEmbedding(_ context.Context, memoryID string, vec []flo
 	return nil
 }
 
-// --- Mock Ollama HTTP server ---
-
-// For unit tests, we bypass the real HTTP client and test the Worker logic
-// with a mock client that returns deterministic embeddings.
-type mockHTTPClient struct {
-	alive      bool
-	embeddings map[string][]float32
-	embedErr   error
-}
-
 func TestEmbedOne_HappyPath(t *testing.T) {
 	store := newMockStore()
 	store.memories["mem-1"] = "Go uses goroutines for concurrency"

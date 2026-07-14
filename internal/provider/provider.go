@@ -8,19 +8,10 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// LLMProvider abstracts LLM interactions for streaming chat and reflection.
+// LLMProvider abstracts LLM interactions for reflection. (A streaming chat
+// method lived here until the assistant-era streaming client was removed;
+// reflection is the only LLM consumer.)
 type LLMProvider interface {
-	// ChatStream sends a conversation to the LLM and streams events back.
-	ChatStream(
-		ctx context.Context,
-		messages []ai.Message,
-		system []ai.SystemBlock,
-		tools []ai.ToolDefinition,
-		model string,
-		maxTokens int,
-		thinkingBudget int,
-	) (<-chan ai.StreamEvent, error)
-
 	// Reflect calls a fast model (e.g., Haiku) for memory extraction/reflection.
 	Reflect(ctx context.Context, prompt string) (string, ai.TokenUsage, error)
 }

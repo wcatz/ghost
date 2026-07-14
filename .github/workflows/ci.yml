@@ -31,7 +31,9 @@ jobs:
 
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          # Pinned to the version verified locally against .golangci.yml —
+          # 'latest' can break CI without a code change on a major bump.
+          version: v2.12.2
           args: --new-from-rev=origin/main
 
       - name: Test
@@ -39,9 +41,3 @@ jobs:
 
       - name: Build
         run: go build -o /dev/null ./cmd/ghost
-
-  extension:
-    runs-on: ubuntu-latest
-    steps:
-      - name: VSCode extension removed in v0.8.0
-        run: echo "Ghost is now MCP-only. VSCode extension has been removed."

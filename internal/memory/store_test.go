@@ -18,7 +18,7 @@ func testStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	s := NewStore(db, logger)

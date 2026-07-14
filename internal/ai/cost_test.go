@@ -15,8 +15,8 @@ func almostEqual(a, b, tol float64) bool {
 
 func TestModelPricing(t *testing.T) {
 	tests := []struct {
-		name                                   string
-		model                                  string
+		name                                  string
+		model                                 string
 		wantInput, wantOutput, wantCW, wantCR float64
 	}{
 		{
@@ -323,7 +323,7 @@ func TestCostTracker_CacheHitRate(t *testing.T) {
 		{
 			name: "50% cache hit",
 			usage: &TokenUsage{
-				InputTokens:         500,
+				InputTokens:          500,
 				CacheReadInputTokens: 500,
 			},
 			// total = 500 + 0 + 500 = 1000, rate = 500/1000 * 100 = 50

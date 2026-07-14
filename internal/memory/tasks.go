@@ -61,7 +61,7 @@ func (s *Store) ListTasks(ctx context.Context, projectID, status string, limit i
 	if err != nil {
 		return nil, fmt.Errorf("list tasks: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var tasks []Task
 	for rows.Next() {

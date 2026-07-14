@@ -1,12 +1,12 @@
 package mcpserver
 
 import (
-	"unicode/utf8"
 	"context"
 	"log/slog"
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -18,7 +18,7 @@ func testStore(t *testing.T) *memory.Store {
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	s := memory.NewStore(db, logger)
@@ -735,8 +735,8 @@ func TestTruncateUTF8(t *testing.T) {
 	}{
 		{"hello", 10, "hello"},
 		{"hello", 4, "hell"},
-		{"héllo", 2, "h"},      // é is 2 bytes starting at index 1 — must not split
-		{"日本語", 4, "日"},       // each rune is 3 bytes
+		{"héllo", 2, "h"}, // é is 2 bytes starting at index 1 — must not split
+		{"日本語", 4, "日"},   // each rune is 3 bytes
 		{"日本語", 6, "日本"},
 		{"", 5, ""},
 	}

@@ -40,7 +40,7 @@ func LatestRelease() (*Release, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetch latest release: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("github API returned %d", resp.StatusCode)
@@ -83,7 +83,7 @@ func Download(url string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("download: %w", err)
 	}
 	if resp.StatusCode != 200 {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("download returned %d", resp.StatusCode)
 	}
 	return resp.Body, nil
@@ -95,7 +95,7 @@ func ExtractBinary(r io.Reader) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gzip: %w", err)
 	}
-	defer gz.Close()
+	defer gz.Close() //nolint:errcheck
 
 	tr := tar.NewReader(gz)
 	for {
@@ -137,20 +137,20 @@ func Replace(targetPath string, newBinary []byte) error {
 	tmpPath := tmp.Name()
 
 	if _, err := tmp.Write(newBinary); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write temp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temp: %w", err)
 	}
 	if err := os.Chmod(tmpPath, info.Mode()); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("chmod temp: %w", err)
 	}
 	if err := os.Rename(tmpPath, resolved); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename: %w", err)
 	}
 	return nil

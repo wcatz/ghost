@@ -137,7 +137,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var projects []Project
 	for rows.Next() {
@@ -422,7 +422,7 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	if err != nil {
 		return nil, fmt.Errorf("get top memories: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanMemories(rows)
 }
 
@@ -444,7 +444,7 @@ func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit in
 	if err != nil {
 		return nil, fmt.Errorf("search memories: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanMemories(rows)
 }
 
@@ -465,7 +465,7 @@ func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Me
 	if err != nil {
 		return nil, fmt.Errorf("search all memories: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanMemories(rows)
 }
 
@@ -485,7 +485,7 @@ func (s *Store) GetByCategory(ctx context.Context, projectID, category string, l
 	if err != nil {
 		return nil, fmt.Errorf("get by category: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanMemories(rows)
 }
 
@@ -505,7 +505,7 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 	if err != nil {
 		return nil, fmt.Errorf("get all memories: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanMemories(rows)
 }
 
@@ -782,7 +782,7 @@ func (s *Store) GetRecentExchanges(ctx context.Context, projectID string, limit 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var pairs [][2]string
 	var current [2]string
@@ -979,7 +979,7 @@ func sanitizeFTS(text string) string {
 	for _, word := range strings.Fields(text) {
 		// Strip non-alphanumeric characters from edges.
 		clean := strings.TrimFunc(word, func(r rune) bool {
-			return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+			return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
 		})
 		if len(clean) >= 1 {
 			// Quote each word to treat as literal.
