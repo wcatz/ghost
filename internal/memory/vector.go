@@ -203,13 +203,27 @@ func (s *Store) fuseAndRank(ctx context.Context, projectID string, ftsResults []
 		idSet[sm.MemoryID] = true
 	}
 
+	// Ranking sorts break score ties by ID so identical searches return
+	// identical orderings (and pick identical graph seeds) — the candidate
+	// sets come from map iteration, which would otherwise make tie order
+	// random per call.
+	byScoreThenID := func(ids []string) {
+		sort.Slice(ids, func(i, j int) bool {
+			si, sj := scores[ids[i]], scores[ids[j]]
+			if si != sj {
+				return si > sj
+			}
+			return ids[i] < ids[j]
+		})
+	}
+
 	if p.GraphWeight > 0 && p.GraphSeeds > 0 {
 		// Preliminary ranking to pick graph seeds.
 		prelim := make([]string, 0, len(idSet))
 		for id := range idSet {
 			prelim = append(prelim, id)
 		}
-		sort.Slice(prelim, func(i, j int) bool { return scores[prelim[i]] > scores[prelim[j]] })
+		byScoreThenID(prelim)
 
 		// Third signal: link-graph expansion from top seeds (additive-only).
 		s.applyGraphBonus(ctx, projectID, scores, idSet, prelim, limit, p)
@@ -220,7 +234,7 @@ func (s *Store) fuseAndRank(ctx context.Context, projectID string, ftsResults []
 	for id := range idSet {
 		ranked = append(ranked, id)
 	}
-	sort.Slice(ranked, func(i, j int) bool { return scores[ranked[i]] > scores[ranked[j]] })
+	byScoreThenID(ranked)
 	if len(ranked) > limit {
 		ranked = ranked[:limit]
 	}
@@ -229,9 +243,14 @@ func (s *Store) fuseAndRank(ctx context.Context, projectID string, ftsResults []
 	if err != nil {
 		return nil, err
 	}
-	// Re-sort by fused score (GetByIDs doesn't preserve order).
+	// Re-sort by fused score (GetByIDs doesn't preserve order), same
+	// tie-breaking as the ID ranking above.
 	sort.Slice(memories, func(i, j int) bool {
-		return scores[memories[i].ID] > scores[memories[j].ID]
+		si, sj := scores[memories[i].ID], scores[memories[j].ID]
+		if si != sj {
+			return si > sj
+		}
+		return memories[i].ID < memories[j].ID
 	})
 	return memories, nil
 }
