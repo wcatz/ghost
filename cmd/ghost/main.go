@@ -587,7 +587,8 @@ Commands:
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
   obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
-  bench                       Run the retrieval-quality benchmark (built-in dataset)
+  bench [--sweep]             Run the retrieval-quality benchmark (built-in dataset);
+                              --sweep grid-searches the fusion parameters
   upgrade                     Update ghost to the latest release
   version                     Print version
 
@@ -602,11 +603,23 @@ Environment:
 `, version)
 }
 
-// bootstrap loads config, sets up logging, and opens the database.
 // runBench implements `ghost bench` — runs the built-in retrieval-quality
 // benchmark (four ablations over the embedded dataset) and prints the metric
-// table. Judge-free, deterministic, no network. See docs/benchmarks.md.
+// table. With --sweep it instead grid-searches the fusion parameters and
+// prints the ranked table. Judge-free, deterministic, no network. See
+// docs/benchmarks.md.
 func runBench() {
+	sweep := false
+	for _, arg := range os.Args[2:] {
+		switch arg {
+		case "--sweep":
+			sweep = true
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n\nUsage: ghost bench [--sweep]\n", arg)
+			os.Exit(1)
+		}
+	}
+
 	ds, vecs, err := bench.BuiltinDataset()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -635,6 +648,20 @@ func runBench() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+
+	if sweep {
+		// The sweep varies query-time fusion parameters over one prepared
+		// store, so the link graph is built once up front.
+		linking.NewWorker(store, logger, time.Hour, threshold).SweepOnce(ctx)
+		points, err := bench.Sweep(ctx, store, queries, bench.SweepGrid())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(bench.FormatSweep(points))
+		return
+	}
+
 	results, err := bench.Run(ctx, store, queries, threshold)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
