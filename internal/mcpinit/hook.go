@@ -29,6 +29,41 @@ func roDSN(dbPath string) string {
 	return u.String()
 }
 
+// bumpSessionCount increments the project's session counter and returns the
+// new count, or 0 on any failure. It is the session hook's single deliberate
+// write: its own short-lived read-write connection (URI-escaped like roDSN,
+// busy_timeout so a live MCP server never blocks it for long), guarded by an
+// existence check so a missing database is never created.
+func bumpSessionCount(dbPath, projectID string) int {
+	if _, err := os.Stat(dbPath); err != nil {
+		return 0
+	}
+	u := url.URL{
+		Scheme:   "file",
+		Opaque:   (&url.URL{Path: dbPath}).EscapedPath(),
+		RawQuery: "_pragma=busy_timeout(1000)",
+	}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return 0
+	}
+	defer db.Close() //nolint:errcheck
+
+	var n int
+	err = db.QueryRow(`
+		INSERT INTO ghost_state (project_id, interaction_count)
+		VALUES (?, 1)
+		ON CONFLICT(project_id) DO UPDATE SET
+			interaction_count = interaction_count + 1,
+			updated_at = datetime('now')
+		RETURNING interaction_count
+	`, projectID).Scan(&n)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 type sessionStartInput struct {
 	CWD    string `json:"cwd"`
 	Source string `json:"source"`
@@ -55,7 +90,19 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 		cwd = resolved
 	}
 
-	project, memories, learned, tasks, decisions, interactionCount := loadSessionContext(cwd)
+	projectID, project, memories, learned, tasks, decisions, interactionCount := loadSessionContext(cwd)
+
+	// Count this session. Context loading above is strictly read-only; the
+	// counter bump is the one deliberate write, scoped to its own short-lived
+	// connection and best-effort — on any failure (busy store, permissions)
+	// the stale stored count is shown instead. Never creates a database.
+	if projectID != "" {
+		if dataDir, err := config.DataDir(); err == nil {
+			if n := bumpSessionCount(filepath.Join(dataDir, "ghost.db"), projectID); n > 0 {
+				interactionCount = n
+			}
+		}
+	}
 
 	// Load globals unconditionally — they apply to every session regardless of project match.
 	var globalSection string
@@ -155,7 +202,7 @@ func loadGlobalMemories(dbPath string) [][2]string {
 	return out
 }
 
-func loadSessionContext(cwd string) (project string, memories [][3]string, learned string, tasks [][4]string, decisions [][2]string, interactionCount int) {
+func loadSessionContext(cwd string) (projectID, project string, memories [][3]string, learned string, tasks [][4]string, decisions [][2]string, interactionCount int) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
@@ -171,7 +218,6 @@ func loadSessionContext(cwd string) (project string, memories [][3]string, learn
 	defer db.Close() //nolint:errcheck
 
 	// Find matching project: try full path prefix first, then cwd basename name match
-	var projectID string
 	projectID, project = lookupProject(db, cwd)
 	if projectID == "" {
 		return
