@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/wcatz/ghost/internal/obsidian"
 	"github.com/wcatz/ghost/internal/reflection"
 	"github.com/wcatz/ghost/internal/selfupdate"
+	"github.com/wcatz/ghost/internal/supersede"
 )
 
 var version = "dev"
@@ -57,6 +59,9 @@ func main() {
 			return
 		case "reflect":
 			runReflect()
+			return
+		case "supersede":
+			runSupersede()
 			return
 		case "upgrade":
 			runUpgrade()
@@ -372,6 +377,92 @@ Flags:
 	}
 }
 
+// runSupersede implements `ghost supersede <project> [--apply]` — the creation
+// half of staleness-aware ranking. It proposes newer→older 'supersedes' links
+// over the project's live memories (cosine-similar candidates, Haiku-confirmed)
+// and, with --apply, writes them. Dry-run by default. Re-runnable: it self-heals
+// after `ghost reflect` cascade-deletes links. Consumed by search only when
+// SupersedeDemote is set. See docs/benchmarks.md Phase 3.
+func runSupersede() {
+	var projectName string
+	apply := false
+	threshold := float32(0.80) // supersession candidates are the SAME fact — tighter than the 0.70 'related' floor
+	for i := 2; i < len(os.Args); i++ {
+		switch {
+		case os.Args[i] == "--apply":
+			apply = true
+		case os.Args[i] == "--threshold" && i+1 < len(os.Args):
+			if v, err := strconv.ParseFloat(os.Args[i+1], 32); err == nil {
+				threshold = float32(v)
+			}
+			i++
+		case strings.HasPrefix(os.Args[i], "--threshold="):
+			if v, err := strconv.ParseFloat(strings.TrimPrefix(os.Args[i], "--threshold="), 32); err == nil {
+				threshold = float32(v)
+			}
+		case !strings.HasPrefix(os.Args[i], "-"):
+			projectName = os.Args[i]
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", os.Args[i])
+			os.Exit(1)
+		}
+	}
+	if projectName == "" {
+		fmt.Fprintln(os.Stderr, `Usage: ghost supersede <project> [flags]
+
+Flags:
+  --apply             Write the supersedes links (default is dry-run/preview)
+  --threshold float   Min cosine similarity for a candidate pair (default 0.80)
+
+Requires ANTHROPIC_API_KEY (uses Haiku to confirm each candidate).`)
+		os.Exit(1)
+	}
+
+	cfg, logger, store := bootstrap()
+	defer store.Close() //nolint:errcheck
+	ctx := context.Background()
+
+	projectID, err := store.ResolveProjectByName(ctx, projectName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if projectID == "" {
+		fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
+		os.Exit(1)
+	}
+	if cfg.API.Key == "" {
+		fmt.Fprintln(os.Stderr, "error: ghost supersede requires ANTHROPIC_API_KEY (Haiku confirms each candidate)")
+		os.Exit(1)
+	}
+
+	cls := supersede.NewHaikuClassifier(ai.NewClient(cfg.API.Key, logger))
+	res, confirmed, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	verb := "would link"
+	if apply {
+		verb = "linked"
+	}
+	short := func(id string) string {
+		if len(id) > 8 {
+			return id[:8]
+		}
+		return id
+	}
+	fmt.Printf("%s: %d candidate pairs, %d confirmed supersessions, %s %d\n",
+		projectName, res.Candidates, res.Confirmed, verb, len(confirmed))
+	for _, c := range confirmed {
+		fmt.Printf("  %s  supersedes  %s\n", short(c.NewerID), short(c.OlderID))
+	}
+	if !apply && res.Confirmed > 0 {
+		fmt.Println("\nRe-run with --apply to write these links.")
+	}
+}
+
 // runUpgrade downloads and installs the latest ghost release.
 func runUpgrade() {
 	exe, err := os.Executable()
@@ -585,6 +676,7 @@ Commands:
   mcp init [--dry-run]        Configure Claude Code integration
   mcp status                  Check Claude Code integration health
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
+  supersede <project> [flags] Link superseded memories (dry-run by default, --apply to write)
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
   obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
   bench [--sweep]             Run the retrieval-quality benchmark (built-in dataset);
