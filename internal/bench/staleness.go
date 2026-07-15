@@ -86,7 +86,7 @@ type StalenessSummary struct {
 // default (RecencyWeight 0) this measures today's behavior; with a recency
 // weight it measures whether the fresh version can be lifted above its
 // superseded siblings.
-func RunStaleness(ctx context.Context, scenarios []StalenessScenario, p memory.SearchParams) ([]ProbeOutcome, error) {
+func RunStaleness(ctx context.Context, scenarios []StalenessScenario, p memory.SearchParams, seedSupersedes bool) ([]ProbeOutcome, error) {
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
 		return nil, err
@@ -114,6 +114,20 @@ func RunStaleness(ctx context.Context, scenarios []StalenessScenario, p memory.S
 				return nil, fmt.Errorf("backdate %s v%d: %w", sc.Name, j, err)
 			}
 			versionIDs[i][j] = id
+		}
+		// Ground-truth supersedes links (star: every newer version supersedes
+		// every older one) so the demote consumer has real edges to act on.
+		// This is what an LLM classifier would emit; the suite seeds them to
+		// validate CONSUMPTION, not creation.
+		if seedSupersedes {
+			ids := versionIDs[i]
+			for newer := len(ids) - 1; newer >= 1; newer-- {
+				for older := newer - 1; older >= 0; older-- {
+					if err := store.CreateLink(ctx, ids[newer], ids[older], "supersedes", 1.0, "llm"); err != nil {
+						return nil, fmt.Errorf("seed supersedes %s: %w", sc.Name, err)
+					}
+				}
+			}
 		}
 	}
 

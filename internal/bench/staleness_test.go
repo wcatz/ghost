@@ -63,7 +63,7 @@ func TestStalenessReport(t *testing.T) {
 	}
 
 	// Production defaults (RecencyWeight 0) — documents today's behavior.
-	outcomes, err := RunStaleness(context.Background(), scenarios, memory.DefaultSearchParams())
+	outcomes, err := RunStaleness(context.Background(), scenarios, memory.DefaultSearchParams(), false)
 	if err != nil {
 		t.Fatalf("RunStaleness: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestStalenessRecencyProof(t *testing.T) {
 	ctx := context.Background()
 
 	base := memory.DefaultSearchParams()
-	baseline, err := RunStaleness(ctx, scenarios, base)
+	baseline, err := RunStaleness(ctx, scenarios, base, false)
 	if err != nil {
 		t.Fatalf("baseline: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestStalenessRecencyProof(t *testing.T) {
 	tuned := base
 	tuned.RecencyWeight = 2.0
 	tuned.RecencyTau = 30
-	tunedOutcomes, err := RunStaleness(ctx, scenarios, tuned)
+	tunedOutcomes, err := RunStaleness(ctx, scenarios, tuned, false)
 	if err != nil {
 		t.Fatalf("tuned: %v", err)
 	}
@@ -162,5 +162,49 @@ func TestRecencyDoesNotPerturbGradedBench(t *testing.T) {
 	if pts[0].Result.NDCG10 != pts[1].Result.NDCG10 || pts[0].Result.Recall10 != pts[1].Result.Recall10 {
 		t.Errorf("recency perturbed graded ranking (uniform timestamps should make it inert): off NDCG=%.4f on NDCG=%.4f",
 			pts[0].Result.NDCG10, pts[1].Result.NDCG10)
+	}
+}
+
+// TestSupersedeDemoteClearsFrontier is the headline result the recency-trap
+// experiment set up: the targeted supersede demote flips the staleness suite
+// AND leaves the recency-trap suite intact — the free lunch the global recency
+// prior could not be. With SupersedeDemote on and ground-truth supersedes links
+// seeded, staleness fresh-wins should reach ~1.0; the trap suite (whose
+// distractors are NOT supersession pairs, so no links exist) is untouched.
+func TestSupersedeDemoteClearsFrontier(t *testing.T) {
+	stale := loadStalenessTestdata(t)
+	traps := loadTrapTestdata(t)
+	ctx := context.Background()
+
+	p := memory.DefaultSearchParams()
+	p.SupersedeDemote = true
+
+	// Staleness with demote + seeded supersedes links: should flip to majority.
+	so, err := RunStaleness(ctx, stale, p, true)
+	if err != nil {
+		t.Fatalf("staleness: %v", err)
+	}
+	sw := freshWins(so)
+
+	// Trap with demote ON but NO supersedes links (distractors aren't
+	// supersession): demote is inert, correct-wins must match the default.
+	to, err := RunRecencyTrap(ctx, traps, p)
+	if err != nil {
+		t.Fatalf("trap: %v", err)
+	}
+	tw := TrapCorrectWins(to)
+
+	baseTrap, err := RunRecencyTrap(ctx, traps, memory.DefaultSearchParams())
+	if err != nil {
+		t.Fatalf("trap baseline: %v", err)
+	}
+	baseTW := TrapCorrectWins(baseTrap)
+
+	t.Logf("supersede demote: staleness fresh-wins=%.3f, trap correct-wins=%.3f (default trap=%.3f)", sw, tw, baseTW)
+	if sw < 0.9 {
+		t.Errorf("supersede demote should flip staleness to near-1.0, got %.3f", sw)
+	}
+	if tw != baseTW {
+		t.Errorf("supersede demote must not touch the trap (no supersession pairs there): %.3f vs default %.3f", tw, baseTW)
 	}
 }

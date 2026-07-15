@@ -240,6 +240,48 @@ func (s *Store) GraphNeighbors(ctx context.Context, projectID string, seedIDs []
 
 // InvalidateLink soft-invalidates a link (Zep-style: never delete, mark
 // invalid with a timestamp so history is preserved).
+// SupersedesWithin returns the valid 'supersedes' edges whose BOTH endpoints
+// are in ids: each pair is [superseder, superseded]. Used by ranking to demote
+// a memory only when its actual replacement co-occurs in the same result set,
+// so a superseded fact is never buried when its successor isn't even present.
+func (s *Store) SupersedesWithin(ctx context.Context, ids []string) ([][2]string, error) {
+	if len(ids) < 2 {
+		return nil, nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ph := make([]string, len(ids))
+	args := make([]interface{}, 0, len(ids)*2)
+	for i, id := range ids {
+		ph[i] = "?"
+		args = append(args, id)
+	}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	list := strings.Join(ph, ",")
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT source_id, target_id FROM memory_links
+		WHERE relation = 'supersedes' AND invalidated_at IS NULL
+		  AND source_id IN (%s) AND target_id IN (%s)
+	`, list, list), args...)
+	if err != nil {
+		return nil, fmt.Errorf("supersedes within: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var pairs [][2]string
+	for rows.Next() {
+		var src, tgt string
+		if err := rows.Scan(&src, &tgt); err != nil {
+			return nil, err
+		}
+		pairs = append(pairs, [2]string{src, tgt})
+	}
+	return pairs, rows.Err()
+}
+
 func (s *Store) InvalidateLink(ctx context.Context, sourceID, targetID, relation string) error {
 	if symmetricRelations[relation] && sourceID > targetID {
 		sourceID, targetID = targetID, sourceID

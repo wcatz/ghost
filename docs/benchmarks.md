@@ -92,7 +92,17 @@ recency   staleness-fresh   trap-correct   min(both)
 
 At *every* weight that meaningfully helps staleness, the trap collapses. The best achievable `min(both)` is 0.214 — i.e. there is no global recency weight where both old-but-correct and newer-supersedes retrieval are acceptable, because the only signal (age) is exactly the thing that conflates the two cases. **Verdict: the recency prior is not defaultable; it ships off permanently as a global default** and remains a per-query / sweep-tuning tool.
 
-**The real fix is targeted, not global:** LLM-classified `supersedes` links (the schema relation exists, unused) consumed by a demote that fires *only when a memory's actual superseder co-occurs in the results*. That never touches the trap scenarios — correct-old and trap-new are unrelated facts with no supersedes edge between them — so it can flip staleness without the collateral damage the frontier shows. It needs the reflection-LLM creator (the cosine linking worker is rejected: symmetric similarity can't assign direction, the same failure that got the graph-expansion bonus disabled). That is the next roadmap item; the recency prior stays as the measured baseline it must beat.
+**The real fix is targeted, and it clears the frontier.** `SearchParams.SupersedeDemote` (default off) consumes directed `supersedes` links: within the result window it demotes a memory below every present memory that supersedes it (penalty = count of present superseders, stable-sorted — so update chains order correctly given star links, and it is a hard no-op when no supersedes edge joins two results). Because it only ever acts on genuine replacement pairs, it does what no global recency weight could (`TestSupersedeDemoteClearsFrontier`):
+
+```text
+                        staleness fresh-wins   recency-trap correct-wins
+default (both off)      0.083                  0.929
+supersede demote on     1.000                  0.929   ← flips staleness, trap untouched
+```
+
+The trap is untouched because its distractors are *not* supersession pairs — no `supersedes` edge exists between them, so the demote never fires. That is the free lunch the recency frontier proved a global prior can't be.
+
+**What ships here vs. what's next.** The *consumption* half is in the tree, off by default and proven to clear the frontier (the graded benchmarks are inert — they contain no supersedes links; `ghost bench` hybrid NDCG@10 stays 0.989). The remaining half is *creation*: an LLM classifier (reflection-time, `source='llm'`) that emits the star `supersedes` links over real memories. The cosine linking worker is rejected as the creator — symmetric similarity can't assign direction, the same failure that got the graph-expansion bonus disabled — and creation must contend with reflection's cascade-delete of links (`ReplaceNonManual` reinserts memories with new IDs). That is the next roadmap item; this PR is the proven consumer it will feed.
 
 ## Phase 4 — end-to-end LongMemEval-S (leaderboard-comparable)
 

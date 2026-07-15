@@ -72,7 +72,7 @@ func TestRecencyFrontier(t *testing.T) {
 		p := memory.DefaultSearchParams()
 		p.RecencyWeight = w
 
-		so, err := RunStaleness(ctx, stale, p)
+		so, err := RunStaleness(ctx, stale, p, false)
 		if err != nil {
 			t.Fatalf("staleness w=%.2f: %v", w, err)
 		}
