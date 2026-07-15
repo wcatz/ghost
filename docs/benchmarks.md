@@ -79,7 +79,20 @@ This suite was designed to *fail* at first — production search had no recency 
 
 Turned on in the sweep, it **flips the staleness suite from fresh-wins 0.083 to 1.000** (`TestStalenessRecencyProof`, w=2/τ=30). It is provably inert on the graded benchmarks: those datasets seed via `store.Create`, which never sets `created_at`, so every candidate shares a timestamp and the recency factor is identical across them — no reorder possible at any weight (`TestRecencyDoesNotPerturbGradedBench`).
 
-**Why it still ships off:** a global recency prior structurally can't tell "superseded" from "old-but-still-true," and every current harness only tests newest-is-right (uniform timestamps elsewhere). Before `RecencyWeight` moves off 0 by default, a **recency-trap fixture** — where the *older* version is the correct answer — must be added and pass, bounding how hard the weight can push. The precise successor is LLM-classified `supersedes` links (the schema relation exists, unused) consumed by a targeted demote that fires only when a superseder co-occurs — precision the global prior can't provide, but it needs the reflection-LLM creator (the cosine linking worker is rejected: symmetric similarity can't assign direction, the same failure mode that got the graph-expansion bonus disabled).
+**Why it stays off as a global default — the recency-trap experiment.** The predicted risk was that a global recency prior can't tell "superseded" from "old-but-still-true." A second fixture (`internal/bench/testdata/recency_trap.jsonl`) tests the opposite of staleness: the *older* memory is the correct answer, with a newer keyword-overlapping distractor that recency would wrongly promote (`correct-wins` = correct outranks every trap). Sweeping `RecencyWeight` against both suites at once (`TestRecencyFrontier`) is not a gentle tradeoff — it's a cliff:
+
+```text
+recency   staleness-fresh   trap-correct   min(both)
+0.00      0.083             0.929          0.083
+0.05      0.750             0.214          0.214   ← best min(both)
+0.10      0.917             0.071          0.071
+0.15      0.979             0.000          0.000
+0.25+     1.000             0.000          0.000
+```
+
+At *every* weight that meaningfully helps staleness, the trap collapses. The best achievable `min(both)` is 0.214 — i.e. there is no global recency weight where both old-but-correct and newer-supersedes retrieval are acceptable, because the only signal (age) is exactly the thing that conflates the two cases. **Verdict: the recency prior is not defaultable; it ships off permanently as a global default** and remains a per-query / sweep-tuning tool.
+
+**The real fix is targeted, not global:** LLM-classified `supersedes` links (the schema relation exists, unused) consumed by a demote that fires *only when a memory's actual superseder co-occurs in the results*. That never touches the trap scenarios — correct-old and trap-new are unrelated facts with no supersedes edge between them — so it can flip staleness without the collateral damage the frontier shows. It needs the reflection-LLM creator (the cosine linking worker is rejected: symmetric similarity can't assign direction, the same failure that got the graph-expansion bonus disabled). That is the next roadmap item; the recency prior stays as the measured baseline it must beat.
 
 ## Phase 4 — end-to-end LongMemEval-S (leaderboard-comparable)
 
