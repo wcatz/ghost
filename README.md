@@ -223,7 +223,20 @@ Note: env-var names map underscores to config dots, so keys that themselves cont
 
 ## Benchmarks
 
-Ghost ships a retrieval-quality benchmark you can run yourself in seconds — `ghost bench` — and every number below is deterministic, judge-free, and regression-guarded in CI. Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
+Every number below is deterministic, judge-free, reproducible with the in-repo harnesses, and shipped with per-question logs. Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
+
+**LongMemEval-S** ([the consensus long-term-memory benchmark](https://arxiv.org/abs/2410.10813); cleaned variant, session-level retrieval against the official evidence labels, all 470 answerable questions, no LLM judge):
+
+```text
+condition   R@1     R@5     R@10    MRR@10  NDCG@10
+fts-only    0.429   0.751   0.832   0.758   0.738
+vector      0.558   0.926   0.968   0.911   0.909
+hybrid      0.532   0.930   0.973   0.901   0.903
+```
+
+**Hybrid session Recall@5 93.0%, Recall@10 97.3%** — in the band of the best-reported hybrid retrieval results on this benchmark, using nothing but the single Ghost binary and local Ollama embeddings. Harness + per-question logs: [`bench/longmemeval/`](bench/longmemeval/). Honest nuances: retrieval-only numbers are not comparable to end-to-end answer-accuracy percentages (those depend mostly on the generator model); and on this chat-style data vector-only ties hybrid — the keyword leg earns its keep on exact identifiers (ports, versions, hostnames), which is what the next table shows.
+
+**`ghost bench`** — the in-repo dev-facts dataset, runs in seconds, regression-guarded in CI:
 
 ```text
 $ ghost bench
@@ -236,13 +249,11 @@ hybrid+graph     0.500   0.964   1.000    0.780    0.824
 14 graded queries, 22 memories. Retrieval-only, no LLM judge.
 ```
 
-What this shows, honestly stated:
+- **Hybrid fusion beats both single legs here** (NDCG@10 0.989 vs 0.965 full-text, 0.946 vector) — CI asserts that relationship on every PR. Across both benchmarks, fusion is the robustness play: vectors win conversational recall, keywords win exact identifiers.
+- **We ran the ablations, found our own regression, and fixed it.** The graph-expansion ranking bonus *hurt* retrieval (`hybrid+graph`), so it ships disabled — the table keeps measuring it so a redesign has a bar to clear. `ghost bench --sweep` grid-searches the fusion parameters if you want to check our tuning.
+- **The staleness suite** ("prod ran Postgres 14, we migrated to 16" — does search rank the fresh fact first?) runs report-only in CI and currently *fails on purpose*: fresh facts are always retrieved but outrank their superseded versions only 8% of the time. No memory system we know of measures this; fixing it (supersedes-aware ranking) is the roadmap, and the suite is the gate.
 
-- **Hybrid fusion earns its keep** — it beats both single legs (NDCG@10 0.989 vs 0.965 full-text, 0.946 vector), and CI asserts that relationship on every PR.
-- **We ran the ablations, found our own regression, and fixed it.** The graph-expansion ranking bonus *hurt* retrieval (`hybrid+graph`, NDCG 0.824), so it now ships disabled — the table keeps measuring it so a redesign has a bar to clear. `ghost bench --sweep` grid-searches the fusion parameters if you want to check our tuning.
-- **Scope caveat:** this is a self-authored 22-memory / 14-query graded dataset exercising Ghost's real search code paths — a regression guard and tuning instrument, not a leaderboard. It is not comparable to other systems' LOCOMO/LongMemEval scores.
-
-For external comparability (in progress, in order): **LongMemEval-S retrieval metrics** — session-level Recall@k/NDCG@k against the dataset's official evidence labels, no LLM judge; a **deterministic staleness suite** ("prod ran Postgres 14, we migrated to 16" — does search rank the fresh fact first?); then **end-to-end LongMemEval-S** with the official GPT-4o judge. Several popular memory benchmarks have known problems (LOCOMO's answer key and judge have been publicly audited as unreliable), so numbers land here only with the harness, fixed seeds, and per-question logs to re-run them yourself.
+Skipped deliberately: LOCOMO (publicly audited answer-key and judge problems) and DMR. **End-to-end LongMemEval-S** with the official GPT-4o judge is next; until then no answer-accuracy percentage appears here.
 
 ## Works well with Superpowers
 
