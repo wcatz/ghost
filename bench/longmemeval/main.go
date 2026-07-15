@@ -177,7 +177,7 @@ func main() {
 				Recall1: r1, Recall5: r5, Recall10: r10, MRR10: mrr, NDCG10: ndcg,
 				TopSessions: top,
 			})
-			fmt.Fprintf(outFile, "%s\n", line)
+			_, _ = fmt.Fprintf(outFile, "%s\n", line)
 		}
 		if scored%50 == 0 {
 			fmt.Fprintf(os.Stderr, "progress: %d questions scored (%.0fs elapsed)\n", scored, time.Since(start).Seconds())

@@ -2,7 +2,7 @@
 
 This document is the methodology for publishing retrieval-quality numbers honestly. The guiding rule: **a score only exists if anyone can re-run the harness with one command** — fixed seeds, published judge prompts (where a judge is used at all), and per-question logs.
 
-**Status:** Phase 2 (`ghost bench`) has shipped — run `ghost bench` for the current numbers. Phase 1 (LongMemEval-S) is next.
+**Status:** Phase 1 (LongMemEval-S retrieval) and Phase 2 (`ghost bench`) have shipped with published numbers below. Phase 3 (staleness suite) ships report-only in CI. Phase 4 (end-to-end with the official judge) is next.
 
 ## Why these benchmarks and not others
 
@@ -10,18 +10,29 @@ This document is the methodology for publishing retrieval-quality numbers honest
 - **LOCOMO** is skipped deliberately. Public audits found ~6.4% of its answer key wrong, its standard judge accepts a majority of intentionally wrong answers, and trivial baselines (full-context, even filesystem+grep) beat specialized memory systems on it. A 2026 reader discounts LOCOMO numbers; we won't publish one.
 - **Zep's DMR** is skipped — 60-message conversations that fit trivially in any context window; Zep itself moved on from it.
 
-## Phase 1 — LongMemEval-S retrieval-only (judge-free)
+## Phase 1 — LongMemEval-S retrieval-only (judge-free) — SHIPPED
 
-The first published numbers. A Go harness that, per question, ingests the haystack sessions into a fresh Ghost store, runs Ghost's real search paths, and scores against the official evidence labels on the 470 non-abstention questions.
+The harness lives at `bench/longmemeval/` (standalone program, not in the ghost binary). Per question it ingests every haystack turn into a fresh in-memory Ghost store, runs Ghost's production search, collapses ranked memories to unique sessions (first occurrence wins), and scores against the official `answer_session_ids` evidence labels on the 470 non-abstention questions. No LLM judge; deterministic given the embedding cache. Dataset: **`longmemeval_s_cleaned.json`** from [`xiaowu0162/longmemeval-cleaned`](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned) — the current canonical variant (the original HF dataset is deprecated); numbers are not directly comparable to runs on the original -S files.
 
-- **Metrics:** session-level Recall@1/5/10, MRR@10, NDCG@10.
-- **Ablations (each an architecture claim under test):**
-  1. FTS5-only (no embeddings)
-  2. vector-only
-  3. hybrid RRF (the shipped 70/30 fusion, k=60)
-  4. hybrid + graph-expansion bonus (candidate weight 0.15 — disabled in production defaults; the ablation opts in to keep measuring it)
-- **Cost:** $0 API. Wall-clock is dominated by locally embedding the haystack through Ollama (`nomic-embed-text:v1.5`); the FTS5-only ablation runs in minutes.
-- **Published anchors for context:** the LongMemEval paper's flat-index baseline (session-level Recall@5 ≈ 0.64 on the -M variant) and reported ~95% Recall@5 hybrid results on -S.
+Results (2026-07-15, `nomic-embed-text:v1.5` local embeddings; per-question logs committed at `bench/longmemeval/results/`):
+
+```text
+condition   R@1     R@5     R@10    MRR@10  NDCG@10   (session-level, n=470)
+fts-only    0.429   0.751   0.832   0.758   0.738     44s wall
+vector      0.558   0.926   0.968   0.911   0.909     ~1m wall on a warm embedding cache
+hybrid      0.532   0.930   0.973   0.901   0.903     one-time local embedding ~12h on ARM64 CPU
+```
+
+- **Hybrid session Recall@5 is 93.0%, Recall@10 97.3%** — in the band of the best-reported hybrid retrieval results on -S (~95% R@5 published for hybrid BM25+vector on the original variant) and far above the paper's flat-index baseline (R@5 ≈ 0.64 on -M).
+- **The lift lands exactly where the architecture predicts.** FTS alone nearly solves keyword-friendly classes (`single-session-user` R@10 1.000) but fails vocabulary-mismatch classes; embeddings fix precisely those: `single-session-assistant` R@10 **0.607 → 1.000**, `temporal-reasoning` 0.767 → 0.938.
+- **Honest nuance: on this chat-style benchmark, vector-only ties hybrid** (vector edges R@1/MRR/NDCG, hybrid edges deep recall R@5/R@10). On the dev-facts `ghost bench` dataset below, hybrid beats vector decisively (NDCG 0.989 vs 0.946) — exact identifiers (ports, versions, hostnames) need the keyword leg. Fusion is the robustness play across both data shapes, which is exactly why a memory system for coding agents ships it.
+- **Remaining headroom is at R@1** (0.532 overall; `multi-session` 0.371, `temporal-reasoning` 0.379) — R@10 is close to saturated, so the next win is ranking, not recall.
+- Reproduce: `go run ./bench/longmemeval --data <longmemeval_s_cleaned.json> --condition fts|vector|hybrid --embed-cache <cache.jsonl>`. The append-only content-hash cache makes reruns and interruptions cheap.
+- The hybrid+graph ablation is deliberately not run here: the graph bonus is disabled in production defaults after the Phase-2 sweep measured it degrading ranking; it stays under measurement in `ghost bench` until a redesign beats graph=0.
+
+## Phase 1b — end-to-end anchors (for later comparison)
+
+Published end-to-end (answer-accuracy) numbers use a GPT-4o judge and a generator that dominates the score — see Phase 4. Retrieval-only numbers above are not comparable to those percentages.
 
 ## Phase 2 — `ghost bench`: an in-repo dataset + CI regression floors — SHIPPED
 
