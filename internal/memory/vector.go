@@ -146,6 +146,13 @@ type SearchParams struct {
 	// `ghost bench --sweep`; see docs/benchmarks.md Phase 3.
 	RecencyWeight float64
 	RecencyTau    float64 // freshness decay scale in days; ignored when RecencyWeight is 0
+	// SupersedeDemote, when true, demotes a memory below its superseder within
+	// the result window when a valid 'supersedes' link between them exists AND
+	// both are present. Unlike the recency prior it is targeted — it only ever
+	// touches genuine replacement pairs, so it flips the staleness suite
+	// without the collateral damage the recency-trap frontier showed. Default
+	// false. See docs/benchmarks.md Phase 3.
+	SupersedeDemote bool
 }
 
 // DefaultSearchParams returns the production fusion parameters.
@@ -159,15 +166,56 @@ type SearchParams struct {
 // tuned values so an explicit non-zero GraphWeight behaves as before.
 func DefaultSearchParams() SearchParams {
 	return SearchParams{
-		FTSWeight:     0.3,
-		VecWeight:     0.7,
-		RRFK:          60,
-		GraphWeight:   0,
-		GraphSeeds:    3,
-		GraphHops:     2,
-		RecencyWeight: 0,
-		RecencyTau:    30,
+		FTSWeight:       0.3,
+		VecWeight:       0.7,
+		RRFK:            60,
+		GraphWeight:     0,
+		GraphSeeds:      3,
+		GraphHops:       2,
+		RecencyWeight:   0,
+		RecencyTau:      30,
+		SupersedeDemote: false,
 	}
+}
+
+// demoteSuperseded reorders results so a superseded memory falls below every
+// present memory that supersedes it. It penalizes each result by the number of
+// its present superseders and stable-sorts by that penalty ascending — so a
+// memory with no present superseder keeps its place, and an update chain
+// (v3 supersedes v2 and v1; v2 supersedes v1 — star links) orders v3, v2, v1.
+// A no-op when SupersedeDemote is off or no supersedes edge joins two results,
+// so it never fires on unrelated memories (the recency-trap case). Errors are
+// non-fatal: the unreordered results are returned.
+func (s *Store) demoteSuperseded(ctx context.Context, results []Memory, p SearchParams) []Memory {
+	if !p.SupersedeDemote || len(results) < 2 {
+		return results
+	}
+	ids := make([]string, len(results))
+	for i, m := range results {
+		ids[i] = m.ID
+	}
+	pairs, err := s.SupersedesWithin(ctx, ids)
+	if err != nil {
+		s.logger.Debug("supersede demote: lookup failed", "error", err)
+		return results
+	}
+	if len(pairs) == 0 {
+		return results
+	}
+	present := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		present[id] = true
+	}
+	penalty := make(map[string]int, len(ids))
+	for _, pr := range pairs { // pr = [superseder, superseded]
+		if present[pr[0]] {
+			penalty[pr[1]]++
+		}
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		return penalty[results[i].ID] < penalty[results[j].ID]
+	})
+	return results
 }
 
 // applyRecency re-ranks results by a freshness prior:
@@ -316,8 +364,11 @@ func (s *Store) fuseAndRank(ctx context.Context, projectID string, ftsResults []
 		return memories[i].ID < memories[j].ID
 	})
 
-	// Freshness prior over the final window (no-op at RecencyWeight 0).
-	return applyRecency(memories, scores, p, time.Now().UTC()), nil
+	// Freshness prior over the final window (no-op at RecencyWeight 0), then
+	// the targeted supersede demote (no-op unless SupersedeDemote is on and a
+	// superseded pair co-occurs).
+	memories = applyRecency(memories, scores, p, time.Now().UTC())
+	return s.demoteSuperseded(ctx, memories, p), nil
 }
 
 // SearchHybrid combines FTS5 keyword search with vector similarity using
@@ -338,7 +389,7 @@ func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string,
 
 	// If no vector, return FTS results directly.
 	if queryVec == nil {
-		return recencyRerank(ftsResults, nil, p, limit), nil
+		return s.demoteSuperseded(ctx, recencyRerank(ftsResults, nil, p, limit), p), nil
 	}
 
 	// Vector results.
@@ -349,7 +400,7 @@ func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string,
 
 	// If only FTS worked, return that.
 	if len(vecResults) == 0 {
-		return recencyRerank(ftsResults, nil, p, limit), nil
+		return s.demoteSuperseded(ctx, recencyRerank(ftsResults, nil, p, limit), p), nil
 	}
 
 	return s.fuseAndRank(ctx, projectID, ftsResults, vecResults, limit, p)
