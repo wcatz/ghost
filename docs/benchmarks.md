@@ -71,7 +71,15 @@ Deterministic scenarios for the failure users actually complain about: agents ac
 - Deletion regressions: reflection must never drop pinned or manual memories (codifies the existing empty-set guard and snapshot behavior).
 - Runs in CI in seconds. No LLM judge.
 
-This suite is expected to *fail* in places at first — current search has no recency signal in ranking (decay applies to project-context reads via `GetTopMemories`, not to `SearchHybrid` or the session hook), and `supersedes` links exist in the schema but nothing creates them yet. That's the point: the suite specifies the desired behavior before those features ship, and documents progress honestly. It lands in CI as **report-only** (results printed, never failing the build); individual scenarios graduate to enforced assertions as the features they specify ship.
+This suite was designed to *fail* at first — production search had no recency signal in ranking (decay lived only in `GetTopMemories`, not `SearchHybrid`). At the shipped default it still reports **fresh-wins 0.083** (fresh-found 1.000 — the update is always retrieved, just out-ranked by its shorter, older original). It lands in CI as **report-only**; scenarios graduate to enforced assertions as the fix ships.
+
+### The recency prior (mechanism shipped, default off)
+
+`SearchParams.RecencyWeight` adds a freshness prior to the final ranking window: `final = base * (1 + RecencyWeight · recency(age))`, `recency = 1/(1 + age_days/RecencyTau)`, age from each memory's `created_at`. It reorders **within** the already-returned top-`limit` set, so it can never drop a result that would otherwise be returned, and at the default `RecencyWeight 0` it is a hard no-op — production ranking is byte-identical (the `ghost bench` NDCG@10 0.989 and `hybrid ≥ single legs` floors are unchanged, verified in CI).
+
+Turned on in the sweep, it **flips the staleness suite from fresh-wins 0.083 to 1.000** (`TestStalenessRecencyProof`, w=2/τ=30). It is provably inert on the graded benchmarks: those datasets seed via `store.Create`, which never sets `created_at`, so every candidate shares a timestamp and the recency factor is identical across them — no reorder possible at any weight (`TestRecencyDoesNotPerturbGradedBench`).
+
+**Why it still ships off:** a global recency prior structurally can't tell "superseded" from "old-but-still-true," and every current harness only tests newest-is-right (uniform timestamps elsewhere). Before `RecencyWeight` moves off 0 by default, a **recency-trap fixture** — where the *older* version is the correct answer — must be added and pass, bounding how hard the weight can push. The precise successor is LLM-classified `supersedes` links (the schema relation exists, unused) consumed by a targeted demote that fires only when a superseder co-occurs — precision the global prior can't provide, but it needs the reflection-LLM creator (the cosine linking worker is rejected: symmetric similarity can't assign direction, the same failure mode that got the graph-expansion bonus disabled).
 
 ## Phase 4 — end-to-end LongMemEval-S (leaderboard-comparable)
 
