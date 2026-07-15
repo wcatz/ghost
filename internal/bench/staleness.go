@@ -81,8 +81,12 @@ type StalenessSummary struct {
 // scenarios act as each other's clutter), backdates created_at per version,
 // and probes with Ghost's production search over the FTS path (no embedding
 // fixtures — the keyword path is where stale/fresh versions collide hardest,
-// since both match the fact's terms).
-func RunStaleness(ctx context.Context, scenarios []StalenessScenario) ([]ProbeOutcome, error) {
+// since both match the fact's terms). The SearchParams are passed through to
+// SearchHybridParams so the recency prior can be swept: at the production
+// default (RecencyWeight 0) this measures today's behavior; with a recency
+// weight it measures whether the fresh version can be lifted above its
+// superseded siblings.
+func RunStaleness(ctx context.Context, scenarios []StalenessScenario, p memory.SearchParams) ([]ProbeOutcome, error) {
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
 		return nil, err
@@ -118,7 +122,7 @@ func RunStaleness(ctx context.Context, scenarios []StalenessScenario) ([]ProbeOu
 		ids := versionIDs[i]
 		freshID, staleIDs := ids[len(ids)-1], ids[:len(ids)-1]
 		for _, probe := range sc.Probes {
-			results, err := store.SearchHybrid(ctx, project, probe.Text, nil, scoreK)
+			results, err := store.SearchHybridParams(ctx, project, probe.Text, nil, scoreK, p)
 			if err != nil {
 				return nil, fmt.Errorf("probe %s/%s: %w", sc.Name, probe.Type, err)
 			}

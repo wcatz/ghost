@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 )
 
 // StoreEmbedding saves an embedding vector for a memory.
@@ -139,6 +140,12 @@ type SearchParams struct {
 	GraphWeight float64 // additive link-graph bonus weight; 0 skips the graph pass
 	GraphSeeds  int     // top-ranked results used as graph-expansion seeds
 	GraphHops   int     // link-traversal depth from each seed
+	// RecencyWeight scales a freshness prior on the final ranking:
+	// final = base * (1 + RecencyWeight*recency), recency = 1/(1 + age_days/RecencyTau).
+	// 0 (the default) is a hard no-op — ranking is untouched. Tuned via
+	// `ghost bench --sweep`; see docs/benchmarks.md Phase 3.
+	RecencyWeight float64
+	RecencyTau    float64 // freshness decay scale in days; ignored when RecencyWeight is 0
 }
 
 // DefaultSearchParams returns the production fusion parameters.
@@ -152,13 +159,69 @@ type SearchParams struct {
 // tuned values so an explicit non-zero GraphWeight behaves as before.
 func DefaultSearchParams() SearchParams {
 	return SearchParams{
-		FTSWeight:   0.3,
-		VecWeight:   0.7,
-		RRFK:        60,
-		GraphWeight: 0,
-		GraphSeeds:  3,
-		GraphHops:   2,
+		FTSWeight:     0.3,
+		VecWeight:     0.7,
+		RRFK:          60,
+		GraphWeight:   0,
+		GraphSeeds:    3,
+		GraphHops:     2,
+		RecencyWeight: 0,
+		RecencyTau:    30,
 	}
+}
+
+// applyRecency re-ranks results by a freshness prior:
+//
+//	final = base * (1 + RecencyWeight*recency),  recency = 1/(1 + age_days/RecencyTau)
+//
+// base is the fused score when scores is non-nil (the fused path), otherwise it
+// is synthesized from position (the FTS-only paths). A RecencyWeight <= 0 is a
+// hard no-op: results are returned untouched, so production defaults never
+// perturb ranking. Age is read from each memory's created_at — NOT updated_at,
+// which Upsert's strengthen path bumps, and which would make a re-mentioned
+// stale fact look as fresh as the version that replaced it. An unparseable
+// created_at yields no freshness boost (treated as ancient) so a malformed
+// timestamp can never spuriously win.
+func applyRecency(results []Memory, scores map[string]float64, p SearchParams, now time.Time) []Memory {
+	if p.RecencyWeight <= 0 || len(results) < 2 {
+		return results
+	}
+	tau := p.RecencyTau
+	if tau <= 0 {
+		tau = 30
+	}
+	final := make(map[string]float64, len(results))
+	for i, m := range results {
+		base := scores[m.ID]
+		if scores == nil {
+			base = 1.0 / float64(p.RRFK+i+1)
+		}
+		ageDays := now.Sub(parseCreatedAt(m.CreatedAt)).Hours() / 24.0
+		if ageDays < 0 {
+			ageDays = 0
+		}
+		recency := 1.0 / (1.0 + ageDays/tau)
+		final[m.ID] = base * (1 + p.RecencyWeight*recency)
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		fi, fj := final[results[i].ID], final[results[j].ID]
+		if fi != fj {
+			return fi > fj
+		}
+		return results[i].ID < results[j].ID
+	})
+	return results
+}
+
+// parseCreatedAt parses the SQLite datetime('now') format stored in
+// memories.created_at. On failure it returns the zero time (ancient), so the
+// caller applies no freshness boost.
+func parseCreatedAt(s string) time.Time {
+	t, err := time.Parse("2006-01-02 15:04:05", s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // applyGraphBonus adds an additive RRF-style bonus to scores for memories
@@ -252,7 +315,9 @@ func (s *Store) fuseAndRank(ctx context.Context, projectID string, ftsResults []
 		}
 		return memories[i].ID < memories[j].ID
 	})
-	return memories, nil
+
+	// Freshness prior over the final window (no-op at RecencyWeight 0).
+	return applyRecency(memories, scores, p, time.Now().UTC()), nil
 }
 
 // SearchHybrid combines FTS5 keyword search with vector similarity using
@@ -273,10 +338,7 @@ func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string,
 
 	// If no vector, return FTS results directly.
 	if queryVec == nil {
-		if len(ftsResults) > limit {
-			ftsResults = ftsResults[:limit]
-		}
-		return ftsResults, nil
+		return recencyRerank(ftsResults, nil, p, limit), nil
 	}
 
 	// Vector results.
@@ -287,13 +349,25 @@ func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string,
 
 	// If only FTS worked, return that.
 	if len(vecResults) == 0 {
-		if len(ftsResults) > limit {
-			ftsResults = ftsResults[:limit]
-		}
-		return ftsResults, nil
+		return recencyRerank(ftsResults, nil, p, limit), nil
 	}
 
 	return s.fuseAndRank(ctx, projectID, ftsResults, vecResults, limit, p)
+}
+
+// recencyRerank truncates results to limit by their existing (base-score) order
+// — identical membership to the pre-recency behavior — and, when the recency
+// prior is enabled, reorders that final window by freshness. Because truncation
+// happens first, the returned set membership never changes with RecencyWeight;
+// only the order within the window does, so enabling recency can never drop a
+// result that would otherwise have been returned. (A fresh memory ranked below
+// the cut by base score is not rescued — an accepted v1 limitation; the
+// staleness suite's versions all fall inside the window.)
+func recencyRerank(results []Memory, scores map[string]float64, p SearchParams, limit int) []Memory {
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return applyRecency(results, scores, p, time.Now().UTC())
 }
 
 // GetByIDs fetches memories by a list of IDs.
