@@ -566,9 +566,32 @@ func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 	return err
 }
 
+// CurrentTimestamp returns the database's own notion of "now", formatted
+// exactly like the created_at columns (UTC, via SQLite's datetime('now')).
+// Callers can later filter rows by created_at against this value with a
+// plain string comparison, with no clock-skew risk between the Go process
+// and SQLite.
+func (s *Store) CurrentTimestamp(ctx context.Context) (string, error) {
+	var ts string
+	if err := s.db.QueryRowContext(ctx, `SELECT datetime('now')`).Scan(&ts); err != nil {
+		return "", fmt.Errorf("current timestamp: %w", err)
+	}
+	return ts, nil
+}
+
 // ReplaceNonManual atomically replaces all non-manual memories for a project.
 // Manual-sourced memories are preserved. Refuses to replace with an empty set.
-func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory) error {
+//
+// consolidatedSince should be a timestamp (see CurrentTimestamp) captured
+// before the caller started building the consolidation input. ghost reflect
+// runs as a separate process from the long-lived MCP server, so a
+// ghost_memory_save/ghost_decision_record call landing on the live server
+// during the multi-minute consolidation round trip would otherwise be
+// silently deleted here because it wasn't part of what the consolidator
+// saw — any non-manual memory created at/after that timestamp is preserved
+// instead of being discarded. Pass "" to skip this check (e.g. from tests
+// that don't care about the race).
+func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string) error {
 	if len(memories) == 0 {
 		return fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
 	}
@@ -593,6 +616,35 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		return fmt.Errorf("snapshot memories: %w", err)
 	}
 
+	// Preserve memories saved concurrently with the consolidation round trip
+	// — the consolidator never saw them, so the replace below must not
+	// discard them.
+	var preserved []Memory
+	if consolidatedSince != "" {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT category, content, importance, source, tags
+			FROM memories WHERE project_id = ? AND source != 'manual' AND created_at >= ?
+		`, projectID, consolidatedSince)
+		if err != nil {
+			return fmt.Errorf("find concurrent memories: %w", err)
+		}
+		for rows.Next() {
+			var m Memory
+			var tags string
+			if err := rows.Scan(&m.Category, &m.Content, &m.Importance, &m.Source, &tags); err != nil {
+				rows.Close() //nolint:errcheck
+				return fmt.Errorf("scan concurrent memory: %w", err)
+			}
+			_ = json.Unmarshal([]byte(tags), &m.Tags)
+			preserved = append(preserved, m)
+		}
+		rowsErr := rows.Err()
+		rows.Close() //nolint:errcheck
+		if rowsErr != nil {
+			return fmt.Errorf("iterate concurrent memories: %w", rowsErr)
+		}
+	}
+
 	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual'`, projectID)
 	if err != nil {
 		return fmt.Errorf("delete old memories: %w", err)
@@ -607,6 +659,21 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		if err != nil {
 			return fmt.Errorf("insert memory: %w", err)
 		}
+	}
+
+	for _, m := range preserved {
+		tags, _ := json.Marshal(m.Tags)
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO memories (project_id, category, content, source, importance, tags)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, projectID, m.Category, m.Content, m.Source, m.Importance, string(tags))
+		if err != nil {
+			return fmt.Errorf("insert preserved memory: %w", err)
+		}
+	}
+	if len(preserved) > 0 {
+		s.logger.Info("preserved concurrently-saved memories across reflection replace",
+			"project_id", projectID, "count", len(preserved))
 	}
 
 	// Prune old snapshots — keep only the 3 most recent per project.
@@ -977,13 +1044,22 @@ func sanitizeFTS(text string) string {
 	// Remove FTS5 operators and punctuation, keep only words.
 	var words []string
 	for _, word := range strings.Fields(text) {
-		// Strip non-alphanumeric characters from edges.
+		// Strip non-alphanumeric characters from edges only — interior
+		// punctuation (192.168.9.150, sealed-secrets, status.acme.io) is
+		// preserved so FTS5's own tokenizer can still split it and match
+		// against the indexed content; the keyword leg's whole value on
+		// exact identifiers depends on this surviving.
 		clean := strings.TrimFunc(word, func(r rune) bool {
 			return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9')
 		})
 		if len(clean) >= 1 {
-			// Quote each word to treat as literal.
-			words = append(words, `"`+clean+`"`)
+			// Quote each word to treat as literal. A surviving interior
+			// quote (e.g. `fo"o`) must be doubled per FTS5's own escaping
+			// rule for quoted phrases — otherwise it produces an unbalanced
+			// "..." wrapper that lets the token escape back into raw FTS5
+			// query grammar instead of staying a literal.
+			escaped := strings.ReplaceAll(clean, `"`, `""`)
+			words = append(words, `"`+escaped+`"`)
 		}
 	}
 	if len(words) == 0 {

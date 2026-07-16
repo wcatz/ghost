@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -236,6 +237,15 @@ Flags:
 		fmt.Fprintf(os.Stderr, "error: get memories: %v\n", err)
 		os.Exit(1)
 	}
+	// Captured now, before the (up to 3-minute) consolidation round trip: any
+	// non-manual memory saved on the live MCP server at/after this instant
+	// wasn't seen by the consolidator and must be preserved through the
+	// eventual ReplaceNonManual rather than silently dropped.
+	consolidatedSince, err := store.CurrentTimestamp(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: get timestamp: %v\n", err)
+		os.Exit(1)
+	}
 	currentContext, _ := store.GetLearnedContext(ctx, projectID)
 	exchanges, _ := store.GetRecentExchanges(ctx, projectID, 15)
 
@@ -357,7 +367,7 @@ Flags:
 			}
 		}
 
-		if err := store.ReplaceNonManual(ctx, projectID, dbMemories); err != nil {
+		if err := store.ReplaceNonManual(ctx, projectID, dbMemories, consolidatedSince); err != nil {
 			fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 			os.Exit(1)
 		}
@@ -492,15 +502,42 @@ func runUpgrade() {
 		os.Exit(1)
 	}
 
+	checksumAsset, err := selfupdate.FindChecksumAsset(rel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	checksumBody, err := selfupdate.Download(checksumAsset.BrowserDownloadURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	checksumBytes, err := io.ReadAll(checksumBody)
+	_ = checksumBody.Close()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: reading checksums.txt: %v\n", err)
+		os.Exit(1)
+	}
+
 	fmt.Printf("Downloading %s...\n", asset.Name)
 	body, err := selfupdate.Download(asset.BrowserDownloadURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	defer body.Close() //nolint:errcheck
+	archiveBytes, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: downloading %s: %v\n", asset.Name, err)
+		os.Exit(1)
+	}
 
-	bin, err := selfupdate.ExtractBinary(body)
+	if err := selfupdate.VerifyChecksum(archiveBytes, string(checksumBytes), asset.Name); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	bin, err := selfupdate.ExtractBinary(bytes.NewReader(archiveBytes))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
