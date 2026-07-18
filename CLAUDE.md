@@ -1,20 +1,22 @@
 # Ghost — MCP Memory Server
 
 ## Stack
-- Go 1.25+ CLI application
+- Go 1.26+ CLI application
 - SQLite with FTS5 for memory persistence (modernc.org/sqlite — pure Go, no CGO)
 - Claude API (manual HTTP client) — used by reflection only
 - MCP server via modelcontextprotocol/go-sdk (stdio transport)
 
 ## Architecture
-- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, obsidian, upgrade, version
-- `internal/ai/` — Claude API client with streaming (Reflect method for consolidation)
+- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, supersede, obsidian, bench, upgrade, version
+- `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + supersede)
 - `internal/memory/` — SQLite CRUD, FTS5 search, vector search, time-decay scoring
 - `internal/mcpserver/` — MCP server: 16 tools + 4 resources
 - `internal/mcpinit/` — `ghost mcp init`, `ghost mcp status`, `ghost hook session-start`
 - `internal/claudeimport/` — One-time import of Claude Code auto-memory on first contact
 - `internal/embedding/` — Ollama async vectorization worker
 - `internal/linking/` — Background worker linking similar memories into a graph
+- `internal/supersede/` — `ghost supersede`: LLM-classified 'supersedes' link creation over live memories
+- `internal/bench/` — `ghost bench`: retrieval-quality benchmark harness (graded dataset + sweep + staleness/recency suites)
 - `internal/obsidian/` — One-way Markdown vault mirror (`ghost obsidian export|sync`)
 - `internal/reflection/` — Memory consolidation: HaikuConsolidator + SQLiteConsolidator
 - `internal/provider/` — Interface contracts: LLMProvider, MemoryStore

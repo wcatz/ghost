@@ -194,6 +194,8 @@ ghost mcp init [--dry-run]   # Configure Claude Code integration
 ghost mcp status             # Deep health checks (incl. Ollama reachability, model presence)
 ghost hook session-start     # SessionStart hook — prints exactly what gets injected
 ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
+ghost supersede <project>    # Link superseded memories (dry-run by default; --apply, --threshold)
+ghost bench [--sweep]        # Retrieval-quality benchmark on the built-in dataset
 ghost obsidian export        # Mirror memories to an Obsidian vault (one-way; --out, --project)
 ghost obsidian sync          # Keep the vault mirror fresh (--interval; polls for DB changes)
 ghost upgrade                # Self-update from GitHub Releases (linux/macOS; Windows: re-download)

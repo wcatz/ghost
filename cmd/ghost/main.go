@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -231,6 +232,17 @@ Flags:
 	fmt.Printf("Project:      %s (%s)\n", projectName, projectID)
 	fmt.Printf("Consolidator: %s\n", consolidator.Name())
 
+	// Captured BEFORE fetching the consolidation input, then handed to
+	// ReplaceNonManual: ghost reflect runs as a separate process from the live
+	// MCP server, so any non-manual memory saved from this instant on wasn't
+	// seen by the consolidator and must survive the replace. Capturing after
+	// GetAll would leave a gap where a concurrent save is neither in the
+	// snapshot nor recent enough to be preserved.
+	consolidatedSince, err := store.CurrentTimestamp(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: get timestamp: %v\n", err)
+		os.Exit(1)
+	}
 	existingMemories, err := store.GetAll(ctx, projectID, 200)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: get memories: %v\n", err)
@@ -357,7 +369,7 @@ Flags:
 			}
 		}
 
-		if err := store.ReplaceNonManual(ctx, projectID, dbMemories); err != nil {
+		if err := store.ReplaceNonManual(ctx, projectID, dbMemories, consolidatedSince); err != nil {
 			fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 			os.Exit(1)
 		}
@@ -492,15 +504,46 @@ func runUpgrade() {
 		os.Exit(1)
 	}
 
+	// Fail closed: the archive digest must match the release's checksums.txt
+	// manifest before a single byte reaches Replace. Without this, anyone able
+	// to substitute a release asset gets arbitrary code execution on every
+	// machine that runs `ghost upgrade`.
+	checksumAsset, err := selfupdate.FindChecksumAsset(rel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	checksumBody, err := selfupdate.Download(checksumAsset.BrowserDownloadURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	checksumBytes, err := io.ReadAll(checksumBody)
+	_ = checksumBody.Close()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: reading checksums.txt: %v\n", err)
+		os.Exit(1)
+	}
+
 	fmt.Printf("Downloading %s...\n", asset.Name)
 	body, err := selfupdate.Download(asset.BrowserDownloadURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	defer body.Close() //nolint:errcheck
+	archiveBytes, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: downloading %s: %v\n", asset.Name, err)
+		os.Exit(1)
+	}
 
-	bin, err := selfupdate.ExtractBinary(body)
+	if err := selfupdate.VerifyChecksum(archiveBytes, string(checksumBytes), asset.Name); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	bin, err := selfupdate.ExtractBinary(bytes.NewReader(archiveBytes))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

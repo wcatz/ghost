@@ -23,8 +23,11 @@
 #   dimensions: 768
 
 # --- Memory Linking (requires embedding) ---
-# Background worker that links similar memories into a graph; hybrid search
-# expands over links for better multi-hop recall. On by default.
+# Background worker that links similar memories into a graph. The graph feeds
+# the Obsidian mirror's graph view and supersede candidate selection; the
+# search-time graph-expansion ranking bonus ships DISABLED (GraphWeight=0) —
+# the bench sweep measured it demoting exact matches (see docs/benchmarks.md).
+# The worker itself is on by default.
 # linking:
 #   enabled: true
 #   threshold: 0.70   # min cosine similarity to create a link

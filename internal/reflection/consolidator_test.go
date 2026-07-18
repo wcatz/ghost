@@ -188,6 +188,10 @@ func TestInferGlobalScope(t *testing.T) {
 		{"all repos", "pattern", "run go vet across all repos before release", "global"},
 		{"dev machine", "fact", "dev machine runs Asahi Fedora on Apple Silicon", "global"},
 		{"plain project fact", "fact", "FTS5 uses porter stemmer tokenizer", "project"},
+		{"secret never global even as preference", "preference", "the api key for staging is abc123", "project"},
+		{"credential fact stays project", "fact", "the deploy credential rotates every 90 days", "project"},
+		{"bearer token stays project", "gotcha", "requests need a bearer token in the header", "project"},
+		{"password in cross-repo phrasing stays project", "fact", "the grafana password works across all repos", "project"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

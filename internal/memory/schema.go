@@ -8,9 +8,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// initSQL is the schema for the ghost database.
+// initSQL is the schema for the ghost database — the single source of truth.
 // Kept as a Go constant rather than go:embed because embed paths cannot use "..".
-// The canonical SQL file is also maintained at migrations/001_init.sql for reference.
+// Note: CREATE TABLE IF NOT EXISTS never migrates an existing database — a new
+// column or CHECK value only reaches DBs created after the change.
 const initSQL = `
 CREATE TABLE IF NOT EXISTS projects (
     id          TEXT PRIMARY KEY,
@@ -128,17 +129,6 @@ CREATE TABLE IF NOT EXISTS memory_embeddings (
     memory_id   TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
     embedding   BLOB NOT NULL,
     model       TEXT NOT NULL DEFAULT 'nomic-embed-text',
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS scheduled_jobs (
-    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    name        TEXT NOT NULL,
-    schedule    TEXT NOT NULL,
-    payload     TEXT DEFAULT '{}',
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    last_run    TEXT,
-    next_run    TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
