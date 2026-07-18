@@ -86,7 +86,7 @@ func Status(w io.Writer) error {
 		}
 	}
 
-	// 6. Project redirects.
+	// 7. Project redirects.
 	dataDir, err := config.DataDir()
 	if err == nil {
 		dbPath := filepath.Join(dataDir, "ghost.db")
@@ -116,7 +116,7 @@ func Status(w io.Writer) error {
 						fmt.Sprintf("project redirects: %d/%d", redirected, total))
 				}
 
-				// 7. Embedding & linking health — silent embed failures
+				// 8. Embedding & linking health — silent embed failures
 				// leave vector search and memory linking inactive.
 				if cfg, cfgErr := config.Load(); cfgErr == nil {
 					if !cfg.Embedding.Enabled {

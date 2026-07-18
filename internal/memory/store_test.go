@@ -188,7 +188,7 @@ func TestStoreReplaceNonManual(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("empty set guard", func(t *testing.T) {
-		err := s.ReplaceNonManual(ctx, testProject, []Memory{})
+		err := s.ReplaceNonManual(ctx, testProject, []Memory{}, "")
 		if err == nil {
 			t.Fatal("expected error for empty set")
 		}
@@ -224,7 +224,7 @@ func TestStoreReplaceNonManual(t *testing.T) {
 		replacement := []Memory{
 			{Category: "fact", Content: "New consolidated fact", Importance: 0.6, Tags: []string{}},
 		}
-		if err := s.ReplaceNonManual(ctx, testProject, replacement); err != nil {
+		if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -253,6 +253,57 @@ func TestStoreReplaceNonManual(t *testing.T) {
 		}
 		if !foundReplacement {
 			t.Error("replacement memory should be present")
+		}
+	})
+
+	t.Run("preserves memories saved concurrently with consolidation", func(t *testing.T) {
+		s := testStore(t)
+
+		// Simulate ghost reflect's flow: capture "now" before the consolidation
+		// input is fetched, then a ghost_memory_save lands on the live MCP
+		// server while the (slow) consolidation round trip is in flight.
+		since, err := s.CurrentTimestamp(ctx)
+		if err != nil {
+			t.Fatalf("CurrentTimestamp: %v", err)
+		}
+
+		concurrentID, err := s.Create(ctx, testProject, Memory{
+			Category:   "gotcha",
+			Content:    "saved while reflection was running",
+			Source:     "mcp",
+			Importance: 0.7,
+			Tags:       []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create concurrent memory: %v", err)
+		}
+
+		replacement := []Memory{
+			{Category: "fact", Content: "consolidator output, stale snapshot", Importance: 0.6, Tags: []string{}},
+		}
+		if err := s.ReplaceNonManual(ctx, testProject, replacement, since); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+
+		all, err := s.GetAll(ctx, testProject, 100)
+		if err != nil {
+			t.Fatalf("GetAll: %v", err)
+		}
+
+		var foundConcurrent, foundReplacement bool
+		for _, m := range all {
+			if m.Content == "saved while reflection was running" && m.Source == "mcp" {
+				foundConcurrent = true
+			}
+			if m.Content == "consolidator output, stale snapshot" {
+				foundReplacement = true
+			}
+		}
+		if !foundConcurrent {
+			t.Errorf("memory %s saved during consolidation was dropped by ReplaceNonManual", concurrentID)
+		}
+		if !foundReplacement {
+			t.Error("consolidator output should still be present")
 		}
 	})
 }
@@ -376,6 +427,16 @@ func TestSanitizeFTS(t *testing.T) {
 			name:  "only punctuation",
 			input: "* + - !",
 			want:  `""`,
+		},
+		{
+			name:  "escapes mid-token quote instead of leaving an unbalanced literal",
+			input: `fo"o`,
+			want:  `"fo""o"`,
+		},
+		{
+			name:  "escapes mid-token quotes while preserving exact identifiers",
+			input: `evil"NEAR"foo 192.168.9.150 sealed-secrets`,
+			want:  `"evil""NEAR""foo" OR "192.168.9.150" OR "sealed-secrets"`,
 		},
 		{
 			name:  "limits to 10 words",
@@ -1371,7 +1432,7 @@ func TestSeedGlobalMemories(t *testing.T) {
 	replaceMems := []Memory{
 		{ProjectID: "_global", Category: "fact", Content: "some new fact", Source: "reflection", Importance: 0.5},
 	}
-	if err := s.ReplaceNonManual(ctx, "_global", replaceMems); err != nil {
+	if err := s.ReplaceNonManual(ctx, "_global", replaceMems, ""); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 

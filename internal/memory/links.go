@@ -238,8 +238,6 @@ func (s *Store) GraphNeighbors(ctx context.Context, projectID string, seedIDs []
 	return neighbors, rows.Err()
 }
 
-// InvalidateLink soft-invalidates a link (Zep-style: never delete, mark
-// invalid with a timestamp so history is preserved).
 // SupersedesWithin returns the valid 'supersedes' edges whose BOTH endpoints
 // are in ids: each pair is [superseder, superseded]. Used by ranking to demote
 // a memory only when its actual replacement co-occurs in the same result set,
@@ -282,6 +280,8 @@ func (s *Store) SupersedesWithin(ctx context.Context, ids []string) ([][2]string
 	return pairs, rows.Err()
 }
 
+// InvalidateLink soft-invalidates a link (Zep-style: never delete, mark
+// invalid with a timestamp so history is preserved).
 func (s *Store) InvalidateLink(ctx context.Context, sourceID, targetID, relation string) error {
 	if symmetricRelations[relation] && sourceID > targetID {
 		sourceID, targetID = targetID, sourceID
