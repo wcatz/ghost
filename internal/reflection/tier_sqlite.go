@@ -109,13 +109,21 @@ func tokenize(s string) map[string]bool {
 // inferGlobalScope uses keyword heuristics to detect memories that apply across
 // all repositories rather than being project-specific. Used by the SQLite tier
 // which cannot use LLM classification.
+// Secret-looking content is never promoted to global scope: the LLM tier's
+// extraction prompt explicitly excludes secrets, and global memories are
+// replayed into every project's injected context, so promoting a credential
+// here would widen its blast radius instead of containing it.
 func inferGlobalScope(category, content string) string {
+	lower := strings.ToLower(content)
+
+	if looksLikeSecret(lower) {
+		return "project"
+	}
+
 	// Preferences and certain facts are strong global signals.
 	if category == "preference" {
 		return "global"
 	}
-
-	lower := strings.ToLower(content)
 
 	// Cross-repo workflow indicators.
 	globalPatterns := []string{
@@ -126,7 +134,6 @@ func inferGlobalScope(category, content string) string {
 		"always use", "never use", "prefer ",
 		"personal tool", "dev machine", "workstation",
 		"infrastructure topology", "cluster ",
-		"api key", "credential", "token ",
 	}
 	for _, p := range globalPatterns {
 		if strings.Contains(lower, p) {
@@ -135,6 +142,22 @@ func inferGlobalScope(category, content string) string {
 	}
 
 	return "project"
+}
+
+// looksLikeSecret flags content that plausibly contains a credential.
+// lower must already be lowercased.
+func looksLikeSecret(lower string) bool {
+	secretPatterns := []string{
+		"api key", "api_key", "apikey", "credential", "password",
+		"secret ", "secret_", "token ", "token_", "access_token",
+		"private key", "bearer ",
+	}
+	for _, p := range secretPatterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // jaccard computes the Jaccard similarity coefficient between two token sets.
