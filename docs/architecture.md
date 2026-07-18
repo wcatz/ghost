@@ -10,7 +10,10 @@ ghost mcp init         Configure Claude Code integration
 ghost mcp status       Health check
 ghost hook session-start   SessionStart hook (called by Claude Code)
 ghost reflect <project>    Manual memory consolidation
-ghost upgrade          Self-update from GitHub Releases
+ghost supersede <project>  LLM-classified 'supersedes' link creation
+ghost obsidian export|sync One-way Markdown vault mirror
+ghost bench [--sweep]      Retrieval-quality benchmark
+ghost upgrade          Self-update from GitHub Releases (sha256-verified)
 ghost version          Print version
 ```
 
@@ -19,9 +22,8 @@ ghost version          Print version
 ```
 cmd/ghost/main.go          CLI entrypoint + subcommand dispatch
 internal/
-  ai/                      Claude API client (used by reflection only)
-    client.go              HTTP client, ChatStream(), Reflect()
-    stream.go              SSE parser, StreamEvent channel
+  ai/                      Claude API client (used by reflection and supersede)
+    client.go              HTTP client, Reflect(), CountTokens() — non-streaming
     models.go              Message, ContentBlock, SystemBlock, TokenUsage
     cost.go                Per-model pricing, CostForUsage()
   config/                  Layered configuration (koanf)
@@ -32,9 +34,19 @@ internal/
     worker.go              Async batch embedder
   linking/                 Memory auto-linking
     worker.go              Sweeps embedded memories, links cosine neighbors ≥ threshold
+  supersede/               ghost supersede — 'supersedes' link creation
+    supersede.go           Candidate selection (cosine proposes, created_at directs), Run()
+    haiku.go               LLM classifier confirming genuine replacements
+  bench/                   ghost bench — retrieval-quality benchmark harness
+    dataset.go             JSONL dataset loading + seeding with embedding fixtures
+    runner.go              Graded conditions (fts/vector/hybrid/graph)
+    metrics.go             Recall@k, MRR, NDCG
+    sweep.go               Fusion-parameter grid search
+    staleness.go           Fresh-fact-wins suite (supersede demote proof)
+    recencytrap.go         Older-answer-correct suite (recency-prior frontier)
   memory/                  Persistence layer
     store.go               SQLite CRUD, FTS5 search, time-decay scoring
-    schema.go              DDL (Go string constant; migrations/001_init.sql is the reference copy)
+    schema.go              DDL (embedded Go string constant — the single source of truth)
     vector.go              Cosine similarity, hybrid RRF search
     links.go               Memory links: edge CRUD, recursive-CTE graph traversal
   mcpserver/               MCP server (stdio transport)
@@ -144,9 +156,14 @@ linking.Worker goroutine:
 | `token_usage` | Per-request token + cost tracking |
 | `tasks` | Task tracker (title, status, priority, description) |
 | `decisions` | Architectural decisions (rationale, alternatives, status) |
-| `notifications` | GitHub notifications (P0-P4 priority) |
-| `scheduled_jobs` | Persistent cron jobs |
-| `reminders` | One-shot reminders |
+| `memory_links` | Memory graph edges (related/supersedes/contradicts/elaborates/causes; soft-invalidated, cascade-delete) |
+| `link_scans` | Tracks which embedded memories the linking worker has scanned |
+| `memory_snapshots` | Pre-replace backups consumed by `ghost reflect --restore` |
+| `audit_log` | Append-only record of destructive/consolidation operations |
+
+The schema lives solely in `internal/memory/schema.go` (embedded Go constant).
+Note that `CREATE TABLE IF NOT EXISTS` never migrates an existing database —
+schema changes only reach databases created after the change.
 
 ## Time-Decay Scoring
 

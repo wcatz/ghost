@@ -5,6 +5,8 @@ package selfupdate
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -87,6 +89,44 @@ func Download(url string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("download returned %d", resp.StatusCode)
 	}
 	return resp.Body, nil
+}
+
+// FindChecksumAsset locates the checksums.txt asset published alongside the
+// release binaries (goreleaser's default checksum manifest name — present on
+// every ghost release).
+func FindChecksumAsset(rel *Release) (*Asset, error) {
+	for i := range rel.Assets {
+		if rel.Assets[i].Name == "checksums.txt" {
+			return &rel.Assets[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no checksums.txt asset in release %s — refusing to install an unverifiable binary", rel.TagName)
+}
+
+// VerifyChecksum checks that sha256(data) matches the entry for assetName in a
+// checksums.txt manifest (goreleaser format: "<hex sha256>  <filename>" per
+// line, with an optional binary-mode "*" filename prefix). It errors if the
+// entry is missing or the digest mismatches, so a corrupted or substituted
+// archive never reaches Replace.
+func VerifyChecksum(data []byte, checksumsText, assetName string) error {
+	sum := sha256.Sum256(data)
+	got := hex.EncodeToString(sum[:])
+
+	for _, line := range strings.Split(checksumsText, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		want, name := fields[0], strings.TrimPrefix(fields[1], "*")
+		if name != assetName {
+			continue
+		}
+		if !strings.EqualFold(want, got) {
+			return fmt.Errorf("checksum mismatch for %s: manifest says %s, downloaded archive is %s", assetName, want, got)
+		}
+		return nil
+	}
+	return fmt.Errorf("no checksum entry for %s in checksums.txt", assetName)
 }
 
 // ExtractBinary extracts the "ghost" binary from a .tar.gz archive.
