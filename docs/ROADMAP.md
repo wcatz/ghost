@@ -30,7 +30,8 @@ Horizons, roughly:
   `sqlite`, `golang`, `local-first`. Drives discovery via GitHub topic search
   and any registry that scrapes topics.
 - [ ] **Submit to Anthropic's MCP registry/directory.** Lowest-effort,
-  highest-relevance distribution channel available.
+  highest-relevance distribution channel available. (prepared: Dockerfile
+  label + server.json in-repo; publish via mcp-publisher after v0.13.0)
 - [ ] **Add a short README section addressing "why not just use \[platform]'s
   built-in memory" head-on**, near the top rather than implied by the
   comparison table. The honest answer: native memory (ChatGPT, Claude, Gemini)
