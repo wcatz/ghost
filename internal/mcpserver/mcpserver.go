@@ -831,13 +831,13 @@ func (s *Server) registerTools() {
 
 	// ghost_task_complete — mark a task as done.
 	type taskCompleteArgs struct {
-		TaskID string `json:"task_id" jsonschema:"Task ID"`
+		TaskID string `json:"task_id" jsonschema:"Task ID — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
 		Notes  string `json:"notes,omitempty" jsonschema:"Completion notes"`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_task_complete",
-		Description: "Mark a task as done with optional completion notes.",
+		Description: "Mark a task as done with optional completion notes. Accepts a full task ID or a unique short prefix (like git short SHAs).",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
@@ -1026,7 +1026,7 @@ func (s *Server) registerTools() {
 	// ghost_task_update — update a task's status, priority, or description.
 	// Priority and description are optional — omitting them preserves current values.
 	type taskUpdateArgs struct {
-		TaskID      string  `json:"task_id" jsonschema:"Task ID to update"`
+		TaskID      string  `json:"task_id" jsonschema:"Task ID to update — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
 		Status      string  `json:"status,omitempty" jsonschema:"New status: pending, active, blocked, done (omit to preserve current)"`
 		Priority    *int    `json:"priority,omitempty" jsonschema:"Priority 0-4 (0=critical, 2=normal, 4=low). Omit to keep current value."`
 		Description *string `json:"description,omitempty" jsonschema:"Updated description. Omit to keep current value."`
@@ -1034,7 +1034,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_task_update",
-		Description: "Update a task's status, priority, or description. All fields are optional — omit any field to preserve its current value. Only pass what you want to change.",
+		Description: "Update a task's status, priority, or description. All fields are optional — omit any field to preserve its current value. Only pass what you want to change. Accepts a full task ID or a unique short prefix (like git short SHAs).",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
@@ -1075,7 +1075,9 @@ func (s *Server) registerTools() {
 			description = *args.Description
 		}
 
-		if err := s.store.UpdateTask(ctx, args.TaskID, status, priority, description); err != nil {
+		// Pass the resolved full ID, not the caller's (possibly prefix) input,
+		// so the fetch above and the write below can't hit different tasks.
+		if err := s.store.UpdateTask(ctx, current.ID, status, priority, description); err != nil {
 			return nil, nil, fmt.Errorf("update task: %w", err)
 		}
 		return &mcp.CallToolResult{

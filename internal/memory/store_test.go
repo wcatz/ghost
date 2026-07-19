@@ -1430,6 +1430,88 @@ func TestStoreTasks(t *testing.T) {
 	}
 }
 
+func TestStoreTaskIDPrefix(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	fullID, err := s.CreateTask(ctx, testProject, "Prefix me", "Resolved by short ID", 2)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	prefix := fullID[:8]
+
+	// GetTask resolves an 8-char prefix (what the session hook and task list show).
+	got, err := s.GetTask(ctx, prefix)
+	if err != nil {
+		t.Fatalf("GetTask by prefix: %v", err)
+	}
+	if got.ID != fullID {
+		t.Errorf("GetTask by prefix resolved %q, want %q", got.ID, fullID)
+	}
+
+	// UpdateTask and CompleteTask resolve prefixes too.
+	if err := s.UpdateTask(ctx, prefix, "active", 1, "updated via prefix"); err != nil {
+		t.Fatalf("UpdateTask by prefix: %v", err)
+	}
+	got, err = s.GetTask(ctx, fullID)
+	if err != nil {
+		t.Fatalf("GetTask after update: %v", err)
+	}
+	if got.Status != "active" || got.Description != "updated via prefix" {
+		t.Errorf("UpdateTask by prefix did not apply: status=%q desc=%q", got.Status, got.Description)
+	}
+	if err := s.CompleteTask(ctx, prefix, "done via prefix"); err != nil {
+		t.Fatalf("CompleteTask by prefix: %v", err)
+	}
+	got, err = s.GetTask(ctx, fullID)
+	if err != nil {
+		t.Fatalf("GetTask after complete: %v", err)
+	}
+	if got.Status != "done" || got.Notes != "done via prefix" {
+		t.Errorf("CompleteTask by prefix did not apply: status=%q notes=%q", got.Status, got.Notes)
+	}
+
+	// Ambiguous prefix: two tasks sharing the first 8 chars must error, not
+	// pick one arbitrarily.
+	for _, id := range []string{"AAAABBBB000000000000000000000001", "AAAABBBB000000000000000000000002"} {
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO tasks (id, project_id, title) VALUES (?, ?, ?)`, id, testProject, "twin "+id[len(id)-1:]); err != nil {
+			t.Fatalf("insert fixture task: %v", err)
+		}
+	}
+	if _, err := s.GetTask(ctx, "AAAABBBB"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("GetTask ambiguous prefix: want ambiguity error, got %v", err)
+	}
+	if err := s.CompleteTask(ctx, "AAAABBBB", ""); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("CompleteTask ambiguous prefix: want ambiguity error, got %v", err)
+	}
+	// A longer, unique prefix disambiguates.
+	got, err = s.GetTask(ctx, "AAAABBBB000000000000000000000001")
+	if err != nil {
+		t.Fatalf("GetTask exact ID among twins: %v", err)
+	}
+	if got.Title != "twin 1" {
+		t.Errorf("expected twin 1, got %q", got.Title)
+	}
+
+	// Unknown IDs now fail loudly everywhere — CompleteTask/UpdateTask used to
+	// silently no-op on a missing ID.
+	if _, err := s.GetTask(ctx, "ZZZZ9999"); err == nil || !strings.Contains(err.Error(), "task not found") {
+		t.Errorf("GetTask unknown: want not-found error, got %v", err)
+	}
+	if err := s.CompleteTask(ctx, "ZZZZ9999", ""); err == nil || !strings.Contains(err.Error(), "task not found") {
+		t.Errorf("CompleteTask unknown: want not-found error, got %v", err)
+	}
+	if err := s.UpdateTask(ctx, "ZZZZ9999", "active", 1, ""); err == nil || !strings.Contains(err.Error(), "task not found") {
+		t.Errorf("UpdateTask unknown: want not-found error, got %v", err)
+	}
+
+	// Empty ID is rejected, never treated as a match-everything prefix.
+	if _, err := s.GetTask(ctx, ""); err == nil {
+		t.Error("GetTask empty id: want error, got nil")
+	}
+}
+
 func TestStoreGetLatestConversationNoRows(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
