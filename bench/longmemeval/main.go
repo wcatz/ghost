@@ -15,12 +15,20 @@
 //
 //	go run ./bench/longmemeval --data ~/.cache/ghost-bench/longmemeval_s_cleaned.json \
 //	    --condition fts|vector|hybrid [--questions N] [--out per-question.jsonl] \
-//	    [--ollama http://localhost:11434] [--embed-cache ~/.cache/ghost-bench/nomic-cache.jsonl]
+//	    [--ollama http://localhost:11434] [--embed-cache ~/.cache/ghost-bench/nomic-cache.jsonl] \
+//	    [--floors "r5=0.74,ndcg10=0.72"]
 //
 // The fts condition needs no embeddings and runs in minutes. vector/hybrid
 // embed every turn and question through local Ollama (nomic-embed-text:v1.5),
 // memoized in an append-only content-hash cache so shared sessions across
 // questions and repeat runs cost nothing.
+//
+// --floors takes a comma-separated metric=min spec over the OVERALL
+// (all-questions) aggregate — accepted keys r1, r5, r10, mrr10, ndcg10,
+// case-insensitive. After the normal table prints, any violated floor logs a
+// "FLOOR VIOLATION: metric = got < min" line to stderr and the process exits
+// 1, for use as a CI regression gate. An unknown key or malformed spec is
+// validated before the benchmark runs and exits 1 immediately.
 //
 // See docs/benchmarks.md ("Phase 1") for methodology and reporting rules.
 package main
@@ -34,6 +42,8 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/wcatz/ghost/internal/bench"
@@ -82,6 +92,84 @@ func (a *agg) add(r1, r5, r10, mrr, ndcg float64) {
 	a.ndcg += ndcg
 }
 
+// floorMetricKeys are the only metric names -floors accepts, matching the
+// per-question-type table's columns.
+var floorMetricKeys = map[string]bool{
+	"r1": true, "r5": true, "r10": true, "mrr10": true, "ndcg10": true,
+}
+
+// overallMetrics averages an agg's sums into the canonical, floor-key-named
+// metrics map. agg accumulates sums across questions (see add); this is the
+// only place those sums become means.
+func overallMetrics(a *agg) map[string]float64 {
+	if a.n == 0 {
+		return map[string]float64{"r1": 0, "r5": 0, "r10": 0, "mrr10": 0, "ndcg10": 0}
+	}
+	n := float64(a.n)
+	return map[string]float64{
+		"r1":     a.r1 / n,
+		"r5":     a.r5 / n,
+		"r10":    a.r10 / n,
+		"mrr10":  a.mrr / n,
+		"ndcg10": a.ndcg / n,
+	}
+}
+
+// parseFloors parses a comma-separated "metric=min" spec (e.g.
+// "r5=0.74,ndcg10=0.72") into a floor map. Metric keys are case-insensitive
+// and must be one of floorMetricKeys. Returns an error on any unknown key or
+// malformed pair — called before the benchmark runs, so a bad spec fails
+// fast. An empty (or all-whitespace) spec parses to an empty, non-nil map.
+func parseFloors(spec string) (map[string]float64, error) {
+	floors := make(map[string]float64)
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return floors, nil
+	}
+	for _, pair := range strings.Split(spec, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("malformed floor %q: expected metric=min", pair)
+		}
+		key := strings.ToLower(strings.TrimSpace(parts[0]))
+		if !floorMetricKeys[key] {
+			return nil, fmt.Errorf("unknown floor metric %q: must be one of r1, r5, r10, mrr10, ndcg10", key)
+		}
+		val, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+		if err != nil {
+			return nil, fmt.Errorf("malformed floor value for %q: %w", key, err)
+		}
+		floors[key] = val
+	}
+	return floors, nil
+}
+
+// checkFloors compares overall metrics against floors and returns one
+// "FLOOR VIOLATION: ..." message per breach (overall < floor), in stable
+// key-sorted order. Exact equality is not a violation. Empty floors always
+// yields no violations.
+func checkFloors(overall map[string]float64, floors map[string]float64) []string {
+	keys := make([]string, 0, len(floors))
+	for k := range floors {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var violations []string
+	for _, k := range keys {
+		floor := floors[k]
+		got := overall[k]
+		if got < floor {
+			violations = append(violations, fmt.Sprintf("FLOOR VIOLATION: %s = %.3f < %.3f", k, got, floor))
+		}
+	}
+	return violations
+}
+
 func main() {
 	dataPath := flag.String("data", "", "path to longmemeval_s_cleaned.json (required)")
 	condition := flag.String("condition", "fts", "fts | vector | hybrid")
@@ -89,7 +177,16 @@ func main() {
 	outPath := flag.String("out", "", "per-question JSONL results log")
 	ollamaURL := flag.String("ollama", "http://localhost:11434", "Ollama URL for vector/hybrid")
 	embedCache := flag.String("embed-cache", "", "append-only embedding cache JSONL (vector/hybrid)")
+	floorsSpec := flag.String("floors", "", "comma-separated metric=min floors over OVERALL metrics, e.g. \"r5=0.74,ndcg10=0.72\" (keys: r1, r5, r10, mrr10, ndcg10)")
 	flag.Parse()
+
+	// Parse -floors before any other validation: an unknown key or malformed
+	// spec must fail fast, before the (potentially long) benchmark runs.
+	floors, err := parseFloors(*floorsSpec)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 
 	if *dataPath == "" {
 		fmt.Fprintln(os.Stderr, "error: --data is required")
@@ -200,6 +297,13 @@ func main() {
 	if embedder != nil {
 		hits, misses := embedder.Stats()
 		fmt.Printf("Embedding cache: %d hits, %d computed.\n", hits, misses)
+	}
+
+	if violations := checkFloors(overallMetrics(overall), floors); len(violations) > 0 {
+		for _, v := range violations {
+			fmt.Fprintln(os.Stderr, v)
+		}
+		os.Exit(1)
 	}
 }
 

@@ -1,0 +1,160 @@
+name: longmemeval
+
+# LongMemEval-S retrieval-only regression benchmark (see docs/benchmarks.md,
+# "Phase 1"). Judge-free, deterministic given a fixed embedding cache — this
+# workflow gates on metric FLOORS (bench/longmemeval -floors), not exact
+# rankings, since RRF scores can tie.
+#
+# - pull_request: fts only (no Ollama) — fast enough for PR latency.
+# - schedule / workflow_dispatch: fts + hybrid (Ollama + nomic-embed-text).
+#   Hybrid is skipped on pull_request because the first-ever embedding pass
+#   over the dataset is CPU-bound and slow (see the hybrid job below); a warm
+#   embed-cache (restored via actions/cache) makes subsequent runs fast.
+on:
+  workflow_dispatch:
+    inputs:
+      condition:
+        description: "Which condition(s) to run"
+        required: false
+        default: both
+        type: choice
+        options:
+          - both
+          - fts
+          - hybrid
+  schedule:
+    # Weekly, Monday 06:00 UTC.
+    - cron: "0 6 * * 1"
+  pull_request:
+    paths:
+      - "internal/memory/**"
+      - "bench/longmemeval/**"
+      - ".github/workflows/longmemeval.yml"
+
+permissions:
+  contents: read
+
+env:
+  # xiaowu0162/longmemeval-cleaned — the canonical cleaned -S variant (the
+  # original HF longmemeval dataset is deprecated; see docs/benchmarks.md).
+  # Verified 2026-07-19: resolve URL 302s to a signed CDN URL then 200s,
+  # content-length 277383467 bytes (~277MB), so a plain `curl -fL` download
+  # (following the redirect) works with no auth.
+  DATASET_URL: https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
+
+jobs:
+  fts:
+    name: fts (retrieval-only, no Ollama)
+    runs-on: ubuntu-latest
+    # Skip only when a manual dispatch explicitly asked for hybrid alone.
+    if: github.event_name != 'workflow_dispatch' || inputs.condition != 'hybrid'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Set cache paths
+        run: echo "DATASET_PATH=$HOME/.cache/ghost-bench/longmemeval_s_cleaned.json" >> "$GITHUB_ENV"
+
+      - name: Restore LongMemEval-S dataset cache
+        id: cache-dataset
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.DATASET_PATH }}
+          key: longmemeval-s-cleaned-v1
+
+      - name: Download dataset (cache miss)
+        if: steps.cache-dataset.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$(dirname "$DATASET_PATH")"
+          curl -fL --retry 3 --retry-delay 5 -o "$DATASET_PATH" "$DATASET_URL"
+
+      - name: Run fts condition with regression floors
+        run: |
+          go run ./bench/longmemeval \
+            -data "$DATASET_PATH" \
+            -condition fts \
+            -floors "r5=0.74,ndcg10=0.72"
+        # Floors derived from published fts OVERALL numbers
+        # (docs/benchmarks.md, 2026-07-15 run, n=470): R@5 0.751 -> floor
+        # 0.74, NDCG@10 0.738 -> floor 0.72. ~0.01-0.02 safety margin below
+        # the observed score: enough to catch a real regression, loose
+        # enough to tolerate RRF tie jitter.
+
+  hybrid:
+    name: hybrid (Ollama embeddings)
+    runs-on: ubuntu-latest
+    # Never on pull_request — cold-cache embedding is too slow for PR
+    # latency. Runs on schedule always, and on manual dispatch unless the
+    # input explicitly asked for fts alone.
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.condition != 'fts')
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Set cache paths
+        run: |
+          echo "DATASET_PATH=$HOME/.cache/ghost-bench/longmemeval_s_cleaned.json" >> "$GITHUB_ENV"
+          echo "EMBED_CACHE_PATH=$HOME/.cache/ghost-bench/embed-cache.jsonl" >> "$GITHUB_ENV"
+
+      - name: Restore LongMemEval-S dataset cache
+        id: cache-dataset
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.DATASET_PATH }}
+          key: longmemeval-s-cleaned-v1
+
+      - name: Download dataset (cache miss)
+        if: steps.cache-dataset.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$(dirname "$DATASET_PATH")"
+          curl -fL --retry 3 --retry-delay 5 -o "$DATASET_PATH" "$DATASET_URL"
+
+      - name: Restore embedding cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.EMBED_CACHE_PATH }}
+          key: longmemeval-embed-cache-v1
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama
+        run: |
+          ollama serve > /tmp/ollama.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "ollama serve did not become ready in time"; cat /tmp/ollama.log; exit 1
+
+      - name: Pull embedding model
+        # Must match embedModel in bench/longmemeval/embed.go exactly —
+        # /api/embed does not auto-pull, and an untagged "nomic-embed-text"
+        # pull leaves the v1.5 tag missing, so a 404 fails the run outright.
+        run: ollama pull nomic-embed-text:v1.5
+
+      - name: Run hybrid condition with regression floors
+        run: |
+          mkdir -p "$(dirname "$EMBED_CACHE_PATH")"
+          go run ./bench/longmemeval \
+            -data "$DATASET_PATH" \
+            -condition hybrid \
+            -ollama http://localhost:11434 \
+            -embed-cache "$EMBED_CACHE_PATH" \
+            -floors "r5=0.91,ndcg10=0.89"
+        # Floors derived from published hybrid OVERALL numbers
+        # (docs/benchmarks.md, 2026-07-15 run, n=470): R@5 0.930 -> floor
+        # 0.91, NDCG@10 0.903 -> floor 0.89. Same ~0.01-0.02 safety margin
+        # as the fts job. First run on a cold embed-cache embeds the whole
+        # dataset on CPU and is slow (hence the generous timeout above);
+        # once actions/cache has a warm entry under
+        # longmemeval-embed-cache-v1, subsequent runs are fast (only new/
+        # changed content gets embedded).
