@@ -819,6 +819,59 @@ func TestApplyMemoryUpdate(t *testing.T) {
 	})
 }
 
+func TestPromoteMemory(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+
+	id, err := srv.store.Create(ctx, "abc123", memory.Memory{
+		Category: "preference", Content: "tabs never spaces", Source: "mcp", Importance: 0.8, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	t.Run("rejects wrong project", func(t *testing.T) {
+		if err := srv.store.EnsureProject(ctx, "other", "/tmp/other2", "other"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		if _, err := srv.promoteMemory(ctx, "other", id); err == nil {
+			t.Error("expected ownership rejection")
+		}
+	})
+
+	t.Run("promotes and then rejects re-promotion", func(t *testing.T) {
+		msg, err := srv.promoteMemory(ctx, "test-project", id)
+		if err != nil {
+			t.Fatalf("promoteMemory: %v", err)
+		}
+		if !strings.Contains(msg, "global") {
+			t.Errorf("message should mention global, got %q", msg)
+		}
+		mems, _ := srv.store.GetByIDs(ctx, []string{id})
+		if mems[0].ProjectID != "_global" {
+			t.Errorf("project = %q, want _global", mems[0].ProjectID)
+		}
+		if _, err := srv.promoteMemory(ctx, "test-project", id); err == nil {
+			t.Error("expected already-global rejection")
+		}
+	})
+
+	t.Run("rejects unknown memory", func(t *testing.T) {
+		if _, err := srv.promoteMemory(ctx, "test-project", "nope"); err == nil {
+			t.Error("expected not-found error")
+		}
+	})
+
+	t.Run("rejects missing args", func(t *testing.T) {
+		if _, err := srv.promoteMemory(ctx, "", id); err == nil {
+			t.Error("expected missing project_id error")
+		}
+		if _, err := srv.promoteMemory(ctx, "test-project", ""); err == nil {
+			t.Error("expected missing memory_id error")
+		}
+	})
+}
+
 func TestTruncateUTF8(t *testing.T) {
 	tests := []struct {
 		in       string
