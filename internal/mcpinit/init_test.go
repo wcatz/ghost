@@ -287,8 +287,8 @@ func TestShellQuote(t *testing.T) {
 
 func TestGhostPermissions_Complete(t *testing.T) {
 	// Verify the canonical list has the expected count.
-	if len(ghostPermissions) != 16 {
-		t.Errorf("expected 16 ghost permissions, got %d", len(ghostPermissions))
+	if len(ghostPermissions) != 18 {
+		t.Errorf("expected 18 ghost permissions, got %d", len(ghostPermissions))
 	}
 
 	// All should start with the correct prefix.
@@ -296,5 +296,35 @@ func TestGhostPermissions_Complete(t *testing.T) {
 		if !strings.HasPrefix(p, "mcp__ghost__ghost_") {
 			t.Errorf("permission %q has unexpected prefix", p)
 		}
+	}
+}
+
+func TestEnsureStopHook(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+
+	var out strings.Builder
+	if err := ensureStopHook(&out, sf, "/usr/local/bin/ghost"); err != nil {
+		t.Fatalf("ensureStopHook: %v", err)
+	}
+	if !sf.hasHook("Stop", "hook stop") {
+		t.Error("Stop hook should be present after ensureStopHook")
+	}
+
+	// Idempotent: second call reports already-configured, adds nothing.
+	out.Reset()
+	if err := ensureStopHook(&out, sf, "/usr/local/bin/ghost"); err != nil {
+		t.Fatalf("ensureStopHook (second): %v", err)
+	}
+	if !strings.Contains(out.String(), "already configured") {
+		t.Errorf("second run should be a no-op, got %q", out.String())
+	}
+
+	// SessionStart hooks are untouched.
+	if sf.hasHook("SessionStart", "hook stop") {
+		t.Error("Stop hook must not leak into SessionStart")
 	}
 }
