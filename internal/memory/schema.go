@@ -11,7 +11,9 @@ import (
 // initSQL is the schema for the ghost database — the single source of truth.
 // Kept as a Go constant rather than go:embed because embed paths cannot use "..".
 // Note: CREATE TABLE IF NOT EXISTS never migrates an existing database — a new
-// column or CHECK value only reaches DBs created after the change.
+// column or CHECK value only reaches DBs created after the change. When you
+// alter an existing table here, bump schemaVersion and append a migration
+// step in migrate.go so existing databases receive it too.
 const initSQL = `
 CREATE TABLE IF NOT EXISTS projects (
     id          TEXT PRIMARY KEY,
@@ -219,9 +221,42 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	}
 
 	db.SetMaxOpenConns(1) // SQLite is single-writer; prevent connection pool contention
+
+	// Distinguish a fresh database from an existing one BEFORE initSQL runs:
+	// fresh databases get the current schema from initSQL and are stamped at
+	// schemaVersion directly; existing ones must pass through migrate(), since
+	// CREATE TABLE IF NOT EXISTS never alters tables that already exist.
+	var tableCount int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type='table'`,
+	).Scan(&tableCount); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("inspect schema: %w", err)
+	}
+
 	if _, err := db.Exec(initSQL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
+	}
+
+	if tableCount == 0 {
+		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("stamp schema version: %w", err)
+		}
+		return db, nil
+	}
+
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("read schema version: %w", err)
+	}
+	if version < schemaVersion {
+		if err := migrate(db, version); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("migrate schema v%d→v%d: %w", version, schemaVersion, err)
+		}
 	}
 
 	return db, nil
