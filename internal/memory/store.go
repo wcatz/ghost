@@ -8,9 +8,9 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
-	"unicode"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/wcatz/ghost/internal/ai"
 )
@@ -577,6 +577,122 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	n, _ := result.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("memory not found: %s", id)
+	}
+	return nil
+}
+
+// UpdateMemory applies a partial update to a memory. Nil content/category/
+// importance preserve current values; a non-nil tags slice replaces the tag
+// list (pass an empty slice to clear). Source and pinned are never touched.
+// When the content changes, the embedding and link-scan rows are deleted in
+// the same transaction so the background workers re-embed and re-link the
+// memory; FTS needs nothing — the memories_au trigger re-syncs it.
+//
+// The write is project-scoped: the in-transaction ownership lookup is keyed
+// by (id, project_id), so ownership is verified and the update applied
+// atomically inside a single transaction — closing the check-then-write race
+// where a separate lookup-then-write could target a memory that moved to a
+// different project (e.g. via PromoteToGlobal) between the check and the write.
+func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var curContent, curCategory, curTags string
+	var curImportance float32
+	err = tx.QueryRowContext(ctx,
+		`SELECT content, category, importance, tags FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
+	).Scan(&curContent, &curCategory, &curImportance, &curTags)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("memory %s not found in project %s", id, projectID)
+	}
+	if err != nil {
+		return fmt.Errorf("lookup memory: %w", err)
+	}
+
+	newContent, newCategory, newImportance, newTags := curContent, curCategory, curImportance, curTags
+	if content != nil {
+		newContent = *content
+	}
+	if category != nil {
+		newCategory = *category
+	}
+	if importance != nil {
+		newImportance = *importance
+	}
+	if tags != nil {
+		b, mErr := json.Marshal(tags)
+		if mErr != nil {
+			return fmt.Errorf("marshal tags: %w", mErr)
+		}
+		newTags = string(b)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE memories
+		SET content = ?, category = ?, importance = ?, tags = ?, updated_at = datetime('now')
+		WHERE id = ?
+	`, newContent, newCategory, newImportance, newTags, id); err != nil {
+		return fmt.Errorf("update memory: %w", err)
+	}
+
+	if newContent != curContent {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM memory_embeddings WHERE memory_id = ?`, id); err != nil {
+			return fmt.Errorf("invalidate embedding: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM link_scans WHERE memory_id = ?`, id); err != nil {
+			return fmt.Errorf("invalidate link scan: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+// PromoteToGlobal moves a memory into the shared _global project. The memory
+// keeps its ID, so its embedding and graph links survive; pinned state and
+// importance are preserved. The _global project row is ensured inline (the
+// FK on memories.project_id requires it) — EnsureProject can't be called
+// here because s.mu is already held.
+//
+// The write is project-scoped: the UPDATE's WHERE clause binds both id and
+// projectID, so ownership is verified and the move applied atomically in a
+// single statement — closing the check-then-write race where a separate
+// lookup-then-write could promote a memory that moved to a different
+// project between the check and the write. As a side effect, promoting an
+// already-global memory (project_id = '_global') also fails this ownership
+// match, which is desired: re-promotion is rejected with a
+// not-found-in-project error, not a silently accepted no-op.
+func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')
+		ON CONFLICT(id) DO NOTHING
+	`); err != nil {
+		return fmt.Errorf("ensure _global project: %w", err)
+	}
+	_, _ = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`)
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE memories SET project_id = '_global', updated_at = datetime('now')
+		WHERE id = ? AND project_id = ?
+	`, id, projectID)
+	if err != nil {
+		return fmt.Errorf("promote memory: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("promote memory rows: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("memory %s not found in project %s", id, projectID)
 	}
 	return nil
 }

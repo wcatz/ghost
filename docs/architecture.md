@@ -9,6 +9,7 @@ ghost mcp              MCP server on stdio (used by Claude Code, Cursor, Goose)
 ghost mcp init         Configure Claude Code integration
 ghost mcp status       Health check
 ghost hook session-start   SessionStart hook (called by Claude Code)
+ghost hook stop            Stop hook — save-nudge, blocks stop once (called by Claude Code)
 ghost reflect <project>    Manual memory consolidation
 ghost supersede <project>  LLM-classified 'supersedes' link creation
 ghost obsidian export|sync One-way Markdown vault mirror
@@ -50,11 +51,12 @@ internal/
     vector.go              Cosine similarity, hybrid RRF search
     links.go               Memory links: edge CRUD, recursive-CTE graph traversal
   mcpserver/               MCP server (stdio transport)
-    mcpserver.go           16 tools + 4 resources via go-sdk
+    mcpserver.go           18 tools + 4 resources via go-sdk
   mcpinit/                 Claude Code integration setup
     init.go                ghost mcp init — registers server, imports memories, writes redirects
     status.go              ghost mcp status — health check
     hook.go                ghost hook session-start — injects project context
+    stophook.go            ghost hook stop — save-nudge, blocks stop once when nothing was saved
   claudeimport/            One-time import of Claude Code auto-memory files
     import.go              Scans ~/.claude/projects/*/memory/*.md, upserts into Ghost
   reflection/              Memory consolidation
@@ -82,7 +84,7 @@ Claude Code / Cursor → stdio JSON-RPC → mcpserver
                           ghost_task_create/update/complete → store.CreateTask()...
                           ghost_decision_record → store.RecordDecision()
                           ghost_health        → store metadata query
-                          ... 16 tools total
+                          ... 18 tools total
                                           ↓
                         Resources (pinnable, survive context compaction):
                           ghost://project/{id}/context   → GetTopMemories + GetLearnedContext
