@@ -648,6 +648,39 @@ func (s *Store) UpdateMemory(ctx context.Context, id string, content, category *
 	return tx.Commit()
 }
 
+// PromoteToGlobal moves a memory into the shared _global project. The memory
+// keeps its ID, so its embedding and graph links survive; pinned state and
+// importance are preserved. The _global project row is ensured inline (the
+// FK on memories.project_id requires it) — EnsureProject can't be called
+// here because s.mu is already held.
+func (s *Store) PromoteToGlobal(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')
+		ON CONFLICT(id) DO NOTHING
+	`); err != nil {
+		return fmt.Errorf("ensure _global project: %w", err)
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE memories SET project_id = '_global', updated_at = datetime('now')
+		WHERE id = ?
+	`, id)
+	if err != nil {
+		return fmt.Errorf("promote memory: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("promote memory rows: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("memory %s not found", id)
+	}
+	return nil
+}
+
 // TogglePin sets or clears the pinned flag.
 func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 	s.mu.Lock()

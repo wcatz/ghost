@@ -1752,6 +1752,97 @@ func TestStoreUpdateMemory(t *testing.T) {
 			t.Error("expected error for unknown memory id")
 		}
 	})
+
+	t.Run("pinned survives update", func(t *testing.T) {
+		id := newID(t)
+		if err := s.TogglePin(ctx, id, true); err != nil {
+			t.Fatalf("TogglePin: %v", err)
+		}
+		content := "Pinned memory, corrected"
+		if err := s.UpdateMemory(ctx, id, &content, nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory: %v", err)
+		}
+		if m := getOne(t, id); !m.Pinned {
+			t.Error("pinned flag should survive an update")
+		}
+	})
+
+	t.Run("tags replaced with new values", func(t *testing.T) {
+		id := newID(t)
+		if err := s.UpdateMemory(ctx, id, nil, nil, nil, []string{"alpha", "beta"}); err != nil {
+			t.Fatalf("UpdateMemory: %v", err)
+		}
+		m := getOne(t, id)
+		if len(m.Tags) != 2 || m.Tags[0] != "alpha" || m.Tags[1] != "beta" {
+			t.Errorf("tags = %v, want [alpha beta]", m.Tags)
+		}
+	})
+}
+
+func TestStorePromoteToGlobal(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	t.Run("moves memory preserving id, pin, importance, embedding", func(t *testing.T) {
+		id, err := s.Create(ctx, testProject, Memory{
+			Category:   "preference",
+			Content:    "Always use two-space YAML indentation",
+			Source:     "mcp",
+			Importance: 0.8,
+			Tags:       []string{"yaml"},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := s.TogglePin(ctx, id, true); err != nil {
+			t.Fatalf("TogglePin: %v", err)
+		}
+		vec := make([]float32, 8)
+		vec[0] = 1
+		if err := s.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
+
+		if err := s.PromoteToGlobal(ctx, id); err != nil {
+			t.Fatalf("PromoteToGlobal: %v", err)
+		}
+
+		mems, err := s.GetByIDs(ctx, []string{id})
+		if err != nil || len(mems) != 1 {
+			t.Fatalf("GetByIDs: %v (n=%d)", err, len(mems))
+		}
+		m := mems[0]
+		if m.ProjectID != "_global" {
+			t.Errorf("project = %q, want _global", m.ProjectID)
+		}
+		if !m.Pinned || m.Importance != 0.8 {
+			t.Errorf("pin/importance not preserved: pinned=%v importance=%f", m.Pinned, m.Importance)
+		}
+		if _, err := s.GetEmbedding(ctx, id); err != nil {
+			t.Error("embedding should survive promotion")
+		}
+	})
+
+	t.Run("works without prior _global row", func(t *testing.T) {
+		// testStore never seeds _global — the first subtest exercised the
+		// inline ensure; this one proves a fresh store promotes fine too.
+		s2 := testStore(t)
+		id, err := s2.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "promotable", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := s2.PromoteToGlobal(ctx, id); err != nil {
+			t.Fatalf("PromoteToGlobal on fresh store: %v", err)
+		}
+	})
+
+	t.Run("unknown id errors", func(t *testing.T) {
+		if err := s.PromoteToGlobal(ctx, "does-not-exist"); err == nil {
+			t.Error("expected error for unknown memory id")
+		}
+	})
 }
 
 func TestEnsureProject_AutoMerge(t *testing.T) {
