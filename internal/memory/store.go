@@ -357,9 +357,12 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 		LIMIT 5
 	`, projectID, category, ftsQuery)
 	if err == nil {
+		// Token-free content (punctuation/single-char words only) can still
+		// FTS-match — sanitizeFTS keeps single-char words that tokenizeContent
+		// drops — and jaccard(∅,∅) scores 1.0. Never merge on empty tokens.
 		newTokens := tokenizeContent(content)
 		var bestSim float64
-		for rows.Next() {
+		for len(newTokens) > 0 && rows.Next() {
 			var candID, candContent string
 			var candImportance float32
 			if scanErr := rows.Scan(&candID, &candImportance, &candContent); scanErr != nil {

@@ -189,6 +189,36 @@ func TestStoreUpsertNoMergeBelowThreshold(t *testing.T) {
 	}
 }
 
+func TestStoreUpsertNoMergeOnTokenFreeContent(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Contents whose tokens are all single characters produce EMPTY token
+	// sets (tokenizeContent keeps len>1 only) while still FTS-matching each
+	// other (sanitizeFTS keeps single-char words). jaccard(∅,∅) = 1.0, so
+	// without a guard these unrelated saves would spuriously merge.
+	_, _, err := s.Upsert(ctx, testProject, "fact", "a b c", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert (first): %v", err)
+	}
+
+	_, merged, err := s.Upsert(ctx, testProject, "fact", "a x y", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert (second): %v", err)
+	}
+	if merged {
+		t.Error("token-free contents must never merge")
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 memories, got %d", len(all))
+	}
+}
+
 func TestStoreUpsertMergesBestCandidate(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
