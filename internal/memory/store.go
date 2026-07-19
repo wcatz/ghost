@@ -8,9 +8,9 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
-	"unicode"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/wcatz/ghost/internal/ai"
 )
