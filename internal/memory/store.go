@@ -663,6 +663,7 @@ func (s *Store) PromoteToGlobal(ctx context.Context, id string) error {
 	`); err != nil {
 		return fmt.Errorf("ensure _global project: %w", err)
 	}
+	_, _ = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`)
 
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE memories SET project_id = '_global', updated_at = datetime('now')

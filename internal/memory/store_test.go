@@ -1836,6 +1836,14 @@ func TestStorePromoteToGlobal(t *testing.T) {
 		if err := s2.PromoteToGlobal(ctx, id); err != nil {
 			t.Fatalf("PromoteToGlobal on fresh store: %v", err)
 		}
+
+		mems, err := s2.GetByIDs(ctx, []string{id})
+		if err != nil || len(mems) != 1 {
+			t.Fatalf("GetByIDs: %v (n=%d)", err, len(mems))
+		}
+		if mems[0].ProjectID != "_global" {
+			t.Errorf("project = %q, want _global", mems[0].ProjectID)
+		}
 	})
 
 	t.Run("unknown id errors", func(t *testing.T) {
