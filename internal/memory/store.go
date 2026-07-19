@@ -666,7 +666,8 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 // lookup-then-write could promote a memory that moved to a different
 // project between the check and the write. As a side effect, promoting an
 // already-global memory (project_id = '_global') also fails this ownership
-// match, which is desired: re-promotion is a no-op, not a silent success.
+// match, which is desired: re-promotion is rejected with a
+// not-found-in-project error, not a silently accepted no-op.
 func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
