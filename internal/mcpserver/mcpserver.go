@@ -253,7 +253,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, args updateArgs) (string
 		changed = append(changed, "tags")
 	}
 
-	if err := s.store.UpdateMemory(ctx, args.MemoryID, content, category, args.Importance, args.Tags); err != nil {
+	if err := s.store.UpdateMemory(ctx, resolvedProjectID, args.MemoryID, content, category, args.Importance, args.Tags); err != nil {
 		return "", fmt.Errorf("update failed: %w", err)
 	}
 

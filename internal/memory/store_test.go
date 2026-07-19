@@ -1653,7 +1653,7 @@ func TestStoreUpdateMemory(t *testing.T) {
 	t.Run("content only, others preserved", func(t *testing.T) {
 		id := newID(t)
 		content := "Corrected content about the deploy pipeline"
-		if err := s.UpdateMemory(ctx, id, &content, nil, nil, nil); err != nil {
+		if err := s.UpdateMemory(ctx, testProject, id, &content, nil, nil, nil); err != nil {
 			t.Fatalf("UpdateMemory: %v", err)
 		}
 		m := getOne(t, id)
@@ -1673,7 +1673,7 @@ func TestStoreUpdateMemory(t *testing.T) {
 		id := newID(t)
 		cat := "gotcha"
 		imp := float32(0.9)
-		if err := s.UpdateMemory(ctx, id, nil, &cat, &imp, nil); err != nil {
+		if err := s.UpdateMemory(ctx, testProject, id, nil, &cat, &imp, nil); err != nil {
 			t.Fatalf("UpdateMemory: %v", err)
 		}
 		m := getOne(t, id)
@@ -1688,13 +1688,13 @@ func TestStoreUpdateMemory(t *testing.T) {
 	t.Run("nil tags preserve, empty tags clear", func(t *testing.T) {
 		id := newID(t)
 		imp := float32(0.5)
-		if err := s.UpdateMemory(ctx, id, nil, nil, &imp, nil); err != nil {
+		if err := s.UpdateMemory(ctx, testProject, id, nil, nil, &imp, nil); err != nil {
 			t.Fatalf("UpdateMemory (nil tags): %v", err)
 		}
 		if m := getOne(t, id); len(m.Tags) != 1 {
 			t.Errorf("nil tags should preserve, got %v", m.Tags)
 		}
-		if err := s.UpdateMemory(ctx, id, nil, nil, nil, []string{}); err != nil {
+		if err := s.UpdateMemory(ctx, testProject, id, nil, nil, nil, []string{}); err != nil {
 			t.Fatalf("UpdateMemory (empty tags): %v", err)
 		}
 		if m := getOne(t, id); len(m.Tags) != 0 {
@@ -1713,7 +1713,7 @@ func TestStoreUpdateMemory(t *testing.T) {
 			t.Fatalf("MarkLinkScanned: %v", err)
 		}
 		content := "Entirely rewritten content"
-		if err := s.UpdateMemory(ctx, id, &content, nil, nil, nil); err != nil {
+		if err := s.UpdateMemory(ctx, testProject, id, &content, nil, nil, nil); err != nil {
 			t.Fatalf("UpdateMemory: %v", err)
 		}
 		if _, err := s.GetEmbedding(ctx, id); err == nil {
@@ -1737,7 +1737,7 @@ func TestStoreUpdateMemory(t *testing.T) {
 			t.Fatalf("StoreEmbedding: %v", err)
 		}
 		imp := float32(0.4)
-		if err := s.UpdateMemory(ctx, id, nil, nil, &imp, nil); err != nil {
+		if err := s.UpdateMemory(ctx, testProject, id, nil, nil, &imp, nil); err != nil {
 			t.Fatalf("UpdateMemory: %v", err)
 		}
 		if _, err := s.GetEmbedding(ctx, id); err != nil {
@@ -1747,7 +1747,7 @@ func TestStoreUpdateMemory(t *testing.T) {
 
 	t.Run("unknown id errors", func(t *testing.T) {
 		content := "x"
-		err := s.UpdateMemory(ctx, "does-not-exist", &content, nil, nil, nil)
+		err := s.UpdateMemory(ctx, testProject, "does-not-exist", &content, nil, nil, nil)
 		if err == nil {
 			t.Error("expected error for unknown memory id")
 		}
@@ -1759,7 +1759,7 @@ func TestStoreUpdateMemory(t *testing.T) {
 			t.Fatalf("TogglePin: %v", err)
 		}
 		content := "Pinned memory, corrected"
-		if err := s.UpdateMemory(ctx, id, &content, nil, nil, nil); err != nil {
+		if err := s.UpdateMemory(ctx, testProject, id, &content, nil, nil, nil); err != nil {
 			t.Fatalf("UpdateMemory: %v", err)
 		}
 		if m := getOne(t, id); !m.Pinned {
@@ -1769,12 +1769,26 @@ func TestStoreUpdateMemory(t *testing.T) {
 
 	t.Run("tags replaced with new values", func(t *testing.T) {
 		id := newID(t)
-		if err := s.UpdateMemory(ctx, id, nil, nil, nil, []string{"alpha", "beta"}); err != nil {
+		if err := s.UpdateMemory(ctx, testProject, id, nil, nil, nil, []string{"alpha", "beta"}); err != nil {
 			t.Fatalf("UpdateMemory: %v", err)
 		}
 		m := getOne(t, id)
 		if len(m.Tags) != 2 || m.Tags[0] != "alpha" || m.Tags[1] != "beta" {
 			t.Errorf("tags = %v, want [alpha beta]", m.Tags)
+		}
+	})
+
+	t.Run("wrong project cannot update", func(t *testing.T) {
+		id := newID(t)
+		if err := s.EnsureProject(ctx, "other-proj", "/tmp/other-proj", "other-proj"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		content := "hijacked"
+		if err := s.UpdateMemory(ctx, "other-proj", id, &content, nil, nil, nil); err == nil {
+			t.Error("expected error updating another project's memory")
+		}
+		if m := getOne(t, id); m.Content == "hijacked" {
+			t.Error("content must be unchanged after cross-project update attempt")
 		}
 	})
 }
@@ -1803,7 +1817,7 @@ func TestStorePromoteToGlobal(t *testing.T) {
 			t.Fatalf("StoreEmbedding: %v", err)
 		}
 
-		if err := s.PromoteToGlobal(ctx, id); err != nil {
+		if err := s.PromoteToGlobal(ctx, testProject, id); err != nil {
 			t.Fatalf("PromoteToGlobal: %v", err)
 		}
 
@@ -1833,7 +1847,7 @@ func TestStorePromoteToGlobal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		if err := s2.PromoteToGlobal(ctx, id); err != nil {
+		if err := s2.PromoteToGlobal(ctx, testProject, id); err != nil {
 			t.Fatalf("PromoteToGlobal on fresh store: %v", err)
 		}
 
@@ -1847,8 +1861,30 @@ func TestStorePromoteToGlobal(t *testing.T) {
 	})
 
 	t.Run("unknown id errors", func(t *testing.T) {
-		if err := s.PromoteToGlobal(ctx, "does-not-exist"); err == nil {
+		if err := s.PromoteToGlobal(ctx, testProject, "does-not-exist"); err == nil {
 			t.Error("expected error for unknown memory id")
+		}
+	})
+
+	t.Run("wrong project cannot promote", func(t *testing.T) {
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "stays put", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := s.EnsureProject(ctx, "other-proj2", "/tmp/other-proj2", "other-proj2"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		if err := s.PromoteToGlobal(ctx, "other-proj2", id); err == nil {
+			t.Error("expected error promoting another project's memory")
+		}
+		mems, err := s.GetByIDs(ctx, []string{id})
+		if err != nil || len(mems) != 1 {
+			t.Fatalf("GetByIDs: %v", err)
+		}
+		if mems[0].ProjectID != testProject {
+			t.Errorf("memory moved to %q, must stay in %q", mems[0].ProjectID, testProject)
 		}
 	})
 }

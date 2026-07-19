@@ -771,6 +771,10 @@ func TestApplyMemoryUpdate(t *testing.T) {
 		if err == nil {
 			t.Error("expected ownership rejection")
 		}
+		mems, _ := srv.store.GetByIDs(ctx, []string{id})
+		if mems[0].Content == "hijack" {
+			t.Error("content must be unchanged after rejected cross-project update")
+		}
 	})
 
 	t.Run("rejects unknown memory", func(t *testing.T) {

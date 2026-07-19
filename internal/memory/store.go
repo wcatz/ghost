@@ -587,7 +587,13 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 // When the content changes, the embedding and link-scan rows are deleted in
 // the same transaction so the background workers re-embed and re-link the
 // memory; FTS needs nothing — the memories_au trigger re-syncs it.
-func (s *Store) UpdateMemory(ctx context.Context, id string, content, category *string, importance *float32, tags []string) error {
+//
+// The write is project-scoped: the in-transaction ownership lookup is keyed
+// by (id, project_id), so ownership is verified and the update applied
+// atomically inside a single transaction — closing the check-then-write race
+// where a separate lookup-then-write could target a memory that moved to a
+// different project (e.g. via PromoteToGlobal) between the check and the write.
+func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -600,10 +606,10 @@ func (s *Store) UpdateMemory(ctx context.Context, id string, content, category *
 	var curContent, curCategory, curTags string
 	var curImportance float32
 	err = tx.QueryRowContext(ctx,
-		`SELECT content, category, importance, tags FROM memories WHERE id = ?`, id,
+		`SELECT content, category, importance, tags FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
 	).Scan(&curContent, &curCategory, &curImportance, &curTags)
 	if err == sql.ErrNoRows {
-		return fmt.Errorf("memory %s not found", id)
+		return fmt.Errorf("memory %s not found in project %s", id, projectID)
 	}
 	if err != nil {
 		return fmt.Errorf("lookup memory: %w", err)
@@ -653,7 +659,15 @@ func (s *Store) UpdateMemory(ctx context.Context, id string, content, category *
 // importance are preserved. The _global project row is ensured inline (the
 // FK on memories.project_id requires it) — EnsureProject can't be called
 // here because s.mu is already held.
-func (s *Store) PromoteToGlobal(ctx context.Context, id string) error {
+//
+// The write is project-scoped: the UPDATE's WHERE clause binds both id and
+// projectID, so ownership is verified and the move applied atomically in a
+// single statement — closing the check-then-write race where a separate
+// lookup-then-write could promote a memory that moved to a different
+// project between the check and the write. As a side effect, promoting an
+// already-global memory (project_id = '_global') also fails this ownership
+// match, which is desired: re-promotion is a no-op, not a silent success.
+func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -667,8 +681,8 @@ func (s *Store) PromoteToGlobal(ctx context.Context, id string) error {
 
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE memories SET project_id = '_global', updated_at = datetime('now')
-		WHERE id = ?
-	`, id)
+		WHERE id = ? AND project_id = ?
+	`, id, projectID)
 	if err != nil {
 		return fmt.Errorf("promote memory: %w", err)
 	}
@@ -677,7 +691,7 @@ func (s *Store) PromoteToGlobal(ctx context.Context, id string) error {
 		return fmt.Errorf("promote memory rows: %w", err)
 	}
 	if n == 0 {
-		return fmt.Errorf("memory %s not found", id)
+		return fmt.Errorf("memory %s not found in project %s", id, projectID)
 	}
 	return nil
 }

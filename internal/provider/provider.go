@@ -22,7 +22,8 @@ type MemoryStore interface {
 	Create(ctx context.Context, projectID string, m memory.Memory) (string, error)
 	Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (string, bool, error)
 	Delete(ctx context.Context, id string) error
-	UpdateMemory(ctx context.Context, id string, content, category *string, importance *float32, tags []string) error
+	UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error
+	PromoteToGlobal(ctx context.Context, projectID, id string) error
 
 	// Queries
 	GetTopMemories(ctx context.Context, projectID string, limit int) ([]memory.Memory, error)
