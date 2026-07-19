@@ -139,6 +139,8 @@ func runHook() {
 	switch os.Args[2] {
 	case "session-start":
 		mcpinit.HandleSessionStartHook(os.Stdin, os.Stdout)
+	case "stop":
+		mcpinit.HandleStopHook(os.Stdin, os.Stdout)
 	}
 }
 

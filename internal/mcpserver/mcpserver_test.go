@@ -727,6 +727,151 @@ func TestDefaultImportance(t *testing.T) {
 	}
 }
 
+func testServer(t *testing.T) *Server {
+	t.Helper()
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	return &Server{store: store, logger: logger}
+}
+
+func TestApplyMemoryUpdate(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+
+	id, err := srv.store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "original", Source: "mcp", Importance: 0.7, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	t.Run("updates content and reports changed fields", func(t *testing.T) {
+		msg, err := srv.applyMemoryUpdate(ctx, updateArgs{
+			ProjectID: "test-project", MemoryID: id, Content: "corrected",
+		})
+		if err != nil {
+			t.Fatalf("applyMemoryUpdate: %v", err)
+		}
+		if !strings.Contains(msg, "content") {
+			t.Errorf("message should name changed field, got %q", msg)
+		}
+		mems, _ := srv.store.GetByIDs(ctx, []string{id})
+		if mems[0].Content != "corrected" {
+			t.Errorf("content = %q, want corrected", mems[0].Content)
+		}
+	})
+
+	t.Run("rejects wrong project", func(t *testing.T) {
+		if err := srv.store.EnsureProject(ctx, "other", "/tmp/other", "other"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+			ProjectID: "other", MemoryID: id, Content: "hijack",
+		})
+		if err == nil {
+			t.Error("expected ownership rejection")
+		}
+		mems, _ := srv.store.GetByIDs(ctx, []string{id})
+		if mems[0].Content == "hijack" {
+			t.Error("content must be unchanged after rejected cross-project update")
+		}
+	})
+
+	t.Run("rejects unknown memory", func(t *testing.T) {
+		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+			ProjectID: "test-project", MemoryID: "nope", Content: "x",
+		})
+		if err == nil {
+			t.Error("expected not-found error")
+		}
+	})
+
+	t.Run("rejects invalid category", func(t *testing.T) {
+		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+			ProjectID: "test-project", MemoryID: id, Category: "bogus",
+		})
+		if err == nil {
+			t.Error("expected invalid-category error")
+		}
+	})
+
+	t.Run("rejects empty update", func(t *testing.T) {
+		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+			ProjectID: "test-project", MemoryID: id,
+		})
+		if err == nil {
+			t.Error("expected nothing-to-update error")
+		}
+	})
+
+	t.Run("clamps importance", func(t *testing.T) {
+		imp := float32(4.2)
+		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+			ProjectID: "test-project", MemoryID: id, Importance: &imp,
+		})
+		if err != nil {
+			t.Fatalf("applyMemoryUpdate: %v", err)
+		}
+		mems, _ := srv.store.GetByIDs(ctx, []string{id})
+		if mems[0].Importance > 1.0 {
+			t.Errorf("importance should clamp to 1.0, got %f", mems[0].Importance)
+		}
+	})
+}
+
+func TestPromoteMemory(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+
+	id, err := srv.store.Create(ctx, "abc123", memory.Memory{
+		Category: "preference", Content: "tabs never spaces", Source: "mcp", Importance: 0.8, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	t.Run("rejects wrong project", func(t *testing.T) {
+		if err := srv.store.EnsureProject(ctx, "other", "/tmp/other2", "other"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		if _, err := srv.promoteMemory(ctx, "other", id); err == nil {
+			t.Error("expected ownership rejection")
+		}
+	})
+
+	t.Run("promotes and then rejects re-promotion", func(t *testing.T) {
+		msg, err := srv.promoteMemory(ctx, "test-project", id)
+		if err != nil {
+			t.Fatalf("promoteMemory: %v", err)
+		}
+		if !strings.Contains(msg, "global") {
+			t.Errorf("message should mention global, got %q", msg)
+		}
+		mems, _ := srv.store.GetByIDs(ctx, []string{id})
+		if mems[0].ProjectID != "_global" {
+			t.Errorf("project = %q, want _global", mems[0].ProjectID)
+		}
+		if _, err := srv.promoteMemory(ctx, "test-project", id); err == nil {
+			t.Error("expected already-global rejection")
+		}
+	})
+
+	t.Run("rejects unknown memory", func(t *testing.T) {
+		if _, err := srv.promoteMemory(ctx, "test-project", "nope"); err == nil {
+			t.Error("expected not-found error")
+		}
+	})
+
+	t.Run("rejects missing args", func(t *testing.T) {
+		if _, err := srv.promoteMemory(ctx, "", id); err == nil {
+			t.Error("expected missing project_id error")
+		}
+		if _, err := srv.promoteMemory(ctx, "test-project", ""); err == nil {
+			t.Error("expected missing memory_id error")
+		}
+	})
+}
+
 func TestTruncateUTF8(t *testing.T) {
 	tests := []struct {
 		in       string

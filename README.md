@@ -177,11 +177,11 @@ ghost obsidian sync --interval 30s                   # keep it fresh
 
 ## MCP surface
 
-16 tools, 4 resources:
+18 tools, 4 resources:
 
 | Group | Tools |
 |---|---|
-| Memory | `ghost_memory_save` `ghost_memory_search` `ghost_search_all` `ghost_memories_list` `ghost_memory_delete` `ghost_memory_pin` `ghost_save_global` |
+| Memory | `ghost_memory_save` `ghost_memory_search` `ghost_search_all` `ghost_memories_list` `ghost_memory_update` `ghost_memory_delete` `ghost_memory_pin` `ghost_memory_promote` `ghost_save_global` |
 | Context | `ghost_project_context` `ghost_list_projects` `ghost_health` |
 | Tasks | `ghost_task_create` `ghost_task_list` `ghost_task_update` `ghost_task_complete` |
 | Decisions | `ghost_decision_record` `ghost_decisions_list` |
@@ -197,6 +197,7 @@ ghost mcp                    # Run MCP server on stdio (used by your MCP client)
 ghost mcp init [--dry-run]   # Configure Claude Code integration
 ghost mcp status             # Deep health checks (incl. Ollama reachability, model presence)
 ghost hook session-start     # SessionStart hook — prints exactly what gets injected
+ghost hook stop              # Stop hook — blocks stop once if a tool-using session saved nothing
 ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
 ghost supersede <project>    # Link superseded memories (dry-run by default; --apply, --threshold)
 ghost bench [--sweep]        # Retrieval-quality benchmark on the built-in dataset
