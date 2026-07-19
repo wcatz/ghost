@@ -581,6 +581,73 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// UpdateMemory applies a partial update to a memory. Nil content/category/
+// importance preserve current values; a non-nil tags slice replaces the tag
+// list (pass an empty slice to clear). Source and pinned are never touched.
+// When the content changes, the embedding and link-scan rows are deleted in
+// the same transaction so the background workers re-embed and re-link the
+// memory; FTS needs nothing — the memories_au trigger re-syncs it.
+func (s *Store) UpdateMemory(ctx context.Context, id string, content, category *string, importance *float32, tags []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var curContent, curCategory, curTags string
+	var curImportance float32
+	err = tx.QueryRowContext(ctx,
+		`SELECT content, category, importance, tags FROM memories WHERE id = ?`, id,
+	).Scan(&curContent, &curCategory, &curImportance, &curTags)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("memory %s not found", id)
+	}
+	if err != nil {
+		return fmt.Errorf("lookup memory: %w", err)
+	}
+
+	newContent, newCategory, newImportance, newTags := curContent, curCategory, curImportance, curTags
+	if content != nil {
+		newContent = *content
+	}
+	if category != nil {
+		newCategory = *category
+	}
+	if importance != nil {
+		newImportance = *importance
+	}
+	if tags != nil {
+		b, mErr := json.Marshal(tags)
+		if mErr != nil {
+			return fmt.Errorf("marshal tags: %w", mErr)
+		}
+		newTags = string(b)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE memories
+		SET content = ?, category = ?, importance = ?, tags = ?, updated_at = datetime('now')
+		WHERE id = ?
+	`, newContent, newCategory, newImportance, newTags, id); err != nil {
+		return fmt.Errorf("update memory: %w", err)
+	}
+
+	if newContent != curContent {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM memory_embeddings WHERE memory_id = ?`, id); err != nil {
+			return fmt.Errorf("invalidate embedding: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM link_scans WHERE memory_id = ?`, id); err != nil {
+			return fmt.Errorf("invalidate link scan: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
 // TogglePin sets or clears the pinned flag.
 func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 	s.mu.Lock()

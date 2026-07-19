@@ -1622,6 +1622,138 @@ func TestEnsureProject_EmptyPath_NoUniqueConflict(t *testing.T) {
 	}
 }
 
+func TestStoreUpdateMemory(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	newID := func(t *testing.T) string {
+		t.Helper()
+		id, err := s.Create(ctx, testProject, Memory{
+			Category:   "fact",
+			Content:    "Original content about the deploy pipeline",
+			Source:     "mcp",
+			Importance: 0.7,
+			Tags:       []string{"deploy"},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return id
+	}
+
+	getOne := func(t *testing.T, id string) Memory {
+		t.Helper()
+		mems, err := s.GetByIDs(ctx, []string{id})
+		if err != nil || len(mems) != 1 {
+			t.Fatalf("GetByIDs(%s): %v (n=%d)", id, err, len(mems))
+		}
+		return mems[0]
+	}
+
+	t.Run("content only, others preserved", func(t *testing.T) {
+		id := newID(t)
+		content := "Corrected content about the deploy pipeline"
+		if err := s.UpdateMemory(ctx, id, &content, nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory: %v", err)
+		}
+		m := getOne(t, id)
+		if m.Content != content {
+			t.Errorf("content = %q, want %q", m.Content, content)
+		}
+		if m.Category != "fact" || m.Importance != 0.7 || m.Source != "mcp" {
+			t.Errorf("unchanged fields clobbered: category=%q importance=%f source=%q",
+				m.Category, m.Importance, m.Source)
+		}
+		if len(m.Tags) != 1 || m.Tags[0] != "deploy" {
+			t.Errorf("tags clobbered: %v", m.Tags)
+		}
+	})
+
+	t.Run("category and importance", func(t *testing.T) {
+		id := newID(t)
+		cat := "gotcha"
+		imp := float32(0.9)
+		if err := s.UpdateMemory(ctx, id, nil, &cat, &imp, nil); err != nil {
+			t.Fatalf("UpdateMemory: %v", err)
+		}
+		m := getOne(t, id)
+		if m.Category != "gotcha" || m.Importance != 0.9 {
+			t.Errorf("category=%q importance=%f, want gotcha/0.9", m.Category, m.Importance)
+		}
+		if m.Content != "Original content about the deploy pipeline" {
+			t.Errorf("content clobbered: %q", m.Content)
+		}
+	})
+
+	t.Run("nil tags preserve, empty tags clear", func(t *testing.T) {
+		id := newID(t)
+		imp := float32(0.5)
+		if err := s.UpdateMemory(ctx, id, nil, nil, &imp, nil); err != nil {
+			t.Fatalf("UpdateMemory (nil tags): %v", err)
+		}
+		if m := getOne(t, id); len(m.Tags) != 1 {
+			t.Errorf("nil tags should preserve, got %v", m.Tags)
+		}
+		if err := s.UpdateMemory(ctx, id, nil, nil, nil, []string{}); err != nil {
+			t.Fatalf("UpdateMemory (empty tags): %v", err)
+		}
+		if m := getOne(t, id); len(m.Tags) != 0 {
+			t.Errorf("empty tags should clear, got %v", m.Tags)
+		}
+	})
+
+	t.Run("content change invalidates embedding and link scan", func(t *testing.T) {
+		id := newID(t)
+		vec := make([]float32, 8)
+		vec[0] = 1
+		if err := s.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
+		if err := s.MarkLinkScanned(ctx, id); err != nil {
+			t.Fatalf("MarkLinkScanned: %v", err)
+		}
+		content := "Entirely rewritten content"
+		if err := s.UpdateMemory(ctx, id, &content, nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory: %v", err)
+		}
+		if _, err := s.GetEmbedding(ctx, id); err == nil {
+			t.Error("embedding should be deleted after content change")
+		}
+		var n int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM link_scans WHERE memory_id = ?`, id).Scan(&n); err != nil {
+			t.Fatalf("count link_scans: %v", err)
+		}
+		if n != 0 {
+			t.Error("link_scans row should be deleted after content change")
+		}
+	})
+
+	t.Run("non-content change keeps embedding", func(t *testing.T) {
+		id := newID(t)
+		vec := make([]float32, 8)
+		vec[0] = 1
+		if err := s.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
+		imp := float32(0.4)
+		if err := s.UpdateMemory(ctx, id, nil, nil, &imp, nil); err != nil {
+			t.Fatalf("UpdateMemory: %v", err)
+		}
+		if _, err := s.GetEmbedding(ctx, id); err != nil {
+			t.Error("embedding should survive a non-content update")
+		}
+	})
+
+	t.Run("unknown id errors", func(t *testing.T) {
+		content := "x"
+		err := s.UpdateMemory(ctx, "does-not-exist", &content, nil, nil, nil)
+		if err == nil {
+			t.Error("expected error for unknown memory id")
+		}
+	})
+}
+
 func TestEnsureProject_AutoMerge(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
