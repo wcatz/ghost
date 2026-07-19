@@ -49,6 +49,10 @@ docker run -i -e XDG_DATA_HOME=/data -v ghost-data:/data \
   -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/wcatz/ghost:latest reflect myproject --apply
 ```
 
+## Why not just use built-in memory?
+
+ChatGPT, Claude, Gemini, and Copilot all ship native memory now — but each one is walled off inside its own product. Nothing you teach ChatGPT carries over to Claude Code, and nothing Claude Code learns carries over to Cursor or Goose. Ghost's bet isn't "better than any single one of those" — it's *one* memory, across every MCP client, that lives on your own disk: a local SQLite file you can query, back up, and delete, instead of a separate silo per product. See [Why Ghost?](#why-ghost) below for the specific comparison against Claude Code's built-in memory.
+
 ## Why Ghost?
 
 Coding agents forget everything between sessions. You re-explain your architecture, your conventions, and that one gotcha with the staging database — every single day.
