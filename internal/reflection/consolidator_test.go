@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -235,7 +236,10 @@ func TestParseReflectionResponse_NormalizesScope(t *testing.T) {
 		{"category":"fact","content":"bad scope","importance":0.6,"tags":[],"scope":"invalid"}
 	]}`
 
-	result := parseReflectionResponse(input)
+	result, err := parseReflectionResponse(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if result.Memories[0].Scope != "global" {
 		t.Errorf("expected global scope preserved, got %q", result.Memories[0].Scope)
 	}
@@ -244,6 +248,54 @@ func TestParseReflectionResponse_NormalizesScope(t *testing.T) {
 	}
 	if result.Memories[2].Scope != "project" {
 		t.Errorf("expected invalid scope normalized to project, got %q", result.Memories[2].Scope)
+	}
+}
+
+// TestParseReflectionResponse_MalformedJSON: unparseable output (e.g. a
+// response truncated mid-JSON) must surface as an error — the old fallback
+// returned it as learned_context with zero memories, which the tiered quality
+// gate misread as "consolidated everything away" with no hint of the cause.
+func TestParseReflectionResponse_MalformedJSON(t *testing.T) {
+	truncated := `{"learned_context":"ctx","memories":[{"category":"fact","content":"cut off mid-obj`
+	if _, err := parseReflectionResponse(truncated); err == nil {
+		t.Fatal("expected error for truncated JSON, got nil")
+	}
+
+	prose := "I could not produce JSON, here is a summary instead."
+	if _, err := parseReflectionResponse(prose); err == nil {
+		t.Fatal("expected error for non-JSON prose, got nil")
+	}
+}
+
+// TestParseReflectionResponse_StripsFences: fenced JSON still parses.
+func TestParseReflectionResponse_StripsFences(t *testing.T) {
+	fenced := "```json\n{\"learned_context\":\"ctx\",\"memories\":[{\"category\":\"fact\",\"content\":\"ok\",\"importance\":0.7,\"tags\":[\"a\"]}]}\n```"
+	result, err := parseReflectionResponse(fenced)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result.Memories) != 1 || result.Memories[0].Content != "ok" {
+		t.Fatalf("fenced JSON not parsed: %+v", result)
+	}
+}
+
+// TestBuildReflectionPrompt_IncludesTags: existing tags must be serialized with
+// their memory. Omitting them forced the LLM to invent fresh tags for every
+// memory, cross-assigning keywords from unrelated memories in the corpus.
+func TestBuildReflectionPrompt_IncludesTags(t *testing.T) {
+	prompt := BuildReflectionPrompt(ReflectionInput{
+		ProjectName:     "ghost",
+		ProjectLanguage: "go",
+		ExistingMemories: []memory.Memory{
+			{Category: "fact", Content: "obsidian mirror is one-way", Importance: 0.7, Tags: []string{"obsidian", "vault"}},
+			{Category: "gotcha", Content: "no tags on this one", Importance: 0.5},
+		},
+	})
+	if !strings.Contains(prompt, "tags:[obsidian,vault]") {
+		t.Errorf("prompt missing serialized tags:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "keep its existing tags") {
+		t.Errorf("prompt missing tag-preservation rule")
 	}
 }
 

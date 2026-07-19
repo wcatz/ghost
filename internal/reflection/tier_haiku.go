@@ -3,6 +3,7 @@ package reflection
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/wcatz/ghost/internal/ai"
@@ -36,10 +37,10 @@ func (h *HaikuConsolidator) Consolidate(ctx context.Context, input ReflectionInp
 	if err != nil {
 		return ReflectionResult{}, err
 	}
-	return parseReflectionResponse(responseText), nil
+	return parseReflectionResponse(responseText)
 }
 
-func parseReflectionResponse(text string) ReflectionResult {
+func parseReflectionResponse(text string) (ReflectionResult, error) {
 	text = strings.TrimSpace(text)
 
 	// Strip markdown code fences.
@@ -53,9 +54,17 @@ func parseReflectionResponse(text string) ReflectionResult {
 		text = strings.TrimSpace(text)
 	}
 
+	// Unparseable output is an error, not a result: the old fallback returned
+	// the raw text as learned_context with ZERO memories, which read as "the
+	// model consolidated everything away" — the tiered quality gate then fell
+	// through to sqlite with no hint of the real cause (truncated/malformed JSON).
 	var result ReflectionResult
 	if err := json.Unmarshal([]byte(text), &result); err != nil {
-		return ReflectionResult{LearnedContext: text}
+		snippet := text
+		if len(snippet) > 120 {
+			snippet = snippet[:120] + "..."
+		}
+		return ReflectionResult{}, fmt.Errorf("reflection output is not valid JSON: %w (starts: %q)", err, snippet)
 	}
 
 	// Validate importance ranges and scope.
@@ -74,5 +83,5 @@ func parseReflectionResponse(text string) ReflectionResult {
 		}
 	}
 
-	return result
+	return result, nil
 }
