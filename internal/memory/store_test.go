@@ -117,6 +117,112 @@ func TestStoreUpsert(t *testing.T) {
 	}
 }
 
+func TestStoreUpsertNoMergeOnSharedWord(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Two unrelated same-category memories sharing a single common word
+	// ("Phase"). Reproduces the 2026-07-19 live bug: the FTS OR-probe alone
+	// treated any one-word overlap as a duplicate and silently swallowed
+	// the second save.
+	id1, merged, err := s.Upsert(ctx, testProject, "decision",
+		"Benchmark strategy decided: Phase one is LongMemEval retrieval eval with ablations",
+		"mcp", 0.8, nil)
+	if err != nil {
+		t.Fatalf("Upsert (first): %v", err)
+	}
+	if merged {
+		t.Error("first Upsert should not merge")
+	}
+
+	id2, merged, err := s.Upsert(ctx, testProject, "decision",
+		"MCP Phase two design approved: memory update tool, stop hook, promote to global",
+		"mcp", 0.8, nil)
+	if err != nil {
+		t.Fatalf("Upsert (second): %v", err)
+	}
+	if merged {
+		t.Error("unrelated content sharing one word must not merge")
+	}
+	if id2 == id1 {
+		t.Error("second Upsert should have created a distinct memory")
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 memories, got %d", len(all))
+	}
+}
+
+func TestStoreUpsertNoMergeBelowThreshold(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Same topic vocabulary but genuinely different facts: token overlap is
+	// real yet below the 0.5 Jaccard gate, so both must survive.
+	_, _, err := s.Upsert(ctx, testProject, "gotcha",
+		"SQLite busy timeout must be set on the read-only hook connection",
+		"mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (first): %v", err)
+	}
+
+	_, merged, err := s.Upsert(ctx, testProject, "gotcha",
+		"SQLite FTS5 rank ordering is unstable across identical RRF scores in hybrid search",
+		"mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (second): %v", err)
+	}
+	if merged {
+		t.Error("below-threshold overlap must not merge")
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 memories, got %d", len(all))
+	}
+}
+
+func TestStoreUpsertMergesBestCandidate(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Two existing memories; the new content shares one word with A but is a
+	// near-duplicate of B. It must merge into B, not the first FTS hit.
+	_, _, err := s.Upsert(ctx, testProject, "fact",
+		"Deployment pipeline uses GitHub Actions runners on the cluster",
+		"mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (A): %v", err)
+	}
+
+	idB, _, err := s.Upsert(ctx, testProject, "fact",
+		"Ollama embedding worker sweeps unembedded memories every two minutes",
+		"mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (B): %v", err)
+	}
+
+	idNew, merged, err := s.Upsert(ctx, testProject, "fact",
+		"Ollama embedding worker sweeps the unembedded memories every two minutes for cluster projects",
+		"mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (near-dup of B): %v", err)
+	}
+	if !merged {
+		t.Fatal("near-duplicate of B should merge")
+	}
+	if idNew != idB {
+		t.Errorf("should merge into B (%s), merged into %s", idB, idNew)
+	}
+}
+
 func TestStoreUpsertImportanceCap(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
