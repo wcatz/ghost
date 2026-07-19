@@ -31,9 +31,13 @@ func NewClient(apiKey string, logger *slog.Logger) *Client {
 
 // Reflect calls Haiku (non-streaming) for memory extraction/reflection.
 func (c *Client) Reflect(ctx context.Context, prompt string) (string, TokenUsage, error) {
+	// 8192, not 2000: reflection returns the COMPLETE consolidated memory set
+	// as one JSON object (10-25 memories plus learned_context). At 2000 the
+	// response truncated mid-JSON on any real corpus, which parsed to zero
+	// memories and silently knocked the haiku tier out of every consolidation.
 	reqBody := apiRequest{
 		Model:     ModelHaiku45,
-		MaxTokens: 2000,
+		MaxTokens: 8192,
 		System: []SystemBlock{
 			CachedBlock("You analyze a software developer's coding patterns and produce structured memory output. You must return ONLY valid JSON — no markdown fences, no extra text. Be specific and actionable."),
 		},
@@ -73,7 +77,8 @@ func (c *Client) Reflect(ctx context.Context, prompt string) (string, TokenUsage
 		Content []struct {
 			Text string `json:"text"`
 		} `json:"content"`
-		Usage struct {
+		StopReason string `json:"stop_reason"`
+		Usage      struct {
 			InputTokens  int `json:"input_tokens"`
 			OutputTokens int `json:"output_tokens"`
 		} `json:"usage"`
@@ -90,6 +95,13 @@ func (c *Client) Reflect(ctx context.Context, prompt string) (string, TokenUsage
 	usage := TokenUsage{
 		InputTokens:  result.Usage.InputTokens,
 		OutputTokens: result.Usage.OutputTokens,
+	}
+
+	// A max_tokens stop means the JSON was cut mid-object — unparseable at
+	// best, silently incomplete at worst. Fail loudly so the tiered
+	// consolidator logs the real reason instead of "returned 0 memories".
+	if result.StopReason == "max_tokens" {
+		return "", usage, fmt.Errorf("reflect response truncated at max_tokens (%d output tokens) — memory set incomplete", usage.OutputTokens)
 	}
 
 	return text, usage, nil
