@@ -130,14 +130,43 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		Name:    "ghost",
 		Version: version,
 	}, &mcp.ServerOptions{
-		Instructions: mcpInstructions,
-		Logger:       logger,
+		Instructions:       mcpInstructions,
+		Logger:             logger,
+		SubscribeHandler:   s.handleSubscribe,
+		UnsubscribeHandler: s.handleUnsubscribe,
 	})
 
 	s.registerTools()
 	s.registerResources()
 	s.registerPrompts()
 	return s
+}
+
+// handleSubscribe validates that a client is subscribing to a known ghost://
+// resource or resource-template URI before the SDK starts tracking it.
+func (s *Server) handleSubscribe(ctx context.Context, req *mcp.SubscribeRequest) error {
+	if !strings.HasPrefix(req.Params.URI, "ghost://") {
+		return fmt.Errorf("unknown resource URI: %s", req.Params.URI)
+	}
+	return nil
+}
+
+// handleUnsubscribe accepts any unsubscribe request — the SDK already tracks
+// whether the session was subscribed and no-ops otherwise.
+func (s *Server) handleUnsubscribe(ctx context.Context, req *mcp.UnsubscribeRequest) error {
+	return nil
+}
+
+// notifyResourceUpdated sends a notifications/resources/updated push to any
+// MCP client subscribed to uri. Best-effort: logged, never fails the caller's
+// tool call.
+func (s *Server) notifyResourceUpdated(ctx context.Context, uri string) {
+	if s.mcp == nil {
+		return
+	}
+	if err := s.mcp.ResourceUpdated(ctx, &mcp.ResourceUpdatedNotificationParams{URI: uri}); err != nil {
+		s.logger.Warn("resource updated notification failed", "uri", uri, "error", err)
+	}
 }
 
 // SetEmbedder configures optional vector embedding for hybrid search.
@@ -257,6 +286,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, args updateArgs) (string
 	if err := s.store.UpdateMemory(ctx, resolvedProjectID, args.MemoryID, content, category, args.Importance, args.Tags); err != nil {
 		return "", fmt.Errorf("update failed: %w", err)
 	}
+	s.notifyResourceUpdated(ctx, "ghost://project/"+resolvedProjectID+"/context")
 
 	// A content change dropped the embedding — nudge the worker to re-embed.
 	if content != nil && s.projectCh != nil {
@@ -299,6 +329,8 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	if err := s.store.PromoteToGlobal(ctx, resolvedProjectID, memoryID); err != nil {
 		return "", fmt.Errorf("promote failed: %w", err)
 	}
+	s.notifyResourceUpdated(ctx, "ghost://project/"+resolvedProjectID+"/context")
+	s.notifyResourceUpdated(ctx, "ghost://memories/global")
 	return fmt.Sprintf("Memory promoted to global scope (id: %s).", memoryID), nil
 }
 
@@ -425,6 +457,7 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
+		s.notifyResourceUpdated(ctx, "ghost://project/"+args.ProjectID+"/context")
 
 		// Notify embedding worker of new/updated memory.
 		if s.projectCh != nil {
@@ -601,6 +634,7 @@ func (s *Server) registerTools() {
 		if err := s.store.Delete(ctx, args.MemoryID); err != nil {
 			return nil, nil, fmt.Errorf("delete failed: %w", err)
 		}
+		s.notifyResourceUpdated(ctx, "ghost://project/"+resolvedProjectID+"/context")
 
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Memory deleted."}},
@@ -742,6 +776,7 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
+		s.notifyResourceUpdated(ctx, "ghost://memories/global")
 		action := "saved"
 		if merged {
 			action = "merged with existing"
@@ -789,6 +824,7 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("create task: %w", err)
 		}
+		s.notifyResourceUpdated(ctx, "ghost://project/"+args.ProjectID+"/tasks")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Task created (id: %s)", id)}},
 		}, nil, nil
@@ -860,9 +896,14 @@ func (s *Server) registerTools() {
 		if args.TaskID == "" {
 			return nil, nil, fmt.Errorf("task_id is required")
 		}
+		task, err := s.store.GetTask(ctx, args.TaskID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("task not found: %w", err)
+		}
 		if err := s.store.CompleteTask(ctx, args.TaskID, args.Notes); err != nil {
 			return nil, nil, fmt.Errorf("complete task: %w", err)
 		}
+		s.notifyResourceUpdated(ctx, "ghost://project/"+task.ProjectID+"/tasks")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Task completed."}},
 		}, nil, nil
@@ -911,6 +952,7 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
+		s.notifyResourceUpdated(ctx, "ghost://project/"+args.ProjectID+"/decisions")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Decision recorded (id: %s)", id)}},
 		}, nil, nil
@@ -1031,6 +1073,9 @@ func (s *Server) registerTools() {
 		if err := s.store.TogglePin(ctx, args.MemoryID, args.Pinned); err != nil {
 			return nil, nil, fmt.Errorf("toggle pin: %w", err)
 		}
+		if mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID}); err == nil && len(mems) > 0 {
+			s.notifyResourceUpdated(ctx, "ghost://project/"+mems[0].ProjectID+"/context")
+		}
 		action := "pinned"
 		if !args.Pinned {
 			action = "unpinned"
@@ -1098,6 +1143,7 @@ func (s *Server) registerTools() {
 		if err := s.store.UpdateTask(ctx, current.ID, status, priority, description); err != nil {
 			return nil, nil, fmt.Errorf("update task: %w", err)
 		}
+		s.notifyResourceUpdated(ctx, "ghost://project/"+current.ProjectID+"/tasks")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Task updated."}},
 		}, nil, nil
