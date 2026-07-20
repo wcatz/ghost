@@ -1,4 +1,4 @@
-# Graph-Expansion Stays Off — Decision & Reproducible Diagnostic
+# Remove Graph-Expansion Ranking Bonus — Decision & Cleanup
 
 **Date:** 2026-07-20
 **Status:** Design (pending implementation)
@@ -7,227 +7,117 @@
 ## Summary
 
 Ghost's link-graph expansion ranking bonus ships disabled
-(`DefaultSearchParams().GraphWeight = 0`). This spec makes that a
-**documented, evidence-backed decision** rather than an unexplained default,
-and ships a **reproducible public diagnostic** that anyone can re-run to
-confirm — or falsify — the decision.
+(`DefaultSearchParams().GraphWeight = 0`). It was evaluated against public
+multi-session retrieval data (LongMemEval-S) and lost cleanly to the cheaper
+alternative of simply retrieving deeper (a larger vector `k`). We are not going
+to revisit it.
 
-The bonus was evaluated against public multi-session retrieval data and lost
-cleanly to the cheaper alternative of simply retrieving deeper (larger vector
-`k`). This spec does **not** design a new graph mechanism: the kill experiment
-returned no-go, so there is nothing downstream to build.
+This spec therefore **removes the dead machinery** rather than documenting a
+default nobody will change or maintaining a harness to re-litigate a settled
+question. It leaves a short rationale in its place so the decision is legible
+and no one re-adds the mechanism blindly.
 
-## Background
+## Why remove instead of document-and-keep
 
-Graph expansion injects the link-graph neighbors of the top retrieval seeds
-into the result set with an additive, strength-scaled bonus and **no
-query-relevance gate**. It is controlled by `GraphWeight`, `GraphSeeds` (3),
-`GraphHops` (2). Links are built by the background linking worker
-(`internal/linking`), which connects each embedded memory to its top-6 cosine
-neighbors at similarity `>= 0.70`.
+The instinct to keep a "reproducible diagnostic + falsification condition"
+assumes the decision might flip on new data. It won't, because the reason it
+loses is **structural, not a benchmark artifact**:
 
-The in-repo `ghost bench` dataset (22 memories) cannot test graph expansion:
-it produces only ~2 links and only ~2 golds ever fall out of base top-10. Any
-conclusion drawn from it is an artifact of dataset size. The honest test needs
-a corpus with genuine multi-session evidence chains — which is exactly what
-the public LongMemEval-S benchmark already provides, and which Ghost already
-ingests in `bench/longmemeval`.
+- Links are built from cosine similarity (the linking worker connects each
+  memory to its top cosine neighbors ≥ 0.70).
+- The hybrid searcher's vector leg is *also* cosine.
+- So graph expansion — "pull in the cosine-neighbors of the top seeds" — is an
+  approximation of "retrieve more cosine-neighbors of the query," i.e. a larger
+  `k`. Deeper-`k` reaches a superset of what graph reaches, more cheaply.
 
-### Benchmark data policy
+A kill experiment on public LongMemEval-S multi-session haystacks confirmed
+this empirically: graph's recoveries were a strict subset of deeper-`k`'s, and
+at production retrieval depth base search already surfaced every answer session
+(zero headroom for any intervention). Full findings are recorded in the Ghost
+decision record and the commit message; they are not reproduced here because
+the code that produced them is being removed.
 
-All CI regression gating already runs on public data: the `longmemeval`
-workflow downloads `xiaowu0162/longmemeval-cleaned` from HuggingFace and gates
-on metric floors (`fts r5=0.74,ndcg10=0.72`; `hybrid r5=0.91,ndcg10=0.89`).
-The synthetic 22-row `internal/bench` dataset is **not** CI-gated — it is a
-local-only report harness. Its content is hand-authored synthetic
-Cardano/Ghost-domain text (public knowledge, e.g. "cardano-node listens on TCP
-3001"), not private infrastructure data.
+Since the conclusion follows from the architecture, a permanent re-runnable
+diagnostic earns nothing — it would only re-derive a fact the design already
+implies. YAGNI applies: delete the dead lever, keep a note.
 
-Policy, affirmed by this spec: **LongMemEval-S is the authoritative public
-benchmark for retrieval quality.** The synthetic `internal/bench` harness is
-**kept as a clearly-labeled supplementary local-only tool** for the
-time-decay signals LongMemEval cannot exercise — the staleness and
-recency-trap suites, which depend on controlled timestamps and superseded
-facts that a public QA corpus does not provide. Removing it would lose that
-regression coverage with no public replacement, so it stays; the relabeling is
-documentation-only.
+## What is dead vs. load-bearing
 
-## The decision bar
+Verified by tracing consumers across the codebase.
 
-The relevant comparison is **not** `graph=0` vs `graph-on`. Links are built
-from cosine similarity, and the hybrid searcher's vector leg is *also* cosine.
-So graph expansion — "pull in cosine-neighbors of the seeds" — is structurally
-an approximation of "retrieve more cosine-neighbors of the query," i.e. a
-larger `k`. The bar graph must clear is therefore:
+**Dead — only ever fed the disabled bonus, safe to remove:**
 
-> **graph-on must recover relevant results that `graph=0` with a deeper
-> vector-`k` does not.**
+- `Store.GraphNeighbors` and the `GraphNeighbor` struct
+  (`internal/memory/links.go`). Sole consumer is `applyGraphBonus`, inside the
+  `GraphWeight > 0` guard that never fires in production.
+- `SearchParams.GraphWeight` / `GraphSeeds` / `GraphHops` fields and their
+  defaults (`internal/memory/vector.go`).
+- `Store.applyGraphBonus` and the `if p.GraphWeight > 0 && p.GraphSeeds > 0`
+  block in `fuseAndRank` (`internal/memory/vector.go`).
+- The graph-ablation arm in the synthetic bench harness: `candidateGraphWeight`
+  and `pGraph` in `internal/bench/runner.go`, the `GraphWeight` grid in
+  `internal/bench/sweep.go`, and `internal/bench/graph_test.go`.
 
-If deeper-`k` recovers everything graph recovers, graph is a strictly more
-expensive way to get a strict subset — and it stays off.
+**Load-bearing — must NOT be touched:**
 
-## Why only cross-session links can matter
+- The linking worker (`internal/linking`) and the `'related'` links it builds.
+  They also feed the **Obsidian vault graph** — `obsidian/export.go` renders a
+  memory's links into its note (`GetLinks` → `renderMemory`). Removing the
+  worker would degrade a shipped feature.
+- The `memory_links` table, `CreateLink` / `GetLinks` / `InvalidateLink`.
+- The entire `supersedes` machinery — `SupersedesWithin`, `demoteSuperseded`,
+  `ghost supersede`, the staleness suite. It is independent of the graph bonus
+  and drives real ranking demotion.
 
-LongMemEval labels are **session-level** (`answer_session_ids`), not
-memory-level. A multi-session question's evidence spans several sessions;
-"recall" means surfacing those answer *sessions*.
+The removal is surgical: only the graph-*bonus* traversal and its parameters
+go. The link graph itself stays, because other features depend on it.
 
-This makes the mechanism's necessary condition precise. If a starved base
-retrieves memories from session S1 but misses answer sessions S2/S3, graph
-can only help if some S2/S3 memory is linked to a *retrieved* S1 memory — a
-**cross-session** link. Intra-session links (turns within one already-retrieved
-session) are inert: expanding into more S1 memories recovers a session already
-counted. So the fraction of cross-session links is not decorative color — it is
-the precondition for graph to move the metric at all, and measuring it is what
-makes a null result *diagnosable* ("no bridge links form" vs "they form but
-deeper-`k` dominates").
+## The mention that stays
 
-## Evidence (preliminary probe)
+1. **`SearchParams` / `DefaultSearchParams`** (`internal/memory/vector.go`):
+   the current multi-line `GraphWeight` comment is replaced by a one- or
+   two-line note at the top of `DefaultSearchParams` (or the type doc):
+   *"A link-graph expansion bonus was evaluated and removed — it was
+   structurally dominated by a deeper vector-`k` (links and the vector leg are
+   both cosine). The link graph is retained for Obsidian export and supersedes
+   ranking. See docs/architecture.md."*
+2. **`docs/architecture.md`** (and the existing `memory_links` line in
+   `CLAUDE.md`, updated in a follow-up): one paragraph recording that graph
+   expansion was evaluated against public LongMemEval-S and removed as dominated
+   by deeper-`k`, and that the link graph now serves only Obsidian export and
+   supersedes.
+3. **The commit message** carries the empirical kill-experiment numbers for the
+   git record; the Ghost decision record (`AD0310468A0E17128E3FED6AA941CDE2`,
+   already updated) is the durable home for the reasoning.
 
-A throwaway probe over **15** multi-session haystacks (~489 memories each,
-threshold 0.70, embeddings from the cached `nomic-embed-text:v1.5` run)
-produced three independently decisive results. The committed diagnostic
-(below) regenerates these over the full 133-question set; those become the
-authoritative numbers in this doc.
+## Benchmark data policy (unchanged, affirmed)
 
-| Probe | Preliminary result | Interpretation |
-|---|---|---|
-| Link composition | 7.3% cross-session, 92.7% intra-session; cross-session links touch an answer session in **15/15** questions | Bridge links **do** form — not a null-link artifact. The mechanism had a fair shot. |
-| Reachability (starved base k=5) | graph recovered 7/9 missed answer sessions; deeper-k(30) recovered 9/9; **graph-beyond-deeper-k = 0** | Graph's recoveries are a strict **subset** of deeper-k's. It reaches nothing deeper-k misses, even in a regime engineered to favor it. |
-| Natural regime (production k=150) | **0/15** questions miss any answer session | Base retrieval at production depth already finds every answer session. Zero headroom for any intervention. |
-
-**Conclusion:** graph expansion is dominated by deeper-`k` on public
-multi-session data, and there is no headroom for either at production depth.
-`GraphWeight` stays `0`.
-
-## Deliverable 1 — reproducible diagnostic
-
-A new diagnostic mode in the existing `bench/longmemeval` program.
-
-### Interface
-
-```
-go run ./bench/longmemeval --diagnostic graph \
-    --data <longmemeval_s_cleaned.json> \
-    --embed-cache <nomic-cache.jsonl> \
-    [--question-type multi-session] [--limit 0] \
-    [--threshold 0.70] [--starved-k 5] [--deeper-k 30] [--hops 2]
-```
-
-- `--diagnostic graph` short-circuits **before** the normal
-  condition/aggregation loop and runs the probe instead.
-- `--question-type` defaults to `multi-session` (133 questions); the flag
-  accepts any single type (e.g. `temporal-reasoning`) or `all` (every
-  question, used for the per-type base-miss map).
-- `--limit 0` means all matching questions; a positive value samples the first
-  N (for quick local runs).
-- `--threshold` defaults to `0.70` to match the shipped linking worker; the
-  flag lets a user explore other thresholds.
-- `--starved-k`, `--deeper-k`, `--hops` parameterize the reachability arms.
-
-### Behavior
-
-The diagnostic **reuses the existing ingestion path** — `loadQuestions`, the
-`cachedEmbedder`, and the same per-turn `fact` ingestion + `memToSession`
-mapping used by `rankSessionsForQuestion`. This guarantees it tests the
-identical corpus the scored benchmark uses; there is no second ingestion
-codepath to drift.
-
-For each matching question it:
-
-1. Ingests every turn as a `fact` with its cached embedding, recording
-   `memToSession`.
-2. Builds the link graph by looping `linking.Worker.SweepOnce` until
-   `UnscannedEmbeddedMemoryIDs` drains (the worker processes `batchSize`=50
-   per sweep, so a ~489-memory haystack needs ~10 sweeps).
-3. Enumerates unique links and classifies each as cross- or intra-session via
-   `memToSession`.
-4. Computes the reachability arms: starved base (`SearchHybrid` top
-   `--starved-k`), graph expansion (`GraphNeighbors` from the base hits), and
-   deeper-`k` (`SearchHybrid` top `--deeper-k`), counting per-question
-   recoveries of *missed* answer sessions and the decisive
-   graph-beyond-deeper-k count.
-5. Computes natural-regime miss rates at k=10 and k=150.
-6. Emits a **per-question-type base-miss map**: base-miss rate at production
-   k=150 grouped by `question_type` across the full dataset (run with
-   `--question-type all`). This is the diagnostic's forward-looking output —
-   it shows *where* base retrieval genuinely has headroom, turning "where
-   should retrieval quality improve next?" into evidence rather than
-   speculation. It is a measurement, not a change; acting on it is out of
-   scope (see "Where the real headroom is").
-
-### Output
-
-Four aligned tables printed to stdout — link composition, reachability,
-natural regime, and (with `--question-type all`) the per-type base-miss map —
-plus the run parameters. Deterministic given a fixed embed cache. This is a **diagnostic**, not a floor-gated CI benchmark: the 1.7 GB
-embed cache is not in CI, so it is not wired into `--floors`. It is a
-documented, re-runnable local tool.
-
-### Constraints
-
-- No hardcoded paths; every input is a flag.
-- `go vet ./...` clean; follows the existing `bench/longmemeval` style.
-- Does not alter the existing `fts`/`vector`/`hybrid` condition paths or the
-  floor-gate machinery.
-
-## Deliverable 2 — documentation
-
-1. **This spec** records the decision, the bar, the mechanism analysis, the
-   evidence, and the reproduce command.
-2. **`docs/benchmarks.md`** gains a short "Graph expansion — evaluated and
-   rejected" subsection: one paragraph stating the decision, linking to this
-   spec, and giving the one-line reproduce command. It also relabels the
-   synthetic `internal/bench` harness as a supplementary local-only tool and
-   affirms LongMemEval-S as the authoritative public retrieval benchmark
-   (documentation-only; no code or data change to that harness).
-3. **Falsification condition (in this spec):** the decision reopens if a future
-   run of the diagnostic shows graph-beyond-deeper-k > 0 on a non-trivial
-   fraction of questions *and* non-zero base misses at production k=150 — i.e.
-   both that graph reaches something deeper-`k` cannot *and* that there is
-   headroom to reach it. A change to the embedding model, the link threshold,
-   or the linking strategy is the kind of event that warrants re-running it.
-
-## Where the real headroom is (future work, not this spec)
-
-The probe's most useful side result: on multi-session, base hybrid at
-production k=150 already surfaces every answer session. Multi-session retrieval
-is not broken — which is precisely why graph expansion found no headroom to
-capture. The lever was wrong for a problem that isn't there.
-
-The question types where base retrieval plausibly *does* miss are
-**representation** problems, not traversal problems:
-
-- **knowledge-update** — the answer is a superseded fact; the lever is
-  supersedes edges + demotion (`ghost supersede`, `SupersedesWithin`), already
-  in Ghost.
-- **temporal-reasoning** — the answer depends on *when*; the lever is
-  timestamps/recency as first-class ranking signals (time-decay scoring, the
-  staleness/recency suites), already in Ghost.
-
-So the honest "better way" than graph expansion is better *memory
-representation* — temporal metadata, supersession, and chunking/summarization
-quality — not link-graph walks. The per-type base-miss map (Deliverable 1,
-step 6) is the evidence that would scope such an effort. Designing it is a
-separate future spec; this spec only produces the measurement that would
-justify starting it.
+No change to how benchmarks run; this is only stated so the cleanup does not
+disturb it. CI regression gating already runs on public data — the
+`longmemeval` workflow downloads `xiaowu0162/longmemeval-cleaned` and gates on
+metric floors. The synthetic `internal/bench` harness is a local-only report
+tool (hand-authored synthetic Cardano/Ghost-domain text, no private data); it
+is kept for the time-decay signals LongMemEval cannot exercise — the staleness
+and recency-trap suites. This cleanup only removes that harness's dead
+graph-ablation arm; its fts/vector/hybrid conditions and staleness/recency
+suites are untouched.
 
 ## Out of scope
 
-- Any new graph ranking mechanism (protected-head/contested-tail, relevance-
-  gated expansion, etc.). The kill experiment returned no-go; there is no
-  Stage 2.
-- Wiring the diagnostic into CI floors (the embed cache is not available in
-  CI).
-- Changing `DefaultSearchParams()` — `GraphWeight` is already `0`; this spec
-  documents *why* it stays there.
+- Any new or redesigned graph ranking mechanism. The kill experiment returned
+  no-go; there is no Stage 2.
+- Removing or altering the linking worker, `memory_links`, Obsidian export, or
+  the supersedes machinery.
+- Building a reproducible diagnostic or CI gate for graph expansion (the whole
+  point of removal is that we won't re-run it).
+- Changing any non-graph search parameter or the floor-gate machinery.
 
 ## Testing
 
-- The diagnostic is itself the test harness; correctness is verified by
-  running it against the cached dataset and confirming the three tables match
-  the preliminary probe's shape (subset relationship, zero production-regime
-  misses).
-- `go vet ./...` and `go test ./...` pass (the diagnostic mode adds no new
-  unit-test surface beyond a smoke check that `--diagnostic graph` parses and
-  dispatches).
+- `go vet ./...` and `go test ./...` pass after removal. Existing tests that
+  reference the graph params (`internal/bench/graph_test.go`, the graph rows of
+  `sweep_test.go`) are removed or trimmed with them; no fts/vector/hybrid or
+  staleness/recency test loses coverage.
+- Manual check: `ghost obsidian export` still renders `'related'` links into
+  vault notes (confirms the linking worker and `GetLinks` path are intact after
+  the surgical removal).
