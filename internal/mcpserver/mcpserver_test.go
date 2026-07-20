@@ -6,8 +6,10 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -724,6 +726,296 @@ func TestDefaultImportance(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func testServer(t *testing.T) *Server {
+	t.Helper()
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	return &Server{store: store, logger: logger}
+}
+
+func TestApplyMemoryUpdate(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+
+	id, err := srv.store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "original", Source: "mcp", Importance: 0.7, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	t.Run("updates content and reports changed fields", func(t *testing.T) {
+		msg, err := srv.applyMemoryUpdate(ctx, updateArgs{
+			ProjectID: "test-project", MemoryID: id, Content: "corrected",
+		})
+		if err != nil {
+			t.Fatalf("applyMemoryUpdate: %v", err)
+		}
+		if !strings.Contains(msg, "content") {
+			t.Errorf("message should name changed field, got %q", msg)
+		}
+		mems, _ := srv.store.GetByIDs(ctx, []string{id})
+		if mems[0].Content != "corrected" {
+			t.Errorf("content = %q, want corrected", mems[0].Content)
+		}
+	})
+
+	t.Run("rejects wrong project", func(t *testing.T) {
+		if err := srv.store.EnsureProject(ctx, "other", "/tmp/other", "other"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+			ProjectID: "other", MemoryID: id, Content: "hijack",
+		})
+		if err == nil {
+			t.Error("expected ownership rejection")
+		}
+		mems, _ := srv.store.GetByIDs(ctx, []string{id})
+		if mems[0].Content == "hijack" {
+			t.Error("content must be unchanged after rejected cross-project update")
+		}
+	})
+
+	t.Run("rejects unknown memory", func(t *testing.T) {
+		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+			ProjectID: "test-project", MemoryID: "nope", Content: "x",
+		})
+		if err == nil {
+			t.Error("expected not-found error")
+		}
+	})
+
+	t.Run("rejects invalid category", func(t *testing.T) {
+		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+			ProjectID: "test-project", MemoryID: id, Category: "bogus",
+		})
+		if err == nil {
+			t.Error("expected invalid-category error")
+		}
+	})
+
+	t.Run("rejects empty update", func(t *testing.T) {
+		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+			ProjectID: "test-project", MemoryID: id,
+		})
+		if err == nil {
+			t.Error("expected nothing-to-update error")
+		}
+	})
+
+	t.Run("clamps importance", func(t *testing.T) {
+		imp := float32(4.2)
+		_, err := srv.applyMemoryUpdate(ctx, updateArgs{
+			ProjectID: "test-project", MemoryID: id, Importance: &imp,
+		})
+		if err != nil {
+			t.Fatalf("applyMemoryUpdate: %v", err)
+		}
+		mems, _ := srv.store.GetByIDs(ctx, []string{id})
+		if mems[0].Importance > 1.0 {
+			t.Errorf("importance should clamp to 1.0, got %f", mems[0].Importance)
+		}
+	})
+}
+
+func TestPromoteMemory(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+
+	id, err := srv.store.Create(ctx, "abc123", memory.Memory{
+		Category: "preference", Content: "tabs never spaces", Source: "mcp", Importance: 0.8, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	t.Run("rejects wrong project", func(t *testing.T) {
+		if err := srv.store.EnsureProject(ctx, "other", "/tmp/other2", "other"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		if _, err := srv.promoteMemory(ctx, "other", id); err == nil {
+			t.Error("expected ownership rejection")
+		}
+	})
+
+	t.Run("promotes and then rejects re-promotion", func(t *testing.T) {
+		msg, err := srv.promoteMemory(ctx, "test-project", id)
+		if err != nil {
+			t.Fatalf("promoteMemory: %v", err)
+		}
+		if !strings.Contains(msg, "global") {
+			t.Errorf("message should mention global, got %q", msg)
+		}
+		mems, _ := srv.store.GetByIDs(ctx, []string{id})
+		if mems[0].ProjectID != "_global" {
+			t.Errorf("project = %q, want _global", mems[0].ProjectID)
+		}
+		if _, err := srv.promoteMemory(ctx, "test-project", id); err == nil {
+			t.Error("expected already-global rejection")
+		}
+	})
+
+	t.Run("rejects unknown memory", func(t *testing.T) {
+		if _, err := srv.promoteMemory(ctx, "test-project", "nope"); err == nil {
+			t.Error("expected not-found error")
+		}
+	})
+
+	t.Run("rejects missing args", func(t *testing.T) {
+		if _, err := srv.promoteMemory(ctx, "", id); err == nil {
+			t.Error("expected missing project_id error")
+		}
+		if _, err := srv.promoteMemory(ctx, "test-project", ""); err == nil {
+			t.Error("expected missing memory_id error")
+		}
+	})
+}
+
+// connectedClient spins up a Server and a Client wired together over an
+// in-memory transport, and returns the connected ClientSession. Callers must
+// close the returned session's connection via t.Cleanup handling in Connect.
+func connectedClient(t *testing.T, srv *Server) *mcp.ClientSession {
+	t.Helper()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+
+	ctx := context.Background()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
+
+func TestPrompts_RecallProject(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "seed memory for recall test", "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	session := connectedClient(t, srv)
+
+	res, err := session.GetPrompt(ctx, &mcp.GetPromptParams{
+		Name:      "recall_project",
+		Arguments: map[string]string{"project_id": "test-project"},
+	})
+	if err != nil {
+		t.Fatalf("GetPrompt recall_project: %v", err)
+	}
+	if len(res.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(res.Messages))
+	}
+	text, ok := res.Messages[0].Content.(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", res.Messages[0].Content)
+	}
+	if !strings.Contains(text.Text, "seed memory for recall test") {
+		t.Errorf("expected recalled memory in prompt text, got: %s", text.Text)
+	}
+
+	if _, err := session.GetPrompt(ctx, &mcp.GetPromptParams{Name: "recall_project"}); err == nil {
+		t.Error("expected error for missing project_id argument")
+	}
+}
+
+func TestPrompts_RecordDecision(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	res, err := session.GetPrompt(ctx, &mcp.GetPromptParams{
+		Name:      "record_decision",
+		Arguments: map[string]string{"project_id": "test-project", "topic": "auth strategy"},
+	})
+	if err != nil {
+		t.Fatalf("GetPrompt record_decision: %v", err)
+	}
+	text, ok := res.Messages[0].Content.(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", res.Messages[0].Content)
+	}
+	if !strings.Contains(text.Text, "auth strategy") || !strings.Contains(text.Text, "ghost_decision_record") {
+		t.Errorf("expected topic and tool reference in prompt text, got: %s", text.Text)
+	}
+
+	if _, err := session.GetPrompt(ctx, &mcp.GetPromptParams{
+		Name:      "record_decision",
+		Arguments: map[string]string{"project_id": "test-project"},
+	}); err == nil {
+		t.Error("expected error for missing topic argument")
+	}
+}
+
+func TestResourceSubscription_NotifiesOnMemorySave(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+
+	updated := make(chan string, 1)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
+		ResourceUpdatedHandler: func(ctx context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
+			updated <- req.Params.URI
+		},
+	})
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	const uri = "ghost://project/abc123/context"
+	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: uri}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "triggers subscription notify", "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	srv.notifyResourceUpdated(ctx, uri)
+
+	select {
+	case got := <-updated:
+		if got != uri {
+			t.Errorf("notified URI = %q, want %q", got, uri)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for resources/updated notification")
+	}
+
+	if err := session.Unsubscribe(ctx, &mcp.UnsubscribeParams{URI: uri}); err != nil {
+		t.Fatalf("Unsubscribe: %v", err)
+	}
+}
+
+func TestResourceSubscription_RejectsUnknownURI(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: "http://not-ghost/resource"}); err == nil {
+		t.Error("expected error subscribing to non-ghost:// URI")
 	}
 }
 

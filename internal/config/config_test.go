@@ -324,4 +324,7 @@ func TestObsidianDefaults(t *testing.T) {
 	if cfg.Obsidian.Interval != "30s" {
 		t.Errorf("Interval default = %q, want 30s", cfg.Obsidian.Interval)
 	}
+	if cfg.Obsidian.AutoSync {
+		t.Error("AutoSync default = true, want false (opt-in only)")
+	}
 }

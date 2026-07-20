@@ -62,6 +62,7 @@ type LinkingConfig struct {
 type ObsidianConfig struct {
 	VaultDir string `koanf:"vault_dir"` // empty = ~/Documents/GhostVault, resolved by the CLI
 	Interval string `koanf:"interval"`  // sync poll cadence, time.ParseDuration format
+	AutoSync bool   `koanf:"auto_sync"` // if true, session-start spawns `ghost obsidian sync` automatically
 }
 
 // defaults is the base layer — always loaded first.
@@ -75,6 +76,7 @@ var defaults = map[string]interface{}{
 	"linking.threshold":    0.70,
 	"obsidian.vault_dir":   "",
 	"obsidian.interval":    "30s",
+	"obsidian.auto_sync":   false,
 }
 
 // Load reads configuration with layered precedence.

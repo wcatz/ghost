@@ -8,6 +8,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -ldflags="-s -w -X main.version=$VERSION" -o ghost ./cmd/ghost
 
 FROM alpine:3.21
+LABEL io.modelcontextprotocol.server.name="io.github.wcatz/ghost"
 RUN apk add --no-cache ca-certificates tzdata
 COPY --from=builder /src/ghost /usr/local/bin/ghost
 ENTRYPOINT ["ghost"]

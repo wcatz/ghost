@@ -49,6 +49,10 @@ docker run -i -e XDG_DATA_HOME=/data -v ghost-data:/data \
   -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/wcatz/ghost:latest reflect myproject --apply
 ```
 
+## Why not just use built-in memory?
+
+ChatGPT, Claude, Gemini, and Copilot all ship native memory now — but each one is walled off inside its own product. Nothing you teach ChatGPT carries over to Claude Code, and nothing Claude Code learns carries over to Cursor or Goose. Ghost's bet isn't "better than any single one of those" — it's *one* memory, across every MCP client, that lives on your own disk: a local SQLite file you can query, back up, and delete, instead of a separate silo per product. See [Why Ghost?](#why-ghost) below for the specific comparison against Claude Code's built-in memory.
+
 ## Why Ghost?
 
 Coding agents forget everything between sessions. You re-explain your architecture, your conventions, and that one gotcha with the staging database — every single day.
@@ -171,13 +175,15 @@ ghost obsidian export --out ~/Documents/GhostVault   # one-shot mirror
 ghost obsidian sync --interval 30s                   # keep it fresh
 ```
 
+Set `obsidian.auto_sync: true` in config to have the session-start hook spawn `ghost obsidian sync` in the background automatically instead of running it by hand — off by default, so nobody gets a vault directory or a background process without asking for it.
+
 ## MCP surface
 
-16 tools, 4 resources:
+18 tools, 4 resources:
 
 | Group | Tools |
 |---|---|
-| Memory | `ghost_memory_save` `ghost_memory_search` `ghost_search_all` `ghost_memories_list` `ghost_memory_delete` `ghost_memory_pin` `ghost_save_global` |
+| Memory | `ghost_memory_save` `ghost_memory_search` `ghost_search_all` `ghost_memories_list` `ghost_memory_update` `ghost_memory_delete` `ghost_memory_pin` `ghost_memory_promote` `ghost_save_global` |
 | Context | `ghost_project_context` `ghost_list_projects` `ghost_health` |
 | Tasks | `ghost_task_create` `ghost_task_list` `ghost_task_update` `ghost_task_complete` |
 | Decisions | `ghost_decision_record` `ghost_decisions_list` |
@@ -193,6 +199,7 @@ ghost mcp                    # Run MCP server on stdio (used by your MCP client)
 ghost mcp init [--dry-run]   # Configure Claude Code integration
 ghost mcp status             # Deep health checks (incl. Ollama reachability, model presence)
 ghost hook session-start     # SessionStart hook — prints exactly what gets injected
+ghost hook stop              # Stop hook — blocks stop once if a tool-using session saved nothing
 ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
 ghost supersede <project>    # Link superseded memories (dry-run by default; --apply, --threshold)
 ghost bench [--sweep]        # Retrieval-quality benchmark on the built-in dataset

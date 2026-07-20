@@ -74,6 +74,9 @@ func Status(w io.Writer) error {
 			hasHk := sf.hasHook("SessionStart", "ghost hook session-start")
 			check(hasHk, "SessionStart hook configured", "SessionStart hook missing")
 
+			hasStop := sf.hasHook("Stop", "hook stop")
+			check(hasStop, "Stop hook configured", "Stop hook missing")
+
 			// autoMemoryEnabled must be false to prevent competing file-memory.
 			autoMemVal, autoMemSet := sf.getAutoMemoryEnabled()
 			autoMemOff := autoMemSet && !autoMemVal

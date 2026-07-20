@@ -16,7 +16,7 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// Run executes the 7-step Claude Code integration setup.
+// Run executes the 8-step Claude Code integration setup.
 // When dryRun is true, it reports what would change without modifying anything.
 func Run(w io.Writer, dryRun bool) error {
 	if dryRun {
@@ -24,38 +24,44 @@ func Run(w io.Writer, dryRun bool) error {
 	}
 
 	// Step 1: Prerequisites.
-	_, _ = fmt.Fprintln(w, "[1/7] Checking prerequisites...")
+	_, _ = fmt.Fprintln(w, "[1/8] Checking prerequisites...")
 	ghostBin, claudeBin, err := checkPrereqs(w)
 	if err != nil {
 		return retryHint(err)
 	}
 
 	// Step 2: MCP server registration.
-	_, _ = fmt.Fprintln(w, "\n[2/7] Registering MCP server...")
+	_, _ = fmt.Fprintln(w, "\n[2/8] Registering MCP server...")
 	if err := registerMCP(w, ghostBin, claudeBin, dryRun); err != nil {
 		return retryHint(err)
 	}
 
 	// Step 3: Tool permissions.
-	_, _ = fmt.Fprintln(w, "\n[3/7] Adding tool permissions...")
+	_, _ = fmt.Fprintln(w, "\n[3/8] Adding tool permissions...")
 	settingsFile, err := ensurePermissions(w)
 	if err != nil {
 		return retryHint(err)
 	}
 
 	// Step 4: SessionStart hook.
-	_, _ = fmt.Fprintln(w, "\n[4/7] Configuring SessionStart hook...")
+	_, _ = fmt.Fprintln(w, "\n[4/8] Configuring SessionStart hook...")
 	if err := ensureHook(w, settingsFile, ghostBin); err != nil {
 		return retryHint(err)
 	}
 
-	// Step 5: Disable Claude Code's built-in file memory.
-	_, _ = fmt.Fprintln(w, "\n[5/7] Disabling Claude Code built-in memory...")
+	// Step 5: Stop hook.
+	_, _ = fmt.Fprintln(w, "\n[5/8] Configuring Stop hook...")
+	if err := ensureStopHook(w, settingsFile, ghostBin); err != nil {
+		return retryHint(err)
+	}
+
+	// Step 6: Disable Claude Code's built-in file memory.
+	_, _ = fmt.Fprintln(w, "\n[6/8] Disabling Claude Code built-in memory...")
 	if err := ensureAutoMemoryDisabled(w, settingsFile, dryRun); err != nil {
 		return retryHint(err)
 	}
 
-	// Save settings (steps 3+4+5 all modify it).
+	// Save settings (steps 3-6 all modify it).
 	if dryRun {
 		_, _ = fmt.Fprintln(w, "\n  (skipping settings write — dry run)")
 	} else {
@@ -64,15 +70,15 @@ func Run(w io.Writer, dryRun bool) error {
 		}
 	}
 
-	// Step 6: Import Claude Code memories.
-	_, _ = fmt.Fprintln(w, "\n[6/7] Importing Claude Code memories...")
+	// Step 7: Import Claude Code memories.
+	_, _ = fmt.Fprintln(w, "\n[7/8] Importing Claude Code memories...")
 	projects, err := importMemories(w, dryRun)
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "  ! import error: %v (continuing)\n", err)
 	}
 
-	// Step 7: Project memory redirects.
-	_, _ = fmt.Fprintln(w, "\n[7/7] Writing project memory redirects...")
+	// Step 8: Project memory redirects.
+	_, _ = fmt.Fprintln(w, "\n[8/8] Writing project memory redirects...")
 	writeRedirects(w, projects, dryRun)
 
 	if dryRun {
@@ -213,6 +219,29 @@ func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 	}
 
 	_, _ = fmt.Fprintf(w, "  + added SessionStart hook: %s\n", hookCmd)
+	return nil
+}
+
+// ensureStopHook adds a Stop hook if not already present.
+func ensureStopHook(w io.Writer, sf *settingsFile, ghostBin string) error {
+	hookCmd := shellQuote(ghostBin) + " hook stop"
+
+	if sf.hasHook("Stop", "hook stop") {
+		_, _ = fmt.Fprintln(w, "  ✓ Stop hook already configured")
+		return nil
+	}
+
+	entry := hookEntry{
+		Matcher: "",
+		Hooks: []hookAction{
+			{Type: "command", Command: hookCmd},
+		},
+	}
+	if err := sf.addHook("Stop", entry); err != nil {
+		return fmt.Errorf("add stop hook: %w", err)
+	}
+
+	_, _ = fmt.Fprintf(w, "  + added Stop hook: %s\n", hookCmd)
 	return nil
 }
 

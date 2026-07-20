@@ -86,6 +86,12 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 			if m.AccessCount > 0 {
 				line += fmt.Sprintf(", used:%d", m.AccessCount)
 			}
+			// Tags travel with their memory — omitting them forced the model to
+			// invent fresh tags for every memory, cross-assigning keywords from
+			// unrelated memories elsewhere in the corpus.
+			if len(m.Tags) > 0 {
+				line += fmt.Sprintf(", tags:[%s]", strings.Join(m.Tags, ","))
+			}
 			line += fmt.Sprintf(") %s\n", quoteData(m.Content))
 			sb.WriteString(line)
 		}
@@ -100,6 +106,7 @@ Produce a JSON object with two fields:
    - Keep identity facts (architecture, conventions) — never drop these
    - Drop stale situational memories (old gotchas that were fixed)
    - Each memory: "category" (architecture/decision/pattern/convention/gotcha/dependency/preference/fact), "content" (1-2 sentences), "importance" (0.0-1.0), "tags" (1-3 keywords), "scope" ("project" or "global")
+   - Tags: when carrying a memory forward, keep its existing tags (shown as tags:[...] above); when merging memories, union their tags. Only invent tags for memories that have none — and derive them from THAT memory's content, never from neighboring memories
    - Aim for 10-25 high-quality memories, not 50 repetitive ones
    - Scope: most memories are "project". Mark as "global" ONLY if the knowledge applies across ALL repositories — examples: user preferences, cross-repo workflows (deploying from one repo to another), personal tooling choices, SSH hosts, infrastructure topology. Project-specific architecture, patterns, or conventions are always "project".
 

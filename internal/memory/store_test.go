@@ -117,6 +117,142 @@ func TestStoreUpsert(t *testing.T) {
 	}
 }
 
+func TestStoreUpsertNoMergeOnSharedWord(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Two unrelated same-category memories sharing a single common word
+	// ("Phase"). Reproduces the 2026-07-19 live bug: the FTS OR-probe alone
+	// treated any one-word overlap as a duplicate and silently swallowed
+	// the second save.
+	id1, merged, err := s.Upsert(ctx, testProject, "decision",
+		"Benchmark strategy decided: Phase one is LongMemEval retrieval eval with ablations",
+		"mcp", 0.8, nil)
+	if err != nil {
+		t.Fatalf("Upsert (first): %v", err)
+	}
+	if merged {
+		t.Error("first Upsert should not merge")
+	}
+
+	id2, merged, err := s.Upsert(ctx, testProject, "decision",
+		"MCP Phase two design approved: memory update tool, stop hook, promote to global",
+		"mcp", 0.8, nil)
+	if err != nil {
+		t.Fatalf("Upsert (second): %v", err)
+	}
+	if merged {
+		t.Error("unrelated content sharing one word must not merge")
+	}
+	if id2 == id1 {
+		t.Error("second Upsert should have created a distinct memory")
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 memories, got %d", len(all))
+	}
+}
+
+func TestStoreUpsertNoMergeBelowThreshold(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Same topic vocabulary but genuinely different facts: token overlap is
+	// real yet below the 0.5 Jaccard gate, so both must survive.
+	_, _, err := s.Upsert(ctx, testProject, "gotcha",
+		"SQLite busy timeout must be set on the read-only hook connection",
+		"mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (first): %v", err)
+	}
+
+	_, merged, err := s.Upsert(ctx, testProject, "gotcha",
+		"SQLite FTS5 rank ordering is unstable across identical RRF scores in hybrid search",
+		"mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (second): %v", err)
+	}
+	if merged {
+		t.Error("below-threshold overlap must not merge")
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 memories, got %d", len(all))
+	}
+}
+
+func TestStoreUpsertNoMergeOnTokenFreeContent(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Contents whose tokens are all single characters produce EMPTY token
+	// sets (tokenizeContent keeps len>1 only) while still FTS-matching each
+	// other (sanitizeFTS keeps single-char words). jaccard(∅,∅) = 1.0, so
+	// without a guard these unrelated saves would spuriously merge.
+	_, _, err := s.Upsert(ctx, testProject, "fact", "a b c", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert (first): %v", err)
+	}
+
+	_, merged, err := s.Upsert(ctx, testProject, "fact", "a x y", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert (second): %v", err)
+	}
+	if merged {
+		t.Error("token-free contents must never merge")
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 memories, got %d", len(all))
+	}
+}
+
+func TestStoreUpsertMergesBestCandidate(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Two existing memories; the new content shares one word with A but is a
+	// near-duplicate of B. It must merge into B, not the first FTS hit.
+	_, _, err := s.Upsert(ctx, testProject, "fact",
+		"Deployment pipeline uses GitHub Actions runners on the cluster",
+		"mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (A): %v", err)
+	}
+
+	idB, _, err := s.Upsert(ctx, testProject, "fact",
+		"Ollama embedding worker sweeps unembedded memories every two minutes",
+		"mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (B): %v", err)
+	}
+
+	idNew, merged, err := s.Upsert(ctx, testProject, "fact",
+		"Ollama embedding worker sweeps the unembedded memories every two minutes for cluster projects",
+		"mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (near-dup of B): %v", err)
+	}
+	if !merged {
+		t.Fatal("near-duplicate of B should merge")
+	}
+	if idNew != idB {
+		t.Errorf("should merge into B (%s), merged into %s", idB, idNew)
+	}
+}
+
 func TestStoreUpsertImportanceCap(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -1294,6 +1430,88 @@ func TestStoreTasks(t *testing.T) {
 	}
 }
 
+func TestStoreTaskIDPrefix(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	fullID, err := s.CreateTask(ctx, testProject, "Prefix me", "Resolved by short ID", 2)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	prefix := fullID[:8]
+
+	// GetTask resolves an 8-char prefix (what the session hook and task list show).
+	got, err := s.GetTask(ctx, prefix)
+	if err != nil {
+		t.Fatalf("GetTask by prefix: %v", err)
+	}
+	if got.ID != fullID {
+		t.Errorf("GetTask by prefix resolved %q, want %q", got.ID, fullID)
+	}
+
+	// UpdateTask and CompleteTask resolve prefixes too.
+	if err := s.UpdateTask(ctx, prefix, "active", 1, "updated via prefix"); err != nil {
+		t.Fatalf("UpdateTask by prefix: %v", err)
+	}
+	got, err = s.GetTask(ctx, fullID)
+	if err != nil {
+		t.Fatalf("GetTask after update: %v", err)
+	}
+	if got.Status != "active" || got.Description != "updated via prefix" {
+		t.Errorf("UpdateTask by prefix did not apply: status=%q desc=%q", got.Status, got.Description)
+	}
+	if err := s.CompleteTask(ctx, prefix, "done via prefix"); err != nil {
+		t.Fatalf("CompleteTask by prefix: %v", err)
+	}
+	got, err = s.GetTask(ctx, fullID)
+	if err != nil {
+		t.Fatalf("GetTask after complete: %v", err)
+	}
+	if got.Status != "done" || got.Notes != "done via prefix" {
+		t.Errorf("CompleteTask by prefix did not apply: status=%q notes=%q", got.Status, got.Notes)
+	}
+
+	// Ambiguous prefix: two tasks sharing the first 8 chars must error, not
+	// pick one arbitrarily.
+	for _, id := range []string{"AAAABBBB000000000000000000000001", "AAAABBBB000000000000000000000002"} {
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO tasks (id, project_id, title) VALUES (?, ?, ?)`, id, testProject, "twin "+id[len(id)-1:]); err != nil {
+			t.Fatalf("insert fixture task: %v", err)
+		}
+	}
+	if _, err := s.GetTask(ctx, "AAAABBBB"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("GetTask ambiguous prefix: want ambiguity error, got %v", err)
+	}
+	if err := s.CompleteTask(ctx, "AAAABBBB", ""); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("CompleteTask ambiguous prefix: want ambiguity error, got %v", err)
+	}
+	// A longer, unique prefix disambiguates.
+	got, err = s.GetTask(ctx, "AAAABBBB000000000000000000000001")
+	if err != nil {
+		t.Fatalf("GetTask exact ID among twins: %v", err)
+	}
+	if got.Title != "twin 1" {
+		t.Errorf("expected twin 1, got %q", got.Title)
+	}
+
+	// Unknown IDs now fail loudly everywhere — CompleteTask/UpdateTask used to
+	// silently no-op on a missing ID.
+	if _, err := s.GetTask(ctx, "ZZZZ9999"); err == nil || !strings.Contains(err.Error(), "task not found") {
+		t.Errorf("GetTask unknown: want not-found error, got %v", err)
+	}
+	if err := s.CompleteTask(ctx, "ZZZZ9999", ""); err == nil || !strings.Contains(err.Error(), "task not found") {
+		t.Errorf("CompleteTask unknown: want not-found error, got %v", err)
+	}
+	if err := s.UpdateTask(ctx, "ZZZZ9999", "active", 1, ""); err == nil || !strings.Contains(err.Error(), "task not found") {
+		t.Errorf("UpdateTask unknown: want not-found error, got %v", err)
+	}
+
+	// Empty ID is rejected, never treated as a match-everything prefix.
+	if _, err := s.GetTask(ctx, ""); err == nil {
+		t.Error("GetTask empty id: want error, got nil")
+	}
+}
+
 func TestStoreGetLatestConversationNoRows(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -1484,6 +1702,273 @@ func TestEnsureProject_EmptyPath_NoUniqueConflict(t *testing.T) {
 	if found != 2 {
 		t.Errorf("expected 2 projects, found %d", found)
 	}
+}
+
+func TestStoreUpdateMemory(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	newID := func(t *testing.T) string {
+		t.Helper()
+		id, err := s.Create(ctx, testProject, Memory{
+			Category:   "fact",
+			Content:    "Original content about the deploy pipeline",
+			Source:     "mcp",
+			Importance: 0.7,
+			Tags:       []string{"deploy"},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return id
+	}
+
+	getOne := func(t *testing.T, id string) Memory {
+		t.Helper()
+		mems, err := s.GetByIDs(ctx, []string{id})
+		if err != nil || len(mems) != 1 {
+			t.Fatalf("GetByIDs(%s): %v (n=%d)", id, err, len(mems))
+		}
+		return mems[0]
+	}
+
+	t.Run("content only, others preserved", func(t *testing.T) {
+		id := newID(t)
+		content := "Corrected content about the deploy pipeline"
+		if err := s.UpdateMemory(ctx, testProject, id, &content, nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory: %v", err)
+		}
+		m := getOne(t, id)
+		if m.Content != content {
+			t.Errorf("content = %q, want %q", m.Content, content)
+		}
+		if m.Category != "fact" || m.Importance != 0.7 || m.Source != "mcp" {
+			t.Errorf("unchanged fields clobbered: category=%q importance=%f source=%q",
+				m.Category, m.Importance, m.Source)
+		}
+		if len(m.Tags) != 1 || m.Tags[0] != "deploy" {
+			t.Errorf("tags clobbered: %v", m.Tags)
+		}
+	})
+
+	t.Run("category and importance", func(t *testing.T) {
+		id := newID(t)
+		cat := "gotcha"
+		imp := float32(0.9)
+		if err := s.UpdateMemory(ctx, testProject, id, nil, &cat, &imp, nil); err != nil {
+			t.Fatalf("UpdateMemory: %v", err)
+		}
+		m := getOne(t, id)
+		if m.Category != "gotcha" || m.Importance != 0.9 {
+			t.Errorf("category=%q importance=%f, want gotcha/0.9", m.Category, m.Importance)
+		}
+		if m.Content != "Original content about the deploy pipeline" {
+			t.Errorf("content clobbered: %q", m.Content)
+		}
+	})
+
+	t.Run("nil tags preserve, empty tags clear", func(t *testing.T) {
+		id := newID(t)
+		imp := float32(0.5)
+		if err := s.UpdateMemory(ctx, testProject, id, nil, nil, &imp, nil); err != nil {
+			t.Fatalf("UpdateMemory (nil tags): %v", err)
+		}
+		if m := getOne(t, id); len(m.Tags) != 1 {
+			t.Errorf("nil tags should preserve, got %v", m.Tags)
+		}
+		if err := s.UpdateMemory(ctx, testProject, id, nil, nil, nil, []string{}); err != nil {
+			t.Fatalf("UpdateMemory (empty tags): %v", err)
+		}
+		if m := getOne(t, id); len(m.Tags) != 0 {
+			t.Errorf("empty tags should clear, got %v", m.Tags)
+		}
+	})
+
+	t.Run("content change invalidates embedding and link scan", func(t *testing.T) {
+		id := newID(t)
+		vec := make([]float32, 8)
+		vec[0] = 1
+		if err := s.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
+		if err := s.MarkLinkScanned(ctx, id); err != nil {
+			t.Fatalf("MarkLinkScanned: %v", err)
+		}
+		content := "Entirely rewritten content"
+		if err := s.UpdateMemory(ctx, testProject, id, &content, nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory: %v", err)
+		}
+		if _, err := s.GetEmbedding(ctx, id); err == nil {
+			t.Error("embedding should be deleted after content change")
+		}
+		var n int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM link_scans WHERE memory_id = ?`, id).Scan(&n); err != nil {
+			t.Fatalf("count link_scans: %v", err)
+		}
+		if n != 0 {
+			t.Error("link_scans row should be deleted after content change")
+		}
+	})
+
+	t.Run("non-content change keeps embedding", func(t *testing.T) {
+		id := newID(t)
+		vec := make([]float32, 8)
+		vec[0] = 1
+		if err := s.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
+		imp := float32(0.4)
+		if err := s.UpdateMemory(ctx, testProject, id, nil, nil, &imp, nil); err != nil {
+			t.Fatalf("UpdateMemory: %v", err)
+		}
+		if _, err := s.GetEmbedding(ctx, id); err != nil {
+			t.Error("embedding should survive a non-content update")
+		}
+	})
+
+	t.Run("unknown id errors", func(t *testing.T) {
+		content := "x"
+		err := s.UpdateMemory(ctx, testProject, "does-not-exist", &content, nil, nil, nil)
+		if err == nil {
+			t.Error("expected error for unknown memory id")
+		}
+	})
+
+	t.Run("pinned survives update", func(t *testing.T) {
+		id := newID(t)
+		if err := s.TogglePin(ctx, id, true); err != nil {
+			t.Fatalf("TogglePin: %v", err)
+		}
+		content := "Pinned memory, corrected"
+		if err := s.UpdateMemory(ctx, testProject, id, &content, nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory: %v", err)
+		}
+		if m := getOne(t, id); !m.Pinned {
+			t.Error("pinned flag should survive an update")
+		}
+	})
+
+	t.Run("tags replaced with new values", func(t *testing.T) {
+		id := newID(t)
+		if err := s.UpdateMemory(ctx, testProject, id, nil, nil, nil, []string{"alpha", "beta"}); err != nil {
+			t.Fatalf("UpdateMemory: %v", err)
+		}
+		m := getOne(t, id)
+		if len(m.Tags) != 2 || m.Tags[0] != "alpha" || m.Tags[1] != "beta" {
+			t.Errorf("tags = %v, want [alpha beta]", m.Tags)
+		}
+	})
+
+	t.Run("wrong project cannot update", func(t *testing.T) {
+		id := newID(t)
+		if err := s.EnsureProject(ctx, "other-proj", "/tmp/other-proj", "other-proj"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		content := "hijacked"
+		if err := s.UpdateMemory(ctx, "other-proj", id, &content, nil, nil, nil); err == nil {
+			t.Error("expected error updating another project's memory")
+		}
+		if m := getOne(t, id); m.Content == "hijacked" {
+			t.Error("content must be unchanged after cross-project update attempt")
+		}
+	})
+}
+
+func TestStorePromoteToGlobal(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	t.Run("moves memory preserving id, pin, importance, embedding", func(t *testing.T) {
+		id, err := s.Create(ctx, testProject, Memory{
+			Category:   "preference",
+			Content:    "Always use two-space YAML indentation",
+			Source:     "mcp",
+			Importance: 0.8,
+			Tags:       []string{"yaml"},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := s.TogglePin(ctx, id, true); err != nil {
+			t.Fatalf("TogglePin: %v", err)
+		}
+		vec := make([]float32, 8)
+		vec[0] = 1
+		if err := s.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
+
+		if err := s.PromoteToGlobal(ctx, testProject, id); err != nil {
+			t.Fatalf("PromoteToGlobal: %v", err)
+		}
+
+		mems, err := s.GetByIDs(ctx, []string{id})
+		if err != nil || len(mems) != 1 {
+			t.Fatalf("GetByIDs: %v (n=%d)", err, len(mems))
+		}
+		m := mems[0]
+		if m.ProjectID != "_global" {
+			t.Errorf("project = %q, want _global", m.ProjectID)
+		}
+		if !m.Pinned || m.Importance != 0.8 {
+			t.Errorf("pin/importance not preserved: pinned=%v importance=%f", m.Pinned, m.Importance)
+		}
+		if _, err := s.GetEmbedding(ctx, id); err != nil {
+			t.Error("embedding should survive promotion")
+		}
+	})
+
+	t.Run("works without prior _global row", func(t *testing.T) {
+		// testStore never seeds _global — the first subtest exercised the
+		// inline ensure; this one proves a fresh store promotes fine too.
+		s2 := testStore(t)
+		id, err := s2.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "promotable", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := s2.PromoteToGlobal(ctx, testProject, id); err != nil {
+			t.Fatalf("PromoteToGlobal on fresh store: %v", err)
+		}
+
+		mems, err := s2.GetByIDs(ctx, []string{id})
+		if err != nil || len(mems) != 1 {
+			t.Fatalf("GetByIDs: %v (n=%d)", err, len(mems))
+		}
+		if mems[0].ProjectID != "_global" {
+			t.Errorf("project = %q, want _global", mems[0].ProjectID)
+		}
+	})
+
+	t.Run("unknown id errors", func(t *testing.T) {
+		if err := s.PromoteToGlobal(ctx, testProject, "does-not-exist"); err == nil {
+			t.Error("expected error for unknown memory id")
+		}
+	})
+
+	t.Run("wrong project cannot promote", func(t *testing.T) {
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "stays put", Source: "mcp", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := s.EnsureProject(ctx, "other-proj2", "/tmp/other-proj2", "other-proj2"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		if err := s.PromoteToGlobal(ctx, "other-proj2", id); err == nil {
+			t.Error("expected error promoting another project's memory")
+		}
+		mems, err := s.GetByIDs(ctx, []string{id})
+		if err != nil || len(mems) != 1 {
+			t.Fatalf("GetByIDs: %v", err)
+		}
+		if mems[0].ProjectID != testProject {
+			t.Errorf("memory moved to %q, must stay in %q", mems[0].ProjectID, testProject)
+		}
+	})
 }
 
 func TestEnsureProject_AutoMerge(t *testing.T) {
