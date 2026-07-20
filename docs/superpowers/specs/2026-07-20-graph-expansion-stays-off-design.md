@@ -33,6 +33,25 @@ a corpus with genuine multi-session evidence chains — which is exactly what
 the public LongMemEval-S benchmark already provides, and which Ghost already
 ingests in `bench/longmemeval`.
 
+### Benchmark data policy
+
+All CI regression gating already runs on public data: the `longmemeval`
+workflow downloads `xiaowu0162/longmemeval-cleaned` from HuggingFace and gates
+on metric floors (`fts r5=0.74,ndcg10=0.72`; `hybrid r5=0.91,ndcg10=0.89`).
+The synthetic 22-row `internal/bench` dataset is **not** CI-gated — it is a
+local-only report harness. Its content is hand-authored synthetic
+Cardano/Ghost-domain text (public knowledge, e.g. "cardano-node listens on TCP
+3001"), not private infrastructure data.
+
+Policy, affirmed by this spec: **LongMemEval-S is the authoritative public
+benchmark for retrieval quality.** The synthetic `internal/bench` harness is
+**kept as a clearly-labeled supplementary local-only tool** for the
+time-decay signals LongMemEval cannot exercise — the staleness and
+recency-trap suites, which depend on controlled timestamps and superseded
+facts that a public QA corpus does not provide. Removing it would lose that
+regression coverage with no public replacement, so it stays; the relabeling is
+documentation-only.
+
 ## The decision bar
 
 The relevant comparison is **not** `graph=0` vs `graph-on`. Links are built
@@ -97,8 +116,9 @@ go run ./bench/longmemeval --diagnostic graph \
 
 - `--diagnostic graph` short-circuits **before** the normal
   condition/aggregation loop and runs the probe instead.
-- `--question-type` defaults to `multi-session` (133 questions); the flag lets
-  a user point it at `temporal-reasoning` or any other type.
+- `--question-type` defaults to `multi-session` (133 questions); the flag
+  accepts any single type (e.g. `temporal-reasoning`) or `all` (every
+  question, used for the per-type base-miss map).
 - `--limit 0` means all matching questions; a positive value samples the first
   N (for quick local runs).
 - `--threshold` defaults to `0.70` to match the shipped linking worker; the
@@ -128,12 +148,19 @@ For each matching question it:
    recoveries of *missed* answer sessions and the decisive
    graph-beyond-deeper-k count.
 5. Computes natural-regime miss rates at k=10 and k=150.
+6. Emits a **per-question-type base-miss map**: base-miss rate at production
+   k=150 grouped by `question_type` across the full dataset (run with
+   `--question-type all`). This is the diagnostic's forward-looking output —
+   it shows *where* base retrieval genuinely has headroom, turning "where
+   should retrieval quality improve next?" into evidence rather than
+   speculation. It is a measurement, not a change; acting on it is out of
+   scope (see "Where the real headroom is").
 
 ### Output
 
-Three aligned tables printed to stdout (link composition, reachability,
-natural regime), plus the run parameters. Deterministic given a fixed embed
-cache. This is a **diagnostic**, not a floor-gated CI benchmark: the 1.7 GB
+Four aligned tables printed to stdout — link composition, reachability,
+natural regime, and (with `--question-type all`) the per-type base-miss map —
+plus the run parameters. Deterministic given a fixed embed cache. This is a **diagnostic**, not a floor-gated CI benchmark: the 1.7 GB
 embed cache is not in CI, so it is not wired into `--floors`. It is a
 documented, re-runnable local tool.
 
@@ -150,13 +177,40 @@ documented, re-runnable local tool.
    evidence, and the reproduce command.
 2. **`docs/benchmarks.md`** gains a short "Graph expansion — evaluated and
    rejected" subsection: one paragraph stating the decision, linking to this
-   spec, and giving the one-line reproduce command.
+   spec, and giving the one-line reproduce command. It also relabels the
+   synthetic `internal/bench` harness as a supplementary local-only tool and
+   affirms LongMemEval-S as the authoritative public retrieval benchmark
+   (documentation-only; no code or data change to that harness).
 3. **Falsification condition (in this spec):** the decision reopens if a future
    run of the diagnostic shows graph-beyond-deeper-k > 0 on a non-trivial
    fraction of questions *and* non-zero base misses at production k=150 — i.e.
    both that graph reaches something deeper-`k` cannot *and* that there is
    headroom to reach it. A change to the embedding model, the link threshold,
    or the linking strategy is the kind of event that warrants re-running it.
+
+## Where the real headroom is (future work, not this spec)
+
+The probe's most useful side result: on multi-session, base hybrid at
+production k=150 already surfaces every answer session. Multi-session retrieval
+is not broken — which is precisely why graph expansion found no headroom to
+capture. The lever was wrong for a problem that isn't there.
+
+The question types where base retrieval plausibly *does* miss are
+**representation** problems, not traversal problems:
+
+- **knowledge-update** — the answer is a superseded fact; the lever is
+  supersedes edges + demotion (`ghost supersede`, `SupersedesWithin`), already
+  in Ghost.
+- **temporal-reasoning** — the answer depends on *when*; the lever is
+  timestamps/recency as first-class ranking signals (time-decay scoring, the
+  staleness/recency suites), already in Ghost.
+
+So the honest "better way" than graph expansion is better *memory
+representation* — temporal metadata, supersession, and chunking/summarization
+quality — not link-graph walks. The per-type base-miss map (Deliverable 1,
+step 6) is the evidence that would scope such an effort. Designing it is a
+separate future spec; this spec only produces the measurement that would
+justify starting it.
 
 ## Out of scope
 
