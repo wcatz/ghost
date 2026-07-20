@@ -137,9 +137,6 @@ type SearchParams struct {
 	FTSWeight   float64 // RRF weight of the full-text leg
 	VecWeight   float64 // RRF weight of the vector leg
 	RRFK        int     // RRF smoothing constant (Cormack & Clarke use 60)
-	GraphWeight float64 // additive link-graph bonus weight; 0 skips the graph pass
-	GraphSeeds  int     // top-ranked results used as graph-expansion seeds
-	GraphHops   int     // link-traversal depth from each seed
 	// RecencyWeight scales a freshness prior on the final ranking:
 	// final = base * (1 + RecencyWeight*recency), recency = 1/(1 + age_days/RecencyTau).
 	// 0 (the default) is a hard no-op — ranking is untouched. Tuned via
@@ -157,21 +154,18 @@ type SearchParams struct {
 
 // DefaultSearchParams returns the production fusion parameters.
 //
-// GraphWeight ships at 0: the ghost bench --sweep grid showed the additive
-// graph bonus degrades ranking monotonically at every effective weight on the
-// graded dataset (the former 0.15 default demoted exact matches below
-// semantically-adjacent neighbors — see docs/benchmarks.md). The link graph
-// itself is still built and traversable; a redesigned bonus must beat
-// GraphWeight 0 in the sweep before it ships. GraphSeeds/GraphHops keep their
-// tuned values so an explicit non-zero GraphWeight behaves as before.
+// A link-graph expansion bonus was evaluated and removed. It was structurally
+// dominated by simply retrieving a deeper vector-k: links are built from cosine
+// similarity and the vector leg is also cosine, so the bonus only re-surfaced
+// cosine-neighbors a larger k already reaches — a public LongMemEval-S kill
+// experiment confirmed its recoveries were a strict subset of deeper-k's, with
+// no headroom at production depth. The link graph is retained for Obsidian
+// export and supersedes ranking. See docs/architecture.md.
 func DefaultSearchParams() SearchParams {
 	return SearchParams{
 		FTSWeight:       0.3,
 		VecWeight:       0.7,
 		RRFK:            60,
-		GraphWeight:     0,
-		GraphSeeds:      3,
-		GraphHops:       2,
 		RecencyWeight:   0,
 		RecencyTau:      30,
 		SupersedeDemote: false,
@@ -272,37 +266,9 @@ func parseCreatedAt(s string) time.Time {
 	return t
 }
 
-// applyGraphBonus adds an additive RRF-style bonus to scores for memories
-// reachable via links from the top-ranked seed IDs. Additive-only: when no
-// links exist, scores are unchanged. Errors are non-fatal (the graph signal
-// is best-effort, like the FTS and vector legs). Pass projectID "" to span
-// all projects.
-func (s *Store) applyGraphBonus(ctx context.Context, projectID string, scores map[string]float64, idSet map[string]bool, ranked []string, limit int, p SearchParams) {
-	seeds := ranked
-	if len(seeds) > p.GraphSeeds {
-		seeds = seeds[:p.GraphSeeds]
-	}
-
-	// Walk from each seed separately so a seed is only excluded from its own
-	// expansion — a lower-ranked candidate linked to the top hit still gets
-	// the bonus. The bonus decays with seed rank.
-	for seedRank, seed := range seeds {
-		neighbors, err := s.GraphNeighbors(ctx, projectID, []string{seed}, p.GraphHops, limit)
-		if err != nil {
-			s.logger.Debug("graph bonus: traversal failed", "error", err, "seed", seed)
-			return
-		}
-		for _, n := range neighbors {
-			scores[n.MemoryID] += p.GraphWeight * float64(n.Strength) / float64(p.RRFK+seedRank+1)
-			idSet[n.MemoryID] = true
-		}
-	}
-}
-
 // fuseAndRank runs the shared hybrid pipeline: RRF-fuse the two result legs,
-// optionally apply the link-graph bonus, then rank, truncate, and hydrate.
-// projectID scopes the graph traversal; "" spans all projects.
-func (s *Store) fuseAndRank(ctx context.Context, projectID string, ftsResults []Memory, vecResults []ScoredMemory, limit int, p SearchParams) ([]Memory, error) {
+// then rank, truncate, and hydrate.
+func (s *Store) fuseAndRank(ctx context.Context, ftsResults []Memory, vecResults []ScoredMemory, limit int, p SearchParams) ([]Memory, error) {
 	scores := make(map[string]float64)
 	idSet := make(map[string]bool)
 	for rank, m := range ftsResults {
@@ -315,9 +281,8 @@ func (s *Store) fuseAndRank(ctx context.Context, projectID string, ftsResults []
 	}
 
 	// Ranking sorts break score ties by ID so identical searches return
-	// identical orderings (and pick identical graph seeds) — the candidate
-	// sets come from map iteration, which would otherwise make tie order
-	// random per call.
+	// identical orderings — the candidate sets come from map iteration, which
+	// would otherwise make tie order random per call.
 	byScoreThenID := func(ids []string) {
 		sort.Slice(ids, func(i, j int) bool {
 			si, sj := scores[ids[i]], scores[ids[j]]
@@ -326,18 +291,6 @@ func (s *Store) fuseAndRank(ctx context.Context, projectID string, ftsResults []
 			}
 			return ids[i] < ids[j]
 		})
-	}
-
-	if p.GraphWeight > 0 && p.GraphSeeds > 0 {
-		// Preliminary ranking to pick graph seeds.
-		prelim := make([]string, 0, len(idSet))
-		for id := range idSet {
-			prelim = append(prelim, id)
-		}
-		byScoreThenID(prelim)
-
-		// Third signal: link-graph expansion from top seeds (additive-only).
-		s.applyGraphBonus(ctx, projectID, scores, idSet, prelim, limit, p)
 	}
 
 	// Sort by fused score, truncate, and hydrate.
@@ -372,8 +325,7 @@ func (s *Store) fuseAndRank(ctx context.Context, projectID string, ftsResults []
 }
 
 // SearchHybrid combines FTS5 keyword search with vector similarity using
-// Reciprocal Rank Fusion (RRF), plus an additive link-graph expansion bonus.
-// Falls back to FTS-only if queryVec is nil.
+// Reciprocal Rank Fusion (RRF). Falls back to FTS-only if queryVec is nil.
 func (s *Store) SearchHybrid(ctx context.Context, projectID, query string, queryVec []float32, limit int) ([]Memory, error) {
 	return s.SearchHybridParams(ctx, projectID, query, queryVec, limit, DefaultSearchParams())
 }
@@ -403,7 +355,7 @@ func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string,
 		return s.demoteSuperseded(ctx, recencyRerank(ftsResults, nil, p, limit), p), nil
 	}
 
-	return s.fuseAndRank(ctx, projectID, ftsResults, vecResults, limit, p)
+	return s.fuseAndRank(ctx, ftsResults, vecResults, limit, p)
 }
 
 // recencyRerank truncates results to limit by their existing (base-score) order
@@ -518,7 +470,7 @@ func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []fl
 		return ftsResults, nil
 	}
 
-	return s.fuseAndRank(ctx, "", ftsResults, vecResults, limit, DefaultSearchParams())
+	return s.fuseAndRank(ctx, ftsResults, vecResults, limit, DefaultSearchParams())
 }
 
 func float32sToBytes(fs []float32) []byte {
