@@ -1061,6 +1061,57 @@ func TestResourceSubscription_NotifiesNameSubscriberOnToolSave(t *testing.T) {
 	}
 }
 
+func TestResourceSubscription_NotifiesHashSubscriberOnToolSave(t *testing.T) {
+	// Guards the previously-working direction: emitting both aliases must not
+	// disturb delivery to a client subscribed by the resolved hash ID.
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/home/wayne/git/myproj", "myproj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+
+	updated := make(chan string, 4)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
+		ResourceUpdatedHandler: func(ctx context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
+			updated <- req.Params.URI
+		},
+	})
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	const hashURI = "ghost://project/6bdc098af7f5/context"
+	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: hashURI}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_memory_save",
+		Arguments: map[string]any{"project_id": "myproj", "content": "hash subscriber should still be notified", "category": "fact"},
+	}); err != nil {
+		t.Fatalf("CallTool ghost_memory_save: %v", err)
+	}
+
+	select {
+	case got := <-updated:
+		if got != hashURI {
+			t.Errorf("notified URI = %q, want %q", got, hashURI)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for resources/updated notification on hash URI")
+	}
+}
+
 func TestResourceSubscription_RejectsUnknownURI(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
