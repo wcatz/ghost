@@ -1007,6 +1007,60 @@ func TestResourceSubscription_NotifiesOnMemorySave(t *testing.T) {
 	}
 }
 
+func TestResourceSubscription_NotifiesNameSubscriberOnToolSave(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+
+	// Create a project whose hash ID differs from its name, exactly as the
+	// session-start hook does (path-hashed ID + human-readable name).
+	if err := store.EnsureProject(ctx, "6bdc098af7f5", "/home/wayne/git/myproj", "myproj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+
+	updated := make(chan string, 4)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
+		ResourceUpdatedHandler: func(ctx context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
+			updated <- req.Params.URI
+		},
+	})
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	// Clients read (and thus subscribe to) resources by project name.
+	const nameURI = "ghost://project/myproj/context"
+	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: nameURI}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	// Drive the real tool handler, which resolves name -> hash internally.
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_memory_save",
+		Arguments: map[string]any{"project_id": "myproj", "content": "name subscriber should be notified", "category": "fact"},
+	}); err != nil {
+		t.Fatalf("CallTool ghost_memory_save: %v", err)
+	}
+
+	select {
+	case got := <-updated:
+		if got != nameURI {
+			t.Errorf("notified URI = %q, want %q", got, nameURI)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for resources/updated notification on name URI")
+	}
+}
+
 func TestResourceSubscription_RejectsUnknownURI(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
