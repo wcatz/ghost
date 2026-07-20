@@ -18,36 +18,30 @@ type SweepPoint struct {
 }
 
 // SweepGrid returns the default parameter grid: vector-leg weight (FTS weight
-// is its complement, keeping the legs normalized to 1) crossed with the graph
-// bonus weight, including 0 (graph off). RRF k and graph seeds/hops stay at
-// production defaults — sweep one axis at a time.
+// is its complement, keeping the legs normalized to 1). RRF k stays at the
+// production default — sweep one axis at a time.
 func SweepGrid() []memory.SearchParams {
 	vecWeights := []float64{0.3, 0.5, 0.6, 0.7, 0.8, 0.9}
-	graphWeights := []float64{0, 0.02, 0.05, 0.10, 0.15, 0.30}
-	grid := make([]memory.SearchParams, 0, len(vecWeights)*len(graphWeights))
+	grid := make([]memory.SearchParams, 0, len(vecWeights))
 	for _, vw := range vecWeights {
-		for _, gw := range graphWeights {
-			p := memory.DefaultSearchParams()
-			p.VecWeight = vw
-			// Round the complement so e.g. 1-0.7 is exactly 0.3 and the grid
-			// contains a point == DefaultSearchParams (float identity matters
-			// for the "current default" marker).
-			p.FTSWeight = math.Round((1-vw)*100) / 100
-			p.GraphWeight = gw
-			grid = append(grid, p)
-		}
+		p := memory.DefaultSearchParams()
+		p.VecWeight = vw
+		// Round the complement so e.g. 1-0.7 is exactly 0.3 and the grid
+		// contains a point == DefaultSearchParams (float identity matters
+		// for the "current default" marker).
+		p.FTSWeight = math.Round((1-vw)*100) / 100
+		grid = append(grid, p)
 	}
 	return grid
 }
 
 // Sweep evaluates every parameter combination with the hybrid searcher over an
-// already-seeded store whose link graph is already built (the graph pass reads
-// links at query time, so one store serves every point). Results are sorted by
+// already-seeded store (one store serves every point). Results are sorted by
 // NDCG@10 descending, ties broken by MRR@10 then recall@1.
 func Sweep(ctx context.Context, store *memory.Store, queries []Query, grid []memory.SearchParams) ([]SweepPoint, error) {
 	points := make([]SweepPoint, 0, len(grid))
 	for _, p := range grid {
-		cond := fmt.Sprintf("vec=%.2f graph=%.2f", p.VecWeight, p.GraphWeight)
+		cond := fmt.Sprintf("vec=%.2f", p.VecWeight)
 		res, err := runCondition(ctx, cond, queries, func(q Query) ([]string, error) {
 			return idsFromMemories(store.SearchHybridParams(ctx, q.ProjectID, q.Text, q.Vector, scoreK, p))
 		})

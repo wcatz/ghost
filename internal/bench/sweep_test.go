@@ -30,12 +30,12 @@ func TestSweep(t *testing.T) {
 	store, queries := sweepFixture(t)
 	ctx := context.Background()
 
-	// A tiny grid containing the production default (graph off) and the
-	// candidate graph weight the ablation runner tracks.
+	// Two points: the production default and an off-default leg weighting.
 	def := memory.DefaultSearchParams()
-	graph := def
-	graph.GraphWeight = candidateGraphWeight
-	points, err := Sweep(ctx, store, queries, []memory.SearchParams{def, graph})
+	alt := def
+	alt.VecWeight = 0.9
+	alt.FTSWeight = 0.1
+	points, err := Sweep(ctx, store, queries, []memory.SearchParams{def, alt})
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
@@ -48,12 +48,8 @@ func TestSweep(t *testing.T) {
 		t.Errorf("points not sorted by NDCG: %.3f then %.3f", points[0].Result.NDCG10, points[1].Result.NDCG10)
 	}
 
-	// Cross-check both points against the ablation runner: default params
-	// (graph off) == the hybrid ablation, and the candidate graph weight ==
-	// the hybrid+graph ablation. The ablation runner MUST start from a
-	// link-free store (it builds the graph itself between conditions — a
-	// pre-linked store would contaminate its plain-hybrid condition if a
-	// caller opted into a graph weight), so use runTestdata, not sweepFixture.
+	// Cross-check the default point against the ablation runner: default
+	// params == the hybrid ablation.
 	byCond := byCondition(runTestdata(t))
 	find := func(p memory.SearchParams) Result {
 		for _, pt := range points {
@@ -65,38 +61,29 @@ func TestSweep(t *testing.T) {
 		return Result{}
 	}
 	if got, want := find(def).NDCG10, byCond[CondHybrid].NDCG10; got != want {
-		t.Errorf("default (graph-off) sweep point NDCG %.6f != hybrid ablation %.6f", got, want)
-	}
-	if got, want := find(graph).NDCG10, byCond[CondHybridGraph].NDCG10; got != want {
-		t.Errorf("candidate-graph sweep point NDCG %.6f != hybrid+graph ablation %.6f", got, want)
+		t.Errorf("default sweep point NDCG %.6f != hybrid ablation %.6f", got, want)
 	}
 }
 
 func TestSweepGrid(t *testing.T) {
 	grid := SweepGrid()
-	if len(grid) != 36 {
-		t.Fatalf("grid size %d, want 36 (6 vec weights x 6 graph weights)", len(grid))
+	if len(grid) != 6 {
+		t.Fatalf("grid size %d, want 6 (6 vec weights)", len(grid))
 	}
 	def := memory.DefaultSearchParams()
-	foundDefault, foundGraphOff := false, false
+	foundDefault := false
 	for _, p := range grid {
 		if got := p.FTSWeight + p.VecWeight; got < 0.999 || got > 1.001 {
 			t.Errorf("leg weights not normalized: fts=%.2f vec=%.2f", p.FTSWeight, p.VecWeight)
 		}
-		if p.RRFK != def.RRFK || p.GraphSeeds != def.GraphSeeds || p.GraphHops != def.GraphHops {
+		if p.RRFK != def.RRFK {
 			t.Errorf("non-swept knobs must stay at defaults: %+v", p)
 		}
 		if p == def {
 			foundDefault = true
 		}
-		if p.GraphWeight == 0 && p.VecWeight == def.VecWeight {
-			foundGraphOff = true
-		}
 	}
 	if !foundDefault {
 		t.Error("grid must include the production default point")
-	}
-	if !foundGraphOff {
-		t.Error("grid must include a graph-off point at the default leg weighting")
 	}
 }
