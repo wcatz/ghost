@@ -37,7 +37,9 @@ jobs:
           args: --new-from-rev=origin/main
 
       - name: Vulnerability scan
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        # Pinned for the same reproducibility reason as golangci-lint above —
+        # 'latest' can change scan behavior without a repository change.
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
       - name: Test
         run: go test -race -count=1 ./...
