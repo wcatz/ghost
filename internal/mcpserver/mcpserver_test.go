@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -956,6 +957,65 @@ func TestPrompts_RecordDecision(t *testing.T) {
 		Arguments: map[string]string{"project_id": "test-project"},
 	}); err == nil {
 		t.Error("expected error for missing topic argument")
+	}
+}
+
+func TestResourceSubscription_NotifiesOnMemorySave(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+
+	updated := make(chan string, 1)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
+		ResourceUpdatedHandler: func(ctx context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
+			updated <- req.Params.URI
+		},
+	})
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	const uri = "ghost://project/abc123/context"
+	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: uri}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "triggers subscription notify", "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	srv.notifyResourceUpdated(ctx, uri)
+
+	select {
+	case got := <-updated:
+		if got != uri {
+			t.Errorf("notified URI = %q, want %q", got, uri)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for resources/updated notification")
+	}
+
+	if err := session.Unsubscribe(ctx, &mcp.UnsubscribeParams{URI: uri}); err != nil {
+		t.Fatalf("Unsubscribe: %v", err)
+	}
+}
+
+func TestResourceSubscription_RejectsUnknownURI(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: "http://not-ghost/resource"}); err == nil {
+		t.Error("expected error subscribing to non-ghost:// URI")
 	}
 }
 
