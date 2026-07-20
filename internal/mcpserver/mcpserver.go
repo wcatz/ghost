@@ -78,6 +78,11 @@ const (
 	maxContentLen   = 2000
 	maxTitleLen     = 300
 	maxAlternatives = 20
+
+	// globalMemoriesLimit bounds the ghost://memories/global resource. Shared by
+	// the resource Description and its handler so the advertised count and the
+	// fetched count cannot drift apart.
+	globalMemoriesLimit = 15
 )
 
 // validCategories is the canonical memory-category set, shared by save,
@@ -1278,11 +1283,11 @@ func (s *Server) registerResources() {
 		Title:    "Global Memories",
 		URI:      "ghost://memories/global",
 		MIMEType: "text/plain",
-		Description: "Top 50 cross-project Ghost memories: personal preferences, global conventions, " +
-			"toolchain facts. These apply to all projects. " +
-			"Add entries via the ghost_save_global tool.",
+		Description: fmt.Sprintf("Top %d cross-project Ghost memories: personal preferences, global conventions, "+
+			"toolchain facts. These apply to all projects. "+
+			"Add entries via the ghost_save_global tool.", globalMemoriesLimit),
 	}, func(ctx context.Context, req *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-		memories, err := s.store.GetTopMemories(ctx, "_global", 15)
+		memories, err := s.store.GetTopMemories(ctx, "_global", globalMemoriesLimit)
 		if err != nil {
 			return nil, fmt.Errorf("get global memories: %w", err)
 		}
