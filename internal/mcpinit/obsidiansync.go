@@ -49,7 +49,7 @@ func ensureObsidianSyncRunning() {
 	cmd.Stderr = logFile
 	// New session: survives this short-lived hook process exiting, and won't
 	// receive signals sent to Claude Code's process group.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	detachProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return
 	}
