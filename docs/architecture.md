@@ -130,7 +130,10 @@ embedding.Worker goroutine:
              
 Search with embeddings enabled:
   store.SearchHybrid() → 70% vector (cosine) + 30% FTS5, RRF fusion (k=60)
-                       + additive graph bonus: 2-hop link expansion from top-3 seeds
+                       (optional additive graph bonus — 2-hop link expansion from
+                        top-3 seeds — ships DISABLED: DefaultSearchParams sets
+                        GraphWeight=0 after a bench sweep showed it demoting exact
+                        matches; opt in via SearchHybridParams)
 
 Search without embeddings:
   store.SearchFTS() → FTS5 only (porter unicode61 tokenizer)
@@ -169,15 +172,18 @@ schema changes only reach databases created after the change.
 
 ## Time-Decay Scoring
 
-Memories are scored by `importance × decay_factor` where:
+Memories are scored by `importance × decay_factor × pinned_boost`, where
+`decay_factor = max(floor, 1 / (1 + age_days / scale))`:
 
-| Category | Half-life |
-|----------|-----------|
-| preference, convention, fact | none (no decay) |
-| architecture, pattern | 45-day |
-| decision, gotcha, dependency | 30-day |
+| Category | Scale (half-life) | Floor |
+|----------|-------------------|-------|
+| preference, convention, fact | none (no decay) | — |
+| architecture, pattern | 45-day | 0.3 |
+| decision, gotcha, dependency | 30-day | 0.15 |
 
-Pinned memories bypass decay entirely and always rank first.
+Pinned memories get a 1.5× boost (`pinned_boost`) on top of their decayed score —
+they do **not** bypass decay, so a sufficiently stale pinned memory can still rank
+below a fresh unpinned one. See `GetTopMemories` in `internal/memory/store.go`.
 
 ## Build
 
