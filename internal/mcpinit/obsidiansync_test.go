@@ -7,6 +7,22 @@ import (
 	"testing"
 )
 
+func TestEnsureObsidianSyncRunning_DisabledByDefault(t *testing.T) {
+	// Isolate from the host: obsidian.auto_sync defaults to false, and this
+	// must not touch a real home/config/data dir either way.
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	dataDir := filepath.Join(tmpDir, "data")
+	t.Setenv("XDG_DATA_HOME", dataDir)
+
+	ensureObsidianSyncRunning()
+
+	if _, err := os.Stat(filepath.Join(dataDir, "ghost", "obsidian-sync.pid")); !os.IsNotExist(err) {
+		t.Errorf("expected no pidfile to be created when auto_sync is off (err=%v)", err)
+	}
+}
+
 func TestIsAlive_MissingFile(t *testing.T) {
 	if isAlive(filepath.Join(t.TempDir(), "nope.pid")) {
 		t.Error("isAlive() = true for a missing pidfile, want false")

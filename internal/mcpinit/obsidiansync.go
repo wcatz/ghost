@@ -15,9 +15,16 @@ import (
 // background process if one isn't already running, so the Obsidian vault
 // mirror stays current for the rest of the machine's uptime instead of only
 // reflecting whatever was in the DB the last time someone ran the command by
-// hand. Best-effort and silent: any failure here must never block or fail
-// the session-start hook.
+// hand. Opt-in via obsidian.auto_sync (default false) — most users never run
+// Obsidian at all, and this must not create a vault directory or spawn a
+// process on their machines without asking. Best-effort and silent
+// otherwise: any failure here must never block or fail the session-start hook.
 func ensureObsidianSyncRunning() {
+	cfg, err := config.Load()
+	if err != nil || !cfg.Obsidian.AutoSync {
+		return
+	}
+
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
