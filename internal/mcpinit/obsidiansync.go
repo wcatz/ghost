@@ -35,6 +35,7 @@ func ensureObsidianSyncRunning() {
 	if err != nil {
 		return
 	}
+	defer logFile.Close() //nolint:errcheck
 
 	cmd := exec.Command(exe, "obsidian", "sync")
 	cmd.Stdout = logFile
@@ -43,7 +44,6 @@ func ensureObsidianSyncRunning() {
 	// receive signals sent to Claude Code's process group.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
 		return
 	}
 	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
