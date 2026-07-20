@@ -76,6 +76,8 @@ type sessionStartInput struct {
 // Its stdout becomes visible in Claude's context as a system-reminder.
 // It automatically loads project context from the ghost DB based on cwd.
 func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
+	ensureObsidianSyncRunning()
+
 	data, _ := io.ReadAll(stdin)
 
 	var input sessionStartInput
