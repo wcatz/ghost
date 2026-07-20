@@ -30,7 +30,7 @@
 - Project lookup: path-prefix match (longest wins) OR basename name fallback
 - Global memories: `_global` project, included in every project's context
 - Hybrid search: 70% vector (cosine, Ollama) + 30% FTS5, RRF fusion — falls back to FTS5-only
-- Memory links: `memory_links` edge table auto-populated by cosine similarity (internal/linking worker); links cascade-delete with memories and self-heal after reflection. The graph-expansion ranking bonus ships disabled (`DefaultSearchParams().GraphWeight = 0`) — the bench sweep measured it degrading ranking; opt in via `SearchHybridParams`
+- Memory links: `memory_links` edge table auto-populated by cosine similarity (internal/linking worker); links cascade-delete with memories and self-heal after reflection. A graph-expansion ranking bonus was evaluated and removed — dominated by a deeper vector-k (links and the vector leg are both cosine); the link graph is retained for Obsidian export and supersedes ranking (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`).
 
 ## Critical Rules
 - Always `go vet ./...` before committing

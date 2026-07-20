@@ -24,10 +24,10 @@
 
 # --- Memory Linking (requires embedding) ---
 # Background worker that links similar memories into a graph. The graph feeds
-# the Obsidian mirror's graph view and supersede candidate selection; the
-# search-time graph-expansion ranking bonus ships DISABLED (GraphWeight=0) —
-# the bench sweep measured it demoting exact matches (see docs/benchmarks.md).
-# The worker itself is on by default.
+# the Obsidian mirror's graph view and supersede candidate selection. A
+# search-time graph-expansion ranking bonus was evaluated and removed
+# (dominated by a deeper vector-k; see docs/benchmarks.md); the link graph is
+# retained for the uses above. The worker itself is on by default.
 # linking:
 #   enabled: true
 #   threshold: 0.70   # min cosine similarity to create a link

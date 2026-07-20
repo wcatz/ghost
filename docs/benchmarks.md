@@ -28,7 +28,6 @@ hybrid      0.532   0.930   0.973   0.901   0.903     one-time local embedding ~
 - **Honest nuance: on this chat-style benchmark, vector-only ties hybrid** (vector edges R@1/MRR/NDCG, hybrid edges deep recall R@5/R@10). On the dev-facts `ghost bench` dataset below, hybrid beats vector decisively (NDCG 0.989 vs 0.946) — exact identifiers (ports, versions, hostnames) need the keyword leg. Fusion is the robustness play across both data shapes, which is exactly why a memory system for coding agents ships it.
 - **Remaining headroom is at R@1** (0.532 overall; `multi-session` 0.371, `temporal-reasoning` 0.379) — R@10 is close to saturated, so the next win is ranking, not recall.
 - Reproduce: `go run ./bench/longmemeval --data <longmemeval_s_cleaned.json> --condition fts|vector|hybrid --embed-cache <cache.jsonl>`. The append-only content-hash cache makes reruns and interruptions cheap.
-- The hybrid+graph ablation is deliberately not run here: the graph bonus is disabled in production defaults after the Phase-2 sweep measured it degrading ranking; it stays under measurement in `ghost bench` until a redesign beats graph=0.
 
 ## Phase 1b — end-to-end anchors (for later comparison)
 
@@ -45,23 +44,21 @@ condition          R@1     R@5    R@10   MRR@10  NDCG@10
 fts-only         0.786   0.964   1.000    0.964    0.965
 vector-only      0.786   0.929   0.964    0.952    0.946
 hybrid           0.857   0.964   1.000    1.000    0.989
-hybrid+graph     0.500   0.964   1.000    0.780    0.824
 ```
 
 Two findings, both honest:
 
 - **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.989) beats both single legs (FTS 0.965, vector 0.946) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI.
-- **The graph-expansion bonus hurts, so it now ships disabled.** `hybrid+graph` is *worse* than plain hybrid (NDCG 0.824, R@1 0.500) — the additive bonus at its former 0.15 default lifts semantically-adjacent neighbors above exact matches. Following the parameter sweep below, production defaults ship with `GraphWeight 0`; the ablation opts into the candidate 0.15 weight so the signal stays under measurement.
+- **The graph-expansion bonus was evaluated and removed.** An additive link-graph bonus (former 0.15 default) lifted semantically-adjacent neighbors above exact matches, and a public LongMemEval-S kill experiment showed its recoveries were a strict subset of a deeper vector-k's, with no headroom at production depth. It shipped at `GraphWeight 0` and has now been removed entirely (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`). The link graph is retained for the Obsidian mirror and `supersedes` ranking.
 
 The dataset is deliberately a v1 starter (all 8 categories represented); growing it toward ~150 memories / ~40 graded queries is planned. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie.
 
 ### Parameter sweep (`ghost bench --sweep`)
 
-The RRF fusion is parameterized (`memory.SearchParams`), and `ghost bench --sweep` grid-searches the vector-leg weight (FTS = complement) × the graph-bonus weight — 36 combinations over the same dataset, one prepared store, link graph built once. Findings from the first sweep (full table: run `ghost bench --sweep`):
+The RRF fusion is parameterized (`memory.SearchParams`), and `ghost bench --sweep` grid-searches the vector-leg weight (FTS = complement) — 6 combinations over the same dataset, one prepared store, link graph built once. Findings from the first sweep (full table: run `ghost bench --sweep`):
 
-- **The graph bonus degrades retrieval monotonically.** `graph=0` and `graph=0.02` tie for best at every leg weighting (0.02 is too small to reorder anything — effectively off); at vec 0.3–0.7, `0.05` costs ~2.5 NDCG points and `0.10` costs ~9 (worse still at vec ≥ 0.8); the former `0.15` default put the production configuration (NDCG 0.824, rank 24 of 36, in a display tie spilling into the bottom third) far below every graph-off point. The additive strength-scaled bonus, at any effective magnitude, lifts semantically-adjacent neighbors above exact matches on this dataset.
 - **Leg weights are robust.** With the graph off, vec 0.3–0.7 all land within 0.989–0.992 NDCG; only vec ≥ 0.8 degrades. The shipped 70/30 weighting is fine; there is no evidence for changing it from a 14-query dataset.
-- **Outcome: production defaults now ship with `GraphWeight 0`.** The link graph is still built (it powers the Obsidian mirror's graph view and future link-aware features), and the bonus mechanism remains behind `SearchHybridParams`. A redesign — e.g. relation-aware or seed-confidence-gated expansion — ships only when it beats `graph=0` in this sweep.
+- **Outcome: the 70/30 leg weighting ships unchanged, and the graph bonus was removed.** With the leg weights robust across vec 0.3–0.7, there is no evidence to change the shipped 70/30 split. The graph-expansion bonus was removed rather than kept disabled (see the spec linked above); the link graph is still built for the Obsidian mirror and `supersedes`.
 
 ## Phase 3 — staleness suite (the flagship)
 
