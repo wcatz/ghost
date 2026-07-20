@@ -43,6 +43,7 @@ func TestRenderMemory(t *testing.T) {
 	got := renderMemory(m, links, fileFor)
 	want := `---
 ghost_id: 74a37cba00112233
+aliases: ["Embedding backfill bug: ticker only swept seen projects."]
 type: memory
 category: gotcha
 importance: 0.8
@@ -70,6 +71,29 @@ Embedding backfill bug: ticker only swept seen projects.
 	}
 }
 
+// TestRenderMemoryAlias: notes carry an `aliases` flow list so Obsidian's
+// graph and Quick Switcher show a readable label instead of the id8-suffixed
+// filename. The alias is a single-line preview of the content; the flow form
+// keeps the one-line-per-key invariant prune depends on, and ghost_id stays
+// first.
+func TestRenderMemoryAlias(t *testing.T) {
+	m := memory.Memory{
+		ID: "74a37cba00112233", ProjectID: "ghost", Category: "gotcha",
+		Content:    "Embedding backfill bug: ticker only swept seen projects.",
+		Importance: 0.8, Source: "mcp",
+		CreatedAt: "2026-07-06 12:00:00", UpdatedAt: "2026-07-08 09:30:00",
+	}
+	got := renderMemory(m, nil, nil)
+	// Content holds ": " so the alias is quoted; it is under 60 chars so it is
+	// not truncated.
+	if !strings.Contains(got, "aliases: [\"Embedding backfill bug: ticker only swept seen projects.\"]\n") {
+		t.Errorf("expected quoted single-line alias:\n%s", got)
+	}
+	if !strings.HasPrefix(got, "---\nghost_id: 74a37cba00112233\n") {
+		t.Errorf("ghost_id must stay the first frontmatter line:\n%s", got)
+	}
+}
+
 // TestRenderHostileFrontmatter: frontmatter values must occupy exactly one
 // line per key (the ghost_id-first invariant prune depends on) and must not
 // change the YAML shape of their line, whatever the store holds. The note
@@ -91,6 +115,11 @@ func TestRenderHostileFrontmatter(t *testing.T) {
 	if !strings.Contains(got, "project: \"evil: proj ect\"\n") {
 		t.Errorf("hostile project value must be flattened and quoted:\n%s", got)
 	}
+	// Alias is the first content line; the ": " forces quoting so it stays a
+	// single valid scalar.
+	if !strings.Contains(got, `aliases: ["Body content: stays verbatim, even with colons"]`+"\n") {
+		t.Errorf("alias must be quoted single-line preview:\n%s", got)
+	}
 	// Tags: flow-structural characters force per-item quoting, preserving the
 	// tag content rather than stripping it.
 	if !strings.Contains(got, `tags: ["a,b", "x[0]", "quo\"te"]`+"\n") {
@@ -108,8 +137,8 @@ func TestRenderHostileFrontmatter(t *testing.T) {
 		t.Fatalf("no closing frontmatter fence:\n%s", got)
 	}
 	lines := strings.Split(rest[:end], "\n")
-	if len(lines) != 10 {
-		t.Errorf("frontmatter must hold exactly 10 single-line keys, got %d:\n%s", len(lines), rest[:end])
+	if len(lines) != 11 {
+		t.Errorf("frontmatter must hold exactly 11 single-line keys, got %d:\n%s", len(lines), rest[:end])
 	}
 	for _, line := range lines {
 		if !strings.Contains(line, ": ") {
