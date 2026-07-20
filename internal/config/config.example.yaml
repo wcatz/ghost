@@ -41,6 +41,11 @@
 # --- Obsidian Vault Mirror ---
 # One-way Markdown mirror of memories, decisions, and tasks
 # (ghost obsidian export|sync). Empty vault_dir means ~/Documents/GhostVault.
+# auto_sync (default false) makes the session-start hook spawn `ghost
+# obsidian sync` in the background automatically. Leave it off if you don't
+# use Obsidian — it's opt-in so nobody gets a vault directory or a background
+# process they didn't ask for.
 # obsidian:
 #   vault_dir: ""                    # or set GHOST_OBSIDIAN_VAULT_DIR
 #   interval: "30s"                  # sync poll cadence (Go duration, e.g. "1m")
+#   auto_sync: false                 # true = auto-start sync from session-start

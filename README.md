@@ -175,6 +175,8 @@ ghost obsidian export --out ~/Documents/GhostVault   # one-shot mirror
 ghost obsidian sync --interval 30s                   # keep it fresh
 ```
 
+Set `obsidian.auto_sync: true` in config to have the session-start hook spawn `ghost obsidian sync` in the background automatically instead of running it by hand — off by default, so nobody gets a vault directory or a background process without asking for it.
+
 ## MCP surface
 
 18 tools, 4 resources:
