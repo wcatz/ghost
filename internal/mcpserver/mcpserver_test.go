@@ -8,6 +8,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -870,6 +871,92 @@ func TestPromoteMemory(t *testing.T) {
 			t.Error("expected missing memory_id error")
 		}
 	})
+}
+
+// connectedClient spins up a Server and a Client wired together over an
+// in-memory transport, and returns the connected ClientSession. Callers must
+// close the returned session's connection via t.Cleanup handling in Connect.
+func connectedClient(t *testing.T, srv *Server) *mcp.ClientSession {
+	t.Helper()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+
+	ctx := context.Background()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
+
+func TestPrompts_RecallProject(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	if _, _, err := store.Upsert(ctx, "abc123", "fact", "seed memory for recall test", "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	session := connectedClient(t, srv)
+
+	res, err := session.GetPrompt(ctx, &mcp.GetPromptParams{
+		Name:      "recall_project",
+		Arguments: map[string]string{"project_id": "test-project"},
+	})
+	if err != nil {
+		t.Fatalf("GetPrompt recall_project: %v", err)
+	}
+	if len(res.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(res.Messages))
+	}
+	text, ok := res.Messages[0].Content.(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", res.Messages[0].Content)
+	}
+	if !strings.Contains(text.Text, "seed memory for recall test") {
+		t.Errorf("expected recalled memory in prompt text, got: %s", text.Text)
+	}
+
+	if _, err := session.GetPrompt(ctx, &mcp.GetPromptParams{Name: "recall_project"}); err == nil {
+		t.Error("expected error for missing project_id argument")
+	}
+}
+
+func TestPrompts_RecordDecision(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	res, err := session.GetPrompt(ctx, &mcp.GetPromptParams{
+		Name:      "record_decision",
+		Arguments: map[string]string{"project_id": "test-project", "topic": "auth strategy"},
+	})
+	if err != nil {
+		t.Fatalf("GetPrompt record_decision: %v", err)
+	}
+	text, ok := res.Messages[0].Content.(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", res.Messages[0].Content)
+	}
+	if !strings.Contains(text.Text, "auth strategy") || !strings.Contains(text.Text, "ghost_decision_record") {
+		t.Errorf("expected topic and tool reference in prompt text, got: %s", text.Text)
+	}
+
+	if _, err := session.GetPrompt(ctx, &mcp.GetPromptParams{
+		Name:      "record_decision",
+		Arguments: map[string]string{"project_id": "test-project"},
+	}); err == nil {
+		t.Error("expected error for missing topic argument")
+	}
 }
 
 func TestTruncateUTF8(t *testing.T) {

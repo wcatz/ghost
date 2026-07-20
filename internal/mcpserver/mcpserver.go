@@ -136,6 +136,7 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 
 	s.registerTools()
 	s.registerResources()
+	s.registerPrompts()
 	return s
 }
 
@@ -1288,6 +1289,64 @@ func (s *Server) registerResources() {
 				MIMEType: "text/plain",
 				Text:     text,
 			}},
+		}, nil
+	})
+}
+
+// registerPrompts registers MCP prompt templates — user-invokable shortcuts
+// (e.g. slash commands in Claude Code) that wrap Ghost's existing workflows.
+func (s *Server) registerPrompts() {
+	s.mcp.AddPrompt(&mcp.Prompt{
+		Name:        "recall_project",
+		Description: "Recall everything Ghost knows about a project on demand — memories and learned context, same data as the ghost://project/{id}/context resource.",
+		Arguments: []*mcp.PromptArgument{
+			{Name: "project_id", Description: "Project name (e.g. 'ghost') or hash ID.", Required: true},
+		},
+	}, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		rawID := req.Params.Arguments["project_id"]
+		if rawID == "" {
+			return nil, fmt.Errorf("project_id argument is required")
+		}
+		projectID := s.resolveProjectID(ctx, rawID)
+		text, err := s.buildProjectContext(ctx, projectID)
+		if err != nil {
+			return nil, fmt.Errorf("recall project context for %q: %w", rawID, err)
+		}
+		if text == "" {
+			text = "No memories or learned context saved yet for this project."
+		}
+		return &mcp.GetPromptResult{
+			Description: "Ghost's accumulated knowledge for " + rawID,
+			Messages: []*mcp.PromptMessage{
+				{Role: "user", Content: &mcp.TextContent{
+					Text: "Recall what Ghost knows about project \"" + rawID + "\" before continuing:\n\n" + text,
+				}},
+			},
+		}, nil
+	})
+
+	s.mcp.AddPrompt(&mcp.Prompt{
+		Name:        "record_decision",
+		Description: "Walk through structuring a design decision (title, decision, rationale, alternatives) and save it with ghost_decision_record.",
+		Arguments: []*mcp.PromptArgument{
+			{Name: "project_id", Description: "Project name (e.g. 'ghost') or hash ID.", Required: true},
+			{Name: "topic", Description: "What the decision is about, in a few words.", Required: true},
+		},
+	}, func(ctx context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+		projectID := req.Params.Arguments["project_id"]
+		topic := req.Params.Arguments["topic"]
+		if projectID == "" || topic == "" {
+			return nil, fmt.Errorf("project_id and topic arguments are required")
+		}
+		return &mcp.GetPromptResult{
+			Description: "Structure and record a decision about " + topic,
+			Messages: []*mcp.PromptMessage{
+				{Role: "user", Content: &mcp.TextContent{
+					Text: "Help me record a design decision about \"" + topic + "\" for project \"" + projectID + "\". " +
+						"Ask me for (or infer from context): a short title, the decision itself, the rationale, and any " +
+						"alternatives considered. Then call ghost_decision_record with project_id=\"" + projectID + "\" to save it.",
+				}},
+			},
 		}, nil
 	})
 }
