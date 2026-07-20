@@ -41,6 +41,23 @@ func slug(content string) string {
 	return s
 }
 
+// aliasLabel derives a short, readable display name from text: the first line,
+// whitespace-collapsed, capped at 60 runes. Obsidian shows it in the graph and
+// Quick Switcher instead of the id8-suffixed filename. Empty when text has no
+// usable content, in which case the caller omits the aliases key entirely.
+func aliasLabel(text string) string {
+	line := text
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	line = strings.Join(strings.Fields(line), " ")
+	const max = 60
+	if r := []rune(line); len(r) > max {
+		line = strings.TrimRight(string(r[:max]), " ")
+	}
+	return line
+}
+
 func id8(id string) string {
 	if len(id) > 8 {
 		return id[:8]
@@ -117,6 +134,17 @@ func fm(b *strings.Builder, key, val string) {
 	fmt.Fprintf(b, "%s: %s\n", key, yamlScalar(val, false))
 }
 
+// fmAlias writes the aliases flow list when label is non-empty. The single-
+// line flow form preserves the one-line-per-key frontmatter invariant, and the
+// label is rendered through yamlScalar (flow=true) so a colon- or bracket-
+// bearing preview stays a valid quoted scalar.
+func fmAlias(b *strings.Builder, label string) {
+	if label == "" {
+		return
+	}
+	fmt.Fprintf(b, "aliases: [%s]\n", yamlScalar(label, true))
+}
+
 // fmTags writes the tags flow list. Each tag is rendered as a flow-sequence
 // item via yamlScalar (flow=true), which quotes any tag containing flow-
 // structural characters or a YAML indicator so the composed [a, b] list always
@@ -134,6 +162,7 @@ func renderMemory(m memory.Memory, links []memory.Link, fileFor map[string]strin
 	var b strings.Builder
 	b.WriteString("---\n")
 	fm(&b, "ghost_id", m.ID)
+	fmAlias(&b, aliasLabel(m.Content))
 	fm(&b, "type", "memory")
 	fm(&b, "category", m.Category)
 	fm(&b, "importance", strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", m.Importance), "0"), "."))
@@ -172,6 +201,7 @@ func renderDecision(d memory.Decision) string {
 	var b strings.Builder
 	b.WriteString("---\n")
 	fm(&b, "ghost_id", d.ID)
+	fmAlias(&b, aliasLabel(d.Title))
 	fm(&b, "type", "decision")
 	fm(&b, "status", d.Status)
 	fm(&b, "project", d.ProjectID)
@@ -197,6 +227,7 @@ func renderTask(t memory.Task) string {
 	var b strings.Builder
 	b.WriteString("---\n")
 	fm(&b, "ghost_id", t.ID)
+	fmAlias(&b, aliasLabel(t.Title))
 	fm(&b, "type", "task")
 	fm(&b, "status", t.Status)
 	fm(&b, "priority", fmt.Sprintf("%d", t.Priority))

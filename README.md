@@ -177,6 +177,25 @@ ghost obsidian sync --interval 30s                   # keep it fresh
 
 Set `obsidian.auto_sync: true` in config to have the session-start hook spawn `ghost obsidian sync` in the background automatically instead of running it by hand — off by default, so nobody gets a vault directory or a background process without asking for it.
 
+#### Using the vault
+
+Every note carries YAML frontmatter (`category`, `importance`, `pinned`, `project`, `tags`, `created`, `updated`, `source`) and an `aliases` entry — a short single-line preview of the content — so the graph view and Quick Switcher show a readable label instead of the id-suffixed filename. That structure turns the mirror into a queryable knowledge base with no extra tooling:
+
+- **Graph view** already maps your memories: each `## Related` wikilink is an edge, so the auto-linked graph renders natively. Colour nodes by folder (project) or tag to see clusters.
+- **[Dataview](https://github.com/blacksmithgu/obsidian-dataview) queries** over the frontmatter give live tables without touching Ghost — e.g. pinned gotchas, stale memories, or decisions by status:
+
+  ````markdown
+  ```dataview
+  TABLE importance, updated FROM "Ghost"
+  WHERE type = "memory" AND pinned = true AND category = "gotcha"
+  SORT importance DESC
+  ```
+  ````
+
+- **Backlinks** show what links into a memory; the **tag pane** browses `tags:`; **local graph** and **Canvas** explore or arrange nodes spatially.
+
+Because the mirror is one-way, edits inside the vault are informational only and are **not** synced back to Ghost — and if `sync` is running it will overwrite hand-edits on the next database change. Change memories through the MCP tools (or `ghost` CLI), not by editing notes.
+
 ## MCP surface
 
 18 tools, 4 resources:
