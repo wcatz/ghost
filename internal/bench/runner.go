@@ -41,10 +41,8 @@ const (
 )
 
 // Run evaluates the fts, vector, and hybrid ablations over the seeded store
-// and query set. linkThreshold is retained in the signature for call-site
-// stability but is no longer used (the graph ablation it fed was removed).
-func Run(ctx context.Context, store *memory.Store, queries []Query, linkThreshold float32) ([]Result, error) {
-	_ = linkThreshold
+// and query set.
+func Run(ctx context.Context, store *memory.Store, queries []Query) ([]Result, error) {
 	fts, err := runCondition(ctx, CondFTS, queries, func(q Query) ([]string, error) {
 		return idsFromMemories(store.SearchFTS(ctx, q.ProjectID, q.Text, scoreK))
 	})

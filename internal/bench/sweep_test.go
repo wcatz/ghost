@@ -2,17 +2,13 @@ package bench
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"testing"
-	"time"
 
-	"github.com/wcatz/ghost/internal/linking"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// sweepFixture seeds the committed dataset into a fresh store and builds the
-// link graph, mirroring what runBench does before a sweep.
+// sweepFixture seeds the committed dataset into a fresh store, mirroring what
+// runBench does before a sweep.
 func sweepFixture(t *testing.T) (*memory.Store, []Query) {
 	t.Helper()
 	ds, vecs := loadTestdataDataset(t)
@@ -22,7 +18,6 @@ func sweepFixture(t *testing.T) (*memory.Store, []Query) {
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	linking.NewWorker(store, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Hour, 0.70).SweepOnce(ctx)
 	return store, queries
 }
 

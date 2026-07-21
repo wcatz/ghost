@@ -37,7 +37,7 @@ func runTestdata(t *testing.T) []Result {
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	results, err := Run(ctx, store, queries, 0.70)
+	results, err := Run(ctx, store, queries)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
