@@ -10,7 +10,7 @@ The pipeline is four stages. Retrieval is Ghost (Go); generation and judging
 reuse the **original** LongMemEval prompt/grading code, with only the API
 client swapped, so the numbers stay reproducible against the published harness.
 
-```
+```text
 ┌── 1. retrieve (Ghost) ─────────────────────────────────────────────┐
 │ go run ./bench/longmemeval -data longmemeval_s_cleaned.json \       │
 │     -condition hybrid -ollama http://localhost:11434 \              │
