@@ -1,5 +1,5 @@
 // Package bench provides a retrieval-quality benchmark harness for Ghost's
-// search. It drives the real FTS/vector/hybrid/graph code paths over an
+// search. It drives the real FTS/vector/hybrid code paths over an
 // in-memory store and scores the ranked results with judge-free IR metrics.
 //
 // See docs/benchmarks.md for methodology. All metrics here are pure functions

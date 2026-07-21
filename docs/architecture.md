@@ -40,7 +40,7 @@ internal/
     haiku.go               LLM classifier confirming genuine replacements
   bench/                   ghost bench — retrieval-quality benchmark harness
     dataset.go             JSONL dataset loading + seeding with embedding fixtures
-    runner.go              Graded conditions (fts/vector/hybrid/graph)
+    runner.go              Graded conditions (fts/vector/hybrid)
     metrics.go             Recall@k, MRR, NDCG
     sweep.go               Fusion-parameter grid search
     staleness.go           Fresh-fact-wins suite (supersede demote proof)
@@ -49,7 +49,7 @@ internal/
     store.go               SQLite CRUD, FTS5 search, time-decay scoring
     schema.go              DDL (embedded Go string constant — the single source of truth)
     vector.go              Cosine similarity, hybrid RRF search
-    links.go               Memory links: edge CRUD, recursive-CTE graph traversal
+    links.go               Memory links: edge CRUD (related/supersedes)
   mcpserver/               MCP server (stdio transport)
     mcpserver.go           18 tools + 4 resources via go-sdk
   mcpinit/                 Claude Code integration setup
@@ -130,10 +130,6 @@ embedding.Worker goroutine:
              
 Search with embeddings enabled:
   store.SearchHybrid() → 70% vector (cosine) + 30% FTS5, RRF fusion (k=60)
-                       (optional additive graph bonus — 2-hop link expansion from
-                        top-3 seeds — ships DISABLED: DefaultSearchParams sets
-                        GraphWeight=0 after a bench sweep showed it demoting exact
-                        matches; opt in via SearchHybridParams)
 
 Search without embeddings:
   store.SearchFTS() → FTS5 only (porter unicode61 tokenizer)
@@ -146,6 +142,8 @@ linking.Worker goroutine:
   Links cascade-delete with memories and are rebuilt after reflection
   rewrites them — same self-healing lifecycle as embeddings.
 ```
+
+A link-graph expansion bonus was evaluated and removed (dominated by a deeper vector-k; links and the vector leg are both cosine). The memory_links graph is retained for Obsidian export and supersedes ranking.
 
 ## SQLite Schema
 

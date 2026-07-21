@@ -51,14 +51,4 @@ func TestBenchRegressionFloors(t *testing.T) {
 	if r[CondHybrid].NDCG10 < r[CondVector].NDCG10 {
 		t.Errorf("hybrid NDCG@10 %.3f must be >= vector-only %.3f", r[CondHybrid].NDCG10, r[CondVector].NDCG10)
 	}
-
-	// Tracked, not asserted: the hybrid+graph ablation opts into the candidate
-	// graph weight (the former default — production now ships GraphWeight 0
-	// after the sweep measured the bonus degrading ranking monotonically).
-	// The gap is logged so redesign progress is visible; a graph redesign
-	// ships when this inverts, i.e. it beats plain hybrid here and in the
-	// sweep (see docs/benchmarks.md).
-	if g, h := r[CondHybridGraph].NDCG10, r[CondHybrid].NDCG10; g < h {
-		t.Logf("note: hybrid+graph (candidate weight %.2f) NDCG@10 %.3f < hybrid %.3f — graph bonus disabled in production defaults (see docs/benchmarks.md)", candidateGraphWeight, g, h)
-	}
 }

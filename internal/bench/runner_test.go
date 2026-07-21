@@ -61,12 +61,12 @@ func TestRunAllConditions(t *testing.T) {
 		{Name: "no-relevant", ProjectID: "p", Text: "nothing", Rel: Relevance{}}, // excluded from scoring
 	}
 
-	results, err := Run(ctx, store, queries, 0.70)
+	results, err := Run(ctx, store, queries)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	wantConds := []string{CondFTS, CondVector, CondHybrid, CondHybridGraph}
+	wantConds := []string{CondFTS, CondVector, CondHybrid}
 	if len(results) != len(wantConds) {
 		t.Fatalf("got %d conditions, want %d", len(results), len(wantConds))
 	}
@@ -89,7 +89,7 @@ func TestRunAllConditions(t *testing.T) {
 
 func TestRunNoQueries(t *testing.T) {
 	store, _ := seedRunnerStore(t)
-	results, err := Run(context.Background(), store, nil, 0.70)
+	results, err := Run(context.Background(), store, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

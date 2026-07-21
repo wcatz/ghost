@@ -762,10 +762,6 @@ func runBench() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	threshold := float32(0.70)
-	if cfg, err := config.Load(); err == nil {
-		threshold = float32(cfg.Linking.Threshold)
-	}
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -787,9 +783,6 @@ func runBench() {
 	}
 
 	if sweep {
-		// The sweep varies query-time fusion parameters over one prepared
-		// store, so the link graph is built once up front.
-		linking.NewWorker(store, logger, time.Hour, threshold).SweepOnce(ctx)
 		points, err := bench.Sweep(ctx, store, queries, bench.SweepGrid())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -799,7 +792,7 @@ func runBench() {
 		return
 	}
 
-	results, err := bench.Run(ctx, store, queries, threshold)
+	results, err := bench.Run(ctx, store, queries)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

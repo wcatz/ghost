@@ -3,10 +3,7 @@ package bench
 import (
 	"context"
 	"fmt"
-	"log/slog"
-	"time"
 
-	"github.com/wcatz/ghost/internal/linking"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -38,24 +35,14 @@ type Result struct {
 
 // Condition names, stable for reporting.
 const (
-	CondFTS         = "fts-only"
-	CondVector      = "vector-only"
-	CondHybrid      = "hybrid"
-	CondHybridGraph = "hybrid+graph"
+	CondFTS    = "fts-only"
+	CondVector = "vector-only"
+	CondHybrid = "hybrid"
 )
 
-// candidateGraphWeight is the graph-bonus weight the hybrid+graph ablation
-// opts into. It is the former production default, kept under measurement
-// after the sweep showed it degrades ranking; production defaults now ship
-// with GraphWeight 0.
-const candidateGraphWeight = 0.15
-
-// Run evaluates all four ablations over the seeded store and query set. The
-// graph condition is run last: it first builds the memory-link graph (the same
-// linking worker production uses, at the given cosine threshold), which
-// SearchHybrid then folds in as an additive bonus. Running it last keeps the
-// plain hybrid condition free of link effects on the same store.
-func Run(ctx context.Context, store *memory.Store, queries []Query, linkThreshold float32) ([]Result, error) {
+// Run evaluates the fts, vector, and hybrid ablations over the seeded store
+// and query set.
+func Run(ctx context.Context, store *memory.Store, queries []Query) ([]Result, error) {
 	fts, err := runCondition(ctx, CondFTS, queries, func(q Query) ([]string, error) {
 		return idsFromMemories(store.SearchFTS(ctx, q.ProjectID, q.Text, scoreK))
 	})
@@ -75,23 +62,7 @@ func Run(ctx context.Context, store *memory.Store, queries []Query, linkThreshol
 		return nil, err
 	}
 
-	// Build the link graph, then re-run hybrid with the CANDIDATE graph weight
-	// so the graph-expansion bonus participates. Production defaults ship with
-	// GraphWeight 0 (the sweep showed the bonus degrades ranking — see
-	// docs/benchmarks.md), so this ablation deliberately opts in: it keeps
-	// measuring the signal a redesign must improve. SweepOnce does a single
-	// pass; the interval is irrelevant.
-	linking.NewWorker(store, slog.New(slog.NewTextHandler(discard{}, nil)), time.Hour, linkThreshold).SweepOnce(ctx)
-	pGraph := memory.DefaultSearchParams()
-	pGraph.GraphWeight = candidateGraphWeight
-	hybridGraph, err := runCondition(ctx, CondHybridGraph, queries, func(q Query) ([]string, error) {
-		return idsFromMemories(store.SearchHybridParams(ctx, q.ProjectID, q.Text, q.Vector, scoreK, pGraph))
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return []Result{fts, vec, hybrid, hybridGraph}, nil
+	return []Result{fts, vec, hybrid}, nil
 }
 
 // rankFn returns the ranked memory IDs for one query under a condition.
@@ -147,9 +118,3 @@ func idsFromScored(ss []memory.ScoredMemory, err error) ([]string, error) {
 	}
 	return ids, nil
 }
-
-// discard is an io.Writer that drops the linking worker's log output during a
-// benchmark run.
-type discard struct{}
-
-func (discard) Write(p []byte) (int, error) { return len(p), nil }
