@@ -125,11 +125,19 @@ jobs:
           mkdir -p "$(dirname "$DATASET_PATH")"
           curl -fL --retry 3 --retry-delay 5 -o "$DATASET_PATH" "$DATASET_URL"
 
+      # Restore/save split (not a single actions/cache): cache keys are
+      # immutable, and the fixed-key single-action variant only saves in the
+      # post-job phase, which a timed-out cold run never reaches — so the cache
+      # could never warm. A per-run save key plus the shared prefix restore-key
+      # lets each dispatch resume from the latest snapshot and warm the cache
+      # incrementally across runs.
       - name: Restore embedding cache
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: ${{ env.EMBED_CACHE_PATH }}
-          key: longmemeval-embed-cache-v1
+          key: longmemeval-embed-cache-v1-${{ github.run_id }}
+          restore-keys: |
+            longmemeval-embed-cache-v1-
 
       - name: Install Ollama
         run: curl -fsSL https://ollama.com/install.sh | sh
@@ -167,5 +175,15 @@ jobs:
         # when you want to re-confirm the numbers, not to establish them.
         # First run on a cold embed-cache embeds the whole dataset on CPU and
         # is slow (hence the generous timeout above); once actions/cache has a
-        # warm entry under longmemeval-embed-cache-v1, subsequent runs are fast
-        # (only new/changed content gets embedded).
+        # warm entry under the longmemeval-embed-cache-v1- prefix, subsequent
+        # runs are fast (only new/changed content gets embedded).
+
+      - name: Save embedding cache
+        # if: always() so a partial embed pass still snapshots progress even if
+        # the run step fails or the job hits its timeout — the next dispatch
+        # then resumes via restore-keys instead of starting cold again.
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.EMBED_CACHE_PATH }}
+          key: longmemeval-embed-cache-v1-${{ github.run_id }}
