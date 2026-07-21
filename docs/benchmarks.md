@@ -2,7 +2,7 @@
 
 This document is the methodology for publishing retrieval-quality numbers honestly. The guiding rule: **a score only exists if anyone can re-run the harness with one command** — fixed seeds, published judge prompts (where a judge is used at all), and per-question logs.
 
-**Status:** Phase 1 (LongMemEval-S retrieval) and Phase 2 (`ghost bench`) have shipped with published numbers below. Phase 3 (staleness suite) ships report-only in CI. Phase 4 (end-to-end with the official judge) is next.
+**Status:** Phase 1 (LongMemEval-S retrieval) and Phase 2 (`ghost bench`) have shipped with published numbers below. Phase 3 (staleness suite) ships report-only in CI. Phase 4 (end-to-end retrieve→generate→judge) scaffolding has shipped; the paid full run is pending.
 
 ## Why these benchmarks and not others
 
@@ -104,9 +104,16 @@ The trap is untouched because its distractors are *not* supersession pairs — n
 
 **Current default is still off end to end.** Creation is opt-in (`--apply`) and consumption is opt-in (`SupersedeDemote`, reachable via `SearchHybridParams` but not yet wired into production `SearchHybrid`, which uses `DefaultSearchParams`). So no user's ranking changes until both are turned on. The final step — a config toggle wiring `SupersedeDemote` into production search — is deliberately separate: it changes live ranking, so it graduates only once link-creation precision is trusted beyond a small labeled set.
 
-## Phase 4 — end-to-end LongMemEval-S (leaderboard-comparable)
+## Phase 4 — end-to-end LongMemEval-S (retrieve → generate → judge)
 
-Only after phases 1–3: the official harness (`evaluate_qa.py`) with the **standard GPT-4o judge** — substituting a different judge makes numbers non-comparable, which is a known problem with some published scores. Fixed generator model, temperature 0, single deterministic run, per-case results JSON and full logs committed, an explicit note proving the memory system never saw oracle context, and generator model stated prominently (it dominates the score). Estimated cost: ~$30–80 in API calls.
+The scaffolding has **shipped** ([`bench/longmemeval/phase4/`](../bench/longmemeval/phase4/)); the paid full run has not been executed yet. The pipeline is four stages: Ghost retrieves (Go, `-retrieval-out ranked.jsonl`), `merge_retrieval.py` folds the ranking into the dataset, and `phase4_run.py` generates hypotheses then judges them. Generation prompt assembly (`prepare_prompt`) and the yes/no grading templates (`get_anscheck_prompt`) are imported **verbatim** from an upstream LongMemEval checkout — only the API client is swapped — so numbers stay reproducible against the published harness. Both stages are append-only and resume-safe. See the [phase4 README](../bench/longmemeval/phase4/README.md) for the full command sequence.
+
+Two backends are supported:
+
+- **`openai` with a gpt-4o generator + gpt-4o judge** — the official, leaderboard-comparable setup (`evaluate_qa.py`, `o200k_base`, temperature 0). Substituting a different judge makes numbers non-comparable, a known problem with some published scores. The generator dominates the score and must be stated prominently.
+- **`anthropic` (Claude generator/judge)** — **not** leaderboard-comparable; an internal "Ghost retrieval + Claude generation, Claude-judged" check. Same-family generator+judge carries a self-preference caveat (the official gpt-4o-judges-gpt-4o setup has the same property); a different strong judge (e.g. gen `claude-sonnet-5`, judge `claude-opus-4-8`) costs only a few dollars more since the judge emits ~10 tokens/question.
+
+Estimated cost at `topk_context=5` over the full 470 answerable questions: ~$20 (gpt-4o gen+judge) or ~$24 (claude-sonnet-5 gen+judge); Opus as *generator* is ~$116 and should be avoided. Use `cost_estimate.py` (no API calls) to re-anchor before spending. When the run executes: temperature 0, single deterministic run, per-case results JSON and full logs committed, an explicit note that the memory system never saw oracle context.
 
 Reference points, all judged with the official GPT-4o harness but with **different generators** (which dominate the score — compare within-generator only): Zep 71.2% and full-context 60.2% (GPT-4o generator); Mastra 94.87% (gpt-5-mini generator; 84.23% with GPT-4o); agentmemory 96.2% (Claude Opus 4.6 generator, temperature 0).
 
