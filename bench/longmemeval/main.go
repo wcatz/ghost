@@ -15,8 +15,15 @@
 //
 //	go run ./bench/longmemeval --data ~/.cache/ghost-bench/longmemeval_s_cleaned.json \
 //	    --condition fts|vector|hybrid [--questions N] [--out per-question.jsonl] \
+//	    [--retrieval-out ranked.jsonl] \
 //	    [--ollama http://localhost:11434] [--embed-cache ~/.cache/ghost-bench/nomic-cache.jsonl] \
 //	    [--floors "r5=0.74,ndcg10=0.72"]
+//
+// --retrieval-out emits, per scored question, the full untruncated ranked
+// session list in the official LongMemEval retrieval_results format
+// ({question_id, ranked_items:[{corpus_id, text}]}), the input the Phase 4
+// (end-to-end, leaderboard-comparable) generation stage merges into the
+// dataset. See docs/benchmarks.md.
 //
 // The fts condition needs no embeddings and runs in minutes. vector/hybrid
 // embed every turn and question through local Ollama (nomic-embed-text:v1.5),
@@ -63,6 +70,27 @@ type question struct {
 	AnswerSessionIDs []string `json:"answer_session_ids"`
 	SessionIDs       []string `json:"haystack_session_ids"`
 	Sessions         [][]turn `json:"haystack_sessions"`
+}
+
+// rankedItem is one entry of the official LongMemEval retrieval_results format
+// (src/generation/run_generation.py reads entry['retrieval_results']
+// ['ranked_items'] as [{corpus_id, text}]). Ghost's corpus_id is the haystack
+// session id verbatim; text is unused by the flat-session reader (merge=none)
+// but kept for schema fidelity.
+type rankedItem struct {
+	CorpusID string `json:"corpus_id"`
+	Text     string `json:"text"`
+}
+
+// retrievalLine is one line of the --retrieval-out log: a question's full,
+// untruncated ranked session list in the official retrieval_results shape,
+// ready to merge into the dataset as the --in_file for the Phase 4 (end-to-end,
+// leaderboard-comparable) generation stage. Unlike perQuestion.TopSessions
+// (capped at 10 for the metrics log), this keeps every ranked session so a
+// downstream topk_context up to 50 has enough to slice.
+type retrievalLine struct {
+	QuestionID     string       `json:"question_id"`
+	RankedSessions []rankedItem `json:"ranked_items"`
 }
 
 // perQuestion is one line of the --out log, per the honest-reporting rules
@@ -175,6 +203,7 @@ func main() {
 	condition := flag.String("condition", "fts", "fts | vector | hybrid")
 	maxQuestions := flag.Int("questions", 0, "limit scored questions (0 = all)")
 	outPath := flag.String("out", "", "per-question JSONL results log")
+	retrievalOutPath := flag.String("retrieval-out", "", "JSONL of full ranked sessions per question in official retrieval_results format (Phase 4 generation input)")
 	ollamaURL := flag.String("ollama", "http://localhost:11434", "Ollama URL for vector/hybrid")
 	embedCache := flag.String("embed-cache", "", "append-only embedding cache JSONL (vector/hybrid)")
 	floorsSpec := flag.String("floors", "", "comma-separated metric=min floors over OVERALL metrics, e.g. \"r5=0.74,ndcg10=0.72\" (keys: r1, r5, r10, mrr10, ndcg10)")
@@ -227,6 +256,16 @@ func main() {
 		defer outFile.Close() //nolint:errcheck
 	}
 
+	var retrievalOutFile *os.File
+	if *retrievalOutPath != "" {
+		retrievalOutFile, err = os.Create(*retrievalOutPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		defer retrievalOutFile.Close() //nolint:errcheck
+	}
+
 	ctx := context.Background()
 	overall := &agg{}
 	byType := map[string]*agg{}
@@ -275,6 +314,14 @@ func main() {
 				TopSessions: top,
 			})
 			_, _ = fmt.Fprintf(outFile, "%s\n", line)
+		}
+		if retrievalOutFile != nil {
+			items := make([]rankedItem, len(rankedSessions))
+			for i, sid := range rankedSessions {
+				items[i] = rankedItem{CorpusID: sid, Text: ""}
+			}
+			line, _ := json.Marshal(retrievalLine{QuestionID: q.QuestionID, RankedSessions: items})
+			_, _ = fmt.Fprintf(retrievalOutFile, "%s\n", line)
 		}
 		if scored%50 == 0 {
 			fmt.Fprintf(os.Stderr, "progress: %d questions scored (%.0fs elapsed)\n", scored, time.Since(start).Seconds())

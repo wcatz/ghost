@@ -1,0 +1,8 @@
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Local run artifacts (never commit generated data / hypotheses / judged logs)
+*.jsonl
+merged.json
+venv/
