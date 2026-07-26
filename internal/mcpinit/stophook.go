@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -158,15 +160,26 @@ func spawnResolveIfConfigured(cwd string) {
 	if isAlive(pidPath) {
 		return
 	}
-	// isAlive false means no pidfile or a stale one from a prior failed spawn;
-	// clear it and atomically claim the slot so two stop hooks firing close
-	// together (same project, e.g. near-simultaneous sessions) can't both pass
-	// the liveness check and double-spawn a paid-API, DB-writing process.
-	_ = os.Remove(pidPath)
+	// isAlive false means no pidfile, or a stale one left by a prior spawn that
+	// never got as far as writing a real PID. Atomically claim the slot with
+	// our own PID before doing any of the expensive setup below, so two stop
+	// hooks firing close together (same project, e.g. near-simultaneous
+	// sessions) can't both pass the liveness check and double-spawn a
+	// paid-API, DB-writing process: whichever loses the O_EXCL create sees a
+	// live PID (ours) via isAlive and backs off, rather than an empty file it
+	// would mistake for a free slot.
 	claim, err := os.OpenFile(pidPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		if isAlive(pidPath) {
+			return
+		}
+		_ = os.Remove(pidPath)
+		claim, err = os.OpenFile(pidPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	}
 	if err != nil {
 		return
 	}
+	_, _ = claim.WriteString(strconv.Itoa(os.Getpid()))
 	_ = claim.Close()
 
 	exe, err := os.Executable()

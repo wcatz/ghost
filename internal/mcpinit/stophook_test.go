@@ -113,14 +113,14 @@ func TestHandleStopHook(t *testing.T) {
 	})
 }
 
-func TestHandleStopHook_SpawnResolveIfConfigured_NoOpWhenDisabled(t *testing.T) {
-	// spawnResolveIfConfigured must be a silent no-op when
-	// reflection.auto_resolve is false (the default) — the common case for
-	// every user who hasn't opted in. This is the only spawn-path behavior
-	// safely testable without a real ghost.db or a real config file: it
-	// confirms HandleStopHook still returns promptly and performs its usual
-	// block-decision logic even when CWD is set, proving the new call didn't
-	// introduce a hang or a panic on the hot path.
+func TestHandleStopHook_FailsOpenOnEmptyTranscriptPathEvenWithCWD(t *testing.T) {
+	// HandleStopHook must stay silent and return promptly when transcript_path
+	// is empty, even once cwd is populated and a spawn attempt is made first —
+	// proving the new spawnResolveIfConfigured call didn't introduce a hang or
+	// panic on the hot path. This does NOT assert spawnResolveIfConfigured was
+	// a no-op (see TestSpawnResolveIfConfigured_NoOpWhenDisabled for that); the
+	// early return below is guaranteed independently of spawn behavior.
+	isolatedHome(t)
 	var buf bytes.Buffer
 	input := `{"transcript_path":"","stop_hook_active":false,"cwd":"/tmp/does-not-matter"}`
 	HandleStopHook(strings.NewReader(input), &buf)
@@ -129,13 +129,23 @@ func TestHandleStopHook_SpawnResolveIfConfigured_NoOpWhenDisabled(t *testing.T) 
 	}
 }
 
-// isolatedHome points HOME/XDG_CONFIG_HOME/XDG_DATA_HOME at fresh temp dirs so
-// config.Load and config.DataDir can never see the developer's real
-// ~/.config/ghost/config.yaml or ~/.local/share/ghost/ghost.db. Without this,
-// TestSpawnResolveIfConfigured_NoOpWhenDisabled would only be hermetic by
-// accident of the machine it happens to run on.
+// isolatedHome points HOME/XDG_CONFIG_HOME/XDG_DATA_HOME at fresh temp dirs
+// and clears GHOST_* / ANTHROPIC_API_KEY env vars, so config.Load and
+// config.DataDir can never see the developer's real
+// ~/.config/ghost/config.yaml, real GHOST_REFLECTION_AUTO_RESOLVE-style
+// overrides, or ~/.local/share/ghost/ghost.db. Without this, tests that
+// exercise spawnResolveIfConfigured would only be hermetic by accident of the
+// machine and environment they happen to run in.
 func isolatedHome(t *testing.T) string {
 	t.Helper()
+	for _, e := range os.Environ() {
+		if key, _, ok := strings.Cut(e, "="); ok && (strings.HasPrefix(key, "GHOST_") || key == "ANTHROPIC_API_KEY") {
+			if old, ok := os.LookupEnv(key); ok {
+				t.Setenv(key, old)
+				_ = os.Unsetenv(key)
+			}
+		}
+	}
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
