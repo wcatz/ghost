@@ -2,15 +2,22 @@ package mcpinit
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+
+	"github.com/wcatz/ghost/internal/config"
 )
 
 type stopHookInput struct {
 	TranscriptPath string `json:"transcript_path"`
 	StopHookActive bool   `json:"stop_hook_active"`
+	CWD            string `json:"cwd"`
 }
 
 // transcriptLine is the minimal shape needed to spot tool_use entries in a
@@ -44,7 +51,10 @@ const stopBlockMessage = `{"decision":"block","reason":"This session used tools 
 // It blocks the stop once — via {"decision":"block"} on stdout — when the
 // session used tools but never saved anything to Ghost. Every failure path
 // returns silently, allowing the stop: the hook must never trap a session.
-// It performs no database access.
+// It performs no synchronous database access of its own; the one exception is
+// spawnResolveIfConfigured, which — best-effort — forks a detached
+// `ghost resolve --apply` and returns immediately without waiting on it, so
+// this function's own hot path still does no DB/LLM work.
 func HandleStopHook(stdin io.Reader, stdout io.Writer) {
 	data, err := io.ReadAll(stdin)
 	if err != nil {
@@ -58,6 +68,9 @@ func HandleStopHook(stdin io.Reader, stdout io.Writer) {
 	if input.StopHookActive {
 		return
 	}
+
+	spawnResolveIfConfigured(input.CWD)
+
 	if input.TranscriptPath == "" {
 		return
 	}
@@ -100,4 +113,70 @@ func scanTranscript(r io.Reader) (toolCalls, ghostSaves int) {
 		}
 	}
 	return toolCalls, ghostSaves
+}
+
+// spawnResolveIfConfigured starts `ghost resolve <project> --apply` as a
+// detached background process for the project matching cwd, if one isn't
+// already running for that project. Opt-in via reflection.auto_resolve
+// (default false) — most users never want an unattended write pass. Every
+// failure path returns silently: this must never block or fail the stop hook.
+// If the Anthropic API is out of credit, the spawned process itself fails
+// fast (per Task 6) and logs the failure to resolve.log — no local fallback
+// runs in this path, so auto-resolve simply does nothing until credits are
+// restored.
+// Known limitation: resolution here depends on lookupProject's path/basename
+// match against the stored project row; a cwd with no matching project is a
+// silent no-op, same as an unconfigured user.
+func spawnResolveIfConfigured(cwd string) {
+	if cwd == "" {
+		return
+	}
+	cfg, err := config.Load()
+	if err != nil || !cfg.Reflection.AutoResolve {
+		return
+	}
+
+	dataDir, err := config.DataDir()
+	if err != nil {
+		return
+	}
+	dbPath := filepath.Join(dataDir, "ghost.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return
+	}
+	db, err := sql.Open("sqlite", roDSN(dbPath))
+	if err != nil {
+		return
+	}
+	defer db.Close() //nolint:errcheck
+
+	projectID, projectName := lookupProject(db, cwd)
+	if projectID == "" || projectName == "" {
+		return
+	}
+
+	pidPath := filepath.Join(dataDir, "resolve-"+projectID+".pid")
+	if isAlive(pidPath) {
+		return
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	logFile, err := os.OpenFile(filepath.Join(dataDir, "resolve.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer logFile.Close() //nolint:errcheck
+
+	cmd := exec.Command(exe, "resolve", projectName, "--apply")
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	detachProcess(cmd)
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
+	_ = cmd.Process.Release()
 }

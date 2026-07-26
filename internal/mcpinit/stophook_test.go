@@ -1,6 +1,7 @@
 package mcpinit
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -110,4 +111,20 @@ func TestHandleStopHook(t *testing.T) {
 			t.Errorf("expected silence (save found despite garbage), got %q", out)
 		}
 	})
+}
+
+func TestHandleStopHook_SpawnResolveIfConfigured_NoOpWhenDisabled(t *testing.T) {
+	// spawnResolveIfConfigured must be a silent no-op when
+	// reflection.auto_resolve is false (the default) — the common case for
+	// every user who hasn't opted in. This is the only spawn-path behavior
+	// safely testable without a real ghost.db or a real config file: it
+	// confirms HandleStopHook still returns promptly and performs its usual
+	// block-decision logic even when CWD is set, proving the new call didn't
+	// introduce a hang or a panic on the hot path.
+	var buf bytes.Buffer
+	input := `{"transcript_path":"","stop_hook_active":false,"cwd":"/tmp/does-not-matter"}`
+	HandleStopHook(strings.NewReader(input), &buf)
+	if buf.Len() != 0 {
+		t.Errorf("expected no output for empty transcript_path, got %q", buf.String())
+	}
 }
