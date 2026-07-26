@@ -4,10 +4,8 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -160,21 +158,13 @@ func spawnResolveIfConfigured(cwd string) {
 	if isAlive(pidPath) {
 		return
 	}
-	// isAlive false means no pidfile, or a stale one left by a prior spawn that
-	// never got as far as writing a real PID. Claim the slot before doing any
-	// of the expensive setup below, so two stop hooks firing close together
-	// (same project, e.g. near-simultaneous sessions) can't both pass the
-	// liveness check and double-spawn a paid-API, DB-writing process.
-	//
-	// A plain os.OpenFile(O_CREATE|O_EXCL) claim is atomic for *existence* but
-	// not for *content* — a second caller can observe the file the instant
-	// after create, before this process's PID is written into it, and
-	// mistake the still-empty file for a free slot. Avoiding that requires
-	// content to exist at the moment the name is claimed, which os.Link
-	// gives us: write our PID to a private temp file first, then hard-link it
-	// onto pidPath — an atomic, all-or-nothing rename-like claim that fails
-	// with ErrExist if the name is already taken, with no window where the
-	// name exists but the content doesn't.
+	// isAlive false above is only a fast path to skip locking in the common
+	// case (no resolve running at all). It is NOT sufficient on its own: two
+	// stop hooks firing close together for the same project could both pass
+	// it and both decide to spawn a paid-API, DB-writing process. claimPidFile
+	// re-checks liveness under an OS-level lock, serializing the
+	// check-then-write against every other caller on the machine, so exactly
+	// one of them wins the claim.
 	if !claimPidFile(pidPath) {
 		return
 	}
@@ -200,38 +190,32 @@ func spawnResolveIfConfigured(cwd string) {
 	_ = cmd.Process.Release()
 }
 
-// claimPidFile atomically claims pidPath for the current process, retrying
-// once against a stale claim. It writes a temp file containing our own PID,
-// then hard-links it onto pidPath: os.Link fails with ErrExist if the name
-// is taken, and unlike os.OpenFile(O_EXCL) there is no window where the name
-// exists but the content is still empty, because the link target already
-// has its final content at the moment the name is claimed. Returns false if
-// the slot is genuinely held by a live process, or on any I/O failure.
+// claimPidFile atomically claims pidPath for the current process. It takes
+// an OS-level exclusive lock (flock/LockFileEx) on a sibling ".lock" file
+// before checking liveness and writing the PID, so the whole
+// check-then-write sequence is serialized against every other caller on the
+// machine rather than just the final write. That serialization is the part
+// a plain os.OpenFile(O_EXCL) or os.Link claim can't provide on its own:
+// once a caller decides an existing claim is stale and moves to reclaim it,
+// nothing stops a second caller from reaching the same decision against the
+// same stale content and reclaiming it too. The lock is kernel-owned, so a
+// process that dies mid-claim releases it automatically — a crash here can
+// never deadlock a later caller. Returns false if the slot is genuinely held
+// by a live process, or on any I/O failure.
 func claimPidFile(pidPath string) bool {
-	tmp, err := os.CreateTemp(filepath.Dir(pidPath), "resolve-*.pid.tmp")
+	lockFile, err := os.OpenFile(pidPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return false
 	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath) //nolint:errcheck
+	defer lockFile.Close() //nolint:errcheck
 
-	_, writeErr := tmp.WriteString(strconv.Itoa(os.Getpid()))
-	closeErr := tmp.Close()
-	if writeErr != nil || closeErr != nil {
+	if err := lockExclusive(lockFile); err != nil {
 		return false
 	}
+	defer unlockFile(lockFile) //nolint:errcheck
 
-	if err := os.Link(tmpPath, pidPath); err != nil {
-		if !errors.Is(err, fs.ErrExist) {
-			return false
-		}
-		if isAlive(pidPath) {
-			return false
-		}
-		_ = os.Remove(pidPath)
-		if err := os.Link(tmpPath, pidPath); err != nil {
-			return false
-		}
+	if isAlive(pidPath) {
+		return false
 	}
-	return true
+	return os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o600) == nil
 }

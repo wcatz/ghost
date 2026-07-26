@@ -172,17 +172,50 @@ func TestSpawnResolveIfConfigured_NoOpWhenDisabled(t *testing.T) {
 }
 
 // TestClaimPidFile_ConcurrentCallersOnlyOneWins races many goroutines against
-// the same pidPath, simulating near-simultaneous stop hooks for the same
-// project. Exactly one must win the claim; every loser must see a live PID
-// (never an empty/stale file) via isAlive, which is what makes the claim
-// double-spawn-proof — content exists at the same instant the name does, so
-// there is no window where a loser could mistake a winner's in-progress
-// claim for a free slot.
+// an empty pidPath, simulating near-simultaneous stop hooks for the same
+// project when no resolve has ever run. Exactly one must win the claim.
 func TestClaimPidFile_ConcurrentCallersOnlyOneWins(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "resolve-test.pid")
 
-	const n = 50
+	wins := raceClaimPidFile(t, pidPath, 50)
+	if wins != 1 {
+		t.Errorf("expected exactly 1 winner among 50 concurrent claimants, got %d", wins)
+	}
+
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("read pidPath: %v", err)
+	}
+	if _, err := strconv.Atoi(strings.TrimSpace(string(data))); err != nil {
+		t.Errorf("pidPath content is never a valid PID (empty/stale window observed): %q", data)
+	}
+}
+
+// TestClaimPidFile_ConcurrentCallersOnlyOneWinsAgainstStaleClaim seeds
+// pidPath with a definitely-dead PID first, then races many goroutines
+// against it. This exercises the reclaim path specifically — the one a
+// prior fix attempt got wrong, letting multiple callers each independently
+// decide the stale claim was theirs to steal and all "win." The exclusive
+// lock in claimPidFile must serialize the check-then-write against every
+// caller, not just protect the initial claim, so exactly one winner here
+// proves the reclaim path is race-free too.
+func TestClaimPidFile_ConcurrentCallersOnlyOneWinsAgainstStaleClaim(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "resolve-test.pid")
+	// A PID astronomically unlikely to be alive on any real machine.
+	if err := os.WriteFile(pidPath, []byte("999999999"), 0o600); err != nil {
+		t.Fatalf("seed stale pidfile: %v", err)
+	}
+
+	wins := raceClaimPidFile(t, pidPath, 20)
+	if wins != 1 {
+		t.Errorf("expected exactly 1 winner reclaiming a stale pidfile, got %d", wins)
+	}
+}
+
+func raceClaimPidFile(t *testing.T, pidPath string, n int) int {
+	t.Helper()
 	var wg sync.WaitGroup
 	results := make([]bool, n)
 	for i := 0; i < n; i++ {
@@ -200,15 +233,5 @@ func TestClaimPidFile_ConcurrentCallersOnlyOneWins(t *testing.T) {
 			wins++
 		}
 	}
-	if wins != 1 {
-		t.Errorf("expected exactly 1 winner among %d concurrent claimants, got %d", n, wins)
-	}
-
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
-		t.Fatalf("read pidPath: %v", err)
-	}
-	if _, err := strconv.Atoi(strings.TrimSpace(string(data))); err != nil {
-		t.Errorf("pidPath content is never a valid PID (empty/stale window observed): %q", data)
-	}
+	return wins
 }
