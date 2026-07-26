@@ -8,11 +8,15 @@ import (
 )
 
 type fakeProvider struct {
-	text string
-	err  error
+	text            string
+	err             error
+	gotSystemPrompt string
+	gotUserContent  string
 }
 
 func (f *fakeProvider) Classify(ctx context.Context, systemPrompt, userContent string) (string, error) {
+	f.gotSystemPrompt = systemPrompt
+	f.gotUserContent = userContent
 	return f.text, f.err
 }
 
@@ -28,13 +32,17 @@ func TestFallbackProvider_PrimarySucceeds(t *testing.T) {
 }
 
 func TestFallbackProvider_CreditExhaustionFallsThrough(t *testing.T) {
-	fp := NewFallbackProvider(&fakeProvider{err: ErrCreditExhausted}, &fakeProvider{text: "RESOLVED"}, true)
+	secondary := &fakeProvider{text: "RESOLVED"}
+	fp := NewFallbackProvider(&fakeProvider{err: ErrCreditExhausted}, secondary, true)
 	res, err := fp.Classify(context.Background(), "sys", "content")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if res.Text != "RESOLVED" || !res.FromFallback {
 		t.Errorf("got %+v, want {RESOLVED true}", res)
+	}
+	if secondary.gotSystemPrompt != "sys" || secondary.gotUserContent != "content" {
+		t.Errorf("secondary got (%q, %q), want (sys, content) forwarded unmodified", secondary.gotSystemPrompt, secondary.gotUserContent)
 	}
 }
 

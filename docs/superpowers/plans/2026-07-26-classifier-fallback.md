@@ -89,11 +89,11 @@ type reflectClient interface {
 	Reflect(ctx context.Context, prompt string) (string, TokenUsage, error)
 }
 
-// anthropicClient adapts a *Client to the Provider interface. The
-// systemPrompt argument is intentionally ignored: Client.Reflect always sends
-// its own fixed system block, and callers already fold their task
-// instructions into userContent — this preserves that existing, unchanged
-// behavior for the primary provider everywhere.
+// anthropicClient adapts a *Client to the Provider interface.
+// Client.Reflect takes a single prompt string and always sends its own fixed
+// system block (for reflection, not classification) — so systemPrompt and
+// userContent are joined into one prompt here, reproducing the single
+// fmt.Sprintf-built prompt the classifiers used before this seam existed.
 type anthropicClient struct {
 	client reflectClient
 }
@@ -103,8 +103,8 @@ func NewAnthropicProvider(client reflectClient) Provider {
 	return &anthropicClient{client: client}
 }
 
-func (a *anthropicClient) Classify(ctx context.Context, _, userContent string) (string, error) {
-	text, _, err := a.client.Reflect(ctx, userContent)
+func (a *anthropicClient) Classify(ctx context.Context, systemPrompt, userContent string) (string, error) {
+	text, _, err := a.client.Reflect(ctx, systemPrompt+"\n\n"+userContent)
 	return text, err
 }
 
@@ -164,19 +164,22 @@ package ai
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
 type fakeReflectClient struct {
-	text string
-	err  error
+	text      string
+	err       error
+	gotPrompt string
 }
 
 func (f *fakeReflectClient) Reflect(ctx context.Context, prompt string) (string, TokenUsage, error) {
+	f.gotPrompt = prompt
 	return f.text, TokenUsage{}, f.err
 }
 
-func TestAnthropicClient_Classify_PassesUserContentIgnoresSystemPrompt(t *testing.T) {
+func TestAnthropicClient_Classify_CombinesSystemPromptAndUserContent(t *testing.T) {
 	fake := &fakeReflectClient{text: "RESOLVED"}
 	p := NewAnthropicProvider(fake)
 	out, err := p.Classify(context.Background(), "some system prompt", "some user content")
@@ -185,6 +188,12 @@ func TestAnthropicClient_Classify_PassesUserContentIgnoresSystemPrompt(t *testin
 	}
 	if out != "RESOLVED" {
 		t.Fatalf("got %q, want RESOLVED", out)
+	}
+	if !strings.Contains(fake.gotPrompt, "some system prompt") {
+		t.Errorf("Reflect prompt %q missing systemPrompt", fake.gotPrompt)
+	}
+	if !strings.Contains(fake.gotPrompt, "some user content") {
+		t.Errorf("Reflect prompt %q missing userContent", fake.gotPrompt)
 	}
 }
 
@@ -460,11 +469,15 @@ import (
 )
 
 type fakeProvider struct {
-	text string
-	err  error
+	text            string
+	err             error
+	gotSystemPrompt string
+	gotUserContent  string
 }
 
 func (f *fakeProvider) Classify(ctx context.Context, systemPrompt, userContent string) (string, error) {
+	f.gotSystemPrompt = systemPrompt
+	f.gotUserContent = userContent
 	return f.text, f.err
 }
 
@@ -480,13 +493,17 @@ func TestFallbackProvider_PrimarySucceeds(t *testing.T) {
 }
 
 func TestFallbackProvider_CreditExhaustionFallsThrough(t *testing.T) {
-	fp := NewFallbackProvider(&fakeProvider{err: ErrCreditExhausted}, &fakeProvider{text: "RESOLVED"}, true)
+	secondary := &fakeProvider{text: "RESOLVED"}
+	fp := NewFallbackProvider(&fakeProvider{err: ErrCreditExhausted}, secondary, true)
 	res, err := fp.Classify(context.Background(), "sys", "content")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if res.Text != "RESOLVED" || !res.FromFallback {
 		t.Errorf("got %+v, want {RESOLVED true}", res)
+	}
+	if secondary.gotSystemPrompt != "sys" || secondary.gotUserContent != "content" {
+		t.Errorf("secondary got (%q, %q), want (sys, content) forwarded unmodified", secondary.gotSystemPrompt, secondary.gotUserContent)
 	}
 }
 

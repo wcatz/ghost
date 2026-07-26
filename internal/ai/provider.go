@@ -34,11 +34,11 @@ type reflectClient interface {
 	Reflect(ctx context.Context, prompt string) (string, TokenUsage, error)
 }
 
-// anthropicClient adapts a *Client to the Provider interface. The
-// systemPrompt argument is intentionally ignored: Client.Reflect always sends
-// its own fixed system block, and callers already fold their task
-// instructions into userContent — this preserves that existing, unchanged
-// behavior for the primary provider everywhere.
+// anthropicClient adapts a *Client to the Provider interface.
+// Client.Reflect takes a single prompt string and always sends its own fixed
+// system block (for reflection, not classification) — so systemPrompt and
+// userContent are joined into one prompt here, reproducing the single
+// fmt.Sprintf-built prompt the classifiers used before this seam existed.
 type anthropicClient struct {
 	client reflectClient
 }
@@ -48,8 +48,8 @@ func NewAnthropicProvider(client reflectClient) Provider {
 	return &anthropicClient{client: client}
 }
 
-func (a *anthropicClient) Classify(ctx context.Context, _, userContent string) (string, error) {
-	text, _, err := a.client.Reflect(ctx, userContent)
+func (a *anthropicClient) Classify(ctx context.Context, systemPrompt, userContent string) (string, error) {
+	text, _, err := a.client.Reflect(ctx, systemPrompt+"\n\n"+userContent)
 	return text, err
 }
 

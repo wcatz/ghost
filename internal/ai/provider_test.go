@@ -4,19 +4,22 @@ package ai
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
 type fakeReflectClient struct {
-	text string
-	err  error
+	text      string
+	err       error
+	gotPrompt string
 }
 
 func (f *fakeReflectClient) Reflect(ctx context.Context, prompt string) (string, TokenUsage, error) {
+	f.gotPrompt = prompt
 	return f.text, TokenUsage{}, f.err
 }
 
-func TestAnthropicClient_Classify_PassesUserContentIgnoresSystemPrompt(t *testing.T) {
+func TestAnthropicClient_Classify_CombinesSystemPromptAndUserContent(t *testing.T) {
 	fake := &fakeReflectClient{text: "RESOLVED"}
 	p := NewAnthropicProvider(fake)
 	out, err := p.Classify(context.Background(), "some system prompt", "some user content")
@@ -25,6 +28,12 @@ func TestAnthropicClient_Classify_PassesUserContentIgnoresSystemPrompt(t *testin
 	}
 	if out != "RESOLVED" {
 		t.Fatalf("got %q, want RESOLVED", out)
+	}
+	if !strings.Contains(fake.gotPrompt, "some system prompt") {
+		t.Errorf("Reflect prompt %q missing systemPrompt", fake.gotPrompt)
+	}
+	if !strings.Contains(fake.gotPrompt, "some user content") {
+		t.Errorf("Reflect prompt %q missing userContent", fake.gotPrompt)
 	}
 }
 
