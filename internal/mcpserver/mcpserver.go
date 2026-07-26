@@ -920,9 +920,6 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("project is required")
 		}
 		projectID := s.resolveProjectID(ctx, args.Project)
-		if projectID == "" {
-			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("project %q not found", args.Project)}}}, nil, nil
-		}
 		rs, ok := s.store.(resolveCapableStore)
 		if !ok {
 			return nil, nil, fmt.Errorf("ghost_resolve: store does not support resolve operations")
@@ -942,7 +939,7 @@ func (s *Server) registerTools() {
 		if args.Apply {
 			verb = "resolved"
 			count = res.Resolved
-			s.notifyProjectResource(ctx, projectID, "memories")
+			s.notifyProjectResource(ctx, projectID, "context")
 		}
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %s %d\n",
