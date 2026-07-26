@@ -435,7 +435,8 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, created_at, updated_at
 		FROM memories
-		WHERE project_id = ? OR project_id = '_global'
+		WHERE (project_id = ? OR project_id = '_global')
+		  AND resolved_at IS NULL
 		ORDER BY (
 			importance
 			* CASE

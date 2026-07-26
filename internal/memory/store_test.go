@@ -2071,3 +2071,59 @@ func TestResolveCandidatesAndSetResolved(t *testing.T) {
 		t.Errorf("candidates after resolve = %d, want 0", len(cands))
 	}
 }
+
+func TestGetTopMemoriesExcludesResolved(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	activeID, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "active gotcha keep", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create active: %v", err)
+	}
+	resolvedID, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "resolved evidence drop", Source: "manual", Importance: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("create resolved: %v", err)
+	}
+	if err := s.SetResolved(ctx, []string{resolvedID}); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+
+	// Ranked browse drops the resolved memory even though it has higher importance.
+	top, err := s.GetTopMemories(ctx, testProject, 25)
+	if err != nil {
+		t.Fatalf("GetTopMemories: %v", err)
+	}
+	for _, m := range top {
+		if m.ID == resolvedID {
+			t.Errorf("resolved memory %s must not appear in GetTopMemories", resolvedID)
+		}
+	}
+	var sawActive bool
+	for _, m := range top {
+		if m.ID == activeID {
+			sawActive = true
+		}
+	}
+	if !sawActive {
+		t.Errorf("active memory %s missing from GetTopMemories", activeID)
+	}
+
+	// ...but it is still searchable.
+	hits, err := s.SearchFTS(ctx, testProject, "resolved evidence", 10)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	var sawInSearch bool
+	for _, m := range hits {
+		if m.ID == resolvedID {
+			sawInSearch = true
+		}
+	}
+	if !sawInSearch {
+		t.Errorf("resolved memory %s must remain searchable", resolvedID)
+	}
+}
