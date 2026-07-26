@@ -2060,7 +2060,7 @@ func TestResolveCandidatesAndSetResolved(t *testing.T) {
 	}
 
 	// Marking resolved removes it from the candidate set (idempotent re-run).
-	if err := s.SetResolved(ctx, []string{evID}); err != nil {
+	if _, err := s.SetResolved(ctx, []string{evID}); err != nil {
 		t.Fatalf("SetResolved: %v", err)
 	}
 	cands, err = s.ResolveCandidates(ctx, testProject)
@@ -2069,6 +2069,65 @@ func TestResolveCandidatesAndSetResolved(t *testing.T) {
 	}
 	if len(cands) != 0 {
 		t.Errorf("candidates after resolve = %d, want 0", len(cands))
+	}
+}
+
+// TestSetResolvedRechecksEligibilityAtWriteTime guards the TOCTOU window
+// between ResolveCandidates (read) and SetResolved (write): a candidate
+// pinned or recategorized into an exempt bucket after classification started
+// must not be stamped, even though its ID was in the confirmed batch.
+func TestSetResolvedRechecksEligibilityAtWriteTime(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	pinnedLate, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "kill experiment returned NO-GO", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	recategorizedLate, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "fixed in PR #210, removed", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	stillEligible, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "shipped and archived", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Simulate state changing between ResolveCandidates and SetResolved: pin
+	// one, recategorize another into an exempt bucket.
+	if err := s.TogglePin(ctx, pinnedLate, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	category := "convention"
+	if err := s.UpdateMemory(ctx, testProject, recategorizedLate, nil, &category, nil, nil); err != nil {
+		t.Fatalf("recategorize: %v", err)
+	}
+
+	n, err := s.SetResolved(ctx, []string{pinnedLate, recategorizedLate, stillEligible})
+	if err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("SetResolved returned %d, want 1 (only stillEligible)", n)
+	}
+
+	assertActive(t, s, testProject, pinnedLate)
+	assertActive(t, s, testProject, recategorizedLate)
+
+	cands, err := s.ResolveCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveCandidates: %v", err)
+	}
+	for _, c := range cands {
+		if c.ID == stillEligible {
+			t.Errorf("stillEligible %s should be resolved and excluded from candidates", stillEligible)
+		}
 	}
 }
 
@@ -2088,7 +2147,7 @@ func TestGetTopMemoriesExcludesResolved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create resolved: %v", err)
 	}
-	if err := s.SetResolved(ctx, []string{resolvedID}); err != nil {
+	if _, err := s.SetResolved(ctx, []string{resolvedID}); err != nil {
 		t.Fatalf("SetResolved: %v", err)
 	}
 
@@ -2139,7 +2198,7 @@ func TestUnresolveOnWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if err := s.SetResolved(ctx, []string{id}); err != nil {
+	if _, err := s.SetResolved(ctx, []string{id}); err != nil {
 		t.Fatalf("SetResolved: %v", err)
 	}
 	newContent := "resumed via update — now with more detail"
@@ -2153,7 +2212,7 @@ func TestUnresolveOnWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert create: %v", err)
 	}
-	if err := s.SetResolved(ctx, []string{uid}); err != nil {
+	if _, err := s.SetResolved(ctx, []string{uid}); err != nil {
 		t.Fatalf("SetResolved upsert row: %v", err)
 	}
 	gotID, merged, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)

@@ -49,7 +49,7 @@ type Classifier interface {
 // testability.
 type resolveStore interface {
 	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
-	SetResolved(ctx context.Context, ids []string) error
+	SetResolved(ctx context.Context, ids []string) (int, error)
 }
 
 // Result summarizes a pass.
@@ -111,10 +111,11 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 		for i, m := range confirmed {
 			ids[i] = m.ID
 		}
-		if err := store.SetResolved(ctx, ids); err != nil {
+		n, err := store.SetResolved(ctx, ids)
+		if err != nil {
 			return res, nil, fmt.Errorf("set resolved: %w", err)
 		}
-		res.Resolved = len(ids)
+		res.Resolved = n
 		if logger != nil {
 			logger.Info("resolve applied", "resolved", res.Resolved)
 		}

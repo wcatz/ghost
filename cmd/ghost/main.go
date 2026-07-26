@@ -498,6 +498,10 @@ func runResolve() {
 		case os.Args[i] == "--apply":
 			apply = true
 		case !strings.HasPrefix(os.Args[i], "-"):
+			if projectName != "" {
+				fmt.Fprintln(os.Stderr, "error: expected exactly one project")
+				os.Exit(1)
+			}
 			projectName = os.Args[i]
 		default:
 			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", os.Args[i])
@@ -541,8 +545,10 @@ Marks resolved-evidence memories so they drop from session-start injection
 	}
 
 	verb := "would resolve"
+	count := len(confirmed)
 	if apply {
 		verb = "resolved"
+		count = res.Resolved
 	}
 	short := func(id string) string {
 		if len(id) > 8 {
@@ -551,7 +557,7 @@ Marks resolved-evidence memories so they drop from session-start injection
 		return id
 	}
 	fmt.Printf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %s %d\n",
-		projectName, res.Loaded, res.Candidates, res.Confirmed, verb, len(confirmed))
+		projectName, res.Loaded, res.Candidates, res.Confirmed, verb, count)
 	for _, m := range confirmed {
 		fmt.Printf("  %s  [%s]  %s\n", short(m.ID), m.Category, firstLine(m.Content, 70))
 	}

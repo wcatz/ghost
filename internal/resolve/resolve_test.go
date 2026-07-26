@@ -34,12 +34,12 @@ type fakeStore struct {
 func (s *fakeStore) ResolveCandidates(_ context.Context, _ string) ([]memory.Memory, error) {
 	return s.candidates, nil
 }
-func (s *fakeStore) SetResolved(_ context.Context, ids []string) error {
+func (s *fakeStore) SetResolved(_ context.Context, ids []string) (int, error) {
 	if s.err != nil {
-		return s.err
+		return 0, s.err
 	}
 	s.resolved = append(s.resolved, ids...)
-	return nil
+	return len(ids), nil
 }
 
 func TestPrefilterKeepsOnlyPlausible(t *testing.T) {

@@ -100,7 +100,7 @@ Expected: FAIL — either `no such column: resolved_at` or `user_version = 1, wa
 
 In `internal/memory/schema.go`, the `memories` table definition ends:
 
-```
+```sql
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -108,7 +108,7 @@ In `internal/memory/schema.go`, the `memories` table definition ends:
 
 Change the `updated_at` line to add a trailing comma and a new column line:
 
-```
+```sql
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT
@@ -1290,5 +1290,4 @@ No commit — verification only.
 - **Guardrail is convention/preference only.** `fact` is intentionally *not* exempt (resolved changelog notes are category `fact`). The "never push to main" rule is category `convention`, which the exemption covers. This is enforced once, in `ResolveCandidates` (Task 2), so the LLM never sees an exempt memory.
 - **Idempotent + re-runnable.** `ResolveCandidates` excludes already-resolved rows, so re-running `ghost resolve --apply` only classifies the newly-eligible ones.
 - **No new dependency.** The classifier reuses `internal/ai` (Haiku), already in the binary. A local-Ollama option is described in the spec (§3.2) as future opt-in and is **out of scope** for this plan.
-```
 

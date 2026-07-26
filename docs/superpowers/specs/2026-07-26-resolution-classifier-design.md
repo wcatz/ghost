@@ -82,7 +82,7 @@ Four parts. Detection is a standalone CLI batch, fully off every hot path; consu
 
 Add a nullable column to `memories`:
 
-```
+```sql
 resolved_at TIMESTAMP   -- NULL = active/unknown; set = classified as resolved evidence
 ```
 

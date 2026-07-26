@@ -595,11 +595,15 @@ func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memo
 }
 
 // SetResolved stamps resolved_at = now on the given memory IDs, dropping them
-// from the ranked injection/browse surface while leaving them searchable.
-// A no-op on an empty slice.
-func (s *Store) SetResolved(ctx context.Context, ids []string) error {
+// from the ranked injection/browse surface while leaving them searchable. The
+// WHERE clause re-checks the same eligibility guard as ResolveCandidates
+// (unresolved, unpinned, non-exempt category) at write time, not just at read
+// time — a candidate pinned or recategorized during the classify loop is
+// excluded rather than stamped anyway. Returns the count actually stamped,
+// which callers should report instead of len(ids). A no-op on an empty slice.
+func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 	if len(ids) == 0 {
-		return nil
+		return 0, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -610,12 +614,20 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) error {
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	q := `UPDATE memories SET resolved_at = datetime('now') WHERE id IN (` +
-		strings.Join(placeholders, ",") + `)`
-	if _, err := s.db.ExecContext(ctx, q, args...); err != nil {
-		return fmt.Errorf("set resolved: %w", err)
+	q := `UPDATE memories SET resolved_at = datetime('now')
+	      WHERE id IN (` + strings.Join(placeholders, ",") + `)
+	        AND resolved_at IS NULL
+	        AND pinned = 0
+	        AND category NOT IN ('convention', 'preference')`
+	result, err := s.db.ExecContext(ctx, q, args...)
+	if err != nil {
+		return 0, fmt.Errorf("set resolved: %w", err)
 	}
-	return nil
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("set resolved rows affected: %w", err)
+	}
+	return int(n), nil
 }
 
 // Delete removes a specific memory.

@@ -114,17 +114,44 @@ func migrateV1(tx *sql.Tx) error {
 // external-content index untouched — so this is a guarded ALTER, not the
 // rebuild dance migrateV1 needed for its CHECK-constraint change.
 func migrateV2(tx *sql.Tx) error {
-	missing, err := tableDDLLacks(tx, "memories", "resolved_at")
+	exists, err := columnExists(tx, "memories", "resolved_at")
 	if err != nil {
 		return err
 	}
-	if !missing {
+	if exists {
 		return nil // hand-migrated DB already has the column
 	}
 	if _, err := tx.Exec(`ALTER TABLE memories ADD COLUMN resolved_at TEXT`); err != nil {
 		return fmt.Errorf("add memories.resolved_at: %w", err)
 	}
 	return nil
+}
+
+// columnExists reports whether table has a column named column, matching
+// case-insensitively — SQLite itself treats column identifiers as
+// case-insensitive, so a hand-migrated RESOLVED_AT column must be recognized
+// as the same column resolved_at names, not trigger a duplicate ALTER that
+// SQLite would then reject.
+func columnExists(tx *sql.Tx, table, column string) (bool, error) {
+	rows, err := tx.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, fmt.Errorf("read %s columns: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("scan %s column info: %w", table, err)
+		}
+		if strings.EqualFold(name, column) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // tableDDLLacks reports whether the named table exists and its stored DDL does
