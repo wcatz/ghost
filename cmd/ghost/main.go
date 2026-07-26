@@ -818,6 +818,7 @@ Commands:
   mcp status                  Check Claude Code integration health
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
   supersede <project> [flags] Link superseded memories (dry-run by default, --apply to write)
+  resolve <project> [flags]   Mark resolved evidence memories (dry-run by default, --apply to write)
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
   obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
   bench [--sweep]             Run the retrieval-quality benchmark (built-in dataset);
