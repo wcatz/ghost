@@ -70,7 +70,7 @@ func (c *Client) Reflect(ctx context.Context, prompt string) (string, TokenUsage
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", TokenUsage{}, fmt.Errorf("reflect API status %d: %s", resp.StatusCode, string(respBody))
+		return "", TokenUsage{}, parseAPIError(resp.StatusCode, respBody)
 	}
 
 	var result struct {
@@ -127,7 +127,7 @@ func parseAPIError(statusCode int, body []byte) error {
 		switch {
 		case statusCode == 400 && apiErr.Error.Type == "invalid_request_error" &&
 			(len(apiErr.Error.Message) > 20 && apiErr.Error.Message[:20] == "Your credit balance "):
-			return fmt.Errorf("credit balance too low — add credits at console.anthropic.com/settings/billing")
+			return fmt.Errorf("%w — add credits at console.anthropic.com/settings/billing", ErrCreditExhausted)
 		case statusCode == 401:
 			return fmt.Errorf("invalid API key — check ghost config")
 		case statusCode == 403:
