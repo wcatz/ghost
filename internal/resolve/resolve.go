@@ -6,8 +6,9 @@
 // Design mirrors internal/supersede: a cheap local prefilter proposes
 // candidates, an LLM Classifier adjudicates each with a crisp one-word
 // question (biased to KEEP), and — with apply — the confirmed set is stamped
-// via SetResolved. The command is a standalone `ghost resolve` batch, never a
-// hook: the stop hook contract forbids DB access on that path
+// via SetResolved. The real Classifier will live behind an LLM implementation
+// added in a later task. The command is a standalone `ghost resolve` batch,
+// never a hook: the stop hook contract forbids DB access on that path
 // (internal/mcpinit/stophook.go). The pass is re-runnable and idempotent —
 // already-resolved rows are excluded by ResolveCandidates.
 package resolve
@@ -26,6 +27,9 @@ import (
 // a keyword only costs recall (the memory stays injectable), so the set is
 // deliberately conservative — false negatives are cheap, false positives reach
 // the KEEP-biased LLM which is the real gate.
+//
+// All entries must be lowercase: they are matched against
+// strings.ToLower(content) in Prefilter.
 var resolveKeywords = []string{
 	"no-go", "resolved", "shipped", "retracted", "superseded", "abandoned",
 	"fixed in", "removed", "merged", "kill experiment", "root cause",
