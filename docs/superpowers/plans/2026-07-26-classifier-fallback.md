@@ -1,14 +1,16 @@
-# Classifier Fallback (MCP Sampling + Ollama) Implementation Plan
+# Classifier Fallback (MCP Sampling) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give `ghost resolve` and `ghost supersede` a fallback classifier when the Anthropic API is out of credit — MCP sampling in a live session, a local Ollama model headless — with a hard guardrail so a degraded-quality fallback answer never auto-applies a write, plus a new `ghost_resolve` MCP tool and stop-hook auto-trigger.
+**Goal:** Give `ghost resolve` and `ghost supersede` a fallback classification path for the live MCP session — a new `ghost_resolve` tool that classifies via the calling session's own model (MCP sampling, free, no Anthropic credits spent) — while the headless CLI path (`ghost resolve`/`ghost supersede`, and the stop-hook auto-trigger) fails fast with a clear "out of credits" message on `ai.ErrCreditExhausted` instead of silently degrading.
 
-**Architecture:** A new `ai.Provider` interface (`Classify(ctx, systemPrompt, userContent) (string, error)`) is implemented three ways — `anthropicClient` (wraps the existing `*ai.Client.Reflect`, unchanged behavior), `OllamaProvider` (new HTTP client, local `/api/chat`), `SamplingProvider` (new, wraps `*mcp.ServerSession.CreateMessage`). `FallbackProvider` tries a primary and falls to a secondary only on a new `ai.ErrCreditExhausted` sentinel, tagging the result `FromFallback`. `resolve` and `supersede` depend on `FallbackProvider` directly (not the bare `Provider` interface) and refuse to apply a write when any candidate's answer came from a dry-run-only fallback. The CLI (`ghost resolve`/`ghost supersede`) builds `FallbackProvider(anthropicClient, OllamaProvider, secondaryIsDryRunOnly: true)`; the new `ghost_resolve` MCP tool builds `FallbackProvider(samplingProvider, nil, false)` (no secondary — sampling failures just fail). The stop hook gains a `cwd` field and spawns `ghost resolve <project> --apply` detached, mirroring the existing `ensureObsidianSyncRunning` template.
+**Architecture:** A new `ai.Provider` interface (`Classify(ctx, systemPrompt, userContent) (string, error)`) is implemented two ways — `anthropicClient` (wraps the existing `*ai.Client.Reflect`, unchanged behavior) and `SamplingProvider` (new, wraps `*mcp.ServerSession.CreateMessage`). `FallbackProvider` wraps a primary and an optional secondary, falling through to secondary only on a new `ai.ErrCreditExhausted` sentinel and tagging the result `FromFallback`; it exists as a general seam so a secondary can be added later, but no secondary ships in this pass — headless CLI calls build `FallbackProvider(primary, nil, false)`, so `ErrCreditExhausted` returns to the caller unchanged (fail fast, no degraded answer). `resolve` and `supersede` depend on `FallbackProvider` directly (not the bare `Provider` interface) and refuse to apply a write when any candidate's answer came from a fallback — dormant on the CLI path today (no secondary exists to fall to), live for the one path that does have a secondary: `ghost_resolve`'s sampling provider, which itself has `secondaryIsDryRunOnly: false` because sampling failures simply fail (no secondary at all). The stop hook gains a `cwd` field and spawns `ghost resolve <project> --apply` detached, mirroring the existing `ensureObsidianSyncRunning` template; on credit exhaustion that spawned process just exits non-zero and logs the failure — no auto-resolve happens until credits are restored.
 
-**Tech Stack:** Go 1.26, `modelcontextprotocol/go-sdk` v1.6.1 (`mcp.ServerSession.CreateMessage`), Ollama `/api/chat` HTTP API, `net/http`, `encoding/json`, `log/slog`.
+**Tech Stack:** Go 1.26, `modelcontextprotocol/go-sdk` v1.6.1 (`mcp.ServerSession.CreateMessage`), `net/http`, `encoding/json`, `log/slog`.
 
-**Reflect is explicitly out of scope for this pass.** `internal/reflection`'s `HaikuConsolidator` returns a full structured JSON memory set, not a one-word classification — it doesn't fit `ai.Provider`'s `Classify` shape, and reflection already has its own tiered SQLite fallback for outages (see `internal/reflection`'s empty-set guard). Only `resolve` and `supersede` get the new fallback path.
+**Reflect is explicitly out of scope for this pass.** `internal/reflection`'s `HaikuConsolidator` returns a full structured JSON memory set, not a one-word classification — it doesn't fit `ai.Provider`'s `Classify` shape. Reflection already has its own outage handling: `SQLiteConsolidator` degrades to a local heuristic pass when the LLM path is unavailable, and a separate empty-set guard prevents consolidation from ever wiping all memories regardless of which consolidator ran. Only `resolve` and `supersede` get the new fallback path in this plan.
+
+**Scope note (cut from the original design):** An earlier version of this plan also added a local-model fallback (`OllamaProvider`, wired into the headless CLI as a secondary). It's cut: the design spec's own measurement (§5) found both candidate local models unsafe to trust — one produced wrong answers on 4 of 5 real decision records, the other never answered decisively at all — and a dry-run-only local-model answer that a human must re-verify anyway is barely better than just failing fast and asking the human to rerun later once credits are back. The `FallbackProvider` seam still supports a secondary generically (tested with fakes), so a local-model fallback can be added later if a model is found that's actually trustworthy enough to skip the dry-run-only restriction — but nothing wires one in today.
 
 ---
 
@@ -17,8 +19,6 @@
 New files:
 - `internal/ai/provider.go` — `Provider` interface, `ClassifyResult`, `ErrCreditExhausted`, `isCreditExhausted`, `anthropicClient`
 - `internal/ai/provider_test.go` — tests for the above
-- `internal/ai/ollama_provider.go` — `OllamaProvider`
-- `internal/ai/ollama_provider_test.go`
 - `internal/ai/sampling_provider.go` — `SamplingProvider`, `sampler` interface
 - `internal/ai/sampling_provider_test.go`
 - `internal/ai/fallback_provider.go` — `FallbackProvider`
@@ -32,11 +32,12 @@ Modified files:
 - `internal/supersede/haiku.go` — same treatment as resolve/haiku.go, for `Supersedes`
 - `internal/supersede/supersede.go` — same treatment as resolve/resolve.go, for `Run`
 - `internal/supersede/haiku_test.go`, `internal/supersede/supersede_test.go` — updated for the new signature
-- `cmd/ghost/main.go` — `runResolve`/`runSupersede` build `FallbackProvider(anthropicClient, OllamaProvider)`
-- `internal/mcpserver/mcpserver.go` — new `ghost_resolve` tool registration
+- `cmd/ghost/main.go` — `runResolve`/`runSupersede` build `FallbackProvider(anthropicClient, nil, false)` (no secondary: fails fast on `ErrCreditExhausted`)
+- `internal/mcpserver/mcpserver.go` — new `ghost_resolve` tool registration, using `SamplingProvider`
 - `internal/mcpserver/mcpserver_test.go` — test for the new tool
 - `internal/mcpinit/stophook.go` — `stopHookInput` gains `CWD`; `HandleStopHook` spawns `ghost resolve` detached
 - `internal/mcpinit/stophook_test.go` — tests for the new spawn logic (guarded so it never actually spawns in CI)
+- `internal/config/config.go` — `ReflectionConfig` gains `AutoResolve bool`
 - `CLAUDE.md` — Architecture/Key Patterns updates
 - `README.md` — `ghost_resolve` tool doc + stop-hook auto-resolve behavior
 
@@ -49,7 +50,7 @@ Modified files:
 - Create: `internal/ai/provider_test.go`
 - Modify: `internal/ai/client.go:72-74` (Reflect's error branch), `internal/ai/client.go:128-130` (parseAPIError's credit-balance case)
 
-- [ ] **Step 1: Write the new provider.go with Provider, ClassifyResult, ErrCreditExhausted, anthropicClient**
+- [ ] **Step 1: Write provider.go with Provider, ClassifyResult, ErrCreditExhausted, anthropicClient**
 
 ```go
 // internal/ai/provider.go
@@ -58,7 +59,6 @@ package ai
 import (
 	"context"
 	"errors"
-	"fmt"
 )
 
 // ErrCreditExhausted marks an Anthropic API response that failed specifically
@@ -113,17 +113,6 @@ func (a *anthropicClient) Classify(ctx context.Context, _, userContent string) (
 func isCreditExhausted(err error) bool {
 	return errors.Is(err, ErrCreditExhausted)
 }
-
-var _ = fmt.Sprintf // keep fmt import if unused elsewhere; removed once wired below
-```
-
-Note: the `var _ = fmt.Sprintf` line is a placeholder to keep the file compiling before Step 2 removes the unused import — **delete it now** and drop `"fmt"` from the import block instead, since this file doesn't otherwise use `fmt`:
-
-```go
-import (
-	"context"
-	"errors"
-)
 ```
 
 - [ ] **Step 2: Wire ErrCreditExhausted into parseAPIError**
@@ -208,6 +197,13 @@ func TestAnthropicClient_Classify_PropagatesError(t *testing.T) {
 	}
 }
 
+// parseAPIErrorFixtureCreditBalance calls the real parseAPIError so this test
+// exercises the actual wrapping path end to end, not a hand-rolled substitute.
+func parseAPIErrorFixtureCreditBalance() error {
+	body := []byte(`{"error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Claude API."}}`)
+	return parseAPIError(400, body)
+}
+
 func TestIsCreditExhausted(t *testing.T) {
 	tests := []struct {
 		name string
@@ -215,7 +211,7 @@ func TestIsCreditExhausted(t *testing.T) {
 		want bool
 	}{
 		{"credit exhausted", ErrCreditExhausted, true},
-		{"wrapped credit exhausted", errAs("credit balance too low — add credits at console.anthropic.com/settings/billing", ErrCreditExhausted), true},
+		{"wrapped credit exhausted", parseAPIErrorFixtureCreditBalance(), true},
 		{"invalid key", errors.New("invalid API key — check ghost config"), false},
 		{"nil", nil, false},
 		{"network timeout", errors.New("reflect API call: context deadline exceeded"), false},
@@ -228,28 +224,7 @@ func TestIsCreditExhausted(t *testing.T) {
 		})
 	}
 }
-
-func errAs(msg string, wrapped error) error {
-	return fmtErrorfW(msg, wrapped)
-}
 ```
-
-Rather than reimplementing an fmt.Errorf-with-%w helper, replace the `errAs` test helper with a direct call — edit the test to use the real thing instead:
-
-```go
-		{"wrapped credit exhausted", parseAPIErrorFixtureCreditBalance(), true},
-```
-
-And add this small fixture function at the bottom of `provider_test.go` (it calls the real `parseAPIError` so the test exercises the actual wrapping path end to end, not a hand-rolled substitute):
-
-```go
-func parseAPIErrorFixtureCreditBalance() error {
-	body := []byte(`{"error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Claude API."}}`)
-	return parseAPIError(400, body)
-}
-```
-
-Delete the `errAs`/`fmtErrorfW` lines above — they're replaced by this fixture-based case.
 
 - [ ] **Step 6: Run the tests**
 
@@ -265,203 +240,7 @@ git commit -m "feat(ai): add Provider seam and ErrCreditExhausted sentinel"
 
 ---
 
-## Task 2: `OllamaProvider`
-
-**Files:**
-- Create: `internal/ai/ollama_provider.go`
-- Create: `internal/ai/ollama_provider_test.go`
-
-- [ ] **Step 1: Write ollama_provider.go**
-
-```go
-// internal/ai/ollama_provider.go
-package ai
-
-import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"time"
-)
-
-type ollamaChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type ollamaChatOptions struct {
-	Temperature float64 `json:"temperature"`
-	NumPredict  int     `json:"num_predict"`
-}
-
-type ollamaChatRequest struct {
-	Model    string              `json:"model"`
-	Messages []ollamaChatMessage `json:"messages"`
-	Stream   bool                `json:"stream"`
-	Options  ollamaChatOptions   `json:"options"`
-}
-
-type ollamaChatResponse struct {
-	Message struct {
-		Content string `json:"content"`
-	} `json:"message"`
-}
-
-// OllamaProvider calls a local Ollama /api/chat endpoint for classification —
-// the headless-path fallback when the Anthropic API is out of credit. Bounded
-// identically to the Anthropic call (temperature 0, num_predict 16) so a
-// rambling local-model reply can't run away the way an unbounded chat
-// response would.
-type OllamaProvider struct {
-	baseURL    string
-	model      string
-	httpClient *http.Client
-}
-
-// NewOllamaProvider creates an Ollama-backed Provider. baseURL is the Ollama
-// API base (e.g. "http://localhost:11434").
-func NewOllamaProvider(baseURL, model string) *OllamaProvider {
-	return &OllamaProvider{
-		baseURL:    baseURL,
-		model:      model,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-	}
-}
-
-func (o *OllamaProvider) Classify(ctx context.Context, systemPrompt, userContent string) (string, error) {
-	reqBody := ollamaChatRequest{
-		Model: o.model,
-		Messages: []ollamaChatMessage{
-			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: userContent},
-		},
-		Stream:  false,
-		Options: ollamaChatOptions{Temperature: 0, NumPredict: 16},
-	}
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", fmt.Errorf("marshal ollama chat request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("create ollama chat request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := o.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("ollama chat request: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return "", fmt.Errorf("ollama chat %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result ollamaChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode ollama chat response: %w", err)
-	}
-	return result.Message.Content, nil
-}
-```
-
-- [ ] **Step 2: Write ollama_provider_test.go**
-
-```go
-// internal/ai/ollama_provider_test.go
-package ai
-
-import (
-	"context"
-	"net/http"
-	"net/http/httptest"
-	"strings"
-	"testing"
-)
-
-func TestOllamaProvider_Classify_Success(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/chat" {
-			t.Errorf("got path %q, want /api/chat", r.URL.Path)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"RESOLVED"}}`))
-	}))
-	defer srv.Close()
-
-	p := NewOllamaProvider(srv.URL, "qwen2.5:3b")
-	out, err := p.Classify(context.Background(), "system prompt", "user content")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out != "RESOLVED" {
-		t.Fatalf("got %q, want RESOLVED", out)
-	}
-}
-
-func TestOllamaProvider_Classify_SendsSystemAndUserRoles(t *testing.T) {
-	var gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buf := make([]byte, r.ContentLength)
-		_, _ = r.Body.Read(buf)
-		gotBody = string(buf)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"KEEP"}}`))
-	}))
-	defer srv.Close()
-
-	p := NewOllamaProvider(srv.URL, "llama3.1")
-	_, err := p.Classify(context.Background(), "SYSTEM_MARKER", "USER_MARKER")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(gotBody, `"role":"system"`) || !strings.Contains(gotBody, "SYSTEM_MARKER") {
-		t.Errorf("request body missing system role/content: %s", gotBody)
-	}
-	if !strings.Contains(gotBody, `"role":"user"`) || !strings.Contains(gotBody, "USER_MARKER") {
-		t.Errorf("request body missing user role/content: %s", gotBody)
-	}
-}
-
-func TestOllamaProvider_Classify_NonOKStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("model not loaded"))
-	}))
-	defer srv.Close()
-
-	p := NewOllamaProvider(srv.URL, "qwen2.5:3b")
-	_, err := p.Classify(context.Background(), "sys", "content")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "503") {
-		t.Errorf("got %v, want error mentioning 503", err)
-	}
-}
-```
-
-- [ ] **Step 3: Run the tests**
-
-Run: `go test ./internal/ai/... -run TestOllamaProvider -v`
-Expected: all 3 tests PASS.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add internal/ai/ollama_provider.go internal/ai/ollama_provider_test.go
-git commit -m "feat(ai): add OllamaProvider for local classification fallback"
-```
-
----
-
-## Task 3: `SamplingProvider`
+## Task 2: `SamplingProvider`
 
 **Files:**
 - Create: `internal/ai/sampling_provider.go`
@@ -493,7 +272,7 @@ type sampler interface {
 // exists — this is the live-session fallback path, never used headless. A
 // FallbackProvider built around a SamplingProvider has no secondary: a
 // sampling failure simply fails, since there is no live-session equivalent of
-// a local Ollama fallback.
+// a local fallback model.
 type SamplingProvider struct {
 	session sampler
 }
@@ -537,8 +316,8 @@ import (
 )
 
 type fakeSampler struct {
-	result *mcp.CreateMessageResult
-	err    error
+	result    *mcp.CreateMessageResult
+	err       error
 	gotParams *mcp.CreateMessageParams
 }
 
@@ -605,7 +384,7 @@ git commit -m "feat(ai): add SamplingProvider for live-session MCP sampling fall
 
 ---
 
-## Task 4: `FallbackProvider`
+## Task 3: `FallbackProvider`
 
 **Files:**
 - Create: `internal/ai/fallback_provider.go`
@@ -623,13 +402,17 @@ import "context"
 // does it fall through to secondary. Any other primary error (invalid key,
 // permission denied, network failure) is returned as-is — those aren't
 // credit outages and a fallback answer wouldn't fix them next time either.
+// secondary may be nil (no fallback exists for this path): a credit
+// exhaustion error is then returned unchanged, so the caller fails fast
+// instead of degrading.
 //
 // secondaryIsDryRunOnly documents whether a secondary answer must be treated
-// as advisory-only by the caller (no writes) — true for the headless
-// Anthropic→Ollama pairing (local models measured unsafe to auto-apply, see
-// docs/superpowers/specs/2026-07-26-classifier-fallback-design.md §5), and
-// moot for the live-session SamplingProvider pairing (which has no
-// secondary: a sampling failure just fails, so FromFallback is never true).
+// as advisory-only by the caller (no writes). No path currently wires a
+// non-nil secondary with secondaryIsDryRunOnly=false — every real secondary
+// added to this seam so far (see the sampling path) either doesn't exist
+// headless or is dry-run-restricted; the flag exists so a future trusted
+// secondary can opt out explicitly rather than silently inheriting a
+// permissive default.
 type FallbackProvider struct {
 	primary               Provider
 	secondary             Provider
@@ -637,8 +420,7 @@ type FallbackProvider struct {
 }
 
 // NewFallbackProvider builds a FallbackProvider. secondary may be nil — a
-// primary-only provider (used for the live-session sampling path) simply
-// returns the primary's error unfallen-through.
+// primary-only provider simply returns the primary's error unfallen-through.
 func NewFallbackProvider(primary, secondary Provider, secondaryIsDryRunOnly bool) *FallbackProvider {
 	return &FallbackProvider{primary: primary, secondary: secondary, secondaryIsDryRunOnly: secondaryIsDryRunOnly}
 }
@@ -726,7 +508,7 @@ func TestFallbackProvider_NoSecondary_CreditExhaustionFailsFast(t *testing.T) {
 }
 
 func TestFallbackProvider_SecondaryAlsoFails(t *testing.T) {
-	secondaryErr := errors.New("ollama chat request: connection refused")
+	secondaryErr := errors.New("secondary provider: connection refused")
 	fp := NewFallbackProvider(&fakeProvider{err: ErrCreditExhausted}, &fakeProvider{err: secondaryErr}, true)
 	_, err := fp.Classify(context.Background(), "sys", "content")
 	if !errors.Is(err, secondaryErr) {
@@ -749,7 +531,7 @@ func TestFallbackProvider_DryRunOnlyOnFallback(t *testing.T) {
 - [ ] **Step 3: Run the tests**
 
 Run: `go test ./internal/ai/... -v`
-Expected: every test in the package PASSes (this also re-runs Tasks 1-3's tests).
+Expected: every test in the package PASSes (this also re-runs Tasks 1-2's tests).
 
 - [ ] **Step 4: Commit**
 
@@ -760,7 +542,7 @@ git commit -m "feat(ai): add FallbackProvider with credit-exhaustion fallover"
 
 ---
 
-## Task 5: Adapt `internal/resolve` to `FallbackProvider`
+## Task 4: Adapt `internal/resolve` to `FallbackProvider`
 
 **Files:**
 - Modify: `internal/resolve/haiku.go` (full rewrite of the file's body)
@@ -803,7 +585,7 @@ func NewHaikuClassifier(client classifyProvider) *HaikuClassifier {
 
 const classifySystemPrompt = `You decide whether a memory note is RESOLVED evidence or should be KEPT.
 
-A note is RESOLVED evidence when it records intermediate findings, changelog entries, cost estimates, PR locators, or experiment results for work that has since concluded — the kind of note that mattered while the work was in progress but is now just history. Example: "kill experiment found 7.3% cross-session links, so we removed the bonus."
+A note is RESOLVED evidence when it records intermediate findings, changelog entries, cost estimates, PR locators, or experiment results for work that has since concluded — the kind of note that mattered while the work was in progress but is now just history. Example: "kill experiment found 7.3%% cross-session links, so we removed the bonus."
 
 KEEP the note when it is a terminal conclusion, an active decision of record, a standing rule, or reusable knowledge that still guides future work — even if it refers to a concluded thread. Example: "Graph-expansion RESOLVED NO-GO (2026-07-20)" is a decision record: KEEP.
 
@@ -999,9 +781,9 @@ git commit -m "feat(resolve): adapt classifier to FallbackProvider with apply gu
 
 ---
 
-## Task 6: Adapt `internal/supersede` to `FallbackProvider`
+## Task 5: Adapt `internal/supersede` to `FallbackProvider`
 
-Mirrors Task 5 exactly, for `Supersedes` instead of `IsResolved`.
+Mirrors Task 4 exactly, for `Supersedes` instead of `IsResolved`.
 
 **Files:**
 - Modify: `internal/supersede/haiku.go` (full rewrite)
@@ -1095,17 +877,17 @@ type Classifier interface {
 }
 ```
 
-Read `internal/supersede/supersede.go`'s `Run` function in full (it continues past the excerpt already seen — `res.Confirmed` accumulation, then a `CreateLink` write loop under `if apply`). Apply the identical pattern as Task 5 Step 2: track `anyFallback := false` across the classify loop, capture the third return value from `Supersedes`, set `anyFallback = true` when seen, and — mirroring resolve's guardrail — skip the `apply` write branch entirely (log a `logger.Warn` with the same wording, substituting "supersede" for "resolve") when `apply && anyFallback`, returning before any `CreateLink` call.
+Read `internal/supersede/supersede.go`'s `Run` function in full (it continues past the excerpt already seen — `res.Confirmed` accumulation, then a `CreateLink` write loop under `if apply`). Apply the identical pattern as Task 4 Step 2: track `anyFallback := false` across the classify loop, capture the third return value from `Supersedes`, set `anyFallback = true` when seen, and — mirroring resolve's guardrail — skip the `apply` write branch entirely (log a `logger.Warn` with the same wording, substituting "supersede" for "resolve") when `apply && anyFallback`, returning before any `CreateLink` call.
 
 - [ ] **Step 3: Find and update the existing tests**
 
 Run: `grep -rn "Supersedes\|supersede.Classifier\|fakeClassifier" internal/supersede/*_test.go`
 
-Same mechanical update as Task 5 Step 3: every fake classifier's `Supersedes` method gains the `fromFallback bool` return; every call site adds `_` or captures it.
+Same mechanical update as Task 4 Step 3: every fake classifier's `Supersedes` method gains the `fromFallback bool` return; every call site adds `_` or captures it.
 
 - [ ] **Step 4: Add a guardrail test to supersede_test.go**
 
-Same shape as Task 5 Step 4, adapted to supersede's `Run` signature (which takes a `threshold float32` — reuse whatever fake `vectorStore` the file already defines) — assert that when the fake classifier returns `fromFallback: true`, `Run(..., apply=true, ...)` returns `Result.Created == 0` and the fake store's `CreateLink` was never invoked.
+Same shape as Task 4 Step 4, adapted to supersede's `Run` signature (which takes a `threshold float32` — reuse whatever fake `vectorStore` the file already defines) — assert that when the fake classifier returns `fromFallback: true`, `Run(..., apply=true, ...)` returns `Result.Created == 0` and the fake store's `CreateLink` was never invoked.
 
 - [ ] **Step 5: Run the tests**
 
@@ -1121,7 +903,9 @@ git commit -m "feat(supersede): adapt classifier to FallbackProvider with apply 
 
 ---
 
-## Task 7: Wire `FallbackProvider` into the CLI (`runResolve`, `runSupersede`)
+## Task 6: Wire `FallbackProvider` into the CLI (`runResolve`, `runSupersede`)
+
+No secondary is wired here — see the plan header's scope note. `FallbackProvider(primary, nil, false)` exists purely so `runResolve`/`runSupersede` satisfy the `classifyProvider` interface (which returns `ai.ClassifyResult`, not the bare `Provider`'s `(string, error)`); a credit-exhaustion error still returns to the caller unchanged, so `ghost resolve`/`ghost supersede` fail fast with the existing `ErrCreditExhausted`-wrapped message ("credit balance too low — add credits at console.anthropic.com/settings/billing") telling the user to add credits and rerun.
 
 **Files:**
 - Modify: `cmd/ghost/main.go:493-565` (`runResolve`), and the analogous `runSupersede` function (find via `grep -n "func runSupersede" cmd/ghost/main.go`)
@@ -1148,48 +932,11 @@ to:
 	}
 
 	primary := ai.NewAnthropicProvider(ai.NewClient(cfg.API.Key, logger))
-	secondary := ai.NewOllamaProvider(cfg.Embedding.OllamaURL, cfg.Embedding.Model)
-	provider := ai.NewFallbackProvider(primary, secondary, true)
+	provider := ai.NewFallbackProvider(primary, nil, false)
 	cls := resolve.NewHaikuClassifier(provider)
 ```
 
-`cfg.Embedding.Model` is `nomic-embed-text:v1.5` by default — an embedding model, not a chat model, and unsuitable for `/api/chat`. Use a dedicated config key instead: add `Reflection.FallbackModel` (default `"llama3.1"`) to `internal/config/config.go`'s `ReflectionConfig` struct and `defaults` map (see Task 7 Step 2), and reference `cfg.Reflection.FallbackModel` here instead of `cfg.Embedding.Model`.
-
-Corrected final version of the snippet:
-
-```go
-	primary := ai.NewAnthropicProvider(ai.NewClient(cfg.API.Key, logger))
-	secondary := ai.NewOllamaProvider(cfg.Embedding.OllamaURL, cfg.Reflection.FallbackModel)
-	provider := ai.NewFallbackProvider(primary, secondary, true)
-	cls := resolve.NewHaikuClassifier(provider)
-```
-
-- [ ] **Step 2: Add Reflection.FallbackModel to config**
-
-Modify `internal/config/config.go`'s `ReflectionConfig` struct, changing:
-
-```go
-type ReflectionConfig struct {
-	Backend string `koanf:"backend"`
-}
-```
-
-to:
-
-```go
-type ReflectionConfig struct {
-	Backend      string `koanf:"backend"`
-	FallbackModel string `koanf:"fallback_model"`
-}
-```
-
-And add to the `defaults` map (alongside the existing `"reflection.backend": "auto"` entry):
-
-```go
-	"reflection.fallback_model": "llama3.1",
-```
-
-- [ ] **Step 3: Update runSupersede identically**
+- [ ] **Step 2: Update runSupersede identically**
 
 Read `cmd/ghost/main.go`'s `runSupersede` function in full first (`grep -n "func runSupersede" cmd/ghost/main.go` to find the line, then Read that range) to get its exact current construction line — it will read something like:
 
@@ -1201,37 +948,46 @@ Replace with the identical pattern from Step 1:
 
 ```go
 	primary := ai.NewAnthropicProvider(ai.NewClient(cfg.API.Key, logger))
-	secondary := ai.NewOllamaProvider(cfg.Embedding.OllamaURL, cfg.Reflection.FallbackModel)
-	provider := ai.NewFallbackProvider(primary, secondary, true)
+	provider := ai.NewFallbackProvider(primary, nil, false)
 	cls := supersede.NewHaikuClassifier(provider)
 ```
 
-- [ ] **Step 4: Build and run go vet**
+- [ ] **Step 3: Build and run go vet**
 
 Run: `go build ./... && go vet ./...`
 Expected: no errors, no warnings.
 
-- [ ] **Step 5: Run the full test suite**
+- [ ] **Step 4: Run the full test suite**
 
 Run: `go test ./... 2>&1 | tail -40`
 Expected: all packages PASS (or `ok`), no failures.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add cmd/ghost/main.go internal/config/config.go
+git add cmd/ghost/main.go
 git commit -m "feat(cli): wire FallbackProvider into ghost resolve and ghost supersede"
 ```
 
 ---
 
-## Task 8: New `ghost_resolve` MCP tool
+## Task 7: New `ghost_resolve` MCP tool
 
 **Files:**
 - Modify: `internal/mcpserver/mcpserver.go` (add a new tool registration, following the `ghost_task_create` template read earlier in this session)
 - Create/Modify: `internal/mcpserver/mcpserver_test.go` (add a test; check via `grep -n "^func Test" internal/mcpserver/mcpserver_test.go` for naming conventions first)
 
-- [ ] **Step 1: Find the tool registration function and add the new tool**
+- [ ] **Step 1: Verify helper functions exist before writing the tool**
+
+Run: `grep -n "^func boolPtr\|^func shortID\|^func firstLine" internal/mcpserver/mcpserver.go` and `grep -n "req.Session" internal/mcpserver/mcpserver.go`.
+
+- `boolPtr` is used by every existing tool's `Annotations` (e.g. `DestructiveHint: boolPtr(false)`) — confirm it already exists in this file (it must, since 18 tools already use it) and note its exact signature.
+- `shortID`/`firstLine`: if the grep finds them already defined in `mcpserver.go`, reuse them as-is. If not, they're currently only in `cmd/ghost/main.go`; add unexported copies directly above the new tool registration (shown in Step 2) rather than importing across packages.
+- `req.Session`: confirm the exact accessor an existing handler uses to reach the `*mcp.ServerSession` (field vs. method) and match that in Step 2's handler.
+
+If any of these differ from what Step 2 assumes, adjust Step 2's code to match what you actually found — do not guess.
+
+- [ ] **Step 2: Add the tool registration**
 
 Run: `grep -n "func (s \*Server) registerTools" internal/mcpserver/mcpserver.go` to find where tools are registered, and `grep -n "ghost_task_create" internal/mcpserver/mcpserver.go` to find the exact template call site. Add the new tool registration in the same function, following the exact same structure (`mcp.AddTool` with inline args struct, `Annotations{DestructiveHint, OpenWorldHint}`, handler validates → resolves project → calls the resolve pipeline → notifies resource → returns `*mcp.CallToolResult`):
 
@@ -1277,33 +1033,9 @@ Run: `grep -n "func (s \*Server) registerTools" internal/mcpserver/mcpserver.go`
 	})
 ```
 
-Note: `req.Session` must satisfy the `sampler` interface from Task 3 (`CreateMessage(ctx, *mcp.CreateMessageParams) (*mcp.CreateMessageResult, error)`) — this is `*mcp.ServerSession`, the same type `mcpserver.go`'s other handlers already receive via `req.Session` (confirm the exact field name via `grep -n "req.Session\|req\.Session" internal/mcpserver/mcpserver.go` — if the existing code uses a different accessor, e.g. a method instead of a field, adjust this call site to match). `shortID` and `firstLine` are small helpers already defined in `cmd/ghost/main.go`, not `mcpserver.go` — this tool needs its own copies in `internal/mcpserver/mcpserver.go` (or a shared `internal/resolve` helper); add this small unexported helper directly above the new tool registration to avoid a cross-package import of `cmd/ghost`:
-
-```go
-func shortID(id string) string {
-	if len(id) > 8 {
-		return id[:8]
-	}
-	return id
-}
-
-func firstLine(s string, n int) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	r := []rune(s)
-	if len(r) > n {
-		return string(r[:n]) + "…"
-	}
-	return s
-}
-```
-
-Skip adding these if `grep -n "^func shortID\|^func firstLine" internal/mcpserver/mcpserver.go` shows they (or equivalents) already exist in this file.
-
 Add the required imports to `mcpserver.go`'s import block if not already present: `"github.com/wcatz/ghost/internal/ai"`, `"github.com/wcatz/ghost/internal/resolve"`.
 
-- [ ] **Step 2: Write a test**
+- [ ] **Step 3: Write a test**
 
 Read `internal/mcpserver/mcpserver_test.go`'s existing tool-test pattern first (e.g. `grep -n "func TestGhostTaskCreate\|newTestServer\|newTestClient" internal/mcpserver/mcpserver_test.go`) to find the harness this package already uses for in-process client/server tool-call tests (it necessarily exists, since `ghost_task_create` and the other 17 tools are already tested that way). Using that exact harness, add:
 
@@ -1319,17 +1051,17 @@ func TestGhostResolve_DryRunByDefault(t *testing.T) {
 
 Fill in the body using the harness's actual helper names once confirmed by the grep above — do not invent a different test-setup pattern.
 
-- [ ] **Step 3: Run the tests**
+- [ ] **Step 4: Run the tests**
 
 Run: `go test ./internal/mcpserver/... -run TestGhostResolve -v`
 Expected: PASS.
 
-- [ ] **Step 4: go vet and full build**
+- [ ] **Step 5: go vet and full build**
 
 Run: `go build ./... && go vet ./... && go test ./... 2>&1 | tail -40`
 Expected: clean build, no vet warnings, all tests pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add internal/mcpserver/mcpserver.go internal/mcpserver/mcpserver_test.go
@@ -1338,13 +1070,17 @@ git commit -m "feat(mcpserver): add ghost_resolve tool using MCP sampling"
 
 ---
 
-## Task 9: Stop-hook detached spawn wiring
+## Task 8: Stop-hook detached spawn wiring
 
 **Files:**
 - Modify: `internal/mcpinit/stophook.go` (full content shown below)
 - Create: `internal/mcpinit/stophook_test.go` additions (find via `grep -n "^func Test" internal/mcpinit/stophook_test.go` — add alongside existing tests)
 
-- [ ] **Step 1: Add CWD to stopHookInput and the spawn call**
+- [ ] **Step 1: Check whether database/sql is already imported package-wide**
+
+Run: `grep -n "database/sql\|modernc.org/sqlite" internal/mcpinit/hook.go`. `hook.go` already defines `roDSN`/`lookupProject` and (per that grep) already imports `"database/sql"` and blank-imports the sqlite driver. Go's blank-import driver registration is process-wide, not per-file, so `stophook.go` needs its own `"database/sql"` import (to call `sql.Open`) but does NOT need to repeat the driver blank-import — confirm this against the grep output before writing Step 2.
+
+- [ ] **Step 2: Add CWD to stopHookInput and the spawn call**
 
 Rewrite `internal/mcpinit/stophook.go` in full:
 
@@ -1353,6 +1089,7 @@ package mcpinit
 
 import (
 	"bufio"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1404,10 +1141,9 @@ const stopBlockMessage = `{"decision":"block","reason":"This session used tools 
 // session used tools but never saved anything to Ghost. Every failure path
 // returns silently, allowing the stop: the hook must never trap a session.
 // It performs no synchronous database access of its own; the one exception is
-// spawnResolveIfConfigured, which — best-effort and after the block decision
-// is already written — forks a detached `ghost resolve --apply` and returns
-// immediately without waiting on it, so this function's own hot path still
-// does no DB/LLM work.
+// spawnResolveIfConfigured, which — best-effort — forks a detached
+// `ghost resolve --apply` and returns immediately without waiting on it, so
+// this function's own hot path still does no DB/LLM work.
 func HandleStopHook(stdin io.Reader, stdout io.Writer) {
 	data, err := io.ReadAll(stdin)
 	if err != nil {
@@ -1473,6 +1209,10 @@ func scanTranscript(r io.Reader) (toolCalls, ghostSaves int) {
 // already running for that project. Opt-in via reflection.auto_resolve
 // (default false) — most users never want an unattended write pass. Every
 // failure path returns silently: this must never block or fail the stop hook.
+// If the Anthropic API is out of credit, the spawned process itself fails
+// fast (per Task 6) and logs the failure to resolve.log — no local fallback
+// runs in this path, so auto-resolve simply does nothing until credits are
+// restored.
 // Known limitation: resolution here depends on lookupProject's path/basename
 // match against the stored project row; a cwd with no matching project is a
 // silent no-op, same as an unconfigured user.
@@ -1531,33 +1271,32 @@ func spawnResolveIfConfigured(cwd string) {
 }
 ```
 
-This references `sql.Open`, `roDSN`, `lookupProject`, and `isAlive` — all of which already exist elsewhere in the `mcpinit` package (`hook.go` defines `roDSN`/`lookupProject`; `obsidiansync.go` defines `isAlive`). Add `"database/sql"` and the sqlite driver blank import to the import block only if `hook.go` doesn't already import them at package scope with a driver registered globally — run `grep -n "database/sql\|modernc.org/sqlite" internal/mcpinit/hook.go` first: if `hook.go` already blank-imports the driver package-wide, `stophook.go` only needs `"database/sql"` added to its own import list (Go's blank-import driver registration is process-wide, not per-file), so add just:
+- [ ] **Step 3: Add Reflection.AutoResolve to config**
 
-```go
-	"database/sql"
-```
-
-to the import block shown above (already included in the full rewrite — verify it against the grep result and remove it only if it turns out `sql` isn't actually needed, e.g. if `lookupProject` is refactored in a way that hides the `*sql.DB` — it currently is not, so keep it).
-
-- [ ] **Step 2: Add Reflection.AutoResolve to config**
-
-Modify `internal/config/config.go`'s `ReflectionConfig` struct from Task 7 Step 2, adding one more field:
+Modify `internal/config/config.go`'s `ReflectionConfig` struct, changing:
 
 ```go
 type ReflectionConfig struct {
-	Backend       string `koanf:"backend"`
-	FallbackModel string `koanf:"fallback_model"`
-	AutoResolve   bool   `koanf:"auto_resolve"`
+	Backend string `koanf:"backend"`
 }
 ```
 
-Add to `defaults`:
+to:
+
+```go
+type ReflectionConfig struct {
+	Backend     string `koanf:"backend"`
+	AutoResolve bool   `koanf:"auto_resolve"`
+}
+```
+
+Add to the `defaults` map (alongside the existing `"reflection.backend": "auto"` entry):
 
 ```go
 	"reflection.auto_resolve": false,
 ```
 
-- [ ] **Step 3: Add tests**
+- [ ] **Step 4: Add tests**
 
 Read `internal/mcpinit/stophook_test.go` in full first. Add:
 
@@ -1581,12 +1320,12 @@ func TestHandleStopHook_SpawnResolveIfConfigured_NoOpWhenDisabled(t *testing.T) 
 
 Check the top of `stophook_test.go` for existing imports (`bytes`, `strings`) — add them only if not already present.
 
-- [ ] **Step 4: Build, vet, test**
+- [ ] **Step 5: Build, vet, test**
 
 Run: `go build ./... && go vet ./... && go test ./... 2>&1 | tail -40`
 Expected: clean build, no vet warnings, all tests pass.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add internal/mcpinit/stophook.go internal/mcpinit/stophook_test.go internal/config/config.go
@@ -1595,7 +1334,7 @@ git commit -m "feat(hooks): spawn detached ghost resolve --apply from stop hook 
 
 ---
 
-## Task 10: Documentation updates
+## Task 9: Documentation updates
 
 **Files:**
 - Modify: `CLAUDE.md`
@@ -1606,13 +1345,13 @@ git commit -m "feat(hooks): spawn detached ghost resolve --apply from stop hook 
 In the `## Architecture` section, update the `internal/ai/` line:
 
 ```markdown
-- `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + supersede); `Provider` seam (`anthropicClient`/`OllamaProvider`/`SamplingProvider`) with `FallbackProvider` credit-exhaustion fallover for resolve/supersede
+- `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + supersede); `Provider` seam (`anthropicClient`/`SamplingProvider`) with `FallbackProvider` credit-exhaustion fallover for resolve/supersede
 ```
 
 Add one bullet to `## Key Patterns`:
 
 ```markdown
-- Classifier fallback: `resolve`/`supersede` classify via `ai.FallbackProvider` — Anthropic primary, falls to a local Ollama model (headless CLI) or MCP sampling (live-session `ghost_resolve` tool) only on `ai.ErrCreditExhausted`. A fallback answer never auto-applies a write in the headless path (`--apply` is skipped with a log line) — see `docs/superpowers/specs/2026-07-26-classifier-fallback-design.md`.
+- Classifier fallback: `resolve`/`supersede` classify via `ai.FallbackProvider` — Anthropic primary, falls to a secondary only on `ai.ErrCreditExhausted`. The headless CLI path (`ghost resolve`/`ghost supersede`, and the stop hook's auto-resolve) wires no secondary, so it fails fast with a clear message on credit exhaustion instead of degrading. The live-session `ghost_resolve` MCP tool uses MCP sampling (the calling session's own model, no API credits spent) as its only provider. A fallback answer never auto-applies a write (`--apply` is skipped with a log line) — see `docs/superpowers/specs/2026-07-26-classifier-fallback-design.md`.
 ```
 
 - [ ] **Step 2: Update README.md**
@@ -1620,7 +1359,7 @@ Add one bullet to `## Key Patterns`:
 Run: `grep -n "ghost_task_create\|## MCP Tools\|### Tools" README.md` to find the existing tools list section, and add an entry for `ghost_resolve` following whatever format the other 18 tools use there (name, one-line description, args). Also find the section documenting the stop hook (`grep -n "stop hook\|ghost hook stop" README.md`) and add a short paragraph:
 
 ```markdown
-When `reflection.auto_resolve` is enabled in config (default off), the stop hook also spawns `ghost resolve <project> --apply` as a detached background process after each session, so resolved-evidence memories get marked automatically without waiting for a manual run. This never blocks the hook itself — the spawn is fire-and-forget, logged to `resolve.log` in the ghost data directory.
+When `reflection.auto_resolve` is enabled in config (default off), the stop hook also spawns `ghost resolve <project> --apply` as a detached background process after each session, so resolved-evidence memories get marked automatically without waiting for a manual run. This never blocks the hook itself — the spawn is fire-and-forget, logged to `resolve.log` in the ghost data directory. If the Anthropic API is out of credit at spawn time, the spawned process fails and logs the failure; it does not degrade to a lower-quality answer.
 ```
 
 - [ ] **Step 3: Commit**
@@ -1632,30 +1371,46 @@ git commit -m "docs: document classifier fallback, ghost_resolve tool, and auto-
 
 ---
 
-## Task 11: Benchmark artifact — re-run the §5 eval-set comparison
+## Task 10: Verification artifact — confirm the fallback and guardrail against real code paths
+
+The design spec's §5 measurement (comparing candidate local models against 19 ground-truth memories) informed the decision to cut the local-model fallback (see the plan header's scope note) and does not need re-running — no local model ships in this plan. What still needs verifying against real code (not just unit-test fakes) is: (a) the headless CLI's fail-fast behavior on credit exhaustion, and (b) the `ghost_resolve` MCP tool's sampling path end to end.
 
 **Files:**
-- Create: `docs/benchmarks.md` addition, or a new `docs/superpowers/specs/2026-07-26-classifier-fallback-eval-results.md` (check `grep -n "^## " docs/benchmarks.md` first — if that file already tracks phase-by-phase benchmark results, append there instead of a new file, to keep one canonical benchmark doc)
+- Create/append: `docs/benchmarks.md` (check `grep -n "^## " docs/benchmarks.md` first — if that file already tracks phase-by-phase benchmark results, append there to keep one canonical doc)
 
-- [ ] **Step 1: Re-run the 19-memory ground-truth comparison from spec §5, now through the real code path**
+- [ ] **Step 1: Confirm the CLI fail-fast path can only be verified at the unit level, and record why**
 
-With `ANTHROPIC_API_KEY` set and Ollama running locally with `qwen2.5:3b` and `llama3.1` pulled, run against the same `~/.local/share/ghost/ghost.db` used for the original manual comparison:
+`internal/ai.APIURL` (`internal/ai/models.go`) is a hardcoded package constant, not a config override (`grep -n "APIURL" internal/ai/*.go` confirms every reference is either the constant itself or a test noting `"can't override APIURL"`). That means there is no way to point a real `go run ./cmd/ghost resolve` invocation at a stub server that returns the credit-balance-exhausted fixture — the only way to see a real `ErrCreditExhausted` from the actual Anthropic endpoint is an account that is actually out of credit. Record this limitation explicitly in the benchmark doc rather than fabricating a CLI-level reproduction:
 
-```bash
-go run ./cmd/ghost resolve <project-name>
+```markdown
+## Classifier fallback verification (2026-07-26)
+
+The headless CLI path (`ghost resolve`/`ghost supersede`, and the stop hook's
+auto-resolve) cannot be driven into a real `ErrCreditExhausted` from outside
+the process: `internal/ai.APIURL` is a compile-time constant, not a config
+override, so there is no stub-server route into a live `go run ./cmd/ghost
+resolve` invocation. The fail-fast behavior (Task 6) is therefore verified at
+the unit level only, via `internal/ai/provider_test.go`'s
+`parseAPIErrorFixtureCreditBalance` (exercises the real `parseAPIError` code
+path against the actual Anthropic 400 response shape) and
+`internal/ai/fallback_provider_test.go`'s
+`TestFallbackProvider_NoSecondary_CreditExhaustionFailsFast` (confirms
+`FallbackProvider` with a nil secondary returns `ErrCreditExhausted`
+unchanged). This is a known gap, not a demonstrated end-to-end CLI run —
+flagged here rather than silently treated as equivalent.
 ```
 
-against a build where `cfg.Reflection.FallbackModel` is temporarily forced to `qwen2.5:3b`, then again forced to `llama3.1`, by editing `internal/config/config.go`'s default or setting the env/config override (check `internal/config`'s koanf env-var prefix via `grep -n "envPrefix\|koanf.Env" internal/config/config.go` for the exact override syntax, e.g. `GHOST_REFLECTION_FALLBACK_MODEL=qwen2.5:3b`). Since the primary (Anthropic) provider will succeed normally when credits are available, this exercises `FallbackProvider`'s happy path, not the fallback path — to force the fallback path for this artifact, temporarily set an invalid `ANTHROPIC_API_KEY` (or point `APIURL` at a stub that returns the credit-balance 400 fixture) so `isCreditExhausted` triggers and the Ollama secondary actually runs.
+- [ ] **Step 2: Manually verify the ghost_resolve MCP tool's sampling path in a live session**
 
-- [ ] **Step 2: Record results**
+In a live Claude Code session with this branch's `ghost mcp` server running, seed one memory whose content contains a resolve keyword (e.g. `ghost_memory_save` with content `"root cause: fixed in v2, closing out this investigation"`), then call `ghost_resolve` with `{"project": "<project>"}` (dry run). Confirm the tool's text output contains `"would resolve"` and lists the seeded memory. Then call it again with `{"project": "<project>", "apply": true}` and confirm the memory's `resolved_at` is now set (check via `sqlite3 ~/.local/share/ghost/ghost.db "SELECT resolved_at FROM memories WHERE id='<id>'"`).
 
-Append a table to the benchmark doc summarizing dry-run output for both local models against the same 19-memory ground truth as the design spec's §5 table, confirming the guardrail: dry-run output prints "would resolve" and the log line `"resolve: candidates classified via fallback provider, apply skipped..."` fires, and — critically — confirm via `sqlite3 ~/.local/share/ghost/ghost.db "SELECT COUNT(*) FROM memories WHERE resolved_at IS NOT NULL"` that the count is unchanged after running with `--apply` and a forced fallback, proving the guardrail held under the real CLI path (not just the unit test's fake).
+Record the exact output and the before/after `resolved_at` value in the benchmark doc under the same heading as Step 1.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/benchmarks.md  # or the new spec file, whichever was used
-git commit -m "docs(bench): record classifier-fallback guardrail verification against ground truth"
+git add docs/benchmarks.md
+git commit -m "docs(bench): verify classifier-fallback guardrail and sampling path against real code"
 ```
 
 ---
@@ -1663,21 +1418,21 @@ git commit -m "docs(bench): record classifier-fallback guardrail verification ag
 ## Self-Review
 
 **1. Spec coverage:**
-- §3.1 Provider seam + three implementations → Tasks 1, 2, 3
-- §3.2 FallbackProvider + ClassifyResult + isCreditExhausted → Tasks 1, 4
-- §3.3 two reconciled paths (headless dry-run-only, live-session no-secondary) → Tasks 7, 8
-- §3.4 new `ghost_resolve` MCP tool → Task 8
-- §3.5 stop-hook detached spawn → Task 9
-- §4 hard guardrail (fallback never triggers a write except via sampling) → Tasks 5, 6 (Run's `anyFallback` check), Task 8 (`ghost_resolve` builds `FallbackProvider` with no secondary, so `FromFallback` is structurally always false there — no separate guardrail code needed on that path, which is itself the correct enforcement of §4)
-- §5 empirical testing → already done pre-plan (captured in the spec); Task 11 re-verifies against the real code path as a benchmark artifact
-- §6 testing plan → FallbackProvider branch tests (Task 4), isCreditExhausted table test (Task 1), headless dry-run guardrail test (Tasks 5, 6), ghost_resolve MCP integration test (Task 8), stop-hook non-blocking assertion (Task 9), eval-set re-run (Task 11)
-- §7 docs impact → Task 10
-- §8 rejected alternatives → no task needed (nothing to implement)
-- Reflect's scope-out decision → stated explicitly in the plan header
+- §3.1 Provider seam + implementations → Tasks 1, 2 (Ollama implementation cut — see plan header's scope note)
+- §3.2 FallbackProvider + ClassifyResult + isCreditExhausted → Tasks 1, 3
+- §3.3 two reconciled paths (headless fail-fast, live-session no-secondary) → Tasks 6, 7
+- §3.4 new `ghost_resolve` MCP tool → Task 7
+- §3.5 stop-hook detached spawn → Task 8
+- §4 hard guardrail (fallback never triggers a write except via sampling) → Tasks 4, 5 (Run's `anyFallback` check, dormant on the CLI path today since no secondary exists there), Task 7 (`ghost_resolve` builds `FallbackProvider` with no secondary, so `FromFallback` is structurally always false there — no separate guardrail code needed on that path, which is itself the correct enforcement of §4)
+- §5 empirical testing → already done pre-plan (captured in the spec); its finding is why the local-model fallback was cut, not something to re-run
+- §6 testing plan → FallbackProvider branch tests (Task 3), isCreditExhausted table test (Task 1), headless guardrail test (Tasks 4, 5), ghost_resolve MCP integration test (Task 7), stop-hook non-blocking assertion (Task 8), fallback/sampling verification (Task 10)
+- §7 docs impact → Task 9
+- §8 rejected alternatives → no task needed (nothing to implement); note the local-model fallback itself ended up cut for reasons close to §8's rejected "skip and log" alternative
+- Reflect's scope-out decision → stated explicitly in the plan header, with the corrected justification (SQLiteConsolidator's own degradation path + the separate empty-set guard, not conflated as one mechanism)
 
-**2. Placeholder scan:** No "TBD"/"TODO" strings in any task. Two steps (Task 8 Step 2, Task 5/6 Step 3-4) intentionally direct the implementer to `grep`/read an existing test file before writing new fakes/assertions, because this plan cannot see those files' exact current fake names without guessing wrong — this is a deliberate "read this first" instruction, not a content placeholder; the actual assertions and structure to add are still fully specified.
+**2. Placeholder scan:** No "TBD"/"TODO" strings in any task. Steps that direct the implementer to `grep`/read an existing file before writing new fakes/assertions (Task 7 Step 1, Task 4/5 Step 3-4) are deliberate "read this first" instructions, not content placeholders — the actual assertions and structure to add are fully specified. No step shows a code block only to retract or replace it later — every code block shown is the final form to write.
 
-**3. Type consistency:** `Classifier.IsResolved` → `(bool, bool, error)` used identically in resolve/haiku.go, resolve/resolve.go, and the guardrail test. `Classifier.Supersedes` → `(bool, bool, error)` used identically in supersede/haiku.go, supersede/supersede.go. `Provider.Classify` → `(string, error)` consistent across anthropicClient, OllamaProvider, SamplingProvider. `FallbackProvider.Classify` → `(ClassifyResult, error)` consistent across FallbackProvider and both classifier haiku.go adaptations (`classifyProvider` interface in each package matches). `NewFallbackProvider(primary, secondary Provider, secondaryIsDryRunOnly bool) *FallbackProvider` signature used identically in Tasks 4, 7, 8.
+**3. Type consistency:** `Classifier.IsResolved` → `(bool, bool, error)` used identically in resolve/haiku.go, resolve/resolve.go, and the guardrail test. `Classifier.Supersedes` → `(bool, bool, error)` used identically in supersede/haiku.go, supersede/supersede.go. `Provider.Classify` → `(string, error)` consistent across anthropicClient and SamplingProvider. `FallbackProvider.Classify` → `(ClassifyResult, error)` consistent across FallbackProvider and both classifier haiku.go adaptations (`classifyProvider` interface in each package matches). `NewFallbackProvider(primary, secondary Provider, secondaryIsDryRunOnly bool) *FallbackProvider` signature used identically in Tasks 3, 6, 7 (secondary is always nil outside tests in this plan).
 
 ---
 
