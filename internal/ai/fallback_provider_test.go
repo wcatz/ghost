@@ -21,10 +21,14 @@ func (f *fakeProvider) Classify(ctx context.Context, systemPrompt, userContent s
 }
 
 func TestFallbackProvider_PrimarySucceeds(t *testing.T) {
-	fp := NewFallbackProvider(&fakeProvider{text: "KEEP"}, &fakeProvider{text: "RESOLVED"}, true)
+	primary := &fakeProvider{text: "KEEP"}
+	fp := NewFallbackProvider(primary, &fakeProvider{text: "RESOLVED"}, true)
 	res, err := fp.Classify(context.Background(), "sys", "content")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if primary.gotSystemPrompt != "sys" || primary.gotUserContent != "content" {
+		t.Errorf("primary got (%q, %q), want (sys, content) forwarded unmodified", primary.gotSystemPrompt, primary.gotUserContent)
 	}
 	if res.Text != "KEEP" || res.FromFallback {
 		t.Errorf("got %+v, want {KEEP false}", res)
