@@ -24,14 +24,21 @@ func (f fakeClassifier) IsResolved(_ context.Context, content string) (bool, boo
 	return f.drop[content], false, nil
 }
 
-// fallbackClassifier is a fixed-answer Classifier used to exercise the
-// apply-skip guardrail when an answer came from a fallback provider.
+// fallbackClassifier is a Classifier used to exercise the apply-skip
+// guardrail when an answer came from a fallback provider. When byContent is
+// set, fromFallback is looked up per-candidate by content (all such
+// candidates are treated as resolved); otherwise the fixed resolved/
+// fromFallback fields apply to every call.
 type fallbackClassifier struct {
 	resolved     bool
 	fromFallback bool
+	byContent    map[string]bool
 }
 
-func (f *fallbackClassifier) IsResolved(_ context.Context, _ string) (bool, bool, error) {
+func (f *fallbackClassifier) IsResolved(_ context.Context, content string) (bool, bool, error) {
+	if f.byContent != nil {
+		return true, f.byContent[content], nil
+	}
 	return f.resolved, f.fromFallback, nil
 }
 
@@ -153,5 +160,32 @@ func TestRun_FallbackClassification_SkipsApply(t *testing.T) {
 	}
 	if store.setResolvedCalled {
 		t.Error("SetResolved must not be called when any candidate came from a fallback provider")
+	}
+}
+
+func TestRun_MixedFallbackAndPrimary_SkipsApply(t *testing.T) {
+	store := &fakeStore{
+		candidates: []memory.Memory{
+			{ID: "primary", Content: "resolved: shipped via primary in v1"},
+			{ID: "fallback", Content: "resolved: shipped via fallback in v2"},
+		},
+	}
+	cls := &fallbackClassifier{byContent: map[string]bool{
+		"resolved: shipped via primary in v1":  false, // confirmed via primary
+		"resolved: shipped via fallback in v2": true,  // confirmed via fallback
+	}}
+
+	res, confirmed, err := Run(context.Background(), store, cls, "proj1", true, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(confirmed) != 2 {
+		t.Errorf("got %d confirmed, want 2 (dry-run preview still returned)", len(confirmed))
+	}
+	if res.Resolved != 0 {
+		t.Errorf("got Resolved=%d, want 0 (any fallback in the batch must skip apply)", res.Resolved)
+	}
+	if store.setResolvedCalled {
+		t.Error("SetResolved must not be called when any candidate in the batch came from a fallback provider, even if another was confirmed via primary")
 	}
 }

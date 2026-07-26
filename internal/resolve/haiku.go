@@ -31,7 +31,7 @@ func NewHaikuClassifier(client classifyProvider) *HaikuClassifier {
 
 const classifySystemPrompt = `You decide whether a memory note is RESOLVED evidence or should be KEPT.
 
-A note is RESOLVED evidence when it records intermediate findings, changelog entries, cost estimates, PR locators, or experiment results for work that has since concluded — the kind of note that mattered while the work was in progress but is now just history. Example: "kill experiment found 7.3%% cross-session links, so we removed the bonus."
+A note is RESOLVED evidence when it records intermediate findings, changelog entries, cost estimates, PR locators, or experiment results for work that has since concluded — the kind of note that mattered while the work was in progress but is now just history. Example: "kill experiment found 7.3% cross-session links, so we removed the bonus."
 
 KEEP the note when it is a terminal conclusion, an active decision of record, a standing rule, or reusable knowledge that still guides future work — even if it refers to a concluded thread. Example: "Graph-expansion RESOLVED NO-GO (2026-07-20)" is a decision record: KEEP.
 
