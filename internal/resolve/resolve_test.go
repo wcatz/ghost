@@ -17,24 +17,37 @@ type fakeClassifier struct {
 	err   error
 }
 
-func (f fakeClassifier) IsResolved(_ context.Context, content string) (bool, error) {
+func (f fakeClassifier) IsResolved(_ context.Context, content string) (bool, bool, error) {
 	if f.err != nil && (f.errOn == "" || f.errOn == content) {
-		return false, f.err
+		return false, false, f.err
 	}
-	return f.drop[content], nil
+	return f.drop[content], false, nil
+}
+
+// fallbackClassifier is a fixed-answer Classifier used to exercise the
+// apply-skip guardrail when an answer came from a fallback provider.
+type fallbackClassifier struct {
+	resolved     bool
+	fromFallback bool
+}
+
+func (f *fallbackClassifier) IsResolved(_ context.Context, _ string) (bool, bool, error) {
+	return f.resolved, f.fromFallback, nil
 }
 
 // fakeStore satisfies resolveStore with in-memory candidates.
 type fakeStore struct {
-	candidates []memory.Memory
-	resolved   []string
-	err        error // when set, returned by SetResolved instead of writing
+	candidates        []memory.Memory
+	resolved          []string
+	err               error // when set, returned by SetResolved instead of writing
+	setResolvedCalled bool
 }
 
 func (s *fakeStore) ResolveCandidates(_ context.Context, _ string) ([]memory.Memory, error) {
 	return s.candidates, nil
 }
 func (s *fakeStore) SetResolved(_ context.Context, ids []string) (int, error) {
+	s.setResolvedCalled = true
 	if s.err != nil {
 		return 0, s.err
 	}
@@ -119,5 +132,26 @@ func TestRunFailsFatallyOnClassifierError(t *testing.T) {
 	}
 	if len(store.resolved) != 0 {
 		t.Errorf("store.resolved = %v, want empty — a partial pass must never be applied", store.resolved)
+	}
+}
+
+func TestRun_FallbackClassification_SkipsApply(t *testing.T) {
+	store := &fakeStore{
+		candidates: []memory.Memory{{ID: "m1", Content: "resolved: shipped in v1"}},
+	}
+	cls := &fallbackClassifier{resolved: true, fromFallback: true}
+
+	res, confirmed, err := Run(context.Background(), store, cls, "proj1", true, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Resolved != 0 {
+		t.Errorf("got Resolved=%d, want 0 (apply must be skipped on fallback)", res.Resolved)
+	}
+	if len(confirmed) != 1 {
+		t.Errorf("got %d confirmed, want 1 (dry-run preview still returned)", len(confirmed))
+	}
+	if store.setResolvedCalled {
+		t.Error("SetResolved must not be called when any candidate came from a fallback provider")
 	}
 }

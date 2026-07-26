@@ -42,7 +42,7 @@ var resolveKeywords = []string{
 // biased to KEEP (return false when uncertain): a false resolve buries a useful
 // memory, a missed resolve merely leaves the status quo.
 type Classifier interface {
-	IsResolved(ctx context.Context, content string) (bool, error)
+	IsResolved(ctx context.Context, content string) (resolved bool, fromFallback bool, err error)
 }
 
 // resolveStore is the subset of *memory.Store the pass needs; narrowed for
@@ -94,16 +94,28 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	}
 
 	var confirmed []memory.Memory
+	anyFallback := false
 	for _, m := range cands {
-		ok, err := cls.IsResolved(ctx, m.Content)
+		ok, fromFallback, err := cls.IsResolved(ctx, m.Content)
 		if err != nil {
 			return res, nil, fmt.Errorf("classify %s: %w", m.ID, err)
+		}
+		if fromFallback {
+			anyFallback = true
 		}
 		if !ok {
 			continue
 		}
 		res.Confirmed++
 		confirmed = append(confirmed, m)
+	}
+
+	if apply && anyFallback {
+		if logger != nil {
+			logger.Warn("resolve: candidates classified via fallback provider, apply skipped — rerun once primary is available",
+				"confirmed", res.Confirmed)
+		}
+		return res, confirmed, nil
 	}
 
 	if apply && len(confirmed) > 0 {
