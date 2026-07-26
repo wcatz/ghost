@@ -8,7 +8,7 @@
 
 ## Architecture
 - `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, supersede, obsidian, bench, upgrade, version
-- `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + supersede)
+- `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + supersede); `Provider` seam (`anthropicClient`/`SamplingProvider`) with `FallbackProvider` credit-exhaustion fallover for resolve/supersede
 - `internal/memory/` — SQLite CRUD, FTS5 search, vector search, time-decay scoring
 - `internal/mcpserver/` — MCP server: 18 tools + 4 resources + 2 prompts (`recall_project`, `record_decision`)
 - `internal/mcpinit/` — `ghost mcp init`, `ghost mcp status`, `ghost hook session-start`, `ghost hook stop`
@@ -31,6 +31,7 @@
 - Global memories: `_global` project, included in every project's context
 - Hybrid search: 70% vector (cosine, Ollama) + 30% FTS5, RRF fusion — falls back to FTS5-only
 - Memory links: `memory_links` edge table auto-populated by cosine similarity (internal/linking worker); links cascade-delete with memories and self-heal after reflection. A graph-expansion ranking bonus was evaluated and removed — dominated by a deeper vector-k (links and the vector leg are both cosine); the link graph is retained for Obsidian export and supersedes ranking (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`).
+- Classifier fallback: `resolve`/`supersede` classify via `ai.FallbackProvider` — Anthropic primary, falls to a secondary only on `ai.ErrCreditExhausted`. The headless CLI path (`ghost resolve`/`ghost supersede`, and the stop hook's auto-resolve) wires no secondary, so it fails fast with a clear message on credit exhaustion instead of degrading. The live-session `ghost_resolve` MCP tool uses MCP sampling (the calling session's own model, no API credits spent) as its only provider. A fallback answer never auto-applies a write (`--apply` is skipped with a log line) — see `docs/superpowers/specs/2026-07-26-classifier-fallback-design.md`.
 
 ## Critical Rules
 - Always `go vet ./...` before committing
