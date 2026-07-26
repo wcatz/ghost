@@ -11,7 +11,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 1
+const schemaVersion = 2
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -20,6 +20,7 @@ const schemaVersion = 1
 // that is already done, so a hand-migrated database is stamped without harm.
 var migrations = []func(*sql.Tx) error{
 	migrateV1,
+	migrateV2,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -102,6 +103,26 @@ func migrateV1(tx *sql.Tx) error {
 		if _, err := tx.Exec("DROP TABLE IF EXISTS " + t); err != nil {
 			return fmt.Errorf("drop %s: %w", t, err)
 		}
+	}
+	return nil
+}
+
+// migrateV2 adds the nullable memories.resolved_at column used by the
+// resolution classifier to drop resolved-evidence memories from the ranked
+// injection surface (NULL = active/unknown; set = classified resolved). A
+// nullable column add needs no table rebuild — it leaves the FTS
+// external-content index untouched — so this is a guarded ALTER, not the
+// rebuild dance migrateV1 needed for its CHECK-constraint change.
+func migrateV2(tx *sql.Tx) error {
+	missing, err := tableDDLLacks(tx, "memories", "resolved_at")
+	if err != nil {
+		return err
+	}
+	if !missing {
+		return nil // hand-migrated DB already has the column
+	}
+	if _, err := tx.Exec(`ALTER TABLE memories ADD COLUMN resolved_at TEXT`); err != nil {
+		return fmt.Errorf("add memories.resolved_at: %w", err)
 	}
 	return nil
 }
