@@ -133,10 +133,26 @@ path against the actual Anthropic 400 response shape) and
 unchanged). This is a known gap, not a demonstrated end-to-end CLI run —
 flagged here rather than silently treated as equivalent.
 
-The `ghost_resolve` MCP tool's sampling path (Task 7) requires a live Claude
-Code session with this branch's `ghost mcp` binary running as the connected
-server, so the calling session can act as the sampling provider end to end.
-That live verification has not been run yet — pending.
+**Update (2026-07-26, later same day):** both paths above were exercised live
+against the real `ghost` project database (43 memories):
+
+- **CLI path** (`ghost resolve ghost` then `--apply`, primary
+  `anthropicClient` provider): worked end-to-end — 21 kept after prefilter,
+  13 confirmed evidence on dry-run, 12 actually stamped on `--apply` (one
+  candidate re-classified out at write time by `SetResolved`'s own
+  eligibility re-check, expected non-determinism across two separate Haiku
+  calls, not a bug).
+- **`ghost_resolve` MCP tool / sampling path**: connected live, tool
+  correctly registered and reachable (`project`/`apply` args validated), but
+  the classify call fails immediately with
+  `mcp sampling: calling "sampling/createMessage": Method not found`. This
+  Claude Code session's MCP client does not implement the `sampling/createMessage`
+  capability, so the request never reaches a model — `SamplingProvider` never
+  gets a response to classify. The sampling path is therefore **structurally
+  verified** (wiring, args, error propagation all correct) but **not
+  functionally verified** — no live client currently available on this
+  machine implements MCP sampling to complete the test. Re-test once/if a
+  connected MCP client adds sampling support.
 
 ## Reporting rules (all phases)
 
