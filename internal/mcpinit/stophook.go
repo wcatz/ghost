@@ -161,26 +161,23 @@ func spawnResolveIfConfigured(cwd string) {
 		return
 	}
 	// isAlive false means no pidfile, or a stale one left by a prior spawn that
-	// never got as far as writing a real PID. Atomically claim the slot with
-	// our own PID before doing any of the expensive setup below, so two stop
-	// hooks firing close together (same project, e.g. near-simultaneous
-	// sessions) can't both pass the liveness check and double-spawn a
-	// paid-API, DB-writing process: whichever loses the O_EXCL create sees a
-	// live PID (ours) via isAlive and backs off, rather than an empty file it
-	// would mistake for a free slot.
-	claim, err := os.OpenFile(pidPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if errors.Is(err, fs.ErrExist) {
-		if isAlive(pidPath) {
-			return
-		}
-		_ = os.Remove(pidPath)
-		claim, err = os.OpenFile(pidPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	}
-	if err != nil {
+	// never got as far as writing a real PID. Claim the slot before doing any
+	// of the expensive setup below, so two stop hooks firing close together
+	// (same project, e.g. near-simultaneous sessions) can't both pass the
+	// liveness check and double-spawn a paid-API, DB-writing process.
+	//
+	// A plain os.OpenFile(O_CREATE|O_EXCL) claim is atomic for *existence* but
+	// not for *content* — a second caller can observe the file the instant
+	// after create, before this process's PID is written into it, and
+	// mistake the still-empty file for a free slot. Avoiding that requires
+	// content to exist at the moment the name is claimed, which os.Link
+	// gives us: write our PID to a private temp file first, then hard-link it
+	// onto pidPath — an atomic, all-or-nothing rename-like claim that fails
+	// with ErrExist if the name is already taken, with no window where the
+	// name exists but the content doesn't.
+	if !claimPidFile(pidPath) {
 		return
 	}
-	_, _ = claim.WriteString(strconv.Itoa(os.Getpid()))
-	_ = claim.Close()
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -201,4 +198,40 @@ func spawnResolveIfConfigured(cwd string) {
 	}
 	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
 	_ = cmd.Process.Release()
+}
+
+// claimPidFile atomically claims pidPath for the current process, retrying
+// once against a stale claim. It writes a temp file containing our own PID,
+// then hard-links it onto pidPath: os.Link fails with ErrExist if the name
+// is taken, and unlike os.OpenFile(O_EXCL) there is no window where the name
+// exists but the content is still empty, because the link target already
+// has its final content at the moment the name is claimed. Returns false if
+// the slot is genuinely held by a live process, or on any I/O failure.
+func claimPidFile(pidPath string) bool {
+	tmp, err := os.CreateTemp(filepath.Dir(pidPath), "resolve-*.pid.tmp")
+	if err != nil {
+		return false
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath) //nolint:errcheck
+
+	_, writeErr := tmp.WriteString(strconv.Itoa(os.Getpid()))
+	closeErr := tmp.Close()
+	if writeErr != nil || closeErr != nil {
+		return false
+	}
+
+	if err := os.Link(tmpPath, pidPath); err != nil {
+		if !errors.Is(err, fs.ErrExist) {
+			return false
+		}
+		if isAlive(pidPath) {
+			return false
+		}
+		_ = os.Remove(pidPath)
+		if err := os.Link(tmpPath, pidPath); err != nil {
+			return false
+		}
+	}
+	return true
 }

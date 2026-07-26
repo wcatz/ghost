@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -166,5 +168,47 @@ func TestSpawnResolveIfConfigured_NoOpWhenDisabled(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected ghost data dir to never be created when auto_resolve is disabled, stat err = %v", err)
+	}
+}
+
+// TestClaimPidFile_ConcurrentCallersOnlyOneWins races many goroutines against
+// the same pidPath, simulating near-simultaneous stop hooks for the same
+// project. Exactly one must win the claim; every loser must see a live PID
+// (never an empty/stale file) via isAlive, which is what makes the claim
+// double-spawn-proof — content exists at the same instant the name does, so
+// there is no window where a loser could mistake a winner's in-progress
+// claim for a free slot.
+func TestClaimPidFile_ConcurrentCallersOnlyOneWins(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "resolve-test.pid")
+
+	const n = 50
+	var wg sync.WaitGroup
+	results := make([]bool, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i] = claimPidFile(pidPath)
+		}(i)
+	}
+	wg.Wait()
+
+	wins := 0
+	for _, ok := range results {
+		if ok {
+			wins++
+		}
+	}
+	if wins != 1 {
+		t.Errorf("expected exactly 1 winner among %d concurrent claimants, got %d", n, wins)
+	}
+
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("read pidPath: %v", err)
+	}
+	if _, err := strconv.Atoi(strings.TrimSpace(string(data))); err != nil {
+		t.Errorf("pidPath content is never a valid PID (empty/stale window observed): %q", data)
 	}
 }
