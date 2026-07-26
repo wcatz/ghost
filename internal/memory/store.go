@@ -594,6 +594,11 @@ func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memo
 	return scanMemories(rows)
 }
 
+// setResolvedBatchSize bounds how many IDs go into a single IN (...) clause
+// per SetResolved call, well under SQLite's SQLITE_MAX_VARIABLE_NUMBER
+// (32766 on modern builds) so an unusually large batch can't hit that limit.
+const setResolvedBatchSize = 500
+
 // SetResolved stamps resolved_at = now on the given memory IDs, dropping them
 // from the ranked injection/browse surface while leaving them searchable. The
 // WHERE clause re-checks the same eligibility guard as ResolveCandidates
@@ -608,26 +613,36 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
+	total := 0
+	for len(ids) > 0 {
+		batch := ids
+		if len(batch) > setResolvedBatchSize {
+			batch = ids[:setResolvedBatchSize]
+		}
+		ids = ids[len(batch):]
+
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for i, id := range batch {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		q := `UPDATE memories SET resolved_at = datetime('now')
+		      WHERE id IN (` + strings.Join(placeholders, ",") + `)
+		        AND resolved_at IS NULL
+		        AND pinned = 0
+		        AND category NOT IN ('convention', 'preference')`
+		result, err := s.db.ExecContext(ctx, q, args...)
+		if err != nil {
+			return total, fmt.Errorf("set resolved: %w", err)
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("set resolved rows affected: %w", err)
+		}
+		total += int(n)
 	}
-	q := `UPDATE memories SET resolved_at = datetime('now')
-	      WHERE id IN (` + strings.Join(placeholders, ",") + `)
-	        AND resolved_at IS NULL
-	        AND pinned = 0
-	        AND category NOT IN ('convention', 'preference')`
-	result, err := s.db.ExecContext(ctx, q, args...)
-	if err != nil {
-		return 0, fmt.Errorf("set resolved: %w", err)
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("set resolved rows affected: %w", err)
-	}
-	return int(n), nil
+	return total, nil
 }
 
 // Delete removes a specific memory.

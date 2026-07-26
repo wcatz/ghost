@@ -51,10 +51,11 @@ const stopBlockMessage = `{"decision":"block","reason":"This session used tools 
 // It blocks the stop once — via {"decision":"block"} on stdout — when the
 // session used tools but never saved anything to Ghost. Every failure path
 // returns silently, allowing the stop: the hook must never trap a session.
-// It performs no synchronous database access of its own; the one exception is
-// spawnResolveIfConfigured, which — best-effort — forks a detached
-// `ghost resolve --apply` and returns immediately without waiting on it, so
-// this function's own hot path still does no DB/LLM work.
+// The one exception to "no DB/LLM work on this path" is spawnResolveIfConfigured,
+// which — best-effort, opt-in only — does a small synchronous read-only lookup
+// (config + a project-ID query) before forking a detached `ghost resolve --apply`
+// and returning immediately without waiting on it; no LLM call and no write ever
+// happens inline here, only in the detached child.
 func HandleStopHook(stdin io.Reader, stdout io.Writer) {
 	data, err := io.ReadAll(stdin)
 	if err != nil {
@@ -186,8 +187,21 @@ func spawnResolveIfConfigured(cwd string) {
 	if err := cmd.Start(); err != nil {
 		return
 	}
-	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
+	_ = atomicWritePID(pidPath, cmd.Process.Pid)
 	_ = cmd.Process.Release()
+}
+
+// atomicWritePID writes pid into path via write-temp-then-rename so a
+// concurrent reader (e.g. another caller's claimPidFile, which reads this
+// file under its own lock) never observes a truncated or partially-written
+// file — os.WriteFile's open+truncate+write is not atomic and this call site
+// runs outside any lock.
+func atomicWritePID(path string, pid int) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.Itoa(pid)), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // claimPidFile atomically claims pidPath for the current process. It takes
@@ -217,5 +231,5 @@ func claimPidFile(pidPath string) bool {
 	if isAlive(pidPath) {
 		return false
 	}
-	return os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o600) == nil
+	return atomicWritePID(pidPath, os.Getpid()) == nil
 }
