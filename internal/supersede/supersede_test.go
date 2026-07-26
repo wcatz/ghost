@@ -16,9 +16,25 @@ type mockClassifier struct {
 	calls   int
 }
 
-func (m *mockClassifier) Supersedes(_ context.Context, newer, older string) (bool, error) {
+func (m *mockClassifier) Supersedes(_ context.Context, newer, older string) (bool, bool, error) {
 	m.calls++
-	return m.confirm(newer, older), nil
+	return m.confirm(newer, older), false, nil
+}
+
+// fallbackClassifier confirms every pair and reports whether that answer came
+// from a fallback provider, exercising the apply-skip guardrail. When
+// byNewerContent is set, fromFallback is looked up per-candidate by the
+// newer content string instead of using the fixed field.
+type fallbackClassifier struct {
+	fromFallback   bool
+	byNewerContent map[string]bool
+}
+
+func (f *fallbackClassifier) Supersedes(_ context.Context, newer, _ string) (bool, bool, error) {
+	if f.byNewerContent != nil {
+		return true, f.byNewerContent[newer], nil
+	}
+	return true, f.fromFallback, nil
 }
 
 // seed builds an in-memory store, returns it plus the raw db so tests can
@@ -169,5 +185,64 @@ func TestRunIdempotent(t *testing.T) {
 	}
 	if r1.Created != 1 || r2.Created != 1 {
 		t.Errorf("both runs should (idempotently) create 1 link, got %d then %d", r1.Created, r2.Created)
+	}
+}
+
+func TestRun_FallbackClassification_SkipsApply(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	n := add(t, store, db, "api rate limit raised to 500 rps", []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	o := add(t, store, db, "api rate limit is 100 rps", []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
+
+	cls := &fallbackClassifier{fromFallback: true}
+	res, confirmed, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Created != 0 {
+		t.Errorf("got Created=%d, want 0 (apply must be skipped on fallback)", res.Created)
+	}
+	if len(confirmed) != 1 {
+		t.Errorf("got %d confirmed, want 1 (dry-run preview still returned)", len(confirmed))
+	}
+	pairs, _ := store.SupersedesWithin(ctx, []string{n, o})
+	if len(pairs) != 0 {
+		t.Errorf("CreateLink must not be called when the candidate was classified via a fallback provider, found %d links", len(pairs))
+	}
+}
+
+func TestRun_MixedFallbackAndPrimary_SkipsApply(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	// Three mutually-similar versions of one fact → 3 candidate pairs.
+	v1 := add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
+	v2 := add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
+	v3 := add(t, store, db, "kubernetes now on 1.31", []float32{0.98, 0.02, 0}, "2026-07-01 00:00:00")
+
+	// One pair (v3's "newer" side) is confirmed via the fallback provider; the
+	// rest via primary. The OR-accumulation guardrail must still block the
+	// whole batch's apply.
+	cls := &fallbackClassifier{byNewerContent: map[string]bool{
+		"kubernetes now on 1.31":      true,  // v3 as newer → fallback
+		"kubernetes upgraded to 1.29": false, // v2 as newer → primary
+	}}
+
+	res, confirmed, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Candidates != 3 || res.Confirmed != 3 {
+		t.Fatalf("want 3/3 candidates/confirmed, got %d/%d", res.Candidates, res.Confirmed)
+	}
+	if len(confirmed) != 3 {
+		t.Errorf("got %d confirmed, want 3 (dry-run preview still returned)", len(confirmed))
+	}
+	if res.Created != 0 {
+		t.Errorf("got Created=%d, want 0 (any fallback in the batch must skip apply)", res.Created)
+	}
+	pairs, _ := store.SupersedesWithin(ctx, []string{v1, v2, v3})
+	if len(pairs) != 0 {
+		t.Errorf("CreateLink must not be called when any candidate in the batch came from a fallback provider, even if others were confirmed via primary; found %d links", len(pairs))
 	}
 }

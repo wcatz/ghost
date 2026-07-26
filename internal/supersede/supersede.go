@@ -41,7 +41,7 @@ type Candidate struct {
 // update of the same fact) versus the two being independently valid. The LLM
 // implementation lives in the CLI layer; tests inject a deterministic mock.
 type Classifier interface {
-	Supersedes(ctx context.Context, newer, older string) (bool, error)
+	Supersedes(ctx context.Context, newer, older string) (supersedes bool, fromFallback bool, err error)
 }
 
 // vectorStore is the subset of *memory.Store the pass needs; narrowed for
@@ -135,17 +135,32 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	}
 	res := Result{Candidates: len(cands)}
 	var confirmed []Candidate
+	anyFallback := false
 	for _, c := range cands {
-		ok, err := cls.Supersedes(ctx, c.NewerContent, c.OlderContent)
+		ok, fromFallback, err := cls.Supersedes(ctx, c.NewerContent, c.OlderContent)
 		if err != nil {
 			return res, nil, fmt.Errorf("classify %s→%s: %w", c.NewerID, c.OlderID, err)
+		}
+		if fromFallback {
+			anyFallback = true
 		}
 		if !ok {
 			continue
 		}
 		res.Confirmed++
 		confirmed = append(confirmed, c)
-		if apply {
+	}
+
+	if apply && anyFallback {
+		if logger != nil {
+			logger.Warn("supersede: candidates classified via fallback provider, apply skipped — rerun once primary is available",
+				"confirmed", res.Confirmed)
+		}
+		return res, confirmed, nil
+	}
+
+	if apply {
+		for _, c := range confirmed {
 			if err := store.CreateLink(ctx, c.NewerID, c.OlderID, "supersedes", c.Similarity, "llm"); err != nil {
 				return res, nil, fmt.Errorf("create supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 			}
