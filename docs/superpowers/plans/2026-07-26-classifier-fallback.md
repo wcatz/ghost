@@ -1368,7 +1368,7 @@ In the `## Architecture` section, update the `internal/ai/` line:
 Add one bullet to `## Key Patterns`:
 
 ```markdown
-- Classifier fallback: `resolve`/`supersede` classify via `ai.FallbackProvider` — Anthropic primary, falls to a secondary only on `ai.ErrCreditExhausted`. The headless CLI path (`ghost resolve`/`ghost supersede`, and the stop hook's auto-resolve) wires no secondary, so it fails fast with a clear message on credit exhaustion instead of degrading. The live-session `ghost_resolve` MCP tool uses MCP sampling (the calling session's own model, no API credits spent) as its only provider. A fallback answer never auto-applies a write (`--apply` is skipped with a log line) — see `docs/superpowers/specs/2026-07-26-classifier-fallback-design.md`.
+- Classifier fallback: `resolve`/`supersede` classify via `ai.FallbackProvider` — Anthropic primary, falls to a secondary only on `ai.ErrCreditExhausted`. The headless CLI path (`ghost resolve`/`ghost supersede`, and the stop hook's auto-resolve) wires no secondary, so it fails fast with a clear message on credit exhaustion instead of degrading. The live-session `ghost_resolve` MCP tool uses MCP sampling (the calling session's own model, no API credits spent) as its only provider. A fallback answer never auto-applies a write (`--apply` is skipped with a log line) — see `docs/superpowers/plans/2026-07-26-classifier-fallback.md`.
 ```
 
 - [ ] **Step 2: Update README.md**

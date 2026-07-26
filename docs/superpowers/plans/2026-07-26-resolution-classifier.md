@@ -12,6 +12,8 @@
 
 **Branch:** `feat/resolution-classifier` (spec already committed on `feat/resolution-classifier-design`; create the implementation branch from it or from `main` after the spec merges).
 
+> **Note (post-implementation):** this plan's code snippets show `Store.SetResolved(ctx, ids) error`. A later change (classifier-fallback work) widened the shipped signature to `Store.SetResolved(ctx, ids) (int, error)` for write-guardrail counting. This is a historical plan document — do not copy its snippets verbatim; check `internal/memory/store.go` for the current signature. Similarly, "No hook is touched" (below) describes this plan's original scope only — the later classifier-fallback work added a detached stop-hook trigger (`spawnResolveIfConfigured`); see `docs/superpowers/plans/2026-07-26-classifier-fallback.md`.
+
 ---
 
 ## File Structure
