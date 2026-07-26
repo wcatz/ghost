@@ -2012,3 +2012,62 @@ func TestEnsureProject_AutoMerge(t *testing.T) {
 		t.Error("expected MCP memory to be reassigned to hash-ID project")
 	}
 }
+
+func TestResolveCandidatesAndSetResolved(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Eligible: a resolvable gotcha.
+	evID, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "kill experiment returned NO-GO", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create evidence: %v", err)
+	}
+	// Exempt by category.
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "convention", Content: "never push to main", Source: "manual", Importance: 0.9,
+	}); err != nil {
+		t.Fatalf("create convention: %v", err)
+	}
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "preference", Content: "user prefers tabs", Source: "manual", Importance: 0.5,
+	}); err != nil {
+		t.Fatalf("create preference: %v", err)
+	}
+	// Exempt by pin.
+	pinID, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "pinned gotcha stays", Source: "manual", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create pinned: %v", err)
+	}
+	if err := s.TogglePin(ctx, pinID, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+
+	// Candidates exclude convention, preference, and pinned rows.
+	cands, err := s.ResolveCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveCandidates: %v", err)
+	}
+	if len(cands) != 1 || cands[0].ID != evID {
+		ids := make([]string, len(cands))
+		for i, c := range cands {
+			ids[i] = c.ID + "/" + c.Category
+		}
+		t.Fatalf("candidates = %v, want exactly [%s/gotcha]", ids, evID)
+	}
+
+	// Marking resolved removes it from the candidate set (idempotent re-run).
+	if err := s.SetResolved(ctx, []string{evID}); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+	cands, err = s.ResolveCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveCandidates after SetResolved: %v", err)
+	}
+	if len(cands) != 0 {
+		t.Errorf("candidates after resolve = %d, want 0", len(cands))
+	}
+}

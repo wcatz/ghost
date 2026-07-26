@@ -565,6 +565,57 @@ func (s *Store) Touch(ctx context.Context, ids []string) error {
 	return err
 }
 
+// ResolveCandidates returns the project's memories that are eligible for
+// resolution classification: not yet resolved, not pinned, and not in a
+// standing-preference category (convention/preference are never evictable —
+// see the guardrail in the resolution-classifier spec §4). Globals are
+// excluded by the project_id filter. Newest first, so a batch reviews the most
+// recent work first.
+func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memory, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, project_id, category, content, importance, access_count,
+		       last_accessed, source, tags, pinned, created_at, updated_at
+		FROM memories
+		WHERE project_id = ?
+		  AND resolved_at IS NULL
+		  AND pinned = 0
+		  AND category NOT IN ('convention', 'preference')
+		ORDER BY created_at DESC
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve candidates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanMemories(rows)
+}
+
+// SetResolved stamps resolved_at = now on the given memory IDs, dropping them
+// from the ranked injection/browse surface while leaving them searchable.
+// A no-op on an empty slice.
+func (s *Store) SetResolved(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	placeholders := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	q := `UPDATE memories SET resolved_at = datetime('now') WHERE id IN (` +
+		strings.Join(placeholders, ",") + `)`
+	if _, err := s.db.ExecContext(ctx, q, args...); err != nil {
+		return fmt.Errorf("set resolved: %w", err)
+	}
+	return nil
+}
+
 // Delete removes a specific memory.
 func (s *Store) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
