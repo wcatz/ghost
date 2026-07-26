@@ -27,6 +27,7 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/obsidian"
 	"github.com/wcatz/ghost/internal/reflection"
+	"github.com/wcatz/ghost/internal/resolve"
 	"github.com/wcatz/ghost/internal/selfupdate"
 	"github.com/wcatz/ghost/internal/supersede"
 )
@@ -63,6 +64,9 @@ func main() {
 			return
 		case "supersede":
 			runSupersede()
+			return
+		case "resolve":
+			runResolve()
 			return
 		case "upgrade":
 			runUpgrade()
@@ -475,6 +479,98 @@ Requires ANTHROPIC_API_KEY (uses Haiku to confirm each candidate).`)
 	if !apply && res.Confirmed > 0 {
 		fmt.Println("\nRe-run with --apply to write these links.")
 	}
+}
+
+// runResolve is the CLI entry for `ghost resolve`. It marks resolved-evidence
+// memories (concluded work: findings, changelog notes, PR locators) so they
+// drop out of session-start injection while staying searchable. Cheap local
+// keyword prefilter proposes candidates; Haiku adjudicates each with a crisp
+// conclusion-vs-evidence question biased to KEEP. Dry-run by default; --apply
+// writes resolved_at. Re-runnable and reversible: any later Upsert/UpdateMemory
+// of a memory clears its resolved_at. Standalone command, never a hook — the
+// stop-hook contract forbids DB access on that path. See the
+// resolution-classifier spec.
+func runResolve() {
+	var projectName string
+	apply := false
+	for i := 2; i < len(os.Args); i++ {
+		switch {
+		case os.Args[i] == "--apply":
+			apply = true
+		case !strings.HasPrefix(os.Args[i], "-"):
+			projectName = os.Args[i]
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", os.Args[i])
+			os.Exit(1)
+		}
+	}
+	if projectName == "" {
+		fmt.Fprintln(os.Stderr, `Usage: ghost resolve <project> [flags]
+
+Flags:
+  --apply   Stamp resolved_at on confirmed memories (default is dry-run/preview)
+
+Marks resolved-evidence memories so they drop from session-start injection
+(still searchable). Requires ANTHROPIC_API_KEY (Haiku classifies each candidate).`)
+		os.Exit(1)
+	}
+
+	cfg, logger, store := bootstrap()
+	defer store.Close() //nolint:errcheck
+	ctx := context.Background()
+
+	projectID, err := store.ResolveProjectByName(ctx, projectName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if projectID == "" {
+		fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
+		os.Exit(1)
+	}
+	if cfg.API.Key == "" {
+		fmt.Fprintln(os.Stderr, "error: ghost resolve requires ANTHROPIC_API_KEY (Haiku classifies each candidate)")
+		os.Exit(1)
+	}
+
+	cls := resolve.NewHaikuClassifier(ai.NewClient(cfg.API.Key, logger))
+	res, confirmed, err := resolve.Run(ctx, store, cls, projectID, apply, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	verb := "would resolve"
+	if apply {
+		verb = "resolved"
+	}
+	short := func(id string) string {
+		if len(id) > 8 {
+			return id[:8]
+		}
+		return id
+	}
+	fmt.Printf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %s %d\n",
+		projectName, res.Loaded, res.Candidates, res.Confirmed, verb, len(confirmed))
+	for _, m := range confirmed {
+		fmt.Printf("  %s  [%s]  %s\n", short(m.ID), m.Category, firstLine(m.Content, 70))
+	}
+	if !apply && res.Confirmed > 0 {
+		fmt.Println("\nRe-run with --apply to mark these resolved.")
+	}
+}
+
+// firstLine returns the first line of s, truncated to at most n runes with an
+// ellipsis, for compact CLI preview.
+func firstLine(s string, n int) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
 }
 
 // runUpgrade downloads and installs the latest ghost release.
