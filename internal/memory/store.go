@@ -396,7 +396,8 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 		_, err = s.db.ExecContext(ctx, `
 			UPDATE memories
 			SET content = CASE WHEN source = 'manual' THEN content ELSE ? END,
-			    importance = ?, access_count = access_count + 1, updated_at = datetime('now')
+			    importance = ?, access_count = access_count + 1, updated_at = datetime('now'),
+			    resolved_at = NULL
 			WHERE id = ? AND project_id = ?
 		`, finalContent, newImportance, existingID, projectID)
 		if err != nil {
@@ -687,7 +688,8 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE memories
-		SET content = ?, category = ?, importance = ?, tags = ?, updated_at = datetime('now')
+		SET content = ?, category = ?, importance = ?, tags = ?, updated_at = datetime('now'),
+		    resolved_at = NULL
 		WHERE id = ?
 	`, newContent, newCategory, newImportance, newTags, id); err != nil {
 		return fmt.Errorf("update memory: %w", err)

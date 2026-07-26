@@ -2127,3 +2127,55 @@ func TestGetTopMemoriesExcludesResolved(t *testing.T) {
 		t.Errorf("resolved memory %s must remain searchable", resolvedID)
 	}
 }
+
+func TestUnresolveOnWrite(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// UpdateMemory clears resolved_at.
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "resumed via update", Source: "manual", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := s.SetResolved(ctx, []string{id}); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+	newContent := "resumed via update — now with more detail"
+	if err := s.UpdateMemory(ctx, testProject, id, &newContent, nil, nil, nil); err != nil {
+		t.Fatalf("UpdateMemory: %v", err)
+	}
+	assertActive(t, s, testProject, id)
+
+	// Upsert of a near-duplicate (strengthen branch) clears resolved_at.
+	uid, _, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
+	if err != nil {
+		t.Fatalf("upsert create: %v", err)
+	}
+	if err := s.SetResolved(ctx, []string{uid}); err != nil {
+		t.Fatalf("SetResolved upsert row: %v", err)
+	}
+	gotID, merged, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
+	if err != nil {
+		t.Fatalf("upsert dup: %v", err)
+	}
+	if !merged || gotID != uid {
+		t.Fatalf("upsert dup did not strengthen existing row: merged=%v id=%s want %s", merged, gotID, uid)
+	}
+	assertActive(t, s, testProject, uid)
+}
+
+// assertActive fails if the memory's resolved_at is not NULL.
+func assertActive(t *testing.T, s *Store, projectID, id string) {
+	t.Helper()
+	var resolvedAt sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT resolved_at FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
+	).Scan(&resolvedAt); err != nil {
+		t.Fatalf("read resolved_at for %s: %v", id, err)
+	}
+	if resolvedAt.Valid {
+		t.Errorf("memory %s should be active (resolved_at NULL), got %q", id, resolvedAt.String)
+	}
+}
