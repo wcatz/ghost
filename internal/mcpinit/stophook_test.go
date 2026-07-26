@@ -128,3 +128,33 @@ func TestHandleStopHook_SpawnResolveIfConfigured_NoOpWhenDisabled(t *testing.T) 
 		t.Errorf("expected no output for empty transcript_path, got %q", buf.String())
 	}
 }
+
+// isolatedHome points HOME/XDG_CONFIG_HOME/XDG_DATA_HOME at fresh temp dirs so
+// config.Load and config.DataDir can never see the developer's real
+// ~/.config/ghost/config.yaml or ~/.local/share/ghost/ghost.db. Without this,
+// TestSpawnResolveIfConfigured_NoOpWhenDisabled would only be hermetic by
+// accident of the machine it happens to run on.
+func isolatedHome(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	dataHome := filepath.Join(dir, "data")
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	return dataHome
+}
+
+func TestSpawnResolveIfConfigured_NoOpWhenDisabled(t *testing.T) {
+	// With no config file present, reflection.auto_resolve defaults to false
+	// (internal/config/config.go's defaults map). spawnResolveIfConfigured
+	// must return immediately after that check — before ever calling
+	// config.DataDir (which creates ~/.local/share/ghost), let alone touching
+	// ghost.db, the pidfile, or resolve.log.
+	dataHome := isolatedHome(t)
+
+	spawnResolveIfConfigured("/tmp/does-not-matter")
+
+	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
+		t.Errorf("expected ghost data dir to never be created when auto_resolve is disabled, stat err = %v", err)
+	}
+}

@@ -121,9 +121,8 @@ func scanTranscript(r io.Reader) (toolCalls, ghostSaves int) {
 // (default false) — most users never want an unattended write pass. Every
 // failure path returns silently: this must never block or fail the stop hook.
 // If the Anthropic API is out of credit, the spawned process itself fails
-// fast (per Task 6) and logs the failure to resolve.log — no local fallback
-// runs in this path, so auto-resolve simply does nothing until credits are
-// restored.
+// fast and logs the failure to resolve.log — no local fallback runs in this
+// path, so auto-resolve simply does nothing until credits are restored.
 // Known limitation: resolution here depends on lookupProject's path/basename
 // match against the stored project row; a cwd with no matching project is a
 // silent no-op, same as an unconfigured user.
@@ -159,6 +158,16 @@ func spawnResolveIfConfigured(cwd string) {
 	if isAlive(pidPath) {
 		return
 	}
+	// isAlive false means no pidfile or a stale one from a prior failed spawn;
+	// clear it and atomically claim the slot so two stop hooks firing close
+	// together (same project, e.g. near-simultaneous sessions) can't both pass
+	// the liveness check and double-spawn a paid-API, DB-writing process.
+	_ = os.Remove(pidPath)
+	claim, err := os.OpenFile(pidPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	_ = claim.Close()
 
 	exe, err := os.Executable()
 	if err != nil {
