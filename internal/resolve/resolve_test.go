@@ -1,0 +1,87 @@
+package resolve
+
+import (
+	"context"
+	"testing"
+
+	"github.com/wcatz/ghost/internal/memory"
+)
+
+// fakeClassifier resolves any memory whose content is in the drop set.
+type fakeClassifier struct{ drop map[string]bool }
+
+func (f fakeClassifier) IsResolved(_ context.Context, content string) (bool, error) {
+	return f.drop[content], nil
+}
+
+// fakeStore satisfies resolveStore with in-memory candidates.
+type fakeStore struct {
+	candidates []memory.Memory
+	resolved   []string
+}
+
+func (s *fakeStore) ResolveCandidates(_ context.Context, _ string) ([]memory.Memory, error) {
+	return s.candidates, nil
+}
+func (s *fakeStore) SetResolved(_ context.Context, ids []string) error {
+	s.resolved = append(s.resolved, ids...)
+	return nil
+}
+
+func TestPrefilterKeepsOnlyPlausible(t *testing.T) {
+	in := []memory.Memory{
+		{ID: "1", Content: "Graph-expansion RESOLVED NO-GO after kill experiment"},
+		{ID: "2", Content: "Ghost uses SQLite with FTS5 for storage"},
+		{ID: "3", Content: "fixed in PR #210, dead ranking bonus removed"},
+	}
+	got := Prefilter(in)
+	gotIDs := map[string]bool{}
+	for _, m := range got {
+		gotIDs[m.ID] = true
+	}
+	if !gotIDs["1"] || !gotIDs["3"] {
+		t.Errorf("prefilter dropped a resolution-keyword memory: got %v", gotIDs)
+	}
+	if gotIDs["2"] {
+		t.Errorf("prefilter kept a memory with no resolution keyword: got %v", gotIDs)
+	}
+}
+
+func TestRunResolvesConfirmedEvidence(t *testing.T) {
+	store := &fakeStore{candidates: []memory.Memory{
+		{ID: "keep", Content: "Graph-expansion RESOLVED NO-GO decision record"},
+		{ID: "drop", Content: "kill experiment finding: 7.3% cross-session links, removed"},
+		{ID: "noise", Content: "unrelated architecture note about workers"},
+	}}
+	cls := fakeClassifier{drop: map[string]bool{
+		"kill experiment finding: 7.3% cross-session links, removed": true,
+	}}
+
+	// Dry run: nothing written.
+	res, confirmed, err := Run(context.Background(), store, cls, "proj", false, nil)
+	if err != nil {
+		t.Fatalf("Run dry: %v", err)
+	}
+	if len(store.resolved) != 0 {
+		t.Errorf("dry run wrote %v, want nothing", store.resolved)
+	}
+	if res.Confirmed != 1 || len(confirmed) != 1 || confirmed[0].ID != "drop" {
+		t.Fatalf("dry run: confirmed=%d ids=%v, want 1 [drop]", res.Confirmed, confirmed)
+	}
+	// "noise" has no keyword → prefiltered out → never classified.
+	if res.Candidates != 2 {
+		t.Errorf("candidates after prefilter = %d, want 2 (keep, drop)", res.Candidates)
+	}
+
+	// Apply: the confirmed evidence is written.
+	res, _, err = Run(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Run apply: %v", err)
+	}
+	if len(store.resolved) != 1 || store.resolved[0] != "drop" {
+		t.Errorf("apply wrote %v, want [drop]", store.resolved)
+	}
+	if res.Resolved != 1 {
+		t.Errorf("res.Resolved = %d, want 1", res.Resolved)
+	}
+}
