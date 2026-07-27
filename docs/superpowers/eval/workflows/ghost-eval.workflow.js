@@ -12,7 +12,11 @@ export const meta = {
   ],
 }
 
-const REPO = args && args.repoPath ? args.repoPath : '/home/wayne/git/ghost'
+// args sometimes arrives as a JSON-encoded string rather than a parsed
+// object (observed with the Workflow tool's args passthrough) — normalize.
+const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
+
+const REPO = parsedArgs && parsedArgs.repoPath ? parsedArgs.repoPath : '/home/wayne/git/ghost'
 const REAL_DB = '/home/wayne/.local/share/ghost/ghost.db'
 
 phase('Setup')
@@ -40,7 +44,8 @@ try {
   // session N saved. Every other unit type gets its own unit-run-id.
 
   phase('Replay')
-  const REPLAY_PROJECTS = (args && args.replayProjects) || ['ghost', 'roller', 'infra']
+  const REPLAY_PROJECTS = (parsedArgs && parsedArgs.replayProjects) || ['ghost', 'roller', 'infra']
+  log(`Replay projects: ${REPLAY_PROJECTS.join(', ')}`)
 
   const REPLAY_SCHEMA = {
     type: 'object',
