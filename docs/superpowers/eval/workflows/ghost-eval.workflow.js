@@ -397,8 +397,36 @@ try {
   }))
 
   phase('Synthesize')
-  // placeholder until Task 9 fills this in
-  report = { note: 'synthesis not yet implemented — see plan Task 9' }
+
+  const synthesisPrompt =
+    `Synthesize a Ghost memory-system eval report from the raw results below. Produce Markdown with these sections:\n` +
+    `1. A scorecard table: search relevance, session-start injection, ghost resolve, ghost supersede, MCP tool ` +
+    `ergonomics, save-decision quality (from replay), consolidation quality (from ghost reflect) — score each ` +
+    `Good/Mixed/Poor with a one-line justification.\n` +
+    `2. Replay recall/precision numbers per real project, with example mismatches.\n` +
+    `3. Consolidation notes per real project (dropped-important, bad-merges, scope-errors).\n` +
+    `4. A ranked "friction points worth fixing" list — rank by how many independent agents (across replay, storyline, ` +
+    `and stress) hit the same or a similar issue. Do not just concatenate — actually dedupe and count.\n` +
+    `5. Flag prominently if the prompt-injection stress scenario's securityFlag was ever true.\n\n` +
+    `Replay results:\n${JSON.stringify(replayResults.filter(Boolean))}\n\n` +
+    `Consolidation results:\n${JSON.stringify(consolidationResults.filter(Boolean))}\n\n` +
+    `Storyline results:\n${JSON.stringify(storylineResults.filter(Boolean))}\n\n` +
+    `Stress results:\n${JSON.stringify(stressResults.filter(Boolean))}\n\n` +
+    `Return ONLY the Markdown report body (no preamble, no code fences around the whole thing).`
+
+  const reportBody = await agent(synthesisPrompt, { label: 'synthesis' })
+
+  const reportDate = (await agent('Run exactly: date +%Y-%m-%d\nReturn only the output.', { label: 'report-date' })).trim()
+  const reportPath = `docs/superpowers/reports/${reportDate}-ghost-eval.md`
+
+  await agent(
+    `Write the following content EXACTLY as given (do not alter it) to the file ${REPO}/${reportPath}, creating any ` +
+    `needed parent directories first. After writing, run: cat ${REPO}/${reportPath} | head -5\nand report that output ` +
+    `to confirm the write succeeded.\n\n---CONTENT START---\n${reportBody}\n---CONTENT END---`,
+    { label: 'write-report' }
+  )
+
+  report = { reportPath, reportBody }
 } finally {
   // Per-unit dirs (make-unit-config.sh's UNIT_ROOT) are siblings of scratchRoot,
   // not children — e.g. /tmp/ghost-eval/<run-id>-replay-ghost — so the cleanup
