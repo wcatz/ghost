@@ -28,24 +28,27 @@ await agent(
   { label: 'scratch-mkdir' }
 )
 
-// Later phases each mint their own unit run-id as `${runId.trim()}-<unit-key>`
-// (unit-key = replay project id, storyline key, or stress scenario key) and,
-// inside the agent prompt that does the actual live-agent work, shell out to:
-//   bash ${REPO}/docs/superpowers/eval/lib/make-unit-config.sh <unit-run-id> ${REPO}/docs/superpowers/eval/lib/ghost-wrapped ${REPO}/ghost
-//   bash ${REPO}/docs/superpowers/eval/lib/claude-eval-session.sh <unit-run-id> "<prompt>"
-// A storyline's sessions all reuse the SAME unit-run-id (config built once,
-// before session 1) so session N+1's scratch DB actually contains what
-// session N saved. Every other unit type gets its own unit-run-id.
+let report
+try {
+  // Later phases each mint their own unit run-id as `${runId.trim()}-<unit-key>`
+  // (unit-key = replay project id, storyline key, or stress scenario key) and,
+  // inside the agent prompt that does the actual live-agent work, shell out to:
+  //   bash ${REPO}/docs/superpowers/eval/lib/make-unit-config.sh <unit-run-id> ${REPO}/docs/superpowers/eval/lib/ghost-wrapped ${REPO}/ghost
+  //   bash ${REPO}/docs/superpowers/eval/lib/claude-eval-session.sh <unit-run-id> "<prompt>"
+  // A storyline's sessions all reuse the SAME unit-run-id (config built once,
+  // before session 1) so session N+1's scratch DB actually contains what
+  // session N saved. Every other unit type gets its own unit-run-id.
 
-// ... phases added in later tasks ...
+  // ... phases added in later tasks ...
 
-phase('Synthesize')
-// placeholder until Task 9 fills this in
-const report = { note: 'synthesis not yet implemented — see plan Task 9' }
-
-await agent(
-  `Run: rm -rf ${scratchRoot} && echo cleaned`,
-  { label: 'cleanup' }
-)
+  phase('Synthesize')
+  // placeholder until Task 9 fills this in
+  report = { note: 'synthesis not yet implemented — see plan Task 9' }
+} finally {
+  await agent(
+    `Run: rm -rf ${scratchRoot} && echo cleaned`,
+    { label: 'cleanup' }
+  )
+}
 
 return report
