@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# A drop-in replacement for the `ghost` binary that forces XDG isolation.
+# Usage: ghost-wrapped <run-id> <ghost-binary-path> <ghost-args...>
+set -euo pipefail
+
+RUN_ID="${1:?usage: ghost-wrapped <run-id> <ghost-binary-path> -- <args...>}"
+GHOST_BIN="${2:?missing ghost binary path}"
+shift 2
+
+GHOST_EVAL_ROOT="/tmp/ghost-eval/${RUN_ID}"
+export XDG_DATA_HOME="${GHOST_EVAL_ROOT}/data"
+export XDG_CONFIG_HOME="${GHOST_EVAL_ROOT}/config"
+mkdir -p "${XDG_DATA_HOME}" "${XDG_CONFIG_HOME}"
+
+exec "${GHOST_BIN}" "$@"
