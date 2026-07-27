@@ -24,8 +24,15 @@ const runId = await agent(
   'Run exactly this command and return ONLY its stdout, nothing else: date +%Y%m%d-%H%M%S-eval',
   { label: 'run-id' }
 )
-const scratchRoot = `/tmp/ghost-eval/${runId.trim()}`
-log(`Eval run ${runId.trim()} — scratch root ${scratchRoot}`)
+const trimmedRunId = runId.trim()
+// The finally block's cleanup glob is /tmp/ghost-eval/${trimmedRunId}* — an
+// empty or malformed value here would widen that glob to /tmp/ghost-eval/*
+// and wipe every run's scratch dir, not just this one.
+if (!/^\d{8}-\d{6}-eval$/.test(trimmedRunId)) {
+  throw new Error(`Setup: run-id agent returned unexpected output, refusing to proceed (cleanup glob would be unsafe): ${JSON.stringify(runId)}`)
+}
+const scratchRoot = `/tmp/ghost-eval/${trimmedRunId}`
+log(`Eval run ${trimmedRunId} — scratch root ${scratchRoot} — repo ${REPO}`)
 
 await agent(
   `Run: mkdir -p ${scratchRoot}/data ${scratchRoot}/config && echo ready`,
@@ -64,7 +71,7 @@ try {
   const replayResults = await parallel(REPLAY_PROJECTS.map(projectId => async () => {
     const transcriptGlob = `/home/wayne/.claude/projects/-home-wayne-git-${projectId}*/*.jsonl`
     const exportPath = `${scratchRoot}/${projectId}-real-memories.jsonl`
-    const unitRunId = `${runId.trim()}-replay-${projectId}`
+    const unitRunId = `${trimmedRunId}-replay-${projectId}`
 
     await agent(
       `Run exactly: bash ${REPO}/docs/superpowers/eval/lib/export-memories.sh ${REAL_DB} ${projectId} ${exportPath}\n` +
@@ -124,7 +131,7 @@ try {
   // not children — e.g. /tmp/ghost-eval/<run-id>-replay-ghost — so the cleanup
   // glob must cover /tmp/ghost-eval/<run-id>* to remove them too.
   await agent(
-    `Run: rm -rf /tmp/ghost-eval/${runId.trim()}* && echo cleaned`,
+    `Run: rm -rf /tmp/ghost-eval/${trimmedRunId}* && echo cleaned`,
     { label: 'cleanup' }
   )
 }
