@@ -126,13 +126,14 @@ try {
   phase('Consolidation')
   const CONSOLIDATION_SCHEMA = {
     type: 'object',
-    required: ['projectId', 'droppedImportant', 'badMerges', 'scopeErrors', 'notes'],
+    required: ['projectId', 'droppedImportant', 'badMerges', 'scopeErrors', 'notes', 'infraFailure'],
     properties: {
       projectId: { type: 'string' },
       droppedImportant: { type: 'array', items: { type: 'string' } },
       badMerges: { type: 'array', items: { type: 'string' } },
       scopeErrors: { type: 'array', items: { type: 'string' } },
       notes: { type: 'string' },
+      infraFailure: { type: 'boolean' },
     },
   }
 
@@ -172,7 +173,8 @@ try {
         `The output of "ghost reflect ${projectId} --tier haiku" (a dry-run consolidation proposal), including its ` +
         `trailing exit code line, is:\n${reflectOutput}\n\n` +
         `If the exit code is nonzero or the output shows a fatal error rather than a consolidation proposal, do not ` +
-        `grade it as a quality issue — report the failure in "notes" and leave the array fields empty.\n\n` +
+        `grade it as a quality issue — set "infraFailure" to true, describe the failure in "notes", and leave the array ` +
+        `fields empty. Otherwise set "infraFailure" to false.\n\n` +
         `Otherwise, grade the proposal: did it drop anything from the real set that looks important (droppedImportant)? ` +
         `Did it merge things that shouldn't have been merged, losing distinct information (badMerges)? Did it mis-scope ` +
         `anything project-specific to global, or vice versa (scopeErrors)? Give a short overall note.\n\n` +
