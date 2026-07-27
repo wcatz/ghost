@@ -3,6 +3,8 @@
 # Copies one project's `projects` row and its `memories` rows from the real
 # DB into a scratch DB that ghost has already initialized (so the schema,
 # including FTS5 triggers, already exists there).
+# NOTE: memory_embeddings are NOT copied — seeded rows have no vector until
+# re-embedded, so hybrid search degrades to FTS5-only for this corpus.
 set -euo pipefail
 
 REAL_DB="${1:?usage: seed-project.sh <real-db-path> <project-id> <scratch-db-path>}"
@@ -10,7 +12,7 @@ PROJECT_ID="${2:?missing project-id}"
 SCRATCH_DB="${3:?missing scratch-db-path}"
 
 sqlite3 "${SCRATCH_DB}" <<SQL
-ATTACH DATABASE '${REAL_DB}' AS real_db;
+ATTACH DATABASE 'file:${REAL_DB}?mode=ro' AS real_db;
 
 INSERT INTO projects (id, path, name, created_at, updated_at)
 SELECT id, path, name, created_at, updated_at

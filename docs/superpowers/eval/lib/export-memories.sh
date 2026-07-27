@@ -8,9 +8,11 @@ REAL_DB="${1:?usage: export-memories.sh <real-db-path> <project-id> <output-json
 PROJECT_ID="${2:?missing project-id}"
 OUT_PATH="${3:?missing output path}"
 
+mkdir -p "$(dirname "${OUT_PATH}")"
+
 sqlite3 -readonly "${REAL_DB}" <<SQL > "${OUT_PATH}"
-.mode json
-select category, content, importance, source, tags
+.mode list
+select json_object('category', category, 'content', content, 'importance', importance, 'source', source, 'tags', tags)
 from memories
 where project_id = '${PROJECT_ID}'
   and resolved_at is null
