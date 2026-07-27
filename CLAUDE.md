@@ -7,14 +7,15 @@
 - MCP server via modelcontextprotocol/go-sdk (stdio transport)
 
 ## Architecture
-- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, supersede, obsidian, bench, upgrade, version
-- `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + supersede)
+- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, resolve, supersede, obsidian, bench, upgrade, version
+- `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + resolve + supersede)
 - `internal/memory/` — SQLite CRUD, FTS5 search, vector search, time-decay scoring
 - `internal/mcpserver/` — MCP server: 18 tools + 4 resources + 2 prompts (`recall_project`, `record_decision`)
 - `internal/mcpinit/` — `ghost mcp init`, `ghost mcp status`, `ghost hook session-start`, `ghost hook stop`
 - `internal/claudeimport/` — One-time import of Claude Code auto-memory on first contact
 - `internal/embedding/` — Ollama async vectorization worker
 - `internal/linking/` — Background worker linking similar memories into a graph
+- `internal/resolve/` — `ghost resolve`: LLM-classified de-weighting of resolved-evidence memories (drops from ranked injection, stays searchable); Haiku-only, no fallback, hard-fails without `ANTHROPIC_API_KEY`
 - `internal/supersede/` — `ghost supersede`: LLM-classified 'supersedes' link creation over live memories
 - `internal/bench/` — `ghost bench`: retrieval-quality benchmark harness (graded dataset + sweep + staleness/recency suites)
 - `internal/obsidian/` — One-way Markdown vault mirror (`ghost obsidian export|sync`)
@@ -31,6 +32,7 @@
 - Global memories: `_global` project, included in every project's context
 - Hybrid search: 70% vector (cosine, Ollama) + 30% FTS5, RRF fusion — falls back to FTS5-only
 - Memory links: `memory_links` edge table auto-populated by cosine similarity (internal/linking worker); links cascade-delete with memories and self-heal after reflection. A graph-expansion ranking bonus was evaluated and removed — dominated by a deeper vector-k (links and the vector leg are both cosine); the link graph is retained for Obsidian export and supersedes ranking (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`).
+- Resolution classifier: `ghost resolve` runs a keyword prefilter then a single KEEP-biased Haiku call per candidate to mark `resolved_at`, dropping resolved-evidence memories (changelogs, cost estimates, closed experiment notes) from ranked injection while keeping them searchable. Dry-run by default, `--apply` writes; a partial classify pass fails fatally rather than applying incomplete results. No fallback provider exists — `ANTHROPIC_API_KEY` is hard-required, same as `ghost supersede`. Never invoked from the stop hook (that path forbids DB access); standalone batch command only. See `docs/superpowers/specs/2026-07-26-resolution-classifier-design.md`.
 
 ## Critical Rules
 - Always `go vet ./...` before committing
