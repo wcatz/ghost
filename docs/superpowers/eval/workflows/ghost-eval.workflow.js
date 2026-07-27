@@ -184,6 +184,139 @@ try {
     }
   )
 
+  phase('Storyline')
+
+  const STORYLINES = [
+    {
+      key: 'service-migration',
+      projectId: `storyline-migration-${runId.trim()}`,
+      sessions: [
+        'You are starting work on migrating the "billing-service" from a monolith to a standalone service. This is session 1. Decide on an initial architecture approach (pick one: shared-DB shim vs. full event-sourced rewrite) and record it as a decision. Do real design work — write out the tradeoffs you considered — then use ghost_decision_record to log your choice and reasoning.',
+        'Session 2 on "billing-service" migration. You have no memory of session 1 except what Ghost surfaces to you at start. Continue the migration: implement the first slice of the chosen approach. Partway through, you discover the shared-DB shim approach (if that was chosen) causes a deadlock under concurrent writes — record this as a gotcha.',
+        'Session 3 on "billing-service" migration. You have no memory of prior sessions except what Ghost surfaces. Given the deadlock gotcha from session 2, you decide to abandon the original approach and switch to event sourcing instead. Use ghost_decision_record to log this reversal, and check whether ghost_project_context surfaced the original decision and the deadlock gotcha — if it did not, that is a friction point.',
+        'Session 4 on "billing-service" migration. You have no memory of prior sessions except what Ghost surfaces. Continue implementing the event-sourced approach. Report at the end whether the context you were given matched what you needed, and whether you would have made the same reversal decision again based only on what Ghost gave you.',
+      ],
+    },
+    {
+      key: 'oncall-bughunt',
+      projectId: `storyline-oncall-${runId.trim()}`,
+      sessions: [
+        'You are on-call for the "payments-api" project. Session 1: investigate a reported bug where webhook retries duplicate charges. Find a plausible root cause (idempotency key not checked before retry) and record it as a gotcha, then fix it.',
+        'Session 2 on "payments-api" on-call. No memory of session 1 except what Ghost surfaces. A new report comes in: refunds are failing silently. Investigate, find a root cause (refund endpoint swallows a specific error code), fix it, and record the gotcha.',
+        'Session 3 on "payments-api" on-call. No memory of prior sessions except what Ghost surfaces. The duplicate-charge bug from session 1 recurs in a different code path. Before investigating from scratch, search Ghost for anything related to duplicate charges or idempotency — report whether search surfaced the session-1 gotcha, and how relevant/fast that was.',
+        'Session 4 on "payments-api" on-call. No memory of prior sessions except what Ghost surfaces. Both bugs from sessions 1 and 2 are now considered fully resolved and shipped. This session is a retro: review what Ghost currently surfaces about this project via ghost_project_context, and report whether resolved-evidence content (old bug investigation notes) is cluttering what is shown, or whether it appropriately fell off after resolution.',
+      ],
+    },
+    {
+      key: 'config-clutter',
+      projectId: `storyline-config-${runId.trim()}`,
+      sessions: [
+        'You are configuring a new "edge-cache" infra project. Session 1: record 8-10 small, near-duplicate configuration facts as you set things up (e.g. slightly varying phrasings of "cache TTL is 300s", "the cache TTL is set to 300 seconds", "TTL default: 300s") plus 2-3 genuinely distinct facts (region, instance type, auth method). Use ghost_memory_save naturally as you would while actually configuring something, not as a deliberate stress-test list.',
+        'Session 2 on "edge-cache". No memory of session 1 except what Ghost surfaces. You need to know the cache TTL to configure a related service. Search for it via ghost_memory_search and report: did you get a clean, unambiguous answer, or a wall of near-duplicate near-identical results? How long did it take you to be confident of the actual value?',
+        'Session 3 on "edge-cache". No memory of prior sessions except what Ghost surfaces. Add 3 more genuinely new facts about this project (unrelated to TTL) and then check whether ghost_project_context injection at session start is dominated by the TTL duplicates from session 1, crowding out the newer distinct facts. Report what you observed.',
+      ],
+    },
+    {
+      key: 'reversed-decision',
+      projectId: `storyline-reversal-${runId.trim()}`,
+      sessions: [
+        'You are building a "notification-router" project. Session 1: make and record an early architectural decision — route notifications via a central message bus (pick a specific technology and justify it) — using ghost_decision_record.',
+        'Session 2 on "notification-router". No memory of session 1 except what Ghost surfaces. Continue building on the message-bus approach for a while, then hit a real limitation of it (pick something concrete, e.g. ordering guarantees needed for a specific notification type that the bus cannot provide) and record that as a gotcha.',
+        'Session 3 on "notification-router". No memory of prior sessions except what Ghost surfaces. Given the limitation from session 2, decide to reverse course and switch to a direct point-to-point delivery model instead. Use ghost_decision_record to log the reversal. Report whether Ghost surfaced the original decision clearly, or whether it was buried/decayed/hard to find.',
+        'Session 4 on "notification-router". No memory of prior sessions except what Ghost surfaces. Do unrelated follow-up work on the project, then explicitly search for "message bus" via ghost_memory_search. Report whether the superseded original decision still surfaces prominently (a problem — recency/supersession should de-weight it) or is appropriately down-ranked relative to the reversal.',
+      ],
+    },
+  ]
+
+  const STORYLINE_SESSION_SCHEMA = {
+    type: 'object',
+    required: ['whatIDid', 'frustrations', 'trustRating', 'contextObservation'],
+    properties: {
+      whatIDid: { type: 'string' },
+      frustrations: { type: 'array', items: { type: 'string' } },
+      trustRating: { type: 'string' },
+      contextObservation: { type: 'string' },
+    },
+  }
+
+  async function runStorylineSession(unitRunId, storyline, sessionPrompt, sessionIndex) {
+    const prompt =
+      `Project id for all ghost_* tool calls: "${storyline.projectId}". ${sessionPrompt}\n\n` +
+      `End your final message with a fenced JSON block matching this shape: {"whatIDid": string, "frustrations": ` +
+      `string[], "trustRating": string, "contextObservation": string} — frustration points using Ghost's tools ` +
+      `logged as they happened (not rationalized afterward), an honest trust rating (would you have relied on ` +
+      `what Ghost surfaced, unverified?), and a specific observation about what ghost_project_context / search ` +
+      `surfaced at the start of this session relative to what you actually needed.`
+
+    const rawOutput = await agent(
+      `Run exactly, from ${REPO}, quoting the prompt exactly as given (it contains newlines):\n` +
+      `bash docs/superpowers/eval/lib/claude-eval-session.sh ${unitRunId} '${prompt.replace(/'/g, "'\\''")}'\n` +
+      `Return the full stdout verbatim, nothing else.`,
+      { label: `${storyline.key}:session${sessionIndex + 1}:run`, phase: 'Storyline' }
+    )
+
+    return agent(
+      `The text below is the full transcript of an isolated \`claude -p\` session (session ${sessionIndex + 1} of the ` +
+      `"${storyline.key}" storyline). Extract the trailing fenced JSON block it was asked to produce and re-emit it via ` +
+      `the required schema. If no valid JSON block is present, read the surrounding prose and infer the fields as best ` +
+      `you can, and note this failure inside "frustrations".\n\n${rawOutput}`,
+      { label: `${storyline.key}:session${sessionIndex + 1}`, phase: 'Storyline', schema: STORYLINE_SESSION_SCHEMA }
+    )
+  }
+
+  const STORYLINE_CLI_GRADE = {
+    'oncall-bughunt': { cmd: 'resolve', schema: 'resolve' },
+    'reversed-decision': { cmd: 'supersede', schema: 'supersede' },
+  }
+
+  const CLI_GRADE_SCHEMA = {
+    type: 'object',
+    required: ['cliOutput', 'correctlyClassified', 'missedOrWrong', 'notes'],
+    properties: {
+      cliOutput: { type: 'string' },
+      correctlyClassified: { type: 'array', items: { type: 'string' } },
+      missedOrWrong: { type: 'array', items: { type: 'string' } },
+      notes: { type: 'string' },
+    },
+  }
+
+  // Deviation from the plan's literal `Promise.all(STORYLINES.map(async (storyline) => {...}))`:
+  // wrapped in the environment's `parallel()` helper (thunk form) instead. This phase is the
+  // most expensive in the suite (4 storylines x up to 4 chained sessions x 2 agent calls each,
+  // plus CLI grading) — a raw Promise.all would let one storyline's transient failure reject
+  // the whole call and discard all 4 storylines' results. `parallel()` resolves a throwing
+  // thunk to `null` instead, matching the error-tolerant pattern already used by the Replay
+  // phase above. Body logic is otherwise unchanged from the plan.
+  const storylineResults = await parallel(STORYLINES.map((storyline) => async () => {
+    const unitRunId = `${runId.trim()}-storyline-${storyline.key}`
+
+    await agent(
+      `Run exactly, from ${REPO}: ` +
+      `bash docs/superpowers/eval/lib/make-unit-config.sh ${unitRunId} $(pwd)/docs/superpowers/eval/lib/ghost-wrapped $(pwd)/ghost`,
+      { label: `${storyline.key}:config`, phase: 'Storyline' }
+    )
+
+    const sessionReports = []
+    for (let i = 0; i < storyline.sessions.length; i++) {
+      sessionReports.push(await runStorylineSession(unitRunId, storyline, storyline.sessions[i], i))
+    }
+
+    const cliGrade = STORYLINE_CLI_GRADE[storyline.key]
+    let cliGradeResult = null
+    if (cliGrade) {
+      cliGradeResult = await agent(
+        `Run exactly: ${REPO}/docs/superpowers/eval/lib/ghost-wrapped ${unitRunId} ${REPO}/ghost ${cliGrade.cmd} ${storyline.projectId}\n` +
+        `This targets the same scratch DB the storyline sessions above just wrote to (unit-run-id ${unitRunId}). ` +
+        `This is a dry run (no --apply) — report the full stdout, then grade: for "${cliGrade.cmd}", which candidate ` +
+        `memories were correctly classified, and which were missed or wrongly classified, based on the storyline ` +
+        `context you can see in the sessionReports below?\n\nSession reports:\n${JSON.stringify(sessionReports)}`,
+        { label: `${storyline.key}:${cliGrade.cmd}-grade`, phase: 'Storyline', schema: CLI_GRADE_SCHEMA }
+      )
+    }
+
+    return { storyline: storyline.key, projectId: storyline.projectId, sessionReports, cliGradeResult }
+  }))
+
   phase('Synthesize')
   // placeholder until Task 9 fills this in
   report = { note: 'synthesis not yet implemented — see plan Task 9' }
