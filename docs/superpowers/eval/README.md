@@ -52,6 +52,17 @@ project and stress scenario gets its own `unit-run-id`; a storyline's
 sessions all share one `unit-run-id` (config built once before session 1)
 so later sessions actually see what earlier sessions saved.
 
+`claude-eval-session.sh` also takes a `<project-basename>` argument and
+`cd`s into a scratch directory of that name before launching `claude -p`.
+Ghost's `SessionStart` hook matches a project by cwd path or by
+`name = basename(cwd)` (see `internal/mcpinit/hook.go`'s `lookupProject`),
+and a project created via `ghost_memory_save(project_id=...)` alone has its
+stored name set to that same id — so without this, every subprocess's cwd
+would be this repo's own checkout, the automatic injection the storyline
+module exists to test would never fire, and each subprocess's transcript
+would land in this repo's real `~/.claude/projects/` directory instead of
+staying scratch-isolated.
+
 ## If something breaks isolation
 
 Check that no `/tmp/ghost-eval/<run-id>*` directories remain after the last
