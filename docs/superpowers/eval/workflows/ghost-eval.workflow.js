@@ -189,7 +189,7 @@ try {
   const STORYLINES = [
     {
       key: 'service-migration',
-      projectId: `storyline-migration-${runId.trim()}`,
+      projectId: `storyline-migration-${trimmedRunId}`,
       sessions: [
         'You are starting work on migrating the "billing-service" from a monolith to a standalone service. This is session 1. Decide on an initial architecture approach (pick one: shared-DB shim vs. full event-sourced rewrite) and record it as a decision. Do real design work — write out the tradeoffs you considered — then use ghost_decision_record to log your choice and reasoning.',
         'Session 2 on "billing-service" migration. You have no memory of session 1 except what Ghost surfaces to you at start. Continue the migration: implement the first slice of the chosen approach. Partway through, you discover the shared-DB shim approach (if that was chosen) causes a deadlock under concurrent writes — record this as a gotcha.',
@@ -199,7 +199,7 @@ try {
     },
     {
       key: 'oncall-bughunt',
-      projectId: `storyline-oncall-${runId.trim()}`,
+      projectId: `storyline-oncall-${trimmedRunId}`,
       sessions: [
         'You are on-call for the "payments-api" project. Session 1: investigate a reported bug where webhook retries duplicate charges. Find a plausible root cause (idempotency key not checked before retry) and record it as a gotcha, then fix it.',
         'Session 2 on "payments-api" on-call. No memory of session 1 except what Ghost surfaces. A new report comes in: refunds are failing silently. Investigate, find a root cause (refund endpoint swallows a specific error code), fix it, and record the gotcha.',
@@ -209,7 +209,7 @@ try {
     },
     {
       key: 'config-clutter',
-      projectId: `storyline-config-${runId.trim()}`,
+      projectId: `storyline-config-${trimmedRunId}`,
       sessions: [
         'You are configuring a new "edge-cache" infra project. Session 1: record 8-10 small, near-duplicate configuration facts as you set things up (e.g. slightly varying phrasings of "cache TTL is 300s", "the cache TTL is set to 300 seconds", "TTL default: 300s") plus 2-3 genuinely distinct facts (region, instance type, auth method). Use ghost_memory_save naturally as you would while actually configuring something, not as a deliberate stress-test list.',
         'Session 2 on "edge-cache". No memory of session 1 except what Ghost surfaces. You need to know the cache TTL to configure a related service. Search for it via ghost_memory_search and report: did you get a clean, unambiguous answer, or a wall of near-duplicate near-identical results? How long did it take you to be confident of the actual value?',
@@ -218,7 +218,7 @@ try {
     },
     {
       key: 'reversed-decision',
-      projectId: `storyline-reversal-${runId.trim()}`,
+      projectId: `storyline-reversal-${trimmedRunId}`,
       sessions: [
         'You are building a "notification-router" project. Session 1: make and record an early architectural decision — route notifications via a central message bus (pick a specific technology and justify it) — using ghost_decision_record.',
         'Session 2 on "notification-router". No memory of session 1 except what Ghost surfaces. Continue building on the message-bus approach for a while, then hit a real limitation of it (pick something concrete, e.g. ordering guarantees needed for a specific notification type that the bus cannot provide) and record that as a gotcha.',
@@ -265,8 +265,8 @@ try {
   }
 
   const STORYLINE_CLI_GRADE = {
-    'oncall-bughunt': { cmd: 'resolve', schema: 'resolve' },
-    'reversed-decision': { cmd: 'supersede', schema: 'supersede' },
+    'oncall-bughunt': { cmd: 'resolve' },
+    'reversed-decision': { cmd: 'supersede' },
   }
 
   const CLI_GRADE_SCHEMA = {
@@ -287,8 +287,12 @@ try {
   // the whole call and discard all 4 storylines' results. `parallel()` resolves a throwing
   // thunk to `null` instead, matching the error-tolerant pattern already used by the Replay
   // phase above. Body logic is otherwise unchanged from the plan.
+  //
+  // NOTE for the Task 9 Synthesize implementer: a per-storyline failure surfaces here as a
+  // `null` entry in `storylineResults`, not a thrown error — filter with `.filter(Boolean)`
+  // before consuming this array, or a single flaky storyline will crash Synthesize.
   const storylineResults = await parallel(STORYLINES.map((storyline) => async () => {
-    const unitRunId = `${runId.trim()}-storyline-${storyline.key}`
+    const unitRunId = `${trimmedRunId}-storyline-${storyline.key}`
 
     await agent(
       `Run exactly, from ${REPO}: ` +
