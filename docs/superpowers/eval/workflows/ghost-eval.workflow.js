@@ -13,7 +13,7 @@ export const meta = {
 }
 
 const REPO = args && args.repoPath ? args.repoPath : '/home/wayne/git/ghost'
-const REAL_DB = `${process.env.HOME}/.local/share/ghost/ghost.db`
+const REAL_DB = '/home/wayne/.local/share/ghost/ghost.db'
 
 phase('Setup')
 const runId = await agent(

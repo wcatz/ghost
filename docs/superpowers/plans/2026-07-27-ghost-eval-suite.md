@@ -372,7 +372,7 @@ export const meta = {
 }
 
 const REPO = args && args.repoPath ? args.repoPath : '/home/wayne/git/ghost'
-const REAL_DB = `${process.env.HOME}/.local/share/ghost/ghost.db`
+const REAL_DB = '/home/wayne/.local/share/ghost/ghost.db'
 
 phase('Setup')
 const runId = await agent(
@@ -451,7 +451,7 @@ const REPLAY_SCHEMA = {
 }
 
 const replayResults = await parallel(REPLAY_PROJECTS.map(projectId => async () => {
-  const transcriptGlob = `${process.env.HOME}/.claude/projects/-home-wayne-git-${projectId}*/*.jsonl`
+  const transcriptGlob = `/home/wayne/.claude/projects/-home-wayne-git-${projectId}*/*.jsonl`
   const exportPath = `${scratchRoot}/${projectId}-real-memories.jsonl`
   const unitRunId = `${runId.trim()}-replay-${projectId}`
 
