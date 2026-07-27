@@ -144,20 +144,22 @@ try {
       const scratchConfigHome = `${scratchRoot}/consolidation-${projectId}/config`
 
       await agent(
-        `Run these commands in order and report only the final line of output:\n` +
-        `mkdir -p ${scratchDataHome} ${scratchConfigHome}\n` +
-        `XDG_DATA_HOME=${scratchDataHome} XDG_CONFIG_HOME=${scratchConfigHome} ${REPO}/ghost mcp status || true\n` +
-        `bash ${REPO}/docs/superpowers/eval/lib/seed-project.sh ${REAL_DB} ${projectId} ${scratchDb}\n` +
+        `Run this command and report only the final line of output:\n` +
+        `mkdir -p ${scratchDataHome} ${scratchConfigHome} && ` +
+        `(echo | XDG_DATA_HOME=${scratchDataHome} XDG_CONFIG_HOME=${scratchConfigHome} ${REPO}/ghost mcp > /dev/null) && ` +
+        `bash ${REPO}/docs/superpowers/eval/lib/seed-project.sh ${REAL_DB} ${projectId} ${scratchDb} && ` +
         `echo seeded`,
         { label: `seed:${projectId}`, phase: 'Consolidation' }
       )
 
       const reflectOutput = await agent(
-        `Run exactly: XDG_DATA_HOME=${scratchDataHome} XDG_CONFIG_HOME=${scratchConfigHome} ${REPO}/ghost reflect ${projectId} --tier haiku\n` +
-        `Return the full stdout verbatim (this is a dry run — no --apply — nothing is written).`,
+        `Run exactly: XDG_DATA_HOME=${scratchDataHome} XDG_CONFIG_HOME=${scratchConfigHome} ${REPO}/ghost reflect ${projectId} --tier haiku 2>&1; echo "exit code: $?"\n` +
+        `Return the full combined stdout+stderr verbatim, including the trailing exit code line (this is a dry run — no --apply — nothing is written).`,
         { label: `reflect:${projectId}`, phase: 'Consolidation' }
       )
 
+      // Depends on the Replay phase having already written this project's
+      // ground-truth export to ${scratchRoot}/${projectId}-real-memories.jsonl.
       const realMemories = await agent(
         `Run exactly: cat ${scratchRoot}/${projectId}-real-memories.jsonl\n` +
         `Return the full file contents verbatim.`,
@@ -167,9 +169,12 @@ try {
       return agent(
         `You are grading a memory-consolidation run for the "${projectId}" project.\n\n` +
         `The REAL current memory set (ground truth, before consolidation) is:\n${realMemories}\n\n` +
-        `The output of "ghost reflect ${projectId} --tier haiku" (a dry-run consolidation proposal) is:\n${reflectOutput}\n\n` +
-        `Grade the proposal: did it drop anything from the real set that looks important (droppedImportant)? Did it ` +
-        `merge things that shouldn't have been merged, losing distinct information (badMerges)? Did it mis-scope ` +
+        `The output of "ghost reflect ${projectId} --tier haiku" (a dry-run consolidation proposal), including its ` +
+        `trailing exit code line, is:\n${reflectOutput}\n\n` +
+        `If the exit code is nonzero or the output shows a fatal error rather than a consolidation proposal, do not ` +
+        `grade it as a quality issue — report the failure in "notes" and leave the array fields empty.\n\n` +
+        `Otherwise, grade the proposal: did it drop anything from the real set that looks important (droppedImportant)? ` +
+        `Did it merge things that shouldn't have been merged, losing distinct information (badMerges)? Did it mis-scope ` +
         `anything project-specific to global, or vice versa (scopeErrors)? Give a short overall note.\n\n` +
         `Return your findings via the required schema.`,
         { label: `grade-reflect:${projectId}`, phase: 'Consolidation', schema: CONSOLIDATION_SCHEMA }
