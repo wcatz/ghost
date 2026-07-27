@@ -420,6 +420,9 @@ try {
   const reportBody = await agent(synthesisPrompt, { label: 'synthesis' })
 
   const reportDate = (await agent('Run exactly: date +%Y-%m-%d\nReturn only the output.', { label: 'report-date' })).trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(reportDate)) {
+    throw new Error(`Synthesize: report-date agent returned unexpected output, refusing to write report: ${JSON.stringify(reportDate)}`)
+  }
   const reportPath = `docs/superpowers/reports/${reportDate}-ghost-eval.md`
 
   await agent(
