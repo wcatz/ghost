@@ -16,19 +16,37 @@ All `ghost` invocations in the eval (CLI commands run directly by the harness, a
 
 At the end of a run, the entire `/tmp/ghost-eval/<run-id>/` dir is deleted. Nothing persists in the real DB, config, or Obsidian vault.
 
+**Isolation must be verified before any live-agent phase runs at scale.** Whether a subagent launched via the Workflow tool actually picks up a worktree-local `.mcp.json` (vs. resolving MCP servers from the session's already-established config at startup) is unconfirmed. Before running the full suite, the implementation plan must include a throwaway single-agent smoke test: launch one agent in a worktree with the scratch-wrapped `.mcp.json`, have it call any `ghost_*` tool, then check which DB the row landed in (scratch vs. real). If it lands in the real DB, live agents must shell out to the env-wrapped `ghost` CLI directly instead of relying on MCP tool resolution.
+
 **Cost caveat:** `ghost resolve`/`ghost supersede` and reflection all call the real Anthropic API (Haiku) using the copied key — each eval run spends real API credits. This is expected and acceptable but worth remembering when deciding how many runs/storylines to execute.
 
 ## Test Modules
 
-### 1. Replay module (no live agents)
+### Finding: `messages`/`conversations` are dead tables
+
+Before designing the replay module, we confirmed that `ghost reflect`'s only transcript-shaped input, `Store.GetRecentExchanges` (queries `messages` joined to `conversations`), is fed by `Store.CreateConversation`/`AppendMessage` — and neither has a caller anywhere in the current codebase outside their own tests (`git grep` confirms only `internal/provider/provider.go` and `internal/memory/store.go`). The real DB has 76 conversations / 645 messages, but all dated March 2026, before commit `9aff8a7` ("strip Ghost to MCP-only server (v0.8.0), #149") removed the chat subsystem that used to write them. In the current, shipped codebase, **`ghost reflect` never sees a raw transcript turn** — `RecentExchanges` is always empty in production. Reflection is a *consolidator over already-saved memories*, not an extractor from conversation history. The actual save decision is made entirely by whichever agent calls `ghost_memory_save` during a real session, steered by the MCP server's tool instructions.
+
+This means "feed a transcript through ghost's reflection/extraction path" (the original Module 1) describes a path that doesn't exist in production — testing it would exercise dead code and tell us nothing about real-world behavior. Module 1 is replaced by the two modules below.
+
+### 1a. Live save-decision replay (live agent, one per real project transcript)
 
 Input: real Claude Code session transcripts from `~/.claude/projects/-home-wayne-git-*/*.jsonl`, one project at a time.
 
-Process: feed each transcript's raw turns through ghost's reflection/extraction path against a fresh scratch DB for that project, producing a candidate memory set. Diff that candidate set against what's actually saved in the *real* ghost DB for the same project (pseudo-ground-truth — memories a human+agent pair actually judged worth keeping at the time).
+Process: launch a fresh agent per transcript, wired to ghost MCP pointed at a scratch DB seeded empty for that project. Feed the agent the transcript's real turns as the work it is doing (not as passive text to summarize) — normal coding-session framing, so it makes its own `ghost_memory_save`/`ghost_decision_record` calls exactly as a live agent would. Diff what it chooses to save against what's actually saved in the *real* ghost DB for the same project (pseudo-ground-truth — memories a human+agent pair actually judged worth keeping at the time).
 
-Output: per-project recall (real memories the replay failed to extract) and precision (candidate memories the replay produced that aren't in the real set — noise or over-saving) plus example mismatches for the report.
+Output: per-project recall (real memories the replay agent failed to save) and precision (memories it saved that aren't in the real set — noise or over-saving) plus example mismatches for the report.
 
-This module is deterministic and cheap relative to the live modules — no MCP tool interaction, just extraction + diff.
+This is a live-agent module, not a deterministic diff — it belongs alongside the storyline/stress modules in orchestration, not as a cheap pre-pass.
+
+### 1b. Consolidation quality (no live agents)
+
+Input: a real project's current memory set, copied into a scratch DB.
+
+Process: run `ghost reflect --tier haiku` in dry-run mode against the seeded scratch DB. Grade the proposed consolidation: did it drop anything that looks important, merge things that shouldn't be merged, or mis-scope a memory to `_global`?
+
+Output: per-project notes on consolidation quality plus example problems for the report.
+
+This module is deterministic and cheap relative to the live modules — no MCP tool interaction, just a `ghost reflect` dry-run + diff.
 
 ### 2. Storyline module (live agents, synthetic multi-session projects)
 
@@ -53,26 +71,27 @@ A handful of scenarios targeting specific edge cases that don't reliably emerge 
 
 Built as a Workflow script (per user's explicit opt-in) with phases:
 
-1. **Replay** — one agent per real project transcript, run concurrently (`pipeline`), each returning recall/precision metrics + example mismatches.
-2. **Storyline** — for each storyline, a `pipeline()` of fixed session-stage prompts (session 1, session 2, ... session N), run as independent chained agent calls per item per storyline. Each stage agent gets only its own stage's task script plus the project_id — no session shares context with another except through what Ghost itself surfaces.
-3. **Stress** — one agent per stress scenario, run concurrently.
-4. **Synthesize** — a single final agent reads all replay metrics, storyline reports, and stress-test reports, and writes the combined report.
+1. **Replay (live)** — one live agent per real project transcript (module 1a), run concurrently (`pipeline`), each returning recall/precision metrics + example mismatches + its own frustration-point report (it's a live-agent module).
+2. **Consolidation** — one `ghost reflect --tier haiku` dry-run + grading pass per real project's seeded memory set (module 1b), run concurrently — deterministic, no live agent.
+3. **Storyline** — for each storyline, a `pipeline()` of fixed session-stage prompts (session 1, session 2, ... session N), run as independent chained agent calls per item per storyline. Each stage agent gets only its own stage's task script plus the project_id — no session shares context with another except through what Ghost itself surfaces.
+4. **Stress** — one agent per stress scenario, run concurrently.
+5. **Synthesize** — a single final agent reads all replay metrics, consolidation notes, storyline reports, and stress-test reports, and writes the combined report.
 
-Phases 1 and 3 are pipelines/parallel (independent). Phase 2's storylines are independent of each other but each is a long sequential chain internally. Phase 4 is a genuine barrier — it needs all prior results together to dedupe/rank friction points across agents.
+Phases 1, 2, and 4 are pipelines/parallel (independent). Phase 3's storylines are independent of each other but each is a long sequential chain internally. Phase 5 is a genuine barrier — it needs all prior results together to dedupe/rank friction points across agents.
 
 ## Reporting
 
-Every live agent (storyline + stress) is explicitly prompted, at the end of its run, to report:
+Every live agent (replay 1a, storyline, stress) is explicitly prompted, at the end of its run, to report:
 - What it did, and quantitative observations (did search surface the right memory, did injection include what mattered)
 - **Frustration points**, logged as they happened, not rationalized afterward: anything that felt slow, confusing, misleading, or actively annoying about using Ghost's tools
 - An honest trust rating: would it have relied on what Ghost surfaced, unverified?
 
-The replay module reports quantitative recall/precision only (no live-agent experience to report).
+The consolidation module (1b) reports quantitative notes only (no live-agent experience to report — it's a `ghost reflect` dry-run diff).
 
 The synthesis agent produces one Markdown report at `docs/superpowers/reports/YYYY-MM-DD-ghost-eval.md`:
-- A scorecard per capability (search relevance, session-start injection, `ghost resolve`, `ghost supersede`, MCP tool ergonomics)
-- Replay recall/precision numbers per real project
-- A ranked "friction points worth fixing" list — ranked by how many independent agents (across storyline + stress modules) hit the same or a similar issue, not just a flat log
+- A scorecard per capability (search relevance, session-start injection, `ghost resolve`, `ghost supersede`, MCP tool ergonomics, save-decision quality, consolidation quality)
+- Replay recall/precision numbers per real project (1a) and consolidation notes per real project (1b)
+- A ranked "friction points worth fixing" list — ranked by how many independent agents (across replay, storyline, and stress modules) hit the same or a similar issue, not just a flat log
 
 Per-agent raw reports are not kept as separate permanent artifacts — the synthesis report is the deliverable; raw agent outputs live only in the Workflow's transcript/journal for follow-up if something needs digging into.
 
