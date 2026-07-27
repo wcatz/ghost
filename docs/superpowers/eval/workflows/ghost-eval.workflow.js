@@ -39,7 +39,77 @@ try {
   // before session 1) so session N+1's scratch DB actually contains what
   // session N saved. Every other unit type gets its own unit-run-id.
 
-  // ... phases added in later tasks ...
+  phase('Replay')
+  const REPLAY_PROJECTS = (args && args.replayProjects) || ['ghost', 'roller', 'infra']
+
+  const REPLAY_SCHEMA = {
+    type: 'object',
+    required: ['projectId', 'savedMemories', 'recall', 'precision', 'mismatches', 'frustrations', 'trustRating'],
+    properties: {
+      projectId: { type: 'string' },
+      savedMemories: { type: 'array', items: { type: 'string' } },
+      recall: { type: 'number' },
+      precision: { type: 'number' },
+      mismatches: { type: 'array', items: { type: 'string' } },
+      frustrations: { type: 'array', items: { type: 'string' } },
+      trustRating: { type: 'string' },
+    },
+  }
+
+  const replayResults = await parallel(REPLAY_PROJECTS.map(projectId => async () => {
+    const transcriptGlob = `/home/wayne/.claude/projects/-home-wayne-git-${projectId}*/*.jsonl`
+    const exportPath = `${scratchRoot}/${projectId}-real-memories.jsonl`
+    const unitRunId = `${runId.trim()}-replay-${projectId}`
+
+    await agent(
+      `Run exactly: bash ${REPO}/docs/superpowers/eval/lib/export-memories.sh ${REAL_DB} ${projectId} ${exportPath}\n` +
+      `Then run: cat ${exportPath}\n` +
+      `Return the full file contents verbatim.`,
+      { label: `export:${projectId}`, phase: 'Replay' }
+    )
+
+    // The actual replay work happens inside an isolated `claude -p` subprocess,
+    // not via this agent's own (real, user-scoped) MCP connection. This agent's
+    // job is to set up that subprocess's scratch config, launch it with the
+    // replay task as its prompt, and relay back the raw stdout for grading.
+    const replayPrompt =
+      `You are replaying a real historical coding session for the "${projectId}" project to test whether you would ` +
+      `save the same memories a real agent+human pair actually judged worth keeping. This is a live-agent evaluation, ` +
+      `not a summarization task — behave exactly as you would during a real session.\n\n` +
+      `1. Find the most recent transcript file matching ${transcriptGlob}. Read it.\n` +
+      `2. Work through the transcript's turns as if you were living through that session right now. Ghost's MCP tools ` +
+      `are wired to an isolated scratch database (never the real one) — use project_id "${projectId}-replay" for every ` +
+      `ghost_* call.\n` +
+      `3. Whenever something in the transcript would, in your judgment, be worth saving to memory (an architecture fact, ` +
+      `a decision, a gotcha, a convention, a preference), call ghost_memory_save or ghost_decision_record exactly as you ` +
+      `would live. Do not save everything indiscriminately — save what you'd actually save.\n` +
+      `4. The file ${exportPath} contains the REAL memories a human+agent pair actually kept for this project (ground truth). ` +
+      `Read it (via a plain shell command, e.g. cat) AFTER you finish your own save decisions, not before — don't let it ` +
+      `bias your saves.\n` +
+      `5. Compare your saved memories against the ground truth file. Compute recall (fraction of ground-truth memories ` +
+      `you also saved, by meaning not exact text) and precision (fraction of your saves that match something in ground ` +
+      `truth). List concrete mismatches (missed real memories, and noise you saved that isn't in ground truth).\n` +
+      `6. Report frustration points you hit using ghost's tools during this replay, and an honest trust rating: would ` +
+      `you have relied on what ghost surfaced, unverified?\n\n` +
+      `End your final message with a fenced JSON block matching this shape: {"projectId": string, "savedMemories": ` +
+      `string[], "recall": number, "precision": number, "mismatches": string[], "frustrations": string[], "trustRating": string}.`
+
+    const rawOutput = await agent(
+      `Run these commands in order from ${REPO}, quoting the prompt exactly as given (it contains newlines):\n` +
+      `1. bash docs/superpowers/eval/lib/make-unit-config.sh ${unitRunId} $(pwd)/docs/superpowers/eval/lib/ghost-wrapped $(pwd)/ghost\n` +
+      `2. bash docs/superpowers/eval/lib/claude-eval-session.sh ${unitRunId} '${replayPrompt.replace(/'/g, "'\\''")}'\n` +
+      `Return the full stdout of step 2 verbatim, nothing else.`,
+      { label: `replay-session:${projectId}`, phase: 'Replay' }
+    )
+
+    return agent(
+      `The text below is the full transcript of an isolated \`claude -p\` replay session for project "${projectId}". ` +
+      `Extract the trailing fenced JSON block it was asked to produce and re-emit it via the required schema (fill in ` +
+      `"${projectId}" for projectId if the block omitted or mismatched it). If no valid JSON block is present, read the ` +
+      `surrounding prose and infer the fields as best you can, and note this failure inside "frustrations".\n\n${rawOutput}`,
+      { label: `replay:${projectId}`, phase: 'Replay', schema: REPLAY_SCHEMA }
+    )
+  }))
 
   phase('Synthesize')
   // placeholder until Task 9 fills this in
