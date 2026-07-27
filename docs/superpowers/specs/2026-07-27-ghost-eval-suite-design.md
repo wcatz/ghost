@@ -12,11 +12,25 @@ Every eval run gets a scratch dir `/tmp/ghost-eval/<run-id>/` with:
 - `data/` — becomes `XDG_DATA_HOME` for that run's `ghost` processes (so `internal/config.DataDir()` resolves to `<run-id>/data/ghost/`, containing an isolated `ghost.db`)
 - `config/` — becomes `XDG_CONFIG_HOME`, seeded with a `ghost/config.yaml` copying only the `api.key` value from the real `~/.config/ghost/config.yaml` (resolve/supersede require `ANTHROPIC_API_KEY` — no fallback provider exists yet). Nothing else is copied.
 
-All `ghost` invocations in the eval (CLI commands run directly by the harness, and the `ghost mcp` subprocess used by live tester agents) run with `XDG_DATA_HOME`/`XDG_CONFIG_HOME` pointed at that scratch dir. Live tester agents do not use the session's already-configured `ghost` MCP connection (which stays pointed at the real DB); each is launched in its own worktree with a local `.mcp.json` that points at the same `ghost` binary but wrapped to run with the scratch env vars, so the agent still calls normal `ghost_*` tools, just against an isolated server instance.
+All `ghost` invocations in the eval (CLI commands run directly by the harness, and the `ghost mcp` subprocess used by live tester agents) run with `XDG_DATA_HOME`/`XDG_CONFIG_HOME` pointed at that scratch dir.
+
+**Live agents do not run as Workflow-launched `agent()` subagents.** A Workflow/Agent-tool subagent inherits the parent session's already-established MCP connections at startup — a worktree-local `.mcp.json` does not override this (confirmed by direct experiment, see below), so an `agent()` call has no way to reach an isolated `ghost` instance. It would also never fire the session-start hook, which is the actual mechanism the storyline module (below) needs to test.
+
+Instead, each live-agent unit (one replay transcript, one storyline session, one stress scenario) is a **headless `claude -p` subprocess**, launched via Bash from inside an orchestrating `agent()` call:
+```
+claude -p \
+  --mcp-config <scratch-run>/mcp.json \
+  --strict-mcp-config \
+  "<the live agent's task prompt for this unit>"
+```
+`<scratch-run>/mcp.json` declares a single `ghost` server whose `command` is `ghost-wrapped <run-id> <ghost-bin> mcp` — so the subprocess's `ghost` MCP server is the scratch-wrapped binary, not the real one. `--strict-mcp-config` ensures *only* this server is visible; the session's own already-configured `ghost` connection is excluded entirely. Because `claude -p` starts a real session, the session-start hook fires normally, so `ghost_project_context` injection is exercised for real — not called manually by a scripted agent.
 
 At the end of a run, the entire `/tmp/ghost-eval/<run-id>/` dir is deleted. Nothing persists in the real DB, config, or Obsidian vault.
 
-**Isolation must be verified before any live-agent phase runs at scale.** Whether a subagent launched via the Workflow tool actually picks up a worktree-local `.mcp.json` (vs. resolving MCP servers from the session's already-established config at startup) is unconfirmed. Before running the full suite, the implementation plan must include a throwaway single-agent smoke test: launch one agent in a worktree with the scratch-wrapped `.mcp.json`, have it call any `ghost_*` tool, then check which DB the row landed in (scratch vs. real). If it lands in the real DB, live agents must shell out to the env-wrapped `ghost` CLI directly instead of relying on MCP tool resolution. Confirmed broken as of 2026-07-27 — live agents use the wrapped CLI, not MCP tools, for all eval phases. All later plan tasks referring to agents calling `ghost_*` MCP tools directly must instead use `ghost-wrapped <run-id> <ghost-bin> <cli-equivalent>` via Bash.
+**Isolation was verified before any live-agent phase runs at scale**, via a throwaway experiment on 2026-07-27:
+- First attempt: a Workflow `Agent` subagent launched in a worktree with a scratch-wrapped `.mcp.json` called `ghost_memory_save` — the row landed in the **real** production DB (`~/.local/share/ghost/ghost.db`), and the scratch DB directory was never even created. **Confirmed broken.** The leaked row (and its parent `projects` row) was deleted from the real DB after verification.
+- Second attempt: `claude -p --mcp-config <scratch>/mcp.json --strict-mcp-config "<prompt>"` calling the same tool — the row landed correctly in the scratch DB (`<scratch-run>/data/ghost/ghost.db`); the real DB received nothing. **Confirmed working.**
+- A CLI-only fallback (shelling out to `ghost-wrapped ... <cli-args>` for the save itself) was considered and rejected: `ghost`'s CLI surface (`mcp, hook, reflect, resolve, supersede, obsidian, bench, upgrade, version` — confirmed from `cmd/ghost/main.go`'s command switch) has no write path for saving memories/decisions outside the MCP server. The `claude -p` mechanism above is the only viable isolation strategy for live-agent phases, and is what all later plan tasks must use.
 
 **Cost caveat:** `ghost resolve`/`ghost supersede` and reflection all call the real Anthropic API (Haiku) using the copied key — each eval run spends real API credits. This is expected and acceptable but worth remembering when deciding how many runs/storylines to execute.
 
@@ -32,7 +46,7 @@ This means "feed a transcript through ghost's reflection/extraction path" (the o
 
 Input: real Claude Code session transcripts from `~/.claude/projects/-home-wayne-git-*/*.jsonl`, one project at a time.
 
-Process: launch a fresh agent per transcript, wired to ghost MCP pointed at a scratch DB seeded empty for that project. Feed the agent the transcript's real turns as the work it is doing (not as passive text to summarize) — normal coding-session framing, so it makes its own `ghost_memory_save`/`ghost_decision_record` calls exactly as a live agent would. Diff what it chooses to save against what's actually saved in the *real* ghost DB for the same project (pseudo-ground-truth — memories a human+agent pair actually judged worth keeping at the time).
+Process: launch a fresh `claude -p` session per transcript (see Isolation), wired to a scratch-isolated `ghost` MCP server seeded empty for that project. Feed the session the transcript's real turns as the work it is doing (not as passive text to summarize) — normal coding-session framing, so it makes its own `ghost_memory_save`/`ghost_decision_record` calls exactly as a live agent would. Diff what it chooses to save against what's actually saved in the *real* ghost DB for the same project (pseudo-ground-truth — memories a human+agent pair actually judged worth keeping at the time).
 
 Output: per-project recall (real memories the replay agent failed to save) and precision (memories it saved that aren't in the real set — noise or over-saving) plus example mismatches for the report.
 
@@ -50,7 +64,7 @@ This module is deterministic and cheap relative to the live modules — no MCP t
 
 ### 2. Storyline module (live agents, synthetic multi-session projects)
 
-3-4 synthetic fake projects, each realized as a *chain* of independent agent calls — one per simulated "session." Every Workflow `agent()` call is already a fresh subagent with zero memory of prior calls, which is exactly the mechanism this test needs: session N+1 is a brand-new agent that knows only the storyline's fixed task script for its stage (what to work on this session) and the project_id to use — it has no transcript from session N. Whatever context it has about earlier sessions comes *only* from what Ghost's `ghost_project_context`/session-start injection actually surfaces when it starts. This is the direct, realistic test of whether injection carries forward what matters.
+3-4 synthetic fake projects, each realized as a *chain* of independent `claude -p` sessions (see Isolation) — one per simulated "session," launched sequentially via Bash from an orchestrating `agent()` call. Each `claude -p` invocation is a brand-new session with zero memory of prior sessions, which is exactly the mechanism this test needs: session N+1 knows only the storyline's fixed task script for its stage (what to work on this session) and the project_id to use — it has no transcript from session N. Because each is a real `claude -p` session, the session-start hook fires for real, so whatever context it has about earlier sessions comes *only* from what Ghost's session-start injection actually surfaces when it starts. This is the direct, realistic test of whether injection carries forward what matters.
 
 Candidate storylines:
 - **(a) Service migration** — multi-week fake project naturally producing decisions, gotchas, and at least one abandoned early approach (exercises `ghost_decision_record`, `ghost supersede`).
