@@ -6,8 +6,8 @@
 set -euo pipefail
 
 UNIT_RUN_ID="${1:?usage: make-unit-config.sh <unit-run-id> <ghost-wrapped-path> <ghost-bin-path>}"
-GHOST_WRAPPED="${2:?missing ghost-wrapped path}"
-GHOST_BIN="${3:?missing ghost binary path}"
+GHOST_WRAPPED="$(realpath "${2:?missing ghost-wrapped path}")"
+GHOST_BIN="$(realpath "${3:?missing ghost binary path}")"
 
 UNIT_ROOT="/tmp/ghost-eval/${UNIT_RUN_ID}"
 CONFIG_DIR="${UNIT_ROOT}/claude-config"
@@ -33,7 +33,7 @@ cat > "${CONFIG_DIR}/settings.json" <<EOF
         "hooks": [
           {
             "type": "command",
-            "command": "${GHOST_WRAPPED} ${UNIT_RUN_ID} ${GHOST_BIN} hook session-start"
+            "command": "\"${GHOST_WRAPPED}\" \"${UNIT_RUN_ID}\" \"${GHOST_BIN}\" hook session-start"
           }
         ]
       }
