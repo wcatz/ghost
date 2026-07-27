@@ -838,7 +838,7 @@ Flags (reflect):
   --restore       Undo last consolidation
 
 Environment:
-  ANTHROPIC_API_KEY           Required for reflect --tier haiku
+  ANTHROPIC_API_KEY           Required for reflect --tier haiku, and always for supersede/resolve
   GHOST_DEBUG                 Enable debug logging
 `, version)
 }
