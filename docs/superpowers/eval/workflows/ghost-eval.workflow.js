@@ -115,8 +115,11 @@ try {
   // placeholder until Task 9 fills this in
   report = { note: 'synthesis not yet implemented — see plan Task 9' }
 } finally {
+  // Per-unit dirs (make-unit-config.sh's UNIT_ROOT) are siblings of scratchRoot,
+  // not children — e.g. /tmp/ghost-eval/<run-id>-replay-ghost — so the cleanup
+  // glob must cover /tmp/ghost-eval/<run-id>* to remove them too.
   await agent(
-    `Run: rm -rf ${scratchRoot} && echo cleaned`,
+    `Run: rm -rf /tmp/ghost-eval/${runId.trim()}* && echo cleaned`,
     { label: 'cleanup' }
   )
 }

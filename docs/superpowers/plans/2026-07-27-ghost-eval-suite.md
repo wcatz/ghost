@@ -404,8 +404,11 @@ try {
   // placeholder until Task 9 fills this in
   report = { note: 'synthesis not yet implemented — see plan Task 9' }
 } finally {
+  // Per-unit dirs (make-unit-config.sh's UNIT_ROOT) are siblings of scratchRoot,
+  // not children — e.g. /tmp/ghost-eval/<run-id>-replay-ghost — so the cleanup
+  // glob must cover /tmp/ghost-eval/<run-id>* to remove them too.
   await agent(
-    `Run: rm -rf ${scratchRoot} && echo cleaned`,
+    `Run: rm -rf /tmp/ghost-eval/${runId.trim()}* && echo cleaned`,
     { label: 'cleanup' }
   )
 }
@@ -858,6 +861,8 @@ git commit -m "feat(eval): add Phase 4 stress-test module (3 narrow scenarios)"
 
 - [ ] **Step 1: Replace the Task 4 placeholder synthesis block with the real synthesis agent**
 
+Note: this code runs inside the `try { }` block added by a Task 5 review fix (commit `21728ab`), with cleanup already guaranteed by the `finally` block that follows it — assign to `report` (already declared via `let report` before the `try`) rather than `return`ing early, and do not add a second cleanup call here.
+
 ```javascript
 phase('Synthesize')
 
@@ -889,25 +894,23 @@ await agent(
   { label: 'write-report' }
 )
 
-await agent(`Run: rm -rf ${scratchRoot} && echo cleaned`, { label: 'cleanup' })
-
-return { reportPath, reportBody }
+report = { reportPath, reportBody }
 ```
 
-- [ ] **Step 2: Remove the old placeholder `report` variable and the duplicate cleanup call left over from Task 4's skeleton**
+- [ ] **Step 2: Remove the old placeholder `report` assignment left over from Task 4's skeleton**
 
-Delete the two lines from Task 4's skeleton that are now redundant:
+Delete this line from Task 4's skeleton, now superseded by Step 1's real assignment above:
 ```javascript
-const report = { note: 'synthesis not yet implemented — see plan Task 9' }
+report = { note: 'synthesis not yet implemented — see plan Task 9' }
 ```
-and the `cleanup` `agent()` call that immediately preceded it in the skeleton (Task 4 Step 1) — the real cleanup call now lives at the end of the Step 1 block above. Also remove the now-unused final `return report` line from the skeleton.
+The `finally` block's cleanup call and the final `return report` line stay as-is — they already run after this phase unconditionally, so no changes needed there.
 
 - [ ] **Step 3: Full dry run with a reduced scope to validate the whole pipeline end to end**
 
 Invoke `Workflow` with `args: { replayProjects: ['ghost'] }` and temporarily reduce `STORYLINES` to one entry and `STRESS_SCENARIOS` to one entry (same trick as Tasks 7-8). Confirm:
 - The workflow completes without throwing
 - A file appears at `docs/superpowers/reports/YYYY-MM-DD-ghost-eval.md` with all 5 sections
-- `/tmp/ghost-eval/<run-id>/` no longer exists after the run
+- No `/tmp/ghost-eval/<run-id>*` directories remain after the run (the cleanup glob covers both the shared scratch root and every per-unit sibling dir)
 - `~/.local/share/ghost/ghost.db` mtime is unchanged from before the run (confirms isolation held for the whole pipeline, not just the harness scripts in isolation)
 
 - [ ] **Step 4: Restore full scope (all projects, all 4 storylines, all 3 stress scenarios) and commit**
@@ -984,9 +987,11 @@ so later sessions actually see what earlier sessions saved.
 
 ## If something breaks isolation
 
-Check `/tmp/ghost-eval/<run-id>/` was actually deleted after the last run —
-if a run crashed mid-way, clean it up manually with `rm -rf`. Never inspect
-or restore from it into the real DB.
+Check that no `/tmp/ghost-eval/<run-id>*` directories remain after the last
+run — the cleanup glob removes the shared scratch root and every per-unit
+sibling dir (e.g. `/tmp/ghost-eval/<run-id>-replay-ghost`). If a run crashed
+mid-way, clean it up manually with `rm -rf /tmp/ghost-eval/<run-id>*`. Never
+inspect or restore from it into the real DB.
 ```
 
 - [ ] **Step 2: Commit**
