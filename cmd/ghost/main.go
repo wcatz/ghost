@@ -429,10 +429,11 @@ func runSupersede() {
 		fmt.Fprintln(os.Stderr, `Usage: ghost supersede <project> [flags]
 
 Flags:
-  --apply             Write the supersedes links (default is dry-run/preview)
+  --apply             Write the supersedes/causes links (default is dry-run/preview)
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
 
-Requires ANTHROPIC_API_KEY (uses Haiku to confirm each candidate).`)
+Requires ANTHROPIC_API_KEY (uses Haiku to classify each candidate as
+supersedes, causes, or neither).`)
 		os.Exit(1)
 	}
 

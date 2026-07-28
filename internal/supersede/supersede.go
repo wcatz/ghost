@@ -1,17 +1,28 @@
-// Package supersede creates directed 'supersedes' links between memories where
-// a newer memory replaces an older one about the same subject. It is the
-// creation half of staleness-aware ranking; the consumption half
-// (SearchParams.SupersedeDemote) already ships. See docs/benchmarks.md Phase 3.
+// Package supersede creates directed 'supersedes' and 'causes' links between
+// memories where a newer memory replaces an older one about the same subject
+// (supersedes), or a newer memory is an effect that followed from an older
+// one (causes). It is the creation half of staleness-aware ranking; the
+// consumption half (SearchParams.SupersedeDemote) already ships. See
+// docs/benchmarks.md Phase 3.
 //
 // Design: cosine similarity proposes same-subject candidate pairs (cheap,
-// local), created_at gives direction (newer supersedes older — SQLite's
+// local), created_at gives direction (newer/older — SQLite's
 // 'YYYY-MM-DD HH:MM:SS' timestamps compare lexicographically), and an LLM
-// Classifier confirms each pair is a genuine replacement rather than two
-// parallel valid facts. Confirmed pairs become 'supersedes' links (source
-// 'llm'); classifying every pair in a same-subject group yields the star links
-// the consumer's penalty ordering needs. The pass is re-runnable and self-heals
-// after reflection's cascade-delete of links, like the cosine linking worker
-// rebuilds 'related' edges.
+// Classifier makes a 3-way SUPERSEDES/CAUSES/NEITHER call for each pair, since
+// "replaces a stale claim" and "is caused by / follows from" are distinct
+// relations that a binary confirm/reject can't tell apart. SUPERSEDES writes
+// a newer->older 'supersedes' link (source 'llm'); CAUSES writes an
+// older->newer 'causes' link (cause precedes effect); NEITHER writes nothing.
+// Run() also re-classifies existing 'supersedes'/'llm' links whose endpoints
+// have changed since the link was written, invalidating the link (or
+// flipping it to 'causes') when the verdict no longer matches. The pass is
+// re-runnable and self-heals after reflection's cascade-delete of links, like
+// the cosine linking worker rebuilds 'related' edges — though reclassification
+// of existing links only fires for a pair whose endpoint content actually
+// changed after the link was written; pairs whose link predates this 3-way
+// classifier but whose endpoints haven't changed since are only corrected if
+// they still surface as a fresh candidate (see "Skip-if-unchanged" in
+// docs/superpowers/specs/2026-07-28-supersede-relation-type-fix-design.md).
 package supersede
 
 import (
