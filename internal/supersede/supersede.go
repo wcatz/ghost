@@ -64,9 +64,12 @@ type Classifier interface {
 // testability.
 type vectorStore interface {
 	GetAll(ctx context.Context, projectID string, limit int) ([]memory.Memory, error)
+	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 	GetEmbedding(ctx context.Context, memoryID string) ([]float32, error)
 	SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]memory.ScoredMemory, error)
 	CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error
+	InvalidateLink(ctx context.Context, sourceID, targetID, relation string) error
+	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 }
 
 // SelectCandidates returns the deduped ordered candidate pairs for a project:
