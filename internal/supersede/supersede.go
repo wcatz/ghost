@@ -134,45 +134,157 @@ func orient(a, b memory.Memory) (newer, older memory.Memory) {
 	return b, a
 }
 
-// Result summarizes a pass.
-type Result struct {
-	Candidates int
-	Confirmed  int
-	Created    int // links written (0 in dry-run)
+// Classified pairs a Candidate with the verdict Run() reached for it — used
+// by callers (the CLI) to report the actual relation written, not just that
+// "something" was confirmed.
+type Classified struct {
+	Candidate
+	Relation Relation
 }
 
-// Run selects candidates, classifies each, and — when apply is true — writes a
-// 'supersedes' link (source 'llm') for every confirmed pair. CreateLink is
-// idempotent, so re-running converges; reflection's cascade-delete plus a
-// re-run is the self-heal path. A classifier error on one pair is fatal (the
-// caller decides whether a partial pass is acceptable); a link-write error is
-// fatal so a half-written star is never silently left behind.
-func Run(ctx context.Context, store vectorStore, cls Classifier, projectID string, threshold float32, apply bool, logger *slog.Logger) (Result, []Candidate, error) {
-	cands, err := SelectCandidates(ctx, store, projectID, threshold)
+// Result summarizes a pass.
+type Result struct {
+	Candidates    int
+	Confirmed     int // SUPERSEDES verdicts
+	Created       int // supersedes links written (0 in dry-run)
+	CausesCreated int // CAUSES verdicts (causes links written when apply)
+	Reclassified  int // existing links whose relation changed or was invalidated
+}
+
+// Run selects fresh candidates, unions them with previously-created llm
+// 'supersedes' links (so a pair's classification can be revisited as memory
+// content evolves), classifies every pair once, and — when apply is true —
+// writes or invalidates links per verdict:
+//
+//   - SUPERSEDES: 'supersedes' newer->older; any stale 'causes' older->newer
+//     link for the same pair is invalidated.
+//   - CAUSES: 'causes' older->newer (the cause precedes its effect); any
+//     stale 'supersedes' newer->older link for the same pair is invalidated.
+//   - NEITHER: nothing is written; any existing link for the pair (either
+//     relation) is invalidated.
+//
+// A pair whose existing 'supersedes' link predates neither endpoint's last
+// update is skipped (skip-if-unchanged) — reclassifying it would repeat the
+// same verdict for no reason. Fresh candidates are always classified
+// regardless, since SelectCandidates already bounds their cost.
+//
+// CreateLink and InvalidateLink are both idempotent no-ops when there's
+// nothing to change, so re-running Run converges and self-heals after
+// reflection's cascade-delete of links. A classifier error on one pair is
+// fatal (the caller decides whether a partial pass is acceptable); a
+// link-write error is fatal so a half-written pair is never silently left
+// behind.
+func Run(ctx context.Context, store vectorStore, cls Classifier, projectID string, threshold float32, apply bool, logger *slog.Logger) (Result, []Classified, error) {
+	fresh, err := SelectCandidates(ctx, store, projectID, threshold)
 	if err != nil {
 		return Result{}, nil, err
 	}
-	res := Result{Candidates: len(cands)}
-	var confirmed []Candidate
-	for _, c := range cands {
-		ok, err := cls.Supersedes(ctx, c.NewerContent, c.OlderContent)
-		if err != nil {
-			return res, nil, fmt.Errorf("classify %s→%s: %w", c.NewerID, c.OlderID, err)
-		}
-		if !ok {
-			continue
-		}
-		res.Confirmed++
-		confirmed = append(confirmed, c)
-		if apply {
-			if err := store.CreateLink(ctx, c.NewerID, c.OlderID, "supersedes", c.Similarity, "llm"); err != nil {
-				return res, nil, fmt.Errorf("create supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
-			}
-			res.Created++
-			if logger != nil {
-				logger.Debug("supersede link created", "newer", c.NewerID, "older", c.OlderID)
+	freshKeys := make(map[[2]string]bool, len(fresh))
+	for _, c := range fresh {
+		freshKeys[[2]string{c.NewerID, c.OlderID}] = true
+	}
+
+	existingLinks, err := store.LinksByRelationSource(ctx, projectID, string(RelationSupersedes), "llm")
+	if err != nil {
+		return Result{}, nil, fmt.Errorf("load existing supersedes links: %w", err)
+	}
+
+	var lookupIDs []string
+	seenID := make(map[string]bool)
+	for _, l := range existingLinks {
+		for _, id := range []string{l.SourceID, l.TargetID} {
+			if !seenID[id] {
+				seenID[id] = true
+				lookupIDs = append(lookupIDs, id)
 			}
 		}
 	}
-	return res, confirmed, nil
+	memByID := make(map[string]memory.Memory)
+	if len(lookupIDs) > 0 {
+		mems, err := store.GetByIDs(ctx, lookupIDs)
+		if err != nil {
+			return Result{}, nil, fmt.Errorf("load reclassify memory content: %w", err)
+		}
+		for _, m := range mems {
+			memByID[m.ID] = m
+		}
+	}
+
+	reclassifyByKey := make(map[[2]string]bool, len(existingLinks))
+	all := append([]Candidate{}, fresh...)
+	for _, l := range existingLinks {
+		key := [2]string{l.SourceID, l.TargetID}
+		reclassifyByKey[key] = true
+		if freshKeys[key] {
+			continue // already going to be classified via fresh
+		}
+		newerMem, ok1 := memByID[l.SourceID]
+		olderMem, ok2 := memByID[l.TargetID]
+		if !ok1 || !ok2 {
+			continue // an endpoint no longer exists
+		}
+		if newerMem.UpdatedAt <= l.CreatedAt && olderMem.UpdatedAt <= l.CreatedAt {
+			continue // skip-if-unchanged: neither endpoint changed since this link was written
+		}
+		all = append(all, Candidate{
+			NewerID: l.SourceID, NewerContent: newerMem.Content,
+			OlderID: l.TargetID, OlderContent: olderMem.Content,
+			Similarity: l.Strength,
+		})
+	}
+
+	res := Result{Candidates: len(all)}
+	var classified []Classified
+	for _, c := range all {
+		verdict, err := cls.Classify(ctx, c.NewerContent, c.OlderContent)
+		if err != nil {
+			return res, nil, fmt.Errorf("classify %s→%s: %w", c.NewerID, c.OlderID, err)
+		}
+		classified = append(classified, Classified{Candidate: c, Relation: verdict})
+
+		key := [2]string{c.NewerID, c.OlderID}
+		wasReclassify := reclassifyByKey[key]
+
+		switch verdict {
+		case RelationSupersedes:
+			res.Confirmed++
+		case RelationCauses:
+			res.CausesCreated++
+		}
+		if wasReclassify && verdict != RelationSupersedes {
+			res.Reclassified++
+		}
+
+		if !apply {
+			continue
+		}
+		switch verdict {
+		case RelationSupersedes:
+			if err := store.CreateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes), c.Similarity, "llm"); err != nil {
+				return res, nil, fmt.Errorf("create supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
+			}
+			res.Created++
+			if err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses)); err != nil {
+				return res, nil, fmt.Errorf("invalidate causes link %s→%s: %w", c.OlderID, c.NewerID, err)
+			}
+		case RelationCauses:
+			if err := store.CreateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses), c.Similarity, "llm"); err != nil {
+				return res, nil, fmt.Errorf("create causes link %s→%s: %w", c.OlderID, c.NewerID, err)
+			}
+			if err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes)); err != nil {
+				return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
+			}
+		case RelationNeither:
+			if err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes)); err != nil {
+				return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
+			}
+			if err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses)); err != nil {
+				return res, nil, fmt.Errorf("invalidate causes link %s→%s: %w", c.OlderID, c.NewerID, err)
+			}
+		}
+		if logger != nil {
+			logger.Debug("supersede classified", "newer", c.NewerID, "older", c.OlderID, "verdict", verdict)
+		}
+	}
+	return res, classified, nil
 }
