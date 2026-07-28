@@ -173,6 +173,60 @@ func TestGetEmbedding(t *testing.T) {
 	}
 }
 
+func TestLinksByRelationSource(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a := makeMemory(t, s, "decision: switched to Postgres LISTEN/NOTIFY")
+	b := makeMemory(t, s, "gotcha: NATS can reorder messages under partition rebalance")
+	c := makeMemory(t, s, "unrelated memory about grafana ports")
+
+	if err := s.CreateLink(ctx, a, b, "causes", 0.9, "llm"); err != nil {
+		t.Fatalf("CreateLink causes: %v", err)
+	}
+	if err := s.CreateLink(ctx, c, a, "supersedes", 0.85, "manual"); err != nil {
+		t.Fatalf("CreateLink supersedes: %v", err)
+	}
+
+	links, err := s.LinksByRelationSource(ctx, testProject, "causes", "llm")
+	if err != nil {
+		t.Fatalf("LinksByRelationSource: %v", err)
+	}
+	if len(links) != 1 || links[0].SourceID != a || links[0].TargetID != b {
+		t.Fatalf("got %+v, want exactly one causes/llm link a->b", links)
+	}
+
+	// A different source ('manual') for the same relation must not match.
+	none, err := s.LinksByRelationSource(ctx, testProject, "supersedes", "llm")
+	if err != nil {
+		t.Fatalf("LinksByRelationSource: %v", err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("got %d links, want 0 (source filter must exclude 'manual')", len(none))
+	}
+}
+
+func TestLinksByRelationSourceExcludesInvalidated(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a := makeMemory(t, s, "decision alpha")
+	b := makeMemory(t, s, "evidence beta")
+
+	if err := s.CreateLink(ctx, a, b, "causes", 0.9, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	if err := s.InvalidateLink(ctx, a, b, "causes"); err != nil {
+		t.Fatalf("InvalidateLink: %v", err)
+	}
+
+	links, err := s.LinksByRelationSource(ctx, testProject, "causes", "llm")
+	if err != nil {
+		t.Fatalf("LinksByRelationSource: %v", err)
+	}
+	if len(links) != 0 {
+		t.Fatalf("got %d links, want 0 (invalidated link must be excluded)", len(links))
+	}
+}
+
 func TestEmbeddingAndLinkStats(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

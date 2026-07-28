@@ -213,6 +213,36 @@ func (s *Store) SupersedesWithin(ctx context.Context, ids []string) ([][2]string
 	return pairs, rows.Err()
 }
 
+// LinksByRelationSource returns all valid (non-invalidated) links of the given
+// relation and source whose SOURCE endpoint belongs to projectID. Used by
+// ghost supersede to find previously-created 'supersedes'/llm links so it can
+// reclassify them alongside freshly-discovered candidate pairs.
+func (s *Store) LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]Link, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT l.source_id, l.target_id, l.relation, l.strength, l.source, l.created_at, l.invalidated_at
+		FROM memory_links l
+		JOIN memories m ON m.id = l.source_id
+		WHERE m.project_id = ? AND l.relation = ? AND l.source = ? AND l.invalidated_at IS NULL
+	`, projectID, relation, source)
+	if err != nil {
+		return nil, fmt.Errorf("links by relation source: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var links []Link
+	for rows.Next() {
+		var l Link
+		if err := rows.Scan(&l.SourceID, &l.TargetID, &l.Relation, &l.Strength, &l.Source, &l.CreatedAt, &l.InvalidatedAt); err != nil {
+			return nil, err
+		}
+		links = append(links, l)
+	}
+	return links, rows.Err()
+}
+
 // InvalidateLink soft-invalidates a link (Zep-style: never delete, mark
 // invalid with a timestamp so history is preserved).
 func (s *Store) InvalidateLink(ctx context.Context, sourceID, targetID, relation string) error {
