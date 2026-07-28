@@ -429,10 +429,11 @@ func runSupersede() {
 		fmt.Fprintln(os.Stderr, `Usage: ghost supersede <project> [flags]
 
 Flags:
-  --apply             Write the supersedes links (default is dry-run/preview)
+  --apply             Write the supersedes/causes links (default is dry-run/preview)
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
 
-Requires ANTHROPIC_API_KEY (uses Haiku to confirm each candidate).`)
+Requires ANTHROPIC_API_KEY (uses Haiku to classify each candidate as
+supersedes, causes, or neither).`)
 		os.Exit(1)
 	}
 
@@ -450,14 +451,14 @@ Requires ANTHROPIC_API_KEY (uses Haiku to confirm each candidate).`)
 		os.Exit(1)
 	}
 	if cfg.API.Key == "" {
-		fmt.Fprintln(os.Stderr, "error: ghost supersede requires ANTHROPIC_API_KEY (Haiku confirms each candidate)")
+		fmt.Fprintln(os.Stderr, "error: ghost supersede requires ANTHROPIC_API_KEY (uses Haiku to classify each candidate as supersedes, causes, or neither)")
 		os.Exit(1)
 	}
 
 	primary := ai.NewAnthropicProvider(ai.NewClient(cfg.API.Key, logger))
 	provider := ai.NewFallbackProvider(primary, nil, false)
 	cls := supersede.NewHaikuClassifier(provider)
-	res, confirmed, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
+	res, classified, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -473,12 +474,17 @@ Requires ANTHROPIC_API_KEY (uses Haiku to confirm each candidate).`)
 		}
 		return id
 	}
-	fmt.Printf("%s: %d candidate pairs, %d confirmed supersessions, %s %d\n",
-		projectName, res.Candidates, res.Confirmed, verb, len(confirmed))
-	for _, c := range confirmed {
-		fmt.Printf("  %s  supersedes  %s\n", short(c.NewerID), short(c.OlderID))
+	fmt.Printf("%s: %d candidate pairs, %d supersedes, %d causes, %d reclassified, %s\n",
+		projectName, res.Candidates, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+	for _, c := range classified {
+		switch c.Relation {
+		case supersede.RelationSupersedes:
+			fmt.Printf("  %s  supersedes  %s\n", short(c.NewerID), short(c.OlderID))
+		case supersede.RelationCauses:
+			fmt.Printf("  %s  causes  %s\n", short(c.OlderID), short(c.NewerID))
+		}
 	}
-	if !apply && res.Confirmed > 0 {
+	if !apply && (res.Confirmed > 0 || res.CausesCreated > 0 || res.Reclassified > 0) {
 		fmt.Println("\nRe-run with --apply to write these links.")
 	}
 }
@@ -842,7 +848,7 @@ Flags (reflect):
   --restore       Undo last consolidation
 
 Environment:
-  ANTHROPIC_API_KEY           Required for reflect --tier haiku
+  ANTHROPIC_API_KEY           Required for reflect --tier haiku, and always for supersede/resolve
   GHOST_DEBUG                 Enable debug logging
 `, version)
 }

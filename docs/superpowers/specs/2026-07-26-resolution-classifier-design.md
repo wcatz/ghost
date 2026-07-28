@@ -105,11 +105,6 @@ keeps detection fully off every hot path. A future fire-and-forget trigger from 
 (spawning `ghost resolve --apply` detached, no inline DB/LLM work) is possible but explicitly
 **deferred** — out of scope for this plan.
 
-> **Note (post-implementation):** the deferred stop-hook trigger described above shipped in
-> the later classifier-fallback work (`internal/mcpinit/stophook.go`'s detached
-> `spawnResolveIfConfigured`) — see `docs/superpowers/plans/2026-07-26-classifier-fallback.md`.
-> This section is a historical record of this plan's original scope, not the current state.
-
 1. **Keyword prefilter** bounds LLM calls to plausible candidates. Seed set:
    `NO-GO`, `resolved`, `shipped`, `retracted`, `superseded`, `abandoned`,
    `fixed in`, `removed`, `merged` / PR-merge patterns, `deadlock ... root cause`.
@@ -121,9 +116,6 @@ keeps detection fully off every hot path. A future fire-and-forget trigger from 
 3. **Provider** — default is the existing `ai.Client` (Haiku), already in the binary, zero
    new dependency. A local Ollama model (`qwen2.5:3b`, already pulled) is offered as a
    free/offline option behind config, not the foundation.
-   >  **Note (post-implementation):** the later classifier-fallback work replaced this
-   >  Ollama-as-secondary idea with `ai.FallbackProvider`, which falls to MCP sampling
-   >  (not a local Ollama model) on `ai.ErrCreditExhausted`. No Ollama classify path shipped.
 4. **Recall-loss visibility** — log the count of memories the prefilter *skipped* so
    silent recall loss is observable, not hidden.
 
