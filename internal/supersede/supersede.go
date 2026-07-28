@@ -37,11 +37,27 @@ type Candidate struct {
 	Similarity   float32
 }
 
-// Classifier decides whether Newer genuinely supersedes Older (a replacement or
-// update of the same fact) versus the two being independently valid. The LLM
-// implementation lives in the CLI layer; tests inject a deterministic mock.
+// Relation is a classifier verdict on a NEWER/OLDER candidate pair.
+type Relation string
+
+const (
+	// RelationSupersedes means newer states an updated/changed/replaced value
+	// of the SAME fact as older, making older obsolete.
+	RelationSupersedes Relation = "supersedes"
+	// RelationCauses means newer (typically a decision or change) was informed
+	// by older as supporting evidence, but older remains independently true.
+	RelationCauses Relation = "causes"
+	// RelationNeither means the pair is not a genuine replacement or citation
+	// relationship — e.g. two independently valid parallel facts.
+	RelationNeither Relation = "neither"
+)
+
+// Classifier decides the relationship between a newer and an older memory:
+// a same-fact replacement (SUPERSEDES), a decision citing supporting evidence
+// that stays valid (CAUSES), or neither. The LLM implementation lives in the
+// CLI layer; tests inject a deterministic mock.
 type Classifier interface {
-	Supersedes(ctx context.Context, newer, older string) (bool, error)
+	Classify(ctx context.Context, newer, older string) (Relation, error)
 }
 
 // vectorStore is the subset of *memory.Store the pass needs; narrowed for
