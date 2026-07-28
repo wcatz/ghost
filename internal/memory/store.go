@@ -396,7 +396,8 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 		_, err = s.db.ExecContext(ctx, `
 			UPDATE memories
 			SET content = CASE WHEN source = 'manual' THEN content ELSE ? END,
-			    importance = ?, access_count = access_count + 1, updated_at = datetime('now')
+			    importance = ?, access_count = access_count + 1, updated_at = datetime('now'),
+			    resolved_at = NULL
 			WHERE id = ? AND project_id = ?
 		`, finalContent, newImportance, existingID, projectID)
 		if err != nil {
@@ -435,7 +436,8 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, created_at, updated_at
 		FROM memories
-		WHERE project_id = ? OR project_id = '_global'
+		WHERE (project_id = ? OR project_id = '_global')
+		  AND resolved_at IS NULL
 		ORDER BY (
 			importance
 			* CASE
@@ -565,6 +567,84 @@ func (s *Store) Touch(ctx context.Context, ids []string) error {
 	return err
 }
 
+// ResolveCandidates returns the project's memories that are eligible for
+// resolution classification: not yet resolved, not pinned, and not in a
+// standing-preference category (convention/preference are never evictable —
+// see the guardrail in the resolution-classifier spec §4). Globals are
+// excluded by the project_id filter. Newest first, so a batch reviews the most
+// recent work first.
+func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memory, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, project_id, category, content, importance, access_count,
+		       last_accessed, source, tags, pinned, created_at, updated_at
+		FROM memories
+		WHERE project_id = ?
+		  AND resolved_at IS NULL
+		  AND pinned = 0
+		  AND category NOT IN ('convention', 'preference')
+		ORDER BY created_at DESC
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve candidates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanMemories(rows)
+}
+
+// setResolvedBatchSize bounds how many IDs go into a single IN (...) clause
+// per SetResolved call, well under SQLite's SQLITE_MAX_VARIABLE_NUMBER
+// (32766 on modern builds) so an unusually large batch can't hit that limit.
+const setResolvedBatchSize = 500
+
+// SetResolved stamps resolved_at = now on the given memory IDs, dropping them
+// from the ranked injection/browse surface while leaving them searchable. The
+// WHERE clause re-checks the same eligibility guard as ResolveCandidates
+// (unresolved, unpinned, non-exempt category) at write time, not just at read
+// time — a candidate pinned or recategorized during the classify loop is
+// excluded rather than stamped anyway. Returns the count actually stamped,
+// which callers should report instead of len(ids). A no-op on an empty slice.
+func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	total := 0
+	for len(ids) > 0 {
+		batch := ids
+		if len(batch) > setResolvedBatchSize {
+			batch = ids[:setResolvedBatchSize]
+		}
+		ids = ids[len(batch):]
+
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for i, id := range batch {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		q := `UPDATE memories SET resolved_at = datetime('now')
+		      WHERE id IN (` + strings.Join(placeholders, ",") + `)
+		        AND resolved_at IS NULL
+		        AND pinned = 0
+		        AND category NOT IN ('convention', 'preference')`
+		result, err := s.db.ExecContext(ctx, q, args...)
+		if err != nil {
+			return total, fmt.Errorf("set resolved: %w", err)
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("set resolved rows affected: %w", err)
+		}
+		total += int(n)
+	}
+	return total, nil
+}
+
 // Delete removes a specific memory.
 func (s *Store) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
@@ -635,7 +715,8 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE memories
-		SET content = ?, category = ?, importance = ?, tags = ?, updated_at = datetime('now')
+		SET content = ?, category = ?, importance = ?, tags = ?, updated_at = datetime('now'),
+		    resolved_at = NULL
 		WHERE id = ?
 	`, newContent, newCategory, newImportance, newTags, id); err != nil {
 		return fmt.Errorf("update memory: %w", err)

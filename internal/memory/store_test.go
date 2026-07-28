@@ -2012,3 +2012,229 @@ func TestEnsureProject_AutoMerge(t *testing.T) {
 		t.Error("expected MCP memory to be reassigned to hash-ID project")
 	}
 }
+
+func TestResolveCandidatesAndSetResolved(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Eligible: a resolvable gotcha.
+	evID, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "kill experiment returned NO-GO", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create evidence: %v", err)
+	}
+	// Exempt by category.
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "convention", Content: "never push to main", Source: "manual", Importance: 0.9,
+	}); err != nil {
+		t.Fatalf("create convention: %v", err)
+	}
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "preference", Content: "user prefers tabs", Source: "manual", Importance: 0.5,
+	}); err != nil {
+		t.Fatalf("create preference: %v", err)
+	}
+	// Exempt by pin.
+	pinID, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "pinned gotcha stays", Source: "manual", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create pinned: %v", err)
+	}
+	if err := s.TogglePin(ctx, pinID, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+
+	// Candidates exclude convention, preference, and pinned rows.
+	cands, err := s.ResolveCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveCandidates: %v", err)
+	}
+	if len(cands) != 1 || cands[0].ID != evID {
+		ids := make([]string, len(cands))
+		for i, c := range cands {
+			ids[i] = c.ID + "/" + c.Category
+		}
+		t.Fatalf("candidates = %v, want exactly [%s/gotcha]", ids, evID)
+	}
+
+	// Marking resolved removes it from the candidate set (idempotent re-run).
+	if _, err := s.SetResolved(ctx, []string{evID}); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+	cands, err = s.ResolveCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveCandidates after SetResolved: %v", err)
+	}
+	if len(cands) != 0 {
+		t.Errorf("candidates after resolve = %d, want 0", len(cands))
+	}
+}
+
+// TestSetResolvedRechecksEligibilityAtWriteTime guards the TOCTOU window
+// between ResolveCandidates (read) and SetResolved (write): a candidate
+// pinned or recategorized into an exempt bucket after classification started
+// must not be stamped, even though its ID was in the confirmed batch.
+func TestSetResolvedRechecksEligibilityAtWriteTime(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	pinnedLate, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "kill experiment returned NO-GO", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	recategorizedLate, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "fixed in PR #210, removed", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	stillEligible, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "shipped and archived", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Simulate state changing between ResolveCandidates and SetResolved: pin
+	// one, recategorize another into an exempt bucket.
+	if err := s.TogglePin(ctx, pinnedLate, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	category := "convention"
+	if err := s.UpdateMemory(ctx, testProject, recategorizedLate, nil, &category, nil, nil); err != nil {
+		t.Fatalf("recategorize: %v", err)
+	}
+
+	n, err := s.SetResolved(ctx, []string{pinnedLate, recategorizedLate, stillEligible})
+	if err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("SetResolved returned %d, want 1 (only stillEligible)", n)
+	}
+
+	assertActive(t, s, testProject, pinnedLate)
+	assertActive(t, s, testProject, recategorizedLate)
+
+	cands, err := s.ResolveCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveCandidates: %v", err)
+	}
+	for _, c := range cands {
+		if c.ID == stillEligible {
+			t.Errorf("stillEligible %s should be resolved and excluded from candidates", stillEligible)
+		}
+	}
+}
+
+func TestGetTopMemoriesExcludesResolved(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	activeID, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "active gotcha keep", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create active: %v", err)
+	}
+	resolvedID, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "resolved evidence drop", Source: "manual", Importance: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("create resolved: %v", err)
+	}
+	if _, err := s.SetResolved(ctx, []string{resolvedID}); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+
+	// Ranked browse drops the resolved memory even though it has higher importance.
+	top, err := s.GetTopMemories(ctx, testProject, 25)
+	if err != nil {
+		t.Fatalf("GetTopMemories: %v", err)
+	}
+	for _, m := range top {
+		if m.ID == resolvedID {
+			t.Errorf("resolved memory %s must not appear in GetTopMemories", resolvedID)
+		}
+	}
+	var sawActive bool
+	for _, m := range top {
+		if m.ID == activeID {
+			sawActive = true
+		}
+	}
+	if !sawActive {
+		t.Errorf("active memory %s missing from GetTopMemories", activeID)
+	}
+
+	// ...but it is still searchable.
+	hits, err := s.SearchFTS(ctx, testProject, "resolved evidence", 10)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	var sawInSearch bool
+	for _, m := range hits {
+		if m.ID == resolvedID {
+			sawInSearch = true
+		}
+	}
+	if !sawInSearch {
+		t.Errorf("resolved memory %s must remain searchable", resolvedID)
+	}
+}
+
+func TestUnresolveOnWrite(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// UpdateMemory clears resolved_at.
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "resumed via update", Source: "manual", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.SetResolved(ctx, []string{id}); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+	newContent := "resumed via update — now with more detail"
+	if err := s.UpdateMemory(ctx, testProject, id, &newContent, nil, nil, nil); err != nil {
+		t.Fatalf("UpdateMemory: %v", err)
+	}
+	assertActive(t, s, testProject, id)
+
+	// Upsert of a near-duplicate (strengthen branch) clears resolved_at.
+	uid, _, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
+	if err != nil {
+		t.Fatalf("upsert create: %v", err)
+	}
+	if _, err := s.SetResolved(ctx, []string{uid}); err != nil {
+		t.Fatalf("SetResolved upsert row: %v", err)
+	}
+	gotID, merged, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
+	if err != nil {
+		t.Fatalf("upsert dup: %v", err)
+	}
+	if !merged || gotID != uid {
+		t.Fatalf("upsert dup did not strengthen existing row: merged=%v id=%s want %s", merged, gotID, uid)
+	}
+	assertActive(t, s, testProject, uid)
+}
+
+// assertActive fails if the memory's resolved_at is not NULL.
+func assertActive(t *testing.T, s *Store, projectID, id string) {
+	t.Helper()
+	var resolvedAt sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT resolved_at FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
+	).Scan(&resolvedAt); err != nil {
+		t.Fatalf("read resolved_at for %s: %v", id, err)
+	}
+	if resolvedAt.Valid {
+		t.Errorf("memory %s should be active (resolved_at NULL), got %q", id, resolvedAt.String)
+	}
+}

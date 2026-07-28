@@ -234,7 +234,7 @@ func loadSessionContext(cwd string) (projectID, project string, memories [][3]st
 	// Get top memories: pinned first, then by importance
 	rows, err := db.Query(`
 		SELECT id, category, content FROM memories
-		WHERE project_id = ?
+		WHERE project_id = ? AND resolved_at IS NULL
 		ORDER BY pinned DESC, importance DESC, updated_at DESC
 		LIMIT 25
 	`, projectID)

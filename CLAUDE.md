@@ -7,14 +7,15 @@
 - MCP server via modelcontextprotocol/go-sdk (stdio transport)
 
 ## Architecture
-- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, supersede, obsidian, bench, upgrade, version
-- `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + supersede)
+- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, resolve, supersede, obsidian, bench, upgrade, version
+- `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + resolve + supersede); `Provider` seam (`anthropicClient`/`SamplingProvider`) with `FallbackProvider` credit-exhaustion fallover for resolve/supersede
 - `internal/memory/` — SQLite CRUD, FTS5 search, vector search, time-decay scoring
-- `internal/mcpserver/` — MCP server: 18 tools + 4 resources + 2 prompts (`recall_project`, `record_decision`)
+- `internal/mcpserver/` — MCP server: 19 tools + 4 resources + 2 prompts (`recall_project`, `record_decision`)
 - `internal/mcpinit/` — `ghost mcp init`, `ghost mcp status`, `ghost hook session-start`, `ghost hook stop`
 - `internal/claudeimport/` — One-time import of Claude Code auto-memory on first contact
 - `internal/embedding/` — Ollama async vectorization worker
 - `internal/linking/` — Background worker linking similar memories into a graph
+- `internal/resolve/` — `ghost resolve`: LLM-classified de-weighting of resolved-evidence memories (drops from ranked injection, stays searchable); classifies via `ai.FallbackProvider` (see Classifier fallback below)
 - `internal/supersede/` — `ghost supersede`: LLM-classified 'supersedes' link creation over live memories
 - `internal/bench/` — `ghost bench`: retrieval-quality benchmark harness (graded dataset + sweep + staleness/recency suites)
 - `internal/obsidian/` — One-way Markdown vault mirror (`ghost obsidian export|sync`)
@@ -31,6 +32,8 @@
 - Global memories: `_global` project, included in every project's context
 - Hybrid search: 70% vector (cosine, Ollama) + 30% FTS5, RRF fusion — falls back to FTS5-only
 - Memory links: `memory_links` edge table auto-populated by cosine similarity (internal/linking worker); links cascade-delete with memories and self-heal after reflection. A graph-expansion ranking bonus was evaluated and removed — dominated by a deeper vector-k (links and the vector leg are both cosine); the link graph is retained for Obsidian export and supersedes ranking (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`).
+- Resolution classifier: `ghost resolve` runs a keyword prefilter then a single KEEP-biased Haiku call per candidate to mark `resolved_at`, dropping resolved-evidence memories (changelogs, cost estimates, closed experiment notes) from ranked injection while keeping them searchable. Dry-run by default, `--apply` writes; a partial classify pass fails fatally rather than applying incomplete results. Never invoked from the stop hook's synchronous path (that path forbids DB access); the stop hook's detached `--apply` spawn and the standalone batch command are the only callers. See `docs/superpowers/specs/2026-07-26-resolution-classifier-design.md`.
+- Classifier fallback: `resolve`/`supersede` classify via `ai.FallbackProvider` — Anthropic primary, falls to a secondary only on `ai.ErrCreditExhausted`. The headless CLI path (`ghost resolve`/`ghost supersede`, and the stop hook's auto-resolve) wires no secondary, so it fails fast with a clear message on credit exhaustion instead of degrading. The live-session `ghost_resolve` MCP tool uses MCP sampling (the calling session's own model, no API credits spent) as its only provider. A fallback answer never auto-applies a write (`--apply` is skipped with a log line) — see `docs/superpowers/plans/2026-07-26-classifier-fallback.md`.
 
 ## Critical Rules
 - Always `go vet ./...` before committing

@@ -201,6 +201,23 @@ func TestMigrateFreshDBStamped(t *testing.T) {
 	}
 }
 
+// TestMigrateFreshDBHasResolvedAt: a brand-new database (initSQL path, no
+// legacy schema involved) must have the resolved_at column from the start —
+// guards against resolved_at silently going missing from initSQL while
+// migrateV2 still exists to paper over it on upgraded databases.
+func TestMigrateFreshDBHasResolvedAt(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(`SELECT resolved_at FROM memories LIMIT 0`); err != nil {
+		t.Errorf("resolved_at column missing on fresh db: %v", err)
+	}
+}
+
 // TestMigrateHandMigratedDB: a database whose tables already match the current
 // schema but whose user_version is still 0 (hand-migrated) must be stamped
 // without a rebuild — the introspection guards skip work that is already done.
@@ -267,5 +284,50 @@ func TestMigrateIdempotent(t *testing.T) {
 	}
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Errorf("db missing: %v", err)
+	}
+}
+
+// TestMigrateAddsResolvedAt: a pre-versioning database gains the resolved_at
+// column, keeps all rows and FTS integrity, and lands at the current version.
+func TestMigrateAddsResolvedAt(t *testing.T) {
+	dbPath := newLegacyDB(t)
+
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB on legacy db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	// The column exists and defaults to NULL (active) for migrated rows.
+	var nNull int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM memories WHERE resolved_at IS NULL`,
+	).Scan(&nNull); err != nil || nNull != 2 {
+		t.Fatalf("resolved_at NULL count: n=%d err=%v, want 2", nNull, err)
+	}
+
+	// A value can be written and read back.
+	if _, err := db.Exec(
+		`UPDATE memories SET resolved_at = datetime('now') WHERE id = 'm1'`,
+	); err != nil {
+		t.Fatalf("write resolved_at: %v", err)
+	}
+	var nResolved int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM memories WHERE resolved_at IS NOT NULL`,
+	).Scan(&nResolved); err != nil || nResolved != 1 {
+		t.Errorf("resolved_at set count: n=%d err=%v, want 1", nResolved, err)
+	}
+
+	// FTS survived the column add (external-content index keyed on rowid).
+	var nFts int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM memories_fts WHERE memories_fts MATCH 'obsidian'`,
+	).Scan(&nFts); err != nil || nFts != 1 {
+		t.Errorf("fts match after add-column migration: n=%d err=%v, want 1", nFts, err)
 	}
 }

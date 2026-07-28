@@ -1124,6 +1124,73 @@ func TestResourceSubscription_RejectsUnknownURI(t *testing.T) {
 	}
 }
 
+func TestGhostResolve_DryRunByDefault(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	const content = "root cause: fixed in v2, no further action needed"
+	if _, _, err := store.Upsert(ctx, "abc123", "gotcha", content, "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+
+	// The MCP sampling handler stands in for the calling session's own model:
+	// answer RESOLVED so the classifier confirms the seeded memory and the
+	// dry-run path has a non-zero count to report.
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
+		CreateMessageHandler: func(context.Context, *mcp.CreateMessageRequest) (*mcp.CreateMessageResult, error) {
+			return &mcp.CreateMessageResult{
+				Content: &mcp.TextContent{Text: "RESOLVED"},
+			}, nil
+		},
+	})
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_resolve",
+		Arguments: map[string]any{"project": "test-project"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_resolve: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("ghost_resolve returned an error result: %+v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(text.Text, "would resolve") {
+		t.Errorf("expected dry-run output to contain %q, got %q", "would resolve", text.Text)
+	}
+
+	// Dry-run must not write: the seeded memory must still be an eligible
+	// resolve candidate (resolved_at IS NULL).
+	cands, err := store.ResolveCandidates(ctx, "abc123")
+	if err != nil {
+		t.Fatalf("ResolveCandidates: %v", err)
+	}
+	found := false
+	for _, m := range cands {
+		if m.Content == content {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected seeded memory to remain an eligible resolve candidate after dry-run (resolved_at must still be NULL)")
+	}
+}
+
 func TestTruncateUTF8(t *testing.T) {
 	tests := []struct {
 		in       string

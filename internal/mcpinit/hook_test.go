@@ -249,3 +249,56 @@ func TestBumpSessionCountNoPhantomDB(t *testing.T) {
 		t.Errorf("bumpSessionCount must not create %s", dbPath)
 	}
 }
+
+// TestInjectionExcludesResolved: a resolved memory must not appear in the
+// session-start injection, while an active one does.
+func TestInjectionExcludesResolved(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES ('activ001', 'p1', 'gotcha', 'ACTIVEMARKER keep this', 'manual')`,
+	); err != nil {
+		t.Fatalf("insert active: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source, resolved_at) VALUES ('rslv0001', 'p1', 'gotcha', 'RESOLVEDMARKER drop this', 'manual', datetime('now'))`,
+	); err != nil {
+		t.Fatalf("insert resolved: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	result := out.String()
+
+	if !strings.Contains(result, "ACTIVEMARKER") {
+		t.Errorf("active memory missing from injection; got:\n%s", result)
+	}
+	if strings.Contains(result, "RESOLVEDMARKER") {
+		t.Errorf("resolved memory must not be injected; got:\n%s", result)
+	}
+}

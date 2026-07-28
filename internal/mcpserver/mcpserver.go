@@ -14,9 +14,11 @@ import (
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
+	"github.com/wcatz/ghost/internal/resolve"
 )
 
 // Embedder generates vector embeddings for text. Optional — when nil, search falls back to FTS only.
@@ -33,6 +35,38 @@ type embedderDiagnostics interface {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// resolveCapableStore narrows provider.MemoryStore's concrete backing store to
+// the two methods ghost_resolve needs (ResolveCandidates, SetResolved). These
+// aren't part of provider.MemoryStore, so s.store is type-asserted to this
+// interface at call time; *memory.Store satisfies it.
+type resolveCapableStore interface {
+	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
+	SetResolved(ctx context.Context, ids []string) (int, error)
+}
+
+// shortID truncates a memory ID to 8 characters for compact preview, mirroring
+// cmd/ghost/main.go's local `short` closure.
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// firstLine returns the first line of s, truncated to at most n runes with an
+// ellipsis, mirroring cmd/ghost/main.go's firstLine for compact tool-output
+// preview.
+func firstLine(s string, n int) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
+}
 
 // validateTags enforces tag limits: max 10 tags, max 64 chars each.
 func validateTags(tags []string) []string {
@@ -864,6 +898,56 @@ func (s *Server) registerTools() {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Task created (id: %s)", id)}},
 		}, nil, nil
+	})
+
+	// ghost_resolve — scan a project for resolved-evidence memories via MCP
+	// sampling (the calling session's own model), optionally stamping
+	// resolved_at on the confirmed set.
+	type ghostResolveArgs struct {
+		Project string `json:"project" jsonschema:"the project to scan for resolved-evidence memories"`
+		Apply   bool   `json:"apply,omitempty" jsonschema:"stamp resolved_at on confirmed memories (default false: dry-run preview only)"`
+	}
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_resolve",
+		Title:       "Resolve stale evidence",
+		Description: "Scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own model via MCP sampling — no Anthropic API credits spent. Dry-run by default; pass apply:true to stamp resolved_at.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(false),
+			OpenWorldHint:   boolPtr(false),
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args ghostResolveArgs) (*mcp.CallToolResult, any, error) {
+		if args.Project == "" {
+			return nil, nil, fmt.Errorf("project is required")
+		}
+		projectID := s.resolveProjectID(ctx, args.Project)
+		rs, ok := s.store.(resolveCapableStore)
+		if !ok {
+			return nil, nil, fmt.Errorf("ghost_resolve: store does not support resolve operations")
+		}
+		if req.Session == nil {
+			return nil, nil, fmt.Errorf("ghost_resolve: no active MCP session for sampling")
+		}
+		samplingProvider := ai.NewSamplingProvider(req.Session)
+		fallback := ai.NewFallbackProvider(samplingProvider, nil, false)
+		cls := resolve.NewHaikuClassifier(fallback)
+		res, confirmed, err := resolve.Run(ctx, rs, cls, projectID, args.Apply, s.logger)
+		if err != nil {
+			return nil, nil, fmt.Errorf("ghost_resolve: %w", err)
+		}
+		verb := "would resolve"
+		count := len(confirmed)
+		if args.Apply {
+			verb = "resolved"
+			count = res.Resolved
+			s.notifyProjectResource(ctx, projectID, "context")
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %s %d\n",
+			args.Project, res.Loaded, res.Candidates, res.Confirmed, verb, count)
+		for _, m := range confirmed {
+			fmt.Fprintf(&sb, "  %s  [%s]  %s\n", shortID(m.ID), m.Category, firstLine(m.Content, 70))
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}}}, nil, nil
 	})
 
 	// ghost_task_list — list project tasks.

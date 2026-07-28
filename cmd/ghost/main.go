@@ -27,6 +27,7 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/obsidian"
 	"github.com/wcatz/ghost/internal/reflection"
+	"github.com/wcatz/ghost/internal/resolve"
 	"github.com/wcatz/ghost/internal/selfupdate"
 	"github.com/wcatz/ghost/internal/supersede"
 )
@@ -63,6 +64,9 @@ func main() {
 			return
 		case "supersede":
 			runSupersede()
+			return
+		case "resolve":
+			runResolve()
 			return
 		case "upgrade":
 			runUpgrade()
@@ -425,10 +429,11 @@ func runSupersede() {
 		fmt.Fprintln(os.Stderr, `Usage: ghost supersede <project> [flags]
 
 Flags:
-  --apply             Write the supersedes links (default is dry-run/preview)
+  --apply             Write the supersedes/causes links (default is dry-run/preview)
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
 
-Requires ANTHROPIC_API_KEY (uses Haiku to confirm each candidate).`)
+Requires ANTHROPIC_API_KEY (uses Haiku to classify each candidate as
+supersedes, causes, or neither).`)
 		os.Exit(1)
 	}
 
@@ -446,12 +451,14 @@ Requires ANTHROPIC_API_KEY (uses Haiku to confirm each candidate).`)
 		os.Exit(1)
 	}
 	if cfg.API.Key == "" {
-		fmt.Fprintln(os.Stderr, "error: ghost supersede requires ANTHROPIC_API_KEY (Haiku confirms each candidate)")
+		fmt.Fprintln(os.Stderr, "error: ghost supersede requires ANTHROPIC_API_KEY (uses Haiku to classify each candidate as supersedes, causes, or neither)")
 		os.Exit(1)
 	}
 
-	cls := supersede.NewHaikuClassifier(ai.NewClient(cfg.API.Key, logger))
-	res, confirmed, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
+	primary := ai.NewAnthropicProvider(ai.NewClient(cfg.API.Key, logger))
+	provider := ai.NewFallbackProvider(primary, nil, false)
+	cls := supersede.NewHaikuClassifier(provider)
+	res, classified, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -467,14 +474,119 @@ Requires ANTHROPIC_API_KEY (uses Haiku to confirm each candidate).`)
 		}
 		return id
 	}
-	fmt.Printf("%s: %d candidate pairs, %d confirmed supersessions, %s %d\n",
-		projectName, res.Candidates, res.Confirmed, verb, len(confirmed))
-	for _, c := range confirmed {
-		fmt.Printf("  %s  supersedes  %s\n", short(c.NewerID), short(c.OlderID))
+	fmt.Printf("%s: %d candidate pairs, %d supersedes, %d causes, %d reclassified, %s\n",
+		projectName, res.Candidates, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+	for _, c := range classified {
+		switch c.Relation {
+		case supersede.RelationSupersedes:
+			fmt.Printf("  %s  supersedes  %s\n", short(c.NewerID), short(c.OlderID))
+		case supersede.RelationCauses:
+			fmt.Printf("  %s  causes  %s\n", short(c.OlderID), short(c.NewerID))
+		}
 	}
-	if !apply && res.Confirmed > 0 {
+	if !apply && (res.Confirmed > 0 || res.CausesCreated > 0 || res.Reclassified > 0) {
 		fmt.Println("\nRe-run with --apply to write these links.")
 	}
+}
+
+// runResolve is the CLI entry for `ghost resolve`. It marks resolved-evidence
+// memories (concluded work: findings, changelog notes, PR locators) so they
+// drop out of session-start injection while staying searchable. Cheap local
+// keyword prefilter proposes candidates; Haiku adjudicates each with a crisp
+// conclusion-vs-evidence question biased to KEEP. Dry-run by default; --apply
+// writes resolved_at. Re-runnable and reversible: any later Upsert/UpdateMemory
+// of a memory clears its resolved_at. Standalone command, never a hook — the
+// stop-hook contract forbids DB access on that path. See the
+// resolution-classifier spec.
+func runResolve() {
+	var projectName string
+	apply := false
+	for i := 2; i < len(os.Args); i++ {
+		switch {
+		case os.Args[i] == "--apply":
+			apply = true
+		case !strings.HasPrefix(os.Args[i], "-"):
+			if projectName != "" {
+				fmt.Fprintln(os.Stderr, "error: expected exactly one project")
+				os.Exit(1)
+			}
+			projectName = os.Args[i]
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", os.Args[i])
+			os.Exit(1)
+		}
+	}
+	if projectName == "" {
+		fmt.Fprintln(os.Stderr, `Usage: ghost resolve <project> [flags]
+
+Flags:
+  --apply   Stamp resolved_at on confirmed memories (default is dry-run/preview)
+
+Marks resolved-evidence memories so they drop from session-start injection
+(still searchable). Requires ANTHROPIC_API_KEY (Haiku classifies each candidate).`)
+		os.Exit(1)
+	}
+
+	cfg, logger, store := bootstrap()
+	defer store.Close() //nolint:errcheck
+	ctx := context.Background()
+
+	projectID, err := store.ResolveProjectByName(ctx, projectName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if projectID == "" {
+		fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
+		os.Exit(1)
+	}
+	if cfg.API.Key == "" {
+		fmt.Fprintln(os.Stderr, "error: ghost resolve requires ANTHROPIC_API_KEY (Haiku classifies each candidate)")
+		os.Exit(1)
+	}
+
+	primary := ai.NewAnthropicProvider(ai.NewClient(cfg.API.Key, logger))
+	provider := ai.NewFallbackProvider(primary, nil, false)
+	cls := resolve.NewHaikuClassifier(provider)
+	res, confirmed, err := resolve.Run(ctx, store, cls, projectID, apply, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	verb := "would resolve"
+	count := len(confirmed)
+	if apply {
+		verb = "resolved"
+		count = res.Resolved
+	}
+	short := func(id string) string {
+		if len(id) > 8 {
+			return id[:8]
+		}
+		return id
+	}
+	fmt.Printf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %s %d\n",
+		projectName, res.Loaded, res.Candidates, res.Confirmed, verb, count)
+	for _, m := range confirmed {
+		fmt.Printf("  %s  [%s]  %s\n", short(m.ID), m.Category, firstLine(m.Content, 70))
+	}
+	if !apply && res.Confirmed > 0 {
+		fmt.Println("\nRe-run with --apply to mark these resolved.")
+	}
+}
+
+// firstLine returns the first line of s, truncated to at most n runes with an
+// ellipsis, for compact CLI preview.
+func firstLine(s string, n int) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
 }
 
 // runUpgrade downloads and installs the latest ghost release.
@@ -722,6 +834,7 @@ Commands:
   mcp status                  Check Claude Code integration health
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
   supersede <project> [flags] Link superseded memories (dry-run by default, --apply to write)
+  resolve <project> [flags]   Mark resolved evidence memories (dry-run by default, --apply to write)
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
   obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
   bench [--sweep]             Run the retrieval-quality benchmark (built-in dataset);
@@ -735,7 +848,7 @@ Flags (reflect):
   --restore       Undo last consolidation
 
 Environment:
-  ANTHROPIC_API_KEY           Required for reflect --tier haiku
+  ANTHROPIC_API_KEY           Required for reflect --tier haiku, and always for supersede/resolve
   GHOST_DEBUG                 Enable debug logging
 `, version)
 }

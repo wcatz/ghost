@@ -40,7 +40,8 @@ type APIConfig struct {
 
 // ReflectionConfig holds memory consolidation settings.
 type ReflectionConfig struct {
-	Backend string `koanf:"backend"` // "auto", "haiku", "sqlite", "disabled"
+	Backend     string `koanf:"backend"` // "auto", "haiku", "sqlite", "disabled"
+	AutoResolve bool   `koanf:"auto_resolve"`
 }
 
 // EmbeddingConfig holds local embedding settings.
@@ -67,16 +68,17 @@ type ObsidianConfig struct {
 
 // defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{
-	"embedding.enabled":    true,
-	"embedding.ollama_url": "http://localhost:11434",
-	"embedding.model":      "nomic-embed-text:v1.5",
-	"embedding.dimensions": 768,
-	"reflection.backend":   "auto",
-	"linking.enabled":      true,
-	"linking.threshold":    0.70,
-	"obsidian.vault_dir":   "",
-	"obsidian.interval":    "30s",
-	"obsidian.auto_sync":   false,
+	"embedding.enabled":       true,
+	"embedding.ollama_url":    "http://localhost:11434",
+	"embedding.model":         "nomic-embed-text:v1.5",
+	"embedding.dimensions":    768,
+	"reflection.backend":      "auto",
+	"reflection.auto_resolve": false,
+	"linking.enabled":         true,
+	"linking.threshold":       0.70,
+	"obsidian.vault_dir":      "",
+	"obsidian.interval":       "30s",
+	"obsidian.auto_sync":      false,
 }
 
 // Load reads configuration with layered precedence.

@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS memories (
     tags          TEXT DEFAULT '[]',
     pinned        INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at   TEXT
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(

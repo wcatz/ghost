@@ -117,6 +117,43 @@ Estimated cost at `topk_context=5` over the full 470 answerable questions: ~$20 
 
 Reference points, all judged with the official GPT-4o harness but with **different generators** (which dominate the score — compare within-generator only): Zep 71.2% and full-context 60.2% (GPT-4o generator); Mastra 94.87% (gpt-5-mini generator; 84.23% with GPT-4o); agentmemory 96.2% (Claude Opus 4.6 generator, temperature 0).
 
+## Classifier fallback verification (2026-07-26)
+
+The headless CLI path (`ghost resolve`/`ghost supersede`, and the stop hook's
+auto-resolve) cannot be driven into a real `ErrCreditExhausted` from outside
+the process: `internal/ai.APIURL` is a compile-time constant, not a config
+override, so there is no stub-server route into a live `go run ./cmd/ghost
+resolve` invocation. The fail-fast behavior (Task 6) is therefore verified at
+the unit level only, via `internal/ai/provider_test.go`'s
+`parseAPIErrorFixtureCreditBalance` (exercises the real `parseAPIError` code
+path against the actual Anthropic 400 response shape) and
+`internal/ai/fallback_provider_test.go`'s
+`TestFallbackProvider_NoSecondary_CreditExhaustionFailsFast` (confirms
+`FallbackProvider` with a nil secondary returns `ErrCreditExhausted`
+unchanged). This is a known gap, not a demonstrated end-to-end CLI run —
+flagged here rather than silently treated as equivalent.
+
+**Update (2026-07-26, later same day):** both paths above were exercised live
+against the real `ghost` project database (43 memories):
+
+- **CLI path** (`ghost resolve ghost` then `--apply`, primary
+  `anthropicClient` provider): worked end-to-end — 21 kept after prefilter,
+  13 confirmed evidence on dry-run, 12 actually stamped on `--apply` (one
+  candidate re-classified out at write time by `SetResolved`'s own
+  eligibility re-check, expected non-determinism across two separate Haiku
+  calls, not a bug).
+- **`ghost_resolve` MCP tool / sampling path**: connected live, tool
+  correctly registered and reachable (`project`/`apply` args validated), but
+  the classify call fails immediately with
+  `mcp sampling: calling "sampling/createMessage": Method not found`. This
+  Claude Code session's MCP client does not implement the `sampling/createMessage`
+  capability, so the request never reaches a model — `SamplingProvider` never
+  gets a response to classify. The sampling path is therefore **structurally
+  verified** (wiring, args, error propagation all correct) but **not
+  functionally verified** — no live client currently available on this
+  machine implements MCP sampling to complete the test. Re-test once/if a
+  connected MCP client adds sampling support.
+
 ## Reporting rules (all phases)
 
 1. Harness, datasets, and judge prompts live in this repo.

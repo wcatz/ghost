@@ -198,14 +198,16 @@ Because the mirror is one-way, edits inside the vault are informational only and
 
 ## MCP surface
 
-18 tools, 4 resources:
+19 tools, 4 resources:
 
 | Group | Tools |
 |---|---|
-| Memory | `ghost_memory_save` `ghost_memory_search` `ghost_search_all` `ghost_memories_list` `ghost_memory_update` `ghost_memory_delete` `ghost_memory_pin` `ghost_memory_promote` `ghost_save_global` |
+| Memory | `ghost_memory_save` `ghost_memory_search` `ghost_search_all` `ghost_memories_list` `ghost_memory_update` `ghost_memory_delete` `ghost_memory_pin` `ghost_memory_promote` `ghost_save_global` `ghost_resolve` |
 | Context | `ghost_project_context` `ghost_list_projects` `ghost_health` |
 | Tasks | `ghost_task_create` `ghost_task_list` `ghost_task_update` `ghost_task_complete` |
 | Decisions | `ghost_decision_record` `ghost_decisions_list` |
+
+`ghost_resolve` scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own model via MCP sampling — no Anthropic API credits spent. Args: `project` (required), `apply` (default false: dry-run preview only; pass `true` to stamp `resolved_at` on confirmed memories).
 
 Resources: project context, global memories, project decisions, project tasks — pin them in clients that support it to survive context compaction.
 
@@ -220,6 +222,7 @@ ghost mcp status             # Deep health checks (incl. Ollama reachability, mo
 ghost hook session-start     # SessionStart hook — prints exactly what gets injected
 ghost hook stop              # Stop hook — blocks stop once if a tool-using session saved nothing
 ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
+ghost resolve <project>      # De-weight resolved-evidence memories from injection (dry-run by default; --apply)
 ghost supersede <project>    # Link superseded memories (dry-run by default; --apply, --threshold)
 ghost bench [--sweep]        # Retrieval-quality benchmark on the built-in dataset
 ghost obsidian export        # Mirror memories to an Obsidian vault (one-way; --out, --project)
@@ -227,6 +230,8 @@ ghost obsidian sync          # Keep the vault mirror fresh (--interval; polls fo
 ghost upgrade                # Self-update from GitHub Releases (linux/macOS; Windows: re-download)
 ghost version                # Print version
 ```
+
+When `reflection.auto_resolve` is enabled in config (default off), the stop hook also spawns `ghost resolve <project> --apply` as a detached background process after each session, so resolved-evidence memories get marked automatically without waiting for a manual run. This never blocks the hook itself — the spawn is fire-and-forget, logged to `resolve.log` in the ghost data directory. If the Anthropic API is out of credit at spawn time, the spawned process fails and logs the failure; it does not degrade to a lower-quality answer.
 
 ## Configuration
 
