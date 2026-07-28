@@ -15,7 +15,9 @@ it was built.
 3. Invoke the Workflow tool with `scriptPath` set to
    `docs/superpowers/eval/workflows/ghost-eval.workflow.js` and `args`
    optionally overriding `replayProjects` (default:
-   `['ghost', 'roller', 'infra']`).
+   `['ghost', 'roller', 'infra']`), `repoPath`, `realDbPath`,
+   `transcriptGlobRoot`, or `keepScratch` (set `true` to skip the final
+   `rm -rf` and leave scratch data in place for post-mortem on failure).
 4. The report lands at `docs/superpowers/reports/YYYY-MM-DD-ghost-eval.md`.
 
 ## Cost
@@ -43,6 +45,15 @@ connection. Each `claude -p` subprocess is isolated with:
   required together.
 - `--permission-mode bypassPermissions` — required for headless tool
   calls to execute at all.
+
+**Isolation scope warning:** the flags above scope Ghost's own MCP server and
+hook config to a scratch dir — they do NOT sandbox the `claude -p` subprocess
+itself. `--permission-mode bypassPermissions` gives that subprocess full
+filesystem and network access under the real `$HOME` (only `XDG_DATA_HOME`/
+`XDG_CONFIG_HOME` are scratched). Storyline/replay/stress prompts are written
+by this suite and are trusted, but only run this suite inside a trusted
+OS-level sandbox (container/VM) — never point it at an untrusted prompt or
+transcript source.
 
 `docs/superpowers/eval/lib/make-unit-config.sh` writes the per-unit
 `mcp.json`/`settings.json` (parameterized by a `unit-run-id`, plus the

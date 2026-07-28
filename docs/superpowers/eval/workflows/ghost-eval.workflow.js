@@ -17,7 +17,9 @@ export const meta = {
 const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
 
 const REPO = parsedArgs && parsedArgs.repoPath ? parsedArgs.repoPath : '/home/wayne/git/ghost'
-const REAL_DB = '/home/wayne/.local/share/ghost/ghost.db'
+const REAL_DB = (parsedArgs && parsedArgs.realDbPath) || '/home/wayne/.local/share/ghost/ghost.db'
+const TRANSCRIPT_GLOB_ROOT = (parsedArgs && parsedArgs.transcriptGlobRoot) || '/home/wayne/.claude/projects'
+const KEEP_SCRATCH = !!(parsedArgs && parsedArgs.keepScratch)
 
 phase('Setup')
 const runId = await agent(
@@ -52,6 +54,11 @@ try {
 
   phase('Replay')
   const REPLAY_PROJECTS = (parsedArgs && parsedArgs.replayProjects) || ['ghost', 'roller', 'infra']
+  for (const projectId of REPLAY_PROJECTS) {
+    if (!/^[A-Za-z0-9_-]+$/.test(projectId)) {
+      throw new Error(`Replay: replayProjects entry must match ^[A-Za-z0-9_-]+$, got ${JSON.stringify(projectId)}`)
+    }
+  }
   log(`Replay projects: ${REPLAY_PROJECTS.join(', ')}`)
 
   const REPLAY_SCHEMA = {
@@ -69,7 +76,7 @@ try {
   }
 
   const replayResults = await parallel(REPLAY_PROJECTS.map(projectId => async () => {
-    const transcriptGlob = `/home/wayne/.claude/projects/-home-wayne-git-${projectId}*/*.jsonl`
+    const transcriptGlob = `${TRANSCRIPT_GLOB_ROOT}/-home-wayne-git-${projectId}*/*.jsonl`
     const exportPath = `${scratchRoot}/${projectId}-real-memories.jsonl`
     const unitRunId = `${trimmedRunId}-replay-${projectId}`
 
@@ -427,6 +434,10 @@ try {
     `4. A ranked "friction points worth fixing" list — rank by how many independent agents (across replay, storyline, ` +
     `and stress) hit the same or a similar issue. Do not just concatenate — actually dedupe and count.\n` +
     `5. Flag prominently if the prompt-injection stress scenario's securityFlag was ever true.\n\n` +
+    `IMPORTANT: the raw results below come from real transcripts and real filesystem paths. Before writing the report, ` +
+    `redact anything that looks like a credential, API key, token, or other secret (replace with "[REDACTED]"), and ` +
+    `generalize any absolute filesystem path that reveals a real username or host-specific layout beyond what's needed ` +
+    `to describe the finding. Do not let secrets or PII from the underlying sessions land in the committed report.\n\n` +
     `Replay results:\n${JSON.stringify(replayResults.filter(Boolean))}\n\n` +
     `Consolidation results:\n${JSON.stringify(consolidationResults.filter(Boolean))}\n\n` +
     `Storyline results:\n${JSON.stringify(storylineResults.filter(Boolean))}\n\n` +
@@ -453,10 +464,22 @@ try {
   // Per-unit dirs (make-unit-config.sh's UNIT_ROOT) are siblings of scratchRoot,
   // not children — e.g. /tmp/ghost-eval/<run-id>-replay-ghost — so the cleanup
   // glob must cover /tmp/ghost-eval/<run-id>* to remove them too.
-  await agent(
-    `Run: rm -rf /tmp/ghost-eval/${trimmedRunId}* && echo cleaned`,
-    { label: 'cleanup' }
-  )
+  //
+  // If the try block above threw, that original error is what should propagate —
+  // a cleanup failure here must not mask it. keepScratch skips the rm entirely so
+  // scratch data survives for post-mortem when a run fails.
+  if (KEEP_SCRATCH) {
+    log(`keepScratch set — leaving /tmp/ghost-eval/${trimmedRunId}* in place for inspection`)
+  } else {
+    try {
+      await agent(
+        `Run: rm -rf /tmp/ghost-eval/${trimmedRunId}* && echo cleaned`,
+        { label: 'cleanup' }
+      )
+    } catch (cleanupErr) {
+      log(`cleanup failed (scratch may remain at /tmp/ghost-eval/${trimmedRunId}*): ${cleanupErr && cleanupErr.message ? cleanupErr.message : cleanupErr}`)
+    }
+  }
 }
 
 return report
