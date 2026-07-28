@@ -451,7 +451,7 @@ supersedes, causes, or neither).`)
 		os.Exit(1)
 	}
 	if cfg.API.Key == "" {
-		fmt.Fprintln(os.Stderr, "error: ghost supersede requires ANTHROPIC_API_KEY (Haiku confirms each candidate)")
+		fmt.Fprintln(os.Stderr, "error: ghost supersede requires ANTHROPIC_API_KEY (uses Haiku to classify each candidate as supersedes, causes, or neither)")
 		os.Exit(1)
 	}
 
@@ -482,7 +482,7 @@ supersedes, causes, or neither).`)
 			fmt.Printf("  %s  causes  %s\n", short(c.OlderID), short(c.NewerID))
 		}
 	}
-	if !apply && (res.Confirmed > 0 || res.CausesCreated > 0) {
+	if !apply && (res.Confirmed > 0 || res.CausesCreated > 0 || res.Reclassified > 0) {
 		fmt.Println("\nRe-run with --apply to write these links.")
 	}
 }
