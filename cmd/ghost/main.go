@@ -455,7 +455,7 @@ Requires ANTHROPIC_API_KEY (uses Haiku to confirm each candidate).`)
 	}
 
 	cls := supersede.NewHaikuClassifier(ai.NewClient(cfg.API.Key, logger))
-	res, confirmed, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
+	res, classified, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -471,12 +471,17 @@ Requires ANTHROPIC_API_KEY (uses Haiku to confirm each candidate).`)
 		}
 		return id
 	}
-	fmt.Printf("%s: %d candidate pairs, %d confirmed supersessions, %s %d\n",
-		projectName, res.Candidates, res.Confirmed, verb, len(confirmed))
-	for _, c := range confirmed {
-		fmt.Printf("  %s  supersedes  %s\n", short(c.NewerID), short(c.OlderID))
+	fmt.Printf("%s: %d candidate pairs, %d supersedes, %d causes, %d reclassified, %s\n",
+		projectName, res.Candidates, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+	for _, c := range classified {
+		switch c.Relation {
+		case supersede.RelationSupersedes:
+			fmt.Printf("  %s  supersedes  %s\n", short(c.NewerID), short(c.OlderID))
+		case supersede.RelationCauses:
+			fmt.Printf("  %s  causes  %s\n", short(c.OlderID), short(c.NewerID))
+		}
 	}
-	if !apply && res.Confirmed > 0 {
+	if !apply && (res.Confirmed > 0 || res.CausesCreated > 0) {
 		fmt.Println("\nRe-run with --apply to write these links.")
 	}
 }
