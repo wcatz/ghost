@@ -55,8 +55,9 @@ type EmbeddingConfig struct {
 // LinkingConfig controls the memory auto-linking worker. Linking requires
 // embeddings, so it is only active when embedding is also enabled.
 type LinkingConfig struct {
-	Enabled   bool    `koanf:"enabled"`
-	Threshold float64 `koanf:"threshold"`
+	Enabled           bool    `koanf:"enabled"`
+	Threshold         float64 `koanf:"threshold"`
+	DemotionThreshold float64 `koanf:"demotion_threshold"`
 }
 
 // ObsidianConfig controls the Obsidian vault mirror (ghost obsidian export|sync).
@@ -68,17 +69,18 @@ type ObsidianConfig struct {
 
 // defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{
-	"embedding.enabled":       true,
-	"embedding.ollama_url":    "http://localhost:11434",
-	"embedding.model":         "nomic-embed-text:v1.5",
-	"embedding.dimensions":    768,
-	"reflection.backend":      "auto",
-	"reflection.auto_resolve": false,
-	"linking.enabled":         true,
-	"linking.threshold":       0.70,
-	"obsidian.vault_dir":      "",
-	"obsidian.interval":       "30s",
-	"obsidian.auto_sync":      false,
+	"embedding.enabled":          true,
+	"embedding.ollama_url":       "http://localhost:11434",
+	"embedding.model":            "nomic-embed-text:v1.5",
+	"embedding.dimensions":       768,
+	"reflection.backend":         "auto",
+	"reflection.auto_resolve":    false,
+	"linking.enabled":            true,
+	"linking.threshold":          0.70,
+	"linking.demotion_threshold": 0.90,
+	"obsidian.vault_dir":         "",
+	"obsidian.interval":          "30s",
+	"obsidian.auto_sync":         false,
 }
 
 // Load reads configuration with layered precedence.

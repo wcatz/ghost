@@ -30,7 +30,11 @@
 # retained for the uses above. The worker itself is on by default.
 # linking:
 #   enabled: true
-#   threshold: 0.70   # min cosine similarity to create a link
+#   threshold: 0.70            # min cosine similarity to create a link
+#   demotion_threshold: 0.90   # min 'related' link strength to demote a
+#                              # near-duplicate from GetTopMemories/session-start
+#                              # injection; stricter than threshold since
+#                              # "related" isn't the same bar as "redundant"
 
 # --- Memory Consolidation ---
 # Controls the default tier for ghost reflect.

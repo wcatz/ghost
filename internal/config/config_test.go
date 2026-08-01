@@ -172,6 +172,7 @@ embedding:
   model: "custom-embed-model"
 linking:
   threshold: 0.85
+  demotion_threshold: 0.95
 reflection:
   backend: "sqlite"
 `
@@ -192,6 +193,9 @@ reflection:
 	}
 	if cfg.Linking.Threshold != 0.85 {
 		t.Errorf("linking.threshold = %f, want 0.85", cfg.Linking.Threshold)
+	}
+	if cfg.Linking.DemotionThreshold != 0.95 {
+		t.Errorf("linking.demotion_threshold = %f, want 0.95", cfg.Linking.DemotionThreshold)
 	}
 	if cfg.Reflection.Backend != "sqlite" {
 		t.Errorf("reflection.backend = %q, want %q", cfg.Reflection.Backend, "sqlite")
@@ -296,6 +300,9 @@ func TestLinkingDefaults(t *testing.T) {
 	}
 	if cfg.Linking.Threshold != 0.70 {
 		t.Errorf("expected linking.threshold=0.70, got %f", cfg.Linking.Threshold)
+	}
+	if cfg.Linking.DemotionThreshold != 0.90 {
+		t.Errorf("expected linking.demotion_threshold=0.90, got %f", cfg.Linking.DemotionThreshold)
 	}
 }
 
