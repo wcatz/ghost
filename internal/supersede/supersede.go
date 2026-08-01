@@ -6,7 +6,7 @@
 // docs/benchmarks.md Phase 3.
 //
 // Design: cosine similarity proposes same-subject candidate pairs (cheap,
-// local), created_at gives direction (newer/older — SQLite's
+// local), updated_at gives direction (newer/older — SQLite's
 // 'YYYY-MM-DD HH:MM:SS' timestamps compare lexicographically), and an LLM
 // Classifier makes a 3-way SUPERSEDES/CAUSES/NEITHER call for each pair, since
 // "replaces a stale claim" and "is caused by / follows from" are distinct
@@ -87,7 +87,7 @@ type vectorStore interface {
 
 // SelectCandidates returns the deduped ordered candidate pairs for a project:
 // memories whose cosine similarity is at least threshold, oriented newer→older
-// by created_at. A pair is emitted once regardless of which endpoint surfaced
+// by updated_at. A pair is emitted once regardless of which endpoint surfaced
 // it. Memories without embeddings are skipped (no similarity signal).
 func SelectCandidates(ctx context.Context, store vectorStore, projectID string, threshold float32) ([]Candidate, error) {
 	mems, err := store.GetAll(ctx, projectID, 100000)
@@ -137,11 +137,15 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 	return cands, nil
 }
 
-// orient returns (newer, older) by created_at. SQLite 'YYYY-MM-DD HH:MM:SS'
-// strings order chronologically under lexicographic comparison; ties break by
-// ID so the pair is deterministic.
+// orient returns (newer, older) by updated_at — the same freshness signal
+// Run()'s skip-if-unchanged reclassification already uses. created_at would
+// misorder (and mislabel the direction of) a memory that was edited long
+// after it was first created, which is exactly the reversed-decision case
+// this pass exists to catch. SQLite 'YYYY-MM-DD HH:MM:SS' strings order
+// chronologically under lexicographic comparison; ties break by ID so the
+// pair is deterministic.
 func orient(a, b memory.Memory) (newer, older memory.Memory) {
-	if a.CreatedAt > b.CreatedAt || (a.CreatedAt == b.CreatedAt && a.ID > b.ID) {
+	if a.UpdatedAt > b.UpdatedAt || (a.UpdatedAt == b.UpdatedAt && a.ID > b.ID) {
 		return a, b
 	}
 	return b, a

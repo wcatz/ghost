@@ -1248,7 +1248,7 @@ func TestStoreDecisions(t *testing.T) {
 	ctx := context.Background()
 
 	// Record a decision.
-	id, err := s.RecordDecision(ctx, testProject,
+	id, memID, err := s.RecordDecision(ctx, testProject,
 		"Use SQLite for storage",
 		"SQLite provides embedded persistence with FTS5",
 		"Simple, no external dependencies",
@@ -1260,6 +1260,9 @@ func TestStoreDecisions(t *testing.T) {
 	}
 	if id == "" {
 		t.Fatal("RecordDecision returned empty ID")
+	}
+	if memID == "" || memID == id {
+		t.Fatalf("RecordDecision returned invalid memory ID: %q (decision ID: %q)", memID, id)
 	}
 
 	// List decisions.
@@ -1328,7 +1331,7 @@ func TestRecordDecisionPersistsMemoryRow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	id, err := s.RecordDecision(ctx, testProject,
+	id, memID, err := s.RecordDecision(ctx, testProject,
 		"Use SQLite", "SQLite for persistence", "Simple and embedded",
 		[]string{"postgres"}, []string{"db"})
 	if err != nil {
@@ -1337,8 +1340,25 @@ func TestRecordDecisionPersistsMemoryRow(t *testing.T) {
 	if id == "" {
 		t.Fatal("expected non-empty decision ID")
 	}
+	if memID == "" || memID == id {
+		t.Fatalf("expected distinct non-empty memory ID, got %q (decision ID: %q)", memID, id)
+	}
 
-	// The memory row must exist — verify search finds it.
+	// The memory row must exist under memID — verify GetByIDs finds it
+	// directly, not just via a content search (that's the whole point of
+	// returning it).
+	mems, err := s.GetByIDs(ctx, []string{memID})
+	if err != nil {
+		t.Fatalf("GetByIDs(memID): %v", err)
+	}
+	if len(mems) != 1 {
+		t.Fatalf("GetByIDs(memID): got %d rows, want 1", len(mems))
+	}
+	if mems[0].Category != "decision" || !strings.Contains(mems[0].Content, "SQLite") {
+		t.Fatalf("memory row at memID has unexpected content: %+v", mems[0])
+	}
+
+	// Also verify search finds it (existing coverage, unchanged).
 	results, err := s.SearchFTS(ctx, testProject, "SQLite persistence", 10)
 	if err != nil {
 		t.Fatalf("SearchFTS: %v", err)

@@ -34,7 +34,7 @@ func TestExport(t *testing.T) {
 	if err := store.CreateLink(ctx, id1, id2, "related", 0.83, "auto"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RecordDecision(ctx, "ghost", "Use SQLite", "SQLite it is", "zero infra", []string{"Postgres"}, nil); err != nil {
+	if _, _, err := store.RecordDecision(ctx, "ghost", "Use SQLite", "SQLite it is", "zero infra", []string{"Postgres"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.CreateTask(ctx, "ghost", "Ship mirror", "Build it", 2); err != nil {

@@ -517,12 +517,15 @@ func TestDecisionRecord_EndToEnd(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
 
-	id, err := store.RecordDecision(ctx, "abc123", "Use SQLite", "Embedded DB for simplicity", "No CGO dependency", []string{"PostgreSQL", "MySQL"}, []string{"database"})
+	id, memID, err := store.RecordDecision(ctx, "abc123", "Use SQLite", "Embedded DB for simplicity", "No CGO dependency", []string{"PostgreSQL", "MySQL"}, []string{"database"})
 	if err != nil {
 		t.Fatalf("RecordDecision: %v", err)
 	}
 	if id == "" {
 		t.Error("expected decision ID")
+	}
+	if memID == "" || memID == id {
+		t.Errorf("expected distinct non-empty memory ID, got %q (decision ID: %q)", memID, id)
 	}
 
 	decisions, err := store.ListDecisions(ctx, "abc123", "", 10)

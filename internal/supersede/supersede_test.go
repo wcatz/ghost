@@ -41,7 +41,7 @@ func (f *fallbackClassifier) Classify(_ context.Context, newer, _ string) (Relat
 }
 
 // seed builds an in-memory store, returns it plus the raw db so tests can
-// backdate created_at (Create always stamps now).
+// backdate created_at/updated_at (Create always stamps now).
 func seed(t *testing.T) (*memory.Store, *sql.DB) {
 	t.Helper()
 	db, err := memory.OpenDB(":memory:")
@@ -56,7 +56,8 @@ func seed(t *testing.T) (*memory.Store, *sql.DB) {
 	return store, db
 }
 
-// add creates a memory with an embedding and a controlled created_at age.
+// add creates a memory with an embedding and a controlled created_at/updated_at
+// age (both set to the same value — orient() keys off updated_at).
 func add(t *testing.T, store *memory.Store, db *sql.DB, content string, vec []float32, createdAt string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -67,7 +68,7 @@ func add(t *testing.T, store *memory.Store, db *sql.DB, content string, vec []fl
 	if err := store.StoreEmbedding(ctx, id, vec, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE memories SET created_at = ? WHERE id = ?`, createdAt, id); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?`, createdAt, createdAt, id); err != nil {
 		t.Fatal(err)
 	}
 	return id

@@ -153,7 +153,7 @@ Use ghost_save_global for preferences/facts that apply to ALL repos (not project
 Use ghost_search_all to find knowledge that might be in another project.
 
 ## Project IDs
-Pass the project name (e.g. "ghost", "roller", "infra") as project_id. Ghost resolves names automatically. Never pass raw filesystem paths.`
+Pass the project name (e.g. "ghost", "web-app", "platform-ops") as project_id. Ghost resolves names automatically. Never pass raw filesystem paths.`
 
 // New creates and configures the MCP server with all Ghost tools.
 func New(store provider.MemoryStore, logger *slog.Logger, version string) *Server {
@@ -407,7 +407,7 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 func (s *Server) registerTools() {
 	// ghost_memory_search — search memories by keyword or semantic query.
 	type searchArgs struct {
-		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'infra', 'roller')"`
+		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'platform-ops', 'web-app')"`
 		Query     string `json:"query" jsonschema:"Search query — natural language or FTS5 (e.g. 'helm deploy', 'sqlite*', 'auth AND token')"`
 		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
@@ -453,7 +453,9 @@ func (s *Server) registerTools() {
 		}
 
 		// Post-filter by category if specified.
+		maybeIncomplete := false
 		if args.Category != "" {
+			rawCount := len(memories)
 			filtered := memories[:0]
 			for _, m := range memories {
 				if m.Category == args.Category {
@@ -464,6 +466,11 @@ func (s *Server) registerTools() {
 				filtered = filtered[:args.Limit]
 			}
 			memories = filtered
+			// rawCount == searchLimit means SearchHybrid may have had more
+			// matches beyond what we fetched — the category filter narrowed
+			// an unknown-sized pool, so under-limit results aren't provably
+			// exhaustive.
+			maybeIncomplete = rawCount == searchLimit && len(memories) < args.Limit
 		}
 
 		if len(memories) == 0 {
@@ -472,8 +479,12 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
+		text := formatMemories(memories)
+		if maybeIncomplete {
+			text += "\n\n(Note: category filter may have missed further matches beyond the search window — use ghost_memories_list for exhaustive category browsing.)"
+		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: formatMemories(memories)}},
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
 	})
 
@@ -489,7 +500,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_save",
 		Title:       "Save Memory",
-		Description: "Save a memory about the project. Call proactively — do not wait to be asked. Write concise 1-3 sentence memories (truncated to ~300 chars in session context). Categories: architecture (system design), decision (choices made), pattern (recurring approaches), convention (naming/workflow), gotcha (pitfalls/bugs), dependency (versions/API quirks), preference (user preferences), fact (general knowledge). Importance: 1.0=security/never-do-this, 0.8=architecture/key decisions, 0.6=patterns/conventions, 0.4=minor observations, 0.7=default. Example: project_id='infra', content='k3s-mini-1 runs Grafana on port 80', category='fact', importance=0.7.",
+		Description: "Save a memory about the project. Call proactively — do not wait to be asked. Write concise 1-3 sentence memories (truncated to ~300 chars in session context). Categories: architecture (system design), decision (choices made), pattern (recurring approaches), convention (naming/workflow), gotcha (pitfalls/bugs), dependency (versions/API quirks), preference (user preferences), fact (general knowledge). Importance: 1.0=security/never-do-this, 0.8=architecture/key decisions, 0.6=patterns/conventions, 0.4=minor observations, 0.7=default. Example: project_id='platform-ops', content='k3s-mini-1 runs Grafana on port 80', category='fact', importance=0.7.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
@@ -552,7 +563,7 @@ func (s *Server) registerTools() {
 
 	// ghost_project_context — get project memories and learned context.
 	type contextArgs struct {
-		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'infra')"`
+		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'platform-ops')"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max memories to return (default 20)"`
 	}
 
@@ -1042,7 +1053,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_decision_record",
 		Title:       "Record Decision",
-		Description: "Record an architectural or design decision with rationale and alternatives considered. Use instead of ghost_memory_save when a choice was made between alternatives. Also saved as a memory. Example: title='Use SQLite over Postgres', decision='Embedded SQLite with FTS5', rationale='Zero external deps, sufficient for single-user', alternatives=['PostgreSQL', 'Redis'].",
+		Description: "Record an architectural or design decision with rationale and alternatives considered. Use instead of ghost_memory_save when a choice was made between alternatives. Also saved as a memory — the response returns both a decision_id and a memory_id; they are different rows, and pin/update need memory_id. Example: title='Use SQLite over Postgres', decision='Embedded SQLite with FTS5', rationale='Zero external deps, sufficient for single-user', alternatives=['PostgreSQL', 'Redis'].",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			OpenWorldHint:   boolPtr(false),
@@ -1068,13 +1079,15 @@ func (s *Server) registerTools() {
 			args.Tags = []string{}
 		}
 		args.Tags = validateTags(args.Tags)
-		id, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, args.Alternatives, args.Tags)
+		decisionID, memoryID, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, args.Alternatives, args.Tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "decisions")
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Decision recorded (id: %s)", id)}},
+			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
+				"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.",
+				decisionID, memoryID)}},
 		}, nil, nil
 	})
 

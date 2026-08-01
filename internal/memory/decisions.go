@@ -21,9 +21,13 @@ type Decision struct {
 	UpdatedAt    string   `json:"updated_at"`
 }
 
-// RecordDecision creates a decision and also saves it as a memory.
-// Both writes are atomic — if either fails, neither is committed.
-func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (string, error) {
+// RecordDecision creates a decision and also saves it as a memory. Both
+// writes are atomic — if either fails, neither is committed. It returns both
+// the decision's own ID (for ListDecisions/status lookups) and the companion
+// memory row's ID (needed for ghost_memory_pin/ghost_memory_update, which
+// operate on memories, not decisions) — the two are different rows and
+// different IDs.
+func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -32,37 +36,38 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", fmt.Errorf("record decision: begin tx: %w", err)
+		return "", "", fmt.Errorf("record decision: begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // intentional no-op after Commit
 
-	var id string
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO decisions (project_id, title, decision, alternatives, rationale, tags)
 		VALUES (?, ?, ?, ?, ?, ?)
 		RETURNING id
-	`, projectID, title, decision, string(altJSON), rationale, string(tagJSON)).Scan(&id)
+	`, projectID, title, decision, string(altJSON), rationale, string(tagJSON)).Scan(&decisionID)
 	if err != nil {
-		return "", fmt.Errorf("record decision: %w", err)
+		return "", "", fmt.Errorf("record decision: %w", err)
 	}
 
 	content := fmt.Sprintf("%s: %s. Rationale: %s", title, decision, rationale)
-	if _, err := tx.ExecContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags)
 		VALUES (?, 'decision', ?, 'decision_log', 0.9, ?)
-	`, projectID, content, string(tagJSON)); err != nil {
-		return "", fmt.Errorf("record decision memory: %w", err)
+		RETURNING id
+	`, projectID, content, string(tagJSON)).Scan(&memoryID)
+	if err != nil {
+		return "", "", fmt.Errorf("record decision memory: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("record decision: commit: %w", err)
+		return "", "", fmt.Errorf("record decision: commit: %w", err)
 	}
 
 	if s.onSave != nil {
 		s.onSave(projectID)
 	}
 
-	return id, nil
+	return decisionID, memoryID, nil
 }
 
 // ListDecisions returns decisions for a project.

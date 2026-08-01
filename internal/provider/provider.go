@@ -63,7 +63,7 @@ type MemoryStore interface {
 	UpdateTask(ctx context.Context, taskID, status string, priority int, description string) error
 
 	// Decisions
-	RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (string, error)
+	RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, err error)
 	ListDecisions(ctx context.Context, projectID, status string, limit int) ([]memory.Decision, error)
 
 	// Project management
