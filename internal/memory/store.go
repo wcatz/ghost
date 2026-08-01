@@ -468,8 +468,8 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	if err != nil {
 		return nil, fmt.Errorf("get top memories: %w", err)
 	}
+	defer func() { _ = rows.Close() }()
 	results, err := scanMemories(rows)
-	_ = rows.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -487,9 +487,7 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 		} else {
 			results = StableDemote(results, func(m Memory) string { return m.ID }, penalty)
 		}
-		if len(results) > limit {
-			results = results[:limit]
-		}
+		results = results[:min(limit, len(results))]
 	}
 	return results, nil
 }
