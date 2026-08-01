@@ -2258,3 +2258,81 @@ func assertActive(t *testing.T, s *Store, projectID, id string) {
 		t.Errorf("memory %s should be active (resolved_at NULL), got %q", id, resolvedAt.String)
 	}
 }
+
+func TestGetTopMemoriesBackfillsAfterDemotion(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "alpha fact", Source: "manual", Importance: 0.9})
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	b, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "alpha fact restated", Source: "manual", Importance: 0.85})
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	c, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "distinct fact", Source: "manual", Importance: 0.8})
+	if err != nil {
+		t.Fatalf("create c: %v", err)
+	}
+
+	if err := s.CreateLink(ctx, a, b, "related", 0.95, "auto"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+
+	top, err := s.GetTopMemories(ctx, testProject, 2)
+	if err != nil {
+		t.Fatalf("GetTopMemories: %v", err)
+	}
+	if len(top) != 2 {
+		t.Fatalf("got %d results, want 2: %+v", len(top), top)
+	}
+	got := map[string]bool{top[0].ID: true, top[1].ID: true}
+	if !got[a] {
+		t.Errorf("expected higher-importance duplicate %q (a) to survive; got %+v", a, top)
+	}
+	if got[b] {
+		t.Errorf("expected lower-ranked duplicate %q (b) to be demoted; got %+v", b, top)
+	}
+	if !got[c] {
+		t.Errorf("expected backfill to include distinct memory %q (c); got %+v", c, top)
+	}
+}
+
+func TestSetDemotionThresholdOverridesDefault(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "alpha fact", Source: "manual", Importance: 0.9})
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	b, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "alpha fact restated", Source: "manual", Importance: 0.85})
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	c, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "distinct fact", Source: "manual", Importance: 0.8})
+	if err != nil {
+		t.Fatalf("create c: %v", err)
+	}
+
+	// Link strength (0.80) clears linking.threshold but sits below the
+	// default demotion threshold (0.90) — lowering the override to 0.75
+	// must make it demote.
+	if err := s.CreateLink(ctx, a, b, "related", 0.80, "auto"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	s.SetDemotionThreshold(0.75)
+
+	top, err := s.GetTopMemories(ctx, testProject, 2)
+	if err != nil {
+		t.Fatalf("GetTopMemories: %v", err)
+	}
+	got := map[string]bool{top[0].ID: true, top[1].ID: true}
+	if got[b] {
+		t.Errorf("lowered threshold should have demoted b; got %+v", top)
+	}
+	if !got[c] {
+		t.Errorf("expected backfill to include c; got %+v", top)
+	}
+}

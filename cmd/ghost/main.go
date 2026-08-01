@@ -946,6 +946,7 @@ func bootstrap() (*config.Config, *slog.Logger, *memory.Store) {
 	}
 
 	store := memory.NewStore(db, logger)
+	store.SetDemotionThreshold(cfg.Linking.DemotionThreshold)
 
 	if err := store.SeedGlobalMemories(context.Background()); err != nil {
 		logger.Warn("seed global memories", "error", err)

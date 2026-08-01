@@ -46,6 +46,11 @@ type Store struct {
 	mu     sync.RWMutex
 	logger *slog.Logger
 	onSave func(projectID string) // optional callback after memory create/upsert
+
+	// demotionThreshold gates near-duplicate demotion in GetTopMemories (see
+	// DemotionPenalties). Defaults to DefaultDemotionThreshold; callers that
+	// have loaded config override it via SetDemotionThreshold.
+	demotionThreshold float64
 }
 
 // SetOnSave registers a callback invoked after each successful memory save.
@@ -56,9 +61,18 @@ func (s *Store) SetOnSave(fn func(projectID string)) {
 	s.onSave = fn
 }
 
+// SetDemotionThreshold overrides the near-duplicate demotion cutoff
+// GetTopMemories uses. Call after NewStore once config is loaded; until
+// called, GetTopMemories uses DefaultDemotionThreshold.
+func (s *Store) SetDemotionThreshold(threshold float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.demotionThreshold = threshold
+}
+
 // NewStore creates a new memory store from an open database.
 func NewStore(db *sql.DB, logger *slog.Logger) *Store {
-	return &Store{db: db, logger: logger}
+	return &Store{db: db, logger: logger, demotionThreshold: DefaultDemotionThreshold}
 }
 
 // seedGlobalMemory defines a memory that Ghost ships with out of the box.
@@ -450,12 +464,34 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 			* CASE WHEN pinned = 1 THEN 1.5 ELSE 1.0 END
 		) DESC
 		LIMIT ?
-	`, projectID, limit)
+	`, projectID, limit*2)
 	if err != nil {
 		return nil, fmt.Errorf("get top memories: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-	return scanMemories(rows)
+	results, err := scanMemories(rows)
+	_ = rows.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(results) > limit {
+		ids := make([]string, len(results))
+		pinned := make(map[string]bool, len(results))
+		for i, m := range results {
+			ids[i] = m.ID
+			pinned[m.ID] = m.Pinned
+		}
+		penalty, err := DemotionPenalties(ctx, s.db, ids, pinned, s.demotionThreshold)
+		if err != nil {
+			s.logger.Debug("get top memories: demotion lookup failed", "error", err)
+		} else {
+			results = StableDemote(results, func(m Memory) string { return m.ID }, penalty)
+		}
+		if len(results) > limit {
+			results = results[:limit]
+		}
+	}
+	return results, nil
 }
 
 // SearchFTS searches memories using full-text search.
