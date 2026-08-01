@@ -10,7 +10,7 @@ require (
 	github.com/knadh/koanf/v2 v2.3.5
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	golang.org/x/sys v0.46.0
-	modernc.org/sqlite v1.54.0
+	modernc.org/sqlite v1.55.0
 )
 
 require (
