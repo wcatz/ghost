@@ -9,9 +9,15 @@ it was built.
 ## Running
 
 1. Build the binary: `make build` (from the repo root).
-2. Ensure `ANTHROPIC_API_KEY` is set in your shell — `ghost reflect --tier
-   haiku`, `ghost resolve`, and `ghost supersede` all require it, and each
-   run spends real API credits.
+2. Ensure `ANTHROPIC_API_KEY` is set in the environment of the process that
+   will invoke the Workflow tool call below — `ghost reflect --tier haiku`,
+   `ghost resolve`, and `ghost supersede` all require it, and each run spends
+   real API credits. Setting it in `~/.bashrc` or a terminal you open
+   afterward is not sufficient: a running Claude Code session does not
+   re-source shell rc files, so the key must already be exported in the
+   environment this session actually has. The workflow's Setup phase fails
+   fast with a clear error if the key is missing, rather than letting every
+   Consolidation/storyline call fail individually deep into the run.
 3. Invoke the Workflow tool with `scriptPath` set to
    `docs/superpowers/eval/workflows/ghost-eval.workflow.js` and `args`
    optionally overriding `replayProjects` (default:

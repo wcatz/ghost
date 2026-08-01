@@ -36,6 +36,25 @@ if (!/^\d{8}-\d{6}-eval$/.test(trimmedRunId)) {
 const scratchRoot = `/tmp/ghost-eval/${trimmedRunId}`
 log(`Eval run ${trimmedRunId} — scratch root ${scratchRoot} — repo ${REPO}`)
 
+// ANTHROPIC_API_KEY is required by ghost reflect/resolve/supersede (Consolidation
+// phase and storyline cliGradeResult runs). It must be set in the environment of
+// the process that invoked this Workflow tool call, not merely in an interactive
+// shell's rc file — a Claude Code session does not re-source ~/.bashrc, so
+// exporting the key in a terminal after the session started has no effect here.
+// Checking once up front avoids burning the Replay phase's cost before every
+// Consolidation call fails individually deep into the run.
+const keyCheck = await agent(
+  '[ -n "$ANTHROPIC_API_KEY" ] && echo present || echo missing',
+  { label: 'check-api-key' }
+)
+if (!keyCheck.includes('present')) {
+  throw new Error(
+    'Setup: ANTHROPIC_API_KEY is not set in this Workflow call\'s environment. ' +
+    'ghost reflect/resolve/supersede will fail. Export it in the shell/session that ' +
+    'invokes this Workflow tool (not just your ~/.bashrc), then retry.'
+  )
+}
+
 await agent(
   `Run: mkdir -p ${scratchRoot}/data ${scratchRoot}/config && echo ready`,
   { label: 'scratch-mkdir' }
