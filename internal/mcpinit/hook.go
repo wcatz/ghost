@@ -1,6 +1,7 @@
 package mcpinit
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/memory"
 	_ "modernc.org/sqlite"
 )
 
@@ -145,7 +147,7 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 	if len(memories) > 0 {
 		fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
 		for _, m := range memories {
-			fmt.Fprintf(&sb, "- [%s] `%s` %s\n", m[1], shortID(m[0]), quoteData(m[2]))
+			fmt.Fprintf(&sb, "- [%s] `%s` %s\n", m.Category, shortID(m.ID), quoteData(m.Content))
 		}
 	}
 
@@ -209,7 +211,15 @@ func loadGlobalMemories(dbPath string) [][2]string {
 	return out
 }
 
-func loadSessionContext(cwd string) (projectID, project string, memories [][3]string, learned string, tasks [][4]string, decisions [][2]string, interactionCount int) {
+// sessionMemory is loadSessionContext's own memory shape — a local struct
+// rather than memory.Memory because this function deliberately queries its
+// own lightweight *sql.DB connection instead of depending on Store.
+type sessionMemory struct {
+	ID, Category, Content string
+	Pinned                bool
+}
+
+func loadSessionContext(cwd string) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][2]string, interactionCount int) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
@@ -235,12 +245,14 @@ func loadSessionContext(cwd string) (projectID, project string, memories [][3]st
 		`SELECT learned_context FROM ghost_state WHERE project_id = ?`, projectID,
 	).Scan(&learned)
 
-	// Get top memories: pinned first, then by importance
+	// Get top memories: pinned first, then by importance. Over-fetches
+	// (LIMIT 50 instead of the eventual 25) so near-duplicate demotion below
+	// can drop matches without under-returning.
 	rows, err := db.Query(`
-		SELECT id, category, content FROM memories
+		SELECT id, category, content, pinned FROM memories
 		WHERE project_id = ? AND resolved_at IS NULL
 		ORDER BY pinned DESC, importance DESC, updated_at DESC
-		LIMIT 25
+		LIMIT 50
 	`, projectID)
 	if err != nil {
 		return
@@ -249,11 +261,34 @@ func loadSessionContext(cwd string) (projectID, project string, memories [][3]st
 
 	for rows.Next() {
 		var id, cat, content string
-		if err := rows.Scan(&id, &cat, &content); err != nil {
+		var pinnedInt int
+		if err := rows.Scan(&id, &cat, &content, &pinnedInt); err != nil {
 			continue
 		}
 		content = truncateUTF8(content, 300)
-		memories = append(memories, [3]string{id, cat, content})
+		memories = append(memories, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1})
+	}
+
+	if len(memories) > 25 {
+		demotionThreshold := memory.DefaultDemotionThreshold
+		if cfg, cfgErr := config.Load(); cfgErr == nil {
+			demotionThreshold = cfg.Linking.DemotionThreshold
+		}
+		ids := make([]string, len(memories))
+		pinned := make(map[string]bool, len(memories))
+		for i, m := range memories {
+			ids[i] = m.ID
+			pinned[m.ID] = m.Pinned
+		}
+		penalty, penaltyErr := memory.DemotionPenalties(context.Background(), db, ids, pinned, demotionThreshold)
+		if penaltyErr != nil {
+			fmt.Fprintln(os.Stderr, "ghost: session injection demotion lookup failed:", penaltyErr)
+		} else {
+			memories = memory.StableDemote(memories, func(m sessionMemory) string { return m.ID }, penalty)
+		}
+		if len(memories) > 25 {
+			memories = memories[:25]
+		}
 	}
 
 	// Get open tasks
