@@ -39,6 +39,21 @@ won't be caught until the worker runs. Given the linking worker's existing
 polling interval (2 minutes, `cmd/ghost/main.go`), this lag is acceptable for
 an injection-quality feature.
 
+**Known limitation — `strength` is a ratchet, not a live reading.**
+`CreateLink`'s upsert (`internal/memory/links.go:43-45`) sets
+`strength = MAX(strength, excluded.strength)` on conflict, so a stored
+`related` edge's strength only ever goes up, never down, across rescans. If
+two memories are edited independently after the edge was written and drift
+apart semantically, `memory_links` still reports their old (higher) peak
+similarity — demotion could keep suppressing a pair that's no longer actually
+near-duplicate. This is accepted as a limitation rather than fixed here:
+recomputing a live cosine at injection time would reintroduce the embedding
+cost this design exists to avoid, and the linking worker's own ratchet
+behavior is out of scope for a demotion-only change (see Out of scope). If
+this proves to matter in practice, the fix belongs in the linking worker
+(e.g. overwrite instead of ratchet, or expire edges older than N rescans),
+not in `GetTopMemories`.
+
 ## Threshold: stricter than link-creation
 
 0.70 (the link-creation threshold) is tuned for "genuinely related," not
@@ -53,28 +68,42 @@ ranking.
 
 ## Demotion algorithm
 
-Given the ranked candidate list (see over-fetch below):
+This mirrors the codebase's established batched-lookup + penalty-reorder
+pattern (`SupersedesWithin` + `demoteSuperseded` in
+`internal/memory/links.go`/`vector.go`) rather than a per-pair query loop —
+same shape, new predicate.
 
-1. For each ordered pair of candidates `(a, b)` where `a` ranks higher than
-   `b`, check `memory_links` for a `related` edge between them with
-   `strength >= linking.demotionThreshold`.
-2. If found, one of the pair is dropped:
-   - If neither is pinned, or both are pinned: drop `b` (the lower-ranked).
-   - If exactly one is pinned: drop the *unpinned* one, regardless of rank —
-     pinning is an explicit user signal to keep something visible, and
-     demotion must never drop a pinned memory in favor of an unpinned one.
-3. Repeat pairwise across the surviving set until no remaining pair exceeds
-   the threshold. This collapses transitive clusters (A~B, B~C, A~C all above
-   threshold) down to one survivor per cluster, one pair-comparison at a
-   time, without needing separate cluster-detection logic.
+Given the over-fetched candidate list (see below):
+
+1. One query: `SELECT source_id, target_id FROM memory_links WHERE
+   relation = 'related' AND invalidated_at IS NULL AND strength >=
+   linking.demotionThreshold AND source_id IN (...) AND target_id IN (...)`,
+   parameterized over every candidate ID in the list — a single round trip
+   regardless of candidate count, exactly like `SupersedesWithin`.
+2. Build a `penalty` map over candidate IDs: for each returned pair `(a, b)`,
+   increment the penalty of whichever of `a`/`b` ranks lower in the candidate
+   list — unless that one is pinned and the other isn't, in which case
+   penalize the unpinned one instead regardless of rank. Pinning is an
+   explicit user signal to keep something visible, and demotion must never
+   penalize a pinned memory in favor of an unpinned one.
+3. `sort.SliceStable` the candidate list ascending by penalty (ties keep
+   existing rank order) — identical mechanics to `demoteSuperseded`. This
+   sinks near-duplicates to the bottom without a separate cluster-detection
+   pass: in a transitive cluster (A~B, B~C, A~C all above threshold), each
+   lower-ranked member accumulates a penalty from every higher-ranked member
+   it matches, so the single highest-ranked survivor naturally ends up with
+   the lowest penalty in the cluster.
+4. Truncate to `limit` (see over-fetch below). Truncating after the penalty
+   sort is what actually removes near-duplicates from the returned set —
+   the sort alone only reorders.
 
 ## Backfill via over-fetch
 
-To avoid returning fewer than the caller's requested `limit` after demotion
-removes candidates, `GetTopMemories` fetches `limit * 2` candidates from the
-existing ranked SQL query (mirroring the `limit * 3` over-fetch pattern
-`ghost_memory_search`'s category filter already uses), applies demotion, then
-truncates to `limit`.
+To avoid returning fewer than the caller's requested `limit` after truncation
+removes demoted candidates, `GetTopMemories` fetches `limit * 2` candidates
+from the existing ranked SQL query (mirroring the `limit * 3` over-fetch
+pattern `ghost_memory_search`'s category filter already uses), applies the
+demotion reorder above, then truncates to `limit`.
 
 If fewer than `limit` survive even after over-fetching — the over-fetch
 window itself didn't contain enough non-duplicate candidates — return what's
@@ -84,10 +113,12 @@ possible under-return rather than guaranteeing an exact count.
 
 ## Error handling
 
-If the `memory_links` lookup fails (DB error), fail open: log the error and
-return the un-demoted, over-fetched-then-truncated ranked list. Demotion is a
-quality enhancement, not a correctness-critical path — session-start
-injection must never fail outright because a secondary dedup query broke.
+If the batched `memory_links` query fails (DB error), fail open: log the
+error and return the un-demoted, over-fetched-then-truncated ranked list.
+Demotion is a quality enhancement, not a correctness-critical path —
+session-start injection must never fail outright because a secondary dedup
+query broke. This matches `demoteSuperseded`'s existing non-fatal-on-error
+behavior in `internal/memory/vector.go`.
 
 ## Testing
 
@@ -111,4 +142,10 @@ Unit tests in `internal/memory/store_test.go`:
 - Search-time (`ghost_memory_search`) demotion — follow-up design.
 - Cross-project demotion — `GetTopMemories` is already scoped to one project
   plus `_global`; demotion operates only within that existing candidate set.
-- Changing `linking.threshold` or the linking worker's scan behavior.
+- Changing `linking.threshold` or the linking worker's scan behavior,
+  including its `strength` ratchet (see Known limitation above) and its
+  `maxCandidates = 6` per-memory neighbor cap (`internal/linking/worker.go:35`).
+  That cap means a memory already has at most 6 `related` edges to begin
+  with, so this design's over-fetch window relies on the worker having
+  linked the actual near-duplicate within that top-6 — an existing linking-
+  worker constraint this design inherits rather than changes.
