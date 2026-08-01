@@ -238,6 +238,61 @@ func TestSessionCounterIncrements(t *testing.T) {
 	}
 }
 
+// TestSessionCounterIgnoresResumeClearCompact: resume/clear/compact fire
+// SessionStart too, but a user perceives those as continuing the same
+// session — only "startup" (or an empty/legacy source) should bump the count.
+func TestSessionCounterIgnoresResumeClearCompact(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	run := func(source string) string {
+		m := map[string]string{"cwd": projDir}
+		if source != "" {
+			m["source"] = source
+		}
+		input, _ := json.Marshal(m)
+		var out strings.Builder
+		HandleSessionStartHook(strings.NewReader(string(input)), &out)
+		return out.String()
+	}
+
+	if got := run("startup"); !strings.Contains(got, "Session #1") {
+		t.Errorf("startup should show Session #1; got:\n%s", got)
+	}
+	for _, source := range []string{"resume", "clear", "compact"} {
+		if got := run(source); !strings.Contains(got, "Session #1") {
+			t.Errorf("%s should NOT bump the counter, still Session #1; got:\n%s", source, got)
+		}
+	}
+	if got := run("startup"); !strings.Contains(got, "Session #2") {
+		t.Errorf("second startup should show Session #2; got:\n%s", got)
+	}
+}
+
 // TestBumpSessionCountNoPhantomDB: the counter write path must never create a
 // database that isn't there.
 func TestBumpSessionCountNoPhantomDB(t *testing.T) {

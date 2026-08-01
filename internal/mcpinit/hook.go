@@ -98,7 +98,11 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 	// counter bump is the one deliberate write, scoped to its own short-lived
 	// connection and best-effort — on any failure (busy store, permissions)
 	// the stale stored count is shown instead. Never creates a database.
-	if projectID != "" {
+	// Only a genuine new session should count — resume/clear/compact fire
+	// SessionStart too, but a user perceives those as continuing the same
+	// session, not starting a new one. Bumping on every fire inflated the
+	// displayed session number well past the user's actual session count.
+	if projectID != "" && (input.Source == "" || input.Source == "startup") {
 		if dataDir, err := config.DataDir(); err == nil {
 			if n := bumpSessionCount(filepath.Join(dataDir, "ghost.db"), projectID); n > 0 {
 				interactionCount = n
