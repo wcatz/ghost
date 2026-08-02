@@ -356,9 +356,9 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 
 	// Two-stage duplicate detection. Stage 1 (recall): the FTS OR-probe over
 	// the first 10 words retrieves merge candidates cheaply. Stage 2
-	// (precision): Jaccard >= upsertMergeThreshold over the full token sets
-	// confirms a true duplicate — the OR-probe alone treats a single shared
-	// word as a match, which silently swallowed unrelated saves.
+	// (precision): mergeScore over the full token sets confirms a true
+	// duplicate — the OR-probe alone treats a single shared word as a match,
+	// which silently swallowed unrelated saves.
 	ftsQuery := sanitizeFTS(content)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, m.importance, m.content
@@ -382,8 +382,8 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 			if scanErr := rows.Scan(&candID, &candImportance, &candContent); scanErr != nil {
 				continue
 			}
-			sim := jaccard(newTokens, tokenizeContent(candContent))
-			if sim >= upsertMergeThreshold && sim > bestSim {
+			sim := mergeScore(newTokens, tokenizeContent(candContent))
+			if sim > 0 && sim > bestSim {
 				bestSim = sim
 				existingID = candID
 				existingImportance = candImportance
@@ -1304,9 +1304,44 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 // Extracts plain words and quotes each one so they're treated as literals.
 // upsertMergeThreshold is the minimum Jaccard similarity between full token
 // sets for Upsert to treat two memories as duplicates. Matches the 0.5 gate
-// reflection's SQLite tier uses, so save-time and reflection-time dedup agree
-// on what "duplicate" means.
+// reflection's SQLite tier uses (internal/reflection/tier_sqlite.go), so
+// save-time and reflection-time dedup agree on what "duplicate" means for
+// same-length restatements.
+//
+// Save-time dedup deliberately goes *further* than reflection's tier via the
+// overlap leg below: Upsert sees one candidate against a live corpus and its
+// misses accumulate in the ranked window until they bury distinct facts,
+// whereas reflection re-scores the whole set offline and has an LLM tier
+// behind it. The divergence is intentional, not drift.
 const upsertMergeThreshold = 0.5
+
+// The overlap leg's gates. The overlap coefficient's one known failure mode is
+// subset-of-a-much-larger-text: a short save whose few tokens all happen to
+// appear in a long unrelated memory scores 1.0. The min-token and min-ratio
+// gates — not the threshold — are what exclude that shape, which is why the
+// threshold can sit as low as it does.
+//
+//   - upsertOverlapThreshold: minimum |A∩B| / min(|A|,|B|) — at least half of
+//     the shorter memory's distinct vocabulary must also appear in the other.
+//     0.5 is empirical, not inherited from the Jaccard gate it happens to
+//     equal: the same-fact restatements in
+//     TestStoreUpsertMergesLengthAsymmetricParaphrases score 0.857, 0.600 and
+//     0.545 against the accumulated memory, so any threshold above 0.545
+//     leaves saves that plainly restate one fact unmerged.
+//   - upsertOverlapMinTokens: minimum token count on the shorter side. Below
+//     it, containment is too easy to hit by accident.
+//   - upsertOverlapMinRatio: minimum len(shorter)/len(longer). Genuine
+//     restatements of one fact are comparably sized (~0.9); the accidental
+//     containment case is lopsided (~0.2). A terse fact and a much wordier
+//     version of it are therefore NOT merged — deliberately, because nothing
+//     lexical distinguishes that from accidental containment, and a false
+//     merge destroys information while a false split is recoverable by
+//     reflection.
+const (
+	upsertOverlapThreshold = 0.5
+	upsertOverlapMinTokens = 5
+	upsertOverlapMinRatio  = 0.6
+)
 
 // tokenizeContent lowercases s and splits it into a set of alphanumeric
 // tokens longer than one rune. Mirrors reflection's tokenize so both dedup
@@ -1339,6 +1374,66 @@ func jaccard(a, b map[string]bool) float64 {
 		return 0
 	}
 	return float64(intersection) / float64(union)
+}
+
+// overlapCoefficient (Szymkiewicz–Simpson) is |A∩B| / min(|A|,|B|). Unlike
+// Jaccard it does not penalize length asymmetry, so a terse fact and a verbose
+// restatement of the same fact score high instead of being pulled apart by the
+// longer side's extra filler tokens.
+func overlapCoefficient(a, b map[string]bool) float64 {
+	smaller := len(a)
+	if len(b) < smaller {
+		smaller = len(b)
+	}
+	if smaller == 0 {
+		return 0
+	}
+	intersection := 0
+	for token := range a {
+		if b[token] {
+			intersection++
+		}
+	}
+	return float64(intersection) / float64(smaller)
+}
+
+// mergeScore reports whether two candidate contents' token sets are
+// near-duplicates for Upsert purposes.
+//
+// Jaccard alone under-merges on the dominant real-world case: the same fact
+// restated at a different length. "cache TTL is 300s" vs "the cache TTL is set
+// to 300 seconds" is Jaccard 0.22 — far below any threshold that isn't itself
+// catastrophically over-merging — because the union grows with the wordier
+// side while the intersection cannot. The overlap coefficient scores that pair
+// 0.75 and is the standard fix for exactly this asymmetry.
+//
+// Overlap alone over-merges though: a 2-token save whose tokens both happen to
+// appear in a long unrelated memory scores 1.0. So the overlap leg is gated on
+// token count and length ratio (see the constants) to exclude that shape.
+// Anything the gates reject keeps the original Jaccard-only behavior.
+// It returns 0 when the pair must not merge, and otherwise a positive score
+// used only to pick the best of several candidates.
+func mergeScore(a, b map[string]bool) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	if j := jaccard(a, b); j >= upsertMergeThreshold {
+		return j
+	}
+	smaller, larger := len(a), len(b)
+	if larger < smaller {
+		smaller, larger = larger, smaller
+	}
+	if smaller < upsertOverlapMinTokens {
+		return 0
+	}
+	if float64(smaller)/float64(larger) < upsertOverlapMinRatio {
+		return 0
+	}
+	if o := overlapCoefficient(a, b); o >= upsertOverlapThreshold {
+		return o
+	}
+	return 0
 }
 
 func sanitizeFTS(text string) string {

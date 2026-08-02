@@ -1045,6 +1045,7 @@ func (s *Server) registerTools() {
 		Rationale    string   `json:"rationale" jsonschema:"Why this was chosen"`
 		Alternatives []string `json:"alternatives,omitempty" jsonschema:"What was considered and rejected"`
 		Tags         []string `json:"tags,omitempty" jsonschema:"Tags for categorization"`
+		Supersedes   string   `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -1080,11 +1081,21 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
+		supersedeNote := ""
+		if args.Supersedes != "" {
+			if err := s.store.SupersedeDecision(ctx, args.ProjectID, args.Supersedes, decisionID); err != nil {
+				// The new decision is already committed; report the
+				// supersession failure without losing that ID.
+				supersedeNote = fmt.Sprintf(" WARNING: could not mark %s as superseded: %v.", args.Supersedes, err)
+			} else {
+				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", args.Supersedes)
+			}
+		}
 		s.notifyProjectResource(ctx, args.ProjectID, "decisions")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
-				"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.",
-				decisionID, memoryID)}},
+				"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
+				decisionID, memoryID, supersedeNote)}},
 		}, nil, nil
 	})
 

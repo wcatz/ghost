@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -250,6 +251,123 @@ func TestStoreUpsertMergesBestCandidate(t *testing.T) {
 	}
 	if idNew != idB {
 		t.Errorf("should merge into B (%s), merged into %s", idB, idNew)
+	}
+}
+
+// TestStoreUpsertMergesLengthAsymmetricParaphrases covers the failure the eval
+// surfaced: the same fact restated at a different length accumulated as
+// separate memories because Jaccard punishes the wordier side's filler tokens
+// (these pairs score 0.2–0.45). The overlap-coefficient leg catches them.
+func TestStoreUpsertMergesLengthAsymmetricParaphrases(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	base := "the session cache TTL is 300 seconds"
+	restatements := []string{
+		"session cache TTL is set to 300 seconds by default",
+		"default session cache TTL: 300 seconds, configured in the server config",
+		"the session cache TTL value is 300 seconds and it is not currently tunable",
+	}
+
+	if _, _, err := s.Upsert(ctx, testProject, "fact", base, "mcp", 0.7, nil); err != nil {
+		t.Fatalf("Upsert (base): %v", err)
+	}
+	for i, r := range restatements {
+		_, merged, err := s.Upsert(ctx, testProject, "fact", r, "mcp", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert (restatement %d): %v", i, err)
+		}
+		if !merged {
+			t.Errorf("restatement %d must merge, did not: %q", i, r)
+		}
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 1 {
+		t.Errorf("expected 1 memory after 4 restatements of one fact, got %d", len(all))
+		for _, m := range all {
+			t.Logf("  %s", m.Content)
+		}
+	}
+}
+
+// TestStoreUpsertOverlapLegDoesNotOverMerge guards the risk the overlap leg
+// introduces: containment is trivially satisfied by a short save whose few
+// tokens all appear in a longer, unrelated memory. Distinct facts must survive.
+func TestStoreUpsertOverlapLegDoesNotOverMerge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// A long memory that lexically contains every token of the short saves
+	// below, but states a different fact from each of them.
+	long := "the embedding worker retries the Ollama request twice before giving " +
+		"up and leaves the memory unembedded until the next sweep"
+	if _, _, err := s.Upsert(ctx, testProject, "gotcha", long, "mcp", 0.7, nil); err != nil {
+		t.Fatalf("Upsert (long): %v", err)
+	}
+
+	shorts := []string{
+		"the Ollama request twice",
+		"the next sweep",
+		"the memory unembedded",
+	}
+	for i, sh := range shorts {
+		_, merged, err := s.Upsert(ctx, testProject, "gotcha", sh, "mcp", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert (short %d): %v", i, err)
+		}
+		if merged {
+			t.Errorf("short contained save %d must not merge into a longer unrelated memory: %q", i, sh)
+		}
+	}
+
+	// Comparably-sized, same-topic, genuinely different facts — the shape the
+	// overlap leg's gates do NOT exclude — must still survive on score alone.
+	distinct := []string{
+		"the embedding worker skips memories longer than the model context window",
+		"the embedding worker sweeps the unembedded memories every two minutes",
+		"the embedding worker writes vectors into the memory embeddings table",
+	}
+	for i, d := range distinct {
+		_, merged, err := s.Upsert(ctx, testProject, "gotcha", d, "mcp", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert (distinct %d): %v", i, err)
+		}
+		if merged {
+			t.Errorf("distinct fact %d sharing topic vocabulary must not merge: %q", i, d)
+		}
+	}
+}
+
+func TestMergeScore(t *testing.T) {
+	tests := []struct {
+		name      string
+		a, b      string
+		wantMerge bool
+	}{
+		{"identical", "cache TTL is 300 seconds", "cache TTL is 300 seconds", true},
+		{"length-asymmetric paraphrase", "cache TTL is 300 seconds",
+			"the cache TTL is set to 300 seconds in config", true},
+		{"empty vs empty", "a b c", "x y z", false},
+		{"empty vs populated", "a b c", "the embedding worker sweeps every minute", false},
+		{"short containment below min tokens", "pnpm workspaces",
+			"we use pnpm workspaces because npm workspaces hoists transitive deps wrongly", false},
+		{"unrelated same topic", "SQLite busy timeout must be set on the read-only hook connection",
+			"SQLite FTS5 rank ordering is unstable across identical RRF scores in hybrid search", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeScore(tokenizeContent(tt.a), tokenizeContent(tt.b)) > 0
+			if got != tt.wantMerge {
+				t.Errorf("mergeScore(%q, %q) merge = %v, want %v (jaccard=%.3f overlap=%.3f)",
+					tt.a, tt.b, got, tt.wantMerge,
+					jaccard(tokenizeContent(tt.a), tokenizeContent(tt.b)),
+					overlapCoefficient(tokenizeContent(tt.a), tokenizeContent(tt.b)))
+			}
+		})
 	}
 }
 
@@ -1324,6 +1442,149 @@ func TestStoreDecisions(t *testing.T) {
 	}
 	if !foundDecisionMemory {
 		t.Error("RecordDecision should also create a decision-category memory")
+	}
+}
+
+// TestSupersedeDecision covers the eval finding that a reversed decision kept
+// reporting status "active" and could head ghost_decisions_list ahead of the
+// decision that replaced it. The status/superseded_by columns existed but had
+// no writer, and ListDecisions ordered purely by created_at DESC.
+func TestSupersedeDecision(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	oldID, _, err := s.RecordDecision(ctx, testProject,
+		"Use Redis for the job queue", "Redis lists as the queue backend",
+		"Already deployed for caching", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (old): %v", err)
+	}
+	newID, _, err := s.RecordDecision(ctx, testProject,
+		"Reverse: use Postgres for the job queue", "SKIP LOCKED on Postgres",
+		"Redis lost jobs on failover", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (new): %v", err)
+	}
+
+	if err := s.SupersedeDecision(ctx, testProject, oldID, newID); err != nil {
+		t.Fatalf("SupersedeDecision: %v", err)
+	}
+
+	all, err := s.ListDecisions(ctx, testProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 decisions, got %d", len(all))
+	}
+	// The live decision must come first, and the reversed one must report its
+	// real status and point at its replacement.
+	if all[0].ID != newID {
+		t.Errorf("live decision should rank first, got %s", all[0].ID)
+	}
+	if all[1].ID != oldID {
+		t.Fatalf("superseded decision should rank last, got %s", all[1].ID)
+	}
+	if all[1].Status != "superseded" {
+		t.Errorf("reversed decision status = %q, want superseded", all[1].Status)
+	}
+	if all[1].SupersededBy != newID {
+		t.Errorf("superseded_by = %q, want %s", all[1].SupersededBy, newID)
+	}
+	if all[0].Status != "active" {
+		t.Errorf("replacement status = %q, want active", all[0].Status)
+	}
+
+	// Status filters now actually partition.
+	active, err := s.ListDecisions(ctx, testProject, "active", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions active: %v", err)
+	}
+	if len(active) != 1 || active[0].ID != newID {
+		t.Errorf("expected only the replacement to be active, got %v", active)
+	}
+
+	// Re-running repoints rather than failing.
+	if err := s.SupersedeDecision(ctx, testProject, oldID, newID); err != nil {
+		t.Errorf("re-running SupersedeDecision should be safe: %v", err)
+	}
+}
+
+// TestListDecisionsLimitPicksNewestNotLiveOnly pins the ordering change to
+// presentation only: the limit still selects the newest N decisions, so
+// demoting superseded ones cannot silently push them out of the window. A
+// caller that never sees the reversed decision cannot tell a decision was
+// reversed at all.
+func TestListDecisionsLimitPicksNewestNotLiveOnly(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Oldest recorded first, so the last one recorded is the newest.
+	var ids []string
+	for i := range 4 {
+		id, _, err := s.RecordDecision(ctx, testProject,
+			fmt.Sprintf("Decision %d", i), fmt.Sprintf("do thing %d", i), "because", nil, nil)
+		if err != nil {
+			t.Fatalf("RecordDecision %d: %v", i, err)
+		}
+		ids = append(ids, id)
+		// RecordDecision stamps datetime('now'), so all four land in the same
+		// second and created_at DESC would be arbitrary. Space them out.
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE decisions SET created_at = datetime('now', ?) WHERE id = ?`,
+			fmt.Sprintf("-%d days", 10-i), id); err != nil {
+			t.Fatalf("backdate %d: %v", i, err)
+		}
+	}
+	// Supersede the two newest, which are the ones inside a limit-2 window.
+	for _, i := range []int{2, 3} {
+		if err := s.SupersedeDecision(ctx, testProject, ids[i], ids[0]); err != nil {
+			t.Fatalf("SupersedeDecision %d: %v", i, err)
+		}
+	}
+
+	got, err := s.ListDecisions(ctx, testProject, "", 2)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 decisions, got %d", len(got))
+	}
+	// Window membership is still "the newest 2" — both superseded — not "the
+	// newest 2 active ones".
+	inWindow := map[string]bool{got[0].ID: true, got[1].ID: true}
+	if !inWindow[ids[2]] || !inWindow[ids[3]] {
+		t.Errorf("limit must select the newest decisions regardless of status; got %s, %s (want %s, %s)",
+			got[0].ID, got[1].ID, ids[2], ids[3])
+	}
+}
+
+func TestSupersedeDecisionRejectsBadInput(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, _, err := s.RecordDecision(ctx, testProject, "T", "D", "R", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision: %v", err)
+	}
+
+	if err := s.SupersedeDecision(ctx, testProject, id, id); err == nil {
+		t.Error("a decision must not be able to supersede itself")
+	}
+	if err := s.SupersedeDecision(ctx, testProject, id, "no-such-decision"); err == nil {
+		t.Error("superseding by an unknown decision must fail")
+	}
+	if err := s.SupersedeDecision(ctx, testProject, "no-such-decision", id); err == nil {
+		t.Error("superseding an unknown decision must fail")
+	}
+
+	// The failed attempts must not have flipped anything.
+	all, err := s.ListDecisions(ctx, testProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(all) != 1 || all[0].Status != "active" {
+		t.Errorf("failed supersede attempts must leave status untouched, got %v", all)
 	}
 }
 

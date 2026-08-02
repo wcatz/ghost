@@ -724,3 +724,80 @@ func timeMustParse(s string) time.Time {
 	}
 	return t
 }
+
+// makeScoredMemory is makeMemory with an explicit importance, so a test can
+// pin the pre-demote ranking instead of inheriting makeMemory's fixed 0.7.
+func makeScoredMemory(t *testing.T, s *Store, content string, importance float32) string {
+	t.Helper()
+	id, err := s.Create(context.Background(), testProject, Memory{
+		Category: "fact", Content: content, Source: "manual", Importance: importance,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	return id
+}
+
+// TestProductionSearchDemotesSuperseded is the regression guard for the eval
+// finding that a superseded memory could outrank its replacement in
+// ghost_memory_search. The demote mechanism shipped behind
+// SearchParams.SupersedeDemote but no production caller ever set it, so it was
+// dead code in the live server. These are the entry points the MCP tools
+// actually use — SearchHybrid (ghost_memory_search) and SearchHybridAll
+// (ghost_search_all) — exercised with no query vector, the FTS-only fallback
+// that runs whenever Ollama is unavailable.
+func TestProductionSearchDemotesSuperseded(t *testing.T) {
+	if !DefaultSearchParams().SupersedeDemote {
+		t.Fatal("production default must consume supersedes links")
+	}
+
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Importance is what forces the baseline ordering: without it the two
+	// near-identical contents tie and the winner is decided by FTS rank on a
+	// two-token difference, which is not stable enough to build an assertion
+	// on. The stale memory is deliberately the higher-scoring one so the only
+	// thing that can move it below its replacement is the demote pass.
+	stale := makeScoredMemory(t, s, "the payments service deploys to the eu-west-1 region", 0.9)
+	fresh := makeScoredMemory(t, s, "the payments service deploys to the us-east-1 region", 0.5)
+
+	before, err := s.SearchHybrid(ctx, testProject, "payments service deploys region", nil, 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid (before): %v", err)
+	}
+	if len(before) != 2 {
+		t.Fatalf("expected both versions retrieved, got %d", len(before))
+	}
+	// The demote is only provable if the stale one wins on base score.
+	if before[0].ID != stale {
+		t.Fatalf("baseline must favor the stale memory, got %s first (stale=%s)", before[0].ID, stale)
+	}
+
+	if err := s.CreateLink(ctx, fresh, stale, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+
+	after, err := s.SearchHybrid(ctx, testProject, "payments service deploys region", nil, 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid (after): %v", err)
+	}
+	if len(after) != 2 {
+		t.Fatalf("demote must not drop results: got %d, want 2", len(after))
+	}
+	if after[0].ID != fresh || after[1].ID != stale {
+		t.Errorf("superseded memory must rank below its replacement; got %s then %s (fresh=%s stale=%s)",
+			after[0].ID, after[1].ID, fresh, stale)
+	}
+
+	allProjects, err := s.SearchHybridAll(ctx, "payments service deploys region", nil, 10)
+	if err != nil {
+		t.Fatalf("SearchHybridAll: %v", err)
+	}
+	if len(allProjects) != 2 {
+		t.Fatalf("cross-project demote must not drop results: got %d, want 2", len(allProjects))
+	}
+	if allProjects[0].ID != fresh {
+		t.Errorf("ghost_search_all must demote superseded too; got %s first", allProjects[0].ID)
+	}
+}

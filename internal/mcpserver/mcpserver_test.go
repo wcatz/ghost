@@ -1194,6 +1194,87 @@ func TestGhostResolve_DryRunByDefault(t *testing.T) {
 	}
 }
 
+// TestDecisionRecordSupersedesArg covers both shapes of the optional
+// supersedes argument through the real tool handler. The common case — no
+// supersedes — must not emit a warning: that argument is optional, so a stray
+// UPDATE against an empty id would put "WARNING: could not mark  as
+// superseded" on every ordinary ghost_decision_record result.
+func TestDecisionRecordSupersedesArg(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	ctx := context.Background()
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	record := func(args map[string]any) string {
+		t.Helper()
+		args["project_id"] = "test-project"
+		result, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name: "ghost_decision_record", Arguments: args,
+		})
+		if err != nil {
+			t.Fatalf("CallTool ghost_decision_record: %v", err)
+		}
+		if result.IsError {
+			t.Fatalf("ghost_decision_record returned an error result: %+v", result.Content)
+		}
+		text, ok := result.Content[0].(*mcp.TextContent)
+		if !ok {
+			t.Fatalf("expected TextContent, got %T", result.Content[0])
+		}
+		return text.Text
+	}
+
+	plain := record(map[string]any{
+		"title": "Use Redis for the job queue", "decision": "Redis lists as the backend",
+		"rationale": "already deployed",
+	})
+	if strings.Contains(plain, "WARNING") {
+		t.Errorf("a decision recorded without supersedes must not warn, got %q", plain)
+	}
+	if strings.Contains(plain, "superseded") {
+		t.Errorf("a decision recorded without supersedes must not mention supersession, got %q", plain)
+	}
+
+	decisions, err := store.ListDecisions(ctx, "abc123", "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(decisions) != 1 {
+		t.Fatalf("expected 1 decision, got %d", len(decisions))
+	}
+	oldID := decisions[0].ID
+
+	reversal := record(map[string]any{
+		"title": "Reverse: use Postgres", "decision": "SKIP LOCKED on Postgres",
+		"rationale": "Redis lost jobs on failover", "supersedes": oldID,
+	})
+	if strings.Contains(reversal, "WARNING") {
+		t.Fatalf("supersession of a real decision should succeed, got %q", reversal)
+	}
+	if !strings.Contains(reversal, oldID) {
+		t.Errorf("result should name the superseded decision %s, got %q", oldID, reversal)
+	}
+
+	after, err := store.ListDecisions(ctx, "abc123", "active", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions active: %v", err)
+	}
+	if len(after) != 1 || after[0].ID == oldID {
+		t.Errorf("expected only the replacement to remain active, got %+v", after)
+	}
+}
+
 func TestTruncateUTF8(t *testing.T) {
 	tests := []struct {
 		in       string

@@ -65,6 +65,7 @@ type MemoryStore interface {
 	// Decisions
 	RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, err error)
 	ListDecisions(ctx context.Context, projectID, status string, limit int) ([]memory.Decision, error)
+	SupersedeDecision(ctx context.Context, projectID, oldID, newID string) error
 
 	// Project management
 	ListProjects(ctx context.Context) ([]memory.Project, error)
