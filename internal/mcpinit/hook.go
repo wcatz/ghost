@@ -94,7 +94,7 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 		cwd = resolved
 	}
 
-	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount := loadSessionContext(cwd)
+	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd)
 
 	// Count this session. Context loading above is strictly read-only; the
 	// counter bump is the one deliberate write, scoped to its own short-lived
@@ -145,7 +145,9 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 	}
 
 	if len(memories) > 0 {
-		if totalMemoryCount > len(memories) {
+		if !totalCountKnown {
+			fmt.Fprintf(&sb, "**Memories (%d shown; total unknown — count lookup failed, more may be available; use ghost_memories_list or ghost_memory_search for the rest):**\n", len(memories))
+		} else if totalMemoryCount > len(memories) {
 			fmt.Fprintf(&sb, "**Memories (%d shown of %d total — %d not shown; use ghost_memories_list or ghost_memory_search for the rest):**\n", len(memories), totalMemoryCount, totalMemoryCount-len(memories))
 		} else {
 			fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
@@ -223,7 +225,7 @@ type sessionMemory struct {
 	Pinned                bool
 }
 
-func loadSessionContext(cwd string) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][2]string, interactionCount, totalMemoryCount int) {
+func loadSessionContext(cwd string) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][2]string, interactionCount, totalMemoryCount int, totalCountKnown bool) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
@@ -251,10 +253,13 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 
 	// Total count (pre-truncation) so the rendered context can flag how many
 	// memories weren't shown instead of silently dropping them — see the
-	// "N not shown" line in HandleSessionStartHook.
-	_ = db.QueryRow(`
+	// "N not shown" line in HandleSessionStartHook. A failed COUNT is reported
+	// as "unknown" rather than silently treated as zero/no-truncation.
+	if err := db.QueryRow(`
 		SELECT COUNT(*) FROM memories WHERE project_id = ? AND resolved_at IS NULL
-	`, projectID).Scan(&totalMemoryCount)
+	`, projectID).Scan(&totalMemoryCount); err == nil {
+		totalCountKnown = true
+	}
 
 	// Get top memories: pinned first, then by importance. Over-fetches
 	// (LIMIT 50 instead of the eventual 25) so near-duplicate demotion below

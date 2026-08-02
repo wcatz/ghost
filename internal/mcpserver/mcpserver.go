@@ -285,18 +285,22 @@ func (s *Server) resolveProjectID(ctx context.Context, input string) string {
 // projectExists reports whether id (already resolved via resolveProjectID)
 // matches a registered project. Used to distinguish "this project was never
 // persisted" from "this project exists but has nothing" in empty-result
-// messages — the raw list otherwise reads identically either way.
-func (s *Server) projectExists(ctx context.Context, id string) bool {
+// messages — the raw list otherwise reads identically either way. The error
+// return lets callers distinguish "confirmed unregistered" from "lookup
+// failed" instead of collapsing both to false, which would otherwise
+// misreport a project as unregistered (or risk a duplicate create) on a
+// transient ListProjects failure.
+func (s *Server) projectExists(ctx context.Context, id string) (bool, error) {
 	projects, err := s.store.ListProjects(ctx)
 	if err != nil {
-		return false
+		return false, err
 	}
 	for _, p := range projects {
 		if p.ID == id {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // updateArgs is package-level (unlike most tool arg structs) so the extracted
@@ -636,9 +640,13 @@ func (s *Server) registerTools() {
 
 		text := sb.String()
 		if text == "" {
-			if s.projectExists(ctx, args.ProjectID) {
+			exists, existsErr := s.projectExists(ctx, args.ProjectID)
+			switch {
+			case existsErr != nil:
+				text = "Project lookup failed — unable to determine whether it is registered. Try again or call ghost_memory_save to create it."
+			case exists:
 				text = "Project is registered but has no memories or learned context yet — nothing has been saved for it."
-			} else {
+			default:
 				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it. Call ghost_memory_save to create it.", args.ProjectID)
 			}
 		}
@@ -689,11 +697,15 @@ func (s *Server) registerTools() {
 
 		if len(memories) == 0 {
 			var text string
-			if !s.projectExists(ctx, args.ProjectID) {
+			exists, existsErr := s.projectExists(ctx, args.ProjectID)
+			switch {
+			case existsErr != nil:
+				text = "Project lookup failed — unable to determine whether it is registered."
+			case !exists:
 				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it.", args.ProjectID)
-			} else if args.Category != "" {
+			case args.Category != "":
 				text = fmt.Sprintf("No memories found in category %q for this project.", args.Category)
-			} else {
+			default:
 				text = "Project is registered but has no memories yet."
 			}
 			return &mcp.CallToolResult{

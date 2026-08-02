@@ -1,5 +1,7 @@
 # Ghost Memory-System Eval Report
 
+> Baseline evaluation of behavior before PR #228. Findings below are historical observations from the evaluated commit.
+
 ## 1. Scorecard
 
 | Dimension | Score | Justification |

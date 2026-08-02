@@ -6,7 +6,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
+	"time"
 )
+
+// defaultTimeout bounds a claude -p subprocess call when the caller's context
+// carries no earlier deadline — otherwise a stalled subprocess (auth prompt,
+// network stall, hung MCP init inside it) blocks the classify/reflect loop
+// indefinitely, since resolve/supersede classify candidates one at a time.
+const defaultTimeout = 5 * time.Minute
 
 // CLIClient drives Claude via the `claude` CLI (a `claude -p` subprocess)
 // instead of the direct Anthropic HTTP API, so it bills to the caller's
@@ -41,12 +49,21 @@ func (c *CLIClient) Reflect(ctx context.Context, prompt string) (string, TokenUs
 }
 
 // Classify satisfies the Provider interface (see internal/ai/provider.go).
+// systemPrompt is passed via the CLI's --system-prompt flag rather than being
+// concatenated into the prompt text, so it can't be confused with user content.
 func (c *CLIClient) Classify(ctx context.Context, systemPrompt, userContent string) (string, error) {
-	return c.run(ctx, systemPrompt+"\n\n"+userContent)
+	return c.run(ctx, userContent, "--system-prompt", systemPrompt)
 }
 
-func (c *CLIClient) run(ctx context.Context, prompt string) (string, error) {
-	cmd := exec.CommandContext(ctx, c.binary, "-p", "--setting-sources", "project,local", prompt)
+func (c *CLIClient) run(ctx context.Context, prompt string, extraArgs ...string) (string, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
+		defer cancel()
+	}
+	args := append([]string{"-p", "--setting-sources", "project,local"}, extraArgs...)
+	args = append(args, prompt)
+	cmd := exec.CommandContext(ctx, c.binary, args...)
 	cmd.Env = stripAPIKey(os.Environ())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -60,7 +77,8 @@ func (c *CLIClient) run(ctx context.Context, prompt string) (string, error) {
 func stripAPIKey(env []string) []string {
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
-		if len(kv) >= 18 && kv[:18] == "ANTHROPIC_API_KEY=" {
+		key, _, found := strings.Cut(kv, "=")
+		if found && strings.EqualFold(key, "ANTHROPIC_API_KEY") {
 			continue
 		}
 		out = append(out, kv)

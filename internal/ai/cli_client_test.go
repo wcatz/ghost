@@ -10,11 +10,11 @@ import (
 )
 
 func TestStripAPIKey(t *testing.T) {
-	in := []string{"FOO=bar", "ANTHROPIC_API_KEY=sk-secret", "PATH=/usr/bin"}
+	in := []string{"FOO=bar", "ANTHROPIC_API_KEY=sk-secret", "anthropic_api_key=sk-secret2", "PATH=/usr/bin"}
 	out := stripAPIKey(in)
 	for _, kv := range out {
-		if strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
-			t.Fatalf("expected ANTHROPIC_API_KEY stripped, got %v", out)
+		if strings.HasPrefix(strings.ToUpper(kv), "ANTHROPIC_API_KEY=") {
+			t.Fatalf("expected ANTHROPIC_API_KEY stripped (any case), got %v", out)
 		}
 	}
 	if len(out) != 2 {
@@ -61,11 +61,19 @@ echo -n '{"memories":[]}'
 	}
 }
 
-func TestCLIClient_Classify_JoinsPromptAndReturnsStdout(t *testing.T) {
+func TestCLIClient_Classify_PassesSystemPromptAndUserContentAsDistinctArgs(t *testing.T) {
 	bin := fakeClaudeBinary(t, `
-eval "last=\${$#}"
-echo -n "$last" | grep -q "SYSTEM" || { echo "missing system prompt" >&2; exit 1; }
-echo -n "$last" | grep -q "USERDATA" || { echo "missing user content" >&2; exit 1; }
+found_flag=0
+found_system=0
+found_user=0
+for arg in "$@"; do
+  if [ "$arg" = "--system-prompt" ]; then found_flag=1; fi
+  if [ "$arg" = "SYSTEM instructions" ]; then found_system=1; fi
+  if [ "$arg" = "USERDATA content" ]; then found_user=1; fi
+done
+if [ "$found_flag" -ne 1 ]; then echo "missing --system-prompt flag" >&2; exit 1; fi
+if [ "$found_system" -ne 1 ]; then echo "system prompt not passed as distinct arg" >&2; exit 1; fi
+if [ "$found_user" -ne 1 ]; then echo "user content not passed as distinct arg" >&2; exit 1; fi
 echo -n "KEEP"
 `)
 	c := &CLIClient{binary: bin}
