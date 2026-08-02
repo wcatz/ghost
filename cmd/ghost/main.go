@@ -149,6 +149,27 @@ func runHook() {
 	}
 }
 
+// resolveProjectOrExit resolves projectName to a project ID via store, printing
+// an error (with known-project names when available) and exiting the process
+// on failure or when no matching project is found.
+func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName string) string {
+	projectID, _, err := store.ResolveProject(ctx, projectName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if projectID == "" {
+		names, listErr := store.ListProjectNames(ctx)
+		if listErr != nil || len(names) == 0 {
+			fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
+		} else {
+			fmt.Fprintf(os.Stderr, "error: project %q not found. Known projects: %s\n", projectName, strings.Join(names, ", "))
+		}
+		os.Exit(1)
+	}
+	return projectID
+}
+
 // runReflect manually triggers memory consolidation for a project.
 // Defaults to dry-run (preview only). Use --apply to save results.
 // Use --restore to undo the last consolidation from snapshot.
@@ -186,20 +207,7 @@ Flags:
 
 	ctx := context.Background()
 
-	projectID, _, err := store.ResolveProject(ctx, projectName)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	if projectID == "" {
-		names, listErr := store.ListProjectNames(ctx)
-		if listErr != nil || len(names) == 0 {
-			fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
-		} else {
-			fmt.Fprintf(os.Stderr, "error: project %q not found. Known projects: %s\n", projectName, strings.Join(names, ", "))
-		}
-		os.Exit(1)
-	}
+	projectID := resolveProjectOrExit(ctx, store, projectName)
 
 	if restore {
 		n, err := store.RestoreSnapshot(ctx, projectID)
@@ -482,20 +490,7 @@ ANTHROPIC_API_KEY if set, else falls back to a subscription-billed
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
 
-	projectID, _, err := store.ResolveProject(ctx, projectName)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	if projectID == "" {
-		names, listErr := store.ListProjectNames(ctx)
-		if listErr != nil || len(names) == 0 {
-			fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
-		} else {
-			fmt.Fprintf(os.Stderr, "error: project %q not found. Known projects: %s\n", projectName, strings.Join(names, ", "))
-		}
-		os.Exit(1)
-	}
+	projectID := resolveProjectOrExit(ctx, store, projectName)
 	provider, err := buildClassifyProvider(cfg, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: ghost supersede %v\n", err)
@@ -576,20 +571,7 @@ subscription-billed 'claude' CLI call — requires one of the two.`)
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
 
-	projectID, _, err := store.ResolveProject(ctx, projectName)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	if projectID == "" {
-		names, listErr := store.ListProjectNames(ctx)
-		if listErr != nil || len(names) == 0 {
-			fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
-		} else {
-			fmt.Fprintf(os.Stderr, "error: project %q not found. Known projects: %s\n", projectName, strings.Join(names, ", "))
-		}
-		os.Exit(1)
-	}
+	projectID := resolveProjectOrExit(ctx, store, projectName)
 	provider, err := buildClassifyProvider(cfg, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: ghost resolve %v\n", err)
