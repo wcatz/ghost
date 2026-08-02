@@ -306,20 +306,77 @@ func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) err
 	return nil
 }
 
-// ResolveProjectByName looks up a project by name and returns its hash ID.
-func (s *Store) ResolveProjectByName(ctx context.Context, name string) (string, error) {
+// ResolveProject resolves an identifier — a project name, hash ID, or
+// filesystem path — to that project's (id, name). Returns ("", "", nil)
+// on no match; a non-nil error only indicates a real DB failure.
+//
+// Lookup order, first hit wins:
+//  1. exact id = input
+//  2. exact name = input
+//  3. if input contains '/': input = path OR input LIKE path || '/%'
+//     (ordered by LENGTH(path) DESC — longest/most-specific match wins;
+//     LENGTH(path) > 10 guards against a short project path matching too
+//     broadly, matching the hook's original lookupProject behavior)
+//  4. name = basename(input)
+func (s *Store) ResolveProject(ctx context.Context, input string) (id, name string, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var id string
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE name = ? LIMIT 1`, name).Scan(&id)
-	if err == sql.ErrNoRows {
-		return "", nil
+	err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE id = ? LIMIT 1`, input).Scan(&id, &name)
+	if err == nil {
+		return id, name, nil
 	}
+	if err != sql.ErrNoRows {
+		return "", "", fmt.Errorf("resolve project by id: %w", err)
+	}
+
+	err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE name = ? LIMIT 1`, input).Scan(&id, &name)
+	if err == nil {
+		return id, name, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", "", fmt.Errorf("resolve project by name: %w", err)
+	}
+
+	if strings.Contains(input, "/") {
+		err = s.db.QueryRowContext(ctx, `
+			SELECT id, name FROM projects
+			WHERE (path = ? OR ? LIKE path || '/%') AND LENGTH(path) > 10
+			ORDER BY LENGTH(path) DESC LIMIT 1
+		`, input, input).Scan(&id, &name)
+		if err == nil {
+			return id, name, nil
+		}
+		if err != sql.ErrNoRows {
+			return "", "", fmt.Errorf("resolve project by path: %w", err)
+		}
+	}
+
+	base := filepath.Base(input)
+	err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE name = ? LIMIT 1`, base).Scan(&id, &name)
+	if err == nil {
+		return id, name, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", "", fmt.Errorf("resolve project by basename: %w", err)
+	}
+
+	return "", "", nil
+}
+
+// ListProjectNames returns all known project names, ordered the same way as
+// ListProjects (name ASC) — used to format an actionable CLI error listing
+// known projects on a resolution miss.
+func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
+	projects, err := s.ListProjects(ctx)
 	if err != nil {
-		return "", fmt.Errorf("resolve project by name: %w", err)
+		return nil, err
 	}
-	return id, nil
+	names := make([]string, len(projects))
+	for i, p := range projects {
+		names[i] = p.Name
+	}
+	return names, nil
 }
 
 // Create inserts a new memory and returns its ID.

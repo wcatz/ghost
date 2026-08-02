@@ -1121,26 +1121,142 @@ func TestStoreListProjects(t *testing.T) {
 	}
 }
 
-func TestStoreResolveProjectByName(t *testing.T) {
+func TestStoreResolveProject_ByID(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	// testStore created project with name "test".
-	id, err := s.ResolveProjectByName(ctx, "test")
+	id, name, err := s.ResolveProject(ctx, testProject)
 	if err != nil {
-		t.Fatalf("ResolveProjectByName: %v", err)
+		t.Fatalf("ResolveProject: %v", err)
 	}
-	if id != testProject {
-		t.Errorf("expected %q, got %q", testProject, id)
+	if id != testProject || name != "test" {
+		t.Errorf("got id=%q name=%q, want id=%q name=%q", id, name, testProject, "test")
+	}
+}
+
+func TestStoreResolveProject_ByName(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, name, err := s.ResolveProject(ctx, "test")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != testProject || name != "test" {
+		t.Errorf("got id=%q name=%q, want id=%q name=%q", id, name, testProject, "test")
+	}
+}
+
+func TestStoreResolveProject_PathPrefix(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "ghostid", "/home/wayne/git/ghost", "ghost"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
 	}
 
-	// Non-existent name returns empty string, no error.
-	id, err = s.ResolveProjectByName(ctx, "nonexistent")
+	id, name, err := s.ResolveProject(ctx, "/home/wayne/git/ghost/internal/memory")
 	if err != nil {
-		t.Fatalf("ResolveProjectByName nonexistent: %v", err)
+		t.Fatalf("ResolveProject: %v", err)
 	}
-	if id != "" {
-		t.Errorf("expected empty string for nonexistent, got %q", id)
+	if id != "ghostid" || name != "ghost" {
+		t.Errorf("got id=%q name=%q, want id=%q name=%q", id, name, "ghostid", "ghost")
+	}
+}
+
+func TestStoreResolveProject_LongestPathWins(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "parent", "/home/wayne/git", "parent"); err != nil {
+		t.Fatalf("EnsureProject parent: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "child", "/home/wayne/git/ghost", "ghost"); err != nil {
+		t.Fatalf("EnsureProject child: %v", err)
+	}
+
+	id, _, err := s.ResolveProject(ctx, "/home/wayne/git/ghost/cmd")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "child" {
+		t.Errorf("longest path should win, got %q, want %q", id, "child")
+	}
+}
+
+func TestStoreResolveProject_NoPrefixFalseMatch(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "ghostid", "/home/wayne/git/ghost", "ghost"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	id, name, err := s.ResolveProject(ctx, "/home/wayne/git/ghost-extra")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("ghost-extra should NOT prefix-match ghost, got id=%q name=%q", id, name)
+	}
+}
+
+func TestStoreResolveProject_BasenameFallback(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	// Path shorter than the LENGTH(path) > 10 guard, so prefix matching can't fire —
+	// isolates the basename-of-input fallback (case 4).
+	if err := s.EnsureProject(ctx, "ghostid", "/x/ghost", "ghost"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	id, name, err := s.ResolveProject(ctx, "/some/unrelated/path/ghost")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "ghostid" || name != "ghost" {
+		t.Errorf("basename fallback: got id=%q name=%q, want id=%q name=%q", id, name, "ghostid", "ghost")
+	}
+}
+
+func TestStoreResolveProject_NoMatch(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, name, err := s.ResolveProject(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("expected empty on no match, got id=%q name=%q", id, name)
+	}
+}
+
+func TestStoreResolveProject_ClosedDB(t *testing.T) {
+	s := testStore(t)
+	s.Close() //nolint:errcheck
+	ctx := context.Background()
+
+	_, _, err := s.ResolveProject(ctx, "test")
+	if err == nil {
+		t.Fatal("expected error on closed DB, got nil")
+	}
+}
+
+func TestStoreListProjectNames(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "ghostid", "/home/wayne/git/ghost", "ghost"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	names, err := s.ListProjectNames(ctx)
+	if err != nil {
+		t.Fatalf("ListProjectNames: %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("expected 2 names, got %d: %v", len(names), names)
+	}
+	// ListProjects orders by name ASC — "ghost" before "test".
+	if names[0] != "ghost" || names[1] != "test" {
+		t.Errorf("got %v, want [ghost test]", names)
 	}
 }
 
