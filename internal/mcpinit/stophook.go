@@ -2,16 +2,19 @@ package mcpinit
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 type stopHookInput struct {
@@ -124,9 +127,9 @@ func scanTranscript(r io.Reader) (toolCalls, ghostSaves int) {
 // If the Anthropic API is out of credit, the spawned process itself fails
 // fast and logs the failure to resolve.log — no local fallback runs in this
 // path, so auto-resolve simply does nothing until credits are restored.
-// Known limitation: resolution here depends on lookupProject's path/basename
-// match against the stored project row; a cwd with no matching project is a
-// silent no-op, same as an unconfigured user.
+// Known limitation: resolution here depends on Store.ResolveProject's
+// path/basename match against the stored project row; a cwd with no matching
+// project is a silent no-op, same as an unconfigured user.
 func spawnResolveIfConfigured(cwd string) {
 	if cwd == "" {
 		return
@@ -150,8 +153,9 @@ func spawnResolveIfConfigured(cwd string) {
 	}
 	defer db.Close() //nolint:errcheck
 
-	projectID, projectName := lookupProject(db, cwd)
-	if projectID == "" || projectName == "" {
+	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	projectID, projectName, err := store.ResolveProject(context.Background(), cwd)
+	if err != nil || projectID == "" || projectName == "" {
 		return
 	}
 
