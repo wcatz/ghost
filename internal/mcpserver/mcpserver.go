@@ -282,6 +282,23 @@ func (s *Server) resolveProjectID(ctx context.Context, input string) string {
 	return input
 }
 
+// projectExists reports whether id (already resolved via resolveProjectID)
+// matches a registered project. Used to distinguish "this project was never
+// persisted" from "this project exists but has nothing" in empty-result
+// messages — the raw list otherwise reads identically either way.
+func (s *Server) projectExists(ctx context.Context, id string) bool {
+	projects, err := s.store.ListProjects(ctx)
+	if err != nil {
+		return false
+	}
+	for _, p := range projects {
+		if p.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // updateArgs is package-level (unlike most tool arg structs) so the extracted
 // applyMemoryUpdate method can take it.
 type updateArgs struct {
@@ -619,7 +636,11 @@ func (s *Server) registerTools() {
 
 		text := sb.String()
 		if text == "" {
-			text = "No memories found for this project."
+			if s.projectExists(ctx, args.ProjectID) {
+				text = "Project is registered but has no memories or learned context yet — nothing has been saved for it."
+			} else {
+				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it. Call ghost_memory_save to create it.", args.ProjectID)
+			}
 		}
 
 		return &mcp.CallToolResult{
@@ -667,8 +688,16 @@ func (s *Server) registerTools() {
 		}
 
 		if len(memories) == 0 {
+			text := "No memories found."
+			if !s.projectExists(ctx, args.ProjectID) {
+				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it.", args.ProjectID)
+			} else if args.Category != "" {
+				text = fmt.Sprintf("No memories found in category %q for this project.", args.Category)
+			} else {
+				text = "Project is registered but has no memories yet."
+			}
 			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: "No memories found."}},
+				Content: []mcp.Content{&mcp.TextContent{Text: text}},
 			}, nil, nil
 		}
 
@@ -1043,7 +1072,7 @@ func (s *Server) registerTools() {
 		Title        string   `json:"title" jsonschema:"Decision title (e.g., 'Use SQLite for storage')"`
 		Decision     string   `json:"decision" jsonschema:"What was decided"`
 		Rationale    string   `json:"rationale" jsonschema:"Why this was chosen"`
-		Alternatives []string `json:"alternatives,omitempty" jsonschema:"What was considered and rejected"`
+		Alternatives []string `json:"alternatives,omitempty" jsonschema:"Array of strings — what was considered and rejected (not a single string)"`
 		Tags         []string `json:"tags,omitempty" jsonschema:"Tags for categorization"`
 		Supersedes   string   `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings."`
 	}
@@ -1077,6 +1106,14 @@ func (s *Server) registerTools() {
 			args.Tags = []string{}
 		}
 		args.Tags = validateTags(args.Tags)
+		// Pass "" for path — MCP callers don't have filesystem paths. Mirrors
+		// ghost_memory_save: without this, a decision recorded for a project
+		// that has never saved a memory yet fails with a raw FK-constraint
+		// error instead of succeeding, since decisions.project_id references
+		// projects.id.
+		if err := s.store.EnsureProject(ctx, args.ProjectID, "", args.ProjectID); err != nil {
+			return nil, nil, fmt.Errorf("ensure project: %w", err)
+		}
 		decisionID, memoryID, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, args.Alternatives, args.Tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -174,7 +175,7 @@ func runReflect() {
 		fmt.Fprintln(os.Stderr, `Usage: ghost reflect <project> [flags]
 
 Flags:
-  --tier string   Consolidation tier: auto, haiku, sqlite (default "auto")
+  --tier string   Consolidation tier: auto, haiku, cli, sqlite (default "auto")
   --apply         Save results (default is dry-run/preview only)
   --restore       Undo the last consolidation from snapshot`)
 		os.Exit(1)
@@ -214,6 +215,12 @@ Flags:
 		}
 		client := ai.NewClient(cfg.API.Key, logger)
 		consolidator = reflection.NewHaikuConsolidator(client)
+	case "cli":
+		if _, err := exec.LookPath("claude"); err != nil {
+			fmt.Fprintln(os.Stderr, "error: cli tier requires the `claude` binary on PATH")
+			os.Exit(1)
+		}
+		consolidator = reflection.NewNamedConsolidator(ai.NewCLIClient(), "cli")
 	case "sqlite":
 		consolidator = reflection.NewSQLiteConsolidator()
 	default: // "auto"
@@ -221,6 +228,9 @@ Flags:
 		if cfg.API.Key != "" {
 			client := ai.NewClient(cfg.API.Key, logger)
 			tiers = append(tiers, reflection.NewHaikuConsolidator(client))
+		}
+		if _, err := exec.LookPath("claude"); err == nil {
+			tiers = append(tiers, reflection.NewNamedConsolidator(ai.NewCLIClient(), "cli"))
 		}
 		tiers = append(tiers, reflection.NewSQLiteConsolidator())
 		consolidator = reflection.NewTieredConsolidator(tiers, logger)
@@ -395,6 +405,31 @@ Flags:
 	}
 }
 
+// buildClassifyProvider builds the Provider resolve/supersede classify
+// against: the direct Anthropic API when ANTHROPIC_API_KEY is configured,
+// falling back to a subscription-billed `claude -p` CLI call on credit
+// exhaustion (dry-run-only, matching the sampling-provider convention for a
+// degraded secondary — see ai.FallbackProvider); or the CLI call as the sole,
+// full-write primary when no key is configured at all, so these commands work
+// without spending API credits as long as the `claude` binary is on PATH.
+func buildClassifyProvider(cfg *config.Config, logger *slog.Logger) (*ai.FallbackProvider, error) {
+	cliAvailable := false
+	if _, err := exec.LookPath("claude"); err == nil {
+		cliAvailable = true
+	}
+	if cfg.API.Key == "" {
+		if !cliAvailable {
+			return nil, errors.New("requires ANTHROPIC_API_KEY or the `claude` binary on PATH")
+		}
+		return ai.NewFallbackProvider(ai.NewCLIClient(), nil, false), nil
+	}
+	primary := ai.NewAnthropicProvider(ai.NewClient(cfg.API.Key, logger))
+	if !cliAvailable {
+		return ai.NewFallbackProvider(primary, nil, false), nil
+	}
+	return ai.NewFallbackProvider(primary, ai.NewCLIClient(), true), nil
+}
+
 // runSupersede implements `ghost supersede <project> [--apply]` — the creation
 // half of staleness-aware ranking. It proposes newer→older 'supersedes' links
 // over the project's live memories (cosine-similar candidates, Haiku-confirmed)
@@ -432,8 +467,9 @@ Flags:
   --apply             Write the supersedes/causes links (default is dry-run/preview)
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
 
-Requires ANTHROPIC_API_KEY (uses Haiku to classify each candidate as
-supersedes, causes, or neither).`)
+Classifies each candidate as supersedes, causes, or neither. Uses
+ANTHROPIC_API_KEY if set, else falls back to a subscription-billed
+'claude' CLI call — requires one of the two.`)
 		os.Exit(1)
 	}
 
@@ -450,13 +486,11 @@ supersedes, causes, or neither).`)
 		fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
 		os.Exit(1)
 	}
-	if cfg.API.Key == "" {
-		fmt.Fprintln(os.Stderr, "error: ghost supersede requires ANTHROPIC_API_KEY (uses Haiku to classify each candidate as supersedes, causes, or neither)")
+	provider, err := buildClassifyProvider(cfg, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: ghost supersede %v\n", err)
 		os.Exit(1)
 	}
-
-	primary := ai.NewAnthropicProvider(ai.NewClient(cfg.API.Key, logger))
-	provider := ai.NewFallbackProvider(primary, nil, false)
 	cls := supersede.NewHaikuClassifier(provider)
 	res, classified, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
 	if err != nil {
@@ -523,7 +557,8 @@ Flags:
   --apply   Stamp resolved_at on confirmed memories (default is dry-run/preview)
 
 Marks resolved-evidence memories so they drop from session-start injection
-(still searchable). Requires ANTHROPIC_API_KEY (Haiku classifies each candidate).`)
+(still searchable). Uses ANTHROPIC_API_KEY if set, else falls back to a
+subscription-billed 'claude' CLI call — requires one of the two.`)
 		os.Exit(1)
 	}
 
@@ -540,13 +575,11 @@ Marks resolved-evidence memories so they drop from session-start injection
 		fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
 		os.Exit(1)
 	}
-	if cfg.API.Key == "" {
-		fmt.Fprintln(os.Stderr, "error: ghost resolve requires ANTHROPIC_API_KEY (Haiku classifies each candidate)")
+	provider, err := buildClassifyProvider(cfg, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: ghost resolve %v\n", err)
 		os.Exit(1)
 	}
-
-	primary := ai.NewAnthropicProvider(ai.NewClient(cfg.API.Key, logger))
-	provider := ai.NewFallbackProvider(primary, nil, false)
 	cls := resolve.NewHaikuClassifier(provider)
 	res, confirmed, err := resolve.Run(ctx, store, cls, projectID, apply, logger)
 	if err != nil {
@@ -843,12 +876,15 @@ Commands:
   version                     Print version
 
 Flags (reflect):
-  --tier string   Consolidation tier: auto, haiku, sqlite (default "auto")
+  --tier string   Consolidation tier: auto, haiku, cli, sqlite (default "auto")
   --apply         Save results
   --restore       Undo last consolidation
 
 Environment:
-  ANTHROPIC_API_KEY           Required for reflect --tier haiku, and always for supersede/resolve
+  ANTHROPIC_API_KEY           Required for reflect --tier haiku. supersede/resolve and
+                              reflect --tier cli/auto fall back to a subscription-billed
+                              'claude' CLI call (requires the 'claude' binary on PATH)
+                              when unset or exhausted.
   GHOST_DEBUG                 Enable debug logging
 `, version)
 }

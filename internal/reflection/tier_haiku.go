@@ -14,18 +14,26 @@ type reflector interface {
 	Reflect(ctx context.Context, prompt string) (string, ai.TokenUsage, error)
 }
 
-// HaikuConsolidator uses the Anthropic API (Haiku model) for consolidation.
-// Highest quality tier but requires API credits.
+// HaikuConsolidator uses an LLM (direct Anthropic API by default) for
+// consolidation. Highest quality tier.
 type HaikuConsolidator struct {
 	client reflector
+	name   string
 }
 
 // NewHaikuConsolidator wraps an existing LLM client that has a Reflect method.
 func NewHaikuConsolidator(client reflector) *HaikuConsolidator {
-	return &HaikuConsolidator{client: client}
+	return &HaikuConsolidator{client: client, name: "haiku"}
 }
 
-func (h *HaikuConsolidator) Name() string { return "haiku" }
+// NewNamedConsolidator is NewHaikuConsolidator with an explicit tier name —
+// used when client is a subscription-billed provider (e.g. ai.CLIClient)
+// rather than the direct Anthropic API, so Name() reports which one ran.
+func NewNamedConsolidator(client reflector, name string) *HaikuConsolidator {
+	return &HaikuConsolidator{client: client, name: name}
+}
+
+func (h *HaikuConsolidator) Name() string { return h.name }
 
 func (h *HaikuConsolidator) Available(_ context.Context) bool {
 	return h.client != nil
