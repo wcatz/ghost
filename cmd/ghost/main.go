@@ -186,13 +186,18 @@ Flags:
 
 	ctx := context.Background()
 
-	projectID, err := store.ResolveProjectByName(ctx, projectName)
+	projectID, _, err := store.ResolveProject(ctx, projectName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	if projectID == "" {
-		fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
+		names, listErr := store.ListProjectNames(ctx)
+		if listErr != nil || len(names) == 0 {
+			fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
+		} else {
+			fmt.Fprintf(os.Stderr, "error: project %q not found. Known projects: %s\n", projectName, strings.Join(names, ", "))
+		}
 		os.Exit(1)
 	}
 
@@ -477,13 +482,18 @@ ANTHROPIC_API_KEY if set, else falls back to a subscription-billed
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
 
-	projectID, err := store.ResolveProjectByName(ctx, projectName)
+	projectID, _, err := store.ResolveProject(ctx, projectName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	if projectID == "" {
-		fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
+		names, listErr := store.ListProjectNames(ctx)
+		if listErr != nil || len(names) == 0 {
+			fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
+		} else {
+			fmt.Fprintf(os.Stderr, "error: project %q not found. Known projects: %s\n", projectName, strings.Join(names, ", "))
+		}
 		os.Exit(1)
 	}
 	provider, err := buildClassifyProvider(cfg, logger)
@@ -566,13 +576,18 @@ subscription-billed 'claude' CLI call — requires one of the two.`)
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
 
-	projectID, err := store.ResolveProjectByName(ctx, projectName)
+	projectID, _, err := store.ResolveProject(ctx, projectName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	if projectID == "" {
-		fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
+		names, listErr := store.ListProjectNames(ctx)
+		if listErr != nil || len(names) == 0 {
+			fmt.Fprintf(os.Stderr, "error: project %q not found\n", projectName)
+		} else {
+			fmt.Fprintf(os.Stderr, "error: project %q not found. Known projects: %s\n", projectName, strings.Join(names, ", "))
+		}
 		os.Exit(1)
 	}
 	provider, err := buildClassifyProvider(cfg, logger)
