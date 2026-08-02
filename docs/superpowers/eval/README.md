@@ -33,6 +33,14 @@ transcript) + N consolidation gradings + 4 storylines x 4-5 agents each +
 3 stress-test agents + 1 synthesis agent, plus the `resolve`/`supersede`
 Haiku calls inside the storyline grading steps. Budget accordingly.
 
+Only the `ghost reflect`/`resolve`/`supersede` CLI calls (Consolidation phase
++ storyline grading steps) spend real API credits — `internal/ai/client.go`
+is a direct Anthropic HTTP client and has no subscription option.
+`claude-eval-session.sh` unsets `ANTHROPIC_API_KEY` before launching each
+`claude -p` actor subprocess (replay/storyline/stress), so those ride your
+Claude Code subscription instead of API credits — do not remove that
+`env -u` or every actor session bills as pay-per-token API usage too.
+
 ## Isolation mechanism
 
 Every live-agent phase (replay, storyline, stress) does its actual work
