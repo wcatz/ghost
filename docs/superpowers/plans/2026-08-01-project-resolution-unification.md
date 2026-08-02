@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Add `Store.ResolveProject` and `Store.ListProjectNames`
+## Task 1: Add `Store.ResolveProject` and `Store.ListProjectNames`
 
 **Files:**
 - Modify: `internal/memory/store.go` (add methods near `ResolveProjectByName`, currently at lines 295-309; add after `ListProjects`, currently lines 145-166)
@@ -261,7 +261,7 @@ git commit -m "feat(memory): add Store.ResolveProject and ListProjectNames"
 
 ---
 
-### Task 2: Migrate CLI (`cmd/ghost/main.go`) off `ResolveProjectByName`
+## Task 2: Migrate CLI (`cmd/ghost/main.go`) off `ResolveProjectByName`
 
 **Files:**
 - Modify: `cmd/ghost/main.go` (reflect subcommand ~line 188, resolve subcommand ~line 526 — verify exact line numbers first, since this file was already touched by unrelated commits since the spec was written)
@@ -321,7 +321,7 @@ git commit -m "feat(cli): list known projects on reflect/resolve name-not-found"
 
 ---
 
-### Task 3: Migrate MCP tool layer (`internal/mcpserver/mcpserver.go`) off `resolveProjectID`
+## Task 3: Migrate MCP tool layer (`internal/mcpserver/mcpserver.go`) off `resolveProjectID`
 
 **Files:**
 - Modify: `internal/mcpserver/mcpserver.go` (delete `resolveProjectID` at lines 251-299; update 16 call sites at lines 310, 380, 431, 521, 585, 655, 698, 893, 930, 980, 1071, 1307, 1357, 1416, 1457, 1509 — re-`grep` first, since Task 2 doesn't touch this file but line numbers may have shifted from other concurrent work)
@@ -451,7 +451,7 @@ git commit -m "feat(mcp): migrate resolveProjectID call sites onto Store.Resolve
 
 ---
 
-### Task 4: Migrate session-start hook (`internal/mcpinit/hook.go`) off `lookupProject`
+## Task 4: Migrate session-start hook (`internal/mcpinit/hook.go`) off `lookupProject`
 
 **Files:**
 - Modify: `internal/mcpinit/hook.go` (delete `lookupProject`, lines 341-358; update its one call site in `loadSessionContext`, line 238)
@@ -631,7 +631,7 @@ git commit -m "feat(hook): migrate lookupProject call sites onto Store.ResolvePr
 
 ---
 
-### Task 5: Remove `ResolveProjectByName` from the `provider.MemoryStore` interface
+## Task 5: Remove `ResolveProjectByName` from the `provider.MemoryStore` interface
 
 **Files:**
 - Modify: `internal/provider/provider.go` (line 72)
