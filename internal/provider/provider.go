@@ -70,7 +70,8 @@ type MemoryStore interface {
 	// Project management
 	ListProjects(ctx context.Context) ([]memory.Project, error)
 	EnsureProject(ctx context.Context, id, path, name string) error
-	ResolveProjectByName(ctx context.Context, name string) (string, error)
+	ResolveProject(ctx context.Context, input string) (id, name string, err error)
+	ListProjectNames(ctx context.Context) ([]string, error)
 	MergeProject(ctx context.Context, oldID, newID string) error
 
 	// Conversation persistence
