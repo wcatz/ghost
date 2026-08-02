@@ -100,6 +100,27 @@ func TestLookupProject_NoMatch(t *testing.T) {
 	}
 }
 
+// TestLookupProject_PathWithLikeWildcards is the regression test for a project
+// path containing a literal '%' or '_': those must not act as unintended LIKE
+// wildcards and false-match an unrelated sibling directory.
+func TestLookupProject_PathWithLikeWildcards(t *testing.T) {
+	db := openTestDB(t)
+	insertProject(t, db, "abc123", "/home/wayne/git/foo_bar", "foo_bar")
+
+	// Without escaping, "foo_bar/%" as a LIKE pattern would also match
+	// "fooXbar/anything" since '_' matches any single character.
+	id, name := lookupProject(db, "/home/wayne/git/fooXbar/sub")
+	if id != "" || name != "" {
+		t.Errorf("unescaped underscore false match: got id=%q name=%q, want no match", id, name)
+	}
+
+	// The real subdirectory should still match correctly.
+	id, name = lookupProject(db, "/home/wayne/git/foo_bar/sub")
+	if id != "abc123" || name != "foo_bar" {
+		t.Errorf("exact underscore path: got id=%q name=%q, want abc123/foo_bar", id, name)
+	}
+}
+
 // openFileTestDB creates a real on-disk SQLite DB (needed for mode=ro callers like loadGlobalMemories).
 func openFileTestDB(t *testing.T) (db *sql.DB, path string) {
 	t.Helper()

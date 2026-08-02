@@ -162,23 +162,53 @@ func (s *Store) GetTask(ctx context.Context, taskID string) (Task, error) {
 	return t, nil
 }
 
-// UpdateTask updates a task's status, priority, or description. Accepts a
-// full task ID or a unique prefix.
-func (s *Store) UpdateTask(ctx context.Context, taskID, status string, priority int, description string) error {
+// UpdateTask merges the caller's optional fields onto the current row and
+// writes the result under a single lock, closing the check-then-write race
+// where a separate get-then-update could clobber a concurrent update made
+// between the read and the write (see UpdateMemory for the same pattern).
+// status, priority, and description are nil to preserve the current value.
+// Accepts a full task ID or a unique prefix. Returns the task as it stood
+// after the merge, so callers don't need a separate read to get ProjectID
+// or the resolved field values.
+func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, priority *int, description *string) (Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	id, err := s.resolveTaskID(ctx, taskID)
 	if err != nil {
-		return err
+		return Task{}, err
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	var t Task
+	err = s.db.QueryRowContext(ctx, `
+		SELECT id, project_id, title, description, status, priority,
+		       COALESCE(blocked_by, ''), COALESCE(branch, ''), COALESCE(pr_number, 0),
+		       COALESCE(notes, ''), created_at, updated_at, COALESCE(completed_at, '')
+		FROM tasks WHERE id = ?
+	`, id).Scan(
+		&t.ID, &t.ProjectID, &t.Title, &t.Description, &t.Status,
+		&t.Priority, &t.BlockedBy, &t.Branch, &t.PRNumber, &t.Notes,
+		&t.CreatedAt, &t.UpdatedAt, &t.CompletedAt,
+	)
+	if err != nil {
+		return Task{}, fmt.Errorf("get task: %w", err)
+	}
+
+	if status != nil {
+		t.Status = *status
+	}
+	if priority != nil {
+		t.Priority = *priority
+	}
+	if description != nil {
+		t.Description = *description
+	}
+
+	if _, err := s.db.ExecContext(ctx, `
 		UPDATE tasks SET status = ?, priority = ?, description = ?, updated_at = datetime('now')
 		WHERE id = ?
-	`, status, priority, description, id)
-	if err != nil {
-		return fmt.Errorf("update task: %w", err)
+	`, t.Status, t.Priority, t.Description, id); err != nil {
+		return Task{}, fmt.Errorf("update task: %w", err)
 	}
-	return nil
+	return t, nil
 }

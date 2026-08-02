@@ -1298,14 +1298,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("task_id is required")
 		}
 
-		// Fetch current task to fill in omitted fields (prevents zero-value clobber).
-		current, err := s.store.GetTask(ctx, args.TaskID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("task not found: %w", err)
-		}
-
-		// status is optional — omitting it preserves the current value.
-		status := current.Status
+		var status *string
 		if args.Status != "" {
 			validStatuses := map[string]bool{
 				"pending": true, "active": true, "blocked": true, "done": true,
@@ -1313,27 +1306,26 @@ func (s *Server) registerTools() {
 			if !validStatuses[args.Status] {
 				return nil, nil, fmt.Errorf("invalid status %q — must be one of: pending, active, blocked, done", args.Status)
 			}
-			status = args.Status
+			status = &args.Status
 		}
 
-		priority := current.Priority
-		if args.Priority != nil {
-			priority = *args.Priority
-			if priority < 0 || priority > 4 {
-				priority = 2
-			}
+		if args.Priority != nil && (*args.Priority < 0 || *args.Priority > 4) {
+			normalized := 2
+			args.Priority = &normalized
 		}
-		description := current.Description
 		if args.Description != nil {
-			description = *args.Description
+			truncated := truncateUTF8(*args.Description, maxContentLen)
+			args.Description = &truncated
 		}
 
-		// Pass the resolved full ID, not the caller's (possibly prefix) input,
-		// so the fetch above and the write below can't hit different tasks.
-		if err := s.store.UpdateTask(ctx, current.ID, status, priority, description); err != nil {
+		// UpdateTask does its own read-merge-write under one lock, so a
+		// concurrent update between a separate read and this write can't be
+		// silently overwritten.
+		updated, err := s.store.UpdateTask(ctx, args.TaskID, status, args.Priority, args.Description)
+		if err != nil {
 			return nil, nil, fmt.Errorf("update task: %w", err)
 		}
-		s.notifyProjectResource(ctx, current.ProjectID, "tasks")
+		s.notifyProjectResource(ctx, updated.ProjectID, "tasks")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Task updated."}},
 		}, nil, nil

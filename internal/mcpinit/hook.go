@@ -361,9 +361,13 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 // Returns ("", "") when no project matches.
 func lookupProject(db *sql.DB, cwd string) (id, name string) {
 	cwdBase := filepath.Base(cwd)
+	// path is escaped before use as a LIKE pattern so a literal '%' or '_' in
+	// a project's path (e.g. a directory named "foo_bar") can't act as an
+	// unintended wildcard and false-match an unrelated cwd.
 	row := db.QueryRow(`
 		SELECT id, name FROM projects
-		WHERE ((? = path OR ? LIKE path || '/%') AND LENGTH(path) > 10)
+		WHERE ((? = path OR ? LIKE REPLACE(REPLACE(REPLACE(path, '\', '\\'), '%', '\%'), '_', '\_') || '/%' ESCAPE '\')
+		       AND LENGTH(path) > 10)
 		   OR name = ?
 		ORDER BY LENGTH(path) DESC LIMIT 1
 	`, cwd, cwd, cwdBase)

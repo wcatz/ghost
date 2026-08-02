@@ -1695,7 +1695,8 @@ func TestStoreTasks(t *testing.T) {
 	}
 
 	// Update a task.
-	if err := s.UpdateTask(ctx, id2, "active", 1, "Updated description"); err != nil {
+	updStatus, updPriority, updDesc := "active", 1, "Updated description"
+	if _, err := s.UpdateTask(ctx, id2, &updStatus, &updPriority, &updDesc); err != nil {
 		t.Fatalf("UpdateTask: %v", err)
 	}
 
@@ -1731,7 +1732,8 @@ func TestStoreTaskIDPrefix(t *testing.T) {
 	}
 
 	// UpdateTask and CompleteTask resolve prefixes too.
-	if err := s.UpdateTask(ctx, prefix, "active", 1, "updated via prefix"); err != nil {
+	prefixStatus, prefixPriority, prefixDesc := "active", 1, "updated via prefix"
+	if _, err := s.UpdateTask(ctx, prefix, &prefixStatus, &prefixPriority, &prefixDesc); err != nil {
 		t.Fatalf("UpdateTask by prefix: %v", err)
 	}
 	got, err = s.GetTask(ctx, fullID)
@@ -1783,7 +1785,8 @@ func TestStoreTaskIDPrefix(t *testing.T) {
 	if err := s.CompleteTask(ctx, "ZZZZ9999", ""); err == nil || !strings.Contains(err.Error(), "task not found") {
 		t.Errorf("CompleteTask unknown: want not-found error, got %v", err)
 	}
-	if err := s.UpdateTask(ctx, "ZZZZ9999", "active", 1, ""); err == nil || !strings.Contains(err.Error(), "task not found") {
+	unknownStatus, unknownPriority, unknownDesc := "active", 1, ""
+	if _, err := s.UpdateTask(ctx, "ZZZZ9999", &unknownStatus, &unknownPriority, &unknownDesc); err == nil || !strings.Contains(err.Error(), "task not found") {
 		t.Errorf("UpdateTask unknown: want not-found error, got %v", err)
 	}
 

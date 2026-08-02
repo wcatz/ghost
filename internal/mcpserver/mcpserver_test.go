@@ -605,8 +605,8 @@ func TestTaskUpdate_EmptyStatusPreservesCurrentStatus(t *testing.T) {
 		t.Fatalf("CreateTask: %v", err)
 	}
 
-	// Default status is "pending". Update priority only (no status change).
-	// The fixed handler fetches current task and uses current.Status when args.Status == "".
+	// Default status is "pending". Update priority only (no status change) —
+	// UpdateTask preserves status/description internally when passed nil.
 	current, err := store.GetTask(ctx, id)
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
@@ -615,8 +615,8 @@ func TestTaskUpdate_EmptyStatusPreservesCurrentStatus(t *testing.T) {
 		t.Fatalf("expected initial status=pending, got %q", current.Status)
 	}
 
-	// Simulate what the fixed ghost_task_update handler does: use current status.
-	if err := store.UpdateTask(ctx, id, current.Status, 1, current.Description); err != nil {
+	priority := 1
+	if _, err := store.UpdateTask(ctx, id, nil, &priority, nil); err != nil {
 		t.Fatalf("UpdateTask: %v", err)
 	}
 
