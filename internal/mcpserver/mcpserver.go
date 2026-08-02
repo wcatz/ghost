@@ -248,41 +248,7 @@ func (s *Server) Run(ctx context.Context) error {
 	return s.mcp.Run(ctx, &mcp.StdioTransport{})
 }
 
-// resolveProjectID resolves a project_id that may be a name (e.g. "ghost")
-// into the actual hash ID (e.g. "6bdc098af7f5") stored in the database.
-// Name lookup takes precedence to avoid collisions where a project name
-// happens to match another project's hash ID.
-func (s *Server) resolveProjectID(ctx context.Context, input string) string {
-	// Try name lookup first — most MCP clients pass project names.
-	resolved, err := s.store.ResolveProjectByName(ctx, input)
-	if err == nil && resolved != "" {
-		return resolved
-	}
-
-	// Fall back to direct ID match, then path match.
-	projects, err := s.store.ListProjects(ctx)
-	if err == nil {
-		for _, p := range projects {
-			if p.ID == input {
-				return input
-			}
-		}
-		// If input looks like an absolute path, match against project paths.
-		// This prevents creating duplicate projects when Claude passes a raw
-		// filesystem path instead of a project name or hash ID.
-		if filepath.IsAbs(input) {
-			for _, p := range projects {
-				if p.Path == input {
-					return p.ID
-				}
-			}
-		}
-	}
-
-	return input
-}
-
-// projectExists reports whether id (already resolved via resolveProjectID)
+// projectExists reports whether id (already resolved via Store.ResolveProject)
 // matches a registered project. Used to distinguish "this project was never
 // persisted" from "this project exists but has nothing" in empty-result
 // messages — the raw list otherwise reads identically either way. The error
@@ -328,7 +294,10 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, args updateArgs) (string
 		return "", fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
 	}
 
-	resolvedProjectID := s.resolveProjectID(ctx, args.ProjectID)
+	resolvedProjectID, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+	if err != nil {
+		return "", fmt.Errorf("resolve project: %w", err)
+	}
 	mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID})
 	if err != nil {
 		return "", fmt.Errorf("lookup failed: %w", err)
@@ -398,7 +367,10 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	if projectID == "" || memoryID == "" {
 		return "", fmt.Errorf("project_id and memory_id are required")
 	}
-	resolvedProjectID := s.resolveProjectID(ctx, projectID)
+	resolvedProjectID, _, err := s.store.ResolveProject(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("resolve project: %w", err)
+	}
 
 	mems, err := s.store.GetByIDs(ctx, []string{memoryID})
 	if err != nil {
@@ -449,7 +421,11 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		args.ProjectID = resolved
 
 		// Use hybrid search (FTS5 + vector) when embedder is available.
 		var queryVec []float32
@@ -539,7 +515,16 @@ func (s *Server) registerTools() {
 			args.Tags = []string{}
 		}
 		args.Tags = validateTags(args.Tags)
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		if resolved != "" {
+			// Only overwrite with the resolved ID on a hit. On a miss, keep the
+			// raw input so EnsureProject below can auto-create a new project —
+			// preserving today's create-on-first-save behavior.
+			args.ProjectID = resolved
+		}
 
 		truncated := false
 		if len(args.Content) > maxContentLen {
@@ -602,7 +587,11 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		args.ProjectID = resolved
 
 		// First-contact import: if project has zero memories, try importing
 		// from Claude Code's auto-memory files (read-only, one-time).
@@ -680,7 +669,11 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, resolveErr := s.store.ResolveProject(ctx, args.ProjectID)
+		if resolveErr != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", resolveErr)
+		}
+		args.ProjectID = resolved
 
 		var memories []memory.Memory
 		var err error
@@ -735,7 +728,10 @@ func (s *Server) registerTools() {
 		if args.ProjectID == "" || args.MemoryID == "" {
 			return nil, nil, fmt.Errorf("project_id and memory_id are required")
 		}
-		resolvedProjectID := s.resolveProjectID(ctx, args.ProjectID)
+		resolvedProjectID, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
 
 		// Verify the memory exists and belongs to the specified project.
 		mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID})
@@ -929,7 +925,11 @@ func (s *Server) registerTools() {
 		}
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		args.Description = truncateUTF8(args.Description, maxContentLen)
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		args.ProjectID = resolved
 		priority := 2 // default: normal
 		if args.Priority != nil {
 			priority = *args.Priority
@@ -966,7 +966,10 @@ func (s *Server) registerTools() {
 		if args.Project == "" {
 			return nil, nil, fmt.Errorf("project is required")
 		}
-		projectID := s.resolveProjectID(ctx, args.Project)
+		projectID, _, err := s.store.ResolveProject(ctx, args.Project)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
 		rs, ok := s.store.(resolveCapableStore)
 		if !ok {
 			return nil, nil, fmt.Errorf("ghost_resolve: store does not support resolve operations")
@@ -1016,7 +1019,11 @@ func (s *Server) registerTools() {
 		if args.ProjectID == "" {
 			return nil, nil, fmt.Errorf("project_id is required")
 		}
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		args.ProjectID = resolved
 		if args.Limit <= 0 {
 			args.Limit = 30
 		}
@@ -1108,7 +1115,11 @@ func (s *Server) registerTools() {
 		for i, alt := range args.Alternatives {
 			args.Alternatives[i] = truncateUTF8(alt, maxTitleLen)
 		}
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		args.ProjectID = resolved
 		if args.Alternatives == nil {
 			args.Alternatives = []string{}
 		}
@@ -1354,7 +1365,11 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		args.ProjectID = resolved
 
 		decisions, err := s.store.ListDecisions(ctx, args.ProjectID, args.Status, args.Limit)
 		if err != nil {
@@ -1404,7 +1419,10 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, err
 		}
-		projectID := s.resolveProjectID(ctx, rawID)
+		projectID, _, err := s.store.ResolveProject(ctx, rawID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve project: %w", err)
+		}
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
 			return nil, fmt.Errorf("reading project context %q: %w", projectID, err)
@@ -1463,7 +1481,10 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, err
 		}
-		projectID := s.resolveProjectID(ctx, rawID)
+		projectID, _, err := s.store.ResolveProject(ctx, rawID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve project: %w", err)
+		}
 
 		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 20)
 		if err != nil {
@@ -1504,7 +1525,10 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, err
 		}
-		projectID := s.resolveProjectID(ctx, rawID)
+		projectID, _, err := s.store.ResolveProject(ctx, rawID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve project: %w", err)
+		}
 
 		var sb strings.Builder
 		sb.WriteString("## Open Tasks\n\n")
@@ -1556,7 +1580,10 @@ func (s *Server) registerPrompts() {
 		if rawID == "" {
 			return nil, fmt.Errorf("project_id argument is required")
 		}
-		projectID := s.resolveProjectID(ctx, rawID)
+		projectID, _, err := s.store.ResolveProject(ctx, rawID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve project: %w", err)
+		}
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
 			return nil, fmt.Errorf("recall project context for %q: %w", rawID, err)
