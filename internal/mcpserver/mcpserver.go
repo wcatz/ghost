@@ -688,7 +688,7 @@ func (s *Server) registerTools() {
 		}
 
 		if len(memories) == 0 {
-			text := "No memories found."
+			var text string
 			if !s.projectExists(ctx, args.ProjectID) {
 				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it.", args.ProjectID)
 			} else if args.Category != "" {
