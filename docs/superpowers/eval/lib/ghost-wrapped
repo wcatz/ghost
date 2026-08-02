@@ -12,4 +12,12 @@ export XDG_DATA_HOME="${GHOST_EVAL_ROOT}/data"
 export XDG_CONFIG_HOME="${GHOST_EVAL_ROOT}/config"
 mkdir -p "${XDG_DATA_HOME}" "${XDG_CONFIG_HOME}"
 
+# Force the subscription-billed CLI tier for resolve/supersede regardless of
+# whatever the calling shell's ambient environment has exported — the eval
+# suite's whole point is to run without spending real API credits, and an
+# ambient ANTHROPIC_API_KEY (e.g. left over in a session's process env from
+# before ~/.bashrc's export was removed) would otherwise silently route these
+# calls back to the direct API.
+unset ANTHROPIC_API_KEY
+
 exec "${GHOST_BIN}" "$@"
