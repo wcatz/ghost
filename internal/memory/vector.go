@@ -169,7 +169,7 @@ type SearchParams struct {
 // benchmarks establish: it is a hard no-op unless a 'supersedes' edge joins
 // two memories inside one result window; those edges only exist if the user
 // ran `ghost supersede --apply`, which is itself opt-in and LLM-confirmed; and
-// on the graded suites it flips staleness fresh-wins 0.4 -> 1.0 while leaving
+// on the graded suites it flips staleness fresh-wins 0.083 -> 1.0 while leaving
 // recency-trap correct-wins untouched at 0.929
 // (TestSupersedeDemoteClearsFrontier). Leaving it off meant a memory the user
 // had explicitly marked as replaced could still outrank its replacement in
