@@ -241,7 +241,7 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	}
 	defer db.Close() //nolint:errcheck
 
-	// Find matching project: try full path prefix first, then cwd basename name match
+	// Resolve cwd to a project: id, name, path-prefix, then basename fallback (see Store.ResolveProject).
 	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	projectID, project, err = store.ResolveProject(context.Background(), cwd)
 	if err != nil || projectID == "" {
