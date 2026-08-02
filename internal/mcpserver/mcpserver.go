@@ -298,6 +298,9 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, args updateArgs) (string
 	if err != nil {
 		return "", fmt.Errorf("resolve project: %w", err)
 	}
+	if resolvedProjectID == "" {
+		return "", fmt.Errorf("project %q not found", args.ProjectID)
+	}
 	mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID})
 	if err != nil {
 		return "", fmt.Errorf("lookup failed: %w", err)
@@ -370,6 +373,9 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	resolvedProjectID, _, err := s.store.ResolveProject(ctx, projectID)
 	if err != nil {
 		return "", fmt.Errorf("resolve project: %w", err)
+	}
+	if resolvedProjectID == "" {
+		return "", fmt.Errorf("project %q not found", projectID)
 	}
 
 	mems, err := s.store.GetByIDs(ctx, []string{memoryID})
@@ -732,6 +738,9 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
+		if resolvedProjectID == "" {
+			return nil, nil, fmt.Errorf("project %q not found", args.ProjectID)
+		}
 
 		// Verify the memory exists and belongs to the specified project.
 		mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID})
@@ -929,6 +938,9 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
 		}
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %q not found", args.ProjectID)
+		}
 		args.ProjectID = resolved
 		priority := 2 // default: normal
 		if args.Priority != nil {
@@ -969,6 +981,9 @@ func (s *Server) registerTools() {
 		projectID, _, err := s.store.ResolveProject(ctx, args.Project)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		if projectID == "" {
+			return nil, nil, fmt.Errorf("project %q not found", args.Project)
 		}
 		rs, ok := s.store.(resolveCapableStore)
 		if !ok {
@@ -1118,6 +1133,9 @@ func (s *Server) registerTools() {
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %q not found", args.ProjectID)
 		}
 		args.ProjectID = resolved
 		if args.Alternatives == nil {

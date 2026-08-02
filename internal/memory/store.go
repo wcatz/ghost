@@ -313,10 +313,12 @@ func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) err
 // Lookup order, first hit wins:
 //  1. exact id = input
 //  2. exact name = input
-//  3. if input contains '/': input = path OR input LIKE path || '/%'
+//  3. if input contains '/': input = path OR input has literal prefix path + "/"
 //     (ordered by LENGTH(path) DESC — longest/most-specific match wins;
 //     LENGTH(path) > 10 guards against a short project path matching too
-//     broadly, matching the hook's original lookupProject behavior)
+//     broadly, matching the hook's original lookupProject behavior; the
+//     prefix check is a literal substr comparison, not LIKE, so '%'/'_' in a
+//     stored path can't act as SQL wildcards against input)
 //  4. name = basename(input)
 func (s *Store) ResolveProject(ctx context.Context, input string) (id, name string, err error) {
 	s.mu.RLock()
@@ -339,9 +341,11 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	}
 
 	if strings.Contains(input, "/") {
+		// Literal prefix comparison, not LIKE: a stored path containing '%' or
+		// '_' must not be treated as a SQL wildcard against input.
 		err = s.db.QueryRowContext(ctx, `
 			SELECT id, name FROM projects
-			WHERE (path = ? OR ? LIKE path || '/%') AND LENGTH(path) > 10
+			WHERE (path = ? OR substr(?, 1, LENGTH(path) + 1) = path || '/') AND LENGTH(path) > 10
 			ORDER BY LENGTH(path) DESC LIMIT 1
 		`, input, input).Scan(&id, &name)
 		if err == nil {

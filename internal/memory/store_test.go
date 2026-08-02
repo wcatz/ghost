@@ -1163,6 +1163,32 @@ func TestStoreResolveProject_PathPrefix(t *testing.T) {
 	}
 }
 
+func TestStoreResolveProject_PathWithWildcardChars(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	// A stored path containing literal '%'/'_' must not act as a SQL LIKE
+	// wildcard against an unrelated input path.
+	if err := s.EnsureProject(ctx, "wildid", "/home/wayne/git/foo_bar", "foobar"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	id, name, err := s.ResolveProject(ctx, "/home/wayne/git/fooXbar/sub")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("'_' in stored path must not wildcard-match, got id=%q name=%q", id, name)
+	}
+
+	id, name, err = s.ResolveProject(ctx, "/home/wayne/git/foo_bar/sub")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "wildid" || name != "foobar" {
+		t.Errorf("exact literal prefix should still match, got id=%q name=%q, want id=%q name=%q", id, name, "wildid", "foobar")
+	}
+}
+
 func TestStoreResolveProject_LongestPathWins(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

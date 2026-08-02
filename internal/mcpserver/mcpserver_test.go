@@ -89,6 +89,65 @@ func TestResolveProject_IDTakesPrecedenceOverName(t *testing.T) {
 	}
 }
 
+func TestGhostTaskCreate_RejectsUnknownProject(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_task_create",
+		Arguments: map[string]any{"project_id": "nonexistent-project", "title": "should not be created"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_task_create: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error result for unknown project, got: %+v", result.Content)
+	}
+
+	tasks, err := store.ListTasks(ctx, "", "", 10)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if len(tasks) != 0 {
+		t.Errorf("task must not be persisted against an empty project id, found %d", len(tasks))
+	}
+}
+
+func TestGhostDecisionRecord_RejectsUnknownProject(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "ghost_decision_record",
+		Arguments: map[string]any{
+			"project_id": "nonexistent-project",
+			"title":      "should not be recorded",
+			"decision":   "some decision",
+			"rationale":  "some rationale",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_decision_record: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error result for unknown project, got: %+v", result.Content)
+	}
+
+	decisions, err := store.ListDecisions(ctx, "", "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(decisions) != 0 {
+		t.Errorf("decision must not be persisted against an empty project id, found %d", len(decisions))
+	}
+}
+
 func TestFormatMemories(t *testing.T) {
 	tests := []struct {
 		name     string
