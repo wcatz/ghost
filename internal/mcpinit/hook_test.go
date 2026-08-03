@@ -136,13 +136,19 @@ func TestLookupProject_PathWithLikeWildcards(t *testing.T) {
 
 	// Without escaping, "foo_bar/%" as a LIKE pattern would also match
 	// "fooXbar/anything" since '_' matches any single character.
-	id, name := lookupProject(db, "/home/wayne/git/fooXbar/sub")
+	id, name, err := testStore(db).ResolveProject(context.Background(), "/home/wayne/git/fooXbar/sub")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
 	if id != "" || name != "" {
 		t.Errorf("unescaped underscore false match: got id=%q name=%q, want no match", id, name)
 	}
 
 	// The real subdirectory should still match correctly.
-	id, name = lookupProject(db, "/home/wayne/git/foo_bar/sub")
+	id, name, err = testStore(db).ResolveProject(context.Background(), "/home/wayne/git/foo_bar/sub")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
 	if id != "abc123" || name != "foo_bar" {
 		t.Errorf("exact underscore path: got id=%q name=%q, want abc123/foo_bar", id, name)
 	}
