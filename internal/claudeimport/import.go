@@ -241,7 +241,7 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 			continue
 		}
 
-		_, _, err = store.Upsert(ctx, projectID, category, content, source, importance, importTags)
+		_, _, _, err = store.Upsert(ctx, projectID, category, content, source, importance, importTags)
 		if err != nil {
 			logger.Warn("claude import: upsert failed", "file", entry.Name(), "error", err)
 			continue

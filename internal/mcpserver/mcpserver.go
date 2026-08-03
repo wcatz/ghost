@@ -552,7 +552,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
 
-		id, merged, err := s.store.Upsert(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, args.Tags)
+		id, duplicateOf, score, err := s.store.Upsert(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, args.Tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -566,11 +566,10 @@ func (s *Server) registerTools() {
 			}
 		}
 
-		action := "saved"
-		if merged {
-			action = "merged with existing memory"
+		msg := fmt.Sprintf("Memory saved (id: %s)", id)
+		if duplicateOf != "" {
+			msg = fmt.Sprintf("Memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
 		}
-		msg := fmt.Sprintf("Memory %s (id: %s)", action, id)
 		if truncated {
 			msg += fmt.Sprintf(" (content truncated to %d chars)", maxContentLen)
 		}
@@ -891,16 +890,15 @@ func (s *Server) registerTools() {
 		if err := s.store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
 			return nil, nil, fmt.Errorf("ensure global project: %w", err)
 		}
-		id, merged, err := s.store.Upsert(ctx, "_global", args.Category, args.Content, "mcp", importance, args.Tags)
+		id, duplicateOf, score, err := s.store.Upsert(ctx, "_global", args.Category, args.Content, "mcp", importance, args.Tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
 		s.notifyResourceUpdated(ctx, "ghost://memories/global")
-		action := "saved"
-		if merged {
-			action = "merged with existing"
+		msg := fmt.Sprintf("Global memory saved (id: %s)", id)
+		if duplicateOf != "" {
+			msg = fmt.Sprintf("Global memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
 		}
-		msg := fmt.Sprintf("Global memory %s (id: %s)", action, id)
 		if globalTruncated {
 			msg += fmt.Sprintf(" (content truncated to %d chars)", maxContentLen)
 		}

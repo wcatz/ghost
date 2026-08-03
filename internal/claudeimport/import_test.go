@@ -320,20 +320,24 @@ Should be skipped.`)
 		t.Errorf("store count = %d, want >= 2", count)
 	}
 
-	// Test idempotency — importing again should not increase count.
+	// Re-importing is not idempotent by row count anymore: Upsert is
+	// non-destructive, so a re-imported duplicate gets its own row (linked
+	// to the original via a 'duplicate' relation) instead of merging into
+	// it. Both files still count as successfully imported.
 	imported2, err := importFromDir(ctx, store, projectID, memDir, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Upsert may merge, so imported2 could be non-zero but count should stay same.
+	if imported2 != 2 {
+		t.Errorf("imported2 = %d, want 2 (re-import still succeeds for both files)", imported2)
+	}
 	count2, err := store.CountMemories(ctx, projectID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count2 != count {
-		t.Errorf("after re-import: count = %d, want %d (idempotent)", count2, count)
+	if count2 != count*2 {
+		t.Errorf("after re-import: count = %d, want %d (each duplicate gets its own linked row)", count2, count*2)
 	}
-	_ = imported2
 }
 
 func writeTempFile(t *testing.T, dir, name, content string) {

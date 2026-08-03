@@ -365,7 +365,7 @@ Flags:
 			fmt.Fprintf(os.Stderr, "warning: ensure _global project: %v\n", err)
 		}
 		for _, m := range globalMems {
-			if _, _, err := store.Upsert(ctx, "_global", m.Category, m.Content, "reflection", m.Importance, m.Tags); err != nil {
+			if _, _, _, err := store.Upsert(ctx, "_global", m.Category, m.Content, "reflection", m.Importance, m.Tags); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: upsert global memory: %v\n", err)
 			}
 		}

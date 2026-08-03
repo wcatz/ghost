@@ -183,7 +183,7 @@ func TestBuildProjectContext_WithMemories(t *testing.T) {
 
 	ctx := context.Background()
 	// Seed a memory for the test project (ID "abc123").
-	if _, _, err := store.Upsert(ctx, "abc123", "convention", "use nerdctl on node-2 for builds", "manual", 1.0, []string{"nerdctl"}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "abc123", "convention", "use nerdctl on node-2 for builds", "manual", 1.0, []string{"nerdctl"}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
@@ -224,7 +224,7 @@ func TestBuildProjectContext_IncludesGlobal(t *testing.T) {
 	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
 		t.Fatalf("EnsureProject _global: %v", err)
 	}
-	if _, _, err := store.Upsert(ctx, "_global", "preference", "always use nerdctl not docker", "manual", 1.0, []string{}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "_global", "preference", "always use nerdctl not docker", "manual", 1.0, []string{}); err != nil {
 		t.Fatalf("Upsert global: %v", err)
 	}
 
@@ -247,7 +247,7 @@ func TestBuildProjectContext_IncludesLearnedContext(t *testing.T) {
 	if err := store.UpdateLearnedContext(ctx, "abc123", "This is the learned summary.", ""); err != nil {
 		t.Fatalf("UpdateLearnedContext: %v", err)
 	}
-	if _, _, err := store.Upsert(ctx, "abc123", "fact", "seed memory", "manual", 0.5, []string{}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "abc123", "fact", "seed memory", "manual", 0.5, []string{}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
@@ -300,15 +300,15 @@ func TestSaveAndSearch_EndToEnd(t *testing.T) {
 	ctx := context.Background()
 
 	// Save a memory via store (simulating ghost_memory_save logic).
-	id, merged, err := store.Upsert(ctx, "abc123", "pattern", "use context.Background() in tests", "mcp", 0.7, []string{"testing"})
+	id, dupOf, _, err := store.Upsert(ctx, "abc123", "pattern", "use context.Background() in tests", "mcp", 0.7, []string{"testing"})
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	if id == "" {
 		t.Error("expected non-empty ID")
 	}
-	if merged {
-		t.Error("first save should not be merged")
+	if dupOf != "" {
+		t.Error("first save should not report a duplicate")
 	}
 
 	// Search via FTS (simulating ghost_memory_search without embedder).
@@ -332,7 +332,7 @@ func TestSaveAndSearch_WithEmbedder(t *testing.T) {
 	ctx := context.Background()
 
 	// Save memory.
-	_, _, err := store.Upsert(ctx, "abc123", "fact", "Ghost uses SQLite with FTS5", "mcp", 0.8, []string{})
+	_, _, _, err := store.Upsert(ctx, "abc123", "fact", "Ghost uses SQLite with FTS5", "mcp", 0.8, []string{})
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -357,13 +357,13 @@ func TestListMemories_ByCategoryAndAll(t *testing.T) {
 	ctx := context.Background()
 
 	// Save memories in different categories with distinct content to avoid merge.
-	if _, _, err := store.Upsert(ctx, "abc123", "fact", "Go compiles to static binaries with no runtime dependencies", "mcp", 0.5, []string{}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "abc123", "fact", "Go compiles to static binaries with no runtime dependencies", "mcp", 0.5, []string{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Upsert(ctx, "abc123", "decision", "Chi was chosen as HTTP router for its stdlib compatibility", "mcp", 0.7, []string{}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "abc123", "decision", "Chi was chosen as HTTP router for its stdlib compatibility", "mcp", 0.7, []string{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Upsert(ctx, "abc123", "fact", "Cardano uses Ouroboros Praos consensus protocol for block production", "mcp", 0.6, []string{}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "abc123", "fact", "Cardano uses Ouroboros Praos consensus protocol for block production", "mcp", 0.6, []string{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -390,7 +390,7 @@ func TestDeleteMemory_EndToEnd(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
 
-	id, _, err := store.Upsert(ctx, "abc123", "gotcha", "watch for nil pointers", "mcp", 0.5, []string{})
+	id, _, _, err := store.Upsert(ctx, "abc123", "gotcha", "watch for nil pointers", "mcp", 0.5, []string{})
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -429,10 +429,10 @@ func TestSearchAll_CrossProject(t *testing.T) {
 	if err := store.EnsureProject(ctx, "def456", "/tmp/other", "other-project"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Upsert(ctx, "abc123", "fact", "ghost uses SQLite", "mcp", 0.5, []string{}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "abc123", "fact", "ghost uses SQLite", "mcp", 0.5, []string{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Upsert(ctx, "def456", "fact", "roller uses SQLite", "mcp", 0.5, []string{}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "def456", "fact", "roller uses SQLite", "mcp", 0.5, []string{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -455,7 +455,7 @@ func TestSaveGlobal_EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	id, _, err := store.Upsert(ctx, "_global", "preference", "always use nerdctl", "mcp", 0.8, []string{})
+	id, _, _, err := store.Upsert(ctx, "_global", "preference", "always use nerdctl", "mcp", 0.8, []string{})
 	if err != nil {
 		t.Fatalf("Upsert global: %v", err)
 	}
@@ -545,10 +545,10 @@ func TestHealthOutput(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed memories with very distinct content to avoid Upsert merge.
-	if _, _, err := store.Upsert(ctx, "abc123", "fact", "Ghost uses SQLite with FTS5 for full-text search capabilities", "mcp", 0.5, []string{}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "abc123", "fact", "Ghost uses SQLite with FTS5 for full-text search capabilities", "mcp", 0.5, []string{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.Upsert(ctx, "abc123", "convention", "Kubernetes manifests use helmfile for declarative deployment management", "mcp", 0.6, []string{}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "abc123", "convention", "Kubernetes manifests use helmfile for declarative deployment management", "mcp", 0.6, []string{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -904,7 +904,7 @@ func TestPrompts_RecallProject(t *testing.T) {
 	srv := New(store, logger, "test")
 
 	ctx := context.Background()
-	if _, _, err := store.Upsert(ctx, "abc123", "fact", "seed memory for recall test", "manual", 0.5, []string{}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "abc123", "fact", "seed memory for recall test", "manual", 0.5, []string{}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
@@ -991,7 +991,7 @@ func TestResourceSubscription_NotifiesOnMemorySave(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
-	if _, _, err := store.Upsert(ctx, "abc123", "fact", "triggers subscription notify", "manual", 0.5, []string{}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "abc123", "fact", "triggers subscription notify", "manual", 0.5, []string{}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 	srv.notifyResourceUpdated(ctx, uri)
@@ -1134,7 +1134,7 @@ func TestGhostResolve_DryRunByDefault(t *testing.T) {
 
 	ctx := context.Background()
 	const content = "root cause: fixed in v2, no further action needed"
-	if _, _, err := store.Upsert(ctx, "abc123", "gotcha", content, "manual", 0.5, []string{}); err != nil {
+	if _, _, _, err := store.Upsert(ctx, "abc123", "gotcha", content, "manual", 0.5, []string{}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
 
