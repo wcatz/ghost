@@ -40,8 +40,9 @@ type APIConfig struct {
 
 // ReflectionConfig holds memory consolidation settings.
 type ReflectionConfig struct {
-	Backend     string `koanf:"backend"` // "auto", "haiku", "sqlite", "disabled"
-	AutoResolve bool   `koanf:"auto_resolve"`
+	Backend       string `koanf:"backend"` // "auto", "haiku", "sqlite", "disabled"
+	AutoResolve   bool   `koanf:"auto_resolve"`
+	AutoSupersede bool   `koanf:"auto_supersede"`
 }
 
 // EmbeddingConfig holds local embedding settings.
@@ -75,6 +76,7 @@ var defaults = map[string]interface{}{
 	"embedding.dimensions":       768,
 	"reflection.backend":         "auto",
 	"reflection.auto_resolve":    false,
+	"reflection.auto_supersede":  false,
 	"linking.enabled":            true,
 	"linking.threshold":          0.70,
 	"linking.demotion_threshold": 0.90,
