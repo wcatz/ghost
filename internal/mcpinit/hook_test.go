@@ -724,6 +724,9 @@ func TestSessionInjectionRespectsNewCap(t *testing.T) {
 	if !strings.Contains(result, "15 shown of 20 total — 5 not shown") {
 		t.Errorf("expected cap of 15 with not-shown count, got:\n%s", result)
 	}
+	if !strings.Contains(result, "ranked by a composite score of importance, pinned status, and category-aware recency decay") {
+		t.Errorf("memories not-shown line must explain the ranking factors; got:\n%s", result)
+	}
 }
 
 // TestSessionInjectionUsesDecayRanking: ranking must follow the category-aware

@@ -146,7 +146,7 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 			var gsb strings.Builder
 			fmt.Fprintf(&gsb, "\n**Global (applies to all projects):** the user's own saved cross-project preferences.\n")
 			if totalGlobalCountKnown && totalGlobalCount > len(globals) {
-				fmt.Fprintf(&gsb, "(%d shown of %d total — %d not shown; use ghost_search_all for the rest)\n", len(globals), totalGlobalCount, totalGlobalCount-len(globals))
+				fmt.Fprintf(&gsb, "(%d shown of %d total — %d not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)\n", len(globals), totalGlobalCount, totalGlobalCount-len(globals))
 			}
 			for _, m := range globals {
 				fmt.Fprintf(&gsb, "- [%s] %s\n", m.Category, quoteData(m.Content))
@@ -179,7 +179,7 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 		if !totalCountKnown {
 			fmt.Fprintf(&sb, "**Memories (%d shown; total unknown — count lookup failed, more may be available; use ghost_memories_list or ghost_memory_search for the rest):**\n", len(memories))
 		} else if totalMemoryCount > len(memories) {
-			fmt.Fprintf(&sb, "**Memories (%d shown of %d total — %d not shown; use ghost_memories_list or ghost_memory_search for the rest):**\n", len(memories), totalMemoryCount, totalMemoryCount-len(memories))
+			fmt.Fprintf(&sb, "**Memories (%d shown of %d total — %d not shown, ranked by a composite score of importance, pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**\n", len(memories), totalMemoryCount, totalMemoryCount-len(memories))
 		} else {
 			fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
 		}
