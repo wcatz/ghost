@@ -320,23 +320,27 @@ Should be skipped.`)
 		t.Errorf("store count = %d, want >= 2", count)
 	}
 
-	// Re-importing is not idempotent by row count anymore: Upsert is
-	// non-destructive, so a re-imported duplicate gets its own row (linked
-	// to the original via a 'duplicate' relation) instead of merging into
-	// it. Both files still count as successfully imported.
+	// Test idempotency — importing again should not increase count.
+	//
+	// Store.Upsert itself is non-destructive (a duplicate save creates a new
+	// linked row rather than merging), so idempotency here relies on
+	// importFromDir's own dedup guard: it skips any file whose exact content
+	// already exists for the project, rather than calling Upsert at all.
+	// This matters because ghost mcp init calls Import unconditionally on
+	// every run and documents itself as safe to re-run.
 	imported2, err := importFromDir(ctx, store, projectID, memDir, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if imported2 != 2 {
-		t.Errorf("imported2 = %d, want 2 (re-import still succeeds for both files)", imported2)
+	if imported2 != 0 {
+		t.Errorf("imported2 = %d, want 0 (dedup guard skips already-imported content)", imported2)
 	}
 	count2, err := store.CountMemories(ctx, projectID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count2 != count*2 {
-		t.Errorf("after re-import: count = %d, want %d (each duplicate gets its own linked row)", count2, count*2)
+	if count2 != count {
+		t.Errorf("after re-import: count = %d, want %d (idempotent)", count2, count)
 	}
 }
 

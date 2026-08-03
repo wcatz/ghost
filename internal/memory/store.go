@@ -410,7 +410,18 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 		if newImportance > 1.0 {
 			newImportance = 1.0
 		}
-		if _, err = s.db.ExecContext(ctx, `
+
+		// The UPDATE (strengthen), INSERT (new row), and INSERT (link) must
+		// all succeed or none should — otherwise a failure partway through
+		// leaves the new memory row orphaned: unlinked, un-embedded (onSave
+		// never fires), and invisible. Same tx pattern as mergeProjectLocked.
+		tx, txErr := s.db.BeginTx(ctx, nil)
+		if txErr != nil {
+			return "", "", 0, fmt.Errorf("begin upsert tx: %w", txErr)
+		}
+		defer tx.Rollback() //nolint:errcheck
+
+		if _, err = tx.ExecContext(ctx, `
 			UPDATE memories
 			SET importance = ?, access_count = access_count + 1, updated_at = datetime('now'),
 			    resolved_at = NULL
@@ -419,7 +430,7 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 			return "", "", 0, fmt.Errorf("strengthen memory: %w", err)
 		}
 
-		if err = s.db.QueryRowContext(ctx, `
+		if err = tx.QueryRowContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags)
 			VALUES (?, ?, ?, ?, ?, ?)
 			RETURNING id
@@ -431,7 +442,7 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 		// Upsert already holds the lock for its entire body. Inline the same
 		// upsert-link SQL directly instead. Direction is fixed (source_id=new,
 		// target_id=existing), not normalized like symmetric relations.
-		if _, err = s.db.ExecContext(ctx, `
+		if _, err = tx.ExecContext(ctx, `
 			INSERT INTO memory_links (source_id, target_id, relation, strength, source)
 			VALUES (?, ?, 'duplicate', ?, 'auto')
 			ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
@@ -439,6 +450,10 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 				invalidated_at = NULL
 		`, id, existingID, score); err != nil {
 			return "", "", 0, fmt.Errorf("link duplicate: %w", err)
+		}
+
+		if err = tx.Commit(); err != nil {
+			return "", "", 0, fmt.Errorf("commit upsert tx: %w", err)
 		}
 
 		if s.onSave != nil {
