@@ -3,13 +3,11 @@ package supersede
 import (
 	"context"
 	"errors"
-	"log/slog"
-	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/ai"
-	"github.com/wcatz/ghost/internal/config"
 )
 
 // fakeProvider returns a canned response and records the last call it saw.
@@ -106,19 +104,20 @@ func TestQuoteDataNeutralizesEmbeddedDelimiters(t *testing.T) {
 }
 
 // TestHaikuClassifierLive validates the actual prompt against a small labeled
-// set. It needs a real API key, so it is skipped in CI; run it manually to get
-// a precision signal on the classifier (the one piece of the creation path with
-// no deterministic test). A false SUPERSEDES buries a still-valid memory, and a
-// false CAUSES misattributes rationale, so the prompt biases toward NEITHER
-// when uncertain — a missed link merely leaves the staleness bug unfixed for
-// that pair, which is cheaper to recover from.
+// set. It needs the `claude` CLI on PATH and a logged-in subscription, so it
+// is skipped in CI; run it manually to get a precision signal on the
+// classifier (the one piece of the creation path with no deterministic test).
+// It goes through ai.CLIClient rather than the direct Anthropic API client so
+// repeated manual runs bill to the subscription instead of API credits. A
+// false SUPERSEDES buries a still-valid memory, and a false CAUSES
+// misattributes rationale, so the prompt biases toward NEITHER when uncertain
+// — a missed link merely leaves the staleness bug unfixed for that pair,
+// which is cheaper to recover from.
 func TestHaikuClassifierLive(t *testing.T) {
-	cfg, err := config.Load()
-	if err != nil || cfg.API.Key == "" {
-		t.Skip("no ANTHROPIC_API_KEY; skipping live Haiku classifier test")
+	if _, err := exec.LookPath("claude"); err != nil {
+		t.Skip("claude CLI not on PATH; skipping live Haiku classifier test")
 	}
-	client := ai.NewClient(cfg.API.Key, slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	provider := ai.NewFallbackProvider(ai.NewAnthropicProvider(client), nil, false)
+	provider := ai.NewFallbackProvider(ai.NewCLIClient(), nil, false)
 	cls := NewHaikuClassifier(provider)
 	ctx := context.Background()
 
