@@ -149,15 +149,18 @@ func TestLoadGlobalMemories(t *testing.T) {
 		t.Fatalf("insert global memory: %v", err)
 	}
 
-	globals := loadGlobalMemories(dbPath)
+	globals, total, totalKnown := loadGlobalMemories(dbPath)
 	if len(globals) != 1 {
 		t.Fatalf("expected 1 global memory, got %d", len(globals))
 	}
-	if globals[0][0] != "preference" {
-		t.Errorf("category: got %q, want preference", globals[0][0])
+	if globals[0].Category != "preference" {
+		t.Errorf("category: got %q, want preference", globals[0].Category)
 	}
-	if globals[0][1] != "never push to main" {
-		t.Errorf("content: got %q, want 'never push to main'", globals[0][1])
+	if globals[0].Content != "never push to main" {
+		t.Errorf("content: got %q, want 'never push to main'", globals[0].Content)
+	}
+	if !totalKnown || total != 1 {
+		t.Errorf("total: got known=%v total=%d, want known=true total=1", totalKnown, total)
 	}
 }
 
@@ -166,11 +169,98 @@ func TestLoadGlobalMemories(t *testing.T) {
 // to open read-write and materialize a phantom file on first read).
 func TestLoadGlobalMemories_MissingDBNoPhantom(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	if globals := loadGlobalMemories(dbPath); globals != nil {
-		t.Errorf("missing DB should yield no globals, got %v", globals)
+	globals, total, totalKnown := loadGlobalMemories(dbPath)
+	if globals != nil || total != 0 || totalKnown {
+		t.Errorf("missing DB should yield no globals, got globals=%v total=%d known=%v", globals, total, totalKnown)
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
 		t.Errorf("loadGlobalMemories must not create %s (err=%v)", dbPath, err)
+	}
+}
+
+// TestLoadGlobalMemories_DedupsNearDuplicates: two near-duplicate globals
+// linked above the globals demotion threshold (0.85) must not both survive,
+// even though 0.8857 is below the general DefaultDemotionThreshold (0.90)
+// used for project memories.
+func TestLoadGlobalMemories_DedupsNearDuplicates(t *testing.T) {
+	db, dbPath := openFileTestDB(t)
+
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
+		t.Fatalf("insert _global project: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES ('gaaa0001', '_global', 'convention', 'ORIGINAL restricted repos are read-only', 'manual', 0.9)`,
+	); err != nil {
+		t.Fatalf("insert a: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES ('gbbb0001', '_global', 'convention', 'RESTATED restricted repos are read-only too', 'manual', 0.89)`,
+	); err != nil {
+		t.Fatalf("insert b: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memory_links (source_id, target_id, relation, strength, source) VALUES ('gaaa0001', 'gbbb0001', 'related', 0.8857, 'auto')`,
+	); err != nil {
+		t.Fatalf("insert link: %v", err)
+	}
+
+	globals, _, _ := loadGlobalMemories(dbPath)
+	var sawOriginal, sawRestated bool
+	for _, m := range globals {
+		if strings.Contains(m.Content, "ORIGINAL") {
+			sawOriginal = true
+		}
+		if strings.Contains(m.Content, "RESTATED") {
+			sawRestated = true
+		}
+	}
+	if !sawOriginal {
+		t.Errorf("higher-ranked global must survive; got %+v", globals)
+	}
+	if sawRestated {
+		t.Errorf("lower-ranked near-duplicate global must be demoted out; got %+v", globals)
+	}
+}
+
+// TestHandleSessionStartHook_GlobalsCapAndNotShownLine: more than 8 global
+// memories must be capped, and the cap must surface a not-shown count rather
+// than silently dropping the rest.
+func TestHandleSessionStartHook_GlobalsCapAndNotShownLine(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
+		t.Fatalf("insert _global project: %v", err)
+	}
+	for i := 0; i < 12; i++ {
+		id := fmt.Sprintf("gfil%04d", i)
+		importance := 0.9 - float64(i)*0.01
+		if _, err := db.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES (?, '_global', 'preference', ?, 'manual', ?)`,
+			id, fmt.Sprintf("GLOBALFILLER%02d distinct preference", i), importance,
+		); err != nil {
+			t.Fatalf("insert global filler %d: %v", i, err)
+		}
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": "/tmp/no-project-here"})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	result := out.String()
+
+	if !strings.Contains(result, "not shown") {
+		t.Errorf("globals section must surface a not-shown count when capped; got:\n%s", result)
 	}
 }
 
