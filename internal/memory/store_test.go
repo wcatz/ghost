@@ -81,40 +81,67 @@ func TestStoreUpsert(t *testing.T) {
 	ctx := context.Background()
 
 	// First insert via Upsert — should create new.
-	id1, merged, err := s.Upsert(ctx, testProject, "fact", "SQLite supports full-text search via FTS5", "reflection", 0.6, []string{"sqlite"})
+	id1, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "SQLite supports full-text search via FTS5", "reflection", 0.6, []string{"sqlite"})
 	if err != nil {
 		t.Fatalf("Upsert (new): %v", err)
 	}
-	if merged {
-		t.Error("first Upsert should not merge")
+	if dupOf != "" {
+		t.Error("first Upsert should not report a duplicate")
 	}
 	if id1 == "" {
 		t.Fatal("first Upsert returned empty ID")
 	}
 
-	// Second Upsert with overlapping content — should merge.
-	id2, merged, err := s.Upsert(ctx, testProject, "fact", "SQLite FTS5 provides full-text search capabilities", "reflection", 0.5, []string{"sqlite", "fts"})
+	// Second Upsert with overlapping content — should link as a duplicate of id1.
+	id2, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "SQLite FTS5 provides full-text search capabilities", "reflection", 0.5, []string{"sqlite", "fts"})
 	if err != nil {
 		t.Fatalf("Upsert (merge): %v", err)
 	}
-	if !merged {
-		t.Error("second Upsert should have merged")
+	if dupOf != id1 {
+		t.Errorf("second Upsert should report duplicateOf %s, got %q", id1, dupOf)
 	}
-	if id2 != id1 {
-		t.Errorf("merged ID should match original: got %s, want %s", id2, id1)
+	if id2 == id1 {
+		t.Error("second Upsert should have created its own row, not reused id1")
 	}
 
-	// Verify importance was strengthened: 0.6 + (0.5 * 0.2) = 0.7
+	// Both rows exist, with their original content untouched.
 	all, err := s.GetAll(ctx, testProject, 100)
 	if err != nil {
 		t.Fatalf("GetAll: %v", err)
 	}
-	if len(all) != 1 {
-		t.Fatalf("expected 1 memory after merge, got %d", len(all))
+	if len(all) != 2 {
+		t.Fatalf("expected 2 memories after duplicate-link, got %d", len(all))
 	}
+	byID := map[string]Memory{}
+	for _, m := range all {
+		byID[m.ID] = m
+	}
+	if byID[id1].Content != "SQLite supports full-text search via FTS5" {
+		t.Errorf("existing row content was overwritten: %q", byID[id1].Content)
+	}
+	if byID[id2].Content != "SQLite FTS5 provides full-text search capabilities" {
+		t.Errorf("new row content wrong: %q", byID[id2].Content)
+	}
+
+	// Existing row's importance was strengthened: 0.6 + (0.5 * 0.2) = 0.7
 	expected := float32(0.6 + 0.5*0.2)
-	if diff := all[0].Importance - expected; diff > 0.01 || diff < -0.01 {
-		t.Errorf("expected importance ~%f, got %f", expected, all[0].Importance)
+	if diff := byID[id1].Importance - expected; diff > 0.01 || diff < -0.01 {
+		t.Errorf("expected existing-row importance ~%f, got %f", expected, byID[id1].Importance)
+	}
+
+	// A 'duplicate' link connects the two rows in the right direction.
+	links, err := s.GetLinks(ctx, id1)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	found := false
+	for _, l := range links {
+		if l.Relation == "duplicate" && l.SourceID == id2 && l.TargetID == id1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a 'duplicate' link source_id=%s target_id=%s, links: %+v", id2, id1, links)
 	}
 }
 
@@ -126,24 +153,24 @@ func TestStoreUpsertNoMergeOnSharedWord(t *testing.T) {
 	// ("Phase"). Reproduces the 2026-07-19 live bug: the FTS OR-probe alone
 	// treated any one-word overlap as a duplicate and silently swallowed
 	// the second save.
-	id1, merged, err := s.Upsert(ctx, testProject, "decision",
+	id1, dupOf, _, err := s.Upsert(ctx, testProject, "decision",
 		"Benchmark strategy decided: Phase one is LongMemEval retrieval eval with ablations",
 		"mcp", 0.8, nil)
 	if err != nil {
 		t.Fatalf("Upsert (first): %v", err)
 	}
-	if merged {
-		t.Error("first Upsert should not merge")
+	if dupOf != "" {
+		t.Error("first Upsert should not report a duplicate")
 	}
 
-	id2, merged, err := s.Upsert(ctx, testProject, "decision",
+	id2, dupOf, _, err := s.Upsert(ctx, testProject, "decision",
 		"MCP Phase two design approved: memory update tool, stop hook, promote to global",
 		"mcp", 0.8, nil)
 	if err != nil {
 		t.Fatalf("Upsert (second): %v", err)
 	}
-	if merged {
-		t.Error("unrelated content sharing one word must not merge")
+	if dupOf != "" {
+		t.Error("unrelated content sharing one word must not report a duplicate")
 	}
 	if id2 == id1 {
 		t.Error("second Upsert should have created a distinct memory")
@@ -164,21 +191,21 @@ func TestStoreUpsertNoMergeBelowThreshold(t *testing.T) {
 
 	// Same topic vocabulary but genuinely different facts: token overlap is
 	// real yet below the 0.5 Jaccard gate, so both must survive.
-	_, _, err := s.Upsert(ctx, testProject, "gotcha",
+	_, _, _, err := s.Upsert(ctx, testProject, "gotcha",
 		"SQLite busy timeout must be set on the read-only hook connection",
 		"mcp", 0.7, nil)
 	if err != nil {
 		t.Fatalf("Upsert (first): %v", err)
 	}
 
-	_, merged, err := s.Upsert(ctx, testProject, "gotcha",
+	_, dupOf, _, err := s.Upsert(ctx, testProject, "gotcha",
 		"SQLite FTS5 rank ordering is unstable across identical RRF scores in hybrid search",
 		"mcp", 0.7, nil)
 	if err != nil {
 		t.Fatalf("Upsert (second): %v", err)
 	}
-	if merged {
-		t.Error("below-threshold overlap must not merge")
+	if dupOf != "" {
+		t.Error("below-threshold overlap must not report a duplicate")
 	}
 
 	all, err := s.GetAll(ctx, testProject, 100)
@@ -198,17 +225,17 @@ func TestStoreUpsertNoMergeOnTokenFreeContent(t *testing.T) {
 	// sets (tokenizeContent keeps len>1 only) while still FTS-matching each
 	// other (sanitizeFTS keeps single-char words). jaccard(∅,∅) = 1.0, so
 	// without a guard these unrelated saves would spuriously merge.
-	_, _, err := s.Upsert(ctx, testProject, "fact", "a b c", "mcp", 0.5, nil)
+	_, _, _, err := s.Upsert(ctx, testProject, "fact", "a b c", "mcp", 0.5, nil)
 	if err != nil {
 		t.Fatalf("Upsert (first): %v", err)
 	}
 
-	_, merged, err := s.Upsert(ctx, testProject, "fact", "a x y", "mcp", 0.5, nil)
+	_, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "a x y", "mcp", 0.5, nil)
 	if err != nil {
 		t.Fatalf("Upsert (second): %v", err)
 	}
-	if merged {
-		t.Error("token-free contents must never merge")
+	if dupOf != "" {
+		t.Error("token-free contents must never report a duplicate")
 	}
 
 	all, err := s.GetAll(ctx, testProject, 100)
@@ -220,45 +247,45 @@ func TestStoreUpsertNoMergeOnTokenFreeContent(t *testing.T) {
 	}
 }
 
-func TestStoreUpsertMergesBestCandidate(t *testing.T) {
+func TestStoreUpsertDuplicateLinksBestCandidate(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
 	// Two existing memories; the new content shares one word with A but is a
-	// near-duplicate of B. It must merge into B, not the first FTS hit.
-	_, _, err := s.Upsert(ctx, testProject, "fact",
+	// near-duplicate of B. It must link to B, not the first FTS hit.
+	_, _, _, err := s.Upsert(ctx, testProject, "fact",
 		"Deployment pipeline uses GitHub Actions runners on the cluster",
 		"mcp", 0.7, nil)
 	if err != nil {
 		t.Fatalf("Upsert (A): %v", err)
 	}
 
-	idB, _, err := s.Upsert(ctx, testProject, "fact",
+	idB, _, _, err := s.Upsert(ctx, testProject, "fact",
 		"Ollama embedding worker sweeps unembedded memories every two minutes",
 		"mcp", 0.7, nil)
 	if err != nil {
 		t.Fatalf("Upsert (B): %v", err)
 	}
 
-	idNew, merged, err := s.Upsert(ctx, testProject, "fact",
+	idNew, dupOf, _, err := s.Upsert(ctx, testProject, "fact",
 		"Ollama embedding worker sweeps the unembedded memories every two minutes for cluster projects",
 		"mcp", 0.7, nil)
 	if err != nil {
 		t.Fatalf("Upsert (near-dup of B): %v", err)
 	}
-	if !merged {
-		t.Fatal("near-duplicate of B should merge")
+	if dupOf != idB {
+		t.Fatalf("should link to B (%s), linked to %q", idB, dupOf)
 	}
-	if idNew != idB {
-		t.Errorf("should merge into B (%s), merged into %s", idB, idNew)
+	if idNew == idB {
+		t.Errorf("near-duplicate should get its own row distinct from B (%s)", idB)
 	}
 }
 
-// TestStoreUpsertMergesLengthAsymmetricParaphrases covers the failure the eval
-// surfaced: the same fact restated at a different length accumulated as
-// separate memories because Jaccard punishes the wordier side's filler tokens
-// (these pairs score 0.2–0.45). The overlap-coefficient leg catches them.
-func TestStoreUpsertMergesLengthAsymmetricParaphrases(t *testing.T) {
+// TestStoreUpsertDuplicateLinksLengthAsymmetricParaphrases covers the failure
+// the eval surfaced: the same fact restated at a different length. Each
+// restatement must get its own row and link back to a previously-seen row —
+// not accumulate as unrelated memories, and not silently overwrite one another.
+func TestStoreUpsertDuplicateLinksLengthAsymmetricParaphrases(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
@@ -269,25 +296,28 @@ func TestStoreUpsertMergesLengthAsymmetricParaphrases(t *testing.T) {
 		"the session cache TTL value is 300 seconds and it is not currently tunable",
 	}
 
-	if _, _, err := s.Upsert(ctx, testProject, "fact", base, "mcp", 0.7, nil); err != nil {
+	baseID, _, _, err := s.Upsert(ctx, testProject, "fact", base, "mcp", 0.7, nil)
+	if err != nil {
 		t.Fatalf("Upsert (base): %v", err)
 	}
+	seenIDs := map[string]bool{baseID: true}
 	for i, r := range restatements {
-		_, merged, err := s.Upsert(ctx, testProject, "fact", r, "mcp", 0.7, nil)
+		id, dupOf, _, err := s.Upsert(ctx, testProject, "fact", r, "mcp", 0.7, nil)
 		if err != nil {
 			t.Fatalf("Upsert (restatement %d): %v", i, err)
 		}
-		if !merged {
-			t.Errorf("restatement %d must merge, did not: %q", i, r)
+		if dupOf == "" || !seenIDs[dupOf] {
+			t.Errorf("restatement %d must link to a previously-seen row, got dupOf=%q: %q", i, dupOf, r)
 		}
+		seenIDs[id] = true
 	}
 
 	all, err := s.GetAll(ctx, testProject, 100)
 	if err != nil {
 		t.Fatalf("GetAll: %v", err)
 	}
-	if len(all) != 1 {
-		t.Errorf("expected 1 memory after 4 restatements of one fact, got %d", len(all))
+	if len(all) != 4 {
+		t.Errorf("expected 4 rows (base + 3 restatements), got %d", len(all))
 		for _, m := range all {
 			t.Logf("  %s", m.Content)
 		}
@@ -305,7 +335,7 @@ func TestStoreUpsertOverlapLegDoesNotOverMerge(t *testing.T) {
 	// below, but states a different fact from each of them.
 	long := "the embedding worker retries the Ollama request twice before giving " +
 		"up and leaves the memory unembedded until the next sweep"
-	if _, _, err := s.Upsert(ctx, testProject, "gotcha", long, "mcp", 0.7, nil); err != nil {
+	if _, _, _, err := s.Upsert(ctx, testProject, "gotcha", long, "mcp", 0.7, nil); err != nil {
 		t.Fatalf("Upsert (long): %v", err)
 	}
 
@@ -315,12 +345,12 @@ func TestStoreUpsertOverlapLegDoesNotOverMerge(t *testing.T) {
 		"the memory unembedded",
 	}
 	for i, sh := range shorts {
-		_, merged, err := s.Upsert(ctx, testProject, "gotcha", sh, "mcp", 0.7, nil)
+		_, dupOf, _, err := s.Upsert(ctx, testProject, "gotcha", sh, "mcp", 0.7, nil)
 		if err != nil {
 			t.Fatalf("Upsert (short %d): %v", i, err)
 		}
-		if merged {
-			t.Errorf("short contained save %d must not merge into a longer unrelated memory: %q", i, sh)
+		if dupOf != "" {
+			t.Errorf("short contained save %d must not report a duplicate for a longer unrelated memory: %q", i, sh)
 		}
 	}
 
@@ -332,12 +362,12 @@ func TestStoreUpsertOverlapLegDoesNotOverMerge(t *testing.T) {
 		"the embedding worker writes vectors into the memory embeddings table",
 	}
 	for i, d := range distinct {
-		_, merged, err := s.Upsert(ctx, testProject, "gotcha", d, "mcp", 0.7, nil)
+		_, dupOf, _, err := s.Upsert(ctx, testProject, "gotcha", d, "mcp", 0.7, nil)
 		if err != nil {
 			t.Fatalf("Upsert (distinct %d): %v", i, err)
 		}
-		if merged {
-			t.Errorf("distinct fact %d sharing topic vocabulary must not merge: %q", i, d)
+		if dupOf != "" {
+			t.Errorf("distinct fact %d sharing topic vocabulary must not report a duplicate: %q", i, d)
 		}
 	}
 }
@@ -376,29 +406,26 @@ func TestStoreUpsertImportanceCap(t *testing.T) {
 	ctx := context.Background()
 
 	// Create with high importance.
-	_, _, err := s.Upsert(ctx, testProject, "fact", "Critical architecture pattern for the system", "reflection", 0.95, nil)
+	firstID, _, _, err := s.Upsert(ctx, testProject, "fact", "Critical architecture pattern for the system", "reflection", 0.95, nil)
 	if err != nil {
 		t.Fatalf("Upsert (new): %v", err)
 	}
 
-	// Upsert again — should be capped at 1.0.
-	_, merged, err := s.Upsert(ctx, testProject, "fact", "Critical architecture pattern for the entire system design", "reflection", 0.9, nil)
+	// Upsert a near-duplicate — existing row's importance should be capped at 1.0.
+	_, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "Critical architecture pattern for the entire system design", "reflection", 0.9, nil)
 	if err != nil {
 		t.Fatalf("Upsert (cap): %v", err)
 	}
-	if !merged {
-		t.Error("expected merge")
+	if dupOf != firstID {
+		t.Fatalf("expected duplicate link to %s, got %q", firstID, dupOf)
 	}
 
-	all, err := s.GetAll(ctx, testProject, 100)
-	if err != nil {
-		t.Fatalf("GetAll: %v", err)
+	var importance float32
+	if err := s.db.QueryRowContext(ctx, `SELECT importance FROM memories WHERE id = ?`, firstID).Scan(&importance); err != nil {
+		t.Fatalf("query importance: %v", err)
 	}
-	if len(all) != 1 {
-		t.Fatalf("expected 1 memory, got %d", len(all))
-	}
-	if all[0].Importance > 1.0 {
-		t.Errorf("importance should be capped at 1.0, got %f", all[0].Importance)
+	if importance > 1.0 {
+		t.Errorf("importance should be capped at 1.0, got %f", importance)
 	}
 }
 
@@ -706,6 +733,19 @@ func TestSanitizeFTS(t *testing.T) {
 				t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSanitizeFTSNWiderCap verifies Upsert's duplicate-recall probe (which
+// calls sanitizeFTSN(content, 30)) gets a wider word cap than plain search
+// (sanitizeFTS, capped at 10) — see sanitizeFTSN's doc comment for why the
+// caps must differ.
+func TestSanitizeFTSNWiderCap(t *testing.T) {
+	input := "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twentyone twentytwo twentythree twentyfour twentyfive twentysix twentyseven twentyeight twentynine thirty thirtyone thirtytwo"
+	want := `"one" OR "two" OR "three" OR "four" OR "five" OR "six" OR "seven" OR "eight" OR "nine" OR "ten" OR "eleven" OR "twelve" OR "thirteen" OR "fourteen" OR "fifteen" OR "sixteen" OR "seventeen" OR "eighteen" OR "nineteen" OR "twenty" OR "twentyone" OR "twentytwo" OR "twentythree" OR "twentyfour" OR "twentyfive" OR "twentysix" OR "twentyseven" OR "twentyeight" OR "twentynine" OR "thirty"`
+	got := sanitizeFTSN(input, 30)
+	if got != want {
+		t.Errorf("sanitizeFTSN(%q, 30)\n  got:  %s\n  want: %s", input, got, want)
 	}
 }
 
@@ -1819,7 +1859,7 @@ func TestMergeProject(t *testing.T) {
 	}
 
 	// Seed data under the duplicate project.
-	memID, _, err := s.Upsert(ctx, "test", "fact", "MCP-created memory about deployment", "mcp", 0.7, []string{})
+	memID, _, _, err := s.Upsert(ctx, "test", "fact", "MCP-created memory about deployment", "mcp", 0.7, []string{})
 	if err != nil {
 		t.Fatalf("Upsert under dup: %v", err)
 	}
@@ -2265,7 +2305,7 @@ func TestEnsureProject_AutoMerge(t *testing.T) {
 	}
 
 	// Save a memory under the MCP project.
-	_, _, err := s.Upsert(ctx, "myproject", "fact", "deployed on k8s cluster alpha-7", "mcp", 0.8, []string{})
+	_, _, _, err := s.Upsert(ctx, "myproject", "fact", "deployed on k8s cluster alpha-7", "mcp", 0.8, []string{})
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -2492,19 +2532,19 @@ func TestUnresolveOnWrite(t *testing.T) {
 	assertActive(t, s, testProject, id)
 
 	// Upsert of a near-duplicate (strengthen branch) clears resolved_at.
-	uid, _, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
+	uid, _, _, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
 	if err != nil {
 		t.Fatalf("upsert create: %v", err)
 	}
 	if _, err := s.SetResolved(ctx, []string{uid}); err != nil {
 		t.Fatalf("SetResolved upsert row: %v", err)
 	}
-	gotID, merged, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
+	_, dupOf, _, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
 	if err != nil {
 		t.Fatalf("upsert dup: %v", err)
 	}
-	if !merged || gotID != uid {
-		t.Fatalf("upsert dup did not strengthen existing row: merged=%v id=%s want %s", merged, gotID, uid)
+	if dupOf != uid {
+		t.Fatalf("upsert dup did not link to existing row: dupOf=%s want %s", dupOf, uid)
 	}
 	assertActive(t, s, testProject, uid)
 }

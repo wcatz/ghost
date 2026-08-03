@@ -187,7 +187,7 @@ CREATE TABLE IF NOT EXISTS memory_links (
     source_id      TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
     target_id      TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
     relation       TEXT NOT NULL DEFAULT 'related'
-                   CHECK (relation IN ('related', 'supersedes', 'contradicts', 'elaborates', 'causes')),
+                   CHECK (relation IN ('related', 'supersedes', 'contradicts', 'elaborates', 'causes', 'duplicate')),
     strength       REAL NOT NULL DEFAULT 0.5,
     source         TEXT NOT NULL DEFAULT 'auto'
                    CHECK (source IN ('auto', 'llm', 'manual')),

@@ -345,21 +345,24 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 }
 
 // Upsert checks for an existing similar memory (same category, FTS overlap).
-// If found, it strengthens the existing memory. If not, creates a new one.
-func (s *Store) Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (id string, merged bool, err error) {
+// If found, it strengthens the existing memory's importance/access_count and
+// links the new content to it as a 'duplicate' — it never overwrites the
+// existing row's content, so a genuinely different follow-up save under a
+// manual-sourced target (or any target) is never silently discarded. If no
+// candidate scores above threshold, it creates a new, unlinked row.
+func (s *Store) Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (id string, duplicateOf string, score float64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var existingID string
 	var existingImportance float32
-	var existingContent string
 
 	// Two-stage duplicate detection. Stage 1 (recall): the FTS OR-probe over
-	// the first 10 words retrieves merge candidates cheaply. Stage 2
+	// the first 30 words retrieves merge candidates cheaply. Stage 2
 	// (precision): mergeScore over the full token sets confirms a true
 	// duplicate — the OR-probe alone treats a single shared word as a match,
 	// which silently swallowed unrelated saves.
-	ftsQuery := sanitizeFTS(content)
+	ftsQuery := sanitizeFTSN(content, 30)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, m.importance, m.content
 		FROM memories m
@@ -368,7 +371,7 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 		  AND m.category = ?
 		  AND memories_fts MATCH ?
 		ORDER BY rank, m.importance DESC
-		LIMIT 5
+		LIMIT 15
 	`, projectID, category, ftsQuery)
 	if err == nil {
 		// Token-free content (punctuation/single-char words only) can still
@@ -387,57 +390,91 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 				bestSim = sim
 				existingID = candID
 				existingImportance = candImportance
-				existingContent = candContent
 			}
 		}
 		if rowsErr := rows.Err(); rowsErr != nil {
 			existingID = "" // treat a broken candidate scan as no match
 		}
 		_ = rows.Close()
+		score = bestSim
 	}
 
+	tagsJSON, _ := json.Marshal(tags)
+
 	if existingID != "" {
-		// Found a match — strengthen it.
+		// Found a match — strengthen the existing row, then insert the new
+		// content as its own row and link it back as a 'duplicate'. Never
+		// overwrite existingContent: that silently discarded content for
+		// source='manual' targets while still reporting a merge.
 		newImportance := existingImportance + (importance * 0.2)
 		if newImportance > 1.0 {
 			newImportance = 1.0
 		}
-		finalContent := existingContent
-		if len(content) > len(existingContent) {
-			finalContent = content
-		}
 
-		_, err = s.db.ExecContext(ctx, `
+		// The UPDATE (strengthen), INSERT (new row), and INSERT (link) must
+		// all succeed or none should — otherwise a failure partway through
+		// leaves the new memory row orphaned: unlinked, un-embedded (onSave
+		// never fires), and invisible. Same tx pattern as mergeProjectLocked.
+		tx, txErr := s.db.BeginTx(ctx, nil)
+		if txErr != nil {
+			return "", "", 0, fmt.Errorf("begin upsert tx: %w", txErr)
+		}
+		defer tx.Rollback() //nolint:errcheck
+
+		if _, err = tx.ExecContext(ctx, `
 			UPDATE memories
-			SET content = CASE WHEN source = 'manual' THEN content ELSE ? END,
-			    importance = ?, access_count = access_count + 1, updated_at = datetime('now'),
+			SET importance = ?, access_count = access_count + 1, updated_at = datetime('now'),
 			    resolved_at = NULL
 			WHERE id = ? AND project_id = ?
-		`, finalContent, newImportance, existingID, projectID)
-		if err != nil {
-			return "", false, fmt.Errorf("strengthen memory: %w", err)
+		`, newImportance, existingID, projectID); err != nil {
+			return "", "", 0, fmt.Errorf("strengthen memory: %w", err)
 		}
+
+		if err = tx.QueryRowContext(ctx, `
+			INSERT INTO memories (project_id, category, content, source, importance, tags)
+			VALUES (?, ?, ?, ?, ?, ?)
+			RETURNING id
+		`, projectID, category, content, source, importance, string(tagsJSON)).Scan(&id); err != nil {
+			return "", "", 0, fmt.Errorf("create memory: %w", err)
+		}
+
+		// CreateLink takes s.mu itself — calling it here would deadlock, since
+		// Upsert already holds the lock for its entire body. Inline the same
+		// upsert-link SQL directly instead. Direction is fixed (source_id=new,
+		// target_id=existing), not normalized like symmetric relations.
+		if _, err = tx.ExecContext(ctx, `
+			INSERT INTO memory_links (source_id, target_id, relation, strength, source)
+			VALUES (?, ?, 'duplicate', ?, 'auto')
+			ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
+				strength = MAX(strength, excluded.strength),
+				invalidated_at = NULL
+		`, id, existingID, score); err != nil {
+			return "", "", 0, fmt.Errorf("link duplicate: %w", err)
+		}
+
+		if err = tx.Commit(); err != nil {
+			return "", "", 0, fmt.Errorf("commit upsert tx: %w", err)
+		}
+
 		if s.onSave != nil {
 			s.onSave(projectID)
 		}
-		return existingID, true, nil
+		return id, existingID, score, nil
 	}
 
 	// No match — create new.
-	tagsJSON, _ := json.Marshal(tags)
-
 	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags)
 		VALUES (?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`, projectID, category, content, source, importance, string(tagsJSON)).Scan(&id)
 	if err != nil {
-		return "", false, fmt.Errorf("create memory: %w", err)
+		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
 	if s.onSave != nil {
 		s.onSave(projectID)
 	}
-	return id, false, nil
+	return id, "", 0, nil
 }
 
 // GetTopMemories returns the top N memories ranked by composite score
@@ -1436,7 +1473,19 @@ func mergeScore(a, b map[string]bool) float64 {
 	return 0
 }
 
+// sanitizeFTS sanitizes text into an FTS5 OR-query, capped at 10 words. Used
+// on the search path (SearchFTS, SearchFTSAll) — kept at the original cap so
+// retrieval-quality behavior (see TestBenchRegressionFloors) is unaffected.
 func sanitizeFTS(text string) string {
+	return sanitizeFTSN(text, 10)
+}
+
+// sanitizeFTSN sanitizes text into an FTS5 OR-query, capped at maxWords.
+// Upsert's duplicate-recall probe uses a wider cap than plain search
+// (see sanitizeFTS) because a broader OR-probe over more of the content
+// improves candidate recall for the precision pass (mergeScore) that follows;
+// widening the cap globally would instead perturb ranked search results.
+func sanitizeFTSN(text string, maxWords int) string {
 	// Remove FTS5 operators and punctuation, keep only words.
 	var words []string
 	for _, word := range strings.Fields(text) {
@@ -1458,12 +1507,12 @@ func sanitizeFTS(text string) string {
 	if len(words) == 0 {
 		return `""`
 	}
-	// Limit to first 10 words to keep the query reasonable.
-	if len(words) > 10 {
+	// Limit to first maxWords words to keep the query reasonable.
+	if len(words) > maxWords {
 		slog.Warn("fts query truncated",
 			"original_terms", len(words),
-			"limit", 10)
-		words = words[:10]
+			"limit", maxWords)
+		words = words[:maxWords]
 	}
 	return strings.Join(words, " OR ")
 }
