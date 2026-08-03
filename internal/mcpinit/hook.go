@@ -223,6 +223,12 @@ const globalsCap = 8
 // second pass at demotion the way project memories do via config override.
 const globalsDemotionThreshold = 0.85
 
+// sessionMemoriesCap mirrors Store.GetTopMemories's default caller limit,
+// lowered from the previous 25 now that ranking below matches its decay
+// formula — a smaller cap is only safe once ranking picks the same top
+// items the MCP tool path would.
+const sessionMemoriesCap = 15
+
 func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
 	if _, err := os.Stat(dbPath); err != nil {
 		return nil, 0, false // no store yet — never create a phantom empty DB
@@ -254,12 +260,16 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 		if err := rows.Scan(&id, &cat, &content, &pinnedInt); err != nil {
 			continue
 		}
+		// 300 bytes here vs. 200 for project memories below is deliberate,
+		// not drift: globals are already capped at a much smaller item
+		// count (globalsCap=8), so a larger per-item byte budget still
+		// keeps the total globals-section bytes low.
 		content = truncateUTF8(content, 300)
 		globals = append(globals, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1})
 	}
 
 	// Dedup: unlike project memories (where StableDemote only reorders and
-	// relies on the 25-item cap to actually drop the loser), globals are
+	// relies on the 15-item cap to actually drop the loser), globals are
 	// capped much tighter (globalsCap=8) and near-duplicates must not survive
 	// merely because the set is small — so a near-duplicate loser is filtered
 	// out outright here, independent of whether the cap below ever engages.
@@ -338,32 +348,18 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		totalCountKnown = true
 	}
 
-	// sessionMemoriesCap mirrors Store.GetTopMemories's default caller limit,
-	// lowered from the previous 25 now that ranking below matches its decay
-	// formula — a smaller cap is only safe once ranking picks the same top
-	// items the MCP tool path would.
-	const sessionMemoriesCap = 15
-
 	// Get top memories using the same category-aware time-decay + pinned-boost
-	// ranking as Store.GetTopMemories (internal/memory/store.go) — ported here
-	// rather than shared via a Store call because this function deliberately
-	// uses its own lightweight, read-only *sql.DB connection (see the
-	// sessionMemory doc comment above). Over-fetches (2x cap) so near-duplicate
+	// ranking as Store.GetTopMemories (internal/memory/store.go), sharing the
+	// exact ranking SQL via memory.DecayRankingSQL so the two orderings can
+	// never drift apart. The query itself isn't issued through a Store method
+	// because this function deliberately uses its own lightweight, read-only
+	// *sql.DB connection (see the sessionMemory doc comment above), not
+	// Store's read-write handle. Over-fetches (2x cap) so near-duplicate
 	// demotion below can drop matches without under-returning.
 	rows, err := db.Query(`
 		SELECT id, category, content, pinned FROM memories
 		WHERE project_id = ? AND resolved_at IS NULL
-		ORDER BY (
-			importance
-			* CASE
-				WHEN category IN ('preference', 'convention', 'fact') THEN 1.0
-				WHEN category IN ('pattern', 'architecture') THEN
-					MAX(0.3, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 45.0))
-				ELSE
-					MAX(0.15, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 30.0))
-			END
-			* CASE WHEN pinned = 1 THEN 1.5 ELSE 1.0 END
-		) DESC
+		ORDER BY (`+memory.DecayRankingSQL+`) DESC
 		LIMIT ?
 	`, projectID, sessionMemoriesCap*2)
 	if err != nil {
@@ -377,6 +373,9 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		if err := rows.Scan(&id, &cat, &content, &pinnedInt); err != nil {
 			continue
 		}
+		// 200 bytes per item (vs. globals' 300 above) — project memories
+		// have a larger cap (sessionMemoriesCap=15 vs. globalsCap=8), so a
+		// smaller per-item budget keeps total section bytes comparable.
 		content = truncateUTF8(content, 200)
 		memories = append(memories, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1})
 	}

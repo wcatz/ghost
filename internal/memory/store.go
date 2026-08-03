@@ -440,6 +440,24 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 	return id, false, nil
 }
 
+// DecayRankingSQL is the composite-score ranking expression shared by
+// GetTopMemories below and the session-start hook's own read-only query
+// (internal/mcpinit/hook.go's loadSessionContext) — a single source of truth
+// for the category-aware time-decay + pinned-boost formula so the two
+// callers can never drift apart. It is a fragment, not a full query: callers
+// interpolate it into their own "ORDER BY (...) DESC" clause.
+const DecayRankingSQL = `
+	importance
+	* CASE
+		WHEN category IN ('preference', 'convention', 'fact') THEN 1.0
+		WHEN category IN ('pattern', 'architecture') THEN
+			MAX(0.3, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 45.0))
+		ELSE
+			MAX(0.15, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 30.0))
+	END
+	* CASE WHEN pinned = 1 THEN 1.5 ELSE 1.0 END
+`
+
 // GetTopMemories returns the top N memories ranked by composite score
 // with category-aware time decay and pinned boost.
 func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int) ([]Memory, error) {
@@ -452,17 +470,7 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 		FROM memories
 		WHERE (project_id = ? OR project_id = '_global')
 		  AND resolved_at IS NULL
-		ORDER BY (
-			importance
-			* CASE
-				WHEN category IN ('preference', 'convention', 'fact') THEN 1.0
-				WHEN category IN ('pattern', 'architecture') THEN
-					MAX(0.3, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 45.0))
-				ELSE
-					MAX(0.15, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 30.0))
-			END
-			* CASE WHEN pinned = 1 THEN 1.5 ELSE 1.0 END
-		) DESC
+		ORDER BY (`+DecayRankingSQL+`) DESC
 		LIMIT ?
 	`, projectID, limit*2)
 	if err != nil {

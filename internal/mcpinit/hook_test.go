@@ -513,7 +513,8 @@ func TestInjectionExcludesResolved(t *testing.T) {
 
 // TestSessionInjectionBackfillsAfterDemotion: a near-duplicate pair linked
 // above the demotion threshold must not both occupy injection slots — the
-// backfill (LIMIT 50 over-fetch) must surface a distinct memory instead.
+// backfill (sessionMemoriesCap*2 = 30 over-fetch) must surface a distinct
+// memory instead.
 func TestSessionInjectionBackfillsAfterDemotion(t *testing.T) {
 	xdgHome := t.TempDir()
 	ghostDir := filepath.Join(xdgHome, "ghost")
@@ -539,8 +540,8 @@ func TestSessionInjectionBackfillsAfterDemotion(t *testing.T) {
 		t.Fatalf("insert project: %v", err)
 	}
 	// Two near-duplicates (a, b) plus 13 filler memories plus a distinct
-	// memory (c). loadSessionContext over-fetches LIMIT 50 then truncates to
-	// 15; with only 3 memories total the >15 demotion gate could never fire,
+	// memory (c). loadSessionContext over-fetches at 2x the cap (30) then
+	// truncates to 15; with only 3 memories total the >15 demotion gate could never fire,
 	// so this fixture pads the candidate set past 15 (16 total) so the gate
 	// fires and truncation actually drops the demoted duplicate, letting the
 	// distinct memory (ranked last, just past the naive top-15 cut) backfill
@@ -598,8 +599,11 @@ func TestSessionInjectionBackfillsAfterDemotion(t *testing.T) {
 
 // TestSessionInjectionRespectsNewCap: the memory cap is 15, not 25 — a
 // project with more than 15 active memories must show exactly 15 plus a
-// "not shown" count, and ranking must follow decayed score (parity with
-// Store.GetTopMemories), not raw importance/updated_at.
+// "not shown" count. This test only exercises the cap/not-shown behavior;
+// decay-ranking parity with Store.GetTopMemories is covered separately by
+// TestSessionInjectionUsesDecayRanking (all rows here are category 'fact',
+// which never decays, so this fixture can't distinguish decayed-score
+// ordering from raw-importance ordering).
 func TestSessionInjectionRespectsNewCap(t *testing.T) {
 	xdgHome := t.TempDir()
 	ghostDir := filepath.Join(xdgHome, "ghost")
@@ -646,6 +650,79 @@ func TestSessionInjectionRespectsNewCap(t *testing.T) {
 
 	if !strings.Contains(result, "15 shown of 20 total — 5 not shown") {
 		t.Errorf("expected cap of 15 with not-shown count, got:\n%s", result)
+	}
+}
+
+// TestSessionInjectionUsesDecayRanking: ranking must follow the category-aware
+// decayed score (parity with Store.GetTopMemories), not raw importance. The
+// fixture packs 15 'fact' filler rows (importance 0.2, fresh created_at —
+// facts never decay, so score stays 0.2) plus one 'gotcha' row (importance
+// 0.9, created_at ~400 days back — decays to the 0.15 floor, score
+// 0.9*0.15=0.135). Under raw-importance ordering the gotcha (0.9) would rank
+// first and easily survive the 15-cap; under decayed-score ordering it
+// scores below every fact (0.135 < 0.2) and is the one row trimmed by the
+// cap. Asserting the gotcha marker is absent (and a fact marker present)
+// only passes under decay-ranked ordering.
+func TestSessionInjectionUsesDecayRanking(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	// 15 low-importance 'fact' rows — never decay, score stays 0.2 each.
+	for i := 0; i < 15; i++ {
+		id := fmt.Sprintf("factfil%02d", i)
+		if _, err := db.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES (?, 'p1', 'fact', ?, ?, ?)`,
+			id, fmt.Sprintf("FACTMARKER%02d content", i), "manual", 0.2,
+		); err != nil {
+			t.Fatalf("insert fact filler %d: %v", i, err)
+		}
+	}
+	// High-importance 'gotcha' with an old created_at — decays to the 0.15
+	// floor, decayed score 0.9*0.15=0.135, below every fact's 0.2.
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source, importance, created_at)
+		 VALUES ('gotcha01', 'p1', 'gotcha', 'GOTCHAMARKER old high-importance', 'manual', 0.9, datetime('now', '-400 days'))`,
+	); err != nil {
+		t.Fatalf("insert gotcha: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	result := out.String()
+
+	if strings.Contains(result, "GOTCHAMARKER") {
+		t.Errorf("expected decayed gotcha (score 0.135) to be trimmed by the 15-cap in favor of higher-scoring facts (0.2); got:\n%s", result)
+	}
+	if !strings.Contains(result, "FACTMARKER") {
+		t.Errorf("expected fact rows (score 0.2) to survive the cap; got:\n%s", result)
+	}
+	if !strings.Contains(result, "15 shown of 16 total — 1 not shown") {
+		t.Errorf("expected cap of 15 with 1 not-shown, got:\n%s", result)
 	}
 }
 
