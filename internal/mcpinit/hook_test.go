@@ -338,6 +338,46 @@ func TestHandleSessionStartHook_GlobalsOnNoMatch(t *testing.T) {
 	}
 }
 
+// TestHandleSessionStartHook_NoMatchExplainsDelimiters: the no-project-match
+// branch must still explain the «...» data-delimiter convention when it has
+// global content to show — today it's silently missing there.
+func TestHandleSessionStartHook_NoMatchExplainsDelimiters(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
+		t.Fatalf("insert _global project: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES ('testid03', '_global', 'convention', 'sign all commits with DCO', 'manual')`,
+	); err != nil {
+		t.Fatalf("insert global memory: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": "/tmp/no-project-here"})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	result := out.String()
+
+	if !strings.Contains(result, "delimits stored memory data") {
+		t.Errorf("no-match branch with globals must explain the «...» convention; got:\n%s", result)
+	}
+	if strings.Count(result, "delimits stored memory data") > 1 {
+		t.Errorf("the «...» explainer must appear at most once; got:\n%s", result)
+	}
+}
+
 // TestSessionCounterIncrements: each hook invocation bumps the project's
 // session counter — the one deliberate write the hook makes — and the emitted
 // "Session #N" reflects the post-increment count.
