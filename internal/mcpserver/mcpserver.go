@@ -1516,7 +1516,7 @@ func (s *Server) registerResources() {
 			var sb strings.Builder
 			sb.WriteString("## Active Decisions\n\n")
 			for _, d := range decisions {
-				fmt.Fprintf(&sb, "- **%s**: %s (rationale: %s)\n", d.Title, d.Decision, d.Rationale)
+				fmt.Fprintf(&sb, "- `%s` **%s**: %s (rationale: %s)\n", d.ID, d.Title, d.Decision, d.Rationale)
 			}
 			text = sb.String()
 		}
@@ -1660,6 +1660,17 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	if len(memories) > 0 {
 		sb.WriteString("## Memories\n\n")
 		sb.WriteString(formatMemories(memories))
+	}
+
+	decisions, err := s.store.ListDecisions(ctx, projectID, "active", 5)
+	if err != nil {
+		return "", fmt.Errorf("list decisions for %q: %w", projectID, err)
+	}
+	if len(decisions) > 0 {
+		sb.WriteString("\n\n## Recent Decisions\n\n")
+		for _, d := range decisions {
+			fmt.Fprintf(&sb, "- `%s` **%s**: %s\n", d.ID, d.Title, d.Decision)
+		}
 	}
 
 	learned, err := s.store.GetLearnedContext(ctx, projectID)

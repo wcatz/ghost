@@ -1008,3 +1008,120 @@ func TestHandleSessionStartHook_ClearUnaffected(t *testing.T) {
 		t.Errorf("clear should still get full injection, got:\n%s", got)
 	}
 }
+
+// TestHandleSessionStartHook_FullIDsShown: memory and task IDs must be shown
+// in full — a truncated ID (e.g. 8 chars of a UUID) doesn't exact-match
+// against any store method (Delete, UpdateMemory, TogglePin, CompleteTask,
+// UpdateTask all do `WHERE id = ?`), so a truncated display is unusable with
+// the very tools that consume it.
+func TestHandleSessionStartHook_FullIDsShown(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	memID := "11111111-2222-3333-4444-555555555555"
+	taskID := "66666666-7777-8888-9999-000000000000"
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES (?, 'p1', 'gotcha', 'full-id gotcha', 'manual', 0.9)`,
+		memID,
+	); err != nil {
+		t.Fatalf("insert memory: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO tasks (id, project_id, title, status, priority) VALUES (?, 'p1', 'do the thing', 'pending', 1)`,
+		taskID,
+	); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	result := out.String()
+
+	if !strings.Contains(result, memID) {
+		t.Errorf("memory ID must be shown in full (%s); got:\n%s", memID, result)
+	}
+	if strings.Contains(result, memID[:8]) && !strings.Contains(result, memID) {
+		t.Errorf("memory ID appears truncated; got:\n%s", result)
+	}
+	if !strings.Contains(result, taskID) {
+		t.Errorf("task ID must be shown in full (%s); got:\n%s", taskID, result)
+	}
+}
+
+// TestHandleSessionStartHook_DecisionIDShown: the "Recent Decisions" section
+// must show the decision's own id (decisions.id) — the same id
+// ghost_decisions_list/ghost_decision_record's supersedes param expect —
+// not no id at all.
+func TestHandleSessionStartHook_DecisionIDShown(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	decisionID := "dddddddd-1111-2222-3333-444444444444"
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO decisions (id, project_id, title, decision, rationale, status) VALUES (?, 'p1', 'use postgres', 'use postgres for the ledger', 'durability', 'active')`,
+		decisionID,
+	); err != nil {
+		t.Fatalf("insert decision: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	result := out.String()
+
+	if !strings.Contains(result, "Recent Decisions") {
+		t.Fatalf("Recent Decisions section missing; got:\n%s", result)
+	}
+	if !strings.Contains(result, decisionID) {
+		t.Errorf("decision ID must be shown (%s) so it can be passed to supersedes; got:\n%s", decisionID, result)
+	}
+}

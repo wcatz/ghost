@@ -184,7 +184,7 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 			fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
 		}
 		for _, m := range memories {
-			fmt.Fprintf(&sb, "- [%s] `%s` %s\n", m.Category, shortID(m.ID), quoteData(m.Content))
+			fmt.Fprintf(&sb, "- [%s] `%s` %s\n", m.Category, m.ID, quoteData(m.Content))
 		}
 	}
 
@@ -201,7 +201,7 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 	if len(decisions) > 0 {
 		fmt.Fprintf(&sb, "\n**Recent Decisions:**\n")
 		for _, d := range decisions {
-			fmt.Fprintf(&sb, "- **%s**: %s\n", d[0], quoteData(d[1]))
+			fmt.Fprintf(&sb, "- `%s` **%s**: %s\n", d[0], d[1], quoteData(d[2]))
 		}
 	}
 
@@ -314,7 +314,7 @@ type sessionMemory struct {
 	Pinned                bool
 }
 
-func loadSessionContext(cwd string) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][2]string, interactionCount, totalMemoryCount int, totalCountKnown bool) {
+func loadSessionContext(cwd string) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
@@ -422,13 +422,13 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 				continue
 			}
 			label := fmt.Sprintf("P%d %s", priority, title)
-			tasks = append(tasks, [4]string{shortID(id), status, label, truncateUTF8(desc, 200)})
+			tasks = append(tasks, [4]string{id, status, label, truncateUTF8(desc, 200)})
 		}
 	}
 
 	// Get active decisions
 	decRows, err := db.Query(`
-		SELECT title, decision FROM decisions
+		SELECT id, title, decision FROM decisions
 		WHERE project_id = ? AND status = 'active'
 		ORDER BY created_at DESC
 		LIMIT 5
@@ -436,11 +436,11 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	if err == nil {
 		defer decRows.Close() //nolint:errcheck
 		for decRows.Next() {
-			var title, decision string
-			if err := decRows.Scan(&title, &decision); err != nil {
+			var id, title, decision string
+			if err := decRows.Scan(&id, &title, &decision); err != nil {
 				continue
 			}
-			decisions = append(decisions, [2]string{title, truncateUTF8(decision, 200)})
+			decisions = append(decisions, [3]string{id, title, truncateUTF8(decision, 200)})
 		}
 	}
 
@@ -450,14 +450,6 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	).Scan(&interactionCount)
 
 	return
-}
-
-// shortID returns the first 8 characters of an ID, or the full ID if shorter.
-func shortID(id string) string {
-	if len(id) <= 8 {
-		return id
-	}
-	return id[:8]
 }
 
 // quoteData wraps untrusted stored text in «...» data delimiters, first
