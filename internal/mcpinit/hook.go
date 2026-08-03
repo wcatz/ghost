@@ -338,15 +338,34 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		totalCountKnown = true
 	}
 
-	// Get top memories: pinned first, then by importance. Over-fetches
-	// (LIMIT 50 instead of the eventual 25) so near-duplicate demotion below
-	// can drop matches without under-returning.
+	// sessionMemoriesCap mirrors Store.GetTopMemories's default caller limit,
+	// lowered from the previous 25 now that ranking below matches its decay
+	// formula — a smaller cap is only safe once ranking picks the same top
+	// items the MCP tool path would.
+	const sessionMemoriesCap = 15
+
+	// Get top memories using the same category-aware time-decay + pinned-boost
+	// ranking as Store.GetTopMemories (internal/memory/store.go) — ported here
+	// rather than shared via a Store call because this function deliberately
+	// uses its own lightweight, read-only *sql.DB connection (see the
+	// sessionMemory doc comment above). Over-fetches (2x cap) so near-duplicate
+	// demotion below can drop matches without under-returning.
 	rows, err := db.Query(`
 		SELECT id, category, content, pinned FROM memories
 		WHERE project_id = ? AND resolved_at IS NULL
-		ORDER BY pinned DESC, importance DESC, updated_at DESC
-		LIMIT 50
-	`, projectID)
+		ORDER BY (
+			importance
+			* CASE
+				WHEN category IN ('preference', 'convention', 'fact') THEN 1.0
+				WHEN category IN ('pattern', 'architecture') THEN
+					MAX(0.3, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 45.0))
+				ELSE
+					MAX(0.15, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 30.0))
+			END
+			* CASE WHEN pinned = 1 THEN 1.5 ELSE 1.0 END
+		) DESC
+		LIMIT ?
+	`, projectID, sessionMemoriesCap*2)
 	if err != nil {
 		return
 	}
@@ -358,11 +377,11 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		if err := rows.Scan(&id, &cat, &content, &pinnedInt); err != nil {
 			continue
 		}
-		content = truncateUTF8(content, 300)
+		content = truncateUTF8(content, 200)
 		memories = append(memories, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1})
 	}
 
-	if len(memories) > 25 {
+	if len(memories) > sessionMemoriesCap {
 		demotionThreshold := memory.DefaultDemotionThreshold
 		if cfg, cfgErr := config.Load(); cfgErr == nil {
 			demotionThreshold = cfg.Linking.DemotionThreshold
@@ -379,8 +398,8 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		} else {
 			memories = memory.StableDemote(memories, func(m sessionMemory) string { return m.ID }, penalty)
 		}
-		if len(memories) > 25 {
-			memories = memories[:25]
+		if len(memories) > sessionMemoriesCap {
+			memories = memories[:sessionMemoriesCap]
 		}
 	}
 

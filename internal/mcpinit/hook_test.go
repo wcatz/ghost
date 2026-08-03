@@ -538,12 +538,12 @@ func TestSessionInjectionBackfillsAfterDemotion(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
 		t.Fatalf("insert project: %v", err)
 	}
-	// Two near-duplicates (a, b) plus 23 filler memories plus a distinct
+	// Two near-duplicates (a, b) plus 13 filler memories plus a distinct
 	// memory (c). loadSessionContext over-fetches LIMIT 50 then truncates to
-	// 25; with only 3 memories total the >25 demotion gate could never fire,
-	// so this fixture pads the candidate set past 25 (26 total) so the gate
+	// 15; with only 3 memories total the >15 demotion gate could never fire,
+	// so this fixture pads the candidate set past 15 (16 total) so the gate
 	// fires and truncation actually drops the demoted duplicate, letting the
-	// distinct memory (ranked last, just past the naive top-25 cut) backfill
+	// distinct memory (ranked last, just past the naive top-15 cut) backfill
 	// into the surviving slot instead. Importance ordering: a > b > fillers > c.
 	if _, err := db.Exec(
 		`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES ('aaaa0001', 'p1', 'fact', 'ALPHAMARKER original', 'manual', 0.99)`,
@@ -555,7 +555,7 @@ func TestSessionInjectionBackfillsAfterDemotion(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert b: %v", err)
 	}
-	for i := 0; i < 23; i++ {
+	for i := 0; i < 13; i++ {
 		fillerID := fmt.Sprintf("filler%02d", i)
 		importance := 0.97 - float64(i)*0.01
 		if _, err := db.Exec(
@@ -593,6 +593,59 @@ func TestSessionInjectionBackfillsAfterDemotion(t *testing.T) {
 	}
 	if !strings.Contains(result, "DISTINCTMARKER") {
 		t.Errorf("backfill must surface the distinct memory; got:\n%s", result)
+	}
+}
+
+// TestSessionInjectionRespectsNewCap: the memory cap is 15, not 25 — a
+// project with more than 15 active memories must show exactly 15 plus a
+// "not shown" count, and ranking must follow decayed score (parity with
+// Store.GetTopMemories), not raw importance/updated_at.
+func TestSessionInjectionRespectsNewCap(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		id := fmt.Sprintf("capfil%02d", i)
+		importance := 0.9 - float64(i)*0.01
+		if _, err := db.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES (?, 'p1', 'fact', ?, ?, ?)`,
+			id, fmt.Sprintf("CAPFILLER%02d content", i), "manual", importance,
+		); err != nil {
+			t.Fatalf("insert cap filler %d: %v", i, err)
+		}
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	result := out.String()
+
+	if !strings.Contains(result, "15 shown of 20 total — 5 not shown") {
+		t.Errorf("expected cap of 15 with not-shown count, got:\n%s", result)
 	}
 }
 
