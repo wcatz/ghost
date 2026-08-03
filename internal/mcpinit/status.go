@@ -95,7 +95,9 @@ func Status(w io.Writer) error {
 		dbPath := filepath.Join(dataDir, "ghost.db")
 		if _, err := os.Stat(dbPath); err == nil {
 			db, err := memory.OpenDB(dbPath)
-			if err == nil {
+			if err != nil {
+				check(false, "", fmt.Sprintf("database: %v", err))
+			} else {
 				defer db.Close() //nolint:errcheck
 				logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 				store := memory.NewStore(db, logger)
