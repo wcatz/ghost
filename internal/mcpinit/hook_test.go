@@ -464,3 +464,90 @@ func TestSessionInjectionBackfillsAfterDemotion(t *testing.T) {
 		t.Errorf("backfill must surface the distinct memory; got:\n%s", result)
 	}
 }
+
+// TestHandleSessionStartHook_SubagentSuppressed: a session carrying a
+// non-empty agent_id is a subagent spawn — it already inherits working
+// context in-band from its parent's prompt, so the hook must emit nothing
+// and must not touch the DB (no phantom ghost.db, no counter bump).
+func TestHandleSessionStartHook_SubagentSuppressed(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	_ = db.Close()
+	// Recreate as "not there yet" to prove the subagent path never opens it.
+	if err := os.Remove(dbPath); err != nil {
+		t.Fatalf("remove dbPath: %v", err)
+	}
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir, "agent_id": "sub-123", "agent_type": "Explore"})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+
+	if got := out.String(); got != "" {
+		t.Errorf("subagent session must produce empty output, got:\n%s", got)
+	}
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Errorf("subagent session must not create %s", dbPath)
+	}
+}
+
+// TestHandleSessionStartHook_TopLevelUnaffected: the same fixture without
+// agent_id must still produce the normal full injection (regression guard).
+func TestHandleSessionStartHook_TopLevelUnaffected(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+
+	if got := out.String(); !strings.Contains(got, "## Ghost context: myproj") {
+		t.Errorf("top-level session should still get full injection, got:\n%s", got)
+	}
+}

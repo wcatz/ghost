@@ -67,8 +67,10 @@ func bumpSessionCount(dbPath, projectID string) int {
 }
 
 type sessionStartInput struct {
-	CWD    string `json:"cwd"`
-	Source string `json:"source"`
+	CWD       string `json:"cwd"`
+	Source    string `json:"source"`
+	AgentID   string `json:"agent_id"`
+	AgentType string `json:"agent_type"`
 }
 
 // HandleSessionStartHook is invoked by Claude Code at session start via:
@@ -78,12 +80,21 @@ type sessionStartInput struct {
 // Its stdout becomes visible in Claude's context as a system-reminder.
 // It automatically loads project context from the ghost DB based on cwd.
 func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
-	ensureObsidianSyncRunning()
-
 	data, _ := io.ReadAll(stdin)
 
 	var input sessionStartInput
 	_ = json.Unmarshal(data, &input)
+
+	// Subagent sessions (spawned via the Agent/Task tool, or a Workflow-tool
+	// agent() call) already receive their working context in-band from the
+	// parent's prompt — a second, independent context dump is near-zero
+	// benefit and pure token cost. Gate applies uniformly; a subagent that
+	// genuinely needs project memory can call ghost_project_context itself.
+	if input.AgentID != "" {
+		return
+	}
+
+	ensureObsidianSyncRunning()
 
 	cwd := input.CWD
 	if cwd == "" {
