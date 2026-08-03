@@ -96,6 +96,20 @@ func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
 
 	ensureObsidianSyncRunning()
 
+	switch input.Source {
+	case "resume":
+		// The resumed transcript already contains the original injection
+		// from the earlier startup fire — re-emitting it is pure waste.
+		return
+	case "compact":
+		// Compaction is designed to preserve important content, but there's
+		// no guarantee it retains this system-reminder block verbatim.
+		// Point back at the tool instead of betting on that and re-paying
+		// the full injection cost on every compaction of a long session.
+		_, _ = fmt.Fprintln(stdout, "Ghost context was already loaded earlier this session and may have been condensed by compaction. Call ghost_project_context if you need the full detail again.")
+		return
+	}
+
 	cwd := input.CWD
 	if cwd == "" {
 		cwd, _ = os.Getwd()

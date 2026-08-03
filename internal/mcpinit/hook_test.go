@@ -305,10 +305,17 @@ func TestSessionCounterIgnoresResumeClearCompact(t *testing.T) {
 	if got := run("startup"); !strings.Contains(got, "Session #1") {
 		t.Errorf("startup should show Session #1; got:\n%s", got)
 	}
+	// resume and compact are now suppressed/shrunk (see
+	// TestHandleSessionStartHook_ResumeSuppressed and
+	// TestHandleSessionStartHook_CompactShrunk) so they no longer echo the
+	// session count at all; clear still gets full injection. What this test
+	// cares about is that none of the three bump the underlying counter —
+	// proven below by the follow-up startup still landing on Session #2.
 	for _, source := range []string{"resume", "clear", "compact"} {
-		if got := run(source); !strings.Contains(got, "Session #1") {
-			t.Errorf("%s should NOT bump the counter, still Session #1; got:\n%s", source, got)
-		}
+		run(source)
+	}
+	if got := run("clear"); !strings.Contains(got, "Session #1") {
+		t.Errorf("clear should NOT bump the counter, still Session #1; got:\n%s", got)
 	}
 	if got := run("startup"); !strings.Contains(got, "Session #2") {
 		t.Errorf("second startup should show Session #2; got:\n%s", got)
@@ -549,5 +556,128 @@ func TestHandleSessionStartHook_TopLevelUnaffected(t *testing.T) {
 
 	if got := out.String(); !strings.Contains(got, "## Ghost context: myproj") {
 		t.Errorf("top-level session should still get full injection, got:\n%s", got)
+	}
+}
+
+// TestHandleSessionStartHook_ResumeSuppressed: a resume fire's transcript
+// already contains the original injection from the earlier startup fire —
+// re-emitting it is pure waste.
+func TestHandleSessionStartHook_ResumeSuppressed(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir, "source": "resume"})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+
+	if got := out.String(); got != "" {
+		t.Errorf("resume must produce empty output, got:\n%s", got)
+	}
+}
+
+// TestHandleSessionStartHook_CompactShrunk: a compact fire gets a short
+// pointer instead of the full re-injected block, since Claude Code's
+// compaction behavior toward the original injected block isn't guaranteed.
+func TestHandleSessionStartHook_CompactShrunk(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir, "source": "compact"})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+
+	got := out.String()
+	if !strings.Contains(got, "ghost_project_context") {
+		t.Errorf("compact output should point at ghost_project_context, got:\n%s", got)
+	}
+	if strings.Contains(got, "## Ghost context:") {
+		t.Errorf("compact must NOT re-emit the full block, got:\n%s", got)
+	}
+}
+
+// TestHandleSessionStartHook_ClearUnaffected: /clear wipes the transcript,
+// so this is the one re-fire case that must still get full injection.
+func TestHandleSessionStartHook_ClearUnaffected(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir, "source": "clear"})
+	var out strings.Builder
+	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+
+	if got := out.String(); !strings.Contains(got, "## Ghost context: myproj") {
+		t.Errorf("clear should still get full injection, got:\n%s", got)
 	}
 }
