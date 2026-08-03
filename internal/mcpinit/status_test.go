@@ -25,6 +25,10 @@ func TestStatus_ReportsOpenDBFailure(t *testing.T) {
 		t.Fatalf("write fake db: %v", err)
 	}
 
+	// Isolate PATH so Status can't shell out to a host-installed `claude`
+	// binary — this test only exercises the database-open-failure check.
+	t.Setenv("PATH", t.TempDir())
+
 	var out bytes.Buffer
 	if err := Status(&out); err != nil {
 		t.Fatalf("Status: %v", err)
