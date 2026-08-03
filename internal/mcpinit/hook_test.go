@@ -1,9 +1,12 @@
 package mcpinit
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +15,12 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 	_ "modernc.org/sqlite"
 )
+
+// testStore wraps db in a memory.Store with a discard logger, matching the
+// package's existing convention (see init.go, status.go).
+func testStore(db *sql.DB) *memory.Store {
+	return memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
 
 // openTestDB creates an in-memory SQLite DB with the ghost schema.
 func openTestDB(t *testing.T) *sql.DB {
@@ -37,7 +46,10 @@ func TestLookupProject_ExactMatch(t *testing.T) {
 	db := openTestDB(t)
 	insertProject(t, db, "abc123", "/home/wayne/git/ghost", "ghost")
 
-	id, name := lookupProject(db, "/home/wayne/git/ghost")
+	id, name, err := testStore(db).ResolveProject(context.Background(), "/home/wayne/git/ghost")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
 	if id != "abc123" || name != "ghost" {
 		t.Errorf("exact match: got id=%q name=%q, want abc123/ghost", id, name)
 	}
@@ -47,7 +59,10 @@ func TestLookupProject_SubdirMatch(t *testing.T) {
 	db := openTestDB(t)
 	insertProject(t, db, "abc123", "/home/wayne/git/ghost", "ghost")
 
-	id, name := lookupProject(db, "/home/wayne/git/ghost/internal/mcpinit")
+	id, name, err := testStore(db).ResolveProject(context.Background(), "/home/wayne/git/ghost/internal/mcpinit")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
 	if id != "abc123" || name != "ghost" {
 		t.Errorf("subdir match: got id=%q name=%q, want abc123/ghost", id, name)
 	}
@@ -59,7 +74,10 @@ func TestLookupProject_NoPrefixFalseMatch(t *testing.T) {
 	db := openTestDB(t)
 	insertProject(t, db, "abc123", "/home/wayne/git/ghost", "ghost")
 
-	id, name := lookupProject(db, "/home/wayne/git/ghost-extra")
+	id, name, err := testStore(db).ResolveProject(context.Background(), "/home/wayne/git/ghost-extra")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
 	if id != "" || name != "" {
 		t.Errorf("prefix false match: /home/wayne/git/ghost-extra should NOT match /home/wayne/git/ghost, got id=%q name=%q", id, name)
 	}
@@ -71,7 +89,10 @@ func TestLookupProject_LongestPathWins(t *testing.T) {
 	insertProject(t, db, "child", "/home/wayne/git/ghost", "ghost")
 
 	// CWD inside ghost should match the longer (more specific) path.
-	id, _ := lookupProject(db, "/home/wayne/git/ghost/cmd")
+	id, _, err := testStore(db).ResolveProject(context.Background(), "/home/wayne/git/ghost/cmd")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
 	if id != "child" {
 		t.Errorf("longest path should win, got %q, want %q", id, "child")
 	}
@@ -84,7 +105,10 @@ func TestLookupProject_NameFallback(t *testing.T) {
 	insertProject(t, db, "abc123", "/x/ghost", "ghost")
 
 	// cwd basename is "ghost" — should match by name even when path doesn't match.
-	id, name := lookupProject(db, filepath.Join("/some/unrelated/path", "ghost"))
+	id, name, err := testStore(db).ResolveProject(context.Background(), filepath.Join("/some/unrelated/path", "ghost"))
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
 	if id != "abc123" || name != "ghost" {
 		t.Errorf("name fallback: got id=%q name=%q, want abc123/ghost", id, name)
 	}
@@ -94,7 +118,10 @@ func TestLookupProject_NoMatch(t *testing.T) {
 	db := openTestDB(t)
 	insertProject(t, db, "abc123", "/home/wayne/git/ghost", "ghost")
 
-	id, name := lookupProject(db, "/home/user/other-project")
+	id, name, err := testStore(db).ResolveProject(context.Background(), "/home/user/other-project")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
 	if id != "" || name != "" {
 		t.Errorf("no match: expected empty, got id=%q name=%q", id, name)
 	}
@@ -109,13 +136,19 @@ func TestLookupProject_PathWithLikeWildcards(t *testing.T) {
 
 	// Without escaping, "foo_bar/%" as a LIKE pattern would also match
 	// "fooXbar/anything" since '_' matches any single character.
-	id, name := lookupProject(db, "/home/wayne/git/fooXbar/sub")
+	id, name, err := testStore(db).ResolveProject(context.Background(), "/home/wayne/git/fooXbar/sub")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
 	if id != "" || name != "" {
 		t.Errorf("unescaped underscore false match: got id=%q name=%q, want no match", id, name)
 	}
 
 	// The real subdirectory should still match correctly.
-	id, name = lookupProject(db, "/home/wayne/git/foo_bar/sub")
+	id, name, err = testStore(db).ResolveProject(context.Background(), "/home/wayne/git/foo_bar/sub")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
 	if id != "abc123" || name != "foo_bar" {
 		t.Errorf("exact underscore path: got id=%q name=%q, want abc123/foo_bar", id, name)
 	}

@@ -321,11 +321,20 @@ Should be skipped.`)
 	}
 
 	// Test idempotency — importing again should not increase count.
+	//
+	// Store.Upsert itself is non-destructive (a duplicate save creates a new
+	// linked row rather than merging), so idempotency here relies on
+	// importFromDir's own dedup guard: it skips any file whose exact content
+	// already exists for the project, rather than calling Upsert at all.
+	// This matters because ghost mcp init calls Import unconditionally on
+	// every run and documents itself as safe to re-run.
 	imported2, err := importFromDir(ctx, store, projectID, memDir, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Upsert may merge, so imported2 could be non-zero but count should stay same.
+	if imported2 != 0 {
+		t.Errorf("imported2 = %d, want 0 (dedup guard skips already-imported content)", imported2)
+	}
 	count2, err := store.CountMemories(ctx, projectID)
 	if err != nil {
 		t.Fatal(err)
@@ -333,7 +342,6 @@ Should be skipped.`)
 	if count2 != count {
 		t.Errorf("after re-import: count = %d, want %d (idempotent)", count2, count)
 	}
-	_ = imported2
 }
 
 func writeTempFile(t *testing.T, dir, name, content string) {

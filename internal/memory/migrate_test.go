@@ -331,3 +331,122 @@ func TestMigrateAddsResolvedAt(t *testing.T) {
 		t.Errorf("fts match after add-column migration: n=%d err=%v, want 1", nFts, err)
 	}
 }
+
+// v2WithLinksSQL is a schemaVersion-2 database: memories, memory_links (old
+// CHECK — no 'duplicate'), and the surrounding tables current initSQL creates.
+// Distinct from legacySQL, which predates memory_links entirely.
+const v2WithLinksSQL = `
+CREATE TABLE projects (
+    id          TEXT PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE memories (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL DEFAULT 'fact',
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL DEFAULT 0.5,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT,
+    source        TEXT NOT NULL DEFAULT 'reflection',
+    tags          TEXT DEFAULT '[]',
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    resolved_at   TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE VIRTUAL TABLE memories_fts USING fts5(
+    content,
+    content=memories,
+    content_rowid=rowid,
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+
+CREATE TABLE memory_links (
+    source_id      TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    target_id      TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    relation       TEXT NOT NULL DEFAULT 'related'
+                   CHECK (relation IN ('related', 'supersedes', 'contradicts', 'elaborates', 'causes')),
+    strength       REAL NOT NULL DEFAULT 0.5,
+    source         TEXT NOT NULL DEFAULT 'auto'
+                   CHECK (source IN ('auto', 'llm', 'manual')),
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    invalidated_at TEXT,
+    PRIMARY KEY (source_id, target_id, relation)
+);
+`
+
+// newV2WithLinksDB writes a schemaVersion-2 database with two memories and a
+// 'related' link between them, stamped at user_version=2, and returns its path.
+func newV2WithLinksDB(t *testing.T) string {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open v2 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(v2WithLinksSQL); err != nil {
+		t.Fatalf("create v2 schema: %v", err)
+	}
+	seed := []string{
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v2-p1', 'p1')`,
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES
+			('m1', 'p1', 'fact', 'existing memory one', 'mcp'),
+			('m2', 'p1', 'fact', 'existing memory two', 'mcp')`,
+		`INSERT INTO memory_links (source_id, target_id, relation, strength, source)
+			VALUES ('m1', 'm2', 'related', 0.6, 'auto')`,
+		`PRAGMA user_version = 2`,
+	}
+	for _, s := range seed {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed v2 db: %v", err)
+		}
+	}
+	return dbPath
+}
+
+// TestMigrateV3AddsDuplicateRelation: a schemaVersion-2 database with an
+// existing memory_links row must upgrade to schemaVersion 3, keep the
+// existing link intact, and accept a 'duplicate' relation afterward.
+func TestMigrateV3AddsDuplicateRelation(t *testing.T) {
+	dbPath := newV2WithLinksDB(t)
+
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB on v2-with-links db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	// The existing 'related' link survived the rebuild.
+	var strength float64
+	err = db.QueryRow(
+		`SELECT strength FROM memory_links WHERE source_id = 'm1' AND target_id = 'm2' AND relation = 'related'`,
+	).Scan(&strength)
+	if err != nil {
+		t.Fatalf("existing link missing after migration: %v", err)
+	}
+	if strength != 0.6 {
+		t.Errorf("existing link strength = %f, want 0.6", strength)
+	}
+
+	// The widened CHECK now accepts 'duplicate'.
+	if _, err := db.Exec(
+		`INSERT INTO memory_links (source_id, target_id, relation, strength, source) VALUES ('m2', 'm1', 'duplicate', 0.8, 'auto')`,
+	); err != nil {
+		t.Errorf("insert with relation='duplicate' still fails: %v", err)
+	}
+}

@@ -20,7 +20,7 @@ type LLMProvider interface {
 type MemoryStore interface {
 	// Core CRUD
 	Create(ctx context.Context, projectID string, m memory.Memory) (string, error)
-	Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (string, bool, error)
+	Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (string, string, float64, error)
 	Delete(ctx context.Context, id string) error
 	UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error
 	PromoteToGlobal(ctx context.Context, projectID, id string) error
@@ -70,7 +70,8 @@ type MemoryStore interface {
 	// Project management
 	ListProjects(ctx context.Context) ([]memory.Project, error)
 	EnsureProject(ctx context.Context, id, path, name string) error
-	ResolveProjectByName(ctx context.Context, name string) (string, error)
+	ResolveProject(ctx context.Context, input string) (id, name string, err error)
+	ListProjectNames(ctx context.Context) ([]string, error)
 	MergeProject(ctx context.Context, oldID, newID string) error
 
 	// Conversation persistence

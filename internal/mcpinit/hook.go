@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -328,9 +329,10 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	}
 	defer db.Close() //nolint:errcheck
 
-	// Find matching project: try full path prefix first, then cwd basename name match
-	projectID, project = lookupProject(db, cwd)
-	if projectID == "" {
+	// Resolve cwd to a project: id, name, path-prefix, then basename fallback (see Store.ResolveProject).
+	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	projectID, project, err = store.ResolveProject(context.Background(), cwd)
+	if err != nil || projectID == "" {
 		return
 	}
 
@@ -448,29 +450,6 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	).Scan(&interactionCount)
 
 	return
-}
-
-// lookupProject finds the project ID and name for the given cwd.
-// It checks for an exact path match or a proper subdirectory match first
-// (using path || '/' prefix to avoid false-matching sibling directories),
-// then falls back to matching on the basename of cwd against project names.
-// Returns ("", "") when no project matches.
-func lookupProject(db *sql.DB, cwd string) (id, name string) {
-	cwdBase := filepath.Base(cwd)
-	// path is escaped before use as a LIKE pattern so a literal '%' or '_' in
-	// a project's path (e.g. a directory named "foo_bar") can't act as an
-	// unintended wildcard and false-match an unrelated cwd.
-	row := db.QueryRow(`
-		SELECT id, name FROM projects
-		WHERE ((? = path OR ? LIKE REPLACE(REPLACE(REPLACE(path, '\', '\\'), '%', '\%'), '_', '\_') || '/%' ESCAPE '\')
-		       AND LENGTH(path) > 10)
-		   OR name = ?
-		ORDER BY LENGTH(path) DESC LIMIT 1
-	`, cwd, cwd, cwdBase)
-	if err := row.Scan(&id, &name); err != nil {
-		return "", ""
-	}
-	return id, name
 }
 
 // shortID returns the first 8 characters of an ID, or the full ID if shorter.

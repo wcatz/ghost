@@ -11,7 +11,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 2
+const schemaVersion = 3
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -21,6 +21,7 @@ const schemaVersion = 2
 var migrations = []func(*sql.Tx) error{
 	migrateV1,
 	migrateV2,
+	migrateV3,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -123,6 +124,53 @@ func migrateV2(tx *sql.Tx) error {
 	}
 	if _, err := tx.Exec(`ALTER TABLE memories ADD COLUMN resolved_at TEXT`); err != nil {
 		return fmt.Errorf("add memories.resolved_at: %w", err)
+	}
+	return nil
+}
+
+// migrateV3 adds 'duplicate' to memory_links.relation's CHECK — Upsert no
+// longer destructively overwrites content on a near-duplicate match; it links
+// the new row to the existing one instead, and the CHECK must accept that
+// relation value. SQLite cannot ALTER a CHECK constraint, so this is a table
+// rebuild like migrateV1's, but simpler: memory_links carries no FTS index or
+// rowid dependency, so it's a straight copy under the new DDL. A database that
+// never had memory_links at all (pre-dates the link graph entirely) needs no
+// rebuild — initSQL's CREATE TABLE IF NOT EXISTS will have already created it
+// fresh with this CHECK, same as migrateV1's pattern for tables that don't
+// exist yet.
+func migrateV3(tx *sql.Tx) error {
+	stale, err := tableDDLLacks(tx, "memory_links", "'duplicate'")
+	if err != nil {
+		return err
+	}
+	if !stale {
+		return nil
+	}
+	stmts := []string{
+		`CREATE TABLE memory_links_v3_new (
+    source_id      TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    target_id      TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    relation       TEXT NOT NULL DEFAULT 'related'
+                   CHECK (relation IN ('related', 'supersedes', 'contradicts', 'elaborates', 'causes', 'duplicate')),
+    strength       REAL NOT NULL DEFAULT 0.5,
+    source         TEXT NOT NULL DEFAULT 'auto'
+                   CHECK (source IN ('auto', 'llm', 'manual')),
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    invalidated_at TEXT,
+    PRIMARY KEY (source_id, target_id, relation)
+)`,
+		`INSERT INTO memory_links_v3_new (source_id, target_id, relation, strength, source, created_at, invalidated_at)
+SELECT source_id, target_id, relation, strength, source, created_at, invalidated_at
+FROM memory_links`,
+		`DROP TABLE memory_links`,
+		`ALTER TABLE memory_links_v3_new RENAME TO memory_links`,
+		`CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id) WHERE invalidated_at IS NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id) WHERE invalidated_at IS NULL`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("%q: %w", s[:min(40, len(s))], err)
+		}
 	}
 	return nil
 }
