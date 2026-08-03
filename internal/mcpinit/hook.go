@@ -233,13 +233,13 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 	}
 	defer db.Close() //nolint:errcheck
 
-	if err := db.QueryRow(`SELECT COUNT(*) FROM memories WHERE project_id = '_global'`).Scan(&totalCount); err == nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM memories WHERE project_id = '_global' AND resolved_at IS NULL`).Scan(&totalCount); err == nil {
 		totalCountKnown = true
 	}
 
 	rows, err := db.Query(`
 		SELECT id, category, content, pinned FROM memories
-		WHERE project_id = '_global'
+		WHERE project_id = '_global' AND resolved_at IS NULL
 		ORDER BY pinned DESC, importance DESC, updated_at DESC
 		LIMIT ?
 	`, globalsCap*2)

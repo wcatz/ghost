@@ -222,6 +222,40 @@ func TestLoadGlobalMemories_DedupsNearDuplicates(t *testing.T) {
 	}
 }
 
+// TestLoadGlobalMemories_ExcludesResolved verifies a global memory marked
+// resolved_at (via ghost resolve) is excluded from both the injected set and
+// totalCount, matching the project-memory queries' resolved_at IS NULL filter.
+func TestLoadGlobalMemories_ExcludesResolved(t *testing.T) {
+	db, dbPath := openFileTestDB(t)
+
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
+		t.Fatalf("insert _global project: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES ('gres0001', '_global', 'fact', 'old cost estimate, no longer relevant', 'manual')`,
+	); err != nil {
+		t.Fatalf("insert resolved global: %v", err)
+	}
+	if _, err := db.Exec(
+		`UPDATE memories SET resolved_at = datetime('now') WHERE id = 'gres0001'`,
+	); err != nil {
+		t.Fatalf("mark resolved: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES ('glive0001', '_global', 'preference', 'never push to main', 'manual')`,
+	); err != nil {
+		t.Fatalf("insert live global: %v", err)
+	}
+
+	globals, total, totalKnown := loadGlobalMemories(dbPath)
+	if len(globals) != 1 || globals[0].ID != "glive0001" {
+		t.Fatalf("resolved global must be excluded from fetch, got %+v", globals)
+	}
+	if !totalKnown || total != 1 {
+		t.Errorf("resolved global must be excluded from total count: got known=%v total=%d, want known=true total=1", totalKnown, total)
+	}
+}
+
 // TestHandleSessionStartHook_GlobalsCapAndNotShownLine: more than 8 global
 // memories must be capped, and the cap must surface a not-shown count rather
 // than silently dropping the rest.
