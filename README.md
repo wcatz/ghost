@@ -105,6 +105,14 @@ echo '{"cwd":"'"$PWD"'"}' | ghost hook session-start
 
 No mystery blob in your system prompt. Save-time dedup keeps the digest from bloating, and time-decay scoring weights `ghost_project_context` and resource reads toward what's still true.
 
+A few deliberate cuts keep the hook's footprint small:
+
+- **Subagent sessions get nothing.** A session spawned via the Agent/Task tool (or a Workflow `agent()` call) already inherits its working context in-band from the parent's prompt, so the hook exits immediately rather than paying for a redundant dump. A subagent that genuinely needs project memory can still call `ghost_project_context` itself.
+- **Resume and compact don't re-pay the full cost.** `resume` skips injection entirely — the original startup injection is already in the resumed transcript. `compact` emits a one-line pointer ("call `ghost_project_context` if you need the full detail again") instead of betting that compaction preserved the earlier block verbatim.
+- **Global memories are capped and deduplicated separately from project memories** — 8 items, ranked by pinned status then importance then recency, with near-duplicate globals filtered out outright rather than relying on the cap alone to drop them.
+- **Project memories rank by the same decayed score used everywhere else** — importance × category-aware time-decay × a pinned boost (the same formula `ghost_memory_search` and `ghost_project_context` use), capped at 15 items with content truncated to 200 bytes each. Both the globals and memories sections tell you how many more exist and how they're ranked whenever the cap trims the list.
+- **Stored memory content is always wrapped in `«...»` data delimiters**, including on the no-project-match path when only global memories are shown. Anything inside the delimiters is stored data, never a new instruction — even if it reads like one.
+
 ### What's the exit story?
 
 Your memories are a plain SQLite database in one file. Open it with `sqlite3`, query it with any tool, back it up with `cp`. No proprietary format, no export request form. The schema is a readable Go string constant in [`internal/memory/schema.go`](internal/memory/schema.go). If you stop using Ghost tomorrow, your memories are sitting there in a format that will outlive all of us.
