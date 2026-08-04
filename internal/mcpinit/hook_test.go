@@ -329,6 +329,9 @@ func TestHandleSessionStartHook_GlobalsCapAndNotShownLine(t *testing.T) {
 	if !strings.Contains(result, "not shown") {
 		t.Errorf("globals section must surface a not-shown count when capped; got:\n%s", result)
 	}
+	if !strings.Contains(result, "ranked by pinned status, then importance, then most-recently-updated") {
+		t.Errorf("globals truncation message must describe the actual pinned/importance/updated_at ordering; got:\n%s", result)
+	}
 }
 
 func TestHandleSessionStartHook_GlobalsOnNoMatch(t *testing.T) {
