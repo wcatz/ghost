@@ -322,6 +322,32 @@ func TestBuildProjectContext_IncludesLearnedContext(t *testing.T) {
 	}
 }
 
+// TestBuildProjectContext_IncludesDecisionID: ghost_project_context must show
+// a decision's own decisions.id — the id ghost_decisions_list/supersedes
+// expect — not the unrelated memories.id of its companion memory row.
+func TestBuildProjectContext_IncludesDecisionID(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	decisionID, _, err := store.RecordDecision(ctx, "abc123", "Use SQLite", "Embedded DB for simplicity", "No CGO dependency", []string{"PostgreSQL", "MySQL"}, []string{"database"})
+	if err != nil {
+		t.Fatalf("RecordDecision: %v", err)
+	}
+
+	text, err := srv.buildProjectContext(ctx, "abc123")
+	if err != nil {
+		t.Fatalf("buildProjectContext: %v", err)
+	}
+	if !strings.Contains(text, "## Recent Decisions") {
+		t.Errorf("expected '## Recent Decisions' section, got: %s", text)
+	}
+	if !strings.Contains(text, decisionID) {
+		t.Errorf("expected decision's own id %q in output, got: %s", decisionID, text)
+	}
+}
+
 func TestNew_RegistersResources(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))

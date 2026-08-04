@@ -54,11 +54,13 @@ const stopBlockMessage = `{"decision":"block","reason":"This session used tools 
 // It blocks the stop once — via {"decision":"block"} on stdout — when the
 // session used tools but never saved anything to Ghost. Every failure path
 // returns silently, allowing the stop: the hook must never trap a session.
-// The one exception to "no DB/LLM work on this path" is spawnResolveIfConfigured,
+// The one exception to "no DB/LLM work on this path" is spawnResolveIfConfigured
+// (and, following the identical exception pattern, spawnSupersedeIfConfigured),
 // which — best-effort, opt-in only — does a small synchronous read-only lookup
 // (config + a project-ID query) before forking a detached `ghost resolve --apply`
-// and returning immediately without waiting on it; no LLM call and no write ever
-// happens inline here, only in the detached child.
+// (respectively `ghost supersede --apply`) and returning immediately without
+// waiting on it; no LLM call and no write ever happens inline here, only in the
+// detached child.
 func HandleStopHook(stdin io.Reader, stdout io.Writer) {
 	data, err := io.ReadAll(stdin)
 	if err != nil {
@@ -74,6 +76,7 @@ func HandleStopHook(stdin io.Reader, stdout io.Writer) {
 	}
 
 	spawnResolveIfConfigured(input.CWD)
+	spawnSupersedeIfConfigured(input.CWD)
 
 	if input.TranscriptPath == "" {
 		return
@@ -185,6 +188,82 @@ func spawnResolveIfConfigured(cwd string) {
 	defer logFile.Close() //nolint:errcheck
 
 	cmd := exec.Command(exe, "resolve", projectName, "--apply")
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	detachProcess(cmd)
+	if err := cmd.Start(); err != nil {
+		return
+	}
+	_ = atomicWritePID(pidPath, cmd.Process.Pid)
+	_ = cmd.Process.Release()
+}
+
+// spawnSupersedeIfConfigured starts `ghost supersede <project> --apply` as a
+// detached background process for the project matching cwd, if one isn't
+// already running for that project. Opt-in via reflection.auto_supersede
+// (default false) — most users never want an unattended write pass. Every
+// failure path returns silently: this must never block or fail the stop hook.
+// If the Anthropic API is out of credit, the spawned process itself fails
+// fast and logs the failure to supersede.log — no local fallback runs in this
+// path, so auto-supersede simply does nothing until credits are restored.
+// Known limitation: resolution here depends on Store.ResolveProject's
+// path/basename match against the stored project row; a cwd with no matching
+// project is a silent no-op, same as an unconfigured user.
+func spawnSupersedeIfConfigured(cwd string) {
+	if cwd == "" {
+		return
+	}
+	cfg, err := config.Load()
+	if err != nil || !cfg.Reflection.AutoSupersede {
+		return
+	}
+
+	dataDir, err := config.DataDir()
+	if err != nil {
+		return
+	}
+	dbPath := filepath.Join(dataDir, "ghost.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return
+	}
+	db, err := sql.Open("sqlite", roDSN(dbPath))
+	if err != nil {
+		return
+	}
+	defer db.Close() //nolint:errcheck
+
+	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	projectID, projectName, err := store.ResolveProject(context.Background(), cwd)
+	if err != nil || projectID == "" || projectName == "" {
+		return
+	}
+
+	pidPath := filepath.Join(dataDir, "supersede-"+projectID+".pid")
+	if isAlive(pidPath) {
+		return
+	}
+	// isAlive false above is only a fast path to skip locking in the common
+	// case (no supersede running at all). It is NOT sufficient on its own: two
+	// stop hooks firing close together for the same project could both pass
+	// it and both decide to spawn a paid-API, DB-writing process. claimPidFile
+	// re-checks liveness under an OS-level lock, serializing the
+	// check-then-write against every other caller on the machine, so exactly
+	// one of them wins the claim.
+	if !claimPidFile(pidPath) {
+		return
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	logFile, err := os.OpenFile(filepath.Join(dataDir, "supersede.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer logFile.Close() //nolint:errcheck
+
+	cmd := exec.Command(exe, "supersede", projectName, "--apply")
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	detachProcess(cmd)

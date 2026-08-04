@@ -171,6 +171,21 @@ func TestSpawnResolveIfConfigured_NoOpWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestSpawnSupersedeIfConfigured_NoOpWhenDisabled(t *testing.T) {
+	// With no config file present, reflection.auto_supersede defaults to false
+	// (internal/config/config.go's defaults map). spawnSupersedeIfConfigured
+	// must return immediately after that check — before ever calling
+	// config.DataDir (which creates ~/.local/share/ghost), let alone touching
+	// ghost.db, the pidfile, or supersede.log.
+	dataHome := isolatedHome(t)
+
+	spawnSupersedeIfConfigured("/tmp/does-not-matter")
+
+	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
+		t.Errorf("expected ghost data dir to never be created when auto_supersede is disabled, stat err = %v", err)
+	}
+}
+
 // TestClaimPidFile_ConcurrentCallersOnlyOneWins races many goroutines against
 // an empty pidPath, simulating near-simultaneous stop hooks for the same
 // project when no resolve has ever run. Exactly one must win the claim.
