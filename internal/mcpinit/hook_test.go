@@ -31,11 +31,12 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(dir) //nolint:errcheck
 	os.Setenv("HOME", dir)
 	os.Setenv("XDG_CONFIG_HOME", dir)
 	os.Setenv("XDG_DATA_HOME", dir)
-	os.Exit(m.Run())
+	code := m.Run()
+	os.RemoveAll(dir) //nolint:errcheck
+	os.Exit(code)
 }
 
 // testStore wraps db in a memory.Store with a discard logger, matching the

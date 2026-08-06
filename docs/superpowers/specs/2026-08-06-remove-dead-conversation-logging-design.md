@@ -90,7 +90,12 @@ schema + `RecentExchanges` wiring, `ExtractionPrompt`, and
 ## Non-goals
 
 - No data migration: the tables are always empty in production, so
-  `migrateV4` is a plain drop, not a backfill-and-drop.
+  `migrateV4` is a plain drop, not a backfill-and-drop. As a safety check
+  (not a migration path), `migrateV4` counts rows in both tables first and
+  aborts the migration with an error, without dropping anything, if either
+  is non-empty — this only guards against the "always empty" assumption
+  being wrong on some deployment; it defines no preservation or export
+  behavior, since one is deliberately out of scope.
 - No replacement logging mechanism. The stop hook's mandatory-save nudge
   already covers the curation role `RecentExchanges` used to serve.
 - No change to `ghost resolve`/`ghost supersede` or any other subsystem.

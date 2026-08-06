@@ -26,7 +26,7 @@
 | `internal/memory/store_test.go` | Remove 3 test functions |
 | `internal/reflection/consolidator_test.go` | Remove 1 field from a test literal |
 
-All work happens in one feature branch, one PR. Tasks are ordered so `go build`/`go test` stays green after every commit (migration + schema first, then the Go call sites that would otherwise not compile, then docs, then tests last since they're the thing that made the dead code "look" alive).
+All work happens in one feature branch, one PR. Tasks are ordered migration + schema first, then the Go call sites, then docs, then tests last (since they're the thing that made the dead code "look" alive) — but `go build`/`go test` is intentionally red between Task 3 and Task 6 (interface/struct still reference removed methods/fields mid-sequence); squash Tasks 3-6 into one commit if a fully-green-per-commit history is required instead.
 
 ---
 
@@ -141,8 +141,20 @@ Add a new function after `migrateV3` (after line 176, before `columnExists`):
 // CreateConversation — their only writers — had zero production callers
 // (only test code called them), so in every real deployment both tables
 // were permanently empty; GetRecentExchanges always returned an empty
-// slice. See docs/superpowers/specs/2026-08-06-remove-dead-conversation-logging-design.md.
+// slice. As a safety check against that assumption being wrong on some
+// deployment, this aborts without dropping anything if either table is
+// non-empty — no preservation/export path is provided; see
+// docs/superpowers/specs/2026-08-06-remove-dead-conversation-logging-design.md.
 func migrateV4(tx *sql.Tx) error {
+	for _, table := range []string{"messages", "conversations"} {
+		var count int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+			return fmt.Errorf("count %s: %w", table, err)
+		}
+		if count > 0 {
+			return fmt.Errorf("refusing to drop non-empty table %s (%d rows)", table, count)
+		}
+	}
 	if _, err := tx.Exec(`DROP TABLE IF EXISTS messages`); err != nil {
 		return fmt.Errorf("drop messages: %w", err)
 	}
@@ -156,6 +168,50 @@ func migrateV4(tx *sql.Tx) error {
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `go test ./internal/memory/... -run TestMigrateV4DropsConversationsAndMessages -v`
+Expected: PASS
+
+- [ ] **Step 5b: Write a fixture test proving migrateV4 refuses to drop non-empty tables**
+
+Add to `internal/memory/store_test.go` (or `migrate_test.go`, matching Step 1's choice):
+
+```go
+func TestMigrateV4AbortsOnNonEmptyConversations(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(ON)")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(oldSchema); err != nil { // reuse the v3 DDL from Step 2
+		t.Fatalf("create old schema: %v", err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 3"); err != nil {
+		t.Fatalf("stamp v3: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/p1', 'p1')`); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO conversations (id, project_id) VALUES ('c1', 'p1')`); err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+
+	if err := migrate(db, 3); err == nil {
+		t.Fatal("expected migrate to fail on non-empty conversations table, got nil error")
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM conversations`).Scan(&count); err != nil {
+		t.Fatalf("check conversations: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected conversations row to survive the aborted migration, got count %d", count)
+	}
+}
+```
+
+(Extract the `oldSchema` string from Step 2 into a shared package-level const if it isn't already, so both tests can reuse it.)
+
+Run: `go test ./internal/memory/... -run TestMigrateV4AbortsOnNonEmptyConversations -v`
 Expected: PASS
 
 - [ ] **Step 6: Run the full memory package test suite to check for regressions**
@@ -197,7 +253,30 @@ CREATE TABLE IF NOT EXISTS ghost_state (
 
 Run: `go test ./internal/memory/... -run TestOpenDB -v`
 
-(If no test named `TestOpenDB` exists, instead run the full package tests in the next step — this file change has no dedicated test of its own since `migrateV4` in Task 1 already proves the tables are goneable, and a *fresh* DB created via `OpenDB` is stamped straight at `schemaVersion` without ever creating them from `initSQL` now.)
+(If no test named `TestOpenDB` exists, instead run the full package tests in the next step.)
+
+Add a direct fresh-DB schema assertion so this isn't inferred only from `migrateV4`'s old-schema fixture in Task 1 (which proves tables are *droppable*, not that `initSQL` no longer creates them):
+
+```go
+func TestOpenDBOmitsDeadConversationTables(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	for _, name := range []string{"conversations", "messages"} {
+		var count int
+		err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&count)
+		if err != nil {
+			t.Fatalf("check %s: %v", name, err)
+		}
+		if count != 0 {
+			t.Errorf("expected fresh DB to omit %s table, but it exists", name)
+		}
+	}
+}
+```
 
 - [ ] **Step 3: Run the full memory package tests**
 
@@ -635,7 +714,7 @@ git commit -m "test(memory): remove tests for deleted conversation-persistence m
 
 In `docs/architecture.md`, change:
 
-```
+````text
 ### Memory Consolidation (ghost reflect)
 ```
 ghost reflect <project> --apply
@@ -643,18 +722,18 @@ ghost reflect <project> --apply
   → store.GetRecentExchanges() # recent conversation history
   → TieredConsolidator.Consolidate()
 ```
-```
+````
 
 to:
 
-```
+````text
 ### Memory Consolidation (ghost reflect)
 ```
 ghost reflect <project> --apply
   → store.GetAll()           # existing memories
   → TieredConsolidator.Consolidate()
 ```
-```
+````
 
 (Leave the rest of that code block — `HaikuConsolidator`, `SQLiteConsolidator`, quality gate, `ReplaceNonManual`, `UpdateLearnedContext` lines — unchanged.)
 
@@ -662,7 +741,7 @@ ghost reflect <project> --apply
 
 Delete these two rows from the table at lines 148-167:
 
-```
+```markdown
 | `conversations` | Conversation sessions (project, mode, timestamps) |
 | `messages` | Conversation messages (role, content) |
 ```
