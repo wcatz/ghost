@@ -16,6 +16,28 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// TestMain isolates every test in this package from the real
+// ~/.config/ghost/config.yaml and ~/.local/share/ghost by default. Without
+// this, a test that calls HandleSessionStartHook (which invokes
+// ensureObsidianSyncRunning) and forgets to override these itself would load
+// the developer's real config; if obsidian.auto_sync is true there, it
+// spawns `ghost obsidian sync` — except os.Executable() resolves to this
+// test binary under `go test`, so the "ghost" it spawns is actually another
+// copy of the test suite, which spawns another, without bound. Individual
+// tests may still override via t.Setenv for cases that need specific config
+// content.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "ghost-mcpinit-test-*")
+	if err != nil {
+		panic(err)
+	}
+	defer os.RemoveAll(dir) //nolint:errcheck
+	os.Setenv("HOME", dir)
+	os.Setenv("XDG_CONFIG_HOME", dir)
+	os.Setenv("XDG_DATA_HOME", dir)
+	os.Exit(m.Run())
+}
+
 // testStore wraps db in a memory.Store with a discard logger, matching the
 // package's existing convention (see init.go, status.go).
 func testStore(db *sql.DB) *memory.Store {
