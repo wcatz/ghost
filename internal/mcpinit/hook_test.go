@@ -31,9 +31,15 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	os.Setenv("HOME", dir)
-	os.Setenv("XDG_CONFIG_HOME", dir)
-	os.Setenv("XDG_DATA_HOME", dir)
+	for _, kv := range [][2]string{
+		{"HOME", dir},
+		{"XDG_CONFIG_HOME", dir},
+		{"XDG_DATA_HOME", dir},
+	} {
+		if err := os.Setenv(kv[0], kv[1]); err != nil {
+			panic(err)
+		}
+	}
 	code := m.Run()
 	os.RemoveAll(dir) //nolint:errcheck
 	os.Exit(code)
