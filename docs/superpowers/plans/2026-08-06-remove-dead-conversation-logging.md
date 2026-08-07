@@ -26,7 +26,7 @@
 | `internal/memory/store_test.go` | Remove 3 test functions |
 | `internal/reflection/consolidator_test.go` | Remove 1 field from a test literal |
 
-All work happens in one feature branch, one PR. Tasks are ordered migration + schema first, then the Go call sites, then docs, then tests last (since they're the thing that made the dead code "look" alive) — but `go build`/`go test` is intentionally red between Task 3 and Task 6 (interface/struct still reference removed methods/fields mid-sequence); squash Tasks 3-6 into one commit if a fully-green-per-commit history is required instead.
+All work happens in one feature branch, one PR. Tasks are ordered migration + schema first, then the Go call sites, then docs, then tests last (since they're the thing that made the dead code "look" alive). Tasks 3-6 touch interface/struct/caller in sequence and the repo will not build partway through that span (interface still declares removed methods, callers still reference removed fields) — **squash Tasks 3-6 into a single commit** so every commit that lands on the branch has `go vet ./...` and `go test ./...` passing; do not commit Tasks 3, 4, or 5 individually.
 
 ---
 
@@ -145,8 +145,19 @@ Add a new function after `migrateV3` (after line 176, before `columnExists`):
 // deployment, this aborts without dropping anything if either table is
 // non-empty — no preservation/export path is provided; see
 // docs/superpowers/specs/2026-08-06-remove-dead-conversation-logging-design.md.
+// Either table may already be absent on some on-disk DBs (e.g. a DB created
+// between the v3 schema landing and this migration, or one already patched
+// by hand) — tableExists guards the COUNT so migrateV4 is a no-op for a
+// table that isn't there rather than erroring on "no such table".
 func migrateV4(tx *sql.Tx) error {
 	for _, table := range []string{"messages", "conversations"} {
+		exists, err := tableExists(tx, table)
+		if err != nil {
+			return fmt.Errorf("check %s exists: %w", table, err)
+		}
+		if !exists {
+			continue
+		}
 		var count int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
 			return fmt.Errorf("count %s: %w", table, err)
@@ -163,7 +174,23 @@ func migrateV4(tx *sql.Tx) error {
 	}
 	return nil
 }
+
+// tableExists reports whether the named table exists in the current schema.
+func tableExists(tx *sql.Tx, name string) (bool, error) {
+	var count int
+	err := tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
 ```
+
+Check whether `columnExists` (the existing helper right after this function) already has a sibling `tableExists`-style helper before adding a new one — reuse it instead of duplicating if so.
+
+- [ ] **Step 4b: Add fixture coverage for each table-missing case**
+
+Add two more test cases alongside `TestMigrateV4DropsConversationsAndMessages` (table-driven or as separate functions, matching the file's existing style): one that runs the v3 DDL with only `CREATE TABLE conversations` omitted, one with only `CREATE TABLE messages` omitted, each asserting `migrate(db, 3)` still succeeds and ends at `schemaVersion` with neither table present.
 
 - [ ] **Step 5: Run test to verify it passes**
 
@@ -194,20 +221,39 @@ func TestMigrateV4AbortsOnNonEmptyConversations(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO conversations (id, project_id) VALUES ('c1', 'p1')`); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
+	if _, err := db.Exec(`INSERT INTO messages (conversation_id, role, content) VALUES ('c1', 'user', 'hi')`); err != nil {
+		t.Fatalf("seed message: %v", err)
+	}
 
 	if err := migrate(db, 3); err == nil {
-		t.Fatal("expected migrate to fail on non-empty conversations table, got nil error")
+		t.Fatal("expected migrate to fail on non-empty conversations/messages tables, got nil error")
 	}
 
-	var count int
-	if err := db.QueryRow(`SELECT count(*) FROM conversations`).Scan(&count); err != nil {
+	var convCount, msgCount int
+	if err := db.QueryRow(`SELECT count(*) FROM conversations`).Scan(&convCount); err != nil {
 		t.Fatalf("check conversations: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("expected conversations row to survive the aborted migration, got count %d", count)
+	if convCount != 1 {
+		t.Errorf("expected conversations row to survive the aborted migration, got count %d", convCount)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM messages`).Scan(&msgCount); err != nil {
+		t.Fatalf("check messages: %v", err)
+	}
+	if msgCount != 1 {
+		t.Errorf("expected messages row to survive the aborted migration, got count %d", msgCount)
+	}
+
+	var version int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read version: %v", err)
+	}
+	if version != 3 {
+		t.Errorf("expected user_version to remain 3 after aborted migration, got %d", version)
 	}
 }
 ```
+
+`migrateV4` checks `messages` before `conversations` (messages FKs to conversations), so this test seeds both to exercise that ordering and confirms the abort happens before either table is touched.
 
 (Extract the `oldSchema` string from Step 2 into a shared package-level const if it isn't already, so both tests can reuse it.)
 
@@ -281,7 +327,7 @@ func TestOpenDBOmitsDeadConversationTables(t *testing.T) {
 - [ ] **Step 3: Run the full memory package tests**
 
 Run: `go test ./internal/memory/...`
-Expected: PASS (still passes — old tests calling `CreateConversation` etc. still compile/run because those methods aren't removed until Task 6; a fresh test DB from `testStore(t)` now simply lacks the tables, so any of those still-present tests will start FAILING here — that's expected and fixed in Task 6. If they fail here, that's the correct signal to proceed straight to Task 3-6 without pausing.)
+Expected: FAIL for the tests removed in Task 7 (`TestStoreConversations`, `TestStoreGetRecentExchanges`, `TestStoreGetLatestConversationNoRows`) — they still call `CreateConversation`/`AppendMessage`/etc., which still compile fine (not removed until Task 3), but now run against a fresh test DB from `testStore(t)` that simply lacks the tables, so their queries fail at runtime. This is the expected, correct signal at this point in the sequence — proceed straight into Tasks 3-6 (squashed into one commit) without pausing to fix it here; Task 7 deletes these tests for good.
 
 - [ ] **Step 4: Commit**
 
@@ -319,16 +365,7 @@ immediately before the `// RecordUsage saves token usage for cost tracking.` com
 - [ ] **Step 2: Confirm the package fails to compile (expected — callers still exist)**
 
 Run: `go build ./...`
-Expected: FAIL — compile errors in `internal/provider/provider.go` (interface still declares these methods — Go doesn't error on that by itself, interfaces don't need implementations to compile) and in `cmd/ghost/main.go` (calls `store.GetRecentExchanges`) and in `internal/memory/store_test.go` (calls the removed methods/type). This is expected; proceed to the next tasks which fix each caller.
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add internal/memory/store.go
-git commit -m "chore(memory): remove dead conversation-persistence Store methods"
-```
-
-(The repo will not build between this commit and the end of Task 6 — that's expected for this bite-sized breakdown; if your workflow requires a green build per commit, squash Tasks 3-6 into one commit instead.)
+Expected: FAIL — compile errors in `internal/provider/provider.go` (interface still declares these methods — Go doesn't error on that by itself, interfaces don't need implementations to compile) and in `cmd/ghost/main.go` (calls `store.GetRecentExchanges`) and in `internal/memory/store_test.go` (calls the removed methods/type). This is expected; do NOT commit yet — stage these changes and continue straight into Task 4, 5, and 6, then make one combined commit at the end of Task 6 (Step 7 there) covering Tasks 3-6.
 
 ---
 
@@ -358,12 +395,9 @@ Run: `grep -n '"github.com/wcatz/ghost/internal/memory"' internal/provider/provi
 
 If `memory.ConversationMessage` was the only remaining use of the `memory` package alias in this file, `go vet`/`go build` in the next step will report an unused import — check the grep output against other `memory.` usages in the file (e.g. `memory.Task`, `memory.Decision`, `memory.Project`) before assuming it needs removal. Given this interface has many other `memory.X` return types (`memory.Task`, `memory.Decision`, etc.), the import stays.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Continue — do not commit yet**
 
-```bash
-git add internal/provider/provider.go
-git commit -m "chore(provider): remove dead conversation-persistence methods from MemoryStore"
-```
+Stage these changes and continue into Task 5 and Task 6; this is part of the combined Tasks 3-6 commit made at the end of Task 6.
 
 ---
 
@@ -405,15 +439,12 @@ to:
 
 - [ ] **Step 2: Confirm this file now builds in isolation (still expect package-level failures elsewhere until Task 6)**
 
-Run: `go build ./cmd/... 2>&1 | grep -v "internal/reflection\|internal/memory"`
-Expected: no output referencing `cmd/ghost/main.go` itself (remaining errors, if any, come from `internal/reflection` still having the old struct shape until Task 6 — that's fine, Task 6 fixes it next).
+Run: `go build ./cmd/... > /tmp/ghost-build-cmd.log 2>&1; echo "exit: $?"; cat /tmp/ghost-build-cmd.log`
+Expected: nonzero exit (the build as a whole still fails) — check the captured log for `cmd/ghost/main.go` specifically: it should have no errors referencing that file. Remaining errors come from `internal/reflection` still having the old struct shape until Task 6 — that's fine, Task 6 fixes it next. Checking the exit code first (rather than piping straight through `grep -v`) avoids masking a real `cmd/ghost/main.go` failure that happens to mention one of the filtered package names in its message text.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Continue — do not commit yet**
 
-```bash
-git add cmd/ghost/main.go
-git commit -m "chore(cmd): stop passing dead RecentExchanges into reflection input"
-```
+Stage these changes and continue into Task 6; this is part of the combined Tasks 3-6 commit made at the end of Task 6.
 
 ---
 
@@ -512,20 +543,22 @@ so the literal becomes:
 
 - [ ] **Step 5: Search for any other ExtractionPrompt/RecentExchanges/LastCommits/ProjectLanguage references before building**
 
-Run: `grep -rn "ExtractionPrompt\|RecentExchanges\|LastCommits\|ProjectLanguage" --include=*.go /home/wayne/git/ghost`
+Run this from the repo root: `grep -rn "ExtractionPrompt\|RecentExchanges\|LastCommits\|ProjectLanguage" --include=*.go .`
 Expected: no output (all references removed). If anything remains outside the files already covered by this plan, stop and investigate before proceeding — it means a caller wasn't accounted for.
 
-- [ ] **Step 6: Build the whole repo**
+- [ ] **Step 6: Build, vet, and test the whole repo**
 
-Run: `go build ./...`
-Expected: PASS — this is the first point since Task 3 where the whole repo compiles again.
+Run: `go build ./... && go vet ./... && go test ./...`
+Expected: PASS — this is the first point since Task 3 where the whole repo compiles again, and it must be fully green before the commit in Step 7.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7: Commit Tasks 3-6 together**
 
 ```bash
-git add internal/reflection/prompt.go internal/reflection/consolidator_test.go
-git commit -m "chore(reflection): remove dead RecentExchanges/LastCommits/ProjectLanguage and ExtractionPrompt"
+git add internal/memory/store.go internal/provider/provider.go cmd/ghost/main.go internal/reflection/prompt.go internal/reflection/consolidator_test.go
+git commit -m "chore: remove dead conversation-persistence code and unused reflection-prompt fields"
 ```
+
+This single commit covers Task 3 (Store methods), Task 4 (interface methods), Task 5 (main.go wiring), and Task 6 (prompt.go fields/const) — the repo builds, vets, and tests clean at this commit.
 
 ---
 
@@ -781,7 +814,7 @@ Expected: PASS, all packages
 
 - [ ] **Step 4: Confirm zero remaining references to every removed identifier**
 
-Run: `grep -rn "ExtractionPrompt\|RecentExchanges\|LastCommits\|ProjectLanguage\|ConversationMessage\|GetLatestConversation\|GetConversationMessages\|CreateConversation\|AppendMessage\|GetRecentExchanges" --include=*.go /home/wayne/git/ghost`
+Run this from the repo root: `grep -rn "ExtractionPrompt\|RecentExchanges\|LastCommits\|ProjectLanguage\|ConversationMessage\|GetLatestConversation\|GetConversationMessages\|CreateConversation\|AppendMessage\|GetRecentExchanges" --include=*.go .`
 Expected: no output.
 
 - [ ] **Step 5: Manually exercise ghost reflect against a scratch DB**
@@ -796,7 +829,7 @@ Expected: command runs to completion without error (it may report "0% of existin
 - [ ] **Step 6: Confirm no uncommitted changes remain**
 
 Run: `git status`
-Expected: working tree clean, all 8 prior task commits present in `git log`.
+Expected: working tree clean. History doesn't need one commit per task — Tasks 3-6 are deliberately squashed into a single commit (Task 6 Step 7) so every commit on the branch builds/vets/tests clean; what matters is that the PR's required CI checks pass on the final state, not a specific commit count.
 
 ---
 
@@ -804,4 +837,4 @@ Expected: working tree clean, all 8 prior task commits present in `git log`.
 
 - Spec coverage: all 9 file-level changes from the spec's "Changes" section (1-9) map 1:1 to Tasks 1-8 here (Task 9 is pure verification, not in the spec's numbered list, but covered by the spec's "Testing" section).
 - No data migration needed — confirmed both by the spec and by Task 1's test proving the tables are unconditionally empty-droppable.
-- Task ordering deliberately breaks the build between Task 3 and Task 6 (interface/struct still reference removed methods/fields) — this is intentional bite-sizing per-file; squash into fewer commits if a fully-green-per-commit history is required instead.
+- Tasks 3-6 touch interface/struct/caller in sequence and are squashed into one commit (made at the end of Task 6) so no commit on the branch has a broken build — see the note under "File Structure" above.

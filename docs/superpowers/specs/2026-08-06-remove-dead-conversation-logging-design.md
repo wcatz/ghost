@@ -45,8 +45,12 @@ dead-code items surfaced in the same file and are folded into this same pass:
 
 Remove all three dead-code items in one pass: the conversations/messages
 schema + `RecentExchanges` wiring, `ExtractionPrompt`, and
-`LastCommits`/`ProjectLanguage`. No behavior change for any live code path —
-`ghost reflect` already runs today with these inputs always empty/zero-valued.
+`LastCommits`/`ProjectLanguage`. No behavior change for any live code path on
+a database where `conversations`/`messages` are empty — `ghost reflect`
+already runs today with these inputs always empty/zero-valued. A database
+where either table is non-empty is out of scope for this change (see
+"Non-goals" below); it exists only if some code path wrote to them outside
+this repo's own callers, since none of this repo's shipped code does.
 
 ## Changes
 
@@ -96,6 +100,17 @@ schema + `RecentExchanges` wiring, `ExtractionPrompt`, and
   is non-empty — this only guards against the "always empty" assumption
   being wrong on some deployment; it defines no preservation or export
   behavior, since one is deliberately out of scope.
+- **Recovery policy for a non-empty table:** a deployment that hits the
+  abort is explicitly unsupported by this migration — `ghost` ships no
+  backfill, export, or backup tooling for `conversations`/`messages`. If it
+  happens, the operator's options are: (a) inspect and manually export any
+  rows they care about via `sqlite3 <db> ".dump conversations messages"` (or
+  equivalent), then manually `DROP TABLE conversations; DROP TABLE
+  messages;` and re-run `ghost` so the migration completes on the now-empty
+  tables, or (b) open an issue if this occurs on a real deployment, since it
+  would mean the "zero production callers" premise this whole change rests
+  on is wrong and needs re-investigating before deleting anything further.
+  This is a manual, one-time recovery step, not a maintained code path.
 - No replacement logging mechanism. The stop hook's mandatory-save nudge
   already covers the curation role `RecentExchanges` used to serve.
 - No change to `ghost resolve`/`ghost supersede` or any other subsystem.
