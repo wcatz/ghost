@@ -108,11 +108,11 @@ func TestSyncRetriesFailedExport(t *testing.T) {
 		return len(m) == 1
 	})
 
-	// Break the vault: ensureVault's ReadDir fails on an unreadable root.
-	if err := os.Chmod(vault, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(vault, 0o755) }) // let TempDir removal succeed on failure paths
+	// Break the vault: force ensureVault's ReadDir to fail. A permission-bit
+	// approach (os.Chmod(vault, 0o000)) is unreliable across CI privilege
+	// levels, so this swaps the package's ReadDir seam instead.
+	readDirFn.Store(func(string) ([]os.DirEntry, error) { return nil, errors.New("injected: unreadable vault") })
+	t.Cleanup(func() { readDirFn.Store(os.ReadDir) })
 
 	// A commit from the other connection triggers an export that fails.
 	if _, err := writeStore.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "second memory", Importance: 0.7, Source: "mcp"}); err != nil {
@@ -121,9 +121,7 @@ func TestSyncRetriesFailedExport(t *testing.T) {
 	waitFor(t, func() bool { return strings.Contains(buf.String(), "export failed") })
 
 	// Fix the vault. NO further commits: only a retained baseline retries.
-	if err := os.Chmod(vault, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	readDirFn.Store(os.ReadDir)
 	waitFor(t, func() bool {
 		m, _ := filepath.Glob(filepath.Join(vault, "p1", "Memories", "*.md"))
 		return len(m) == 2
