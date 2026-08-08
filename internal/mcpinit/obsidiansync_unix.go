@@ -3,6 +3,7 @@
 package mcpinit
 
 import (
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -12,4 +13,15 @@ import (
 // process group.
 func detachProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+}
+
+// isProcessAlive reports whether pid names a running process, by sending
+// it signal 0 — this checks existence and permission without actually
+// signaling the process.
+func isProcessAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }

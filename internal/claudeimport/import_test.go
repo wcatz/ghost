@@ -20,6 +20,14 @@ func TestClaudeMemoryDir(t *testing.T) {
 		}
 	})
 
+	t.Run("encoding_windows", func(t *testing.T) {
+		got := EncodeProjectPath(`C:\Users\me\repo`)
+		want := "C--Users-me-repo"
+		if got != want {
+			t.Errorf("EncodeProjectPath = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("returns_empty_for_missing_dir", func(t *testing.T) {
 		got := ClaudeMemoryDir("/nonexistent/project/path")
 		if got != "" {

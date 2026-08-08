@@ -45,7 +45,12 @@ const defaultImportance float32 = 0.7
 
 // EncodeProjectPath converts an absolute path to Claude's directory name format.
 // E.g., "/home/wayne/git/ghost" → "-home-wayne-git-ghost".
+// Windows paths also carry backslashes and a drive-letter colon (e.g.
+// "C:\Users\me\repo"); both are folded into "-" the same as "/" so the
+// encoded name never embeds a literal ":" or "\", which would otherwise
+// break directory creation and the path-traversal check in ClaudeMemoryDir.
 func EncodeProjectPath(projectPath string) string {
+	projectPath = strings.NewReplacer(`\`, "-", ":", "-").Replace(projectPath)
 	return strings.ReplaceAll(projectPath, "/", "-")
 }
 
