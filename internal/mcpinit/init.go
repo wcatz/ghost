@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/wcatz/ghost/internal/claudeimport"
@@ -194,8 +195,24 @@ func ensurePermissions(w io.Writer) (*settingsFile, error) {
 	return sf, nil
 }
 
-// shellQuote wraps s in POSIX single quotes, escaping any single quotes within.
+// shellQuote quotes s for safe embedding in a hook command line, matching
+// the shell Claude Code invokes hooks through: cmd.exe on Windows (which
+// does not treat ' as a quote character), POSIX shells elsewhere.
 func shellQuote(s string) string {
+	if runtime.GOOS == "windows" {
+		return shellQuoteWindows(s)
+	}
+	return shellQuotePOSIX(s)
+}
+
+// shellQuoteWindows quotes s for cmd.exe, which has no escape for embedded
+// double quotes other than doubling them.
+func shellQuoteWindows(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// shellQuotePOSIX quotes s for POSIX shells using single quotes.
+func shellQuotePOSIX(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
