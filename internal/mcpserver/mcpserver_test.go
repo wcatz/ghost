@@ -1252,38 +1252,64 @@ func (t discoverlessTransport) Connect(ctx context.Context) (mcp.Connection, err
 	if err != nil {
 		return nil, err
 	}
-	return &discoverlessConn{Connection: conn}, nil
+	return &discoverlessConn{
+		Connection: conn,
+		pending:    make(chan jsonrpc.Message, 4),
+		real:       make(chan discoverlessReadResult),
+	}, nil
 }
 
+// discoverlessConn intercepts "server/discover" so tests can run against a
+// go-sdk client that probes for it, without the real connection ever seeing
+// (or needing to answer) that request. Read must never block exclusively on
+// the real connection: the SDK dispatches incoming messages via a single
+// goroutine that calls Read in a loop, and that call can start blocking on
+// the real connection before Write has enqueued the synthetic response —
+// leaving nothing to wake it, since the discover request was never actually
+// sent. A background reader plus select avoids that race.
 type discoverlessConn struct {
 	mcp.Connection
-	mu      sync.Mutex
-	pending []jsonrpc.Message
+	pending  chan jsonrpc.Message
+	real     chan discoverlessReadResult
+	realOnce sync.Once
+}
+
+type discoverlessReadResult struct {
+	msg jsonrpc.Message
+	err error
 }
 
 func (c *discoverlessConn) Write(ctx context.Context, msg jsonrpc.Message) error {
 	if req, ok := msg.(*jsonrpc.Request); ok && req.Method == "server/discover" {
-		c.mu.Lock()
-		c.pending = append(c.pending, &jsonrpc.Response{
+		c.pending <- &jsonrpc.Response{
 			ID:    req.ID,
 			Error: &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "server/discover not supported"},
-		})
-		c.mu.Unlock()
+		}
 		return nil
 	}
 	return c.Connection.Write(ctx, msg)
 }
 
 func (c *discoverlessConn) Read(ctx context.Context) (jsonrpc.Message, error) {
-	c.mu.Lock()
-	if len(c.pending) > 0 {
-		m := c.pending[0]
-		c.pending = c.pending[1:]
-		c.mu.Unlock()
+	c.realOnce.Do(func() {
+		go func() {
+			for {
+				m, err := c.Connection.Read(ctx)
+				c.real <- discoverlessReadResult{msg: m, err: err}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	})
+	select {
+	case m := <-c.pending:
 		return m, nil
+	case r := <-c.real:
+		return r.msg, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	c.mu.Unlock()
-	return c.Connection.Read(ctx)
 }
 
 func TestGhostResolve_DryRunByDefault(t *testing.T) {
