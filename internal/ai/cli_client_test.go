@@ -44,7 +44,7 @@ if [ -n "$ANTHROPIC_API_KEY" ]; then
   echo "LEAKED" >&2
   exit 1
 fi
-echo -n '{"memories":[]}'
+printf '%s' '{"memories":[]}'
 `)
 	t.Setenv("ANTHROPIC_API_KEY", "sk-should-not-leak")
 
@@ -74,7 +74,7 @@ done
 if [ "$found_flag" -ne 1 ]; then echo "missing --system-prompt flag" >&2; exit 1; fi
 if [ "$found_system" -ne 1 ]; then echo "system prompt not passed as distinct arg" >&2; exit 1; fi
 if [ "$found_user" -ne 1 ]; then echo "user content not passed as distinct arg" >&2; exit 1; fi
-echo -n "KEEP"
+printf '%s' "KEEP"
 `)
 	c := &CLIClient{binary: bin}
 	text, err := c.Classify(context.Background(), "SYSTEM instructions", "USERDATA content")

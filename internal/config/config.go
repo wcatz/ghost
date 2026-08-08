@@ -100,7 +100,7 @@ func Load() (*Config, error) {
 	loadFileIfExists(k, "/etc/ghost/config.yaml", parser)
 
 	// Layer 3: ~/.config/ghost/config.yaml (user-global).
-	if configDir, err := os.UserConfigDir(); err == nil {
+	if configDir, err := userConfigDir(); err == nil {
 		loadFileIfExists(k, filepath.Join(configDir, "ghost", "config.yaml"), parser)
 	}
 
@@ -161,7 +161,7 @@ func DataDir() (string, error) {
 // EnsureConfigFile creates ~/.config/ghost/config.yaml from the embedded example
 // if it doesn't already exist. Returns the path and whether a new file was created.
 func EnsureConfigFile() (path string, created bool, err error) {
-	configDir, err := os.UserConfigDir()
+	configDir, err := userConfigDir()
 	if err != nil {
 		return "", false, err
 	}
@@ -186,4 +186,15 @@ func loadFileIfExists(k *koanf.Koanf, path string, parser koanf.Parser) {
 	if _, err := os.Stat(path); err == nil {
 		_ = k.Load(file.Provider(path), parser)
 	}
+}
+
+// userConfigDir returns the base user config directory, honoring XDG_CONFIG_HOME
+// when set. Unlike os.UserConfigDir — which ignores XDG_CONFIG_HOME on macOS —
+// this keeps the config path consistent with DataDir's XDG_DATA_HOME handling
+// and lets tests point XDG_CONFIG_HOME at a temp dir on every platform.
+func userConfigDir() (string, error) {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		return dir, nil
+	}
+	return os.UserConfigDir()
 }
