@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
+	"testing"
 
 	"github.com/wcatz/ghost/internal/config"
 )
@@ -20,6 +20,14 @@ import (
 // process on their machines without asking. Best-effort and silent
 // otherwise: any failure here must never block or fail the session-start hook.
 func ensureObsidianSyncRunning() {
+	// os.Executable() below resolves to the running binary's own path. Under
+	// `go test` that's the compiled test binary, not `ghost` — spawning it
+	// with "obsidian sync" as args would just re-run the whole test suite,
+	// which calls back into this function, recursively. Refuse unconditionally.
+	if testing.Testing() {
+		return
+	}
+
 	cfg, err := config.Load()
 	if err != nil || !cfg.Obsidian.AutoSync {
 		return
@@ -59,7 +67,9 @@ func ensureObsidianSyncRunning() {
 
 // isAlive reports whether pidPath names a PID file for a process that is
 // still running. It never treats a stale or missing PID file as an error —
-// the caller's only decision is "spawn a new one, or not".
+// the caller's only decision is "spawn a new one, or not". The liveness
+// check itself is platform-specific — see isProcessAlive in
+// obsidiansync_unix.go / obsidiansync_windows.go.
 func isAlive(pidPath string) bool {
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
@@ -69,9 +79,5 @@ func isAlive(pidPath string) bool {
 	if err != nil || pid <= 0 {
 		return false
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	return isProcessAlive(pid)
 }

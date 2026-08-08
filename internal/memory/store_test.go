@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -80,40 +81,67 @@ func TestStoreUpsert(t *testing.T) {
 	ctx := context.Background()
 
 	// First insert via Upsert — should create new.
-	id1, merged, err := s.Upsert(ctx, testProject, "fact", "SQLite supports full-text search via FTS5", "reflection", 0.6, []string{"sqlite"})
+	id1, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "SQLite supports full-text search via FTS5", "reflection", 0.6, []string{"sqlite"})
 	if err != nil {
 		t.Fatalf("Upsert (new): %v", err)
 	}
-	if merged {
-		t.Error("first Upsert should not merge")
+	if dupOf != "" {
+		t.Error("first Upsert should not report a duplicate")
 	}
 	if id1 == "" {
 		t.Fatal("first Upsert returned empty ID")
 	}
 
-	// Second Upsert with overlapping content — should merge.
-	id2, merged, err := s.Upsert(ctx, testProject, "fact", "SQLite FTS5 provides full-text search capabilities", "reflection", 0.5, []string{"sqlite", "fts"})
+	// Second Upsert with overlapping content — should link as a duplicate of id1.
+	id2, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "SQLite FTS5 provides full-text search capabilities", "reflection", 0.5, []string{"sqlite", "fts"})
 	if err != nil {
 		t.Fatalf("Upsert (merge): %v", err)
 	}
-	if !merged {
-		t.Error("second Upsert should have merged")
+	if dupOf != id1 {
+		t.Errorf("second Upsert should report duplicateOf %s, got %q", id1, dupOf)
 	}
-	if id2 != id1 {
-		t.Errorf("merged ID should match original: got %s, want %s", id2, id1)
+	if id2 == id1 {
+		t.Error("second Upsert should have created its own row, not reused id1")
 	}
 
-	// Verify importance was strengthened: 0.6 + (0.5 * 0.2) = 0.7
+	// Both rows exist, with their original content untouched.
 	all, err := s.GetAll(ctx, testProject, 100)
 	if err != nil {
 		t.Fatalf("GetAll: %v", err)
 	}
-	if len(all) != 1 {
-		t.Fatalf("expected 1 memory after merge, got %d", len(all))
+	if len(all) != 2 {
+		t.Fatalf("expected 2 memories after duplicate-link, got %d", len(all))
 	}
+	byID := map[string]Memory{}
+	for _, m := range all {
+		byID[m.ID] = m
+	}
+	if byID[id1].Content != "SQLite supports full-text search via FTS5" {
+		t.Errorf("existing row content was overwritten: %q", byID[id1].Content)
+	}
+	if byID[id2].Content != "SQLite FTS5 provides full-text search capabilities" {
+		t.Errorf("new row content wrong: %q", byID[id2].Content)
+	}
+
+	// Existing row's importance was strengthened: 0.6 + (0.5 * 0.2) = 0.7
 	expected := float32(0.6 + 0.5*0.2)
-	if diff := all[0].Importance - expected; diff > 0.01 || diff < -0.01 {
-		t.Errorf("expected importance ~%f, got %f", expected, all[0].Importance)
+	if diff := byID[id1].Importance - expected; diff > 0.01 || diff < -0.01 {
+		t.Errorf("expected existing-row importance ~%f, got %f", expected, byID[id1].Importance)
+	}
+
+	// A 'duplicate' link connects the two rows in the right direction.
+	links, err := s.GetLinks(ctx, id1)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	found := false
+	for _, l := range links {
+		if l.Relation == "duplicate" && l.SourceID == id2 && l.TargetID == id1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a 'duplicate' link source_id=%s target_id=%s, links: %+v", id2, id1, links)
 	}
 }
 
@@ -125,24 +153,24 @@ func TestStoreUpsertNoMergeOnSharedWord(t *testing.T) {
 	// ("Phase"). Reproduces the 2026-07-19 live bug: the FTS OR-probe alone
 	// treated any one-word overlap as a duplicate and silently swallowed
 	// the second save.
-	id1, merged, err := s.Upsert(ctx, testProject, "decision",
+	id1, dupOf, _, err := s.Upsert(ctx, testProject, "decision",
 		"Benchmark strategy decided: Phase one is LongMemEval retrieval eval with ablations",
 		"mcp", 0.8, nil)
 	if err != nil {
 		t.Fatalf("Upsert (first): %v", err)
 	}
-	if merged {
-		t.Error("first Upsert should not merge")
+	if dupOf != "" {
+		t.Error("first Upsert should not report a duplicate")
 	}
 
-	id2, merged, err := s.Upsert(ctx, testProject, "decision",
+	id2, dupOf, _, err := s.Upsert(ctx, testProject, "decision",
 		"MCP Phase two design approved: memory update tool, stop hook, promote to global",
 		"mcp", 0.8, nil)
 	if err != nil {
 		t.Fatalf("Upsert (second): %v", err)
 	}
-	if merged {
-		t.Error("unrelated content sharing one word must not merge")
+	if dupOf != "" {
+		t.Error("unrelated content sharing one word must not report a duplicate")
 	}
 	if id2 == id1 {
 		t.Error("second Upsert should have created a distinct memory")
@@ -163,21 +191,21 @@ func TestStoreUpsertNoMergeBelowThreshold(t *testing.T) {
 
 	// Same topic vocabulary but genuinely different facts: token overlap is
 	// real yet below the 0.5 Jaccard gate, so both must survive.
-	_, _, err := s.Upsert(ctx, testProject, "gotcha",
+	_, _, _, err := s.Upsert(ctx, testProject, "gotcha",
 		"SQLite busy timeout must be set on the read-only hook connection",
 		"mcp", 0.7, nil)
 	if err != nil {
 		t.Fatalf("Upsert (first): %v", err)
 	}
 
-	_, merged, err := s.Upsert(ctx, testProject, "gotcha",
+	_, dupOf, _, err := s.Upsert(ctx, testProject, "gotcha",
 		"SQLite FTS5 rank ordering is unstable across identical RRF scores in hybrid search",
 		"mcp", 0.7, nil)
 	if err != nil {
 		t.Fatalf("Upsert (second): %v", err)
 	}
-	if merged {
-		t.Error("below-threshold overlap must not merge")
+	if dupOf != "" {
+		t.Error("below-threshold overlap must not report a duplicate")
 	}
 
 	all, err := s.GetAll(ctx, testProject, 100)
@@ -197,17 +225,17 @@ func TestStoreUpsertNoMergeOnTokenFreeContent(t *testing.T) {
 	// sets (tokenizeContent keeps len>1 only) while still FTS-matching each
 	// other (sanitizeFTS keeps single-char words). jaccard(∅,∅) = 1.0, so
 	// without a guard these unrelated saves would spuriously merge.
-	_, _, err := s.Upsert(ctx, testProject, "fact", "a b c", "mcp", 0.5, nil)
+	_, _, _, err := s.Upsert(ctx, testProject, "fact", "a b c", "mcp", 0.5, nil)
 	if err != nil {
 		t.Fatalf("Upsert (first): %v", err)
 	}
 
-	_, merged, err := s.Upsert(ctx, testProject, "fact", "a x y", "mcp", 0.5, nil)
+	_, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "a x y", "mcp", 0.5, nil)
 	if err != nil {
 		t.Fatalf("Upsert (second): %v", err)
 	}
-	if merged {
-		t.Error("token-free contents must never merge")
+	if dupOf != "" {
+		t.Error("token-free contents must never report a duplicate")
 	}
 
 	all, err := s.GetAll(ctx, testProject, 100)
@@ -219,37 +247,157 @@ func TestStoreUpsertNoMergeOnTokenFreeContent(t *testing.T) {
 	}
 }
 
-func TestStoreUpsertMergesBestCandidate(t *testing.T) {
+func TestStoreUpsertDuplicateLinksBestCandidate(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
 	// Two existing memories; the new content shares one word with A but is a
-	// near-duplicate of B. It must merge into B, not the first FTS hit.
-	_, _, err := s.Upsert(ctx, testProject, "fact",
+	// near-duplicate of B. It must link to B, not the first FTS hit.
+	_, _, _, err := s.Upsert(ctx, testProject, "fact",
 		"Deployment pipeline uses GitHub Actions runners on the cluster",
 		"mcp", 0.7, nil)
 	if err != nil {
 		t.Fatalf("Upsert (A): %v", err)
 	}
 
-	idB, _, err := s.Upsert(ctx, testProject, "fact",
+	idB, _, _, err := s.Upsert(ctx, testProject, "fact",
 		"Ollama embedding worker sweeps unembedded memories every two minutes",
 		"mcp", 0.7, nil)
 	if err != nil {
 		t.Fatalf("Upsert (B): %v", err)
 	}
 
-	idNew, merged, err := s.Upsert(ctx, testProject, "fact",
+	idNew, dupOf, _, err := s.Upsert(ctx, testProject, "fact",
 		"Ollama embedding worker sweeps the unembedded memories every two minutes for cluster projects",
 		"mcp", 0.7, nil)
 	if err != nil {
 		t.Fatalf("Upsert (near-dup of B): %v", err)
 	}
-	if !merged {
-		t.Fatal("near-duplicate of B should merge")
+	if dupOf != idB {
+		t.Fatalf("should link to B (%s), linked to %q", idB, dupOf)
 	}
-	if idNew != idB {
-		t.Errorf("should merge into B (%s), merged into %s", idB, idNew)
+	if idNew == idB {
+		t.Errorf("near-duplicate should get its own row distinct from B (%s)", idB)
+	}
+}
+
+// TestStoreUpsertDuplicateLinksLengthAsymmetricParaphrases covers the failure
+// the eval surfaced: the same fact restated at a different length. Each
+// restatement must get its own row and link back to a previously-seen row —
+// not accumulate as unrelated memories, and not silently overwrite one another.
+func TestStoreUpsertDuplicateLinksLengthAsymmetricParaphrases(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	base := "the session cache TTL is 300 seconds"
+	restatements := []string{
+		"session cache TTL is set to 300 seconds by default",
+		"default session cache TTL: 300 seconds, configured in the server config",
+		"the session cache TTL value is 300 seconds and it is not currently tunable",
+	}
+
+	baseID, _, _, err := s.Upsert(ctx, testProject, "fact", base, "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (base): %v", err)
+	}
+	seenIDs := map[string]bool{baseID: true}
+	for i, r := range restatements {
+		id, dupOf, _, err := s.Upsert(ctx, testProject, "fact", r, "mcp", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert (restatement %d): %v", i, err)
+		}
+		if dupOf == "" || !seenIDs[dupOf] {
+			t.Errorf("restatement %d must link to a previously-seen row, got dupOf=%q: %q", i, dupOf, r)
+		}
+		seenIDs[id] = true
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 4 {
+		t.Errorf("expected 4 rows (base + 3 restatements), got %d", len(all))
+		for _, m := range all {
+			t.Logf("  %s", m.Content)
+		}
+	}
+}
+
+// TestStoreUpsertOverlapLegDoesNotOverMerge guards the risk the overlap leg
+// introduces: containment is trivially satisfied by a short save whose few
+// tokens all appear in a longer, unrelated memory. Distinct facts must survive.
+func TestStoreUpsertOverlapLegDoesNotOverMerge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// A long memory that lexically contains every token of the short saves
+	// below, but states a different fact from each of them.
+	long := "the embedding worker retries the Ollama request twice before giving " +
+		"up and leaves the memory unembedded until the next sweep"
+	if _, _, _, err := s.Upsert(ctx, testProject, "gotcha", long, "mcp", 0.7, nil); err != nil {
+		t.Fatalf("Upsert (long): %v", err)
+	}
+
+	shorts := []string{
+		"the Ollama request twice",
+		"the next sweep",
+		"the memory unembedded",
+	}
+	for i, sh := range shorts {
+		_, dupOf, _, err := s.Upsert(ctx, testProject, "gotcha", sh, "mcp", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert (short %d): %v", i, err)
+		}
+		if dupOf != "" {
+			t.Errorf("short contained save %d must not report a duplicate for a longer unrelated memory: %q", i, sh)
+		}
+	}
+
+	// Comparably-sized, same-topic, genuinely different facts — the shape the
+	// overlap leg's gates do NOT exclude — must still survive on score alone.
+	distinct := []string{
+		"the embedding worker skips memories longer than the model context window",
+		"the embedding worker sweeps the unembedded memories every two minutes",
+		"the embedding worker writes vectors into the memory embeddings table",
+	}
+	for i, d := range distinct {
+		_, dupOf, _, err := s.Upsert(ctx, testProject, "gotcha", d, "mcp", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert (distinct %d): %v", i, err)
+		}
+		if dupOf != "" {
+			t.Errorf("distinct fact %d sharing topic vocabulary must not report a duplicate: %q", i, d)
+		}
+	}
+}
+
+func TestMergeScore(t *testing.T) {
+	tests := []struct {
+		name      string
+		a, b      string
+		wantMerge bool
+	}{
+		{"identical", "cache TTL is 300 seconds", "cache TTL is 300 seconds", true},
+		{"length-asymmetric paraphrase", "cache TTL is 300 seconds",
+			"the cache TTL is set to 300 seconds in config", true},
+		{"empty vs empty", "a b c", "x y z", false},
+		{"empty vs populated", "a b c", "the embedding worker sweeps every minute", false},
+		{"short containment below min tokens", "pnpm workspaces",
+			"we use pnpm workspaces because npm workspaces hoists transitive deps wrongly", false},
+		{"unrelated same topic", "SQLite busy timeout must be set on the read-only hook connection",
+			"SQLite FTS5 rank ordering is unstable across identical RRF scores in hybrid search", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeScore(tokenizeContent(tt.a), tokenizeContent(tt.b)) > 0
+			if got != tt.wantMerge {
+				t.Errorf("mergeScore(%q, %q) merge = %v, want %v (jaccard=%.3f overlap=%.3f)",
+					tt.a, tt.b, got, tt.wantMerge,
+					jaccard(tokenizeContent(tt.a), tokenizeContent(tt.b)),
+					overlapCoefficient(tokenizeContent(tt.a), tokenizeContent(tt.b)))
+			}
+		})
 	}
 }
 
@@ -258,29 +406,26 @@ func TestStoreUpsertImportanceCap(t *testing.T) {
 	ctx := context.Background()
 
 	// Create with high importance.
-	_, _, err := s.Upsert(ctx, testProject, "fact", "Critical architecture pattern for the system", "reflection", 0.95, nil)
+	firstID, _, _, err := s.Upsert(ctx, testProject, "fact", "Critical architecture pattern for the system", "reflection", 0.95, nil)
 	if err != nil {
 		t.Fatalf("Upsert (new): %v", err)
 	}
 
-	// Upsert again — should be capped at 1.0.
-	_, merged, err := s.Upsert(ctx, testProject, "fact", "Critical architecture pattern for the entire system design", "reflection", 0.9, nil)
+	// Upsert a near-duplicate — existing row's importance should be capped at 1.0.
+	_, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "Critical architecture pattern for the entire system design", "reflection", 0.9, nil)
 	if err != nil {
 		t.Fatalf("Upsert (cap): %v", err)
 	}
-	if !merged {
-		t.Error("expected merge")
+	if dupOf != firstID {
+		t.Fatalf("expected duplicate link to %s, got %q", firstID, dupOf)
 	}
 
-	all, err := s.GetAll(ctx, testProject, 100)
-	if err != nil {
-		t.Fatalf("GetAll: %v", err)
+	var importance float32
+	if err := s.db.QueryRowContext(ctx, `SELECT importance FROM memories WHERE id = ?`, firstID).Scan(&importance); err != nil {
+		t.Fatalf("query importance: %v", err)
 	}
-	if len(all) != 1 {
-		t.Fatalf("expected 1 memory, got %d", len(all))
-	}
-	if all[0].Importance > 1.0 {
-		t.Errorf("importance should be capped at 1.0, got %f", all[0].Importance)
+	if importance > 1.0 {
+		t.Errorf("importance should be capped at 1.0, got %f", importance)
 	}
 }
 
@@ -588,6 +733,19 @@ func TestSanitizeFTS(t *testing.T) {
 				t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSanitizeFTSNWiderCap verifies Upsert's duplicate-recall probe (which
+// calls sanitizeFTSN(content, 30)) gets a wider word cap than plain search
+// (sanitizeFTS, capped at 10) — see sanitizeFTSN's doc comment for why the
+// caps must differ.
+func TestSanitizeFTSNWiderCap(t *testing.T) {
+	input := "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twentyone twentytwo twentythree twentyfour twentyfive twentysix twentyseven twentyeight twentynine thirty thirtyone thirtytwo"
+	want := `"one" OR "two" OR "three" OR "four" OR "five" OR "six" OR "seven" OR "eight" OR "nine" OR "ten" OR "eleven" OR "twelve" OR "thirteen" OR "fourteen" OR "fifteen" OR "sixteen" OR "seventeen" OR "eighteen" OR "nineteen" OR "twenty" OR "twentyone" OR "twentytwo" OR "twentythree" OR "twentyfour" OR "twentyfive" OR "twentysix" OR "twentyseven" OR "twentyeight" OR "twentynine" OR "thirty"`
+	got := sanitizeFTSN(input, 30)
+	if got != want {
+		t.Errorf("sanitizeFTSN(%q, 30)\n  got:  %s\n  want: %s", input, got, want)
 	}
 }
 
@@ -963,26 +1121,168 @@ func TestStoreListProjects(t *testing.T) {
 	}
 }
 
-func TestStoreResolveProjectByName(t *testing.T) {
+func TestStoreResolveProject_ByID(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	// testStore created project with name "test".
-	id, err := s.ResolveProjectByName(ctx, "test")
+	id, name, err := s.ResolveProject(ctx, testProject)
 	if err != nil {
-		t.Fatalf("ResolveProjectByName: %v", err)
+		t.Fatalf("ResolveProject: %v", err)
 	}
-	if id != testProject {
-		t.Errorf("expected %q, got %q", testProject, id)
+	if id != testProject || name != "test" {
+		t.Errorf("got id=%q name=%q, want id=%q name=%q", id, name, testProject, "test")
+	}
+}
+
+func TestStoreResolveProject_ByName(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, name, err := s.ResolveProject(ctx, "test")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != testProject || name != "test" {
+		t.Errorf("got id=%q name=%q, want id=%q name=%q", id, name, testProject, "test")
+	}
+}
+
+func TestStoreResolveProject_PathPrefix(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "ghostid", "/home/wayne/git/ghost", "ghost"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
 	}
 
-	// Non-existent name returns empty string, no error.
-	id, err = s.ResolveProjectByName(ctx, "nonexistent")
+	id, name, err := s.ResolveProject(ctx, "/home/wayne/git/ghost/internal/memory")
 	if err != nil {
-		t.Fatalf("ResolveProjectByName nonexistent: %v", err)
+		t.Fatalf("ResolveProject: %v", err)
 	}
-	if id != "" {
-		t.Errorf("expected empty string for nonexistent, got %q", id)
+	if id != "ghostid" || name != "ghost" {
+		t.Errorf("got id=%q name=%q, want id=%q name=%q", id, name, "ghostid", "ghost")
+	}
+}
+
+func TestStoreResolveProject_PathWithWildcardChars(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	// A stored path containing literal '%'/'_' must not act as a SQL LIKE
+	// wildcard against an unrelated input path.
+	if err := s.EnsureProject(ctx, "wildid", "/home/wayne/git/foo_bar", "foobar"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	id, name, err := s.ResolveProject(ctx, "/home/wayne/git/fooXbar/sub")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("'_' in stored path must not wildcard-match, got id=%q name=%q", id, name)
+	}
+
+	id, name, err = s.ResolveProject(ctx, "/home/wayne/git/foo_bar/sub")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "wildid" || name != "foobar" {
+		t.Errorf("exact literal prefix should still match, got id=%q name=%q, want id=%q name=%q", id, name, "wildid", "foobar")
+	}
+}
+
+func TestStoreResolveProject_LongestPathWins(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "parent", "/home/wayne/git", "parent"); err != nil {
+		t.Fatalf("EnsureProject parent: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "child", "/home/wayne/git/ghost", "ghost"); err != nil {
+		t.Fatalf("EnsureProject child: %v", err)
+	}
+
+	id, _, err := s.ResolveProject(ctx, "/home/wayne/git/ghost/cmd")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "child" {
+		t.Errorf("longest path should win, got %q, want %q", id, "child")
+	}
+}
+
+func TestStoreResolveProject_NoPrefixFalseMatch(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "ghostid", "/home/wayne/git/ghost", "ghost"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	id, name, err := s.ResolveProject(ctx, "/home/wayne/git/ghost-extra")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("ghost-extra should NOT prefix-match ghost, got id=%q name=%q", id, name)
+	}
+}
+
+func TestStoreResolveProject_BasenameFallback(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	// Path shorter than the LENGTH(path) > 10 guard, so prefix matching can't fire —
+	// isolates the basename-of-input fallback (case 4).
+	if err := s.EnsureProject(ctx, "ghostid", "/x/ghost", "ghost"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	id, name, err := s.ResolveProject(ctx, "/some/unrelated/path/ghost")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "ghostid" || name != "ghost" {
+		t.Errorf("basename fallback: got id=%q name=%q, want id=%q name=%q", id, name, "ghostid", "ghost")
+	}
+}
+
+func TestStoreResolveProject_NoMatch(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, name, err := s.ResolveProject(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("expected empty on no match, got id=%q name=%q", id, name)
+	}
+}
+
+func TestStoreResolveProject_ClosedDB(t *testing.T) {
+	s := testStore(t)
+	s.Close() //nolint:errcheck
+	ctx := context.Background()
+
+	_, _, err := s.ResolveProject(ctx, "test")
+	if err == nil {
+		t.Fatal("expected error on closed DB, got nil")
+	}
+}
+
+func TestStoreListProjectNames(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "ghostid", "/home/wayne/git/ghost", "ghost"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	names, err := s.ListProjectNames(ctx)
+	if err != nil {
+		t.Fatalf("ListProjectNames: %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("expected 2 names, got %d: %v", len(names), names)
+	}
+	// ListProjects orders by name ASC — "ghost" before "test".
+	if names[0] != "ghost" || names[1] != "test" {
+		t.Errorf("got %v, want [ghost test]", names)
 	}
 }
 
@@ -1327,6 +1627,149 @@ func TestStoreDecisions(t *testing.T) {
 	}
 }
 
+// TestSupersedeDecision covers the eval finding that a reversed decision kept
+// reporting status "active" and could head ghost_decisions_list ahead of the
+// decision that replaced it. The status/superseded_by columns existed but had
+// no writer, and ListDecisions ordered purely by created_at DESC.
+func TestSupersedeDecision(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	oldID, _, err := s.RecordDecision(ctx, testProject,
+		"Use Redis for the job queue", "Redis lists as the queue backend",
+		"Already deployed for caching", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (old): %v", err)
+	}
+	newID, _, err := s.RecordDecision(ctx, testProject,
+		"Reverse: use Postgres for the job queue", "SKIP LOCKED on Postgres",
+		"Redis lost jobs on failover", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (new): %v", err)
+	}
+
+	if err := s.SupersedeDecision(ctx, testProject, oldID, newID); err != nil {
+		t.Fatalf("SupersedeDecision: %v", err)
+	}
+
+	all, err := s.ListDecisions(ctx, testProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("expected 2 decisions, got %d", len(all))
+	}
+	// The live decision must come first, and the reversed one must report its
+	// real status and point at its replacement.
+	if all[0].ID != newID {
+		t.Errorf("live decision should rank first, got %s", all[0].ID)
+	}
+	if all[1].ID != oldID {
+		t.Fatalf("superseded decision should rank last, got %s", all[1].ID)
+	}
+	if all[1].Status != "superseded" {
+		t.Errorf("reversed decision status = %q, want superseded", all[1].Status)
+	}
+	if all[1].SupersededBy != newID {
+		t.Errorf("superseded_by = %q, want %s", all[1].SupersededBy, newID)
+	}
+	if all[0].Status != "active" {
+		t.Errorf("replacement status = %q, want active", all[0].Status)
+	}
+
+	// Status filters now actually partition.
+	active, err := s.ListDecisions(ctx, testProject, "active", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions active: %v", err)
+	}
+	if len(active) != 1 || active[0].ID != newID {
+		t.Errorf("expected only the replacement to be active, got %v", active)
+	}
+
+	// Re-running repoints rather than failing.
+	if err := s.SupersedeDecision(ctx, testProject, oldID, newID); err != nil {
+		t.Errorf("re-running SupersedeDecision should be safe: %v", err)
+	}
+}
+
+// TestListDecisionsLimitPicksNewestNotLiveOnly pins the ordering change to
+// presentation only: the limit still selects the newest N decisions, so
+// demoting superseded ones cannot silently push them out of the window. A
+// caller that never sees the reversed decision cannot tell a decision was
+// reversed at all.
+func TestListDecisionsLimitPicksNewestNotLiveOnly(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Oldest recorded first, so the last one recorded is the newest.
+	var ids []string
+	for i := range 4 {
+		id, _, err := s.RecordDecision(ctx, testProject,
+			fmt.Sprintf("Decision %d", i), fmt.Sprintf("do thing %d", i), "because", nil, nil)
+		if err != nil {
+			t.Fatalf("RecordDecision %d: %v", i, err)
+		}
+		ids = append(ids, id)
+		// RecordDecision stamps datetime('now'), so all four land in the same
+		// second and created_at DESC would be arbitrary. Space them out.
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE decisions SET created_at = datetime('now', ?) WHERE id = ?`,
+			fmt.Sprintf("-%d days", 10-i), id); err != nil {
+			t.Fatalf("backdate %d: %v", i, err)
+		}
+	}
+	// Supersede the two newest, which are the ones inside a limit-2 window.
+	for _, i := range []int{2, 3} {
+		if err := s.SupersedeDecision(ctx, testProject, ids[i], ids[0]); err != nil {
+			t.Fatalf("SupersedeDecision %d: %v", i, err)
+		}
+	}
+
+	got, err := s.ListDecisions(ctx, testProject, "", 2)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 decisions, got %d", len(got))
+	}
+	// Window membership is still "the newest 2" — both superseded — not "the
+	// newest 2 active ones".
+	inWindow := map[string]bool{got[0].ID: true, got[1].ID: true}
+	if !inWindow[ids[2]] || !inWindow[ids[3]] {
+		t.Errorf("limit must select the newest decisions regardless of status; got %s, %s (want %s, %s)",
+			got[0].ID, got[1].ID, ids[2], ids[3])
+	}
+}
+
+func TestSupersedeDecisionRejectsBadInput(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, _, err := s.RecordDecision(ctx, testProject, "T", "D", "R", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision: %v", err)
+	}
+
+	if err := s.SupersedeDecision(ctx, testProject, id, id); err == nil {
+		t.Error("a decision must not be able to supersede itself")
+	}
+	if err := s.SupersedeDecision(ctx, testProject, id, "no-such-decision"); err == nil {
+		t.Error("superseding by an unknown decision must fail")
+	}
+	if err := s.SupersedeDecision(ctx, testProject, "no-such-decision", id); err == nil {
+		t.Error("superseding an unknown decision must fail")
+	}
+
+	// The failed attempts must not have flipped anything.
+	all, err := s.ListDecisions(ctx, testProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	if len(all) != 1 || all[0].Status != "active" {
+		t.Errorf("failed supersede attempts must leave status untouched, got %v", all)
+	}
+}
+
 func TestRecordDecisionPersistsMemoryRow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -1434,7 +1877,8 @@ func TestStoreTasks(t *testing.T) {
 	}
 
 	// Update a task.
-	if err := s.UpdateTask(ctx, id2, "active", 1, "Updated description"); err != nil {
+	updStatus, updPriority, updDesc := "active", 1, "Updated description"
+	if _, err := s.UpdateTask(ctx, id2, &updStatus, &updPriority, &updDesc); err != nil {
 		t.Fatalf("UpdateTask: %v", err)
 	}
 
@@ -1470,7 +1914,8 @@ func TestStoreTaskIDPrefix(t *testing.T) {
 	}
 
 	// UpdateTask and CompleteTask resolve prefixes too.
-	if err := s.UpdateTask(ctx, prefix, "active", 1, "updated via prefix"); err != nil {
+	prefixStatus, prefixPriority, prefixDesc := "active", 1, "updated via prefix"
+	if _, err := s.UpdateTask(ctx, prefix, &prefixStatus, &prefixPriority, &prefixDesc); err != nil {
 		t.Fatalf("UpdateTask by prefix: %v", err)
 	}
 	got, err = s.GetTask(ctx, fullID)
@@ -1522,7 +1967,8 @@ func TestStoreTaskIDPrefix(t *testing.T) {
 	if err := s.CompleteTask(ctx, "ZZZZ9999", ""); err == nil || !strings.Contains(err.Error(), "task not found") {
 		t.Errorf("CompleteTask unknown: want not-found error, got %v", err)
 	}
-	if err := s.UpdateTask(ctx, "ZZZZ9999", "active", 1, ""); err == nil || !strings.Contains(err.Error(), "task not found") {
+	unknownStatus, unknownPriority, unknownDesc := "active", 1, ""
+	if _, err := s.UpdateTask(ctx, "ZZZZ9999", &unknownStatus, &unknownPriority, &unknownDesc); err == nil || !strings.Contains(err.Error(), "task not found") {
 		t.Errorf("UpdateTask unknown: want not-found error, got %v", err)
 	}
 
@@ -1555,7 +2001,7 @@ func TestMergeProject(t *testing.T) {
 	}
 
 	// Seed data under the duplicate project.
-	memID, _, err := s.Upsert(ctx, "test", "fact", "MCP-created memory about deployment", "mcp", 0.7, []string{})
+	memID, _, _, err := s.Upsert(ctx, "test", "fact", "MCP-created memory about deployment", "mcp", 0.7, []string{})
 	if err != nil {
 		t.Fatalf("Upsert under dup: %v", err)
 	}
@@ -2001,7 +2447,7 @@ func TestEnsureProject_AutoMerge(t *testing.T) {
 	}
 
 	// Save a memory under the MCP project.
-	_, _, err := s.Upsert(ctx, "myproject", "fact", "deployed on k8s cluster alpha-7", "mcp", 0.8, []string{})
+	_, _, _, err := s.Upsert(ctx, "myproject", "fact", "deployed on k8s cluster alpha-7", "mcp", 0.8, []string{})
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
@@ -2228,19 +2674,19 @@ func TestUnresolveOnWrite(t *testing.T) {
 	assertActive(t, s, testProject, id)
 
 	// Upsert of a near-duplicate (strengthen branch) clears resolved_at.
-	uid, _, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
+	uid, _, _, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
 	if err != nil {
 		t.Fatalf("upsert create: %v", err)
 	}
 	if _, err := s.SetResolved(ctx, []string{uid}); err != nil {
 		t.Fatalf("SetResolved upsert row: %v", err)
 	}
-	gotID, merged, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
+	_, dupOf, _, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
 	if err != nil {
 		t.Fatalf("upsert dup: %v", err)
 	}
-	if !merged || gotID != uid {
-		t.Fatalf("upsert dup did not strengthen existing row: merged=%v id=%s want %s", merged, gotID, uid)
+	if dupOf != uid {
+		t.Fatalf("upsert dup did not link to existing row: dupOf=%s want %s", dupOf, uid)
 	}
 	assertActive(t, s, testProject, uid)
 }

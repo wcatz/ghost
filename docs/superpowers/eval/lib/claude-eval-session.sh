@@ -15,6 +15,15 @@
 # fire correctly instead of matching this repo's own cwd. This also keeps
 # the subprocess's session transcript out of the real
 # ~/.claude/projects/-home-wayne-git-ghost/ directory.
+#
+# ANTHROPIC_API_KEY is deliberately unset before invoking `claude -p` below.
+# If present, it overrides Claude Code's subscription/OAuth login and bills
+# this actor session as pay-per-token API usage instead of the subscription
+# — the opposite of what an eval "session replay" should cost. The Ghost
+# CLI calls this suite's Consolidation phase makes directly (ghost reflect/
+# resolve/supersede, in internal/ai/client.go) are a separate, unavoidable
+# direct HTTP client that always needs the key; only these `claude -p`
+# actor subprocesses can ride the subscription instead.
 set -euo pipefail
 
 UNIT_RUN_ID="${1:?usage: claude-eval-session.sh <unit-run-id> <prompt> <project-basename>}"
@@ -27,7 +36,7 @@ mkdir -p "${SESSION_CWD}"
 
 cd "${SESSION_CWD}"
 
-claude -p \
+env -u ANTHROPIC_API_KEY claude -p \
   --mcp-config "${CONFIG_DIR}/mcp.json" \
   --strict-mcp-config \
   --settings "${CONFIG_DIR}/settings.json" \

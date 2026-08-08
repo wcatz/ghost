@@ -147,8 +147,9 @@ type SearchParams struct {
 	// the result window when a valid 'supersedes' link between them exists AND
 	// both are present. Unlike the recency prior it is targeted — it only ever
 	// touches genuine replacement pairs, so it flips the staleness suite
-	// without the collateral damage the recency-trap frontier showed. Default
-	// false. See docs/benchmarks.md Phase 3.
+	// without the collateral damage the recency-trap frontier showed. On by
+	// default in production (DefaultSearchParams). See docs/benchmarks.md
+	// Phase 3.
 	SupersedeDemote bool
 }
 
@@ -161,6 +162,18 @@ type SearchParams struct {
 // experiment confirmed its recoveries were a strict subset of deeper-k's, with
 // no headroom at production depth. The link graph is retained for Obsidian
 // export and supersedes ranking. See docs/architecture.md.
+//
+// SupersedeDemote graduates to on here — the last step of the supersedes
+// feature, which docs/benchmarks.md Phase 3 left deliberately separate because
+// it changes live ranking. It is safe as a default for three reasons the
+// benchmarks establish: it is a hard no-op unless a 'supersedes' edge joins
+// two memories inside one result window; those edges only exist if the user
+// ran `ghost supersede --apply`, which is itself opt-in and LLM-confirmed; and
+// on the graded suites it flips staleness fresh-wins 0.083 -> 1.0 while leaving
+// recency-trap correct-wins untouched at 0.929
+// (TestSupersedeDemoteClearsFrontier). Leaving it off meant a memory the user
+// had explicitly marked as replaced could still outrank its replacement in
+// ghost_memory_search.
 func DefaultSearchParams() SearchParams {
 	return SearchParams{
 		FTSWeight:       0.3,
@@ -168,7 +181,7 @@ func DefaultSearchParams() SearchParams {
 		RRFK:            60,
 		RecencyWeight:   0,
 		RecencyTau:      30,
-		SupersedeDemote: false,
+		SupersedeDemote: true,
 	}
 }
 
@@ -446,16 +459,20 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 // SearchHybridAll combines FTS5 and vector search across ALL projects using RRF.
 // Falls back to FTS-only when queryVec is nil.
 func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []float32, limit int) ([]Memory, error) {
+	p := DefaultSearchParams()
 	ftsResults, err := s.SearchFTSAll(ctx, query, limit*2)
 	if err != nil {
 		ftsResults = nil
 	}
 
+	// The FTS-only fallbacks below must apply the same supersede demote the
+	// fused path does — otherwise cross-project search silently ranks
+	// superseded memories above their replacements whenever Ollama is down.
 	if queryVec == nil {
 		if len(ftsResults) > limit {
 			ftsResults = ftsResults[:limit]
 		}
-		return ftsResults, nil
+		return s.demoteSuperseded(ctx, ftsResults, p), nil
 	}
 
 	vecResults, err := s.SearchVectorAll(ctx, queryVec, limit*2)
@@ -467,10 +484,10 @@ func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []fl
 		if len(ftsResults) > limit {
 			ftsResults = ftsResults[:limit]
 		}
-		return ftsResults, nil
+		return s.demoteSuperseded(ctx, ftsResults, p), nil
 	}
 
-	return s.fuseAndRank(ctx, ftsResults, vecResults, limit, DefaultSearchParams())
+	return s.fuseAndRank(ctx, ftsResults, vecResults, limit, p)
 }
 
 func float32sToBytes(fs []float32) []byte {

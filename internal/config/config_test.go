@@ -90,11 +90,11 @@ func TestLoad_GhostEnvOverrides(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear any interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_REFLECTION_BACKEND", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_EMBEDDING_MODEL", "ANTHROPIC_API_KEY"})
 
 	// Set GHOST_* overrides.
 	t.Setenv("GHOST_API_KEY", "sk-ghost-override")
-	t.Setenv("GHOST_REFLECTION_BACKEND", "sqlite")
+	t.Setenv("GHOST_EMBEDDING_MODEL", "custom-embed-model")
 
 	cfg, err := Load()
 	if err != nil {
@@ -104,8 +104,8 @@ func TestLoad_GhostEnvOverrides(t *testing.T) {
 	if cfg.API.Key != "sk-ghost-override" {
 		t.Errorf("expected api.key from GHOST_API_KEY, got %q", cfg.API.Key)
 	}
-	if cfg.Reflection.Backend != "sqlite" {
-		t.Errorf("expected reflection.backend=sqlite from env, got %q", cfg.Reflection.Backend)
+	if cfg.Embedding.Model != "custom-embed-model" {
+		t.Errorf("expected embedding.model=custom-embed-model from env, got %q", cfg.Embedding.Model)
 	}
 }
 
@@ -157,7 +157,7 @@ func TestLoad_YAMLFileOverride(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_REFLECTION_BACKEND", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_EMBEDDING_MODEL", "ANTHROPIC_API_KEY"})
 
 	// Create a config file in the user config dir.
 	configDir := filepath.Join(tmpDir, "ghost")
@@ -174,7 +174,7 @@ linking:
   threshold: 0.85
   demotion_threshold: 0.95
 reflection:
-  backend: "sqlite"
+  auto_resolve: true
 `
 	if err := os.WriteFile(configFile, []byte(yamlContent), 0o600); err != nil {
 		t.Fatal(err)
@@ -197,8 +197,8 @@ reflection:
 	if cfg.Linking.DemotionThreshold != 0.95 {
 		t.Errorf("linking.demotion_threshold = %f, want 0.95", cfg.Linking.DemotionThreshold)
 	}
-	if cfg.Reflection.Backend != "sqlite" {
-		t.Errorf("reflection.backend = %q, want %q", cfg.Reflection.Backend, "sqlite")
+	if !cfg.Reflection.AutoResolve {
+		t.Errorf("reflection.auto_resolve = %v, want true", cfg.Reflection.AutoResolve)
 	}
 
 	// Unaffected defaults should remain.
@@ -213,19 +213,19 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_REFLECTION_BACKEND", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_EMBEDDING_MODEL", "ANTHROPIC_API_KEY"})
 
-	// YAML file sets backend to "haiku".
+	// YAML file sets embedding.model to "yaml-model".
 	configDir := filepath.Join(tmpDir, "ghost")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("reflection:\n  backend: haiku\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("embedding:\n  model: yaml-model\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	// Env var overrides to "sqlite".
-	t.Setenv("GHOST_REFLECTION_BACKEND", "sqlite")
+	// Env var overrides to "env-model".
+	t.Setenv("GHOST_EMBEDDING_MODEL", "env-model")
 
 	cfg, err := Load()
 	if err != nil {
@@ -233,8 +233,8 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	}
 
 	// Env should take precedence over YAML.
-	if cfg.Reflection.Backend != "sqlite" {
-		t.Errorf("backend = %q, want %q (env should override yaml)", cfg.Reflection.Backend, "sqlite")
+	if cfg.Embedding.Model != "env-model" {
+		t.Errorf("embedding.model = %q, want %q (env should override yaml)", cfg.Embedding.Model, "env-model")
 	}
 }
 

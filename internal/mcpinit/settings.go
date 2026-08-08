@@ -23,6 +23,7 @@ var ghostPermissions = []string{
 	"mcp__ghost__ghost_memory_search",
 	"mcp__ghost__ghost_memory_update",
 	"mcp__ghost__ghost_project_context",
+	"mcp__ghost__ghost_resolve",
 	"mcp__ghost__ghost_save_global",
 	"mcp__ghost__ghost_search_all",
 	"mcp__ghost__ghost_task_complete",

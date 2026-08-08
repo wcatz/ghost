@@ -306,20 +306,81 @@ func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) err
 	return nil
 }
 
-// ResolveProjectByName looks up a project by name and returns its hash ID.
-func (s *Store) ResolveProjectByName(ctx context.Context, name string) (string, error) {
+// ResolveProject resolves an identifier — a project name, hash ID, or
+// filesystem path — to that project's (id, name). Returns ("", "", nil)
+// on no match; a non-nil error only indicates a real DB failure.
+//
+// Lookup order, first hit wins:
+//  1. exact id = input
+//  2. exact name = input
+//  3. if input contains '/': input = path OR input has literal prefix path + "/"
+//     (ordered by LENGTH(path) DESC — longest/most-specific match wins;
+//     LENGTH(path) > 10 guards against a short project path matching too
+//     broadly, matching the hook's original lookupProject behavior; the
+//     prefix check is a literal substr comparison, not LIKE, so '%'/'_' in a
+//     stored path can't act as SQL wildcards against input)
+//  4. name = basename(input)
+func (s *Store) ResolveProject(ctx context.Context, input string) (id, name string, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var id string
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM projects WHERE name = ? LIMIT 1`, name).Scan(&id)
-	if err == sql.ErrNoRows {
-		return "", nil
+	err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE id = ? LIMIT 1`, input).Scan(&id, &name)
+	if err == nil {
+		return id, name, nil
 	}
+	if err != sql.ErrNoRows {
+		return "", "", fmt.Errorf("resolve project by id: %w", err)
+	}
+
+	err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE name = ? LIMIT 1`, input).Scan(&id, &name)
+	if err == nil {
+		return id, name, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", "", fmt.Errorf("resolve project by name: %w", err)
+	}
+
+	if strings.Contains(input, "/") {
+		// Literal prefix comparison, not LIKE: a stored path containing '%' or
+		// '_' must not be treated as a SQL wildcard against input.
+		err = s.db.QueryRowContext(ctx, `
+			SELECT id, name FROM projects
+			WHERE (path = ? OR substr(?, 1, LENGTH(path) + 1) = path || '/') AND LENGTH(path) > 10
+			ORDER BY LENGTH(path) DESC LIMIT 1
+		`, input, input).Scan(&id, &name)
+		if err == nil {
+			return id, name, nil
+		}
+		if err != sql.ErrNoRows {
+			return "", "", fmt.Errorf("resolve project by path: %w", err)
+		}
+	}
+
+	base := filepath.Base(input)
+	err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE name = ? LIMIT 1`, base).Scan(&id, &name)
+	if err == nil {
+		return id, name, nil
+	}
+	if err != sql.ErrNoRows {
+		return "", "", fmt.Errorf("resolve project by basename: %w", err)
+	}
+
+	return "", "", nil
+}
+
+// ListProjectNames returns all known project names, ordered the same way as
+// ListProjects (name ASC) — used to format an actionable CLI error listing
+// known projects on a resolution miss.
+func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
+	projects, err := s.ListProjects(ctx)
 	if err != nil {
-		return "", fmt.Errorf("resolve project by name: %w", err)
+		return nil, err
 	}
-	return id, nil
+	names := make([]string, len(projects))
+	for i, p := range projects {
+		names[i] = p.Name
+	}
+	return names, nil
 }
 
 // Create inserts a new memory and returns its ID.
@@ -345,21 +406,24 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 }
 
 // Upsert checks for an existing similar memory (same category, FTS overlap).
-// If found, it strengthens the existing memory. If not, creates a new one.
-func (s *Store) Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (id string, merged bool, err error) {
+// If found, it strengthens the existing memory's importance/access_count and
+// links the new content to it as a 'duplicate' — it never overwrites the
+// existing row's content, so a genuinely different follow-up save under a
+// manual-sourced target (or any target) is never silently discarded. If no
+// candidate scores above threshold, it creates a new, unlinked row.
+func (s *Store) Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (id string, duplicateOf string, score float64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var existingID string
 	var existingImportance float32
-	var existingContent string
 
 	// Two-stage duplicate detection. Stage 1 (recall): the FTS OR-probe over
-	// the first 10 words retrieves merge candidates cheaply. Stage 2
-	// (precision): Jaccard >= upsertMergeThreshold over the full token sets
-	// confirms a true duplicate — the OR-probe alone treats a single shared
-	// word as a match, which silently swallowed unrelated saves.
-	ftsQuery := sanitizeFTS(content)
+	// the first 30 words retrieves merge candidates cheaply. Stage 2
+	// (precision): mergeScore over the full token sets confirms a true
+	// duplicate — the OR-probe alone treats a single shared word as a match,
+	// which silently swallowed unrelated saves.
+	ftsQuery := sanitizeFTSN(content, 30)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, m.importance, m.content
 		FROM memories m
@@ -368,7 +432,7 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 		  AND m.category = ?
 		  AND memories_fts MATCH ?
 		ORDER BY rank, m.importance DESC
-		LIMIT 5
+		LIMIT 15
 	`, projectID, category, ftsQuery)
 	if err == nil {
 		// Token-free content (punctuation/single-char words only) can still
@@ -382,63 +446,115 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 			if scanErr := rows.Scan(&candID, &candImportance, &candContent); scanErr != nil {
 				continue
 			}
-			sim := jaccard(newTokens, tokenizeContent(candContent))
-			if sim >= upsertMergeThreshold && sim > bestSim {
+			sim := mergeScore(newTokens, tokenizeContent(candContent))
+			if sim > 0 && sim > bestSim {
 				bestSim = sim
 				existingID = candID
 				existingImportance = candImportance
-				existingContent = candContent
 			}
 		}
 		if rowsErr := rows.Err(); rowsErr != nil {
 			existingID = "" // treat a broken candidate scan as no match
 		}
 		_ = rows.Close()
+		score = bestSim
 	}
 
+	tagsJSON, _ := json.Marshal(tags)
+
 	if existingID != "" {
-		// Found a match — strengthen it.
+		// Found a match — strengthen the existing row, then insert the new
+		// content as its own row and link it back as a 'duplicate'. Never
+		// overwrite existingContent: that silently discarded content for
+		// source='manual' targets while still reporting a merge.
 		newImportance := existingImportance + (importance * 0.2)
 		if newImportance > 1.0 {
 			newImportance = 1.0
 		}
-		finalContent := existingContent
-		if len(content) > len(existingContent) {
-			finalContent = content
-		}
 
-		_, err = s.db.ExecContext(ctx, `
+		// The UPDATE (strengthen), INSERT (new row), and INSERT (link) must
+		// all succeed or none should — otherwise a failure partway through
+		// leaves the new memory row orphaned: unlinked, un-embedded (onSave
+		// never fires), and invisible. Same tx pattern as mergeProjectLocked.
+		tx, txErr := s.db.BeginTx(ctx, nil)
+		if txErr != nil {
+			return "", "", 0, fmt.Errorf("begin upsert tx: %w", txErr)
+		}
+		defer tx.Rollback() //nolint:errcheck
+
+		if _, err = tx.ExecContext(ctx, `
 			UPDATE memories
-			SET content = CASE WHEN source = 'manual' THEN content ELSE ? END,
-			    importance = ?, access_count = access_count + 1, updated_at = datetime('now'),
+			SET importance = ?, access_count = access_count + 1, updated_at = datetime('now'),
 			    resolved_at = NULL
 			WHERE id = ? AND project_id = ?
-		`, finalContent, newImportance, existingID, projectID)
-		if err != nil {
-			return "", false, fmt.Errorf("strengthen memory: %w", err)
+		`, newImportance, existingID, projectID); err != nil {
+			return "", "", 0, fmt.Errorf("strengthen memory: %w", err)
 		}
+
+		if err = tx.QueryRowContext(ctx, `
+			INSERT INTO memories (project_id, category, content, source, importance, tags)
+			VALUES (?, ?, ?, ?, ?, ?)
+			RETURNING id
+		`, projectID, category, content, source, importance, string(tagsJSON)).Scan(&id); err != nil {
+			return "", "", 0, fmt.Errorf("create memory: %w", err)
+		}
+
+		// CreateLink takes s.mu itself — calling it here would deadlock, since
+		// Upsert already holds the lock for its entire body. Inline the same
+		// upsert-link SQL directly instead. Direction is fixed (source_id=new,
+		// target_id=existing), not normalized like symmetric relations.
+		if _, err = tx.ExecContext(ctx, `
+			INSERT INTO memory_links (source_id, target_id, relation, strength, source)
+			VALUES (?, ?, 'duplicate', ?, 'auto')
+			ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
+				strength = MAX(strength, excluded.strength),
+				invalidated_at = NULL
+		`, id, existingID, score); err != nil {
+			return "", "", 0, fmt.Errorf("link duplicate: %w", err)
+		}
+
+		if err = tx.Commit(); err != nil {
+			return "", "", 0, fmt.Errorf("commit upsert tx: %w", err)
+		}
+
 		if s.onSave != nil {
 			s.onSave(projectID)
 		}
-		return existingID, true, nil
+		return id, existingID, score, nil
 	}
 
 	// No match — create new.
-	tagsJSON, _ := json.Marshal(tags)
-
 	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags)
 		VALUES (?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`, projectID, category, content, source, importance, string(tagsJSON)).Scan(&id)
 	if err != nil {
-		return "", false, fmt.Errorf("create memory: %w", err)
+		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
 	if s.onSave != nil {
 		s.onSave(projectID)
 	}
-	return id, false, nil
+	return id, "", 0, nil
 }
+
+// DecayRankingSQL is the composite-score ranking expression shared by
+// GetTopMemories below and the session-start hook's own read-only query
+// (internal/mcpinit/hook.go's loadSessionContext) — a single source of truth
+// for the category-aware time-decay + pinned-boost formula so the two
+// callers can never drift apart. It is a fragment, not a full query: callers
+// interpolate it into their own "ORDER BY (...) DESC" clause.
+const DecayRankingSQL = `
+	importance
+	* CASE
+		WHEN category IN ('preference', 'convention', 'fact') THEN 1.0
+		WHEN category IN ('pattern', 'architecture') THEN
+			MAX(0.3, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 45.0))
+		ELSE
+			MAX(0.15, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 30.0))
+	END
+	* CASE WHEN pinned = 1 THEN 1.5 ELSE 1.0 END
+`
 
 // GetTopMemories returns the top N memories ranked by composite score
 // with category-aware time decay and pinned boost.
@@ -452,17 +568,7 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 		FROM memories
 		WHERE (project_id = ? OR project_id = '_global')
 		  AND resolved_at IS NULL
-		ORDER BY (
-			importance
-			* CASE
-				WHEN category IN ('preference', 'convention', 'fact') THEN 1.0
-				WHEN category IN ('pattern', 'architecture') THEN
-					MAX(0.3, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 45.0))
-				ELSE
-					MAX(0.15, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 30.0))
-			END
-			* CASE WHEN pinned = 1 THEN 1.5 ELSE 1.0 END
-		) DESC
+		ORDER BY (`+DecayRankingSQL+`) DESC
 		LIMIT ?
 	`, projectID, limit*2)
 	if err != nil {
@@ -1304,9 +1410,44 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 // Extracts plain words and quotes each one so they're treated as literals.
 // upsertMergeThreshold is the minimum Jaccard similarity between full token
 // sets for Upsert to treat two memories as duplicates. Matches the 0.5 gate
-// reflection's SQLite tier uses, so save-time and reflection-time dedup agree
-// on what "duplicate" means.
+// reflection's SQLite tier uses (internal/reflection/tier_sqlite.go), so
+// save-time and reflection-time dedup agree on what "duplicate" means for
+// same-length restatements.
+//
+// Save-time dedup deliberately goes *further* than reflection's tier via the
+// overlap leg below: Upsert sees one candidate against a live corpus and its
+// misses accumulate in the ranked window until they bury distinct facts,
+// whereas reflection re-scores the whole set offline and has an LLM tier
+// behind it. The divergence is intentional, not drift.
 const upsertMergeThreshold = 0.5
+
+// The overlap leg's gates. The overlap coefficient's one known failure mode is
+// subset-of-a-much-larger-text: a short save whose few tokens all happen to
+// appear in a long unrelated memory scores 1.0. The min-token and min-ratio
+// gates — not the threshold — are what exclude that shape, which is why the
+// threshold can sit as low as it does.
+//
+//   - upsertOverlapThreshold: minimum |A∩B| / min(|A|,|B|) — at least half of
+//     the shorter memory's distinct vocabulary must also appear in the other.
+//     0.5 is empirical, not inherited from the Jaccard gate it happens to
+//     equal: the same-fact restatements in
+//     TestStoreUpsertMergesLengthAsymmetricParaphrases score 0.857, 0.600 and
+//     0.545 against the accumulated memory, so any threshold above 0.545
+//     leaves saves that plainly restate one fact unmerged.
+//   - upsertOverlapMinTokens: minimum token count on the shorter side. Below
+//     it, containment is too easy to hit by accident.
+//   - upsertOverlapMinRatio: minimum len(shorter)/len(longer). Genuine
+//     restatements of one fact are comparably sized (~0.9); the accidental
+//     containment case is lopsided (~0.2). A terse fact and a much wordier
+//     version of it are therefore NOT merged — deliberately, because nothing
+//     lexical distinguishes that from accidental containment, and a false
+//     merge destroys information while a false split is recoverable by
+//     reflection.
+const (
+	upsertOverlapThreshold = 0.5
+	upsertOverlapMinTokens = 5
+	upsertOverlapMinRatio  = 0.6
+)
 
 // tokenizeContent lowercases s and splits it into a set of alphanumeric
 // tokens longer than one rune. Mirrors reflection's tokenize so both dedup
@@ -1341,7 +1482,79 @@ func jaccard(a, b map[string]bool) float64 {
 	return float64(intersection) / float64(union)
 }
 
+// overlapCoefficient (Szymkiewicz–Simpson) is |A∩B| / min(|A|,|B|). Unlike
+// Jaccard it does not penalize length asymmetry, so a terse fact and a verbose
+// restatement of the same fact score high instead of being pulled apart by the
+// longer side's extra filler tokens.
+func overlapCoefficient(a, b map[string]bool) float64 {
+	smaller := len(a)
+	if len(b) < smaller {
+		smaller = len(b)
+	}
+	if smaller == 0 {
+		return 0
+	}
+	intersection := 0
+	for token := range a {
+		if b[token] {
+			intersection++
+		}
+	}
+	return float64(intersection) / float64(smaller)
+}
+
+// mergeScore reports whether two candidate contents' token sets are
+// near-duplicates for Upsert purposes.
+//
+// Jaccard alone under-merges on the dominant real-world case: the same fact
+// restated at a different length. "cache TTL is 300s" vs "the cache TTL is set
+// to 300 seconds" is Jaccard 0.22 — far below any threshold that isn't itself
+// catastrophically over-merging — because the union grows with the wordier
+// side while the intersection cannot. The overlap coefficient scores that pair
+// 0.75 and is the standard fix for exactly this asymmetry.
+//
+// Overlap alone over-merges though: a 2-token save whose tokens both happen to
+// appear in a long unrelated memory scores 1.0. So the overlap leg is gated on
+// token count and length ratio (see the constants) to exclude that shape.
+// Anything the gates reject keeps the original Jaccard-only behavior.
+// It returns 0 when the pair must not merge, and otherwise a positive score
+// used only to pick the best of several candidates.
+func mergeScore(a, b map[string]bool) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	if j := jaccard(a, b); j >= upsertMergeThreshold {
+		return j
+	}
+	smaller, larger := len(a), len(b)
+	if larger < smaller {
+		smaller, larger = larger, smaller
+	}
+	if smaller < upsertOverlapMinTokens {
+		return 0
+	}
+	if float64(smaller)/float64(larger) < upsertOverlapMinRatio {
+		return 0
+	}
+	if o := overlapCoefficient(a, b); o >= upsertOverlapThreshold {
+		return o
+	}
+	return 0
+}
+
+// sanitizeFTS sanitizes text into an FTS5 OR-query, capped at 10 words. Used
+// on the search path (SearchFTS, SearchFTSAll) — kept at the original cap so
+// retrieval-quality behavior (see TestBenchRegressionFloors) is unaffected.
 func sanitizeFTS(text string) string {
+	return sanitizeFTSN(text, 10)
+}
+
+// sanitizeFTSN sanitizes text into an FTS5 OR-query, capped at maxWords.
+// Upsert's duplicate-recall probe uses a wider cap than plain search
+// (see sanitizeFTS) because a broader OR-probe over more of the content
+// improves candidate recall for the precision pass (mergeScore) that follows;
+// widening the cap globally would instead perturb ranked search results.
+func sanitizeFTSN(text string, maxWords int) string {
 	// Remove FTS5 operators and punctuation, keep only words.
 	var words []string
 	for _, word := range strings.Fields(text) {
@@ -1363,12 +1576,12 @@ func sanitizeFTS(text string) string {
 	if len(words) == 0 {
 		return `""`
 	}
-	// Limit to first 10 words to keep the query reasonable.
-	if len(words) > 10 {
+	// Limit to first maxWords words to keep the query reasonable.
+	if len(words) > maxWords {
 		slog.Warn("fts query truncated",
 			"original_terms", len(words),
-			"limit", 10)
-		words = words[:10]
+			"limit", maxWords)
+		words = words[:maxWords]
 	}
 	return strings.Join(words, " OR ")
 }

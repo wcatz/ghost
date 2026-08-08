@@ -248,38 +248,25 @@ func (s *Server) Run(ctx context.Context) error {
 	return s.mcp.Run(ctx, &mcp.StdioTransport{})
 }
 
-// resolveProjectID resolves a project_id that may be a name (e.g. "ghost")
-// into the actual hash ID (e.g. "6bdc098af7f5") stored in the database.
-// Name lookup takes precedence to avoid collisions where a project name
-// happens to match another project's hash ID.
-func (s *Server) resolveProjectID(ctx context.Context, input string) string {
-	// Try name lookup first — most MCP clients pass project names.
-	resolved, err := s.store.ResolveProjectByName(ctx, input)
-	if err == nil && resolved != "" {
-		return resolved
-	}
-
-	// Fall back to direct ID match, then path match.
+// projectExists reports whether id (already resolved via Store.ResolveProject)
+// matches a registered project. Used to distinguish "this project was never
+// persisted" from "this project exists but has nothing" in empty-result
+// messages — the raw list otherwise reads identically either way. The error
+// return lets callers distinguish "confirmed unregistered" from "lookup
+// failed" instead of collapsing both to false, which would otherwise
+// misreport a project as unregistered (or risk a duplicate create) on a
+// transient ListProjects failure.
+func (s *Server) projectExists(ctx context.Context, id string) (bool, error) {
 	projects, err := s.store.ListProjects(ctx)
-	if err == nil {
-		for _, p := range projects {
-			if p.ID == input {
-				return input
-			}
-		}
-		// If input looks like an absolute path, match against project paths.
-		// This prevents creating duplicate projects when Claude passes a raw
-		// filesystem path instead of a project name or hash ID.
-		if filepath.IsAbs(input) {
-			for _, p := range projects {
-				if p.Path == input {
-					return p.ID
-				}
-			}
+	if err != nil {
+		return false, err
+	}
+	for _, p := range projects {
+		if p.ID == id {
+			return true, nil
 		}
 	}
-
-	return input
+	return false, nil
 }
 
 // updateArgs is package-level (unlike most tool arg structs) so the extracted
@@ -307,7 +294,13 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, args updateArgs) (string
 		return "", fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
 	}
 
-	resolvedProjectID := s.resolveProjectID(ctx, args.ProjectID)
+	resolvedProjectID, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+	if err != nil {
+		return "", fmt.Errorf("resolve project: %w", err)
+	}
+	if resolvedProjectID == "" {
+		return "", fmt.Errorf("project %q not found", args.ProjectID)
+	}
 	mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID})
 	if err != nil {
 		return "", fmt.Errorf("lookup failed: %w", err)
@@ -377,7 +370,13 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	if projectID == "" || memoryID == "" {
 		return "", fmt.Errorf("project_id and memory_id are required")
 	}
-	resolvedProjectID := s.resolveProjectID(ctx, projectID)
+	resolvedProjectID, _, err := s.store.ResolveProject(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("resolve project: %w", err)
+	}
+	if resolvedProjectID == "" {
+		return "", fmt.Errorf("project %q not found", projectID)
+	}
 
 	mems, err := s.store.GetByIDs(ctx, []string{memoryID})
 	if err != nil {
@@ -428,7 +427,11 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		args.ProjectID = resolved
 
 		// Use hybrid search (FTS5 + vector) when embedder is available.
 		var queryVec []float32
@@ -518,7 +521,16 @@ func (s *Server) registerTools() {
 			args.Tags = []string{}
 		}
 		args.Tags = validateTags(args.Tags)
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		if resolved != "" {
+			// Only overwrite with the resolved ID on a hit. On a miss, keep the
+			// raw input so EnsureProject below can auto-create a new project —
+			// preserving today's create-on-first-save behavior.
+			args.ProjectID = resolved
+		}
 
 		truncated := false
 		if len(args.Content) > maxContentLen {
@@ -531,7 +543,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
 
-		id, merged, err := s.store.Upsert(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, args.Tags)
+		id, duplicateOf, score, err := s.store.Upsert(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, args.Tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -545,11 +557,10 @@ func (s *Server) registerTools() {
 			}
 		}
 
-		action := "saved"
-		if merged {
-			action = "merged with existing memory"
+		msg := fmt.Sprintf("Memory saved (id: %s)", id)
+		if duplicateOf != "" {
+			msg = fmt.Sprintf("Memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
 		}
-		msg := fmt.Sprintf("Memory %s (id: %s)", action, id)
 		if truncated {
 			msg += fmt.Sprintf(" (content truncated to %d chars)", maxContentLen)
 		}
@@ -582,7 +593,11 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		args.ProjectID = resolved
 
 		// First-contact import: if project has zero memories, try importing
 		// from Claude Code's auto-memory files (read-only, one-time).
@@ -619,7 +634,15 @@ func (s *Server) registerTools() {
 
 		text := sb.String()
 		if text == "" {
-			text = "No memories found for this project."
+			exists, existsErr := s.projectExists(ctx, args.ProjectID)
+			switch {
+			case existsErr != nil:
+				text = "Project lookup failed — unable to determine whether it is registered. Try again or call ghost_memory_save to create it."
+			case exists:
+				text = "Project is registered but has no memories or learned context yet — nothing has been saved for it."
+			default:
+				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it. Call ghost_memory_save to create it.", args.ProjectID)
+			}
 		}
 
 		return &mcp.CallToolResult{
@@ -652,7 +675,11 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, resolveErr := s.store.ResolveProject(ctx, args.ProjectID)
+		if resolveErr != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", resolveErr)
+		}
+		args.ProjectID = resolved
 
 		var memories []memory.Memory
 		var err error
@@ -667,8 +694,20 @@ func (s *Server) registerTools() {
 		}
 
 		if len(memories) == 0 {
+			var text string
+			exists, existsErr := s.projectExists(ctx, args.ProjectID)
+			switch {
+			case existsErr != nil:
+				text = "Project lookup failed — unable to determine whether it is registered."
+			case !exists:
+				text = fmt.Sprintf("Project %q is not registered with Ghost yet — nothing has ever been saved for it.", args.ProjectID)
+			case args.Category != "":
+				text = fmt.Sprintf("No memories found in category %q for this project.", args.Category)
+			default:
+				text = "Project is registered but has no memories yet."
+			}
 			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: "No memories found."}},
+				Content: []mcp.Content{&mcp.TextContent{Text: text}},
 			}, nil, nil
 		}
 
@@ -695,7 +734,13 @@ func (s *Server) registerTools() {
 		if args.ProjectID == "" || args.MemoryID == "" {
 			return nil, nil, fmt.Errorf("project_id and memory_id are required")
 		}
-		resolvedProjectID := s.resolveProjectID(ctx, args.ProjectID)
+		resolvedProjectID, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		if resolvedProjectID == "" {
+			return nil, nil, fmt.Errorf("project %q not found", args.ProjectID)
+		}
 
 		// Verify the memory exists and belongs to the specified project.
 		mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID})
@@ -850,16 +895,15 @@ func (s *Server) registerTools() {
 		if err := s.store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
 			return nil, nil, fmt.Errorf("ensure global project: %w", err)
 		}
-		id, merged, err := s.store.Upsert(ctx, "_global", args.Category, args.Content, "mcp", importance, args.Tags)
+		id, duplicateOf, score, err := s.store.Upsert(ctx, "_global", args.Category, args.Content, "mcp", importance, args.Tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
 		s.notifyResourceUpdated(ctx, "ghost://memories/global")
-		action := "saved"
-		if merged {
-			action = "merged with existing"
+		msg := fmt.Sprintf("Global memory saved (id: %s)", id)
+		if duplicateOf != "" {
+			msg = fmt.Sprintf("Global memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
 		}
-		msg := fmt.Sprintf("Global memory %s (id: %s)", action, id)
 		if globalTruncated {
 			msg += fmt.Sprintf(" (content truncated to %d chars)", maxContentLen)
 		}
@@ -890,7 +934,14 @@ func (s *Server) registerTools() {
 		}
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		args.Description = truncateUTF8(args.Description, maxContentLen)
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %q not found", args.ProjectID)
+		}
+		args.ProjectID = resolved
 		priority := 2 // default: normal
 		if args.Priority != nil {
 			priority = *args.Priority
@@ -927,7 +978,13 @@ func (s *Server) registerTools() {
 		if args.Project == "" {
 			return nil, nil, fmt.Errorf("project is required")
 		}
-		projectID := s.resolveProjectID(ctx, args.Project)
+		projectID, _, err := s.store.ResolveProject(ctx, args.Project)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		if projectID == "" {
+			return nil, nil, fmt.Errorf("project %q not found", args.Project)
+		}
 		rs, ok := s.store.(resolveCapableStore)
 		if !ok {
 			return nil, nil, fmt.Errorf("ghost_resolve: store does not support resolve operations")
@@ -977,7 +1034,11 @@ func (s *Server) registerTools() {
 		if args.ProjectID == "" {
 			return nil, nil, fmt.Errorf("project_id is required")
 		}
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		args.ProjectID = resolved
 		if args.Limit <= 0 {
 			args.Limit = 30
 		}
@@ -1043,8 +1104,9 @@ func (s *Server) registerTools() {
 		Title        string   `json:"title" jsonschema:"Decision title (e.g., 'Use SQLite for storage')"`
 		Decision     string   `json:"decision" jsonschema:"What was decided"`
 		Rationale    string   `json:"rationale" jsonschema:"Why this was chosen"`
-		Alternatives []string `json:"alternatives,omitempty" jsonschema:"What was considered and rejected"`
+		Alternatives []string `json:"alternatives,omitempty" jsonschema:"Array of strings — what was considered and rejected (not a single string)"`
 		Tags         []string `json:"tags,omitempty" jsonschema:"Tags for categorization"`
+		Supersedes   string   `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -1068,7 +1130,14 @@ func (s *Server) registerTools() {
 		for i, alt := range args.Alternatives {
 			args.Alternatives[i] = truncateUTF8(alt, maxTitleLen)
 		}
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		if resolved == "" {
+			return nil, nil, fmt.Errorf("project %q not found", args.ProjectID)
+		}
+		args.ProjectID = resolved
 		if args.Alternatives == nil {
 			args.Alternatives = []string{}
 		}
@@ -1076,15 +1145,33 @@ func (s *Server) registerTools() {
 			args.Tags = []string{}
 		}
 		args.Tags = validateTags(args.Tags)
+		// Pass "" for path — MCP callers don't have filesystem paths. Mirrors
+		// ghost_memory_save: without this, a decision recorded for a project
+		// that has never saved a memory yet fails with a raw FK-constraint
+		// error instead of succeeding, since decisions.project_id references
+		// projects.id.
+		if err := s.store.EnsureProject(ctx, args.ProjectID, "", args.ProjectID); err != nil {
+			return nil, nil, fmt.Errorf("ensure project: %w", err)
+		}
 		decisionID, memoryID, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, args.Alternatives, args.Tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
+		supersedeNote := ""
+		if args.Supersedes != "" {
+			if err := s.store.SupersedeDecision(ctx, args.ProjectID, args.Supersedes, decisionID); err != nil {
+				// The new decision is already committed; report the
+				// supersession failure without losing that ID.
+				supersedeNote = fmt.Sprintf(" WARNING: could not mark %s as superseded: %v.", args.Supersedes, err)
+			} else {
+				supersedeNote = fmt.Sprintf(" Decision %s is now marked superseded by this one.", args.Supersedes)
+			}
+		}
 		s.notifyProjectResource(ctx, args.ProjectID, "decisions")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
-				"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.",
-				decisionID, memoryID)}},
+				"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
+				decisionID, memoryID, supersedeNote)}},
 		}, nil, nil
 	})
 
@@ -1238,14 +1325,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("task_id is required")
 		}
 
-		// Fetch current task to fill in omitted fields (prevents zero-value clobber).
-		current, err := s.store.GetTask(ctx, args.TaskID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("task not found: %w", err)
-		}
-
-		// status is optional — omitting it preserves the current value.
-		status := current.Status
+		var status *string
 		if args.Status != "" {
 			validStatuses := map[string]bool{
 				"pending": true, "active": true, "blocked": true, "done": true,
@@ -1253,27 +1333,26 @@ func (s *Server) registerTools() {
 			if !validStatuses[args.Status] {
 				return nil, nil, fmt.Errorf("invalid status %q — must be one of: pending, active, blocked, done", args.Status)
 			}
-			status = args.Status
+			status = &args.Status
 		}
 
-		priority := current.Priority
-		if args.Priority != nil {
-			priority = *args.Priority
-			if priority < 0 || priority > 4 {
-				priority = 2
-			}
+		if args.Priority != nil && (*args.Priority < 0 || *args.Priority > 4) {
+			normalized := 2
+			args.Priority = &normalized
 		}
-		description := current.Description
 		if args.Description != nil {
-			description = *args.Description
+			truncated := truncateUTF8(*args.Description, maxContentLen)
+			args.Description = &truncated
 		}
 
-		// Pass the resolved full ID, not the caller's (possibly prefix) input,
-		// so the fetch above and the write below can't hit different tasks.
-		if err := s.store.UpdateTask(ctx, current.ID, status, priority, description); err != nil {
+		// UpdateTask does its own read-merge-write under one lock, so a
+		// concurrent update between a separate read and this write can't be
+		// silently overwritten.
+		updated, err := s.store.UpdateTask(ctx, args.TaskID, status, args.Priority, args.Description)
+		if err != nil {
 			return nil, nil, fmt.Errorf("update task: %w", err)
 		}
-		s.notifyProjectResource(ctx, current.ProjectID, "tasks")
+		s.notifyProjectResource(ctx, updated.ProjectID, "tasks")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Task updated."}},
 		}, nil, nil
@@ -1304,7 +1383,11 @@ func (s *Server) registerTools() {
 		if args.Limit > 100 {
 			args.Limit = 100
 		}
-		args.ProjectID = s.resolveProjectID(ctx, args.ProjectID)
+		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		args.ProjectID = resolved
 
 		decisions, err := s.store.ListDecisions(ctx, args.ProjectID, args.Status, args.Limit)
 		if err != nil {
@@ -1354,7 +1437,10 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, err
 		}
-		projectID := s.resolveProjectID(ctx, rawID)
+		projectID, _, err := s.store.ResolveProject(ctx, rawID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve project: %w", err)
+		}
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
 			return nil, fmt.Errorf("reading project context %q: %w", projectID, err)
@@ -1413,7 +1499,10 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, err
 		}
-		projectID := s.resolveProjectID(ctx, rawID)
+		projectID, _, err := s.store.ResolveProject(ctx, rawID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve project: %w", err)
+		}
 
 		decisions, err := s.store.ListDecisions(ctx, projectID, "active", 20)
 		if err != nil {
@@ -1427,7 +1516,7 @@ func (s *Server) registerResources() {
 			var sb strings.Builder
 			sb.WriteString("## Active Decisions\n\n")
 			for _, d := range decisions {
-				fmt.Fprintf(&sb, "- **%s**: %s (rationale: %s)\n", d.Title, d.Decision, d.Rationale)
+				fmt.Fprintf(&sb, "- `%s` **%s**: %s (rationale: %s)\n", d.ID, d.Title, d.Decision, d.Rationale)
 			}
 			text = sb.String()
 		}
@@ -1454,7 +1543,10 @@ func (s *Server) registerResources() {
 		if err != nil {
 			return nil, err
 		}
-		projectID := s.resolveProjectID(ctx, rawID)
+		projectID, _, err := s.store.ResolveProject(ctx, rawID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve project: %w", err)
+		}
 
 		var sb strings.Builder
 		sb.WriteString("## Open Tasks\n\n")
@@ -1506,7 +1598,10 @@ func (s *Server) registerPrompts() {
 		if rawID == "" {
 			return nil, fmt.Errorf("project_id argument is required")
 		}
-		projectID := s.resolveProjectID(ctx, rawID)
+		projectID, _, err := s.store.ResolveProject(ctx, rawID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve project: %w", err)
+		}
 		text, err := s.buildProjectContext(ctx, projectID)
 		if err != nil {
 			return nil, fmt.Errorf("recall project context for %q: %w", rawID, err)
@@ -1565,6 +1660,17 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 	if len(memories) > 0 {
 		sb.WriteString("## Memories\n\n")
 		sb.WriteString(formatMemories(memories))
+	}
+
+	decisions, err := s.store.ListDecisions(ctx, projectID, "active", 5)
+	if err != nil {
+		return "", fmt.Errorf("list decisions for %q: %w", projectID, err)
+	}
+	if len(decisions) > 0 {
+		sb.WriteString("\n\n## Recent Decisions\n\n")
+		for _, d := range decisions {
+			fmt.Fprintf(&sb, "- `%s` **%s**: %s\n", d.ID, d.Title, d.Decision)
+		}
 	}
 
 	learned, err := s.store.GetLearnedContext(ctx, projectID)

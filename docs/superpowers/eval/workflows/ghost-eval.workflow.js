@@ -36,22 +36,21 @@ if (!/^\d{8}-\d{6}-eval$/.test(trimmedRunId)) {
 const scratchRoot = `/tmp/ghost-eval/${trimmedRunId}`
 log(`Eval run ${trimmedRunId} — scratch root ${scratchRoot} — repo ${REPO}`)
 
-// ANTHROPIC_API_KEY is required by ghost reflect/resolve/supersede (Consolidation
-// phase and storyline cliGradeResult runs). It must be set in the environment of
-// the process that invoked this Workflow tool call, not merely in an interactive
-// shell's rc file — a Claude Code session does not re-source ~/.bashrc, so
-// exporting the key in a terminal after the session started has no effect here.
-// Checking once up front avoids burning the Replay phase's cost before every
-// Consolidation call fails individually deep into the run.
-const keyCheck = await agent(
-  '[ -n "$ANTHROPIC_API_KEY" ] && echo present || echo missing',
-  { label: 'check-api-key' }
+// This suite runs Consolidation/resolve/supersede on the subscription-billed
+// CLI tier (ai.CLIClient — see internal/ai/cli_client.go), not the direct
+// Anthropic API, so a run never spends real API credits. That requires the
+// `claude` binary on PATH; the reflect call below passes `env -u
+// ANTHROPIC_API_KEY` and ghost-wrapped unsets it too, so an ambient key
+// left over in this session's process env (e.g. from before ~/.bashrc's
+// export was removed) can't silently route calls back to the direct API.
+const cliCheck = await agent(
+  'command -v claude >/dev/null 2>&1 && echo present || echo missing',
+  { label: 'check-cli' }
 )
-if (!keyCheck.includes('present')) {
+if (cliCheck.includes('missing')) {
   throw new Error(
-    'Setup: ANTHROPIC_API_KEY is not set in this Workflow call\'s environment. ' +
-    'ghost reflect/resolve/supersede will fail. Export it in the shell/session that ' +
-    'invokes this Workflow tool (not just your ~/.bashrc), then retry.'
+    'Setup: no `claude` binary on PATH in this Workflow call\'s environment. ' +
+    'ghost reflect/resolve/supersede\'s CLI tier requires it.'
   )
 }
 
@@ -180,7 +179,7 @@ try {
       )
 
       const reflectOutput = await agent(
-        `Run exactly: XDG_DATA_HOME=${scratchDataHome} XDG_CONFIG_HOME=${scratchConfigHome} ${REPO}/ghost reflect ${projectId} --tier haiku 2>&1; echo "exit code: $?"\n` +
+        `Run exactly: env -u ANTHROPIC_API_KEY XDG_DATA_HOME=${scratchDataHome} XDG_CONFIG_HOME=${scratchConfigHome} ${REPO}/ghost reflect ${projectId} --tier auto 2>&1; echo "exit code: $?"\n` +
         `Return the full combined stdout+stderr verbatim, including the trailing exit code line (this is a dry run — no --apply — nothing is written).`,
         { label: `reflect:${projectId}`, phase: 'Consolidation' }
       )

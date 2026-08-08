@@ -45,7 +45,12 @@ const defaultImportance float32 = 0.7
 
 // EncodeProjectPath converts an absolute path to Claude's directory name format.
 // E.g., "/home/wayne/git/ghost" → "-home-wayne-git-ghost".
+// Windows paths also carry backslashes and a drive-letter colon (e.g.
+// "C:\Users\me\repo"); both are folded into "-" the same as "/" so the
+// encoded name never embeds a literal ":" or "\", which would otherwise
+// break directory creation and the path-traversal check in ClaudeMemoryDir.
 func EncodeProjectPath(projectPath string) string {
+	projectPath = strings.NewReplacer(`\`, "-", ":", "-").Replace(projectPath)
 	return strings.ReplaceAll(projectPath, "/", "-")
 }
 
@@ -218,11 +223,30 @@ func Import(ctx context.Context, store provider.MemoryStore, projectID, projectP
 }
 
 // importFromDir imports all Claude Code memories from a specific directory.
+//
+// Dedup guard: this is the ONLY caller in the codebase that needs re-runs to
+// be true no-ops (ghost mcp init documents itself as idempotent and safe to
+// re-run, and calls this unconditionally every time). Store.Upsert itself is
+// intentionally non-destructive — a duplicate save always creates a new,
+// linked row rather than silently merging, since ordinary ghost_memory_save
+// callers must never have content dropped. So the guard belongs here: before
+// importing a file's content, skip it if that exact content already exists
+// for this project. This keeps re-imports of previously-seen Claude Code
+// memory files from doubling the project's memory count on every init.
 func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, dir string, logger *slog.Logger) (int, error) {
 	cleanDir := filepath.Clean(dir)
 	entries, err := os.ReadDir(cleanDir)
 	if err != nil {
 		return 0, fmt.Errorf("read claude memory dir: %w", err)
+	}
+
+	existing, err := store.GetAll(ctx, projectID, 100000)
+	if err != nil {
+		logger.Warn("claude import: could not load existing content for dedup guard", "error", err)
+	}
+	seen := make(map[string]bool, len(existing))
+	for _, m := range existing {
+		seen[m.Content] = true
 	}
 
 	var imported int
@@ -240,12 +264,16 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 		if skip {
 			continue
 		}
+		if seen[content] {
+			continue
+		}
 
-		_, _, err = store.Upsert(ctx, projectID, category, content, source, importance, importTags)
+		_, _, _, err = store.Upsert(ctx, projectID, category, content, source, importance, importTags)
 		if err != nil {
 			logger.Warn("claude import: upsert failed", "file", entry.Name(), "error", err)
 			continue
 		}
+		seen[content] = true
 		imported++
 	}
 

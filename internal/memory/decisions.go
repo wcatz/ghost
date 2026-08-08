@@ -70,22 +70,80 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 	return decisionID, memoryID, nil
 }
 
+// SupersedeDecision marks oldID as superseded by newID within one project.
+// The decisions table has carried `status` and `superseded_by` columns since
+// the schema was written, but nothing ever wrote them — so a reversed decision
+// stayed `status: active` forever and ranked alongside the decision that
+// replaced it. This is the writer.
+//
+// Both IDs must belong to projectID and must differ; a decision cannot
+// supersede itself. Superseding an already-superseded decision just repoints
+// it, so re-running is safe.
+func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID string) error {
+	if oldID == newID {
+		return fmt.Errorf("supersede decision: a decision cannot supersede itself (%s)", oldID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Verify the superseding decision exists in this project before pointing
+	// at it — superseded_by is ON DELETE SET NULL, not enforced on insert.
+	var exists int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM decisions WHERE id = ? AND project_id = ?`,
+		newID, projectID).Scan(&exists); err != nil {
+		return fmt.Errorf("supersede decision: lookup %s: %w", newID, err)
+	}
+	if exists == 0 {
+		return fmt.Errorf("supersede decision: superseding decision %s not found in project %s", newID, projectID)
+	}
+
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE decisions
+		SET status = 'superseded', superseded_by = ?, updated_at = datetime('now')
+		WHERE id = ? AND project_id = ?
+	`, newID, oldID, projectID)
+	if err != nil {
+		return fmt.Errorf("supersede decision: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("supersede decision: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("supersede decision: decision %s not found in project %s", oldID, projectID)
+	}
+	return nil
+}
+
 // ListDecisions returns decisions for a project.
 func (s *Store) ListDecisions(ctx context.Context, projectID, status string, limit int) ([]Decision, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	query := `SELECT id, project_id, title, decision, alternatives, rationale, status,
-	                  COALESCE(superseded_by, ''), tags, created_at, updated_at
-	           FROM decisions WHERE project_id = ?`
+	inner := `SELECT id, project_id, title, decision, alternatives, rationale, status,
+	                 COALESCE(superseded_by, '') AS superseded_by, tags, created_at, updated_at
+	          FROM decisions WHERE project_id = ?`
 	args := []interface{}{projectID}
 
 	if status != "" {
-		query += ` AND status = ?`
+		inner += ` AND status = ?`
 		args = append(args, status)
 	}
-	query += ` ORDER BY created_at DESC LIMIT ?`
+	// The limit picks the window (newest first, as it always has), and only
+	// then are superseded decisions sorted below live ones. Reordering before
+	// truncating would change *which* decisions come back — it would push the
+	// oldest superseded ones out of the window entirely, and a superseded
+	// decision is exactly what a caller needs to see to know a prior one was
+	// reversed. Same invariant as recencyRerank in vector.go: truncate first,
+	// reorder the window. (The outer sort is a no-op when the caller already
+	// filtered by status.)
+	inner += ` ORDER BY created_at DESC LIMIT ?`
 	args = append(args, limit)
+
+	query := `SELECT id, project_id, title, decision, alternatives, rationale, status,
+	                 superseded_by, tags, created_at, updated_at
+	          FROM (` + inner + `) ORDER BY (status = 'superseded'), created_at DESC`
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {

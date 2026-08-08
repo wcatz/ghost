@@ -37,10 +37,9 @@
 #                              # "related" isn't the same bar as "redundant"
 
 # --- Memory Consolidation ---
-# Controls the default tier for ghost reflect.
-# auto: tries haiku (if ANTHROPIC_API_KEY set) → sqlite (free, always available)
+# ghost reflect's tier is chosen via the --tier CLI flag, not config.
 # reflection:
-#   backend: "auto"                  # "auto", "haiku", "sqlite"
+#   auto_resolve: false               # run ghost resolve automatically after reflect
 
 # --- Obsidian Vault Mirror ---
 # One-way Markdown mirror of memories, decisions, and tasks
