@@ -119,18 +119,85 @@ func runMCP() {
 	}
 }
 
-// runMCPInit configures Claude Code to use Ghost as its memory system.
+// parseMCPClient parses the --client flag value (either "--client NAME" or
+// "--client=NAME") from args, returning the name or an error when the flag is
+// present with no value. The caller supplies the default for an absent flag.
+func parseMCPClient(args []string) (string, error) {
+	var client string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--client":
+			if i+1 >= len(args) {
+				return "", fmt.Errorf("--client requires a value (claude or opencode)")
+			}
+			client = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--client="):
+			client = strings.TrimPrefix(args[i], "--client=")
+			if client == "" {
+				return "", fmt.Errorf("--client requires a value (claude or opencode)")
+			}
+		}
+	}
+	return client, nil
+}
+
+// runMCPInit configures an MCP client to use Ghost as its memory system.
+// Defaults to Claude Code; --client opencode targets opencode instead.
 func runMCPInit() {
-	dryRun := len(os.Args) > 3 && os.Args[3] == "--dry-run"
-	if err := mcpinit.Run(os.Stdout, dryRun); err != nil {
+	client, err := parseMCPClient(os.Args[3:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if client == "" {
+		client = "claude"
+	}
+
+	dryRun := false
+	for _, a := range os.Args[3:] {
+		if a == "--dry-run" {
+			dryRun = true
+		}
+	}
+
+	switch client {
+	case "opencode":
+		err = mcpinit.RunOpencode(os.Stdout, dryRun)
+	case "claude":
+		err = mcpinit.Run(os.Stdout, dryRun)
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude or opencode)\n", client)
+		os.Exit(1)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// runMCPStatus checks the health of the Ghost ↔ Claude Code integration.
+// runMCPStatus checks the health of the Ghost ↔ MCP client integration.
+// Defaults to Claude Code; --client opencode reports opencode-specific checks.
 func runMCPStatus() {
-	if err := mcpinit.Status(os.Stdout); err != nil {
+	client, err := parseMCPClient(os.Args[3:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if client == "" {
+		client = "claude"
+	}
+
+	switch client {
+	case "opencode":
+		err = mcpinit.StatusOpencode(os.Stdout)
+	case "claude":
+		err = mcpinit.Status(os.Stdout)
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude or opencode)\n", client)
+		os.Exit(1)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -860,8 +927,8 @@ Usage:
 
 Commands:
   mcp                         Start MCP server on stdio (used by Claude Code)
-  mcp init [--dry-run]        Configure Claude Code integration
-  mcp status                  Check Claude Code integration health
+  mcp init [--client claude|opencode] [--dry-run]  Configure MCP client integration
+  mcp status [--client claude|opencode]            Check MCP client integration health
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
   supersede <project> [flags] Link superseded memories (dry-run by default, --apply to write)
   resolve <project> [flags]   Mark resolved evidence memories (dry-run by default, --apply to write)
