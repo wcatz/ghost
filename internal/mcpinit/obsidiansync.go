@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/config"
@@ -68,7 +67,9 @@ func ensureObsidianSyncRunning() {
 
 // isAlive reports whether pidPath names a PID file for a process that is
 // still running. It never treats a stale or missing PID file as an error —
-// the caller's only decision is "spawn a new one, or not".
+// the caller's only decision is "spawn a new one, or not". The liveness
+// check itself is platform-specific — see isProcessAlive in
+// obsidiansync_unix.go / obsidiansync_windows.go.
 func isAlive(pidPath string) bool {
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
@@ -78,9 +79,5 @@ func isAlive(pidPath string) bool {
 	if err != nil || pid <= 0 {
 		return false
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	return isProcessAlive(pid)
 }

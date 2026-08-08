@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -277,11 +278,42 @@ func TestShellQuote(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := shellQuote(tt.input)
+			got := shellQuotePOSIX(tt.input)
 			if got != tt.want {
-				t.Errorf("shellQuote(%q) = %q, want %q", tt.input, got, tt.want)
+				t.Errorf("shellQuotePOSIX(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestShellQuoteWindows(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"ghost", `"ghost"`},
+		{`C:\Users\me\ghost.exe`, `"C:\Users\me\ghost.exe"`},
+		{`C:\path with spaces\ghost.exe`, `"C:\path with spaces\ghost.exe"`},
+		{`C:\path\with"quote\ghost.exe`, `"C:\path\with""quote\ghost.exe"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := shellQuoteWindows(tt.input)
+			if got != tt.want {
+				t.Errorf("shellQuoteWindows(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShellQuoteDispatch(t *testing.T) {
+	input := `C:\path with spaces\ghost.exe`
+	want := shellQuotePOSIX(input)
+	if runtime.GOOS == "windows" {
+		want = shellQuoteWindows(input)
+	}
+	if got := shellQuote(input); got != want {
+		t.Errorf("shellQuote(%q) = %q, want %q", input, got, want)
 	}
 }
 
