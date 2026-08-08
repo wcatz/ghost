@@ -24,6 +24,9 @@ func detachProcess(cmd *exec.Cmd) {
 // to an unrelated process would be mistaken for the one that owned the PID
 // file.
 func isProcessAlive(pid int) bool {
+	if pid <= 0 || int64(pid) > 0xFFFFFFFF {
+		return false
+	}
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
 		return false

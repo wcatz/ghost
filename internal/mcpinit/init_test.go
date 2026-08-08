@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -302,6 +303,17 @@ func TestShellQuoteWindows(t *testing.T) {
 				t.Errorf("shellQuoteWindows(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestShellQuoteDispatch(t *testing.T) {
+	input := `C:\path with spaces\ghost.exe`
+	want := shellQuotePOSIX(input)
+	if runtime.GOOS == "windows" {
+		want = shellQuoteWindows(input)
+	}
+	if got := shellQuote(input); got != want {
+		t.Errorf("shellQuote(%q) = %q, want %q", input, got, want)
 	}
 }
 
