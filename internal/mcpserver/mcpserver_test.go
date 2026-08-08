@@ -5,10 +5,12 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -1200,16 +1202,88 @@ func TestResourceSubscription_NotifiesHashSubscriberOnToolSave(t *testing.T) {
 	}
 }
 
+// TestResourceSubscription_RejectsUnknownURI exercises handleSubscribe
+// directly rather than through session.Subscribe. Under go-sdk 1.7.0's
+// SEP-2575 protocol, ClientSession.Subscribe dispatches "subscriptions/listen"
+// fire-and-forget (see callSubscriptionsListen in the SDK's transport.go) and
+// always returns nil once the call is sent, regardless of whether the
+// server's SubscribeHandler later rejects the URI — so the rejection is no
+// longer observable through the client round trip. handleSubscribe is
+// Ghost's own validation logic; test it directly.
 func TestResourceSubscription_RejectsUnknownURI(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	srv := New(store, logger, "test")
-	session := connectedClient(t, srv)
 
 	ctx := context.Background()
-	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: "http://not-ghost/resource"}); err == nil {
+	req := &mcp.SubscribeRequest{Params: &mcp.SubscribeParams{URI: "http://not-ghost/resource"}}
+	if err := srv.handleSubscribe(ctx, req); err == nil {
 		t.Error("expected error subscribing to non-ghost:// URI")
 	}
+}
+
+// discoverlessTransport wraps a client-side mcp.Transport to drop any
+// outgoing "server/discover" call (SEP-2575) before it reaches the wire,
+// answering it locally with CodeMethodNotFound instead. This reproduces
+// every real-world MCP client today: none of them send server/discover yet,
+// so they negotiate the legacy initialize handshake, under which
+// ServerSession.CreateMessage remains synchronous — matching ghost_resolve's
+// current sampling-based design.
+//
+// (Filtering supported versions server-side via mcp.ProtocolVersionSupporter
+// was tried first and rejected: Server.discover unconditionally records
+// InitializeParams as a side effect, so the client's graceful fallback to a
+// legacy initialize on the same connection is rejected as a "duplicate
+// initialize request" by the SDK. Dropping discover before the server ever
+// sees it avoids that entirely, and is arguably more faithful to reality:
+// no shipped client currently issues the probe at all.)
+//
+// go-sdk 1.7.0 forbids synchronous CreateMessage entirely once a client
+// negotiates >= 2026-07-28 (see assertServerInitiatedRequestAllowed in the
+// SDK's server.go) — ai.SamplingProvider would need a SEP-2322 rewrite
+// (InputRequests/InputRequiredResult) to keep working once real clients
+// adopt that protocol. Tracked as a follow-up; not yet required.
+type discoverlessTransport struct {
+	mcp.Transport
+}
+
+func (t discoverlessTransport) Connect(ctx context.Context) (mcp.Connection, error) {
+	conn, err := t.Transport.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &discoverlessConn{Connection: conn}, nil
+}
+
+type discoverlessConn struct {
+	mcp.Connection
+	mu      sync.Mutex
+	pending []jsonrpc.Message
+}
+
+func (c *discoverlessConn) Write(ctx context.Context, msg jsonrpc.Message) error {
+	if req, ok := msg.(*jsonrpc.Request); ok && req.Method == "server/discover" {
+		c.mu.Lock()
+		c.pending = append(c.pending, &jsonrpc.Response{
+			ID:    req.ID,
+			Error: &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "server/discover not supported"},
+		})
+		c.mu.Unlock()
+		return nil
+	}
+	return c.Connection.Write(ctx, msg)
+}
+
+func (c *discoverlessConn) Read(ctx context.Context) (jsonrpc.Message, error) {
+	c.mu.Lock()
+	if len(c.pending) > 0 {
+		m := c.pending[0]
+		c.pending = c.pending[1:]
+		c.mu.Unlock()
+		return m, nil
+	}
+	c.mu.Unlock()
+	return c.Connection.Read(ctx)
 }
 
 func TestGhostResolve_DryRunByDefault(t *testing.T) {
@@ -1223,10 +1297,11 @@ func TestGhostResolve_DryRunByDefault(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverTransport, clientInMemTransport := mcp.NewInMemoryTransports()
 	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
 		t.Fatalf("server Connect: %v", err)
 	}
+	var clientTransport mcp.Transport = discoverlessTransport{clientInMemTransport}
 
 	// The MCP sampling handler stands in for the calling session's own model:
 	// answer RESOLVED so the classifier confirms the seeded memory and the
