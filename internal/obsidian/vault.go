@@ -5,15 +5,29 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 )
 
 const markerName = ".ghost-vault"
+
+// readDirFn is swappable so tests can force ensureVault's ReadDir call to
+// fail deterministically — os.Chmod-based fault injection is unreliable
+// across CI privilege levels (e.g. a process with CAP_DAC_READ_SEARCH can
+// bypass a directory's permission bits).
+var readDirFn atomic.Value // func(string) ([]os.DirEntry, error)
+
+func init() { readDirFn.Store(os.ReadDir) }
+
+func readDir(dir string) ([]os.DirEntry, error) {
+	fn, _ := readDirFn.Load().(func(string) ([]os.DirEntry, error))
+	return fn(dir)
+}
 
 // ensureVault prepares dir as a Ghost-managed mirror target. Fresh or empty
 // dirs are initialized with the marker; a non-empty dir without the marker is
 // refused — Ghost never adopts a folder it didn't create.
 func ensureVault(dir string) error {
-	entries, err := os.ReadDir(dir)
+	entries, err := readDir(dir)
 	if os.IsNotExist(err) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create vault dir: %w", err)

@@ -28,12 +28,28 @@ ghost mcp init
 
 Then start a session. Ghost injects your project's context automatically and starts remembering.
 
+**Using opencode (with Ollama)?** Skip the Claude Code init entirely — register Ghost as an MCP server:
+
+```bash
+ghost mcp init --client opencode
+# optional but recommended — enables hybrid vector search:
+ollama pull nomic-embed-text:v1.5
+```
+
+This writes the `ghost` entry into `~/.config/opencode/opencode.json` (or merges it into an existing `opencode.jsonc`). Restart opencode — Ghost's `ghost_*` tools and context injection go live automatically. Verify with `ghost mcp status --client opencode`.
+
 No Go toolchain? Grab a prebuilt binary from [Releases](https://github.com/wcatz/ghost/releases/latest) — linux, macOS, and Windows, amd64 and arm64, with `checksums.txt`. Building from source needs Go 1.26+ (older toolchains fetch it automatically via `GOTOOLCHAIN=auto`).
 
 **Using Cursor, Goose, or another MCP client?** Ghost speaks standard MCP over stdio — point any client at the binary:
 
 ```json
 { "mcpServers": { "ghost": { "type": "stdio", "command": "ghost", "args": ["mcp"] } } }
+```
+
+**Using opencode?** The entry goes in `~/.config/opencode/opencode.json` (or merges into an existing `opencode.jsonc`):
+
+```json
+{ "mcp": { "ghost": { "type": "local", "command": ["ghost", "mcp"], "enabled": true } } }
 ```
 
 **Docker** (multi-arch, amd64 + arm64):
@@ -225,8 +241,8 @@ The server ships with embedded instructions that teach the agent when to save, w
 
 ```text
 ghost mcp                    # Run MCP server on stdio (used by your MCP client)
-ghost mcp init [--dry-run]   # Configure Claude Code integration
-ghost mcp status             # Deep health checks (incl. Ollama reachability, model presence)
+ghost mcp init [--client claude|opencode] [--dry-run]   # Configure MCP client integration (default: Claude Code)
+ghost mcp status [--client claude|opencode]             # Deep health checks (incl. Ollama reachability, model presence)
 ghost hook session-start     # SessionStart hook — prints exactly what gets injected
 ghost hook stop              # Stop hook — blocks stop once if a tool-using session saved nothing
 ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
@@ -238,6 +254,8 @@ ghost obsidian sync          # Keep the vault mirror fresh (--interval; polls fo
 ghost upgrade                # Self-update from GitHub Releases (linux/macOS; Windows: re-download)
 ghost version                # Print version
 ```
+
+`ghost mcp init` and `ghost mcp status` default to Claude Code; `--client opencode` targets opencode instead, writing the `ghost` entry to `~/.config/opencode/opencode.json` (or merging into an existing `opencode.jsonc`).
 
 When `reflection.auto_resolve` is enabled in config (default off), the stop hook also spawns `ghost resolve <project> --apply` as a detached background process after each session, so resolved-evidence memories get marked automatically without waiting for a manual run. This never blocks the hook itself — the spawn is fire-and-forget, logged to `resolve.log` in the ghost data directory. If the Anthropic API is out of credit at spawn time, the spawned process fails and logs the failure; it does not degrade to a lower-quality answer.
 

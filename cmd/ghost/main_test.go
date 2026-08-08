@@ -43,6 +43,49 @@ func TestParseObsidianFlags(t *testing.T) {
 	})
 }
 
+// TestParseMCPClient verifies --client parsing rejects a missing or empty
+// value (which previously silently fell back to Claude) and accepts both
+// "--client NAME" and "--client=NAME" forms.
+func TestParseMCPClient(t *testing.T) {
+	t.Run("separate argument", func(t *testing.T) {
+		client, err := parseMCPClient([]string{"--client", "opencode"})
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if client != "opencode" {
+			t.Fatalf("got %q, want opencode", client)
+		}
+	})
+	t.Run("equals form", func(t *testing.T) {
+		client, err := parseMCPClient([]string{"--client=opencode"})
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if client != "opencode" {
+			t.Fatalf("got %q, want opencode", client)
+		}
+	})
+	t.Run("absent defaults to empty", func(t *testing.T) {
+		client, err := parseMCPClient(nil)
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+		if client != "" {
+			t.Fatalf("got %q, want empty (caller supplies default)", client)
+		}
+	})
+	t.Run("missing value errors", func(t *testing.T) {
+		if _, err := parseMCPClient([]string{"--client"}); err == nil {
+			t.Fatal("--client with no value must error, not silently default")
+		}
+	})
+	t.Run("empty equals value errors", func(t *testing.T) {
+		if _, err := parseMCPClient([]string{"--client="}); err == nil {
+			t.Fatal("--client= with empty value must error, not silently default")
+		}
+	})
+}
+
 // TestRODSNIsReadOnly guards the obsidian commands' read-only guarantee:
 // modernc.org/sqlite honors mode=ro only on file: URI DSNs — with a bare
 // path the connection opens silently read-write (verified empirically
