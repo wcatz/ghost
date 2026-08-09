@@ -203,6 +203,48 @@ func TestFindHookCommand_MalformedHooksReturnsError(t *testing.T) {
 	}
 }
 
+func TestFindHookCommand_NullHooksReturnsError(t *testing.T) {
+	path := tempSettings(t, `{"hooks":null}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sf.findHookCommand("SessionStart", "hook session-start"); err == nil {
+		t.Error("expected findHookCommand to return an error for hooks:null")
+	}
+}
+
+func TestFindHookCommand_NullEventReturnsError(t *testing.T) {
+	path := tempSettings(t, `{"hooks":{"SessionStart":null}}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sf.findHookCommand("SessionStart", "hook session-start"); err == nil {
+		t.Error("expected findHookCommand to return an error for hooks.SessionStart:null")
+	}
+}
+
+// TestAddHook_NeverCalledWithNullHooks documents the invariant that prevents
+// the CodeRabbit-flagged panic: addHook assigns into the "hooks" map
+// unconditionally, so it must never be reached when "hooks" is null. In
+// production the only caller is reconcileHook, which is gated behind
+// findHookCommand's error return — this test proves addHook itself no
+// longer panics even if that gate is bypassed, since json.Unmarshal of a
+// null root leaves the local map nil and the assignment below would panic
+// without the nil-guard added alongside these findHookCommand changes.
+func TestAddHook_NullHooksDoesNotPanic(t *testing.T) {
+	path := tempSettings(t, `{"hooks":null}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := hookEntry{Hooks: []hookAction{{Type: "command", Command: "ghost hook session-start"}}}
+	if err := sf.addHook("SessionStart", entry); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHasExactHookCommand(t *testing.T) {
 	path := tempSettings(t, `{}`)
 	sf, err := loadSettings(path)

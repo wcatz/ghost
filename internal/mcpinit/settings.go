@@ -249,23 +249,51 @@ func (s *settingsFile) hasHook(event, cmdSubstr string) bool {
 	return false
 }
 
+// isJSONNull reports whether raw is the JSON literal null. json.Unmarshal
+// happily decodes null into a map or slice as nil with no error, which would
+// otherwise make an explicit null indistinguishable from "absent" — that
+// distinction matters here because "absent" is safe to fill in via addHook,
+// while an explicit null is structurally-invalid-but-present data that must
+// halt reconciliation instead.
+func isJSONNull(raw json.RawMessage) bool {
+	return strings.TrimSpace(string(raw)) == "null"
+}
+
 // findHookCommand returns the first hook command for event containing
-// cmdSubstr, and whether one was found. err is non-nil only when the
-// existing "hooks" value is present but structurally invalid — callers must
-// treat that as "stop", not "absent": proceeding to addHook would silently
-// discard the malformed value via its own parse-failure fallback.
+// cmdSubstr, and whether one was found. err is non-nil when the existing
+// "hooks" value (or the specific event's value within it) is present but
+// structurally invalid — including explicit JSON null, which unmarshals into
+// a nil map/slice with no error — so callers must treat that as "stop", not
+// "absent": proceeding to addHook on a nil "hooks" map panics, and on a nil
+// per-event value silently discards it.
 func (s *settingsFile) findHookCommand(event, cmdSubstr string) (cmd string, ok bool, err error) {
 	hooksRaw, present := s.raw["hooks"]
 	if !present {
 		return "", false, nil
 	}
+	if isJSONNull(hooksRaw) {
+		return "", false, fmt.Errorf("hooks is null")
+	}
 
-	var hooks map[string][]hookEntry
-	if uerr := json.Unmarshal(hooksRaw, &hooks); uerr != nil {
+	var hooksMap map[string]json.RawMessage
+	if uerr := json.Unmarshal(hooksRaw, &hooksMap); uerr != nil {
 		return "", false, fmt.Errorf("parse hooks: %w", uerr)
 	}
 
-	for _, entry := range hooks[event] {
+	eventRaw, present := hooksMap[event]
+	if !present {
+		return "", false, nil
+	}
+	if isJSONNull(eventRaw) {
+		return "", false, fmt.Errorf("hooks[%s] is null", event)
+	}
+
+	var entries []hookEntry
+	if uerr := json.Unmarshal(eventRaw, &entries); uerr != nil {
+		return "", false, fmt.Errorf("parse %s hooks: %w", event, uerr)
+	}
+
+	for _, entry := range entries {
 		for _, h := range entry.Hooks {
 			if strings.Contains(h.Command, cmdSubstr) {
 				return h.Command, true, nil
@@ -285,13 +313,29 @@ func (s *settingsFile) hasExactHookCommand(event, cmd string) (bool, error) {
 	if !present {
 		return false, nil
 	}
+	if isJSONNull(hooksRaw) {
+		return false, fmt.Errorf("hooks is null")
+	}
 
-	var hooks map[string][]hookEntry
-	if err := json.Unmarshal(hooksRaw, &hooks); err != nil {
+	var hooksMap map[string]json.RawMessage
+	if err := json.Unmarshal(hooksRaw, &hooksMap); err != nil {
 		return false, fmt.Errorf("parse hooks: %w", err)
 	}
 
-	for _, entry := range hooks[event] {
+	eventRaw, present := hooksMap[event]
+	if !present {
+		return false, nil
+	}
+	if isJSONNull(eventRaw) {
+		return false, fmt.Errorf("hooks[%s] is null", event)
+	}
+
+	var entries []hookEntry
+	if err := json.Unmarshal(eventRaw, &entries); err != nil {
+		return false, fmt.Errorf("parse %s hooks: %w", event, err)
+	}
+
+	for _, entry := range entries {
 		for _, h := range entry.Hooks {
 			if h.Command == cmd {
 				return true, nil
@@ -312,6 +356,9 @@ func (s *settingsFile) replaceHookCommand(event, oldCmd, newCmd string) (bool, e
 	if !ok {
 		return false, nil
 	}
+	if isJSONNull(raw) {
+		return false, fmt.Errorf("hooks is null")
+	}
 
 	var hooks map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &hooks); err != nil {
@@ -321,6 +368,9 @@ func (s *settingsFile) replaceHookCommand(event, oldCmd, newCmd string) (bool, e
 	eventRaw, ok := hooks[event]
 	if !ok {
 		return false, nil
+	}
+	if isJSONNull(eventRaw) {
+		return false, fmt.Errorf("hooks[%s] is null", event)
 	}
 	var entries []hookEntry
 	if err := json.Unmarshal(eventRaw, &entries); err != nil {
@@ -361,7 +411,8 @@ func (s *settingsFile) addHook(event string, entry hookEntry) error {
 		if err := json.Unmarshal(raw, &hooks); err != nil {
 			hooks = make(map[string]json.RawMessage)
 		}
-	} else {
+	}
+	if hooks == nil {
 		hooks = make(map[string]json.RawMessage)
 	}
 

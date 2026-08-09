@@ -546,6 +546,42 @@ func TestReconcileHook_StopsOnMalformedHooks(t *testing.T) {
 	}
 }
 
+// TestReconcileHook_StopsOnNullHooks covers the CodeRabbit Critical finding
+// on PR #255: {"hooks":null} must halt reconciliation with an error rather
+// than reaching addHook, which assigns into the "hooks" map unconditionally
+// and would panic on the nil map produced by unmarshaling a null root.
+func TestReconcileHook_StopsOnNullHooks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":null}`), 0600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+
+	if _, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true); err == nil {
+		t.Fatal("expected reconcileHook to return an error for hooks:null")
+	}
+}
+
+// TestReconcileHook_StopsOnNullEventHooks covers the same finding for a null
+// value scoped to a single event rather than the whole "hooks" object.
+func TestReconcileHook_StopsOnNullEventHooks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":null}}`), 0600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+
+	if _, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true); err == nil {
+		t.Fatal("expected reconcileHook to return an error for hooks.SessionStart:null")
+	}
+}
+
 func TestReconcileHook_PreservesOtherKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(path, []byte(`{
