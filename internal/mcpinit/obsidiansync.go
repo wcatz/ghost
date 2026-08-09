@@ -61,23 +61,27 @@ func ensureObsidianSyncRunning() {
 	if err := cmd.Start(); err != nil {
 		return
 	}
-	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
+	token, haveToken := processStartTime(cmd.Process.Pid)
+	_ = atomicWritePID(pidPath, cmd.Process.Pid, token, haveToken)
 	_ = cmd.Process.Release()
 }
 
 // isAlive reports whether pidPath names a PID file for a process that is
 // still running. It never treats a stale or missing PID file as an error —
-// the caller's only decision is "spawn a new one, or not". The liveness
-// check itself is platform-specific — see isProcessAlive in
+// the caller's only decision is "spawn a new one, or not". The file holds
+// either a bare PID (legacy format, liveness-only) or "pid:token" (see
+// processStartTime), in which case a live PID additionally has to still
+// carry that token to be reported alive — see isProcessAlive in
 // obsidiansync_unix.go / obsidiansync_windows.go.
 func isAlive(pidPath string) bool {
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
 		return false
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	pidStr, token, haveToken := strings.Cut(strings.TrimSpace(string(data)), ":")
+	pid, err := strconv.Atoi(pidStr)
 	if err != nil || pid <= 0 {
 		return false
 	}
-	return isProcessAlive(pid)
+	return isProcessAlive(pid, token, haveToken)
 }

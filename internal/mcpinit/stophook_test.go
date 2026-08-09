@@ -202,7 +202,8 @@ func TestClaimPidFile_ConcurrentCallersOnlyOneWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read pidPath: %v", err)
 	}
-	if _, err := strconv.Atoi(strings.TrimSpace(string(data))); err != nil {
+	pidStr, _, _ := strings.Cut(strings.TrimSpace(string(data)), ":")
+	if _, err := strconv.Atoi(pidStr); err != nil {
 		t.Errorf("pidPath content is never a valid PID (empty/stale window observed): %q", data)
 	}
 }

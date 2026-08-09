@@ -60,3 +60,43 @@ func TestIsAlive_DeadProcess(t *testing.T) {
 		t.Error("isAlive() = true for an implausible PID, want false")
 	}
 }
+
+func TestIsAlive_TokenFormatOwnPID(t *testing.T) {
+	token, ok := processStartTime(os.Getpid())
+	if !ok {
+		t.Skip("processStartTime unsupported on this platform; nothing to test here")
+	}
+	pidPath := filepath.Join(t.TempDir(), "obsidian-sync.pid")
+	content := strconv.Itoa(os.Getpid()) + ":" + token
+	if err := os.WriteFile(pidPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !isAlive(pidPath) {
+		t.Error("isAlive() = false for own pid:token, want true")
+	}
+}
+
+func TestIsAlive_TokenMismatchMeansReuse(t *testing.T) {
+	if _, ok := processStartTime(os.Getpid()); !ok {
+		t.Skip("processStartTime unsupported on this platform; nothing to test here")
+	}
+	pidPath := filepath.Join(t.TempDir(), "obsidian-sync.pid")
+	content := strconv.Itoa(os.Getpid()) + ":stale-token-from-a-different-process-instance"
+	if err := os.WriteFile(pidPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if isAlive(pidPath) {
+		t.Error("isAlive() = true for own pid with a mismatched token, want false (this is the PID-reuse regression test)")
+	}
+}
+
+func TestIsAlive_DeadPIDWithTokenStillDead(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "obsidian-sync.pid")
+	content := "999999999:some-token"
+	if err := os.WriteFile(pidPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if isAlive(pidPath) {
+		t.Error("isAlive() = true for an implausible pid:token, want false")
+	}
+}
