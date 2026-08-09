@@ -502,7 +502,7 @@ Run: `go test ./internal/mcpinit/... -run TestIsProcessAlive -v`
 Expected: PASS (all 4 subtests). Note: the full package won't compile yet — `obsidiansync.go`'s `isAlive` and `obsidiansync_windows.go`'s `isProcessAlive` still call/define the old 1-arg form. Run the narrower Linux-only test target instead if the full package fails to build:
 
 Run: `go vet ./internal/mcpinit/... 2>&1 | head -20`
-Expected at this point: errors from `obsidiansync.go` (`isAlive` calling `isProcessAlive(pid)` with 1 arg) and `obsidiansync_windows.go` (duplicate-signature mismatch is fine since it's build-tag excluded on Linux, but its own `isProcessAlive(pid int) bool` doesn't match this file if both were ever compiled together — they never are, different build tags, so no conflict). This is expected and resolved by Tasks 6–7; do not fix it here.
+Expected at this point: errors from `obsidiansync.go` (`isAlive` calling `isProcessAlive(pid)` with 1 arg) and `obsidiansync_windows.go` (duplicate-signature mismatch is fine since it's build-tag excluded on Linux, but its own `isProcessAlive(pid int) bool` doesn't match this file if both were ever compiled together — they never are, different build tags, so no conflict). This is expected and resolved by Task 8 (which updates `isAlive`'s caller); do not fix it here.
 
 - [ ] **Step 5: Commit**
 
@@ -628,7 +628,7 @@ func isProcessAlive(pid int, wantToken string, haveToken bool) bool {
 - [ ] **Step 4: Verify it builds and vets clean**
 
 Run: `GOOS=windows GOARCH=amd64 go vet ./internal/mcpinit/... && GOOS=windows GOARCH=arm64 go build ./internal/mcpinit/...`
-Expected: no output, exit 0 (still fails until Task 7 fixes `obsidiansync.go`'s caller — expected, same as Task 5 Step 4)
+Expected: this still fails until Task 8 fixes `obsidiansync.go`'s caller — expected, same as Task 5 Step 4; do not fix it here.
 
 - [ ] **Step 5: Commit**
 
