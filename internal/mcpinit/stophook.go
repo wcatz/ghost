@@ -194,7 +194,8 @@ func spawnResolveIfConfigured(cwd string) {
 	if err := cmd.Start(); err != nil {
 		return
 	}
-	_ = atomicWritePID(pidPath, cmd.Process.Pid)
+	token, haveToken := processStartTime(cmd.Process.Pid)
+	_ = atomicWritePID(pidPath, cmd.Process.Pid, token, haveToken)
 	_ = cmd.Process.Release()
 }
 
@@ -270,18 +271,26 @@ func spawnSupersedeIfConfigured(cwd string) {
 	if err := cmd.Start(); err != nil {
 		return
 	}
-	_ = atomicWritePID(pidPath, cmd.Process.Pid)
+	token, haveToken := processStartTime(cmd.Process.Pid)
+	_ = atomicWritePID(pidPath, cmd.Process.Pid, token, haveToken)
 	_ = cmd.Process.Release()
 }
 
-// atomicWritePID writes pid into path via write-temp-then-rename so a
-// concurrent reader (e.g. another caller's claimPidFile, which reads this
-// file under its own lock) never observes a truncated or partially-written
-// file — os.WriteFile's open+truncate+write is not atomic and this call site
-// runs outside any lock.
-func atomicWritePID(path string, pid int) error {
+// atomicWritePID writes pid (and, when haveToken is true, its creation-time
+// token in "pid:token" form — see processStartTime) into path via
+// write-temp-then-rename so a concurrent reader (e.g. another caller's
+// claimPidFile, which reads this file under its own lock) never observes a
+// truncated or partially-written file — os.WriteFile's
+// open+truncate+write is not atomic and this call site runs outside any
+// lock. When haveToken is false, the bare-PID legacy format is written,
+// same as before this token support existed.
+func atomicWritePID(path string, pid int, token string, haveToken bool) error {
+	content := strconv.Itoa(pid)
+	if haveToken {
+		content += ":" + token
+	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strconv.Itoa(pid)), 0o600); err != nil {
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
@@ -314,5 +323,6 @@ func claimPidFile(pidPath string) bool {
 	if isAlive(pidPath) {
 		return false
 	}
-	return atomicWritePID(pidPath, os.Getpid()) == nil
+	token, haveToken := processStartTime(os.Getpid())
+	return atomicWritePID(pidPath, os.Getpid(), token, haveToken) == nil
 }

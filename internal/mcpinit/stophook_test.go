@@ -250,3 +250,31 @@ func raceClaimPidFile(t *testing.T, pidPath string, n int) int {
 	}
 	return wins
 }
+
+// TestClaimPidFile_PlaceholderCarriesToken proves the placeholder PID
+// claimPidFile writes (the caller's own PID, before it has spawned
+// anything) is written in the same "pid:token" format as a real spawn —
+// otherwise an abandoned placeholder (caller hits an early-return failure
+// path after claiming but before cmd.Start()) has no creation-time guard
+// and reproduces the exact PID-reuse bug this design fixes.
+func TestClaimPidFile_PlaceholderCarriesToken(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "resolve-test.pid")
+
+	if !claimPidFile(pidPath) {
+		t.Fatal("claimPidFile on an empty slot = false, want true")
+	}
+
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("read pidPath: %v", err)
+	}
+	content := strings.TrimSpace(string(data))
+	pidStr, token, haveToken := strings.Cut(content, ":")
+	if _, err := strconv.Atoi(pidStr); err != nil {
+		t.Errorf("placeholder content has no valid leading PID: %q", content)
+	}
+	if wantToken, ok := processStartTime(os.Getpid()); ok && (!haveToken || token != wantToken) {
+		t.Errorf("processStartTime succeeded (token=%q) but placeholder token is %q (haveToken=%v): %q", wantToken, token, haveToken, content)
+	}
+}
