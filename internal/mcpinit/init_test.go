@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -358,5 +359,167 @@ func TestEnsureStopHook(t *testing.T) {
 	// SessionStart hooks are untouched.
 	if sf.hasHook("SessionStart", "hook stop") {
 		t.Error("Stop hook must not leak into SessionStart")
+	}
+}
+
+func TestNeedsQuoteMigration(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		{"legacy single-quoted", "'/usr/local/bin/ghost' hook session-start", true},
+		{"cmd.exe double-quoted", `"C:\ghost\ghost.exe" hook session-start`, false},
+		{"unquoted", "ghost hook session-start", false},
+		{"empty", "", false},
+	}
+	for _, tt := range tests {
+		if got := needsQuoteMigration(tt.cmd); got != tt.want {
+			t.Errorf("needsQuoteMigration(%q) = %v, want %v", tt.cmd, got, tt.want)
+		}
+	}
+}
+
+func TestReconcileHook_AddsWhenAbsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+
+	action, err := reconcileHook(sf, "SessionStart", "hook session-start", `"C:\ghost\ghost.exe" hook session-start`, true)
+	if err != nil {
+		t.Fatalf("reconcileHook: %v", err)
+	}
+	if action != hookAdded {
+		t.Errorf("action = %v, want hookAdded", action)
+	}
+	if !sf.hasHook("SessionStart", "hook session-start") {
+		t.Error("hook should be present")
+	}
+}
+
+func TestReconcileHook_MigratesLegacyQuotingOnWindows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+	legacy := `'C:\ghost\ghost.exe' hook session-start`
+	if err := sf.addHook("SessionStart", hookEntry{Hooks: []hookAction{{Type: "command", Command: legacy}}}); err != nil {
+		t.Fatalf("addHook: %v", err)
+	}
+
+	desired := `"C:\ghost\ghost.exe" hook session-start`
+	action, err := reconcileHook(sf, "SessionStart", "hook session-start", desired, true)
+	if err != nil {
+		t.Fatalf("reconcileHook: %v", err)
+	}
+	if action != hookMigrated {
+		t.Errorf("action = %v, want hookMigrated", action)
+	}
+	got, ok := sf.findHookCommand("SessionStart", "hook session-start")
+	if !ok || got != desired {
+		t.Errorf("findHookCommand = (%q, %v), want (%q, true)", got, ok, desired)
+	}
+}
+
+func TestReconcileHook_LeavesLegacyQuotingUntouchedOnPOSIX(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+	legacy := "'/usr/local/bin/ghost' hook session-start"
+	if err := sf.addHook("SessionStart", hookEntry{Hooks: []hookAction{{Type: "command", Command: legacy}}}); err != nil {
+		t.Fatalf("addHook: %v", err)
+	}
+
+	action, err := reconcileHook(sf, "SessionStart", "hook session-start", legacy, false)
+	if err != nil {
+		t.Fatalf("reconcileHook: %v", err)
+	}
+	if action != hookUnchanged {
+		t.Errorf("action = %v, want hookUnchanged — single-quoted is the correct POSIX form", action)
+	}
+	got, _ := sf.findHookCommand("SessionStart", "hook session-start")
+	if got != legacy {
+		t.Errorf("command changed to %q, want untouched %q", got, legacy)
+	}
+}
+
+func TestReconcileHook_LeavesCustomCommandUntouched(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+	custom := `"C:\tools\wrapper.exe" ghost hook session-start --verbose`
+	if err := sf.addHook("SessionStart", hookEntry{Hooks: []hookAction{{Type: "command", Command: custom}}}); err != nil {
+		t.Fatalf("addHook: %v", err)
+	}
+
+	action, err := reconcileHook(sf, "SessionStart", "hook session-start", `"C:\ghost\ghost.exe" hook session-start`, true)
+	if err != nil {
+		t.Fatalf("reconcileHook: %v", err)
+	}
+	if action != hookUnchanged {
+		t.Errorf("action = %v, want hookUnchanged — a hand-edited command must never be clobbered", action)
+	}
+	got, _ := sf.findHookCommand("SessionStart", "hook session-start")
+	if got != custom {
+		t.Errorf("command changed to %q, want untouched %q", got, custom)
+	}
+}
+
+func TestReconcileHook_PreservesOtherKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{
+		"otherTopLevelKey": "keep-me",
+		"hooks": {
+			"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi", "timeout": 30}]}],
+			"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "'C:\\ghost\\ghost.exe' hook session-start"}]}]
+		}
+	}`), 0600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+
+	if _, err := reconcileHook(sf, "SessionStart", "hook session-start", `"C:\ghost\ghost.exe" hook session-start`, true); err != nil {
+		t.Fatalf("reconcileHook: %v", err)
+	}
+	if err := sf.save(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out["otherTopLevelKey"] != "keep-me" {
+		t.Errorf("otherTopLevelKey was dropped: %v", out)
+	}
+	hooks, _ := out["hooks"].(map[string]any)
+	preToolUse, _ := json.Marshal(hooks["PreToolUse"])
+	if !strings.Contains(string(preToolUse), `"timeout":30`) {
+		t.Errorf("PreToolUse entry lost its timeout field: %s", preToolUse)
+	}
+}
+
+func TestWarnPercentPath(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("warnPercentPath only warns on windows")
+	}
+	var out strings.Builder
+	warnPercentPath(&out, `C:\Users\%USERNAME%\ghost.exe`)
+	if !strings.Contains(out.String(), "warning") {
+		t.Errorf("expected a warning, got %q", out.String())
 	}
 }

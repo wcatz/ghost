@@ -249,50 +249,104 @@ func shellQuotePOSIX(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// ensureHook adds a SessionStart hook if not already present.
+// hookReconcileAction describes what reconcileHook did, for caller logging.
+type hookReconcileAction int
+
+const (
+	hookUnchanged hookReconcileAction = iota
+	hookAdded
+	hookMigrated
+)
+
+// needsQuoteMigration reports whether an existing hook command is the
+// single-quoted form ghost generated before #251. cmd.exe never treats ' as
+// a quote character, so that form is broken on Windows and not a string a
+// user would write by hand for this hook — safe to recognize and migrate.
+// On POSIX, a leading ' is the correct, current quoting, so callers must
+// only apply this check when targeting Windows.
+func needsQuoteMigration(existingCmd string) bool {
+	return strings.HasPrefix(existingCmd, "'")
+}
+
+// reconcileHook adds the hook if absent, migrates it in place if it's the
+// pre-#251 Windows-broken single-quoted form, and otherwise leaves it
+// untouched — including hand-edited commands that merely differ from
+// desiredCmd, since ghost mcp init must stay non-destructive on re-run.
+func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd string, isWindows bool) (hookReconcileAction, error) {
+	existing, ok := sf.findHookCommand(event, cmdSubstr)
+	if !ok {
+		entry := hookEntry{
+			Matcher: "",
+			Hooks: []hookAction{
+				{Type: "command", Command: desiredCmd},
+			},
+		}
+		if err := sf.addHook(event, entry); err != nil {
+			return hookUnchanged, fmt.Errorf("add hook: %w", err)
+		}
+		return hookAdded, nil
+	}
+
+	if isWindows && existing != desiredCmd && needsQuoteMigration(existing) {
+		if _, err := sf.replaceHookCommand(event, cmdSubstr, desiredCmd); err != nil {
+			return hookUnchanged, fmt.Errorf("migrate hook: %w", err)
+		}
+		return hookMigrated, nil
+	}
+
+	return hookUnchanged, nil
+}
+
+// ensureHook adds a SessionStart hook if not already present, or migrates it
+// off the pre-#251 quoting that's broken under cmd.exe.
 func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 	hookCmd := shellQuote(ghostBin) + " hook session-start"
+	warnPercentPath(w, ghostBin)
 
-	if sf.hasHook("SessionStart", "hook session-start") {
+	action, err := reconcileHook(sf, "SessionStart", "hook session-start", hookCmd, runtime.GOOS == "windows")
+	if err != nil {
+		return err
+	}
+	switch action {
+	case hookAdded:
+		_, _ = fmt.Fprintf(w, "  + added SessionStart hook: %s\n", hookCmd)
+	case hookMigrated:
+		_, _ = fmt.Fprintf(w, "  + migrated SessionStart hook to cmd.exe-safe quoting: %s\n", hookCmd)
+	default:
 		_, _ = fmt.Fprintln(w, "  ✓ SessionStart hook already configured")
-		return nil
 	}
-
-	entry := hookEntry{
-		Matcher: "",
-		Hooks: []hookAction{
-			{Type: "command", Command: hookCmd},
-		},
-	}
-	if err := sf.addHook("SessionStart", entry); err != nil {
-		return fmt.Errorf("add hook: %w", err)
-	}
-
-	_, _ = fmt.Fprintf(w, "  + added SessionStart hook: %s\n", hookCmd)
 	return nil
 }
 
-// ensureStopHook adds a Stop hook if not already present.
+// ensureStopHook adds a Stop hook if not already present, or migrates it off
+// the pre-#251 quoting that's broken under cmd.exe.
 func ensureStopHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 	hookCmd := shellQuote(ghostBin) + " hook stop"
 
-	if sf.hasHook("Stop", "hook stop") {
+	action, err := reconcileHook(sf, "Stop", "hook stop", hookCmd, runtime.GOOS == "windows")
+	if err != nil {
+		return err
+	}
+	switch action {
+	case hookAdded:
+		_, _ = fmt.Fprintf(w, "  + added Stop hook: %s\n", hookCmd)
+	case hookMigrated:
+		_, _ = fmt.Fprintf(w, "  + migrated Stop hook to cmd.exe-safe quoting: %s\n", hookCmd)
+	default:
 		_, _ = fmt.Fprintln(w, "  ✓ Stop hook already configured")
-		return nil
 	}
-
-	entry := hookEntry{
-		Matcher: "",
-		Hooks: []hookAction{
-			{Type: "command", Command: hookCmd},
-		},
-	}
-	if err := sf.addHook("Stop", entry); err != nil {
-		return fmt.Errorf("add stop hook: %w", err)
-	}
-
-	_, _ = fmt.Fprintf(w, "  + added Stop hook: %s\n", hookCmd)
 	return nil
+}
+
+// warnPercentPath flags ghost binary paths containing '%' on Windows: cmd.exe
+// may substitute %NAME% sequences when the hook command runs, silently
+// mangling the path. There's no escape that's safe to apply blindly — %%
+// only collapses inside batch-file parsing, not a plain `cmd /c "..."`
+// invocation — so this warns instead of guessing.
+func warnPercentPath(w io.Writer, ghostBin string) {
+	if runtime.GOOS == "windows" && strings.Contains(ghostBin, "%") {
+		_, _ = fmt.Fprintf(w, "  ! warning: ghost binary path %q contains '%%', which cmd.exe may substitute as an environment variable when the hook runs — consider installing ghost to a path without '%%'\n", ghostBin)
+	}
 }
 
 // ensureAutoMemoryDisabled sets "autoMemoryEnabled": false in settings.json so

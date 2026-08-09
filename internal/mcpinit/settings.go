@@ -249,6 +249,80 @@ func (s *settingsFile) hasHook(event, cmdSubstr string) bool {
 	return false
 }
 
+// findHookCommand returns the first hook command for event containing
+// cmdSubstr, and whether one was found.
+func (s *settingsFile) findHookCommand(event, cmdSubstr string) (string, bool) {
+	hooksRaw, ok := s.raw["hooks"]
+	if !ok {
+		return "", false
+	}
+
+	var hooks map[string][]hookEntry
+	if err := json.Unmarshal(hooksRaw, &hooks); err != nil {
+		return "", false
+	}
+
+	for _, entry := range hooks[event] {
+		for _, h := range entry.Hooks {
+			if strings.Contains(h.Command, cmdSubstr) {
+				return h.Command, true
+			}
+		}
+	}
+	return "", false
+}
+
+// replaceHookCommand rewrites every hook command for event containing
+// cmdSubstr to newCmd. Like addHook, it only unmarshals/re-marshals
+// hooks[event], so it does not disturb other events or unrelated top-level
+// keys. Returns false if no matching command was found.
+func (s *settingsFile) replaceHookCommand(event, cmdSubstr, newCmd string) (bool, error) {
+	raw, ok := s.raw["hooks"]
+	if !ok {
+		return false, nil
+	}
+
+	var hooks map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &hooks); err != nil {
+		return false, fmt.Errorf("parse hooks: %w", err)
+	}
+
+	eventRaw, ok := hooks[event]
+	if !ok {
+		return false, nil
+	}
+	var entries []hookEntry
+	if err := json.Unmarshal(eventRaw, &entries); err != nil {
+		return false, fmt.Errorf("parse %s hooks: %w", event, err)
+	}
+
+	found := false
+	for i := range entries {
+		for j := range entries[i].Hooks {
+			if strings.Contains(entries[i].Hooks[j].Command, cmdSubstr) {
+				entries[i].Hooks[j].Command = newCmd
+				found = true
+			}
+		}
+	}
+	if !found {
+		return false, nil
+	}
+
+	entriesJSON, err := json.Marshal(entries)
+	if err != nil {
+		return false, err
+	}
+	hooks[event] = entriesJSON
+
+	hooksJSON, err := json.Marshal(hooks)
+	if err != nil {
+		return false, err
+	}
+	s.raw["hooks"] = hooksJSON
+	return true, nil
+}
+
 // addHook adds a hook entry for the given event. Does not clobber existing hooks.
 func (s *settingsFile) addHook(event string, entry hookEntry) error {
 	var hooks map[string]json.RawMessage

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -158,6 +159,81 @@ func TestAddHook_PreservesExisting(t *testing.T) {
 	}
 	if _, ok := hooks["SessionStart"]; !ok {
 		t.Error("SessionStart hook was not added")
+	}
+}
+
+func TestFindHookCommand_NotPresent(t *testing.T) {
+	path := tempSettings(t, `{}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := sf.findHookCommand("SessionStart", "hook session-start"); ok {
+		t.Error("expected findHookCommand to return false")
+	}
+}
+
+func TestFindHookCommand_Present(t *testing.T) {
+	path := tempSettings(t, `{}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := hookEntry{Hooks: []hookAction{{Type: "command", Command: "ghost hook session-start"}}}
+	if err := sf.addHook("SessionStart", entry); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := sf.findHookCommand("SessionStart", "hook session-start")
+	if !ok || got != "ghost hook session-start" {
+		t.Errorf("findHookCommand = (%q, %v), want (%q, true)", got, ok, "ghost hook session-start")
+	}
+}
+
+func TestReplaceHookCommand_NoMatchingEvent(t *testing.T) {
+	path := tempSettings(t, `{}`)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := sf.replaceHookCommand("SessionStart", "hook session-start", "new command")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replaced {
+		t.Error("expected replaceHookCommand to return false when hooks are absent")
+	}
+}
+
+func TestReplaceHookCommand_PreservesOtherEventsAndFields(t *testing.T) {
+	existing := `{"hooks":{
+		"PreToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"check.sh","timeout":30}]}],
+		"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"'/usr/local/bin/ghost' hook session-start"}]}]
+	}}`
+	path := tempSettings(t, existing)
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replaced, err := sf.replaceHookCommand("SessionStart", "hook session-start", `"C:\ghost\ghost.exe" hook session-start`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replaced {
+		t.Fatal("expected replaceHookCommand to report a match")
+	}
+
+	got, ok := sf.findHookCommand("SessionStart", "hook session-start")
+	if !ok || got != `"C:\ghost\ghost.exe" hook session-start` {
+		t.Errorf("SessionStart command = (%q, %v), want the replaced command", got, ok)
+	}
+
+	var hooks map[string]json.RawMessage
+	if err := json.Unmarshal(sf.raw["hooks"], &hooks); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(hooks["PreToolUse"]), `"timeout":30`) {
+		t.Errorf("PreToolUse entry lost its timeout field: %s", hooks["PreToolUse"])
 	}
 }
 
