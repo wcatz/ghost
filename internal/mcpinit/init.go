@@ -258,23 +258,18 @@ const (
 	hookMigrated
 )
 
-// needsQuoteMigration reports whether an existing hook command is the
-// single-quoted form ghost generated before #251. cmd.exe never treats ' as
-// a quote character, so that form is broken on Windows and not a string a
-// user would write by hand for this hook — safe to recognize and migrate.
-// On POSIX, a leading ' is the correct, current quoting, so callers must
-// only apply this check when targeting Windows.
-func needsQuoteMigration(existingCmd string) bool {
-	return strings.HasPrefix(existingCmd, "'")
-}
-
-// reconcileHook adds the hook if absent, migrates it in place if it's the
-// pre-#251 Windows-broken single-quoted form, and otherwise leaves it
-// untouched — including hand-edited commands that merely differ from
-// desiredCmd, since ghost mcp init must stay non-destructive on re-run.
-func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd string, isWindows bool) (hookReconcileAction, error) {
-	existing, ok := sf.findHookCommand(event, cmdSubstr)
-	if !ok {
+// reconcileHook adds the hook if absent, migrates it in place if it exactly
+// matches legacyCmd — the pre-#251 Windows-broken single-quoted form — and
+// otherwise leaves it untouched, including hand-edited commands that merely
+// differ from desiredCmd, since ghost mcp init must stay non-destructive on
+// re-run. The migration match is exact, not substring, so a hand-edited
+// wrapper that happens to also mention cmdSubstr is never rewritten.
+func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd, legacyCmd string, isWindows bool) (hookReconcileAction, error) {
+	_, exists, err := sf.findHookCommand(event, cmdSubstr)
+	if err != nil {
+		return hookUnchanged, fmt.Errorf("parse existing %s hooks: %w", event, err)
+	}
+	if !exists {
 		entry := hookEntry{
 			Matcher: "",
 			Hooks: []hookAction{
@@ -287,11 +282,17 @@ func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd string, isWind
 		return hookAdded, nil
 	}
 
-	if isWindows && existing != desiredCmd && needsQuoteMigration(existing) {
-		if _, err := sf.replaceHookCommand(event, cmdSubstr, desiredCmd); err != nil {
-			return hookUnchanged, fmt.Errorf("migrate hook: %w", err)
+	if isWindows && legacyCmd != desiredCmd {
+		isLegacy, err := sf.hasExactHookCommand(event, legacyCmd)
+		if err != nil {
+			return hookUnchanged, fmt.Errorf("parse existing %s hooks: %w", event, err)
 		}
-		return hookMigrated, nil
+		if isLegacy {
+			if _, err := sf.replaceHookCommand(event, legacyCmd, desiredCmd); err != nil {
+				return hookUnchanged, fmt.Errorf("migrate hook: %w", err)
+			}
+			return hookMigrated, nil
+		}
 	}
 
 	return hookUnchanged, nil
@@ -301,9 +302,10 @@ func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd string, isWind
 // off the pre-#251 quoting that's broken under cmd.exe.
 func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 	hookCmd := shellQuote(ghostBin) + " hook session-start"
+	legacyCmd := shellQuotePOSIX(ghostBin) + " hook session-start"
 	warnPercentPath(w, ghostBin)
 
-	action, err := reconcileHook(sf, "SessionStart", "hook session-start", hookCmd, runtime.GOOS == "windows")
+	action, err := reconcileHook(sf, "SessionStart", "hook session-start", hookCmd, legacyCmd, runtime.GOOS == "windows")
 	if err != nil {
 		return err
 	}
@@ -322,8 +324,9 @@ func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 // the pre-#251 quoting that's broken under cmd.exe.
 func ensureStopHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 	hookCmd := shellQuote(ghostBin) + " hook stop"
+	legacyCmd := shellQuotePOSIX(ghostBin) + " hook stop"
 
-	action, err := reconcileHook(sf, "Stop", "hook stop", hookCmd, runtime.GOOS == "windows")
+	action, err := reconcileHook(sf, "Stop", "hook stop", hookCmd, legacyCmd, runtime.GOOS == "windows")
 	if err != nil {
 		return err
 	}

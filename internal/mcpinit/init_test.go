@@ -362,23 +362,10 @@ func TestEnsureStopHook(t *testing.T) {
 	}
 }
 
-func TestNeedsQuoteMigration(t *testing.T) {
-	tests := []struct {
-		name string
-		cmd  string
-		want bool
-	}{
-		{"legacy single-quoted", "'/usr/local/bin/ghost' hook session-start", true},
-		{"cmd.exe double-quoted", `"C:\ghost\ghost.exe" hook session-start`, false},
-		{"unquoted", "ghost hook session-start", false},
-		{"empty", "", false},
-	}
-	for _, tt := range tests {
-		if got := needsQuoteMigration(tt.cmd); got != tt.want {
-			t.Errorf("needsQuoteMigration(%q) = %v, want %v", tt.cmd, got, tt.want)
-		}
-	}
-}
+const (
+	testLegacyCmd  = `'C:\ghost\ghost.exe' hook session-start`
+	testDesiredCmd = `"C:\ghost\ghost.exe" hook session-start`
+)
 
 func TestReconcileHook_AddsWhenAbsent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
@@ -387,7 +374,7 @@ func TestReconcileHook_AddsWhenAbsent(t *testing.T) {
 		t.Fatalf("loadSettings: %v", err)
 	}
 
-	action, err := reconcileHook(sf, "SessionStart", "hook session-start", `"C:\ghost\ghost.exe" hook session-start`, true)
+	action, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true)
 	if err != nil {
 		t.Fatalf("reconcileHook: %v", err)
 	}
@@ -405,22 +392,20 @@ func TestReconcileHook_MigratesLegacyQuotingOnWindows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadSettings: %v", err)
 	}
-	legacy := `'C:\ghost\ghost.exe' hook session-start`
-	if err := sf.addHook("SessionStart", hookEntry{Hooks: []hookAction{{Type: "command", Command: legacy}}}); err != nil {
+	if err := sf.addHook("SessionStart", hookEntry{Hooks: []hookAction{{Type: "command", Command: testLegacyCmd}}}); err != nil {
 		t.Fatalf("addHook: %v", err)
 	}
 
-	desired := `"C:\ghost\ghost.exe" hook session-start`
-	action, err := reconcileHook(sf, "SessionStart", "hook session-start", desired, true)
+	action, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true)
 	if err != nil {
 		t.Fatalf("reconcileHook: %v", err)
 	}
 	if action != hookMigrated {
 		t.Errorf("action = %v, want hookMigrated", action)
 	}
-	got, ok := sf.findHookCommand("SessionStart", "hook session-start")
-	if !ok || got != desired {
-		t.Errorf("findHookCommand = (%q, %v), want (%q, true)", got, ok, desired)
+	got, ok, _ := sf.findHookCommand("SessionStart", "hook session-start")
+	if !ok || got != testDesiredCmd {
+		t.Errorf("findHookCommand = (%q, %v), want (%q, true)", got, ok, testDesiredCmd)
 	}
 }
 
@@ -435,14 +420,14 @@ func TestReconcileHook_LeavesLegacyQuotingUntouchedOnPOSIX(t *testing.T) {
 		t.Fatalf("addHook: %v", err)
 	}
 
-	action, err := reconcileHook(sf, "SessionStart", "hook session-start", legacy, false)
+	action, err := reconcileHook(sf, "SessionStart", "hook session-start", legacy, legacy, false)
 	if err != nil {
 		t.Fatalf("reconcileHook: %v", err)
 	}
 	if action != hookUnchanged {
 		t.Errorf("action = %v, want hookUnchanged — single-quoted is the correct POSIX form", action)
 	}
-	got, _ := sf.findHookCommand("SessionStart", "hook session-start")
+	got, _, _ := sf.findHookCommand("SessionStart", "hook session-start")
 	if got != legacy {
 		t.Errorf("command changed to %q, want untouched %q", got, legacy)
 	}
@@ -459,16 +444,105 @@ func TestReconcileHook_LeavesCustomCommandUntouched(t *testing.T) {
 		t.Fatalf("addHook: %v", err)
 	}
 
-	action, err := reconcileHook(sf, "SessionStart", "hook session-start", `"C:\ghost\ghost.exe" hook session-start`, true)
+	action, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true)
 	if err != nil {
 		t.Fatalf("reconcileHook: %v", err)
 	}
 	if action != hookUnchanged {
 		t.Errorf("action = %v, want hookUnchanged — a hand-edited command must never be clobbered", action)
 	}
-	got, _ := sf.findHookCommand("SessionStart", "hook session-start")
+	got, _, _ := sf.findHookCommand("SessionStart", "hook session-start")
 	if got != custom {
 		t.Errorf("command changed to %q, want untouched %q", got, custom)
+	}
+}
+
+// TestReconcileHook_MigratesExactLegacyCommandOnly covers the CodeRabbit
+// finding on PR #255: a hand-edited wrapper that starts with ' and mentions
+// "hook session-start" must never be mistaken for the legacy command, and the
+// exact legacy command must be found and migrated regardless of which entry
+// comes first in the hook list.
+func TestReconcileHook_MigratesExactLegacyCommandOnly(t *testing.T) {
+	wrapper := `'C:\tools\wrap.exe' --run 'hook session-start' --extra`
+
+	for _, order := range []string{"legacy-first", "wrapper-first"} {
+		t.Run(order, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.json")
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatalf("loadSettings: %v", err)
+			}
+
+			first, second := testLegacyCmd, wrapper
+			if order == "wrapper-first" {
+				first, second = wrapper, testLegacyCmd
+			}
+			entry := hookEntry{Hooks: []hookAction{
+				{Type: "command", Command: first},
+				{Type: "command", Command: second},
+			}}
+			if err := sf.addHook("SessionStart", entry); err != nil {
+				t.Fatalf("addHook: %v", err)
+			}
+
+			action, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true)
+			if err != nil {
+				t.Fatalf("reconcileHook: %v", err)
+			}
+			if action != hookMigrated {
+				t.Errorf("action = %v, want hookMigrated", action)
+			}
+
+			isLegacy, err := sf.hasExactHookCommand("SessionStart", testLegacyCmd)
+			if err != nil {
+				t.Fatalf("hasExactHookCommand: %v", err)
+			}
+			if isLegacy {
+				t.Error("legacy command was not migrated")
+			}
+			isDesired, err := sf.hasExactHookCommand("SessionStart", testDesiredCmd)
+			if err != nil {
+				t.Fatalf("hasExactHookCommand: %v", err)
+			}
+			if !isDesired {
+				t.Error("migrated command not found")
+			}
+			wrapperStillPresent, err := sf.hasExactHookCommand("SessionStart", wrapper)
+			if err != nil {
+				t.Fatalf("hasExactHookCommand: %v", err)
+			}
+			if !wrapperStillPresent {
+				t.Error("hand-edited wrapper was clobbered by the migration")
+			}
+		})
+	}
+}
+
+// TestReconcileHook_StopsOnMalformedHooks covers the CodeRabbit finding on
+// PR #255: a structurally invalid "hooks" value (valid JSON, wrong shape)
+// must halt reconciliation with an error rather than being silently
+// discarded by addHook's own parse-failure fallback.
+func TestReconcileHook_StopsOnMalformedHooks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"hooks":[]}`), 0600); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+
+	if _, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true); err == nil {
+		t.Fatal("expected reconcileHook to return an error for malformed hooks")
+	}
+
+	// The malformed value must survive untouched — no silent overwrite.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !strings.Contains(string(raw), `"hooks":[]`) {
+		t.Errorf("malformed hooks value was altered: %s", raw)
 	}
 }
 
@@ -488,7 +562,7 @@ func TestReconcileHook_PreservesOtherKeys(t *testing.T) {
 		t.Fatalf("loadSettings: %v", err)
 	}
 
-	if _, err := reconcileHook(sf, "SessionStart", "hook session-start", `"C:\ghost\ghost.exe" hook session-start`, true); err != nil {
+	if _, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true); err != nil {
 		t.Fatalf("reconcileHook: %v", err)
 	}
 	if err := sf.save(); err != nil {

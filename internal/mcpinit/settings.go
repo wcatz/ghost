@@ -250,33 +250,64 @@ func (s *settingsFile) hasHook(event, cmdSubstr string) bool {
 }
 
 // findHookCommand returns the first hook command for event containing
-// cmdSubstr, and whether one was found.
-func (s *settingsFile) findHookCommand(event, cmdSubstr string) (string, bool) {
-	hooksRaw, ok := s.raw["hooks"]
-	if !ok {
-		return "", false
+// cmdSubstr, and whether one was found. err is non-nil only when the
+// existing "hooks" value is present but structurally invalid — callers must
+// treat that as "stop", not "absent": proceeding to addHook would silently
+// discard the malformed value via its own parse-failure fallback.
+func (s *settingsFile) findHookCommand(event, cmdSubstr string) (cmd string, ok bool, err error) {
+	hooksRaw, present := s.raw["hooks"]
+	if !present {
+		return "", false, nil
 	}
 
 	var hooks map[string][]hookEntry
-	if err := json.Unmarshal(hooksRaw, &hooks); err != nil {
-		return "", false
+	if uerr := json.Unmarshal(hooksRaw, &hooks); uerr != nil {
+		return "", false, fmt.Errorf("parse hooks: %w", uerr)
 	}
 
 	for _, entry := range hooks[event] {
 		for _, h := range entry.Hooks {
 			if strings.Contains(h.Command, cmdSubstr) {
-				return h.Command, true
+				return h.Command, true, nil
 			}
 		}
 	}
-	return "", false
+	return "", false, nil
 }
 
-// replaceHookCommand rewrites every hook command for event containing
-// cmdSubstr to newCmd. Like addHook, it only unmarshals/re-marshals
-// hooks[event], so it does not disturb other events or unrelated top-level
-// keys. Returns false if no matching command was found.
-func (s *settingsFile) replaceHookCommand(event, cmdSubstr, newCmd string) (bool, error) {
+// hasExactHookCommand reports whether any hook command for event exactly
+// equals cmd. Used to find the precise pre-#251 legacy command rather than
+// anything that merely contains the same substring — a hand-edited wrapper
+// can legitimately contain "hook session-start" too, and must never be
+// mistaken for the legacy command.
+func (s *settingsFile) hasExactHookCommand(event, cmd string) (bool, error) {
+	hooksRaw, present := s.raw["hooks"]
+	if !present {
+		return false, nil
+	}
+
+	var hooks map[string][]hookEntry
+	if err := json.Unmarshal(hooksRaw, &hooks); err != nil {
+		return false, fmt.Errorf("parse hooks: %w", err)
+	}
+
+	for _, entry := range hooks[event] {
+		for _, h := range entry.Hooks {
+			if h.Command == cmd {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// replaceHookCommand rewrites every hook command for event that exactly
+// equals oldCmd to newCmd — an exact match, not a substring one, so a
+// hand-edited command that merely contains the same text is never touched.
+// Like addHook, it only unmarshals/re-marshals hooks[event], so it does not
+// disturb other events or unrelated top-level keys. Returns false if no
+// exact match was found.
+func (s *settingsFile) replaceHookCommand(event, oldCmd, newCmd string) (bool, error) {
 	raw, ok := s.raw["hooks"]
 	if !ok {
 		return false, nil
@@ -299,7 +330,7 @@ func (s *settingsFile) replaceHookCommand(event, cmdSubstr, newCmd string) (bool
 	found := false
 	for i := range entries {
 		for j := range entries[i].Hooks {
-			if strings.Contains(entries[i].Hooks[j].Command, cmdSubstr) {
+			if entries[i].Hooks[j].Command == oldCmd {
 				entries[i].Hooks[j].Command = newCmd
 				found = true
 			}
