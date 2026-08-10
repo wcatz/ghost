@@ -108,3 +108,25 @@ function Get-GhostRelease {
 
     return @{ TempDir = $tempDir; ZipPath = $zipPath }
 }
+
+function Install-Ghost {
+    param(
+        [Parameter(Mandatory)][string]$ZipPath,
+        [Parameter(Mandatory)][string]$Destination
+    )
+
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+
+    $extractDir = Join-Path ([System.IO.Path]::GetDirectoryName($ZipPath)) 'extracted'
+    Expand-Archive -Path $ZipPath -DestinationPath $extractDir -Force
+
+    $exePath = Join-Path $extractDir 'ghost.exe'
+    if (-not (Test-Path $exePath)) {
+        throw "ghost.exe not found in extracted archive at $exePath"
+    }
+
+    $destExe = Join-Path $Destination 'ghost.exe'
+    Copy-Item -Path $exePath -Destination $destExe -Force
+
+    return $destExe
+}
