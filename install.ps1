@@ -167,22 +167,25 @@ function Add-UserPathEntry {
         [Parameter(Mandatory)][string]$Directory
     )
 
-    $envKey = 'Registry::HKEY_CURRENT_USER\Environment'
-    $current = (Get-ItemProperty -Path $envKey -Name 'Path' -ErrorAction SilentlyContinue).Path
-    if (-not $current) { $current = '' }
-
-    $entries = $current -split ';' | Where-Object { $_ -ne '' }
-    $alreadyPresent = $entries | Where-Object { $_.TrimEnd('\') -ieq $Directory.TrimEnd('\') }
-    if ($alreadyPresent) {
-        return $false
-    }
-
-    $newValue = if ($current -eq '') { $Directory } else { "$current;$Directory" }
     try {
-        Set-ItemProperty -Path $envKey -Name 'Path' -Value $newValue -Type ExpandString
+        $envRegKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+        $current = $envRegKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if (-not $current) { $current = '' }
+
+        $entries = $current -split ';' | Where-Object { $_ -ne '' }
+        $alreadyPresent = $entries | Where-Object { $_.TrimEnd('\') -ieq $Directory.TrimEnd('\') }
+        if ($alreadyPresent) {
+            return $false
+        }
+
+        $newValue = if ($current -eq '') { $Directory } else { "$current;$Directory" }
+        $envRegKey.SetValue('Path', $newValue, [Microsoft.Win32.RegistryValueKind]::ExpandString)
     }
     catch {
         throw "Failed to update user PATH in the registry: $($_.Exception.Message)"
+    }
+    finally {
+        if ($envRegKey) { $envRegKey.Dispose() }
     }
 
     Broadcast-EnvironmentChange
@@ -223,7 +226,7 @@ function Main {
         Write-Host 'Open a new terminal, then run: ghost mcp init'
     }
     catch {
-        Write-Error "Install failed: $($_.Exception.Message)"
+        Write-Error "Install failed: $($_.Exception.Message)" -ErrorAction Continue
         if ($PSCommandPath) {
             exit 1
         }
