@@ -15,8 +15,11 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// Status checks the health of the Ghost ↔ Claude Code integration.
-func Status(w io.Writer) error {
+// Status checks the health of the Ghost ↔ Claude Code integration. The
+// returned healthy bool reflects whether every check passed; err is reserved
+// for actual failures (I/O, config parse) that prevented the checks from
+// running at all.
+func Status(w io.Writer) (bool, error) {
 	_, _ = fmt.Fprintf(w, "\nGhost ↔ Claude Code integration status:\n\n")
 
 	healthy := true
@@ -121,7 +124,7 @@ func Status(w io.Writer) error {
 	} else {
 		_, _ = fmt.Fprintln(w, "Run `ghost mcp init` to fix issues.")
 	}
-	return nil
+	return healthy, nil
 }
 
 // StatusOpencode checks the health of the Ghost ↔ opencode integration.
@@ -130,7 +133,7 @@ func Status(w io.Writer) error {
 // embedding/link stats. Claude-only checks (hooks, permissions, autoMemory,
 // redirects) are never reported here, so a clean opencode setup prints
 // "All checks passed." without the Claude CLI installed.
-func StatusOpencode(w io.Writer) error {
+func StatusOpencode(w io.Writer) (bool, error) {
 	_, _ = fmt.Fprintf(w, "\nGhost ↔ opencode integration status:\n\n")
 
 	healthy := true
@@ -175,7 +178,7 @@ func StatusOpencode(w io.Writer) error {
 	} else {
 		_, _ = fmt.Fprintln(w, "Run `ghost mcp init --client opencode` to fix issues.")
 	}
-	return nil
+	return healthy, nil
 }
 
 // checkEmbeddingStats reports embedding coverage via the check closure. An

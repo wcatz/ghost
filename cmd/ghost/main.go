@@ -188,17 +188,21 @@ func runMCPStatus() {
 		client = "claude"
 	}
 
+	var healthy bool
 	switch client {
 	case "opencode":
-		err = mcpinit.StatusOpencode(os.Stdout)
+		healthy, err = mcpinit.StatusOpencode(os.Stdout)
 	case "claude":
-		err = mcpinit.Status(os.Stdout)
+		healthy, err = mcpinit.Status(os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude or opencode)\n", client)
 		os.Exit(1)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if !healthy {
 		os.Exit(1)
 	}
 }

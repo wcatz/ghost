@@ -33,8 +33,12 @@ func TestStatus_ReportsOpenDBFailure(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
 	var out bytes.Buffer
-	if err := Status(&out); err != nil {
+	healthy, err := Status(&out)
+	if err != nil {
 		t.Fatalf("Status: %v", err)
+	}
+	if healthy {
+		t.Error("Status: healthy = true, want false for a broken database")
 	}
 
 	output := out.String()
@@ -69,8 +73,12 @@ func TestStatus_ReportsInaccessibleDatabase(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(ghostDir, 0o700) }) // let TempDir removal succeed
 
 	var out bytes.Buffer
-	if err := Status(&out); err != nil {
+	healthy, err := Status(&out)
+	if err != nil {
 		t.Fatalf("Status: %v", err)
+	}
+	if healthy {
+		t.Error("Status: healthy = true, want false for an inaccessible database")
 	}
 
 	output := out.String()
@@ -152,8 +160,12 @@ func TestStatusOpencode_GhostMissing(t *testing.T) {
 	writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), `{"mcp":{"ghost":{"type":"local","command":["ghost","mcp"],"enabled":true}}}`)
 
 	var out bytes.Buffer
-	if err := StatusOpencode(&out); err != nil {
+	healthy, err := StatusOpencode(&out)
+	if err != nil {
 		t.Fatalf("StatusOpencode: %v", err)
+	}
+	if healthy {
+		t.Error("StatusOpencode: healthy = true, want false when the ghost binary is missing")
 	}
 
 	output := out.String()
@@ -175,8 +187,12 @@ func TestStatusOpencode_RegisteredNoDatabase(t *testing.T) {
 	writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), `{"mcp":{"ghost":{"type":"local","command":["ghost","mcp"],"enabled":true}}}`)
 
 	var out bytes.Buffer
-	if err := StatusOpencode(&out); err != nil {
+	healthy, err := StatusOpencode(&out)
+	if err != nil {
 		t.Fatalf("StatusOpencode: %v", err)
+	}
+	if !healthy {
+		t.Error("StatusOpencode: healthy = false, want true for a clean opencode setup")
 	}
 
 	output := out.String()
@@ -209,8 +225,12 @@ func TestStatusOpencode_MCPConfigNotRegistered(t *testing.T) {
 			writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), cfg)
 
 			var out bytes.Buffer
-			if err := StatusOpencode(&out); err != nil {
+			healthy, err := StatusOpencode(&out)
+			if err != nil {
 				t.Fatalf("StatusOpencode: %v", err)
+			}
+			if healthy {
+				t.Error("StatusOpencode: healthy = true, want false for a bad mcp.ghost entry")
 			}
 
 			output := out.String()
@@ -256,8 +276,12 @@ func TestStatusOpencode_EmptyStoreHealthy(t *testing.T) {
 	writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), `{"mcp":{"ghost":{"type":"local","command":["ghost","mcp"],"enabled":true}}}`)
 
 	var out bytes.Buffer
-	if err := StatusOpencode(&out); err != nil {
+	healthy, err := StatusOpencode(&out)
+	if err != nil {
 		t.Fatalf("StatusOpencode: %v", err)
+	}
+	if !healthy {
+		t.Error("StatusOpencode: healthy = false, want true for an empty but valid store")
 	}
 
 	output := out.String()
