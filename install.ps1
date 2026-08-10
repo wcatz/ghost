@@ -23,7 +23,7 @@ function Get-Arch {
     .OUTPUTS
         String: 'amd64' or 'arm64'. Throws on any other architecture.
     #>
-    $arch = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
+    $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
     switch ($arch) {
         'X64' { return 'amd64' }
         'Arm64' { return 'arm64' }
