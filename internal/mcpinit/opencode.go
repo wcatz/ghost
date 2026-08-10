@@ -140,7 +140,9 @@ func mcpGhostCommand(cfg map[string]any) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	return first, filepath.Base(first) == "ghost" && cmd[1] == "mcp"
+	base := strings.ToLower(filepath.Base(first))
+	base = strings.TrimSuffix(base, ".exe")
+	return first, base == "ghost" && cmd[1] == "mcp"
 }
 
 // mcpGhostAlreadyRegistered reports whether the config's mcp.ghost entry uses
