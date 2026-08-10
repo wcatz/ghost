@@ -43,7 +43,7 @@ No Go toolchain? Grab a prebuilt binary from [Releases](https://github.com/wcatz
 **On Windows?** Skip the manual download/unzip/PATH steps with the one-command installer:
 
 ```powershell
-irm https://raw.githubusercontent.com/wcatz/ghost/main/install.ps1 | iex
+irm https://github.com/wcatz/ghost/releases/latest/download/install.ps1 | iex
 ```
 
 This downloads the latest release, verifies its checksum, installs
