@@ -32,3 +32,32 @@ function Get-Arch {
         }
     }
 }
+
+function Get-LatestReleaseInfo {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('amd64', 'arm64')]
+        [string]$Arch
+    )
+
+    $apiUrl = "https://api.github.com/repos/$script:Repo/releases/latest"
+    $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ 'User-Agent' = 'ghost-install-script' }
+    $version = $release.tag_name -replace '^v', ''
+
+    $zipName = "ghost_${version}_windows_${Arch}.zip"
+    $asset = $release.assets | Where-Object { $_.name -eq $zipName }
+    if (-not $asset) {
+        throw "Release $($release.tag_name) has no asset named $zipName"
+    }
+    $checksumsAsset = $release.assets | Where-Object { $_.name -eq 'checksums.txt' }
+    if (-not $checksumsAsset) {
+        throw "Release $($release.tag_name) has no checksums.txt asset"
+    }
+
+    return @{
+        Version      = $version
+        ZipUrl       = $asset.browser_download_url
+        ZipName      = $zipName
+        ChecksumsUrl = $checksumsAsset.browser_download_url
+    }
+}
