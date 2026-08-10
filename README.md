@@ -109,7 +109,7 @@ Mem0, Zep, and supermemory are excellent hosted products — but self-hosting th
 
 ### Where does my data go?
 
-One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`). Ghost makes no network calls in normal operation, with three exceptions you control: **localhost** Ollama for embeddings (optional), the Claude API *only if* you run `ghost reflect` with the Haiku tier (needs `ANTHROPIC_API_KEY`; the SQLite tier is fully offline), and the GitHub API *only if* you run `ghost upgrade`. That's the complete list.
+One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`) — this path is the same on every OS, including Windows (i.e. `%USERPROFILE%\.local\share\ghost`, not `%AppData%`); only the config file follows the OS-native convention (see Configuration below). Ghost makes no network calls in normal operation, with three exceptions you control: **localhost** Ollama for embeddings (optional), the Claude API *only if* you run `ghost reflect` with the Haiku tier (needs `ANTHROPIC_API_KEY`; the SQLite tier is fully offline), and the GitHub API *only if* you run `ghost upgrade`. That's the complete list.
 
 ### What exactly gets injected into my agent's context?
 
@@ -265,7 +265,7 @@ Ghost works with zero config. When you want to change something, layers are (lat
 
 1. Compiled defaults
 2. `/etc/ghost/config.yaml`
-3. `~/.config/ghost/config.yaml`
+3. `~/.config/ghost/config.yaml` (honors `$XDG_CONFIG_HOME` when set; on Windows, absent an `XDG_CONFIG_HOME` override, this resolves to `%AppData%\ghost\config.yaml`)
 4. `GHOST_*` environment variables, plus `ANTHROPIC_API_KEY` for the Haiku reflection tier
 
 ```yaml
