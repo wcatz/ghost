@@ -63,3 +63,41 @@ function Get-LatestReleaseInfo {
         ChecksumsUrl = $checksumsAsset.browser_download_url
     }
 }
+
+function Test-Checksum {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory)][string]$FileName,
+        [Parameter(Mandatory)][string]$ChecksumsPath
+    )
+
+    $line = Get-Content $ChecksumsPath | Where-Object { $_ -match [regex]::Escape($FileName) }
+    if (-not $line) {
+        throw "No checksum entry found for $FileName in checksums.txt"
+    }
+    $expected = ($line -split '\s+')[0].ToLowerInvariant()
+    $actual = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    if ($expected -ne $actual) {
+        throw "Checksum mismatch for $FileName`: expected $expected, got $actual"
+    }
+}
+
+function Get-GhostRelease {
+    param(
+        [Parameter(Mandatory)][hashtable]$ReleaseInfo
+    )
+
+    $tempDir = Join-Path $env:TEMP "ghost-install-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+
+    $zipPath = Join-Path $tempDir $ReleaseInfo.ZipName
+    $checksumsPath = Join-Path $tempDir 'checksums.txt'
+
+    Invoke-WebRequest -Uri $ReleaseInfo.ZipUrl -OutFile $zipPath
+    Invoke-WebRequest -Uri $ReleaseInfo.ChecksumsUrl -OutFile $checksumsPath
+
+    Test-Checksum -FilePath $zipPath -FileName $ReleaseInfo.ZipName -ChecksumsPath $checksumsPath
+
+    return @{ TempDir = $tempDir; ZipPath = $zipPath }
+}
