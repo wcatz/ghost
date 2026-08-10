@@ -50,6 +50,44 @@ func TestStatus_ReportsOpenDBFailure(t *testing.T) {
 	}
 }
 
+// TestStatus_HookMatchWithQuotedPath verifies that a SessionStart hook whose
+// command is a quoted binary path (the form `ghost mcp init` writes on
+// Windows, e.g. `"C:\Users\ghost\bin\ghost.exe" hook session-start`) is
+// recognized as configured. Before this fix, Status checked for the literal
+// substring "ghost hook session-start", which never appears once the binary
+// path is quoted — so a fully healthy install was reported as missing the
+// hook on every platform where ghostBin isn't literally "ghost".
+func TestStatus_HookMatchWithQuotedPath(t *testing.T) {
+	statusEnv(t)
+	home := os.Getenv("HOME")
+	settingsDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatalf("mkdir settings dir: %v", err)
+	}
+	settings := `{
+  "hooks": {
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "\"/opt/ghost/bin/ghost\" hook session-start"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "\"/opt/ghost/bin/ghost\" hook stop"}]}]
+  }
+}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatalf("write settings.json: %v", err)
+	}
+
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "✓ SessionStart hook configured") {
+		t.Errorf("expected SessionStart hook to be recognized as configured, got:\n%s", output)
+	}
+	if strings.Contains(output, "✗ SessionStart hook missing") {
+		t.Errorf("a quoted-path hook command must not be reported missing, got:\n%s", output)
+	}
+}
+
 // TestStatus_ReportsInaccessibleDatabase verifies that a database which cannot
 // be stat'd for a reason other than absence (e.g. a permission error) is
 // surfaced as a failed check instead of being reported as a fresh install.

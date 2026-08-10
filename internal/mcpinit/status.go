@@ -75,7 +75,7 @@ func Status(w io.Writer) (bool, error) {
 				fmt.Sprintf("permissions: %d/%d (run ghost mcp init)", present, len(ghostPermissions)))
 
 			// Hook.
-			hasHk := sf.hasHook("SessionStart", "ghost hook session-start")
+			hasHk := sf.hasHook("SessionStart", "hook session-start")
 			check(hasHk, "SessionStart hook configured", "SessionStart hook missing")
 
 			hasStop := sf.hasHook("Stop", "hook stop")
