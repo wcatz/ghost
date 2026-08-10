@@ -183,3 +183,50 @@ function Add-UserPathEntry {
 
     return $true
 }
+
+function Main {
+    $tempDir = $null
+    try {
+        Write-Host 'Detecting architecture...'
+        $arch = Get-Arch
+        Write-Host "  -> $arch"
+
+        Write-Host 'Resolving latest release...'
+        $release = Get-LatestReleaseInfo -Arch $arch
+        Write-Host "  -> ghost $($release.Version)"
+
+        Write-Host 'Downloading and verifying...'
+        $downloaded = Get-GhostRelease -ReleaseInfo $release
+        $tempDir = $downloaded.TempDir
+        Write-Host '  -> checksum OK'
+
+        Write-Host "Installing to $script:InstallDir..."
+        $exePath = Install-Ghost -ZipPath $downloaded.ZipPath -Destination $script:InstallDir
+        Write-Host "  -> installed $exePath"
+
+        Write-Host 'Updating PATH...'
+        $changed = Add-UserPathEntry -Directory $script:InstallDir
+        if ($changed) {
+            Write-Host '  -> added to user PATH'
+        } else {
+            Write-Host '  -> already on PATH'
+        }
+
+        Write-Host ''
+        Write-Host 'ghost installed successfully.'
+        Write-Host 'Open a new terminal, then run: ghost mcp init'
+    }
+    catch {
+        Write-Error "Install failed: $($_.Exception.Message)"
+        exit 1
+    }
+    finally {
+        if ($tempDir -and (Test-Path $tempDir)) {
+            Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+if ($MyInvocation.InvocationName -ne '.') {
+    Main
+}
