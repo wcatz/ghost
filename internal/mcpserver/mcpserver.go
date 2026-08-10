@@ -900,6 +900,15 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
 		s.notifyResourceUpdated(ctx, "ghost://memories/global")
+
+		// Notify embedding worker of new/updated memory.
+		if s.projectCh != nil {
+			select {
+			case s.projectCh <- "_global":
+			default: // non-blocking
+			}
+		}
+
 		msg := fmt.Sprintf("Global memory saved (id: %s)", id)
 		if duplicateOf != "" {
 			msg = fmt.Sprintf("Global memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
