@@ -40,6 +40,18 @@ This writes the `ghost` entry into `~/.config/opencode/opencode.json` (or merges
 
 No Go toolchain? Grab a prebuilt binary from [Releases](https://github.com/wcatz/ghost/releases/latest) — linux, macOS, and Windows, amd64 and arm64, with `checksums.txt`. Building from source needs Go 1.26+ (older toolchains fetch it automatically via `GOTOOLCHAIN=auto`).
 
+**On Windows?** Skip the manual download/unzip/PATH steps with the one-command installer:
+
+```powershell
+irm https://raw.githubusercontent.com/wcatz/ghost/main/install.ps1 | iex
+```
+
+This downloads the latest release, verifies its checksum, installs
+`ghost.exe` to `%LOCALAPPDATA%\ghost\bin`, and adds that directory to your
+user PATH. Open a new terminal afterward, then run `ghost mcp init`.
+
+Re-running the command upgrades an existing install in place.
+
 **Using Cursor, Goose, or another MCP client?** Ghost speaks standard MCP over stdio — point any client at the binary:
 
 ```json
