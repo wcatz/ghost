@@ -151,6 +151,28 @@ func TestLoad_ObsidianVaultDirEnvOverride(t *testing.T) {
 	}
 }
 
+func TestLoad_OllamaURLEnvOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	// Clear interfering env vars.
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY"})
+
+	// The generic _ → . transformer would map this to embedding.ollama.url,
+	// missing the embedding.ollama_url key — the explicit override must catch it.
+	t.Setenv("GHOST_OLLAMA_URL", "http://10.0.2.2:11434")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Embedding.OllamaURL != "http://10.0.2.2:11434" {
+		t.Errorf("embedding.ollama_url = %q, want %q (explicit env override)", cfg.Embedding.OllamaURL, "http://10.0.2.2:11434")
+	}
+}
+
 func TestLoad_YAMLFileOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)

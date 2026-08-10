@@ -318,7 +318,7 @@ linking:
   threshold: 0.70                        # min cosine similarity to auto-link memories
 ```
 
-Note: env-var names map underscores to config dots, so keys that themselves contain underscores (e.g. `embedding.ollama_url`) must be set in a config file, not via env.
+Note: env-var names map underscores to config dots, so keys that themselves contain underscores (e.g. `embedding.ollama_url`, `obsidian.vault_dir`) need an explicit shortcut rather than the generic `GHOST_*` mapping; `GHOST_OLLAMA_URL` and `GHOST_OBSIDIAN_VAULT_DIR` are provided for exactly that. Running Ghost inside a VM with Ollama on the host? Point it at the host's gateway IP instead of hand-editing the config file, e.g. `GHOST_OLLAMA_URL=http://10.0.2.2:11434` (the default host-gateway address for UTM/QEMU on macOS; other hypervisors use their own convention, such as `host.docker.internal` for Docker Desktop).
 
 ## Benchmarks
 

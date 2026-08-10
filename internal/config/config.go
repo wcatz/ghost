@@ -152,6 +152,7 @@ func Load() (*Config, error) {
 		"GHOST_REFLECTION_AUTO_REFLECT":   "reflection.auto_reflect",
 		"GHOST_REFLECTION_AUTO_RESOLVE":   "reflection.auto_resolve",
 		"GHOST_REFLECTION_AUTO_SUPERSEDE": "reflection.auto_supersede",
+		"GHOST_OLLAMA_URL":                "embedding.ollama_url",
 	}
 	for envKey, koanfKey := range envOverrides {
 		if val := os.Getenv(envKey); val != "" {
