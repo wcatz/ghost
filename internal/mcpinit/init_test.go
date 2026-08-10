@@ -254,6 +254,59 @@ func TestEnsureAutoMemoryDisabled_DryRun(t *testing.T) {
 	}
 }
 
+func TestEnsureConfigBootstrap_CreatesFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	var out bytes.Buffer
+	if err := ensureConfigBootstrap(&out, false); err != nil {
+		t.Fatalf("ensureConfigBootstrap: %v", err)
+	}
+
+	path := filepath.Join(tmpDir, "ghost", "config.yaml")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected config file to be created: %v", err)
+	}
+	if !strings.Contains(out.String(), "created config file") {
+		t.Errorf("expected 'created config file' in output, got: %s", out.String())
+	}
+}
+
+func TestEnsureConfigBootstrap_Idempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	var out bytes.Buffer
+	if err := ensureConfigBootstrap(&out, false); err != nil {
+		t.Fatalf("ensureConfigBootstrap (1st): %v", err)
+	}
+	out.Reset()
+	if err := ensureConfigBootstrap(&out, false); err != nil {
+		t.Fatalf("ensureConfigBootstrap (2nd): %v", err)
+	}
+	if !strings.Contains(out.String(), "config file exists") {
+		t.Errorf("expected 'config file exists' in output, got: %s", out.String())
+	}
+}
+
+func TestEnsureConfigBootstrap_DryRunDoesNotCreate(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	var out bytes.Buffer
+	if err := ensureConfigBootstrap(&out, true); err != nil {
+		t.Fatalf("ensureConfigBootstrap dry run: %v", err)
+	}
+
+	path := filepath.Join(tmpDir, "ghost", "config.yaml")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("dry run must not create the config file, stat err = %v", err)
+	}
+	if !strings.Contains(out.String(), "would create config file") {
+		t.Errorf("expected 'would create config file' in output, got: %s", out.String())
+	}
+}
+
 func TestRetryHint(t *testing.T) {
 	err := retryHint(fmt.Errorf("something broke"))
 	msg := err.Error()

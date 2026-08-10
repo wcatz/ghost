@@ -41,6 +41,8 @@ func Status(w io.Writer) error {
 		fmt.Sprintf("claude CLI: %s", claudeBin),
 		"claude CLI not found in PATH")
 
+	reportConfigFile(w)
+
 	// 3. MCP server registration.
 	if claudeBin != "" {
 		out, err := exec.Command(claudeBin, "mcp", "get", "ghost").CombinedOutput()
@@ -149,6 +151,8 @@ func StatusOpencode(w io.Writer) error {
 		fmt.Sprintf("ghost binary: %s", ghostBin),
 		"ghost binary not found in PATH")
 
+	reportConfigFile(w)
+
 	// 2. opencode MCP config.
 	path, err := opencodeConfigPath()
 	if err != nil {
@@ -176,6 +180,23 @@ func StatusOpencode(w io.Writer) error {
 		_, _ = fmt.Fprintln(w, "Run `ghost mcp init --client opencode` to fix issues.")
 	}
 	return nil
+}
+
+// reportConfigFile prints the user config file's location informationally.
+// It never fails the health check — the config file is optional, since
+// compiled defaults work without one — so it deliberately doesn't take a
+// check closure.
+func reportConfigFile(w io.Writer) {
+	path, err := config.ConfigFilePath()
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "  ! config file: %v\n", err)
+		return
+	}
+	if _, err := os.Stat(path); err == nil {
+		_, _ = fmt.Fprintf(w, "  - config file: %s\n", path)
+	} else {
+		_, _ = fmt.Fprintf(w, "  - no config file (run ghost mcp init)\n")
+	}
 }
 
 // checkEmbeddingStats reports embedding coverage via the check closure. An

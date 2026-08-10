@@ -272,6 +272,34 @@ func TestStatusOpencode_EmptyStoreHealthy(t *testing.T) {
 	}
 }
 
+// TestReportConfigFile_Missing verifies the config file is reported
+// informationally when absent, without failing the check (the config file is
+// optional — defaults work without one).
+func TestReportConfigFile_Missing(t *testing.T) {
+	statusEnv(t)
+
+	var out bytes.Buffer
+	reportConfigFile(&out)
+
+	if !strings.Contains(out.String(), "no config file") {
+		t.Errorf("expected 'no config file' in output, got: %s", out.String())
+	}
+}
+
+// TestReportConfigFile_Present verifies the config file's path is reported
+// when it exists.
+func TestReportConfigFile_Present(t *testing.T) {
+	statusEnv(t)
+	path := writeGhostConfigFile(t, "")
+
+	var out bytes.Buffer
+	reportConfigFile(&out)
+
+	if !strings.Contains(out.String(), path) {
+		t.Errorf("expected config file path %q in output, got: %s", path, out.String())
+	}
+}
+
 // TestCheckEmbeddingStats pins the embedding-stats classification: an empty
 // store passes with "(store empty)", a populated store passes only when some
 // memories are embedded, and a populated store with zero embeddings fails.

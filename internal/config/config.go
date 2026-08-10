@@ -158,21 +158,30 @@ func DataDir() (string, error) {
 	return dir, nil
 }
 
+// ConfigFilePath returns the path to the user config file
+// (~/.config/ghost/config.yaml), without checking whether it exists or
+// creating it.
+func ConfigFilePath() (string, error) {
+	configDir, err := userConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, "ghost", "config.yaml"), nil
+}
+
 // EnsureConfigFile creates ~/.config/ghost/config.yaml from the embedded example
 // if it doesn't already exist. Returns the path and whether a new file was created.
 func EnsureConfigFile() (path string, created bool, err error) {
-	configDir, err := userConfigDir()
+	path, err = ConfigFilePath()
 	if err != nil {
 		return "", false, err
 	}
-	dir := filepath.Join(configDir, "ghost")
-	path = filepath.Join(dir, "config.yaml")
 
 	if _, err := os.Stat(path); err == nil {
 		return path, false, nil
 	}
 
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", false, err
 	}
 	if err := os.WriteFile(path, exampleConfig, 0o600); err != nil {

@@ -25,14 +25,20 @@ func RunOpencode(w io.Writer, dryRun bool) error {
 	}
 
 	// Step 1: Prerequisites — only the ghost binary is required.
-	_, _ = fmt.Fprintln(w, "[1/2] Checking prerequisites...")
+	_, _ = fmt.Fprintln(w, "[1/3] Checking prerequisites...")
 	ghostBin, _, err := checkPrereqs(w, "opencode")
 	if err != nil {
 		return retryHint(err)
 	}
 
-	// Step 2: MCP server registration.
-	_, _ = fmt.Fprintln(w, "\n[2/2] Registering MCP server...")
+	// Step 2: Config file.
+	_, _ = fmt.Fprintln(w, "\n[2/3] Ensuring config file...")
+	if err := ensureConfigBootstrap(w, dryRun); err != nil {
+		return retryHint(err)
+	}
+
+	// Step 3: MCP server registration.
+	_, _ = fmt.Fprintln(w, "\n[3/3] Registering MCP server...")
 	changed, err := registerOpencodeMCP(w, ghostBin, dryRun)
 	if err != nil {
 		return retryHint(err)
@@ -43,7 +49,7 @@ func RunOpencode(w io.Writer, dryRun bool) error {
 		verifyOpencodeRegistration(w)
 	}
 
-	// Step 3: Ollama embedding model.
+	// Step 4: Ollama embedding model.
 	cfg, err := config.Load()
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "  ! load config: %v\n", err)

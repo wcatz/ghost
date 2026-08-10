@@ -270,6 +270,22 @@ func TestEnsureConfigFile(t *testing.T) {
 	}
 }
 
+func TestConfigFilePath_DoesNotCreateFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	path, err := ConfigFilePath()
+	if err != nil {
+		t.Fatalf("ConfigFilePath: %v", err)
+	}
+	if want := filepath.Join(tmpDir, "ghost", "config.yaml"); path != want {
+		t.Errorf("ConfigFilePath = %q, want %q", path, want)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("ConfigFilePath must not create the file, stat err = %v", err)
+	}
+}
+
 func TestDataDir_DefaultFallback(t *testing.T) {
 	// Unset XDG_DATA_HOME to test the fallback to ~/.local/share.
 	t.Setenv("XDG_DATA_HOME", "")

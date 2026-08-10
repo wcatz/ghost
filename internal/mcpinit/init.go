@@ -17,7 +17,7 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// Run executes the 8-step Claude Code integration setup.
+// Run executes the 9-step Claude Code integration setup.
 // When dryRun is true, it reports what would change without modifying anything.
 func Run(w io.Writer, dryRun bool) error {
 	if dryRun {
@@ -25,44 +25,50 @@ func Run(w io.Writer, dryRun bool) error {
 	}
 
 	// Step 1: Prerequisites.
-	_, _ = fmt.Fprintln(w, "[1/8] Checking prerequisites...")
+	_, _ = fmt.Fprintln(w, "[1/9] Checking prerequisites...")
 	ghostBin, claudeBin, err := checkPrereqs(w, "claude")
 	if err != nil {
 		return retryHint(err)
 	}
 
-	// Step 2: MCP server registration.
-	_, _ = fmt.Fprintln(w, "\n[2/8] Registering MCP server...")
+	// Step 2: Config file.
+	_, _ = fmt.Fprintln(w, "\n[2/9] Ensuring config file...")
+	if err := ensureConfigBootstrap(w, dryRun); err != nil {
+		return retryHint(err)
+	}
+
+	// Step 3: MCP server registration.
+	_, _ = fmt.Fprintln(w, "\n[3/9] Registering MCP server...")
 	if err := registerMCP(w, ghostBin, claudeBin, dryRun); err != nil {
 		return retryHint(err)
 	}
 
-	// Step 3: Tool permissions.
-	_, _ = fmt.Fprintln(w, "\n[3/8] Adding tool permissions...")
+	// Step 4: Tool permissions.
+	_, _ = fmt.Fprintln(w, "\n[4/9] Adding tool permissions...")
 	settingsFile, err := ensurePermissions(w)
 	if err != nil {
 		return retryHint(err)
 	}
 
-	// Step 4: SessionStart hook.
-	_, _ = fmt.Fprintln(w, "\n[4/8] Configuring SessionStart hook...")
+	// Step 5: SessionStart hook.
+	_, _ = fmt.Fprintln(w, "\n[5/9] Configuring SessionStart hook...")
 	if err := ensureHook(w, settingsFile, ghostBin); err != nil {
 		return retryHint(err)
 	}
 
-	// Step 5: Stop hook.
-	_, _ = fmt.Fprintln(w, "\n[5/8] Configuring Stop hook...")
+	// Step 6: Stop hook.
+	_, _ = fmt.Fprintln(w, "\n[6/9] Configuring Stop hook...")
 	if err := ensureStopHook(w, settingsFile, ghostBin); err != nil {
 		return retryHint(err)
 	}
 
-	// Step 6: Disable Claude Code's built-in file memory.
-	_, _ = fmt.Fprintln(w, "\n[6/8] Disabling Claude Code built-in memory...")
+	// Step 7: Disable Claude Code's built-in file memory.
+	_, _ = fmt.Fprintln(w, "\n[7/9] Disabling Claude Code built-in memory...")
 	if err := ensureAutoMemoryDisabled(w, settingsFile, dryRun); err != nil {
 		return retryHint(err)
 	}
 
-	// Save settings (steps 3-6 all modify it).
+	// Save settings (steps 4-7 all modify it).
 	if dryRun {
 		_, _ = fmt.Fprintln(w, "\n  (skipping settings write — dry run)")
 	} else {
@@ -71,21 +77,50 @@ func Run(w io.Writer, dryRun bool) error {
 		}
 	}
 
-	// Step 7: Import Claude Code memories.
-	_, _ = fmt.Fprintln(w, "\n[7/8] Importing Claude Code memories...")
+	// Step 8: Import Claude Code memories.
+	_, _ = fmt.Fprintln(w, "\n[8/9] Importing Claude Code memories...")
 	projects, err := importMemories(w, dryRun)
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "  ! import error: %v (continuing)\n", err)
 	}
 
-	// Step 8: Project memory redirects.
-	_, _ = fmt.Fprintln(w, "\n[8/8] Writing project memory redirects...")
+	// Step 9: Project memory redirects.
+	_, _ = fmt.Fprintln(w, "\n[9/9] Writing project memory redirects...")
 	writeRedirects(w, projects, dryRun)
 
 	if dryRun {
 		_, _ = fmt.Fprintln(w, "\nNo changes made (dry run).")
 	} else {
 		_, _ = fmt.Fprintln(w, "\nDone! Restart Claude Code to activate.")
+	}
+	return nil
+}
+
+// ensureConfigBootstrap creates the user config file
+// (~/.config/ghost/config.yaml) from the embedded example if it's missing.
+// In dry-run mode it reports what would happen without creating anything.
+func ensureConfigBootstrap(w io.Writer, dryRun bool) error {
+	if dryRun {
+		path, err := config.ConfigFilePath()
+		if err != nil {
+			return fmt.Errorf("config file path: %w", err)
+		}
+		if _, err := os.Stat(path); err == nil {
+			_, _ = fmt.Fprintf(w, "  ✓ config file exists: %s\n", path)
+		} else {
+			_, _ = fmt.Fprintf(w, "  ~ would create config file: %s\n", path)
+		}
+		return nil
+	}
+
+	path, created, err := config.EnsureConfigFile()
+	if err != nil {
+		return fmt.Errorf("ensure config file: %w", err)
+	}
+	if created {
+		_, _ = fmt.Fprintf(w, "  + created config file: %s\n", path)
+	} else {
+		_, _ = fmt.Fprintf(w, "  ✓ config file exists: %s\n", path)
 	}
 	return nil
 }
