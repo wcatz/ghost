@@ -126,7 +126,12 @@ function Install-Ghost {
     }
 
     $destExe = Join-Path $Destination 'ghost.exe'
+    $oldExe = "$destExe.old"
+    if (Test-Path $destExe) {
+        Move-Item -Path $destExe -Destination $oldExe -Force
+    }
     Copy-Item -Path $exePath -Destination $destExe -Force
+    Remove-Item -Path $oldExe -Force -ErrorAction SilentlyContinue
 
     return $destExe
 }
