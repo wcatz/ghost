@@ -97,14 +97,20 @@ function Get-GhostRelease {
     $previousProgressPreference = $ProgressPreference
     $ProgressPreference = 'SilentlyContinue'
     try {
-        Invoke-WebRequest -Uri $ReleaseInfo.ZipUrl -OutFile $zipPath
-        Invoke-WebRequest -Uri $ReleaseInfo.ChecksumsUrl -OutFile $checksumsPath
-    }
-    finally {
-        $ProgressPreference = $previousProgressPreference
-    }
+        try {
+            Invoke-WebRequest -Uri $ReleaseInfo.ZipUrl -OutFile $zipPath
+            Invoke-WebRequest -Uri $ReleaseInfo.ChecksumsUrl -OutFile $checksumsPath
+        }
+        finally {
+            $ProgressPreference = $previousProgressPreference
+        }
 
-    Test-Checksum -FilePath $zipPath -FileName $ReleaseInfo.ZipName -ChecksumsPath $checksumsPath
+        Test-Checksum -FilePath $zipPath -FileName $ReleaseInfo.ZipName -ChecksumsPath $checksumsPath
+    }
+    catch {
+        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
 
     return @{ TempDir = $tempDir; ZipPath = $zipPath }
 }
@@ -218,7 +224,10 @@ function Main {
     }
     catch {
         Write-Error "Install failed: $($_.Exception.Message)"
-        exit 1
+        if ($PSCommandPath) {
+            exit 1
+        }
+        return
     }
     finally {
         if ($tempDir -and (Test-Path $tempDir)) {
