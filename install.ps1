@@ -71,9 +71,9 @@ function Test-Checksum {
         [Parameter(Mandatory)][string]$ChecksumsPath
     )
 
-    $line = Get-Content $ChecksumsPath | Where-Object { $_ -match [regex]::Escape($FileName) }
-    if (-not $line) {
-        throw "No checksum entry found for $FileName in checksums.txt"
+    $line = Get-Content $ChecksumsPath | Where-Object { $_ -match "\s+$([regex]::Escape($FileName))$" }
+    if (@($line).Count -ne 1) {
+        throw "Expected exactly one checksum entry for $FileName, found $(@($line).Count)"
     }
     $expected = ($line -split '\s+')[0].ToLowerInvariant()
     $actual = (Get-FileHash -Path $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -94,8 +94,15 @@ function Get-GhostRelease {
     $zipPath = Join-Path $tempDir $ReleaseInfo.ZipName
     $checksumsPath = Join-Path $tempDir 'checksums.txt'
 
-    Invoke-WebRequest -Uri $ReleaseInfo.ZipUrl -OutFile $zipPath
-    Invoke-WebRequest -Uri $ReleaseInfo.ChecksumsUrl -OutFile $checksumsPath
+    $previousProgressPreference = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $ReleaseInfo.ZipUrl -OutFile $zipPath
+        Invoke-WebRequest -Uri $ReleaseInfo.ChecksumsUrl -OutFile $checksumsPath
+    }
+    finally {
+        $ProgressPreference = $previousProgressPreference
+    }
 
     Test-Checksum -FilePath $zipPath -FileName $ReleaseInfo.ZipName -ChecksumsPath $checksumsPath
 
