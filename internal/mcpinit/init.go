@@ -294,13 +294,15 @@ const (
 )
 
 // reconcileHook adds the hook if absent, migrates it in place if it exactly
-// matches legacyCmd — the pre-#251 Windows-broken single-quoted form — and
-// otherwise leaves it untouched, including hand-edited commands that merely
-// differ from desiredCmd, since ghost mcp init must stay non-destructive on
-// re-run. The migration match is exact, not substring, so a hand-edited
-// wrapper that happens to also mention cmdSubstr is never rewritten.
+// matches legacyCmd — the pre-#251 Windows-broken single-quoted form — or if
+// it invokes a ghost binary at a stale path (#273, e.g. after an upgrade
+// moved the binary), and otherwise leaves it untouched, including hand-edited
+// commands that merely differ from desiredCmd, since ghost mcp init must stay
+// non-destructive on re-run. The legacy-quoting match is exact, not
+// substring, so a hand-edited wrapper that happens to also mention cmdSubstr
+// is never rewritten.
 func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd, legacyCmd string, isWindows bool) (hookReconcileAction, error) {
-	_, exists, err := sf.findHookCommand(event, cmdSubstr)
+	existingCmd, exists, err := sf.findHookCommand(event, cmdSubstr)
 	if err != nil {
 		return hookUnchanged, fmt.Errorf("parse existing %s hooks: %w", event, err)
 	}
@@ -317,6 +319,10 @@ func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd, legacyCmd str
 		return hookAdded, nil
 	}
 
+	if existingCmd == desiredCmd {
+		return hookUnchanged, nil
+	}
+
 	if isWindows && legacyCmd != desiredCmd {
 		isLegacy, err := sf.hasExactHookCommand(event, legacyCmd)
 		if err != nil {
@@ -330,7 +336,100 @@ func reconcileHook(sf *settingsFile, event, cmdSubstr, desiredCmd, legacyCmd str
 		}
 	}
 
+	if isStaleGhostHookCommand(existingCmd, desiredCmd) {
+		if _, err := sf.replaceHookCommand(event, existingCmd, desiredCmd); err != nil {
+			return hookUnchanged, fmt.Errorf("repair stale hook path: %w", err)
+		}
+		return hookMigrated, nil
+	}
+
 	return hookUnchanged, nil
+}
+
+// isStaleGhostHookCommand reports whether existingCmd invokes a ghost binary
+// (basename "ghost"/"ghost.exe", case-insensitive) at a different path than
+// desiredCmd, with the same trailing arguments — the #273 case where an
+// upgrade moved the binary and left the hook pointing at the old location.
+// Hand-edited wrapper commands (whose leading token isn't a ghost binary) are
+// left untouched.
+func isStaleGhostHookCommand(existingCmd, desiredCmd string) bool {
+	existingBin, existingRest, ok := splitHookCommand(existingCmd)
+	if !ok || !isGhostBinaryName(existingBin) {
+		return false
+	}
+	desiredBin, desiredRest, ok := splitHookCommand(desiredCmd)
+	if !ok || !isGhostBinaryName(desiredBin) {
+		return false
+	}
+	return existingBin != desiredBin && existingRest == desiredRest
+}
+
+// isGhostBinaryName reports whether path's basename is "ghost" or
+// "ghost.exe" (case-insensitive), mirroring mcpGhostCommand's check.
+func isGhostBinaryName(path string) bool {
+	base := hookCommandBase(path)
+	base = strings.ToLower(base)
+	base = strings.TrimSuffix(base, ".exe")
+	return base == "ghost"
+}
+
+// hookCommandBase extracts the final path segment, splitting on both '/' and
+// '\\' since a hook command embedding a Windows path may be parsed on any
+// host OS (filepath.Base only splits on the host separator).
+func hookCommandBase(path string) string {
+	i := strings.LastIndexAny(path, `/\`)
+	return path[i+1:]
+}
+
+// splitHookCommand extracts the leading executable token from a hook command
+// string and the remainder (trimmed of leading whitespace), reversing
+// shellQuoteWindows/shellQuotePOSIX. It handles the three forms
+// ghost mcp init can produce: Windows double-quoting with ""-doubling,
+// POSIX single-quoting with '\''-escaping, and a bare unquoted path.
+func splitHookCommand(cmd string) (bin, rest string, ok bool) {
+	if cmd == "" {
+		return "", "", false
+	}
+	switch cmd[0] {
+	case '"':
+		var b strings.Builder
+		i := 1
+		for i < len(cmd) {
+			if cmd[i] == '"' {
+				if i+1 < len(cmd) && cmd[i+1] == '"' {
+					b.WriteByte('"')
+					i += 2
+					continue
+				}
+				return b.String(), strings.TrimSpace(cmd[i+1:]), true
+			}
+			b.WriteByte(cmd[i])
+			i++
+		}
+		return "", "", false
+	case '\'':
+		var b strings.Builder
+		i := 1
+		for i < len(cmd) {
+			if cmd[i] == '\'' {
+				if strings.HasPrefix(cmd[i:], `'\''`) {
+					b.WriteByte('\'')
+					i += 4
+					continue
+				}
+				return b.String(), strings.TrimSpace(cmd[i+1:]), true
+			}
+			b.WriteByte(cmd[i])
+			i++
+		}
+		return "", "", false
+	default:
+		i := strings.IndexByte(cmd, ' ')
+		if i < 0 {
+			return cmd, "", true
+		}
+		return cmd[:i], strings.TrimSpace(cmd[i+1:]), true
+	}
 }
 
 // ensureHook adds a SessionStart hook if not already present, or migrates it

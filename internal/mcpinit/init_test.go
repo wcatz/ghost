@@ -571,6 +571,63 @@ func TestReconcileHook_MigratesExactLegacyCommandOnly(t *testing.T) {
 	}
 }
 
+// TestReconcileHook_RepairsStaleGhostPathWindows covers #273: after an
+// upgrade moves the ghost binary, a previously registered hook pointing at
+// the old path must be rewritten to the new one, not left stale.
+func TestReconcileHook_RepairsStaleGhostPathWindows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+	stale := `"C:\old\ghost.exe" hook session-start`
+	desired := `"C:\new\ghost.exe" hook session-start`
+	legacy := `'C:\new\ghost.exe' hook session-start`
+	if err := sf.addHook("SessionStart", hookEntry{Hooks: []hookAction{{Type: "command", Command: stale}}}); err != nil {
+		t.Fatalf("addHook: %v", err)
+	}
+
+	action, err := reconcileHook(sf, "SessionStart", "hook session-start", desired, legacy, true)
+	if err != nil {
+		t.Fatalf("reconcileHook: %v", err)
+	}
+	if action != hookMigrated {
+		t.Errorf("action = %v, want hookMigrated", action)
+	}
+	got, ok, _ := sf.findHookCommand("SessionStart", "hook session-start")
+	if !ok || got != desired {
+		t.Errorf("findHookCommand = (%q, %v), want (%q, true)", got, ok, desired)
+	}
+}
+
+// TestReconcileHook_RepairsStaleGhostPathPOSIX is the POSIX counterpart of
+// TestReconcileHook_RepairsStaleGhostPathWindows — the repair must not be
+// gated on isWindows, since binaries move on every platform.
+func TestReconcileHook_RepairsStaleGhostPathPOSIX(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+	stale := `'/opt/old/ghost' hook session-start`
+	desired := `'/opt/new/ghost' hook session-start`
+	if err := sf.addHook("SessionStart", hookEntry{Hooks: []hookAction{{Type: "command", Command: stale}}}); err != nil {
+		t.Fatalf("addHook: %v", err)
+	}
+
+	action, err := reconcileHook(sf, "SessionStart", "hook session-start", desired, desired, false)
+	if err != nil {
+		t.Fatalf("reconcileHook: %v", err)
+	}
+	if action != hookMigrated {
+		t.Errorf("action = %v, want hookMigrated", action)
+	}
+	got, ok, _ := sf.findHookCommand("SessionStart", "hook session-start")
+	if !ok || got != desired {
+		t.Errorf("findHookCommand = (%q, %v), want (%q, true)", got, ok, desired)
+	}
+}
+
 // TestReconcileHook_StopsOnMalformedHooks covers the CodeRabbit finding on
 // PR #255: a structurally invalid "hooks" value (valid JSON, wrong shape)
 // must halt reconciliation with an error rather than being silently
