@@ -480,7 +480,7 @@ git commit -m "feat: wire up install.ps1 main orchestration and error handling"
 Find the existing install instructions in `README.md` (the `go install` /
 `make install` section) and add a Windows subsection immediately after it:
 
-```markdown
+````markdown
 ### Windows
 
 ```powershell
@@ -492,7 +492,7 @@ This downloads the latest release, verifies its checksum, installs
 user PATH. Open a new terminal afterward, then run `ghost mcp init`.
 
 Re-running the command upgrades an existing install in place.
-```
+````
 
 - [ ] **Step 2: Commit**
 

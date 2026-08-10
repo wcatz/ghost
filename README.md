@@ -150,7 +150,7 @@ Switching *in* is just as easy: `ghost mcp init` imports Claude Code memories, a
 ### Where's the off switch?
 
 - **Per client:** remove the `ghost` entry from your MCP config. Ghost only runs when your client spawns it over stdio — there is no daemon.
-- **Embeddings:** set `embedding.enabled: false` in `~/.config/ghost/config.yaml`.
+- **Embeddings:** set `embedding.enabled: false` in your config file (see [Configuration](#configuration) for the OS-specific path — `%AppData%\ghost\config.yaml` on Windows, `~/.config/ghost/config.yaml` elsewhere).
 - **Consolidation:** never runs unless you invoke `ghost reflect` — and that's a dry run unless you pass `--apply`.
 - **Everything:** delete `$XDG_DATA_HOME/ghost`, or `~/.local/share/ghost` when `XDG_DATA_HOME` is unset. There is nothing else.
 

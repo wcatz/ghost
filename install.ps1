@@ -98,8 +98,8 @@ function Get-GhostRelease {
     $ProgressPreference = 'SilentlyContinue'
     try {
         try {
-            Invoke-WebRequest -Uri $ReleaseInfo.ZipUrl -OutFile $zipPath
-            Invoke-WebRequest -Uri $ReleaseInfo.ChecksumsUrl -OutFile $checksumsPath
+            Invoke-WebRequest -Uri $ReleaseInfo.ZipUrl -OutFile $zipPath -UseBasicParsing
+            Invoke-WebRequest -Uri $ReleaseInfo.ChecksumsUrl -OutFile $checksumsPath -UseBasicParsing
         }
         finally {
             $ProgressPreference = $previousProgressPreference
@@ -133,10 +133,19 @@ function Install-Ghost {
 
     $destExe = Join-Path $Destination 'ghost.exe'
     $oldExe = "$destExe.old"
-    if (Test-Path $destExe) {
+    $hadExisting = Test-Path $destExe
+    if ($hadExisting) {
         Move-Item -Path $destExe -Destination $oldExe -Force
     }
-    Copy-Item -Path $exePath -Destination $destExe -Force
+    try {
+        Copy-Item -Path $exePath -Destination $destExe -Force
+    }
+    catch {
+        if ($hadExisting -and (Test-Path $oldExe)) {
+            Move-Item -Path $oldExe -Destination $destExe -Force
+        }
+        throw
+    }
     Remove-Item -Path $oldExe -Force -ErrorAction SilentlyContinue
 
     return $destExe
@@ -173,7 +182,10 @@ function Add-UserPathEntry {
         if (-not $current) { $current = '' }
 
         $entries = $current -split ';' | Where-Object { $_ -ne '' }
-        $alreadyPresent = $entries | Where-Object { $_.TrimEnd('\') -ieq $Directory.TrimEnd('\') }
+        $normalizedDirectory = [Environment]::ExpandEnvironmentVariables($Directory).TrimEnd('\')
+        $alreadyPresent = $entries | Where-Object {
+            [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ieq $normalizedDirectory
+        }
         if ($alreadyPresent) {
             return $false
         }
