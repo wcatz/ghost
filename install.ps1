@@ -135,3 +135,44 @@ function Install-Ghost {
 
     return $destExe
 }
+
+function Broadcast-EnvironmentChange {
+    $signature = @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(
+    IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+    uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+    Add-Type -MemberDefinition $signature -Namespace Win32Native -Name User32 -ErrorAction SilentlyContinue
+
+    $HWND_BROADCAST = [IntPtr]0xffff
+    $WM_SETTINGCHANGE = 0x1a
+    $SMTO_ABORTIFHUNG = 0x2
+    $result = [UIntPtr]::Zero
+    [Win32Native.User32]::SendMessageTimeout(
+        $HWND_BROADCAST, $WM_SETTINGCHANGE, [UIntPtr]::Zero, 'Environment',
+        $SMTO_ABORTIFHUNG, 5000, [ref]$result) | Out-Null
+}
+
+function Add-UserPathEntry {
+    param(
+        [Parameter(Mandatory)][string]$Directory
+    )
+
+    $envKey = 'Registry::HKEY_CURRENT_USER\Environment'
+    $current = (Get-ItemProperty -Path $envKey -Name 'Path' -ErrorAction SilentlyContinue).Path
+    if (-not $current) { $current = '' }
+
+    $entries = $current -split ';' | Where-Object { $_ -ne '' }
+    $alreadyPresent = $entries | Where-Object { $_.TrimEnd('\') -ieq $Directory.TrimEnd('\') }
+    if ($alreadyPresent) {
+        return $false
+    }
+
+    $newValue = if ($current -eq '') { $Directory } else { "$current;$Directory" }
+    Set-ItemProperty -Path $envKey -Name 'Path' -Value $newValue -Type ExpandString
+
+    Broadcast-EnvironmentChange
+
+    return $true
+}
