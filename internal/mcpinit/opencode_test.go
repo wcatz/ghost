@@ -373,3 +373,21 @@ func TestCheckPrereqs_ClaudeMissing(t *testing.T) {
 		t.Errorf("opencode target should require only ghost: %v", err)
 	}
 }
+
+func TestMCPGhostCommand_ExeSuffix(t *testing.T) {
+	binPath := filepath.Join("C:", "Users", "skinner", "ghost", "bin", "ghost.exe")
+	cfg := map[string]any{
+		"mcp": map[string]any{
+			"ghost": map[string]any{
+				"command": []any{binPath, "mcp"},
+			},
+		},
+	}
+	first, ok := mcpGhostCommand(cfg)
+	if first != binPath {
+		t.Errorf("first = %q, want %q", first, binPath)
+	}
+	if !ok {
+		t.Error("mcpGhostCommand: ok = false, want true for a ghost.exe command with the mcp subcommand — Windows binaries carry a .exe suffix that exact string comparison against \"ghost\" rejects")
+	}
+}
