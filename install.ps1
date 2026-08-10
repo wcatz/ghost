@@ -143,7 +143,9 @@ public static extern IntPtr SendMessageTimeout(
     IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
     uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
 '@
-    Add-Type -MemberDefinition $signature -Namespace Win32Native -Name User32 -ErrorAction SilentlyContinue
+    if (-not ([System.Management.Automation.PSTypeName]'Win32Native.User32').Type) {
+        Add-Type -MemberDefinition $signature -Namespace Win32Native -Name User32
+    }
 
     $HWND_BROADCAST = [IntPtr]0xffff
     $WM_SETTINGCHANGE = 0x1a
@@ -170,7 +172,12 @@ function Add-UserPathEntry {
     }
 
     $newValue = if ($current -eq '') { $Directory } else { "$current;$Directory" }
-    Set-ItemProperty -Path $envKey -Name 'Path' -Value $newValue -Type ExpandString
+    try {
+        Set-ItemProperty -Path $envKey -Name 'Path' -Value $newValue -Type ExpandString
+    }
+    catch {
+        throw "Failed to update user PATH in the registry: $($_.Exception.Message)"
+    }
 
     Broadcast-EnvironmentChange
 
