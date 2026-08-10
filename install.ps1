@@ -13,6 +13,8 @@ param()
 
 $ErrorActionPreference = 'Stop'
 
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 $script:Repo = 'wcatz/ghost'
 $script:InstallDir = Join-Path $env:LOCALAPPDATA 'ghost\bin'
 
