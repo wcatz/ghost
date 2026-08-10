@@ -40,6 +40,18 @@ This writes the `ghost` entry into `~/.config/opencode/opencode.json` (or merges
 
 No Go toolchain? Grab a prebuilt binary from [Releases](https://github.com/wcatz/ghost/releases/latest) — linux, macOS, and Windows, amd64 and arm64, with `checksums.txt`. Building from source needs Go 1.26+ (older toolchains fetch it automatically via `GOTOOLCHAIN=auto`).
 
+**On Windows?** Skip the manual download/unzip/PATH steps with the one-command installer:
+
+```powershell
+irm https://github.com/wcatz/ghost/releases/latest/download/install.ps1 | iex
+```
+
+This downloads the latest release, verifies its checksum, installs
+`ghost.exe` to `%LOCALAPPDATA%\ghost\bin`, and adds that directory to your
+user PATH. Open a new terminal afterward, then run `ghost mcp init`.
+
+Re-running the command upgrades an existing install in place.
+
 **Using Cursor, Goose, or another MCP client?** Ghost speaks standard MCP over stdio — point any client at the binary:
 
 ```json
@@ -109,7 +121,7 @@ Mem0, Zep, and supermemory are excellent hosted products — but self-hosting th
 
 ### Where does my data go?
 
-One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`). Ghost makes no network calls in normal operation, with three exceptions you control: **localhost** Ollama for embeddings (optional), the Claude API *only if* you run `ghost reflect` with the Haiku tier (needs `ANTHROPIC_API_KEY`; the SQLite tier is fully offline), and the GitHub API *only if* you run `ghost upgrade`. That's the complete list.
+One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`) — this path is the same on every OS, including Windows (i.e. `%USERPROFILE%\.local\share\ghost`, not `%AppData%`); only the config file follows the OS-native convention (see Configuration below). Ghost makes no network calls in normal operation, with three exceptions you control: **localhost** Ollama for embeddings (optional), the Claude API *only if* you run `ghost reflect` with the Haiku tier (needs `ANTHROPIC_API_KEY`; the SQLite tier is fully offline), and the GitHub API *only if* you run `ghost upgrade`. That's the complete list.
 
 ### What exactly gets injected into my agent's context?
 
@@ -138,7 +150,7 @@ Switching *in* is just as easy: `ghost mcp init` imports Claude Code memories, a
 ### Where's the off switch?
 
 - **Per client:** remove the `ghost` entry from your MCP config. Ghost only runs when your client spawns it over stdio — there is no daemon.
-- **Embeddings:** set `embedding.enabled: false` in `~/.config/ghost/config.yaml`.
+- **Embeddings:** set `embedding.enabled: false` in your config file (see [Configuration](#configuration) for the OS-specific path — `%AppData%\ghost\config.yaml` on Windows, `~/.config/ghost/config.yaml` elsewhere).
 - **Consolidation:** never runs unless you invoke `ghost reflect` — and that's a dry run unless you pass `--apply`.
 - **Everything:** delete `$XDG_DATA_HOME/ghost`, or `~/.local/share/ghost` when `XDG_DATA_HOME` is unset. There is nothing else.
 
@@ -265,7 +277,7 @@ Ghost works with zero config. When you want to change something, layers are (lat
 
 1. Compiled defaults
 2. `/etc/ghost/config.yaml`
-3. `~/.config/ghost/config.yaml`
+3. `~/.config/ghost/config.yaml` (honors `$XDG_CONFIG_HOME` when set; on Windows, absent an `XDG_CONFIG_HOME` override, this resolves to `%AppData%\ghost\config.yaml`)
 4. `GHOST_*` environment variables, plus `ANTHROPIC_API_KEY` for the Haiku reflection tier
 
 ```yaml
