@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -94,7 +95,7 @@ func TestEmbedOne_HappyPath(t *testing.T) {
 
 	// Create a worker with a real client pointing at a fake URL.
 	client := NewClient("http://localhost:0", "nomic-embed-text", 3)
-	worker := NewWorker(client, store, logger, 5*time.Minute)
+	worker := NewWorker(client, store, logger, 5*time.Minute, t.TempDir())
 
 	// EmbedOne with unreachable server will fail gracefully (no panic).
 	worker.EmbedOne(context.Background(), "mem-1")
@@ -114,7 +115,7 @@ func TestEmbedOne_MissingMemory(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	client := NewClient("http://localhost:0", "nomic-embed-text", 3)
-	worker := NewWorker(client, store, logger, 5*time.Minute)
+	worker := NewWorker(client, store, logger, 5*time.Minute, t.TempDir())
 
 	// Should not panic on missing memory.
 	worker.EmbedOne(context.Background(), "nonexistent")
@@ -124,8 +125,9 @@ func TestNewWorker(t *testing.T) {
 	store := newMockStore()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	client := NewClient("http://localhost:11434", "nomic-embed-text", 768)
+	dataDir := t.TempDir()
 
-	worker := NewWorker(client, store, logger, 30*time.Second)
+	worker := NewWorker(client, store, logger, 30*time.Second, dataDir)
 	if worker == nil {
 		t.Fatal("NewWorker returned nil")
 	}
@@ -135,13 +137,16 @@ func TestNewWorker(t *testing.T) {
 	if worker.interval != 30*time.Second {
 		t.Errorf("interval = %v, want 30s", worker.interval)
 	}
+	if worker.dataDir != dataDir {
+		t.Errorf("dataDir = %q, want %q", worker.dataDir, dataDir)
+	}
 }
 
 func TestWorkerRun_ContextCancellation(t *testing.T) {
 	store := newMockStore()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	client := NewClient("http://localhost:0", "nomic-embed-text", 3)
-	worker := NewWorker(client, store, logger, 24*time.Hour) // long interval so ticker doesn't fire
+	worker := NewWorker(client, store, logger, 24*time.Hour, t.TempDir()) // long interval so ticker doesn't fire
 
 	ctx, cancel := context.WithCancel(context.Background())
 	projectIDs := make(chan string, 1)
@@ -166,7 +171,7 @@ func TestWorkerRun_ChannelClose(t *testing.T) {
 	store := newMockStore()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	client := NewClient("http://localhost:0", "nomic-embed-text", 3)
-	worker := NewWorker(client, store, logger, 24*time.Hour)
+	worker := NewWorker(client, store, logger, 24*time.Hour, t.TempDir())
 
 	ctx := context.Background()
 	projectIDs := make(chan string)
@@ -193,7 +198,7 @@ func TestWorkerRun_ProcessesProject(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	client := NewClient("http://localhost:0", "nomic-embed-text", 3)
-	worker := NewWorker(client, store, logger, 24*time.Hour)
+	worker := NewWorker(client, store, logger, 24*time.Hour, t.TempDir())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	projectIDs := make(chan string, 1)
@@ -255,7 +260,7 @@ func TestProcessProject_NoUnembedded(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	client := NewClient("http://localhost:0", "nomic-embed-text", 3)
-	worker := NewWorker(client, store, logger, 5*time.Minute)
+	worker := NewWorker(client, store, logger, 5*time.Minute, t.TempDir())
 
 	// Should return early without error (no unembedded memories, plus Ollama not alive).
 	worker.processProject(context.Background(), "test-project")
@@ -285,7 +290,7 @@ func TestSweepOnce_BackfillsWithoutSaves(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	client := NewClient(srv.URL, "test-model", 3)
-	worker := NewWorker(client, store, logger, time.Minute)
+	worker := NewWorker(client, store, logger, time.Minute, t.TempDir())
 
 	// No channel sends — the sweep alone must find and embed the memory.
 	worker.SweepOnce(context.Background())
@@ -296,4 +301,112 @@ func TestSweepOnce_BackfillsWithoutSaves(t *testing.T) {
 	if !hasEmb {
 		t.Fatal("sweep did not embed a memory in a project never seen on the channel")
 	}
+}
+
+// markerPath returns the path checkAlive uses for the Ollama-down marker
+// inside dataDir, mirroring the join in checkAlive itself.
+func markerPath(dataDir string) string {
+	return filepath.Join(dataDir, OllamaDownMarkerFilename)
+}
+
+// TestCheckAlive_WritesMarkerWhenDown verifies that observing Ollama
+// unreachable for the first time writes the down-since marker file, with a
+// parseable RFC3339 timestamp close to "now" — this is the signal `ghost mcp
+// status` reads to report outage duration (issue #287).
+func TestCheckAlive_WritesMarkerWhenDown(t *testing.T) {
+	dataDir := t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient("http://localhost:0", "nomic-embed-text", 3) // unreachable
+	worker := NewWorker(client, newMockStore(), logger, time.Minute, dataDir)
+
+	if alive := worker.checkAlive(context.Background()); alive {
+		t.Fatal("checkAlive = true, want false for an unreachable client")
+	}
+
+	data, err := os.ReadFile(markerPath(dataDir))
+	if err != nil {
+		t.Fatalf("marker file was not created: %v", err)
+	}
+	since, err := time.Parse(time.RFC3339, string(data))
+	if err != nil {
+		t.Fatalf("marker file content %q is not a valid RFC3339 timestamp: %v", data, err)
+	}
+	if age := time.Since(since); age < 0 || age > 10*time.Second {
+		t.Errorf("marker timestamp %v is not close to now (age %v)", since, age)
+	}
+}
+
+// TestCheckAlive_RemovesMarkerWhenReachableAgain verifies that once Ollama
+// answers alive, a previously-written down-since marker is removed so a
+// resolved outage stops being reported.
+func TestCheckAlive_RemovesMarkerWhenReachableAgain(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.WriteFile(markerPath(dataDir), []byte("2020-01-01T00:00:00Z"), 0o600); err != nil {
+		t.Fatalf("seed marker file: %v", err)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient(srv.URL, "nomic-embed-text", 3)
+	worker := NewWorker(client, newMockStore(), logger, time.Minute, dataDir)
+
+	if alive := worker.checkAlive(context.Background()); !alive {
+		t.Fatal("checkAlive = false, want true for a reachable client")
+	}
+
+	if _, err := os.Stat(markerPath(dataDir)); !os.IsNotExist(err) {
+		t.Errorf("marker file still present after Ollama became reachable: err=%v", err)
+	}
+}
+
+// TestCheckAlive_DoesNotClobberExistingMarker is the regression test for the
+// actual bug behind #287: if checkAlive rewrote the marker on every poll, a
+// still-down Ollama would keep resetting its own "down since" clock and the
+// reported duration would never grow past one poll interval. Observing "down"
+// repeatedly must leave an existing marker's timestamp untouched. Exercises
+// SweepOnce (one of the two real call sites named in the issue) rather than
+// checkAlive directly, so the regression is pinned at the entry point the bug
+// report describes.
+func TestCheckAlive_DoesNotClobberExistingMarker(t *testing.T) {
+	dataDir := t.TempDir()
+	const backdated = "2020-01-01T00:00:00Z"
+	if err := os.WriteFile(markerPath(dataDir), []byte(backdated), 0o600); err != nil {
+		t.Fatalf("seed marker file: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient("http://localhost:0", "nomic-embed-text", 3) // unreachable
+	store := newMockStore()
+	worker := NewWorker(client, store, logger, time.Minute, dataDir)
+
+	worker.SweepOnce(context.Background())
+
+	data, err := os.ReadFile(markerPath(dataDir))
+	if err != nil {
+		t.Fatalf("marker file missing after sweep: %v", err)
+	}
+	if string(data) != backdated {
+		t.Errorf("marker timestamp = %q, want unchanged %q (sweep clobbered it)", data, backdated)
+	}
+}
+
+// TestCheckAlive_BlankDataDirDisablesMarker verifies that a Worker built with
+// dataDir == "" (the fallback when config.DataDir() itself fails at startup —
+// see cmd/ghost/main.go) behaves exactly like calling client.Alive directly,
+// without attempting to write anywhere.
+func TestCheckAlive_BlankDataDirDisablesMarker(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient("http://localhost:0", "nomic-embed-text", 3) // unreachable
+	worker := NewWorker(client, newMockStore(), logger, time.Minute, "")
+
+	if alive := worker.checkAlive(context.Background()); alive {
+		t.Error("checkAlive = true, want false for an unreachable client")
+	}
+	// No dataDir means no marker path to check — the assertion above not
+	// panicking (no filepath.Join(\"\", ...) misuse causing a write to an
+	// unexpected location) is the behavior under test.
 }
