@@ -13,6 +13,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/provider"
 )
 
 // testStore creates an in-memory Store suitable for testing.
@@ -716,6 +717,53 @@ func TestTaskUpdate_EmptyStatusPreservesCurrentStatus(t *testing.T) {
 	}
 	if after.Priority != 1 {
 		t.Errorf("priority should be updated to 1, got %d", after.Priority)
+	}
+}
+
+func TestGhostTaskUpdate_RejectsInvalidStatus(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	id, err := store.CreateTask(ctx, "abc123", "Fix the bug", "needs triage", 2)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_task_update",
+		Arguments: map[string]any{"task_id": id, "status": "pendding"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_task_update: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error result for invalid status, got: %+v", result.Content)
+	}
+
+	var msg string
+	if len(result.Content) > 0 {
+		if tc, ok := result.Content[0].(*mcp.TextContent); ok {
+			msg = tc.Text
+		}
+	}
+	if strings.Contains(msg, "CHECK constraint") {
+		t.Errorf("expected a clear validation error, but got the raw SQLite constraint error: %s", msg)
+	}
+	wantSubstr := `invalid status "pendding" — must be one of: pending, active, blocked, done`
+	if !strings.Contains(msg, wantSubstr) {
+		t.Errorf("expected error to contain %q, got: %s", wantSubstr, msg)
+	}
+
+	// The task's status must be untouched by the rejected update.
+	task, err := store.GetTask(ctx, id)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task.Status != "pending" {
+		t.Errorf("status should remain pending after rejected update, got %q", task.Status)
 	}
 }
 
@@ -1519,5 +1567,116 @@ func TestTruncateUTF8(t *testing.T) {
 		if !utf8.ValidString(got) {
 			t.Errorf("truncateUTF8(%q, %d) produced invalid UTF-8: %q", tc.in, tc.maxBytes, got)
 		}
+	}
+}
+
+func TestShortID(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+		want string
+	}{
+		{"shorter than 8", "abc", "abc"},
+		{"exactly 8", "12345678", "12345678"},
+		{"longer than 8", "123456789abcdef", "12345678"},
+		{"empty", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shortID(tc.id); got != tc.want {
+				t.Errorf("shortID(%q) = %q, want %q", tc.id, got, tc.want)
+			}
+		})
+	}
+}
+
+// shortTaskListStore wraps a real store but overrides ListTasks to return a
+// fixed, caller-supplied task instead of querying SQLite. CreateTask always
+// mints a 32-char hex ID (hex(randomblob(16)), see internal/memory/schema.go),
+// so a task ID shorter than 8 characters can never occur through the public
+// Store API — this wrapper is the only way to get one in front of the
+// ghost_task_list tool and the project-tasks resource template, to prove
+// their output formatting doesn't panic on one.
+type shortTaskListStore struct {
+	provider.MemoryStore
+	task memory.Task
+}
+
+func (s shortTaskListStore) ListTasks(ctx context.Context, projectID, status string, limit int) ([]memory.Task, error) {
+	if status != "" && status != s.task.Status {
+		return nil, nil
+	}
+	return []memory.Task{s.task}, nil
+}
+
+// TestGhostTaskList_ShortTaskID proves the ghost_task_list tool formats a
+// task ID via shortID rather than an unguarded t.ID[:8] slice. Before the
+// fix, t.ID[:8] on this 3-character ID panics with "slice bounds out of
+// range"; shortID returns it unchanged.
+func TestGhostTaskList_ShortTaskID(t *testing.T) {
+	store := testStore(t)
+	wrapped := shortTaskListStore{
+		MemoryStore: store,
+		task: memory.Task{
+			ID:        "abc",
+			ProjectID: "abc123",
+			Title:     "short id task",
+			Status:    "pending",
+			Priority:  1,
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(wrapped, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_task_list",
+		Arguments: map[string]any{"project_id": "abc123"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_task_list: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("ghost_task_list returned an error result: %+v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(text.Text, "`abc`") {
+		t.Errorf("expected output to contain the short task id `abc`, got: %s", text.Text)
+	}
+}
+
+// TestProjectTasksResource_ShortTaskID is the resource-template counterpart
+// of TestGhostTaskList_ShortTaskID: it exercises the second t.ID[:8] call
+// site, in the ghost://project/{project_id}/tasks resource template.
+func TestProjectTasksResource_ShortTaskID(t *testing.T) {
+	store := testStore(t)
+	wrapped := shortTaskListStore{
+		MemoryStore: store,
+		task: memory.Task{
+			ID:        "abc",
+			ProjectID: "abc123",
+			Title:     "short id task",
+			Status:    "pending",
+			Priority:  1,
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(wrapped, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	result, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: "ghost://project/abc123/tasks"})
+	if err != nil {
+		t.Fatalf("ReadResource tasks: %v", err)
+	}
+	if len(result.Contents) == 0 {
+		t.Fatal("expected resource contents")
+	}
+	if !strings.Contains(result.Contents[0].Text, "`abc`") {
+		t.Errorf("expected output to contain the short task id `abc`, got: %s", result.Contents[0].Text)
 	}
 }

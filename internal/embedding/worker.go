@@ -51,12 +51,38 @@ func (w *Worker) Run(ctx context.Context, projectIDs <-chan string) {
 			if !ok {
 				return
 			}
-			w.processProject(ctx, pid)
+			w.safeProcessProject(ctx, pid)
 
 		case <-ticker.C:
-			w.SweepOnce(ctx)
+			w.safeSweepOnce(ctx)
 		}
 	}
+}
+
+// safeProcessProject wraps processProject with panic recovery. A panic here
+// must not escape into Run's select loop: unwinding past Run itself would
+// leave nothing left to fire the loop's next tick/message, so embedding
+// would stop for good even after the panic is otherwise "handled". Recovering
+// inside this small function means control returns to Run — still live —
+// once this call completes, so the loop keeps going on the next iteration.
+func (w *Worker) safeProcessProject(ctx context.Context, projectID string) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.logger.Error("panic in embedding processProject, recovered", "panic", r, "project_id", projectID)
+		}
+	}()
+	w.processProject(ctx, projectID)
+}
+
+// safeSweepOnce wraps SweepOnce with panic recovery for the same reason as
+// safeProcessProject above.
+func (w *Worker) safeSweepOnce(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.logger.Error("panic in embedding sweep, recovered", "panic", r)
+		}
+	}()
+	w.SweepOnce(ctx)
 }
 
 // SweepOnce embeds unembedded memories across all projects.
