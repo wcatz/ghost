@@ -544,6 +544,12 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 // for the category-aware time-decay + pinned-boost formula so the two
 // callers can never drift apart. It is a fragment, not a full query: callers
 // interpolate it into their own "ORDER BY (...) DESC" clause.
+// The 0.15 and 0.3 floors create a dead zone at the low end of each decaying
+// category: a brand-new memory saved at importance 0.15 (or 0.3) scores
+// identically to a maximally-important, fully-decayed one of the same
+// category (1.0 * 0.15 == 0.15 * 1.0). Accepted — importance that low is rare
+// in practice (defaults are 0.5+) — but if ranking ever looks off for a
+// low-importance category member, this tie is why.
 const DecayRankingSQL = `
 	importance
 	* CASE
