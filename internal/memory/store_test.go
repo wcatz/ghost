@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -2780,5 +2781,397 @@ func TestSetDemotionThresholdOverridesDefault(t *testing.T) {
 	}
 	if !got[c] {
 		t.Errorf("expected backfill to include c; got %+v", top)
+	}
+}
+
+// --- Decay floor boundary coverage (issue #282) ---
+
+// setCreatedAtDaysAgo backdates a memory's created_at by the given number of
+// days, the same datetime('now', modifier) pattern already used to backdate
+// decisions (see TestListDecisionsLimitPicksNewestNotLiveOnly) — Create and
+// Upsert always stamp "now", so decay-boundary tests must reach into the DB
+// directly to simulate an old memory.
+func setCreatedAtDaysAgo(t *testing.T, s *Store, id string, days int) {
+	t.Helper()
+	if _, err := s.db.Exec(
+		`UPDATE memories SET created_at = datetime('now', ?) WHERE id = ?`,
+		fmt.Sprintf("-%d days", days), id,
+	); err != nil {
+		t.Fatalf("backdate created_at for %s: %v", id, err)
+	}
+}
+
+// memoryScore evaluates the exact shared DecayRankingSQL expression for a
+// single memory, so boundary tests exercise the real production formula
+// instead of a Go reimplementation of it.
+func memoryScore(t *testing.T, s *Store, id string) float64 {
+	t.Helper()
+	var score float64
+	if err := s.db.QueryRow(
+		`SELECT (`+DecayRankingSQL+`) FROM memories WHERE id = ?`, id,
+	).Scan(&score); err != nil {
+		t.Fatalf("score memory %s: %v", id, err)
+	}
+	return score
+}
+
+// memoryCreatedAt reads a memory's raw created_at column.
+func memoryCreatedAt(t *testing.T, s *Store, id string) string {
+	t.Helper()
+	var createdAt string
+	if err := s.db.QueryRow(
+		`SELECT created_at FROM memories WHERE id = ?`, id,
+	).Scan(&createdAt); err != nil {
+		t.Fatalf("read created_at for %s: %v", id, err)
+	}
+	return createdAt
+}
+
+// TestDecayFloorCrossoverBoundaries pins down the exact day counts where each
+// decay tier's MAX(floor, curve) expression (see DecayRankingSQL in store.go)
+// switches from "still decaying" to "floored", plus a deep-age point per tier
+// that confirms the MAX(...) clamp is actually doing something (at the exact
+// crossover day the raw curve already equals the floor, so a test only at
+// that day can't tell a real MAX() from an accidentally-removed one).
+//
+// The 30-day tier (gotcha/decision/dependency; floor 0.15) crosses at exactly
+// 170 days: 1/(1+170/30) = 0.15. The 45-day tier (pattern/architecture; floor
+// 0.3) crosses at exactly 105 days: 1/(1+105/45) = 0.3. One day on either side
+// of each boundary keeps a comfortable margin (~0.0008 and ~0.002
+// respectively) clear of any timing jitter between backdating created_at and
+// scoring.
+func TestDecayFloorCrossoverBoundaries(t *testing.T) {
+	t.Run("thirty_day_tier_gotcha", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		const importance = 0.8
+
+		mk := func(label string, days int) string {
+			id, err := s.Create(ctx, testProject, Memory{
+				Category: "gotcha", Content: label, Source: "manual",
+				Importance: importance, Tags: []string{},
+			})
+			if err != nil {
+				t.Fatalf("Create %s: %v", label, err)
+			}
+			setCreatedAtDaysAgo(t, s, id, days)
+			return id
+		}
+
+		atFloor := mk("at floor (170d)", 170)
+		beforeFloor := mk("before floor (169d)", 169)
+		deepFloor := mk("deep past floor (300d)", 300)
+
+		wantFloor := 0.15 * importance
+		if got := memoryScore(t, s, atFloor); math.Abs(got-wantFloor) > 1e-6 {
+			t.Errorf("170-day gotcha score = %v, want floor %v", got, wantFloor)
+		}
+		if got := memoryScore(t, s, beforeFloor); got <= wantFloor+1e-4 {
+			t.Errorf("169-day gotcha score = %v, want strictly > floor %v (still on curve)", got, wantFloor)
+		}
+		// At 300 days the raw curve (1/(1+300/30) = 0.0909) sits well below
+		// the floor — if MAX(0.15, ...) were ever removed or weakened, this
+		// would score ~0.0727 instead of exactly 0.12, unlike the 170-day
+		// case where curve and floor coincide anyway.
+		if got := memoryScore(t, s, deepFloor); math.Abs(got-wantFloor) > 1e-6 {
+			t.Errorf("300-day gotcha score = %v, want floor %v (clamp must dominate the raw curve)", got, wantFloor)
+		}
+	})
+
+	t.Run("forty_five_day_tier_pattern", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		const importance = 0.8
+
+		mk := func(label string, days int) string {
+			id, err := s.Create(ctx, testProject, Memory{
+				Category: "pattern", Content: label, Source: "manual",
+				Importance: importance, Tags: []string{},
+			})
+			if err != nil {
+				t.Fatalf("Create %s: %v", label, err)
+			}
+			setCreatedAtDaysAgo(t, s, id, days)
+			return id
+		}
+
+		atFloor := mk("at floor (105d)", 105)
+		beforeFloor := mk("before floor (104d)", 104)
+		deepFloor := mk("deep past floor (300d)", 300)
+
+		wantFloor := 0.3 * importance
+		if got := memoryScore(t, s, atFloor); math.Abs(got-wantFloor) > 1e-6 {
+			t.Errorf("105-day pattern score = %v, want floor %v", got, wantFloor)
+		}
+		if got := memoryScore(t, s, beforeFloor); got <= wantFloor+1e-4 {
+			t.Errorf("104-day pattern score = %v, want strictly > floor %v (still on curve)", got, wantFloor)
+		}
+		// At 300 days the raw curve (1/(1+300/45) = 0.1304) sits well below
+		// the floor — same rationale as the 30-day tier's deep-age check.
+		if got := memoryScore(t, s, deepFloor); math.Abs(got-wantFloor) > 1e-6 {
+			t.Errorf("300-day pattern score = %v, want floor %v (clamp must dominate the raw curve)", got, wantFloor)
+		}
+	})
+}
+
+// TestGetTopMemoriesCrossCategoryRankInversion confirms a never-decaying
+// category can outrank a heavily-decayed one despite a much lower importance
+// — fact/preference/convention always score importance*1.0, while gotcha/
+// decision/dependency floor at importance*0.15 once past 170 days old.
+func TestGetTopMemoriesCrossCategoryRankInversion(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	factID, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "never decays", Source: "manual",
+		Importance: 0.4, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create fact: %v", err)
+	}
+
+	gotchaID, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "floored by age", Source: "manual",
+		Importance: 1.0, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create gotcha: %v", err)
+	}
+	setCreatedAtDaysAgo(t, s, gotchaID, 200)
+
+	factScore := memoryScore(t, s, factID)
+	gotchaScore := memoryScore(t, s, gotchaID)
+	if want := 0.4; math.Abs(factScore-want) > 1e-6 {
+		t.Errorf("fact score = %v, want %v", factScore, want)
+	}
+	if want := 0.15; math.Abs(gotchaScore-want) > 1e-6 {
+		t.Errorf("gotcha score = %v, want %v", gotchaScore, want)
+	}
+	if factScore <= gotchaScore {
+		t.Fatalf("fact score %v should exceed gotcha score %v despite its much lower importance", factScore, gotchaScore)
+	}
+
+	top, err := s.GetTopMemories(ctx, testProject, 2)
+	if err != nil {
+		t.Fatalf("GetTopMemories: %v", err)
+	}
+	if len(top) != 2 {
+		t.Fatalf("expected 2 memories, got %d", len(top))
+	}
+	if top[0].ID != factID {
+		t.Errorf("expected fact (importance 0.4, no decay) to outrank the 200-day gotcha (importance 1.0, floored); got top[0]=%q", top[0].Content)
+	}
+}
+
+// TestUpdateMemoryPreservesCreatedAt confirms UpdateMemory never touches
+// created_at (it only bumps updated_at — see UpdateMemory in store.go), so it
+// cannot be used to reset a memory's decay clock the way ReplaceNonManual
+// intentionally does for reflection (see TestReplaceNonManualResetsCreatedAt
+// and issue #279, closed as by-design — the two code paths are deliberately
+// different, not a case to reconcile).
+func TestUpdateMemoryPreservesCreatedAt(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	staleID, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "stale gotcha", Source: "manual",
+		Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create stale: %v", err)
+	}
+	setCreatedAtDaysAgo(t, s, staleID, 15)
+
+	freshID, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "fresh gotcha", Source: "manual",
+		Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create fresh: %v", err)
+	}
+
+	beforeCreatedAt := memoryCreatedAt(t, s, staleID)
+	beforeScore := memoryScore(t, s, staleID)
+
+	top, err := s.GetTopMemories(ctx, testProject, 2)
+	if err != nil {
+		t.Fatalf("GetTopMemories (before): %v", err)
+	}
+	if len(top) != 2 || top[0].ID != freshID {
+		t.Fatalf("setup invariant broken: fresh memory should outrank the 15-day-old one before update; got %+v", top)
+	}
+
+	newContent := "stale gotcha, edited"
+	if err := s.UpdateMemory(ctx, testProject, staleID, &newContent, nil, nil, nil); err != nil {
+		t.Fatalf("UpdateMemory: %v", err)
+	}
+
+	afterCreatedAt := memoryCreatedAt(t, s, staleID)
+	if beforeCreatedAt != afterCreatedAt {
+		t.Errorf("UpdateMemory changed created_at: before=%q after=%q", beforeCreatedAt, afterCreatedAt)
+	}
+
+	// Importance and category are unchanged, so if created_at is also truly
+	// unchanged the decayed score should be identical (up to the negligible
+	// drift from the real time elapsed between these two queries — bounded
+	// well under 1e-4 for a 15-day-old memory; a genuine clock reset would
+	// move this score by roughly 0.17, three orders of magnitude more).
+	afterScore := memoryScore(t, s, staleID)
+	if math.Abs(afterScore-beforeScore) > 1e-4 {
+		t.Errorf("UpdateMemory changed the decay score with importance/category unchanged: before=%v after=%v", beforeScore, afterScore)
+	}
+
+	top, err = s.GetTopMemories(ctx, testProject, 2)
+	if err != nil {
+		t.Fatalf("GetTopMemories (after): %v", err)
+	}
+	if len(top) != 2 || top[0].ID != freshID {
+		t.Errorf("UpdateMemory reset the stale memory's decay clock — it no longer ranks below the fresh one: %+v", top)
+	}
+}
+
+// TestReplaceNonManualResetsCreatedAt confirms reflection-sourced memories
+// inserted by ReplaceNonManual get created_at = now (the INSERT never sets
+// created_at, so the schema default datetime('now') applies — see
+// ReplaceNonManual in store.go). This is documented/intentional behavior per
+// issue #279 ("Reflection resets created_at for non-manual memories", closed
+// as by-design: "consolidated = refreshed knowledge"). This test confirms
+// existing behavior rather than changing it.
+func TestReplaceNonManualResetsCreatedAt(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	oldID, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "old reflection fact", Source: "reflection",
+		Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	setCreatedAtDaysAgo(t, s, oldID, 100)
+	oldCreatedAt := memoryCreatedAt(t, s, oldID)
+
+	before, err := s.CurrentTimestamp(ctx)
+	if err != nil {
+		t.Fatalf("CurrentTimestamp: %v", err)
+	}
+
+	replacement := []Memory{
+		{Category: "fact", Content: "new consolidated fact", Importance: 0.6, Tags: []string{}},
+	}
+	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected exactly 1 memory (old reflection fact replaced), got %d: %+v", len(all), all)
+	}
+	newMem := all[0]
+	if newMem.Content != "new consolidated fact" {
+		t.Fatalf("expected replacement memory, got %q", newMem.Content)
+	}
+
+	if newMem.CreatedAt < before {
+		t.Errorf("new reflection memory created_at = %q, want >= pre-replace timestamp %q (should be fresh, not preserved)", newMem.CreatedAt, before)
+	}
+	if newMem.CreatedAt == oldCreatedAt {
+		t.Errorf("new reflection memory kept the old memory's backdated created_at %q instead of resetting to now", oldCreatedAt)
+	}
+}
+
+// TestGetTopMemoriesDistinctWinnersUnderDemotion covers the limit*2 over-fetch
+// window in GetTopMemories: it fetches limit*2 candidates, then StableDemote
+// sinks the lower-ranked half of every 'related' pair at/above
+// DefaultDemotionThreshold (see DemotionPenalties in demotion.go) before
+// truncating to limit.
+//
+// Ten duplicate pairs (20 memories) are constructed via distinct importance
+// values so the top 10 raw-score rows are exactly five pairs' both members;
+// the other five pairs score lower and never enter the limit*2=10 fetch at
+// all (asserted below — that half of the assertions is specific to this
+// limit*2 window size, not a general demotion property). A real 'related'
+// link at strength 0.95 (>= the 0.90 DefaultDemotionThreshold) is created per
+// pair via CreateLink — the same mechanism TestGetTopMemoriesBackfillsAfterDemotion
+// already uses. Upsert's own 'duplicate' relation (see Upsert in store.go) is
+// a separate, merge-provenance-only link that DemotionPenalties never reads;
+// only 'related' links feed ranking-time demotion, so CreateLink is the real
+// mechanism here, not Upsert.
+func TestGetTopMemoriesDistinctWinnersUnderDemotion(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	type pair struct{ dominant, subordinate string }
+	var pairs []pair
+
+	create := func(importance float32, label string) string {
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: label, Source: "manual",
+			Importance: importance, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create %s: %v", label, err)
+		}
+		return id
+	}
+
+	// Pairs 0-4: importance 0.99 down to 0.90 (10 distinct values) — exactly
+	// the top 10 by raw importance ('fact' never decays) out of all 20.
+	// Pairs 5-9: importance 0.89 down to 0.70 — guaranteed below that window.
+	for i := 0; i < 10; i++ {
+		dom := 0.99 - float32(i)*0.02
+		sub := 0.98 - float32(i)*0.02
+		domID := create(dom, fmt.Sprintf("pair %d dominant", i))
+		subID := create(sub, fmt.Sprintf("pair %d subordinate", i))
+		if err := s.CreateLink(ctx, domID, subID, "related", 0.95, "auto"); err != nil {
+			t.Fatalf("CreateLink pair %d: %v", i, err)
+		}
+		pairs = append(pairs, pair{dominant: domID, subordinate: subID})
+	}
+
+	top, err := s.GetTopMemories(ctx, testProject, 5)
+	if err != nil {
+		t.Fatalf("GetTopMemories: %v", err)
+	}
+	if len(top) != 5 {
+		t.Fatalf("expected exactly 5 winners, got %d: %+v", len(top), top)
+	}
+
+	seen := make(map[string]bool, 5)
+	for _, m := range top {
+		if seen[m.ID] {
+			t.Errorf("duplicate winner ID %s in result set", m.ID)
+		}
+		seen[m.ID] = true
+	}
+
+	// No two winners may be the dominant/subordinate of the same pair — the
+	// "distinct (non-duplicate-of-each-other)" property the issue names.
+	for i, p := range pairs {
+		if seen[p.dominant] && seen[p.subordinate] {
+			t.Errorf("pair %d: both halves survived (dominant %s and subordinate %s)", i, p.dominant, p.subordinate)
+		}
+	}
+
+	// Specific to this limit*2=10 fetch window: pairs 0-4 (the in-window
+	// pairs) must each contribute exactly their dominant half; pairs 5-9
+	// never entered the initial SQL fetch at all, so neither half of those
+	// can appear in the final result.
+	for i, p := range pairs {
+		if i < 5 {
+			if !seen[p.dominant] {
+				t.Errorf("pair %d: expected dominant %s to survive demotion", i, p.dominant)
+			}
+			if seen[p.subordinate] {
+				t.Errorf("pair %d: expected subordinate %s to be demoted out", i, p.subordinate)
+			}
+		} else {
+			if seen[p.dominant] || seen[p.subordinate] {
+				t.Errorf("pair %d fell outside the limit*2 fetch window and should not appear: dominant seen=%v subordinate seen=%v", i, seen[p.dominant], seen[p.subordinate])
+			}
+		}
 	}
 }
