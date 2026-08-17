@@ -154,7 +154,7 @@ func TestWorkerRun_SurvivesPanicInTickerSweep(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	client := NewClient(srv.URL, "test-model", 3)
-	worker := NewWorker(client, store, logger, 20*time.Millisecond)
+	worker := NewWorker(client, store, logger, 20*time.Millisecond, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	projectIDs := make(chan string)
@@ -194,7 +194,7 @@ func TestWorkerRun_SurvivesPanicInChannelProcessProject(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	client := NewClient(srv.URL, "test-model", 3)
-	worker := NewWorker(client, store, logger, 24*time.Hour) // ticker must not fire
+	worker := NewWorker(client, store, logger, 24*time.Hour, "") // ticker must not fire
 
 	ctx, cancel := context.WithCancel(context.Background())
 	projectIDs := make(chan string, 2)
