@@ -190,20 +190,13 @@ func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error 
 			`SELECT id FROM projects WHERE path = ? AND id != ? LIMIT 1`,
 			path, id).Scan(&existingID)
 		if scanErr == nil && existingID != "" {
-			// Merge any child records from the incoming ID into the canonical project.
-			for _, stmt := range []string{
-				`UPDATE memories SET project_id = ? WHERE project_id = ?`,
-				`UPDATE conversations SET project_id = ? WHERE project_id = ?`,
-				`UPDATE tasks SET project_id = ? WHERE project_id = ?`,
-				`UPDATE decisions SET project_id = ? WHERE project_id = ?`,
-				`UPDATE token_usage SET project_id = ? WHERE project_id = ?`,
-				`UPDATE audit_log SET project_id = ? WHERE project_id = ?`,
-			} {
-				_, _ = s.db.ExecContext(ctx, stmt, existingID, id)
+			// Merge any child records from the incoming ID into the canonical
+			// project. mergeProjectLocked does not lock internally (only the
+			// public MergeProject wrapper does), so it's safe to call directly
+			// here while we already hold s.mu.
+			if err := s.mergeProjectLocked(ctx, id, existingID); err != nil {
+				return fmt.Errorf("auto-merge path duplicate: %w", err)
 			}
-			_, _ = s.db.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, id)
-			_, _ = s.db.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, id)
-			s.logger.Info("auto-merged path duplicate", "old_id", id, "canonical_id", existingID, "path", path)
 			return nil
 		}
 	}
@@ -234,20 +227,11 @@ func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error 
 			`SELECT id FROM projects WHERE name = ? AND id != ? AND path NOT LIKE '/%' LIMIT 1`,
 			name, id).Scan(&dupID)
 		if scanErr == nil && dupID != "" {
-			// Use inline merge to avoid deadlock (we already hold s.mu).
-			for _, stmt := range []string{
-				`UPDATE memories SET project_id = ? WHERE project_id = ?`,
-				`UPDATE conversations SET project_id = ? WHERE project_id = ?`,
-				`UPDATE tasks SET project_id = ? WHERE project_id = ?`,
-				`UPDATE decisions SET project_id = ? WHERE project_id = ?`,
-				`UPDATE token_usage SET project_id = ? WHERE project_id = ?`,
-				`UPDATE audit_log SET project_id = ? WHERE project_id = ?`,
-			} {
-				_, _ = s.db.ExecContext(ctx, stmt, id, dupID)
+			// Call mergeProjectLocked directly to avoid deadlock (we already
+			// hold s.mu; only the public MergeProject wrapper locks).
+			if err := s.mergeProjectLocked(ctx, dupID, id); err != nil {
+				return fmt.Errorf("auto-merge duplicate project: %w", err)
 			}
-			_, _ = s.db.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, dupID)
-			_, _ = s.db.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, dupID)
-			s.logger.Info("auto-merged duplicate project", "old_id", dupID, "new_id", id)
 		}
 	}
 
