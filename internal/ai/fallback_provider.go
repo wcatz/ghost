@@ -22,12 +22,25 @@ type FallbackProvider struct {
 	primary               Provider
 	secondary             Provider
 	secondaryIsDryRunOnly bool
+	alwaysFallback        bool
 }
 
 // NewFallbackProvider builds a FallbackProvider. secondary may be nil — a
 // primary-only provider simply returns the primary's error unfallen-through.
 func NewFallbackProvider(primary, secondary Provider, secondaryIsDryRunOnly bool) *FallbackProvider {
 	return &FallbackProvider{primary: primary, secondary: secondary, secondaryIsDryRunOnly: secondaryIsDryRunOnly}
+}
+
+// NewAlwaysFallbackProvider is like NewFallbackProvider, except it falls
+// through to secondary on ANY primary error, not just credit exhaustion.
+// Use this where primary has no notion of "credit" at all — e.g. MCP
+// sampling, where "Method not found" (client doesn't implement sampling),
+// a version-gated protocol rejection, or a user declining the request are
+// all equally "this mechanism is unavailable right now," unlike the
+// Anthropic API where an invalid key or network failure genuinely wouldn't
+// be fixed by retrying against a different provider.
+func NewAlwaysFallbackProvider(primary, secondary Provider, secondaryIsDryRunOnly bool) *FallbackProvider {
+	return &FallbackProvider{primary: primary, secondary: secondary, secondaryIsDryRunOnly: secondaryIsDryRunOnly, alwaysFallback: true}
 }
 
 // DryRunOnlyOnFallback reports whether a ClassifyResult.FromFallback=true
@@ -41,7 +54,7 @@ func (f *FallbackProvider) Classify(ctx context.Context, systemPrompt, userConte
 	if err == nil {
 		return ClassifyResult{Text: out, FromFallback: false}, nil
 	}
-	if !isCreditExhausted(err) || f.secondary == nil {
+	if f.secondary == nil || (!f.alwaysFallback && !isCreditExhausted(err)) {
 		return ClassifyResult{}, err
 	}
 	out, err = f.secondary.Classify(ctx, systemPrompt, userContent)

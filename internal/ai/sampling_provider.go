@@ -16,10 +16,11 @@ type sampler interface {
 
 // SamplingProvider asks the connected MCP client's own model to classify, via
 // MCP sampling (CreateMessage). It is only constructible where a live session
-// exists — this is the live-session fallback path, never used headless. A
-// FallbackProvider built around a SamplingProvider has no secondary: a
-// sampling failure simply fails, since there is no live-session equivalent of
-// a local fallback model.
+// exists — this is the live-session path, never used headless. Sampling
+// support is inconsistent across MCP clients today (some return "Method not
+// found"; see internal/mcpserver's ghost_resolve wiring), so callers should
+// pair it with NewAlwaysFallbackProvider and a CLIClient secondary rather
+// than assume sampling alone is enough.
 type SamplingProvider struct {
 	session sampler
 }

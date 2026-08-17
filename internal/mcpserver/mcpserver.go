@@ -978,7 +978,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_resolve",
 		Title:       "Resolve stale evidence",
-		Description: "Scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own model via MCP sampling — no Anthropic API credits spent. Dry-run by default; pass apply:true to stamp resolved_at.",
+		Description: "Scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own model via MCP sampling when the client supports it, falling back to a subscription-billed `claude -p` call otherwise (dry-run only on that fallback). No Anthropic API credits spent either way. Dry-run by default; pass apply:true to stamp resolved_at.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			OpenWorldHint:   boolPtr(false),
@@ -1002,7 +1002,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("ghost_resolve: no active MCP session for sampling")
 		}
 		samplingProvider := ai.NewSamplingProvider(req.Session)
-		fallback := ai.NewFallbackProvider(samplingProvider, nil, false)
+		fallback := ai.NewAlwaysFallbackProvider(samplingProvider, ai.NewCLIClient(), true)
 		cls := resolve.NewHaikuClassifier(fallback)
 		res, confirmed, err := resolve.Run(ctx, rs, cls, projectID, args.Apply, s.logger)
 		if err != nil {
