@@ -2,7 +2,6 @@ package ai
 
 import (
 	"encoding/json"
-	"strings"
 )
 
 const (
@@ -15,11 +14,6 @@ const (
 	ModelSonnet46 = "claude-sonnet-4-6"
 	ModelHaiku45  = "claude-haiku-4-5-20251001"
 	ModelOpus46   = "claude-opus-4-6"
-
-	// Context window sizes by model family.
-	ContextOpus46   = 1_000_000
-	ContextSonnet46 = 1_000_000
-	ContextHaiku45  = 200_000
 )
 
 // SystemBlock is a system prompt block for the Claude API.
@@ -111,18 +105,4 @@ type apiRequest struct {
 	System    []SystemBlock `json:"system,omitempty"`
 	Stream    bool          `json:"stream"`
 	Messages  []Message     `json:"messages"`
-}
-
-// ContextForModel returns the context window size for a given model ID.
-func ContextForModel(model string) int {
-	switch {
-	case strings.Contains(model, "opus-4-6"):
-		return ContextOpus46
-	case strings.Contains(model, "sonnet-4-5"), strings.Contains(model, "sonnet-4-6"):
-		return ContextSonnet46
-	case strings.Contains(model, "haiku"):
-		return ContextHaiku45
-	default:
-		return 200_000
-	}
 }

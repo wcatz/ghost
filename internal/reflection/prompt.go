@@ -105,31 +105,3 @@ Return ONLY the JSON object, no other text.`)
 func quoteData(s string) string {
 	return "«" + strings.NewReplacer("«", "<<", "»", ">>").Replace(s) + "»"
 }
-
-// ExtractionPrompt is the system prompt for per-exchange memory extraction.
-const ExtractionPrompt = `You analyze a conversation between a developer and their personal assistant (Ghost). Extract project-specific facts, patterns, or decisions worth remembering for future sessions.
-
-Extract:
-- Architecture: how the codebase is organized, key abstractions
-- Decisions: why something was done a certain way, what alternatives were rejected
-- Patterns: recurring code patterns, naming conventions
-- Conventions: formatting, testing, commit message style
-- Gotchas: bugs found, tricky behavior, edge cases discovered
-- Dependencies: key libraries, versions, integration notes
-- Preferences: developer's preferred approaches or tools
-
-Do NOT extract:
-- Transient conversation details ("the user asked about X")
-- Generic programming facts ("Go uses goroutines for concurrency")
-- Anything that's just restating what the code does without insight
-- Secrets, API keys, passwords, or personal data
-
-Importance scale:
-- 0.9-1.0: Architecture decisions, critical gotchas, project identity
-- 0.7-0.8: Useful patterns, conventions, dependencies
-- 0.5-0.6: Minor facts, preferences
-
-Return ONLY a JSON array. Each item:
-{"category": "architecture|decision|pattern|convention|gotcha|dependency|preference|fact", "content": "specific observation", "importance": 0.0-1.0, "tags": ["tag1"]}
-
-Return [] if nothing worth remembering.`
