@@ -1,9 +1,11 @@
 package memory
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -165,6 +167,20 @@ func TestMigrateLegacyDB(t *testing.T) {
 		`SELECT count(*) FROM memories_fts WHERE memories_fts MATCH 'zanzibar'`,
 	).Scan(&n); err != nil || n != 1 {
 		t.Errorf("fts trigger after migration: n=%d err=%v, want 1", n, err)
+	}
+
+	// migrateV1's rebuild is frozen in time and reinstalls the old unguarded
+	// memories_au body; migrateV4 must re-narrow it afterward so a legacy DB
+	// that runs the full V1->V4 chain ends up guarded too, not just DBs that
+	// start at v3.
+	var auSQL string
+	if err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memories_au'`,
+	).Scan(&auSQL); err != nil {
+		t.Fatalf("read memories_au trigger SQL: %v", err)
+	}
+	if !strings.Contains(auSQL, "old.content != new.content") {
+		t.Errorf("memories_au trigger missing content-change guard after full migration chain: %s", auSQL)
 	}
 
 	// The snapshots FK cascades on project delete.
@@ -448,5 +464,180 @@ func TestMigrateV3AddsDuplicateRelation(t *testing.T) {
 		`INSERT INTO memory_links (source_id, target_id, relation, strength, source) VALUES ('m2', 'm1', 'duplicate', 0.8, 'auto')`,
 	); err != nil {
 		t.Errorf("insert with relation='duplicate' still fails: %v", err)
+	}
+}
+
+// v3SQL is a schemaVersion-3 database: current-shape memories/memories_fts
+// and all three FTS triggers, but memories_au still lacks the content-change
+// guard — the shape every database created before the v4 migration has.
+const v3SQL = `
+CREATE TABLE projects (
+    id          TEXT PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE memories (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL DEFAULT 'fact'
+                  CHECK (category IN (
+                      'architecture', 'decision', 'pattern', 'convention',
+                      'gotcha', 'dependency', 'preference', 'fact'
+                  )),
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL DEFAULT 0.5,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT,
+    source        TEXT NOT NULL DEFAULT 'reflection'
+                  CHECK (source IN ('reflection', 'chat', 'manual', 'tool', 'mcp', 'onboarding', 'decision_log')),
+    tags          TEXT DEFAULT '[]',
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at   TEXT
+);
+
+CREATE VIRTUAL TABLE memories_fts USING fts5(
+    content,
+    content=memories,
+    content_rowid=rowid,
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+
+CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+END;
+
+CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+`
+
+// newV3DB writes a schemaVersion-3 database with one memory row, stamped at
+// user_version=3, and returns its path.
+func newV3DB(t *testing.T) string {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open v3 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(v3SQL); err != nil {
+		t.Fatalf("create v3 schema: %v", err)
+	}
+	seed := []string{
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v3-p1', 'p1')`,
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES ('m1', 'p1', 'fact', 'original content here', 'mcp')`,
+		`PRAGMA user_version = 3`,
+	}
+	for _, s := range seed {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed v3 db: %v", err)
+		}
+	}
+	return dbPath
+}
+
+// totalChanges reads SQLite's total_changes() counter on the given pinned
+// connection: the count of rows written since the connection opened,
+// including rows written by trigger bodies (unlike changes(), which counts
+// only the outermost statement and excludes trigger-driven writes). This is
+// the only reliable way to observe whether memories_au's body actually ran —
+// a delete+re-insert of byte-identical FTS content is otherwise invisible
+// from the row data alone, since the shadow tables end up in the same state
+// whether or not the trigger fired.
+func totalChanges(t *testing.T, ctx context.Context, conn *sql.Conn) int64 {
+	t.Helper()
+	var n int64
+	if err := conn.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&n); err != nil {
+		t.Fatalf("total_changes: %v", err)
+	}
+	return n
+}
+
+// TestMigrateV4NarrowsUpdateTrigger: a schemaVersion-3 database's memories_au
+// trigger fires unconditionally on every UPDATE, doing a wasteful FTS
+// delete+re-insert even when content is untouched — e.g. SET pinned, SET
+// resolved_at, SET access_count (#286). Migrating to v4 must narrow it with a
+// WHEN old.content != new.content guard, while a genuine content change must
+// still refresh FTS exactly as before (don't regress the trigger's purpose).
+func TestMigrateV4NarrowsUpdateTrigger(t *testing.T) {
+	dbPath := newV3DB(t)
+
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB on v3 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	// Pin a single connection: total_changes() is per-connection, and
+	// SetMaxOpenConns(1) makes reuse overwhelmingly likely but not
+	// contractual, so pin explicitly rather than rely on pool behavior.
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin conn: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	// Primary evidence: a non-content UPDATE must cost exactly the 1 row
+	// write of the UPDATE itself, with no extra trigger-driven FTS writes.
+	before := totalChanges(t, ctx, conn)
+	if _, err := conn.ExecContext(ctx, `UPDATE memories SET pinned = 1 WHERE id = 'm1'`); err != nil {
+		t.Fatalf("update pinned: %v", err)
+	}
+	pinnedDelta := totalChanges(t, ctx, conn) - before
+	if pinnedDelta != 1 {
+		t.Errorf("pinned-only update total_changes delta = %d, want 1 (trigger fired when it should not have)", pinnedDelta)
+	}
+
+	// A genuine content change must still cost strictly more: the trigger
+	// firing and rewriting the FTS shadow tables on top of the base update.
+	before = totalChanges(t, ctx, conn)
+	if _, err := conn.ExecContext(ctx, `UPDATE memories SET content = 'updated content here' WHERE id = 'm1'`); err != nil {
+		t.Fatalf("update content: %v", err)
+	}
+	contentDelta := totalChanges(t, ctx, conn) - before
+	if contentDelta <= pinnedDelta {
+		t.Errorf("content-changing update total_changes delta = %d, want > %d (trigger should have fired)", contentDelta, pinnedDelta)
+	}
+
+	// FTS actually reflects the new content, not just "some write happened".
+	var n int
+	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM memories_fts WHERE memories_fts MATCH 'updated'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("fts match on updated content: n=%d err=%v, want 1", n, err)
+	}
+	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM memories_fts WHERE memories_fts MATCH 'original'`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("fts still matches stale content: n=%d err=%v, want 0", n, err)
+	}
+
+	// Secondary evidence: the trigger definition itself carries the guard.
+	// If this fails while the delta assertions above pass, that points to a
+	// marker/whitespace mismatch in this check rather than a real regression.
+	// Uses the pinned conn, not db: db's pool has exactly 1 connection (see
+	// OpenDB's SetMaxOpenConns(1)), which conn is still holding, so a db.*
+	// call here would block forever waiting for a connection that only this
+	// same, still-running function could ever release.
+	var auSQL string
+	if err := conn.QueryRowContext(ctx,
+		`SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memories_au'`,
+	).Scan(&auSQL); err != nil {
+		t.Fatalf("read memories_au trigger SQL: %v", err)
+	}
+	if !strings.Contains(auSQL, "old.content != new.content") {
+		t.Errorf("memories_au trigger missing content-change guard, got: %s", auSQL)
 	}
 }
