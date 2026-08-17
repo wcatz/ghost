@@ -998,18 +998,15 @@ func (s *Server) registerTools() {
 		if !ok {
 			return nil, nil, fmt.Errorf("ghost_resolve: store does not support resolve operations")
 		}
-		// Sampling needs a live session; the claude CLI doesn't. When no
-		// session exists at all, skip straight to the CLI as a full-trust
-		// primary (mirrors buildClassifyProvider's headless, no-API-key
-		// case in cmd/ghost/main.go) rather than refusing to run a tool
-		// that has a perfectly good session-independent path available.
-		var provider *ai.FallbackProvider
-		if req.Session != nil {
-			samplingProvider := ai.NewSamplingProvider(req.Session)
-			provider = ai.NewAlwaysFallbackProvider(samplingProvider, ai.NewCLIClient(), true)
-		} else {
-			provider = ai.NewFallbackProvider(ai.NewCLIClient(), nil, false)
-		}
+		// req.Session is never nil here: every ServerRequest the go-sdk
+		// dispatches to a tool handler is constructed from a live
+		// *ServerSession (see mcp.ServerRequest's construction sites in
+		// shared.go/server.go) — there is no headless-invocation path for an
+		// MCP tool. The claude CLI fallback is always a fallback, never a
+		// full-trust primary, so an apply:true request can never write a
+		// CLI-only classification (see resolve.Run's anyFallback guard).
+		samplingProvider := ai.NewSamplingProvider(req.Session)
+		provider := ai.NewAlwaysFallbackProvider(samplingProvider, ai.NewCLIClient(), true)
 		cls := resolve.NewHaikuClassifier(provider)
 		res, confirmed, err := resolve.Run(ctx, rs, cls, projectID, args.Apply, s.logger)
 		if err != nil {

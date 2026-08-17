@@ -59,9 +59,11 @@ type Result struct {
 	Confirmed  int // classified as resolved evidence
 	Resolved   int // rows written (0 in dry-run)
 
-	// SkippedApply is true iff apply was requested but withheld because at
-	// least one classification came from a fallback provider. Callers should
-	// surface this explicitly — a silent Resolved=0 otherwise looks
+	// SkippedApply is true iff apply was requested and withheld because at
+	// least one classification came from a fallback provider AND at least one
+	// candidate was confirmed. Fallback classification with nothing confirmed
+	// leaves this false — there was no write to withhold. Callers should
+	// surface a true value explicitly — a silent Resolved=0 otherwise looks
 	// indistinguishable from "nothing to resolve."
 	SkippedApply bool
 }
