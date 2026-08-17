@@ -970,12 +970,17 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Snapshot existing non-manual memories before deleting.
+	// Snapshot existing non-manual memories before deleting. Pinned memories
+	// are excluded throughout this function — like source='manual', a pin is
+	// an explicit user override that reflection must never delete, rewrite,
+	// or silently drop (it has no way to know a consolidated memory it emits
+	// corresponds to a pinned one it never saw as such, so preservation has
+	// to mean "don't touch it" rather than "carry the flag through").
 	snapshotID := fmt.Sprintf("%s-%d", projectID, time.Now().Unix())
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags)
 		SELECT ?, project_id, category, content, importance, source, tags
-		FROM memories WHERE project_id = ? AND source != 'manual'
+		FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0
 	`, snapshotID, projectID)
 	if err != nil {
 		return fmt.Errorf("snapshot memories: %w", err)
@@ -989,7 +994,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	if consolidatedSince != "" {
 		rows, err := tx.QueryContext(ctx, `
 			SELECT category, content, importance, source, tags
-			FROM memories WHERE project_id = ? AND source != 'manual' AND created_at >= ?
+			FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND created_at >= ?
 		`, projectID, consolidatedSince)
 		if err != nil {
 			return fmt.Errorf("find concurrent memories: %w", err)
@@ -1011,7 +1016,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 	}
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual'`, projectID)
+	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0`, projectID)
 	if err != nil {
 		return fmt.Errorf("delete old memories: %w", err)
 	}
@@ -1089,8 +1094,10 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Delete current non-manual memories.
-	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual'`, projectID)
+	// Delete current non-manual memories. Pinned memories are excluded, same
+	// as ReplaceNonManual: reflection never touched them, so restore must not
+	// delete them either — they aren't in the snapshot to bring back.
+	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0`, projectID)
 	if err != nil {
 		return 0, fmt.Errorf("delete current: %w", err)
 	}
