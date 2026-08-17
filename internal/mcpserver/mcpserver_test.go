@@ -719,6 +719,53 @@ func TestTaskUpdate_EmptyStatusPreservesCurrentStatus(t *testing.T) {
 	}
 }
 
+func TestGhostTaskUpdate_RejectsInvalidStatus(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	id, err := store.CreateTask(ctx, "abc123", "Fix the bug", "needs triage", 2)
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_task_update",
+		Arguments: map[string]any{"task_id": id, "status": "pendding"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_task_update: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error result for invalid status, got: %+v", result.Content)
+	}
+
+	var msg string
+	if len(result.Content) > 0 {
+		if tc, ok := result.Content[0].(*mcp.TextContent); ok {
+			msg = tc.Text
+		}
+	}
+	if strings.Contains(msg, "CHECK constraint") {
+		t.Errorf("expected a clear validation error, but got the raw SQLite constraint error: %s", msg)
+	}
+	wantSubstr := `invalid status "pendding" — must be one of: pending, active, blocked, done`
+	if !strings.Contains(msg, wantSubstr) {
+		t.Errorf("expected error to contain %q, got: %s", wantSubstr, msg)
+	}
+
+	// The task's status must be untouched by the rejected update.
+	task, err := store.GetTask(ctx, id)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if task.Status != "pending" {
+		t.Errorf("status should remain pending after rejected update, got %q", task.Status)
+	}
+}
+
 func TestParseProjectIDFromURI(t *testing.T) {
 	tests := []struct {
 		name    string

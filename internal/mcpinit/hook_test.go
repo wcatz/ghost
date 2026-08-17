@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 	_ "modernc.org/sqlite"
@@ -560,6 +562,173 @@ func TestBumpSessionCountNoPhantomDB(t *testing.T) {
 	}
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
 		t.Errorf("bumpSessionCount must not create %s", dbPath)
+	}
+}
+
+// TestDSNBusyTimeoutValues locks in the deliberate #288 asymmetry: the write
+// path's busy_timeout now matches Store's (memory.OpenDB, busy_timeout(5000)),
+// while the read path stays at the original 1000ms — a reader never blocks on
+// a concurrent writer under Store's WAL journal mode, so it was never exposed
+// to the write-contention failure #288 reported. A future edit that silently
+// drifts either value, or flips mode=ro, should fail this test.
+func TestDSNBusyTimeoutValues(t *testing.T) {
+	const dbPath = "/unused/ghost.db" // DSN string shape only - never opened
+
+	ro := roDSN(dbPath)
+	if !strings.Contains(ro, "busy_timeout(1000)") {
+		t.Errorf("roDSN = %q, want it to contain busy_timeout(1000)", ro)
+	}
+	if !strings.Contains(ro, "mode=ro") {
+		t.Errorf("roDSN = %q, want it to contain mode=ro", ro)
+	}
+
+	rw := rwDSN(dbPath)
+	if !strings.Contains(rw, "busy_timeout(5000)") {
+		t.Errorf("rwDSN = %q, want it to contain busy_timeout(5000)", rw)
+	}
+	if strings.Contains(rw, "mode=ro") {
+		t.Errorf("rwDSN = %q, must not be read-only", rw)
+	}
+}
+
+// TestBumpSessionCountSurvivesWriteContention proves the #288 fix: a
+// concurrent writer — standing in for a live MCP server, or the
+// linking/embedding background workers — holding SQLite's single write lock
+// for longer than the old 1000ms busy_timeout, but less than the new 5000ms,
+// must no longer make the bump fail. Uses a real file-backed database and a
+// genuine BEGIN IMMEDIATE lock: busy_timeout is a real SQLite locking
+// behavior, not something a fake connection could stand in for.
+func TestBumpSessionCountSurvivesWriteContention(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	insertProject(t, db, "p1", "/tmp/contend-new", "contend-new")
+	db.Close() //nolint:errcheck
+
+	// Longer than the old 1000ms busy_timeout, comfortably short of the new
+	// 5000ms one.
+	const holdTime = 2 * time.Second
+
+	blocker, err := sql.Open("sqlite", rwDSN(dbPath))
+	if err != nil {
+		t.Fatalf("open blocker: %v", err)
+	}
+	defer blocker.Close() //nolint:errcheck
+
+	conn, err := blocker.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	// BEGIN IMMEDIATE (rather than a plain deferred BEGIN) grabs SQLite's
+	// write lock right away instead of waiting for the first write statement,
+	// so the hold below is deterministic from this point on.
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE: %v", err)
+	}
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		time.Sleep(holdTime)
+		if _, err := conn.ExecContext(context.Background(), "COMMIT"); err != nil {
+			t.Errorf("release COMMIT: %v", err)
+		}
+	}()
+
+	start := time.Now()
+	n := bumpSessionCount(dbPath, "p1")
+	elapsed := time.Since(start)
+	<-released
+
+	if n == 0 {
+		t.Fatalf("bumpSessionCount failed under %v of write contention; want it to ride out the lock now that it uses busy_timeout(5000)", holdTime)
+	}
+	if elapsed < holdTime {
+		t.Errorf("bumpSessionCount returned after %v, before the %v lock was even released — busy_timeout may not be taking effect", elapsed, holdTime)
+	}
+}
+
+// TestOldBusyTimeoutFailsUnderSameContention documents the #288 regression
+// directly: the exact DSN bumpSessionCount used before this fix
+// (busy_timeout(1000), reconstructed verbatim here since rwDSN now reports
+// 5000ms) does time out and fail under the same write contention that
+// TestBumpSessionCountSurvivesWriteContention proves the new value survives —
+// this is the "silently returns 0, showing a stale session count" symptom
+// #288 reported.
+func TestOldBusyTimeoutFailsUnderSameContention(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	insertProject(t, db, "p1", "/tmp/contend-old", "contend-old")
+	db.Close() //nolint:errcheck
+
+	const holdTime = 2 * time.Second // > old 1000ms busy_timeout
+
+	blocker, err := sql.Open("sqlite", rwDSN(dbPath))
+	if err != nil {
+		t.Fatalf("open blocker: %v", err)
+	}
+	defer blocker.Close() //nolint:errcheck
+
+	conn, err := blocker.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("BEGIN IMMEDIATE: %v", err)
+	}
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		time.Sleep(holdTime)
+		if _, err := conn.ExecContext(context.Background(), "COMMIT"); err != nil {
+			t.Errorf("release COMMIT: %v", err)
+		}
+	}()
+
+	oldDSN := url.URL{
+		Scheme:   "file",
+		Opaque:   (&url.URL{Path: dbPath}).EscapedPath(),
+		RawQuery: "_pragma=busy_timeout(1000)",
+	}
+	oldDB, err := sql.Open("sqlite", oldDSN.String())
+	if err != nil {
+		t.Fatalf("open with pre-#288 DSN: %v", err)
+	}
+	defer oldDB.Close() //nolint:errcheck
+
+	start := time.Now()
+	var n int
+	err = oldDB.QueryRow(`
+		INSERT INTO ghost_state (project_id, interaction_count)
+		VALUES (?, 1)
+		ON CONFLICT(project_id) DO UPDATE SET
+			interaction_count = interaction_count + 1,
+			updated_at = datetime('now')
+		RETURNING interaction_count
+	`, "p1").Scan(&n)
+	elapsed := time.Since(start)
+	<-released
+
+	// The load-bearing assertion is err != nil: that's what proves the old
+	// 1000ms value fails under this contention. Elapsed time is logged, not
+	// asserted on — SQLite's busy handler retries until ~1000ms of
+	// *accumulated* sleep, not a wall-clock guarantee, and a loaded/-race CI
+	// runner can push observed elapsed well past that (see the similar
+	// caveat in internal/obsidian/sync_test.go). Asserting elapsed < holdTime
+	// here would give a test that fails two different ways under slowness.
+	t.Logf("pre-#288 DSN write failed after %v (hold time %v)", elapsed, holdTime)
+	if err == nil {
+		t.Fatalf("expected the pre-#288 busy_timeout(1000) to fail under %v of contention, but it succeeded (n=%d) — the contention setup itself may be wrong", holdTime, n)
 	}
 }
 
