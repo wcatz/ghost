@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -587,6 +588,114 @@ func TestStoreReplaceNonManual(t *testing.T) {
 			t.Error("consolidator output should still be present")
 		}
 	})
+
+	t.Run("pinned non-manual memory survives replace", func(t *testing.T) {
+		s := testStore(t)
+
+		pinnedID, err := s.Create(ctx, testProject, Memory{
+			Category:   "gotcha",
+			Content:    "user-pinned mcp memory",
+			Source:     "mcp",
+			Importance: 0.7,
+			Tags:       []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := s.TogglePin(ctx, pinnedID, true); err != nil {
+			t.Fatalf("TogglePin: %v", err)
+		}
+
+		replacement := []Memory{
+			{Category: "fact", Content: "new consolidated fact", Importance: 0.6, Tags: []string{}},
+		}
+		if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+
+		all, err := s.GetAll(ctx, testProject, 100)
+		if err != nil {
+			t.Fatalf("GetAll: %v", err)
+		}
+
+		var found *Memory
+		for i := range all {
+			if all[i].ID == pinnedID {
+				found = &all[i]
+			}
+		}
+		if found == nil {
+			t.Fatalf("pinned memory %s was dropped by ReplaceNonManual", pinnedID)
+		}
+		if !found.Pinned {
+			t.Error("pinned memory lost its pinned flag after ReplaceNonManual")
+		}
+	})
+}
+
+func TestStoreRestoreSnapshot(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	pinnedID, err := s.Create(ctx, testProject, Memory{
+		Category:   "gotcha",
+		Content:    "user-pinned mcp memory",
+		Source:     "mcp",
+		Importance: 0.7,
+		Tags:       []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create pinned: %v", err)
+	}
+	if err := s.TogglePin(ctx, pinnedID, true); err != nil {
+		t.Fatalf("TogglePin: %v", err)
+	}
+
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "old reflection fact to be snapshotted",
+		Source:     "reflection",
+		Importance: 0.5,
+		Tags:       []string{},
+	}); err != nil {
+		t.Fatalf("Create old: %v", err)
+	}
+
+	replacement := []Memory{
+		{Category: "fact", Content: "new consolidated fact", Importance: 0.6, Tags: []string{}},
+	}
+	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+
+	var found *Memory
+	var foundOld bool
+	for i := range all {
+		if all[i].ID == pinnedID {
+			found = &all[i]
+		}
+		if all[i].Content == "old reflection fact to be snapshotted" {
+			foundOld = true
+		}
+	}
+	if found == nil {
+		t.Fatalf("pinned memory %s was dropped by RestoreSnapshot", pinnedID)
+	}
+	if !found.Pinned {
+		t.Error("pinned memory lost its pinned flag after RestoreSnapshot")
+	}
+	if !foundOld {
+		t.Error("snapshotted memory should have been restored")
+	}
 }
 
 func TestStoreSearchFTS(t *testing.T) {
@@ -1497,6 +1606,22 @@ func TestStoreRecordUsage(t *testing.T) {
 	}
 }
 
+func TestStoreRecordUsage_ClosedDB(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	err := s.RecordUsage(ctx, testProject, "claude-opus-4-6", TokenUsage{InputTokens: 1})
+	if err == nil {
+		t.Fatal("expected error from RecordUsage on closed DB, got nil")
+	}
+	if !strings.Contains(err.Error(), "record usage") {
+		t.Errorf("expected error to contain %q, got %q", "record usage", err.Error())
+	}
+}
+
 func TestStoreSetOnSave(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -2132,6 +2257,41 @@ func TestSeedGlobalMemories(t *testing.T) {
 	}
 }
 
+// TestSeedGlobalMemories_GhostStateInsertFailureLogged covers issue #291:
+// the ghost_state seed insert's error was discarded via `_, _ =`. The
+// ghost_state table is renamed away before calling SeedGlobalMemories so
+// that specific INSERT OR IGNORE fails deterministically ("no such table"),
+// while the preceding "ensure _global project" statement (projects table,
+// already error-checked) and the seed-memory insert loop (memories table)
+// are unaffected and still succeed.
+func TestSeedGlobalMemories_GhostStateInsertFailureLogged(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	s := NewStore(db, logger)
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `ALTER TABLE ghost_state RENAME TO ghost_state_broken`); err != nil {
+		t.Fatalf("rename ghost_state: %v", err)
+	}
+
+	// Non-fatal: the issue treats a missing ghost_state row as acceptable
+	// (GetLearnedContext just sees sql.ErrNoRows), so SeedGlobalMemories
+	// must still return nil even though the insert failed underneath.
+	if err := s.SeedGlobalMemories(ctx); err != nil {
+		t.Fatalf("SeedGlobalMemories should not return a hard error, got: %v", err)
+	}
+
+	if !strings.Contains(logBuf.String(), "seed global ghost_state insert failed") {
+		t.Errorf("expected ghost_state insert failure to be logged, got log output: %q", logBuf.String())
+	}
+}
+
 func TestEnsureProject_EmptyPath_NoUniqueConflict(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -2476,6 +2636,124 @@ func TestEnsureProject_AutoMerge(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected MCP memory to be reassigned to hash-ID project")
+	}
+}
+
+// TestEnsureProject_AutoMerge_PathCollision covers EnsureProject's *other*
+// auto-merge path: a different incoming id colliding with an absolute path
+// that's already owned by another project (as opposed to
+// TestEnsureProject_AutoMerge, which covers the name/non-absolute-path
+// duplicate case). Guards that the DRY refactor onto mergeProjectLocked
+// preserves this success-path outcome (canonical id survives, incoming id's
+// records are reassigned and its row is gone).
+func TestEnsureProject_AutoMerge_PathCollision(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Canonical project already owns this absolute path.
+	if err := s.EnsureProject(ctx, "hash-original", "/home/wayne/git/pathcollide", "pathcollide"); err != nil {
+		t.Fatalf("EnsureProject original: %v", err)
+	}
+
+	// A second, distinct project id accumulates its own record first.
+	if err := s.EnsureProject(ctx, "hash-new", "hash-new", "hash-new"); err != nil {
+		t.Fatalf("EnsureProject placeholder: %v", err)
+	}
+	if _, _, _, err := s.Upsert(ctx, "hash-new", "fact", "belongs to the incoming duplicate id", "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Re-registering "hash-new" against the path already owned by
+	// hash-original must self-heal: fold hash-new into the canonical
+	// project instead of violating the projects.path UNIQUE constraint.
+	if err := s.EnsureProject(ctx, "hash-new", "/home/wayne/git/pathcollide", "pathcollide"); err != nil {
+		t.Fatalf("EnsureProject collision: %v", err)
+	}
+
+	projects, _ := s.ListProjects(ctx)
+	for _, p := range projects {
+		if p.ID == "hash-new" {
+			t.Error("incoming colliding id should have been merged away, not kept")
+		}
+	}
+
+	mems, _ := s.GetTopMemories(ctx, "hash-original", 10)
+	found := false
+	for _, m := range mems {
+		if strings.Contains(m.Content, "belongs to the incoming duplicate id") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected memory reassigned to canonical (pre-existing) project id")
+	}
+}
+
+// TestEnsureProject_AutoMergeErrorNotSwallowed guards issue #290: a failed
+// UPDATE/DELETE inside EnsureProject's auto-merge paths must surface as a
+// real error instead of being silently discarded while the function reports
+// success — and, worse, having already partially reassigned records with no
+// atomicity. Forces the merge to fail partway through by dropping one of the
+// child tables the merge touches.
+func TestEnsureProject_AutoMergeErrorNotSwallowed(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Simulate MCP creating a project with name-as-ID.
+	if err := s.EnsureProject(ctx, "myproject", "myproject", "myproject"); err != nil {
+		t.Fatalf("EnsureProject MCP: %v", err)
+	}
+	if _, _, _, err := s.Upsert(ctx, "myproject", "fact", "deployed on k8s cluster alpha-7", "mcp", 0.8, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Break one of the tables the merge must touch, so the merge fails
+	// partway through instead of completing cleanly.
+	if _, err := s.db.ExecContext(ctx, `DROP TABLE token_usage`); err != nil {
+		t.Fatalf("drop token_usage: %v", err)
+	}
+
+	// Orchestrator creates the real project (abs path, hash ID). This
+	// triggers the name/path-duplicate auto-merge, which must now return a
+	// real error instead of silently reporting success.
+	hashID := "abc123def456"
+	err := s.EnsureProject(ctx, hashID, "/home/wayne/git/myproject", "myproject")
+	if err == nil {
+		t.Fatal("EnsureProject returned nil despite the merge failing — error was silently swallowed")
+	}
+
+	// The merge must have rolled back entirely, not just reported an error
+	// while the old code's uncommitted-transaction-free loop had already
+	// deleted "myproject" and reassigned some (but not all) of its records.
+	// This is what actually distinguishes the fixed, transactional merge
+	// from a version that merely wraps the same errors and returns them.
+	projects, _ := s.ListProjects(ctx)
+	found := false
+	for _, p := range projects {
+		if p.ID == "myproject" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("myproject should still exist — the failed merge must not have deleted it")
+	}
+
+	mems, _ := s.GetTopMemories(ctx, "myproject", 10)
+	memFound := false
+	for _, m := range mems {
+		if strings.Contains(m.Content, "alpha-7") {
+			memFound = true
+		}
+	}
+	if !memFound {
+		t.Error("memory should still be under myproject — the failed merge must not have partially reassigned it")
+	}
+
+	hashMems, _ := s.GetTopMemories(ctx, hashID, 10)
+	for _, m := range hashMems {
+		if strings.Contains(m.Content, "alpha-7") {
+			t.Error("memory should NOT have been reassigned to hashID — the failed merge must not partially apply")
+		}
 	}
 }
 

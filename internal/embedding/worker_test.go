@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,11 @@ type mockStore struct {
 	memories   map[string]string    // id -> content
 	embeddings map[string][]float32 // id -> vector
 	embModel   map[string]string    // id -> model
+
+	// embedded, if non-nil, receives a memory ID each time StoreEmbedding
+	// successfully stores it. Tests use this to detect — without sleeping —
+	// that the worker loop is still alive and processing work.
+	embedded chan string
 }
 
 func (m *mockStore) ListProjects(_ context.Context) ([]memory.Project, error) {
@@ -71,11 +77,147 @@ func (m *mockStore) GetMemoryContent(_ context.Context, id string) (string, erro
 
 func (m *mockStore) StoreEmbedding(_ context.Context, memoryID string, vec []float32, model string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.embeddings[memoryID] = vec
 	m.embModel[memoryID] = model
+	notify := m.embedded
+	m.mu.Unlock()
+
+	if notify != nil {
+		select {
+		case notify <- memoryID:
+		default:
+		}
+	}
 	return nil
+}
+
+// panicOnceStore wraps mockStore and panics exactly once — on the first
+// invocation of the named method — before delegating to the real
+// implementation on every call after that (including the retry of that same
+// method). It exists to prove that Run's select loop survives a panic raised
+// deep in one unit of work and keeps processing later ticks/messages, rather
+// than merely proving recover() appears somewhere in the source.
+type panicOnceStore struct {
+	*mockStore
+	method string // "ListProjects" or "UnembeddedMemoryIDs"
+	fired  atomic.Bool
+}
+
+func (p *panicOnceStore) ListProjects(ctx context.Context) ([]memory.Project, error) {
+	if p.method == "ListProjects" && p.fired.CompareAndSwap(false, true) {
+		panic("simulated panic in ListProjects")
+	}
+	return p.mockStore.ListProjects(ctx)
+}
+
+func (p *panicOnceStore) UnembeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error) {
+	if p.method == "UnembeddedMemoryIDs" && p.fired.CompareAndSwap(false, true) {
+		panic("simulated panic in UnembeddedMemoryIDs")
+	}
+	return p.mockStore.UnembeddedMemoryIDs(ctx, projectID, limit)
+}
+
+// embedOllamaStub returns an httptest server that answers Alive() checks at
+// "/" and Embed() calls at "/api/embed", matching the real Ollama client's
+// request shape (see TestSweepOnce_BackfillsWithoutSaves for the original
+// use of this exact handler).
+func embedOllamaStub() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+		case "/api/embed":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"embeddings":[[0.1,0.2,0.3]]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+// TestWorkerRun_SurvivesPanicInTickerSweep proves the ticker branch of Run's
+// select loop keeps firing after a panic inside SweepOnce (via ListProjects).
+// Before the fix, the first tick's panic is unrecovered anywhere in the
+// goroutine's call stack, which crashes the whole process; the fix must keep
+// later ticks embedding normally.
+func TestWorkerRun_SurvivesPanicInTickerSweep(t *testing.T) {
+	srv := embedOllamaStub()
+	defer srv.Close()
+
+	base := newMockStore()
+	base.projects = []string{"proj-a"}
+	base.memories["mem-1"] = "pre-existing memory"
+	base.embedded = make(chan string, 1)
+
+	store := &panicOnceStore{mockStore: base, method: "ListProjects"}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient(srv.URL, "test-model", 3)
+	worker := NewWorker(client, store, logger, 20*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	projectIDs := make(chan string)
+
+	done := make(chan struct{})
+	go func() {
+		worker.Run(ctx, projectIDs)
+		close(done)
+	}()
+
+	select {
+	case id := <-base.embedded:
+		if id != "mem-1" {
+			t.Fatalf("embedded %q, want mem-1", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not embed after a panic on the first sweep tick — ticker loop likely died")
+	}
+
+	cancel()
+	<-done
+}
+
+// TestWorkerRun_SurvivesPanicInChannelProcessProject proves the projectIDs
+// channel branch of Run's select loop keeps firing after a panic inside
+// processProject (via UnembeddedMemoryIDs). The ticker interval is set to
+// 24h so this test isolates the channel path from the sweep path.
+func TestWorkerRun_SurvivesPanicInChannelProcessProject(t *testing.T) {
+	srv := embedOllamaStub()
+	defer srv.Close()
+
+	base := newMockStore()
+	base.memories["mem-1"] = "content triggered via save notification"
+	base.embedded = make(chan string, 1)
+
+	store := &panicOnceStore{mockStore: base, method: "UnembeddedMemoryIDs"}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	client := NewClient(srv.URL, "test-model", 3)
+	worker := NewWorker(client, store, logger, 24*time.Hour) // ticker must not fire
+
+	ctx, cancel := context.WithCancel(context.Background())
+	projectIDs := make(chan string, 2)
+
+	done := make(chan struct{})
+	go func() {
+		worker.Run(ctx, projectIDs)
+		close(done)
+	}()
+
+	projectIDs <- "proj-a" // triggers the panic inside processProject
+	projectIDs <- "proj-a" // must still be processed if the loop survived
+
+	select {
+	case id := <-base.embedded:
+		if id != "mem-1" {
+			t.Fatalf("embedded %q, want mem-1", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not embed after a panic on the first channel message — loop likely died")
+	}
+
+	cancel()
+	<-done
 }
 
 func TestEmbedOne_HappyPath(t *testing.T) {
