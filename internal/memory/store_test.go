@@ -1497,6 +1497,22 @@ func TestStoreRecordUsage(t *testing.T) {
 	}
 }
 
+func TestStoreRecordUsage_ClosedDB(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	err := s.RecordUsage(ctx, testProject, "claude-opus-4-6", TokenUsage{InputTokens: 1})
+	if err == nil {
+		t.Fatal("expected error from RecordUsage on closed DB, got nil")
+	}
+	if !strings.Contains(err.Error(), "record usage") {
+		t.Errorf("expected error to contain %q, got %q", "record usage", err.Error())
+	}
+}
+
 func TestStoreSetOnSave(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

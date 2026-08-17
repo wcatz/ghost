@@ -1298,7 +1298,10 @@ func (s *Store) RecordUsage(ctx context.Context, projectID, model string, usage 
 		INSERT INTO token_usage (project_id, model, input_tokens, output_tokens, cache_creation, cache_read, cost_usd)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`, projectID, model, usage.InputTokens, usage.OutputTokens, usage.CacheCreation, usage.CacheRead, usage.CostUSD)
-	return err
+	if err != nil {
+		return fmt.Errorf("record usage: %w", err)
+	}
+	return nil
 }
 
 // TokenUsage for cost tracking.
