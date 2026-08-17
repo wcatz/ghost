@@ -901,7 +901,7 @@ func (s *Server) registerTools() {
 		}
 		s.notifyResourceUpdated(ctx, "ghost://memories/global")
 
-		// Notify embedding worker of new/updated memory.
+		// Notify embedding worker of new/updated memory — same as memory_save.
 		if s.projectCh != nil {
 			select {
 			case s.projectCh <- "_global":

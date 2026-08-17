@@ -229,6 +229,36 @@ func TestSetEmbedder(t *testing.T) {
 	}
 }
 
+// TestSaveGlobal_NotifiesEmbeddingWorker is a regression test: ghost_save_global
+// must signal the embedding worker's channel (like ghost_memory_save) so global
+// memories get embedded immediately instead of only on the 2-minute sweep.
+func TestSaveGlobal_NotifiesEmbeddingWorker(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ch := make(chan string, 1)
+	srv.SetEmbedder(&mockEmbedder{}, ch)
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_save_global",
+		Arguments: map[string]any{"content": "global embedding notify regression", "category": "fact"},
+	}); err != nil {
+		t.Fatalf("CallTool ghost_save_global: %v", err)
+	}
+
+	select {
+	case got := <-ch:
+		if got != "_global" {
+			t.Errorf("embedding worker notified with %q, want %q", got, "_global")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ghost_save_global did not notify the embedding worker")
+	}
+}
+
 type mockEmbedder struct{}
 
 func (m *mockEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
@@ -1458,43 +1488,6 @@ func TestDecisionRecordSupersedesArg(t *testing.T) {
 	}
 	if len(after) != 1 || after[0].ID == oldID {
 		t.Errorf("expected only the replacement to remain active, got %+v", after)
-	}
-}
-
-func TestSaveGlobal_NotifiesEmbeddingWorker(t *testing.T) {
-	store := testStore(t)
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	srv := New(store, logger, "test")
-
-	ch := make(chan string, 4)
-	srv.SetEmbedder(&mockEmbedder{}, ch)
-
-	ctx := context.Background()
-	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
-		t.Fatalf("server Connect: %v", err)
-	}
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
-	session, err := client.Connect(ctx, clientTransport, nil)
-	if err != nil {
-		t.Fatalf("client Connect: %v", err)
-	}
-	t.Cleanup(func() { _ = session.Close() })
-
-	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "ghost_save_global",
-		Arguments: map[string]any{"content": "global memory should trigger embedding", "category": "fact"},
-	}); err != nil {
-		t.Fatalf("CallTool ghost_save_global: %v", err)
-	}
-
-	select {
-	case got := <-ch:
-		if got != "_global" {
-			t.Errorf("projectCh notified with %q, want %q", got, "_global")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for embedding worker notification on ghost_save_global")
 	}
 }
 

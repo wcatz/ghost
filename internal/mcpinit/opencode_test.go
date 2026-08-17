@@ -134,6 +134,39 @@ func TestRunOpencode_Idempotent(t *testing.T) {
 	}
 }
 
+// TestRunOpencode_IdempotentWindowsExe is a regression test for the Windows
+// binary-name case: ghost.exe must still be recognized as the ghost binary so
+// a second run reports "already registered" instead of rewriting the config.
+func TestRunOpencode_IdempotentWindowsExe(t *testing.T) {
+	home, xdg := setupOpencodeTestEnv(t)
+	writeStub(t, filepath.Join(home, "bin"), "ghost.exe")
+
+	var out1 bytes.Buffer
+	if err := RunOpencode(&out1, false); err != nil {
+		t.Fatalf("RunOpencode (first): %v", err)
+	}
+	cfgPath := filepath.Join(xdg, "opencode", "opencode.json")
+	first, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	var out2 bytes.Buffer
+	if err := RunOpencode(&out2, false); err != nil {
+		t.Fatalf("RunOpencode (second): %v", err)
+	}
+	second, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Errorf("config changed on second run (ghost.exe idempotency):\n--- first ---\n%s\n--- second ---\n%s", first, second)
+	}
+	if !strings.Contains(out2.String(), "already registered") {
+		t.Errorf("second run should report 'already registered' for ghost.exe, got:\n%s", out2.String())
+	}
+}
+
 func TestRunOpencode_DryRunWritesNothing(t *testing.T) {
 	_, xdg := setupOpencodeTestEnv(t)
 
