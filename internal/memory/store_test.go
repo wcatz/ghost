@@ -587,6 +587,114 @@ func TestStoreReplaceNonManual(t *testing.T) {
 			t.Error("consolidator output should still be present")
 		}
 	})
+
+	t.Run("pinned non-manual memory survives replace", func(t *testing.T) {
+		s := testStore(t)
+
+		pinnedID, err := s.Create(ctx, testProject, Memory{
+			Category:   "gotcha",
+			Content:    "user-pinned mcp memory",
+			Source:     "mcp",
+			Importance: 0.7,
+			Tags:       []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := s.TogglePin(ctx, pinnedID, true); err != nil {
+			t.Fatalf("TogglePin: %v", err)
+		}
+
+		replacement := []Memory{
+			{Category: "fact", Content: "new consolidated fact", Importance: 0.6, Tags: []string{}},
+		}
+		if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+
+		all, err := s.GetAll(ctx, testProject, 100)
+		if err != nil {
+			t.Fatalf("GetAll: %v", err)
+		}
+
+		var found *Memory
+		for i := range all {
+			if all[i].ID == pinnedID {
+				found = &all[i]
+			}
+		}
+		if found == nil {
+			t.Fatalf("pinned memory %s was dropped by ReplaceNonManual", pinnedID)
+		}
+		if !found.Pinned {
+			t.Error("pinned memory lost its pinned flag after ReplaceNonManual")
+		}
+	})
+}
+
+func TestStoreRestoreSnapshot(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	pinnedID, err := s.Create(ctx, testProject, Memory{
+		Category:   "gotcha",
+		Content:    "user-pinned mcp memory",
+		Source:     "mcp",
+		Importance: 0.7,
+		Tags:       []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create pinned: %v", err)
+	}
+	if err := s.TogglePin(ctx, pinnedID, true); err != nil {
+		t.Fatalf("TogglePin: %v", err)
+	}
+
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "old reflection fact to be snapshotted",
+		Source:     "reflection",
+		Importance: 0.5,
+		Tags:       []string{},
+	}); err != nil {
+		t.Fatalf("Create old: %v", err)
+	}
+
+	replacement := []Memory{
+		{Category: "fact", Content: "new consolidated fact", Importance: 0.6, Tags: []string{}},
+	}
+	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+
+	var found *Memory
+	var foundOld bool
+	for i := range all {
+		if all[i].ID == pinnedID {
+			found = &all[i]
+		}
+		if all[i].Content == "old reflection fact to be snapshotted" {
+			foundOld = true
+		}
+	}
+	if found == nil {
+		t.Fatalf("pinned memory %s was dropped by RestoreSnapshot", pinnedID)
+	}
+	if !found.Pinned {
+		t.Error("pinned memory lost its pinned flag after RestoreSnapshot")
+	}
+	if !foundOld {
+		t.Error("snapshotted memory should have been restored")
+	}
 }
 
 func TestStoreSearchFTS(t *testing.T) {
