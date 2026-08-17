@@ -1279,29 +1279,48 @@ func (s *Server) registerTools() {
 
 	// ghost_memory_pin — pin or unpin a memory.
 	type pinArgs struct {
-		MemoryID string `json:"memory_id" jsonschema:"ID of the memory to pin/unpin"`
-		Pinned   bool   `json:"pinned" jsonschema:"true to pin, false to unpin"`
+		ProjectID string `json:"project_id" jsonschema:"Project name the memory belongs to (required for ownership check)"`
+		MemoryID  string `json:"memory_id" jsonschema:"ID of the memory to pin/unpin"`
+		Pinned    bool   `json:"pinned" jsonschema:"true to pin, false to unpin"`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_pin",
 		Title:       "Pin/Unpin Memory",
-		Description: "Pin or unpin a memory. Pinned memories always appear at top of project context and survive reflection pruning. Pin non-negotiable rules, security constraints, or core architectural invariants.",
+		Description: "Pin or unpin a memory. Requires project_id to verify ownership — you cannot pin memories from other projects. Pinned memories always appear at top of project context and survive reflection pruning. Pin non-negotiable rules, security constraints, or core architectural invariants.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
 			OpenWorldHint:   boolPtr(false),
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args pinArgs) (*mcp.CallToolResult, any, error) {
-		if args.MemoryID == "" {
-			return nil, nil, fmt.Errorf("memory_id is required")
+		if args.ProjectID == "" || args.MemoryID == "" {
+			return nil, nil, fmt.Errorf("project_id and memory_id are required")
 		}
+		resolvedProjectID, _, err := s.store.ResolveProject(ctx, args.ProjectID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve project: %w", err)
+		}
+		if resolvedProjectID == "" {
+			return nil, nil, fmt.Errorf("project %q not found", args.ProjectID)
+		}
+
+		// Verify the memory exists and belongs to the specified project.
+		mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID})
+		if err != nil {
+			return nil, nil, fmt.Errorf("lookup failed: %w", err)
+		}
+		if len(mems) == 0 {
+			return nil, nil, fmt.Errorf("memory %s not found", args.MemoryID)
+		}
+		if mems[0].ProjectID != resolvedProjectID {
+			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, args.ProjectID)
+		}
+
 		if err := s.store.TogglePin(ctx, args.MemoryID, args.Pinned); err != nil {
 			return nil, nil, fmt.Errorf("toggle pin: %w", err)
 		}
-		if mems, err := s.store.GetByIDs(ctx, []string{args.MemoryID}); err == nil && len(mems) > 0 {
-			s.notifyProjectResource(ctx, mems[0].ProjectID, "context")
-		}
+		s.notifyProjectResource(ctx, resolvedProjectID, "context")
 		action := "pinned"
 		if !args.Pinned {
 			action = "unpinned"

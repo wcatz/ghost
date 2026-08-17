@@ -508,6 +508,77 @@ func TestDeleteMemory_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestGhostMemoryPin_EndToEnd(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	id, err := store.Create(ctx, "abc123", memory.Memory{
+		Category: "decision", Content: "pin me", Source: "mcp", Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_memory_pin",
+		Arguments: map[string]any{"project_id": "test-project", "memory_id": id, "pinned": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_memory_pin: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error result: %+v", result.Content)
+	}
+
+	mems, err := store.GetByIDs(ctx, []string{id})
+	if err != nil || len(mems) != 1 {
+		t.Fatalf("GetByIDs: %v (n=%d)", err, len(mems))
+	}
+	if !mems[0].Pinned {
+		t.Error("expected memory to be pinned")
+	}
+}
+
+func TestGhostMemoryPin_RejectsWrongProject(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "other", "/tmp/other-pin", "other"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := store.Create(ctx, "abc123", memory.Memory{
+		Category: "decision", Content: "do not pin from another project", Source: "mcp", Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_memory_pin",
+		Arguments: map[string]any{"project_id": "other", "memory_id": id, "pinned": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_memory_pin: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected ownership rejection, got: %+v", result.Content)
+	}
+
+	mems, err := store.GetByIDs(ctx, []string{id})
+	if err != nil || len(mems) != 1 {
+		t.Fatalf("GetByIDs: %v (n=%d)", err, len(mems))
+	}
+	if mems[0].Pinned {
+		t.Error("pin state must be unchanged after rejected cross-project pin")
+	}
+}
+
 func TestSearchAll_CrossProject(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()

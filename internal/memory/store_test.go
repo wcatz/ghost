@@ -862,6 +862,13 @@ func TestStoreTogglePin(t *testing.T) {
 	if all[0].Pinned {
 		t.Error("expected not pinned after TogglePin(false)")
 	}
+
+	// Toggling pin on a non-existent memory should return an error, not
+	// silently succeed with zero rows affected.
+	err = s.TogglePin(ctx, "nonexistent-id", true)
+	if err == nil {
+		t.Error("expected error toggling pin on non-existent memory")
+	}
 }
 
 func TestStoreGetTopMemories(t *testing.T) {

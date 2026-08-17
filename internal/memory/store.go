@@ -927,10 +927,20 @@ func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 	if pinned {
 		pinnedInt = 1
 	}
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE memories SET pinned = ?, updated_at = datetime('now') WHERE id = ?
 	`, pinnedInt, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("toggle pin: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("toggle pin rows: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("memory %s not found", id)
+	}
+	return nil
 }
 
 // CurrentTimestamp returns the database's own notion of "now", formatted
