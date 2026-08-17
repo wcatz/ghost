@@ -145,6 +145,36 @@ func TestRunFailsFatallyOnClassifierError(t *testing.T) {
 	}
 }
 
+// TestRun_FallbackClassificationButNothingConfirmed_DoesNotReportSkip covers
+// an edge case found by live-testing the ghost_resolve fallback fix: the real
+// claude CLI fallback classified a seeded memory as KEEP, not RESOLVED, so
+// there was nothing to apply — but the pre-fix condition set SkippedApply
+// (and logged "apply skipped") purely because fromFallback was true,
+// regardless of whether anything was actually confirmed. That's misleading:
+// "apply skipped" implies something was found and withheld, not "found
+// nothing." SkippedApply must only report true when a real write was
+// withheld.
+func TestRun_FallbackClassificationButNothingConfirmed_DoesNotReportSkip(t *testing.T) {
+	store := &fakeStore{
+		candidates: []memory.Memory{{ID: "m1", Content: "resolved: shipped in v1"}},
+	}
+	cls := &fallbackClassifier{resolved: false, fromFallback: true}
+
+	res, confirmed, err := Run(context.Background(), store, cls, "proj1", true, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.SkippedApply {
+		t.Error("SkippedApply must be false when nothing was confirmed, even if classification used a fallback")
+	}
+	if len(confirmed) != 0 {
+		t.Errorf("got %d confirmed, want 0", len(confirmed))
+	}
+	if store.setResolvedCalled {
+		t.Error("SetResolved must not be called when nothing was confirmed")
+	}
+}
+
 func TestRun_FallbackClassification_SkipsApply(t *testing.T) {
 	store := &fakeStore{
 		candidates: []memory.Memory{{ID: "m1", Content: "resolved: shipped in v1"}},

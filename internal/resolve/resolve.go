@@ -116,7 +116,7 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 		confirmed = append(confirmed, m)
 	}
 
-	if apply && anyFallback {
+	if apply && anyFallback && len(confirmed) > 0 {
 		res.SkippedApply = true
 		if logger != nil {
 			logger.Warn("resolve: candidates classified via fallback provider, apply skipped — rerun once primary is available",
