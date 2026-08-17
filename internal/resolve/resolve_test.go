@@ -121,6 +121,9 @@ func TestRunResolvesConfirmedEvidence(t *testing.T) {
 	if res.Resolved != 1 {
 		t.Errorf("res.Resolved = %d, want 1", res.Resolved)
 	}
+	if res.SkippedApply {
+		t.Error("SkippedApply must be false when apply succeeds with no fallback involved")
+	}
 }
 
 func TestRunFailsFatallyOnClassifierError(t *testing.T) {
@@ -155,6 +158,9 @@ func TestRun_FallbackClassification_SkipsApply(t *testing.T) {
 	if res.Resolved != 0 {
 		t.Errorf("got Resolved=%d, want 0 (apply must be skipped on fallback)", res.Resolved)
 	}
+	if !res.SkippedApply {
+		t.Error("expected SkippedApply=true so callers can surface the skip explicitly")
+	}
 	if len(confirmed) != 1 {
 		t.Errorf("got %d confirmed, want 1 (dry-run preview still returned)", len(confirmed))
 	}
@@ -184,6 +190,9 @@ func TestRun_MixedFallbackAndPrimary_SkipsApply(t *testing.T) {
 	}
 	if res.Resolved != 0 {
 		t.Errorf("got Resolved=%d, want 0 (any fallback in the batch must skip apply)", res.Resolved)
+	}
+	if !res.SkippedApply {
+		t.Error("expected SkippedApply=true so callers can surface the skip explicitly")
 	}
 	if store.setResolvedCalled {
 		t.Error("SetResolved must not be called when any candidate in the batch came from a fallback provider, even if another was confirmed via primary")

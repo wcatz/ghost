@@ -998,12 +998,19 @@ func (s *Server) registerTools() {
 		if !ok {
 			return nil, nil, fmt.Errorf("ghost_resolve: store does not support resolve operations")
 		}
-		if req.Session == nil {
-			return nil, nil, fmt.Errorf("ghost_resolve: no active MCP session for sampling")
+		// Sampling needs a live session; the claude CLI doesn't. When no
+		// session exists at all, skip straight to the CLI as a full-trust
+		// primary (mirrors buildClassifyProvider's headless, no-API-key
+		// case in cmd/ghost/main.go) rather than refusing to run a tool
+		// that has a perfectly good session-independent path available.
+		var provider *ai.FallbackProvider
+		if req.Session != nil {
+			samplingProvider := ai.NewSamplingProvider(req.Session)
+			provider = ai.NewAlwaysFallbackProvider(samplingProvider, ai.NewCLIClient(), true)
+		} else {
+			provider = ai.NewFallbackProvider(ai.NewCLIClient(), nil, false)
 		}
-		samplingProvider := ai.NewSamplingProvider(req.Session)
-		fallback := ai.NewAlwaysFallbackProvider(samplingProvider, ai.NewCLIClient(), true)
-		cls := resolve.NewHaikuClassifier(fallback)
+		cls := resolve.NewHaikuClassifier(provider)
 		res, confirmed, err := resolve.Run(ctx, rs, cls, projectID, args.Apply, s.logger)
 		if err != nil {
 			return nil, nil, fmt.Errorf("ghost_resolve: %w", err)
@@ -1018,6 +1025,9 @@ func (s *Server) registerTools() {
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %s %d\n",
 			args.Project, res.Loaded, res.Candidates, res.Confirmed, verb, count)
+		if res.SkippedApply {
+			sb.WriteString("  apply skipped: classification used the claude CLI fallback (MCP sampling unavailable on this client) — rerun once sampling works to actually stamp resolved_at\n")
+		}
 		for _, m := range confirmed {
 			fmt.Fprintf(&sb, "  %s  [%s]  %s\n", shortID(m.ID), m.Category, firstLine(m.Content, 70))
 		}

@@ -58,6 +58,12 @@ type Result struct {
 	Candidates int // survived the keyword prefilter and were classified
 	Confirmed  int // classified as resolved evidence
 	Resolved   int // rows written (0 in dry-run)
+
+	// SkippedApply is true iff apply was requested but withheld because at
+	// least one classification came from a fallback provider. Callers should
+	// surface this explicitly — a silent Resolved=0 otherwise looks
+	// indistinguishable from "nothing to resolve."
+	SkippedApply bool
 }
 
 // Prefilter keeps only memories whose content contains a resolution keyword.
@@ -111,6 +117,7 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	}
 
 	if apply && anyFallback {
+		res.SkippedApply = true
 		if logger != nil {
 			logger.Warn("resolve: candidates classified via fallback provider, apply skipped — rerun once primary is available",
 				"confirmed", res.Confirmed)
