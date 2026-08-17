@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -2129,6 +2130,41 @@ func TestSeedGlobalMemories(t *testing.T) {
 	}
 	if !seedSurvived {
 		t.Error("seed memory was deleted by ReplaceNonManual — consolidation protection broken")
+	}
+}
+
+// TestSeedGlobalMemories_GhostStateInsertFailureLogged covers issue #291:
+// the ghost_state seed insert's error was discarded via `_, _ =`. The
+// ghost_state table is renamed away before calling SeedGlobalMemories so
+// that specific INSERT OR IGNORE fails deterministically ("no such table"),
+// while the preceding "ensure _global project" statement (projects table,
+// already error-checked) and the seed-memory insert loop (memories table)
+// are unaffected and still succeed.
+func TestSeedGlobalMemories_GhostStateInsertFailureLogged(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	s := NewStore(db, logger)
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `ALTER TABLE ghost_state RENAME TO ghost_state_broken`); err != nil {
+		t.Fatalf("rename ghost_state: %v", err)
+	}
+
+	// Non-fatal: the issue treats a missing ghost_state row as acceptable
+	// (GetLearnedContext just sees sql.ErrNoRows), so SeedGlobalMemories
+	// must still return nil even though the insert failed underneath.
+	if err := s.SeedGlobalMemories(ctx); err != nil {
+		t.Fatalf("SeedGlobalMemories should not return a hard error, got: %v", err)
+	}
+
+	if !strings.Contains(logBuf.String(), "seed global ghost_state insert failed") {
+		t.Errorf("expected ghost_state insert failure to be logged, got log output: %q", logBuf.String())
 	}
 }
 

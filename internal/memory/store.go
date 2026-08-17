@@ -111,7 +111,9 @@ func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("ensure _global project: %w", err)
 	}
-	_, _ = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`)
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`); err != nil {
+		s.logger.Warn("seed global ghost_state insert failed", "error", err)
+	}
 
 	for _, seed := range defaultSeedMemories {
 		// Skip if content already exists in _global (exact match).
