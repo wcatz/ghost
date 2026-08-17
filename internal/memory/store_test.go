@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -587,6 +588,114 @@ func TestStoreReplaceNonManual(t *testing.T) {
 			t.Error("consolidator output should still be present")
 		}
 	})
+
+	t.Run("pinned non-manual memory survives replace", func(t *testing.T) {
+		s := testStore(t)
+
+		pinnedID, err := s.Create(ctx, testProject, Memory{
+			Category:   "gotcha",
+			Content:    "user-pinned mcp memory",
+			Source:     "mcp",
+			Importance: 0.7,
+			Tags:       []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := s.TogglePin(ctx, pinnedID, true); err != nil {
+			t.Fatalf("TogglePin: %v", err)
+		}
+
+		replacement := []Memory{
+			{Category: "fact", Content: "new consolidated fact", Importance: 0.6, Tags: []string{}},
+		}
+		if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+
+		all, err := s.GetAll(ctx, testProject, 100)
+		if err != nil {
+			t.Fatalf("GetAll: %v", err)
+		}
+
+		var found *Memory
+		for i := range all {
+			if all[i].ID == pinnedID {
+				found = &all[i]
+			}
+		}
+		if found == nil {
+			t.Fatalf("pinned memory %s was dropped by ReplaceNonManual", pinnedID)
+		}
+		if !found.Pinned {
+			t.Error("pinned memory lost its pinned flag after ReplaceNonManual")
+		}
+	})
+}
+
+func TestStoreRestoreSnapshot(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	pinnedID, err := s.Create(ctx, testProject, Memory{
+		Category:   "gotcha",
+		Content:    "user-pinned mcp memory",
+		Source:     "mcp",
+		Importance: 0.7,
+		Tags:       []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create pinned: %v", err)
+	}
+	if err := s.TogglePin(ctx, pinnedID, true); err != nil {
+		t.Fatalf("TogglePin: %v", err)
+	}
+
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category:   "fact",
+		Content:    "old reflection fact to be snapshotted",
+		Source:     "reflection",
+		Importance: 0.5,
+		Tags:       []string{},
+	}); err != nil {
+		t.Fatalf("Create old: %v", err)
+	}
+
+	replacement := []Memory{
+		{Category: "fact", Content: "new consolidated fact", Importance: 0.6, Tags: []string{}},
+	}
+	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+
+	var found *Memory
+	var foundOld bool
+	for i := range all {
+		if all[i].ID == pinnedID {
+			found = &all[i]
+		}
+		if all[i].Content == "old reflection fact to be snapshotted" {
+			foundOld = true
+		}
+	}
+	if found == nil {
+		t.Fatalf("pinned memory %s was dropped by RestoreSnapshot", pinnedID)
+	}
+	if !found.Pinned {
+		t.Error("pinned memory lost its pinned flag after RestoreSnapshot")
+	}
+	if !foundOld {
+		t.Error("snapshotted memory should have been restored")
+	}
 }
 
 func TestStoreSearchFTS(t *testing.T) {
@@ -1497,6 +1606,22 @@ func TestStoreRecordUsage(t *testing.T) {
 	}
 }
 
+func TestStoreRecordUsage_ClosedDB(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	err := s.RecordUsage(ctx, testProject, "claude-opus-4-6", TokenUsage{InputTokens: 1})
+	if err == nil {
+		t.Fatal("expected error from RecordUsage on closed DB, got nil")
+	}
+	if !strings.Contains(err.Error(), "record usage") {
+		t.Errorf("expected error to contain %q, got %q", "record usage", err.Error())
+	}
+}
+
 func TestStoreSetOnSave(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -2129,6 +2254,41 @@ func TestSeedGlobalMemories(t *testing.T) {
 	}
 	if !seedSurvived {
 		t.Error("seed memory was deleted by ReplaceNonManual — consolidation protection broken")
+	}
+}
+
+// TestSeedGlobalMemories_GhostStateInsertFailureLogged covers issue #291:
+// the ghost_state seed insert's error was discarded via `_, _ =`. The
+// ghost_state table is renamed away before calling SeedGlobalMemories so
+// that specific INSERT OR IGNORE fails deterministically ("no such table"),
+// while the preceding "ensure _global project" statement (projects table,
+// already error-checked) and the seed-memory insert loop (memories table)
+// are unaffected and still succeed.
+func TestSeedGlobalMemories_GhostStateInsertFailureLogged(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	s := NewStore(db, logger)
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `ALTER TABLE ghost_state RENAME TO ghost_state_broken`); err != nil {
+		t.Fatalf("rename ghost_state: %v", err)
+	}
+
+	// Non-fatal: the issue treats a missing ghost_state row as acceptable
+	// (GetLearnedContext just sees sql.ErrNoRows), so SeedGlobalMemories
+	// must still return nil even though the insert failed underneath.
+	if err := s.SeedGlobalMemories(ctx); err != nil {
+		t.Fatalf("SeedGlobalMemories should not return a hard error, got: %v", err)
+	}
+
+	if !strings.Contains(logBuf.String(), "seed global ghost_state insert failed") {
+		t.Errorf("expected ghost_state insert failure to be logged, got log output: %q", logBuf.String())
 	}
 }
 

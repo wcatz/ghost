@@ -111,7 +111,9 @@ func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("ensure _global project: %w", err)
 	}
-	_, _ = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`)
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`); err != nil {
+		s.logger.Warn("seed global ghost_state insert failed", "error", err)
+	}
 
 	for _, seed := range defaultSeedMemories {
 		// Skip if content already exists in _global (exact match).
@@ -544,6 +546,12 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 // for the category-aware time-decay + pinned-boost formula so the two
 // callers can never drift apart. It is a fragment, not a full query: callers
 // interpolate it into their own "ORDER BY (...) DESC" clause.
+// The 0.15 and 0.3 floors create a dead zone at the low end of each decaying
+// category: a brand-new memory saved at importance 0.15 (or 0.3) scores
+// identically to a maximally-important, fully-decayed one of the same
+// category (1.0 * 0.15 == 0.15 * 1.0). Accepted — importance that low is rare
+// in practice (defaults are 0.5+) — but if ranking ever looks off for a
+// low-importance category member, this tie is why.
 const DecayRankingSQL = `
 	importance
 	* CASE
@@ -970,12 +978,17 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Snapshot existing non-manual memories before deleting.
+	// Snapshot existing non-manual memories before deleting. Pinned memories
+	// are excluded throughout this function — like source='manual', a pin is
+	// an explicit user override that reflection must never delete, rewrite,
+	// or silently drop (it has no way to know a consolidated memory it emits
+	// corresponds to a pinned one it never saw as such, so preservation has
+	// to mean "don't touch it" rather than "carry the flag through").
 	snapshotID := fmt.Sprintf("%s-%d", projectID, time.Now().Unix())
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags)
 		SELECT ?, project_id, category, content, importance, source, tags
-		FROM memories WHERE project_id = ? AND source != 'manual'
+		FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0
 	`, snapshotID, projectID)
 	if err != nil {
 		return fmt.Errorf("snapshot memories: %w", err)
@@ -989,7 +1002,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	if consolidatedSince != "" {
 		rows, err := tx.QueryContext(ctx, `
 			SELECT category, content, importance, source, tags
-			FROM memories WHERE project_id = ? AND source != 'manual' AND created_at >= ?
+			FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND created_at >= ?
 		`, projectID, consolidatedSince)
 		if err != nil {
 			return fmt.Errorf("find concurrent memories: %w", err)
@@ -1011,7 +1024,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 	}
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual'`, projectID)
+	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0`, projectID)
 	if err != nil {
 		return fmt.Errorf("delete old memories: %w", err)
 	}
@@ -1089,8 +1102,10 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Delete current non-manual memories.
-	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual'`, projectID)
+	// Delete current non-manual memories. Pinned memories are excluded, same
+	// as ReplaceNonManual: reflection never touched them, so restore must not
+	// delete them either — they aren't in the snapshot to bring back.
+	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0`, projectID)
 	if err != nil {
 		return 0, fmt.Errorf("delete current: %w", err)
 	}
@@ -1298,7 +1313,10 @@ func (s *Store) RecordUsage(ctx context.Context, projectID, model string, usage 
 		INSERT INTO token_usage (project_id, model, input_tokens, output_tokens, cache_creation, cache_read, cost_usd)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 	`, projectID, model, usage.InputTokens, usage.OutputTokens, usage.CacheCreation, usage.CacheRead, usage.CostUSD)
-	return err
+	if err != nil {
+		return fmt.Errorf("record usage: %w", err)
+	}
+	return nil
 }
 
 // TokenUsage for cost tracking.
