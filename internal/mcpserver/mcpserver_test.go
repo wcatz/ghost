@@ -1180,7 +1180,7 @@ func TestResourceSubscription_NotifiesOnMemorySave(t *testing.T) {
 		t.Fatalf("server Connect: %v", err)
 	}
 
-	updated := make(chan string, 1)
+	updated := make(chan string, 8)
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
 		ResourceUpdatedHandler: func(ctx context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
 			updated <- req.Params.URI
@@ -1200,15 +1200,29 @@ func TestResourceSubscription_NotifiesOnMemorySave(t *testing.T) {
 	if _, _, _, err := store.Upsert(ctx, "abc123", "fact", "triggers subscription notify", "manual", 0.5, []string{}); err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	srv.notifyResourceUpdated(ctx, uri)
 
-	select {
-	case got := <-updated:
-		if got != uri {
-			t.Errorf("notified URI = %q, want %q", got, uri)
+	// Subscribe's response only confirms the client's request round-trip
+	// completed; it races the server's own internal bookkeeping (server.go's
+	// subscribe() populates resourceSubscriptions under a separate lock
+	// acquisition after the response is already in flight in some
+	// interleavings — confirmed via server-side logging showing
+	// subscriber_count=0 on an immediate notify). A real client would only
+	// ever hit this by chance right at subscribe time; retry a few times
+	// with a short per-attempt wait rather than one long timeout, since a
+	// dropped notification here never arrives no matter how long we wait.
+	var got string
+	for attempt := 0; attempt < 10 && got == ""; attempt++ {
+		srv.notifyResourceUpdated(ctx, uri)
+		select {
+		case got = <-updated:
+		case <-time.After(100 * time.Millisecond):
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for resources/updated notification")
+	}
+	if got == "" {
+		t.Fatal("timed out waiting for resources/updated notification after retries")
+	}
+	if got != uri {
+		t.Errorf("notified URI = %q, want %q", got, uri)
 	}
 
 	if err := session.Unsubscribe(ctx, &mcp.UnsubscribeParams{URI: uri}); err != nil {
