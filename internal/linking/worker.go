@@ -51,9 +51,24 @@ func (w *Worker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.SweepOnce(ctx)
+			w.safeSweepOnce(ctx)
 		}
 	}
+}
+
+// safeSweepOnce wraps SweepOnce with panic recovery. A panic here must not
+// escape into Run's select loop: unwinding past Run itself would leave
+// nothing left to fire the loop's next tick, so linking would stop for good
+// even after the panic is otherwise "handled". Recovering inside this small
+// function means control returns to Run — still live — once this call
+// completes, so the loop keeps going on the next tick.
+func (w *Worker) safeSweepOnce(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.logger.Error("panic in linking sweep, recovered", "panic", r)
+		}
+	}()
+	w.SweepOnce(ctx)
 }
 
 // SweepOnce links unscanned embedded memories across all projects.

@@ -11,7 +11,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 3
+const schemaVersion = 4
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -22,6 +22,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV1,
 	migrateV2,
 	migrateV3,
+	migrateV4,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -175,6 +176,37 @@ FROM memory_links`,
 	return nil
 }
 
+// migrateV4 narrows memories_au to only fire when an UPDATE actually changes
+// content. The trigger previously ran unconditionally on every UPDATE —
+// including SET resolved_at, SET pinned, SET access_count — none of which
+// touch content, so it did a harmless but wasteful FTS delete+re-insert on
+// every such write (#286). SQLite has no ALTER TRIGGER, so this drops and
+// recreates memories_au with a WHEN guard; unlike migrateV1/migrateV3 this
+// needs no table rebuild — a trigger carries no rows or FK dependencies of
+// its own, so replacing it is a plain DROP+CREATE.
+func migrateV4(tx *sql.Tx) error {
+	stale, err := triggerDDLLacks(tx, "memories_au", "old.content != new.content")
+	if err != nil {
+		return err
+	}
+	if !stale {
+		return nil // hand-migrated DB (or a fresh initSQL create) already has the guard
+	}
+	stmts := []string{
+		`DROP TRIGGER IF EXISTS memories_au`,
+		`CREATE TRIGGER memories_au AFTER UPDATE ON memories WHEN old.content != new.content BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("%q: %w", s[:min(40, len(s))], err)
+		}
+	}
+	return nil
+}
+
 // columnExists reports whether table has a column named column, matching
 // case-insensitively — SQLite itself treats column identifiers as
 // case-insensitive, so a hand-migrated RESOLVED_AT column must be recognized
@@ -215,6 +247,25 @@ func tableDDLLacks(tx *sql.Tx, table, marker string) (bool, error) {
 	}
 	if err != nil {
 		return false, fmt.Errorf("read %s DDL: %w", table, err)
+	}
+	return !strings.Contains(ddl, marker), nil
+}
+
+// triggerDDLLacks reports whether the named trigger exists and its stored DDL
+// does NOT contain marker — mirrors tableDDLLacks but queries sqlite_master
+// for a trigger instead of a table. A missing trigger needs no recreate here:
+// initSQL's CREATE TRIGGER IF NOT EXISTS will already have created it in
+// current form before migrate() ever runs.
+func triggerDDLLacks(tx *sql.Tx, trigger, marker string) (bool, error) {
+	var ddl string
+	err := tx.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, trigger,
+	).Scan(&ddl)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read %s DDL: %w", trigger, err)
 	}
 	return !strings.Contains(ddl, marker), nil
 }

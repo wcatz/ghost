@@ -100,7 +100,19 @@ func runMCP() {
 
 	if cfg.Embedding.Enabled {
 		embedClient := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
-		embedWorker := embedding.NewWorker(embedClient, store, logger, 2*time.Minute)
+		// A second config.DataDir() call here is deliberate and cheap (an
+		// idempotent MkdirAll, same precedent as internal/mcpinit/hook.go): it
+		// gives the embedding worker the data directory to write its
+		// Ollama-down marker into without threading dataDir through
+		// bootstrap()'s return values. If it fails, dataDir stays "" and the
+		// worker just skips that bookkeeping (see embedding.NewWorker) — worth
+		// warning about but never fatal, since bootstrap() already succeeded
+		// with its own DataDir() call.
+		dataDir, err := config.DataDir()
+		if err != nil {
+			logger.Warn("mcp: cannot resolve data dir, Ollama-down marker disabled", "error", err)
+		}
+		embedWorker := embedding.NewWorker(embedClient, store, logger, 2*time.Minute, dataDir)
 		projectCh := make(chan string, 16)
 		go embedWorker.Run(ctx, projectCh)
 		srv.SetEmbedder(embedClient, projectCh)

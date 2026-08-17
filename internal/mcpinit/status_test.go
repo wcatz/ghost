@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -395,5 +397,107 @@ func TestCheckEmbeddingStats(t *testing.T) {
 		if text != c.wantText {
 			t.Errorf("embedded=%d total=%d: want text %q, got %q", c.embedded, c.total, c.wantText, text)
 		}
+	}
+}
+
+// TestStatus_OllamaDownDurationReported verifies that a down-since marker
+// written by the embedding worker (internal/embedding.Worker) is surfaced as
+// a duration alongside a currently-unreachable Ollama — the core behavior
+// requested by issue #287.
+func TestStatus_OllamaDownDurationReported(t *testing.T) {
+	statusEnv(t)
+	t.Setenv("PATH", writeStubGhost(t))
+
+	srv := ollamaStub()
+	url := srv.URL
+	srv.Close() // unreachable — Status's own live check must see it down too
+
+	writeGhostConfigFile(t, fmt.Sprintf(`embedding:
+  ollama_url: %s
+  model: nomic-embed-text:v1.5
+  dimensions: 768
+  enabled: true
+`, url))
+	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
+
+	ghostDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir ghost dir: %v", err)
+	}
+	since := time.Now().Add(-(2*time.Hour + 3*time.Minute))
+	marker := since.UTC().Format(time.RFC3339)
+	if err := os.WriteFile(filepath.Join(ghostDir, embedding.OllamaDownMarkerFilename), []byte(marker), 0o600); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	want := fmt.Sprintf("Ollama down since %s (2h 3m)", since.UTC().Format("2006-01-02 15:04 UTC"))
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("expected output to contain %q, got:\n%s", want, out.String())
+	}
+}
+
+// TestStatus_OllamaDownDurationSuppressedWhenReachable is the regression test
+// for the stale-marker failure mode: if the embedding worker's MCP server
+// process exits while Ollama is down, nothing removes the marker file until
+// a new worker instance later observes Ollama reachable again. `ghost mcp
+// status` must not print a contradictory "Ollama down since ..." line next
+// to a passing, live "Ollama model installed" check just because a stale
+// marker happens to still be sitting on disk.
+func TestStatus_OllamaDownDurationSuppressedWhenReachable(t *testing.T) {
+	statusEnv(t)
+	t.Setenv("PATH", writeStubGhost(t))
+
+	model := "nomic-embed-text:v1.5"
+	ollama := ollamaStub(model)
+	defer ollama.Close()
+
+	writeGhostConfigFile(t, fmt.Sprintf(`embedding:
+  ollama_url: %s
+  model: %s
+  dimensions: 768
+  enabled: true
+`, ollama.URL, model))
+	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
+
+	ghostDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir ghost dir: %v", err)
+	}
+	stale := time.Now().Add(-5 * time.Hour).UTC().Format(time.RFC3339)
+	if err := os.WriteFile(filepath.Join(ghostDir, embedding.OllamaDownMarkerFilename), []byte(stale), 0o600); err != nil {
+		t.Fatalf("write stale marker: %v", err)
+	}
+
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+
+	if strings.Contains(out.String(), "Ollama down since") {
+		t.Errorf("a currently-reachable Ollama must not report a stale down-duration, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "✓ Ollama model "+model+" installed") {
+		t.Errorf("expected the live Ollama check to still pass, got:\n%s", out.String())
+	}
+}
+
+// TestStatus_NoOllamaDownDurationWhenAbsent pins the no-marker baseline: a
+// clean install with embedding disabled (statusEnv's default) never prints an
+// Ollama-down duration line.
+func TestStatus_NoOllamaDownDurationWhenAbsent(t *testing.T) {
+	statusEnv(t)
+	t.Setenv("PATH", writeStubGhost(t))
+
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if strings.Contains(out.String(), "Ollama down since") {
+		t.Errorf("expected no Ollama-down line without a marker file, got:\n%s", out.String())
 	}
 }

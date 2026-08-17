@@ -59,7 +59,7 @@ CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
     INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
 END;
 
-CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories WHEN old.content != new.content BEGIN
     INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
     INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
 END;

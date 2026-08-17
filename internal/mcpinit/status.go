@@ -227,7 +227,15 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	// search and memory linking inactive. Ollama checks run regardless of
 	// whether a database exists.
 	if cfg, cfgErr := config.Load(); cfgErr == nil {
-		checkOllama(w, cfg, check)
+		// reportOllamaDownDuration only fires when embedding is enabled AND
+		// checkOllama's live probe just found Ollama unreachable — see that
+		// function's doc comment for why a stale marker must never be printed
+		// next to a currently-passing Ollama check.
+		if alive := checkOllama(w, cfg, check); cfg.Embedding.Enabled && !alive {
+			if dataDir, ddErr := config.DataDir(); ddErr == nil {
+				reportOllamaDownDuration(w, dataDir)
+			}
+		}
 	}
 
 	dataDir, err := config.DataDir()
