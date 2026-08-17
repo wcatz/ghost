@@ -23,6 +23,15 @@ import (
 // read-write and would create a phantom empty ghost.db on first read. The path
 // is URI-escaped so a '?' or '#' in it can't corrupt the query, and no
 // journal_mode pragma is set (a read-only connection cannot write the header).
+//
+// busy_timeout is intentionally left at 1000ms here — shorter than rwDSN's
+// 5000ms below, and deliberately not raised to match it for #288. Store
+// (memory.OpenDB, internal/memory/schema.go) opens the database in WAL mode,
+// which is persisted in the database file itself rather than negotiated per
+// connection, so this connection is in WAL mode too even though it sets no
+// journal_mode pragma of its own. In WAL, a reader does not wait on a
+// concurrent writer for its snapshot, so this path is not exposed to the
+// write-lock contention #288 describes — that fix is scoped to rwDSN.
 func roDSN(dbPath string) string {
 	u := url.URL{
 		Scheme:   "file",
@@ -32,21 +41,34 @@ func roDSN(dbPath string) string {
 	return u.String()
 }
 
+// rwDSN builds a read-write DSN for dbPath, URI-escaped like roDSN. Its
+// busy_timeout matches Store's own (memory.OpenDB, internal/memory/schema.go:
+// busy_timeout(5000)) so a short write from a live MCP server, or from the
+// linking/embedding background workers, can't make a caller on this DSN fail
+// merely because it arrived mid-write (#288: the previous 1000ms could time
+// out and return 0 under contention that 5000ms rides out).
+func rwDSN(dbPath string) string {
+	u := url.URL{
+		Scheme:   "file",
+		Opaque:   (&url.URL{Path: dbPath}).EscapedPath(),
+		RawQuery: "_pragma=busy_timeout(5000)",
+	}
+	return u.String()
+}
+
 // bumpSessionCount increments the project's session counter and returns the
 // new count, or 0 on any failure. It is the session hook's single deliberate
-// write: its own short-lived read-write connection (URI-escaped like roDSN,
-// busy_timeout so a live MCP server never blocks it for long), guarded by an
-// existence check so a missing database is never created.
+// write: its own short-lived read-write connection (rwDSN — URI-escaped like
+// roDSN, busy_timeout matching Store's so a live MCP server's own write can't
+// make this fail under ordinary contention), guarded by an existence check so
+// a missing database is never created. Still best-effort: on any failure
+// (contention that outlasts even 5s, permissions) the stale stored count is
+// shown instead.
 func bumpSessionCount(dbPath, projectID string) int {
 	if _, err := os.Stat(dbPath); err != nil {
 		return 0
 	}
-	u := url.URL{
-		Scheme:   "file",
-		Opaque:   (&url.URL{Path: dbPath}).EscapedPath(),
-		RawQuery: "_pragma=busy_timeout(1000)",
-	}
-	db, err := sql.Open("sqlite", u.String())
+	db, err := sql.Open("sqlite", rwDSN(dbPath))
 	if err != nil {
 		return 0
 	}

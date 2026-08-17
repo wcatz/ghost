@@ -45,8 +45,8 @@ type resolveCapableStore interface {
 	SetResolved(ctx context.Context, ids []string) (int, error)
 }
 
-// shortID truncates a memory ID to 8 characters for compact preview, mirroring
-// cmd/ghost/main.go's local `short` closure.
+// shortID truncates an ID to 8 characters for compact preview (used for both
+// memory and task IDs), mirroring cmd/ghost/main.go's local `short` closure.
 func shortID(id string) string {
 	if len(id) > 8 {
 		return id[:8]
@@ -1065,7 +1065,7 @@ func (s *Server) registerTools() {
 		}
 		var sb strings.Builder
 		for _, t := range tasks {
-			fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority, t.ID[:8], t.Title)
+			fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority, shortID(t.ID), t.Title)
 			if t.Description != "" {
 				fmt.Fprintf(&sb, "  %s\n", t.Description)
 			}
@@ -1568,7 +1568,7 @@ func (s *Server) registerResources() {
 			}
 			for _, t := range tasks {
 				hasContent = true
-				fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority, t.ID[:8], t.Title)
+				fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority, shortID(t.ID), t.Title)
 				if t.Description != "" {
 					fmt.Fprintf(&sb, "  %s\n", t.Description)
 				}

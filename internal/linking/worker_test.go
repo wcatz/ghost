@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,4 +87,70 @@ func TestSweepOnceLinksSimilarMemories(t *testing.T) {
 	if len(ids) != 0 {
 		t.Fatalf("got %d unscanned after sweep, want 0", len(ids))
 	}
+}
+
+// panicOnceStore wraps a real *memory.Store, panicking exactly once — on the
+// first call to ListProjects — before delegating to the real implementation
+// on every call after that. It also observes MarkLinkScanned so the test can
+// detect (without sleeping) that a later sweep tick actually completed
+// processing, proving the worker loop is still alive rather than merely
+// proving recover() appears somewhere in the source.
+type panicOnceStore struct {
+	*memory.Store
+	fired   atomic.Bool
+	scanned chan string
+}
+
+func (p *panicOnceStore) ListProjects(ctx context.Context) ([]memory.Project, error) {
+	if p.fired.CompareAndSwap(false, true) {
+		panic("simulated panic in ListProjects")
+	}
+	return p.Store.ListProjects(ctx)
+}
+
+func (p *panicOnceStore) MarkLinkScanned(ctx context.Context, memoryID string) error {
+	err := p.Store.MarkLinkScanned(ctx, memoryID)
+	if err == nil && p.scanned != nil {
+		select {
+		case p.scanned <- memoryID:
+		default:
+		}
+	}
+	return err
+}
+
+// TestRun_SurvivesPanicInTickerSweep proves Run's ticker branch keeps firing
+// after a panic inside SweepOnce (via ListProjects). Before the fix, the
+// first tick's panic is unrecovered anywhere in the goroutine's call stack,
+// which crashes the whole process; the fix must keep later ticks scanning
+// normally.
+func TestRun_SurvivesPanicInTickerSweep(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id := addEmbedded(t, s, "SQLite WAL journal mode", []float32{1, 0, 0.1})
+
+	store := &panicOnceStore{Store: s, scanned: make(chan string, 1)}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	w := NewWorker(store, logger, 20*time.Millisecond, 0.70)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		w.Run(runCtx)
+		close(done)
+	}()
+
+	select {
+	case got := <-store.scanned:
+		if got != id {
+			t.Fatalf("scanned %q, want %q", got, id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker did not mark the memory scanned after a panic on the first sweep tick — ticker loop likely died")
+	}
+
+	cancel()
+	<-done
 }
