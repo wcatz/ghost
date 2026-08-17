@@ -60,6 +60,9 @@ func (s *Store) UnembeddedMemoryIDs(ctx context.Context, projectID string, limit
 
 // GetMemoryContent returns the content of a memory by ID.
 func (s *Store) GetMemoryContent(ctx context.Context, id string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	var content string
 	err := s.db.QueryRowContext(ctx, `SELECT content FROM memories WHERE id = ?`, id).Scan(&content)
 	return content, err
