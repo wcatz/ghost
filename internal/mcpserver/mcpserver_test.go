@@ -1861,10 +1861,30 @@ func TestGhostProjectDelete_DryRunByDefault(t *testing.T) {
 	session := connectedClient(t, srv)
 
 	ctx := context.Background()
-	if _, err := store.Create(ctx, "abc123", memory.Memory{
+	mem1ID, err := store.Create(ctx, "abc123", memory.Memory{
 		Category: "fact", Content: "will this survive a dry run", Source: "manual", Importance: 0.5, Tags: []string{},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Create: %v", err)
+	}
+	mem2ID, err := store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "second memory for the link", Source: "manual", Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Seed memory_links and token_usage too, not just memories/tasks, and
+	// with deliberately unequal counts (1 vs. 2), so a swap of e.g.
+	// summary.MemoryLinks/summary.TokenUsage in the tool's output formatting
+	// would be caught here the same way the store-layer mutation test
+	// catches a Tasks/Decisions swap.
+	if err := store.CreateLink(ctx, mem1ID, mem2ID, "related", 0.8, "auto"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := store.RecordUsage(ctx, "abc123", "claude-opus-4-6", memory.TokenUsage{InputTokens: 10, OutputTokens: 5}); err != nil {
+			t.Fatalf("RecordUsage: %v", err)
+		}
 	}
 	if _, err := store.CreateTask(ctx, "abc123", "Fix the bug", "needs triage", 1); err != nil {
 		t.Fatalf("CreateTask: %v", err)
@@ -1887,8 +1907,11 @@ func TestGhostProjectDelete_DryRunByDefault(t *testing.T) {
 	if !strings.Contains(text.Text, "Would delete") {
 		t.Errorf("expected dry-run framing %q in response, got %q", "Would delete", text.Text)
 	}
-	if !strings.Contains(text.Text, "memories:     1") {
-		t.Errorf("expected summary line %q in response, got %q", "memories:     1", text.Text)
+	if !strings.Contains(text.Text, "memories:     2") {
+		t.Errorf("expected summary line %q in response, got %q", "memories:     2", text.Text)
+	}
+	if !strings.Contains(text.Text, "memory_links: 1") {
+		t.Errorf("expected summary line %q in response, got %q", "memory_links: 1", text.Text)
 	}
 	if !strings.Contains(text.Text, "tasks:        1") {
 		t.Errorf("expected summary line %q in response, got %q", "tasks:        1", text.Text)
@@ -1896,13 +1919,16 @@ func TestGhostProjectDelete_DryRunByDefault(t *testing.T) {
 	if !strings.Contains(text.Text, "decisions:    0") {
 		t.Errorf("expected summary line %q in response, got %q", "decisions:    0", text.Text)
 	}
+	if !strings.Contains(text.Text, "token_usage:  2") {
+		t.Errorf("expected summary line %q in response, got %q", "token_usage:  2", text.Text)
+	}
 
 	all, err := store.GetAll(ctx, "abc123", 100)
 	if err != nil {
 		t.Fatalf("GetAll: %v", err)
 	}
-	if len(all) != 1 {
-		t.Errorf("expected memory to survive dry-run, got %d memories", len(all))
+	if len(all) != 2 {
+		t.Errorf("expected memories to survive dry-run, got %d memories", len(all))
 	}
 }
 

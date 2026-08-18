@@ -2187,10 +2187,13 @@ func TestMergeProject_SameID(t *testing.T) {
 	}
 }
 
-// seedFullProject creates one memory-link pair, one task, one decision (which
-// also creates its own linked memory row, source='decision_log'), one
+// seedFullProject creates one memory-link pair, two tasks, one decision
+// (which also creates its own linked memory row, source='decision_log'), one
 // token_usage row, and one audit_log row for projectID — one of everything
-// DeleteProject must account for. Returns the two linked memory IDs.
+// DeleteProject must account for, except tasks vs. decisions are deliberately
+// unequal (2 vs. 1) so a test that swaps the Tasks/Decisions scan targets in
+// DeleteProject's count query fails instead of passing silently. Returns the
+// two linked memory IDs.
 func seedFullProject(t *testing.T, s *Store, ctx context.Context, projectID string) (mem1, mem2 string) {
 	t.Helper()
 
@@ -2210,8 +2213,11 @@ func seedFullProject(t *testing.T, s *Store, ctx context.Context, projectID stri
 	if err := s.CreateLink(ctx, mem1, mem2, "related", 0.8, "auto"); err != nil {
 		t.Fatalf("seed link: %v", err)
 	}
-	if _, err := s.CreateTask(ctx, projectID, "seed task", "desc", 1); err != nil {
-		t.Fatalf("seed task: %v", err)
+	if _, err := s.CreateTask(ctx, projectID, "seed task one", "desc", 1); err != nil {
+		t.Fatalf("seed task one: %v", err)
+	}
+	if _, err := s.CreateTask(ctx, projectID, "seed task two", "desc", 1); err != nil {
+		t.Fatalf("seed task two: %v", err)
 	}
 	if _, _, err := s.RecordDecision(ctx, projectID, "seed decision", "did the thing", "because", nil, nil); err != nil {
 		t.Fatalf("seed decision: %v", err)
@@ -2296,8 +2302,8 @@ func TestDeleteProject_DryRunCountsAndWritesNothing(t *testing.T) {
 	if summary.MemoryLinks != 1 {
 		t.Errorf("MemoryLinks = %d, want 1", summary.MemoryLinks)
 	}
-	if summary.Tasks != 1 {
-		t.Errorf("Tasks = %d, want 1", summary.Tasks)
+	if summary.Tasks != 2 {
+		t.Errorf("Tasks = %d, want 2", summary.Tasks)
 	}
 	if summary.Decisions != 1 {
 		t.Errorf("Decisions = %d, want 1", summary.Decisions)
@@ -2313,8 +2319,8 @@ func TestDeleteProject_DryRunCountsAndWritesNothing(t *testing.T) {
 	if n := countRows(t, s, "memories", testProject); n != 3 {
 		t.Errorf("memories after dry-run = %d, want 3 (unchanged)", n)
 	}
-	if n := countRows(t, s, "tasks", testProject); n != 1 {
-		t.Errorf("tasks after dry-run = %d, want 1 (unchanged)", n)
+	if n := countRows(t, s, "tasks", testProject); n != 2 {
+		t.Errorf("tasks after dry-run = %d, want 2 (unchanged)", n)
 	}
 	if n := countRows(t, s, "token_usage", testProject); n != 1 {
 		t.Errorf("token_usage after dry-run = %d, want 1 (unchanged)", n)
@@ -2333,7 +2339,7 @@ func TestDeleteProject_ApplyRemovesEverythingIncludingOrphanTables(t *testing.T)
 	if err != nil {
 		t.Fatalf("DeleteProject apply: %v", err)
 	}
-	if summary.Memories != 3 || summary.MemoryLinks != 1 || summary.Tasks != 1 ||
+	if summary.Memories != 3 || summary.MemoryLinks != 1 || summary.Tasks != 2 ||
 		summary.Decisions != 1 || summary.TokenUsage != 1 || summary.AuditLog != 1 {
 		t.Fatalf("unexpected summary: %+v", summary)
 	}
@@ -2390,7 +2396,7 @@ func TestDeleteProject_IsolatesOtherProjects(t *testing.T) {
 		t.Fatalf("DeleteProject: %v", err)
 	}
 
-	expected := map[string]int{"memories": 3, "tasks": 1, "decisions": 1, "token_usage": 1, "audit_log": 1}
+	expected := map[string]int{"memories": 3, "tasks": 2, "decisions": 1, "token_usage": 1, "audit_log": 1}
 	for table, want := range expected {
 		if n := countRows(t, s, table, otherProject); n != want {
 			t.Errorf("%s for %s after deleting %s = %d, want %d (should be untouched)", table, otherProject, testProject, n, want)
