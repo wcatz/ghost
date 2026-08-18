@@ -2053,6 +2053,34 @@ func TestGhostProjectDelete_NotifiesSubscribersOnApply(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
+	// Subscribe's response only confirms the client's request round-trip
+	// completed; it races the server's own internal bookkeeping (see the
+	// identical note on TestResourceSubscription_NotifiesOnMemorySave).
+	// The deletion notifications below are emitted exactly once and can't
+	// be retried, so confirm each subscription actually registered — and
+	// drain these probe notifications — before triggering the real delete.
+	for _, uri := range []string{contextURI, tasksURI, decisionsURI} {
+		var seen bool
+		for attempt := 0; attempt < 10 && !seen; attempt++ {
+			srv.notifyResourceUpdated(ctx, uri)
+			select {
+			case <-updated:
+				seen = true
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		if !seen {
+			t.Fatalf("subscription for %q never registered", uri)
+		}
+	}
+	for drained := true; drained; {
+		select {
+		case <-updated:
+		default:
+			drained = false
+		}
+	}
+
 	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_project_delete",
 		Arguments: map[string]any{"project": "test-project", "apply": true},
