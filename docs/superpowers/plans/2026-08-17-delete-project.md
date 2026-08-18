@@ -942,13 +942,20 @@ Run:
 ```bash
 go build -o /tmp/ghost-final-check ./cmd/ghost
 mkdir -p /tmp/ghost-final-check-data
-XDG_DATA_HOME=/tmp/ghost-final-check-data /tmp/ghost-final-check reflect smoketest --apply >/dev/null 2>&1
+XDG_DATA_HOME=/tmp/ghost-final-check-data /tmp/ghost-final-check project delete nonexistent >/dev/null 2>&1  # touch bootstrap() once so ghost.db exists with schema applied
+sqlite3 /tmp/ghost-final-check-data/ghost/ghost.db <<'SQL'
+INSERT INTO projects (id, path, name) VALUES ('smoketest', 'smoketest', 'smoketest');
+INSERT INTO memories (project_id, category, content, source, importance, tags)
+VALUES ('smoketest', 'fact', 'smoke test seed memory', 'manual', 0.5, '[]');
+SQL
 XDG_DATA_HOME=/tmp/ghost-final-check-data /tmp/ghost-final-check project delete smoketest
 echo "smoketest" | XDG_DATA_HOME=/tmp/ghost-final-check-data /tmp/ghost-final-check project delete smoketest --apply
 XDG_DATA_HOME=/tmp/ghost-final-check-data /tmp/ghost-final-check project delete smoketest
 rm -rf /tmp/ghost-final-check /tmp/ghost-final-check-data
 ```
-Expected: first call prints a dry-run summary with 1 memory (the preference-style memory `reflect --apply` leaves behind, if any — 0 is also fine, this is just proving the command runs end-to-end); second call (apply, with matching typed confirmation) prints "Deleted ..." with counts; third call (post-delete) errors `project "smoketest" not found`, proving the project is actually gone.
+Note: the originally-drafted bootstrap line here, `ghost reflect smoketest --apply`, can never work — `runReflect` resolves the project via `resolveProjectOrExit`/`ResolveProject`, which only looks projects up and never creates one, and nothing in `bootstrap()` or the session-start hook creates a project named `smoketest` either (`loadSessionContext` explicitly refuses to: "no store yet — never create a phantom empty DB"). This isn't an environment gap (no API key/Ollama) — it's structural, so no tier of `reflect` could ever bootstrap a project that doesn't exist yet. The `sqlite3` seed above inserts exactly what `ghost_memory_save`'s create-on-first-save path (`EnsureProject` + `Create` in `internal/memory/store.go`) would have written for `project_id="smoketest"` (path normalized to id, one `fact` memory), without requiring a live MCP client or an LLM.
+
+Expected: first call prints a dry-run summary with 1 memory; second call (apply, with matching typed confirmation) prints "Deleted ..." with counts; third call (post-delete) errors `project "smoketest" not found`, proving the project is actually gone.
 
 - [ ] **Step 3: Final commit if anything is outstanding**
 
