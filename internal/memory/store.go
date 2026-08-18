@@ -336,57 +336,47 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 		return DeleteProjectSummary{}, fmt.Errorf("refusing to delete the _global project")
 	}
 
-	if apply {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-	} else {
+	if !apply {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-	}
-
-	summary := DeleteProjectSummary{ProjectID: id, ProjectName: name}
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM memories WHERE project_id = ?`, id,
-	).Scan(&summary.Memories); err != nil {
-		return DeleteProjectSummary{}, fmt.Errorf("count memories: %w", err)
-	}
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT count(*) FROM memory_links
-		WHERE source_id IN (SELECT id FROM memories WHERE project_id = ?)
-		   OR target_id IN (SELECT id FROM memories WHERE project_id = ?)
-	`, id, id).Scan(&summary.MemoryLinks); err != nil {
-		return DeleteProjectSummary{}, fmt.Errorf("count memory_links: %w", err)
-	}
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM tasks WHERE project_id = ?`, id,
-	).Scan(&summary.Tasks); err != nil {
-		return DeleteProjectSummary{}, fmt.Errorf("count tasks: %w", err)
-	}
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM decisions WHERE project_id = ?`, id,
-	).Scan(&summary.Decisions); err != nil {
-		return DeleteProjectSummary{}, fmt.Errorf("count decisions: %w", err)
-	}
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM token_usage WHERE project_id = ?`, id,
-	).Scan(&summary.TokenUsage); err != nil {
-		return DeleteProjectSummary{}, fmt.Errorf("count token_usage: %w", err)
-	}
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM audit_log WHERE project_id = ?`, id,
-	).Scan(&summary.AuditLog); err != nil {
-		return DeleteProjectSummary{}, fmt.Errorf("count audit_log: %w", err)
-	}
-
-	if !apply {
+		summary, err := countProjectRows(ctx, s.db, id)
+		if err != nil {
+			return DeleteProjectSummary{}, err
+		}
+		summary.ProjectID, summary.ProjectName = id, name
 		return summary, nil
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("begin delete tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+
+	// database/sql's BeginTx opens a deferred transaction on this driver: it
+	// only acquires SQLite's write lock lazily, on its first write statement.
+	// Without forcing that now, a separate ghost process (CLI and MCP server
+	// each open their own *Store against the same SQLite file) could write
+	// to this project in the gap between the counts below and the deletes —
+	// and the returned/logged summary, the only durable record of what was
+	// removed once the project's own audit_log rows are gone, would silently
+	// undercount what actually got deleted. This no-op write forces the
+	// upgrade to the write lock immediately, before any counting happens;
+	// verified empirically that a concurrent writer on a separate handle
+	// blocks (and eventually times out via busy_timeout) until this
+	// transaction commits or rolls back.
+	if _, err := tx.ExecContext(ctx, `UPDATE projects SET id = id WHERE id = ?`, id); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("acquire write lock: %w", err)
+	}
+
+	summary, err := countProjectRows(ctx, tx, id)
+	if err != nil {
+		return DeleteProjectSummary{}, err
+	}
+	summary.ProjectID, summary.ProjectName = id, name
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM token_usage WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete token_usage: %w", err)
@@ -408,6 +398,53 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 		"memories", summary.Memories, "memory_links", summary.MemoryLinks,
 		"tasks", summary.Tasks, "decisions", summary.Decisions,
 		"token_usage", summary.TokenUsage, "audit_log", summary.AuditLog)
+	return summary, nil
+}
+
+// queryRower is satisfied by both *sql.DB and *sql.Tx, letting
+// countProjectRows run identically as a plain autocommit read (dry-run) or
+// inside an already-open write transaction (apply — see DeleteProject).
+type queryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// countProjectRows computes the per-table counts for DeleteProjectSummary.
+// It does not set ProjectID/ProjectName — the caller already has both from
+// ResolveProject and assigns them itself.
+func countProjectRows(ctx context.Context, q queryRower, id string) (DeleteProjectSummary, error) {
+	var summary DeleteProjectSummary
+	if err := q.QueryRowContext(ctx,
+		`SELECT count(*) FROM memories WHERE project_id = ?`, id,
+	).Scan(&summary.Memories); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("count memories: %w", err)
+	}
+	if err := q.QueryRowContext(ctx, `
+		SELECT count(*) FROM memory_links
+		WHERE source_id IN (SELECT id FROM memories WHERE project_id = ?)
+		   OR target_id IN (SELECT id FROM memories WHERE project_id = ?)
+	`, id, id).Scan(&summary.MemoryLinks); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("count memory_links: %w", err)
+	}
+	if err := q.QueryRowContext(ctx,
+		`SELECT count(*) FROM tasks WHERE project_id = ?`, id,
+	).Scan(&summary.Tasks); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("count tasks: %w", err)
+	}
+	if err := q.QueryRowContext(ctx,
+		`SELECT count(*) FROM decisions WHERE project_id = ?`, id,
+	).Scan(&summary.Decisions); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("count decisions: %w", err)
+	}
+	if err := q.QueryRowContext(ctx,
+		`SELECT count(*) FROM token_usage WHERE project_id = ?`, id,
+	).Scan(&summary.TokenUsage); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("count token_usage: %w", err)
+	}
+	if err := q.QueryRowContext(ctx,
+		`SELECT count(*) FROM audit_log WHERE project_id = ?`, id,
+	).Scan(&summary.AuditLog); err != nil {
+		return DeleteProjectSummary{}, fmt.Errorf("count audit_log: %w", err)
+	}
 	return summary, nil
 }
 

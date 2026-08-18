@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -2479,6 +2481,92 @@ func TestDeleteProjectRowTx_AlreadyDeletedGuard(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "already deleted") {
 		t.Errorf("expected %q in error, got: %v", "already deleted", err)
+	}
+}
+
+// TestDeleteProject_ConcurrentWriteFromSeparateProcessDoesNotUndercountSummary
+// exercises the race DeleteProject's write-lock-first ordering exists to
+// close: two separate *Store instances (simulating two separate ghost
+// processes, e.g. a CLI `project delete --apply` and a long-running MCP
+// server) opened against the same on-disk SQLite file — :memory: databases
+// aren't shared across handles, so this needs a real temp file. One store
+// races a write against the project the other is deleting. Whichever side
+// wins, the returned summary must never lie about what was actually deleted.
+func TestDeleteProject_ConcurrentWriteFromSeparateProcessDoesNotUndercountSummary(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "race.sqlite")
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	dbA, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB A: %v", err)
+	}
+	defer dbA.Close()
+	storeA := NewStore(dbA, logger)
+
+	dbB, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB B: %v", err)
+	}
+	defer dbB.Close()
+	storeB := NewStore(dbB, logger)
+
+	ctx := context.Background()
+	if err := storeA.EnsureProject(ctx, testProject, "/tmp/race", testProject); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	var bErr error
+	var bSucceeded bool
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Retry briefly: the first attempt or two may land before storeA
+		// even starts its transaction, or may block on storeA's held write
+		// lock until it commits or rolls back.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			_, _, _, upsertErr := storeB.Upsert(ctx, testProject, "fact", "racing write from a second process", "manual", 0.5, []string{})
+			if upsertErr == nil {
+				bSucceeded = true
+				return
+			}
+			bErr = upsertErr
+			if strings.Contains(upsertErr.Error(), "FOREIGN KEY") {
+				// The project is already gone — a definitive loss, not a
+				// transient lock contention. Stop retrying.
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	summary, err := storeA.DeleteProject(ctx, testProject, true)
+	wg.Wait()
+
+	if err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	// The invariant this test protects: the summary must never undercount
+	// what actually got deleted. If B's write landed before A's count ran
+	// (bSucceeded), A's count — taken only after the write lock is forced —
+	// must have seen it; if B's write never landed, the count must be 0.
+	if bSucceeded && summary.Memories != 1 {
+		t.Errorf("B's concurrent write succeeded but summary.Memories = %d, want 1 (undercounted)", summary.Memories)
+	}
+	if !bSucceeded && summary.Memories != 0 {
+		t.Errorf("B's concurrent write did not succeed (last err=%v) but summary.Memories = %d, want 0", bErr, summary.Memories)
+	}
+
+	// Whichever side won, the DB must end up fully consistent: no memories
+	// left over under a project that no longer exists.
+	var remaining int
+	if err := dbA.QueryRowContext(ctx, `SELECT count(*) FROM memories WHERE project_id = ?`, testProject).Scan(&remaining); err != nil {
+		t.Fatalf("count remaining: %v", err)
+	}
+	if remaining != 0 {
+		t.Errorf("expected 0 memories remaining for deleted project, got %d", remaining)
 	}
 }
 
