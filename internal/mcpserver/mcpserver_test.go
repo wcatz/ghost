@@ -1866,6 +1866,9 @@ func TestGhostProjectDelete_DryRunByDefault(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	if _, err := store.CreateTask(ctx, "abc123", "Fix the bug", "needs triage", 1); err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_project_delete",
@@ -1883,6 +1886,15 @@ func TestGhostProjectDelete_DryRunByDefault(t *testing.T) {
 	}
 	if !strings.Contains(text.Text, "Would delete") {
 		t.Errorf("expected dry-run framing %q in response, got %q", "Would delete", text.Text)
+	}
+	if !strings.Contains(text.Text, "memories:     1") {
+		t.Errorf("expected summary line %q in response, got %q", "memories:     1", text.Text)
+	}
+	if !strings.Contains(text.Text, "tasks:        1") {
+		t.Errorf("expected summary line %q in response, got %q", "tasks:        1", text.Text)
+	}
+	if !strings.Contains(text.Text, "decisions:    0") {
+		t.Errorf("expected summary line %q in response, got %q", "decisions:    0", text.Text)
 	}
 
 	all, err := store.GetAll(ctx, "abc123", 100)
@@ -1923,6 +1935,9 @@ func TestGhostProjectDelete_ApplyRemovesProject(t *testing.T) {
 	}
 	if !strings.Contains(text.Text, "Deleted") {
 		t.Errorf("expected apply framing %q in response, got %q", "Deleted", text.Text)
+	}
+	if !strings.Contains(text.Text, "memories:     1") {
+		t.Errorf("expected summary line %q in response, got %q", "memories:     1", text.Text)
 	}
 
 	id, _, err := store.ResolveProject(ctx, "test-project")
