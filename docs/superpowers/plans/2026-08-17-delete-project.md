@@ -388,10 +388,21 @@ func TestDeleteProject_IsolatesOtherProjects(t *testing.T) {
 		t.Fatalf("DeleteProject: %v", err)
 	}
 
-	for _, table := range []string{"memories", "tasks", "decisions", "token_usage", "audit_log"} {
-		if n := countRows(t, s, table, otherProject); n != 1 && !(table == "memories" && n == 3) {
-			t.Errorf("%s for %s after deleting %s = %d, unexpected (should be untouched)", table, otherProject, testProject, n)
+	expected := map[string]int{"memories": 3, "tasks": 1, "decisions": 1, "token_usage": 1, "audit_log": 1}
+	for table, want := range expected {
+		if n := countRows(t, s, table, otherProject); n != want {
+			t.Errorf("%s for %s after deleting %s = %d, want %d (should be untouched)", table, otherProject, testProject, n, want)
 		}
+	}
+	var links int
+	if err := s.db.QueryRow(`
+		SELECT count(*) FROM memory_links l
+		JOIN memories m ON m.id = l.source_id
+		WHERE m.project_id = ?`, otherProject).Scan(&links); err != nil {
+		t.Fatalf("count memory_links: %v", err)
+	}
+	if links != 1 {
+		t.Errorf("memory_links for %s = %d, want 1", otherProject, links)
 	}
 	if id, _, err := s.ResolveProject(ctx, otherProject); err != nil || id == "" {
 		t.Errorf("expected %s to still exist, ResolveProject: id=%q err=%v", otherProject, id, err)
