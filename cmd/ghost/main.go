@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -69,6 +70,13 @@ func main() {
 		case "resolve":
 			runResolve()
 			return
+		case "project":
+			if len(os.Args) > 2 && os.Args[2] == "delete" {
+				runProjectDelete()
+				return
+			}
+			fmt.Fprintln(os.Stderr, "Usage: ghost project delete <name-or-id> [--apply]")
+			os.Exit(1)
 		case "upgrade":
 			runUpgrade()
 			return
@@ -689,6 +697,92 @@ subscription-billed 'claude' CLI call — requires one of the two.`)
 	}
 }
 
+// confirmProjectDeleteName reports whether typed (a raw scanned line, not
+// yet trimmed) matches expected exactly once surrounding whitespace is
+// stripped. Pulled out of runProjectDelete as its own pure function so the
+// actual confirmation decision is unit-testable without stdin/os.Exit
+// plumbing.
+func confirmProjectDeleteName(typed, expected string) bool {
+	return strings.TrimSpace(typed) == expected
+}
+
+// runProjectDelete implements `ghost project delete <name-or-id> [--apply]`.
+// Always prints the dry-run summary first. Without --apply it stops there.
+// With --apply, it re-prints the summary and requires re-typing the
+// project's name at a prompt before anything is actually deleted — this is
+// irreversible and there is no undo, so the flag alone is not enough.
+func runProjectDelete() {
+	var projectName string
+	apply := false
+	for i := 3; i < len(os.Args); i++ {
+		switch {
+		case os.Args[i] == "--apply":
+			apply = true
+		case !strings.HasPrefix(os.Args[i], "-"):
+			if projectName != "" {
+				fmt.Fprintln(os.Stderr, "error: expected exactly one project")
+				os.Exit(1)
+			}
+			projectName = os.Args[i]
+		default:
+			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", os.Args[i])
+			os.Exit(1)
+		}
+	}
+	if projectName == "" {
+		fmt.Fprintln(os.Stderr, `Usage: ghost project delete <name-or-id> [flags]
+
+Flags:
+  --apply   Actually delete (default is dry-run/preview)
+
+Permanently removes a project: memories, tags, embeddings, links, tasks,
+decisions, and cost/audit history. Irreversible. Refuses to delete _global.`)
+		os.Exit(1)
+	}
+
+	_, logger, store := bootstrap()
+	defer store.Close() //nolint:errcheck
+	ctx := context.Background()
+	_ = logger
+
+	printDeleteSummary := func(summary memory.DeleteProjectSummary, verb string) {
+		fmt.Printf("%s %q (%s):\n", verb, summary.ProjectName, summary.ProjectID)
+		fmt.Printf("  memories:     %d\n", summary.Memories)
+		fmt.Printf("  memory_links: %d\n", summary.MemoryLinks)
+		fmt.Printf("  tasks:        %d\n", summary.Tasks)
+		fmt.Printf("  decisions:    %d\n", summary.Decisions)
+		fmt.Printf("  token_usage:  %d\n", summary.TokenUsage)
+		fmt.Printf("  audit_log:    %d\n", summary.AuditLog)
+	}
+
+	summary, err := store.DeleteProject(ctx, projectName, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	printDeleteSummary(summary, "Would delete")
+
+	if !apply {
+		fmt.Println("\nRe-run with --apply to actually delete.")
+		return
+	}
+
+	fmt.Printf("\nType the project name (%q) to confirm deletion: ", summary.ProjectName)
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	if !confirmProjectDeleteName(scanner.Text(), summary.ProjectName) {
+		fmt.Fprintln(os.Stderr, "error: confirmation did not match project name — nothing deleted")
+		os.Exit(1)
+	}
+
+	summary, err = store.DeleteProject(ctx, projectName, true)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	printDeleteSummary(summary, "Deleted")
+}
+
 // firstLine returns the first line of s, truncated to at most n runes with an
 // ellipsis, for compact CLI preview.
 func firstLine(s string, n int) string {
@@ -948,6 +1042,8 @@ Commands:
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
   supersede <project> [flags] Link superseded memories (dry-run by default, --apply to write)
   resolve <project> [flags]   Mark resolved evidence memories (dry-run by default, --apply to write)
+  project delete <name> [flags]  Permanently delete a project and everything under it
+                              (dry-run by default, --apply + name re-type to confirm)
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
   obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
   bench [--sweep]             Run the retrieval-quality benchmark (built-in dataset);

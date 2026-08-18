@@ -173,3 +173,21 @@ func TestRODSNEscapesPath(t *testing.T) {
 		})
 	}
 }
+
+func TestConfirmProjectDeleteName_MatchesExactly(t *testing.T) {
+	if !confirmProjectDeleteName("my-project\n", "my-project") {
+		t.Error("expected trimmed exact match to confirm")
+	}
+	if !confirmProjectDeleteName("  my-project  ", "my-project") {
+		t.Error("expected surrounding whitespace to be trimmed before comparing")
+	}
+}
+
+func TestConfirmProjectDeleteName_RejectsMismatch(t *testing.T) {
+	if confirmProjectDeleteName("my-projec", "my-project") {
+		t.Error("expected a partial/typo'd name not to confirm")
+	}
+	if confirmProjectDeleteName("", "my-project") {
+		t.Error("expected an empty input not to confirm")
+	}
+}
