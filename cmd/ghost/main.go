@@ -740,10 +740,9 @@ decisions, and cost/audit history. Irreversible. Refuses to delete _global.`)
 		os.Exit(1)
 	}
 
-	_, logger, store := bootstrap()
+	_, _, store := bootstrap()
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
-	_ = logger
 
 	printDeleteSummary := func(summary memory.DeleteProjectSummary, verb string) {
 		fmt.Printf("%s %q (%s):\n", verb, summary.ProjectName, summary.ProjectID)
