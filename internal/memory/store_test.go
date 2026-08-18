@@ -2187,6 +2187,183 @@ func TestMergeProject_SameID(t *testing.T) {
 	}
 }
 
+// seedFullProject creates one memory-link pair, one task, one decision (which
+// also creates its own linked memory row, source='decision_log'), one
+// token_usage row, and one audit_log row for projectID — one of everything
+// DeleteProject must account for. Returns the two linked memory IDs.
+func seedFullProject(t *testing.T, s *Store, ctx context.Context, projectID string) (mem1, mem2 string) {
+	t.Helper()
+
+	var err error
+	mem1, err = s.Create(ctx, projectID, Memory{
+		Category: "fact", Content: "seed memory one", Source: "manual", Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("seed mem1: %v", err)
+	}
+	mem2, err = s.Create(ctx, projectID, Memory{
+		Category: "fact", Content: "seed memory two", Source: "manual", Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("seed mem2: %v", err)
+	}
+	if err := s.CreateLink(ctx, mem1, mem2, "related", 0.8, "auto"); err != nil {
+		t.Fatalf("seed link: %v", err)
+	}
+	if _, err := s.CreateTask(ctx, projectID, "seed task", "desc", 1); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	if _, _, err := s.RecordDecision(ctx, projectID, "seed decision", "did the thing", "because", nil, nil); err != nil {
+		t.Fatalf("seed decision: %v", err)
+	}
+	if err := s.RecordUsage(ctx, projectID, "claude-opus-4-6", TokenUsage{InputTokens: 10, OutputTokens: 5}); err != nil {
+		t.Fatalf("seed token_usage: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO audit_log (action, project_id) VALUES ('test-action', ?)`, projectID,
+	); err != nil {
+		t.Fatalf("seed audit_log: %v", err)
+	}
+	return mem1, mem2
+}
+
+// countRows returns the number of rows in table matching a project_id column,
+// queried directly so the assertion doesn't depend on DeleteProject's own
+// counting logic being correct.
+func countRows(t *testing.T, s *Store, table, projectID string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM `+table+` WHERE project_id = ?`, projectID).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return n
+}
+
+func TestDeleteProject_NotFound(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	_, err := s.DeleteProject(ctx, "no-such-project", false)
+	if err == nil {
+		t.Fatal("expected error for nonexistent project")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected %q in error, got: %v", "not found", err)
+	}
+}
+
+func TestDeleteProject_RefusesGlobal(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.SeedGlobalMemories(ctx); err != nil {
+		t.Fatalf("SeedGlobalMemories: %v", err)
+	}
+
+	for _, apply := range []bool{false, true} {
+		_, err := s.DeleteProject(ctx, "_global", apply)
+		if err == nil {
+			t.Fatalf("expected error deleting _global (apply=%v)", apply)
+		}
+	}
+
+	// The seeded global preference must have survived both attempts.
+	mems, err := s.GetAll(ctx, "_global", 100)
+	if err != nil {
+		t.Fatalf("GetAll _global: %v", err)
+	}
+	if len(mems) == 0 {
+		t.Error("expected _global memories to survive refused delete attempts")
+	}
+}
+
+func TestDeleteProject_DryRunCountsAndWritesNothing(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	seedFullProject(t, s, ctx, testProject)
+
+	summary, err := s.DeleteProject(ctx, testProject, false)
+	if err != nil {
+		t.Fatalf("DeleteProject dry-run: %v", err)
+	}
+
+	if summary.ProjectID != testProject {
+		t.Errorf("ProjectID = %q, want %q", summary.ProjectID, testProject)
+	}
+	// 3 memories: the 2 seeded directly + 1 from RecordDecision's decision_log row.
+	if summary.Memories != 3 {
+		t.Errorf("Memories = %d, want 3", summary.Memories)
+	}
+	if summary.MemoryLinks != 1 {
+		t.Errorf("MemoryLinks = %d, want 1", summary.MemoryLinks)
+	}
+	if summary.Tasks != 1 {
+		t.Errorf("Tasks = %d, want 1", summary.Tasks)
+	}
+	if summary.Decisions != 1 {
+		t.Errorf("Decisions = %d, want 1", summary.Decisions)
+	}
+	if summary.TokenUsage != 1 {
+		t.Errorf("TokenUsage = %d, want 1", summary.TokenUsage)
+	}
+	if summary.AuditLog != 1 {
+		t.Errorf("AuditLog = %d, want 1", summary.AuditLog)
+	}
+
+	// Dry-run must write nothing: every row must still be there.
+	if n := countRows(t, s, "memories", testProject); n != 3 {
+		t.Errorf("memories after dry-run = %d, want 3 (unchanged)", n)
+	}
+	if n := countRows(t, s, "tasks", testProject); n != 1 {
+		t.Errorf("tasks after dry-run = %d, want 1 (unchanged)", n)
+	}
+	if n := countRows(t, s, "token_usage", testProject); n != 1 {
+		t.Errorf("token_usage after dry-run = %d, want 1 (unchanged)", n)
+	}
+	if _, _, err := s.ResolveProject(ctx, testProject); err != nil {
+		t.Fatalf("ResolveProject after dry-run: %v", err)
+	}
+}
+
+func TestDeleteProject_ApplyRemovesEverythingIncludingOrphanTables(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	seedFullProject(t, s, ctx, testProject)
+
+	summary, err := s.DeleteProject(ctx, testProject, true)
+	if err != nil {
+		t.Fatalf("DeleteProject apply: %v", err)
+	}
+	if summary.Memories != 3 || summary.MemoryLinks != 1 || summary.Tasks != 1 ||
+		summary.Decisions != 1 || summary.TokenUsage != 1 || summary.AuditLog != 1 {
+		t.Fatalf("unexpected summary: %+v", summary)
+	}
+
+	for _, table := range []string{"memories", "tasks", "decisions", "token_usage", "audit_log"} {
+		if n := countRows(t, s, table, testProject); n != 0 {
+			t.Errorf("%s after apply = %d, want 0", table, n)
+		}
+	}
+	var linkCount int
+	if err := s.db.QueryRow(`
+		SELECT count(*) FROM memory_links
+		WHERE source_id NOT IN (SELECT id FROM memories) OR target_id NOT IN (SELECT id FROM memories)
+	`).Scan(&linkCount); err != nil {
+		t.Fatalf("check dangling links: %v", err)
+	}
+	if linkCount != 0 {
+		t.Errorf("expected no dangling memory_links pointing at deleted memories, got %d", linkCount)
+	}
+
+	// The project row itself is gone.
+	id, _, err := s.ResolveProject(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveProject after apply: %v", err)
+	}
+	if id != "" {
+		t.Errorf("expected project to be gone, ResolveProject still returns id %q", id)
+	}
+}
+
 func TestSeedGlobalMemories(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
