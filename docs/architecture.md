@@ -51,7 +51,7 @@ internal/
     vector.go              Cosine similarity, hybrid RRF search
     links.go               Memory links: edge CRUD (related/supersedes)
   mcpserver/               MCP server (stdio transport)
-    mcpserver.go           18 tools + 4 resources via go-sdk
+    mcpserver.go           20 tools + 4 resources via go-sdk
   mcpinit/                 Claude Code integration setup
     init.go                ghost mcp init — registers server, imports memories, writes redirects
     status.go              ghost mcp status — health check
@@ -84,7 +84,7 @@ Claude Code / Cursor → stdio JSON-RPC → mcpserver
                           ghost_task_create/update/complete → store.CreateTask()...
                           ghost_decision_record → store.RecordDecision()
                           ghost_health        → store metadata query
-                          ... 18 tools total
+                          ... 20 tools total
                                           ↓
                         Resources (pinnable, survive context compaction):
                           ghost://project/{id}/context   → GetTopMemories + GetLearnedContext

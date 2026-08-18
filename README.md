@@ -234,12 +234,12 @@ Because the mirror is one-way, edits inside the vault are informational only and
 
 ## MCP surface
 
-19 tools, 4 resources:
+20 tools, 4 resources:
 
 | Group | Tools |
 |---|---|
 | Memory | `ghost_memory_save` `ghost_memory_search` `ghost_search_all` `ghost_memories_list` `ghost_memory_update` `ghost_memory_delete` `ghost_memory_pin` `ghost_memory_promote` `ghost_save_global` `ghost_resolve` |
-| Context | `ghost_project_context` `ghost_list_projects` `ghost_health` |
+| Context | `ghost_project_context` `ghost_list_projects` `ghost_health` `ghost_project_delete` |
 | Tasks | `ghost_task_create` `ghost_task_list` `ghost_task_update` `ghost_task_complete` |
 | Decisions | `ghost_decision_record` `ghost_decisions_list` |
 

@@ -1284,6 +1284,47 @@ func (s *Server) registerTools() {
 		}, nil, nil
 	})
 
+	// ghost_project_delete — permanently delete a project and everything
+	// under it. Dry-run by default; apply:true actually deletes. _global is
+	// always refused, in both modes.
+	type projectDeleteArgs struct {
+		Project string `json:"project" jsonschema:"the project to delete (id, name, or path)"`
+		Apply   bool   `json:"apply,omitempty" jsonschema:"actually delete (default false: dry-run preview only)"`
+	}
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_project_delete",
+		Title:       "Delete Project",
+		Description: "Permanently deletes a project: memories, tags, embeddings, links, tasks, decisions, and cost/audit history. Irreversible — there is no undo. Dry-run by default (returns counts of what would be removed); pass apply:true to actually delete. Always refuses to delete the _global project. Only use when the user has explicitly and unambiguously asked to delete an entire project, never as a side effect of another request.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(true),
+			OpenWorldHint:   boolPtr(false),
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args projectDeleteArgs) (*mcp.CallToolResult, any, error) {
+		if args.Project == "" {
+			return nil, nil, fmt.Errorf("project is required")
+		}
+		summary, err := s.store.DeleteProject(ctx, args.Project, args.Apply)
+		if err != nil {
+			return nil, nil, fmt.Errorf("ghost_project_delete: %w", err)
+		}
+		verb := "Would delete"
+		if args.Apply {
+			verb = "Deleted"
+		}
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "%s %q (%s):\n", verb, summary.ProjectName, summary.ProjectID)
+		fmt.Fprintf(&sb, "  memories:     %d\n", summary.Memories)
+		fmt.Fprintf(&sb, "  memory_links: %d\n", summary.MemoryLinks)
+		fmt.Fprintf(&sb, "  tasks:        %d\n", summary.Tasks)
+		fmt.Fprintf(&sb, "  decisions:    %d\n", summary.Decisions)
+		fmt.Fprintf(&sb, "  token_usage:  %d\n", summary.TokenUsage)
+		fmt.Fprintf(&sb, "  audit_log:    %d\n", summary.AuditLog)
+		if !args.Apply {
+			sb.WriteString("\nRe-run with apply:true to actually delete.")
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: sb.String()}}}, nil, nil
+	})
+
 	// ghost_memory_pin — pin or unpin a memory.
 	type pinArgs struct {
 		ProjectID string `json:"project_id" jsonschema:"Project name the memory belongs to (required for ownership check)"`

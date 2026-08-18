@@ -1853,3 +1853,105 @@ func TestProjectTasksResource_ShortTaskID(t *testing.T) {
 		t.Errorf("expected output to contain the short task id `abc`, got: %s", result.Contents[0].Text)
 	}
 }
+
+func TestGhostProjectDelete_DryRunByDefault(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	if _, err := store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "will this survive a dry run", Source: "manual", Importance: 0.5, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_project_delete",
+		Arguments: map[string]any{"project": "test-project"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_project_delete: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error result: %+v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(text.Text, "Would delete") {
+		t.Errorf("expected dry-run framing %q in response, got %q", "Would delete", text.Text)
+	}
+
+	all, err := store.GetAll(ctx, "abc123", 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 1 {
+		t.Errorf("expected memory to survive dry-run, got %d memories", len(all))
+	}
+}
+
+func TestGhostProjectDelete_ApplyRemovesProject(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+
+	ctx := context.Background()
+	if _, err := store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "will this survive apply", Source: "manual", Importance: 0.5, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_project_delete",
+		Arguments: map[string]any{"project": "test-project", "apply": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_project_delete: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("expected success, got error result: %+v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(text.Text, "Deleted") {
+		t.Errorf("expected apply framing %q in response, got %q", "Deleted", text.Text)
+	}
+
+	id, _, err := store.ResolveProject(ctx, "test-project")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "" {
+		t.Error("expected project to be gone after apply")
+	}
+}
+
+func TestGhostProjectDelete_RejectsGlobal(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	session := connectedClient(t, srv)
+	ctx := context.Background()
+	if err := store.SeedGlobalMemories(ctx); err != nil {
+		t.Fatalf("SeedGlobalMemories: %v", err)
+	}
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_project_delete",
+		Arguments: map[string]any{"project": "_global", "apply": true},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_project_delete: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected an error result deleting _global, got success")
+	}
+}

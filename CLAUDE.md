@@ -10,7 +10,7 @@
 - `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, resolve, supersede, obsidian, bench, upgrade, version
 - `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + resolve + supersede); `Provider` seam (`anthropicClient`/`SamplingProvider`) with `FallbackProvider` credit-exhaustion fallover for resolve/supersede
 - `internal/memory/` — SQLite CRUD, FTS5 search, vector search, time-decay scoring
-- `internal/mcpserver/` — MCP server: 19 tools + 4 resources + 2 prompts (`recall_project`, `record_decision`)
+- `internal/mcpserver/` — MCP server: 20 tools + 4 resources + 2 prompts (`recall_project`, `record_decision`)
 - `internal/mcpinit/` — `ghost mcp init`, `ghost mcp status`, `ghost hook session-start`, `ghost hook stop`
 - `internal/claudeimport/` — One-time import of Claude Code auto-memory on first contact
 - `internal/embedding/` — Ollama async vectorization worker
