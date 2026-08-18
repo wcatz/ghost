@@ -2375,6 +2375,31 @@ func TestDeleteProject_ApplyRemovesEverythingIncludingOrphanTables(t *testing.T)
 	}
 }
 
+func TestDeleteProject_IsolatesOtherProjects(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const otherProject = "other-project"
+	if err := s.EnsureProject(ctx, otherProject, "/tmp/other-project", "other-project"); err != nil {
+		t.Fatalf("EnsureProject other: %v", err)
+	}
+
+	seedFullProject(t, s, ctx, testProject)
+	seedFullProject(t, s, ctx, otherProject)
+
+	if _, err := s.DeleteProject(ctx, testProject, true); err != nil {
+		t.Fatalf("DeleteProject: %v", err)
+	}
+
+	for _, table := range []string{"memories", "tasks", "decisions", "token_usage", "audit_log"} {
+		if n := countRows(t, s, table, otherProject); n != 1 && !(table == "memories" && n == 3) {
+			t.Errorf("%s for %s after deleting %s = %d, unexpected (should be untouched)", table, otherProject, testProject, n)
+		}
+	}
+	if id, _, err := s.ResolveProject(ctx, otherProject); err != nil || id == "" {
+		t.Errorf("expected %s to still exist, ResolveProject: id=%q err=%v", otherProject, id, err)
+	}
+}
+
 // TestDeleteProjectRowTx_AlreadyDeletedGuard exercises deleteProjectRowTx
 // directly rather than the full DeleteProject method. DeleteProject holds
 // s.mu for its entire apply path (count queries through the final delete),
