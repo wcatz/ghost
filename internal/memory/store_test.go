@@ -2355,7 +2355,45 @@ func TestDeleteProject_DryRunCountsAndWritesNothing(t *testing.T) {
 func TestDeleteProject_ApplyRemovesEverythingIncludingOrphanTables(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	seedFullProject(t, s, ctx, testProject)
+	mem1, _ := seedFullProject(t, s, ctx, testProject)
+
+	// Seed one row in every remaining cascading table seedFullProject
+	// doesn't already cover, so this test proves the full cascade chain
+	// documented on DeleteProject, not just the tables exercised elsewhere.
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO memory_embeddings (memory_id, embedding) VALUES (?, ?)`, mem1, []byte{0x01, 0x02},
+	); err != nil {
+		t.Fatalf("seed memory_embeddings: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO link_scans (memory_id) VALUES (?)`, mem1,
+	); err != nil {
+		t.Fatalf("seed link_scans: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO ghost_state (project_id, learned_context) VALUES (?, ?)
+		 ON CONFLICT(project_id) DO UPDATE SET learned_context = excluded.learned_context`,
+		testProject, "seeded learned context",
+	); err != nil {
+		t.Fatalf("seed ghost_state: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source) VALUES (?, ?, ?, ?, ?, ?)`,
+		"snap-1", testProject, "fact", "seed snapshot content", 0.5, "manual",
+	); err != nil {
+		t.Fatalf("seed memory_snapshots: %v", err)
+	}
+	const seedConversationID = "conv-1"
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO conversations (id, project_id) VALUES (?, ?)`, seedConversationID, testProject,
+	); err != nil {
+		t.Fatalf("seed conversations: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)`, seedConversationID, "user", "seed message",
+	); err != nil {
+		t.Fatalf("seed messages: %v", err)
+	}
 
 	summary, err := s.DeleteProject(ctx, testProject, true)
 	if err != nil {
@@ -2391,6 +2429,37 @@ func TestDeleteProject_ApplyRemovesEverythingIncludingOrphanTables(t *testing.T)
 	}
 	if ftsCount != 0 {
 		t.Errorf("memories_fts retains %d rows after apply, want 0", ftsCount)
+	}
+
+	// memory_embeddings and link_scans key off memory_id, not project_id, so
+	// countRows can't check them directly.
+	var embedCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memory_embeddings WHERE memory_id = ?`, mem1).Scan(&embedCount); err != nil {
+		t.Fatalf("count memory_embeddings: %v", err)
+	}
+	if embedCount != 0 {
+		t.Errorf("memory_embeddings retains %d rows after apply, want 0", embedCount)
+	}
+	var scanCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM link_scans WHERE memory_id = ?`, mem1).Scan(&scanCount); err != nil {
+		t.Fatalf("count link_scans: %v", err)
+	}
+	if scanCount != 0 {
+		t.Errorf("link_scans retains %d rows after apply, want 0", scanCount)
+	}
+
+	for _, table := range []string{"ghost_state", "memory_snapshots", "conversations"} {
+		if n := countRows(t, s, table, testProject); n != 0 {
+			t.Errorf("%s after apply = %d, want 0", table, n)
+		}
+	}
+	// messages keys off conversation_id, not project_id.
+	var msgCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM messages WHERE conversation_id = ?`, seedConversationID).Scan(&msgCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if msgCount != 0 {
+		t.Errorf("messages retains %d rows after apply, want 0", msgCount)
 	}
 
 	// The project row itself is gone.
