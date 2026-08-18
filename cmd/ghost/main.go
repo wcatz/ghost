@@ -706,6 +706,52 @@ func confirmProjectDeleteName(typed, expected string) bool {
 	return strings.TrimSpace(typed) == expected
 }
 
+// printDeleteSummary writes a DeleteProjectSummary to out in the fixed-width
+// format shared by both the dry-run preview and the post-apply report.
+func printDeleteSummary(out io.Writer, summary memory.DeleteProjectSummary, verb string) {
+	fmt.Fprintf(out, "%s %q (%s):\n", verb, summary.ProjectName, summary.ProjectID)
+	fmt.Fprintf(out, "  memories:     %d\n", summary.Memories)
+	fmt.Fprintf(out, "  memory_links: %d\n", summary.MemoryLinks)
+	fmt.Fprintf(out, "  tasks:        %d\n", summary.Tasks)
+	fmt.Fprintf(out, "  decisions:    %d\n", summary.Decisions)
+	fmt.Fprintf(out, "  token_usage:  %d\n", summary.TokenUsage)
+	fmt.Fprintf(out, "  audit_log:    %d\n", summary.AuditLog)
+}
+
+// runProjectDeleteCore implements the confirmation-gated delete against an
+// already-open store: prints the dry-run summary, stops there unless apply
+// is set, and otherwise requires re-typing the project's name (read from in)
+// before calling store.DeleteProject with apply=true. Pulled out of
+// runProjectDelete — which owns CLI arg parsing, bootstrap(), and os.Exit —
+// so the confirmation gate is unit-testable against a real store with
+// injected stdin, without exercising process-exit paths.
+func runProjectDeleteCore(ctx context.Context, store *memory.Store, out io.Writer, in io.Reader, projectName string, apply bool) error {
+	summary, err := store.DeleteProject(ctx, projectName, false)
+	if err != nil {
+		return err
+	}
+	printDeleteSummary(out, summary, "Would delete")
+
+	if !apply {
+		fmt.Fprintln(out, "\nRe-run with --apply to actually delete.")
+		return nil
+	}
+
+	fmt.Fprintf(out, "\nType the project name (%q) to confirm deletion: ", summary.ProjectName)
+	scanner := bufio.NewScanner(in)
+	scanner.Scan()
+	if !confirmProjectDeleteName(scanner.Text(), summary.ProjectName) {
+		return errors.New("confirmation did not match project name — nothing deleted")
+	}
+
+	summary, err = store.DeleteProject(ctx, projectName, true)
+	if err != nil {
+		return err
+	}
+	printDeleteSummary(out, summary, "Deleted")
+	return nil
+}
+
 // runProjectDelete implements `ghost project delete <name-or-id> [--apply]`.
 // Always prints the dry-run summary first. Without --apply it stops there.
 // With --apply, it re-prints the summary and requires re-typing the
@@ -745,42 +791,10 @@ Irreversible. Refuses to delete _global.`)
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
 
-	printDeleteSummary := func(summary memory.DeleteProjectSummary, verb string) {
-		fmt.Printf("%s %q (%s):\n", verb, summary.ProjectName, summary.ProjectID)
-		fmt.Printf("  memories:     %d\n", summary.Memories)
-		fmt.Printf("  memory_links: %d\n", summary.MemoryLinks)
-		fmt.Printf("  tasks:        %d\n", summary.Tasks)
-		fmt.Printf("  decisions:    %d\n", summary.Decisions)
-		fmt.Printf("  token_usage:  %d\n", summary.TokenUsage)
-		fmt.Printf("  audit_log:    %d\n", summary.AuditLog)
-	}
-
-	summary, err := store.DeleteProject(ctx, projectName, false)
-	if err != nil {
+	if err := runProjectDeleteCore(ctx, store, os.Stdout, os.Stdin, projectName, apply); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	printDeleteSummary(summary, "Would delete")
-
-	if !apply {
-		fmt.Println("\nRe-run with --apply to actually delete.")
-		return
-	}
-
-	fmt.Printf("\nType the project name (%q) to confirm deletion: ", summary.ProjectName)
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Scan()
-	if !confirmProjectDeleteName(scanner.Text(), summary.ProjectName) {
-		fmt.Fprintln(os.Stderr, "error: confirmation did not match project name — nothing deleted")
-		os.Exit(1)
-	}
-
-	summary, err = store.DeleteProject(ctx, projectName, true)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	printDeleteSummary(summary, "Deleted")
 }
 
 // firstLine returns the first line of s, truncated to at most n runes with an

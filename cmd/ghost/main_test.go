@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"database/sql"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -10,6 +13,26 @@ import (
 
 	"github.com/wcatz/ghost/internal/memory"
 )
+
+// testDeleteStore returns a real in-memory Store with one project ("proj",
+// name "test-project") already created, for exercising runProjectDeleteCore
+// against real DeleteProject behavior rather than a mock.
+func testDeleteStore(t *testing.T) *memory.Store {
+	t.Helper()
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	s := memory.NewStore(db, logger)
+
+	if err := s.EnsureProject(context.Background(), "proj", "/tmp/proj", "test-project"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	return s
+}
 
 func TestParseObsidianFlags(t *testing.T) {
 	t.Run("both forms and all flags", func(t *testing.T) {
@@ -189,5 +212,131 @@ func TestConfirmProjectDeleteName_RejectsMismatch(t *testing.T) {
 	}
 	if confirmProjectDeleteName("", "my-project") {
 		t.Error("expected an empty input not to confirm")
+	}
+}
+
+// TestPrintDeleteSummary_FieldsNotTransposed pins the label-to-value mapping
+// with six distinct values (one per field) and a whole-string comparison, so
+// swapping any two summary.X arguments inside printDeleteSummary — the same
+// bug class the memory-layer fixture in store_test.go was hardened against —
+// fails this test instead of passing silently.
+func TestPrintDeleteSummary_FieldsNotTransposed(t *testing.T) {
+	var out bytes.Buffer
+	printDeleteSummary(&out, memory.DeleteProjectSummary{
+		ProjectID:   "proj",
+		ProjectName: "test-project",
+		Memories:    1,
+		MemoryLinks: 2,
+		Tasks:       3,
+		Decisions:   4,
+		TokenUsage:  5,
+		AuditLog:    6,
+	}, "Would delete")
+
+	want := `Would delete "test-project" (proj):
+  memories:     1
+  memory_links: 2
+  tasks:        3
+  decisions:    4
+  token_usage:  5
+  audit_log:    6
+`
+	if out.String() != want {
+		t.Errorf("printDeleteSummary output mismatch:\ngot:\n%s\nwant:\n%s", out.String(), want)
+	}
+}
+
+// TestRunProjectDeleteCore_MismatchAborts exercises the full confirmation
+// gate against a real store: apply=true with a wrong re-typed name at the
+// prompt must return an error and leave the project (and its memory)
+// completely untouched. This is the spec's "wrong re-typed name aborts
+// without deleting" requirement.
+func TestRunProjectDeleteCore_MismatchAborts(t *testing.T) {
+	store := testDeleteStore(t)
+	ctx := context.Background()
+
+	if _, err := store.Create(ctx, "proj", memory.Memory{
+		Category: "fact", Content: "must survive an aborted delete", Source: "manual", Importance: 0.5, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var out bytes.Buffer
+	err := runProjectDeleteCore(ctx, store, &out, strings.NewReader("wrong-name\n"), "test-project", true)
+	if err == nil {
+		t.Fatal("expected an error for a mismatched confirmation, got nil")
+	}
+	if !strings.Contains(err.Error(), "did not match") {
+		t.Errorf("expected mismatch error, got: %v", err)
+	}
+
+	id, _, rErr := store.ResolveProject(ctx, "test-project")
+	if rErr != nil || id == "" {
+		t.Errorf("expected project to still exist after aborted delete: id=%q err=%v", id, rErr)
+	}
+	mems, gErr := store.GetAll(ctx, "proj", 100)
+	if gErr != nil {
+		t.Fatalf("GetAll: %v", gErr)
+	}
+	if len(mems) != 1 {
+		t.Errorf("expected the seeded memory to survive an aborted delete, got %d memories", len(mems))
+	}
+	if !strings.Contains(out.String(), "Would delete") {
+		t.Errorf("expected dry-run summary in output, got %q", out.String())
+	}
+	if strings.Contains(out.String(), "\nDeleted ") {
+		t.Errorf("did not expect the post-apply 'Deleted' report after an aborted confirmation, got %q", out.String())
+	}
+}
+
+// TestRunProjectDeleteCore_MatchProceeds is the positive counterpart: the
+// correct re-typed name must let the delete proceed and actually remove the
+// project and its memories.
+func TestRunProjectDeleteCore_MatchProceeds(t *testing.T) {
+	store := testDeleteStore(t)
+	ctx := context.Background()
+
+	if _, err := store.Create(ctx, "proj", memory.Memory{
+		Category: "fact", Content: "should be deleted", Source: "manual", Importance: 0.5, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var out bytes.Buffer
+	err := runProjectDeleteCore(ctx, store, &out, strings.NewReader("test-project\n"), "test-project", true)
+	if err != nil {
+		t.Fatalf("expected a correctly re-typed name to proceed, got error: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "Deleted ") {
+		t.Errorf("expected the post-apply 'Deleted' report, got %q", out.String())
+	}
+	id, _, rErr := store.ResolveProject(ctx, "test-project")
+	if rErr != nil {
+		t.Fatalf("ResolveProject: %v", rErr)
+	}
+	if id != "" {
+		t.Error("expected project to be gone after a correctly confirmed delete")
+	}
+}
+
+// TestRunProjectDeleteCore_DryRunNeverPrompts confirms apply=false stops
+// after the preview and never reads from in or deletes anything, regardless
+// of what stdin contains.
+func TestRunProjectDeleteCore_DryRunNeverPrompts(t *testing.T) {
+	store := testDeleteStore(t)
+	ctx := context.Background()
+
+	var out bytes.Buffer
+	err := runProjectDeleteCore(ctx, store, &out, strings.NewReader(""), "test-project", false)
+	if err != nil {
+		t.Fatalf("dry-run should not error: %v", err)
+	}
+	if !strings.Contains(out.String(), "Would delete") || !strings.Contains(out.String(), "Re-run with --apply") {
+		t.Errorf("expected dry-run preview and re-run hint, got %q", out.String())
+	}
+	id, _, rErr := store.ResolveProject(ctx, "test-project")
+	if rErr != nil || id == "" {
+		t.Errorf("expected project to still exist after dry-run: id=%q err=%v", id, rErr)
 	}
 }
