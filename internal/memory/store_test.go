@@ -2354,6 +2354,17 @@ func TestDeleteProject_ApplyRemovesEverythingIncludingOrphanTables(t *testing.T)
 		t.Errorf("expected no dangling memory_links pointing at deleted memories, got %d", linkCount)
 	}
 
+	// The memories_fts index (maintained by the memories_ad AFTER DELETE
+	// trigger in schema.go) must also be emptied by the cascade delete —
+	// it has no project_id column, so countRows can't check it directly.
+	var ftsCount int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memories_fts`).Scan(&ftsCount); err != nil {
+		t.Fatalf("count memories_fts: %v", err)
+	}
+	if ftsCount != 0 {
+		t.Errorf("memories_fts retains %d rows after apply, want 0", ftsCount)
+	}
+
 	// The project row itself is gone.
 	id, _, err := s.ResolveProject(ctx, testProject)
 	if err != nil {

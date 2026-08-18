@@ -306,11 +306,11 @@ type DeleteProjectSummary struct {
 }
 
 // DeleteProject permanently removes a project and everything under it.
-// memories (and their tags, embeddings, and links), tasks, decisions,
-// ghost_state, and memory_snapshots all cascade from the projects row via
-// ON DELETE CASCADE (see schema.go). token_usage and audit_log carry a
-// project_id column but no foreign key, so they're deleted explicitly in the
-// same transaction.
+// memories (with their FTS index entries, embeddings, and links),
+// conversations (with their messages), tasks, decisions, ghost_state, and
+// memory_snapshots all cascade from the projects row via ON DELETE CASCADE
+// (see schema.go). token_usage and audit_log carry a project_id column but no
+// foreign key, so they're deleted explicitly in the same transaction.
 //
 // input is resolved exactly like every other command resolves a project (see
 // ResolveProject): id, name, path-prefix, or basename all work.
