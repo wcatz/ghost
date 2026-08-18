@@ -306,7 +306,7 @@ type DeleteProjectSummary struct {
 }
 
 // DeleteProject permanently removes a project and everything under it.
-// memories (with their FTS index entries, embeddings, and links),
+// memories (with their FTS index entries, embeddings, links, and link_scans),
 // conversations (with their messages), tasks, decisions, ghost_state, and
 // memory_snapshots all cascade from the projects row via ON DELETE CASCADE
 // (see schema.go). token_usage and audit_log carry a project_id column but no
@@ -394,17 +394,44 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	if _, err := tx.ExecContext(ctx, `DELETE FROM audit_log WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete audit_log: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, id); err != nil {
-		return DeleteProjectSummary{}, fmt.Errorf("delete project: %w", err)
+	if err := deleteProjectRowTx(ctx, tx, id); err != nil {
+		return DeleteProjectSummary{}, err
 	}
 
 	if err := tx.Commit(); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("commit delete: %w", err)
 	}
 
+	// This log line is the only durable record of what was removed once the
+	// project's own audit_log rows are gone, so it carries the full summary.
 	s.logger.Info("deleted project", "project_id", id, "project_name", name,
-		"memories", summary.Memories, "tasks", summary.Tasks, "decisions", summary.Decisions)
+		"memories", summary.Memories, "memory_links", summary.MemoryLinks,
+		"tasks", summary.Tasks, "decisions", summary.Decisions,
+		"token_usage", summary.TokenUsage, "audit_log", summary.AuditLog)
 	return summary, nil
+}
+
+// deleteProjectRowTx deletes the projects row for id inside tx and guards
+// against the row already being gone: ResolveProject released its RLock
+// before DeleteProject acquired s.mu, so a concurrent DeleteProject/
+// MergeProject in this process — or a separate ghost process (CLI and MCP
+// server each open their own *Store against the same SQLite file) — could
+// have already deleted this project in that gap. Without this guard the
+// transaction would still commit and DeleteProject would return a
+// normal-looking success summary for a project that's already gone.
+func deleteProjectRowTx(ctx context.Context, tx *sql.Tx, id string) error {
+	res, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete project rows: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("project %q was already deleted", id)
+	}
+	return nil
 }
 
 // ResolveProject resolves an identifier — a project name, hash ID, or

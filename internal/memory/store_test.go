@@ -2375,6 +2375,49 @@ func TestDeleteProject_ApplyRemovesEverythingIncludingOrphanTables(t *testing.T)
 	}
 }
 
+// TestDeleteProjectRowTx_AlreadyDeletedGuard exercises deleteProjectRowTx
+// directly rather than the full DeleteProject method. DeleteProject holds
+// s.mu for its entire apply path (count queries through the final delete),
+// so within a single process two calls to s.DeleteProject can't interleave —
+// the race this guard defends against is ResolveProject (which takes its own
+// RLock and releases it) reporting the project as present, and the row then
+// vanishing before this transaction's DELETE runs: a concurrent caller in
+// this process racing the window between ResolveProject and s.mu.Lock(), or
+// — the realistic case — a separate ghost process (CLI and MCP server each
+// open their own *Store against the same SQLite file) deleting it via its
+// own connection. Reproducing that with real timing would be flaky; deleting
+// the row directly via s.db and then invoking the exact helper DeleteProject
+// calls proves the guard fires without relying on goroutine scheduling.
+func TestDeleteProjectRowTx_AlreadyDeletedGuard(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Simulate a concurrent deletion that already removed the project row
+	// before this transaction's delete runs. This must happen before
+	// BeginTx below: the store's *sql.DB is capped at one open connection
+	// (SetMaxOpenConns(1), see schema.go OpenDB) to serialize SQLite access,
+	// so issuing this DELETE against s.db while a tx already holds that sole
+	// connection would block forever waiting for a connection that can never
+	// free up.
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, testProject); err != nil {
+		t.Fatalf("pre-delete project: %v", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	err = deleteProjectRowTx(ctx, tx, testProject)
+	if err == nil {
+		t.Fatal("expected error when project row is already gone")
+	}
+	if !strings.Contains(err.Error(), "already deleted") {
+		t.Errorf("expected %q in error, got: %v", "already deleted", err)
+	}
+}
+
 func TestSeedGlobalMemories(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
