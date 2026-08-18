@@ -736,7 +736,8 @@ Flags:
   --apply   Actually delete (default is dry-run/preview)
 
 Permanently removes a project: memories, tags, embeddings, links, tasks,
-decisions, and cost/audit history. Irreversible. Refuses to delete _global.`)
+decisions, learned context, reflection snapshots, and cost/audit history.
+Irreversible. Refuses to delete _global.`)
 		os.Exit(1)
 	}
 

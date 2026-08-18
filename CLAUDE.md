@@ -7,7 +7,7 @@
 - MCP server via modelcontextprotocol/go-sdk (stdio transport)
 
 ## Architecture
-- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, resolve, supersede, obsidian, bench, upgrade, version
+- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, resolve, supersede, project, obsidian, bench, upgrade, version
 - `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + resolve + supersede); `Provider` seam (`anthropicClient`/`SamplingProvider`) with `FallbackProvider` credit-exhaustion fallover for resolve/supersede
 - `internal/memory/` — SQLite CRUD, FTS5 search, vector search, time-decay scoring
 - `internal/mcpserver/` — MCP server: 20 tools + 4 resources + 2 prompts (`recall_project`, `record_decision`)

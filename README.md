@@ -260,6 +260,7 @@ ghost hook stop              # Stop hook — blocks stop once if a tool-using se
 ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
 ghost resolve <project>      # De-weight resolved-evidence memories from injection (dry-run by default; --apply)
 ghost supersede <project>    # Link superseded memories (dry-run by default; --apply, --threshold)
+ghost project delete <name>  # Permanently delete a project (dry-run by default; --apply + re-type name to confirm)
 ghost bench [--sweep]        # Retrieval-quality benchmark on the built-in dataset
 ghost obsidian export        # Mirror memories to an Obsidian vault (one-way; --out, --project)
 ghost obsidian sync          # Keep the vault mirror fresh (--interval; polls for DB changes)
