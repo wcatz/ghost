@@ -707,15 +707,31 @@ func confirmProjectDeleteName(typed, expected string) bool {
 }
 
 // printDeleteSummary writes a DeleteProjectSummary to out in the fixed-width
-// format shared by both the dry-run preview and the post-apply report.
-func printDeleteSummary(out io.Writer, summary memory.DeleteProjectSummary, verb string) {
-	fmt.Fprintf(out, "%s %q (%s):\n", verb, summary.ProjectName, summary.ProjectID)
-	fmt.Fprintf(out, "  memories:     %d\n", summary.Memories)
-	fmt.Fprintf(out, "  memory_links: %d\n", summary.MemoryLinks)
-	fmt.Fprintf(out, "  tasks:        %d\n", summary.Tasks)
-	fmt.Fprintf(out, "  decisions:    %d\n", summary.Decisions)
-	fmt.Fprintf(out, "  token_usage:  %d\n", summary.TokenUsage)
-	fmt.Fprintf(out, "  audit_log:    %d\n", summary.AuditLog)
+// format shared by both the dry-run preview and the post-apply report. It
+// returns the first write error encountered, if any.
+func printDeleteSummary(out io.Writer, summary memory.DeleteProjectSummary, verb string) error {
+	if _, err := fmt.Fprintf(out, "%s %q (%s):\n", verb, summary.ProjectName, summary.ProjectID); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  memories:     %d\n", summary.Memories); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  memory_links: %d\n", summary.MemoryLinks); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  tasks:        %d\n", summary.Tasks); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  decisions:    %d\n", summary.Decisions); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  token_usage:  %d\n", summary.TokenUsage); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "  audit_log:    %d\n", summary.AuditLog); err != nil {
+		return err
+	}
+	return nil
 }
 
 // runProjectDeleteCore implements the confirmation-gated delete against an
@@ -730,25 +746,37 @@ func runProjectDeleteCore(ctx context.Context, store *memory.Store, out io.Write
 	if err != nil {
 		return err
 	}
-	printDeleteSummary(out, summary, "Would delete")
+	if err := printDeleteSummary(out, summary, "Would delete"); err != nil {
+		return err
+	}
 
 	if !apply {
-		fmt.Fprintln(out, "\nRe-run with --apply to actually delete.")
+		if _, err := fmt.Fprintln(out, "\nRe-run with --apply to actually delete."); err != nil {
+			return err
+		}
 		return nil
 	}
 
-	fmt.Fprintf(out, "\nType the project name (%q) to confirm deletion: ", summary.ProjectName)
+	if _, err := fmt.Fprintf(out, "\nType the project name (%q) to confirm deletion: ", summary.ProjectName); err != nil {
+		return err
+	}
 	scanner := bufio.NewScanner(in)
 	scanner.Scan()
 	if !confirmProjectDeleteName(scanner.Text(), summary.ProjectName) {
 		return errors.New("confirmation did not match project name — nothing deleted")
 	}
 
-	summary, err = store.DeleteProject(ctx, projectName, true)
+	// Reuse the ID resolved by the preview above rather than re-resolving
+	// projectName: the confirmation prompt waits on a human, and re-resolving
+	// a mutable name/path in that window could silently hit a different
+	// project if it was renamed or recreated in the meantime.
+	summary, err = store.DeleteProject(ctx, summary.ProjectID, true)
 	if err != nil {
 		return err
 	}
-	printDeleteSummary(out, summary, "Deleted")
+	if err := printDeleteSummary(out, summary, "Deleted"); err != nil {
+		return err
+	}
 	return nil
 }
 
