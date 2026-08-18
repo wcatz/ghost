@@ -2010,3 +2010,119 @@ func TestGhostProjectDelete_RejectsGlobal(t *testing.T) {
 		t.Fatal("expected an error result deleting _global, got success")
 	}
 }
+
+func TestGhostProjectDelete_NotifiesSubscribersOnApply(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	if _, err := store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "subscriber should hear about this deletion", Source: "manual", Importance: 0.5, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+
+	updated := make(chan string, 8)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
+		ResourceUpdatedHandler: func(ctx context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
+			updated <- req.Params.URI
+		},
+	})
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	const contextURI = "ghost://project/test-project/context"
+	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: contextURI}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	const tasksURI = "ghost://project/test-project/tasks"
+	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: tasksURI}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	const decisionsURI = "ghost://project/test-project/decisions"
+	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: decisionsURI}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_project_delete",
+		Arguments: map[string]any{"project": "test-project", "apply": true},
+	}); err != nil {
+		t.Fatalf("CallTool ghost_project_delete: %v", err)
+	}
+
+	want := map[string]bool{contextURI: false, tasksURI: false, decisionsURI: false}
+	deadline := time.After(2 * time.Second)
+	for remaining := len(want); remaining > 0; {
+		select {
+		case got := <-updated:
+			if seen, ok := want[got]; !ok {
+				t.Errorf("notified unexpected URI %q", got)
+			} else if seen {
+				// Duplicate notification for the same URI; ignore.
+			} else {
+				want[got] = true
+				remaining--
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for notifications, still missing: %+v", want)
+		}
+	}
+}
+
+func TestGhostProjectDelete_DryRunDoesNotNotify(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	if _, err := store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "dry run must not notify anyone", Source: "manual", Importance: 0.5, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+
+	updated := make(chan string, 8)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
+		ResourceUpdatedHandler: func(ctx context.Context, req *mcp.ResourceUpdatedNotificationRequest) {
+			updated <- req.Params.URI
+		},
+	})
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	const contextURI = "ghost://project/test-project/context"
+	if err := session.Subscribe(ctx, &mcp.SubscribeParams{URI: contextURI}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	if _, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_project_delete",
+		Arguments: map[string]any{"project": "test-project"},
+	}); err != nil {
+		t.Fatalf("CallTool ghost_project_delete: %v", err)
+	}
+
+	select {
+	case got := <-updated:
+		t.Fatalf("expected no notification on dry-run, got %q", got)
+	case <-time.After(300 * time.Millisecond):
+	}
+}

@@ -1307,6 +1307,19 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("ghost_project_delete: %w", err)
 		}
+		if args.Apply {
+			// notifyProjectResource's hash/name alias lookup queries
+			// ListProjects, which no longer has a row for this project once
+			// DeleteProject has committed — it would only ever emit the ID
+			// form. Emit both aliases directly from the summary instead,
+			// since DeleteProject already resolved and returned them.
+			for _, suffix := range []string{"context", "tasks", "decisions"} {
+				s.notifyResourceUpdated(ctx, "ghost://project/"+summary.ProjectID+"/"+suffix)
+				if summary.ProjectName != summary.ProjectID {
+					s.notifyResourceUpdated(ctx, "ghost://project/"+summary.ProjectName+"/"+suffix)
+				}
+			}
+		}
 		verb := "Would delete"
 		if args.Apply {
 			verb = "Deleted"
