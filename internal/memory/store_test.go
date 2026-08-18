@@ -2569,14 +2569,14 @@ func TestDeleteProject_ConcurrentWriteFromSeparateProcessDoesNotUndercountSummar
 	if err != nil {
 		t.Fatalf("OpenDB A: %v", err)
 	}
-	defer dbA.Close()
+	defer func() { _ = dbA.Close() }()
 	storeA := NewStore(dbA, logger)
 
 	dbB, err := OpenDB(dbPath)
 	if err != nil {
 		t.Fatalf("OpenDB B: %v", err)
 	}
-	defer dbB.Close()
+	defer func() { _ = dbB.Close() }()
 	storeB := NewStore(dbB, logger)
 
 	ctx := context.Background()

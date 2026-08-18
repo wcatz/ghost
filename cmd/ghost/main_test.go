@@ -222,7 +222,7 @@ func TestConfirmProjectDeleteName_RejectsMismatch(t *testing.T) {
 // fails this test instead of passing silently.
 func TestPrintDeleteSummary_FieldsNotTransposed(t *testing.T) {
 	var out bytes.Buffer
-	printDeleteSummary(&out, memory.DeleteProjectSummary{
+	if err := printDeleteSummary(&out, memory.DeleteProjectSummary{
 		ProjectID:   "proj",
 		ProjectName: "test-project",
 		Memories:    1,
@@ -231,7 +231,9 @@ func TestPrintDeleteSummary_FieldsNotTransposed(t *testing.T) {
 		Decisions:   4,
 		TokenUsage:  5,
 		AuditLog:    6,
-	}, "Would delete")
+	}, "Would delete"); err != nil {
+		t.Fatalf("printDeleteSummary: %v", err)
+	}
 
 	want := `Would delete "test-project" (proj):
   memories:     1
