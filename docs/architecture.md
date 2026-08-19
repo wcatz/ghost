@@ -170,7 +170,7 @@ schema changes only reach databases created after the change.
 
 ## Time-Decay Scoring
 
-Memories are scored by `importance × decay_factor × pinned_boost`, where
+Memories are scored by `importance × decay_factor`, where
 `decay_factor = max(floor, 1 / (1 + age_days / scale))`:
 
 | Category | Scale (half-life) | Floor |
@@ -179,9 +179,10 @@ Memories are scored by `importance × decay_factor × pinned_boost`, where
 | architecture, pattern | 45-day | 0.3 |
 | decision, gotcha, dependency | 30-day | 0.15 |
 
-Pinned memories get a 1.5× boost (`pinned_boost`) on top of their decayed score —
-they do **not** bypass decay, so a sufficiently stale pinned memory can still rank
-below a fresh unpinned one. See `GetTopMemories` in `internal/memory/store.go`.
+Pinned memories are fully exempt from decay — `decay_factor` is forced to `1.0`
+regardless of category or age, so a pinned memory always scores at its raw
+importance. This is a no-op for preference/convention/fact, which already never
+decay. See `DecayRankingSQL` / `GetTopMemories` in `internal/memory/store.go`.
 
 ## Build
 
