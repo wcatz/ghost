@@ -373,8 +373,9 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		totalCountKnown = true
 	}
 
-	// Get top memories using the same category-aware time-decay + pinned-boost
-	// ranking as Store.GetTopMemories (internal/memory/store.go), sharing the
+	// Get top memories using the same category-aware time-decay +
+	// pinned-exemption ranking as Store.GetTopMemories
+	// (internal/memory/store.go), sharing the
 	// exact ranking SQL via memory.DecayRankingSQL so the two orderings can
 	// never drift apart. The query itself isn't issued through a Store method
 	// because this function deliberately uses its own lightweight, read-only

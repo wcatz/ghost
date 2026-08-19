@@ -179,7 +179,7 @@ Facts about your stack shouldn't expire. Last month's debugging detour should. T
 | `architecture`, `pattern` | 45-day scale | 0.3 |
 | `decision`, `gotcha`, `dependency` | 30-day scale | 0.15 |
 
-Pinned memories get a 1.5× boost on top.
+Pinned memories are fully exempt from decay — they score at raw importance regardless of age or category.
 
 ### Consolidation you can undo
 

@@ -706,7 +706,7 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 // DecayRankingSQL is the composite-score ranking expression shared by
 // GetTopMemories below and the session-start hook's own read-only query
 // (internal/mcpinit/hook.go's loadSessionContext) — a single source of truth
-// for the category-aware time-decay + pinned-boost formula so the two
+// for the category-aware time-decay + pinned-exemption formula so the two
 // callers can never drift apart. It is a fragment, not a full query: callers
 // interpolate it into their own "ORDER BY (...) DESC" clause.
 // The 0.15 and 0.3 floors create a dead zone at the low end of each decaying
@@ -715,16 +715,20 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 // category (1.0 * 0.15 == 0.15 * 1.0). Accepted — importance that low is rare
 // in practice (defaults are 0.5+) — but if ranking ever looks off for a
 // low-importance category member, this tie is why.
+// Pinned is a full decay exemption (factor 1.0), not a multiplier on top of
+// the decayed/floored score — a pinned memory always scores at its raw
+// importance regardless of age or category. It's a no-op for
+// preference/convention/fact, which already never decay.
 const DecayRankingSQL = `
 	importance
 	* CASE
+		WHEN pinned = 1 THEN 1.0
 		WHEN category IN ('preference', 'convention', 'fact') THEN 1.0
 		WHEN category IN ('pattern', 'architecture') THEN
 			MAX(0.3, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 45.0))
 		ELSE
 			MAX(0.15, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 30.0))
 	END
-	* CASE WHEN pinned = 1 THEN 1.5 ELSE 1.0 END
 `
 
 // GetTopMemories returns the top N memories ranked by composite score

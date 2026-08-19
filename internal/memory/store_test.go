@@ -1049,22 +1049,30 @@ func TestStoreGetTopMemoriesPinnedBoost(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	// Create two memories — lower importance but pinned should rank higher.
+	// Lower importance but pinned (and thus exempt from decay) should still
+	// outrank a higher-importance memory that has decayed to its floor.
+	// Both use a decaying category ('dependency') and are aged past the
+	// 170-day floor crossover (see TestDecayFloorCrossoverBoundaries) so an
+	// unpinned row would score importance*0.15.
 	id1, err := s.Create(ctx, testProject, Memory{
-		Category: "fact", Content: "Pinned low importance",
+		Category: "dependency", Content: "Pinned low importance",
 		Source: "manual", Importance: 0.5, Tags: []string{},
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := s.Create(ctx, testProject, Memory{
-		Category: "fact", Content: "Unpinned higher importance",
+	id2, err := s.Create(ctx, testProject, Memory{
+		Category: "dependency", Content: "Unpinned higher importance",
 		Source: "manual", Importance: 0.6, Tags: []string{},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	setCreatedAtDaysAgo(t, s, id1, 300)
+	setCreatedAtDaysAgo(t, s, id2, 300)
 
-	// Pin the first one — 0.5 * 1.5 = 0.75 > 0.6.
+	// Pin the first one — exemption scores it at full importance (0.5),
+	// beating the unpinned one's floored 0.6*0.15=0.09.
 	if err := s.TogglePin(ctx, id1, true); err != nil {
 		t.Fatalf("TogglePin: %v", err)
 	}
@@ -1075,6 +1083,36 @@ func TestStoreGetTopMemoriesPinnedBoost(t *testing.T) {
 	}
 	if top[0].Content != "Pinned low importance" {
 		t.Errorf("expected pinned memory first, got %q", top[0].Content)
+	}
+}
+
+// TestPinnedMemoryExemptFromDecay confirms pinned means fully exempt from
+// category decay (score == importance) rather than a 1.5x multiplier
+// stacked on top of the decayed/floored score. A 300-day-old dependency
+// memory would otherwise floor at importance*0.15 (see
+// TestDecayFloorCrossoverBoundaries); pinned, it must score at full
+// importance instead of importance*0.15*1.5.
+func TestPinnedMemoryExemptFromDecay(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const importance = 0.6
+
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "dependency", Content: "old pinned dependency",
+		Source: "manual", Importance: importance, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	setCreatedAtDaysAgo(t, s, id, 300)
+
+	if err := s.TogglePin(ctx, id, true); err != nil {
+		t.Fatalf("TogglePin: %v", err)
+	}
+
+	want := importance
+	if got := memoryScore(t, s, id); math.Abs(got-want) > 1e-6 {
+		t.Errorf("pinned 300-day dependency score = %v, want %v (full exemption, not a boosted floor)", got, want)
 	}
 }
 
