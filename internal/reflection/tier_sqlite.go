@@ -120,24 +120,37 @@ func inferGlobalScope(category, content string) string {
 		return "project"
 	}
 
-	// Preferences and certain facts are strong global signals.
-	if category == "preference" {
-		return "global"
-	}
-
-	// Cross-repo workflow indicators.
-	globalPatterns := []string{
+	// Unambiguous cross-repo/personal-environment language: one hit is enough.
+	strongPatterns := []string{
 		"across all", "all repos", "all projects", "every repo", "every project",
 		"cross-repo", "cross-project", "from any repo",
-		"deploy to", "deploy from", "push to infra",
-		"ssh ", "ssh into", "hostname",
-		"always use", "never use", "prefer ",
 		"personal tool", "dev machine", "workstation",
-		"infrastructure topology", "cluster ",
+		"infrastructure topology",
 	}
-	for _, p := range globalPatterns {
+	for _, p := range strongPatterns {
 		if strings.Contains(lower, p) {
 			return "global"
+		}
+	}
+
+	// Ambiguous DevOps phrasing reads the same whether the memory is
+	// project-specific or genuinely cross-repo (e.g. "SSH into relay 3 to
+	// restart the block producer" is project-specific, not global — see #319).
+	// A single hit isn't enough signal on its own; require two independent
+	// hits before promoting.
+	weakPatterns := []string{
+		"deploy to", "deploy from", "push to infra",
+		"ssh ", "hostname",
+		"always use", "never use", "prefer ",
+		"cluster ",
+	}
+	hits := 0
+	for _, p := range weakPatterns {
+		if strings.Contains(lower, p) {
+			hits++
+			if hits >= 2 {
+				return "global"
+			}
 		}
 	}
 

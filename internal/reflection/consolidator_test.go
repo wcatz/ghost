@@ -180,11 +180,15 @@ func TestInferGlobalScope(t *testing.T) {
 		content  string
 		want     string
 	}{
-		{"preference always global", "preference", "use tabs not spaces", "global"},
+		{"generic preference without cross-repo signal stays project", "preference", "use tabs not spaces", "project"},
+		{"preference with explicit cross-repo signal is global", "preference", "use tabs not spaces across all repos", "global"},
 		{"architecture is project", "architecture", "ghost uses 3-block prompt caching", "project"},
 		{"cross-repo workflow", "fact", "deploy to infra cluster from any repo", "global"},
-		{"ssh host", "fact", "SSH into node3 via bastion", "global"},
-		{"always use pattern", "convention", "always use nerdctl not docker", "global"},
+		{"single ssh hit stays project (was false positive, #319)", "fact", "SSH into node3 via bastion", "project"},
+		{"issue #319 example: project-specific ssh note stays project", "fact", "SSH into relay 3 to restart the block producer", "project"},
+		{"issue #319 example: project-specific relay preference stays project", "preference", "prefer using relay 3 for deploys", "project"},
+		{"single always-use hit stays project (was false positive, #319)", "convention", "always use nerdctl not docker", "project"},
+		{"two weak hits promote to global", "fact", "SSH into the shared cluster for maintenance", "global"},
 		{"project convention", "convention", "commit messages use feat/fix prefix", "project"},
 		{"all repos", "pattern", "run go vet across all repos before release", "global"},
 		{"dev machine", "fact", "dev machine runs Asahi Fedora on Apple Silicon", "global"},
@@ -209,7 +213,7 @@ func TestSQLiteConsolidator_SetsScope(t *testing.T) {
 
 	input := ReflectionInput{
 		ExistingMemories: []memory.Memory{
-			{Category: "preference", Content: "use nerdctl not docker", Importance: 0.9, Tags: []string{}},
+			{Category: "preference", Content: "use nerdctl not docker across all repos", Importance: 0.9, Tags: []string{}},
 			{Category: "architecture", Content: "ghost uses SQLite with FTS5", Importance: 0.8, Tags: []string{}},
 		},
 	}
