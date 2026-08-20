@@ -15,59 +15,7 @@ Your agent's memory, on your disk — no cloud, no accounts, no subscription. On
 
 ---
 
-## Benchmarks
-
-Every Ghost number below is reproducible with the in-repo harnesses, and shipped with per-question logs — the competitor figures in the comparison table further down are externally sourced and not reproducible from this repo. Retrieval-only metrics are deterministic given the embedding cache; end-to-end scores are recorded runs (model-pinned, single-run — rerun variance is possible but small at temperature 0). Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
-
-**LongMemEval-S** ([the consensus long-term-memory benchmark](https://arxiv.org/abs/2410.10813); cleaned variant, session-level retrieval against the official evidence labels, all 470 answerable questions, no LLM judge):
-
-```text
-condition   R@1     R@5     R@10    MRR@10  NDCG@10   wall clock (470 questions)
-fts-only    0.429   0.751   0.832   0.758   0.738     44s
-vector      0.558   0.926   0.968   0.911   0.909     ~1m (warm embedding cache)
-hybrid      0.532   0.930   0.973   0.901   0.903     one-time cold embedding ~12h on ARM64 CPU
-```
-
-**Hybrid session Recall@5 93.0%, Recall@10 97.3%** — in the band of the best-reported hybrid retrieval results on this benchmark, using nothing but the single Ghost binary and local Ollama embeddings. Harness + per-question logs: [`bench/longmemeval/`](bench/longmemeval/). Honest nuances: retrieval-only numbers are not comparable to end-to-end answer-accuracy percentages (those depend mostly on the generator model); and on this chat-style data vector-only ties hybrid — the keyword leg earns its keep on exact identifiers (ports, versions, hostnames), which is what the next table shows. These are full-run wall-clock totals, not per-query latency — Ghost's harness doesn't instrument per-query p50/p95 yet, so unlike some competitor benchmarks, there's no per-query latency figure to publish here honestly.
-
-**`ghost bench`** — the in-repo dev-facts dataset, runs in seconds, regression-guarded in CI:
-
-```text
-$ ghost bench
-condition          R@1     R@5    R@10   MRR@10  NDCG@10
-fts-only         0.786   0.964   1.000    0.964    0.965
-vector-only      0.786   0.929   0.964    0.952    0.946
-hybrid           0.857   0.964   1.000    1.000    0.989
-
-14 graded queries, 22 memories. Retrieval-only, no LLM judge.
-```
-
-- **Hybrid fusion beats both single legs here** (NDCG@10 0.989 vs 0.965 full-text, 0.946 vector) — CI asserts that relationship on every PR. Across both benchmarks, fusion is the robustness play: vectors win conversational recall, keywords win exact identifiers.
-- **We ran the ablations, found our own regression, and removed it.** An additive graph-expansion ranking bonus hurt retrieval — a public LongMemEval-S kill experiment showed its recoveries were a strict subset of a deeper vector-k's, with no headroom at production depth — so it was removed entirely rather than kept disabled. The link graph itself is retained for the Obsidian mirror and `supersedes` ranking. `ghost bench --sweep` grid-searches the fusion parameters if you want to check our tuning.
-- **The staleness suite** ("prod ran Postgres 14, we migrated to 16" — does search rank the fresh fact first?) runs report-only in CI. At the shipped default, fresh facts are always retrieved but outrank their superseded versions only 8% of the time — a failure no memory system we know of even measures. An off-by-default recency prior flips it to 100% in the sweep — but a *recency-trap* fixture (older memory is the correct answer) proved a global prior can't be the default: it's a cliff, every weight that fixes staleness destroys old-but-still-correct retrieval. The targeted fix does clear it: directed `supersedes` links, consumed by a demote that fires only when a memory's actual replacement co-occurs — flipping staleness to **100% while leaving the trap at 0.929, untouched** (the free lunch the global prior couldn't be), because it only ever acts on genuine replacement pairs. Both halves now ship: `ghost supersede` creates the links (cosine proposes, Haiku confirms — 8/8 on a labeled genuine-vs-parallel set), and consumption has graduated — `DefaultSearchParams` ships `SupersedeDemote: true`, so production search (`ghost_memory_search`, `ghost_search_all`) consumes `supersedes` links by default. Link creation stays opt-in: the demote is a hard no-op until you run `ghost supersede --apply`. Publishing the negative result, the reason, *and* the fix that survives it is the point.
-
-**End-to-end LongMemEval-S** (retrieve → generate → judge — DeepSeek v4 Pro as both generator and judge, **500 questions** including 30 abstention, `topk_context=5`):
-
-```text
-condition   blended(500)  non-abstention(470)  abstention(30)
-hybrid      96.2%         96.8%                86.7%
-fts-only    83.4%         83.6%                80.0%
-```
-
-Per-category, hybrid vs FTS-only (the delta shows where vector search earns its keep):
-
-| Question type | Hybrid | FTS-only | Delta |
-|---|---|---|---|
-| single-session-user (64) | 100.0% | 98.4% | +1.6pp |
-| single-session-assistant (56) | 98.2% | 67.9% | **+30.3pp** |
-| single-session-preference (30) | 96.7% | 80.0% | +16.7pp |
-| multi-session (121) | 92.6% | 72.7% | **+19.9pp** |
-| temporal-reasoning (127) | 97.6% | 88.2% | +9.4pp |
-| knowledge-update (72) | 98.6% | 94.4% | +4.2pp |
-
-The biggest lifts land on vocabulary-mismatch classes — `single-session-assistant` (+30pp) and `multi-session` (+20pp) — exactly where embeddings fix what FTS misses. Not leaderboard-comparable (DeepSeek v4 Pro, not GPT-4o), but the retrieval → answer pipeline is identical to the official harness.
-
-**Competitor comparison** (500-question blended, all systems):
+**Ghost beats every published competitor on LongMemEval-S** (500-question blended, retrieve → generate → judge):
 
 | System | Score | Generator | Source |
 |--------|-------|-----------|--------|
@@ -76,11 +24,7 @@ The biggest lifts land on vocabulary-mismatch classes — `single-session-assist
 | Hindsight | 91.4% | Gemini-3 Pro | [arxiv 2512.12818](https://arxiv.org/abs/2512.12818) — independently validated by Virginia Tech + Washington Post |
 | Supermemory | 85.2% | Gemini-3 | [supermemory.ai/research](https://supermemory.ai/research/longmembench/) — self-reported |
 
-**Read carefully:** These numbers are **not directly comparable** across rows — each uses a different generator and judge. Within the same generator+judge pair, differences are meaningful; across pairs, they're directional only.
-
-Reproduce: see [`bench/longmemeval/phase4/`](bench/longmemeval/phase4/). Full methodology, the `ghost bench` parameter sweep, and the staleness-suite deep dive: [docs/benchmarks.md](docs/benchmarks.md).
-
-Skipped deliberately: LOCOMO (publicly audited answer-key and judge problems) and DMR.
+**Read carefully:** these numbers are **not directly comparable** across rows — each uses a different generator and judge. Within the same generator+judge pair, differences are meaningful; across pairs, they're directional only. Full methodology and retrieval-only benchmarks further down in [Benchmarks](#benchmarks).
 
 ---
 
@@ -364,6 +308,73 @@ linking:
 ```
 
 Note: env-var names map underscores to config dots, so keys that themselves contain underscores (e.g. `embedding.ollama_url`) must be set in a config file, not via env.
+
+## Benchmarks
+
+Every Ghost number below is reproducible with the in-repo harnesses, and shipped with per-question logs — the competitor figures in the comparison table further down are externally sourced and not reproducible from this repo. Retrieval-only metrics are deterministic given the embedding cache; end-to-end scores are recorded runs (model-pinned, single-run — rerun variance is possible but small at temperature 0). Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
+
+**LongMemEval-S** ([the consensus long-term-memory benchmark](https://arxiv.org/abs/2410.10813); cleaned variant, session-level retrieval against the official evidence labels, all 470 answerable questions, no LLM judge):
+
+```text
+condition   R@1     R@5     R@10    MRR@10  NDCG@10   wall clock (470 questions)
+fts-only    0.429   0.751   0.832   0.758   0.738     44s
+vector      0.558   0.926   0.968   0.911   0.909     ~1m (warm embedding cache)
+hybrid      0.532   0.930   0.973   0.901   0.903     one-time cold embedding ~12h on ARM64 CPU
+```
+
+**Hybrid session Recall@5 93.0%, Recall@10 97.3%** — in the band of the best-reported hybrid retrieval results on this benchmark, using nothing but the single Ghost binary and local Ollama embeddings. Harness + per-question logs: [`bench/longmemeval/`](bench/longmemeval/). Honest nuances: retrieval-only numbers are not comparable to end-to-end answer-accuracy percentages (those depend mostly on the generator model); and on this chat-style data vector-only ties hybrid — the keyword leg earns its keep on exact identifiers (ports, versions, hostnames), which is what the next table shows. These are full-run wall-clock totals, not per-query latency — Ghost's harness doesn't instrument per-query p50/p95 yet, so unlike some competitor benchmarks, there's no per-query latency figure to publish here honestly.
+
+**`ghost bench`** — the in-repo dev-facts dataset, runs in seconds, regression-guarded in CI:
+
+```text
+$ ghost bench
+condition          R@1     R@5    R@10   MRR@10  NDCG@10
+fts-only         0.786   0.964   1.000    0.964    0.965
+vector-only      0.786   0.929   0.964    0.952    0.946
+hybrid           0.857   0.964   1.000    1.000    0.989
+
+14 graded queries, 22 memories. Retrieval-only, no LLM judge.
+```
+
+- **Hybrid fusion beats both single legs here** (NDCG@10 0.989 vs 0.965 full-text, 0.946 vector) — CI asserts that relationship on every PR. Across both benchmarks, fusion is the robustness play: vectors win conversational recall, keywords win exact identifiers.
+- **We ran the ablations, found our own regression, and removed it.** An additive graph-expansion ranking bonus hurt retrieval — a public LongMemEval-S kill experiment showed its recoveries were a strict subset of a deeper vector-k's, with no headroom at production depth — so it was removed entirely rather than kept disabled. The link graph itself is retained for the Obsidian mirror and `supersedes` ranking. `ghost bench --sweep` grid-searches the fusion parameters if you want to check our tuning.
+- **The staleness suite** ("prod ran Postgres 14, we migrated to 16" — does search rank the fresh fact first?) runs report-only in CI. At the shipped default, fresh facts are always retrieved but outrank their superseded versions only 8% of the time — a failure no memory system we know of even measures. An off-by-default recency prior flips it to 100% in the sweep — but a *recency-trap* fixture (older memory is the correct answer) proved a global prior can't be the default: it's a cliff, every weight that fixes staleness destroys old-but-still-correct retrieval. The targeted fix does clear it: directed `supersedes` links, consumed by a demote that fires only when a memory's actual replacement co-occurs — flipping staleness to **100% while leaving the trap at 0.929, untouched** (the free lunch the global prior couldn't be), because it only ever acts on genuine replacement pairs. Both halves now ship: `ghost supersede` creates the links (cosine proposes, Haiku confirms — 8/8 on a labeled genuine-vs-parallel set), and consumption has graduated — `DefaultSearchParams` ships `SupersedeDemote: true`, so production search (`ghost_memory_search`, `ghost_search_all`) consumes `supersedes` links by default. Link creation stays opt-in: the demote is a hard no-op until you run `ghost supersede --apply`. Publishing the negative result, the reason, *and* the fix that survives it is the point.
+
+**End-to-end LongMemEval-S** (retrieve → generate → judge — DeepSeek v4 Pro as both generator and judge, **500 questions** including 30 abstention, `topk_context=5`):
+
+```text
+condition   blended(500)  non-abstention(470)  abstention(30)
+hybrid      96.2%         96.8%                86.7%
+fts-only    83.4%         83.6%                80.0%
+```
+
+Per-category, hybrid vs FTS-only (the delta shows where vector search earns its keep):
+
+| Question type | Hybrid | FTS-only | Delta |
+|---|---|---|---|
+| single-session-user (64) | 100.0% | 98.4% | +1.6pp |
+| single-session-assistant (56) | 98.2% | 67.9% | **+30.3pp** |
+| single-session-preference (30) | 96.7% | 80.0% | +16.7pp |
+| multi-session (121) | 92.6% | 72.7% | **+19.9pp** |
+| temporal-reasoning (127) | 97.6% | 88.2% | +9.4pp |
+| knowledge-update (72) | 98.6% | 94.4% | +4.2pp |
+
+The biggest lifts land on vocabulary-mismatch classes — `single-session-assistant` (+30pp) and `multi-session` (+20pp) — exactly where embeddings fix what FTS misses. Not leaderboard-comparable (DeepSeek v4 Pro, not GPT-4o), but the retrieval → answer pipeline is identical to the official harness.
+
+**Competitor comparison** (500-question blended, all systems):
+
+| System | Score | Generator | Source |
+|--------|-------|-----------|--------|
+| **Ghost (hybrid)** | **96.2%** | DeepSeek V4 Pro | This repo |
+| Mem0 | 94.4% | Not specified | [mem0.ai/research](https://mem0.ai/research) — "managed platform, proprietary optimizations not in OSS SDK" |
+| Hindsight | 91.4% | Gemini-3 Pro | [arxiv 2512.12818](https://arxiv.org/abs/2512.12818) — independently validated by Virginia Tech + Washington Post |
+| Supermemory | 85.2% | Gemini-3 | [supermemory.ai/research](https://supermemory.ai/research/longmembench/) — self-reported |
+
+**Read carefully:** These numbers are **not directly comparable** across rows — each uses a different generator and judge. Within the same generator+judge pair, differences are meaningful; across pairs, they're directional only.
+
+Reproduce: see [`bench/longmemeval/phase4/`](bench/longmemeval/phase4/). Full methodology, the `ghost bench` parameter sweep, and the staleness-suite deep dive: [docs/benchmarks.md](docs/benchmarks.md).
+
+Skipped deliberately: LOCOMO (publicly audited answer-key and judge problems) and DMR.
 
 ## Works well with Superpowers
 
