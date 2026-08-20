@@ -459,6 +459,8 @@ import (
 // newer/older by updated_at, so every seeded fact needs a distinct timestamp
 // matching its list position. Duplicated from internal/bench/staleness.go's
 // helper of the same name/shape — raw SQL on the harness-owned store only.
+// This bypasses Store's internal mutex; it is safe only because seedFacts
+// calls it sequentially, never concurrently.
 func backdate(ctx context.Context, db *sql.DB, id string, ageDays int) error {
 	_, err := db.ExecContext(ctx,
 		`UPDATE memories SET created_at = datetime('now', ?), updated_at = datetime('now', ?) WHERE id = ?`,
@@ -482,12 +484,12 @@ func seedFacts(ctx context.Context, store *memory.Store, db *sql.DB, project str
 			Category: "fact", Content: fact, Importance: 0.7, Source: "mcp",
 		})
 		if err != nil {
-			return nil, fmt.Errorf("seed fact %d: %w", i, err)
+			return ids[:i], fmt.Errorf("seed fact %d: %w", i, err)
 		}
 		// The oldest fact gets the largest age; the newest gets age 1 (never
 		// 0 — 0 would tie with "now" for anything created after this pass).
 		if err := backdate(ctx, db, id, n-i); err != nil {
-			return nil, fmt.Errorf("backdate fact %d: %w", i, err)
+			return ids[:i], fmt.Errorf("backdate fact %d: %w", i, err)
 		}
 		ids[i] = id
 	}
