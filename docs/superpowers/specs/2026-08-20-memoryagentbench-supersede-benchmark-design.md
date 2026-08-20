@@ -22,10 +22,11 @@ The `Conflict_Resolution` split is a single parquet file with 8 rows — one per
 ### Conversion step
 
 `bench/memoryagentbench/convert.py` (pyarrow; same role as `bench/longmemeval/phase4/merge_retrieval.py`):
-1. Downloads/reads `data/Conflict_Resolution-00000-of-00001.parquet`.
+1. Reads a locally-downloaded `data/Conflict_Resolution-00000-of-00001.parquet`.
 2. Filters to rows whose `metadata.source` matches `factconsolidation_sh_*`.
-3. Regex-splits each row's `context` on `^\d+\.\s` into an ordered `facts: []string` list (list order = temporal order — line N is stated after line N-1).
-4. Writes one JSON object per line (JSONL) with `{source, facts, questions, answers, qa_pair_ids}`.
+3. Writes one JSON object per line (JSONL) with `{source, context, questions, answers, qa_pair_ids}` — `context` passed through raw.
+
+The regex split of `context` into an ordered `facts: []string` list (on `^\d+\.\s`, list order = temporal order — line N is stated after line N-1) happens in Go (`splitFacts`, `bench/memoryagentbench/dataset.go`), not in `convert.py`. Keeping the split in Go — the language the rest of the harness and its tests are written in — makes it a `go test`-covered pure function instead of untested Python; `convert.py` stays a dumb format-and-filter step with nothing benchmark-specific to get wrong.
 
 Output is not committed, matching the existing convention that external benchmark data (`longmemeval_s_cleaned.json`) is reproduced locally, not vendored.
 
