@@ -120,6 +120,18 @@ func inferGlobalScope(category, content string) string {
 		return "project"
 	}
 
+	// Explicit project-scoping language wins even over multiple weak-pattern
+	// hits below: "deploy to the project cluster for maintenance" hits both
+	// "deploy to" and "cluster " but is unambiguously project-specific.
+	projectScopedMarkers := []string{
+		"this project", "this repo", "the project", "for this service",
+	}
+	for _, p := range projectScopedMarkers {
+		if strings.Contains(lower, p) {
+			return "project"
+		}
+	}
+
 	// Unambiguous cross-repo/personal-environment language: one hit is enough.
 	strongPatterns := []string{
 		"across all", "all repos", "all projects", "every repo", "every project",

@@ -189,6 +189,7 @@ func TestInferGlobalScope(t *testing.T) {
 		{"issue #319 example: project-specific relay preference stays project", "preference", "prefer using relay 3 for deploys", "project"},
 		{"single always-use hit stays project (was false positive, #319)", "convention", "always use nerdctl not docker", "project"},
 		{"two weak hits promote to global", "fact", "SSH into the shared cluster for maintenance", "global"},
+		{"correlated weak hits in a project-scoped sentence stay project", "fact", "deploy to the project cluster for maintenance", "project"},
 		{"project convention", "convention", "commit messages use feat/fix prefix", "project"},
 		{"all repos", "pattern", "run go vet across all repos before release", "global"},
 		{"dev machine", "fact", "dev machine runs Asahi Fedora on Apple Silicon", "global"},
@@ -214,6 +215,7 @@ func TestSQLiteConsolidator_SetsScope(t *testing.T) {
 	input := ReflectionInput{
 		ExistingMemories: []memory.Memory{
 			{Category: "preference", Content: "use nerdctl not docker across all repos", Importance: 0.9, Tags: []string{}},
+			{Category: "preference", Content: "use tabs not spaces", Importance: 0.9, Tags: []string{}},
 			{Category: "architecture", Content: "ghost uses SQLite with FTS5", Importance: 0.8, Tags: []string{}},
 		},
 	}
@@ -223,13 +225,22 @@ func TestSQLiteConsolidator_SetsScope(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	wantScope := map[string]string{
+		"use nerdctl not docker across all repos": "global",
+		"use tabs not spaces":                     "project",
+		"ghost uses SQLite with FTS5":             "project",
+	}
 	for _, m := range result.Memories {
-		if m.Category == "preference" && m.Scope != "global" {
-			t.Errorf("preference should be global, got %q", m.Scope)
+		want, ok := wantScope[m.Content]
+		if !ok {
+			t.Fatalf("unexpected memory in result: %q", m.Content)
 		}
-		if m.Category == "architecture" && m.Scope != "project" {
-			t.Errorf("architecture should be project, got %q", m.Scope)
+		if m.Scope != want {
+			t.Errorf("Scope for %q = %q, want %q", m.Content, m.Scope, want)
 		}
+	}
+	if len(result.Memories) != len(wantScope) {
+		t.Errorf("got %d memories, want %d", len(result.Memories), len(wantScope))
 	}
 }
 
