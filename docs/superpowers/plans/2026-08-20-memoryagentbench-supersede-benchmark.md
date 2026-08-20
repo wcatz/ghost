@@ -516,12 +516,11 @@ git commit -s -m "feat(bench): add list-order timestamp backdating for supersede
 **Files:**
 - Create: `bench/memoryagentbench/embed.go`
 
-This file is a byte-for-byte duplicate of `bench/longmemeval/embed.go` (only the package-level doc comment below is new) — same package shape (`package main`), same small self-contained-per-benchmark convention the `bench/` directory already uses. No new test: the source file being duplicated has none either (`bench/longmemeval/` has no `embed_test.go`), and its logic is a thin HTTP/cache wrapper exercised end-to-end by every real run.
+This file is a byte-for-byte duplicate of `bench/longmemeval/embed.go` — same package shape (`package main`), same small self-contained-per-benchmark convention the `bench/` directory already uses. No new test: the source file being duplicated has none either (`bench/longmemeval/` has no `embed_test.go`), and its logic is a thin HTTP/cache wrapper exercised end-to-end by every real run.
 
-- [ ] **Step 1: Create the file**
+- [ ] **Step 1: Create the file, byte-for-byte identical to the source**
 
 ```go
-// bench/memoryagentbench/embed.go
 package main
 
 import (
@@ -541,9 +540,8 @@ const embedModel = "nomic-embed-text:v1.5"
 const embedBatchSize = 64
 
 // cachedEmbedder resolves text embeddings through an append-only JSONL cache
-// keyed by content hash, batching cache misses to Ollama. Shared facts across
-// demos (and across runs) are embedded exactly once. Duplicated from
-// bench/longmemeval/embed.go — see that file's package for the original.
+// keyed by content hash, batching cache misses to Ollama. Shared sessions
+// across questions (and across runs) are embedded exactly once.
 type cachedEmbedder struct {
 	ollamaURL string
 	client    *http.Client
@@ -700,6 +698,35 @@ Expected: succeeds (no output). Use `go vet`, not `go build`, here: this package
 ```bash
 git add bench/memoryagentbench/embed.go
 git commit -s -m "feat(bench): add cached Ollama embedder for memoryagentbench"
+```
+
+- [ ] **Step 4: Add a duplication pointer, in a separate follow-up commit**
+
+A byte-for-byte duplicate with no cross-reference is a maintenance trap: unlike `seed.go` (which documents "Duplicated from `internal/bench/staleness.go`") and `dataset.go`, nothing in either `embed.go` copy says a twin exists. Add one to `bench/memoryagentbench/embed.go` only — **do not touch `bench/longmemeval/embed.go`**, a separate benchmark outside this plan's scope:
+
+```go
+// cachedEmbedder resolves text embeddings through an append-only JSONL cache
+// keyed by content hash, batching cache misses to Ollama. Shared sessions
+// across questions (and across runs) are embedded exactly once. Duplicated
+// from bench/longmemeval/embed.go — see that file for the original; keep
+// embedModel in sync between the two if it ever changes, since a cache file
+// shared across both harnesses (--embed-cache pointed at the same path) is
+// keyed by content hash alone, with no model tag.
+type cachedEmbedder struct {
+```
+
+(Replaces the plain doc comment above `type cachedEmbedder struct` from Step 1 — everything else in the file is unchanged.)
+
+- [ ] **Step 5: Verify**
+
+Run: `cd bench/memoryagentbench && go vet ./... && gofmt -l .`
+Expected: both clean (no output).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add bench/memoryagentbench/embed.go
+git commit -s -m "docs(bench): note embed.go's duplication source and cache-key coupling"
 ```
 
 ---
