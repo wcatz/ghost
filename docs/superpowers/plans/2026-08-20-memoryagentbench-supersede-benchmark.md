@@ -469,13 +469,17 @@ func backdate(ctx context.Context, db *sql.DB, id string, ageDays int) error {
 // seedFacts creates one memory per fact, oldest (facts[0]) to newest
 // (facts[len(facts)-1]) — list order is temporal order in MemoryAgentBench's
 // Conflict_Resolution data (see splitFacts). Returns store IDs in the same
-// order.
+// order. Source is "mcp" — the memories.source column has a CHECK constraint
+// (internal/memory/schema.go) allowing only 'reflection', 'chat', 'manual',
+// 'tool', 'mcp', 'onboarding', 'decision_log'; "mcp" matches the convention
+// internal/bench/staleness.go and internal/bench/dataset.go already use for
+// their own seeded benchmark memories.
 func seedFacts(ctx context.Context, store *memory.Store, db *sql.DB, project string, facts []string) ([]string, error) {
 	ids := make([]string, len(facts))
 	n := len(facts)
 	for i, fact := range facts {
 		id, err := store.Create(ctx, project, memory.Memory{
-			Category: "fact", Content: fact, Importance: 0.7, Source: "bench",
+			Category: "fact", Content: fact, Importance: 0.7, Source: "mcp",
 		})
 		if err != nil {
 			return nil, fmt.Errorf("seed fact %d: %w", i, err)
