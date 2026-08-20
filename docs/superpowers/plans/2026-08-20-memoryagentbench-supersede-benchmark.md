@@ -6,7 +6,7 @@
 
 **Architecture:** `convert.py` turns the HF parquet into JSONL (one demo per line: a flat fact list + single-hop questions + gold answers). The Go program seeds each demo's facts as memories with list-order timestamps, embeds them locally via Ollama, runs the real `internal/supersede` Haiku classifier with `apply=true`, then scores every question twice — once with `SupersedeDemote: false` (baseline) and once with `SupersedeDemote: true` (production default) — via substring match on the top-ranked memory's content. No LLM judge, no generation step.
 
-**Tech Stack:** Go 1.26 (`github.com/wcatz/ghost/internal/{memory,supersede,ai,config}`), Python 3 + pyarrow (one-off conversion only), local Ollama (`nomic-embed-text:v1.5`), real Anthropic API (Haiku, via `ANTHROPIC_API_KEY`).
+**Tech Stack:** Go 1.26 (`github.com/wcatz/ghost/internal/{memory,supersede,ai,config}`), Python 3 + pyarrow (one-off conversion only), local Ollama (`nomic-embed-text:v1.5`), the real supersede classifier via the `opencode` CLI (subscription-billed, no `ANTHROPIC_API_KEY`).
 
 **Spec:** `docs/superpowers/specs/2026-08-20-memoryagentbench-supersede-benchmark-design.md`
 
@@ -659,12 +659,14 @@ git commit -s -m "feat(bench): add cached Ollama embedder for memoryagentbench"
 
 ---
 
-### Task 5: `classifier.go` — build the real Haiku supersede classifier
+### Task 5: `classifier.go` — build the real supersede classifier via OpenCode
 
 **Files:**
 - Create: `bench/memoryagentbench/classifier.go`
 
-This benchmark exists specifically to exercise the real classifier, so there's no mock/fallback path — a missing API key is a fatal, explicit error, matching `cmd/ghost/main.go`'s `buildClassifyProvider` no-CLI-fallback branch (`fmt.Errorf("no API key...")`). No unit test: the only interesting branch (missing key) depends on `config.Load()`'s layered file/env lookup, which reads real machine state (`~/.config/ghost/config.yaml`, `ANTHROPIC_API_KEY`) — asserting on that from an automated test would be either a no-op (a key is already configured on this machine) or require mutating real env/files, which risks corrupting a real config read by other tools. `go build`/`go vet` cover this file; the "no key" branch is exercised naturally on any machine without Ghost configured.
+This benchmark exists specifically to exercise the real classifier, but it runs the classifier through the `opencode` CLI (`ai.NewOpenCodeClientWithBinary`, the same client reflection's `--tier opencode` uses — see `cmd/ghost/main.go`'s `opencode` case), not `ANTHROPIC_API_KEY` — subscription-billed, no direct Anthropic API credits spent by this harness. `supersede.HaikuClassifier` is just a type name (a holdover from its original model target); it wraps whatever `ai.Provider` it's given, so no change is needed in `internal/supersede` itself. This is scoped to the benchmark only — production `ghost resolve`/`ghost supersede` (`cmd/ghost/main.go`'s `buildClassifyProvider`) is untouched and keeps its existing Anthropic-primary/CLI-fallback behavior.
+
+No unit test: the interesting branch (`opencode` missing from PATH) depends on real machine state (`exec.LookPath`), and asserting on that from an automated test would be either a no-op (opencode is already on PATH on this machine) or require mutating `PATH`, which risks masking real lookups for other code running in the same test process. `go build`/`go vet` cover this file; the missing-binary branch is exercised naturally on any machine without `opencode` installed.
 
 - [ ] **Step 1: Create the file**
 
@@ -674,27 +676,34 @@ package main
 
 import (
 	"fmt"
-	"log/slog"
+	"os/exec"
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/supersede"
 )
 
-// buildClassifier resolves the same real Haiku classifier `ghost supersede
-// --apply` uses in production (cmd/ghost/main.go's buildClassifyProvider,
-// no-CLI-fallback branch): ANTHROPIC_API_KEY, or api.key from
-// ~/.config/ghost/config.yaml via config.Load().
-func buildClassifier(logger *slog.Logger) (*supersede.HaikuClassifier, error) {
+// buildClassifier builds the real supersede classifier backed by the
+// `opencode` CLI (ai.NewOpenCodeClientWithBinary) — subscription-billed, no
+// ANTHROPIC_API_KEY required. cfg.CLI.OpenCodeBinary overrides the "opencode"
+// PATH lookup, matching cmd/ghost/main.go's own opencode-tier resolution.
+func buildClassifier() (*supersede.HaikuClassifier, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
-	if cfg.API.Key == "" {
-		return nil, fmt.Errorf("no API key: set ANTHROPIC_API_KEY or api.key in ~/.config/ghost/config.yaml")
+	binary := "opencode"
+	if cfg.CLI.OpenCodeBinary != "" {
+		binary = cfg.CLI.OpenCodeBinary
 	}
-	primary := ai.NewAnthropicProvider(ai.NewClient(cfg.API.Key, logger))
-	provider := ai.NewFallbackProvider(primary, nil, false)
+	if _, err := exec.LookPath(binary); err != nil {
+		hint := "set cli.opencode_binary in ~/.config/ghost/config.yaml"
+		if cfg.CLI.OpenCodeBinary != "" {
+			hint = fmt.Sprintf("check that cli.opencode_binary (%s) is a valid, executable path", binary)
+		}
+		return nil, fmt.Errorf("memoryagentbench requires the `%s` binary on PATH (or %s): %w", binary, hint, err)
+	}
+	provider := ai.NewFallbackProvider(ai.NewOpenCodeClientWithBinary(binary), nil, false)
 	return supersede.NewHaikuClassifier(provider), nil
 }
 ```
@@ -708,7 +717,7 @@ Expected: succeeds (no output).
 
 ```bash
 git add bench/memoryagentbench/classifier.go
-git commit -s -m "feat(bench): wire the real supersede Haiku classifier for memoryagentbench"
+git commit -s -m "feat(bench): wire the real supersede classifier via opencode for memoryagentbench"
 ```
 
 ---
@@ -881,7 +890,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cls, err := buildClassifier(logger)
+	cls, err := buildClassifier()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -1242,7 +1251,8 @@ python3 convert.py --parquet Conflict_Resolution-00000-of-00001.parquet --out de
 ## Run
 
 ```bash
-export ANTHROPIC_API_KEY=sk-...   # or set api.key in ~/.config/ghost/config.yaml
+# requires the `opencode` CLI on PATH (or cli.opencode_binary in
+# ~/.config/ghost/config.yaml) — no ANTHROPIC_API_KEY needed
 go run ./bench/memoryagentbench --data demos.jsonl \
     --embed-cache ~/.cache/ghost-bench/mabench-embed-cache.jsonl \
     --out per-question.jsonl
@@ -1255,13 +1265,14 @@ uses in production) — pass `--ollama <url>` if it's not on `localhost:11434`.
 
 - Default `--sources` runs `factconsolidation_sh_6k,factconsolidation_sh_32k`
   only — a few hundred facts each, so the classifier sees at most
-  `facts × 8` (`supersede.maxNeighbors`) candidate pairs, deduped. Cheap at
-  Haiku pricing.
+  `facts × 8` (`supersede.maxNeighbors`) candidate pairs, deduped: at most
+  that many `opencode run` subprocess calls.
 - `factconsolidation_sh_64k`/`factconsolidation_sh_262k` are reachable via
   `--sources factconsolidation_sh_64k` etc., but scale the haystack ~5x/40x —
-  expect a proportional jump in candidate pairs and Haiku calls. Not run by
-  default.
-- No CI gate: every run spends real Anthropic API credits.
+  expect a proportional jump in candidate pairs and `opencode` calls (each is
+  a subprocess spawn, so wall-clock — not API cost — is the constraint at
+  that scale). Not run by default.
+- No CI gate: every run shells out to `opencode` once per candidate pair.
 - `ghost resolve` is not exercised here — its keyword prefilter
   (`"resolved"`, `"shipped"`, `"deprecated"`, etc.) doesn't match
   FactConsolidation's neutral factual sentences.
