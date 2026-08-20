@@ -18,7 +18,11 @@ const embedBatchSize = 64
 
 // cachedEmbedder resolves text embeddings through an append-only JSONL cache
 // keyed by content hash, batching cache misses to Ollama. Shared sessions
-// across questions (and across runs) are embedded exactly once.
+// across questions (and across runs) are embedded exactly once. Duplicated
+// from bench/longmemeval/embed.go — see that file for the original; keep
+// embedModel in sync between the two if it ever changes, since a cache file
+// shared across both harnesses (--embed-cache pointed at the same path) is
+// keyed by content hash alone, with no model tag.
 type cachedEmbedder struct {
 	ollamaURL string
 	client    *http.Client
