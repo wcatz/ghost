@@ -692,8 +692,8 @@ func (e *cachedEmbedder) embedRemote(ctx context.Context, texts []string) ([][]f
 
 - [ ] **Step 2: Verify it compiles**
 
-Run: `cd bench/memoryagentbench && go build ./...`
-Expected: succeeds (no output). It won't be exercised by a test until Task 7 wires it into `main`.
+Run: `cd bench/memoryagentbench && go vet ./...`
+Expected: succeeds (no output). Use `go vet`, not `go build`, here: this package has no `func main()` until Task 7 creates `main.go`, so `go build ./...` fails at the link step with "function main is undeclared in the main package" even though every file compiles fine — `go vet` type-checks without requiring a linkable binary, so it's the right check before Task 7 lands. It won't be exercised by a test until Task 7 wires it into `main`.
 
 - [ ] **Step 3: Commit**
 
@@ -755,8 +755,8 @@ func buildClassifier() (*supersede.HaikuClassifier, error) {
 
 - [ ] **Step 2: Verify it compiles**
 
-Run: `cd bench/memoryagentbench && go build ./... && go vet ./...`
-Expected: succeeds (no output).
+Run: `cd bench/memoryagentbench && go vet ./...`
+Expected: succeeds (no output). Use `go vet`, not `go build`, until Task 7 adds `main.go` — see Task 4's note on why `go build ./...` fails at the link step (missing `func main()`) even when every file is correct.
 
 - [ ] **Step 3: Commit**
 
@@ -843,8 +843,8 @@ func evaluateQuestions(ctx context.Context, store *memory.Store, project string,
 
 - [ ] **Step 2: Verify it compiles**
 
-Run: `cd bench/memoryagentbench && go build ./... && go vet ./...`
-Expected: succeeds (no output).
+Run: `cd bench/memoryagentbench && go vet ./...`
+Expected: succeeds (no output). Use `go vet`, not `go build`, until Task 7 adds `main.go` — see Task 4's note on why `go build ./...` fails at the link step (missing `func main()`) even when every file is correct.
 
 - [ ] **Step 3: Commit**
 
