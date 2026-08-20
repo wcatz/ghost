@@ -125,15 +125,14 @@ Expected: FAIL — `splitFacts`/`Demo`/`loadDemos` undefined (no `dataset.go` ye
 ```go
 // bench/memoryagentbench/dataset.go
 
-// Command memoryagentbench runs Ghost's real ghost-supersede pipeline
-// against MemoryAgentBench's Conflict_Resolution (fact_sh) data and scores
-// hybrid search before and after supersede links exist. See
-// docs/superpowers/specs/2026-08-20-memoryagentbench-supersede-benchmark-design.md
-// and this directory's README.md for setup and cost.
+// dataset.go loads MemoryAgentBench Conflict_Resolution demos (converted to
+// JSONL by convert.py) and splits each demo's numbered fact list into
+// ordered fact sentences.
 package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -152,15 +151,20 @@ type Demo struct {
 
 // factLine matches one numbered fact line, e.g. "16. Chanel was founded by
 // Coco Chanel." — the captured group is the fact sentence without its
-// leading index.
-var factLine = regexp.MustCompile(`(?m)^\d+\.\s+(.+)$`)
+// leading index. Only spaces/tabs (not \s, which includes \n) are allowed
+// between the dot and the body: an empty-body numbered line (e.g. "0.\n")
+// then simply produces no match, instead of \s+ swallowing the newline and
+// merging the next line's fact into this one. The capture excludes CR/LF
+// directly so a CRLF-terminated line never leaves a trailing \r in the
+// fact text.
+var factLine = regexp.MustCompile(`(?m)^\d+\.[ \t]+([^\r\n]+)`)
 
 // splitFacts splits a demo's context into its ordered fact sentences. List
 // order is temporal order: MemoryAgentBench encodes a fact update/contradiction
 // as a later line restating an earlier subject+relation with a different
 // object, so fact N is understood to have been "stated after" fact N-1.
-func splitFacts(context string) []string {
-	matches := factLine.FindAllStringSubmatch(context, -1)
+func splitFacts(text string) []string {
+	matches := factLine.FindAllStringSubmatch(text, -1)
 	facts := make([]string, len(matches))
 	for i, m := range matches {
 		facts[i] = m[1]
@@ -181,7 +185,7 @@ func loadDemos(path string) ([]Demo, error) {
 	sc.Buffer(make([]byte, 0, 1<<20), 1<<21)
 	for sc.Scan() {
 		line := sc.Bytes()
-		if len(line) == 0 {
+		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 		var d Demo
@@ -201,10 +205,45 @@ func loadDemos(path string) ([]Demo, error) {
 }
 ```
 
+Also add these three tests to `dataset_test.go` alongside the four above (a code-quality review of this exact code caught the `\s+`/CRLF/blank-line issues this version already fixes — these tests pin the fix down):
+
+```go
+func TestSplitFactsEmptyBodyLine(t *testing.T) {
+	facts := splitFacts("0.\n1. B.\n")
+	if len(facts) != 1 || facts[0] != "B." {
+		t.Fatalf("got %v, want exactly [\"B.\"] (line 0 has no body and must not merge into line 1)", facts)
+	}
+}
+
+func TestSplitFactsCRLF(t *testing.T) {
+	facts := splitFacts("0. A.\r\n1. B.\r\n")
+	want := []string{"A.", "B."}
+	if len(facts) != len(want) {
+		t.Fatalf("got %d facts, want %d: %v", len(facts), len(want), facts)
+	}
+	for i, f := range facts {
+		if f != want[i] {
+			t.Errorf("fact %d = %q, want %q (no trailing CR)", i, f, want[i])
+		}
+	}
+}
+
+func TestLoadDemosInvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "demos.jsonl")
+	if err := os.WriteFile(path, []byte("not valid json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadDemos(path); err == nil {
+		t.Fatal("expected error for invalid JSON line")
+	}
+}
+```
+
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd bench/memoryagentbench && go test ./... -run 'TestSplitFacts|TestLoadDemos' -v`
-Expected: PASS (all 4 tests)
+Expected: PASS (all 7 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -1104,7 +1143,7 @@ Expected: PASS (both tests)
 - [ ] **Step 4: Full package build/vet/test**
 
 Run: `cd bench/memoryagentbench && go build ./... && go vet ./... && go test ./...`
-Expected: all succeed; `go test` reports `ok` with the full count of tests from Tasks 1–3 and this task (9 tests total: `TestSplitFacts`, `TestSplitFactsIgnoresNonNumberedLines`, `TestLoadDemos`, `TestLoadDemosMismatchedLengths`, `TestAnswerHit`, `TestTopKHit`, `TestSeedFactsOrdersTimestamps`, `TestAggregateOutcomes`, `TestAggregateOutcomesEmpty`).
+Expected: all succeed; `go test` reports `ok` with the full count of tests from Tasks 1–3 and this task (12 tests total: `TestSplitFacts`, `TestSplitFactsIgnoresNonNumberedLines`, `TestSplitFactsEmptyBodyLine`, `TestSplitFactsCRLF`, `TestLoadDemos`, `TestLoadDemosMismatchedLengths`, `TestLoadDemosInvalidJSON`, `TestAnswerHit`, `TestTopKHit`, `TestSeedFactsOrdersTimestamps`, `TestAggregateOutcomes`, `TestAggregateOutcomesEmpty`).
 
 - [ ] **Step 5: Commit**
 
