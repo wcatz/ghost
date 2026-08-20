@@ -1142,10 +1142,10 @@ import (
 
 func TestAggregateOutcomes(t *testing.T) {
 	outcomes := []questionOutcome{
-		{QAPairID: "q0", BaselineHit1: false, BaselineHit5: true, SupersedeHit1: true, SupersedeHit5: true},
-		{QAPairID: "q1", BaselineHit1: true, BaselineHit5: true, SupersedeHit1: true, SupersedeHit5: true},
-		{QAPairID: "q2", BaselineHit1: false, BaselineHit5: false, SupersedeHit1: false, SupersedeHit5: true},
-		{QAPairID: "q3", BaselineHit1: false, BaselineHit5: false, SupersedeHit1: false, SupersedeHit5: false},
+		{QAPairID: "q0", BaselineHit1: false, BaselineHit5: false, SupersedeHit1: false, SupersedeHit5: true},
+		{QAPairID: "q1", BaselineHit1: false, BaselineHit5: false, SupersedeHit1: true, SupersedeHit5: true},
+		{QAPairID: "q2", BaselineHit1: false, BaselineHit5: true, SupersedeHit1: true, SupersedeHit5: true},
+		{QAPairID: "q3", BaselineHit1: true, BaselineHit5: true, SupersedeHit1: true, SupersedeHit5: true},
 	}
 	res := supersede.Result{Candidates: 10, Confirmed: 3, Created: 3}
 
@@ -1160,11 +1160,11 @@ func TestAggregateOutcomes(t *testing.T) {
 	if got.BaselineAcc5 != 0.5 {
 		t.Errorf("BaselineAcc5 = %v, want 0.5", got.BaselineAcc5)
 	}
-	if got.SupersedeAcc1 != 0.5 {
-		t.Errorf("SupersedeAcc1 = %v, want 0.5", got.SupersedeAcc1)
+	if got.SupersedeAcc1 != 0.75 {
+		t.Errorf("SupersedeAcc1 = %v, want 0.75", got.SupersedeAcc1)
 	}
-	if got.SupersedeAcc5 != 0.75 {
-		t.Errorf("SupersedeAcc5 = %v, want 0.75", got.SupersedeAcc5)
+	if got.SupersedeAcc5 != 1.0 {
+		t.Errorf("SupersedeAcc5 = %v, want 1.0", got.SupersedeAcc5)
 	}
 	if got.Candidates != 10 || got.Confirmed != 3 || got.Created != 3 {
 		t.Errorf("classifier counts not passed through: %+v", got)
