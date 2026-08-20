@@ -71,3 +71,34 @@ func TestLoadDemosMismatchedLengths(t *testing.T) {
 		t.Fatal("expected error for mismatched questions/answers/qa_pair_ids lengths")
 	}
 }
+
+func TestSplitFactsEmptyBodyLine(t *testing.T) {
+	facts := splitFacts("0.\n1. B.\n")
+	if len(facts) != 1 || facts[0] != "B." {
+		t.Fatalf("got %v, want exactly [\"B.\"] (line 0 has no body and must not merge into line 1)", facts)
+	}
+}
+
+func TestSplitFactsCRLF(t *testing.T) {
+	facts := splitFacts("0. A.\r\n1. B.\r\n")
+	want := []string{"A.", "B."}
+	if len(facts) != len(want) {
+		t.Fatalf("got %d facts, want %d: %v", len(facts), len(want), facts)
+	}
+	for i, f := range facts {
+		if f != want[i] {
+			t.Errorf("fact %d = %q, want %q (no trailing CR)", i, f, want[i])
+		}
+	}
+}
+
+func TestLoadDemosInvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "demos.jsonl")
+	if err := os.WriteFile(path, []byte("not valid json\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadDemos(path); err == nil {
+		t.Fatal("expected error for invalid JSON line")
+	}
+}

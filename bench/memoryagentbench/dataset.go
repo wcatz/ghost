@@ -1,12 +1,11 @@
-// Command memoryagentbench runs Ghost's real ghost-supersede pipeline
-// against MemoryAgentBench's Conflict_Resolution (fact_sh) data and scores
-// hybrid search before and after supersede links exist. See
-// docs/superpowers/specs/2026-08-20-memoryagentbench-supersede-benchmark-design.md
-// and this directory's README.md for setup and cost.
+// dataset.go loads MemoryAgentBench Conflict_Resolution demos (converted to
+// JSONL by convert.py) and splits each demo's numbered fact list into
+// ordered fact sentences.
 package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -26,14 +25,14 @@ type Demo struct {
 // factLine matches one numbered fact line, e.g. "16. Chanel was founded by
 // Coco Chanel." — the captured group is the fact sentence without its
 // leading index.
-var factLine = regexp.MustCompile(`(?m)^\d+\.\s+(.+)$`)
+var factLine = regexp.MustCompile(`(?m)^\d+\.[ \t]+([^\r\n]+)`)
 
 // splitFacts splits a demo's context into its ordered fact sentences. List
 // order is temporal order: MemoryAgentBench encodes a fact update/contradiction
 // as a later line restating an earlier subject+relation with a different
 // object, so fact N is understood to have been "stated after" fact N-1.
-func splitFacts(context string) []string {
-	matches := factLine.FindAllStringSubmatch(context, -1)
+func splitFacts(text string) []string {
+	matches := factLine.FindAllStringSubmatch(text, -1)
 	facts := make([]string, len(matches))
 	for i, m := range matches {
 		facts[i] = m[1]
@@ -54,7 +53,7 @@ func loadDemos(path string) ([]Demo, error) {
 	sc.Buffer(make([]byte, 0, 1<<20), 1<<21)
 	for sc.Scan() {
 		line := sc.Bytes()
-		if len(line) == 0 {
+		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 		var d Demo
