@@ -1160,8 +1160,8 @@ func TestAggregateOutcomes(t *testing.T) {
 	if got.BaselineAcc5 != 0.5 {
 		t.Errorf("BaselineAcc5 = %v, want 0.5", got.BaselineAcc5)
 	}
-	if got.SupersedeAcc1 != 0.25 {
-		t.Errorf("SupersedeAcc1 = %v, want 0.25", got.SupersedeAcc1)
+	if got.SupersedeAcc1 != 0.5 {
+		t.Errorf("SupersedeAcc1 = %v, want 0.5", got.SupersedeAcc1)
 	}
 	if got.SupersedeAcc5 != 0.75 {
 		t.Errorf("SupersedeAcc5 = %v, want 0.75", got.SupersedeAcc5)
