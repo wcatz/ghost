@@ -1244,12 +1244,16 @@ def main():
             questions = row["questions"] or []
             answers = row["answers"] or []
             qa_pair_ids = meta.get("qa_pair_ids") or []
+            context = row["context"] or ""
+            if not context:
+                print(f"warning: {source} has empty context, skipping", file=sys.stderr)
+                continue
             if len(questions) != len(answers) or len(questions) != len(qa_pair_ids):
                 print(f"warning: {source} has mismatched questions/answers/qa_pair_ids lengths, skipping", file=sys.stderr)
                 continue
             demo = {
                 "source": source,
-                "context": row["context"] or "",
+                "context": context,
                 "questions": questions,
                 "answers": answers,
                 "qa_pair_ids": qa_pair_ids,
