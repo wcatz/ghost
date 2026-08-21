@@ -23,10 +23,11 @@ func loadTrapTestdata(t *testing.T) []TrapScenario {
 	return scenarios
 }
 
-// TestRecencyTrapAtDefault: with recency off (production default), the correct
+// TestRecencyTrapAtDefault: at the production default (decay on), the correct
 // old memory wins its trap scenarios — the FTS ranking already favors the
-// direct keyword match, and no recency demotes it. This is the invariant the
-// recency prior must not break.
+// direct keyword match, and because the trap fixtures are `fact` category
+// (never-decay), decay does not demote them. This is the invariant that makes
+// category-aware decay safe as a default.
 func TestRecencyTrapAtDefault(t *testing.T) {
 	scenarios := loadTrapTestdata(t)
 	if len(scenarios) < 12 {
@@ -44,69 +45,61 @@ func TestRecencyTrapAtDefault(t *testing.T) {
 	cw := TrapCorrectWins(outcomes)
 	t.Logf("trap correct-wins at default: %.3f", cw)
 	if cw < 0.9 {
-		t.Errorf("at default (no recency) the correct old memory should win nearly always, got %.3f", cw)
+		t.Errorf("at default the correct old memory should win nearly always (fact never decays), got %.3f", cw)
 	}
 }
 
-// TestRecencyFrontier is the pivotal experiment: sweep RecencyWeight and report
-// staleness fresh-wins vs trap correct-wins together. The staleness suite wants
-// fresh-wins HIGH (newer wins); the trap wants correct-wins HIGH (older, correct
-// answer wins). A global recency prior trades one for the other. This test
-// prints the frontier and asserts only that the tension is real and measured —
-// it does NOT pick a default (that decision uses this data). It is the evidence
-// for whether a single global weight can serve both, or whether targeted
-// supersedes links are required.
-func TestRecencyFrontier(t *testing.T) {
+// TestDecayFrontier reports the decay-on/off tradeoff over both suites. The
+// staleness suite (dependency category) wants fresh-wins HIGH; the
+// recency-trap suite (fact category, never-decay) wants correct-wins HIGH.
+// Category-aware decay should help staleness WITHOUT hurting the trap suite —
+// the free lunch a blanket age-only recency prior could not achieve. The test
+// prints the frontier and asserts both properties.
+func TestDecayFrontier(t *testing.T) {
 	stale := loadStalenessTestdata(t)
 	traps := loadTrapTestdata(t)
 	ctx := context.Background()
 
-	weights := []float64{0, 0.02, 0.05, 0.1, 0.15, 0.25, 0.5, 1, 2, 4, 8}
 	type row struct {
-		w                   float64
+		label               string
 		freshWins, trapWins float64
-		minOfBoth           float64
 	}
 	var rows []row
-	for _, w := range weights {
+	for _, on := range []bool{false, true} {
 		p := memory.DefaultSearchParams()
-		p.RecencyWeight = w
+		p.DecayEnabled = on
 
 		so, err := RunStaleness(ctx, stale, p, false)
 		if err != nil {
-			t.Fatalf("staleness w=%.2f: %v", w, err)
+			t.Fatalf("staleness decay=%v: %v", on, err)
 		}
 		to, err := RunRecencyTrap(ctx, traps, p)
 		if err != nil {
-			t.Fatalf("trap w=%.2f: %v", w, err)
+			t.Fatalf("trap decay=%v: %v", on, err)
 		}
-		fw, tw := freshWins(so), TrapCorrectWins(to)
-		m := fw
-		if tw < m {
-			m = tw
-		}
-		rows = append(rows, row{w, fw, tw, m})
+		rows = append(rows, row{
+			label:     map[bool]string{false: "decay-off", true: "decay-on"}[on],
+			freshWins: freshWins(so),
+			trapWins:  TrapCorrectWins(to),
+		})
 	}
 
 	var b string
-	b += fmt.Sprintf("%-8s %-16s %-16s %-10s\n", "recency", "staleness-fresh", "trap-correct", "min(both)")
-	best := rows[0]
+	b += fmt.Sprintf("%-12s %-16s %-16s\n", "mode", "staleness-fresh", "trap-correct")
 	for _, r := range rows {
-		b += fmt.Sprintf("%-8.2f %-16.3f %-16.3f %-10.3f\n", r.w, r.freshWins, r.trapWins, r.minOfBoth)
-		if r.minOfBoth > best.minOfBoth {
-			best = r
-		}
+		b += fmt.Sprintf("%-12s %-16.3f %-16.3f\n", r.label, r.freshWins, r.trapWins)
 	}
-	t.Logf("recency frontier (staleness wants fresh HIGH, trap wants correct HIGH):\n%s\nbest min(both) = %.3f at w=%.2f", b, best.minOfBoth, best.w)
+	t.Logf("decay frontier:\n%s", b)
 
-	// The tension must be real: at some weight the two metrics move oppositely.
-	// (If they didn't, a global recency prior would be a free lunch — it isn't.)
-	if rows[0].trapWins <= rows[len(rows)-1].trapWins {
-		t.Errorf("expected trap correct-wins to DROP as recency rises (the trap): w=0 %.3f vs w=%.2f %.3f",
-			rows[0].trapWins, rows[len(rows)-1].w, rows[len(rows)-1].trapWins)
+	// Decay must help staleness...
+	if rows[1].freshWins <= rows[0].freshWins {
+		t.Errorf("expected staleness fresh-wins to RISE with decay: off %.3f on %.3f",
+			rows[0].freshWins, rows[1].freshWins)
 	}
-	if rows[len(rows)-1].freshWins <= rows[0].freshWins {
-		t.Errorf("expected staleness fresh-wins to RISE as recency rises: w=0 %.3f vs w=%.2f %.3f",
-			rows[0].freshWins, rows[len(rows)-1].w, rows[len(rows)-1].freshWins)
+	// ...and must NOT hurt old-but-correct facts (trap suite is fact category,
+	// which never decays — its correct-wins should stay flat).
+	if rows[1].trapWins < rows[0].trapWins-0.02 {
+		t.Errorf("expected trap correct-wins to stay flat under decay (fact never decays): off %.3f on %.3f",
+			rows[0].trapWins, rows[1].trapWins)
 	}
 }

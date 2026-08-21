@@ -44,7 +44,7 @@ internal/
     metrics.go             Recall@k, MRR, NDCG
     sweep.go               Fusion-parameter grid search
     staleness.go           Fresh-fact-wins suite (supersede demote proof)
-    recencytrap.go         Older-answer-correct suite (recency-prior frontier)
+    recencytrap.go         Older-answer-correct suite (category-aware decay frontier)
   memory/                  Persistence layer
     store.go               SQLite CRUD, FTS5 search, time-decay scoring
     schema.go              DDL (embedded Go string constant — the single source of truth)

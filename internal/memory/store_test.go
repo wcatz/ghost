@@ -3747,6 +3747,70 @@ func memoryCreatedAt(t *testing.T, s *Store, id string) string {
 	return createdAt
 }
 
+// TestDecaySQLParity pins decayFactor (Go) to the exact DecayRankingSQL
+// expression by evaluating both over a grid of categories × ages × pinned.
+// This is the drift guard between the SQL constant (GetTopMemories +
+// session-start hook) and the Go function (search ranking) — if one is ever
+// edited without the other, this test fails.
+func TestDecaySQLParity(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	categories := []string{
+		"preference", "convention", "fact",
+		"pattern", "architecture",
+		"decision", "gotcha", "dependency",
+	}
+	ages := []int{0, 1, 7, 30, 45, 90, 180, 365, 1000}
+
+	const eps = 1e-4 // absorbs ms-level julianday('now') drift vs time.Now()
+	for _, cat := range categories {
+		for _, age := range ages {
+			for _, pinned := range []bool{false, true} {
+				id, err := s.Create(ctx, testProject, Memory{
+					Category: cat, Content: cat, Source: "manual",
+					Importance: 1.0, // importance must be 1 so the SQL result IS the factor
+				})
+				if err != nil {
+					t.Fatalf("create %s/%d/pinned=%v: %v", cat, age, pinned, err)
+				}
+				setCreatedAtDaysAgo(t, s, id, age)
+				if pinned {
+					if err := s.TogglePin(ctx, id, true); err != nil {
+						t.Fatalf("pin %s/%d: %v", cat, age, err)
+					}
+				}
+
+				sqlFactor := memoryScore(t, s, id)
+				// Recompute age in Go from the same now used by SQLite's
+				// julianday('now') at query time (sub-second drift, absorbed
+				// by eps).
+				goAge := time.Since(memoryCreatedAtAsTime(t, s, id)).Hours() / 24.0
+				if goAge < 0 {
+					goAge = 0
+				}
+				goFactor := decayFactor(cat, pinned, goAge)
+
+				if math.Abs(sqlFactor-goFactor) > eps {
+					t.Errorf("category=%s age=%d pinned=%v: SQL=%v Go=%v (diff %v)",
+						cat, age, pinned, sqlFactor, goFactor, math.Abs(sqlFactor-goFactor))
+				}
+			}
+		}
+	}
+}
+
+// memoryCreatedAtAsTime parses a memory's created_at into a time.Time.
+func memoryCreatedAtAsTime(t *testing.T, s *Store, id string) time.Time {
+	t.Helper()
+	raw := memoryCreatedAt(t, s, id)
+	parsed, err := time.Parse("2006-01-02 15:04:05", raw)
+	if err != nil {
+		t.Fatalf("parse created_at %q: %v", raw, err)
+	}
+	return parsed
+}
+
 // TestDecayFloorCrossoverBoundaries pins down the exact day counts where each
 // decay tier's MAX(floor, curve) expression (see DecayRankingSQL in store.go)
 // switches from "still decaying" to "floored", plus a deep-age point per tier

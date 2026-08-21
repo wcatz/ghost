@@ -137,15 +137,16 @@ type ScoredMemory struct {
 // harness (ghost bench --sweep) grid-searches these knobs against the graded
 // dataset; defaults should only change on the strength of those numbers.
 type SearchParams struct {
-	FTSWeight   float64 // RRF weight of the full-text leg
-	VecWeight   float64 // RRF weight of the vector leg
-	RRFK        int     // RRF smoothing constant (Cormack & Clarke use 60)
-	// RecencyWeight scales a freshness prior on the final ranking:
-	// final = base * (1 + RecencyWeight*recency), recency = 1/(1 + age_days/RecencyTau).
-	// 0 (the default) is a hard no-op — ranking is untouched. Tuned via
-	// `ghost bench --sweep`; see docs/benchmarks.md Phase 3.
-	RecencyWeight float64
-	RecencyTau    float64 // freshness decay scale in days; ignored when RecencyWeight is 0
+	FTSWeight float64 // RRF weight of the full-text leg
+	VecWeight float64 // RRF weight of the vector leg
+	RRFK      int     // RRF smoothing constant (Cormack & Clarke use 60)
+	// DecayEnabled applies the category-aware time-decay factor
+	// (decayFactor — the Go mirror of DecayRankingSQL) to reorder the result
+	// window after truncation: decay reorders but never changes membership, so
+	// a more-relevant memory is never dropped in favor of an unrelated younger
+	// one. True by default (production behavior). The bench harness toggles it
+	// to measure decay-on vs decay-off impact.
+	DecayEnabled bool
 	// SupersedeDemote, when true, demotes a memory below its superseder within
 	// the result window when a valid 'supersedes' link between them exists AND
 	// both are present. Unlike the recency prior it is targeted — it only ever
@@ -157,6 +158,13 @@ type SearchParams struct {
 }
 
 // DefaultSearchParams returns the production fusion parameters.
+//
+// Time-awareness comes from the always-on category-aware decay (DecayEnabled,
+// see decayFactor) — not a blanket age-only freshness prior. The recency-trap
+// suite in docs/benchmarks.md showed an untargeted prior damages correct-wins,
+// which is why a flat RecencyWeight/RecencyTau prior was removed in favor of
+// the category-aware factor (preference/convention/fact never decay, pattern/
+// architecture tau 45, decision/gotcha/dependency tau 30).
 //
 // A link-graph expansion bonus was evaluated and removed. It was structurally
 // dominated by simply retrieving a deeper vector-k: links are built from cosine
@@ -182,8 +190,7 @@ func DefaultSearchParams() SearchParams {
 		FTSWeight:       0.3,
 		VecWeight:       0.7,
 		RRFK:            60,
-		RecencyWeight:   0,
-		RecencyTau:      30,
+		DecayEnabled:    true,
 		SupersedeDemote: true,
 	}
 }
@@ -228,49 +235,6 @@ func (s *Store) demoteSuperseded(ctx context.Context, results []Memory, p Search
 	return results
 }
 
-// applyRecency re-ranks results by a freshness prior:
-//
-//	final = base * (1 + RecencyWeight*recency),  recency = 1/(1 + age_days/RecencyTau)
-//
-// base is the fused score when scores is non-nil (the fused path), otherwise it
-// is synthesized from position (the FTS-only paths). A RecencyWeight <= 0 is a
-// hard no-op: results are returned untouched, so production defaults never
-// perturb ranking. Age is read from each memory's created_at — NOT updated_at,
-// which Upsert's strengthen path bumps, and which would make a re-mentioned
-// stale fact look as fresh as the version that replaced it. An unparseable
-// created_at yields no freshness boost (treated as ancient) so a malformed
-// timestamp can never spuriously win.
-func applyRecency(results []Memory, scores map[string]float64, p SearchParams, now time.Time) []Memory {
-	if p.RecencyWeight <= 0 || len(results) < 2 {
-		return results
-	}
-	tau := p.RecencyTau
-	if tau <= 0 {
-		tau = 30
-	}
-	final := make(map[string]float64, len(results))
-	for i, m := range results {
-		base := scores[m.ID]
-		if scores == nil {
-			base = 1.0 / float64(p.RRFK+i+1)
-		}
-		ageDays := now.Sub(parseCreatedAt(m.CreatedAt)).Hours() / 24.0
-		if ageDays < 0 {
-			ageDays = 0
-		}
-		recency := 1.0 / (1.0 + ageDays/tau)
-		final[m.ID] = base * (1 + p.RecencyWeight*recency)
-	}
-	sort.SliceStable(results, func(i, j int) bool {
-		fi, fj := final[results[i].ID], final[results[j].ID]
-		if fi != fj {
-			return fi > fj
-		}
-		return results[i].ID < results[j].ID
-	})
-	return results
-}
-
 // parseCreatedAt parses the SQLite datetime('now') format stored in
 // memories.created_at. On failure it returns the zero time (ancient), so the
 // caller applies no freshness boost.
@@ -282,8 +246,98 @@ func parseCreatedAt(s string) time.Time {
 	return t
 }
 
+// decayFactor returns the category-aware time-decay multiplier for a memory
+// given its age in days. It mirrors DecayRankingSQL (store.go) exactly — a
+// pinned memory or a preference/convention/fact never decays (factor 1.0);
+// pattern/architecture decay with tau 45 and a 0.3 floor; all other categories
+// (decision, gotcha, dependency, ...) decay with tau 30 and a 0.15 floor. The
+// SQL-vs-Go parity test (store_test.go) guards against drift between this and
+// the SQL constant.
+func decayFactor(category string, pinned bool, ageDays float64) float64 {
+	if pinned {
+		return 1.0
+	}
+	switch category {
+	case "preference", "convention", "fact":
+		return 1.0
+	case "pattern", "architecture":
+		return math.Max(0.3, 1.0/(1.0+ageDays/45.0))
+	default:
+		return math.Max(0.15, 1.0/(1.0+ageDays/30.0))
+	}
+}
+
+// decayRank truncates results to limit by base score, then (when enabled)
+// reorders the surviving window by base score × decayFactor. base is the fused
+// score when scores is non-nil; otherwise it is synthesized from position (the
+// FTS-only paths), base = 1/(RRFK+rank+1). Membership is owned by base score
+// alone — decay reorders but never drops a more-relevant memory, which is what
+// keeps findability intact (a rank-1 relevant fresh answer is never displaced
+// by unrelated younger memories). The tradeoff, accepted by design: a fresh
+// memory ranked below the cut by base score is NOT rescued — decay only lifts
+// fresh versions that are already inside the window. The sort by base happens
+// in both modes — the fused path hydrates via GetByIDs, which does NOT
+// preserve order. Age reads created_at — never updated_at, which Upsert's
+// strengthen path bumps. An unparseable created_at is treated as ancient so a
+// malformed timestamp can never spuriously win.
+func decayRank(results []Memory, scores map[string]float64, p SearchParams, limit int, now time.Time) []Memory {
+	scored := make([]struct {
+		m    Memory
+		base float64
+	}, len(results))
+	for i, m := range results {
+		base := scores[m.ID]
+		if scores == nil {
+			base = 1.0 / float64(p.RRFK+i+1)
+		}
+		scored[i] = struct {
+			m    Memory
+			base float64
+		}{m, base}
+	}
+
+	// Truncate by base score first: relevance owns membership.
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].base != scored[j].base {
+			return scored[i].base > scored[j].base
+		}
+		return scored[i].m.ID < scored[j].m.ID
+	})
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+
+	// Reorder the window by base × decay (ordering only, never membership).
+	if p.DecayEnabled {
+		sort.SliceStable(scored, func(i, j int) bool {
+			fi := scored[i].base * decayFactor(scored[i].m.Category, scored[i].m.Pinned, ageDays(scored[i].m.CreatedAt, now))
+			fj := scored[j].base * decayFactor(scored[j].m.Category, scored[j].m.Pinned, ageDays(scored[j].m.CreatedAt, now))
+			if fi != fj {
+				return fi > fj
+			}
+			return scored[i].m.ID < scored[j].m.ID
+		})
+	}
+
+	out := make([]Memory, len(scored))
+	for i, s := range scored {
+		out[i] = s.m
+	}
+	return out
+}
+
+// ageDays returns a memory's age in days from its created_at, clamped at 0
+// (a future timestamp is treated as brand-new).
+func ageDays(createdAt string, now time.Time) float64 {
+	ageDays := now.Sub(parseCreatedAt(createdAt)).Hours() / 24.0
+	if ageDays < 0 {
+		return 0
+	}
+	return ageDays
+}
+
 // fuseAndRank runs the shared hybrid pipeline: RRF-fuse the two result legs,
-// then rank, truncate, and hydrate.
+// hydrate the candidate pool, then rank and truncate (inside decayRank).
 func (s *Store) fuseAndRank(ctx context.Context, ftsResults []Memory, vecResults []ScoredMemory, limit int, p SearchParams) ([]Memory, error) {
 	scores := make(map[string]float64)
 	idSet := make(map[string]bool)
@@ -296,47 +350,20 @@ func (s *Store) fuseAndRank(ctx context.Context, ftsResults []Memory, vecResults
 		idSet[sm.MemoryID] = true
 	}
 
-	// Ranking sorts break score ties by ID so identical searches return
-	// identical orderings — the candidate sets come from map iteration, which
-	// would otherwise make tie order random per call.
-	byScoreThenID := func(ids []string) {
-		sort.Slice(ids, func(i, j int) bool {
-			si, sj := scores[ids[i]], scores[ids[j]]
-			if si != sj {
-				return si > sj
-			}
-			return ids[i] < ids[j]
-		})
-	}
-
-	// Sort by fused score, truncate, and hydrate.
 	ranked := make([]string, 0, len(idSet))
 	for id := range idSet {
 		ranked = append(ranked, id)
 	}
-	byScoreThenID(ranked)
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
-	}
 
+	// Hydrate the full candidate pool before ranking — decayRank needs
+	// category/pinned/created_at to reorder the window, and hydration via
+	// GetByIDs does not preserve order, so the final sort lives there too.
 	memories, err := s.GetByIDs(ctx, ranked)
 	if err != nil {
 		return nil, err
 	}
-	// Re-sort by fused score (GetByIDs doesn't preserve order), same
-	// tie-breaking as the ID ranking above.
-	sort.Slice(memories, func(i, j int) bool {
-		si, sj := scores[memories[i].ID], scores[memories[j].ID]
-		if si != sj {
-			return si > sj
-		}
-		return memories[i].ID < memories[j].ID
-	})
 
-	// Freshness prior over the final window (no-op at RecencyWeight 0), then
-	// the targeted supersede demote (no-op unless SupersedeDemote is on and a
-	// superseded pair co-occurs).
-	memories = applyRecency(memories, scores, p, time.Now().UTC())
+	memories = decayRank(memories, scores, p, limit, time.Now().UTC())
 	return s.demoteSuperseded(ctx, memories, p), nil
 }
 
@@ -357,7 +384,7 @@ func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string,
 
 	// If no vector, return FTS results directly.
 	if queryVec == nil {
-		return s.demoteSuperseded(ctx, recencyRerank(ftsResults, nil, p, limit), p), nil
+		return s.demoteSuperseded(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
 	}
 
 	// Vector results.
@@ -368,25 +395,10 @@ func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string,
 
 	// If only FTS worked, return that.
 	if len(vecResults) == 0 {
-		return s.demoteSuperseded(ctx, recencyRerank(ftsResults, nil, p, limit), p), nil
+		return s.demoteSuperseded(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
 	}
 
 	return s.fuseAndRank(ctx, ftsResults, vecResults, limit, p)
-}
-
-// recencyRerank truncates results to limit by their existing (base-score) order
-// — identical membership to the pre-recency behavior — and, when the recency
-// prior is enabled, reorders that final window by freshness. Because truncation
-// happens first, the returned set membership never changes with RecencyWeight;
-// only the order within the window does, so enabling recency can never drop a
-// result that would otherwise have been returned. (A fresh memory ranked below
-// the cut by base score is not rescued — an accepted v1 limitation; the
-// staleness suite's versions all fall inside the window.)
-func recencyRerank(results []Memory, scores map[string]float64, p SearchParams, limit int) []Memory {
-	if len(results) > limit {
-		results = results[:limit]
-	}
-	return applyRecency(results, scores, p, time.Now().UTC())
 }
 
 // GetByIDs fetches memories by a list of IDs.
@@ -472,10 +484,7 @@ func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []fl
 	// fused path does — otherwise cross-project search silently ranks
 	// superseded memories above their replacements whenever Ollama is down.
 	if queryVec == nil {
-		if len(ftsResults) > limit {
-			ftsResults = ftsResults[:limit]
-		}
-		return s.demoteSuperseded(ctx, ftsResults, p), nil
+		return s.demoteSuperseded(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
 	}
 
 	vecResults, err := s.SearchVectorAll(ctx, queryVec, limit*2)
@@ -484,10 +493,7 @@ func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []fl
 	}
 
 	if len(vecResults) == 0 {
-		if len(ftsResults) > limit {
-			ftsResults = ftsResults[:limit]
-		}
-		return s.demoteSuperseded(ctx, ftsResults, p), nil
+		return s.demoteSuperseded(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
 	}
 
 	return s.fuseAndRank(ctx, ftsResults, vecResults, limit, p)

@@ -1,9 +1,11 @@
 # Recency-trap fixture: cases where the OLDER memory is the correct answer and a
-# NEWER memory shares the probe's keywords but is the wrong answer. A recency
-# prior that promotes newest-wins blindly will demote the correct old fact below
-# the fresh distractor. correct-wins = correct outranks every trap. This is the
-# gate the staleness recency prior must survive before its default moves off 0:
-# it bounds how hard RecencyWeight can push. See docs/benchmarks.md Phase 3.
+# NEWER memory shares the probe's keywords but is the wrong answer. A blanket
+# age-only recency prior that promotes newest-wins blindly will demote the
+# correct old fact below the fresh distractor. correct-wins = correct outranks
+# every trap. This is the gate a time-decay default must survive: the fixtures
+# are `fact` category (never-decay), so decay cannot touch them — the reason
+# category-aware decay can ship on where a blanket recency prior could not. See
+# docs/benchmarks.md.
 {"name":"mainnet_magic","correct":{"content":"Mainnet network magic is 764824073.","age_days":600},"traps":[{"content":"Preview network magic is 2, used for the preview testnet only.","age_days":8},{"content":"Preprod network magic is 1 for the preprod testnet.","age_days":5}],"probes":[{"text":"what is the mainnet network magic number"}]}
 {"name":"pool_ticker","correct":{"content":"Our production stake pool ticker is DUCK.","age_days":500},"traps":[{"content":"Registered a throwaway test pool with ticker TEST on preprod for CI.","age_days":6}],"probes":[{"text":"what is our production pool ticker"}]}
 {"name":"yaml_indent","correct":{"content":"YAML files use two-space indentation everywhere; never change it.","age_days":420},"traps":[{"content":"Added a new .editorconfig setting for four-space indentation in Python scripts.","age_days":10}],"probes":[{"text":"what indentation do our YAML files use"}]}

@@ -135,9 +135,9 @@ func (s *Store) ListDecisions(ctx context.Context, projectID, status string, lim
 	// truncating would change *which* decisions come back — it would push the
 	// oldest superseded ones out of the window entirely, and a superseded
 	// decision is exactly what a caller needs to see to know a prior one was
-	// reversed. Same invariant as recencyRerank in vector.go: truncate first,
-	// reorder the window. (The outer sort is a no-op when the caller already
-	// filtered by status.)
+	// reversed. (This is the same truncate-first invariant the search path's
+	// decayRank applies to superseded memories.) The outer sort is a no-op when
+	// the caller already filtered by status.
 	inner += ` ORDER BY created_at DESC LIMIT ?`
 	args = append(args, limit)
 
