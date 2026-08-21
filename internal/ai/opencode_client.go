@@ -54,13 +54,20 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 		defer cancel()
 	}
 	// --format json emits a JSON-lines stream; --pure skips plugins. The prompt
-	// is the last argument. cmd.Dir is a neutral temp dir so the subprocess does
-	// not load the repo's CLAUDE.md/AGENTS.md, project opencode.json, or git
-	// context — the reflect prompt is self-contained. subprocessEnv (below)
-	// additionally points XDG_CONFIG_HOME at a fresh empty dir so the child does
-	// not load the user's global opencode config (which would start Ghost's own
-	// MCP server against this process's SQLite DB) and strips ANTHROPIC_API_KEY.
-	args := []string{"run", "--format", "json", "--pure", prompt}
+	// is the last argument. GHOST_OPENCODE_MODEL, when set, pins the model via
+	// `-m` — the child's config dir is scrubbed below, so without it opencode
+	// would always run its built-in default model. cmd.Dir is a neutral temp
+	// dir so the subprocess does not load the repo's CLAUDE.md/AGENTS.md,
+	// project opencode.json, or git context — the reflect prompt is
+	// self-contained. subprocessEnv (below) additionally points
+	// XDG_CONFIG_HOME at a fresh empty dir so the child does not load the
+	// user's global opencode config (which would start Ghost's own MCP server
+	// against this process's SQLite DB) and strips ANTHROPIC_API_KEY.
+	args := []string{"run", "--format", "json", "--pure"}
+	if model := os.Getenv("GHOST_OPENCODE_MODEL"); model != "" {
+		args = append(args, "-m", model)
+	}
+	args = append(args, prompt)
 	cmd := exec.CommandContext(ctx, c.binary, args...)
 	cmd.Dir = os.TempDir()
 	env, cleanup, err := c.subprocessEnv()
