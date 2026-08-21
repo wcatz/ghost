@@ -108,6 +108,9 @@ func run(cfg config) error {
 	if err != nil {
 		return fmt.Errorf("inject: %w", err)
 	}
+	if err := restampChronology(dbPath, cfg.project, entries, ids); err != nil {
+		return fmt.Errorf("restamp chronology: %w", err)
+	}
 
 	// The embedding worker lives INSIDE the ghost mcp process — the session
 	// must stay open until embeddings drain or nothing will ever embed.

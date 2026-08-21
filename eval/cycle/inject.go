@@ -13,6 +13,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/eval/cycle/corpus"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // savedIDRe extracts the memory id from a ghost_memory_save response
@@ -145,4 +146,40 @@ func ollamaReachable(url string) error {
 		return fmt.Errorf("ollama status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// restampChronology rewrites created_at/updated_at so corpus order becomes
+// true chronological order, one minute apart. Two artifacts otherwise corrupt
+// supersede's newer/older ordering: second-granularity ties across a burst
+// injection, and Upsert's duplicate-strengthening refreshing the OLDER row's
+// updated_at when a newer paraphrase saves. Real projects accumulate memories
+// over days — this makes the fixture honest. Timestamps are metadata, not
+// content; all content still flows through the save path.
+func restampChronology(dbPath, projectName string, entries []corpus.Entry, ids map[string]string) error {
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close() //nolint:errcheck
+	base := time.Now().UTC().Add(-time.Duration(len(entries)) * time.Minute)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`UPDATE memories SET created_at=?, updated_at=? WHERE id=?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close() //nolint:errcheck
+	for i, e := range entries {
+		id, ok := ids[e.Key]
+		if !ok {
+			continue
+		}
+		ts := base.Add(time.Duration(i) * time.Minute).Format("2006-01-02 15:04:05")
+		if _, err := stmt.Exec(ts, ts, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
