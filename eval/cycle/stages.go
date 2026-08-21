@@ -19,24 +19,20 @@ type supPair struct {
 }
 
 var (
-	supLineRe = idPairLineRe(`(supersedes|causes)`)
-	resLineRe = resolveConfirmedRe()
+	// NOTE: stored ids are SQLite hex() output — UPPERCASE. Match and
+	// normalize case-insensitively everywhere.
+	supLineRe = regexp.MustCompile(`(?mi)^\s*([0-9a-f]{8})(?:[0-9a-f]+)?\s+(supersedes|causes)\s+([0-9a-f]{8})(?:[0-9a-f]+)?\s*$`)
+	resLineRe = regexp.MustCompile(`(?mi)^\s*([0-9a-f]{8})(?:[0-9a-f]+)?\s+\[[a-z]+\]`)
 )
-
-// idPairLineRe matches `  <id8>[hex]  <relation>  <id8>[hex]` lines, tolerant
-// of full-id echoes; only the first 8 hex chars are captured.
-func idPairLineRe(rel string) *regexp.Regexp {
-	return regexp.MustCompile(`(?m)^\s*([0-9a-f]{8})(?:[0-9a-f]+)?\s+` + rel + `\s+([0-9a-f]{8})(?:[0-9a-f]+)?\s*$`)
-}
-
-func resolveConfirmedRe() *regexp.Regexp {
-	return regexp.MustCompile(`(?m)^\s*([0-9a-f]{8})(?:[0-9a-f]+)?\s+\[[a-z]+\]`)
-}
 
 func parseSupersedeLines(out string) []supPair {
 	var pairs []supPair
 	for _, m := range supLineRe.FindAllStringSubmatch(out, -1) {
-		pairs = append(pairs, supPair{NewerID8: m[1], Relation: m[2], OtherID8: m[3]})
+		pairs = append(pairs, supPair{
+			NewerID8: strings.ToLower(m[1]),
+			Relation: m[2],
+			OtherID8: strings.ToLower(m[3]),
+		})
 	}
 	return pairs
 }
@@ -44,7 +40,7 @@ func parseSupersedeLines(out string) []supPair {
 func parseResolveIDs(out string) []string {
 	var ids []string
 	for _, m := range resLineRe.FindAllStringSubmatch(out, -1) {
-		ids = append(ids, m[1])
+		ids = append(ids, strings.ToLower(m[1]))
 	}
 	return ids
 }
@@ -82,15 +78,15 @@ func (s Stage) Recall() float64 {
 	return float64(s.TP) / float64(s.TP+s.FN)
 }
 
-// id8ToKey maps the first 8 hex chars of every injected memory id to its
-// corpus key. Collisions would make grading ambiguous and are fatal.
+// id8ToKey maps the lowercased first 8 hex chars of every injected memory id
+// to its corpus key. Collisions would make grading ambiguous and are fatal.
 func id8ToKey(ids map[string]string) map[string]string {
 	m := make(map[string]string, len(ids))
 	for key, full := range ids {
 		if len(full) < 8 {
 			continue
 		}
-		prefix := full[:8]
+		prefix := strings.ToLower(full[:8])
 		if prev, ok := m[prefix]; ok && prev != key {
 			continue // collision: leave first, graders treat unknown ids as FP/FN with detail
 		}

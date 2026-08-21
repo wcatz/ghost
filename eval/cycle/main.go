@@ -105,19 +105,17 @@ func run(cfg config) error {
 		return err
 	}
 	ids, err := saveAll(ctx, mcpSess, cfg.project, entries)
-	closeErr := func() error {
-		mcpSess.close()
-		return nil
-	}()
 	if err != nil {
 		return fmt.Errorf("inject: %w", err)
 	}
-	_ = closeErr
 
+	// The embedding worker lives INSIDE the ghost mcp process — the session
+	// must stay open until embeddings drain or nothing will ever embed.
 	fmt.Println("waiting for embeddings to drain...")
 	if err := waitForEmbeddings(ctx, cfg.ollamaURL, dbPath, cfg.project, cfg.drainTO); err != nil {
 		return err
 	}
+	mcpSess.close()
 
 	rep := ReportData{
 		Date:       time.Now().Format("2006-01-02 15:04"),
@@ -132,6 +130,7 @@ func run(cfg config) error {
 	if err != nil {
 		return fmt.Errorf("supersede: %w", err)
 	}
+	writeRaw(cfg.resultsDir, "supersede", supOut)
 	rep.Supersede = gradeSupersede(ids, entries, parseSupersedeLines(supOut))
 	reportStage("supersede", rep.Supersede)
 
@@ -140,6 +139,7 @@ func run(cfg config) error {
 	if err != nil {
 		return fmt.Errorf("resolve: %w", err)
 	}
+	writeRaw(cfg.resultsDir, "resolve", resOut)
 	rep.Resolve = gradeResolve(entries, parseResolveIDs(resOut), ids)
 	reportStage("resolve", rep.Resolve)
 
@@ -157,6 +157,7 @@ func run(cfg config) error {
 		if rerr != nil {
 			return fmt.Errorf("reflect: %w\noutput:\n%s", rerr, refOut)
 		}
+		writeRaw(cfg.resultsDir, "reflect", refOut)
 		rowsAfter, ferr := fetchMemRows(dbPath, cfg.project)
 		if ferr != nil {
 			return fmt.Errorf("post-reflect state: %w", ferr)
@@ -176,6 +177,16 @@ func run(cfg config) error {
 		fmt.Printf("scratch kept: %s\n", scratch)
 	}
 	return nil
+}
+
+// writeRaw persists one stage's raw CLI output next to the report so misses
+// can be judged against exactly what the stage printed.
+func writeRaw(dir, stage, out string) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	name := filepath.Join(dir, time.Now().Format("2006-01-02")+"-"+stage+".out.txt")
+	_ = os.WriteFile(name, []byte(out), 0o644) //nolint:errcheck // diagnostics only
 }
 
 func reportStage(name string, st Stage) {
