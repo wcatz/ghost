@@ -21,6 +21,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -41,6 +42,7 @@ type config struct {
 	drainTO     time.Duration
 	ollamaURL   string
 	resultsDir  string
+	gradeOnly   string // existing scratch dir: re-grade only (no ghost processes)
 }
 
 func main() {
@@ -53,6 +55,7 @@ func main() {
 	flag.DurationVar(&cfg.drainTO, "drain-timeout", 3*time.Minute, "max wait for embedding drain")
 	flag.StringVar(&cfg.ollamaURL, "ollama", "http://localhost:11434", "Ollama base URL for the reachability check")
 	flag.StringVar(&cfg.resultsDir, "results-dir", "eval/cycle/results", "directory for dated reports")
+	flag.StringVar(&cfg.gradeOnly, "grade-only", "", "existing kept scratch dir: re-grade final state + saved raw outputs, run nothing")
 	flag.Parse()
 	if err := run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -61,6 +64,9 @@ func main() {
 }
 
 func run(cfg config) error {
+	if cfg.gradeOnly != "" {
+		return gradeOnlyRun(cfg)
+	}
 	entries, err := corpus.Load(cfg.corpusPath)
 	if err != nil {
 		return fmt.Errorf("load corpus: %w", err)
@@ -75,7 +81,7 @@ func run(cfg config) error {
 		return err
 	}
 	if !cfg.keep {
-		defer os.RemoveAll(scratch)
+		defer func() { _ = os.RemoveAll(scratch) }()
 	}
 	for _, sub := range []string{"data", "config"} {
 		if err := os.MkdirAll(filepath.Join(scratch, sub), 0o700); err != nil {
@@ -110,6 +116,9 @@ func run(cfg config) error {
 	}
 	if err := restampChronology(dbPath, cfg.project, entries, ids); err != nil {
 		return fmt.Errorf("restamp chronology: %w", err)
+	}
+	if err := writeIDsFile(scratch, ids); err != nil {
+		return fmt.Errorf("persist ids: %w", err)
 	}
 
 	// The embedding worker lives INSIDE the ghost mcp process — the session
@@ -193,6 +202,53 @@ func run(cfg config) error {
 	return nil
 }
 
+// gradeOnlyRun re-grades a previously completed (kept) run: fetches the final
+// memory state from that scratch DB and re-parses the saved raw stage outputs,
+// then writes a fresh report. No ghost processes are started.
+func gradeOnlyRun(cfg config) error {
+	entries, err := corpus.Load(cfg.corpusPath)
+	if err != nil {
+		return fmt.Errorf("load corpus: %w", err)
+	}
+	if err := corpus.Validate(entries); err != nil {
+		return fmt.Errorf("validate corpus: %w", err)
+	}
+	dbPath := filepath.Join(cfg.gradeOnly, "data", "ghost", "ghost.db")
+	ids, err := readIDsFile(cfg.gradeOnly)
+	if err != nil {
+		return fmt.Errorf("load ids (pre-ids.json scratch?): %w", err)
+	}
+	rep := ReportData{
+		Date:        time.Now().Format("2006-01-02 15:04") + " (grade-only)",
+		CorpusPath:  cfg.corpusPath,
+		Project:     cfg.project,
+		Total:       len(entries),
+		ScratchDir:  cfg.gradeOnly,
+		SkipReflect: cfg.skipReflect,
+	}
+	day := time.Now().Format("2006-01-02")
+	if supOut, err := os.ReadFile(filepath.Join(cfg.resultsDir, day+"-supersede.out.txt")); err == nil {
+		rep.Supersede = gradeSupersede(ids, entries, parseSupersedeLines(string(supOut)))
+		reportStage("supersede", rep.Supersede)
+	}
+	if resOut, err := os.ReadFile(filepath.Join(cfg.resultsDir, day+"-resolve.out.txt")); err == nil {
+		rep.Resolve = gradeResolve(entries, parseResolveIDs(string(resOut)), ids)
+		reportStage("resolve", rep.Resolve)
+	}
+	rowsAfter, ferr := fetchMemRows(dbPath, cfg.project)
+	if ferr != nil {
+		return fmt.Errorf("final state: %w", ferr)
+	}
+	rep.Reflect = gradeReflect(entries, nil, rowsAfter)
+	reportReflect(rep.Reflect)
+	path, err := writeReport(cfg.resultsDir, rep)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("report written: %s\n", path)
+	return nil
+}
+
 // writeRaw persists one stage's raw CLI output next to the report so misses
 // can be judged against exactly what the stage printed.
 func writeRaw(dir, stage, out string) {
@@ -252,4 +308,26 @@ func runGhost(ctx context.Context, env []string, bin string, args ...string) (st
 			strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
 	return out.String(), nil
+}
+
+// writeIDsFile persists the corpus-key → memory-id mapping inside the kept
+// scratch dir so --grade-only can re-map CLI id prefixes to keys later.
+func writeIDsFile(scratch string, ids map[string]string) error {
+	b, err := json.MarshalIndent(ids, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(scratch, "ids.json"), b, 0o644)
+}
+
+func readIDsFile(scratch string) (map[string]string, error) {
+	b, err := os.ReadFile(filepath.Join(scratch, "ids.json"))
+	if err != nil {
+		return nil, err
+	}
+	ids := map[string]string{}
+	if err := json.Unmarshal(b, &ids); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }

@@ -154,17 +154,17 @@ func gradeReflect(entries []corpus.Entry, rowsBefore, rowsAfter []memRow) Reflec
 			}
 		}
 		var status, detail string
-		switch n := len(groupRowIDs); {
-		case n == 0:
+		switch rows := len(groupRowIDs); rows {
+		case 0:
 			status = "lost"
 			rep.DroppedImportant += len(members)
 			detail = fmt.Sprintf("0/%d members have any close surviving row", len(members))
-		case n == 1:
+		case 1:
 			status = "collapsed"
-			detail = fmt.Sprintf("%d/%d members recognized, collapsed onto %d row", len(survivors), len(members), n)
+			detail = fmt.Sprintf("%d/%d members recognized, collapsed onto %d row", len(survivors), len(members), rows)
 		default:
 			status = "partial"
-			detail = fmt.Sprintf("%d/%d members recognized across %d separate rows — no merge happened", len(survivors), len(members), n)
+			detail = fmt.Sprintf("%d/%d members recognized across %d separate rows — no merge happened", len(survivors), len(members), rows)
 		}
 		rep.Groups = append(rep.Groups, MergeResult{
 			Group: g, Status: status, Survivors: strings.Join(survivors, ","), Detail: detail,
