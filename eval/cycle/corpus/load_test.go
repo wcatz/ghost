@@ -77,3 +77,43 @@ func TestValidateLoneMergeGroupAndBadCategory(t *testing.T) {
 		t.Fatalf("want category error, got %v", err)
 	}
 }
+
+// TestCommittedCorpusShape pins the committed dataset's composition so
+// annotation drift fails loudly: 55 entries, 8 supersede-pair olders,
+// 12 resolved-evidence, exactly 3 merge groups of 3, 18 unannotated
+// distractors.
+func TestCommittedCorpusShape(t *testing.T) {
+	entries, err := Load("corpus.jsonl")
+	if err != nil {
+		t.Fatalf("load committed corpus: %v", err)
+	}
+	if err := Validate(entries); err != nil {
+		t.Fatalf("validate committed corpus: %v", err)
+	}
+	sup, res := 0, 0
+	grouped := map[string]int{}
+	for _, e := range entries {
+		switch {
+		case e.ExpectedSupersededBy != "":
+			sup++
+		case e.ExpectedResolved:
+			res++
+		}
+		if e.MergeGroup != "" {
+			grouped[e.MergeGroup]++
+		}
+	}
+	if sup != 8 || res != 12 {
+		t.Fatalf("composition drift: supersedes=%d resolved=%d", sup, res)
+	}
+	if len(grouped) != 3 {
+		t.Fatalf("want 3 merge groups, got %d (%v)", len(grouped), grouped)
+	}
+	distractors := len(entries) - sup - res
+	for _, n := range grouped {
+		distractors -= n
+	}
+	if distractors != 18 {
+		t.Fatalf("want 18 distractors, got %d", distractors)
+	}
+}
