@@ -266,7 +266,7 @@ func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName 
 // Use --restore to undo the last consolidation from snapshot.
 func runReflect() {
 	var projectName, tierValue string
-	var apply, restore, requireLLM bool
+	var apply, restore, requireLLM, allowDrops bool
 	tierValue = "auto"
 	for i := 2; i < len(os.Args); i++ {
 		switch {
@@ -281,6 +281,8 @@ func runReflect() {
 			restore = true
 		case os.Args[i] == "--require-llm":
 			requireLLM = true
+		case os.Args[i] == "--allow-drops":
+			allowDrops = true
 		case !strings.HasPrefix(os.Args[i], "-"):
 			projectName = os.Args[i]
 		}
@@ -292,7 +294,8 @@ Flags:
   --tier string   Consolidation tier: auto, haiku, cli, opencode, sqlite (default "auto")
   --apply         Save results (default is dry-run/preview only)
   --restore       Undo the last consolidation from snapshot
-  --require-llm   Fail instead of falling back to the Jaccard-only sqlite tier`)
+  --require-llm   Fail instead of falling back to the Jaccard-only sqlite tier
+  --allow-drops   Apply even when guarded-category memories would be deleted without a merge`)
 		os.Exit(1)
 	}
 
@@ -512,6 +515,25 @@ Flags:
 			len(projectMems), existingNonManual)
 		if len(globalMems) > 0 {
 			fmt.Fprintf(os.Stderr, "  (%d memories classified as global — check scope accuracy)\n", len(globalMems))
+		}
+	}
+
+	// Guarded-drop audit (#337): gotcha/dependency/preference/convention
+	// memories must be merged, never deleted outright. Dry-run reports them;
+	// --apply refuses to write unless --allow-drops is set.
+	guardedDrops := reflection.AuditGuardedDrops(input, result)
+	if len(guardedDrops) > 0 {
+		fmt.Fprintf(os.Stderr, "WARNING: %d guarded-category memory(ies) would be deleted without a merge:\n", len(guardedDrops))
+		for _, d := range guardedDrops {
+			truncated := d.Content
+			if len(truncated) > 100 {
+				truncated = truncated[:100] + "..."
+			}
+			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, truncated)
+		}
+		if apply && !allowDrops {
+			fmt.Fprintln(os.Stderr, "error: refusing to apply — re-run with --allow-drops to accept these deletions")
+			os.Exit(1)
 		}
 	}
 

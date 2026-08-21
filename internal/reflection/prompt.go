@@ -81,6 +81,7 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 	if len(input.ExistingMemories) > 0 {
 		_, _ = fmt.Fprintf(&sb, "\n\n## Existing Memories (%d total) — CONSOLIDATE THESE\n", len(input.ExistingMemories))
 		sb.WriteString("Review each memory. Merge duplicates, combine similar items into one stronger memory, drop stale/irrelevant ones, and keep confirmed facts.\n")
+		sb.WriteString("Hard rule: never DROP a memory whose category is gotcha, dependency, preference, or convention, or that records operational configuration (ports, hosts, paths, credentials locations) — fold its substance into a surviving memory instead. These facts still guide future work even when the surrounding thread is stale.\n")
 		for _, m := range input.ExistingMemories {
 			line := fmt.Sprintf("- [%s] (imp:%.1f, src:%s", m.Category, m.Importance, m.Source)
 			if m.AccessCount > 0 {
