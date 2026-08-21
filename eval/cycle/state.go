@@ -171,8 +171,18 @@ func gradeReflect(entries []corpus.Entry, rowsBefore, rowsAfter []memRow) Reflec
 		})
 	}
 
+	// Distractor survival: entries with no annotation at all. Supersede-pair
+	// NEWER members are excluded — they are pipeline participants (graded by
+	// the supersede stage and reflect's old-member drop), not stability
+	// fixtures, and reflect is free to rewrite them.
+	targets := map[string]bool{}
 	for _, e := range entries {
-		if e.ExpectedResolved || e.ExpectedSupersededBy != "" || e.MergeGroup != "" {
+		if e.ExpectedSupersededBy != "" {
+			targets[e.ExpectedSupersededBy] = true
+		}
+	}
+	for _, e := range entries {
+		if e.ExpectedResolved || e.ExpectedSupersededBy != "" || e.MergeGroup != "" || targets[e.Key] {
 			continue // graded elsewhere or above
 		}
 		if bestJaccard(e.Content, rowsAfter) < survivalThreshold {
