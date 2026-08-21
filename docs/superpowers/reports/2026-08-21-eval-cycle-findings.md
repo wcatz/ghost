@@ -64,3 +64,17 @@ Surviving 27 rows audited by hand against the corpus: 8/8 supersede *new* facts 
 2. Resolve prefilter vocabulary/embedding-assist expansion.
 3. Consolidator no-delete guard for config/gotcha/preference categories.
 4. CI `workflow_dispatch` wiring for the harness (needs opencode auth-as-secret).
+
+## PR validation run (same day, post-review fixes)
+
+Re-run on the final branch state (`GHOST_OPENCODE_MODEL=opencode/deepseek-v4-flash`, kept scratch audited by hand):
+
+| Stage | Precision | Recall | Detail |
+|---|---|---|---|
+| Supersede | 0.83 | 0.62 | TP=5 FP=1 FN=3; sole FP is an intra-cluster link; direction stable |
+| Resolve | 1.00 | 0.42–0.67 | P perfect every run; R wobbles with prefilter + classifier variance |
+| Reflect | — | — | 55 → 28; **all 3 merge groups collapsed**; hand-audited real loss: 1 preference |
+
+Hand audit of the 7 distractor flags: 6 were lossless merges (conventions quartet → one PR-workflow memory; redis/caddy/restic pins → one versions memory; postgres pin folded into the db-host fact); `pref_rebase_no_merge` survived verbatim. Genuine deletion: `pref_short_prs` alone. Reflect quality is materially better than the first judged run — consolidation nondeterminism cuts both ways, which strengthens F3's recommendation for a no-delete guard rather than model tuning.
+
+Known grader limitation: set-level survival heuristics under-count rewritten/merged content even with ghost-mirrored tokenization; final-state hand audits remain the source of truth for reflect.
