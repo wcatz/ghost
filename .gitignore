@@ -44,3 +44,10 @@ ranked*.jsonl
 hyp*.jsonl
 merged*.json
 *.eval-results-*
+
+# evalcycle run artifacts (regenerated per run)
+eval/cycle/results/
+
+# local scratch
+.cache/
+/cycle

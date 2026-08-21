@@ -135,3 +135,34 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"OK"}}'
 		t.Errorf("got %q, want OK", text)
 	}
 }
+
+// TestOpenCodeClient_ModelFlagFromEnv: when GHOST_OPENCODE_MODEL is set the
+// subprocess invocation must carry `-m <model>` so callers can pin the model
+// (e.g. deepseek) despite opencode's scrubbed config dir.
+func TestOpenCodeClient_ModelFlagFromEnv(t *testing.T) {
+	bin := fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`)
+	t.Setenv("GHOST_OPENCODE_MODEL", "deepseek/deepseek-v4")
+	c := &OpenCodeClient{binary: bin}
+	text, _, err := c.Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if !strings.Contains(text, "-m deepseek/deepseek-v4") || !strings.Contains(text, "--pure") {
+		t.Fatalf("model flag not passed, got %q", text)
+	}
+}
+
+// TestOpenCodeClient_NoEnvNoModelFlag: with GHOST_OPENCODE_MODEL unset or
+// empty, no -m flag may appear (opencode keeps its default model selection).
+func TestOpenCodeClient_NoEnvNoModelFlag(t *testing.T) {
+	bin := fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`)
+	t.Setenv("GHOST_OPENCODE_MODEL", "")
+	c := &OpenCodeClient{binary: bin}
+	text, _, err := c.Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if strings.Contains(text, " -m ") || strings.HasSuffix(strings.TrimSpace(text), "-m") {
+		t.Fatalf("unexpected -m flag: %q", text)
+	}
+}
