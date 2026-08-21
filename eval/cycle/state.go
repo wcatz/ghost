@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/wcatz/ghost/eval/cycle/corpus"
 	"github.com/wcatz/ghost/internal/memory"
@@ -51,12 +52,19 @@ func normContent(s string) string {
 	return strings.TrimSpace(wsRe.ReplaceAllString(strings.ToLower(s), " "))
 }
 
-// jaccard scores token-set overlap of two contents, 0..1.
+// jaccard scores token-set overlap of two contents, 0..1. Tokenization
+// mirrors memory.tokenizeContent: lowercase, split on non-alphanumerics,
+// drop single-char words — so merged rewrites that preserve substance still
+// score as survivors.
 func jaccard(a, b string) float64 {
 	set := func(s string) map[string]bool {
 		m := map[string]bool{}
-		for _, tok := range strings.Fields(normContent(s)) {
-			m[tok] = true
+		for _, tok := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		}) {
+			if len(tok) > 1 {
+				m[tok] = true
+			}
 		}
 		return m
 	}

@@ -63,7 +63,7 @@ func TestGradeReflect_Collapsed(t *testing.T) {
 		t.Fatalf("counts wrong: %+v", rep)
 	}
 	g := rep.Groups[0]
-	if g.Status != "collapsed" || g.Survivors != "mA" {
+	if g.Status != "collapsed" || !strings.Contains(g.Survivors, "mA") {
 		t.Fatalf("group wrong: %+v", g)
 	}
 	if rep.DroppedImportant != 0 || len(rep.DroppedDistractors) != 1 || rep.DroppedDistractors[0] != "d1" {
