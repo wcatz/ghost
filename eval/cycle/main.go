@@ -145,25 +145,25 @@ func run(cfg config) error {
 	// default timeout when the caller's context has none — a deadline here
 	// both bounds the stage and lets classify calls run past that default.
 	supCtx, supCancel := context.WithTimeout(ctx, 8*time.Minute)
-	supOut, err := runGhost(supCtx, env, ghostBin, "supersede", cfg.project, "--apply")
+	supOut, supErrOut, err := runGhost(supCtx, env, ghostBin, "supersede", cfg.project, "--apply")
 	supCancel()
 	if err != nil {
 		return fmt.Errorf("supersede: %w", err)
 	}
-	writeRaw(cfg.resultsDir, "supersede", supOut)
-	_ = os.WriteFile(filepath.Join(scratch, "supersede.out.txt"), []byte(supOut), 0o644)
+	writeRaw(cfg.resultsDir, "supersede", supOut+supErrOut)
+	_ = os.WriteFile(filepath.Join(scratch, "supersede.out.txt"), []byte(supOut+supErrOut), 0o644)
 	rep.Supersede = gradeSupersede(ids, entries, parseSupersedeLines(supOut))
 	reportStage("supersede", rep.Supersede)
 
 	fmt.Println("stage: resolve")
 	resCtx, resCancel := context.WithTimeout(ctx, 8*time.Minute)
-	resOut, err := runGhost(resCtx, env, ghostBin, "resolve", cfg.project, "--apply")
+	resOut, resErrOut, err := runGhost(resCtx, env, ghostBin, "resolve", cfg.project, "--apply")
 	resCancel()
 	if err != nil {
 		return fmt.Errorf("resolve: %w", err)
 	}
-	writeRaw(cfg.resultsDir, "resolve", resOut)
-	_ = os.WriteFile(filepath.Join(scratch, "resolve.out.txt"), []byte(resOut), 0o644)
+	writeRaw(cfg.resultsDir, "resolve", resOut+resErrOut)
+	_ = os.WriteFile(filepath.Join(scratch, "resolve.out.txt"), []byte(resOut+resErrOut), 0o644)
 	rep.Resolve = gradeResolve(entries, parseResolveIDs(resOut), ids)
 	reportStage("resolve", rep.Resolve)
 
@@ -176,19 +176,19 @@ func run(cfg config) error {
 		refCtx, refCancel := context.WithTimeout(ctx, 15*time.Minute)
 		// --allow-drops: in the scratch DB, guarded-category deletions are
 		// data the reflect grader measures, not production harm.
-		refOut, rerr := runGhost(refCtx, env, ghostBin, "reflect", cfg.project, "--tier", "opencode", "--apply", "--allow-drops")
+		refOut, refErrOut, rerr := runGhost(refCtx, env, ghostBin, "reflect", cfg.project, "--tier", "opencode", "--apply", "--allow-drops")
 		refCancel()
 		if rerr != nil && strings.Contains(rerr.Error(), "SQLITE_BUSY") {
 			time.Sleep(5 * time.Second)
 			refCtx2, refCancel2 := context.WithTimeout(ctx, 15*time.Minute)
-			refOut, rerr = runGhost(refCtx2, env, ghostBin, "reflect", cfg.project, "--tier", "opencode", "--apply", "--allow-drops")
+			refOut, refErrOut, rerr = runGhost(refCtx2, env, ghostBin, "reflect", cfg.project, "--tier", "opencode", "--apply", "--allow-drops")
 			refCancel2()
 		}
 		if rerr != nil {
-			return fmt.Errorf("reflect: %w\noutput:\n%s", rerr, refOut)
+			return fmt.Errorf("reflect: %w\noutput:\n%s\nstderr:\n%s", rerr, refOut, refErrOut)
 		}
-		writeRaw(cfg.resultsDir, "reflect", refOut)
-		_ = os.WriteFile(filepath.Join(scratch, "reflect.out.txt"), []byte(refOut), 0o644)
+		writeRaw(cfg.resultsDir, "reflect", refOut+refErrOut)
+		_ = os.WriteFile(filepath.Join(scratch, "reflect.out.txt"), []byte(refOut+refErrOut), 0o644)
 		rowsAfter, ferr := fetchMemRows(dbPath, cfg.project)
 		if ferr != nil {
 			return fmt.Errorf("post-reflect state: %w", ferr)
@@ -316,17 +316,19 @@ func scratchEnv(scratch string) []string {
 	)
 }
 
-// runGhost runs one ghost CLI command in the scratch environment.
-func runGhost(ctx context.Context, env []string, bin string, args ...string) (string, error) {
+// runGhost runs one ghost CLI command in the scratch environment, returning
+// stdout and stderr separately — stderr carries warnings (e.g. the guarded-
+// drop audit) worth persisting even when the command succeeds.
+func runGhost(ctx context.Context, env []string, bin string, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = env
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
-		return out.String(), fmt.Errorf("ghost %s: %w: %s",
+		return out.String(), errb.String(), fmt.Errorf("ghost %s: %w: %s",
 			strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
-	return out.String(), nil
+	return out.String(), errb.String(), nil
 }
 
 // writeIDsFile persists the corpus-key → memory-id mapping inside the kept
