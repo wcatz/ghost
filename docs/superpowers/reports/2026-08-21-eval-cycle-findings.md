@@ -25,9 +25,9 @@ The two supersede FPs are **intra-cluster links** (e.g. `redis_maxmemory_a` "sup
 
 ## Findings
 
-### F1 — Production bug: Upsert duplicate-strengthening corrupts supersession direction (HIGH)
+### F1 — Production bug: Upsert duplicate-strengthening corrupts supersession direction (HIGH) — FIXED in this PR
 
-When a newer paraphrase saves and triggers Upsert's duplicate detection, the strengthening path bumps the **older** row's `updated_at = datetime('now')` (internal/memory/store.go:653). Supersede's candidate generation derives newer/older from timestamps, so a later genuine update can be linked **backwards** (old supersedes new). Reproduced twice before the harness's restamp workaround. Recommend: strengthen importance/access-count without touching `updated_at`. Follow-up task filed.
+When a newer paraphrase saves and triggers Upsert's duplicate detection, the strengthening path bumped the **older** row's `updated_at = datetime('now')` (internal/memory/store.go:653). Supersede's candidate generation derives newer/older from timestamps, so a later genuine update could be linked **backwards** (old supersedes new). Reproduced twice before the harness's restamp workaround. **Fixed here**: strengthen no longer touches `updated_at` (regression test `TestStoreUpsert_StrengthenPreservesUpdatedAt`; closes #335). The harness restamp remains for second-granularity burst-injection ties.
 
 ### F2 — Resolve prefilter recall gap (MEDIUM)
 

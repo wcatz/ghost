@@ -4159,3 +4159,52 @@ func TestGetTopMemoriesDistinctWinnersUnderDemotion(t *testing.T) {
 		}
 	}
 }
+
+// TestStoreUpsert_StrengthenPreservesUpdatedAt pins eval-cycle finding F1:
+// the strengthen path must NOT refresh the existing row's updated_at.
+// Supersede derives newer/older from that column, so refreshing an older row
+// on a near-duplicate save flips supersession direction. Decay reads
+// created_at and is unaffected either way.
+func TestStoreUpsert_StrengthenPreservesUpdatedAt(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	s := NewStore(db, logger)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, testProject, "/tmp/test", "test"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	idA, _, _, err := s.Upsert(ctx, testProject, "fact", "The production deploy target is Fly.io in region iad", "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert A: %v", err)
+	}
+
+	// Simulate A having existed for a while: pin its timestamps to the past.
+	const past = "2026-01-01 00:00:00"
+	if _, err := db.Exec(`UPDATE memories SET created_at=?, updated_at=? WHERE id=?`, past, past, idA); err != nil {
+		t.Fatalf("pin timestamps: %v", err)
+	}
+
+	idB, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "The production deploy target is Hetzner Compose in region fsn1", "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert B: %v", err)
+	}
+	if dupOf != idA {
+		t.Fatalf("expected B to take the strengthen path (duplicateOf=%s), got %q", idA, dupOf)
+	}
+	if idB == idA {
+		t.Fatal("B should still be its own row")
+	}
+
+	var ua string
+	if err := db.QueryRow(`SELECT updated_at FROM memories WHERE id=?`, idA).Scan(&ua); err != nil {
+		t.Fatalf("read updated_at: %v", err)
+	}
+	if ua != past {
+		t.Fatalf("strengthen refreshed the OLDER row's updated_at: got %q, want %q — supersedes direction would flip", ua, past)
+	}
+}

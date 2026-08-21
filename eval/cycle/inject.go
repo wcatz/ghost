@@ -149,10 +149,11 @@ func ollamaReachable(url string) error {
 }
 
 // restampChronology rewrites created_at/updated_at so corpus order becomes
-// true chronological order, one minute apart. Two artifacts otherwise corrupt
-// supersede's newer/older ordering: second-granularity ties across a burst
-// injection, and Upsert's duplicate-strengthening refreshing the OLDER row's
-// updated_at when a newer paraphrase saves. Real projects accumulate memories
+// true chronological order, one minute apart. A burst injection otherwise
+// leaves second-granularity ties across rows, making supersede's newer/older
+// ordering arbitrary. (The upsert strengthen-path refresh of the older row's
+// updated_at that also corrupted direction is fixed — see issue #335 — but
+// ties alone still justify restamping.) Real projects accumulate memories
 // over days — this makes the fixture honest. Timestamps are metadata, not
 // content; all content still flows through the save path.
 func restampChronology(dbPath, projectName string, entries []corpus.Entry, ids map[string]string) error {

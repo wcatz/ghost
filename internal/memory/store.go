@@ -650,7 +650,7 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 
 		if _, err = tx.ExecContext(ctx, `
 			UPDATE memories
-			SET importance = ?, access_count = access_count + 1, updated_at = datetime('now'),
+			SET importance = ?, access_count = access_count + 1,
 			    resolved_at = NULL
 			WHERE id = ? AND project_id = ?
 		`, newImportance, existingID, projectID); err != nil {
