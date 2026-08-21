@@ -83,6 +83,11 @@ func saveAll(ctx context.Context, s *mcpSession, project string, entries []corpu
 			return nil, fmt.Errorf("save %s: id collision %q vs %q", e.Key, prev, m[1])
 		}
 		ids[e.Key] = m[1]
+		// created_at/updated_at carry second granularity; without spacing all
+		// rows tie and supersede's newer/older ordering becomes arbitrary
+		// (source of the reversed-link false positives on the first judged
+		// run). Corpus order is chronological intent, so preserve it.
+		time.Sleep(1100 * time.Millisecond)
 	}
 	return ids, nil
 }

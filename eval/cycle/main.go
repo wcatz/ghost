@@ -126,7 +126,12 @@ func run(cfg config) error {
 	}
 
 	fmt.Println("stage: supersede")
-	supOut, err := runGhost(ctx, env, ghostBin, "supersede", cfg.project, "--apply")
+	// Explicit deadlines: the CLI LLM clients only apply their own short
+	// default timeout when the caller's context has none — a deadline here
+	// both bounds the stage and lets classify calls run past that default.
+	supCtx, supCancel := context.WithTimeout(ctx, 8*time.Minute)
+	supOut, err := runGhost(supCtx, env, ghostBin, "supersede", cfg.project, "--apply")
+	supCancel()
 	if err != nil {
 		return fmt.Errorf("supersede: %w", err)
 	}
@@ -135,7 +140,9 @@ func run(cfg config) error {
 	reportStage("supersede", rep.Supersede)
 
 	fmt.Println("stage: resolve")
-	resOut, err := runGhost(ctx, env, ghostBin, "resolve", cfg.project, "--apply")
+	resCtx, resCancel := context.WithTimeout(ctx, 8*time.Minute)
+	resOut, err := runGhost(resCtx, env, ghostBin, "resolve", cfg.project, "--apply")
+	resCancel()
 	if err != nil {
 		return fmt.Errorf("resolve: %w", err)
 	}
@@ -149,10 +156,14 @@ func run(cfg config) error {
 		if ferr != nil {
 			return fmt.Errorf("pre-reflect state: %w", ferr)
 		}
-		refOut, rerr := runGhost(ctx, env, ghostBin, "reflect", cfg.project, "--tier", "opencode", "--apply")
+		refCtx, refCancel := context.WithTimeout(ctx, 15*time.Minute)
+		refOut, rerr := runGhost(refCtx, env, ghostBin, "reflect", cfg.project, "--tier", "opencode", "--apply")
+		refCancel()
 		if rerr != nil && strings.Contains(rerr.Error(), "SQLITE_BUSY") {
 			time.Sleep(5 * time.Second)
-			refOut, rerr = runGhost(ctx, env, ghostBin, "reflect", cfg.project, "--tier", "opencode", "--apply")
+			refCtx2, refCancel2 := context.WithTimeout(ctx, 15*time.Minute)
+			refOut, rerr = runGhost(refCtx2, env, ghostBin, "reflect", cfg.project, "--tier", "opencode", "--apply")
+			refCancel2()
 		}
 		if rerr != nil {
 			return fmt.Errorf("reflect: %w\noutput:\n%s", rerr, refOut)
