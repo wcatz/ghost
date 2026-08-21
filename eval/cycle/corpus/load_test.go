@@ -90,12 +90,14 @@ func TestCommittedCorpusShape(t *testing.T) {
 	if err := Validate(entries); err != nil {
 		t.Fatalf("validate committed corpus: %v", err)
 	}
-	sup, res := 0, 0
+	supOlder, res := 0, 0
 	grouped := map[string]int{}
+	targets := map[string]bool{} // newer members of supersede pairs
 	for _, e := range entries {
 		switch {
 		case e.ExpectedSupersededBy != "":
-			sup++
+			supOlder++
+			targets[e.ExpectedSupersededBy] = true
 		case e.ExpectedResolved:
 			res++
 		}
@@ -103,15 +105,19 @@ func TestCommittedCorpusShape(t *testing.T) {
 			grouped[e.MergeGroup]++
 		}
 	}
-	if sup != 8 || res != 12 {
-		t.Fatalf("composition drift: supersedes=%d resolved=%d", sup, res)
+	if supOlder != 8 || res != 12 {
+		t.Fatalf("composition drift: supersedes=%d resolved=%d", supOlder, res)
 	}
 	if len(grouped) != 3 {
 		t.Fatalf("want 3 merge groups, got %d (%v)", len(grouped), grouped)
 	}
-	distractors := len(entries) - sup - res
+	pairMembers := supOlder + len(targets)
+	distractors := len(entries) - pairMembers - res
 	for _, n := range grouped {
 		distractors -= n
+	}
+	if pairMembers != 16 {
+		t.Fatalf("want 16 supersede-pair members, got %d", pairMembers)
 	}
 	if distractors != 18 {
 		t.Fatalf("want 18 distractors, got %d", distractors)
