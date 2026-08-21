@@ -123,3 +123,12 @@ func TestCommittedCorpusShape(t *testing.T) {
 		t.Fatalf("want 18 distractors, got %d", distractors)
 	}
 }
+
+// TestLoadRejectsUnknownFields: a typo'd annotation key must fail loudly —
+// silently ignoring it would change grading semantics.
+func TestLoadRejectsUnknownFields(t *testing.T) {
+	typo := `{"key":"a","category":"fact","content":"x","importance":0.7,"expected_resovled":true}`
+	if _, err := Load(writeTemp(t, typo)); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("want unknown field error, got %v", err)
+	}
+}

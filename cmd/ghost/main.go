@@ -577,7 +577,7 @@ func buildClassifyProvider(cfg *config.Config, logger *slog.Logger) (*ai.Fallbac
 	cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary)
 	if cfg.API.Key == "" {
 		if !cli.Available() {
-			return nil, errors.New("requires ANTHROPIC_API_KEY or a `claude`/`opencode` binary on PATH")
+			return nil, errors.New("requires ANTHROPIC_API_KEY or a `claude`/`opencode` binary (on PATH or via cli.claude_binary/cli.opencode_binary)")
 		}
 		return ai.NewFallbackProvider(cli, nil, false), nil
 	}
@@ -626,8 +626,9 @@ Flags:
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
 
 Classifies each candidate as supersedes, causes, or neither. Uses
-ANTHROPIC_API_KEY if set, else falls back to a subscription-billed
-'claude' CLI call — requires one of the two.`)
+ANTHROPIC_API_KEY if set; otherwise falls back to a subscription-billed
+'claude' or 'opencode' CLI call (paths configurable via cli.claude_binary /
+cli.opencode_binary) — requires one of the two.`)
 		os.Exit(1)
 	}
 
@@ -707,8 +708,9 @@ Flags:
   --apply   Stamp resolved_at on confirmed memories (default is dry-run/preview)
 
 Marks resolved-evidence memories so they drop from session-start injection
-(still searchable). Uses ANTHROPIC_API_KEY if set, else falls back to a
-subscription-billed 'claude' CLI call — requires one of the two.`)
+(still searchable). Uses ANTHROPIC_API_KEY if set; otherwise falls back to a
+subscription-billed 'claude' or 'opencode' CLI call (paths configurable via
+cli.claude_binary / cli.opencode_binary) — requires one of the two.`)
 		os.Exit(1)
 	}
 

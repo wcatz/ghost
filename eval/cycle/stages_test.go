@@ -127,3 +127,25 @@ func TestExcerpt(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// TestGradeSupersede_DeduplicatesRepeatedLines: a duplicated output line must
+// not inflate TP (CodeRabbit: grade stage output as a set).
+func TestGradeSupersede_DeduplicatesRepeatedLines(t *testing.T) {
+	pairs := []supPair{
+		{NewerID8: "22222222", Relation: "supersedes", OtherID8: "11111111"},
+		{NewerID8: "22222222", Relation: "supersedes", OtherID8: "11111111"},
+		{NewerID8: "22222222", Relation: "supersedes", OtherID8: "11111111"},
+	}
+	st := gradeSupersede(gradeIDs, gradeEntries(), pairs)
+	if st.TP != 1 || st.FP != 0 || st.FN != 1 {
+		t.Fatalf("dedupe failed: %+v", st)
+	}
+}
+
+func TestGradeResolve_DeduplicatesRepeatedIDs(t *testing.T) {
+	confirmed := []string{"55555555", "55555555"}
+	st := gradeResolve(gradeEntries(), confirmed, gradeIDs)
+	if st.TP != 1 || st.FP != 0 || st.FN != 0 {
+		t.Fatalf("dedupe failed: %+v", st)
+	}
+}

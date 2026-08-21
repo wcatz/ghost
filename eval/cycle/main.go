@@ -120,6 +120,8 @@ func run(cfg config) error {
 	if err := writeIDsFile(scratch, ids); err != nil {
 		return fmt.Errorf("persist ids: %w", err)
 	}
+	meta := fmt.Sprintf("skip_reflect: %v\n", cfg.skipReflect)
+	_ = os.WriteFile(filepath.Join(scratch, "meta.yaml"), []byte(meta), 0o644)
 
 	// The embedding worker lives INSIDE the ghost mcp process — the session
 	// must stay open until embeddings drain or nothing will ever embed.
@@ -130,11 +132,12 @@ func run(cfg config) error {
 	mcpSess.close()
 
 	rep := ReportData{
-		Date:       time.Now().Format("2006-01-02 15:04"),
-		CorpusPath: cfg.corpusPath,
-		Project:    cfg.project,
-		Total:      len(entries),
-		ScratchDir: scratch,
+		Date:        time.Now().Format("2006-01-02 15:04"),
+		CorpusPath:  cfg.corpusPath,
+		Project:     cfg.project,
+		Total:       len(entries),
+		ScratchDir:  scratch,
+		SkipReflect: cfg.skipReflect,
 	}
 
 	fmt.Println("stage: supersede")
@@ -148,6 +151,7 @@ func run(cfg config) error {
 		return fmt.Errorf("supersede: %w", err)
 	}
 	writeRaw(cfg.resultsDir, "supersede", supOut)
+	_ = os.WriteFile(filepath.Join(scratch, "supersede.out.txt"), []byte(supOut), 0o644)
 	rep.Supersede = gradeSupersede(ids, entries, parseSupersedeLines(supOut))
 	reportStage("supersede", rep.Supersede)
 
@@ -159,6 +163,7 @@ func run(cfg config) error {
 		return fmt.Errorf("resolve: %w", err)
 	}
 	writeRaw(cfg.resultsDir, "resolve", resOut)
+	_ = os.WriteFile(filepath.Join(scratch, "resolve.out.txt"), []byte(resOut), 0o644)
 	rep.Resolve = gradeResolve(entries, parseResolveIDs(resOut), ids)
 	reportStage("resolve", rep.Resolve)
 
@@ -181,6 +186,7 @@ func run(cfg config) error {
 			return fmt.Errorf("reflect: %w\noutput:\n%s", rerr, refOut)
 		}
 		writeRaw(cfg.resultsDir, "reflect", refOut)
+		_ = os.WriteFile(filepath.Join(scratch, "reflect.out.txt"), []byte(refOut), 0o644)
 		rowsAfter, ferr := fetchMemRows(dbPath, cfg.project)
 		if ferr != nil {
 			return fmt.Errorf("post-reflect state: %w", ferr)
@@ -226,21 +232,32 @@ func gradeOnlyRun(cfg config) error {
 		ScratchDir:  cfg.gradeOnly,
 		SkipReflect: cfg.skipReflect,
 	}
-	day := time.Now().Format("2006-01-02")
-	if supOut, err := os.ReadFile(filepath.Join(cfg.resultsDir, day+"-supersede.out.txt")); err == nil {
-		rep.Supersede = gradeSupersede(ids, entries, parseSupersedeLines(string(supOut)))
-		reportStage("supersede", rep.Supersede)
+	// Raw outputs and run metadata are bound to the scratch dir — a regrade
+	// can never mix outputs from a different run or silently skip a stage.
+	supOut, err := os.ReadFile(filepath.Join(cfg.gradeOnly, "supersede.out.txt"))
+	if err != nil {
+		return fmt.Errorf("supersede output missing from scratch (did the stage run?): %w", err)
 	}
-	if resOut, err := os.ReadFile(filepath.Join(cfg.resultsDir, day+"-resolve.out.txt")); err == nil {
-		rep.Resolve = gradeResolve(entries, parseResolveIDs(string(resOut)), ids)
-		reportStage("resolve", rep.Resolve)
+	rep.Supersede = gradeSupersede(ids, entries, parseSupersedeLines(string(supOut)))
+	reportStage("supersede", rep.Supersede)
+	resOut, err := os.ReadFile(filepath.Join(cfg.gradeOnly, "resolve.out.txt"))
+	if err != nil {
+		return fmt.Errorf("resolve output missing from scratch (did the stage run?): %w", err)
 	}
-	rowsAfter, ferr := fetchMemRows(dbPath, cfg.project)
-	if ferr != nil {
-		return fmt.Errorf("final state: %w", ferr)
+	rep.Resolve = gradeResolve(entries, parseResolveIDs(string(resOut)), ids)
+	reportStage("resolve", rep.Resolve)
+
+	meta, merr := os.ReadFile(filepath.Join(cfg.gradeOnly, "meta.yaml"))
+	skipReflect := merr == nil && strings.Contains(string(meta), "true")
+	if !skipReflect {
+		rowsAfter, ferr := fetchMemRows(dbPath, cfg.project)
+		if ferr != nil {
+			return fmt.Errorf("final state: %w", ferr)
+		}
+		rep.Reflect = gradeReflect(entries, nil, rowsAfter)
+		reportReflect(rep.Reflect)
 	}
-	rep.Reflect = gradeReflect(entries, nil, rowsAfter)
-	reportReflect(rep.Reflect)
+	rep.SkipReflect = skipReflect
 	path, err := writeReport(cfg.resultsDir, rep)
 	if err != nil {
 		return err

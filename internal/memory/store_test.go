@@ -4208,3 +4208,48 @@ func TestStoreUpsert_StrengthenPreservesUpdatedAt(t *testing.T) {
 		t.Fatalf("strengthen refreshed the OLDER row's updated_at: got %q, want %q — supersedes direction would flip", ua, past)
 	}
 }
+
+// TestStoreUpsert_StrengthenDirectionForSupersede extends the updated_at
+// regression with the property supersede actually consumes: after a
+// near-duplicate save, timestamp ordering (the same ORDER BY supersede uses
+// for newer/older orientation) must rank the genuinely-newer row first.
+func TestStoreUpsert_StrengthenDirectionForSupersede(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	s := NewStore(db, logger)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, testProject, "/tmp/test", "test"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	idA, _, _, err := s.Upsert(ctx, testProject, "fact", "The production deploy target is Fly.io in region iad", "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert A: %v", err)
+	}
+	const past = "2026-01-01 00:00:00"
+	if _, err := db.Exec(`UPDATE memories SET created_at=?, updated_at=? WHERE id=?`, past, past, idA); err != nil {
+		t.Fatalf("pin timestamps: %v", err)
+	}
+	idB, dupOf, _, err := s.Upsert(ctx, testProject, "fact", "The production deploy target is Hetzner Compose in region fsn1", "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert B: %v", err)
+	}
+	if dupOf != idA {
+		t.Fatalf("expected strengthen path, got duplicateOf=%q", dupOf)
+	}
+
+	// Same freshness signal supersede's candidate query orders by.
+	var firstID string
+	if err := db.QueryRow(
+		`SELECT id FROM memories WHERE project_id=? ORDER BY updated_at DESC LIMIT 1`,
+		testProject).Scan(&firstID); err != nil {
+		t.Fatalf("order query: %v", err)
+	}
+	if firstID != idB {
+		t.Fatalf("supersede orientation would pick the wrong row as newer: got %s, want B (%s)", firstID, idB)
+	}
+}

@@ -60,10 +60,10 @@ Surviving 27 rows audited by hand against the corpus: 8/8 supersede *new* facts 
 
 ## Follow-ups
 
-1. Fix Upsert `updated_at` refresh on duplicate-strengthening (+ regression test: two near-dup saves → assert supersede direction) — **filed as task**.
-2. Resolve prefilter vocabulary/embedding-assist expansion.
-3. Consolidator no-delete guard for config/gotcha/preference categories.
-4. CI `workflow_dispatch` wiring for the harness (needs opencode auth-as-secret).
+1. ~~Fix Upsert `updated_at` refresh on duplicate-strengthening~~ — **done in this PR** (regression tests `TestStoreUpsert_StrengthenPreservesUpdatedAt` + `TestStoreUpsert_StrengthenDirectionForSupersede`; #335 closes on merge).
+2. Resolve prefilter vocabulary/embedding-assist expansion (#336).
+3. Consolidator no-delete guard for config/gotcha/preference categories (#337).
+4. CI `workflow_dispatch` wiring for the harness (needs opencode auth-as-secret) (#338).
 
 ## PR validation run (same day, post-review fixes)
 

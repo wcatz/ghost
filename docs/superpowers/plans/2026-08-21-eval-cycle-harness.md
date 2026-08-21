@@ -690,7 +690,7 @@ func runGhost(ctx context.Context, env []string, bin string, args ...string) (st
 }
 ```
 
-Wire `run()` through step order: build binary (`go build -o <scratch>/ghost ./cmd/ghost`, Dir=`--repo`) → startMCP → saveAll → close MCP session → waitForEmbeddings (DB at `<scratch>/data/ghost/ghost.db`). Print progress per phase.
+Wire `run()` through step order: build binary (`go build -o <scratch>/ghost ./cmd/ghost`, Dir=`--repo`) → startMCP → saveAll → waitForEmbeddings (session stays open — the embedding worker lives inside `ghost mcp`) → close MCP session (DB at `<scratch>/data/ghost/ghost.db`). Print progress per phase.
 
 - [ ] **Step 4: Pass + suite.** `go test ./eval/cycle/... -v && go vet ./... && go test ./...`
 - [ ] **Step 5: Commit** — `feat(eval): evalcycle runner core (scratch isolation, MCP inject, drain gate)`
@@ -789,7 +789,7 @@ Grading tests build synthetic `ids` maps (16-hex values whose first 8 chars matc
 - Produces: `writeReport(dir, dateStr string, d ReportData) (string, error)` where `ReportData{Date, CorpusPath, Project string; Total int; DrainDrained bool; Supersede, Resolve Stage; Reflect ReflectReport; Applied bool; Backend string /* cli.Name() */}`; Markdown layout: H1 date, environment block, per-stage scorecard tables (P/R/TP/FP/FN/causes), reflect table (group statuses, dropped lists), then full misclassification listing (one bullet per Miss with content excerpt ≤70 chars).
 
 - [ ] **Step 1: Implement report.go** (fmt.Fprintf sections; filename `<date>-report.md`, suffix `-<HHMMSS>` if exists; MkdirAll results dir).
-- [ ] **Step 2: Finish run()**: stage invocations — `runGhost(supersede --apply)` → parse+grade; `runGhost(resolve --apply)` → parse+grade; unless `--skip-reflect`: `rowsBefore := fetchMemRows(...)`, `runGhost(reflect --tier opencode --apply)` (retry once after 5s on SQLITE_BUSY text), `rowsAfter := fetchMemRows(...)`, `gradeReflect`. Close MCP session BEFORE stages. Write report, print one-line summary per stage to stdout. Exit 0 unless infrastructure error; scores live in the report.
+- [ ] **Step 2: Finish run()**: stage invocations — `runGhost(supersede --apply)` → parse+grade; `runGhost(resolve --apply)` → parse+grade; unless `--skip-reflect`: `rowsBefore := fetchMemRows(...)`, `runGhost(reflect --tier opencode --apply)` (retry once after 5s on SQLITE_BUSY text), `rowsAfter := fetchMemRows(...)`, `gradeReflect`. (The MCP session was already closed after the drain gate.) Write report, print one-line summary per stage to stdout. Exit 0 unless infrastructure error; scores live in the report.
 - [ ] **Step 3: Compile + suite + vet.**
 - [ ] **Step 4: Commit** — `feat(eval): evalcycle report writer and stage orchestration`
 

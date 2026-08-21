@@ -39,7 +39,9 @@ var validCategories = map[string]bool{
 }
 
 // Load reads entries from JSONL, skipping blank and '#' comment lines.
-// Duplicate keys are rejected: keys are the grading identity.
+// Duplicate keys are rejected: keys are the grading identity. Unknown JSON
+// fields are rejected too — a typo'd annotation ("expected_resovled") would
+// otherwise silently change grading semantics.
 func Load(path string) ([]Entry, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -58,8 +60,13 @@ func Load(path string) ([]Entry, error) {
 			continue
 		}
 		var e Entry
-		if err := json.Unmarshal([]byte(b), &e); err != nil {
+		dec := json.NewDecoder(strings.NewReader(string(b)))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&e); err != nil {
 			return nil, fmt.Errorf("line %d: %w", line, err)
+		}
+		if dec.More() {
+			return nil, fmt.Errorf("line %d: more than one JSON value", line)
 		}
 		if seen[e.Key] {
 			return nil, fmt.Errorf("line %d: duplicate key %q", line, e.Key)

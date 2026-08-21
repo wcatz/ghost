@@ -108,9 +108,19 @@ func excerpt(s string) string {
 
 // gradeSupersede scores parsed supersedes/causes links against the corpus's
 // expected_superseded_by annotations (direction-aware: older→newer must match).
+// Pairs are deduplicated first — a repeated output line must not inflate TP.
 func gradeSupersede(ids map[string]string, entries []corpus.Entry, pairs []supPair) Stage {
 	st := Stage{Name: "supersede"}
 	k2k := id8ToKey(ids)
+
+	seenPairs := map[supPair]bool{}
+	deduped := make([]supPair, 0, len(pairs))
+	for _, p := range pairs {
+		if !seenPairs[p] {
+			seenPairs[p] = true
+			deduped = append(deduped, p)
+		}
+	}
 
 	type exp struct{ older, newer string }
 	expected := make(map[exp]string) // pair -> corpus key of the older member
@@ -121,7 +131,7 @@ func gradeSupersede(ids map[string]string, entries []corpus.Entry, pairs []supPa
 	}
 
 	satisfied := map[string]bool{}
-	for _, p := range pairs {
+	for _, p := range deduped {
 		if p.Relation == "causes" {
 			st.Causes++
 			continue
@@ -167,8 +177,13 @@ func gradeResolve(entries []corpus.Entry, confirmedID8s []string, ids map[string
 	st := Stage{Name: "resolve"}
 	k2k := id8ToKey(ids)
 
+	seenIDs := map[string]bool{}
 	confirmedKeys := map[string]bool{}
 	for _, id8 := range confirmedID8s {
+		if seenIDs[id8] {
+			continue
+		}
+		seenIDs[id8] = true
 		key, ok := k2k[id8]
 		if !ok {
 			st.FP++

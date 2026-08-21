@@ -6,7 +6,7 @@ Ghost's staleness pipeline (`ghost supersede` → `ghost resolve` → `ghost ref
 
 Two constraints shape the design:
 
-1. **Zero Anthropic API spend.** All LLM calls (classify + consolidate) run through the `opencode` CLI, billed to whatever provider opencode is configured with.
+1. **Zero Anthropic API spend.** All LLM calls (classify + consolidate) run through the claude-or-opencode CLI path (claude first when present, opencode otherwise), with opencode calls billed to whatever provider opencode is configured with.
 2. **Zero risk to production data.** Every run uses throwaway `XDG_DATA_HOME`/`XDG_CONFIG_HOME` scratch dirs — the isolation pattern proven by the 2026-07-27 real-world eval suite.
 
 ## Part 1: Enabler — opencode-backed classifiers (code change)
@@ -48,7 +48,7 @@ Distractors are graded implicitly: anything annotated neither supersede-target n
 2. **Inject** — drive a real `ghost mcp` subprocess over stdio using the `modelcontextprotocol/go-sdk` client; call `ghost_memory_save` once per corpus entry (the genuine save path, including embedding-worker notification); record returned memory IDs keyed by corpus key.
 3. **Drain gate** — poll the scratch SQLite DB until `memory_embeddings` row count equals the injected memory count for the project (supersede candidate generation needs vectors; requires local Ollama with nomic-embed-text up; unreachable Ollama fails fast with a hint). Timeout → fatal.
 4. **Stages**, one `--apply` invocation each (dry-run + apply would double LLM cost and re-roll classification between passes; the applied run prints the same classified list, so grading reads that single run's output):
-   - `ghost supersede acme-migration --apply` — parse `  <id8>  supersedes  <id8>` lines; precision/recall vs `expected_superseded_by` annotations (direction-aware).
+   - `ghost supersede acme-migration --apply` — parse `<id8> supersedes <id8>` lines (whitespace-separated); precision/recall vs `expected_superseded_by` annotations (direction-aware).
    - `ghost resolve acme-migration --apply` — parse confirmed `<id8>` lines; P/R vs `expected_resolved`.
    - `ghost reflect acme-migration --tier opencode --apply` — grade at set level from the final memory state read directly from the scratch SQLite `memories` table (read-only; writes still flow only through the one MCP session plus these CLI invocations): per-merge-group collapse (exactly one survivor ≈ pass), survival of distractors, dropped-important count. Reflect is always applied inside the harness — the DB is scratch and snapshot-restorable, so there is nothing real to damage; `--skip-reflect` omits the stage entirely.
 5. **Report** — dated Markdown scorecard (per-stage precision/recall/counts) written under `eval/cycle/results/<date>-report.md`, followed by an itemized misclassification table (expected vs got, with content excerpts) for eyeball judgment.

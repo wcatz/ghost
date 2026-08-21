@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -350,6 +351,9 @@ func TestRunProjectDeleteCore_DryRunNeverPrompts(t *testing.T) {
 // in for a real `opencode` binary in provider-selection tests.
 func stubBinary(t *testing.T, payload string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires a POSIX shell")
+	}
 	path := filepath.Join(t.TempDir(), "fakeopencode")
 	script := "#!/bin/sh\nprintf '%s\\n' '" + payload + "'\n"
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
