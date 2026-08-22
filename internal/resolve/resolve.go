@@ -34,6 +34,13 @@ var resolveKeywords = []string{
 	"no-go", "resolved", "shipped", "retracted", "superseded", "abandoned",
 	"fixed in", "removed", "merged", "kill experiment", "root cause",
 	"concluded", "closed", "reverted", "deprecated", "landed in",
+	// Concluded-work genres the eval corpus showed slipping the net
+	// (finding F2, issue #336). Multi-word phrases stay high-precision;
+	// "completed" is broader but false positives only cost one KEEP-biased
+	// LLM call.
+	"cost estimate", "postmortem", "changelog:", "investigation note",
+	"pr locator", "reference only", "history only", "no follow-up",
+	"completed",
 }
 
 // Classifier decides whether a memory's content is resolved evidence (true) or

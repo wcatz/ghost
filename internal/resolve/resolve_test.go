@@ -228,3 +228,28 @@ func TestRun_MixedFallbackAndPrimary_SkipsApply(t *testing.T) {
 		t.Error("SetResolved must not be called when any candidate in the batch came from a fallback provider, even if another was confirmed via primary")
 	}
 }
+
+// TestPrefilterCatchesEstimateAndPostmortemPhrasings: eval-cycle corpus
+// evidence (finding F2, issue #336) showed concluded-work phrasings like cost
+// estimates and downtime estimates slipping past the keyword net.
+func TestPrefilterCatchesEstimateAndPostmortemPhrasings(t *testing.T) {
+	in := []memory.Memory{
+		{ID: "est", Content: "Cost estimate from May: Fly.io projected $148/mo at current traffic."},
+		{ID: "downtime", Content: "Migration plan estimated a 20-minute downtime window for final cutover; cutover completed 07-19."},
+		{ID: "pm", Content: "Postmortem (concluded): the deploy failure was a stale compose hash."},
+		{ID: "inv", Content: "Investigation note: slow queue drain was a missing XACK; fixed in v0.9.4."},
+		{ID: "loc", Content: "PR locator: compose file split landed in PR #405. Reference only."},
+	}
+	got := Prefilter(in)
+	if len(got) != len(in) {
+		dropped := map[string]bool{}
+		for _, m := range got {
+			dropped[m.ID] = true
+		}
+		for _, m := range in {
+			if !dropped[m.ID] {
+				t.Errorf("prefilter dropped resolved-evidence memory %s: %q", m.ID, m.Content)
+			}
+		}
+	}
+}
