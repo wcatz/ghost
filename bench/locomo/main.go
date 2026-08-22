@@ -615,9 +615,17 @@ func lmevalEntry(qid, qType string, q locoQA, sessions []locoSession, goldSessio
 		}
 		sessionsOut = append(sessionsOut, turns)
 	}
+	// question_date = last content-bearing session's date: LoCoMo questions
+	// are posed at the end of the conversation, and upstream prepare_prompt
+	// uses it as the prompt's "Current Date".
+	questionDate := ""
+	if len(sessions) > 0 {
+		questionDate = sessions[len(sessions)-1].Date
+	}
 	return map[string]any{
 		"question_id":          qid,
 		"question_type":        qType,
+		"question_date":        questionDate,
 		"question":             q.Question,
 		"answer":               answer,
 		"answer_session_ids":   sortedKeys(goldSessions),
