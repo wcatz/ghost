@@ -48,6 +48,8 @@ RETRY_STATUS = {429, 500, 502, 503, 529}
 # key sourcing (never logged)
 # --------------------------------------------------------------------------
 def get_key(provider):
+    if provider == "opencode":
+        return ""  # subscription-billed CLI; no key
     if provider == "openai":
         k = os.environ.get("OPENAI_API_KEY")
         if not k:
@@ -138,6 +140,8 @@ def _post(url, headers, body, max_retries=30):
 
 def chat(provider, model, key, prompt, max_tokens, api_base_url=None):
     """Single-user-message chat completion, temperature 0. Returns text."""
+    if provider == "opencode":
+        return chat_opencode(model, prompt)
     if provider == "openai":
         body = {"model": model, "temperature": 0, "max_tokens": max_tokens, "n": 1,
                 "messages": [{"role": "user", "content": prompt}]}
@@ -157,6 +161,47 @@ def chat(provider, model, key, prompt, max_tokens, api_base_url=None):
     return "".join(b.get("text", "") for b in out["content"] if b.get("type") == "text")
 
 
+def chat_opencode(model, prompt):
+    """Run one prompt through the `opencode` CLI (subscription-billed; no API
+    key). Mirrors internal/ai.OpenCodeClient: --pure skips plugins, the child
+    gets a scrubbed XDG_CONFIG_HOME and no ANTHROPIC_API_KEY so it cannot load
+    the user's global opencode config or this repo's project config. Retries
+    transient failures like _post."""
+    import subprocess
+    import tempfile
+    last_err = None
+    for attempt in range(3):
+        try:
+            env = {k: v for k, v in os.environ.items()
+                   if k != "ANTHROPIC_API_KEY" and not k.startswith("XDG_CONFIG_HOME")}
+            scratch = tempfile.mkdtemp(prefix="locomo-opencode-")
+            env["XDG_CONFIG_HOME"] = scratch
+            cmd = ["opencode", "run", "--format", "json", "--pure"]
+            if model:
+                cmd += ["-m", model]
+            cmd.append(prompt)
+            proc = subprocess.run(cmd, env=env, capture_output=True,
+                                  text=True, timeout=600)
+            if proc.returncode != 0:
+                raise RuntimeError(f"opencode run: {proc.stderr[:300]}")
+            parts = []
+            for line in proc.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                ev = json.loads(line)
+                if ev.get("type") == "text" and ev.get("part", {}).get("type") == "text":
+                    parts.append(ev["part"].get("text", ""))
+            return "".join(parts)
+        except (RuntimeError, subprocess.TimeoutExpired) as e:
+            last_err = e
+            wait = min(2 ** attempt, 30)
+            sys.stderr.write(f"  opencode error ({e}), retry in {wait}s "
+                             f"({attempt + 1}/3)\n")
+            time.sleep(wait)
+    raise RuntimeError(f"opencode exhausted retries: {last_err}")
+
+
 # --------------------------------------------------------------------------
 # official prompt functions, imported from a LongMemEval checkout
 # --------------------------------------------------------------------------
@@ -170,6 +215,26 @@ def import_official(longmemeval_src):
     from run_generation import prepare_prompt          # noqa: E402
     from evaluate_qa import get_anscheck_prompt         # noqa: E402
     return prepare_prompt, get_anscheck_prompt
+
+
+def judge_type(qtype):
+    """Map LoCoMo question types onto LongMemEval's answer-check templates
+    (upstream get_anscheck_prompt raises NotImplementedError for anything
+    else). Temporal keeps its off-by-one-lenient template; everything else
+    uses the standard correctness check. Grouping/reporting still uses the
+    original LoCoMo type."""
+    return {
+        "single-hop": "multi-session",
+        "multi-hop": "multi-session",
+        "open-domain": "multi-session",
+        "temporal": "temporal-reasoning",
+    }.get(qtype, qtype)
+
+
+def safe_model(model):
+    """Model ids like 'opencode-go/deepseek-v4-pro' contain '/', which would
+    become a path separator in derived output filenames."""
+    return model.replace("/", "_")
 
 
 def load_done(path):
@@ -192,7 +257,9 @@ def cmd_generate(args):
     tok = tiktoken.get_encoding("o200k_base")
     max_ret = args.model_max_length - GEN_LENGTH - RESERVE
 
-    if args.api_base_url:
+    if args.provider == "opencode":
+        key = ""
+    elif args.api_base_url:
         key = get_key_openai_compat()
     else:
         key = get_key(args.provider)
@@ -226,13 +293,15 @@ def cmd_generate(args):
 def cmd_judge(args):
     _, get_anscheck_prompt = import_official(args.longmemeval_src)
     from abstention_prompt import get_abstention_prompt
-    if args.api_base_url:
+    if args.provider == "opencode":
+        key = ""
+    elif args.api_base_url:
         key = get_key_openai_compat()
     else:
         key = get_key(args.provider)
 
     meta = {e["question_id"]: e for e in json.load(open(args.dataset))}
-    out_path = args.judged or (args.hyp + f".eval-results-{args.model}")
+    out_path = args.judged or (args.hyp + f".eval-results-{safe_model(args.model)}")
     done = load_done(out_path)
     if done:
         sys.stderr.write(f"resume: {len(done)} already judged, skipping them\n")
@@ -251,8 +320,8 @@ def cmd_judge(args):
                 prompt = get_abstention_prompt(e["question"], h["hypothesis"])
             else:
                 prompt = get_anscheck_prompt(
-                    e["question_type"], e["question"], e["answer"], h["hypothesis"],
-                    abstention=abstention)
+                    judge_type(e["question_type"]), e["question"], e["answer"],
+                    h["hypothesis"], abstention=abstention)
 
             resp = chat(args.provider, args.model, key, prompt, 50,
                         api_base_url=args.api_base_url)
@@ -312,7 +381,7 @@ def _report(judged_path):
 
 
 def cmd_report(args):
-    path = args.judged or (args.hyp + f".eval-results-{args.model}")
+    path = args.judged or (args.hyp + f".eval-results-{safe_model(args.model)}")
     _report(path)
 
 
@@ -322,7 +391,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def add_common(p):
-        p.add_argument("--provider", choices=["openai", "anthropic"], required=True)
+        p.add_argument("--provider", choices=["openai", "anthropic", "opencode"], required=True)
         p.add_argument("--model", required=True,
                        help="e.g. gpt-4o-2024-08-06 | claude-sonnet-5 | claude-opus-4-8")
         p.add_argument("--longmemeval-src",
