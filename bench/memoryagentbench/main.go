@@ -39,7 +39,24 @@ type perQuestionLine struct {
 	Source        string `json:"source"`
 	QAPairID      string `json:"qa_pair_id"`
 	BaselineHit1  bool   `json:"baseline_hit@1"`
+	BaselineHit5  bool   `json:"baseline_hit@5"`
 	SupersedeHit1 bool   `json:"supersede_hit@1"`
+	SupersedeHit5 bool   `json:"supersede_hit@5"`
+}
+
+// resultRowFormat is shared by the header and every printed row so the two
+// can never drift out of column alignment.
+const resultRowFormat = "%-28s %5d %10.3f %10.3f %12.3f %12.3f %6d %6d %6d\n"
+
+// printResultRow prints one demoResult in the table's column format. Called
+// as soon as each demo finishes — not buffered until the end — so an earlier
+// demo's numbers are never lost to stdout if a later demo aborts the run
+// (see runDemo's supersede.Run call: a single classify failure is
+// non-resumable and discards that demo's in-progress work, but never an
+// already-printed row from a prior demo).
+func printResultRow(r demoResult) {
+	fmt.Printf(resultRowFormat, r.Source, r.Questions, r.BaselineAcc1, r.BaselineAcc5,
+		r.SupersedeAcc1, r.SupersedeAcc5, r.Candidates, r.Confirmed, r.Created)
 }
 
 func main() {
@@ -93,6 +110,10 @@ func main() {
 		defer outFile.Close() //nolint:errcheck
 	}
 
+	fmt.Printf("MemoryAgentBench Conflict_Resolution (fact_sh) — supersede ablation\n\n")
+	fmt.Printf("%-28s %5s %10s %10s %12s %12s %6s %6s %6s\n",
+		"source", "n", "base@1", "base@5", "supersede@1", "supersede@5", "cand", "conf", "made")
+
 	ctx := context.Background()
 	var results []demoResult
 	for _, d := range demos {
@@ -106,21 +127,13 @@ func main() {
 			os.Exit(1)
 		}
 		results = append(results, r)
+		printResultRow(r)
 		fmt.Fprintf(os.Stderr, "%s done in %s\n", d.Source, time.Since(start).Round(time.Second))
 	}
 
 	if len(results) == 0 {
 		fmt.Fprintln(os.Stderr, "error: no demo matched --sources")
 		os.Exit(1)
-	}
-
-	fmt.Printf("MemoryAgentBench Conflict_Resolution (fact_sh) — supersede ablation\n\n")
-	fmt.Printf("%-28s %5s %10s %10s %12s %12s %6s %6s %6s\n",
-		"source", "n", "base@1", "base@5", "supersede@1", "supersede@5", "cand", "conf", "made")
-	for _, r := range results {
-		fmt.Printf("%-28s %5d %10.3f %10.3f %12.3f %12.3f %6d %6d %6d\n",
-			r.Source, r.Questions, r.BaselineAcc1, r.BaselineAcc5,
-			r.SupersedeAcc1, r.SupersedeAcc5, r.Candidates, r.Confirmed, r.Created)
 	}
 }
 
@@ -176,7 +189,8 @@ func runDemo(ctx context.Context, d Demo, cls *supersede.HaikuClassifier, embedd
 		for _, o := range outcomes {
 			line, err := json.Marshal(perQuestionLine{
 				Source: d.Source, QAPairID: o.QAPairID,
-				BaselineHit1: o.BaselineHit1, SupersedeHit1: o.SupersedeHit1,
+				BaselineHit1: o.BaselineHit1, BaselineHit5: o.BaselineHit5,
+				SupersedeHit1: o.SupersedeHit1, SupersedeHit5: o.SupersedeHit5,
 			})
 			if err != nil {
 				return demoResult{}, err
