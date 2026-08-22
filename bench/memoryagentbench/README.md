@@ -56,6 +56,16 @@ in by convention).
   expect a proportional jump in candidate pairs and `opencode` calls (each is
   a subprocess spawn, so wall-clock — not API cost — is the constraint at
   that scale). Not run by default.
+- Each `opencode run` call has its own 5-minute timeout
+  (`internal/ai.defaultTimeout`); a real trivial call has been observed to
+  take over a minute, so a heavier classify prompt can get close to that
+  ceiling. `supersede.Run` classifies every candidate pair for a demo before
+  writing any links — a single timed-out call fails the whole demo with no
+  partial credit and no cache to resume from (unlike embeddings, which
+  persist to `--embed-cache`). A demo that hits this must be re-run from
+  scratch. The table prints each demo's row as soon as that demo finishes, so
+  an earlier demo's numbers survive a later demo's failure — but a demo that
+  fails partway through contributes nothing.
 - No CI gate: every run shells out to `opencode` once per candidate pair.
 - `ghost resolve` is not exercised here — its keyword prefilter
   (`"resolved"`, `"shipped"`, `"deprecated"`, etc.) doesn't match
