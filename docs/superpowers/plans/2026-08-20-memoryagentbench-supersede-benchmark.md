@@ -1343,14 +1343,14 @@ python3 convert.py --parquet Conflict_Resolution-00000-of-00001.parquet --out de
 ```bash
 # requires the `opencode` CLI on PATH (or cli.opencode_binary in
 # ~/.config/ghost/config.yaml) — no ANTHROPIC_API_KEY needed
+# also requires a local Ollama serving `nomic-embed-text:v1.5` (the same
+# model Ghost uses in production) — pass --ollama <url> if it's not on
+# localhost:11434
 mkdir -p ~/.cache/ghost-bench
 go run . --data demos.jsonl \
     --embed-cache ~/.cache/ghost-bench/mabench-embed-cache.jsonl \
     --out per-question.jsonl
 ```
-
-Requires a local Ollama serving `nomic-embed-text:v1.5` (the same model Ghost
-uses in production) — pass `--ollama <url>` if it's not on `localhost:11434`.
 
 `--threshold` (default `0.80`, matching `ghost supersede`'s own default) sets
 the minimum cosine similarity for a candidate pair to be offered to the
