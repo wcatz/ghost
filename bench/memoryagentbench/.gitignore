@@ -2,5 +2,8 @@
 __pycache__/
 *.pyc
 
+# go build/go run compiled binary
+/memoryagentbench
+
 # Local run artifacts (never commit generated data / embed caches / results)
 *.jsonl
