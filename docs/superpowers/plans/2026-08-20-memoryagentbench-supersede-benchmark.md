@@ -1316,8 +1316,9 @@ git commit -s -m "feat(bench): add MemoryAgentBench parquet-to-JSONL converter"
 ```markdown
 # MemoryAgentBench Conflict-Resolution — supersede ablation
 
-Runs Ghost's real `ghost supersede` pipeline (the actual Haiku classifier,
-real Anthropic API calls) against MemoryAgentBench's `Conflict_Resolution`
+Runs Ghost's real `ghost supersede` pipeline (the actual classifier, run via
+the `opencode` CLI rather than the Anthropic API) against MemoryAgentBench's
+`Conflict_Resolution`
 split ([HF: `ai-hyz/MemoryAgentBench`](https://huggingface.co/datasets/ai-hyz/MemoryAgentBench),
 ICLR 2026), and scores retrieval before/after supersede links exist. See
 [the design doc](../../docs/superpowers/specs/2026-08-20-memoryagentbench-supersede-benchmark-design.md)
@@ -1327,6 +1328,8 @@ Single-hop (`fact_sh`) only — multi-hop (`fact_mh`) needs a query-decompositio
 step this harness deliberately doesn't have (retrieval-only, no generation).
 
 ## Setup
+
+Run everything below from this directory (`bench/memoryagentbench/`):
 
 ```bash
 pip install pyarrow
@@ -1340,13 +1343,23 @@ python3 convert.py --parquet Conflict_Resolution-00000-of-00001.parquet --out de
 ```bash
 # requires the `opencode` CLI on PATH (or cli.opencode_binary in
 # ~/.config/ghost/config.yaml) — no ANTHROPIC_API_KEY needed
-go run ./bench/memoryagentbench --data demos.jsonl \
+mkdir -p ~/.cache/ghost-bench
+go run . --data demos.jsonl \
     --embed-cache ~/.cache/ghost-bench/mabench-embed-cache.jsonl \
     --out per-question.jsonl
 ```
 
 Requires a local Ollama serving `nomic-embed-text:v1.5` (the same model Ghost
 uses in production) — pass `--ollama <url>` if it's not on `localhost:11434`.
+
+`--threshold` (default `0.80`, matching `ghost supersede`'s own default) sets
+the minimum cosine similarity for a candidate pair to be offered to the
+classifier at all.
+
+The downloaded `.parquet`, the converted `demos.jsonl`, the embed cache, and
+`per-question.jsonl` are all local run artifacts — none of them are committed
+(`*.jsonl` is gitignored in this directory; the `.parquet` just isn't checked
+in by convention).
 
 ## Scope and cost
 
