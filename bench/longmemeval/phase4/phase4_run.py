@@ -163,10 +163,13 @@ def chat(provider, model, key, prompt, max_tokens, api_base_url=None):
 
 def chat_opencode(model, prompt, max_tokens=None):
     """Run one prompt through the `opencode` CLI (subscription-billed; no API
-    key). Mirrors internal/ai.OpenCodeClient: --pure skips plugins, the child
-    gets a scrubbed XDG_CONFIG_HOME and no ANTHROPIC_API_KEY so it cannot load
-    the user's global opencode config or this repo's project config. Retries
-    transient failures like _post. max_tokens is forwarded via the
+    key). Mirrors internal/ai.OpenCodeClient: --pure skips plugins; the child
+    gets a scrubbed XDG_CONFIG_HOME, no ANTHROPIC_API_KEY, and none of
+    OPENCODE_CONFIG / OPENCODE_CONFIG_DIR / OPENCODE_CONFIG_CONTENT, and runs
+    with cwd=scratch so neither the user's global config, this repo's project
+    config (.opencode/, opencode.json), nor launch-environment overrides can
+    change benchmark behavior (--pure alone does not disable project config).
+    Retries transient failures like _post. max_tokens is forwarded via the
     OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX env var (the CLI has no flag for
     it); without it, judge calls could return arbitrarily long output."""
     import subprocess
@@ -177,7 +180,10 @@ def chat_opencode(model, prompt, max_tokens=None):
         scratch = None
         try:
             env = {k: v for k, v in os.environ.items()
-                   if k != "ANTHROPIC_API_KEY" and not k.startswith("XDG_CONFIG_HOME")}
+                   if k != "ANTHROPIC_API_KEY"
+                   and not k.startswith("XDG_CONFIG_HOME")
+                   and k not in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR",
+                                 "OPENCODE_CONFIG_CONTENT")}
             scratch = tempfile.mkdtemp(prefix="locomo-opencode-")
             env["XDG_CONFIG_HOME"] = scratch
             if max_tokens is not None:
@@ -186,8 +192,8 @@ def chat_opencode(model, prompt, max_tokens=None):
             if model:
                 cmd += ["-m", model]
             cmd.append(prompt)
-            proc = subprocess.run(cmd, env=env, capture_output=True,
-                                  text=True, timeout=600)
+            proc = subprocess.run(cmd, env=env, cwd=scratch,
+                                  capture_output=True, text=True, timeout=600)
             if proc.returncode != 0:
                 raise RuntimeError(f"opencode run: {proc.stderr[:300]}")
             parts = []

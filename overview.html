@@ -226,6 +226,20 @@
   details .a b { color: var(--text); font-weight: 600; }
   details .a code { background:#0d1118; border:1px solid var(--card-edge); border-radius:5px; padding:1px 6px; font-size:12.5px; color:var(--accent-2); }
 
+  /* ---------- small screens ---------- */
+  @media (max-width: 720px) {
+    nav .wrap { height: auto; flex-wrap: wrap; padding-top: 10px; gap: 10px 16px; }
+    nav .links { width: 100%; margin-left: 0; overflow-x: auto; -webkit-overflow-scrolling: touch;
+                 scrollbar-width: none; padding-bottom: 10px; gap: 16px; }
+    nav .links::-webkit-scrollbar { display: none; }
+    nav .links a { flex: none; white-space: nowrap; }
+  }
+  @media (max-width: 560px) {
+    .bench-card { padding: 18px; }
+    .bar-row { grid-template-columns: 1fr 52px; }
+    .bar-label { grid-column: 1 / -1; }
+  }
+
   footer { border-top: 1px solid var(--card-edge); padding: 36px 0 48px; color: var(--muted); font-size: 13.5px; }
   footer .wrap { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
 </style>
@@ -357,8 +371,9 @@
       <div class="note">
         Read carefully: these scores are <b>not directly comparable across rows</b> — each system uses a different
         generator and judge, and generators dominate end-to-end scores. Within one generator+judge pair differences are
-        meaningful; across pairs they are directional only. Every number above links to its source in the repo's
-        benchmark document, and Ghost's full harness, datasets, and logs ship in-repo for independent re-running.
+        meaningful; across pairs they are directional only. Ghost's numbers come from runs you can reproduce — the
+        harness, datasets, and per-question logs ship in-repo; sources and methodology are collected in
+        <a href="https://github.com/wcatz/ghost/blob/main/docs/benchmarks.md">docs/benchmarks.md</a>.
       </div>
     </div>
 
@@ -771,7 +786,9 @@
     <div class="kicker">FAQ</div>
     <h2>The questions a security reviewer will ask anyway.</h2>
     <p class="lead" style="margin-bottom:32px;">
-      Short answers here; every claim links back to the repo's documentation and code.
+      Short answers here; the code and documentation behind them live in the repo — start at the
+      <a href="https://github.com/wcatz/ghost/blob/main/README.md">README</a> and
+      <a href="https://github.com/wcatz/ghost/blob/main/docs/benchmarks.md">docs/benchmarks.md</a>.
     </p>
     <div class="faq">
       <details open>

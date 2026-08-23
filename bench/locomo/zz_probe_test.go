@@ -77,7 +77,9 @@ func TestZZLatencyProbe(t *testing.T) {
 				qq := allQs[idx%len(allQs)]
 				idx++
 				start := time.Now()
-				_ = run(qq.text)
+				if err := run(qq.text); err != nil {
+					t.Fatalf("probe %s: %v", name, err)
+				}
 				ds = append(ds, float64(time.Since(start).Microseconds())/1000.0)
 			}
 			for i := 0; i < 5; i++ { // warmup

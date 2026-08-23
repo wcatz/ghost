@@ -218,6 +218,9 @@ func main() {
 			sessionText[s.ID] = sb.String()
 		}
 
+		if len(sessions) > 0 && sessions[len(sessions)-1].Date == "" {
+			fmt.Fprintf(os.Stderr, "warning: %s: last session has no parsed date; question_date will be empty\n", conv.SampleID)
+		}
 		store, memMeta, cleanup, err := openStore(ctx, conv.SampleID, sessions, *condition, embedder)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %s: %v\n", conv.SampleID, err)
