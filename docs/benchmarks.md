@@ -209,6 +209,7 @@ The official LongMemEval benchmark includes 30 abstention questions (question_id
 [LoCoMo](https://arxiv.org/abs/2402.17753) is where mem0 and competitors publish, so Ghost runs it as a **comparability layer** — LongMemEval-S remains the primary benchmark. Methodology differences are explicit: LoCoMo here is judge-free turn-level retrieval over 1,531 scored questions (adversarial excluded), evidence-label scored like Phase 1.
 
 ```bash
+mkdir -p .cache/locomo
 curl -sL -o .cache/locomo/locomo10.json \
   https://raw.githubusercontent.com/snap-research/LoCoMo/main/data/locomo10.json
 go run ./bench/locomo --condition hybrid \
@@ -218,12 +219,14 @@ go run ./bench/locomo --condition hybrid \
 
 **Ghost retrieval, LoCoMo locomo10 (2026-08-21, n=1531):**
 
-| Condition | R@1 | R@5 | R@10 | MRR@10 | NDCG@10 | SessHit@5 |
+Hit@k is a question-level hit rate — 1 when any gold `dia_id` lands in the top-k, not the fraction of gold items retrieved (multi-evidence questions diverge from true recall). MRR/NDCG credit every gold item.
+
+| Condition | Hit@1 | Hit@5 | Hit@10 | MRR@10 | NDCG@10 | SessHit@5 |
 |---|---|---|---|---|---|---|
 | FTS | 0.265 | 0.484 | 0.581 | 0.362 | 0.384 | 0.823 |
 | Hybrid | 0.380 | 0.653 | 0.758 | 0.497 | 0.522 | 0.886 |
 
-Per category (hybrid): temporal R@5 0.719 / open-domain 0.668 / single-hop 0.598 / multi-hop 0.449. Multi-hop is the known hard tail.
+Per category (hybrid): temporal Hit@5 0.719 / open-domain 0.668 / single-hop 0.598 / multi-hop 0.449. Multi-hop is the known hard tail.
 
 The `--lmeval-out` dataset is LongMemEval-schema, so phase4's `merge_retrieval.py` + `phase4_run.py` run **verbatim** against it for the judged end-to-end number. Not a CI gate — report-only, mirroring the hybrid precedent.
 

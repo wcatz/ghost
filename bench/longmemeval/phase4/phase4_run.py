@@ -141,7 +141,7 @@ def _post(url, headers, body, max_retries=30):
 def chat(provider, model, key, prompt, max_tokens, api_base_url=None):
     """Single-user-message chat completion, temperature 0. Returns text."""
     if provider == "opencode":
-        return chat_opencode(model, prompt)
+        return chat_opencode(model, prompt, max_tokens)
     if provider == "openai":
         body = {"model": model, "temperature": 0, "max_tokens": max_tokens, "n": 1,
                 "messages": [{"role": "user", "content": prompt}]}
@@ -161,21 +161,27 @@ def chat(provider, model, key, prompt, max_tokens, api_base_url=None):
     return "".join(b.get("text", "") for b in out["content"] if b.get("type") == "text")
 
 
-def chat_opencode(model, prompt):
+def chat_opencode(model, prompt, max_tokens=None):
     """Run one prompt through the `opencode` CLI (subscription-billed; no API
     key). Mirrors internal/ai.OpenCodeClient: --pure skips plugins, the child
     gets a scrubbed XDG_CONFIG_HOME and no ANTHROPIC_API_KEY so it cannot load
     the user's global opencode config or this repo's project config. Retries
-    transient failures like _post."""
+    transient failures like _post. max_tokens is forwarded via the
+    OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX env var (the CLI has no flag for
+    it); without it, judge calls could return arbitrarily long output."""
     import subprocess
     import tempfile
+    import shutil
     last_err = None
     for attempt in range(3):
+        scratch = None
         try:
             env = {k: v for k, v in os.environ.items()
                    if k != "ANTHROPIC_API_KEY" and not k.startswith("XDG_CONFIG_HOME")}
             scratch = tempfile.mkdtemp(prefix="locomo-opencode-")
             env["XDG_CONFIG_HOME"] = scratch
+            if max_tokens is not None:
+                env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(max_tokens)
             cmd = ["opencode", "run", "--format", "json", "--pure"]
             if model:
                 cmd += ["-m", model]
@@ -199,6 +205,9 @@ def chat_opencode(model, prompt):
             sys.stderr.write(f"  opencode error ({e}), retry in {wait}s "
                              f"({attempt + 1}/3)\n")
             time.sleep(wait)
+        finally:
+            if scratch:
+                shutil.rmtree(scratch, ignore_errors=True)
     raise RuntimeError(f"opencode exhausted retries: {last_err}")
 
 
@@ -264,6 +273,20 @@ def cmd_generate(args):
     else:
         key = get_key(args.provider)
     data = json.load(open(args.dataset))
+    if args.useronly:
+        # LoCoMo-derived datasets carry real speaker names ("role" = speaker),
+        # not user/assistant — upstream prepare_prompt's useronly filter would
+        # silently drop every turn. Reject rather than corrupt the run.
+        bad_roles = {
+            t["role"]
+            for entry in data for sess in entry.get("haystack_sessions", [])
+            for t in sess
+        } - {"user", "assistant"}
+        if bad_roles:
+            sys.exit(
+                "--useronly is unsupported for this dataset: haystack roles are "
+                f"{sorted(bad_roles)[:5]}... (LoCoMo speaker names), not user/assistant. "
+                "Re-run without --useronly.")
     done = load_done(args.out)
     if done:
         sys.stderr.write(f"resume: {len(done)} already generated, skipping them\n")

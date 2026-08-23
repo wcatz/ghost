@@ -395,6 +395,10 @@ func rankTurns(ctx context.Context, store *memory.Store, project, question, cond
 
 // --- scoring --------------------------------------------------------------
 
+// scoreTurns scores a question's ranking against its gold dia_ids. The r*
+// returns are hit rates: 1 when any gold turn lands in the top-k, not the
+// fraction of gold items retrieved — multi-evidence questions diverge from
+// true recall. MRR/NDCG do account for every gold item.
 func scoreTurns(ranked []rankedTurn, gold map[string]bool) (r1, r5, r10, mrr, ndcg float64) {
 	hitAt := func(k int) float64 {
 		n := 0
@@ -564,7 +568,12 @@ func printReport(condition string, convs int, overall *agg, perCat, perConv map[
 		printAgg("  "+c, perCat[c])
 	}
 	fmt.Println()
+	convIDs := make([]string, 0, len(perConv))
 	for id := range perConv {
+		convIDs = append(convIDs, id)
+	}
+	sort.Strings(convIDs)
+	for _, id := range convIDs {
 		printAgg("  "+id, perConv[id])
 	}
 	if embedder != nil {
@@ -575,7 +584,7 @@ func printReport(condition string, convs int, overall *agg, perCat, perConv map[
 
 func printAgg(name string, a *agg) {
 	m := overallMetrics(a)
-	fmt.Printf("%-14s n=%-4d R@1=%.3f R@5=%.3f R@10=%.3f MRR@10=%.3f NDCG@10=%.3f SessHit@5=%.3f\n",
+	fmt.Printf("%-14s n=%-4d Hit@1=%.3f Hit@5=%.3f Hit@10=%.3f MRR@10=%.3f NDCG@10=%.3f SessHit@5=%.3f\n",
 		name, a.n, m["r1"], m["r5"], m["r10"], m["mrr10"], m["ndcg10"], m["sr5"])
 }
 

@@ -63,6 +63,17 @@ func newCachedEmbedder(ollamaURL, cachePath string) (*cachedEmbedder, error) {
 		_ = f.Close()
 		return nil, err
 	}
+	// A torn tail line (interrupted run) was skipped by the loader above;
+	// terminate it so the next append doesn't fuse into an unparseable line.
+	if st, statErr := f.Stat(); statErr == nil && st.Size() > 0 {
+		last := make([]byte, 1)
+		if _, readErr := f.ReadAt(last, st.Size()-1); readErr == nil && last[0] != '\n' {
+			if _, writeErr := f.Write([]byte("\n")); writeErr != nil {
+				_ = f.Close()
+				return nil, fmt.Errorf("terminate torn cache tail: %w", writeErr)
+			}
+		}
+	}
 	e.cacheFile = f
 	return e, nil
 }
