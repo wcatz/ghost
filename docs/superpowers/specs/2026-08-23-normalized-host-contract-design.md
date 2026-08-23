@@ -152,9 +152,15 @@ Rules:
   typed SDK access (`client.session.messages`), so it materializes a temp JSONL in the
   `opencode-messages` format and passes the path. Claude Code forwards its native
   `transcript_path`. Ghost selects a scanner by `format`, never by `source`.
-- **Backward compatible by default.** Bare `ghost hook stop` (no `--source`) keeps
-  parsing the exact Claude Code stdin shape shipped today — existing installs,
-  the Claude plugin spec, and all tests are untouched.
+- **No legacy mode.** The contract is mandatory: `--source` is required, and an
+  invocation without it fails open with one stderr line pointing at
+  `ghost mcp init`. Ghost owns both ends of the wire — the installer writes the
+  hook commands — so pre-contract wiring (`… hook stop` with no flags) is
+  migrated in place by the next idempotent `ghost mcp init`
+  (`migratePreContractHook`), and `ghost mcp status` reports such wiring as
+  missing-or-pre-contract until then. This decision was made during
+  implementation: with a single user and no external installs, two parse modes
+  would only double the test surface.
 
 ### 2.2 v1 event handlers
 
@@ -215,17 +221,24 @@ Honest constraints, stated up front:
 
 ## 4. Implementation plan
 
-### Phase 0 — contract + Claude Code parity (this PR's scope, code to follow)
+### Phase 0 — contract + Claude Code parity (implemented on this branch)
 
-- New `internal/hostevent` package: payload struct, validation (contract version,
-  argv/payload equality per §2.1), capability matrix, outcome table.
-- `HandleStopHook` / `HandleSessionStartHook` refactored into: parse contract →
-  validate → dispatch per §2.2's event table. The Claude Code path becomes an
-  adapter producing the same structs it produces today, so all three v1 events are
-  handled from day one with zero behavior change; existing tests green unchanged.
-- Transcript scanner registry keyed by `format`; `claude-jsonl` is v1's only entry.
-- `ghost mcp status` gains `--client` awareness groundwork (report which sources
-  have wiring present).
+- New `internal/hostevent` package: `Payload` (envelope + shared dialect fields
+  + `Raw` passthrough for host extras), strict validation (`Parse` — contract
+  version, argv/payload equality, event-name normalization across
+  camelCase/kebab spellings), the capability matrix, and the format-keyed
+  transcript scanner registry (`claude-jsonl` is v1's only entry; moved out of
+  the stop hook verbatim).
+- New dispatch entrypoint `mcpinit.RunHostEvent(event, source, stdin, stdout,
+  stderr)` covering all three v1 events: session-start injects context,
+  stop runs lifecycle spawns + capability-gated nudge, session-end runs spawns
+  only. The old per-event handlers are gone — one entrypoint, one code path.
+- **Contract is mandatory** (see §2.1 "No legacy mode"): init writes
+  `--source claude-code` into both hooks and migrates pre-contract wiring in
+  place; status flags stale wiring until init re-runs.
+- Status groundwork: the SessionStart/Stop checks require the `--source` form,
+  so pre-contract installs surface as actionable failures instead of failing
+  open silently at every fire.
 
 ### Phase 1 — opencode adapter (closes #345)
 

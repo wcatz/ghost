@@ -18,6 +18,16 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// runSessionStartHook feeds a native session-start payload (wrapped with the
+// contract-v1 envelope, as every adapter shim does) through RunHostEvent and
+// writes the handler's stdout into out.
+func runSessionStartHook(t *testing.T, input string, out io.Writer) {
+	t.Helper()
+	RunHostEvent("session-start", "claude-code",
+		strings.NewReader(contractInputFor(t, "SessionStart", "claude-code", "claude-jsonl", input)),
+		out, io.Discard)
+}
+
 // TestMain isolates every test in this package from the real
 // ~/.config/ghost/config.yaml and ~/.local/share/ghost by default. Without
 // this, a test that calls HandleSessionStartHook (which invokes
@@ -354,7 +364,7 @@ func TestHandleSessionStartHook_GlobalsCapAndNotShownLine(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": "/tmp/no-project-here"})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
 	if !strings.Contains(result, "not shown") {
@@ -394,7 +404,7 @@ func TestHandleSessionStartHook_GlobalsOnNoMatch(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": "/tmp/no-project-here"})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 
 	result := out.String()
 	if !strings.Contains(result, "Global (applies to all projects)") {
@@ -434,7 +444,7 @@ func TestHandleSessionStartHook_NoMatchExplainsDelimiters(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": "/tmp/no-project-here"})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
 	if !strings.Contains(result, "delimits stored memory data") {
@@ -480,7 +490,7 @@ func TestSessionCounterIncrements(t *testing.T) {
 	run := func() string {
 		input, _ := json.Marshal(map[string]string{"cwd": projDir})
 		var out strings.Builder
-		HandleSessionStartHook(strings.NewReader(string(input)), &out)
+		runSessionStartHook(t, string(input), &out)
 		return out.String()
 	}
 	if got := run(); !strings.Contains(got, "Session #1") {
@@ -529,7 +539,7 @@ func TestSessionCounterIgnoresResumeClearCompact(t *testing.T) {
 		}
 		input, _ := json.Marshal(m)
 		var out strings.Builder
-		HandleSessionStartHook(strings.NewReader(string(input)), &out)
+		runSessionStartHook(t, string(input), &out)
 		return out.String()
 	}
 
@@ -774,7 +784,7 @@ func TestInjectionExcludesResolved(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": projDir})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
 	if !strings.Contains(result, "ACTIVEMARKER") {
@@ -857,7 +867,7 @@ func TestSessionInjectionBackfillsAfterDemotion(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": projDir})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
 	if !strings.Contains(result, "ALPHAMARKER original") {
@@ -919,7 +929,7 @@ func TestSessionInjectionRespectsNewCap(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": projDir})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
 	if !strings.Contains(result, "15 shown of 20 total — 5 not shown") {
@@ -989,7 +999,7 @@ func TestSessionInjectionUsesDecayRanking(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": projDir})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
 	if strings.Contains(result, "GOTCHAMARKER") {
@@ -1041,7 +1051,7 @@ func TestHandleSessionStartHook_SubagentSuppressed(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": projDir, "agent_id": "sub-123", "agent_type": "Explore"})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 
 	if got := out.String(); got != "" {
 		t.Errorf("subagent session must produce empty output, got:\n%s", got)
@@ -1083,7 +1093,7 @@ func TestHandleSessionStartHook_TopLevelUnaffected(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": projDir})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 
 	if got := out.String(); !strings.Contains(got, "## Ghost context: myproj") {
 		t.Errorf("top-level session should still get full injection, got:\n%s", got)
@@ -1123,7 +1133,7 @@ func TestHandleSessionStartHook_ResumeSuppressed(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": projDir, "source": "resume"})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 
 	if got := out.String(); got != "" {
 		t.Errorf("resume must produce empty output, got:\n%s", got)
@@ -1163,7 +1173,7 @@ func TestHandleSessionStartHook_CompactShrunk(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": projDir, "source": "compact"})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 
 	got := out.String()
 	if !strings.Contains(got, "ghost_project_context") {
@@ -1206,7 +1216,7 @@ func TestHandleSessionStartHook_ClearUnaffected(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": projDir, "source": "clear"})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 
 	if got := out.String(); !strings.Contains(got, "## Ghost context: myproj") {
 		t.Errorf("clear should still get full injection, got:\n%s", got)
@@ -1263,7 +1273,7 @@ func TestHandleSessionStartHook_FullIDsShown(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": projDir})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
 	if !strings.Contains(result, memID) {
@@ -1319,7 +1329,7 @@ func TestHandleSessionStartHook_DecisionIDShown(t *testing.T) {
 
 	input, _ := json.Marshal(map[string]string{"cwd": projDir})
 	var out strings.Builder
-	HandleSessionStartHook(strings.NewReader(string(input)), &out)
+	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
 	if !strings.Contains(result, "Recent Decisions") {

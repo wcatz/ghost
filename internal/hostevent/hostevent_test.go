@@ -1,0 +1,170 @@
+package hostevent
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+func TestNormalizeEvent(t *testing.T) {
+	cases := map[string]Event{
+		"stop":          EventStop,
+		"Stop":          EventStop,
+		"session-start": EventSessionStart,
+		"SessionStart":  EventSessionStart,
+		"Session-Start": EventSessionStart,
+		"sessionend":    EventSessionEnd,
+		"SessionEnd":    EventSessionEnd,
+		"":              "",
+		"turn-end":      "",
+	}
+	for in, want := range cases {
+		if got := NormalizeEvent(in); got != want {
+			t.Errorf("NormalizeEvent(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestCapabilityFor(t *testing.T) {
+	cases := []struct {
+		source Source
+		ok     bool
+		block  bool
+		inject bool
+	}{
+		{SourceClaudeCode, true, true, true},
+		{SourceCodex, true, true, true},
+		{SourceGoose, true, true, false},
+		{SourceOpencode, true, false, false},
+		{"gemini-cli", false, false, false},
+		{"", false, false, false},
+	}
+	for _, c := range cases {
+		got, ok := CapabilityFor(c.source)
+		if ok != c.ok || got.BlockStop != c.block || got.InjectContext != c.inject {
+			t.Errorf("CapabilityFor(%q) = %+v,%v want block=%v inject=%v ok=%v", c.source, got, ok, c.block, c.inject, c.ok)
+		}
+	}
+}
+
+// claudeStopPayload is the exact shape Claude Code sends on Stop (no envelope).
+const claudeStopPayload = `{"session_id":"s1","transcript_path":"/t/x.jsonl","cwd":"/repo","stop_hook_active":false}`
+
+// codexStopPayload mirrors codex's documented Stop input: the shared dialect
+// fields plus codex-specific extras that must be tolerated and ignored.
+const codexStopPayload = `{"contract":{"version":1,"source":"codex","transcript_format":"codex-rollout"},"hook_event_name":"Stop","session_id":"thr_123","transcript_path":"/w/.codex/rollout.jsonl","cwd":"/w","stop_hook_active":false,"turn_id":"t9","model":"gpt-5.6","permission_mode":"default","last_assistant_message":null}`
+
+// gooseStopPayload is a native Open Plugins Stop payload wrapped with ghost's
+// envelope by the adapter shim.
+const gooseStopPayload = `{"contract":{"version":1,"source":"goose"},"hook_event_name":"Stop","session_id":"g1","transcript_path":"","cwd":"/g","stop_hook_active":true}`
+
+func TestParseClaudeCode(t *testing.T) {
+	// A native Claude Code Stop payload wrapped with the envelope parses with
+	// no field translation — the dialect fields ARE the contract fields.
+	wrapped := contractWrap(claudeStopPayload, "Stop", "claude-code", FormatClaudeJSONL)
+	p, err := Parse([]byte(wrapped), "stop", "claude-code")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if p.HostSource() != SourceClaudeCode {
+		t.Errorf("source = %q, want claude-code", p.HostSource())
+	}
+	if p.TranscriptPath != "/t/x.jsonl" || p.CWD != "/repo" || p.StopHookActive {
+		t.Errorf("fields wrong: %+v", p)
+	}
+	if p.Event() != EventStop {
+		t.Errorf("event = %q, want stop", p.Event())
+	}
+	if p.Contract.TranscriptFormat != FormatClaudeJSONL {
+		t.Errorf("transcript format = %q, want claude-jsonl", p.Contract.TranscriptFormat)
+	}
+
+	// No legacy mode: an envelope-less native payload is rejected.
+	if _, err := Parse([]byte(claudeStopPayload), "stop", "claude-code"); err == nil || !strings.Contains(err.Error(), "contract.version") {
+		t.Errorf("envelope-less payload should fail on version, got %v", err)
+	}
+
+	// Missing --source is rejected outright (the CLI fails open with guidance).
+	if _, err := Parse([]byte(wrapped), "stop", ""); err == nil || !strings.Contains(err.Error(), "missing --source") {
+		t.Errorf("empty source should error, got %v", err)
+	}
+
+	// Unknown argv event is rejected before parsing even matters.
+	if _, err := Parse([]byte(wrapped), "turn-end", "claude-code"); err == nil || !strings.Contains(err.Error(), "unknown event") {
+		t.Errorf("unknown argv event should error, got %v", err)
+	}
+}
+
+// contractWrap merges the envelope into a native host payload string.
+func contractWrap(inner, eventName, source, format string) string {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(inner), &m); err != nil {
+		panic(err)
+	}
+	m["hook_event_name"] = eventName
+	m["contract"] = map[string]any{"version": ContractVersion, "source": source, "transcript_format": format}
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+
+func TestParseStrict(t *testing.T) {
+	t.Run("codex passthrough with unknown extras tolerated", func(t *testing.T) {
+		p, err := Parse([]byte(codexStopPayload), "stop", "codex")
+		if err != nil {
+			t.Fatalf("strict parse: %v", err)
+		}
+		if p.HostSource() != SourceCodex || p.Event() != EventStop {
+			t.Errorf("wrong routing: source=%q event=%q", p.HostSource(), p.Event())
+		}
+		if p.SessionID != "thr_123" || p.CWD != "/w" || p.StopHookActive {
+			t.Errorf("dialect fields wrong: %+v", p)
+		}
+		if p.Contract.TranscriptFormat != FormatCodexRollout {
+			t.Errorf("transcript format = %q, want codex-rollout", p.Contract.TranscriptFormat)
+		}
+	})
+
+	t.Run("goose payload case-insensitive event name", func(t *testing.T) {
+		p, err := Parse([]byte(gooseStopPayload), "stop", "goose")
+		if err != nil {
+			t.Fatalf("strict parse: %v", err)
+		}
+		if !p.StopHookActive || p.HostSource() != SourceGoose {
+			t.Errorf("payload wrong: %+v", p)
+		}
+	})
+
+	t.Run("missing transcript_format defaults to none", func(t *testing.T) {
+		p, err := Parse([]byte(gooseStopPayload), "stop", "goose")
+		if err != nil {
+			t.Fatalf("strict parse: %v", err)
+		}
+		if p.Contract.TranscriptFormat != FormatNone {
+			t.Errorf("format = %q, want none", p.Contract.TranscriptFormat)
+		}
+	})
+
+	t.Run("failures", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			payload    string
+			event, src string
+			wantErr    string
+		}{
+			{"unknown argv source", codexStopPayload, "stop", "gemini", "unknown --source"},
+			{"version mismatch", `{"contract":{"version":2,"source":"codex"}}`, "stop", "codex", "unsupported"},
+			{"source disagreement", strings.Replace(codexStopPayload, `"source":"codex"`, `"source":"goose"`, 1), "stop", "codex", "disagrees"},
+			{"event disagreement", strings.Replace(codexStopPayload, `"hook_event_name":"Stop"`, `"hook_event_name":"SessionEnd"`, 1), "stop", "codex", "disagrees"},
+			{"unparseable strict payload", "{not json", "stop", "codex", "parse payload"},
+			{"bad transcript format", `{"contract":{"version":1,"source":"codex","transcript_format":"pdf"},"hook_event_name":"Stop"}`, "stop", "codex", "unknown transcript_format"},
+			{"non-v1 hook event name", `{"contract":{"version":1,"source":"codex"},"hook_event_name":"TeammateIdle"}`, "stop", "codex", "not a v1 event"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				if _, err := Parse([]byte(tc.payload), tc.event, tc.src); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("Parse error = %v, want containing %q", err, tc.wantErr)
+				}
+			})
+		}
+	})
+}

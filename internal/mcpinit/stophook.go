@@ -1,10 +1,8 @@
 package mcpinit
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,114 +13,100 @@ import (
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/hostevent"
 	"github.com/wcatz/ghost/internal/memory"
 )
-
-type stopHookInput struct {
-	TranscriptPath string `json:"transcript_path"`
-	StopHookActive bool   `json:"stop_hook_active"`
-	CWD            string `json:"cwd"`
-}
-
-// transcriptLine is the minimal shape needed to spot tool_use entries in a
-// Claude Code transcript JSONL line. Everything else in the line is ignored.
-type transcriptLine struct {
-	Type    string `json:"type"`
-	Message struct {
-		Content []struct {
-			Type string `json:"type"`
-			Name string `json:"name"`
-		} `json:"content"`
-	} `json:"message"`
-}
-
-// ghostSaveTools are the tool names whose presence in a transcript proves the
-// session saved knowledge to Ghost.
-var ghostSaveTools = map[string]bool{
-	"mcp__ghost__ghost_memory_save": true,
-	"mcp__ghost__ghost_save_global": true,
-}
 
 // stopBlockMessage is emitted (as hook JSON) when a tool-using session ends
 // without a single Ghost save. Claude Code shows the reason to Claude and the
 // session continues once; stop_hook_active guarantees the second stop wins.
 const stopBlockMessage = `{"decision":"block","reason":"This session used tools but saved nothing to Ghost. Review the session for discoveries worth keeping (commands, configs, gotchas, decisions) and save them with ghost_memory_save — or stop again if there is truly nothing to save."}`
 
-// HandleStopHook is invoked by Claude Code when a session stops via:
+// RunHostEvent is the contract-v1 entrypoint for every host lifecycle event:
 //
-//	ghost hook stop
+//	ghost hook <event> --source <host>
 //
-// It blocks the stop once — via {"decision":"block"} on stdout — when the
-// session used tools but never saved anything to Ghost. Every failure path
-// returns silently, allowing the stop: the hook must never trap a session.
-// The one exception to "no DB/LLM work on this path" is the three spawn
-// helpers — spawnResolveIfConfigured, spawnSupersedeIfConfigured, and
-// spawnReflectIfConfigured — which, best-effort, opt-in only, do a small
-// synchronous read-only lookup (config + a project-ID query) before forking a
-// detached `ghost resolve --apply` / `ghost supersede --apply` /
-// `ghost reflect --apply --require-llm` and returning immediately without
-// waiting on it; no LLM call and no write ever happens inline here, only in the
-// detached child.
-func HandleStopHook(stdin io.Reader, stdout io.Writer) {
+// It validates the contract envelope strictly (hostevent.Parse) and dispatches
+// per spec §2.2: session-start injects context, stop runs lifecycle spawns plus
+// the capability-gated save nudge, session-end runs the spawns only. Fail-open
+// is absolute: every validation, scan, or I/O failure logs one line to stderr,
+// writes nothing to stdout, and returns — callers exit 0 so the host proceeds.
+func RunHostEvent(eventArg, sourceArg string, stdin io.Reader, stdout io.Writer, stderr io.Writer) {
 	data, err := io.ReadAll(stdin)
 	if err != nil {
+		logFailOpen(stderr, "read stdin", err)
 		return
 	}
-	var input stopHookInput
-	if err := json.Unmarshal(data, &input); err != nil {
-		return
-	}
-	// A prior block already fired this session — the second stop always wins.
-	if input.StopHookActive {
-		return
-	}
-
-	spawnResolveIfConfigured(input.CWD)
-	spawnSupersedeIfConfigured(input.CWD)
-	spawnReflectIfConfigured(input.CWD)
-
-	if input.TranscriptPath == "" {
-		return
-	}
-	f, err := os.Open(input.TranscriptPath)
+	payload, err := hostevent.Parse(data, eventArg, sourceArg)
 	if err != nil {
+		logFailOpen(stderr, "validate contract", err)
+		return
+	}
+
+	switch payload.Event() {
+	case hostevent.EventSessionStart:
+		runSessionStart(payload.Raw, stdout)
+	case hostevent.EventStop:
+		runStop(payload, stdout, stderr, true)
+	case hostevent.EventSessionEnd:
+		runStop(payload, stdout, stderr, false)
+	}
+}
+
+// logFailOpen writes the single fail-open diagnostic line the outcome table
+// promises. It never touches stdout and never returns an error upward: the
+// hook must allow the stop regardless.
+func logFailOpen(stderr io.Writer, stage string, err error) {
+	if stderr == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(stderr, "ghost hook: fail-open (%s: %v)\n", stage, err)
+}
+
+// runStop executes the stop/session-end handler: opt-in lifecycle spawns,
+// then — only on stop events (nudge=true) where the host can actually block —
+// the save-nudge decision. session-end (nudge=false) never scans the
+// transcript and never emits output.
+func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool) {
+	// A prior block already fired this session — the second stop always wins.
+	if p.StopHookActive {
+		return
+	}
+
+	spawnResolveIfConfigured(p.CWD)
+	spawnSupersedeIfConfigured(p.CWD)
+	spawnReflectIfConfigured(p.CWD)
+
+	if !nudge || p.TranscriptPath == "" {
+		return
+	}
+	capability, ok := hostevent.CapabilityFor(p.HostSource())
+	if !ok {
+		logFailOpen(stderr, "unknown source "+string(p.HostSource()), fmt.Errorf("no capability entry"))
+		return
+	}
+	f, err := os.Open(p.TranscriptPath)
+	if err != nil {
+		logFailOpen(stderr, "open transcript", err)
 		return
 	}
 	defer f.Close() //nolint:errcheck
 
-	toolCalls, ghostSaves := scanTranscript(f)
-	if toolCalls == 0 || ghostSaves > 0 {
+	res, ok := hostevent.Scan(p.Contract.TranscriptFormat, f)
+	if !ok {
+		logFailOpen(stderr, "transcript format", fmt.Errorf("no scanner registered for %q", p.Contract.TranscriptFormat))
+		return
+	}
+	if res.ToolCalls == 0 || res.GhostSaves > 0 {
+		return
+	}
+	if !capability.BlockStop {
+		// The nudge would fire, but this host cannot block a stop: degrade to
+		// one stderr line rather than emitting output the host misreads.
+		logFailOpen(stderr, "nudge suppressed", fmt.Errorf("source %q cannot block a stop", p.HostSource()))
 		return
 	}
 	_, _ = fmt.Fprintln(stdout, stopBlockMessage)
-}
-
-// scanTranscript streams a transcript and counts assistant tool_use blocks,
-// plus how many were Ghost save tools. Unparseable lines are skipped; a
-// scanner error mid-file yields the counts seen so far — worst case the nudge
-// fires once and the second stop passes through the stop_hook_active guard.
-func scanTranscript(r io.Reader) (toolCalls, ghostSaves int) {
-	sc := bufio.NewScanner(r)
-	// Transcript lines carry full tool results and can be huge.
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		var line transcriptLine
-		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
-			continue
-		}
-		if line.Type != "assistant" {
-			continue
-		}
-		for _, c := range line.Message.Content {
-			if c.Type == "tool_use" {
-				toolCalls++
-				if ghostSaveTools[c.Name] {
-					ghostSaves++
-				}
-			}
-		}
-	}
-	return toolCalls, ghostSaves
 }
 
 // spawnResolveIfConfigured starts `ghost resolve <project> --apply` as a

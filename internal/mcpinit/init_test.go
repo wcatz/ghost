@@ -13,7 +13,7 @@ import (
 
 func TestHandleSessionStartHook(t *testing.T) {
 	var out bytes.Buffer
-	HandleSessionStartHook(strings.NewReader(`{"event":"SessionStart"}`), &out)
+	runSessionStartHook(t, `{"event":"SessionStart"}`, &out)
 
 	output := out.String()
 	if output == "" {

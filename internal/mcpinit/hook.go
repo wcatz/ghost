@@ -96,15 +96,14 @@ type sessionStartInput struct {
 	AgentType string `json:"agent_type"`
 }
 
-// HandleSessionStartHook is invoked by Claude Code at session start via:
-//
-//	ghost hook session-start
-//
+// runSessionStart is the session-start handler dispatched by RunHostEvent.
 // Its stdout becomes visible in Claude's context as a system-reminder.
 // It automatically loads project context from the ghost DB based on cwd.
-func HandleSessionStartHook(stdin io.Reader, stdout io.Writer) {
-	data, _ := io.ReadAll(stdin)
-
+// The raw payload bytes are passed through untouched so host-specific fields
+// beyond the contract core (Claude's agent_id/agent_type subagent gate and
+// source resume/clear/compact short-circuits) stay available here; strict
+// envelope validation already happened in RunHostEvent.
+func runSessionStart(data []byte, stdout io.Writer) {
 	var input sessionStartInput
 	_ = json.Unmarshal(data, &input)
 
@@ -365,7 +364,7 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 
 	// Total count (pre-truncation) so the rendered context can flag how many
 	// memories weren't shown instead of silently dropping them — see the
-	// "N not shown" line in HandleSessionStartHook. A failed COUNT is reported
+	// "N not shown" line in runSessionStart. A failed COUNT is reported
 	// as "unknown" rather than silently treated as zero/no-truncation.
 	if err := db.QueryRow(`
 		SELECT COUNT(*) FROM memories WHERE project_id = ? AND resolved_at IS NULL
