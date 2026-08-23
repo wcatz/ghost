@@ -33,7 +33,7 @@ native events into that contract. Ghost core learns zero new formats per client.
 
 ### 2.1 The contract
 
-```
+```text
 ghost hook <event> --source <host> [--version 1]
 ```
 
@@ -58,10 +58,34 @@ with a versioned JSON payload on stdin:
 
 Rules:
 
-- **Output protocol is capability-scoped.** `block_stop` output is emitted only when
-  the payload declared it; hosts without blocking (opencode plugins, codex) get the
-  nudge as a log line / no-op instead. Fail-open stays absolute: every parse error,
-  missing transcript, or unknown source silently allows the stop.
+- **CLI args are authoritative; payload must agree.** `event` and `source` exist in
+  both the argv and the payload so the payload is self-describing in logs, but
+  dispatch validates equality (and `contract == 1`) *before* anything else. Any
+  mismatch — including a stale adapter sending `"source": "claude-code"` with
+  `--source opencode` — is rejected as fail-open (log line, empty stdout, exit 0).
+  Routing never consults a field that failed validation.
+- **Output protocol is capability-scoped, enforced by a source matrix.** Blocking
+  output exists only for sources whose v1 capability grants it. The v1 matrix:
+
+  | source | block_stop | inject_context | nudge on save-less stop |
+  | --- | --- | --- | --- |
+  | claude-code | yes | yes | yes |
+  | opencode | no | no | log-only |
+  | codex | no | no | log-only |
+
+- **Executable outcome table.** Every path has defined stdout / stderr / exit code:
+
+  | outcome | stdout | stderr | exit |
+  | --- | --- | --- | --- |
+  | block (claude-code, eligible) | `{"decision":"block","reason":…}` | — | 0 |
+  | context injection (`session-start`) | host-visible injection text (Claude: system-reminder block) | — | 0 |
+  | normal completion (spawns done, nothing to say) | empty | — | 0 |
+  | nudge on non-blocking host | empty | one log line | 0 |
+  | parse error / contract mismatch / unknown source / missing transcript | empty | one log line | 0 |
+
+  Fail-open is absolute and **always exits 0** — a nonzero exit could itself be
+  read by hosts as hook failure; ghost treats "allow the stop" as the only
+  failure response it ever emits.
 - **Transcripts are adapter-normalized where the adapter can.** opencode's plugin has
   typed SDK access (`client.session.messages`), so it materializes a temp JSONL in the
   `opencode-messages` format and passes the path. Claude Code forwards its native
@@ -70,7 +94,17 @@ Rules:
   parsing the exact Claude Code stdin shape shipped today — existing installs,
   the Claude plugin spec, and all tests are untouched.
 
-### 2.2 Why adapters live outside ghost core
+### 2.2 v1 event handlers
+
+All three declared events ship with defined behavior from Phase 0:
+
+| event | handler | behavior |
+| --- | --- | --- |
+| `session-start` | wraps today's `HandleSessionStartHook` logic (`internal/mcpinit/hook.go:105`) | read-only project-context load + globals + obsidian sync kick; subagent gate and resume/compact short-circuits preserved verbatim |
+| `stop` | wraps today's `HandleStopHook` logic | capability-gated spawns (resolve/supersede/reflect) + save-nudge when `block_stop` granted |
+| `session-end` | spawns-only variant of `stop` | lifecycle spawns run; **no nudge** — designed for hosts that emit once per real session end rather than per turn |
+
+### 2.3 Why adapters live outside ghost core
 
 A resident daemon was considered and rejected for now: the current spawn-per-event
 model with flock-serialized PID claims (`claimPidFile`) is proven, dependency-free,
@@ -102,16 +136,22 @@ Honest constraints, stated up front:
 
 ### Phase 0 — contract + Claude Code parity (this PR's scope, code to follow)
 
-- New `internal/hostevent` package: payload struct, validation, capability flags.
-- `HandleStopHook` refactored into: parse contract → dispatch to the existing
-  nudge/spawn logic. Claude Code path becomes an adapter producing the same struct
-  it produces today. Zero behavior change; existing tests green unchanged.
+- New `internal/hostevent` package: payload struct, validation (contract version,
+  argv/payload equality per §2.1), capability matrix, outcome table.
+- `HandleStopHook` / `HandleSessionStartHook` refactored into: parse contract →
+  validate → dispatch per §2.2's event table. The Claude Code path becomes an
+  adapter producing the same structs it produces today, so all three v1 events are
+  handled from day one with zero behavior change; existing tests green unchanged.
 - Transcript scanner registry keyed by `format`; `claude-jsonl` is v1's only entry.
 - `ghost mcp status` gains `--client` awareness groundwork (report which sources
   have wiring present).
 
 ### Phase 1 — opencode adapter (closes #345)
 
+- **Scanner first:** add the `opencode-messages` transcript scanner and its golden
+  fixtures to the registry *before* any adapter lands — an adapter that invokes the
+  contract successfully but fails open on an unsupported format would silently
+  disable reflection/resolve/supersede for opencode users.
 - `plugin/ghost-opencode/` in-repo: TypeScript plugin listening for
   `session.status`→idle transitions; spawns `ghost hook stop --source opencode`
   with SDK-fetched messages serialized to a temp JSONL.
