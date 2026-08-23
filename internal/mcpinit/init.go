@@ -432,47 +432,83 @@ func splitHookCommand(cmd string) (bin, rest string, ok bool) {
 	}
 }
 
-// ensureHook adds a SessionStart hook if not already present, or migrates it
-// off the pre-#251 quoting that's broken under cmd.exe.
+// ensureHook adds a SessionStart hook if not already present, migrates it off
+// the pre-#251 quoting that's broken under cmd.exe, and migrates any
+// pre-contract bare invocation (`… hook session-start`, no --source) onto the
+// contract-v1 form.
 func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
-	hookCmd := shellQuote(ghostBin) + " hook session-start"
+	hookCmd := shellQuote(ghostBin) + " hook session-start --source claude-code"
 	legacyCmd := shellQuotePOSIX(ghostBin) + " hook session-start"
 	warnPercentPath(w, ghostBin)
+
+	contractMigrated, err := migratePreContractHook(sf, "SessionStart", "hook session-start", hookCmd)
+	if err != nil {
+		return err
+	}
 
 	action, err := reconcileHook(sf, "SessionStart", "hook session-start", hookCmd, legacyCmd, runtime.GOOS == "windows")
 	if err != nil {
 		return err
 	}
-	switch action {
-	case hookAdded:
+	switch {
+	case action == hookAdded:
 		_, _ = fmt.Fprintf(w, "  + added SessionStart hook: %s\n", hookCmd)
-	case hookMigrated:
-		_, _ = fmt.Fprintf(w, "  + migrated SessionStart hook to cmd.exe-safe quoting: %s\n", hookCmd)
+	case action == hookMigrated || contractMigrated:
+		_, _ = fmt.Fprintf(w, "  + migrated SessionStart hook to current invocation: %s\n", hookCmd)
 	default:
 		_, _ = fmt.Fprintln(w, "  ✓ SessionStart hook already configured")
 	}
 	return nil
 }
 
-// ensureStopHook adds a Stop hook if not already present, or migrates it off
-// the pre-#251 quoting that's broken under cmd.exe.
+// ensureStopHook adds a Stop hook if not already present, migrates it off the
+// pre-#251 quoting that's broken under cmd.exe, and migrates any pre-contract
+// bare invocation (`… hook stop`, no --source) onto the contract-v1 form.
 func ensureStopHook(w io.Writer, sf *settingsFile, ghostBin string) error {
-	hookCmd := shellQuote(ghostBin) + " hook stop"
+	hookCmd := shellQuote(ghostBin) + " hook stop --source claude-code"
 	legacyCmd := shellQuotePOSIX(ghostBin) + " hook stop"
+
+	contractMigrated, err := migratePreContractHook(sf, "Stop", "hook stop", hookCmd)
+	if err != nil {
+		return err
+	}
 
 	action, err := reconcileHook(sf, "Stop", "hook stop", hookCmd, legacyCmd, runtime.GOOS == "windows")
 	if err != nil {
 		return err
 	}
-	switch action {
-	case hookAdded:
+	switch {
+	case action == hookAdded:
 		_, _ = fmt.Fprintf(w, "  + added Stop hook: %s\n", hookCmd)
-	case hookMigrated:
-		_, _ = fmt.Fprintf(w, "  + migrated Stop hook to cmd.exe-safe quoting: %s\n", hookCmd)
+	case action == hookMigrated || contractMigrated:
+		_, _ = fmt.Fprintf(w, "  + migrated Stop hook to current invocation: %s\n", hookCmd)
 	default:
 		_, _ = fmt.Fprintln(w, "  ✓ Stop hook already configured")
 	}
 	return nil
+}
+
+// migratePreContractHook rewrites a hook whose argument tail is exactly the
+// pre-contract bare form (e.g. `… hook stop` with no flags) into desiredCmd,
+// which carries `--source claude-code`. The contract has no legacy mode, so a
+// stale bare invocation fails open on every fire until rewritten here; this
+// migration keeps `ghost mcp init` (idempotent, non-destructive) the one-step
+// fix. Matching is exact on the arg tail — a hand-edited wrapper that adds
+// redirections or env vars never matches and is left untouched, same policy
+// as reconcileHook. Reports whether a migration happened.
+func migratePreContractHook(sf *settingsFile, event, bareTail, desiredCmd string) (bool, error) {
+	existingCmd, exists, err := sf.findHookCommand(event, bareTail)
+	if err != nil || !exists {
+		return false, err
+	}
+	_, rest, ok := splitHookCommand(existingCmd)
+	if !ok || rest != bareTail {
+		return false, nil
+	}
+	if _, err := sf.replaceHookCommand(event, existingCmd, desiredCmd); err != nil {
+		return false, fmt.Errorf("migrate %s hook to contract invocation: %w", event, err)
+	}
+	return true, nil
 }
 
 // warnPercentPath flags ghost binary paths containing '%' on Windows: cmd.exe

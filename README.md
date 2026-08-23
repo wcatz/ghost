@@ -142,7 +142,7 @@ One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`) — thi
 A bounded digest, and you can inspect it yourself. The session-start hook emits: project name, top memories, learned context, open tasks, and active decisions. Global memories (the `_global` project) are injected even when the cwd matches no known project. See precisely what your agent sees:
 
 ```bash
-echo '{"cwd":"'"$PWD"'"}' | ghost hook session-start
+echo '{"contract":{"version":1,"source":"claude-code","transcript_format":"claude-jsonl"},"hook_event_name":"SessionStart","cwd":"'"$PWD"'"}' | ghost hook session-start --source claude-code
 ```
 
 No mystery blob in your system prompt. Save-time dedup keeps the digest from bloating, and time-decay scoring weights `ghost_project_context` and resource reads toward what's still true. Subagent sessions get nothing (they inherit context in-band from the parent); `resume` skips injection; `compact` emits a one-line pointer instead of re-dumping. Full details in [docs/architecture.md](docs/architecture.md).
@@ -272,8 +272,7 @@ The server ships with embedded instructions that teach the agent when to save, w
 ghost mcp                    # Run MCP server on stdio (used by your MCP client)
 ghost mcp init [--client claude|opencode] [--dry-run]   # Configure MCP client integration (default: Claude Code)
 ghost mcp status [--client claude|opencode]             # Deep health checks (incl. Ollama reachability, model presence)
-ghost hook session-start     # SessionStart hook — prints exactly what gets injected
-ghost hook stop              # Stop hook — blocks stop once if a tool-using session saved nothing
+ghost hook <event> --source <host>  # Contract-v1 lifecycle hook (session-start, stop, session-end)
 ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
 ghost resolve <project>      # De-weight resolved-evidence memories from injection (dry-run by default; --apply)
 ghost supersede <project>    # Link superseded memories (dry-run by default; --apply, --threshold)

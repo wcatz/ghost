@@ -3,6 +3,8 @@ package mcpinit
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,15 +23,39 @@ func writeTranscript(t *testing.T, lines ...string) string {
 	return path
 }
 
-// stopInput builds the hook's stdin JSON.
+// stopInput builds the hook's stdin JSON: a Claude Code Stop payload wrapped
+// with the contract-v1 envelope (the only accepted shape since the contract
+// gained no legacy mode).
 func stopInput(t *testing.T, transcriptPath string, active bool) string {
 	t.Helper()
-	b, err := json.Marshal(map[string]any{
-		"transcript_path":  transcriptPath,
-		"stop_hook_active": active,
-	})
+	return contractInputFor(t, "Stop", "claude-code", "claude-jsonl",
+		fmt.Sprintf(`{"session_id":"s1","transcript_path":%q,"cwd":"/repo","stop_hook_active":%t}`, transcriptPath, active))
+}
+
+// contractInput wraps a native Claude Code Stop payload with the ghost
+// contract envelope, mirroring what every adapter shim does before invoking
+// `ghost hook`.
+func contractInput(t *testing.T, inner string) string {
+	t.Helper()
+	return contractInputFor(t, "Stop", "claude-code", "claude-jsonl", inner)
+}
+
+// contractInputFor is contractInput with every envelope field selectable.
+func contractInputFor(t *testing.T, eventName, source, format, inner string) string {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(inner), &m); err != nil {
+		t.Fatalf("contractInput inner payload: %v", err)
+	}
+	m["hook_event_name"] = eventName
+	m["contract"] = map[string]any{
+		"version":           1,
+		"source":            source,
+		"transcript_format": format,
+	}
+	b, err := json.Marshal(m)
 	if err != nil {
-		t.Fatalf("marshal input: %v", err)
+		t.Fatalf("marshal contract input: %v", err)
 	}
 	return string(b)
 }
@@ -44,7 +70,7 @@ const (
 func runStopHook(t *testing.T, stdin string) string {
 	t.Helper()
 	var out strings.Builder
-	HandleStopHook(strings.NewReader(stdin), &out)
+	RunHostEvent("stop", "claude-code", strings.NewReader(stdin), &out, io.Discard)
 	return out.String()
 }
 
@@ -115,19 +141,69 @@ func TestHandleStopHook(t *testing.T) {
 	})
 }
 
-func TestHandleStopHook_FailsOpenOnEmptyTranscriptPathEvenWithCWD(t *testing.T) {
-	// HandleStopHook must stay silent and return promptly when transcript_path
-	// is empty, even once cwd is populated and a spawn attempt is made first —
-	// proving the new spawnResolveIfConfigured call didn't introduce a hang or
-	// panic on the hot path. This does NOT assert spawnResolveIfConfigured was
-	// a no-op (see TestSpawnResolveIfConfigured_NoOpWhenDisabled for that); the
-	// early return below is guaranteed independently of spawn behavior.
+func TestRunHostEvent_FailsOpenOnEmptyTranscriptPathEvenWithCWD(t *testing.T) {
+	// RunHostEvent must stay silent on stdout and return promptly when
+	// transcript_path is empty, even once cwd is populated and a spawn attempt
+	// is made first — proving the spawnResolveIfConfigured call didn't
+	// introduce a hang or panic on the hot path. This does NOT assert
+	// spawnResolveIfConfigured was a no-op (see
+	// TestSpawnResolveIfConfigured_NoOpWhenDisabled for that); the early
+	// return below is guaranteed independently of spawn behavior.
 	isolatedHome(t)
 	var buf bytes.Buffer
-	input := `{"transcript_path":"","stop_hook_active":false,"cwd":"/tmp/does-not-matter"}`
-	HandleStopHook(strings.NewReader(input), &buf)
+	input := contractInput(t, `{"transcript_path":"","cwd":"/tmp/does-not-matter","stop_hook_active":false}`)
+	RunHostEvent("stop", "claude-code", strings.NewReader(input), &buf, io.Discard)
 	if buf.Len() != 0 {
 		t.Errorf("expected no output for empty transcript_path, got %q", buf.String())
+	}
+}
+
+// TestRunHostEvent_MissingSourceFailsOpen pins the no-legacy-mode rule: an
+// invocation without --source can't be routed, so it fails open with one
+// stderr line, no stdout, and returns normally (the CLI exits 0).
+func TestRunHostEvent_MissingSourceFailsOpen(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	path := writeTranscript(t, lineToolBash)
+	RunHostEvent("stop", "", strings.NewReader(fmt.Sprintf(`{"transcript_path":%q}`, path)), &out, &errBuf)
+	if out.Len() != 0 {
+		t.Errorf("expected no stdout, got %q", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "missing --source") {
+		t.Errorf("expected missing-source guidance on stderr, got %q", errBuf.String())
+	}
+}
+
+// TestRunHostEvent_SessionEndNeverNudges pins spec §2.2: session-end runs the
+// lifecycle spawns only — a tool-using session with zero saves must pass in
+// silence even though the identical payload blocks on stop.
+func TestRunHostEvent_SessionEndNeverNudges(t *testing.T) {
+	isolatedHome(t)
+	path := writeTranscript(t, lineUser, lineToolBash, lineText)
+	input := contractInputFor(t, "SessionEnd", "claude-code", "claude-jsonl",
+		fmt.Sprintf(`{"session_id":"s1","transcript_path":%q,"cwd":"","stop_hook_active":false}`, path))
+	var out strings.Builder
+	RunHostEvent("session-end", "claude-code", strings.NewReader(input), &out, io.Discard)
+	if out.String() != "" {
+		t.Errorf("session-end must never emit a block decision, got %q", out.String())
+	}
+}
+
+// TestRunHostEvent_NudgeSuppressedOnNonBlockingHost pins the capability gate:
+// opencode cannot block a stop, so the eligible nudge degrades to one stderr
+// line instead of emitting output the host would misread.
+func TestRunHostEvent_NudgeSuppressedOnNonBlockingHost(t *testing.T) {
+	isolatedHome(t)
+	path := writeTranscript(t, lineUser, lineToolBash, lineText)
+	input := contractInputFor(t, "Stop", "opencode", "claude-jsonl",
+		fmt.Sprintf(`{"session_id":"s1","transcript_path":%q,"cwd":"","stop_hook_active":false}`, path))
+
+	var out, errBuf bytes.Buffer
+	RunHostEvent("stop", "opencode", strings.NewReader(input), &out, &errBuf)
+	if out.Len() != 0 {
+		t.Errorf("non-blocking host must get no block decision, got %q", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "cannot block") {
+		t.Errorf("expected suppression note on stderr, got %q", errBuf.String())
 	}
 }
 
