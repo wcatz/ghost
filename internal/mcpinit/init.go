@@ -24,11 +24,14 @@ func Run(w io.Writer, dryRun bool) error {
 		_, _ = fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
 	}
 
-	// Step 1: Prerequisites.
+	// Step 1: Prerequisites. No retryHint here: a missing binary is an
+	// install-first problem that re-running init cannot fix, and the
+	// claude-missing error carries its own next-step guidance (alternative
+	// clients) that the generic re-run hint would bury.
 	_, _ = fmt.Fprintln(w, "[1/9] Checking prerequisites...")
 	ghostBin, claudeBin, err := checkPrereqs(w, "claude")
 	if err != nil {
-		return retryHint(err)
+		return err
 	}
 
 	// Step 2: Config file.
@@ -143,7 +146,8 @@ func checkPrereqs(w io.Writer, client string) (ghostBin, claudeBin string, err e
 	if client == "claude" {
 		claudeBin = findBinary("claude")
 		if claudeBin == "" {
-			return "", "", fmt.Errorf("claude CLI not found in PATH — install Claude Code first")
+			return "", "", fmt.Errorf("claude CLI not found in PATH — install Claude Code first\n" +
+				"  Or configure a different MCP client: ghost mcp init --client opencode|codex|goose|all")
 		}
 		_, _ = fmt.Fprintf(w, "  ✓ claude CLI at %s\n", claudeBin)
 	}
