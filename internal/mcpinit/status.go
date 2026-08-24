@@ -172,7 +172,18 @@ func StatusOpencode(w io.Writer) (bool, error) {
 			"opencode MCP config: ghost missing or wrong command")
 	}
 
-	// 3. Embedding & linking health — silent embed failures leave vector
+	// 3. Lifecycle plugin — without it stop events never reach the contract,
+	// so reflection/resolve/supersede silently never run for opencode.
+	pluginPath, perr := opencodePluginPath()
+	if perr != nil {
+		check(false, "", fmt.Sprintf("lifecycle plugin: %v", perr))
+	} else if data, rerr := os.ReadFile(pluginPath); rerr == nil && strings.Contains(string(data), opencodePluginMarker) {
+		check(true, fmt.Sprintf("lifecycle plugin installed: %s", pluginPath), "")
+	} else {
+		check(false, "", "lifecycle plugin missing or outdated (run ghost mcp init --client opencode)")
+	}
+
+	// 4. Embedding & linking health — silent embed failures leave vector
 	// search and memory linking inactive.
 	store := checkStoreHealth(w, check)
 	if store != nil {

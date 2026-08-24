@@ -149,6 +149,77 @@ func TestRunOpencode_DryRunWritesNothing(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(xdg, "opencode", "opencode.json")); err == nil {
 		t.Error("dry run must not write the opencode config")
 	}
+	if _, err := os.Stat(filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")); err == nil {
+		t.Error("dry run must not write the lifecycle plugin")
+	}
+}
+
+// TestRunOpencode_InstallsLifecyclePlugin verifies init writes the embedded
+// adapter to <config>/opencode/plugins/ and that a second run is a no-op
+// reporting "already installed".
+func TestRunOpencode_InstallsLifecyclePlugin(t *testing.T) {
+	_, xdg := setupOpencodeTestEnv(t)
+	pluginPath := filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")
+
+	var out bytes.Buffer
+	if err := RunOpencode(&out, false); err != nil {
+		t.Fatalf("RunOpencode (first): %v", err)
+	}
+	data, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("expected plugin installed at %s: %v", pluginPath, err)
+	}
+	if string(data) != opencodeGhostPluginTS {
+		t.Error("installed plugin should match the embedded source verbatim")
+	}
+	if !strings.Contains(out.String(), "+ installed lifecycle plugin") {
+		t.Errorf("first run should report installation, got:\n%s", out.String())
+	}
+
+	var out2 bytes.Buffer
+	if err := RunOpencode(&out2, false); err != nil {
+		t.Fatalf("RunOpencode (second): %v", err)
+	}
+	if !strings.Contains(out2.String(), "already installed") {
+		t.Errorf("second run should report 'already installed', got:\n%s", out2.String())
+	}
+	again, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("re-read plugin: %v", err)
+	}
+	if string(again) != opencodeGhostPluginTS {
+		t.Error("second run must not alter an identical plugin file")
+	}
+}
+
+// TestRunOpencode_PluginDriftRestored verifies a drifted or outdated plugin
+// file is overwritten with the embedded source by the next init.
+func TestRunOpencode_PluginDriftRestored(t *testing.T) {
+	_, xdg := setupOpencodeTestEnv(t)
+	pluginPath := filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")
+
+	var first bytes.Buffer
+	if err := RunOpencode(&first, false); err != nil {
+		t.Fatalf("RunOpencode (install): %v", err)
+	}
+	if err := os.WriteFile(pluginPath, []byte("// ghost-opencode v0 — stale"), 0644); err != nil {
+		t.Fatalf("clobber plugin: %v", err)
+	}
+
+	var second bytes.Buffer
+	if err := RunOpencode(&second, false); err != nil {
+		t.Fatalf("RunOpencode (repair): %v", err)
+	}
+	data, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("re-read plugin: %v", err)
+	}
+	if string(data) != opencodeGhostPluginTS {
+		t.Error("drifted plugin should be restored to the embedded source")
+	}
+	if !strings.Contains(second.String(), "+ installed lifecycle plugin") {
+		t.Errorf("drift repair should report reinstallation, got:\n%s", second.String())
+	}
 }
 
 func TestRunOpencode_MergesIntoExistingJSONC(t *testing.T) {

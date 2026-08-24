@@ -3,6 +3,7 @@ package mcpinit
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,19 @@ import (
 	"github.com/wcatz/ghost/internal/config"
 )
 
+// opencodeGhostPluginTS is the lifecycle adapter installed under
+// <config>/opencode/plugins/. go:embed keeps the TypeScript source verbatim
+// (template literals would fight a Go string constant) and makes this repo's
+// copy the single source of truth for both in-repo installs and the future
+// npm package (spec §4 Phase 3).
+//
+//go:embed opencode_ghost.ts
+var opencodeGhostPluginTS string
+
+// opencodePluginMarker is the versioned header line used to detect drift
+// between an installed plugin file and the embedded one.
+const opencodePluginMarker = "// ghost-opencode v1"
+
 // RunOpencode registers Ghost as an MCP server for opencode by merging the
 // mcp.ghost entry into opencode's config file, then verifies the local Ollama
 // embedding model. Unlike Run, it never touches Claude Code's settings and
@@ -25,20 +39,20 @@ func RunOpencode(w io.Writer, dryRun bool) error {
 	}
 
 	// Step 1: Prerequisites — only the ghost binary is required.
-	_, _ = fmt.Fprintln(w, "[1/3] Checking prerequisites...")
+	_, _ = fmt.Fprintln(w, "[1/4] Checking prerequisites...")
 	ghostBin, _, err := checkPrereqs(w, "opencode")
 	if err != nil {
 		return retryHint(err)
 	}
 
 	// Step 2: Config file.
-	_, _ = fmt.Fprintln(w, "\n[2/3] Ensuring config file...")
+	_, _ = fmt.Fprintln(w, "\n[2/4] Ensuring config file...")
 	if err := ensureConfigBootstrap(w, dryRun); err != nil {
 		return retryHint(err)
 	}
 
 	// Step 3: MCP server registration.
-	_, _ = fmt.Fprintln(w, "\n[3/3] Registering MCP server...")
+	_, _ = fmt.Fprintln(w, "\n[3/4] Registering MCP server...")
 	changed, err := registerOpencodeMCP(w, ghostBin, dryRun)
 	if err != nil {
 		return retryHint(err)
@@ -47,6 +61,12 @@ func RunOpencode(w io.Writer, dryRun bool) error {
 	if changed && !dryRun {
 		_, _ = fmt.Fprintln(w, "Restart opencode to activate.")
 		verifyOpencodeRegistration(w)
+	}
+
+	// Step 4: Lifecycle plugin (stop events -> host-event contract).
+	_, _ = fmt.Fprintln(w, "\n[4/4] Installing lifecycle plugin...")
+	if _, err := installOpencodePlugin(w, dryRun); err != nil {
+		return retryHint(err)
 	}
 
 	// Step 4: Ollama embedding model.
@@ -101,6 +121,46 @@ func registerOpencodeMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error
 		return false, err
 	}
 	_, _ = fmt.Fprintln(w, "  + registered ghost MCP server for opencode")
+	return true, nil
+}
+
+// opencodePluginPath resolves the installed lifecycle plugin file:
+// <config>/opencode/plugins/ghost-opencode.ts (the plural "plugins" dir is
+// what opencode auto-loads).
+func opencodePluginPath() (string, error) {
+	dir, err := opencodeConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "opencode", "plugins", "ghost-opencode.ts"), nil
+}
+
+// installOpencodePlugin writes the embedded lifecycle adapter to opencode's
+// plugin directory. Idempotent: an identical file is left untouched; a
+// missing, drifted, or outdated file is overwritten with the embedded source.
+func installOpencodePlugin(w io.Writer, dryRun bool) (bool, error) {
+	path, err := opencodePluginPath()
+	if err != nil {
+		return false, err
+	}
+
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == opencodeGhostPluginTS {
+		_, _ = fmt.Fprintf(w, "  ✓ lifecycle plugin already installed (%s)\n", path)
+		return false, nil
+	}
+
+	if dryRun {
+		_, _ = fmt.Fprintf(w, "  ~ would install lifecycle plugin (%s)\n", path)
+		return true, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return false, fmt.Errorf("create plugin dir: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(opencodeGhostPluginTS), 0644); err != nil {
+		return false, fmt.Errorf("write plugin: %w", err)
+	}
+	_, _ = fmt.Fprintf(w, "  + installed lifecycle plugin (%s)\n", path)
 	return true, nil
 }
 
