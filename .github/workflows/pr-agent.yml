@@ -1,0 +1,86 @@
+name: PR Agent
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  config:
+    # Same-repo PRs only. The pull_request event never fires for forks with
+    # secrets anyway, but issue_comment DOES fire on fork-PR comments — so
+    # same-repo must be resolved explicitly (the comment event carries only
+    # the issue, not the head repo) before the agent job, which holds
+    # OPENCODE_GO_API_KEY, is allowed to run against the PR's diff.
+    if: >-
+      github.event.sender.type != 'Bot' && (
+        github.event_name == 'pull_request' ||
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request)
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      same-repo: ${{ steps.pr.outputs.same-repo }}
+    steps:
+      - id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          head_repo="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER" --jq '.head.repo.full_name')"
+          if [ "$head_repo" = "$GITHUB_REPOSITORY" ]; then
+            echo "same-repo=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "same-repo=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  pr_agent_job:
+    needs: config
+    if: needs.config.outputs.same-repo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR Agent action step
+        id: pragent
+        # Pinned release — matches repo convention of pinning tool versions
+        # for reproducibility (see ci.yml golangci-lint pin).
+        uses: the-pr-agent/pr-agent@v0.43.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # Kimi K2.7 Code via opencode Go subscription.
+          # OpenAI-compatible endpoint, so litellm's openai provider +
+          # api_base override routes there (PR-Agent "OpenAI like API" docs).
+          OPENAI__KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+          OPENAI__API_BASE: https://opencode.ai/zen/go/v1
+
+          # openai/ prefix routes through litellm's OpenAI-compatible path;
+          # kimi-k2.7-code is the Go endpoint's model id.
+          config.model: "openai/kimi-k2.7-code"
+          config.fallback_models: '["openai/kimi-k2.7-code"]'
+          # Not in PR-Agent's MAX_TOKENS catalog → must set explicitly.
+          # Conservative slice of K2.7's context window; plenty for any diff.
+          config.custom_model_max_tokens: "65536"
+          # K2.7 Code on the Go endpoint only accepts temperature=1
+          # (PR-Agent's default 0.2 is rejected with invalid_request_error).
+          config.temperature: "1"
+          # Hard cap per LLM call — a hung endpoint must fail fast, not
+          # park the runner for 10 minutes.
+          config.ai_timeout: "90"
+
+          # Reviewer scope: bugs and real regressions, not style nits.
+          pr_reviewer.extra_instructions: >-
+            This is a Go CLI project (Go 1.26+, modernc.org/sqlite, no CGO).
+            Focus on correctness bugs, race conditions, error handling gaps,
+            and breaking changes to MCP tool contracts or the SQLite schema.
+            Do not report style preferences handled by golangci-lint.
+
+          github_action_config.auto_review: "true"
+          # Pilot: review only — isolate the LLM path before enabling improve.
+          github_action_config.auto_improve: "false"
+          github_action_config.auto_describe: "false"
+          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "review_requested"]'
