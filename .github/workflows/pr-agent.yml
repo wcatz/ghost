@@ -68,6 +68,9 @@ jobs:
           # K2.7 Code on the Go endpoint only accepts temperature=1
           # (PR-Agent's default 0.2 is rejected with invalid_request_error).
           config.temperature: "1"
+          # Hard cap per LLM call — a hung endpoint must fail fast, not
+          # park the runner for 10 minutes.
+          config.ai_timeout: "90"
 
           # Reviewer scope: bugs and real regressions, not style nits.
           pr_reviewer.extra_instructions: >-
@@ -77,6 +80,7 @@ jobs:
             Do not report style preferences handled by golangci-lint.
 
           github_action_config.auto_review: "true"
-          github_action_config.auto_improve: "true"
+          # Pilot: review only — isolate the LLM path before enabling improve.
+          github_action_config.auto_improve: "false"
           github_action_config.auto_describe: "false"
           github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "review_requested"]'
