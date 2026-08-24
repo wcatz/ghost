@@ -43,6 +43,9 @@ jobs:
           # Not in PR-Agent's MAX_TOKENS catalog → must set explicitly.
           # Conservative slice of K2.7's context window; plenty for any diff.
           config.custom_model_max_tokens: "65536"
+          # K2.7 Code on the Go endpoint only accepts temperature=1
+          # (PR-Agent's default 0.2 is rejected with invalid_request_error).
+          config.temperature: "1"
 
           # Reviewer scope: bugs and real regressions, not style nits.
           pr_reviewer.extra_instructions: >-
