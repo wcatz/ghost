@@ -48,13 +48,17 @@ client guide, and (for corroboration) the Python SDK's deprecation table.
    back down to `ServerSession.CreateMessage` internally, so the MRTR *shape*
    works on both generations — see
    [the client guide](https://go.sdk.modelcontextprotocol.io/client).
-3. **The deprecation follows the capability, not just the transport shape.**
-   The Python SDK's table makes this concrete: even MRTR-delivered
-   `create_message` fires `MCPDeprecationWarning`, and on a modern connection
-   the send fails outright (*"no back-channel for server-initiated requests"*)
-   — https://py.sdk.modelcontextprotocol.io/deprecated/. Rewriting
-   `SamplingProvider` onto SEP-2322 would therefore buy compatibility past the
-   client upgrade while still parking us on a feature slated for removal.
+3. **The deprecation follows the capability, not the transport shape — with a
+   precise boundary.** What SEP-2577 deprecates is *standalone server-initiated
+   Sampling*: a bare `create_message` request warns (`MCPDeprecationWarning`)
+   and fails on modern connections ("no back-channel for server-initiated
+   requests") — https://py.sdk.modelcontextprotocol.io/deprecated/. MRTR
+   delivery itself stays supported: `CreateMessageRequest` remains valid inside
+   `InputRequiredResult.input_requests` and still reaches the host's
+   `sampling_callback`. Rewriting `SamplingProvider` onto SEP-2322 would
+   therefore keep the calls flowing, but only by adopting a compatibility
+   bridge whose underlying capability is nonetheless slated for removal —
+   maximum effort parked on the shortest remaining lifespan.
 4. **All four Tier-1 SDKs speak 2026-07-28 as of the spec date**
    ([announcement](https://blog.modelcontextprotocol.io/posts/2026-07-28));
    [v1.7.0](https://github.com/modelcontextprotocol/go-sdk/releases/tag/v1.7.0)
@@ -93,12 +97,20 @@ to adopt, plus the eventual removal-day cleanup regardless.
 live tool exactly like headless's no-key branch:
 `ai.NewFallbackProvider(ai.NewCLIProvider(), nil, false)`. Matches the spec's
 recommended migration verbatim, matches the reflection/headless precedent,
-keeps the zero-API-credits property (subscription-billed `claude`/`opencode`),
-and incidentally fixes the claude-only fallback gap. Cost: machines with
-neither CLI binary lose live-session resolve entirely (headless unaffected) —
-acceptable for a single maintainer-user who always has both installed.
+keeps the no-API-credits property, and incidentally fixes the claude-only
+fallback gap. Cost: machines with neither CLI binary lose live-session resolve
+entirely (headless unaffected) — acceptable for a single maintainer-user who
+always has both installed.
 
-**C) Direct Anthropic API always.** Breaks the documented no-credits property
+> Qualification on "no API credits": `NewCLIProvider()` selects a *binary*, not
+> an account or billing mode. Claude Code can run on Console/API billing, and
+> OpenCode supports API-key and local providers alongside subscription-backed
+> ones — so the guarantee holds for subscription-backed or local
+> configurations specifically. Enforcing it mechanically (rejecting Console /
+> API-key auth before invoking resolve) is possible but deliberately deferred:
+> single-user deployment makes the soft guarantee sufficient today.
+
+**C) Direct Anthropic API always.** Breaks the documented no-API-credits property (subscription/local configs — see the qualification under option B)
 of `ghost_resolve` (tool description, CLAUDE.md, mcp_instructions all promise
 it). Rejected without hesitation; it is the one option that makes the tool
 strictly worse than headless.
@@ -170,4 +182,4 @@ the blast radius is "one tool quietly loses its write half," not data loss.
 - **Title:** Live-session `ghost_resolve` classifies via CLI provider; MCP sampling retired
 - **Decision:** `ghost_resolve`'s MCP tool composes `ai.NewCLIProvider()` (claude→opencode, subscription-billed) as sole full-write primary, identical to the headless no-key branch of `buildClassifyProvider`; `ai.SamplingProvider` is deleted. Machines without a CLI binary get a clear tool error; no API credits spent on any path.
 - **Rationale:** Spec 2026-07-28 deprecates Sampling (SEP-2577, ≥12-month window, removal eligible 2027-07-28) and names direct provider integration as the migration; go-sdk 1.7.0 already rejects the synchronous CreateMessage shape on new protocol versions, so keeping sampling guarantees a silent live-write downgrade on client upgrade. CLI-as-full-write matches existing headless/reflection precedent and preserves the tool's zero-credits property.
-- **Alternatives rejected:** Keep sampling until forced removal (silent permanent degradation + deferred same migration); direct Anthropic API (breaks no-credits property); sampling→CLI hybrid precedence (complexity, same forced migration); SEP-2322/MRTR rewrite of SamplingProvider (most effort, deprecation follows the capability not the transport, shortest remaining lifespan).
+- **Alternatives rejected:** Keep sampling until forced removal (silent permanent degradation + deferred same migration); direct Anthropic API (breaks the qualified no-API-credits property); sampling→CLI hybrid precedence (complexity, same forced migration); SEP-2322/MRTR rewrite of SamplingProvider (most effort, deprecation follows the capability not the transport, shortest remaining lifespan).
