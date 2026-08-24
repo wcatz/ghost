@@ -25,10 +25,6 @@ import (
 //go:embed opencode_ghost.ts
 var opencodeGhostPluginTS string
 
-// opencodePluginMarker is the versioned header line used to detect drift
-// between an installed plugin file and the embedded one.
-const opencodePluginMarker = "// ghost-opencode v1"
-
 // RunOpencode registers Ghost as an MCP server for opencode by merging the
 // mcp.ghost entry into opencode's config file, then verifies the local Ollama
 // embedding model. Unlike Run, it never touches Claude Code's settings and

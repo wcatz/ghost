@@ -24,6 +24,21 @@ func installOpencodePluginFile(t *testing.T) {
 	}
 }
 
+// writePluginFile seeds the plugin path with arbitrary content for drift tests.
+func writePluginFile(t *testing.T, content string) {
+	t.Helper()
+	path, err := opencodePluginPath()
+	if err != nil {
+		t.Fatalf("plugin path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir plugin dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+}
+
 // TestStatus_ReportsOpenDBFailure verifies that a database which exists but
 // fails to open (e.g. mid-migration foreign-key corruption) is surfaced as a
 // failed check, not silently skipped. Before this fix, Status only inspected
@@ -268,22 +283,17 @@ func TestStatusOpencode_RegisteredNoDatabase(t *testing.T) {
 }
 
 // TestStatusOpencode_PluginMissing verifies the lifecycle plugin check fails
-// (and blocks "All checks passed.") when the plugin file is absent or lacks
-// the versioned marker.
+// (and blocks "All checks passed.") when the plugin file is absent, lacks the
+// versioned marker, or drifted while keeping its header — a corrupted file
+// must not read healthy just because its header survived.
 func TestStatusOpencode_PluginMissing(t *testing.T) {
 	cases := map[string]func(t *testing.T){
 		"absent": func(t *testing.T) {},
-		"drifted": func(t *testing.T) {
-			path, err := opencodePluginPath()
-			if err != nil {
-				t.Fatalf("plugin path: %v", err)
-			}
-			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-				t.Fatalf("mkdir plugin dir: %v", err)
-			}
-			if err := os.WriteFile(path, []byte("// some other plugin"), 0o644); err != nil {
-				t.Fatalf("write plugin: %v", err)
-			}
+		"unrelated file": func(t *testing.T) {
+			writePluginFile(t, "// some other plugin")
+		},
+		"drifted but marker retained": func(t *testing.T) {
+			writePluginFile(t, opencodeGhostPluginTS[:200] + "\n// truncated/corrupted tail")
 		},
 	}
 	for name, seed := range cases {
