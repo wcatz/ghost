@@ -184,10 +184,14 @@ func runMCPInit() {
 	switch client {
 	case "opencode":
 		err = mcpinit.RunOpencode(os.Stdout, dryRun)
+	case "codex":
+		err = mcpinit.RunCodex(os.Stdout, dryRun)
+	case "goose":
+		err = mcpinit.RunGoose(os.Stdout, dryRun)
 	case "claude":
 		err = mcpinit.Run(os.Stdout, dryRun)
 	default:
-		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude or opencode)\n", client)
+		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude, opencode, codex, or goose)\n", client)
 		os.Exit(1)
 	}
 	if err != nil {
@@ -212,10 +216,14 @@ func runMCPStatus() {
 	switch client {
 	case "opencode":
 		healthy, err = mcpinit.StatusOpencode(os.Stdout)
+	case "codex":
+		healthy, err = mcpinit.StatusCodex(os.Stdout)
+	case "goose":
+		healthy, err = mcpinit.StatusGoose(os.Stdout)
 	case "claude":
 		healthy, err = mcpinit.Status(os.Stdout)
 	default:
-		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude or opencode)\n", client)
+		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude, opencode, codex, or goose)\n", client)
 		os.Exit(1)
 	}
 	if err != nil {

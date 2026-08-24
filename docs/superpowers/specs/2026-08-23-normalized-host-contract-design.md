@@ -302,20 +302,25 @@ Honest constraints, stated up front:
   captured payload through the ghost binary produced the exact §2.1 non-blocking-host
  outcome: exit 0, empty stdout, one "nudge suppressed" stderr line.
 
-### Phase 2 — codex + goose adapters
+### Phase 2 — codex + goose adapters (implemented on this branch)
 
-- `RunCodex`: merge `[mcp_servers.ghost]` into `~/.codex/config.toml` **and**
-  install a `hooks` block (`~/.codex/hooks.json` or inline TOML) wiring
-  `SessionStart`, `Stop`, and `SessionEnd` to the contract. Payloads pass through
-  verbatim — codex shares Claude Code's input fields exactly. The installer must
-  instruct the user to run `/hooks` and trust the entries (codex skips untrusted
-  hooks silently).
-- `RunGoose`: install an Agent Plugins-conformant package under
-  `~/.agents/plugins/ghost/` — `plugin.json`, `mcp.json` (stdio ghost server),
-  and the client-extension hooks dir for its Open Plugins hooks. Goose's payload
-  field names differ from the dialect (`event`, `working_dir`), so the shim maps
-  them onto the contract before invocation; blocking is honored with goose's
-  host-side cap.
+- `RunCodex`: merges `[mcp_servers.ghost]` into `~/.codex/config.toml`
+  **textually** (line-based block splice — user comments preserved
+  byte-for-byte, never parse-and-rewrite) and installs SessionStart/Stop/
+  SessionEnd into `~/.codex/hooks.json` (`~/.codex` honors `$CODEX_HOME`),
+  sharing the Claude dialect verbatim with `--source codex`. The installer
+  prints the mandatory one-time `/hooks` trust instruction; codex skips
+  untrusted hooks silently. SessionEnd gets an explicit 3 s timeout (codex
+  default is 1 s). `StatusCodex` token-validates each hook command against
+  codex's own files.
+- `RunGoose`: installs the Agent Plugins package at `~/.agents/plugins/ghost/`
+  — `plugin.json`, `mcp.json` (stdio ghost server), and a top-level
+  `hooks/hooks.json` per goose's documented discovery. Goose's field-name
+  deviation is aliased **inside core** (`hostevent.Parse`: for `--source
+  goose`, native `event`/`working_dir` backfill absent hook_event_name/cwd;
+  dialect fields always win; argv agreement still enforced), so hooks invoke
+  `<ghost> hook <event> --source goose` directly — no shim scripts,
+  cross-platform by construction.
 - Nudge stays log-only for opencode; document it.
 
 ### Phase 3 — distribution polish

@@ -77,6 +77,18 @@ Re-running the command upgrades an existing install in place.
 ghost mcp init --client opencode   # installs the plugin; restart opencode after
 ```
 
+**Using codex?** `ghost mcp init --client codex` merges `[mcp_servers.ghost]` into `~/.codex/config.toml` (textually — your comments survive) and wires SessionStart/Stop/SessionEnd into `~/.codex/hooks.json`. Then run `/hooks` inside codex once and approve the ghost entries — codex silently skips untrusted hooks.
+
+```bash
+ghost mcp init --client codex   # then /hooks in codex to trust the entries
+```
+
+**Using goose?** `ghost mcp init --client goose` installs an Agent Plugins package at `~/.agents/plugins/ghost/` (`plugin.json`, `mcp.json`, and Open Plugins hooks). Goose's native payload fields (`event`, `working_dir`) are aliased onto the contract internally, so no shim scripts are involved:
+
+```bash
+ghost mcp init --client goose
+```
+
 **Docker** (multi-arch, amd64 + arm64):
 
 ```bash
@@ -270,8 +282,8 @@ The server ships with embedded instructions that teach the agent when to save, w
 
 ```text
 ghost mcp                    # Run MCP server on stdio (used by your MCP client)
-ghost mcp init [--client claude|opencode] [--dry-run]   # Configure MCP client integration (default: Claude Code)
-ghost mcp status [--client claude|opencode]             # Deep health checks (incl. Ollama reachability, model presence)
+ghost mcp init [--client claude|opencode|codex|goose] [--dry-run]  # Configure MCP client integration (default: Claude Code)
+ghost mcp status [--client claude|opencode|codex|goose]    # Deep health checks (incl. Ollama reachability, model presence)
 ghost hook <event> --source <host>  # Contract-v1 lifecycle hook (session-start, stop, session-end)
 ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
 ghost resolve <project>      # De-weight resolved-evidence memories from injection (dry-run by default; --apply)

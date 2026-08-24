@@ -274,6 +274,47 @@ func ReportStaleIntegrations(w io.Writer) {
 		}
 	}
 
+	// codex: hooks are silently skipped until the user's one-time /hooks
+	// trust review, and a stale MCP entry fails invisibly — hint when a
+	// ~/.codex dir exists but wiring is missing or drifted.
+	if codexDir, err := codexHomeDir(); err == nil {
+		if _, statErr := os.Stat(codexDir); statErr == nil {
+			bin := findBinary("ghost")
+			mcpOK, _ := codexMCPEntryStatus(bin)
+			wired := false
+			if rules, rerr := loadCodexHooksRules(); rerr == nil {
+				wired = true
+				for _, ev := range codexLifecycleEvents {
+					if !codexContractHookWired(rules[ev.Key], ev.EventToken, "codex") {
+						wired = false
+						break
+					}
+				}
+			}
+			if !mcpOK || !wired {
+				hints = append(hints, "codex integration missing or miswired — run `ghost mcp init --client codex` (then approve the entries via /hooks)")
+			}
+		}
+	}
+
+	// goose: the plugin package under ~/.agents/plugins/ghost/ is the whole
+	// integration — hint on any drift when an .agents/plugins dir exists.
+	if pluginDir, err := goosePluginDir(); err == nil {
+		if _, statErr := os.Stat(filepath.Dir(filepath.Dir(pluginDir))); statErr == nil {
+			bin := findBinary("ghost")
+			stale := false
+			for _, f := range goosePackageFiles(bin) {
+				if data, rerr := os.ReadFile(filepath.Join(pluginDir, f.rel)); rerr != nil || string(data) != f.want {
+					stale = true
+					break
+				}
+			}
+			if stale {
+				hints = append(hints, "goose plugin package missing or outdated — run `ghost mcp init --client goose` to reinstall it")
+			}
+		}
+	}
+
 	if len(hints) == 0 {
 		return
 	}
