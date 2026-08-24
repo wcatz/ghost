@@ -45,6 +45,12 @@ func RunHostEvent(eventArg, sourceArg string, stdin io.Reader, stdout io.Writer,
 
 	switch payload.Event() {
 	case hostevent.EventSessionStart:
+		// Output is capability-scoped (spec §2.1): hosts that cannot consume
+		// injected context get a silent, successful no-op — never output they
+		// would misread. Parse guarantees a known source.
+		if cap, _ := hostevent.CapabilityFor(payload.HostSource()); !cap.InjectContext {
+			return
+		}
 		runSessionStart(payload.Raw, stdout)
 	case hostevent.EventStop:
 		runStop(payload, stdout, stderr, true)
@@ -92,9 +98,15 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 	}
 	defer f.Close() //nolint:errcheck
 
-	res, ok := hostevent.Scan(p.Contract.TranscriptFormat, f)
+	res, ok, err := hostevent.Scan(p.Contract.TranscriptFormat, f)
 	if !ok {
 		logFailOpen(stderr, "transcript format", fmt.Errorf("no scanner registered for %q", p.Contract.TranscriptFormat))
+		return
+	}
+	if err != nil {
+		// Partial counts only: a save recorded after the cut would be missed,
+		// so decide nothing — the stop passes.
+		logFailOpen(stderr, "scan transcript", err)
 		return
 	}
 	if res.ToolCalls == 0 || res.GhostSaves > 0 {

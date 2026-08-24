@@ -115,18 +115,25 @@ break verbatim passthrough of native payloads:
 
 Rules:
 
-- **Dialect passthrough.** A native Claude Code, codex, or goose hook payload
-  already parses as-is — their common fields (`session_id`, `transcript_path`,
-  `cwd`, `hook_event_name`, `stop_hook_active`) are the contract's fields.
+- **Dialect passthrough with argv-completed envelopes.** A native Claude Code,
+  codex, or goose hook payload parses as-is — their common fields
+  (`session_id`, `transcript_path`, `cwd`, `hook_event_name`,
+  `stop_hook_active`) are the contract's fields. Those hosts send no
+  `contract` object; when it is absent, the authoritative argv values complete
+  the envelope (`version` = 1, `source` = `--source`,
+  `transcript_format` = the source's native format — `claude-jsonl` for
+  Claude Code, `none` otherwise until its adapter lands). An EXPLICIT contract
+  object must agree with argv strictly and is never repaired: a wrong version
+  or disagreeing source is rejected even though completion could have fixed
+  it, keeping one strict validation path with no legacy mode.
   Host-specific extras (`model`, `turn_id`, `permission_mode`, `reason`,
   `source`, `last_assistant_message`) are **tolerated and ignored**; unknown
   fields never cause rejection.
 - **CLI args are authoritative; payload must agree.** `hook_event_name` (from argv
-  `<event>`) and `contract.source` appear in both argv and payload so the payload is
+  `<event>`) appears in both argv and payload so the payload is
   self-describing in logs, but
-  dispatch validates equality (and `contract.version == 1`) *before* anything else. Any
-  mismatch — including a stale adapter sending `"source": "claude-code"` with
-  `--source opencode` — is rejected as fail-open (log line, empty stdout, exit 0).
+  dispatch validates equality *before* anything else. Any
+  mismatch is rejected as fail-open (log line, empty stdout, exit 0).
   Routing never consults a field that failed validation.
 - **Output protocol is capability-scoped, enforced by a source matrix.** The v1
   matrix tracks what hosts can actually do per their docs (codex blocks Stop with
@@ -145,14 +152,18 @@ Rules:
   | outcome | stdout | stderr | exit |
   | --- | --- | --- | --- |
   | block (claude-code, codex, goose; eligible) | `{"decision":"block","reason":…}` | — | 0 |
-  | context injection (`session-start`) | host-visible injection text (Claude: system-reminder block; codex: `additionalContext` JSON) | — | 0 |
+  | context injection (`session-start`, inject-capable hosts) | host-visible injection text (Claude: system-reminder block; codex: `additionalContext` JSON) | — | 0 |
+  | session-start on non-injecting host (goose, opencode) | empty (silent success) | — | 0 |
   | normal completion (spawns done, nothing to say) | empty | — | 0 |
   | nudge on non-blocking host | empty | one log line | 0 |
-  | parse error / contract mismatch / unknown source / missing transcript | empty | one log line | 0 |
+  | parse error / contract mismatch / unknown source / unreadable or partially-read transcript | empty | one log line | 0 |
+  | absent transcript path (`transcript_path: ""`) — nothing to scan, not an error | empty | — | 0 |
 
   Fail-open is absolute and **always exits 0** — a nonzero exit could itself be
   read by hosts as hook failure; ghost treats "allow the stop" as the only
-  failure response it ever emits.
+  failure response it ever emits. A scanner that stops early (read error,
+  line-limit abort) is fail-open too: partial counts never drive a block,
+  because the save proving otherwise could sit after the cut.
 - **Transcripts are adapter-normalized where the adapter can.** opencode's plugin has
   typed SDK access (`client.session.messages`), so it materializes a temp JSONL in the
   `opencode-messages` format and passes the path. Claude Code forwards its native
@@ -173,7 +184,7 @@ All three declared events ship with defined behavior from Phase 0:
 
 | event | handler | behavior |
 | --- | --- | --- |
-| `session-start` | wraps today's `HandleSessionStartHook` logic (`internal/mcpinit/hook.go:105`) | read-only project-context load + globals + obsidian sync kick; subagent gate and resume/compact short-circuits preserved verbatim |
+| `session-start` | wraps today's `HandleSessionStartHook` logic (`internal/mcpinit/hook.go:105`) | read-only project-context load + globals + obsidian sync kick; subagent gate and resume/compact short-circuits preserved verbatim; **gated on `inject_context`** — non-injecting hosts (goose, opencode) get a silent no-op |
 | `stop` | wraps today's `HandleStopHook` logic | capability-gated spawns (resolve/supersede/reflect) + save-nudge when `block_stop` granted |
 | `session-end` | spawns-only variant of `stop` | lifecycle spawns run; **no nudge** — designed for hosts that emit once per real session end rather than per turn |
 

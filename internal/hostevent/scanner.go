@@ -22,10 +22,11 @@ type ScanResult struct {
 	GhostSaves int
 }
 
-// ScanFunc streams a transcript and returns the counts observed before any
-// error. Unparseable lines are skipped; a mid-file read error yields the
-// counts seen so far.
-type ScanFunc func(io.Reader) ScanResult
+// ScanFunc streams a transcript and returns the counts observed. A non-nil
+// error means the transcript was only partially read (I/O failure, scanner
+// limit exceeded) — callers must not act on partial counts: a save recorded
+// after the cut would be missed and a stop could be wrongly blocked.
+type ScanFunc func(io.Reader) (ScanResult, error)
 
 // scanners is the format-keyed registry. Entries land before their adapter
 // does (spec §4): an adapter that invokes the contract successfully but hits
@@ -38,13 +39,15 @@ var scanners = map[string]ScanFunc{
 
 // Scan runs the scanner registered for format. ok is false when no scanner is
 // registered — callers must treat that as a fail-open outcome, never an error
-// surfaced to the host.
-func Scan(format string, r io.Reader) (ScanResult, bool) {
+// surfaced to the host. err != nil means the scan stopped early; treat the
+// counts as incomplete and fail open.
+func Scan(format string, r io.Reader) (ScanResult, bool, error) {
 	fn, ok := scanners[format]
 	if !ok {
-		return ScanResult{}, false
+		return ScanResult{}, false, nil
 	}
-	return fn(r), true
+	res, err := fn(r)
+	return res, true, err
 }
 
 // claudeJSONLLine is the minimal shape needed to spot tool_use entries in a
@@ -66,25 +69,26 @@ var ghostSaveTools = map[string]bool{
 	"mcp__ghost__ghost_save_global": true,
 }
 
-// streamJSONL visits each line of a newline-delimited JSON transcript. The
-// 4 MiB line buffer matches the historical stop-hook scanner: transcript
-// lines carry full tool results and can be huge.
-func streamJSONL(r io.Reader, visit func(line []byte)) {
+// streamJSONL visits each line of a newline-delimited JSON transcript and
+// returns the terminal scanner error, if any (I/O read failure, or the line
+// buffer limit being exceeded). The buffer matches the historical stop-hook
+// scanner: transcript lines carry full tool results and can be huge.
+func streamJSONL(r io.Reader, visit func(line []byte)) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		visit(sc.Bytes())
 	}
+	return sc.Err()
 }
 
 // ScanClaudeJSONL streams a Claude Code transcript and counts assistant
 // tool_use blocks, plus how many were Ghost save tools. Unparseable lines are
-// skipped; a scanner error mid-file yields the counts seen so far — worst case
-// the nudge fires once and the second stop passes through the stop_hook_active
-// guard.
-func ScanClaudeJSONL(r io.Reader) ScanResult {
+// skipped; a read error or over-long line aborts the scan and is returned —
+// the counts are partial and the caller must fail open rather than nudge.
+func ScanClaudeJSONL(r io.Reader) (ScanResult, error) {
 	var res ScanResult
-	streamJSONL(r, func(line []byte) {
+	err := streamJSONL(r, func(line []byte) {
 		var l claudeJSONLLine
 		if err := json.Unmarshal(line, &l); err != nil {
 			return
@@ -101,7 +105,7 @@ func ScanClaudeJSONL(r io.Reader) ScanResult {
 			}
 		}
 	})
-	return res
+	return res, err
 }
 
 // opencodeMessagesLine is the minimal shape needed to spot tool-call parts in
@@ -130,11 +134,11 @@ var ghostSaveToolsOpencode = map[string]bool{
 // ScanOpencodeMessages streams an opencode-messages transcript and counts
 // assistant tool-call parts, plus how many were Ghost save tools. Only parts
 // typed "tool" count — prose mentions never do — and only assistant messages
-// are visited. Unparseable lines are skipped; errors mid-file yield the counts
-// seen so far, same fail-open posture as Claude.
-func ScanOpencodeMessages(r io.Reader) ScanResult {
+// are visited. Unparseable lines are skipped; a read error or over-long line
+// aborts the scan and is returned, same fail-open posture as Claude.
+func ScanOpencodeMessages(r io.Reader) (ScanResult, error) {
 	var res ScanResult
-	streamJSONL(r, func(line []byte) {
+	err := streamJSONL(r, func(line []byte) {
 		var l opencodeMessagesLine
 		if err := json.Unmarshal(line, &l); err != nil {
 			return
@@ -151,5 +155,5 @@ func ScanOpencodeMessages(r io.Reader) ScanResult {
 			}
 		}
 	})
-	return res
+	return res, err
 }

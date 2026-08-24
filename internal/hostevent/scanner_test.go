@@ -1,6 +1,7 @@
 package hostevent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,7 +55,10 @@ func TestScanClaudeJSONL(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ScanClaudeJSONL(strings.NewReader(strings.Join(tc.lines, "\n") + "\n"))
+			got, err := ScanClaudeJSONL(strings.NewReader(strings.Join(tc.lines, "\n") + "\n"))
+			if err != nil {
+				t.Fatalf("ScanClaudeJSONL: %v", err)
+			}
 			if got.ToolCalls != tc.wantToolCalls || got.GhostSaves != tc.wantSaves {
 				t.Errorf("ScanClaudeJSONL = %+v, want toolCalls=%d saves=%d", got, tc.wantToolCalls, tc.wantSaves)
 			}
@@ -62,24 +66,59 @@ func TestScanClaudeJSONL(t *testing.T) {
 	}
 }
 
+// errReader yields some valid lines then fails, simulating a mid-file I/O
+// error or scanner abort.
+type errReader struct {
+	data []byte
+	pos  int
+}
+
+func (e *errReader) Read(p []byte) (int, error) {
+	if e.pos >= len(e.data) {
+		return 0, errors.New("read failure mid-transcript")
+	}
+	n := copy(p, e.data[e.pos:])
+	e.pos += n
+	return n, nil
+}
+
+// TestScanErrorPropagated pins the contract that a partially-read transcript
+// surfaces as an error: counts alone would risk blocking a stop whose save
+// sat after the cut. The reader delivers one full line, then a partial line
+// with no terminator, then fails — so the save line is lost mid-read.
+func TestScanErrorPropagated(t *testing.T) {
+	data := lineToolBash + "\n" + lineGhostSave[:len(lineGhostSave)-10]
+	r := &errReader{data: []byte(data)}
+	res, err := ScanClaudeJSONL(r)
+	if err == nil {
+		t.Fatal("expected scan error from truncated transcript")
+	}
+	if res.ToolCalls != 1 {
+		t.Errorf("partial ToolCalls = %d, want 1 (save after the cut must be missing)", res.ToolCalls)
+	}
+	if _, _, err := Scan(FormatClaudeJSONL, r); err == nil {
+		t.Error("Scan must propagate the scanner error")
+	}
+}
+
 func TestScanRegistry(t *testing.T) {
-	res, ok := Scan(FormatClaudeJSONL, strings.NewReader(lineToolBash))
-	if !ok || res.ToolCalls != 1 {
-		t.Errorf("Scan(claude-jsonl) = %+v,%v want 1 tool call", res, ok)
+	res, ok, err := Scan(FormatClaudeJSONL, strings.NewReader(lineToolBash))
+	if !ok || err != nil || res.ToolCalls != 1 {
+		t.Errorf("Scan(claude-jsonl) = %+v,%v,%v want 1 tool call", res, ok, err)
 	}
 
-	res, ok = Scan(FormatOpencodeMessages, strings.NewReader(ocLineBash))
-	if !ok || res.ToolCalls != 1 {
-		t.Errorf("Scan(opencode-messages) = %+v,%v want 1 tool call", res, ok)
+	res, ok, err = Scan(FormatOpencodeMessages, strings.NewReader(ocLineBash))
+	if !ok || err != nil || res.ToolCalls != 1 {
+		t.Errorf("Scan(opencode-messages) = %+v,%v,%v want 1 tool call", res, ok, err)
 	}
 
 	// Formats whose adapters have not landed stay unregistered — callers fail
 	// open; scanning is selected by format and never falls back by source.
-	if _, ok := Scan(FormatCodexRollout, strings.NewReader(lineToolBash)); ok {
+	if _, ok, err := Scan(FormatCodexRollout, strings.NewReader(lineToolBash)); ok || err != nil {
 		t.Error("Scan(codex-rollout) should be unregistered until the codex adapter lands")
 	}
-	if _, ok := Scan("", strings.NewReader(lineToolBash)); ok {
-		t.Error("Scan(\"\") should be unregistered")
+	if _, ok, err := Scan("", strings.NewReader(lineToolBash)); ok || err != nil {
+		t.Error(`Scan("") should be unregistered`)
 	}
 }
 
@@ -100,7 +139,10 @@ func TestScanOpencodeMessages(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ScanOpencodeMessages(strings.NewReader(strings.Join(tc.lines, "\n") + "\n"))
+			got, err := ScanOpencodeMessages(strings.NewReader(strings.Join(tc.lines, "\n") + "\n"))
+			if err != nil {
+				t.Fatalf("ScanOpencodeMessages: %v", err)
+			}
 			if got.ToolCalls != tc.wantToolCalls || got.GhostSaves != tc.wantSaves {
 				t.Errorf("ScanOpencodeMessages = %+v, want toolCalls=%d saves=%d", got, tc.wantToolCalls, tc.wantSaves)
 			}
@@ -117,7 +159,10 @@ func TestScanOpencodeMessages_GoldenFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close() //nolint:errcheck
-	got := ScanOpencodeMessages(f)
+	got, err := ScanOpencodeMessages(f)
+	if err != nil {
+		t.Fatalf("ScanOpencodeMessages: %v", err)
+	}
 	if got.ToolCalls != 4 || got.GhostSaves != 2 {
 		t.Errorf("golden fixture = %+v, want toolCalls=4 saves=2", got)
 	}
