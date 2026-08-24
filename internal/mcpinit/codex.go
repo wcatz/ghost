@@ -505,7 +505,7 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 				return "", fmt.Errorf("parse hooks.json %s rules: %w", ev.Key, err)
 			}
 		}
-		kept := make([]json.RawMessage, 0, len(rules)+1)
+		kept := make([]json.RawMessage, 0, len(rules))
 		for _, rule := range rules {
 			if !isCodexGhostRule(rule) {
 				kept = append(kept, rule)
@@ -522,7 +522,7 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 		}
 	}
 
-	out := make(map[string]json.RawMessage, len(top)+1)
+	out := make(map[string]json.RawMessage, len(top))
 	for k, v := range top {
 		out[k] = v
 	}
