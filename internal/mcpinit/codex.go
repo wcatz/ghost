@@ -796,7 +796,7 @@ func StatusCodex(w io.Writer) (bool, error) {
 			allWired = allWired && wired
 			check(wired,
 				ev.Key+" hook configured",
-				ev.Key+" hook missing or pre-contract (run ghost mcp init --client codex)")
+				ev.Key+" hook missing or miswired (run ghost mcp init --client codex)")
 		}
 		if allWired {
 			_, _ = fmt.Fprintln(w, "  - hooks are installed; approve them once via /hooks in codex (untrusted hooks are silently skipped)")

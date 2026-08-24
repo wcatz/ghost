@@ -78,6 +78,38 @@ func TestReportStaleIntegrations(t *testing.T) {
 		}
 	})
 
+	t.Run("flags drifted codex wiring when ~/.codex exists", func(t *testing.T) {
+		statusEnv(t)
+		codexHome := t.TempDir()
+		t.Setenv("CODEX_HOME", codexHome)
+		if err := os.WriteFile(filepath.Join(codexHome, "hooks.json"), []byte(`{"hooks":{}}`), 0o600); err != nil {
+			t.Fatalf("write hooks.json: %v", err)
+		}
+
+		var out bytes.Buffer
+		ReportStaleIntegrations(&out)
+		if !strings.Contains(out.String(), "codex integration missing or miswired") {
+			t.Errorf("expected codex hint, got:\n%s", out.String())
+		}
+	})
+
+	t.Run("flags drifted goose package when ~/.agents/plugins exists", func(t *testing.T) {
+		statusEnv(t)
+		dir := filepath.Join(os.Getenv("HOME"), ".agents", "plugins", "ghost")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir goose plugin dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "plugin.json"), []byte(`{"name":"ghost"}`), 0o644); err != nil {
+			t.Fatalf("write plugin.json: %v", err)
+		}
+
+		var out bytes.Buffer
+		ReportStaleIntegrations(&out)
+		if !strings.Contains(out.String(), "goose plugin package missing or outdated") {
+			t.Errorf("expected goose hint, got:\n%s", out.String())
+		}
+	})
+
 	t.Run("flags drifted opencode plugin when opencode is in use", func(t *testing.T) {
 		statusEnv(t)
 		writePluginFile(t, "// ghost-opencode v0 — stale body")
