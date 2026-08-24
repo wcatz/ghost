@@ -68,28 +68,6 @@ CREATE INDEX IF NOT EXISTS idx_memories_project_cat ON memories(project_id, cate
 CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_project_source ON memories(project_id, source);
 
-CREATE TABLE IF NOT EXISTS conversations (
-    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    mode        TEXT NOT NULL DEFAULT 'chat',
-    title       TEXT DEFAULT '',
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id              TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    role            TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool_use', 'tool_result')),
-    content         TEXT NOT NULL,
-    tool_name       TEXT,
-    tool_use_id     TEXT,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project_id, updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);
-
 CREATE TABLE IF NOT EXISTS ghost_state (
     project_id          TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
     interaction_count   INTEGER NOT NULL DEFAULT 0,

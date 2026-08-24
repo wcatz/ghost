@@ -1646,122 +1646,6 @@ func TestStoreLearnedContext(t *testing.T) {
 	}
 }
 
-func TestStoreConversations(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	// Create a conversation.
-	convID, err := s.CreateConversation(ctx, testProject, "chat")
-	if err != nil {
-		t.Fatalf("CreateConversation: %v", err)
-	}
-	if convID == "" {
-		t.Fatal("CreateConversation returned empty ID")
-	}
-
-	// Append messages.
-	if err := s.AppendMessage(ctx, convID, "user", "Hello ghost"); err != nil {
-		t.Fatalf("AppendMessage user: %v", err)
-	}
-	if err := s.AppendMessage(ctx, convID, "assistant", "Hello! How can I help?"); err != nil {
-		t.Fatalf("AppendMessage assistant: %v", err)
-	}
-	if err := s.AppendMessage(ctx, convID, "user", "What is Go?"); err != nil {
-		t.Fatalf("AppendMessage user 2: %v", err)
-	}
-	if err := s.AppendMessage(ctx, convID, "assistant", "Go is a programming language."); err != nil {
-		t.Fatalf("AppendMessage assistant 2: %v", err)
-	}
-
-	// GetConversationMessages.
-	msgs, err := s.GetConversationMessages(ctx, convID)
-	if err != nil {
-		t.Fatalf("GetConversationMessages: %v", err)
-	}
-	if len(msgs) != 4 {
-		t.Fatalf("expected 4 messages, got %d", len(msgs))
-	}
-	if msgs[0].Role != "user" || msgs[0].Content != "Hello ghost" {
-		t.Errorf("unexpected first message: %+v", msgs[0])
-	}
-	if msgs[3].Role != "assistant" || msgs[3].Content != "Go is a programming language." {
-		t.Errorf("unexpected last message: %+v", msgs[3])
-	}
-
-	// GetLatestConversation.
-	latestID, err := s.GetLatestConversation(ctx, testProject)
-	if err != nil {
-		t.Fatalf("GetLatestConversation: %v", err)
-	}
-	if latestID != convID {
-		t.Errorf("expected latest conv %q, got %q", convID, latestID)
-	}
-
-	// GetLatestConversation for non-existent project.
-	_, err = s.GetLatestConversation(ctx, "nonexistent")
-	if err == nil {
-		t.Error("expected error for nonexistent project conversation")
-	}
-}
-
-func TestStoreGetRecentExchanges(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	convID, err := s.CreateConversation(ctx, testProject, "chat")
-	if err != nil {
-		t.Fatalf("CreateConversation: %v", err)
-	}
-
-	// Insert 3 pairs of user/assistant messages with distinct timestamps.
-	// SQLite datetime('now') has only second precision, so we insert with
-	// explicit timestamps to guarantee ordering.
-	msgs := []struct {
-		role, content, ts string
-	}{
-		{"user", "first question", "2026-01-01 00:00:01"},
-		{"assistant", "first answer", "2026-01-01 00:00:02"},
-		{"user", "second question", "2026-01-01 00:00:03"},
-		{"assistant", "second answer", "2026-01-01 00:00:04"},
-		{"user", "third question", "2026-01-01 00:00:05"},
-		{"assistant", "third answer", "2026-01-01 00:00:06"},
-	}
-	for _, m := range msgs {
-		_, err := s.db.ExecContext(ctx,
-			`INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)`,
-			convID, m.role, m.content, m.ts)
-		if err != nil {
-			t.Fatalf("insert message: %v", err)
-		}
-	}
-
-	// Get last 2 exchanges.
-	pairs, err := s.GetRecentExchanges(ctx, testProject, 2)
-	if err != nil {
-		t.Fatalf("GetRecentExchanges: %v", err)
-	}
-	if len(pairs) != 2 {
-		t.Fatalf("expected 2 pairs, got %d", len(pairs))
-	}
-
-	// Should be the last 2, in chronological order.
-	if pairs[0][0] != "second question" || pairs[0][1] != "second answer" {
-		t.Errorf("expected second exchange first, got %v", pairs[0])
-	}
-	if pairs[1][0] != "third question" || pairs[1][1] != "third answer" {
-		t.Errorf("expected third exchange second, got %v", pairs[1])
-	}
-
-	// Get 0 exchanges.
-	pairs, err = s.GetRecentExchanges(ctx, testProject, 0)
-	if err != nil {
-		t.Fatalf("GetRecentExchanges(0): %v", err)
-	}
-	if len(pairs) != 0 {
-		t.Errorf("expected 0 pairs, got %d", len(pairs))
-	}
-}
-
 func TestStoreRecordUsage(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -2296,19 +2180,6 @@ func TestStoreTaskIDPrefix(t *testing.T) {
 	}
 }
 
-func TestStoreGetLatestConversationNoRows(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	_, err := s.GetLatestConversation(ctx, testProject)
-	if err == nil {
-		t.Error("expected error for no conversations")
-	}
-	if err != sql.ErrNoRows {
-		t.Errorf("expected sql.ErrNoRows, got %v", err)
-	}
-}
-
 func TestMergeProject(t *testing.T) {
 	s := testStore(t) // creates testProject ("test-project") at "/tmp/test"
 	ctx := context.Background()
@@ -2566,17 +2437,6 @@ func TestDeleteProject_ApplyRemovesEverythingIncludingOrphanTables(t *testing.T)
 	); err != nil {
 		t.Fatalf("seed memory_snapshots: %v", err)
 	}
-	const seedConversationID = "conv-1"
-	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO conversations (id, project_id) VALUES (?, ?)`, seedConversationID, testProject,
-	); err != nil {
-		t.Fatalf("seed conversations: %v", err)
-	}
-	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)`, seedConversationID, "user", "seed message",
-	); err != nil {
-		t.Fatalf("seed messages: %v", err)
-	}
 
 	summary, err := s.DeleteProject(ctx, testProject, true)
 	if err != nil {
@@ -2631,18 +2491,10 @@ func TestDeleteProject_ApplyRemovesEverythingIncludingOrphanTables(t *testing.T)
 		t.Errorf("link_scans retains %d rows after apply, want 0", scanCount)
 	}
 
-	for _, table := range []string{"ghost_state", "memory_snapshots", "conversations"} {
+	for _, table := range []string{"ghost_state", "memory_snapshots"} {
 		if n := countRows(t, s, table, testProject); n != 0 {
 			t.Errorf("%s after apply = %d, want 0", table, n)
 		}
-	}
-	// messages keys off conversation_id, not project_id.
-	var msgCount int
-	if err := s.db.QueryRow(`SELECT count(*) FROM messages WHERE conversation_id = ?`, seedConversationID).Scan(&msgCount); err != nil {
-		t.Fatalf("count messages: %v", err)
-	}
-	if msgCount != 0 {
-		t.Errorf("messages retains %d rows after apply, want 0", msgCount)
 	}
 
 	// The project row itself is gone.

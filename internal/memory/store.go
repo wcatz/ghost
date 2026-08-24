@@ -263,7 +263,6 @@ func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) err
 	// Reassign all child records from old project to new.
 	stmts := []string{
 		`UPDATE memories SET project_id = ? WHERE project_id = ?`,
-		`UPDATE conversations SET project_id = ? WHERE project_id = ?`,
 		`UPDATE tasks SET project_id = ? WHERE project_id = ?`,
 		`UPDATE decisions SET project_id = ? WHERE project_id = ?`,
 		`UPDATE token_usage SET project_id = ? WHERE project_id = ?`,
@@ -308,10 +307,10 @@ type DeleteProjectSummary struct {
 
 // DeleteProject permanently removes a project and everything under it.
 // memories (with their FTS index entries, embeddings, links, and link_scans),
-// conversations (with their messages), tasks, decisions, ghost_state, and
-// memory_snapshots all cascade from the projects row via ON DELETE CASCADE
-// (see schema.go). token_usage and audit_log carry a project_id column but no
-// foreign key, so they're deleted explicitly in the same transaction.
+// tasks, decisions, ghost_state, and memory_snapshots all cascade from the
+// projects row via ON DELETE CASCADE (see schema.go). token_usage and
+// audit_log carry a project_id column but no foreign key, so they're deleted
+// explicitly in the same transaction.
 //
 // input is resolved exactly like every other command resolves a project (see
 // ResolveProject): id, name, path-prefix, or basename all work.
@@ -1393,96 +1392,6 @@ func (s *Store) AppendMessage(ctx context.Context, conversationID, role, content
 		VALUES (?, ?, ?)
 	`, conversationID, role, content)
 	return err
-}
-
-// GetRecentExchanges returns the last N user+assistant pairs for reflection.
-func (s *Store) GetRecentExchanges(ctx context.Context, projectID string, limit int) ([][2]string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT role, content FROM (
-			SELECT m.role, m.content, m.created_at
-			FROM messages m
-			JOIN conversations c ON c.id = m.conversation_id
-			WHERE c.project_id = ? AND m.role IN ('user', 'assistant')
-			ORDER BY m.created_at DESC
-			LIMIT ?
-		) ORDER BY created_at ASC
-	`, projectID, limit*2)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var pairs [][2]string
-	var current [2]string
-	for rows.Next() {
-		var role, content string
-		if err := rows.Scan(&role, &content); err != nil {
-			return nil, err
-		}
-		if role == "user" {
-			current[0] = content
-		} else {
-			current[1] = content
-			if current[0] != "" {
-				pairs = append(pairs, current)
-			}
-			current = [2]string{}
-		}
-	}
-	return pairs, rows.Err()
-}
-
-// GetLatestConversation returns the most recent conversation ID for a project.
-func (s *Store) GetLatestConversation(ctx context.Context, projectID string) (string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var id string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id FROM conversations
-		WHERE project_id = ?
-		ORDER BY created_at DESC
-		LIMIT 1
-	`, projectID).Scan(&id)
-	if err != nil {
-		return "", err
-	}
-	return id, nil
-}
-
-// ConversationMessage is a stored message with role and JSON content.
-type ConversationMessage struct {
-	Role    string
-	Content string
-}
-
-// GetConversationMessages returns all messages in a conversation, ordered.
-func (s *Store) GetConversationMessages(ctx context.Context, conversationID string) ([]ConversationMessage, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT role, content FROM messages
-		WHERE conversation_id = ?
-		ORDER BY created_at ASC
-	`, conversationID)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	var msgs []ConversationMessage
-	for rows.Next() {
-		var m ConversationMessage
-		if err := rows.Scan(&m.Role, &m.Content); err != nil {
-			return nil, err
-		}
-		msgs = append(msgs, m)
-	}
-	return msgs, rows.Err()
 }
 
 // RecordUsage saves token usage for cost tracking.
