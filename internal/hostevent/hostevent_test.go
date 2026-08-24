@@ -212,3 +212,73 @@ func TestParseStrict(t *testing.T) {
 		}
 	})
 }
+
+// gooseNativeStopPayload is goose's published Open Plugins Stop shape:
+// native `event`/`working_dir` field names, no hook_event_name/cwd, and NO
+// contract envelope — exactly what `hooks/hooks.json` commands receive on
+// stdin.
+const gooseNativeStopPayload = `{"event":"Stop","session_id":"g1","working_dir":"/g/proj"}`
+
+// TestParseGooseNativeAliases pins Phase 2's in-core field aliasing: a native
+// goose payload (no envelope, no dialect fields) parses for --source goose
+// via envelope completion plus event→hook_event_name / working_dir→cwd
+// fallbacks, while every other source keeps strict dialect-only parsing.
+func TestParseGooseNativeAliases(t *testing.T) {
+	t.Run("native payload without envelope parses via completion + aliasing", func(t *testing.T) {
+		p, err := Parse([]byte(gooseNativeStopPayload), "stop", "goose")
+		if err != nil {
+			t.Fatalf("parse native goose payload: %v", err)
+		}
+		if p.HostSource() != SourceGoose || p.Event() != EventStop {
+			t.Errorf("routing wrong: source=%q event=%q", p.HostSource(), p.Event())
+		}
+		if p.CWD != "/g/proj" || p.SessionID != "g1" {
+			t.Errorf("aliased fields wrong: %+v", p)
+		}
+		if p.Contract == nil || p.Contract.Version != ContractVersion || p.Contract.TranscriptFormat != FormatNone {
+			t.Errorf("completed envelope wrong: %+v", p.Contract)
+		}
+		if !strings.Contains(string(p.Raw), `"working_dir":"/g/proj"`) {
+			t.Errorf("Raw passthrough must keep native bytes verbatim: %s", p.Raw)
+		}
+	})
+
+	t.Run("dialect fields win over aliases when present", func(t *testing.T) {
+		p, err := Parse([]byte(`{"event":"SessionEnd","hook_event_name":"Stop","working_dir":"/native","cwd":"/dialect"}`), "stop", "goose")
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if p.Event() != EventStop || p.CWD != "/dialect" {
+			t.Errorf("alias fallback must not override present dialect fields: %+v", p)
+		}
+	})
+
+	t.Run("aliased event disagreement with argv still rejected", func(t *testing.T) {
+		_, err := Parse([]byte(`{"event":"SessionEnd","working_dir":"/g"}`), "stop", "goose")
+		if err == nil || !strings.Contains(err.Error(), "disagrees") {
+			t.Errorf("aliased SessionEnd vs argv stop should fail, got %v", err)
+		}
+	})
+
+	t.Run("non-goose sources never alias", func(t *testing.T) {
+		if _, err := Parse([]byte(`{"event":"Stop","working_dir":"/w"}`), "stop", "codex"); err == nil || !strings.Contains(err.Error(), "not a v1 event") {
+			t.Errorf("native goose fields must not satisfy codex parsing, got %v", err)
+		}
+	})
+
+	t.Run("explicit envelope still wins over aliases", func(t *testing.T) {
+		wrapped := contractWrap(gooseNativeStopPayload, "Stop", "goose", FormatNone)
+		p, err := Parse([]byte(wrapped), "stop", "goose")
+		if err != nil {
+			t.Fatalf("explicit agreeing envelope + aliases should parse, got %v", err)
+		}
+		if p.HostSource() != SourceGoose || p.CWD != "/g/proj" {
+			t.Errorf("explicit-envelope payload wrong: %+v", p)
+		}
+
+		bad := strings.Replace(wrapped, `"source":"goose"`, `"source":"opencode"`, 1)
+		if _, err := Parse([]byte(bad), "stop", "goose"); err == nil || !strings.Contains(err.Error(), "disagrees") {
+			t.Errorf("explicit disagreeing envelope should fail even with aliased fields, got %v", err)
+		}
+	})
+}
