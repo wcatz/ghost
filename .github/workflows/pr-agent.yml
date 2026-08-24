@@ -2,7 +2,10 @@ name: PR Agent
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    # synchronize keeps the pr_agent_job check run current on every push —
+    # it is (or will be) a required branch-protection context, and a stale
+    # context on a new head SHA blocks merge with "Expected" forever.
+    types: [opened, reopened, ready_for_review, synchronize]
   issue_comment:
     types: [created]
 
