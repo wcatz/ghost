@@ -74,14 +74,15 @@ func Status(w io.Writer) (bool, error) {
 				fmt.Sprintf("permissions: %d/%d", present, len(ghostPermissions)),
 				fmt.Sprintf("permissions: %d/%d (run ghost mcp init)", present, len(ghostPermissions)))
 
-			// Hook. The needles include the contract's --source flag: a
-			// pre-contract bare invocation fails open at fire time, so it
-			// must report as missing here — the fix is `ghost mcp init`,
-			// which migrates it in place.
-			hasHk := sf.hasHook("SessionStart", "hook session-start --source")
+			// Hook. The needles include the contract's full --source value: a
+			// pre-contract bare invocation fails open at fire time, and a hook
+			// wired for a different host would too, so both must report as
+			// missing here — the fix is `ghost mcp init`, which migrates or
+			// rewrites in place.
+			hasHk := sf.hasHook("SessionStart", "hook session-start --source claude-code")
 			check(hasHk, "SessionStart hook configured", "SessionStart hook missing or pre-contract (run ghost mcp init)")
 
-			hasStop := sf.hasHook("Stop", "hook stop --source")
+			hasStop := sf.hasHook("Stop", "hook stop --source claude-code")
 			check(hasStop, "Stop hook configured", "Stop hook missing or pre-contract (run ghost mcp init)")
 
 			// autoMemoryEnabled must be false to prevent competing file-memory.

@@ -33,11 +33,16 @@ func stopInput(t *testing.T, transcriptPath string, active bool) string {
 }
 
 // contractInput wraps a native Claude Code Stop payload with the ghost
-// contract envelope, mirroring what every adapter shim does before invoking
-// `ghost hook`.
+// contract envelope, mirroring what an explicit-envelope adapter would send.
 func contractInput(t *testing.T, inner string) string {
 	t.Helper()
 	return contractInputFor(t, "Stop", "claude-code", "claude-jsonl", inner)
+}
+
+// nativeStopInput is the exact JSON Claude Code sends on Stop — no contract
+// object. Envelope completion in hostevent.Parse must make it dispatch.
+func nativeStopInput(transcriptPath string) string {
+	return fmt.Sprintf(`{"hook_event_name":"Stop","session_id":"s1","transcript_path":%q,"cwd":"/repo","stop_hook_active":false,"source":"startup"}`, transcriptPath)
 }
 
 // contractInputFor is contractInput with every envelope field selectable.
@@ -139,6 +144,33 @@ func TestRunStop(t *testing.T) {
 			t.Errorf("expected silence (save found despite garbage), got %q", out)
 		}
 	})
+}
+
+// TestRunHostEvent_NativeClaudePayloadCompletesEnvelope pins the envelope-
+// completion rule at the dispatch level: Claude Code sends no contract
+// object, so the argv values must complete it — a native payload blocks
+// exactly like an explicit-envelope one.
+func TestRunHostEvent_NativeClaudePayloadCompletesEnvelope(t *testing.T) {
+	isolatedHome(t)
+	path := writeTranscript(t, lineUser, lineToolBash, lineText)
+	out := runStopHook(t, nativeStopInput(path))
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("native payload should complete its envelope and block, got %q", out)
+	}
+}
+
+// TestRunHostEvent_SessionStartSuppressedOnNonInjectingHost pins the
+// capability-scoped output rule: opencode cannot consume injected context,
+// so its session-start is a silent success — never stdout it would misread.
+func TestRunHostEvent_SessionStartSuppressedOnNonInjectingHost(t *testing.T) {
+	isolatedHome(t)
+	var out bytes.Buffer
+	input := contractInputFor(t, "SessionStart", "opencode", "none",
+		`{"session_id":"oc1","cwd":"/repo"}`)
+	RunHostEvent("session-start", "opencode", strings.NewReader(input), &out, io.Discard)
+	if out.Len() != 0 {
+		t.Errorf("expected silent no-op session-start for opencode, got %q", out.String())
+	}
 }
 
 func TestRunHostEvent_FailsOpenOnEmptyTranscriptPathEvenWithCWD(t *testing.T) {

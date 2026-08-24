@@ -47,27 +47,31 @@ func TestCapabilityFor(t *testing.T) {
 	}
 }
 
-// claudeStopPayload is the exact shape Claude Code sends on Stop (no envelope).
-const claudeStopPayload = `{"session_id":"s1","transcript_path":"/t/x.jsonl","cwd":"/repo","stop_hook_active":false}`
+// claudeStopPayload is the exact shape Claude Code sends on Stop: shared
+// dialect fields plus hook_event_name, and NO contract envelope.
+const claudeStopPayload = `{"hook_event_name":"Stop","session_id":"s1","transcript_path":"/t/x.jsonl","cwd":"/repo","stop_hook_active":false,"source":"startup"}`
 
-// codexStopPayload mirrors codex's documented Stop input: the shared dialect
-// fields plus codex-specific extras that must be tolerated and ignored.
+// codexStopPayload mirrors codex's documented Stop input with an EXPLICIT
+// agreeing envelope, plus codex-specific extras that must be tolerated and
+// ignored.
 const codexStopPayload = `{"contract":{"version":1,"source":"codex","transcript_format":"codex-rollout"},"hook_event_name":"Stop","session_id":"thr_123","transcript_path":"/w/.codex/rollout.jsonl","cwd":"/w","stop_hook_active":false,"turn_id":"t9","model":"gpt-5.6","permission_mode":"default","last_assistant_message":null}`
 
-// gooseStopPayload is a native Open Plugins Stop payload wrapped with ghost's
-// envelope by the adapter shim.
+// gooseStopPayload is an Open Plugins Stop payload carrying an explicit
+// agreeing envelope (what a Phase 2 adapter shim would emit).
 const gooseStopPayload = `{"contract":{"version":1,"source":"goose"},"hook_event_name":"Stop","session_id":"g1","transcript_path":"","cwd":"/g","stop_hook_active":true}`
 
 func TestParseClaudeCode(t *testing.T) {
-	// A native Claude Code Stop payload wrapped with the envelope parses with
-	// no field translation — the dialect fields ARE the contract fields.
-	wrapped := contractWrap(claudeStopPayload, "Stop", "claude-code", FormatClaudeJSONL)
-	p, err := Parse([]byte(wrapped), "stop", "claude-code")
+	// Envelope completion: a native Claude Code payload has no contract
+	// object — argv completes it, dialect fields pass through untouched.
+	p, err := Parse([]byte(claudeStopPayload), "stop", "claude-code")
 	if err != nil {
-		t.Fatalf("parse: %v", err)
+		t.Fatalf("parse native payload: %v", err)
 	}
 	if p.HostSource() != SourceClaudeCode {
 		t.Errorf("source = %q, want claude-code", p.HostSource())
+	}
+	if p.Contract.Version != ContractVersion || p.Contract.TranscriptFormat != FormatClaudeJSONL {
+		t.Errorf("completed envelope wrong: %+v", p.Contract)
 	}
 	if p.TranscriptPath != "/t/x.jsonl" || p.CWD != "/repo" || p.StopHookActive {
 		t.Errorf("fields wrong: %+v", p)
@@ -75,17 +79,26 @@ func TestParseClaudeCode(t *testing.T) {
 	if p.Event() != EventStop {
 		t.Errorf("event = %q, want stop", p.Event())
 	}
-	if p.Contract.TranscriptFormat != FormatClaudeJSONL {
-		t.Errorf("transcript format = %q, want claude-jsonl", p.Contract.TranscriptFormat)
+
+	// An explicit agreeing envelope is equally valid (adapters may send one).
+	wrapped := contractWrap(claudeStopPayload, "Stop", "claude-code", FormatClaudeJSONL)
+	if _, err := Parse([]byte(wrapped), "stop", "claude-code"); err != nil {
+		t.Errorf("explicit agreeing envelope should parse, got %v", err)
 	}
 
-	// No legacy mode: an envelope-less native payload is rejected.
-	if _, err := Parse([]byte(claudeStopPayload), "stop", "claude-code"); err == nil || !strings.Contains(err.Error(), "contract.version") {
-		t.Errorf("envelope-less payload should fail on version, got %v", err)
+	// Completion is argv-authoritative, not legacy parsing: an explicit
+	// envelope that disagrees is still rejected, never repaired.
+	bad := strings.Replace(wrapped, `"version":1`, `"version":2`, 1)
+	if _, err := Parse([]byte(bad), "stop", "claude-code"); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Errorf("explicit version=2 should fail, got %v", err)
+	}
+	bad = strings.Replace(wrapped, `"source":"claude-code"`, `"source":"goose"`, 1)
+	if _, err := Parse([]byte(bad), "stop", "claude-code"); err == nil || !strings.Contains(err.Error(), "disagrees") {
+		t.Errorf("explicit disagreeing source should fail, got %v", err)
 	}
 
 	// Missing --source is rejected outright (the CLI fails open with guidance).
-	if _, err := Parse([]byte(wrapped), "stop", ""); err == nil || !strings.Contains(err.Error(), "missing --source") {
+	if _, err := Parse([]byte(claudeStopPayload), "stop", ""); err == nil || !strings.Contains(err.Error(), "missing --source") {
 		t.Errorf("empty source should error, got %v", err)
 	}
 
@@ -108,6 +121,21 @@ func contractWrap(inner, eventName, source, format string) string {
 }
 
 func TestParseStrict(t *testing.T) {
+	t.Run("codex native payload completed from argv", func(t *testing.T) {
+		native := `{"hook_event_name":"Stop","session_id":"thr_9","transcript_path":"/w/rollout.jsonl","cwd":"/w","turn_id":"t1"}`
+		p, err := Parse([]byte(native), "stop", "codex")
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if p.HostSource() != SourceCodex || p.Event() != EventStop {
+			t.Errorf("routing wrong: %+v", p)
+		}
+		// codex has no v1 scanner mapping yet, so completion starts at none.
+		if p.Contract.Version != ContractVersion || p.Contract.TranscriptFormat != FormatNone {
+			t.Errorf("completed envelope wrong: %+v", p.Contract)
+		}
+	})
+
 	t.Run("codex passthrough with unknown extras tolerated", func(t *testing.T) {
 		p, err := Parse([]byte(codexStopPayload), "stop", "codex")
 		if err != nil {

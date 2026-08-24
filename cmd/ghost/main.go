@@ -233,7 +233,9 @@ func runMCPStatus() {
 //
 // The contract has no legacy mode: without --source nothing can be routed, so
 // the invocation fails open (one stderr line, exit 0) with a pointer to
-// `ghost mcp init`, which migrates pre-contract wiring idempotently.
+// `ghost mcp init`, which migrates pre-contract wiring idempotently. Every
+// event — including unrecognized ones — goes through RunHostEvent so
+// validation and its fail-open diagnostics live in exactly one place.
 func runHook() {
 	if len(os.Args) < 3 {
 		os.Exit(0)
@@ -249,14 +251,11 @@ func runHook() {
 			source = strings.TrimPrefix(os.Args[i], "--source=")
 		}
 	}
-	switch event {
-	case "session-start", "stop", "session-end":
-		if source == "" {
-			fmt.Fprintln(os.Stderr, "ghost hook: fail-open (missing --source; re-run `ghost mcp init` to migrate hook wiring)")
-			os.Exit(0)
-		}
-		mcpinit.RunHostEvent(event, source, os.Stdin, os.Stdout, os.Stderr)
+	if source == "" {
+		fmt.Fprintln(os.Stderr, "ghost hook: fail-open (missing --source; re-run `ghost mcp init` to migrate hook wiring)")
+		os.Exit(0)
 	}
+	mcpinit.RunHostEvent(event, source, os.Stdin, os.Stdout, os.Stderr)
 }
 
 // resolveProjectOrExit resolves projectName to a project ID via store, printing
