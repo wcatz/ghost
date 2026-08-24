@@ -23,6 +23,18 @@ import (
 //go:embed opencode_ghost.ts
 var opencodeGhostPluginTS string
 
+// ghostBinPlaceholder in the embedded plugin is replaced with the resolved
+// absolute binary path at install time: desktop launchers may run opencode
+// with a narrower PATH than the shell that ran init, so the default cannot
+// rely on lookup. GHOST_BIN stays the runtime override.
+const ghostBinPlaceholder = "__GHOST_BIN__"
+
+// renderOpencodeGhostPlugin returns the plugin source as it must exist on
+// disk for this machine.
+func renderOpencodeGhostPlugin(ghostBin string) string {
+	return strings.ReplaceAll(opencodeGhostPluginTS, ghostBinPlaceholder, ghostBin)
+}
+
 // RunOpencode installs Ghost's opencode integration: one lifecycle plugin
 // file that both registers the ghost MCP server (via the plugin config hook)
 // and bridges idle events to `ghost hook stop --source opencode`. It never
@@ -34,9 +46,11 @@ func RunOpencode(w io.Writer, dryRun bool) error {
 		_, _ = fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
 	}
 
-	// Step 1: Prerequisites — only the ghost binary is required.
+	// Step 1: Prerequisites — only the ghost binary is required; its resolved
+	// path is baked into the installed plugin.
 	_, _ = fmt.Fprintln(w, "[1/3] Checking prerequisites...")
-	if _, _, err := checkPrereqs(w, "opencode"); err != nil {
+	ghostBin, _, err := checkPrereqs(w, "opencode")
+	if err != nil {
 		return retryHint(err)
 	}
 
@@ -48,7 +62,7 @@ func RunOpencode(w io.Writer, dryRun bool) error {
 
 	// Step 3: The lifecycle plugin — MCP registration + stop-event bridge.
 	_, _ = fmt.Fprintln(w, "\n[3/3] Installing lifecycle plugin...")
-	changed, err := installOpencodePlugin(w, dryRun)
+	changed, err := installOpencodePlugin(w, ghostBin, dryRun)
 	if err != nil {
 		return retryHint(err)
 	}
@@ -88,16 +102,18 @@ func opencodePluginPath() (string, error) {
 	return filepath.Join(dir, "opencode", "plugins", "ghost-opencode.ts"), nil
 }
 
-// installOpencodePlugin writes the embedded lifecycle adapter to opencode's
-// plugin directory. Idempotent: an identical file is left untouched; a
-// missing, drifted, or outdated file is overwritten with the embedded source.
-func installOpencodePlugin(w io.Writer, dryRun bool) (bool, error) {
+// installOpencodePlugin writes the lifecycle adapter to opencode's plugin
+// directory, rendered with the resolved ghost binary path. Idempotent: an
+// identical file is left untouched; a missing, drifted, or outdated file is
+// overwritten with the embedded source.
+func installOpencodePlugin(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	path, err := opencodePluginPath()
 	if err != nil {
 		return false, err
 	}
+	want := renderOpencodeGhostPlugin(ghostBin)
 
-	if existing, err := os.ReadFile(path); err == nil && string(existing) == opencodeGhostPluginTS {
+	if existing, err := os.ReadFile(path); err == nil && string(existing) == want {
 		_, _ = fmt.Fprintf(w, "  ✓ lifecycle plugin already installed (%s)\n", path)
 		return false, nil
 	}
@@ -110,7 +126,7 @@ func installOpencodePlugin(w io.Writer, dryRun bool) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return false, fmt.Errorf("create plugin dir: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(opencodeGhostPluginTS), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(want), 0644); err != nil {
 		return false, fmt.Errorf("write plugin: %w", err)
 	}
 	_, _ = fmt.Fprintf(w, "  + installed lifecycle plugin (%s)\n", path)

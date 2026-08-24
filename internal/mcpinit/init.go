@@ -385,7 +385,7 @@ func hookCommandBase(path string) string {
 // string and the remainder (trimmed of leading whitespace), reversing
 // shellQuoteWindows/shellQuotePOSIX. It handles the three forms
 // ghost mcp init can produce: Windows double-quoting with ""-doubling,
-// POSIX single-quoting with '\''-escaping, and a bare unquoted path.
+// POSIX single-quoting with '\”-escaping, and a bare unquoted path.
 func splitHookCommand(cmd string) (bin, rest string, ok bool) {
 	if cmd == "" {
 		return "", "", false

@@ -15,11 +15,12 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// installOpencodePluginFile installs the embedded lifecycle plugin into the
+// installOpencodePluginFile installs the rendered lifecycle plugin into the
 // test XDG_CONFIG_HOME, the same way `ghost mcp init --client opencode` does.
-func installOpencodePluginFile(t *testing.T) {
+// ghostBin must match the stub on PATH so status's byte-compare sees it fresh.
+func installOpencodePluginFile(t *testing.T, ghostBin string) {
 	t.Helper()
-	if _, err := installOpencodePlugin(io.Discard, false); err != nil {
+	if _, err := installOpencodePlugin(io.Discard, ghostBin, false); err != nil {
 		t.Fatalf("install plugin: %v", err)
 	}
 }
@@ -45,8 +46,9 @@ func writePluginFile(t *testing.T, content string) {
 func TestReportStaleIntegrations(t *testing.T) {
 	t.Run("silent when everything is current", func(t *testing.T) {
 		statusEnv(t)
-		t.Setenv("PATH", writeStubGhost(t))
-		installOpencodePluginFile(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		installOpencodePluginFile(t, filepath.Join(binDir, "ghost"))
 
 		var out bytes.Buffer
 		ReportStaleIntegrations(&out)
@@ -288,7 +290,7 @@ func TestStatusOpencode_CleanSetupHealthy(t *testing.T) {
 	statusEnv(t)
 	binDir := writeStubGhost(t)
 	t.Setenv("PATH", binDir)
-	installOpencodePluginFile(t)
+	installOpencodePluginFile(t, filepath.Join(binDir, "ghost"))
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)
@@ -370,7 +372,8 @@ func TestStatusOpencode_EmptyStoreHealthy(t *testing.T) {
   enabled: true
 `, ollama.URL))
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
-	t.Setenv("PATH", writeStubGhost(t))
+	binDir := writeStubGhost(t)
+	t.Setenv("PATH", binDir)
 
 	ghostDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost")
 	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
@@ -384,7 +387,7 @@ func TestStatusOpencode_EmptyStoreHealthy(t *testing.T) {
 		t.Fatalf("close fresh db: %v", err)
 	}
 
-	installOpencodePluginFile(t)
+	installOpencodePluginFile(t, filepath.Join(binDir, "ghost"))
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)

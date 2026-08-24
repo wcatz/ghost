@@ -179,11 +179,6 @@ func TestRunHostEvent_SessionStartSuppressedOnNonInjectingHost(t *testing.T) {
 	}
 }
 
-// TestRunHostEvent_StopHookActiveGatesOnlyStop pins the §2.2 split:
-// stop_hook_active suppresses a repeat stop entirely, but session-end fires
-// once per real session end, so its lifecycle spawns run regardless of any
-// earlier block cycle. Observable via config.DataDir(): with auto_resolve
-// enabled, reaching the spawn probe creates the ghost data dir.
 // TestRunStop_SweepsTransientTempTranscript pins the consumer-side sweep:
 // an opencode-materialized transcript under a mkdtemp ghost-* dir in the OS
 // temp dir is removed after the hook runs, even though the spawning host may
@@ -223,6 +218,11 @@ func TestRunStop_NeverSweepsForeignPaths(t *testing.T) {
 	}
 }
 
+// TestRunHostEvent_StopHookActiveGatesOnlyStop pins the §2.2 split:
+// stop_hook_active suppresses a repeat stop entirely, but session-end fires
+// once per real session end, so its lifecycle spawns run regardless of any
+// earlier block cycle. Observable via config.DataDir(): with auto_resolve
+// enabled, reaching the spawn probe creates the ghost data dir.
 func TestRunHostEvent_StopHookActiveGatesOnlyStop(t *testing.T) {
 	dataHome := isolatedHome(t)
 	writeGhostConfigFile(t, "reflection:\n  auto_resolve: true\n")

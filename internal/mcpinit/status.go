@@ -74,15 +74,16 @@ func Status(w io.Writer) (bool, error) {
 				fmt.Sprintf("permissions: %d/%d", present, len(ghostPermissions)),
 				fmt.Sprintf("permissions: %d/%d (run ghost mcp init)", present, len(ghostPermissions)))
 
-			// Hook. The needles include the contract's full --source value: a
-			// pre-contract bare invocation fails open at fire time, and a hook
-			// wired for a different host would too, so both must report as
-			// missing here — the fix is `ghost mcp init`, which migrates or
-			// rewrites in place.
-			hasHk := sf.hasHook("SessionStart", "hook session-start --source claude-code")
+			// Hook. Token-validated, not substring-matched: the command must
+			// invoke `hook <event>` with an exact --source claude-code token
+			// (either flag form). A pre-contract bare invocation fails open at
+			// fire time and a wrong-source or lookalike value would too — all
+			// must report as missing here so the fix is actionable via
+			// `ghost mcp init`.
+			hasHk := contractHookWired(sf, "SessionStart", "session-start", "claude-code")
 			check(hasHk, "SessionStart hook configured", "SessionStart hook missing or pre-contract (run ghost mcp init)")
 
-			hasStop := sf.hasHook("Stop", "hook stop --source claude-code")
+			hasStop := contractHookWired(sf, "Stop", "stop", "claude-code")
 			check(hasStop, "Stop hook configured", "Stop hook missing or pre-contract (run ghost mcp init)")
 
 			// autoMemoryEnabled must be false to prevent competing file-memory.
@@ -163,13 +164,13 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	// 2. Lifecycle plugin — it both registers the ghost MCP server (config
 	// hook) and bridges idle events to the contract; without it opencode has
 	// neither tools nor reflection/resolve/supersede. Compared byte-for-byte
-	// against the embedded source: a corrupted or hand-mangled file that kept
-	// its header comment must not read healthy, and `ghost mcp init --client
-	// opencode` repairs any drift in place.
+	// against the source rendered with the resolved ghost binary path: a
+	// corrupted or hand-mangled file must not read healthy, and `ghost mcp
+	// init --client opencode` repairs any drift in place.
 	pluginPath, perr := opencodePluginPath()
 	if perr != nil {
 		check(false, "", fmt.Sprintf("lifecycle plugin: %v", perr))
-	} else if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == opencodeGhostPluginTS {
+	} else if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == renderOpencodeGhostPlugin(findBinary("ghost")) {
 		check(true, fmt.Sprintf("lifecycle plugin installed: %s", pluginPath), "")
 	} else {
 		check(false, "", "lifecycle plugin missing or outdated (run ghost mcp init --client opencode)")
@@ -191,6 +192,39 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	return healthy, nil
 }
 
+// contractHookWired reports whether any registered hook command for event
+// invokes `hook <eventToken>` with an exact --source token equal to wantSource.
+// Both accepted flag forms count: "--source X" and "--source=X". Token-based,
+// not substring-based — a lookalike like "--source claude-code-extra" is
+// rejected by hostevent.Parse at runtime, so status must never call it wired;
+// conversely the equals form works and must not read as missing. Unparseable
+// commands (exotic hand-edited quoting) conservatively don't count.
+func contractHookWired(sf *settingsFile, hookEvent, eventToken, wantSource string) bool {
+	cmds, err := sf.hookCommands(hookEvent)
+	if err != nil {
+		return false
+	}
+	for _, cmd := range cmds {
+		_, rest, ok := splitHookCommand(cmd)
+		if !ok {
+			continue
+		}
+		fields := strings.Fields(rest)
+		if len(fields) < 2 || fields[0] != "hook" || fields[1] != eventToken {
+			continue
+		}
+		for i := 2; i < len(fields); i++ {
+			if fields[i] == "--source" && i+1 < len(fields) && fields[i+1] == wantSource {
+				return true
+			}
+			if strings.HasPrefix(fields[i], "--source=") && strings.TrimPrefix(fields[i], "--source=") == wantSource {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ReportStaleIntegrations warns when existing client wiring predates the
 // running binary. Pre-contract Claude hooks fail open on every fire (no
 // context injection, no save-nudge, no lifecycle spawns), and a drifted
@@ -201,25 +235,21 @@ func StatusOpencode(w io.Writer) (bool, error) {
 func ReportStaleIntegrations(w io.Writer) {
 	var hints []string
 
-	const (
-		startNeedle = "hook session-start --source claude-code"
-		stopNeedle  = "hook stop --source claude-code"
-	)
 	if path, err := settingsPath(); err == nil {
 		if sf, err := loadSettings(path); err == nil {
 			for _, c := range []struct {
-				event  string
-				needle string
-				label  string
+				event string
+				token string
+				label string
 			}{
-				{"SessionStart", startNeedle, "Claude Code SessionStart"},
-				{"Stop", stopNeedle, "Claude Code Stop"},
+				{"SessionStart", "session-start", "Claude Code SessionStart"},
+				{"Stop", "stop", "Claude Code Stop"},
 			} {
 				cmds, err := sf.hookCommands(c.event)
 				if err != nil || len(cmds) == 0 {
 					continue // integration not in use, or unreadable — leave status to `ghost mcp status`
 				}
-				if !sf.hasHook(c.event, c.needle) {
+				if !contractHookWired(sf, c.event, c.token, "claude-code") {
 					hints = append(hints, fmt.Sprintf("%s hook is pre-contract or miswired — run `ghost mcp init` to migrate it", c.label))
 				}
 			}
@@ -234,7 +264,8 @@ func ReportStaleIntegrations(w io.Writer) {
 	if _, statErr := os.Stat(filepath.Join(opencodeDirOrEmpty(), "opencode")); statErr == nil {
 		stale := true
 		if pluginPath, perr := opencodePluginPath(); perr == nil {
-			if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == opencodeGhostPluginTS {
+			want := renderOpencodeGhostPlugin(findBinary("ghost"))
+			if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == want {
 				stale = false
 			}
 		}

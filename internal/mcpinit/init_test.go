@@ -577,7 +577,8 @@ func TestMigratePreContractHook_MigratesBehindNonMatchingFirstEntry(t *testing.T
 	}
 }
 
-func TestReconcileHook_MigratesExactLegacyCommandOnly(t *testing.T) {	wrapper := `'C:\tools\wrap.exe' --run 'hook session-start' --extra`
+func TestReconcileHook_MigratesExactLegacyCommandOnly(t *testing.T) {
+	wrapper := `'C:\tools\wrap.exe' --run 'hook session-start' --extra`
 
 	for _, order := range []string{"legacy-first", "wrapper-first"} {
 		t.Run(order, func(t *testing.T) {
