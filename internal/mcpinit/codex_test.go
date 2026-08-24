@@ -303,7 +303,7 @@ func TestRunCodex_HooksMergePreservesUserHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	var doc struct {
-		Description string `json:"description"`
+		Description string                     `json:"description"`
 		Hooks       map[string]json.RawMessage `json:"hooks"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -327,7 +327,7 @@ func TestRunCodex_HooksMergePreservesUserHooks(t *testing.T) {
 	}
 
 	var preToolUse []struct {
-		Matcher string `json:"matcher"`
+		Matcher string           `json:"matcher"`
 		Hooks   []map[string]any `json:"hooks"`
 	}
 	if err := json.Unmarshal(doc.Hooks["PreToolUse"], &preToolUse); err != nil {
@@ -457,7 +457,7 @@ func TestStatusCodex_UnhealthyWithoutInstall(t *testing.T) {
 			if err := os.WriteFile(path, data, 0644); err != nil {
 				t.Fatal(err)
 			}
-		}, wantFail: "SessionStart hook missing or pre-contract"},
+		}, wantFail: "SessionStart hook missing or miswired"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
