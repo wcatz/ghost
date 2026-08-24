@@ -92,17 +92,22 @@ ghost hook <event> --source <host> [--version 1]
 ```
 
 with a versioned JSON payload on stdin. Field names deliberately match the
-Open Plugins / Claude hook dialect wherever one exists; `contract`, `source`, and
-`transcript_format` are ghost envelope extensions:
+Open Plugins / Claude hook dialect wherever one exists; the `contract` object is
+ghost's envelope extension, nested under its own key rather than merged into the
+top level because hosts already use top-level `source` for their own semantics
+(the SessionStart reason: startup|resume|clear|compact) — a collision there would
+break verbatim passthrough of native payloads:
 
 ```json
 {
-  "contract": 1,
-  "source": "claude-code | goose | opencode | codex",
+  "contract": {
+    "version": 1,
+    "source": "claude-code | goose | opencode | codex",
+    "transcript_format": "claude-jsonl | opencode-messages | codex-rollout | none"
+  },
   "hook_event_name": "session-start | stop | session-end",
   "session_id": "…",
   "transcript_path": "~/.claude/projects/….jsonl",
-  "transcript_format": "claude-jsonl | opencode-messages | codex-rollout | none",
   "cwd": "/abs/path",
   "stop_hook_active": false
 }
@@ -117,9 +122,9 @@ Rules:
   `source`, `last_assistant_message`) are **tolerated and ignored**; unknown
   fields never cause rejection.
 - **CLI args are authoritative; payload must agree.** `hook_event_name` (from argv
-  `<event>`) and `source` appear in both argv and payload so the payload is
+  `<event>`) and `contract.source` appear in both argv and payload so the payload is
   self-describing in logs, but
-  dispatch validates equality (and `contract == 1`) *before* anything else. Any
+  dispatch validates equality (and `contract.version == 1`) *before* anything else. Any
   mismatch — including a stale adapter sending `"source": "claude-code"` with
   `--source opencode` — is rejected as fail-open (log line, empty stdout, exit 0).
   Routing never consults a field that failed validation.
@@ -242,10 +247,15 @@ Honest constraints, stated up front:
 
 ### Phase 1 — opencode adapter (closes #345)
 
-- **Scanner first:** add the `opencode-messages` transcript scanner and its golden
-  fixtures to the registry *before* any adapter lands — an adapter that invokes the
-  contract successfully but fails open on an unsupported format would silently
-  disable reflection/resolve/supersede for opencode users.
+- **Scanner first (implemented on this branch):** `hostevent.ScanOpencodeMessages`
+  and its golden fixture are in the registry ahead of any adapter. It parses one
+  `{info, parts}` JSONL object per line — verbatim `client.session.messages`
+  serialization — counting assistant tool-call parts, with save detection keyed
+  to opencode's `<server>_<tool>` MCP naming (`ghost_ghost_memory_save`,
+  `ghost_save_global`), not Claude Code's `mcp__ghost__*`. Without this, an
+  adapter that invoked the contract successfully but failed open on an
+  unsupported format would silently disable reflection/resolve/supersede for
+  opencode users.
 - `plugin/ghost-opencode/` in-repo: TypeScript plugin listening for
   `session.status`→idle transitions; spawns `ghost hook stop --source opencode`
   with SDK-fetched messages serialized to a temp JSONL.

@@ -74,7 +74,7 @@ func runStopHook(t *testing.T, stdin string) string {
 	return out.String()
 }
 
-func TestHandleStopHook(t *testing.T) {
+func TestRunStop(t *testing.T) {
 	t.Run("blocks when tools ran but nothing saved", func(t *testing.T) {
 		path := writeTranscript(t, lineUser, lineToolBash, lineText)
 		out := runStopHook(t, stopInput(t, path, false))
