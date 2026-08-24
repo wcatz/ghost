@@ -52,6 +52,9 @@ jobs:
     needs: config
     if: needs.config.outputs.same-repo == 'true'
     runs-on: ubuntu-latest
+    # Hard cap: litellm's ai_timeout does not bound a hung streamed call —
+    # observed 651s before the upstream 500 came back. Kill at the runner.
+    timeout-minutes: 8
     steps:
       - name: PR Agent action step
         id: pragent
@@ -70,7 +73,10 @@ jobs:
           # openai/ prefix routes through litellm's OpenAI-compatible path;
           # kimi-k2.7-code is the Go endpoint's model id.
           config.model: "openai/kimi-k2.7-code"
-          config.fallback_models: '["openai/kimi-k2.7-code"]'
+          # Fallback rides a different provider lane (DeepSeek vs Moonshot
+          # hosting) so an unhealthy Kimi endpoint doesn't fail the run.
+          # Both accept temperature=1 and are inside the Go subscription.
+          config.fallback_models: '["openai/deepseek-v4-flash"]'
           # Not in PR-Agent's MAX_TOKENS catalog → must set explicitly.
           # Conservative slice of K2.7's context window; plenty for any diff.
           config.custom_model_max_tokens: "65536"
