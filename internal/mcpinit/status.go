@@ -175,10 +175,13 @@ func StatusOpencode(w io.Writer) (bool, error) {
 
 	// 3. Lifecycle plugin — without it stop events never reach the contract,
 	// so reflection/resolve/supersede silently never run for opencode.
+	// Compared byte-for-byte against the embedded source: a corrupted or
+	// hand-mangled file that kept its header comment must not read healthy,
+	// and `ghost mcp init --client opencode` repairs any drift in place.
 	pluginPath, perr := opencodePluginPath()
 	if perr != nil {
 		check(false, "", fmt.Sprintf("lifecycle plugin: %v", perr))
-	} else if data, rerr := os.ReadFile(pluginPath); rerr == nil && strings.Contains(string(data), opencodePluginMarker) {
+	} else if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == opencodeGhostPluginTS {
 		check(true, fmt.Sprintf("lifecycle plugin installed: %s", pluginPath), "")
 	} else {
 		check(false, "", "lifecycle plugin missing or outdated (run ghost mcp init --client opencode)")
