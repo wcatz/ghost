@@ -3,6 +3,7 @@ package mcpinit
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,15 @@ import (
 	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/memory"
 )
+
+// installOpencodePluginFile installs the embedded lifecycle plugin into the
+// test XDG_CONFIG_HOME, the same way `ghost mcp init --client opencode` does.
+func installOpencodePluginFile(t *testing.T) {
+	t.Helper()
+	if _, err := installOpencodePlugin(io.Discard, false); err != nil {
+		t.Fatalf("install plugin: %v", err)
+	}
+}
 
 // TestStatus_ReportsOpenDBFailure verifies that a database which exists but
 // fails to open (e.g. mid-migration foreign-key corruption) is surfaced as a
@@ -229,6 +239,7 @@ func TestStatusOpencode_RegisteredNoDatabase(t *testing.T) {
 	binDir := writeStubGhost(t)
 	t.Setenv("PATH", binDir)
 	writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), `{"mcp":{"ghost":{"type":"local","command":["ghost","mcp"],"enabled":true}}}`)
+	installOpencodePluginFile(t)
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)
@@ -243,6 +254,7 @@ func TestStatusOpencode_RegisteredNoDatabase(t *testing.T) {
 	for _, want := range []string{
 		"✓ ghost binary: " + filepath.Join(binDir, "ghost"),
 		"✓ opencode MCP config: ghost registered",
+		"✓ lifecycle plugin installed: ",
 		"- no Ghost database (run ghost first)",
 		"All checks passed.",
 	} {
@@ -252,6 +264,52 @@ func TestStatusOpencode_RegisteredNoDatabase(t *testing.T) {
 	}
 	if strings.Contains(output, "✗") {
 		t.Errorf("a clean opencode setup must have no failed checks, got:\n%s", output)
+	}
+}
+
+// TestStatusOpencode_PluginMissing verifies the lifecycle plugin check fails
+// (and blocks "All checks passed.") when the plugin file is absent or lacks
+// the versioned marker.
+func TestStatusOpencode_PluginMissing(t *testing.T) {
+	cases := map[string]func(t *testing.T){
+		"absent": func(t *testing.T) {},
+		"drifted": func(t *testing.T) {
+			path, err := opencodePluginPath()
+			if err != nil {
+				t.Fatalf("plugin path: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatalf("mkdir plugin dir: %v", err)
+			}
+			if err := os.WriteFile(path, []byte("// some other plugin"), 0o644); err != nil {
+				t.Fatalf("write plugin: %v", err)
+			}
+		},
+	}
+	for name, seed := range cases {
+		t.Run(name, func(t *testing.T) {
+			statusEnv(t)
+			t.Setenv("PATH", writeStubGhost(t))
+			writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), `{"mcp":{"ghost":{"type":"local","command":["ghost","mcp"],"enabled":true}}}`)
+			seed(t)
+
+			var out bytes.Buffer
+			healthy, err := StatusOpencode(&out)
+			if err != nil {
+				t.Fatalf("StatusOpencode: %v", err)
+			}
+			if healthy {
+				t.Errorf("%s: healthy = true, want false without a valid lifecycle plugin", name)
+			}
+
+			output := out.String()
+			if !strings.Contains(output, "✗ lifecycle plugin missing or outdated") {
+				t.Errorf("%s: expected failed plugin check, got:\n%s", name, output)
+			}
+			if strings.Contains(output, "All checks passed.") {
+				t.Errorf("%s: must not report \"All checks passed.\", got:\n%s", name, output)
+			}
+		})
 	}
 }
 
@@ -318,6 +376,7 @@ func TestStatusOpencode_EmptyStoreHealthy(t *testing.T) {
 	}
 
 	writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), `{"mcp":{"ghost":{"type":"local","command":["ghost","mcp"],"enabled":true}}}`)
+	installOpencodePluginFile(t)
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)

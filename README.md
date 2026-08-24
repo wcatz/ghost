@@ -49,7 +49,7 @@ ghost mcp init --client opencode
 ollama pull nomic-embed-text:v1.5
 ```
 
-This writes the `ghost` entry into `~/.config/opencode/opencode.json` (or merges it into an existing `opencode.jsonc`). Restart opencode — Ghost's `ghost_*` tools and context injection go live automatically. Verify with `ghost mcp status --client opencode`.
+This writes the `ghost` entry into `~/.config/opencode/opencode.json` (or merges it into an existing `opencode.jsonc`) **and** installs a lifecycle plugin to `~/.config/opencode/plugins/ghost-opencode.ts` that bridges session-idle events to ghost's stop hook (memory reflection, resolve, supersede). Restart opencode — Ghost's `ghost_*` tools and context injection go live automatically. Verify with `ghost mcp status --client opencode`.
 
 No Go toolchain? Grab a prebuilt binary from [Releases](https://github.com/wcatz/ghost/releases/latest) — linux, macOS, and Windows, amd64 and arm64, with `checksums.txt`. Building from source needs Go 1.26+ (older toolchains fetch it automatically via `GOTOOLCHAIN=auto`).
 
@@ -283,7 +283,7 @@ ghost upgrade                # Self-update from GitHub Releases (linux/macOS; Wi
 ghost version                # Print version
 ```
 
-`ghost mcp init` and `ghost mcp status` default to Claude Code; `--client opencode` targets opencode instead, writing the `ghost` entry to `~/.config/opencode/opencode.json` (or merging into an existing `opencode.jsonc`).
+`ghost mcp init` and `ghost mcp status` default to Claude Code; `--client opencode` targets opencode instead, writing the `ghost` entry to `~/.config/opencode/opencode.json` (or merging into an existing `opencode.jsonc`) and installing the stop-event lifecycle plugin to `~/.config/opencode/plugins/ghost-opencode.ts` (re-running init repairs an outdated plugin in place).
 
 When `reflection.auto_resolve` is enabled in config (default off), the stop hook also spawns `ghost resolve <project> --apply` as a detached background process after each session, so resolved-evidence memories get marked automatically without waiting for a manual run. This never blocks the hook itself — the spawn is fire-and-forget, logged to `resolve.log` in the ghost data directory. If the Anthropic API is out of credit at spawn time, the spawned process fails and logs the failure; it does not degrade to a lower-quality answer.
 

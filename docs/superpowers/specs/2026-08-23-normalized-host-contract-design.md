@@ -256,13 +256,17 @@ Honest constraints, stated up front:
   adapter that invoked the contract successfully but failed open on an
   unsupported format would silently disable reflection/resolve/supersede for
   opencode users.
-- `plugin/ghost-opencode/` in-repo: TypeScript plugin listening for
-  `session.status`→idle transitions; spawns `ghost hook stop --source opencode`
-  with SDK-fetched messages serialized to a temp JSONL.
-- `RunOpencode` extended: also install the plugin file under
-  `~/.config/opencode/plugin/` (idempotent, versioned header comment) alongside the
-  MCP merge done today.
-- Status check: verify plugin file present + mcp entry (mirrors `hasStop`).
+- `plugin` source of truth: `internal/mcpinit/opencode_ghost.ts`, embedded via
+  `go:embed` and installed by `RunOpencode` to `~/.config/opencode/plugins/ghost-opencode.ts`
+  (idempotent; a drifted or outdated file is repaired by the next init, detected by the
+  versioned `// ghost-opencode v1` header). The plugin listens for
+  `session.status`→idle (falling back to legacy `session.idle` until the first status
+  event is seen, with a per-session debounce), fetches messages via
+  `client.session.messages({path:{id}})`, serializes them verbatim to a temp JSONL,
+  and spawns `ghost hook stop --source opencode` detached. All errors are one
+  best-effort `client.app.log` line — fail-open.
+- Status check: verify plugin file present + versioned marker alongside the mcp entry
+  (mirrors `hasStop`).
 
 ### Phase 2 — codex + goose adapters
 
