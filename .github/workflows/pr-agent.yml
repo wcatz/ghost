@@ -11,6 +11,13 @@ permissions:
   issues: write
   pull-requests: write
 
+# One agent run per PR at a time: a duplicate trigger (e.g. the same /review
+# comment delivered twice by a client retry) replaces the in-flight run
+# instead of racing it and burning double quota.
+concurrency:
+  group: pr-agent-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   config:
     # Same-repo / trust resolution before the agent job (which holds
@@ -54,7 +61,9 @@ jobs:
     runs-on: ubuntu-latest
     # Hard cap: litellm's ai_timeout does not bound a hung streamed call —
     # observed 651s before the upstream 500 came back. Kill at the runner.
-    timeout-minutes: 8
+    # 90s per LLM call x several sequential calls can legitimately exceed
+    # 8 minutes (a full review died at exactly 8m24s), so allow 10.
+    timeout-minutes: 10
     steps:
       - name: PR Agent action step
         id: pragent

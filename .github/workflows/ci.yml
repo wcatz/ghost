@@ -6,15 +6,24 @@ on:
   pull_request:
     branches: [main]
 
+# Rapid successive pushes replace the pending run instead of queueing
+# duplicates behind it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
-  build-and-test:
+  # Fast-feedback leg: everything that fails in seconds, in parallel with
+  # build-and-test instead of ahead of it.
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
+          # --new-from-rev=origin/main needs main's tip in the local history.
           fetch-depth: 0
 
       - uses: actions/setup-go@v7
@@ -40,6 +49,18 @@ jobs:
         # Pinned for the same reproducibility reason as golangci-lint above —
         # 'latest' can change scan behavior without a repository change.
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+  # Heavy leg: race-instrumented compile dominates wall time, so it runs
+  # concurrently with lint. The job name is a required branch-protection
+  # context — do not rename casually.
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
 
       - name: Test
         run: go test -race -count=1 ./...
