@@ -13,15 +13,19 @@ permissions:
 
 jobs:
   config:
-    # Same-repo PRs only. The pull_request event never fires for forks with
-    # secrets anyway, but issue_comment DOES fire on fork-PR comments — so
-    # same-repo must be resolved explicitly (the comment event carries only
-    # the issue, not the head repo) before the agent job, which holds
-    # OPENCODE_GO_API_KEY, is allowed to run against the PR's diff.
+    # Same-repo / trust resolution before the agent job (which holds
+    # OPENCODE_GO_API_KEY) is allowed to run:
+    # - issue_comment fires on fork-PR comments in the base repo, so a PR's
+    #   head repo must be checked via the API.
+    # - Plain-issue comments (no pull_request attached) are inherently
+    #   same-repo — issue_comment only ever fires on this repo's own issues.
+    # Comment commands are limited to trusted authors so drive-by comments on
+    # this public repo cannot burn subscription quota; PR authors here are
+    # always OWNER/MEMBER/COLLABORATOR.
     if: >-
       github.event.sender.type != 'Bot' && (
         github.event_name == 'pull_request' ||
-        (github.event_name == 'issue_comment' && github.event.issue.pull_request)
+        contains('OWNER MEMBER COLLABORATOR', github.event.comment.author_association)
       )
     runs-on: ubuntu-latest
     outputs:
@@ -30,8 +34,13 @@ jobs:
       - id: pr
         env:
           GH_TOKEN: ${{ github.token }}
-          NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
+          is_pr="$(jq -r '(.pull_request != null) or (.issue.pull_request != null)' "$GITHUB_EVENT_PATH")"
+          if [ "$is_pr" != "true" ]; then
+            echo "same-repo=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          NUMBER="$(jq -r '.pull_request.number // .issue.number' "$GITHUB_EVENT_PATH")"
           head_repo="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER" --jq '.head.repo.full_name')"
           if [ "$head_repo" = "$GITHUB_REPOSITORY" ]; then
             echo "same-repo=true" >> "$GITHUB_OUTPUT"
@@ -80,7 +89,6 @@ jobs:
             Do not report style preferences handled by golangci-lint.
 
           github_action_config.auto_review: "true"
-          # Pilot: review only — isolate the LLM path before enabling improve.
-          github_action_config.auto_improve: "false"
+          github_action_config.auto_improve: "true"
           github_action_config.auto_describe: "false"
           github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "review_requested"]'
