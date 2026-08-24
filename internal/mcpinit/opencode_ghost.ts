@@ -21,6 +21,12 @@ import { join } from "node:path"
 
 const CONTRACT_VERSION = 1
 
+// Replaced by the installer with the absolute ghost binary path it resolved
+// at install time. Desktop launchers often run opencode with a narrower PATH
+// than the shell that ran `ghost mcp init`, so the default must not rely on
+// lookup; GHOST_BIN remains the higher-priority override for hermetic setups.
+const GHOST_BIN_DEFAULT = "__GHOST_BIN__"
+
 // Once a modern session.status event has been observed, legacy session.idle
 // events are ignored — versions emitting both would otherwise double-fire.
 let sawStatusEvent = false
@@ -82,7 +88,7 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 		}
 
 		try {
-			const child = spawn(process.env.GHOST_BIN ?? "ghost", ["hook", "stop", "--source", "opencode"], {
+			const child = spawn(process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT, ["hook", "stop", "--source", "opencode"], {
 				stdio: ["pipe", "ignore", "inherit"],
 				detached: true,
 				env: process.env,
@@ -107,13 +113,13 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 	return {
 		// Self-registration: this hook receives the full SDK config, so the
 		// plugin alone brings ghost's MCP tools online — no opencode.json edit
-		// needed. GHOST_BIN overrides the binary for hermetic setups; otherwise
-		// it resolves via PATH at spawn time.
+		// needed. GHOST_BIN overrides the baked-in absolute path (hermetic
+		// setups); without it the installer-resolved path is used.
 		config: async (cfg) => {
 			cfg.mcp = cfg.mcp ?? {}
 			cfg.mcp["ghost"] = {
 				type: "local",
-				command: [process.env.GHOST_BIN ?? "ghost", "mcp"],
+				command: [process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT, "mcp"],
 				enabled: true,
 			}
 		},

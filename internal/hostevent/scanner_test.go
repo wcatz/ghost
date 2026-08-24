@@ -96,7 +96,7 @@ func TestScanErrorPropagated(t *testing.T) {
 	if res.ToolCalls != 1 {
 		t.Errorf("partial ToolCalls = %d, want 1 (save after the cut must be missing)", res.ToolCalls)
 	}
-	if _, _, err := Scan(FormatClaudeJSONL, r); err == nil {
+	if _, _, err := Scan(FormatClaudeJSONL, &errReader{data: []byte(data)}); err == nil {
 		t.Error("Scan must propagate the scanner error")
 	}
 }

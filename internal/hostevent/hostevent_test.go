@@ -172,6 +172,22 @@ func TestParseStrict(t *testing.T) {
 		}
 	})
 
+	t.Run("explicit empty contract object is rejected, never completed", func(t *testing.T) {
+		if _, err := Parse([]byte(`{"contract":{},"hook_event_name":"Stop"}`), "stop", "codex"); err == nil || !strings.Contains(err.Error(), "unsupported") {
+			t.Errorf(`"contract":{} should fail strict validation, got %v`, err)
+		}
+	})
+
+	t.Run("null contract object completes like an absent one", func(t *testing.T) {
+		p, err := Parse([]byte(`{"contract":null,"hook_event_name":"Stop","session_id":"s","cwd":"/w"}`), "stop", "codex")
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		if p.Contract.Version != ContractVersion || p.Contract.TranscriptFormat != FormatNone {
+			t.Errorf("completed envelope wrong: %+v", p.Contract)
+		}
+	})
+
 	t.Run("failures", func(t *testing.T) {
 		cases := []struct {
 			name       string

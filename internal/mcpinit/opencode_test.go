@@ -40,7 +40,8 @@ func writeStub(t *testing.T, binDir, name string) string {
 }
 
 func TestRunOpencode_NoClaudeRequired(t *testing.T) {
-	_, xdg := setupOpencodeTestEnv(t)
+	home, xdg := setupOpencodeTestEnv(t)
+	want := renderOpencodeGhostPlugin(filepath.Join(home, "bin", "ghost"))
 
 	var out bytes.Buffer
 	if err := RunOpencode(&out, false); err != nil {
@@ -62,8 +63,11 @@ func TestRunOpencode_NoClaudeRequired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected plugin installed at %s: %v", pluginPath, err)
 	}
-	if string(data) != opencodeGhostPluginTS {
-		t.Error("installed plugin should match the embedded source verbatim")
+	if string(data) != want {
+		t.Error("installed plugin should match the rendered embedded source (binary path baked)")
+	}
+	if !strings.Contains(string(data), `const GHOST_BIN_DEFAULT = "`+filepath.Join(home, "bin", "ghost")+`"`) {
+		t.Error("plugin default must be the resolved absolute binary path")
 	}
 
 	output := out.String()
@@ -150,7 +154,8 @@ func TestRunOpencode_DryRunWritesNothing(t *testing.T) {
 // adapter to <config>/opencode/plugins/ and that a second run is a no-op
 // reporting "already installed".
 func TestRunOpencode_InstallsLifecyclePlugin(t *testing.T) {
-	_, xdg := setupOpencodeTestEnv(t)
+	home, xdg := setupOpencodeTestEnv(t)
+	want := renderOpencodeGhostPlugin(filepath.Join(home, "bin", "ghost"))
 	pluginPath := filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")
 
 	var out bytes.Buffer
@@ -161,8 +166,8 @@ func TestRunOpencode_InstallsLifecyclePlugin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected plugin installed at %s: %v", pluginPath, err)
 	}
-	if string(data) != opencodeGhostPluginTS {
-		t.Error("installed plugin should match the embedded source verbatim")
+	if string(data) != want {
+		t.Error("installed plugin should match the rendered embedded source")
 	}
 	if !strings.Contains(out.String(), "+ installed lifecycle plugin") {
 		t.Errorf("first run should report installation, got:\n%s", out.String())
@@ -179,7 +184,7 @@ func TestRunOpencode_InstallsLifecyclePlugin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-read plugin: %v", err)
 	}
-	if string(again) != opencodeGhostPluginTS {
+	if string(again) != want {
 		t.Error("second run must not alter an identical plugin file")
 	}
 }
@@ -187,7 +192,8 @@ func TestRunOpencode_InstallsLifecyclePlugin(t *testing.T) {
 // TestRunOpencode_PluginDriftRestored verifies a drifted or outdated plugin
 // file is overwritten with the embedded source by the next init.
 func TestRunOpencode_PluginDriftRestored(t *testing.T) {
-	_, xdg := setupOpencodeTestEnv(t)
+	home, xdg := setupOpencodeTestEnv(t)
+	want := renderOpencodeGhostPlugin(filepath.Join(home, "bin", "ghost"))
 	pluginPath := filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")
 
 	var first bytes.Buffer
@@ -206,8 +212,8 @@ func TestRunOpencode_PluginDriftRestored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-read plugin: %v", err)
 	}
-	if string(data) != opencodeGhostPluginTS {
-		t.Error("drifted plugin should be restored to the embedded source")
+	if string(data) != want {
+		t.Error("drifted plugin should be restored to the rendered embedded source")
 	}
 	if !strings.Contains(second.String(), "+ installed lifecycle plugin") {
 		t.Errorf("drift repair should report reinstallation, got:\n%s", second.String())
