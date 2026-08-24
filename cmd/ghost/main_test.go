@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
@@ -410,4 +411,75 @@ func TestBuildClassifyProvider_KeySetBuildsRegardless(t *testing.T) {
 	if err != nil || p == nil {
 		t.Fatalf("build: p=%v err=%v", p, err)
 	}
+}
+
+// TestRunAllClients verifies the `--client all` orchestration: banners in run
+// order, continue past individual failures, per-failure stderr lines, and the
+// failed-names return that drives the exit code.
+func TestRunAllClients(t *testing.T) {
+	t.Run("continues past failures and reports them", func(t *testing.T) {
+		targets := []clientTarget{
+			{"ok-first", func(w io.Writer, dryRun bool) error { return nil }},
+			{"boom", func(w io.Writer, dryRun bool) error { return fmt.Errorf("kaput") }},
+			{"ok-last", func(w io.Writer, dryRun bool) error { return nil }},
+			{"boom2", func(w io.Writer, dryRun bool) error { return fmt.Errorf("kaput too") }},
+		}
+		var stdout, stderr bytes.Buffer
+		failed := runAllClients(&stdout, &stderr, false, targets)
+		if len(failed) != 2 || failed[0] != "boom" || failed[1] != "boom2" {
+			t.Fatalf("failed = %v, want [boom boom2]", failed)
+		}
+		for _, want := range []string{"error (boom): kaput", "error (boom2): kaput too"} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("stderr missing %q, got:\n%s", want, stderr.String())
+			}
+		}
+		out := stdout.String()
+		firstOK, boomOK, lastOK := strings.Index(out, "=== ok-first ==="), strings.Index(out, "=== boom ==="), strings.Index(out, "=== ok-last ===")
+		if firstOK < 0 || boomOK < 0 || lastOK < 0 {
+			t.Fatalf("stdout missing a banner, got:\n%s", out)
+		}
+		if !(firstOK < boomOK && boomOK < lastOK) {
+			t.Errorf("targets must run in order and failures must not stop the loop, got:\n%s", out)
+		}
+	})
+	t.Run("all succeed returns empty", func(t *testing.T) {
+		targets := []clientTarget{
+			{"a", func(w io.Writer, dryRun bool) error { return nil }},
+			{"b", func(w io.Writer, dryRun bool) error { return nil }},
+		}
+		var stdout, stderr bytes.Buffer
+		if failed := runAllClients(&stdout, &stderr, true, targets); len(failed) != 0 {
+			t.Fatalf("failed = %v, want empty", failed)
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("stderr should stay clean when nothing fails, got:\n%s", stderr.String())
+		}
+	})
+}
+
+// TestMCPInitTargets_CoverAllClients guards the target list against accidental
+// drift: every supported client installer appears exactly once, in order.
+func TestMCPInitTargets_CoverAllClients(t *testing.T) {
+	want := []string{"claude", "opencode", "codex", "goose"}
+	targets := mcpInitTargets()
+	if len(targets) != len(want) {
+		t.Fatalf("got %d targets (%v), want %d", len(targets), targetNames(targets), len(want))
+	}
+	for i, name := range want {
+		if targets[i].name != name {
+			t.Errorf("targets[%d] = %q, want %q", i, targets[i].name, name)
+		}
+		if targets[i].run == nil {
+			t.Errorf("target %q has no installer", name)
+		}
+	}
+}
+
+func targetNames(targets []clientTarget) []string {
+	names := make([]string, len(targets))
+	for i, t := range targets {
+		names[i] = t.name
+	}
+	return names
 }
