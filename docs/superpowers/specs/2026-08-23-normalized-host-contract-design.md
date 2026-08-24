@@ -267,6 +267,11 @@ Honest constraints, stated up front:
   best-effort `client.app.log` line — fail-open.
 - Status check: verify plugin file present + versioned marker alongside the mcp entry
   (mirrors `hasStop`).
+- **Verified end-to-end (2026-08-24):** a real opencode session (`hy3-free`, scratch
+  XDG dirs) read files via `bash`+`read`; on idle the plugin materialized a 4-message
+  `{info, parts}` JSONL and fired `ghost hook stop --source opencode`. Replaying the
+  captured payload through the ghost binary produced the exact §2.1 non-blocking-host
+ outcome: exit 0, empty stdout, one "nudge suppressed" stderr line.
 
 ### Phase 2 — codex + goose adapters
 
