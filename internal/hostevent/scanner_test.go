@@ -148,6 +148,7 @@ func TestScanCodexRollout(t *testing.T) {
 		{"namespaced save counts", []string{cxShell, cxSaveNS}, 2, 1},
 		{"legacy flat save counts", []string{cxShell, cxSaveFlat}, 2, 1},
 		{"another server's tool is not a save", []string{cxShell, cxOtherMCP}, 2, 0},
+		{"identically-named tool on another server is not a save", []string{cxShell, `{"timestamp":"t","type":"response_item","payload":{"type":"function_call","name":"ghost_memory_save","namespace":"mcp__other","arguments":"{}","call_id":"c9"}}`}, 2, 0},
 		{"non-response lines skipped", []string{cxMeta, cxShell, cxEventMsg}, 1, 0},
 		{"garbage skipped", []string{"not json", cxShell, "{{{"}, 1, 0},
 	}

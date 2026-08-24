@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
-	"strings"
 )
 
 // Transcript formats known to the contract. The scanner registry is keyed by
@@ -123,16 +122,28 @@ type codexRolloutLine struct {
 	} `json:"payload"`
 }
 
+// codexGhostSaveIdentities are the flattened tool identities (namespace+name;
+// codex's concatenation has no separator) that count as Ghost saves:
+//   - legacy/flat: bare "ghost_memory_save" / "ghost_save_global" with no
+//     namespace
+//   - namespaced: MCP server "ghost" (namespace "mcp__ghost") exposing those
+//     same tool names
+//
+// Exact-match only — a different server shipping an identically-named tool
+// (e.g. namespace "mcp__other", name "ghost_memory_save") must not read as a
+// Ghost save, or codex stops would skip the nudge when nothing was saved.
+var codexGhostSaveIdentities = map[string]bool{
+	"ghost_memory_save":           true,
+	"ghost_save_global":           true,
+	"mcp__ghostghost_memory_save": true,
+	"mcp__ghostghost_save_global": true,
+}
+
 // ScanCodexRollout streams a codex rollout transcript and counts tool calls
 // (function_call items plus local_shell_call items — codex's shell is not a
-// function call), plus how many were Ghost save tools. Ghost save detection
-// is separator-agnostic: codex flattens namespaced tools as namespace+name
-// with no separator (flat_tool_name in codex-rs/core/src/tools), and MCP
-// namespaces take the mcp__<server> form — so "mcp__ghost"+"ghost_memory_save"
-// and a legacy flat "ghost_memory_save" both match on substring, while a
-// different server's identically-named tool cannot (its namespace lacks
-// "ghost"). Unparseable lines are skipped; errors mid-file are returned with
-// partial counts, same fail-open posture as the other scanners.
+// function call), plus how many were Ghost save tools per
+// codexGhostSaveIdentities. Unparseable lines are skipped; errors mid-file are
+// returned with partial counts, same fail-open posture as the other scanners.
 func ScanCodexRollout(r io.Reader) (ScanResult, error) {
 	var res ScanResult
 	err := streamJSONL(r, func(line []byte) {
@@ -151,7 +162,7 @@ func ScanCodexRollout(r io.Reader) (ScanResult, error) {
 				flat = *l.Payload.Namespace
 			}
 			flat += l.Payload.Name
-			if strings.Contains(flat, "ghost_memory_save") || strings.Contains(flat, "ghost_save_global") {
+			if codexGhostSaveIdentities[flat] {
 				res.GhostSaves++
 			}
 		case "local_shell_call":
