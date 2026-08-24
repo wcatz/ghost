@@ -439,7 +439,7 @@ func TestRunAllClients(t *testing.T) {
 		if firstOK < 0 || boomOK < 0 || lastOK < 0 {
 			t.Fatalf("stdout missing a banner, got:\n%s", out)
 		}
-		if !(firstOK < boomOK && boomOK < lastOK) {
+		if firstOK >= boomOK || boomOK >= lastOK {
 			t.Errorf("targets must run in order and failures must not stop the loop, got:\n%s", out)
 		}
 	})
