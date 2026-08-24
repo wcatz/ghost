@@ -31,20 +31,24 @@ Invert the dependency. Ghost defines **one normalized event contract**; each hos
 ships a small out-of-tree artifact (plugin, hook config, shim) that translates its
 native events into that contract. Ghost core learns zero new formats per client.
 
-### 2.0 Grounding: read against the actual specs (researched 2026-08-23)
+### 2.0 Grounding: read against the actual specs (researched 2026-08-23, re-verified 2026-08-24)
 
-Primary sources consulted: MCP specification revisions 2025-06-18 and 2025-11-25,
+Primary sources consulted: the MCP specification (current revision **2026-07-28**;
+prior revisions 2025-06-18 and 2025-11-25 were checked during initial research),
 the Agent Plugins Specification v1.0.0 (agent-plugins.org), Claude Code's hooks
-reference, OpenAI Codex's hooks + config reference, goose's hooks documentation,
-and opencode's plugin docs/issues. Findings that shape this design:
+reference, OpenAI Codex's hooks + config reference, goose's hooks documentation
+and announcement post, and opencode's plugin docs/issues. Findings that shape
+this design:
 
-1. **MCP has no host-conversation lifecycle — verified in both spec revisions.**
-   The MCP lifecycle is *connection*-scoped: initialize → operation → shutdown,
-   where stdio shutdown is just "client closes stdin, then SIGTERM/SIGKILL." There
-   is no primitive for "user session started/ended" or "turn ended." Streamable
-   HTTP's `Mcp-Session-Id` + HTTP DELETE is the closest thing to a session-end
-   signal and only applies to remote servers. Conclusion stands: MCP is the tool
-   surface (ghost must never grow a non-MCP one), lifecycle needs a separate seam.
+1. **MCP has no host-conversation lifecycle — even less than first researched.**
+   The current revision, 2026-07-28, made the protocol stateless per-request:
+   it removed the `initialize`/`initialized` handshake entirely (SEP-2575) and
+   removed protocol-level sessions and the `Mcp-Session-Id` header from
+   Streamable HTTP outright (SEP-2567). The "closest thing to a session-end
+   signal" cited by earlier research no longer exists in the spec. It also
+   deprecates Sampling, Roots, and Logging under a 12-month lifecycle policy
+   (SEP-2577). The conclusion is *stronger* than originally stated: MCP now
+   has no session concept at all; lifecycle needs a separate seam.
 2. **The Claude Code hook wire format became the de-facto cross-host standard.**
    - **Codex** ships `hooks.json` / inline `[hooks]` with the *same event names*
      (`SessionStart`, `Stop`, `SessionEnd`, `PreToolUse`, `PostToolUse`,
@@ -55,9 +59,13 @@ and opencode's plugin docs/issues. Findings that shape this design:
      and Codex even sets `CLAUDE_PLUGIN_ROOT`/`CLAUDE_PLUGIN_DATA` for
      compatibility. Caveats: non-managed hooks require one-time user trust review
      (`/hooks`); `SessionEnd` timeout budget is 1–3 s.
-   - **goose** implements the Open Plugins hooks specification: same shape
-     (`hooks/hooks.json`, JSON-on-stdin, `{"decision":"block"}` stdout signal),
-     fail-open on broken hooks, Stop blocks with a host-side consecutive cap.
+   - **goose** implements the Open Plugins hooks specification (`hooks/hooks.json`
+     auto-discovered under `~/.agents/plugins/<name>/`, JSON-on-stdin, fail-open
+     on broken hooks, Stop blocks with a host-side consecutive cap) — but its
+     payload does **not** share the Claude field names: its published shape uses
+     `event` and `working_dir` where the dialect uses `hook_event_name` and
+     `cwd`. Goose therefore needs a small translation shim like opencode's, not
+     verbatim passthrough.
    - **Zed** has an open feature request for exactly these hooks, citing Claude
      Code as prior art.
 3. **Agent Plugins Spec v1.0.0** (governed alongside goose's move to the Agentic
@@ -73,17 +81,19 @@ and opencode's plugin docs/issues. Findings that shape this design:
    in the `config(cfg)` hook — widely relied upon upstream but officially
    unsupported (anomalyco/opencode #24065, closed not-planned).
 5. **Host timing budgets make our spawn-and-return design mandatory, not
-   optional.** Claude Code gives `SessionEnd` handlers a shared 1.5 s budget;
-   codex 1–3 s. All lifecycle work (resolve/supersede/reflect) already runs in
-   detached children claimed via PID files — this is validated by the specs, not
-   just convenient. Both hosts also offer richer seams we may adopt later
-   (Claude Code `mcp_tool`/`http` hook handler types; codex SessionStart
-   `additionalContext` injection).
+   optional.** Claude Code gives `SessionEnd` handlers a shared budget with a
+   1.5 s floor that escalates to the longest configured per-hook timeout,
+   capped at 60 s; codex gives 1–3 s. All lifecycle work (resolve/supersede/
+   reflect) already runs in detached children claimed via PID files — this is
+   validated by the specs, not just convenient. Both hosts also offer richer
+   seams we may adopt later (Claude Code `mcp_tool`/`http` hook handler types;
+   codex SessionStart `additionalContext` injection).
 
 Consequence: ghost does **not** invent a wire format. The contract below is a thin
-versioned envelope over the de-facto hook dialect, so Claude Code, codex, and
-goose payloads pass through essentially verbatim; only opencode needs a
-translation shim.
+versioned envelope over the de-facto hook dialect: Claude Code and codex payloads
+pass through essentially verbatim (envelope completed from argv); goose and
+opencode each need a small translation shim — goose for field names, opencode for
+the entire event surface.
 
 ### 2.1 The contract
 
@@ -115,8 +125,8 @@ break verbatim passthrough of native payloads:
 
 Rules:
 
-- **Dialect passthrough with argv-completed envelopes.** A native Claude Code,
-  codex, or goose hook payload parses as-is — their common fields
+- **Dialect passthrough with argv-completed envelopes.** A native Claude Code
+  or codex hook payload parses as-is — their common fields
   (`session_id`, `transcript_path`, `cwd`, `hook_event_name`,
   `stop_hook_active`) are the contract's fields. Those hosts send no
   `contract` object; when it is absent, the authoritative argv values complete
@@ -202,8 +212,8 @@ Claude Code, TOML snippet for codex) without a ghost release.
 | --- | --- | --- | --- | --- |
 | Claude Code | SessionStart hook → contract (native dialect) | Stop hook → contract (native dialect) | stdio via plugin `.mcp.json` | Claude plugin (per `2026-08-20` spec) |
 | codex | SessionStart hook `additionalContext` → contract | **Native hooks** — `Stop`/`SessionEnd` in `~/.codex/hooks.json`; payload passes through verbatim | `[mcp_servers.ghost]` TOML merge | hooks.json install + TOML merge; user completes one-time `/hooks` trust review |
-| goose | — | Open Plugins hooks (`SessionEnd`/`Stop`) → contract near-natively; payload passes through almost verbatim | plugin `mcp.json` | Agent Plugins package in `~/.agents/plugins/ghost/` (`plugin.json` + `mcp.json` + client-extension hooks dir) |
-| opencode | MCP instructions block today; optionally `ctx.session.hook("context", …)` later | JS plugin on `session.status`(idle) / `session.idle` → contract (the only translation shim) | npm-plugin path: `cfg.mcp` mutation in `config(cfg)` hook (works, undocumented upstream — #24065); supported fallback: config-file merge stays | One npm package doing both + `mcp init --client opencode` writes the config merge as belt-and-braces |
+| goose | — | Open Plugins hooks (`SessionEnd`/`Stop`) → contract via a small field-mapping shim (`event`→`hook_event_name`, `working_dir`→`cwd`; goose's names differ from the dialect) | plugin `mcp.json` | Agent Plugins package in `~/.agents/plugins/ghost/` (`plugin.json` + `mcp.json` + client-extension hooks dir + shim script) |
+| opencode | MCP instructions block today; optionally `ctx.session.hook("context", …)` later | JS plugin on `session.status`(idle) / `session.idle` → contract (translation shim #1: the whole event surface) | npm-plugin path: `cfg.mcp` mutation in `config(cfg)` hook (works, undocumented upstream — #24065); supported fallback: config-file merge stays | One npm package doing both + `mcp init --client opencode` writes the config merge as belt-and-braces |
 
 Honest constraints, stated up front:
 
@@ -214,8 +224,9 @@ Honest constraints, stated up front:
 - **codex hook trust is a real UX step.** Codex requires one-time review of every
   non-managed hook definition before it runs. Install must tell the user to run
   `/hooks` and trust ghost's entries; until then codex silently skips them.
-- **Session-end budgets are tight everywhere.** Claude Code: 1.5 s shared;
-  codex: 1–3 s; both fire synchronously. Ghost's handlers must only spawn
+- **Session-end budgets are tight everywhere.** Claude Code: a shared budget
+  with a 1.5 s floor escalating to the longest configured per-hook timeout
+  (capped at 60 s); codex: 1–3 s; both fire synchronously. Ghost's handlers must only spawn
   detached workers and return — never do DB or LLM work inline. This validates
   the existing spawn architecture and rules out any future "do it inline" drift.
 - **opencode's `cfg.mcp` plugin registration is real but unsupported** — it works
@@ -294,8 +305,10 @@ Honest constraints, stated up front:
   hooks silently).
 - `RunGoose`: install an Agent Plugins-conformant package under
   `~/.agents/plugins/ghost/` — `plugin.json`, `mcp.json` (stdio ghost server),
-  and the client-extension hooks dir for its Open Plugins hooks. Near-native
-  passthrough; blocking honored with goose's host-side cap.
+  and the client-extension hooks dir for its Open Plugins hooks. Goose's payload
+  field names differ from the dialect (`event`, `working_dir`), so the shim maps
+  them onto the contract before invocation; blocking is honored with goose's
+  host-side cap.
 - Nudge stays log-only for opencode; document it.
 
 ### Phase 3 — distribution polish
