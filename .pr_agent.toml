@@ -1,0 +1,15 @@
+# PR-Agent repository settings.
+# Fetched automatically from this default branch by the pr-agent.yml
+# workflow (apply_repo_settings). Runtime plumbing — API key, endpoint,
+# model routing — stays in the workflow's env; anything set in both
+# places keeps the workflow value.
+
+[pr_reviewer]
+# Anchor key issues as inline comments on diff lines instead of
+# listing them only in the summary table (matches the old CodeRabbit
+# comment style more closely).
+inline_key_issues = true
+
+# Upstream caps findings at 3; raise for better coverage on
+# refactors. Reviewer extra_instructions keep style noise out.
+num_max_findings = 5

@@ -51,3 +51,6 @@ eval/cycle/results/
 # local scratch
 .cache/
 /cycle
+
+__pycache__/
+*.pyc
