@@ -12,14 +12,36 @@ permissions:
   pull-requests: write
 
 jobs:
-  pr_agent_job:
-    # Same-repo PRs only: fork PRs get no secrets under pull_request events,
-    # so fail fast at the gate instead of erroring inside the action.
+  config:
+    # Same-repo PRs only. The pull_request event never fires for forks with
+    # secrets anyway, but issue_comment DOES fire on fork-PR comments — so
+    # same-repo must be resolved explicitly (the comment event carries only
+    # the issue, not the head repo) before the agent job, which holds
+    # OPENCODE_GO_API_KEY, is allowed to run against the PR's diff.
     if: >-
       github.event.sender.type != 'Bot' && (
-        (github.event_name == 'issue_comment' && github.event.issue.pull_request) ||
-        github.event.pull_request.head.repo.full_name == github.repository
+        github.event_name == 'pull_request' ||
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request)
       )
+    runs-on: ubuntu-latest
+    outputs:
+      same-repo: ${{ steps.pr.outputs.same-repo }}
+    steps:
+      - id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          head_repo="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER" --jq '.head.repo.full_name')"
+          if [ "$head_repo" = "$GITHUB_REPOSITORY" ]; then
+            echo "same-repo=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "same-repo=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  pr_agent_job:
+    needs: config
+    if: needs.config.outputs.same-repo == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: PR Agent action step
