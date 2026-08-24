@@ -26,9 +26,13 @@ const CONTRACT_VERSION = 1
 let sawStatusEvent = false
 
 // Idle transitions can repeat in quick succession (status + legacy idle, or
-// rapid turns); one stop hook per session per window is enough.
+// rapid turns); one stop hook per session per window is enough. The map is
+// FIFO-bounded: long-lived hosts (desktop apps) would otherwise grow one
+// entry per session forever. JS Maps iterate in insertion order, so the
+// oldest entry is evicted.
 const lastFire = new Map<string, number>()
 const DEBOUNCE_MS = 2000
+const MAX_TRACKED_SESSIONS = 256
 
 export const GhostPlugin: Plugin = async ({ client, directory }) => {
 	const log = async (level: "info" | "warn" | "error", message: string) => {
@@ -44,6 +48,10 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 		const now = Date.now()
 		if (now - (lastFire.get(sessionID) ?? 0) < DEBOUNCE_MS) return
 		lastFire.set(sessionID, now)
+		if (lastFire.size > MAX_TRACKED_SESSIONS) {
+			const oldest = lastFire.keys().next().value
+			if (oldest !== undefined) lastFire.delete(oldest)
+		}
 
 		let transcriptPath = ""
 		try {
@@ -82,6 +90,9 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 			child.on("error", async (e) => {
 				await log("warn", `ghost: fail-open (spawn: ${e})`)
 			})
+			// Best-effort local cleanup when we outlive the hook; ghost also
+			// sweeps its ghost-* temp transcript dirs consumer-side, covering
+			// hosts that exit before this handler runs (e.g. `opencode run`).
 			child.on("close", () => {
 				if (transcriptPath) rm(join(transcriptPath, ".."), { recursive: true, force: true }).catch(() => {})
 			})

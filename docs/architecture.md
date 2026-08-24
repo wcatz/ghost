@@ -8,8 +8,8 @@ Ghost runs as a single binary with one primary mode:
 ghost mcp              MCP server on stdio (used by Claude Code, Cursor, Goose)
 ghost mcp init         Configure Claude Code integration
 ghost mcp status       Health check
-ghost hook session-start   SessionStart hook (called by Claude Code)
-ghost hook stop            Stop hook — save-nudge, blocks stop once (called by Claude Code)
+ghost hook session-start --source claude-code   SessionStart hook (called by Claude Code)
+ghost hook stop --source claude-code        Stop hook — save-nudge, blocks stop once (called by Claude Code)
 ghost reflect <project>    Manual memory consolidation
 ghost supersede <project>  LLM-classified 'supersedes' link creation
 ghost obsidian export|sync One-way Markdown vault mirror
@@ -52,9 +52,11 @@ internal/
     links.go               Memory links: edge CRUD (related/supersedes)
   mcpserver/               MCP server (stdio transport)
     mcpserver.go           20 tools + 4 resources via go-sdk
-  mcpinit/                 Claude Code integration setup
+  hostevent/               Normalized host-event contract: envelope parse, capability matrix, transcript scanners
+  mcpinit/                 Host integration setup — contract-v1 lifecycle dispatch, installers (Claude Code, opencode)
     init.go                ghost mcp init — registers server, imports memories, writes redirects
     status.go              ghost mcp status — health check
+    opencode_ghost.ts      Embedded opencode lifecycle plugin (session.status→idle → contract)
     hook.go                ghost hook session-start — injects project context
     stophook.go            ghost hook stop — save-nudge, blocks stop once when nothing was saved
   claudeimport/            One-time import of Claude Code auto-memory files
@@ -98,7 +100,7 @@ Claude Code / Cursor → stdio JSON-RPC → mcpserver
 ### SessionStart Hook
 ```
 Claude Code session opens
-  → ghost hook session-start (stdin: JSON with cwd + projectPath)
+  → ghost hook session-start --source claude-code (stdin: JSON with cwd + projectPath)
   → lookupProject(db, cwd)           # path-prefix match OR name fallback
   → buildProjectContext(store, id)   # top memories + tasks + decisions + globals
   → writes markdown to stdout

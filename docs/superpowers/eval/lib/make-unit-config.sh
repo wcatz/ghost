@@ -51,7 +51,7 @@ cat > "${CONFIG_DIR}/settings.json" <<EOF
         "hooks": [
           {
             "type": "command",
-            "command": "\"${GHOST_WRAPPED_JSON}\" \"${UNIT_RUN_ID_JSON}\" \"${GHOST_BIN_JSON}\" hook session-start"
+            "command": "\"${GHOST_WRAPPED_JSON}\" \"${UNIT_RUN_ID_JSON}\" \"${GHOST_BIN_JSON}\" hook session-start --source claude-code"
           }
         ]
       }

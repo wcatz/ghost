@@ -1015,6 +1015,11 @@ func runUpgrade() {
 	}
 
 	fmt.Printf("Updated: ghost %s → %s\n", version, latest)
+
+	// A new binary can invalidate wiring the old one installed (hook flags,
+	// embedded plugin sources). Surface stale integrations instead of letting
+	// them fail open invisibly on every fire.
+	mcpinit.ReportStaleIntegrations(os.Stdout)
 }
 
 // parseObsidianFlags parses the flags following `ghost obsidian <mode>`. It

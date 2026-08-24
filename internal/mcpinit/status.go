@@ -203,6 +203,66 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	return healthy, nil
 }
 
+// ReportStaleIntegrations warns when existing client wiring predates the
+// running binary. Pre-contract Claude hooks fail open on every fire (no
+// context injection, no save-nudge, no lifecycle spawns), and a drifted
+// opencode lifecycle plugin means idle events never reach ghost at all —
+// neither failure is visible to the user, so `ghost upgrade` surfaces them
+// instead of silently disabling a working integration. Best-effort and
+// completely silent when everything is current; read-only.
+func ReportStaleIntegrations(w io.Writer) {
+	var hints []string
+
+	const (
+		startNeedle = "hook session-start --source claude-code"
+		stopNeedle  = "hook stop --source claude-code"
+	)
+	if path, err := settingsPath(); err == nil {
+		if sf, err := loadSettings(path); err == nil {
+			for _, c := range []struct {
+				event  string
+				needle string
+				label  string
+			}{
+				{"SessionStart", startNeedle, "Claude Code SessionStart"},
+				{"Stop", stopNeedle, "Claude Code Stop"},
+			} {
+				cmds, err := sf.hookCommands(c.event)
+				if err != nil || len(cmds) == 0 {
+					continue // integration not in use, or unreadable — leave status to `ghost mcp status`
+				}
+				if !sf.hasHook(c.event, c.needle) {
+					hints = append(hints, fmt.Sprintf("%s hook is pre-contract or miswired — run `ghost mcp init` to migrate it", c.label))
+				}
+			}
+		}
+	}
+
+	if path, err := opencodeConfigPath(); err == nil {
+		if cfg, err := loadOpencodeConfig(path); err == nil {
+			if _, registered := mcpGhostCommand(cfg); registered {
+				stale := true
+				if pluginPath, perr := opencodePluginPath(); perr == nil {
+					if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == opencodeGhostPluginTS {
+						stale = false
+					}
+				}
+				if stale {
+					hints = append(hints, "opencode lifecycle plugin is missing or outdated — run `ghost mcp init --client opencode` to reinstall it")
+				}
+			}
+		}
+	}
+
+	if len(hints) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(w, "\nIntegration wiring check:")
+	for _, h := range hints {
+		_, _ = fmt.Fprintf(w, "  ! %s\n", h)
+	}
+}
+
 // reportConfigFile prints the user config file's location informationally.
 // It never fails the health check — the config file is optional, since
 // compiled defaults work without one — so it deliberately doesn't take a
