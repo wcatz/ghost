@@ -160,24 +160,12 @@ func StatusOpencode(w io.Writer) (bool, error) {
 
 	reportConfigFile(w)
 
-	// 2. opencode MCP config.
-	path, err := opencodeConfigPath()
-	if err != nil {
-		check(false, "", fmt.Sprintf("opencode MCP config: %v", err))
-	} else if cfg, err := loadOpencodeConfig(path); err != nil {
-		check(false, "", fmt.Sprintf("opencode MCP config: %v", err))
-	} else {
-		_, registered := mcpGhostCommand(cfg)
-		check(registered,
-			"opencode MCP config: ghost registered",
-			"opencode MCP config: ghost missing or wrong command")
-	}
-
-	// 3. Lifecycle plugin — without it stop events never reach the contract,
-	// so reflection/resolve/supersede silently never run for opencode.
-	// Compared byte-for-byte against the embedded source: a corrupted or
-	// hand-mangled file that kept its header comment must not read healthy,
-	// and `ghost mcp init --client opencode` repairs any drift in place.
+	// 2. Lifecycle plugin — it both registers the ghost MCP server (config
+	// hook) and bridges idle events to the contract; without it opencode has
+	// neither tools nor reflection/resolve/supersede. Compared byte-for-byte
+	// against the embedded source: a corrupted or hand-mangled file that kept
+	// its header comment must not read healthy, and `ghost mcp init --client
+	// opencode` repairs any drift in place.
 	pluginPath, perr := opencodePluginPath()
 	if perr != nil {
 		check(false, "", fmt.Sprintf("lifecycle plugin: %v", perr))
@@ -187,7 +175,7 @@ func StatusOpencode(w io.Writer) (bool, error) {
 		check(false, "", "lifecycle plugin missing or outdated (run ghost mcp init --client opencode)")
 	}
 
-	// 4. Embedding & linking health — silent embed failures leave vector
+	// 3. Embedding & linking health — silent embed failures leave vector
 	// search and memory linking inactive.
 	store := checkStoreHealth(w, check)
 	if store != nil {
@@ -238,19 +226,20 @@ func ReportStaleIntegrations(w io.Writer) {
 		}
 	}
 
-	if path, err := opencodeConfigPath(); err == nil {
-		if cfg, err := loadOpencodeConfig(path); err == nil {
-			if _, registered := mcpGhostCommand(cfg); registered {
-				stale := true
-				if pluginPath, perr := opencodePluginPath(); perr == nil {
-					if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == opencodeGhostPluginTS {
-						stale = false
-					}
-				}
-				if stale {
-					hints = append(hints, "opencode lifecycle plugin is missing or outdated — run `ghost mcp init --client opencode` to reinstall it")
-				}
+	// opencode: the plugin is the whole integration (MCP registration via its
+	// config hook + stop-event bridge), so drift or absence anywhere under an
+	// existing opencode config dir warrants a hint. A missing plugin with no
+	// opencode dir at all means opencode isn't in use — leave it to
+	// `ghost mcp status --client opencode`.
+	if _, statErr := os.Stat(filepath.Join(opencodeDirOrEmpty(), "opencode")); statErr == nil {
+		stale := true
+		if pluginPath, perr := opencodePluginPath(); perr == nil {
+			if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == opencodeGhostPluginTS {
+				stale = false
 			}
+		}
+		if stale {
+			hints = append(hints, "opencode lifecycle plugin is missing or outdated — run `ghost mcp init --client opencode` to reinstall it")
 		}
 	}
 
@@ -261,6 +250,16 @@ func ReportStaleIntegrations(w io.Writer) {
 	for _, h := range hints {
 		_, _ = fmt.Fprintf(w, "  ! %s\n", h)
 	}
+}
+
+// opencodeDirOrEmpty returns the base config dir that opencode reads
+// ($XDG_CONFIG_HOME or ~/.config), or "" when it cannot be resolved.
+func opencodeDirOrEmpty() string {
+	dir, err := opencodeConfigDir()
+	if err != nil {
+		return ""
+	}
+	return dir
 }
 
 // reportConfigFile prints the user config file's location informationally.

@@ -2,7 +2,7 @@ package mcpinit
 
 import (
 	"bytes"
-	"encoding/json"
+
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,41 +47,28 @@ func TestRunOpencode_NoClaudeRequired(t *testing.T) {
 		t.Fatalf("RunOpencode: %v", err)
 	}
 
+	// Plugin-only integration: the single artifact registers MCP (config
+	// hook) and bridges stop events. opencode's own config file is never
+	// touched — no jsonc rewriting, no comment loss.
 	cfgPath := filepath.Join(xdg, "opencode", "opencode.json")
-	data, err := os.ReadFile(cfgPath)
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Error("RunOpencode must not write opencode.json")
+	}
+	if _, err := os.Stat(filepath.Join(xdg, "opencode", "opencode.jsonc")); !os.IsNotExist(err) {
+		t.Error("RunOpencode must not write opencode.jsonc")
+	}
+	pluginPath := filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")
+	data, err := os.ReadFile(pluginPath)
 	if err != nil {
-		t.Fatalf("expected opencode config to be written: %v", err)
+		t.Fatalf("expected plugin installed at %s: %v", pluginPath, err)
 	}
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("config should be valid JSON: %v", err)
-	}
-	mcp, ok := cfg["mcp"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected mcp object in config, got: %v", cfg)
-	}
-	ghost, ok := mcp["ghost"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected mcp.ghost in config, got: %v", mcp)
-	}
-	if ghost["type"] != "local" {
-		t.Errorf("expected type local, got %v", ghost["type"])
-	}
-	cmd, ok := ghost["command"].([]any)
-	if !ok || len(cmd) != 2 || cmd[1] != "mcp" {
-		t.Errorf("expected command [<ghost> mcp], got %v", ghost["command"])
-	}
-	first, ok := cmd[0].(string)
-	if !ok || filepath.Base(first) != "ghost" {
-		t.Errorf("expected command[0] to be the ghost binary, got %v", cmd[0])
-	}
-	if ghost["enabled"] != true {
-		t.Errorf("expected enabled true, got %v", ghost["enabled"])
+	if string(data) != opencodeGhostPluginTS {
+		t.Error("installed plugin should match the embedded source verbatim")
 	}
 
 	output := out.String()
-	if !strings.Contains(output, "registered ghost MCP server for opencode") {
-		t.Errorf("expected registration message, got:\n%s", output)
+	if !strings.Contains(output, "+ installed lifecycle plugin") {
+		t.Errorf("expected installation message, got:\n%s", output)
 	}
 	if strings.Contains(output, "claude") {
 		t.Errorf("opencode path must not mention claude, got:\n%s", output)
@@ -105,32 +92,37 @@ func TestRunOpencode_DoesNotTouchClaudeSettings(t *testing.T) {
 	}
 }
 
+// TestRunOpencode_Idempotent verifies a second run changes nothing on disk
+// beyond what the first wrote.
 func TestRunOpencode_Idempotent(t *testing.T) {
 	_, xdg := setupOpencodeTestEnv(t)
+	pluginPath := filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")
 
 	var out1 bytes.Buffer
 	if err := RunOpencode(&out1, false); err != nil {
 		t.Fatalf("RunOpencode (first): %v", err)
 	}
-	cfgPath := filepath.Join(xdg, "opencode", "opencode.json")
-	first, err := os.ReadFile(cfgPath)
+	first, err := os.ReadFile(pluginPath)
 	if err != nil {
-		t.Fatalf("read config: %v", err)
+		t.Fatalf("read plugin: %v", err)
 	}
 
 	var out2 bytes.Buffer
 	if err := RunOpencode(&out2, false); err != nil {
 		t.Fatalf("RunOpencode (second): %v", err)
 	}
-	second, err := os.ReadFile(cfgPath)
+	if !strings.Contains(out2.String(), "already installed") {
+		t.Errorf("second run should report 'already installed', got:\n%s", out2.String())
+	}
+	second, err := os.ReadFile(pluginPath)
 	if err != nil {
-		t.Fatalf("read config: %v", err)
+		t.Fatalf("re-read plugin: %v", err)
 	}
 	if !bytes.Equal(first, second) {
-		t.Errorf("config changed on second run:\n--- first ---\n%s\n--- second ---\n%s", first, second)
+		t.Error("second run must not alter an identical plugin file")
 	}
-	if !strings.Contains(out2.String(), "already registered") {
-		t.Errorf("second run should report 'already registered', got:\n%s", out2.String())
+	if _, err := os.Stat(filepath.Join(xdg, "opencode", "opencode.json")); !os.IsNotExist(err) {
+		t.Error("no opencode.json should exist after idempotent runs")
 	}
 }
 
@@ -143,8 +135,8 @@ func TestRunOpencode_DryRunWritesNothing(t *testing.T) {
 	}
 
 	output := out.String()
-	if !strings.Contains(output, "would register ghost MCP server for opencode") {
-		t.Errorf("dry run should say 'would register', got:\n%s", output)
+	if !strings.Contains(output, "would install lifecycle plugin") {
+		t.Errorf("dry run should say 'would install lifecycle plugin', got:\n%s", output)
 	}
 	if _, err := os.Stat(filepath.Join(xdg, "opencode", "opencode.json")); err == nil {
 		t.Error("dry run must not write the opencode config")
@@ -222,176 +214,6 @@ func TestRunOpencode_PluginDriftRestored(t *testing.T) {
 	}
 }
 
-func TestRunOpencode_MergesIntoExistingJSONC(t *testing.T) {
-	_, xdg := setupOpencodeTestEnv(t)
-	dir := filepath.Join(xdg, "opencode")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	jsonc := filepath.Join(dir, "opencode.jsonc")
-	existing := `{
-  // theme preference
-  "theme": "dark",
-  "mcp": {
-    "other": {"type": "local", "command": ["node", "server.js"]}
-  }
-}
-`
-	if err := os.WriteFile(jsonc, []byte(existing), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	var out bytes.Buffer
-	if err := RunOpencode(&out, false); err != nil {
-		t.Fatalf("RunOpencode: %v", err)
-	}
-
-	data, err := os.ReadFile(jsonc)
-	if err != nil {
-		t.Fatalf("read opencode.jsonc: %v", err)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("merged config must be valid JSON (comments stripped): %v\n%s", err, data)
-	}
-	if cfg["theme"] != "dark" {
-		t.Errorf("expected existing theme key preserved, got %v", cfg["theme"])
-	}
-	mcp, _ := cfg["mcp"].(map[string]any)
-	if mcp == nil || mcp["other"] == nil {
-		t.Errorf("expected existing mcp.other server preserved, got %v", mcp)
-	}
-	if mcp == nil || mcp["ghost"] == nil {
-		t.Errorf("expected mcp.ghost merged in, got %v", mcp)
-	}
-	if _, err := os.Stat(filepath.Join(xdg, "opencode", "opencode.json")); err == nil {
-		t.Error("must not create opencode.json alongside opencode.jsonc")
-	}
-}
-
-// TestRunOpencode_MergesIntoJSONCWithComments covers the previously-missing
-// JSONC forms: /* block comments */ and trailing commas, plus warning that the
-// rewrite drops comments.
-func TestRunOpencode_MergesJSONCWithBlockCommentsAndTrailingCommas(t *testing.T) {
-	_, xdg := setupOpencodeTestEnv(t)
-	dir := filepath.Join(xdg, "opencode")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	jsonc := filepath.Join(dir, "opencode.jsonc")
-	existing := `{
-  /* global theme */
-  "theme": "dark",
-  "mcp": {
-    "other": {"type": "local", "command": ["node", "server.js"]},
-  },
-}
-`
-	if err := os.WriteFile(jsonc, []byte(existing), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	var out bytes.Buffer
-	if err := RunOpencode(&out, false); err != nil {
-		t.Fatalf("RunOpencode: %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "warning: rewriting opencode.jsonc") {
-		t.Errorf("expected comment-drop warning, got:\n%s", output)
-	}
-
-	data, err := os.ReadFile(jsonc)
-	if err != nil {
-		t.Fatalf("read opencode.jsonc: %v", err)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("merged config must be valid JSON (block comments + trailing commas stripped): %v\n%s", err, data)
-	}
-	if cfg["theme"] != "dark" {
-		t.Errorf("expected existing theme key preserved, got %v", cfg["theme"])
-	}
-	mcp, _ := cfg["mcp"].(map[string]any)
-	if mcp == nil || mcp["ghost"] == nil {
-		t.Errorf("expected mcp.ghost merged in, got %v", mcp)
-	}
-}
-
-// TestWriteOpencodeConfig_PreservesMode pins the config file mode: an existing
-// 0600 file stays 0600 after a rewrite (the previous 0644 chmod would have
-// widened it), and a new file defaults to 0600.
-func TestWriteOpencodeConfig_PreservesMode(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "opencode.json")
-
-	t.Run("existing 0600 file preserves mode", func(t *testing.T) {
-		if err := os.WriteFile(path, []byte(`{"mcp":{}}`), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := writeOpencodeConfig(path, map[string]any{"mcp": map[string]any{"ghost": map[string]any{"type": "local", "command": []string{"ghost", "mcp"}, "enabled": true}}}); err != nil {
-			t.Fatalf("writeOpencodeConfig: %v", err)
-		}
-		st, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := st.Mode().Perm() & 0o777; got != 0600 {
-			t.Errorf("mode = %o, want 600", got)
-		}
-	})
-
-	t.Run("new file defaults to 0600", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "opencode.json")
-		if err := writeOpencodeConfig(path, map[string]any{"mcp": map[string]any{}}); err != nil {
-			t.Fatalf("writeOpencodeConfig: %v", err)
-		}
-		st, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := st.Mode().Perm() & 0o777; got != 0600 {
-			t.Errorf("mode = %o, want 600", got)
-		}
-	})
-
-	t.Run("symlinked config preserves the symlink", func(t *testing.T) {
-		dir := t.TempDir()
-		real := filepath.Join(dir, "real.json")
-		link := filepath.Join(dir, "opencode.json")
-		if err := os.WriteFile(real, []byte(`{"mcp":{}}`), 0600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(real, link); err != nil {
-			t.Fatal(err)
-		}
-		if err := writeOpencodeConfig(link, map[string]any{"mcp": map[string]any{"ghost": map[string]any{"type": "local", "command": []string{"ghost", "mcp"}, "enabled": true}}}); err != nil {
-			t.Fatalf("writeOpencodeConfig: %v", err)
-		}
-		fi, err := os.Lstat(link)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if fi.Mode()&os.ModeSymlink == 0 {
-			t.Fatal("writeOpencodeConfig replaced the symlink with a regular file")
-		}
-		target, err := os.Readlink(link)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if target != real {
-			t.Errorf("symlink target = %q, want %q", target, real)
-		}
-		data, err := os.ReadFile(real)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.Contains(string(data), "ghost") {
-			t.Errorf("real file not updated: %s", data)
-		}
-	})
-}
-
 func TestCheckPrereqs_ProbesCommonDirs(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -442,23 +264,5 @@ func TestCheckPrereqs_ClaudeMissing(t *testing.T) {
 	}
 	if _, _, err := checkPrereqs(&out, "opencode"); err != nil {
 		t.Errorf("opencode target should require only ghost: %v", err)
-	}
-}
-
-func TestMCPGhostCommand_ExeSuffix(t *testing.T) {
-	binPath := filepath.Join("C:", "Users", "skinner", "ghost", "bin", "ghost.exe")
-	cfg := map[string]any{
-		"mcp": map[string]any{
-			"ghost": map[string]any{
-				"command": []any{binPath, "mcp"},
-			},
-		},
-	}
-	first, ok := mcpGhostCommand(cfg)
-	if first != binPath {
-		t.Errorf("first = %q, want %q", first, binPath)
-	}
-	if !ok {
-		t.Error("mcpGhostCommand: ok = false, want true for a ghost.exe command with the mcp subcommand — Windows binaries carry a .exe suffix that exact string comparison against \"ghost\" rejects")
 	}
 }
