@@ -77,9 +77,14 @@ this design:
    finding 2, convergence is effectively happening around the Claude dialect.
 4. **opencode is the one real deviant**: no hooks.json; lifecycle arrives via
    in-process JS plugin events (`session.status`→idle, deprecated-but-emitted
-   `session.idle`). Its plugins *can* register MCP servers by mutating `cfg.mcp`
-   in the `config(cfg)` hook — widely relied upon upstream but officially
-   unsupported (anomalyco/opencode #24065, closed not-planned).
+   `session.idle`). Its plugins **can** register MCP servers: `Hooks.config` is
+   a first-class, typed hook in `@opencode-ai/plugin` whose input is the full
+   SDK config (including `mcp`), and ghost has verified registration
+   end-to-end on v1.18.21 with no config file present. Upstream declined to
+   formally bless the pattern in writing (anomalyco/opencode #24065, closed
+   not-planned) and one regression — v1.14.32 silently dropping plugin MCPs,
+   fixed in v1.14.33 (#25449) — shows it can break without notice, which is
+   why ghost keeps the config-file merge as belt-and-braces.
 5. **Host timing budgets make our spawn-and-return design mandatory, not
    optional.** Claude Code gives `SessionEnd` handlers a shared budget with a
    1.5 s floor that escalates to the longest configured per-hook timeout,
@@ -213,7 +218,7 @@ Claude Code, TOML snippet for codex) without a ghost release.
 | Claude Code | SessionStart hook → contract (native dialect) | Stop hook → contract (native dialect) | stdio via plugin `.mcp.json` | Claude plugin (per `2026-08-20` spec) |
 | codex | SessionStart hook `additionalContext` → contract | **Native hooks** — `Stop`/`SessionEnd` in `~/.codex/hooks.json`; payload passes through verbatim | `[mcp_servers.ghost]` TOML merge | hooks.json install + TOML merge; user completes one-time `/hooks` trust review |
 | goose | — | Open Plugins hooks (`SessionEnd`/`Stop`) → contract via a small field-mapping shim (`event`→`hook_event_name`, `working_dir`→`cwd`; goose's names differ from the dialect) | plugin `mcp.json` | Agent Plugins package in `~/.agents/plugins/ghost/` (`plugin.json` + `mcp.json` + client-extension hooks dir + shim script) |
-| opencode | MCP instructions block today; optionally `ctx.session.hook("context", …)` later | JS plugin on `session.status`(idle) / `session.idle` → contract (translation shim #1: the whole event surface) | npm-plugin path: `cfg.mcp` mutation in `config(cfg)` hook (works, undocumented upstream — #24065); supported fallback: config-file merge stays | One npm package doing both + `mcp init --client opencode` writes the config merge as belt-and-braces |
+| opencode | MCP instructions block today; optionally `ctx.session.hook("context", …)` later | JS plugin on `session.status`(idle) / `session.idle` → contract (translation shim #1: the whole event surface) | plugin `config(cfg)` hook mutating `cfg.mcp` — typed, first-class, verified working; kept unguaranteed upstream (#24065) so the config-file merge stays as belt-and-braces | One npm package doing both + `mcp init --client opencode` writes the config merge as belt-and-braces |
 
 Honest constraints, stated up front:
 
@@ -229,11 +234,13 @@ Honest constraints, stated up front:
   (capped at 60 s); codex: 1–3 s; both fire synchronously. Ghost's handlers must only spawn
   detached workers and return — never do DB or LLM work inline. This validates
   the existing spawn architecture and rules out any future "do it inline" drift.
-- **opencode's `cfg.mcp` plugin registration is real but unsupported** — it works
-  today via live-reference mutation and much of the ecosystem depends on it, but
-  upstream closed the request to bless it without committing. Ghost treats the
-  config-file merge as the source of truth and plugin self-registration as an
-  optimization that must be safe to lose.
+- **opencode's plugin MCP registration works but carries no stability
+  guarantee** — `Hooks.config` is typed in the official plugin package and the
+  pattern is ecosystem-load-bearing (a v1.14.32 regression that silently broke
+  it was patched within one release), but upstream has declined to commit to it
+  in writing (#24065). Ghost treats the config-file merge as the source of
+  truth and plugin self-registration as an optimization that must be safe to
+  lose.
 - **Transcript formats are explicitly unstable.** Codex documents that
   `transcript_path` "isn't a stable interface"; formats may change per host
   release. Scanner registry entries are versioned and fail open, so format drift
