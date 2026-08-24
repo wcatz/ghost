@@ -30,7 +30,7 @@ func runSessionStartHook(t *testing.T, input string, out io.Writer) {
 
 // TestMain isolates every test in this package from the real
 // ~/.config/ghost/config.yaml and ~/.local/share/ghost by default. Without
-// this, a test that calls HandleSessionStartHook (which invokes
+// this, a test that calls runSessionStartHook (which invokes
 // ensureObsidianSyncRunning) and forgets to override these itself would load
 // the developer's real config; if obsidian.auto_sync is true there, it
 // spawns `ghost obsidian sync` — except os.Executable() resolves to this
