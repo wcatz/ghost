@@ -515,8 +515,69 @@ func TestReconcileHook_LeavesCustomCommandUntouched(t *testing.T) {
 // "hook session-start" must never be mistaken for the legacy command, and the
 // exact legacy command must be found and migrated regardless of which entry
 // comes first in the hook list.
-func TestReconcileHook_MigratesExactLegacyCommandOnly(t *testing.T) {
-	wrapper := `'C:\tools\wrap.exe' --run 'hook session-start' --extra`
+// TestMigratePreContractHook_MigratesBehindNonMatchingFirstEntry pins the
+// all-entries rule: a stale duplicate sorting ahead of the real bare hook
+// must not mask it. The first entry contains the bare tail as a substring
+// but has extra args (a hand-edited wrapper), so only the second, genuinely
+// bare command is migrated — regardless of order.
+func TestMigratePreContractHook_MigratesBehindNonMatchingFirstEntry(t *testing.T) {
+	desired := "/bin/ghost hook stop --source claude-code"
+	for _, order := range []string{"wrapper-first", "bare-first"} {
+		t.Run(order, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.json")
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatalf("loadSettings: %v", err)
+			}
+
+			wrapper := `/bin/ghost hook stop --verbose`
+			bare := `/bin/ghost hook stop`
+			first, second := wrapper, bare
+			if order == "bare-first" {
+				first, second = bare, wrapper
+			}
+			entry := hookEntry{Hooks: []hookAction{
+				{Type: "command", Command: first},
+				{Type: "command", Command: second},
+			}}
+			if err := sf.addHook("Stop", entry); err != nil {
+				t.Fatalf("addHook: %v", err)
+			}
+
+			migrated, err := migratePreContractHook(sf, "Stop", "hook stop", desired)
+			if err != nil {
+				t.Fatalf("migratePreContractHook: %v", err)
+			}
+			if !migrated {
+				t.Error("expected the bare hook to be migrated")
+			}
+
+			stillBare, err := sf.hasExactHookCommand("Stop", bare)
+			if err != nil {
+				t.Fatalf("hasExactHookCommand: %v", err)
+			}
+			if stillBare {
+				t.Error("bare pre-contract hook survived the migration")
+			}
+			isDesired, err := sf.hasExactHookCommand("Stop", desired)
+			if err != nil {
+				t.Fatalf("hasExactHookCommand: %v", err)
+			}
+			if !isDesired {
+				t.Error("contract-form command not found after migration")
+			}
+			wrapperIntact, err := sf.hasExactHookCommand("Stop", wrapper)
+			if err != nil {
+				t.Fatalf("hasExactHookCommand: %v", err)
+			}
+			if !wrapperIntact {
+				t.Error("hand-edited wrapper was clobbered by the migration")
+			}
+		})
+	}
+}
+
+func TestReconcileHook_MigratesExactLegacyCommandOnly(t *testing.T) {	wrapper := `'C:\tools\wrap.exe' --run 'hook session-start' --extra`
 
 	for _, order := range []string{"legacy-first", "wrapper-first"} {
 		t.Run(order, func(t *testing.T) {

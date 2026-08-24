@@ -76,6 +76,10 @@ func CapabilityFor(source Source) (Capability, bool) {
 // because hosts already use top-level "source" for their own semantics (the
 // session start reason: startup|resume|clear|compact); a collision there
 // would break verbatim passthrough of native payloads.
+//
+// Payload.Contract is a pointer so a single JSON pass distinguishes an absent
+// envelope (nil — Parse completes it from authoritative argv values) from an
+// explicit-but-invalid one (non-nil zero value — rejected, never repaired).
 type Envelope struct {
 	Version          int    `json:"version"`
 	Source           string `json:"source"`
@@ -86,7 +90,7 @@ type Envelope struct {
 // conforming host already sends. Field names deliberately match the hosts'
 // common input schema so native payloads parse without translation.
 type Payload struct {
-	Contract       Envelope        `json:"contract"`
+	Contract       *Envelope       `json:"contract"`
 	HookEventName  string          `json:"hook_event_name"`
 	SessionID      string          `json:"session_id"`
 	TranscriptPath string          `json:"transcript_path"`

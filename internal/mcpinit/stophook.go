@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
@@ -74,8 +75,16 @@ func logFailOpen(stderr io.Writer, stage string, err error) {
 // the save-nudge decision. session-end (nudge=false) never scans the
 // transcript and never emits output.
 func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool) {
-	// A prior block already fired this session — the second stop always wins.
-	if p.StopHookActive {
+	// Adapter-materialized transcripts are swept once this invocation ends —
+	// including on the guarded early-return below, so a leaked temp dir can't
+	// outlive us regardless of which path fires.
+	defer cleanupTransientTranscript(p)
+
+	// stop_hook_active means the host already granted one continuation from
+	// our block and is re-stopping immediately — spawning and nudging again
+	// would just loop. session-end ignores the flag: it fires once per real
+	// session end, so its lifecycle spawns always run (spec §2.2).
+	if nudge && p.StopHookActive {
 		return
 	}
 
@@ -119,6 +128,30 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 		return
 	}
 	_, _ = fmt.Fprintln(stdout, stopBlockMessage)
+}
+
+// cleanupTransientTranscript removes an adapter-materialized transcript once
+// ghost is done with it. The opencode plugin writes under a mkdtemp
+// `ghost-*` directory in the OS temp dir; because the plugin's own cleanup
+// runs in its (possibly exiting) host process, a host that quits before the
+// detached hook finishes — or exits right after spawning — would otherwise
+// leak transcript dirs forever (`opencode run` does exactly this). Guarded
+// twice: only adapter-materialized formats are considered, and only paths
+// directly inside <os.TempDir()>/ghost-*/ are ever removed.
+func cleanupTransientTranscript(p hostevent.Payload) {
+	if p.Contract == nil || p.TranscriptPath == "" {
+		return
+	}
+	switch p.Contract.TranscriptFormat {
+	case hostevent.FormatOpencodeMessages, hostevent.FormatCodexRollout:
+	default:
+		return
+	}
+	dir := filepath.Dir(p.TranscriptPath)
+	if !strings.HasPrefix(filepath.Base(dir), "ghost-") || filepath.Dir(dir) != os.TempDir() {
+		return
+	}
+	_ = os.RemoveAll(dir)
 }
 
 // spawnResolveIfConfigured starts `ghost resolve <project> --apply` as a

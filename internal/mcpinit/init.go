@@ -488,27 +488,40 @@ func ensureStopHook(w io.Writer, sf *settingsFile, ghostBin string) error {
 	return nil
 }
 
-// migratePreContractHook rewrites a hook whose argument tail is exactly the
-// pre-contract bare form (e.g. `… hook stop` with no flags) into desiredCmd,
-// which carries `--source claude-code`. The contract has no legacy mode, so a
-// stale bare invocation fails open on every fire until rewritten here; this
-// migration keeps `ghost mcp init` (idempotent, non-destructive) the one-step
-// fix. Matching is exact on the arg tail — a hand-edited wrapper that adds
-// redirections or env vars never matches and is left untouched, same policy
-// as reconcileHook. Reports whether a migration happened.
+// migratePreContractHook rewrites every hook whose argument tail is exactly
+// the pre-contract bare form (e.g. `… hook stop` with no flags) into
+// desiredCmd, which carries `--source claude-code`. The contract has no
+// legacy mode, so a stale bare invocation fails open on every fire until
+// rewritten here; this migration keeps `ghost mcp init` (idempotent,
+// non-destructive) the one-step fix. Every registered command is examined —
+// not just the first substring match — so a stale duplicate sorting ahead of
+// the real bare hook can never mask it. Matching is exact on the arg tail: a
+// hand-edited wrapper that adds redirections or env vars never matches and is
+// left untouched, same policy as reconcileHook. Reports whether any
+// migration happened.
 func migratePreContractHook(sf *settingsFile, event, bareTail, desiredCmd string) (bool, error) {
-	existingCmd, exists, err := sf.findHookCommand(event, bareTail)
-	if err != nil || !exists {
+	cmds, err := sf.hookCommands(event)
+	if err != nil || len(cmds) == 0 {
 		return false, err
 	}
-	_, rest, ok := splitHookCommand(existingCmd)
-	if !ok || rest != bareTail {
-		return false, nil
+	migrated := false
+	seen := make(map[string]bool, len(cmds))
+	for _, cmd := range cmds {
+		if seen[cmd] {
+			continue // replaceHookCommand already rewrote every exact instance
+		}
+		seen[cmd] = true
+		_, rest, ok := splitHookCommand(cmd)
+		if !ok || rest != bareTail {
+			continue
+		}
+		changed, err := sf.replaceHookCommand(event, cmd, desiredCmd)
+		if err != nil {
+			return migrated, fmt.Errorf("migrate %s hook to contract invocation: %w", event, err)
+		}
+		migrated = migrated || changed
 	}
-	if _, err := sf.replaceHookCommand(event, existingCmd, desiredCmd); err != nil {
-		return false, fmt.Errorf("migrate %s hook to contract invocation: %w", event, err)
-	}
-	return true, nil
+	return migrated, nil
 }
 
 // warnPercentPath flags ghost binary paths containing '%' on Windows: cmd.exe

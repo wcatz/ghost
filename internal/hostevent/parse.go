@@ -42,14 +42,8 @@ func Parse(data []byte, eventArg, sourceArg string) (Payload, error) {
 	// Absent (or null) contract object → argv completes the envelope. An
 	// explicit contract must validate strictly below; `"contract": {}` is
 	// explicit-but-invalid and is rejected, never silently completed.
-	var probe struct {
-		Contract *Envelope `json:"contract"`
-	}
-	if err := json.Unmarshal(data, &probe); err != nil {
-		return Payload{}, fmt.Errorf("parse payload: %w", err)
-	}
-	if probe.Contract == nil {
-		p.Contract = Envelope{
+	if p.Contract == nil {
+		p.Contract = &Envelope{
 			Version:          ContractVersion,
 			Source:           sourceArg,
 			TranscriptFormat: defaultFormatFor(wantSource),

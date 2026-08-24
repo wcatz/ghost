@@ -39,6 +39,58 @@ func writePluginFile(t *testing.T, content string) {
 	}
 }
 
+// TestReportStaleIntegrations pins the post-upgrade wiring check: stale
+// Claude hooks and a drifted opencode plugin each produce an actionable
+// hint; current wiring produces no output at all.
+func TestReportStaleIntegrations(t *testing.T) {
+	t.Run("silent when everything is current", func(t *testing.T) {
+		statusEnv(t)
+		t.Setenv("PATH", writeStubGhost(t))
+		writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), `{"mcp":{"ghost":{"type":"local","command":["ghost","mcp"],"enabled":true}}}`)
+		installOpencodePluginFile(t)
+
+		var out bytes.Buffer
+		ReportStaleIntegrations(&out)
+		if out.Len() != 0 {
+			t.Errorf("current wiring must print nothing, got:\n%s", out.String())
+		}
+	})
+
+	t.Run("flags pre-contract claude hook", func(t *testing.T) {
+		statusEnv(t)
+		writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), `{"mcp":{}}`)
+
+		path, err := settingsPath()
+		if err != nil {
+			t.Fatalf("settingsPath: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("mkdir settings dir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(`{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"/bin/ghost hook stop"}]}]}}`), 0o600); err != nil {
+			t.Fatalf("write settings: %v", err)
+		}
+
+		var out bytes.Buffer
+		ReportStaleIntegrations(&out)
+		if !strings.Contains(out.String(), "Claude Code Stop hook is pre-contract") {
+			t.Errorf("expected pre-contract stop hook hint, got:\n%s", out.String())
+		}
+	})
+
+	t.Run("flags drifted opencode plugin only when mcp registered", func(t *testing.T) {
+		statusEnv(t)
+		writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), `{"mcp":{"ghost":{"type":"local","command":["ghost","mcp"],"enabled":true}}}`)
+		writePluginFile(t, "// ghost-opencode v0 — stale body")
+
+		var out bytes.Buffer
+		ReportStaleIntegrations(&out)
+		if !strings.Contains(out.String(), "opencode lifecycle plugin is missing or outdated") {
+			t.Errorf("expected drifted plugin hint, got:\n%s", out.String())
+		}
+	})
+}
+
 // TestStatus_ReportsOpenDBFailure verifies that a database which exists but
 // fails to open (e.g. mid-migration foreign-key corruption) is surfaced as a
 // failed check, not silently skipped. Before this fix, Status only inspected

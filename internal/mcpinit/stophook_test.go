@@ -72,6 +72,12 @@ const (
 	lineUser      = `{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}`
 )
 
+// ocLineBashTool is an opencode-format assistant tool-call line for sweep
+// tests (the sweep must run regardless of which decision branch follows).
+func ocLineBashTool() string {
+	return `{"info":{"role":"assistant"},"parts":[{"type":"tool","tool":"bash","state":{"status":"completed"}}]}`
+}
+
 func runStopHook(t *testing.T, stdin string) string {
 	t.Helper()
 	var out strings.Builder
@@ -170,6 +176,78 @@ func TestRunHostEvent_SessionStartSuppressedOnNonInjectingHost(t *testing.T) {
 	RunHostEvent("session-start", "opencode", strings.NewReader(input), &out, io.Discard)
 	if out.Len() != 0 {
 		t.Errorf("expected silent no-op session-start for opencode, got %q", out.String())
+	}
+}
+
+// TestRunHostEvent_StopHookActiveGatesOnlyStop pins the §2.2 split:
+// stop_hook_active suppresses a repeat stop entirely, but session-end fires
+// once per real session end, so its lifecycle spawns run regardless of any
+// earlier block cycle. Observable via config.DataDir(): with auto_resolve
+// enabled, reaching the spawn probe creates the ghost data dir.
+// TestRunStop_SweepsTransientTempTranscript pins the consumer-side sweep:
+// an opencode-materialized transcript under a mkdtemp ghost-* dir in the OS
+// temp dir is removed after the hook runs, even though the spawning host may
+// have exited before its own cleanup could fire (`opencode run`).
+func TestRunStop_SweepsTransientTempTranscript(t *testing.T) {
+	isolatedHome(t)
+	dir, err := os.MkdirTemp("", "ghost-sweeptest-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	path := filepath.Join(dir, "messages.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join([]string{lineUser, ocLineBashTool()}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	input := contractInputFor(t, "Stop", "opencode", "opencode-messages",
+		fmt.Sprintf(`{"session_id":"oc1","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, path))
+	var out bytes.Buffer
+	RunHostEvent("stop", "opencode", strings.NewReader(input), &out, io.Discard)
+	if out.Len() != 0 {
+		t.Errorf("non-blocking host must stay silent on stdout, got %q", out.String())
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("transient transcript dir was not swept: %v", err)
+	}
+}
+
+// TestRunStop_NeverSweepsForeignPaths pins the sweep's blast radius: a
+// transcript anywhere other than <tmpdir>/ghost-*/ is left untouched.
+func TestRunStop_NeverSweepsForeignPaths(t *testing.T) {
+	isolatedHome(t)
+	path := writeTranscript(t, lineToolBash)
+	runStopHook(t, contractInputFor(t, "Stop", "claude-code", "claude-jsonl",
+		fmt.Sprintf(`{"session_id":"s1","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, path)))
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("native transcript must never be swept: %v", err)
+	}
+}
+
+func TestRunHostEvent_StopHookActiveGatesOnlyStop(t *testing.T) {
+	dataHome := isolatedHome(t)
+	writeGhostConfigFile(t, "reflection:\n  auto_resolve: true\n")
+
+	input := contractInputFor(t, "SessionEnd", "claude-code", "none",
+		`{"session_id":"s1","transcript_path":"","cwd":"/tmp/does-not-matter","stop_hook_active":true}`)
+	var out bytes.Buffer
+	RunHostEvent("session-end", "claude-code", strings.NewReader(input), &out, io.Discard)
+	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); err != nil {
+		t.Errorf("session-end must run lifecycle spawns despite stop_hook_active; data dir not created: %v", err)
+	}
+}
+
+// TestRunHostEvent_StopStillGuardedWhenActive pins the other half: a stop
+// carrying stop_hook_active still short-circuits before any spawn work.
+func TestRunHostEvent_StopStillGuardedWhenActive(t *testing.T) {
+	dataHome := isolatedHome(t)
+	writeGhostConfigFile(t, "reflection:\n  auto_resolve: true\n")
+
+	path := writeTranscript(t, lineToolBash)
+	if out := runStopHook(t, stopInput(t, path, true)); out != "" {
+		t.Errorf("expected silence on guarded stop, got %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
+		t.Errorf("guarded stop must short-circuit before spawn probes; data dir exists")
 	}
 }
 

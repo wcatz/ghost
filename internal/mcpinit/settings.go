@@ -303,6 +303,46 @@ func (s *settingsFile) findHookCommand(event, cmdSubstr string) (cmd string, ok 
 	return "", false, nil
 }
 
+// hookCommands returns every hook command registered for event, preserving
+// order. err is non-nil when the "hooks" value (or the event's value) is
+// present but structurally invalid, including explicit JSON null — callers
+// must treat that as "stop", mirroring findHookCommand.
+func (s *settingsFile) hookCommands(event string) ([]string, error) {
+	hooksRaw, present := s.raw["hooks"]
+	if !present {
+		return nil, nil
+	}
+	if isJSONNull(hooksRaw) {
+		return nil, fmt.Errorf("hooks is null")
+	}
+
+	var hooksMap map[string]json.RawMessage
+	if uerr := json.Unmarshal(hooksRaw, &hooksMap); uerr != nil {
+		return nil, fmt.Errorf("parse hooks: %w", uerr)
+	}
+
+	eventRaw, present := hooksMap[event]
+	if !present {
+		return nil, nil
+	}
+	if isJSONNull(eventRaw) {
+		return nil, fmt.Errorf("hooks[%s] is null", event)
+	}
+
+	var entries []hookEntry
+	if uerr := json.Unmarshal(eventRaw, &entries); uerr != nil {
+		return nil, fmt.Errorf("parse %s hooks: %w", event, uerr)
+	}
+
+	var cmds []string
+	for _, entry := range entries {
+		for _, h := range entry.Hooks {
+			cmds = append(cmds, h.Command)
+		}
+	}
+	return cmds, nil
+}
+
 // hasExactHookCommand reports whether any hook command for event exactly
 // equals cmd. Used to find the precise pre-#251 legacy command rather than
 // anything that merely contains the same substring — a hand-edited wrapper
