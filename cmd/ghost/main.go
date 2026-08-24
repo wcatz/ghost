@@ -148,14 +148,14 @@ func parseMCPClient(args []string) (string, error) {
 		switch {
 		case args[i] == "--client":
 			if i+1 >= len(args) {
-				return "", fmt.Errorf("--client requires a value (claude, opencode, codex, or goose)")
+				return "", fmt.Errorf("--client requires a value (claude, opencode, codex, goose, or all)")
 			}
 			client = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--client="):
 			client = strings.TrimPrefix(args[i], "--client=")
 			if client == "" {
-				return "", fmt.Errorf("--client requires a value (claude, opencode, codex, or goose)")
+				return "", fmt.Errorf("--client requires a value (claude, opencode, codex, goose, or all)")
 			}
 		}
 	}
