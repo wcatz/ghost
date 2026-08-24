@@ -71,10 +71,10 @@ Re-running the command upgrades an existing install in place.
 { "mcpServers": { "ghost": { "type": "stdio", "command": "ghost", "args": ["mcp"] } } }
 ```
 
-**Using opencode?** The entry goes in `~/.config/opencode/opencode.json` (or merges into an existing `opencode.jsonc`):
+**Using opencode?** Don't edit any config — `ghost mcp init --client opencode` installs a single plugin (`~/.config/opencode/plugins/ghost-opencode.ts`) that registers the MCP server itself (via opencode's plugin config hook) and bridges session-idle events to ghost's stop hook:
 
-```json
-{ "mcp": { "ghost": { "type": "local", "command": ["ghost", "mcp"], "enabled": true } } }
+```bash
+ghost mcp init --client opencode   # installs the plugin; restart opencode after
 ```
 
 **Docker** (multi-arch, amd64 + arm64):
