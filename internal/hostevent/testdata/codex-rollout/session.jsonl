@@ -1,0 +1,10 @@
+{"timestamp":"2026-08-24T09:00:00.000Z","type":"session_meta","payload":{"id":"sess_cx1","timestamp":1756000000000,"cwd":"/repo","originator":"codex_cli_rs","cli_version":"0.149.1"}}
+{"timestamp":"2026-08-24T09:00:05.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"text","text":"list files and save what you learn"}]}}
+this line is not json and must be skipped
+{"timestamp":"2026-08-24T09:00:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{}}}
+{"timestamp":"2026-08-24T09:00:07.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking"}]}}
+{"timestamp":"2026-08-24T09:00:08.000Z","type":"response_item","payload":{"type":"local_shell_call","call_id":"call_a","status":"completed","action":{"command":["ls","internal/"]}}}
+{"timestamp":"2026-08-24T09:00:09.000Z","type":"response_item","payload":{"type":"function_call","name":"read_file","arguments":"{\"path\":\"README.md\"}","call_id":"call_b"}}
+{"timestamp":"2026-08-24T09:00:10.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_b","output":"content"}}
+{"timestamp":"2026-08-24T09:00:11.000Z","type":"response_item","payload":{"type":"function_call","name":"ghost_memory_save","namespace":"mcp__ghost","arguments":"{\"content\":\"config loader lives in internal/config\"}","call_id":"call_c"}}
+{"timestamp":"2026-08-24T09:00:12.000Z","type":"response_item","payload":{"type":"local_shell_call","call_id":"call_d","status":"timeout","action":{"command":["sleep","999"]},"output":"timed out"}}
