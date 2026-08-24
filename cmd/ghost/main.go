@@ -450,7 +450,6 @@ Flags:
 		live = append(live, m)
 	}
 	currentContext, _ := store.GetLearnedContext(ctx, projectID)
-	exchanges, _ := store.GetRecentExchanges(ctx, projectID, 15)
 
 	if resolvedCount > 0 {
 		fmt.Printf("Memories:     %d existing (%d resolved, excluded from consolidation)\n", len(existingMemories), resolvedCount)
@@ -460,7 +459,6 @@ Flags:
 	fmt.Println("Running consolidation...")
 
 	input := reflection.ReflectionInput{
-		RecentExchanges:  exchanges,
 		ExistingMemories: live,
 		CurrentContext:   currentContext,
 		ProjectName:      projectName,
