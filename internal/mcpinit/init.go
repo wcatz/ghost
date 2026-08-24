@@ -365,7 +365,7 @@ func isStaleGhostHookCommand(existingCmd, desiredCmd string) bool {
 }
 
 // isGhostBinaryName reports whether path's basename is "ghost" or
-// "ghost.exe" (case-insensitive), mirroring mcpGhostCommand's check.
+// "ghost.exe" (case-insensitive).
 func isGhostBinaryName(path string) bool {
 	base := hookCommandBase(path)
 	base = strings.ToLower(base)

@@ -105,6 +105,18 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 	}
 
 	return {
+		// Self-registration: this hook receives the full SDK config, so the
+		// plugin alone brings ghost's MCP tools online — no opencode.json edit
+		// needed. GHOST_BIN overrides the binary for hermetic setups; otherwise
+		// it resolves via PATH at spawn time.
+		config: async (cfg) => {
+			cfg.mcp = cfg.mcp ?? {}
+			cfg.mcp["ghost"] = {
+				type: "local",
+				command: [process.env.GHOST_BIN ?? "ghost", "mcp"],
+				enabled: true,
+			}
+		},
 		event: async ({ event }) => {
 			try {
 				if (event.type === "session.status") {
