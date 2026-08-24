@@ -11,7 +11,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 4
+const schemaVersion = 5
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -23,6 +23,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV2,
 	migrateV3,
 	migrateV4,
+	migrateV5,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -202,6 +203,27 @@ END`,
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("%q: %w", s[:min(40, len(s))], err)
+		}
+	}
+	return nil
+}
+
+// migrateV5 drops the orphaned conversation/message tables (#347). Both date
+// from the assistant-era chat subsystem stripped in 9aff8a7 (v0.8.0, #149):
+// nothing has written to them since v0.8.0 — reflection's recent-exchanges
+// feed has been returning empty ever since. migrateV1 dropped the other
+// assistant-era tables (notifications, reminders, scheduled_jobs) but left
+// these two because reflect still read them; with their writers gone and the
+// read path dead in practice, they are now dead weight — 76 conversations /
+// 645 messages of orphaned rows in the production DB as of 2026-08-24.
+// Dropping a table drops its indices (idx_conversations_project,
+// idx_messages_conv) with it. Messages is dropped before its parent
+// conversations for FK hygiene, though migrate() already runs each step with
+// foreign_keys=OFF.
+func migrateV5(tx *sql.Tx) error {
+	for _, t := range []string{"messages", "conversations"} {
+		if _, err := tx.Exec("DROP TABLE IF EXISTS " + t); err != nil {
+			return fmt.Errorf("drop %s: %w", t, err)
 		}
 	}
 	return nil
