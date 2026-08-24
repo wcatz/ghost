@@ -276,6 +276,109 @@ func TestMigrateHandMigratedDB(t *testing.T) {
 }
 
 // TestMigrateIdempotent: opening an already-migrated database repeatedly is a no-op.
+// v4WithConversationsDB writes a schemaVersion-4 database: the current
+// initSQL shape plus the pre-v5 conversations/messages tables with orphaned
+// rows still in them — the state of every DB created before #347's strip.
+// initSQL no longer creates those two tables, so they're added explicitly to
+// reproduce what a real v4 database carries; stamped at user_version=4.
+func v4WithConversationsDB(t *testing.T) string {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open v4 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(initSQL); err != nil {
+		t.Fatalf("create current schema: %v", err)
+	}
+	legacy := []string{
+		`CREATE TABLE conversations (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    mode        TEXT NOT NULL DEFAULT 'chat',
+    title       TEXT DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`CREATE TABLE messages (
+    id              TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool_use', 'tool_result')),
+    content         TEXT NOT NULL,
+    tool_name       TEXT,
+    tool_use_id     TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v4-p1', 'p1')`,
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES
+			('m1', 'p1', 'fact', 'memory that must survive the drop', 'mcp')`,
+		`INSERT INTO conversations (id, project_id, mode) VALUES ('c1', 'p1', 'chat')`,
+		`INSERT INTO messages (conversation_id, role, content) VALUES
+			('c1', 'user', 'pre-strip transcript row'),
+			('c1', 'assistant', 'another orphaned row')`,
+		`PRAGMA user_version = 4`,
+	}
+	for _, s := range legacy {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed v4 db: %v", err)
+		}
+	}
+	return dbPath
+}
+
+// TestMigrateV5DropsConversationTables: a schemaVersion-4 database carrying
+// the orphaned assistant-era conversations/messages rows must land at the
+// current version with both tables (and their indices) gone, while every
+// surviving table keeps its data untouched (#347).
+func TestMigrateV5DropsConversationTables(t *testing.T) {
+	dbPath := v4WithConversationsDB(t)
+
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB on v4 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	// Tables and their indices are gone entirely — not just emptied.
+	for _, name := range []string{
+		"conversations", "messages",
+		"idx_conversations_project", "idx_messages_conv",
+	} {
+		var c int
+		typ := "table"
+		if strings.HasPrefix(name, "idx_") {
+			typ = "index"
+		}
+		if err := db.QueryRow(
+			`SELECT count(*) FROM sqlite_master WHERE type=? AND name=?`, typ, name,
+		).Scan(&c); err != nil || c != 0 {
+			t.Errorf("%s %s still present after migration (c=%d err=%v)", typ, name, c, err)
+		}
+	}
+
+	// Surviving data is intact: the seeded project and memory rows are
+	// unaffected by dropping their conversational siblings.
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM memories WHERE id = 'm1'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("memories after migration: n=%d err=%v, want 1", n, err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM projects WHERE id = 'p1'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("projects after migration: n=%d err=%v, want 1", n, err)
+	}
+
+	// A fresh write into a surviving table works normally post-migration.
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, content, source) VALUES ('m2', 'p1', 'post-migration insert', 'mcp')`,
+	); err != nil {
+		t.Errorf("insert after migration: %v", err)
+	}
+}
+
 func TestMigrateIdempotent(t *testing.T) {
 	dbPath := newLegacyDB(t)
 	for i := 0; i < 3; i++ {

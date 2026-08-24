@@ -184,10 +184,14 @@ func runMCPInit() {
 	switch client {
 	case "opencode":
 		err = mcpinit.RunOpencode(os.Stdout, dryRun)
+	case "codex":
+		err = mcpinit.RunCodex(os.Stdout, dryRun)
+	case "goose":
+		err = mcpinit.RunGoose(os.Stdout, dryRun)
 	case "claude":
 		err = mcpinit.Run(os.Stdout, dryRun)
 	default:
-		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude or opencode)\n", client)
+		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude, opencode, codex, or goose)\n", client)
 		os.Exit(1)
 	}
 	if err != nil {
@@ -212,10 +216,14 @@ func runMCPStatus() {
 	switch client {
 	case "opencode":
 		healthy, err = mcpinit.StatusOpencode(os.Stdout)
+	case "codex":
+		healthy, err = mcpinit.StatusCodex(os.Stdout)
+	case "goose":
+		healthy, err = mcpinit.StatusGoose(os.Stdout)
 	case "claude":
 		healthy, err = mcpinit.Status(os.Stdout)
 	default:
-		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude or opencode)\n", client)
+		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude, opencode, codex, or goose)\n", client)
 		os.Exit(1)
 	}
 	if err != nil {
@@ -227,17 +235,35 @@ func runMCPStatus() {
 	}
 }
 
-// runHook dispatches Claude Code hook events.
+// runHook dispatches host lifecycle events per the contract-v1 spec:
+//
+//	ghost hook <event> --source <host>
+//
+// The contract has no legacy mode: without --source nothing can be routed, so
+// the invocation fails open (one stderr line, exit 0) with a pointer to
+// `ghost mcp init`, which migrates pre-contract wiring idempotently. Every
+// event — including unrecognized ones — goes through RunHostEvent so
+// validation and its fail-open diagnostics live in exactly one place.
 func runHook() {
 	if len(os.Args) < 3 {
 		os.Exit(0)
 	}
-	switch os.Args[2] {
-	case "session-start":
-		mcpinit.HandleSessionStartHook(os.Stdin, os.Stdout)
-	case "stop":
-		mcpinit.HandleStopHook(os.Stdin, os.Stdout)
+	event := os.Args[2]
+	var source string
+	for i := 3; i < len(os.Args); i++ {
+		switch {
+		case os.Args[i] == "--source" && i+1 < len(os.Args):
+			source = os.Args[i+1]
+			i++
+		case strings.HasPrefix(os.Args[i], "--source="):
+			source = strings.TrimPrefix(os.Args[i], "--source=")
+		}
 	}
+	if source == "" {
+		fmt.Fprintln(os.Stderr, "ghost hook: fail-open (missing --source; re-run `ghost mcp init` to migrate hook wiring)")
+		os.Exit(0)
+	}
+	mcpinit.RunHostEvent(event, source, os.Stdin, os.Stdout, os.Stderr)
 }
 
 // resolveProjectOrExit resolves projectName to a project ID via store, printing
@@ -424,7 +450,6 @@ Flags:
 		live = append(live, m)
 	}
 	currentContext, _ := store.GetLearnedContext(ctx, projectID)
-	exchanges, _ := store.GetRecentExchanges(ctx, projectID, 15)
 
 	if resolvedCount > 0 {
 		fmt.Printf("Memories:     %d existing (%d resolved, excluded from consolidation)\n", len(existingMemories), resolvedCount)
@@ -434,7 +459,6 @@ Flags:
 	fmt.Println("Running consolidation...")
 
 	input := reflection.ReflectionInput{
-		RecentExchanges:  exchanges,
 		ExistingMemories: live,
 		CurrentContext:   currentContext,
 		ProjectName:      projectName,
@@ -997,6 +1021,11 @@ func runUpgrade() {
 	}
 
 	fmt.Printf("Updated: ghost %s → %s\n", version, latest)
+
+	// A new binary can invalidate wiring the old one installed (hook flags,
+	// embedded plugin sources). Surface stale integrations instead of letting
+	// them fail open invisibly on every fire.
+	mcpinit.ReportStaleIntegrations(os.Stdout)
 }
 
 // parseObsidianFlags parses the flags following `ghost obsidian <mode>`. It

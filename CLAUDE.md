@@ -11,7 +11,7 @@
 - `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + resolve + supersede); `Provider` seam (`anthropicClient`/`SamplingProvider`) with `FallbackProvider` credit-exhaustion fallover for resolve/supersede
 - `internal/memory/` — SQLite CRUD, FTS5 search, vector search, time-decay scoring
 - `internal/mcpserver/` — MCP server: 20 tools + 4 resources + 2 prompts (`recall_project`, `record_decision`)
-- `internal/mcpinit/` — `ghost mcp init`, `ghost mcp status`, `ghost hook session-start`, `ghost hook stop`
+- `internal/mcpinit/` — `ghost mcp init`, `ghost mcp status`, `ghost hook <event> --source <host>` (contract-v1 lifecycle dispatch; installers: claude-code, opencode plugin-only, codex TOML+hooks.json, goose Agent-Plugins package; goose field aliasing lives in hostevent.Parse)
 - `internal/claudeimport/` — One-time import of Claude Code auto-memory on first contact
 - `internal/embedding/` — Ollama async vectorization worker
 - `internal/linking/` — Background worker linking similar memories into a graph
