@@ -89,10 +89,14 @@ func Parse(data []byte, eventArg, sourceArg string) (Payload, error) {
 // dialect, used only when argv completes an absent envelope. Sources without a
 // v1 scanner mapping start at "none" until their adapter lands.
 func defaultFormatFor(source Source) string {
-	if source == SourceClaudeCode {
+	switch source {
+	case SourceClaudeCode:
 		return FormatClaudeJSONL
+	case SourceCodex:
+		return FormatCodexRollout
+	default:
+		return FormatNone
 	}
-	return FormatNone
 }
 
 // gooseNativeFields mirrors the native payload fields goose actually sends,

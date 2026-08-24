@@ -321,6 +321,13 @@ Honest constraints, stated up front:
   dialect fields always win; argv agreement still enforced), so hooks invoke
   `<ghost> hook <event> --source goose` directly — no shim scripts,
   cross-platform by construction.
+- **`codex-rollout` scanner registered** (follow-up): Parse completes codex
+  envelopes to `codex-rollout`, and the scanner counts function_call /
+  local_shell_call items in `~/.codex/sessions/**.jsonl`. Ghost save detection
+  is separator-agnostic — codex flattens namespaced tools as namespace+name and
+  MCP namespaces take the `mcp__<server>` form, so both
+  `mcp__ghost`+`ghost_memory_save` and legacy flat forms match on substring.
+  Codex stops now get the full save-nudge treatment.
 - Nudge stays log-only for opencode; document it.
 
 ### Phase 3 — distribution polish

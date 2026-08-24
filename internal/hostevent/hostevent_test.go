@@ -130,8 +130,8 @@ func TestParseStrict(t *testing.T) {
 		if p.HostSource() != SourceCodex || p.Event() != EventStop {
 			t.Errorf("routing wrong: %+v", p)
 		}
-		// codex has no v1 scanner mapping yet, so completion starts at none.
-		if p.Contract.Version != ContractVersion || p.Contract.TranscriptFormat != FormatNone {
+		// codex completion points at its rollout scanner.
+		if p.Contract.Version != ContractVersion || p.Contract.TranscriptFormat != FormatCodexRollout {
 			t.Errorf("completed envelope wrong: %+v", p.Contract)
 		}
 	})
@@ -183,7 +183,7 @@ func TestParseStrict(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse: %v", err)
 		}
-		if p.Contract.Version != ContractVersion || p.Contract.TranscriptFormat != FormatNone {
+		if p.Contract.Version != ContractVersion || p.Contract.TranscriptFormat != FormatCodexRollout {
 			t.Errorf("completed envelope wrong: %+v", p.Contract)
 		}
 	})

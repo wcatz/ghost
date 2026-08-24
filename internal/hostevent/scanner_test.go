@@ -112,13 +112,73 @@ func TestScanRegistry(t *testing.T) {
 		t.Errorf("Scan(opencode-messages) = %+v,%v,%v want 1 tool call", res, ok, err)
 	}
 
-	// Formats whose adapters have not landed stay unregistered — callers fail
-	// open; scanning is selected by format and never falls back by source.
-	if _, ok, err := Scan(FormatCodexRollout, strings.NewReader(lineToolBash)); ok || err != nil {
-		t.Error("Scan(codex-rollout) should be unregistered until the codex adapter lands")
+	res, ok, err = Scan(FormatCodexRollout, strings.NewReader(`{"timestamp":"t","type":"response_item","payload":{"type":"function_call","name":"shell"}}`))
+	if !ok || err != nil || res.ToolCalls != 1 {
+		t.Errorf("Scan(codex-rollout) = %+v,%v,%v want 1 tool call", res, ok, err)
 	}
+
+	// Unknown formats stay unregistered — callers fail open; scanning is
+	// selected by format and never falls back by source.
 	if _, ok, err := Scan("", strings.NewReader(lineToolBash)); ok || err != nil {
 		t.Error(`Scan("") should be unregistered`)
+	}
+}
+
+// codex-rollout fixtures: timestamped envelopes whose payload carries the
+// Responses-API items (function_call with optional mcp__<server> namespace,
+// local_shell_call for the built-in shell).
+const (
+	cxMeta     = `{"timestamp":"t0","type":"session_meta","payload":{"id":"s"}}`
+	cxMsg      = `{"timestamp":"t1","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"ghost_memory_save in prose does not count"}]}}`
+	cxShell    = `{"timestamp":"t2","type":"response_item","payload":{"type":"local_shell_call","call_id":"c1","status":"completed","action":{"command":["ls"]}}}`
+	cxSaveNS   = `{"timestamp":"t3","type":"response_item","payload":{"type":"function_call","name":"ghost_memory_save","namespace":"mcp__ghost","arguments":"{}","call_id":"c2"}}`
+	cxSaveFlat = `{"timestamp":"t4","type":"response_item","payload":{"type":"function_call","name":"ghost_save_global","arguments":"{}","call_id":"c3"}}`
+	cxOtherMCP = `{"timestamp":"t5","type":"response_item","payload":{"type":"function_call","name":"search","namespace":"mcp__other","arguments":"{}","call_id":"c4"}}`
+	cxEventMsg = `{"timestamp":"t6","type":"event_msg","payload":{"type":"token_count"}}`
+)
+
+func TestScanCodexRollout(t *testing.T) {
+	cases := []struct {
+		name          string
+		lines         []string
+		wantToolCalls int
+		wantSaves     int
+	}{
+		{"shell counts as a tool call", []string{cxMeta, cxShell}, 1, 0},
+		{"namespaced save counts", []string{cxShell, cxSaveNS}, 2, 1},
+		{"legacy flat save counts", []string{cxShell, cxSaveFlat}, 2, 1},
+		{"another server's tool is not a save", []string{cxShell, cxOtherMCP}, 2, 0},
+		{"non-response lines skipped", []string{cxMeta, cxShell, cxEventMsg}, 1, 0},
+		{"garbage skipped", []string{"not json", cxShell, "{{{"}, 1, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ScanCodexRollout(strings.NewReader(strings.Join(tc.lines, "\n") + "\n"))
+			if err != nil {
+				t.Fatalf("ScanCodexRollout: %v", err)
+			}
+			if got.ToolCalls != tc.wantToolCalls || got.GhostSaves != tc.wantSaves {
+				t.Errorf("= %+v, want calls=%d saves=%d", got, tc.wantToolCalls, tc.wantSaves)
+			}
+		})
+	}
+}
+
+// TestScanCodexRollout_GoldenFixture pins the scanner against a realistic
+// full-fidelity rollout (meta + event noise, shell + MCP function calls,
+// non-JSON junk).
+func TestScanCodexRollout_GoldenFixture(t *testing.T) {
+	f, err := os.Open(filepath.Join("testdata", "codex-rollout", "session.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close() //nolint:errcheck
+	got, err := ScanCodexRollout(f)
+	if err != nil {
+		t.Fatalf("ScanCodexRollout: %v", err)
+	}
+	if got.ToolCalls != 4 || got.GhostSaves != 1 {
+		t.Errorf("golden fixture = %+v, want toolCalls=4 saves=1", got)
 	}
 }
 

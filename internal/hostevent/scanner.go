@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"strings"
 )
 
 // Transcript formats known to the contract. The scanner registry is keyed by
@@ -35,6 +36,7 @@ type ScanFunc func(io.Reader) (ScanResult, error)
 var scanners = map[string]ScanFunc{
 	FormatClaudeJSONL:      ScanClaudeJSONL,
 	FormatOpencodeMessages: ScanOpencodeMessages,
+	FormatCodexRollout:     ScanCodexRollout,
 }
 
 // Scan runs the scanner registered for format. ok is false when no scanner is
@@ -103,6 +105,57 @@ func ScanClaudeJSONL(r io.Reader) (ScanResult, error) {
 					res.GhostSaves++
 				}
 			}
+		}
+	})
+	return res, err
+}
+
+// codexRolloutLine is the minimal shape of one codex rollout JSONL record
+// (openai/codex, codex-rs/rollout): a timestamped envelope whose type selects
+// the payload — only "response_item" lines carry model traffic; everything
+// else (session_meta, event_msg, turn_context, …) is skipped.
+type codexRolloutLine struct {
+	Type    string `json:"type"`
+	Payload struct {
+		Type      string  `json:"type"`
+		Name      string  `json:"name"`
+		Namespace *string `json:"namespace"`
+	} `json:"payload"`
+}
+
+// ScanCodexRollout streams a codex rollout transcript and counts tool calls
+// (function_call items plus local_shell_call items — codex's shell is not a
+// function call), plus how many were Ghost save tools. Ghost save detection
+// is separator-agnostic: codex flattens namespaced tools as namespace+name
+// with no separator (flat_tool_name in codex-rs/core/src/tools), and MCP
+// namespaces take the mcp__<server> form — so "mcp__ghost"+"ghost_memory_save"
+// and a legacy flat "ghost_memory_save" both match on substring, while a
+// different server's identically-named tool cannot (its namespace lacks
+// "ghost"). Unparseable lines are skipped; errors mid-file are returned with
+// partial counts, same fail-open posture as the other scanners.
+func ScanCodexRollout(r io.Reader) (ScanResult, error) {
+	var res ScanResult
+	err := streamJSONL(r, func(line []byte) {
+		var l codexRolloutLine
+		if err := json.Unmarshal(line, &l); err != nil {
+			return
+		}
+		if l.Type != "response_item" {
+			return
+		}
+		switch l.Payload.Type {
+		case "function_call":
+			res.ToolCalls++
+			flat := ""
+			if l.Payload.Namespace != nil {
+				flat = *l.Payload.Namespace
+			}
+			flat += l.Payload.Name
+			if strings.Contains(flat, "ghost_memory_save") || strings.Contains(flat, "ghost_save_global") {
+				res.GhostSaves++
+			}
+		case "local_shell_call":
+			res.ToolCalls++
 		}
 	})
 	return res, err
