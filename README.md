@@ -49,7 +49,7 @@ ghost mcp init --client opencode
 ollama pull nomic-embed-text:v1.5
 ```
 
-This writes the `ghost` entry into `~/.config/opencode/opencode.json` (or merges it into an existing `opencode.jsonc`). Restart opencode — Ghost's `ghost_*` tools and context injection go live automatically. Verify with `ghost mcp status --client opencode`.
+This installs a single lifecycle plugin to `~/.config/opencode/plugins/ghost-opencode.ts` that does everything: it registers the `ghost` MCP server (via opencode's plugin config hook) **and** bridges session-idle events to ghost's stop hook (memory reflection, resolve, supersede). Your `opencode.json` is never touched. Restart opencode — Ghost's `ghost_*` tools and lifecycle processing go live automatically. Verify with `ghost mcp status --client opencode`.
 
 No Go toolchain? Grab a prebuilt binary from [Releases](https://github.com/wcatz/ghost/releases/latest) — linux, macOS, and Windows, amd64 and arm64, with `checksums.txt`. Building from source needs Go 1.26+ (older toolchains fetch it automatically via `GOTOOLCHAIN=auto`).
 
@@ -71,10 +71,10 @@ Re-running the command upgrades an existing install in place.
 { "mcpServers": { "ghost": { "type": "stdio", "command": "ghost", "args": ["mcp"] } } }
 ```
 
-**Using opencode?** The entry goes in `~/.config/opencode/opencode.json` (or merges into an existing `opencode.jsonc`):
+**Using opencode?** Don't edit any config — `ghost mcp init --client opencode` installs a single plugin (`~/.config/opencode/plugins/ghost-opencode.ts`) that registers the MCP server itself (via opencode's plugin config hook) and bridges session-idle events to ghost's stop hook:
 
-```json
-{ "mcp": { "ghost": { "type": "local", "command": ["ghost", "mcp"], "enabled": true } } }
+```bash
+ghost mcp init --client opencode   # installs the plugin; restart opencode after
 ```
 
 **Docker** (multi-arch, amd64 + arm64):
@@ -142,7 +142,7 @@ One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`) — thi
 A bounded digest, and you can inspect it yourself. The session-start hook emits: project name, top memories, learned context, open tasks, and active decisions. Global memories (the `_global` project) are injected even when the cwd matches no known project. See precisely what your agent sees:
 
 ```bash
-echo '{"cwd":"'"$PWD"'"}' | ghost hook session-start
+echo '{"contract":{"version":1,"source":"claude-code","transcript_format":"claude-jsonl"},"hook_event_name":"SessionStart","cwd":"'"$PWD"'"}' | ghost hook session-start --source claude-code
 ```
 
 No mystery blob in your system prompt. Save-time dedup keeps the digest from bloating, and time-decay scoring weights `ghost_project_context` and resource reads toward what's still true. Subagent sessions get nothing (they inherit context in-band from the parent); `resume` skips injection; `compact` emits a one-line pointer instead of re-dumping. Full details in [docs/architecture.md](docs/architecture.md).
@@ -272,8 +272,7 @@ The server ships with embedded instructions that teach the agent when to save, w
 ghost mcp                    # Run MCP server on stdio (used by your MCP client)
 ghost mcp init [--client claude|opencode] [--dry-run]   # Configure MCP client integration (default: Claude Code)
 ghost mcp status [--client claude|opencode]             # Deep health checks (incl. Ollama reachability, model presence)
-ghost hook session-start     # SessionStart hook — prints exactly what gets injected
-ghost hook stop              # Stop hook — blocks stop once if a tool-using session saved nothing
+ghost hook <event> --source <host>  # Contract-v1 lifecycle hook (session-start, stop, session-end)
 ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
 ghost resolve <project>      # De-weight resolved-evidence memories from injection (dry-run by default; --apply)
 ghost supersede <project>    # Link superseded memories (dry-run by default; --apply, --threshold)
@@ -284,7 +283,7 @@ ghost upgrade                # Self-update from GitHub Releases (linux/macOS; Wi
 ghost version                # Print version
 ```
 
-`ghost mcp init` and `ghost mcp status` default to Claude Code; `--client opencode` targets opencode instead, writing the `ghost` entry to `~/.config/opencode/opencode.json` (or merging into an existing `opencode.jsonc`).
+`ghost mcp init` and `ghost mcp status` default to Claude Code; `--client opencode` targets opencode instead, installing a single lifecycle plugin to `~/.config/opencode/plugins/ghost-opencode.ts` that self-registers the MCP server and bridges stop events (opencode's own config file is never modified; re-running init repairs an outdated plugin in place).
 
 When `reflection.auto_resolve` is enabled in config (default off), the stop hook also spawns `ghost resolve <project> --apply` as a detached background process after each session, so resolved-evidence memories get marked automatically without waiting for a manual run. This never blocks the hook itself — the spawn is fire-and-forget, logged to `resolve.log` in the ghost data directory. If the Anthropic API is out of credit at spawn time, the spawned process fails and logs the failure; it does not degrade to a lower-quality answer.
 

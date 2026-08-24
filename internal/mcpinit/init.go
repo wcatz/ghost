@@ -365,7 +365,7 @@ func isStaleGhostHookCommand(existingCmd, desiredCmd string) bool {
 }
 
 // isGhostBinaryName reports whether path's basename is "ghost" or
-// "ghost.exe" (case-insensitive), mirroring mcpGhostCommand's check.
+// "ghost.exe" (case-insensitive).
 func isGhostBinaryName(path string) bool {
 	base := hookCommandBase(path)
 	base = strings.ToLower(base)
@@ -385,7 +385,7 @@ func hookCommandBase(path string) string {
 // string and the remainder (trimmed of leading whitespace), reversing
 // shellQuoteWindows/shellQuotePOSIX. It handles the three forms
 // ghost mcp init can produce: Windows double-quoting with ""-doubling,
-// POSIX single-quoting with '\''-escaping, and a bare unquoted path.
+// POSIX single-quoting with '\”-escaping, and a bare unquoted path.
 func splitHookCommand(cmd string) (bin, rest string, ok bool) {
 	if cmd == "" {
 		return "", "", false
@@ -432,47 +432,96 @@ func splitHookCommand(cmd string) (bin, rest string, ok bool) {
 	}
 }
 
-// ensureHook adds a SessionStart hook if not already present, or migrates it
-// off the pre-#251 quoting that's broken under cmd.exe.
+// ensureHook adds a SessionStart hook if not already present, migrates it off
+// the pre-#251 quoting that's broken under cmd.exe, and migrates any
+// pre-contract bare invocation (`… hook session-start`, no --source) onto the
+// contract-v1 form.
 func ensureHook(w io.Writer, sf *settingsFile, ghostBin string) error {
-	hookCmd := shellQuote(ghostBin) + " hook session-start"
+	hookCmd := shellQuote(ghostBin) + " hook session-start --source claude-code"
 	legacyCmd := shellQuotePOSIX(ghostBin) + " hook session-start"
 	warnPercentPath(w, ghostBin)
+
+	contractMigrated, err := migratePreContractHook(sf, "SessionStart", "hook session-start", hookCmd)
+	if err != nil {
+		return err
+	}
 
 	action, err := reconcileHook(sf, "SessionStart", "hook session-start", hookCmd, legacyCmd, runtime.GOOS == "windows")
 	if err != nil {
 		return err
 	}
-	switch action {
-	case hookAdded:
+	switch {
+	case action == hookAdded:
 		_, _ = fmt.Fprintf(w, "  + added SessionStart hook: %s\n", hookCmd)
-	case hookMigrated:
-		_, _ = fmt.Fprintf(w, "  + migrated SessionStart hook to cmd.exe-safe quoting: %s\n", hookCmd)
+	case action == hookMigrated || contractMigrated:
+		_, _ = fmt.Fprintf(w, "  + migrated SessionStart hook to current invocation: %s\n", hookCmd)
 	default:
 		_, _ = fmt.Fprintln(w, "  ✓ SessionStart hook already configured")
 	}
 	return nil
 }
 
-// ensureStopHook adds a Stop hook if not already present, or migrates it off
-// the pre-#251 quoting that's broken under cmd.exe.
+// ensureStopHook adds a Stop hook if not already present, migrates it off the
+// pre-#251 quoting that's broken under cmd.exe, and migrates any pre-contract
+// bare invocation (`… hook stop`, no --source) onto the contract-v1 form.
 func ensureStopHook(w io.Writer, sf *settingsFile, ghostBin string) error {
-	hookCmd := shellQuote(ghostBin) + " hook stop"
+	hookCmd := shellQuote(ghostBin) + " hook stop --source claude-code"
 	legacyCmd := shellQuotePOSIX(ghostBin) + " hook stop"
+
+	contractMigrated, err := migratePreContractHook(sf, "Stop", "hook stop", hookCmd)
+	if err != nil {
+		return err
+	}
 
 	action, err := reconcileHook(sf, "Stop", "hook stop", hookCmd, legacyCmd, runtime.GOOS == "windows")
 	if err != nil {
 		return err
 	}
-	switch action {
-	case hookAdded:
+	switch {
+	case action == hookAdded:
 		_, _ = fmt.Fprintf(w, "  + added Stop hook: %s\n", hookCmd)
-	case hookMigrated:
-		_, _ = fmt.Fprintf(w, "  + migrated Stop hook to cmd.exe-safe quoting: %s\n", hookCmd)
+	case action == hookMigrated || contractMigrated:
+		_, _ = fmt.Fprintf(w, "  + migrated Stop hook to current invocation: %s\n", hookCmd)
 	default:
 		_, _ = fmt.Fprintln(w, "  ✓ Stop hook already configured")
 	}
 	return nil
+}
+
+// migratePreContractHook rewrites every hook whose argument tail is exactly
+// the pre-contract bare form (e.g. `… hook stop` with no flags) into
+// desiredCmd, which carries `--source claude-code`. The contract has no
+// legacy mode, so a stale bare invocation fails open on every fire until
+// rewritten here; this migration keeps `ghost mcp init` (idempotent,
+// non-destructive) the one-step fix. Every registered command is examined —
+// not just the first substring match — so a stale duplicate sorting ahead of
+// the real bare hook can never mask it. Matching is exact on the arg tail: a
+// hand-edited wrapper that adds redirections or env vars never matches and is
+// left untouched, same policy as reconcileHook. Reports whether any
+// migration happened.
+func migratePreContractHook(sf *settingsFile, event, bareTail, desiredCmd string) (bool, error) {
+	cmds, err := sf.hookCommands(event)
+	if err != nil || len(cmds) == 0 {
+		return false, err
+	}
+	migrated := false
+	seen := make(map[string]bool, len(cmds))
+	for _, cmd := range cmds {
+		if seen[cmd] {
+			continue // replaceHookCommand already rewrote every exact instance
+		}
+		seen[cmd] = true
+		_, rest, ok := splitHookCommand(cmd)
+		if !ok || rest != bareTail {
+			continue
+		}
+		changed, err := sf.replaceHookCommand(event, cmd, desiredCmd)
+		if err != nil {
+			return migrated, fmt.Errorf("migrate %s hook to contract invocation: %w", event, err)
+		}
+		migrated = migrated || changed
+	}
+	return migrated, nil
 }
 
 // warnPercentPath flags ghost binary paths containing '%' on Windows: cmd.exe

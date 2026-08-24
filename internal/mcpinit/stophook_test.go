@@ -3,6 +3,8 @@ package mcpinit
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,15 +23,44 @@ func writeTranscript(t *testing.T, lines ...string) string {
 	return path
 }
 
-// stopInput builds the hook's stdin JSON.
+// stopInput builds the hook's stdin JSON: a Claude Code Stop payload wrapped
+// with the contract-v1 envelope (the only accepted shape since the contract
+// gained no legacy mode).
 func stopInput(t *testing.T, transcriptPath string, active bool) string {
 	t.Helper()
-	b, err := json.Marshal(map[string]any{
-		"transcript_path":  transcriptPath,
-		"stop_hook_active": active,
-	})
+	return contractInputFor(t, "Stop", "claude-code", "claude-jsonl",
+		fmt.Sprintf(`{"session_id":"s1","transcript_path":%q,"cwd":"/repo","stop_hook_active":%t}`, transcriptPath, active))
+}
+
+// contractInput wraps a native Claude Code Stop payload with the ghost
+// contract envelope, mirroring what an explicit-envelope adapter would send.
+func contractInput(t *testing.T, inner string) string {
+	t.Helper()
+	return contractInputFor(t, "Stop", "claude-code", "claude-jsonl", inner)
+}
+
+// nativeStopInput is the exact JSON Claude Code sends on Stop — no contract
+// object. Envelope completion in hostevent.Parse must make it dispatch.
+func nativeStopInput(transcriptPath string) string {
+	return fmt.Sprintf(`{"hook_event_name":"Stop","session_id":"s1","transcript_path":%q,"cwd":"/repo","stop_hook_active":false,"source":"startup"}`, transcriptPath)
+}
+
+// contractInputFor is contractInput with every envelope field selectable.
+func contractInputFor(t *testing.T, eventName, source, format, inner string) string {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(inner), &m); err != nil {
+		t.Fatalf("contractInput inner payload: %v", err)
+	}
+	m["hook_event_name"] = eventName
+	m["contract"] = map[string]any{
+		"version":           1,
+		"source":            source,
+		"transcript_format": format,
+	}
+	b, err := json.Marshal(m)
 	if err != nil {
-		t.Fatalf("marshal input: %v", err)
+		t.Fatalf("marshal contract input: %v", err)
 	}
 	return string(b)
 }
@@ -41,14 +72,20 @@ const (
 	lineUser      = `{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}`
 )
 
+// ocLineBashTool is an opencode-format assistant tool-call line for sweep
+// tests (the sweep must run regardless of which decision branch follows).
+func ocLineBashTool() string {
+	return `{"info":{"role":"assistant"},"parts":[{"type":"tool","tool":"bash","state":{"status":"completed"}}]}`
+}
+
 func runStopHook(t *testing.T, stdin string) string {
 	t.Helper()
 	var out strings.Builder
-	HandleStopHook(strings.NewReader(stdin), &out)
+	RunHostEvent("stop", "claude-code", strings.NewReader(stdin), &out, io.Discard)
 	return out.String()
 }
 
-func TestHandleStopHook(t *testing.T) {
+func TestRunStop(t *testing.T) {
 	t.Run("blocks when tools ran but nothing saved", func(t *testing.T) {
 		path := writeTranscript(t, lineUser, lineToolBash, lineText)
 		out := runStopHook(t, stopInput(t, path, false))
@@ -115,19 +152,168 @@ func TestHandleStopHook(t *testing.T) {
 	})
 }
 
-func TestHandleStopHook_FailsOpenOnEmptyTranscriptPathEvenWithCWD(t *testing.T) {
-	// HandleStopHook must stay silent and return promptly when transcript_path
-	// is empty, even once cwd is populated and a spawn attempt is made first —
-	// proving the new spawnResolveIfConfigured call didn't introduce a hang or
-	// panic on the hot path. This does NOT assert spawnResolveIfConfigured was
-	// a no-op (see TestSpawnResolveIfConfigured_NoOpWhenDisabled for that); the
-	// early return below is guaranteed independently of spawn behavior.
+// TestRunHostEvent_NativeClaudePayloadCompletesEnvelope pins the envelope-
+// completion rule at the dispatch level: Claude Code sends no contract
+// object, so the argv values must complete it — a native payload blocks
+// exactly like an explicit-envelope one.
+func TestRunHostEvent_NativeClaudePayloadCompletesEnvelope(t *testing.T) {
+	isolatedHome(t)
+	path := writeTranscript(t, lineUser, lineToolBash, lineText)
+	out := runStopHook(t, nativeStopInput(path))
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("native payload should complete its envelope and block, got %q", out)
+	}
+}
+
+// TestRunHostEvent_SessionStartSuppressedOnNonInjectingHost pins the
+// capability-scoped output rule: opencode cannot consume injected context,
+// so its session-start is a silent success — never stdout it would misread.
+func TestRunHostEvent_SessionStartSuppressedOnNonInjectingHost(t *testing.T) {
+	isolatedHome(t)
+	var out bytes.Buffer
+	input := contractInputFor(t, "SessionStart", "opencode", "none",
+		`{"session_id":"oc1","cwd":"/repo"}`)
+	RunHostEvent("session-start", "opencode", strings.NewReader(input), &out, io.Discard)
+	if out.Len() != 0 {
+		t.Errorf("expected silent no-op session-start for opencode, got %q", out.String())
+	}
+}
+
+// TestRunStop_SweepsTransientTempTranscript pins the consumer-side sweep:
+// an opencode-materialized transcript under a mkdtemp ghost-* dir in the OS
+// temp dir is removed after the hook runs, even though the spawning host may
+// have exited before its own cleanup could fire (`opencode run`).
+func TestRunStop_SweepsTransientTempTranscript(t *testing.T) {
+	isolatedHome(t)
+	dir, err := os.MkdirTemp("", "ghost-sweeptest-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	path := filepath.Join(dir, "messages.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join([]string{lineUser, ocLineBashTool()}, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	input := contractInputFor(t, "Stop", "opencode", "opencode-messages",
+		fmt.Sprintf(`{"session_id":"oc1","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, path))
+	var out bytes.Buffer
+	RunHostEvent("stop", "opencode", strings.NewReader(input), &out, io.Discard)
+	if out.Len() != 0 {
+		t.Errorf("non-blocking host must stay silent on stdout, got %q", out.String())
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("transient transcript dir was not swept: %v", err)
+	}
+}
+
+// TestRunStop_NeverSweepsForeignPaths pins the sweep's blast radius: a
+// transcript anywhere other than <tmpdir>/ghost-*/ is left untouched.
+func TestRunStop_NeverSweepsForeignPaths(t *testing.T) {
+	isolatedHome(t)
+	path := writeTranscript(t, lineToolBash)
+	runStopHook(t, contractInputFor(t, "Stop", "claude-code", "claude-jsonl",
+		fmt.Sprintf(`{"session_id":"s1","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, path)))
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("native transcript must never be swept: %v", err)
+	}
+}
+
+// TestRunHostEvent_StopHookActiveGatesOnlyStop pins the §2.2 split:
+// stop_hook_active suppresses a repeat stop entirely, but session-end fires
+// once per real session end, so its lifecycle spawns run regardless of any
+// earlier block cycle. Observable via config.DataDir(): with auto_resolve
+// enabled, reaching the spawn probe creates the ghost data dir.
+func TestRunHostEvent_StopHookActiveGatesOnlyStop(t *testing.T) {
+	dataHome := isolatedHome(t)
+	writeGhostConfigFile(t, "reflection:\n  auto_resolve: true\n")
+
+	input := contractInputFor(t, "SessionEnd", "claude-code", "none",
+		`{"session_id":"s1","transcript_path":"","cwd":"/tmp/does-not-matter","stop_hook_active":true}`)
+	var out bytes.Buffer
+	RunHostEvent("session-end", "claude-code", strings.NewReader(input), &out, io.Discard)
+	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); err != nil {
+		t.Errorf("session-end must run lifecycle spawns despite stop_hook_active; data dir not created: %v", err)
+	}
+}
+
+// TestRunHostEvent_StopStillGuardedWhenActive pins the other half: a stop
+// carrying stop_hook_active still short-circuits before any spawn work.
+func TestRunHostEvent_StopStillGuardedWhenActive(t *testing.T) {
+	dataHome := isolatedHome(t)
+	writeGhostConfigFile(t, "reflection:\n  auto_resolve: true\n")
+
+	path := writeTranscript(t, lineToolBash)
+	if out := runStopHook(t, stopInput(t, path, true)); out != "" {
+		t.Errorf("expected silence on guarded stop, got %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
+		t.Errorf("guarded stop must short-circuit before spawn probes; data dir exists")
+	}
+}
+
+func TestRunHostEvent_FailsOpenOnEmptyTranscriptPathEvenWithCWD(t *testing.T) {
+	// RunHostEvent must stay silent on stdout and return promptly when
+	// transcript_path is empty, even once cwd is populated and a spawn attempt
+	// is made first — proving the spawnResolveIfConfigured call didn't
+	// introduce a hang or panic on the hot path. This does NOT assert
+	// spawnResolveIfConfigured was a no-op (see
+	// TestSpawnResolveIfConfigured_NoOpWhenDisabled for that); the early
+	// return below is guaranteed independently of spawn behavior.
 	isolatedHome(t)
 	var buf bytes.Buffer
-	input := `{"transcript_path":"","stop_hook_active":false,"cwd":"/tmp/does-not-matter"}`
-	HandleStopHook(strings.NewReader(input), &buf)
+	input := contractInput(t, `{"transcript_path":"","cwd":"/tmp/does-not-matter","stop_hook_active":false}`)
+	RunHostEvent("stop", "claude-code", strings.NewReader(input), &buf, io.Discard)
 	if buf.Len() != 0 {
 		t.Errorf("expected no output for empty transcript_path, got %q", buf.String())
+	}
+}
+
+// TestRunHostEvent_MissingSourceFailsOpen pins the no-legacy-mode rule: an
+// invocation without --source can't be routed, so it fails open with one
+// stderr line, no stdout, and returns normally (the CLI exits 0).
+func TestRunHostEvent_MissingSourceFailsOpen(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	path := writeTranscript(t, lineToolBash)
+	RunHostEvent("stop", "", strings.NewReader(fmt.Sprintf(`{"transcript_path":%q}`, path)), &out, &errBuf)
+	if out.Len() != 0 {
+		t.Errorf("expected no stdout, got %q", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "missing --source") {
+		t.Errorf("expected missing-source guidance on stderr, got %q", errBuf.String())
+	}
+}
+
+// TestRunHostEvent_SessionEndNeverNudges pins spec §2.2: session-end runs the
+// lifecycle spawns only — a tool-using session with zero saves must pass in
+// silence even though the identical payload blocks on stop.
+func TestRunHostEvent_SessionEndNeverNudges(t *testing.T) {
+	isolatedHome(t)
+	path := writeTranscript(t, lineUser, lineToolBash, lineText)
+	input := contractInputFor(t, "SessionEnd", "claude-code", "claude-jsonl",
+		fmt.Sprintf(`{"session_id":"s1","transcript_path":%q,"cwd":"","stop_hook_active":false}`, path))
+	var out strings.Builder
+	RunHostEvent("session-end", "claude-code", strings.NewReader(input), &out, io.Discard)
+	if out.String() != "" {
+		t.Errorf("session-end must never emit a block decision, got %q", out.String())
+	}
+}
+
+// TestRunHostEvent_NudgeSuppressedOnNonBlockingHost pins the capability gate:
+// opencode cannot block a stop, so the eligible nudge degrades to one stderr
+// line instead of emitting output the host would misread.
+func TestRunHostEvent_NudgeSuppressedOnNonBlockingHost(t *testing.T) {
+	isolatedHome(t)
+	path := writeTranscript(t, lineUser, lineToolBash, lineText)
+	input := contractInputFor(t, "Stop", "opencode", "claude-jsonl",
+		fmt.Sprintf(`{"session_id":"s1","transcript_path":%q,"cwd":"","stop_hook_active":false}`, path))
+
+	var out, errBuf bytes.Buffer
+	RunHostEvent("stop", "opencode", strings.NewReader(input), &out, &errBuf)
+	if out.Len() != 0 {
+		t.Errorf("non-blocking host must get no block decision, got %q", out.String())
+	}
+	if !strings.Contains(errBuf.String(), "cannot block") {
+		t.Errorf("expected suppression note on stderr, got %q", errBuf.String())
 	}
 }
 

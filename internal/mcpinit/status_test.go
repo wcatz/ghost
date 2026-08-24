@@ -3,6 +3,7 @@ package mcpinit
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,81 @@ import (
 	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/memory"
 )
+
+// installOpencodePluginFile installs the rendered lifecycle plugin into the
+// test XDG_CONFIG_HOME, the same way `ghost mcp init --client opencode` does.
+// ghostBin must match the stub on PATH so status's byte-compare sees it fresh.
+func installOpencodePluginFile(t *testing.T, ghostBin string) {
+	t.Helper()
+	if _, err := installOpencodePlugin(io.Discard, ghostBin, false); err != nil {
+		t.Fatalf("install plugin: %v", err)
+	}
+}
+
+// writePluginFile seeds the plugin path with arbitrary content for drift tests.
+func writePluginFile(t *testing.T, content string) {
+	t.Helper()
+	path, err := opencodePluginPath()
+	if err != nil {
+		t.Fatalf("plugin path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir plugin dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write plugin: %v", err)
+	}
+}
+
+// TestReportStaleIntegrations pins the post-upgrade wiring check: stale
+// Claude hooks and a drifted opencode plugin each produce an actionable
+// hint; current wiring produces no output at all.
+func TestReportStaleIntegrations(t *testing.T) {
+	t.Run("silent when everything is current", func(t *testing.T) {
+		statusEnv(t)
+		binDir := writeStubGhost(t)
+		t.Setenv("PATH", binDir)
+		installOpencodePluginFile(t, filepath.Join(binDir, "ghost"))
+
+		var out bytes.Buffer
+		ReportStaleIntegrations(&out)
+		if out.Len() != 0 {
+			t.Errorf("current wiring must print nothing, got:\n%s", out.String())
+		}
+	})
+
+	t.Run("flags pre-contract claude hook", func(t *testing.T) {
+		statusEnv(t)
+
+		path, err := settingsPath()
+		if err != nil {
+			t.Fatalf("settingsPath: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("mkdir settings dir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte(`{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"/bin/ghost hook stop"}]}]}}`), 0o600); err != nil {
+			t.Fatalf("write settings: %v", err)
+		}
+
+		var out bytes.Buffer
+		ReportStaleIntegrations(&out)
+		if !strings.Contains(out.String(), "Claude Code Stop hook is pre-contract") {
+			t.Errorf("expected pre-contract stop hook hint, got:\n%s", out.String())
+		}
+	})
+
+	t.Run("flags drifted opencode plugin when opencode is in use", func(t *testing.T) {
+		statusEnv(t)
+		writePluginFile(t, "// ghost-opencode v0 — stale body")
+
+		var out bytes.Buffer
+		ReportStaleIntegrations(&out)
+		if !strings.Contains(out.String(), "opencode lifecycle plugin is missing or outdated") {
+			t.Errorf("expected drifted plugin hint, got:\n%s", out.String())
+		}
+	})
+}
 
 // TestStatus_ReportsOpenDBFailure verifies that a database which exists but
 // fails to open (e.g. mid-migration foreign-key corruption) is surfaced as a
@@ -55,11 +131,11 @@ func TestStatus_ReportsOpenDBFailure(t *testing.T) {
 
 // TestStatus_HookMatchWithQuotedPath verifies that a SessionStart hook whose
 // command is a quoted binary path (the form `ghost mcp init` writes on
-// Windows, e.g. `"C:\Users\ghost\bin\ghost.exe" hook session-start`) is
-// recognized as configured. Before this fix, Status checked for the literal
-// substring "ghost hook session-start", which never appears once the binary
-// path is quoted — so a fully healthy install was reported as missing the
-// hook on every platform where ghostBin isn't literally "ghost".
+// Windows, e.g. `"C:\Users\ghost\bin\ghost.exe" hook session-start --source
+// claude-code`) is recognized as configured. Before this fix, Status checked
+// for the literal substring "ghost hook session-start", which never appears
+// once the binary path is quoted — so a fully healthy install was reported as
+// missing the hook on every platform where ghostBin isn't literally "ghost".
 func TestStatus_HookMatchWithQuotedPath(t *testing.T) {
 	statusEnv(t)
 	home := os.Getenv("HOME")
@@ -69,8 +145,8 @@ func TestStatus_HookMatchWithQuotedPath(t *testing.T) {
 	}
 	settings := `{
   "hooks": {
-    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "\"/opt/ghost/bin/ghost\" hook session-start"}]}],
-    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "\"/opt/ghost/bin/ghost\" hook stop"}]}]
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "\"/opt/ghost/bin/ghost\" hook session-start --source claude-code"}]}],
+    "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "\"/opt/ghost/bin/ghost\" hook stop --source claude-code"}]}]
   }
 }`
 	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(settings), 0o600); err != nil {
@@ -182,26 +258,10 @@ func writeGhostConfigFile(t *testing.T, content string) string {
 	return path
 }
 
-// writeOpencodeConfigFile writes an opencode config file into the given
-// XDG_CONFIG_HOME and returns its path.
-func writeOpencodeConfigFile(t *testing.T, configHome, content string) string {
-	t.Helper()
-	dir := filepath.Join(configHome, "opencode")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("mkdir opencode config dir: %v", err)
-	}
-	path := filepath.Join(dir, "opencode.json")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatalf("write opencode config: %v", err)
-	}
-	return path
-}
-
 // TestStatusOpencode_GhostMissing verifies a missing ghost binary is reported
 // as a failed check and blocks "All checks passed.".
 func TestStatusOpencode_GhostMissing(t *testing.T) {
 	statusEnv(t)
-	writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), `{"mcp":{"ghost":{"type":"local","command":["ghost","mcp"],"enabled":true}}}`)
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)
@@ -221,14 +281,16 @@ func TestStatusOpencode_GhostMissing(t *testing.T) {
 	}
 }
 
-// TestStatusOpencode_RegisteredNoDatabase verifies a clean opencode setup — a
-// ghost binary on PATH, a correct mcp.ghost config, and no database yet — is
-// fully healthy and prints "All checks passed." without a Claude binary.
-func TestStatusOpencode_RegisteredNoDatabase(t *testing.T) {
+// TestStatusOpencode_CleanSetupHealthy verifies a clean opencode setup — a
+// ghost binary on PATH and the lifecycle plugin installed — is fully healthy
+// and prints "All checks passed." without a Claude binary. The plugin is the
+// whole integration: it registers MCP via its config hook and bridges stop
+// events, so no opencode.json check exists anymore.
+func TestStatusOpencode_CleanSetupHealthy(t *testing.T) {
 	statusEnv(t)
 	binDir := writeStubGhost(t)
 	t.Setenv("PATH", binDir)
-	writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), `{"mcp":{"ghost":{"type":"local","command":["ghost","mcp"],"enabled":true}}}`)
+	installOpencodePluginFile(t, filepath.Join(binDir, "ghost"))
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)
@@ -242,7 +304,7 @@ func TestStatusOpencode_RegisteredNoDatabase(t *testing.T) {
 	output := out.String()
 	for _, want := range []string{
 		"✓ ghost binary: " + filepath.Join(binDir, "ghost"),
-		"✓ opencode MCP config: ghost registered",
+		"✓ lifecycle plugin installed: ",
 		"- no Ghost database (run ghost first)",
 		"All checks passed.",
 	} {
@@ -255,18 +317,25 @@ func TestStatusOpencode_RegisteredNoDatabase(t *testing.T) {
 	}
 }
 
-// TestStatusOpencode_MCPConfigNotRegistered verifies a missing or wrongly
-// commanded mcp.ghost entry fails the config check and blocks "All checks passed.".
-func TestStatusOpencode_MCPConfigNotRegistered(t *testing.T) {
-	cases := map[string]string{
-		"wrong command": `{"mcp":{"ghost":{"type":"local","command":["ghost","server"],"enabled":true}}}`,
-		"missing entry": `{"mcp":{}}`,
+// TestStatusOpencode_PluginMissing verifies the lifecycle plugin check fails
+// (and blocks "All checks passed.") when the plugin file is absent, lacks the
+// versioned marker, or drifted while keeping its header — a corrupted file
+// must not read healthy just because its header survived.
+func TestStatusOpencode_PluginMissing(t *testing.T) {
+	cases := map[string]func(t *testing.T){
+		"absent": func(t *testing.T) {},
+		"unrelated file": func(t *testing.T) {
+			writePluginFile(t, "// some other plugin")
+		},
+		"drifted but marker retained": func(t *testing.T) {
+			writePluginFile(t, opencodeGhostPluginTS[:200]+"\n// truncated/corrupted tail")
+		},
 	}
-	for name, cfg := range cases {
+	for name, seed := range cases {
 		t.Run(name, func(t *testing.T) {
 			statusEnv(t)
 			t.Setenv("PATH", writeStubGhost(t))
-			writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), cfg)
+			seed(t)
 
 			var out bytes.Buffer
 			healthy, err := StatusOpencode(&out)
@@ -274,15 +343,15 @@ func TestStatusOpencode_MCPConfigNotRegistered(t *testing.T) {
 				t.Fatalf("StatusOpencode: %v", err)
 			}
 			if healthy {
-				t.Error("StatusOpencode: healthy = true, want false for a bad mcp.ghost entry")
+				t.Errorf("%s: healthy = true, want false without a valid lifecycle plugin", name)
 			}
 
 			output := out.String()
-			if !strings.Contains(output, "✗ opencode MCP config: ghost missing or wrong command") {
-				t.Errorf("expected a failed opencode config check, got:\n%s", output)
+			if !strings.Contains(output, "✗ lifecycle plugin missing or outdated") {
+				t.Errorf("%s: expected failed plugin check, got:\n%s", name, output)
 			}
 			if strings.Contains(output, "All checks passed.") {
-				t.Errorf("a bad mcp.ghost entry must not report \"All checks passed.\", got:\n%s", output)
+				t.Errorf("%s: must not report \"All checks passed.\", got:\n%s", name, output)
 			}
 		})
 	}
@@ -303,7 +372,8 @@ func TestStatusOpencode_EmptyStoreHealthy(t *testing.T) {
   enabled: true
 `, ollama.URL))
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
-	t.Setenv("PATH", writeStubGhost(t))
+	binDir := writeStubGhost(t)
+	t.Setenv("PATH", binDir)
 
 	ghostDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost")
 	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
@@ -317,7 +387,7 @@ func TestStatusOpencode_EmptyStoreHealthy(t *testing.T) {
 		t.Fatalf("close fresh db: %v", err)
 	}
 
-	writeOpencodeConfigFile(t, os.Getenv("XDG_CONFIG_HOME"), `{"mcp":{"ghost":{"type":"local","command":["ghost","mcp"],"enabled":true}}}`)
+	installOpencodePluginFile(t, filepath.Join(binDir, "ghost"))
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)
