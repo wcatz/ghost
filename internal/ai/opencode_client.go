@@ -104,7 +104,7 @@ func (c *OpenCodeClient) subprocessEnv() ([]string, func(), error) {
 		env = append(env, kv)
 	}
 	env = append(env, "XDG_CONFIG_HOME="+scratch)
-	return stripAPIKey(env), func() { _ = os.RemoveAll(scratch) }, nil
+	return stripLLMKeys(env), func() { _ = os.RemoveAll(scratch) }, nil
 }
 
 // opencodeEvent is the minimal shape of one JSON line in `opencode run --format

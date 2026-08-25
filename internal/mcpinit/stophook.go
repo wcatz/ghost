@@ -337,8 +337,8 @@ func spawnReflectIfConfigured(cwd, source string) {
 	if err != nil || !cfg.Reflection.AutoReflect {
 		return
 	}
-	if cfg.API.Key == "" && !ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary).Available() {
-		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary)
+	if cfg.API.Key == "" && !ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary).Available() {
+		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
 		if !sp.Available() {
 			return
 		}

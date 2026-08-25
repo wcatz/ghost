@@ -16,12 +16,18 @@ type SourceProvider struct {
 // NewSourceProviderForSource returns a provider matching the host source.
 // Empty/unknown source falls back to best-available-on-PATH.
 func NewSourceProviderForSource(source string, cfgBinaries ...string) *SourceProvider {
-	claudeBin, opencodeBin := "", ""
+	var claudeBin, opencodeBin, codexBin, gooseBin string
 	if len(cfgBinaries) > 0 {
 		claudeBin = cfgBinaries[0]
 	}
 	if len(cfgBinaries) > 1 {
 		opencodeBin = cfgBinaries[1]
+	}
+	if len(cfgBinaries) > 2 {
+		codexBin = cfgBinaries[2]
+	}
+	if len(cfgBinaries) > 3 {
+		gooseBin = cfgBinaries[3]
 	}
 	switch source {
 	case "claude-code":
@@ -29,14 +35,11 @@ func NewSourceProviderForSource(source string, cfgBinaries ...string) *SourcePro
 	case "opencode":
 		return resolveCLI(opencodeBin, "opencode", "opencode")
 	case "codex":
-		// Codex doesn't have a Reflect/Classify-compatible CLI yet.
-		// Fall back to best available (same as unknown source).
-		return fallbackCLI(claudeBin, opencodeBin)
+		return resolveCLI(codexBin, "codex", "codex")
 	case "goose":
-		// Goose doesn't have a Reflect/Classify-compatible CLI yet.
-		return fallbackCLI(claudeBin, opencodeBin)
+		return resolveCLI(gooseBin, "goose", "goose")
 	default:
-		return fallbackCLI(claudeBin, opencodeBin)
+		return fallbackCLI(claudeBin, opencodeBin, codexBin, gooseBin)
 	}
 }
 
@@ -58,12 +61,16 @@ func resolveCLI(configured, defaultName, providerName string) *SourceProvider {
 		return &SourceProvider{backend: NewCLIClientWithBinary(bin), name: "cli"}
 	case "opencode":
 		return &SourceProvider{backend: NewOpenCodeClientWithBinary(bin), name: "opencode"}
+	case "codex":
+		return &SourceProvider{backend: NewCodexClientWithBinary(bin), name: "codex"}
+	case "goose":
+		return &SourceProvider{backend: NewGooseClientWithBinary(bin), name: "goose"}
 	}
 	return &SourceProvider{backend: nil, name: "none"}
 }
 
-func fallbackCLI(claudeBin, opencodeBin string) *SourceProvider {
-	p := NewCLIProviderWithBinaries(claudeBin, opencodeBin)
+func fallbackCLI(claudeBin, opencodeBin, codexBin, gooseBin string) *SourceProvider {
+	p := NewCLIProviderWithBinaries(claudeBin, opencodeBin, codexBin, gooseBin)
 	return &SourceProvider{backend: p.backend, name: p.name}
 }
 

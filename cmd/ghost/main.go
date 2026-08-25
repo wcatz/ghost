@@ -419,7 +419,7 @@ Flags:
 	// lets the stop-hook or cron reflect use the same CLI that served the
 	// session, avoiding ANTHROPIC_API_KEY when not needed.
 	if tierValue == "auto" && source != "" {
-		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary)
+		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
 		if sp.Available() {
 			var tiers []reflection.Consolidator
 			tiers = append(tiers, reflection.NewNamedConsolidator(sp, sp.Name()))
@@ -484,7 +484,7 @@ Flags:
 			client := ai.NewClient(cfg.API.Key, logger)
 			tiers = append(tiers, reflection.NewHaikuConsolidator(client))
 		}
-		if cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary); cli.Available() {
+		if cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary); cli.Available() {
 			tiers = append(tiers, reflection.NewNamedConsolidator(cli, cli.Name()))
 		}
 		// --require-llm is the autonomous-reflect guard: it must never silently
@@ -714,7 +714,7 @@ built:
 // primary when no key is configured at all, so these commands work without
 // spending API credits as long as `claude` or `opencode` is available.
 func buildClassifyProvider(cfg *config.Config, logger *slog.Logger) (*ai.FallbackProvider, error) {
-	cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary)
+	cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
 	if cfg.API.Key == "" {
 		if !cli.Available() {
 			return nil, errors.New("requires ANTHROPIC_API_KEY or a `claude`/`opencode` binary (on PATH or via cli.claude_binary/cli.opencode_binary)")
@@ -733,7 +733,7 @@ func buildClassifyProvider(cfg *config.Config, logger *slog.Logger) (*ai.Fallbac
 // API-first fallback chain.
 func buildClassifyProviderForSource(cfg *config.Config, source string, logger *slog.Logger) (*ai.FallbackProvider, error) {
 	if source != "" {
-		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary)
+		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
 		if !sp.Available() {
 			return nil, fmt.Errorf("source %q: no CLI binary available", source)
 		}

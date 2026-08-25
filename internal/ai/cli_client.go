@@ -70,7 +70,7 @@ func (c *CLIClient) run(ctx context.Context, prompt string, extraArgs ...string)
 	args := append([]string{"-p", "--setting-sources", "project,local"}, extraArgs...)
 	args = append(args, prompt)
 	cmd := exec.CommandContext(ctx, c.binary, args...)
-	cmd.Env = stripAPIKey(os.Environ())
+	cmd.Env = stripLLMKeys(os.Environ())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -85,6 +85,27 @@ func stripAPIKey(env []string) []string {
 	for _, kv := range env {
 		key, _, found := strings.Cut(kv, "=")
 		if found && strings.EqualFold(key, "ANTHROPIC_API_KEY") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// stripLLMKeys strips API keys for all LLM providers from the environment,
+// preventing the subprocess from billing to the wrong account.
+func stripLLMKeys(env []string) []string {
+	out := stripAPIKey(env)
+	out = stripEnvKey(out, "OPENAI_API_KEY")
+	out = stripEnvKey(out, "GOOSE_PROVIDER__API_KEY")
+	return out
+}
+
+func stripEnvKey(env []string, key string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		k, _, found := strings.Cut(kv, "=")
+		if found && strings.EqualFold(k, key) {
 			continue
 		}
 		out = append(out, kv)
