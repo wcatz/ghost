@@ -70,9 +70,12 @@ func logFailOpen(stderr io.Writer, stage string, err error) {
 	_, _ = fmt.Fprintf(stderr, "ghost hook: fail-open (%s: %v)\n", stage, err)
 }
 
-// runStop executes the stop/session-end handler: opt-in lifecycle spawns,
-// then — only on stop events (nudge=true) where the host can actually block —
-// the save-nudge decision. session-end (nudge=false) never scans the
+// runStop executes the stop/session-end handler: opt-in lifecycle spawns, then
+// — only on stop events (nudge=true) — the save-nudge decision. The nudge
+// block decision is emitted on stdout for every host that reaches the nudge
+// path; blocking hosts (claude/codex/goose) honor {"decision":"block"} and hold
+// the stop, while non-blocking hosts (opencode) let their plugin re-present it
+// as a non-blocking reminder. session-end (nudge=false) never scans the
 // transcript and never emits output.
 func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool) {
 	// Adapter-materialized transcripts are swept once this invocation ends —
@@ -95,8 +98,7 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 	if !nudge || p.TranscriptPath == "" {
 		return
 	}
-	capability, ok := hostevent.CapabilityFor(p.HostSource())
-	if !ok {
+	if _, ok := hostevent.CapabilityFor(p.HostSource()); !ok {
 		logFailOpen(stderr, "unknown source "+string(p.HostSource()), fmt.Errorf("no capability entry"))
 		return
 	}
@@ -121,12 +123,11 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 	if res.ToolCalls == 0 || res.GhostSaves > 0 {
 		return
 	}
-	if !capability.BlockStop {
-		// The nudge would fire, but this host cannot block a stop: degrade to
-		// one stderr line rather than emitting output the host misreads.
-		logFailOpen(stderr, "nudge suppressed", fmt.Errorf("source %q cannot block a stop", p.HostSource()))
-		return
-	}
+	// The nudge fires for every host that reaches here. Blocking hosts
+	// (claude/codex/goose) consume the structured {"decision":"block"} payload
+	// on stdout and hold the stop; non-blocking hosts (opencode) cannot block,
+	// so their plugin captures this same stdout and re-presents it as a
+	// non-blocking reminder through their own log channel — no terminal bleed.
 	_, _ = fmt.Fprintln(stdout, stopBlockMessage)
 }
 

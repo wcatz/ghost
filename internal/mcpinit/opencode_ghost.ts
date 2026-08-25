@@ -106,17 +106,33 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 
 		try {
 			const child = spawn(process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT, ["hook", "stop", "--source", "opencode"], {
-				stdio: ["pipe", "ignore", "inherit"],
+				stdio: ["pipe", "pipe", "inherit"],
 				detached: true,
 				env: process.env,
 			})
 			child.on("error", async (e) => {
 				await log("warn", `ghost: fail-open (spawn: ${e})`)
 			})
+			// opencode cannot block a stop, so the {"decision":"block"} nudge
+			// ghost emits on stdout is re-presented as a non-blocking reminder
+			// through opencode's own log channel — visible, but no terminal
+			// bleed (which raw stderr would cause) and no blocking the host
+			// can't honor.
+			let nudge = ""
+			child.stdout?.on("data", (d) => { nudge += d.toString() })
 			// Best-effort local cleanup when we outlive the hook; ghost also
 			// sweeps its ghost-* temp transcript dirs consumer-side, covering
 			// hosts that exit before this handler runs (e.g. `opencode run`).
 			child.on("close", () => {
+				const trimmed = nudge.trim()
+				if (trimmed) {
+					let reason = trimmed
+					try {
+						const parsed = JSON.parse(trimmed)
+						if (typeof parsed?.reason === "string") reason = parsed.reason
+					} catch { /* keep raw payload */ }
+					log("warn", `ghost: ${reason}`).catch(() => {})
+				}
 				if (transcriptPath) rm(join(transcriptPath, ".."), { recursive: true, force: true }).catch(() => {})
 			})
 			child.stdin.on("error", () => {})
