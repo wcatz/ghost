@@ -89,17 +89,28 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 
 		try {
 			const child = spawn(GHOST_BIN, ["hook", "stop", "--source", "opencode"], {
-				stdio: ["pipe", "ignore", "inherit"],
+				// stderr piped and drained, never inherited: this child is
+				// detached from opencode's process tree, so an inherited
+				// stderr writes straight to the controlling terminal outside
+				// the TUI redraw (issue #363). Diagnostics re-route to
+				// app.log on close; if this process exits first the drain is
+				// lost — acceptable for fail-open diagnostics.
+				stdio: ["pipe", "ignore", "pipe"],
 				detached: true,
 				env: process.env,
 			})
 			child.on("error", async (e) => {
 				await log("warn", `ghost: fail-open (spawn: ${e})`)
 			})
+			let errs = ""
+			child.stderr?.on("data", (d) => { errs += d.toString() })
 			// Best-effort local cleanup when we outlive the hook; ghost also
 			// sweeps its ghost-* temp transcript dirs consumer-side, covering
 			// hosts that exit before this handler runs (e.g. `opencode run`).
 			child.on("close", () => {
+				if (errs.trim()) {
+					log("warn", `ghost hook stderr: ${errs.trim().slice(0, 500)}`)
+				}
 				if (transcriptPath) rm(join(transcriptPath, ".."), { recursive: true, force: true }).catch(() => {})
 			})
 			child.stdin.on("error", () => {})

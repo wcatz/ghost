@@ -57,11 +57,13 @@ const nudgePrompt = (reason: string): string =>
 // Materializes ghost's session-start context block for a directory and returns
 // it, so opencode can inject it passively via instructions (opencode has no
 // stdout-injection surface of its own). Read-only and fail-open: any spawn
-// error or missing context yields "" and the caller skips injection.
+// error or missing context yields "" and the caller skips injection. stderr is
+// ignored — this helper runs outside the plugin closure (no app.log access),
+// and ghost context diagnostics must never reach the terminal (issue #363).
 const renderStartContext = (cwd: string): Promise<string> =>
 	new Promise((resolve) => {
 		const child = spawn(process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT, ["context", "--cwd", cwd], {
-			stdio: ["ignore", "pipe", "inherit"],
+			stdio: ["ignore", "pipe", "ignore"],
 		})
 		let out = ""
 		child.stdout?.on("data", (d) => {
@@ -120,25 +122,35 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 
 		try {
 			const child = spawn(process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT, ["hook", "stop", "--source", "opencode"], {
-				stdio: ["pipe", "pipe", "inherit"],
+				stdio: ["pipe", "pipe", "pipe"],
 				detached: true,
 				env: process.env,
 			})
 			child.on("error", async (e) => {
 				await log("warn", `ghost: fail-open (spawn: ${e})`)
 			})
-			// opencode cannot block a stop, so the {"decision":"block"} nudge
+			// opencode cannot block a stop, so the {"decision":"approve"} nudge
 			// ghost emits on stdout is captured here and injected into the live
 			// session (client.session.promptAsync) so the agent itself acts on
 			// it — the faithful analog of the claude/codex blocking nudge. If
-			// the injection fails it falls back to a log line. Either way the
-			// nudge never touches stderr, so there is no terminal bleed.
+			// the injection fails it falls back to a log line.
 			let nudge = ""
 			child.stdout?.on("data", (d) => { nudge += d.toString() })
+			// stderr is piped and drained rather than inherited: this child is
+			// detached from opencode's process tree, so an inherited stderr
+			// writes straight to the controlling terminal outside the TUI
+			// redraw (issue #363). Diagnostics are re-routed to app.log on
+			// close; if this process exits before the child does, the drain is
+			// lost — acceptable for fail-open diagnostics.
+			let errs = ""
+			child.stderr?.on("data", (d) => { errs += d.toString() })
 			// Best-effort local cleanup when we outlive the hook; ghost also
 			// sweeps its ghost-* temp transcript dirs consumer-side, covering
 			// hosts that exit before this handler runs (e.g. `opencode run`).
 			child.on("close", () => {
+				if (errs.trim()) {
+					log("warn", `ghost hook stderr: ${errs.trim().slice(0, 500)}`)
+				}
 				const trimmed = nudge.trim()
 				if (trimmed) {
 					let reason = trimmed
