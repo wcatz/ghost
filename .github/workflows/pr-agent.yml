@@ -99,11 +99,18 @@ jobs:
           config.ai_timeout: "90"
 
           # Reviewer scope: bugs and real regressions, not style nits.
+          # CLAUDE.md and best_practices.md are fed as repo context (see
+          # .pr_agent.toml repo_context_files), so the model has full
+          # project architecture and conventions.
           pr_reviewer.extra_instructions: >-
             This is a Go CLI project (Go 1.26+, modernc.org/sqlite, no CGO).
+            You have full project context from CLAUDE.md and best_practices.md.
             Focus on correctness bugs, race conditions, error handling gaps,
             and breaking changes to MCP tool contracts or the SQLite schema.
             Do not report style preferences handled by golangci-lint.
+            Verify your findings against the code before posting —
+            false positives erode trust. If unsure, say "needs verification"
+            rather than asserting a bug.
 
           github_action_config.auto_review: "true"
           # On-demand only (/improve comment): per-finding suggestion

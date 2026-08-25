@@ -4,6 +4,19 @@
 # model routing — stays in the workflow's env; anything set in both
 # places keeps the workflow value.
 
+[config]
+# Feed project context so the model reviews with full knowledge.
+repo_context_files = ["CLAUDE.md", "best_practices.md"]
+repo_context_from_default_branch = true
+repo_context_max_lines = 500
+# Don't re-post the same suggestion on every push — fingerprint
+# markers deduplicate across runs.
+persistent_inline_comments = true
+
+[best_practices]
+# Auto-detect from best_practices.md at repo root.
+enable_global_best_practices = true
+
 [pr_reviewer]
 # Anchor key issues as inline comments on diff lines instead of
 # listing them only in the summary table (matches the old CodeRabbit
@@ -14,15 +27,16 @@ inline_key_issues = true
 # refactors. Reviewer extra_instructions keep style noise out.
 num_max_findings = 5
 
+# Richer review sections (CodeRabbit parity).
+require_score_review = true
+require_todo_scan = true
+require_can_be_split_review = true
+
 [pr_code_suggestions]
 # Post high-confidence suggestions as committable inline code comments
 # (GitHub suggestion blocks the author can accept with one click).
-# Threshold 8 keeps only near-certain fixes — low-confidence noise
-# stays in the summary table only.
 commitable_code_suggestions = true
-dual_publishing_score_threshold = 8
-
-[config]
-# Don't re-post the same suggestion on every push — fingerprint
-# markers deduplicate across runs.
-persistent_inline_comments = true
+# Medium-confidence (7+) suggestions get both table + inline comment.
+dual_publishing_score_threshold = 7
+# Filter low-confidence suggestions — biggest noise reducer.
+suggestions_score_threshold = 3
