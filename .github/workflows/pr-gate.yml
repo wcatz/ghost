@@ -1,0 +1,114 @@
+# Merge gate for PR-Agent findings.
+#
+# Blocks merge while any unresolved, non-outdated PR-Agent review thread
+# exists on a pull request. Complements the native "require conversation
+# resolution" protection (which only covers threads — not the agent's
+# top-level summary comments) and adds two things GitHub cannot express:
+#
+#   1. Staleness: fails when the PR head has moved past the commit the
+#      agent last reviewed, so findings can never outlive their diff.
+#   2. Re-evaluation on demand: thread resolution fires no GitHub event,
+#      so after resolving findings, comment anything (e.g. "/recheck") to
+#      re-run this gate.
+#
+# Triggered by workflow_run (after every completed PR Agent run) and
+# issue_comment (manual recheck). NOT on synchronize: the agent itself
+# re-runs on synchronize, and workflow_run chains off its completion —
+# gating here would race ahead of the fresh review.
+
+name: PR Gate
+
+on:
+  workflow_run:
+    workflows: ["PR Agent"]
+    types: [completed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: pr-gate-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    if: >-
+      github.event_name == 'workflow_run' ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        github.event.sender.type != 'Bot')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          NUMBER="$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")"
+          if [ -z "$NUMBER" ]; then
+            HEAD_SHA="$(jq -r '.workflow_run.head_sha' "$GITHUB_EVENT_PATH")"
+            NUMBER="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" --jq '.[0].number')"
+          fi
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Evaluate findings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          NUMBER="${{ steps.pr.outputs.number }}"
+
+          QUERY='query($owner:String!,$name:String!,$number:Int!){
+            repository(owner:$owner,name:$name){
+              pullRequest(number:$number){
+                headRefOid
+                reviewThreads(first:100){
+                  nodes{
+                    isResolved
+                    isOutdated
+                    comments(first:1){nodes{author{login} body path line}}
+                  }
+                }
+              }
+            }
+          }'
+
+          gh api graphql \
+            -f query="$QUERY" \
+            -f owner="${GITHUB_REPOSITORY%%/*}" \
+            -f name="${GITHUB_REPOSITORY##*/}" \
+            -F number="$NUMBER" \
+            --jq '.data.repository.pullRequest' > /tmp/pr.json
+
+          HEAD_SHA="$(jq -r .headRefOid /tmp/pr.json)"
+
+          jq '[.reviewThreads.nodes[]
+                | select(.isResolved == false)
+                | select(.isOutdated == false)
+                | select(.comments.nodes[0].author.login == "github-actions[bot]")]' \
+            /tmp/pr.json > /tmp/findings.json
+
+          COUNT="$(jq length /tmp/findings.json)"
+
+          if [ -n "$EXPECTED_SHA" ] && [ "$HEAD_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::PR head ($HEAD_SHA) is newer than the last agent-reviewed commit ($EXPECTED_SHA). Waiting for the fresh PR-Agent run."
+            exit 1
+          fi
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo "::error::$COUNT unresolved PR-Agent finding(s) block this merge:"
+            jq -r '.[] | .comments.nodes[0] |
+                   "::error file=\(.path // "review"),line=\(.line // 0)::\(.body | gsub("\n"; " ") | .[0:200])"' \
+              /tmp/findings.json
+            echo "::error::Fix and push, or resolve the threads — then the gate re-runs automatically after the next agent review. To re-check without a push, comment anything on the PR."
+            exit 1
+          fi
+
+          echo "Gate clear: no unresolved PR-Agent findings at $HEAD_SHA"

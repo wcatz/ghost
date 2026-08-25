@@ -107,6 +107,11 @@ jobs:
             Do not report style preferences handled by golangci-lint.
 
           github_action_config.auto_review: "true"
-          github_action_config.auto_improve: "true"
-          github_action_config.auto_describe: "false"
+          # On-demand only (/improve comment): per-finding suggestion
+          # generation is sequential LLM calls and blew the 10-min runner
+          # cap three runs straight when always-on.
+          github_action_config.auto_improve: "false"
+          # Cheap single-call walkthrough summary (CodeRabbit-style) posted
+          # with the first review.
+          github_action_config.auto_describe: "true"
           github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "review_requested"]'
