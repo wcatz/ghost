@@ -18,10 +18,13 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// stopBlockMessage is emitted (as hook JSON) when a tool-using session ends
-// without a single Ghost save. Claude Code shows the reason to Claude and the
-// session continues once; stop_hook_active guarantees the second stop wins.
-const stopBlockMessage = `{"decision":"block","reason":"This session used tools but saved nothing to Ghost. Review the session for discoveries worth keeping (commands, configs, gotchas, decisions) and save them with ghost_memory_save — or stop again if there is truly nothing to save."}`
+// stopReminder is emitted (as hook JSON) when a tool-using session ends
+// without a single Ghost save. It is a non-blocking "approve" so no host
+// renders it as a Stop hook error — the message is surfaced as a plain
+// reminder, never as a failure. (Hosts that cannot honor a block — opencode —
+// re-present it through their own channel; Claude/Codex/Goose show it as a
+// normal system note, not an error.)
+const stopReminder = `{"decision":"approve","reason":"Reminder: this session used tools but saved nothing to Ghost. If you learned anything worth keeping — commands, configs, gotchas, decisions — save it with ghost_memory_save before moving on."}`
 
 // RunHostEvent is the contract-v1 entrypoint for every host lifecycle event:
 //
@@ -71,22 +74,22 @@ func logFailOpen(stderr io.Writer, stage string, err error) {
 }
 
 // runStop executes the stop/session-end handler: opt-in lifecycle spawns, then
-// — only on stop events (nudge=true) — the save-nudge decision. The nudge
-// block decision is emitted on stdout for every host that reaches the nudge
-// path; blocking hosts (claude/codex/goose) honor {"decision":"block"} and hold
-// the stop, while non-blocking hosts (opencode) let their plugin re-present it
-// as a non-blocking reminder. session-end (nudge=false) never scans the
-// transcript and never emits output.
+// — only on stop events (nudge=true) — the save-nudge reminder. The nudge is a
+// non-blocking {"decision":"approve"} emitted for every host that reaches the
+// nudge path, so no host surfaces it as a Stop hook error. opencode's plugin
+// re-presents it through its own log channel; claude/codex/goose show it as a
+// plain system note. session-end (nudge=false) never scans the transcript and
+// never emits output.
 func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool) {
 	// Adapter-materialized transcripts are swept once this invocation ends —
 	// including on the guarded early-return below, so a leaked temp dir can't
 	// outlive us regardless of which path fires.
 	defer cleanupTransientTranscript(p)
 
-	// stop_hook_active means the host already granted one continuation from
-	// our block and is re-stopping immediately — spawning and nudging again
-	// would just loop. session-end ignores the flag: it fires once per real
-	// session end, so its lifecycle spawns always run (spec §2.2).
+	// stop_hook_active means the host is re-stopping immediately after our
+	// reminder — spawning and nudging again would just loop. session-end
+	// ignores the flag: it fires once per real session end, so its lifecycle
+	// spawns always run (spec §2.2).
 	if nudge && p.StopHookActive {
 		return
 	}
@@ -123,12 +126,10 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 	if res.ToolCalls == 0 || res.GhostSaves > 0 {
 		return
 	}
-	// The nudge fires for every host that reaches here. Blocking hosts
-	// (claude/codex/goose) consume the structured {"decision":"block"} payload
-	// on stdout and hold the stop; non-blocking hosts (opencode) cannot block,
-	// so their plugin captures this same stdout and re-presents it as a
-	// non-blocking reminder through their own log channel — no terminal bleed.
-	_, _ = fmt.Fprintln(stdout, stopBlockMessage)
+	// The reminder fires for every host that reaches here, but as a non-blocking
+	// "approve" so hosts never present it as a Stop hook error. opencode's plugin
+	// captures this same stdout and re-presents it through its own log channel.
+	_, _ = fmt.Fprintln(stdout, stopReminder)
 }
 
 // cleanupTransientTranscript removes an adapter-materialized transcript once
