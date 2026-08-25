@@ -54,7 +54,16 @@ jobs:
           NUMBER="$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")"
           if [ -z "$NUMBER" ]; then
             HEAD_SHA="$(jq -r '.workflow_run.head_sha' "$GITHUB_EVENT_PATH")"
-            NUMBER="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" --jq '.[0].number')"
+            NUMBER="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" --jq '.[0].number // empty')"
+          fi
+          # Agent runs fired from PR comments execute in default-branch
+          # context with no associated PR — there is nothing to gate.
+          # Exit clean; a required check must never fail on an unmappable
+          # run, and skipping via job-level `if` would count as success
+          # anyway.
+          if [ -z "$NUMBER" ] || [ "$NUMBER" = "null" ]; then
+            echo "No PR associated with this run (default-branch context); nothing to gate."
+            exit 0
           fi
           echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
 
