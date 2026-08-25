@@ -94,9 +94,10 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 		return
 	}
 
-	spawnResolveIfConfigured(p.CWD)
-	spawnSupersedeIfConfigured(p.CWD)
-	spawnReflectIfConfigured(p.CWD)
+	source := string(p.HostSource())
+	spawnResolveIfConfigured(p.CWD, source)
+	spawnSupersedeIfConfigured(p.CWD, source)
+	spawnReflectIfConfigured(p.CWD, source)
 
 	if !nudge || p.TranscriptPath == "" {
 		return
@@ -167,7 +168,7 @@ func cleanupTransientTranscript(p hostevent.Payload) {
 // Known limitation: resolution here depends on Store.ResolveProject's
 // path/basename match against the stored project row; a cwd with no matching
 // project is a silent no-op, same as an unconfigured user.
-func spawnResolveIfConfigured(cwd string) {
+func spawnResolveIfConfigured(cwd, source string) {
 	if cwd == "" {
 		return
 	}
@@ -222,6 +223,9 @@ func spawnResolveIfConfigured(cwd string) {
 	defer logFile.Close() //nolint:errcheck
 
 	cmd := exec.Command(exe, "resolve", projectName, "--apply")
+	if source != "" {
+		cmd.Args = append(cmd.Args, "--source", source)
+	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	detachProcess(cmd)
@@ -244,7 +248,7 @@ func spawnResolveIfConfigured(cwd string) {
 // Known limitation: resolution here depends on Store.ResolveProject's
 // path/basename match against the stored project row; a cwd with no matching
 // project is a silent no-op, same as an unconfigured user.
-func spawnSupersedeIfConfigured(cwd string) {
+func spawnSupersedeIfConfigured(cwd, source string) {
 	if cwd == "" {
 		return
 	}
@@ -299,6 +303,9 @@ func spawnSupersedeIfConfigured(cwd string) {
 	defer logFile.Close() //nolint:errcheck
 
 	cmd := exec.Command(exe, "supersede", projectName, "--apply")
+	if source != "" {
+		cmd.Args = append(cmd.Args, "--source", source)
+	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	detachProcess(cmd)
@@ -322,7 +329,7 @@ func spawnSupersedeIfConfigured(cwd string) {
 // Jaccard-only sqlite tier and rewrite every non-manual memory for no quality
 // gain, so the spawn is skipped entirely — before the DB is even opened, so
 // this stays a cheap read-only no-op.
-func spawnReflectIfConfigured(cwd string) {
+func spawnReflectIfConfigured(cwd, source string) {
 	if cwd == "" {
 		return
 	}
@@ -330,8 +337,12 @@ func spawnReflectIfConfigured(cwd string) {
 	if err != nil || !cfg.Reflection.AutoReflect {
 		return
 	}
-	if cfg.API.Key == "" && !ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary).Available() {
-		return
+	if cfg.API.Key == "" && !ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary).Available() {
+		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
+		if !sp.Available() {
+			slog.Warn("reflect: skipping — no CLI binary available", "source", source)
+			return
+		}
 	}
 
 	dataDir, err := config.DataDir()
@@ -373,6 +384,9 @@ func spawnReflectIfConfigured(cwd string) {
 	defer logFile.Close() //nolint:errcheck
 
 	cmd := exec.Command(exe, "reflect", projectName, "--apply", "--require-llm")
+	if source != "" {
+		cmd.Args = append(cmd.Args, "--source", source)
+	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	detachProcess(cmd)

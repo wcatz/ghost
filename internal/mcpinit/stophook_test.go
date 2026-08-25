@@ -355,7 +355,7 @@ func TestSpawnResolveIfConfigured_NoOpWhenDisabled(t *testing.T) {
 	// ghost.db, the pidfile, or resolve.log.
 	dataHome := isolatedHome(t)
 
-	spawnResolveIfConfigured("/tmp/does-not-matter")
+	spawnResolveIfConfigured("/tmp/does-not-matter", "")
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected ghost data dir to never be created when auto_resolve is disabled, stat err = %v", err)
@@ -370,7 +370,7 @@ func TestSpawnSupersedeIfConfigured_NoOpWhenDisabled(t *testing.T) {
 	// ghost.db, the pidfile, or supersede.log.
 	dataHome := isolatedHome(t)
 
-	spawnSupersedeIfConfigured("/tmp/does-not-matter")
+	spawnSupersedeIfConfigured("/tmp/does-not-matter", "")
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected ghost data dir to never be created when auto_supersede is disabled, stat err = %v", err)
@@ -385,7 +385,7 @@ func TestSpawnReflectIfConfigured_NoOpWhenDisabled(t *testing.T) {
 	// pidfile, or reflect.log.
 	dataHome := isolatedHome(t)
 
-	spawnReflectIfConfigured("/tmp/does-not-matter")
+	spawnReflectIfConfigured("/tmp/does-not-matter", "")
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected ghost data dir to never be created when auto_reflect is disabled, stat err = %v", err)
@@ -406,7 +406,7 @@ func TestSpawnReflectIfConfigured_NoOpWithoutLLM(t *testing.T) {
 	}
 	t.Setenv("PATH", t.TempDir()) // no claude, no opencode
 
-	spawnReflectIfConfigured("/tmp/does-not-matter")
+	spawnReflectIfConfigured("/tmp/does-not-matter", "")
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected no ghost data dir when no LLM is available, stat err = %v", err)

@@ -80,7 +80,7 @@ func TestCLIProviderWithBinaries_UsesExplicitOpenCodePath(t *testing.T) {
 	writeFake(t, dir, "opencode")
 	t.Setenv("PATH", t.TempDir()) // empty PATH: nothing resolvable by name
 
-	p := NewCLIProviderWithBinaries("", filepath.Join(dir, "opencode"))
+	p := NewCLIProviderWithBinaries("", filepath.Join(dir, "opencode"), "", "")
 	if !p.Available() {
 		t.Fatal("expected available via explicit opencode path")
 	}
@@ -94,7 +94,7 @@ func TestCLIProviderWithBinaries_UsesExplicitClaudePath(t *testing.T) {
 	writeFake(t, dir, "claude")
 	t.Setenv("PATH", t.TempDir())
 
-	p := NewCLIProviderWithBinaries(filepath.Join(dir, "claude"), "")
+	p := NewCLIProviderWithBinaries(filepath.Join(dir, "claude"), "", "", "")
 	if !p.Available() {
 		t.Fatal("expected available via explicit claude path")
 	}
@@ -110,7 +110,7 @@ func TestCLIProviderWithBinaries_FallsBackToPathWhenOverrideMissing(t *testing.T
 
 	// Explicit claude path is missing, so fall back to the PATH lookup, which
 	// finds opencode.
-	p := NewCLIProviderWithBinaries(filepath.Join(dir, "no-such-claude"), "")
+	p := NewCLIProviderWithBinaries(filepath.Join(dir, "no-such-claude"), "", "", "")
 	if !p.Available() {
 		t.Fatal("expected available via PATH fallback")
 	}

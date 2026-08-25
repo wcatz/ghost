@@ -27,14 +27,14 @@ type CLIProvider struct {
 // NewCLIProvider picks the best backend available on PATH: claude if present,
 // else opencode if present, else an unavailable provider.
 func NewCLIProvider() *CLIProvider {
-	return NewCLIProviderWithBinaries("", "")
+	return NewCLIProviderWithBinaries("", "", "", "")
 }
 
 // NewCLIProviderWithBinaries is NewCLIProvider with explicit binary paths.
-// claudeBinary/opencodeBinary override the PATH lookup when set (and resolvable),
-// so a binary installed outside the current process's PATH still wins; an empty
-// value falls back to the PATH lookup for that backend.
-func NewCLIProviderWithBinaries(claudeBinary, opencodeBinary string) *CLIProvider {
+// Binary paths override the PATH lookup when set (and resolvable), so a binary
+// installed outside the current process's PATH still wins; an empty value falls
+// back to the PATH lookup for that backend. Priority: claude > opencode > codex > goose.
+func NewCLIProviderWithBinaries(claudeBinary, opencodeBinary, codexBinary, gooseBinary string) *CLIProvider {
 	if claudeBinary != "" {
 		if _, err := exec.LookPath(claudeBinary); err == nil {
 			return &CLIProvider{backend: NewCLIClientWithBinary(claudeBinary), name: "cli"}
@@ -50,6 +50,22 @@ func NewCLIProviderWithBinaries(claudeBinary, opencodeBinary string) *CLIProvide
 	}
 	if _, err := exec.LookPath("opencode"); err == nil {
 		return &CLIProvider{backend: NewOpenCodeClient(), name: "opencode"}
+	}
+	if codexBinary != "" {
+		if _, err := exec.LookPath(codexBinary); err == nil {
+			return &CLIProvider{backend: NewCodexClientWithBinary(codexBinary), name: "codex"}
+		}
+	}
+	if _, err := exec.LookPath("codex"); err == nil {
+		return &CLIProvider{backend: NewCodexClient(), name: "codex"}
+	}
+	if gooseBinary != "" {
+		if _, err := exec.LookPath(gooseBinary); err == nil {
+			return &CLIProvider{backend: NewGooseClientWithBinary(gooseBinary), name: "goose"}
+		}
+	}
+	if _, err := exec.LookPath("goose"); err == nil {
+		return &CLIProvider{backend: NewGooseClient(), name: "goose"}
 	}
 	return &CLIProvider{backend: nil, name: "none"}
 }

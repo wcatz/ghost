@@ -359,7 +359,7 @@ func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName 
 // Defaults to dry-run (preview only). Use --apply to save results.
 // Use --restore to undo the last consolidation from snapshot.
 func runReflect() {
-	var projectName, tierValue string
+	var projectName, tierValue, source string
 	var apply, restore, requireLLM, allowDrops bool
 	tierValue = "auto"
 	for i := 2; i < len(os.Args); i++ {
@@ -377,6 +377,11 @@ func runReflect() {
 			requireLLM = true
 		case os.Args[i] == "--allow-drops":
 			allowDrops = true
+		case os.Args[i] == "--source" && i+1 < len(os.Args):
+			source = os.Args[i+1]
+			i++
+		case strings.HasPrefix(os.Args[i], "--source="):
+			source = strings.TrimPrefix(os.Args[i], "--source=")
 		case !strings.HasPrefix(os.Args[i], "-"):
 			projectName = os.Args[i]
 		}
@@ -389,7 +394,8 @@ Flags:
   --apply         Save results (default is dry-run/preview only)
   --restore       Undo the last consolidation from snapshot
   --require-llm   Fail instead of falling back to the Jaccard-only sqlite tier
-  --allow-drops   Apply even when guarded-category memories would be deleted without a merge`)
+  --allow-drops   Apply even when guarded-category memories would be deleted without a merge
+  --source string Host source for CLI selection (e.g. claude-code, opencode)`)
 		os.Exit(1)
 	}
 
@@ -411,68 +417,89 @@ Flags:
 	}
 
 	var consolidator reflection.Consolidator
-	switch tierValue {
-	case "haiku":
-		if cfg.API.Key == "" {
-			fmt.Fprintln(os.Stderr, "error: haiku tier requires ANTHROPIC_API_KEY")
-			os.Exit(1)
-		}
-		client := ai.NewClient(cfg.API.Key, logger)
-		consolidator = reflection.NewHaikuConsolidator(client)
-	case "cli":
-		binary := "claude"
-		if cfg.CLI.ClaudeBinary != "" {
-			binary = cfg.CLI.ClaudeBinary
-		}
-		if _, err := exec.LookPath(binary); err != nil {
-			hint := "set cli.claude_binary"
-			if cfg.CLI.ClaudeBinary != "" {
-				hint = "check that cli.claude_binary (" + binary + ") is a valid, executable path"
+
+	// Source-aware auto tier: when --source is set and tier is "auto", prefer
+	// the source-matched CLI backend directly, skipping API entirely. This
+	// lets the stop-hook or cron reflect use the same CLI that served the
+	// session, avoiding ANTHROPIC_API_KEY when not needed.
+	if tierValue == "auto" && source != "" {
+		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
+		if sp.Available() {
+			var tiers []reflection.Consolidator
+			tiers = append(tiers, reflection.NewNamedConsolidator(sp, sp.Name()))
+			if !requireLLM {
+				tiers = append(tiers, reflection.NewSQLiteConsolidator())
 			}
-			fmt.Fprintf(os.Stderr, "error: cli tier requires the `%s` binary on PATH (or %s)\n", binary, hint)
-			os.Exit(1)
+			consolidator = reflection.NewTieredConsolidator(tiers, logger)
 		}
-		consolidator = reflection.NewNamedConsolidator(ai.NewCLIClientWithBinary(binary), "cli")
-	case "opencode":
-		binary := "opencode"
-		if cfg.CLI.OpenCodeBinary != "" {
-			binary = cfg.CLI.OpenCodeBinary
-		}
-		if _, err := exec.LookPath(binary); err != nil {
-			hint := "set cli.opencode_binary"
-			if cfg.CLI.OpenCodeBinary != "" {
-				hint = "check that cli.opencode_binary (" + binary + ") is a valid, executable path"
+	}
+
+	// If source-aware path above didn't build a consolidator, fall through
+	// to the standard tier switch.
+	if consolidator == nil {
+		switch tierValue {
+		case "haiku":
+			if cfg.API.Key == "" {
+				fmt.Fprintln(os.Stderr, "error: haiku tier requires ANTHROPIC_API_KEY")
+				os.Exit(1)
 			}
-			fmt.Fprintf(os.Stderr, "error: opencode tier requires the `%s` binary on PATH (or %s)\n", binary, hint)
-			os.Exit(1)
-		}
-		consolidator = reflection.NewNamedConsolidator(ai.NewOpenCodeClientWithBinary(binary), "opencode")
-	case "sqlite":
-		if requireLLM {
-			fmt.Fprintln(os.Stderr, "error: --require-llm conflicts with --tier sqlite")
-			os.Exit(1)
-		}
-		consolidator = reflection.NewSQLiteConsolidator()
-	default: // "auto"
-		var tiers []reflection.Consolidator
-		if cfg.API.Key != "" {
 			client := ai.NewClient(cfg.API.Key, logger)
-			tiers = append(tiers, reflection.NewHaikuConsolidator(client))
+			consolidator = reflection.NewHaikuConsolidator(client)
+		case "cli":
+			binary := "claude"
+			if cfg.CLI.ClaudeBinary != "" {
+				binary = cfg.CLI.ClaudeBinary
+			}
+			if _, err := exec.LookPath(binary); err != nil {
+				hint := "set cli.claude_binary"
+				if cfg.CLI.ClaudeBinary != "" {
+					hint = "check that cli.claude_binary (" + binary + ") is a valid, executable path"
+				}
+				fmt.Fprintf(os.Stderr, "error: cli tier requires the `%s` binary on PATH (or %s)\n", binary, hint)
+				os.Exit(1)
+			}
+			consolidator = reflection.NewNamedConsolidator(ai.NewCLIClientWithBinary(binary), "cli")
+		case "opencode":
+			binary := "opencode"
+			if cfg.CLI.OpenCodeBinary != "" {
+				binary = cfg.CLI.OpenCodeBinary
+			}
+			if _, err := exec.LookPath(binary); err != nil {
+				hint := "set cli.opencode_binary"
+				if cfg.CLI.OpenCodeBinary != "" {
+					hint = "check that cli.opencode_binary (" + binary + ") is a valid, executable path"
+				}
+				fmt.Fprintf(os.Stderr, "error: opencode tier requires the `%s` binary on PATH (or %s)\n", binary, hint)
+				os.Exit(1)
+			}
+			consolidator = reflection.NewNamedConsolidator(ai.NewOpenCodeClientWithBinary(binary), "opencode")
+		case "sqlite":
+			if requireLLM {
+				fmt.Fprintln(os.Stderr, "error: --require-llm conflicts with --tier sqlite")
+				os.Exit(1)
+			}
+			consolidator = reflection.NewSQLiteConsolidator()
+		default: // "auto"
+			var tiers []reflection.Consolidator
+			if cfg.API.Key != "" {
+				client := ai.NewClient(cfg.API.Key, logger)
+				tiers = append(tiers, reflection.NewHaikuConsolidator(client))
+			}
+			if cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary); cli.Available() {
+				tiers = append(tiers, reflection.NewNamedConsolidator(cli, cli.Name()))
+			}
+			// --require-llm is the autonomous-reflect guard: it must never silently
+			// degrade to the Jaccard-only sqlite tier (which would rewrite every
+			// non-manual memory with no consolidation quality). A stale/exhausted
+			// ANTHROPIC_API_KEY is a false positive for "has an LLM", so the cheap
+			// stop-hook pre-check can't be trusted; this flag is the real guard at
+			// the write site — no LLM tier available (or all fail) => exit non-zero
+			// without touching the DB.
+			if !requireLLM {
+				tiers = append(tiers, reflection.NewSQLiteConsolidator())
+			}
+			consolidator = reflection.NewTieredConsolidator(tiers, logger)
 		}
-		if cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary); cli.Available() {
-			tiers = append(tiers, reflection.NewNamedConsolidator(cli, cli.Name()))
-		}
-		// --require-llm is the autonomous-reflect guard: it must never silently
-		// degrade to the Jaccard-only sqlite tier (which would rewrite every
-		// non-manual memory with no consolidation quality). A stale/exhausted
-		// ANTHROPIC_API_KEY is a false positive for "has an LLM", so the cheap
-		// stop-hook pre-check can't be trusted; this flag is the real guard at
-		// the write site — no LLM tier available (or all fail) => exit non-zero
-		// without touching the DB.
-		if !requireLLM {
-			tiers = append(tiers, reflection.NewSQLiteConsolidator())
-		}
-		consolidator = reflection.NewTieredConsolidator(tiers, logger)
 	}
 
 	if !consolidator.Available(ctx) {
@@ -688,7 +715,7 @@ Flags:
 // primary when no key is configured at all, so these commands work without
 // spending API credits as long as `claude` or `opencode` is available.
 func buildClassifyProvider(cfg *config.Config, logger *slog.Logger) (*ai.FallbackProvider, error) {
-	cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary)
+	cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
 	if cfg.API.Key == "" {
 		if !cli.Available() {
 			return nil, errors.New("requires ANTHROPIC_API_KEY or a `claude`/`opencode` binary (on PATH or via cli.claude_binary/cli.opencode_binary)")
@@ -702,6 +729,20 @@ func buildClassifyProvider(cfg *config.Config, logger *slog.Logger) (*ai.Fallbac
 	return ai.NewFallbackProvider(primary, cli, true), nil
 }
 
+// buildClassifyProviderForSource wraps buildClassifyProvider when --source is
+// set: routes through the matching CLI backend instead of the default
+// API-first fallback chain.
+func buildClassifyProviderForSource(cfg *config.Config, source string, logger *slog.Logger) (*ai.FallbackProvider, error) {
+	if source != "" {
+		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
+		if !sp.Available() {
+			return nil, fmt.Errorf("source %q: no CLI binary available", source)
+		}
+		return ai.NewFallbackProvider(sp, nil, false), nil
+	}
+	return buildClassifyProvider(cfg, logger)
+}
+
 // runSupersede implements `ghost supersede <project> [--apply]` — the creation
 // half of staleness-aware ranking. It proposes newer→older 'supersedes' links
 // over the project's live memories (cosine-similar candidates, Haiku-confirmed)
@@ -710,6 +751,7 @@ func buildClassifyProvider(cfg *config.Config, logger *slog.Logger) (*ai.Fallbac
 // SupersedeDemote is set. See docs/benchmarks.md Phase 3.
 func runSupersede() {
 	var projectName string
+	var source string
 	apply := false
 	threshold := float32(0.80) // supersession candidates are the SAME fact — tighter than the 0.70 'related' floor
 	for i := 2; i < len(os.Args); i++ {
@@ -725,6 +767,11 @@ func runSupersede() {
 			if v, err := strconv.ParseFloat(strings.TrimPrefix(os.Args[i], "--threshold="), 32); err == nil {
 				threshold = float32(v)
 			}
+		case os.Args[i] == "--source" && i+1 < len(os.Args):
+			source = os.Args[i+1]
+			i++
+		case strings.HasPrefix(os.Args[i], "--source="):
+			source = strings.TrimPrefix(os.Args[i], "--source=")
 		case !strings.HasPrefix(os.Args[i], "-"):
 			projectName = os.Args[i]
 		default:
@@ -738,6 +785,7 @@ func runSupersede() {
 Flags:
   --apply             Write the supersedes/causes links (default is dry-run/preview)
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
+  --source string     Host source for CLI selection (e.g. claude-code, opencode)
 
 Classifies each candidate as supersedes, causes, or neither. Uses
 ANTHROPIC_API_KEY if set; otherwise falls back to a subscription-billed
@@ -751,7 +799,7 @@ cli.opencode_binary) — requires one of the two.`)
 	ctx := context.Background()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
-	provider, err := buildClassifyProvider(cfg, logger)
+	provider, err := buildClassifyProviderForSource(cfg, source, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: ghost supersede %v\n", err)
 		os.Exit(1)
@@ -799,11 +847,17 @@ cli.opencode_binary) — requires one of the two.`)
 // resolution-classifier spec.
 func runResolve() {
 	var projectName string
+	var source string
 	apply := false
 	for i := 2; i < len(os.Args); i++ {
 		switch {
 		case os.Args[i] == "--apply":
 			apply = true
+		case os.Args[i] == "--source" && i+1 < len(os.Args):
+			source = os.Args[i+1]
+			i++
+		case strings.HasPrefix(os.Args[i], "--source="):
+			source = strings.TrimPrefix(os.Args[i], "--source=")
 		case !strings.HasPrefix(os.Args[i], "-"):
 			if projectName != "" {
 				fmt.Fprintln(os.Stderr, "error: expected exactly one project")
@@ -819,7 +873,8 @@ func runResolve() {
 		fmt.Fprintln(os.Stderr, `Usage: ghost resolve <project> [flags]
 
 Flags:
-  --apply   Stamp resolved_at on confirmed memories (default is dry-run/preview)
+  --apply         Stamp resolved_at on confirmed memories (default is dry-run/preview)
+  --source string Host source for CLI selection (e.g. claude-code, opencode)
 
 Marks resolved-evidence memories so they drop from session-start injection
 (still searchable). Uses ANTHROPIC_API_KEY if set; otherwise falls back to a
@@ -833,7 +888,7 @@ cli.claude_binary / cli.opencode_binary) — requires one of the two.`)
 	ctx := context.Background()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
-	provider, err := buildClassifyProvider(cfg, logger)
+	provider, err := buildClassifyProviderForSource(cfg, source, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: ghost resolve %v\n", err)
 		os.Exit(1)

@@ -48,6 +48,8 @@ type APIConfig struct {
 type CLIConfig struct {
 	ClaudeBinary   string `koanf:"claude_binary"`
 	OpenCodeBinary string `koanf:"opencode_binary"`
+	CodexBinary    string `koanf:"codex_binary"`
+	GooseBinary    string `koanf:"goose_binary"`
 }
 
 // ReflectionConfig holds memory consolidation settings.
@@ -91,6 +93,8 @@ var defaults = map[string]interface{}{
 	"reflection.auto_reflect":    false,
 	"cli.claude_binary":          "",
 	"cli.opencode_binary":        "",
+	"cli.codex_binary":           "",
+	"cli.goose_binary":           "",
 	"linking.enabled":            true,
 	"linking.threshold":          0.70,
 	"linking.demotion_threshold": 0.90,
@@ -143,6 +147,8 @@ func Load() (*Config, error) {
 		"GHOST_OBSIDIAN_VAULT_DIR":        "obsidian.vault_dir",
 		"GHOST_CLI_CLAUDE_BINARY":         "cli.claude_binary",
 		"GHOST_CLI_OPENCODE_BINARY":       "cli.opencode_binary",
+		"GHOST_CLI_CODEX_BINARY":          "cli.codex_binary",
+		"GHOST_CLI_GOOSE_BINARY":          "cli.goose_binary",
 		"GHOST_REFLECTION_AUTO_REFLECT":   "reflection.auto_reflect",
 		"GHOST_REFLECTION_AUTO_RESOLVE":   "reflection.auto_resolve",
 		"GHOST_REFLECTION_AUTO_SUPERSEDE": "reflection.auto_supersede",
