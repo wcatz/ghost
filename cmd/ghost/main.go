@@ -86,6 +86,9 @@ func main() {
 		case "bench":
 			runBench()
 			return
+		case "context":
+			runContext()
+			return
 		}
 	}
 	printUsage()
@@ -233,6 +236,25 @@ func runMCPStatus() {
 	if !healthy {
 		os.Exit(1)
 	}
+}
+
+// runContext prints the passive session-start context block for a directory,
+// backing opencode's plugin-injected instructions. It is read-only: no
+// session-count bump, no background workers. `ghost context` is the
+// opencode-appropriate alternative to the SessionStart hook, which opencode
+// cannot consume (no stdout-injection surface). See RenderSessionContext.
+func runContext() {
+	cwd := ""
+	for i := 2; i < len(os.Args); i++ {
+		switch {
+		case os.Args[i] == "--cwd" && i+1 < len(os.Args):
+			cwd = os.Args[i+1]
+			i++
+		case strings.HasPrefix(os.Args[i], "--cwd="):
+			cwd = strings.TrimPrefix(os.Args[i], "--cwd=")
+		}
+	}
+	fmt.Println(mcpinit.RenderSessionContext(cwd))
 }
 
 // runHook dispatches host lifecycle events per the contract-v1 spec:
@@ -1195,6 +1217,7 @@ Commands:
                               (dry-run by default, --apply + name re-type to confirm)
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
   obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
+  context [--cwd <dir>]       Print the passive session-start context block (for opencode)
   bench [--sweep]             Run the retrieval-quality benchmark (built-in dataset);
                               --sweep grid-searches the fusion parameters
   upgrade                     Update ghost to the latest release

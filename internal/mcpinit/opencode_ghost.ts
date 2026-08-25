@@ -15,8 +15,8 @@
 // session.
 import type { Plugin } from "@opencode-ai/plugin"
 import { spawn } from "node:child_process"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
 const CONTRACT_VERSION = 1
@@ -39,6 +39,23 @@ let sawStatusEvent = false
 const lastFire = new Map<string, number>()
 const DEBOUNCE_MS = 2000
 const MAX_TRACKED_SESSIONS = 256
+
+// Materializes ghost's session-start context block for a directory and returns
+// it, so opencode can inject it passively via instructions (opencode has no
+// stdout-injection surface of its own). Read-only and fail-open: any spawn
+// error or missing context yields "" and the caller skips injection.
+const renderStartContext = (cwd: string): Promise<string> =>
+	new Promise((resolve) => {
+		const child = spawn(process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT, ["context", "--cwd", cwd], {
+			stdio: ["ignore", "pipe", "inherit"],
+		})
+		let out = ""
+		child.stdout?.on("data", (d) => {
+			out += d.toString()
+		})
+		child.on("error", () => resolve(""))
+		child.on("close", () => resolve(out))
+	})
 
 export const GhostPlugin: Plugin = async ({ client, directory }) => {
 	const log = async (level: "info" | "warn" | "error", message: string) => {
@@ -121,6 +138,24 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 				type: "local",
 				command: [process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT, "mcp"],
 				enabled: true,
+			}
+			// Passive start context: ghost's session-start block is materialized
+			// into a cache file and injected via opencode's instructions, so
+			// every session opens with project memory without an agent action.
+			// opencode cannot consume the hook's stdout injection, so this is
+			// the supported path. Fail-open: any error leaves cfg untouched.
+			try {
+				const ctx = await renderStartContext(directory ?? process.cwd())
+				if (ctx && ctx.trim()) {
+					const dir = join(homedir(), ".cache", "ghost")
+					await mkdir(dir, { recursive: true })
+					const file = join(dir, "opencode-context.md")
+					await writeFile(file, ctx)
+					cfg.instructions = cfg.instructions ?? []
+					if (!cfg.instructions.includes(file)) cfg.instructions.push(file)
+				}
+			} catch {
+				// fail-open: never block opencode startup over missing context
 			}
 		},
 		event: async ({ event }) => {
