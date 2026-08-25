@@ -101,7 +101,10 @@ func runMCP() {
 		fmt.Fprintln(os.Stderr, "To set up the integration, run: ghost mcp init")
 		fmt.Fprintln(os.Stderr, "")
 	}
-	logWriter, logLevel := mcpLogConfig(isTerminalFile(os.Stderr))
+	logWriter, logLevel, closeLog := mcpLogConfig(isTerminalFile(os.Stderr))
+	if closeLog != nil {
+		defer closeLog()
+	}
 	cfg, logger, store := bootstrap(logWriter, logLevel)
 	defer store.Close() //nolint:errcheck
 
@@ -1389,10 +1392,12 @@ func bootstrap(logWriter io.Writer, logLevel slog.Level) (*config.Config, *slog.
 // server is spawned by a client (stderr not a terminal), routine INFO logs
 // are dropped and only WARN+ reaches stderr, unless GHOST_LOG_FILE redirects
 // the full stream to a file. Interactive runs (stderr is a terminal) keep
-// INFO on stderr. GHOST_DEBUG always restores Debug level.
-func mcpLogConfig(stderrTerminal bool) (io.Writer, slog.Level) {
+// INFO on stderr. GHOST_DEBUG always restores Debug level. The returned
+// closeLog is non-nil when a file was opened and must be called on shutdown.
+func mcpLogConfig(stderrTerminal bool) (io.Writer, slog.Level, func()) {
 	level := slog.LevelInfo
 	writer := io.Writer(os.Stderr)
+	var closeLog func()
 
 	if path := os.Getenv("GHOST_LOG_FILE"); path != "" {
 		if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err != nil {
@@ -1402,6 +1407,7 @@ func mcpLogConfig(stderrTerminal bool) (io.Writer, slog.Level) {
 			}
 		} else {
 			writer = f
+			closeLog = func() { _ = f.Close() }
 		}
 	} else if !stderrTerminal {
 		level = slog.LevelWarn
@@ -1410,7 +1416,7 @@ func mcpLogConfig(stderrTerminal bool) (io.Writer, slog.Level) {
 	if os.Getenv("GHOST_DEBUG") != "" {
 		level = slog.LevelDebug
 	}
-	return writer, level
+	return writer, level, closeLog
 }
 
 // cliLogLevel is the stderr log level for interactive CLI commands: Info,

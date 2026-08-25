@@ -490,24 +490,30 @@ func targetNames(targets []clientTarget) []string {
 func TestMCPLogConfig_QuietWhenSpawned(t *testing.T) {
 	t.Setenv("GHOST_LOG_FILE", "")
 	t.Setenv("GHOST_DEBUG", "")
-	writer, level := mcpLogConfig(false)
+	writer, level, closeLog := mcpLogConfig(false)
 	if level != slog.LevelWarn {
 		t.Fatalf("level = %v, want Warn", level)
 	}
 	if writer != io.Writer(os.Stderr) {
 		t.Fatal("writer must be stderr")
 	}
+	if closeLog != nil {
+		t.Fatal("no file opened, closer must be nil")
+	}
 }
 
 func TestMCPLogConfig_InfoWhenTerminal(t *testing.T) {
 	t.Setenv("GHOST_LOG_FILE", "")
 	t.Setenv("GHOST_DEBUG", "")
-	writer, level := mcpLogConfig(true)
+	writer, level, closeLog := mcpLogConfig(true)
 	if level != slog.LevelInfo {
 		t.Fatalf("level = %v, want Info (interactive debugging)", level)
 	}
 	if writer != io.Writer(os.Stderr) {
 		t.Fatal("writer must be stderr")
+	}
+	if closeLog != nil {
+		t.Fatal("no file opened, closer must be nil")
 	}
 }
 
@@ -518,9 +524,12 @@ func TestMCPLogConfig_FileRedirect(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "ghost.log")
 	t.Setenv("GHOST_LOG_FILE", logPath)
 	t.Setenv("GHOST_DEBUG", "")
-	writer, level := mcpLogConfig(false)
+	writer, level, closeLog := mcpLogConfig(false)
 	if level != slog.LevelInfo {
 		t.Fatalf("level = %v, want Info (full stream to file)", level)
+	}
+	if closeLog == nil {
+		t.Fatal("file opened, closer must be non-nil")
 	}
 	f, ok := writer.(*os.File)
 	if !ok {
@@ -528,7 +537,10 @@ func TestMCPLogConfig_FileRedirect(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: level}))
 	logger.Info("hello from test")
-	_ = f.Close()
+	closeLog()
+	if _, err := f.Write([]byte("after close")); err == nil {
+		t.Fatal("closer must actually close the file")
+	}
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
@@ -541,7 +553,7 @@ func TestMCPLogConfig_FileRedirect(t *testing.T) {
 func TestMCPLogConfig_DebugWins(t *testing.T) {
 	t.Setenv("GHOST_LOG_FILE", "")
 	t.Setenv("GHOST_DEBUG", "1")
-	_, level := mcpLogConfig(false)
+	_, level, _ := mcpLogConfig(false)
 	if level != slog.LevelDebug {
 		t.Fatalf("level = %v, want Debug", level)
 	}
@@ -557,11 +569,14 @@ func TestMCPLogConfig_UnopenableFileFallsBackQuiet(t *testing.T) {
 	}
 	t.Setenv("GHOST_LOG_FILE", dir) // existing directory: open for write fails
 	t.Setenv("GHOST_DEBUG", "")
-	writer, level := mcpLogConfig(false)
+	writer, level, closeLog := mcpLogConfig(false)
 	if level != slog.LevelWarn {
 		t.Fatalf("level = %v, want Warn (quiet fallback)", level)
 	}
 	if writer != io.Writer(os.Stderr) {
 		t.Fatal("writer must fall back to stderr")
+	}
+	if closeLog != nil {
+		t.Fatal("no file opened, closer must be nil")
 	}
 }
