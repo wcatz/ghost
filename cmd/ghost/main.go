@@ -427,79 +427,76 @@ Flags:
 				tiers = append(tiers, reflection.NewSQLiteConsolidator())
 			}
 			consolidator = reflection.NewTieredConsolidator(tiers, logger)
-			if consolidator.Available(ctx) {
-				// Re-use the existing consolidation path below; override tierValue
-				// so the switch-case doesn't fire. The consolidator is built.
-				goto built
-			}
 		}
-		// Not available — fall through to standard auto logic.
 	}
 
-	switch tierValue {
-	case "haiku":
-		if cfg.API.Key == "" {
-			fmt.Fprintln(os.Stderr, "error: haiku tier requires ANTHROPIC_API_KEY")
-			os.Exit(1)
-		}
-		client := ai.NewClient(cfg.API.Key, logger)
-		consolidator = reflection.NewHaikuConsolidator(client)
-	case "cli":
-		binary := "claude"
-		if cfg.CLI.ClaudeBinary != "" {
-			binary = cfg.CLI.ClaudeBinary
-		}
-		if _, err := exec.LookPath(binary); err != nil {
-			hint := "set cli.claude_binary"
-			if cfg.CLI.ClaudeBinary != "" {
-				hint = "check that cli.claude_binary (" + binary + ") is a valid, executable path"
+	// If source-aware path above didn't build a consolidator, fall through
+	// to the standard tier switch.
+	if consolidator == nil {
+		switch tierValue {
+		case "haiku":
+			if cfg.API.Key == "" {
+				fmt.Fprintln(os.Stderr, "error: haiku tier requires ANTHROPIC_API_KEY")
+				os.Exit(1)
 			}
-			fmt.Fprintf(os.Stderr, "error: cli tier requires the `%s` binary on PATH (or %s)\n", binary, hint)
-			os.Exit(1)
-		}
-		consolidator = reflection.NewNamedConsolidator(ai.NewCLIClientWithBinary(binary), "cli")
-	case "opencode":
-		binary := "opencode"
-		if cfg.CLI.OpenCodeBinary != "" {
-			binary = cfg.CLI.OpenCodeBinary
-		}
-		if _, err := exec.LookPath(binary); err != nil {
-			hint := "set cli.opencode_binary"
-			if cfg.CLI.OpenCodeBinary != "" {
-				hint = "check that cli.opencode_binary (" + binary + ") is a valid, executable path"
-			}
-			fmt.Fprintf(os.Stderr, "error: opencode tier requires the `%s` binary on PATH (or %s)\n", binary, hint)
-			os.Exit(1)
-		}
-		consolidator = reflection.NewNamedConsolidator(ai.NewOpenCodeClientWithBinary(binary), "opencode")
-	case "sqlite":
-		if requireLLM {
-			fmt.Fprintln(os.Stderr, "error: --require-llm conflicts with --tier sqlite")
-			os.Exit(1)
-		}
-		consolidator = reflection.NewSQLiteConsolidator()
-	default: // "auto"
-		var tiers []reflection.Consolidator
-		if cfg.API.Key != "" {
 			client := ai.NewClient(cfg.API.Key, logger)
-			tiers = append(tiers, reflection.NewHaikuConsolidator(client))
+			consolidator = reflection.NewHaikuConsolidator(client)
+		case "cli":
+			binary := "claude"
+			if cfg.CLI.ClaudeBinary != "" {
+				binary = cfg.CLI.ClaudeBinary
+			}
+			if _, err := exec.LookPath(binary); err != nil {
+				hint := "set cli.claude_binary"
+				if cfg.CLI.ClaudeBinary != "" {
+					hint = "check that cli.claude_binary (" + binary + ") is a valid, executable path"
+				}
+				fmt.Fprintf(os.Stderr, "error: cli tier requires the `%s` binary on PATH (or %s)\n", binary, hint)
+				os.Exit(1)
+			}
+			consolidator = reflection.NewNamedConsolidator(ai.NewCLIClientWithBinary(binary), "cli")
+		case "opencode":
+			binary := "opencode"
+			if cfg.CLI.OpenCodeBinary != "" {
+				binary = cfg.CLI.OpenCodeBinary
+			}
+			if _, err := exec.LookPath(binary); err != nil {
+				hint := "set cli.opencode_binary"
+				if cfg.CLI.OpenCodeBinary != "" {
+					hint = "check that cli.opencode_binary (" + binary + ") is a valid, executable path"
+				}
+				fmt.Fprintf(os.Stderr, "error: opencode tier requires the `%s` binary on PATH (or %s)\n", binary, hint)
+				os.Exit(1)
+			}
+			consolidator = reflection.NewNamedConsolidator(ai.NewOpenCodeClientWithBinary(binary), "opencode")
+		case "sqlite":
+			if requireLLM {
+				fmt.Fprintln(os.Stderr, "error: --require-llm conflicts with --tier sqlite")
+				os.Exit(1)
+			}
+			consolidator = reflection.NewSQLiteConsolidator()
+		default: // "auto"
+			var tiers []reflection.Consolidator
+			if cfg.API.Key != "" {
+				client := ai.NewClient(cfg.API.Key, logger)
+				tiers = append(tiers, reflection.NewHaikuConsolidator(client))
+			}
+			if cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary); cli.Available() {
+				tiers = append(tiers, reflection.NewNamedConsolidator(cli, cli.Name()))
+			}
+			// --require-llm is the autonomous-reflect guard: it must never silently
+			// degrade to the Jaccard-only sqlite tier (which would rewrite every
+			// non-manual memory with no consolidation quality). A stale/exhausted
+			// ANTHROPIC_API_KEY is a false positive for "has an LLM", so the cheap
+			// stop-hook pre-check can't be trusted; this flag is the real guard at
+			// the write site — no LLM tier available (or all fail) => exit non-zero
+			// without touching the DB.
+			if !requireLLM {
+				tiers = append(tiers, reflection.NewSQLiteConsolidator())
+			}
+			consolidator = reflection.NewTieredConsolidator(tiers, logger)
 		}
-		if cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary); cli.Available() {
-			tiers = append(tiers, reflection.NewNamedConsolidator(cli, cli.Name()))
-		}
-		// --require-llm is the autonomous-reflect guard: it must never silently
-		// degrade to the Jaccard-only sqlite tier (which would rewrite every
-		// non-manual memory with no consolidation quality). A stale/exhausted
-		// ANTHROPIC_API_KEY is a false positive for "has an LLM", so the cheap
-		// stop-hook pre-check can't be trusted; this flag is the real guard at
-		// the write site — no LLM tier available (or all fail) => exit non-zero
-		// without touching the DB.
-		if !requireLLM {
-			tiers = append(tiers, reflection.NewSQLiteConsolidator())
-		}
-		consolidator = reflection.NewTieredConsolidator(tiers, logger)
 	}
-built:
 
 	if !consolidator.Available(ctx) {
 		fmt.Fprintf(os.Stderr, "error: consolidator %q is not available\n", consolidator.Name())
