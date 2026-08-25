@@ -2,7 +2,7 @@
 #
 # Closes the gap vs CodeRabbit's automatic learning: mines review
 # findings the PR-Agent made on merged PRs (resolved threads authored by
-# github-actions[bot]) and distills recurring ones into proposed
+# github-actions) and distills recurring ones into proposed
 # best_practices.md additions. Output lands as a DRAFT PR — never merged
 # automatically, so the model's suggestions always pass a human gate and
 # get reviewed by PR-Agent itself (dogfooding).
@@ -61,7 +61,7 @@ jobs:
             | .reviewThreads.nodes[]
             | select(.isResolved)
             | .comments.nodes[]
-            | select(.author.login == "github-actions[bot]")
+            | select((.author.login // "") | startswith("github-actions"))
             | "--- FINDING (PR #\($pr.number) \($pr.title)) ---\n\(.body)\n"
           ' prs.json > findings.txt
           echo "findings bytes: $(wc -c < findings.txt)"
