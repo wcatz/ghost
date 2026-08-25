@@ -137,11 +137,11 @@ jobs:
           # accepted trade-off for never letting a dead thread block merge.
           STALE="$(echo "$THREADS" | jq '[.reviewThreads.nodes[]
             | select(.isResolved==false and .isOutdated==true)
-            | select(.comments.nodes[0].author.login=="github-actions[bot]") | .id]')"
+            | select((.comments.nodes[0].author.login // "") | startswith("github-actions")) | .id]')"
 
           LIVE="$(echo "$THREADS" | jq '[.reviewThreads.nodes[]
             | select(.isResolved==false and .isOutdated==false)
-            | select(.comments.nodes[0].author.login=="github-actions[bot]")]')"
+            | select((.comments.nodes[0].author.login // "") | startswith("github-actions"))]')"
 
           N_STALE="$(jq length <<<"$STALE")"
           N_LIVE="$(jq length <<<"$LIVE")"
