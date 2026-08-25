@@ -2,10 +2,13 @@ name: PR Agent
 
 on:
   pull_request:
-    # synchronize keeps the pr_agent_job check run current on every push —
-    # it is (or will be) a required branch-protection context, and a stale
-    # context on a new head SHA blocks merge with "Expected" forever.
-    types: [opened, reopened, ready_for_review, synchronize]
+    # review_requested (not synchronize): a fresh review per push burns Go
+    # quota every commit, and the original plan ("Re-review policy: NOT on
+    # synchronize; manual /review instead") still holds — pr_agent_job is
+    # not a required branch-protection context (workflow_run-triggered
+    # workflows attach to the wrong SHA for that; see pr-loop.yml), so a
+    # stale context on a new head SHA cannot block merge.
+    types: [opened, reopened, ready_for_review, review_requested]
   issue_comment:
     types: [created]
 
@@ -27,8 +30,8 @@ jobs:
     # OPENCODE_GO_API_KEY) is allowed to run:
     # - issue_comment fires on fork-PR comments in the base repo, so a PR's
     #   head repo must be checked via the API.
-    # - Plain-issue comments (no pull_request attached) are inherently
-    #   same-repo — issue_comment only ever fires on this repo's own issues.
+    # - Plain-issue comments have no PR for PR-Agent to act on — skip rather
+    #   than spinning up a no-op agent run.
     # Comment commands are limited to trusted authors so drive-by comments on
     # this public repo cannot burn subscription quota; PR authors here are
     # always OWNER/MEMBER/COLLABORATOR.
@@ -47,7 +50,7 @@ jobs:
         run: |
           is_pr="$(jq -r '(.pull_request != null) or (.issue.pull_request != null)' "$GITHUB_EVENT_PATH")"
           if [ "$is_pr" != "true" ]; then
-            echo "same-repo=true" >> "$GITHUB_OUTPUT"
+            echo "same-repo=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           NUMBER="$(jq -r '.pull_request.number // .issue.number' "$GITHUB_EVENT_PATH")"
@@ -70,9 +73,9 @@ jobs:
     steps:
       - name: PR Agent action step
         id: pragent
-        # Pinned release — matches repo convention of pinning tool versions
-        # for reproducibility (see ci.yml golangci-lint pin).
-        uses: the-pr-agent/pr-agent@v0.43.0
+        # Pinned to a commit SHA (not a mutable tag) for supply-chain
+        # hardening — matches repo convention of pinning tool versions.
+        uses: the-pr-agent/pr-agent@4ebd5c5333c6ef21509e7304d27969eb825e6f22
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -105,9 +108,12 @@ jobs:
           github_action_config.auto_review: "true"
           # On-demand only (/improve comment): per-finding suggestion
           # generation is sequential LLM calls and blew the 10-min runner
-          # cap three runs straight when always-on.
+          # cap three runs straight when always-on. Also, do NOT auto-commit
+          # to PR branches — that needs pull-requests: write and surprises
+          # authors.
           github_action_config.auto_improve: "false"
-          # Cheap single-call walkthrough summary (CodeRabbit-style) posted
-          # with the first review.
-          github_action_config.auto_describe: "true"
+          # Off: the generated walkthrough summaries are verbose LLM slop
+          # and have hallucinated project-specific names. Findings live in
+          # the review + inline threads; no description is posted.
+          github_action_config.auto_describe: "false"
           github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "review_requested"]'
