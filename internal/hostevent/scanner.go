@@ -35,6 +35,7 @@ type ScanFunc func(io.Reader) (ScanResult, error)
 var scanners = map[string]ScanFunc{
 	FormatClaudeJSONL:      ScanClaudeJSONL,
 	FormatOpencodeMessages: ScanOpencodeMessages,
+	FormatCodexRollout:     ScanCodexRollout,
 }
 
 // Scan runs the scanner registered for format. ok is false when no scanner is
@@ -103,6 +104,69 @@ func ScanClaudeJSONL(r io.Reader) (ScanResult, error) {
 					res.GhostSaves++
 				}
 			}
+		}
+	})
+	return res, err
+}
+
+// codexRolloutLine is the minimal shape of one codex rollout JSONL record
+// (openai/codex, codex-rs/rollout): a timestamped envelope whose type selects
+// the payload — only "response_item" lines carry model traffic; everything
+// else (session_meta, event_msg, turn_context, …) is skipped.
+type codexRolloutLine struct {
+	Type    string `json:"type"`
+	Payload struct {
+		Type      string  `json:"type"`
+		Name      string  `json:"name"`
+		Namespace *string `json:"namespace"`
+	} `json:"payload"`
+}
+
+// codexGhostSaveIdentities are the flattened tool identities (namespace+name;
+// codex's concatenation has no separator) that count as Ghost saves:
+//   - legacy/flat: bare "ghost_memory_save" / "ghost_save_global" with no
+//     namespace
+//   - namespaced: MCP server "ghost" (namespace "mcp__ghost") exposing those
+//     same tool names
+//
+// Exact-match only — a different server shipping an identically-named tool
+// (e.g. namespace "mcp__other", name "ghost_memory_save") must not read as a
+// Ghost save, or codex stops would skip the nudge when nothing was saved.
+var codexGhostSaveIdentities = map[string]bool{
+	"ghost_memory_save":           true,
+	"ghost_save_global":           true,
+	"mcp__ghostghost_memory_save": true,
+	"mcp__ghostghost_save_global": true,
+}
+
+// ScanCodexRollout streams a codex rollout transcript and counts tool calls
+// (function_call items plus local_shell_call items — codex's shell is not a
+// function call), plus how many were Ghost save tools per
+// codexGhostSaveIdentities. Unparseable lines are skipped; errors mid-file are
+// returned with partial counts, same fail-open posture as the other scanners.
+func ScanCodexRollout(r io.Reader) (ScanResult, error) {
+	var res ScanResult
+	err := streamJSONL(r, func(line []byte) {
+		var l codexRolloutLine
+		if err := json.Unmarshal(line, &l); err != nil {
+			return
+		}
+		if l.Type != "response_item" {
+			return
+		}
+		switch l.Payload.Type {
+		case "function_call":
+			res.ToolCalls++
+			flat := ""
+			if l.Payload.Namespace != nil {
+				flat = *l.Payload.Namespace
+			}
+			flat += l.Payload.Name
+			if codexGhostSaveIdentities[flat] {
+				res.GhostSaves++
+			}
+		case "local_shell_call":
+			res.ToolCalls++
 		}
 	})
 	return res, err

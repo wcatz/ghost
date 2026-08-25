@@ -2,7 +2,10 @@ name: PR Agent
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    # synchronize keeps the pr_agent_job check run current on every push —
+    # it is (or will be) a required branch-protection context, and a stale
+    # context on a new head SHA blocks merge with "Expected" forever.
+    types: [opened, reopened, ready_for_review, synchronize]
   issue_comment:
     types: [created]
 
@@ -10,6 +13,13 @@ permissions:
   contents: read
   issues: write
   pull-requests: write
+
+# One agent run per PR at a time: a duplicate trigger (e.g. the same /review
+# comment delivered twice by a client retry) replaces the in-flight run
+# instead of racing it and burning double quota.
+concurrency:
+  group: pr-agent-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   config:
@@ -54,7 +64,9 @@ jobs:
     runs-on: ubuntu-latest
     # Hard cap: litellm's ai_timeout does not bound a hung streamed call —
     # observed 651s before the upstream 500 came back. Kill at the runner.
-    timeout-minutes: 8
+    # 90s per LLM call x several sequential calls can legitimately exceed
+    # 8 minutes (a full review died at exactly 8m24s), so allow 10.
+    timeout-minutes: 10
     steps:
       - name: PR Agent action step
         id: pragent
@@ -95,6 +107,11 @@ jobs:
             Do not report style preferences handled by golangci-lint.
 
           github_action_config.auto_review: "true"
-          github_action_config.auto_improve: "true"
-          github_action_config.auto_describe: "false"
+          # On-demand only (/improve comment): per-finding suggestion
+          # generation is sequential LLM calls and blew the 10-min runner
+          # cap three runs straight when always-on.
+          github_action_config.auto_improve: "false"
+          # Cheap single-call walkthrough summary (CodeRabbit-style) posted
+          # with the first review.
+          github_action_config.auto_describe: "true"
           github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "review_requested"]'

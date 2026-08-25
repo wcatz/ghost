@@ -151,22 +151,55 @@ func parseMCPClient(args []string) (string, error) {
 		switch {
 		case args[i] == "--client":
 			if i+1 >= len(args) {
-				return "", fmt.Errorf("--client requires a value (claude or opencode)")
+				return "", fmt.Errorf("--client requires a value (claude, opencode, codex, goose, or all)")
 			}
 			client = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--client="):
 			client = strings.TrimPrefix(args[i], "--client=")
 			if client == "" {
-				return "", fmt.Errorf("--client requires a value (claude or opencode)")
+				return "", fmt.Errorf("--client requires a value (claude, opencode, codex, goose, or all)")
 			}
 		}
 	}
 	return client, nil
 }
 
+// clientTarget pairs a display name with its `mcp init` installer.
+type clientTarget struct {
+	name string
+	run  func(w io.Writer, dryRun bool) error
+}
+
+// mcpInitTargets lists every installable client in run order.
+func mcpInitTargets() []clientTarget {
+	return []clientTarget{
+		{"claude", mcpinit.Run},
+		{"opencode", mcpinit.RunOpencode},
+		{"codex", mcpinit.RunCodex},
+		{"goose", mcpinit.RunGoose},
+	}
+}
+
+// runAllClients installs ghost into every target sequentially, continuing past
+// individual failures so one broken client never blocks the rest. Each target's
+// installer output goes to stdout under a banner; failures go to stderr. Returns
+// the names of failed targets (empty when all succeeded).
+func runAllClients(stdout, stderr io.Writer, dryRun bool, targets []clientTarget) []string {
+	var failed []string
+	for _, t := range targets {
+		_, _ = fmt.Fprintf(stdout, "\n=== %s ===\n", t.name)
+		if err := t.run(stdout, dryRun); err != nil {
+			_, _ = fmt.Fprintf(stderr, "error (%s): %v\n", t.name, err)
+			failed = append(failed, t.name)
+		}
+	}
+	return failed
+}
+
 // runMCPInit configures an MCP client to use Ghost as its memory system.
-// Defaults to Claude Code; --client opencode targets opencode instead.
+// Defaults to Claude Code; --client opencode targets opencode instead; --client
+// all installs into every supported client sequentially.
 func runMCPInit() {
 	client, err := parseMCPClient(os.Args[3:])
 	if err != nil {
@@ -185,6 +218,13 @@ func runMCPInit() {
 	}
 
 	switch client {
+	case "all":
+		failed := runAllClients(os.Stdout, os.Stderr, dryRun, mcpInitTargets())
+		if len(failed) > 0 {
+			fmt.Fprintf(os.Stderr, "\ncompleted with failures: %s\n", strings.Join(failed, ", "))
+			os.Exit(1)
+		}
+		return
 	case "opencode":
 		err = mcpinit.RunOpencode(os.Stdout, dryRun)
 	case "codex":
@@ -194,7 +234,7 @@ func runMCPInit() {
 	case "claude":
 		err = mcpinit.Run(os.Stdout, dryRun)
 	default:
-		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude, opencode, codex, or goose)\n", client)
+		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude, opencode, codex, goose, or all)\n", client)
 		os.Exit(1)
 	}
 	if err != nil {
@@ -1210,8 +1250,8 @@ Usage:
 
 Commands:
   mcp                         Start MCP server on stdio (used by Claude Code)
-  mcp init [--client claude|opencode] [--dry-run]  Configure MCP client integration
-  mcp status [--client claude|opencode]            Check MCP client integration health
+  mcp init [--client claude|opencode|codex|goose|all] [--dry-run]  Configure MCP client integration
+  mcp status [--client claude|opencode|codex|goose]                Check MCP client integration health
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
   supersede <project> [flags] Link superseded memories (dry-run by default, --apply to write)
   resolve <project> [flags]   Mark resolved evidence memories (dry-run by default, --apply to write)

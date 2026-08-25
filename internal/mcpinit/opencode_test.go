@@ -265,8 +265,19 @@ func TestCheckPrereqs_ClaudeMissing(t *testing.T) {
 	t.Setenv("PATH", binDir)
 
 	var out bytes.Buffer
-	if _, _, err := checkPrereqs(&out, "claude"); err == nil {
+	_, _, err := checkPrereqs(&out, "claude")
+	if err == nil {
 		t.Error("expected error when claude is missing from PATH and common dirs")
+	} else {
+		// The dead-end guard: the error must point at the other clients and
+		// must not suggest re-running init, which can never succeed here.
+		msg := err.Error()
+		if !strings.Contains(msg, "--client opencode") {
+			t.Errorf("claude-missing error should list alternative clients, got: %q", msg)
+		}
+		if strings.Contains(msg, "Re-run") {
+			t.Errorf("claude-missing error should not carry the circular re-run hint, got: %q", msg)
+		}
 	}
 	if _, _, err := checkPrereqs(&out, "opencode"); err != nil {
 		t.Errorf("opencode target should require only ghost: %v", err)
