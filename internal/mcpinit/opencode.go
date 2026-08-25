@@ -16,9 +16,8 @@ import (
 
 // opencodeGhostPluginTS is the lifecycle adapter installed under
 // <config>/opencode/plugins/. go:embed keeps the TypeScript source verbatim
-// (template literals would fight a Go string constant) and makes this repo's
-// copy the single source of truth for both in-repo installs and the future
-// npm package (spec §4 Phase 3).
+// (template literals would fight a Go string constant); the embedded copy is
+// the single source of truth for the plugin.
 //
 //go:embed opencode_ghost.ts
 var opencodeGhostPluginTS string
