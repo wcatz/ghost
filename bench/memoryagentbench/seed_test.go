@@ -42,7 +42,7 @@ func TestSeedFactsOrdersTimestamps(t *testing.T) {
 	}
 	for i := 1; i < len(ids); i++ {
 		prev, cur := byID[ids[i-1]], byID[ids[i]]
-		if !(prev.UpdatedAt < cur.UpdatedAt) {
+		if prev.UpdatedAt >= cur.UpdatedAt {
 			t.Errorf("fact %d (%q, updated_at=%s) is not strictly older than fact %d (%q, updated_at=%s)",
 				i-1, prev.Content, prev.UpdatedAt, i, cur.Content, cur.UpdatedAt)
 		}
