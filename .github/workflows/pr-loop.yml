@@ -85,26 +85,49 @@ jobs:
         run: |
           [ -n "$NUMBER" ] || { echo "no PR"; exit 0; }
 
-          # first:100 — not paginated. Over 100 threads, older ones are
-          # silently skipped: stale findings would survive the sweep and
-          # keep blocking merge via required conversation resolution until
-          # a human resolves them. Observed PRs stay far below the cap;
-          # raise it (and add cursor pagination) if that ever changes.
-          THREADS="$(gh api graphql \
-            -f query='query($owner:String!,$name:String!,$number:Int!){
-              repository(owner:$owner,name:$name){
-                pullRequest(number:$number){
-                  headRefOid
-                  reviewThreads(first:100){nodes{
-                    id isResolved isOutdated
-                    comments(first:1){nodes{author{login}}}
-                  }}
-                }
-              }}' \
+          # Cursor-paginated: first:100 alone silently skipped threads past
+          # 100, letting stale findings survive the sweep and keep blocking
+          # merge via required conversation resolution until a human
+          # resolved them. The page cap bounds a pathological repo
+          # (20 pages x 100 threads) so the loop can never run away.
+          HEADREF="$(gh api graphql \
+            -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid}}}' \
             -f owner="${GITHUB_REPOSITORY%%/*}" \
             -f name="${GITHUB_REPOSITORY##*/}" \
             -F number="$NUMBER" \
-            --jq '.data.repository.pullRequest')"
+            --jq '.data.repository.pullRequest.headRefOid')"
+
+          PAGES_FILE="$(mktemp)"
+          trap 'rm -f "$PAGES_FILE"' EXIT
+          CURSOR_ARG=()
+          for _ in $(seq 1 20); do
+            PAGE="$(gh api graphql \
+              -f query='query($owner:String!,$name:String!,$number:Int!,$cursor:String){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$number){
+                    reviewThreads(first:100,after:$cursor){
+                      nodes{
+                        id isResolved isOutdated
+                        comments(first:1){nodes{author{login}}}
+                      }
+                      pageInfo{hasNextPage endCursor}
+                    }
+                  }
+                }}' \
+              -f owner="${GITHUB_REPOSITORY%%/*}" \
+              -f name="${GITHUB_REPOSITORY##*/}" \
+              -F number="$NUMBER" "${CURSOR_ARG[@]}" \
+              --jq '.data.repository.pullRequest.reviewThreads')"
+            echo "$PAGE" >> "$PAGES_FILE"
+            [ "$(jq -r '.pageInfo.hasNextPage' <<<"$PAGE")" != "true" ] && break
+            CURSOR_ARG=(-f cursor="$(jq -r '.pageInfo.endCursor' <<<"$PAGE")")
+          done
+
+          THREADS="$(jq -n --arg head "$HEADREF" \
+            '{headRefOid: $head,
+              reviewThreads: {nodes: [inputs | .nodes[]]}}' \
+            "$PAGES_FILE" 2>/dev/null || echo '{"headRefOid":"","reviewThreads":{"nodes":[]}}')"
+          rm -f "$NODES_FILE"
 
           # isOutdated is a proxy, not a verdict: a thread goes outdated
           # when the diff line it was anchored to changes or disappears,
