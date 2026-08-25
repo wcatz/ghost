@@ -2,14 +2,15 @@
 #
 # Validated mechanics (wcatz/ci-mech-spike, 2026-08-25):
 #   - GITHUB_TOKEN cannot resolve review threads ("not accessible by
-#     integration") — resolutions use the GH_RESOLVE_TOKEN secret, a
-#     fine-grained PAT with Pull requests: read+write on this repo only.
-#     Without the secret this job degrades to reporting-only.
+#     integration") and cannot submit APPROVED reviews. Resolutions go
+#     through a GitHub App installation token (GH_APP_ID +
+#     GH_APP_PRIVATE_KEY secrets, Pull requests: read+write on this repo
+#     only). Without those secrets this job degrades to report-only.
 #   - Outdated unresolved threads still block merge under required
 #     conversation resolution, so stale agent findings must be swept
 #     once a fresh review has re-judged the new diff.
-#   - GITHUB_TOKEN CAN submit REQUEST_CHANGES reviews; it can never
-#     APPROVE. Signal-only: approvals stay out of branch protection.
+#   - GITHUB_TOKEN CAN submit REQUEST_CHANGES reviews. Signal-only:
+#     approvals stay out of branch protection entirely.
 #
 # Triggered by workflow_run after each PR Agent completion and by PR
 # comments for manual re-runs. workflow_run executes in default-branch
@@ -41,6 +42,8 @@ jobs:
         github.event.sender.type != 'Bot')
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      HAS_APP: ${{ secrets.GH_APP_ID != '' && secrets.GH_APP_PRIVATE_KEY != '' }}
     steps:
       - name: Resolve PR number
         id: pr
@@ -62,10 +65,18 @@ jobs:
           fi
           echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
 
+      - name: Mint app token
+        id: app-token
+        if: env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
       - name: Sweep stale findings, signal on live ones
         env:
           GH_TOKEN: ${{ github.token }}
-          RESOLVE_TOKEN: ${{ secrets.GH_RESOLVE_TOKEN }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
           NUMBER: ${{ steps.pr.outputs.number }}
         run: |
           [ -n "$NUMBER" ] || { echo "no PR"; exit 0; }
@@ -98,17 +109,18 @@ jobs:
           N_LIVE="$(jq length <<<"$LIVE")"
 
           if [ "$N_STALE" -gt 0 ]; then
-            if [ -n "$RESOLVE_TOKEN" ]; then
+            if [ -n "$APP_TOKEN" ]; then
               RESOLVED=0
               for id in $(jq -r .[] <<<"$STALE"); do
-                if gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' \
+                if GH_TOKEN="$APP_TOKEN" gh api graphql \
+                     -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' \
                      -f id="$id" --jq '.data.resolveReviewThread.thread.isResolved' >/dev/null 2>&1; then
                   RESOLVED=$((RESOLVED+1))
                 fi
               done
               echo "Auto-resolved $RESOLVED/$N_STALE stale finding(s) (superseded by newer review)."
             else
-              echo "::warning::$N_STALE stale finding(s) need resolution but GH_RESOLVE_TOKEN is not configured."
+              echo "::warning::$N_STALE stale finding(s) await resolution — configure the GH_APP_ID / GH_APP_PRIVATE_KEY secrets to enable auto-resolve."
             fi
           fi
 
@@ -116,7 +128,7 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
               -f event=REQUEST_CHANGES \
               -f body="PR-Agent has $N_LIVE unresolved finding(s) — see inline threads." >/dev/null 2>&1 \
-              && echo "Requested changes: $N_LIVE live finding(s) block-by-thread." \
+              && echo "Requested changes: $N_LIVE live finding(s)." \
               || echo "Could not set REQUEST_CHANGES state."
           else
             echo "No live PR-Agent findings."
