@@ -408,3 +408,8 @@ Issues and PRs welcome. `go test ./...` and `go vet ./...` must pass; feature br
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
+
+## Review pipeline
+
+PRs are reviewed automatically on every push. Findings land as inline threads that
+must be resolved before merge; findings superseded by a newer review auto-resolve.
