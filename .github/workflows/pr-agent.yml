@@ -3,7 +3,7 @@ name: PR Agent
 on:
   pull_request:
     # Re-review policy: every code push gets fresh bot eyes (synchronize);
-    # docs-only pushes skip the trigger entirely so they don't burn quota.
+    # docs-only pushes skip the trigger so they do not burn Go quota.
     # Trade-offs: a PR whose FIRST push is docs-only gets no automatic
     # review until a code-containing push fires synchronize (paths filters
     # apply to opened too) — request one via /review comment for that
