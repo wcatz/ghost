@@ -13,3 +13,16 @@ inline_key_issues = true
 # Upstream caps findings at 3; raise for better coverage on
 # refactors. Reviewer extra_instructions keep style noise out.
 num_max_findings = 5
+
+[pr_code_suggestions]
+# Post high-confidence suggestions as committable inline code comments
+# (GitHub suggestion blocks the author can accept with one click).
+# Threshold 8 keeps only near-certain fixes — low-confidence noise
+# stays in the summary table only.
+commitable_code_suggestions = true
+dual_publishing_score_threshold = 8
+
+[config]
+# Don't re-post the same suggestion on every push — fingerprint
+# markers deduplicate across runs.
+persistent_inline_comments = true
