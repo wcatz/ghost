@@ -150,7 +150,12 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 					const dir = join(homedir(), ".cache", "ghost")
 					await mkdir(dir, { recursive: true })
 					const file = join(dir, "opencode-context.md")
-					await writeFile(file, ctx)
+					// The block is a startup snapshot (opencode has no resume/
+					// compact re-injection like claude), so flag its staleness
+					// locally — without touching formatSessionContext, which
+					// claude/codex consume verbatim.
+					const ctxHint = "\n\n---\n\n*Snapshot captured at this session's start. Memory saved after startup won't appear here — call `ghost_project_context` (or any `ghost_*` MCP tool) for the live view.*\n"
+					await writeFile(file, ctx + ctxHint)
 					cfg.instructions = cfg.instructions ?? []
 					if (!cfg.instructions.includes(file)) cfg.instructions.push(file)
 				}

@@ -252,14 +252,16 @@ func formatSessionContext(projectID, project string, memories []sessionMemory, l
 	return sb.String()
 }
 
-// RenderSessionContext is the read-only context renderer backing the
-// `ghost context` command. It produces exactly what the SessionStart hook would
-// emit for the same cwd — project memories, globals, open tasks, recent
-// decisions — without bumping the session counter or starting background
-// workers. opencode's plugin materializes this into its instructions so every
-// session opens with project memory (opencode has no stdout-injection surface
-// of its own). An empty cwd resolves to the process working directory; a
-// missing store or unmatched directory with no globals yields an empty string.
+// RenderSessionContext is the context renderer backing the `ghost context`
+// command and opencode's plugin. It produces exactly what the SessionStart hook
+// would emit for the same cwd — project memories, globals, open tasks, recent
+// decisions. To keep opencode's injected context at parity with claude/codex it
+// also mirrors the SessionStart hook's startup side effects: it starts the
+// Obsidian mirror when configured and counts this as a new session. opencode's
+// plugin materializes the result into its instructions so every session opens
+// with project memory (opencode has no stdout-injection surface of its own).
+// An empty cwd resolves to the process working directory; a missing store or
+// unmatched directory with no globals yields an empty string.
 func RenderSessionContext(cwd string) string {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
@@ -267,7 +269,20 @@ func RenderSessionContext(cwd string) string {
 	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
 		cwd = resolved
 	}
+
+	// Parity with the SessionStart hook: opencode has no separate lifecycle
+	// event that triggers these, so the context render is the single startup
+	// entry point that must. Both are best-effort and idempotent.
+	ensureObsidianSyncRunning()
+
 	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd)
+	if projectID != "" {
+		if dataDir, err := config.DataDir(); err == nil {
+			if n := bumpSessionCount(filepath.Join(dataDir, "ghost.db"), projectID); n > 0 {
+				interactionCount = n
+			}
+		}
+	}
 	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals()
 	// Nothing to surface — don't inject an empty/decorative block.
 	if projectID == "" && len(globals) == 0 {

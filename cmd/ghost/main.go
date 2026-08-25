@@ -239,10 +239,12 @@ func runMCPStatus() {
 }
 
 // runContext prints the passive session-start context block for a directory,
-// backing opencode's plugin-injected instructions. It is read-only: no
-// session-count bump, no background workers. `ghost context` is the
-// opencode-appropriate alternative to the SessionStart hook, which opencode
-// cannot consume (no stdout-injection surface). See RenderSessionContext.
+// backing opencode's plugin-injected instructions. It mirrors the SessionStart
+// hook's startup side effects (Obsidian sync when configured, session-count
+// bump) so opencode's injected context stays at parity with claude/codex.
+// `ghost context` is the opencode-appropriate alternative to the SessionStart
+// hook, which opencode cannot consume (no stdout-injection surface). See
+// RenderSessionContext.
 func runContext() {
 	cwd := ""
 	for i := 2; i < len(os.Args); i++ {
