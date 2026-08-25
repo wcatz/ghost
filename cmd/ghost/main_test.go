@@ -483,3 +483,100 @@ func targetNames(targets []clientTarget) []string {
 	}
 	return names
 }
+
+// TestMCPLogConfig_QuietWhenSpawned guards the #373 fix: a client-spawned
+// server (stderr not a terminal) must drop routine INFO logs from stderr so
+// MCP clients that surface stderr don't leak them into the UI.
+func TestMCPLogConfig_QuietWhenSpawned(t *testing.T) {
+	t.Setenv("GHOST_LOG_FILE", "")
+	t.Setenv("GHOST_DEBUG", "")
+	writer, level, closeLog := mcpLogConfig(false)
+	if level != slog.LevelWarn {
+		t.Fatalf("level = %v, want Warn", level)
+	}
+	if writer != io.Writer(os.Stderr) {
+		t.Fatal("writer must be stderr")
+	}
+	if closeLog != nil {
+		t.Fatal("no file opened, closer must be nil")
+	}
+}
+
+func TestMCPLogConfig_InfoWhenTerminal(t *testing.T) {
+	t.Setenv("GHOST_LOG_FILE", "")
+	t.Setenv("GHOST_DEBUG", "")
+	writer, level, closeLog := mcpLogConfig(true)
+	if level != slog.LevelInfo {
+		t.Fatalf("level = %v, want Info (interactive debugging)", level)
+	}
+	if writer != io.Writer(os.Stderr) {
+		t.Fatal("writer must be stderr")
+	}
+	if closeLog != nil {
+		t.Fatal("no file opened, closer must be nil")
+	}
+}
+
+// TestMCPLogConfig_FileRedirect: GHOST_LOG_FILE must divert the full stream
+// (INFO included) to the file even when spawned by a client, keeping stderr
+// clean while preserving logs for debugging.
+func TestMCPLogConfig_FileRedirect(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "ghost.log")
+	t.Setenv("GHOST_LOG_FILE", logPath)
+	t.Setenv("GHOST_DEBUG", "")
+	writer, level, closeLog := mcpLogConfig(false)
+	if level != slog.LevelInfo {
+		t.Fatalf("level = %v, want Info (full stream to file)", level)
+	}
+	if closeLog == nil {
+		t.Fatal("file opened, closer must be non-nil")
+	}
+	f, ok := writer.(*os.File)
+	if !ok {
+		t.Fatalf("writer is %T, want *os.File", writer)
+	}
+	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: level}))
+	logger.Info("hello from test")
+	closeLog()
+	if _, err := f.Write([]byte("after close")); err == nil {
+		t.Fatal("closer must actually close the file")
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "hello from test") {
+		t.Fatalf("log file missing the info line, got %q", data)
+	}
+}
+
+func TestMCPLogConfig_DebugWins(t *testing.T) {
+	t.Setenv("GHOST_LOG_FILE", "")
+	t.Setenv("GHOST_DEBUG", "1")
+	_, level, _ := mcpLogConfig(false)
+	if level != slog.LevelDebug {
+		t.Fatalf("level = %v, want Debug", level)
+	}
+}
+
+// TestMCPLogConfig_UnopenableFileFallsBackQuiet: a GHOST_LOG_FILE that cannot
+// be opened must not silently restore INFO logging to stderr in client-spawned
+// mode — that would leak the very noise the quiet default removes.
+func TestMCPLogConfig_UnopenableFileFallsBackQuiet(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "adir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GHOST_LOG_FILE", dir) // existing directory: open for write fails
+	t.Setenv("GHOST_DEBUG", "")
+	writer, level, closeLog := mcpLogConfig(false)
+	if level != slog.LevelWarn {
+		t.Fatalf("level = %v, want Warn (quiet fallback)", level)
+	}
+	if writer != io.Writer(os.Stderr) {
+		t.Fatal("writer must fall back to stderr")
+	}
+	if closeLog != nil {
+		t.Fatal("no file opened, closer must be nil")
+	}
+}

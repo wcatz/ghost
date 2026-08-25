@@ -101,7 +101,11 @@ func runMCP() {
 		fmt.Fprintln(os.Stderr, "To set up the integration, run: ghost mcp init")
 		fmt.Fprintln(os.Stderr, "")
 	}
-	cfg, logger, store := bootstrap()
+	logWriter, logLevel, closeLog := mcpLogConfig(isTerminalFile(os.Stderr))
+	if closeLog != nil {
+		defer closeLog()
+	}
+	cfg, logger, store := bootstrap(logWriter, logLevel)
 	defer store.Close() //nolint:errcheck
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -389,7 +393,7 @@ Flags:
 		os.Exit(1)
 	}
 
-	cfg, logger, store := bootstrap()
+	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel())
 	defer store.Close() //nolint:errcheck
 
 	ctx := context.Background()
@@ -742,7 +746,7 @@ cli.opencode_binary) — requires one of the two.`)
 		os.Exit(1)
 	}
 
-	cfg, logger, store := bootstrap()
+	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel())
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
 
@@ -824,7 +828,7 @@ cli.claude_binary / cli.opencode_binary) — requires one of the two.`)
 		os.Exit(1)
 	}
 
-	cfg, logger, store := bootstrap()
+	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel())
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
 
@@ -981,7 +985,7 @@ Irreversible. Refuses to delete _global.`)
 		os.Exit(1)
 	}
 
-	_, _, store := bootstrap()
+	_, _, store := bootstrap(os.Stderr, cliLogLevel())
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
 
@@ -1341,12 +1345,18 @@ func runBench() {
 	fmt.Print(bench.FormatResults(results))
 }
 
-func bootstrap() (*config.Config, *slog.Logger, *memory.Store) {
+// bootstrap loads config, opens the database, and returns the wiring every
+// command shares. logWriter/logLevel come from the caller: interactive CLI
+// commands log INFO to stderr, while the MCP server resolves a quiet default
+// (see mcpLogConfig) so stderr stays clean for MCP clients that surface it.
+func bootstrap(logWriter io.Writer, logLevel slog.Level) (*config.Config, *slog.Logger, *memory.Store) {
+	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: logLevel}))
+
 	configPath, created, err := config.EnsureConfigFile()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not create config file: %v\n", err)
+		logger.Warn("could not create config file", "error", err)
 	} else if created {
-		fmt.Fprintf(os.Stderr, "Created config file: %s\n", configPath)
+		logger.Info("created config file", "path", configPath)
 	}
 
 	cfg, err := config.Load()
@@ -1354,12 +1364,6 @@ func bootstrap() (*config.Config, *slog.Logger, *memory.Store) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-
-	logLevel := slog.LevelInfo
-	if os.Getenv("GHOST_DEBUG") != "" {
-		logLevel = slog.LevelDebug
-	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 
 	dataDir, err := config.DataDir()
 	if err != nil {
@@ -1383,9 +1387,55 @@ func bootstrap() (*config.Config, *slog.Logger, *memory.Store) {
 	return cfg, logger, store
 }
 
+// mcpLogConfig resolves the log writer and minimum level for `ghost mcp`.
+// MCP protocol traffic occupies stdout, so stderr must stay clean: when the
+// server is spawned by a client (stderr not a terminal), routine INFO logs
+// are dropped and only WARN+ reaches stderr, unless GHOST_LOG_FILE redirects
+// the full stream to a file. Interactive runs (stderr is a terminal) keep
+// INFO on stderr. GHOST_DEBUG always restores Debug level. The returned
+// closeLog is non-nil when a file was opened and must be called on shutdown.
+func mcpLogConfig(stderrTerminal bool) (io.Writer, slog.Level, func()) {
+	level := slog.LevelInfo
+	writer := io.Writer(os.Stderr)
+	var closeLog func()
+
+	if path := os.Getenv("GHOST_LOG_FILE"); path != "" {
+		if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cannot open GHOST_LOG_FILE %q: %v\n", path, err)
+			if !stderrTerminal {
+				level = slog.LevelWarn
+			}
+		} else {
+			writer = f
+			closeLog = func() { _ = f.Close() }
+		}
+	} else if !stderrTerminal {
+		level = slog.LevelWarn
+	}
+
+	if os.Getenv("GHOST_DEBUG") != "" {
+		level = slog.LevelDebug
+	}
+	return writer, level, closeLog
+}
+
+// cliLogLevel is the stderr log level for interactive CLI commands: Info,
+// or Debug when GHOST_DEBUG is set.
+func cliLogLevel() slog.Level {
+	if os.Getenv("GHOST_DEBUG") != "" {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
+}
+
 // isTerminal reports whether stdin is connected to a terminal.
 func isTerminal() bool {
-	fi, err := os.Stdin.Stat()
+	return isTerminalFile(os.Stdin)
+}
+
+// isTerminalFile reports whether f is connected to a terminal.
+func isTerminalFile(f *os.File) bool {
+	fi, err := f.Stat()
 	if err != nil {
 		return false
 	}
