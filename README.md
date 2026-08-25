@@ -272,7 +272,7 @@ Because the mirror is one-way, edits inside the vault are informational only and
 | Tasks | `ghost_task_create` `ghost_task_list` `ghost_task_update` `ghost_task_complete` |
 | Decisions | `ghost_decision_record` `ghost_decisions_list` |
 
-`ghost_resolve` scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own model via MCP sampling — no Anthropic API credits spent. Args: `project` (required), `apply` (default false: dry-run preview only; pass `true` to stamp `resolved_at` on confirmed memories).
+`ghost_resolve` scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own model via MCP sampling when the client supports it, falling back to a subscription-billed `claude -p` call otherwise (dry-run only on that fallback) — no Anthropic API credits spent either way. Args: `project` (required), `apply` (default false: dry-run preview only; pass `true` to stamp `resolved_at` on confirmed memories).
 
 Resources: project context, global memories, project decisions, project tasks — pin them in clients that support it to survive context compaction.
 
@@ -395,7 +395,7 @@ Skipped deliberately: LOCOMO (publicly audited answer-key and judge problems) an
 
 Ghost is a solo project, built because I wanted my own agents to stop forgetting, and used daily on real infrastructure work. What you can verify rather than trust:
 
-- Pure Go, `CGO_ENABLED=0`, 7 direct dependencies (SQLite via `modernc.org/sqlite` — no C toolchain anywhere); a static binary around 12.5 MB
+- Pure Go, `CGO_ENABLED=0`, 8 direct dependencies (SQLite via `modernc.org/sqlite` — no C toolchain anywhere); a static binary around 12.5 MB
 - ~1:1 test-to-code ratio; CI runs `go vet`, `golangci-lint`, and race-enabled tests on every PR and push to main
 - Releases for 6 OS/arch targets built by GoReleaser with checksums, plus a multi-arch Docker image
 
