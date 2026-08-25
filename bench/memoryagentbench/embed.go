@@ -109,7 +109,10 @@ func (e *cachedEmbedder) EnsureBatch(ctx context.Context, texts []string) error 
 			e.cache[h] = vecs[i]
 			e.misses++
 			if e.cacheFile != nil {
-				line, _ := json.Marshal(cacheLine{Hash: h, Vector: vecs[i]})
+				line, err := json.Marshal(cacheLine{Hash: h, Vector: vecs[i]})
+				if err != nil {
+					return fmt.Errorf("marshal cache line: %w", err)
+				}
 				if _, err := fmt.Fprintf(e.cacheFile, "%s\n", line); err != nil {
 					return fmt.Errorf("append embed cache: %w", err)
 				}
