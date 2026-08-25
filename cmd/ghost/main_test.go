@@ -483,3 +483,66 @@ func targetNames(targets []clientTarget) []string {
 	}
 	return names
 }
+
+// TestMCPLogConfig_QuietWhenSpawned guards the #373 fix: a client-spawned
+// server (stderr not a terminal) must drop routine INFO logs from stderr so
+// MCP clients that surface stderr don't leak them into the UI.
+func TestMCPLogConfig_QuietWhenSpawned(t *testing.T) {
+	t.Setenv("GHOST_LOG_FILE", "")
+	t.Setenv("GHOST_DEBUG", "")
+	writer, level := mcpLogConfig(false)
+	if level != slog.LevelWarn {
+		t.Fatalf("level = %v, want Warn", level)
+	}
+	if writer != io.Writer(os.Stderr) {
+		t.Fatal("writer must be stderr")
+	}
+}
+
+func TestMCPLogConfig_InfoWhenTerminal(t *testing.T) {
+	t.Setenv("GHOST_LOG_FILE", "")
+	t.Setenv("GHOST_DEBUG", "")
+	writer, level := mcpLogConfig(true)
+	if level != slog.LevelInfo {
+		t.Fatalf("level = %v, want Info (interactive debugging)", level)
+	}
+	if writer != io.Writer(os.Stderr) {
+		t.Fatal("writer must be stderr")
+	}
+}
+
+// TestMCPLogConfig_FileRedirect: GHOST_LOG_FILE must divert the full stream
+// (INFO included) to the file even when spawned by a client, keeping stderr
+// clean while preserving logs for debugging.
+func TestMCPLogConfig_FileRedirect(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "ghost.log")
+	t.Setenv("GHOST_LOG_FILE", logPath)
+	t.Setenv("GHOST_DEBUG", "")
+	writer, level := mcpLogConfig(false)
+	if level != slog.LevelInfo {
+		t.Fatalf("level = %v, want Info (full stream to file)", level)
+	}
+	f, ok := writer.(*os.File)
+	if !ok {
+		t.Fatalf("writer is %T, want *os.File", writer)
+	}
+	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: level}))
+	logger.Info("hello from test")
+	_ = f.Close()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "hello from test") {
+		t.Fatalf("log file missing the info line, got %q", data)
+	}
+}
+
+func TestMCPLogConfig_DebugWins(t *testing.T) {
+	t.Setenv("GHOST_LOG_FILE", "")
+	t.Setenv("GHOST_DEBUG", "1")
+	_, level := mcpLogConfig(false)
+	if level != slog.LevelDebug {
+		t.Fatalf("level = %v, want Debug", level)
+	}
+}
