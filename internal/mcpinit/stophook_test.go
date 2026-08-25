@@ -198,8 +198,11 @@ func TestRunStop_SweepsTransientTempTranscript(t *testing.T) {
 		fmt.Sprintf(`{"session_id":"oc1","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, path))
 	var out bytes.Buffer
 	RunHostEvent("stop", "opencode", strings.NewReader(input), &out, io.Discard)
-	if out.Len() != 0 {
-		t.Errorf("non-blocking host must stay silent on stdout, got %q", out.String())
+	// opencode now receives the nudge on stdout (its plugin re-presents it as a
+	// non-blocking reminder); the key invariant here is that the transient
+	// transcript dir is still swept after the hook runs.
+	if !strings.Contains(out.String(), `"decision":"block"`) {
+		t.Errorf("expected nudge block decision on stdout, got %q", out.String())
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("transient transcript dir was not swept: %v", err)
@@ -298,10 +301,12 @@ func TestRunHostEvent_SessionEndNeverNudges(t *testing.T) {
 	}
 }
 
-// TestRunHostEvent_NudgeSuppressedOnNonBlockingHost pins the capability gate:
-// opencode cannot block a stop, so the eligible nudge degrades to one stderr
-// line instead of emitting output the host would misread.
-func TestRunHostEvent_NudgeSuppressedOnNonBlockingHost(t *testing.T) {
+// TestRunHostEvent_NudgeEmittedForAllHosts pins the contract: the save-nudge
+// block decision is emitted on stdout for every host that reaches the stop
+// nudge path — including non-blocking hosts like opencode (which cannot honor
+// the block but re-present it as a non-blocking reminder via their plugin). No
+// stderr line is ever emitted, so there is no terminal bleed.
+func TestRunHostEvent_NudgeEmittedForAllHosts(t *testing.T) {
 	isolatedHome(t)
 	path := writeTranscript(t, lineUser, lineToolBash, lineText)
 	input := contractInputFor(t, "Stop", "opencode", "claude-jsonl",
@@ -309,11 +314,11 @@ func TestRunHostEvent_NudgeSuppressedOnNonBlockingHost(t *testing.T) {
 
 	var out, errBuf bytes.Buffer
 	RunHostEvent("stop", "opencode", strings.NewReader(input), &out, &errBuf)
-	if out.Len() != 0 {
-		t.Errorf("non-blocking host must get no block decision, got %q", out.String())
+	if !strings.Contains(out.String(), `"decision":"block"`) {
+		t.Errorf("nudge must emit block decision on stdout, got %q", out.String())
 	}
-	if !strings.Contains(errBuf.String(), "cannot block") {
-		t.Errorf("expected suppression note on stderr, got %q", errBuf.String())
+	if errBuf.Len() != 0 {
+		t.Errorf("nudge must not emit stderr (no terminal bleed), got %q", errBuf.String())
 	}
 }
 

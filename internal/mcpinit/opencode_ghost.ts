@@ -10,13 +10,15 @@
 // with the transcript materialized as temp JSONL in the `opencode-messages`
 // format ({info, parts} per line, verbatim client.session.messages
 // serialization). Ghost scans it for save-tool usage. opencode cannot block
-// stops or inject context, so any ghost nudge degrades to a log line there —
+// a stop, so the save-nudge is injected into the live session via
+// client.session.promptAsync (the faithful analog of the claude/codex blocking
+// nudge) so the agent itself acts on it; failures fall back to a log line.
 // fail-open is absolute: every error logs one line and never disturbs the
 // session.
 import type { Plugin } from "@opencode-ai/plugin"
 import { spawn } from "node:child_process"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
 const CONTRACT_VERSION = 1
@@ -39,6 +41,35 @@ let sawStatusEvent = false
 const lastFire = new Map<string, number>()
 const DEBOUNCE_MS = 2000
 const MAX_TRACKED_SESSIONS = 256
+
+// Once the save reminder has been injected into a session, don't re-inject it
+// on later idle transitions: the nudge condition stays true until something is
+// actually saved, and re-prompting every idle would be noisy. Bounded like
+// lastFire so long-lived hosts don't grow it without limit.
+const nudgedSessions = new Map<string, true>()
+
+// Builds the agent-facing instruction injected into the live session when the
+// save nudge fires: a clear directive to review the session and persist any
+// discoveries via ghost_memory_save.
+const nudgePrompt = (reason: string): string =>
+	`[Ghost] ${reason} As the assistant, if there are discoveries worth keeping, save them now via ghost_ghost_memory_save. This is an automated reminder — act on it rather than asking the user.`
+
+// Materializes ghost's session-start context block for a directory and returns
+// it, so opencode can inject it passively via instructions (opencode has no
+// stdout-injection surface of its own). Read-only and fail-open: any spawn
+// error or missing context yields "" and the caller skips injection.
+const renderStartContext = (cwd: string): Promise<string> =>
+	new Promise((resolve) => {
+		const child = spawn(process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT, ["context", "--cwd", cwd], {
+			stdio: ["ignore", "pipe", "inherit"],
+		})
+		let out = ""
+		child.stdout?.on("data", (d) => {
+			out += d.toString()
+		})
+		child.on("error", () => resolve(""))
+		child.on("close", () => resolve(out))
+	})
 
 export const GhostPlugin: Plugin = async ({ client, directory }) => {
 	const log = async (level: "info" | "warn" | "error", message: string) => {
@@ -89,17 +120,49 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 
 		try {
 			const child = spawn(process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT, ["hook", "stop", "--source", "opencode"], {
-				stdio: ["pipe", "ignore", "inherit"],
+				stdio: ["pipe", "pipe", "inherit"],
 				detached: true,
 				env: process.env,
 			})
 			child.on("error", async (e) => {
 				await log("warn", `ghost: fail-open (spawn: ${e})`)
 			})
+			// opencode cannot block a stop, so the {"decision":"block"} nudge
+			// ghost emits on stdout is captured here and injected into the live
+			// session (client.session.promptAsync) so the agent itself acts on
+			// it — the faithful analog of the claude/codex blocking nudge. If
+			// the injection fails it falls back to a log line. Either way the
+			// nudge never touches stderr, so there is no terminal bleed.
+			let nudge = ""
+			child.stdout?.on("data", (d) => { nudge += d.toString() })
 			// Best-effort local cleanup when we outlive the hook; ghost also
 			// sweeps its ghost-* temp transcript dirs consumer-side, covering
 			// hosts that exit before this handler runs (e.g. `opencode run`).
 			child.on("close", () => {
+				const trimmed = nudge.trim()
+				if (trimmed) {
+					let reason = trimmed
+					try {
+						const parsed = JSON.parse(trimmed)
+						if (typeof parsed?.reason === "string") reason = parsed.reason
+					} catch { /* keep raw payload */ }
+					// Inject the reminder into the live session so the agent
+					// acts on it. Once per session; on failure, fall back to a
+					// log line so the nudge is never silently lost.
+					if (sessionID && !nudgedSessions.has(sessionID)) {
+						nudgedSessions.set(sessionID, true)
+						if (nudgedSessions.size > MAX_TRACKED_SESSIONS) {
+							const oldest = nudgedSessions.keys().next().value
+							if (oldest !== undefined) nudgedSessions.delete(oldest)
+						}
+						client.session.promptAsync({
+							path: { id: sessionID },
+							body: { parts: [{ type: "text", text: nudgePrompt(reason) }] },
+						})
+							.then((r) => { if (r.error) log("warn", `ghost: ${reason}`) })
+							.catch(() => log("warn", `ghost: ${reason}`))
+					}
+				}
 				if (transcriptPath) rm(join(transcriptPath, ".."), { recursive: true, force: true }).catch(() => {})
 			})
 			child.stdin.on("error", () => {})
@@ -121,6 +184,29 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 				type: "local",
 				command: [process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT, "mcp"],
 				enabled: true,
+			}
+			// Passive start context: ghost's session-start block is materialized
+			// into a cache file and injected via opencode's instructions, so
+			// every session opens with project memory without an agent action.
+			// opencode cannot consume the hook's stdout injection, so this is
+			// the supported path. Fail-open: any error leaves cfg untouched.
+			try {
+				const ctx = await renderStartContext(directory ?? process.cwd())
+				if (ctx && ctx.trim()) {
+					const dir = join(homedir(), ".cache", "ghost")
+					await mkdir(dir, { recursive: true })
+					const file = join(dir, "opencode-context.md")
+					// The block is a startup snapshot (opencode has no resume/
+					// compact re-injection like claude), so flag its staleness
+					// locally — without touching formatSessionContext, which
+					// claude/codex consume verbatim.
+					const ctxHint = "\n\n---\n\n*Snapshot captured at this session's start. Memory saved after startup won't appear here — call `ghost_project_context` (or any `ghost_*` MCP tool) for the live view.*\n"
+					await writeFile(file, ctx + ctxHint)
+					cfg.instructions = cfg.instructions ?? []
+					if (!cfg.instructions.includes(file)) cfg.instructions.push(file)
+				}
+			} catch {
+				// fail-open: never block opencode startup over missing context
 			}
 		},
 		event: async ({ event }) => {
