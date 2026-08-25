@@ -68,7 +68,11 @@ jobs:
       - name: Mint app token
         id: app-token
         if: env.HAS_APP == 'true'
-        uses: actions/create-github-app-token@v2
+        # Pinned SHA (not a mutable tag) — same supply-chain convention as
+        # the pr-agent action pin. This action mints a token carrying
+        # whatever permissions the review-sweeper App has, so it is the
+        # highest-value pin in this pipeline.
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
           app-id: ${{ secrets.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
@@ -81,12 +85,17 @@ jobs:
         run: |
           [ -n "$NUMBER" ] || { echo "no PR"; exit 0; }
 
+          # first:100 — not paginated. Over 100 threads, older ones are
+          # silently skipped: stale findings would survive the sweep and
+          # keep blocking merge via required conversation resolution until
+          # a human resolves them. Observed PRs stay far below the cap;
+          # raise it (and add cursor pagination) if that ever changes.
           THREADS="$(gh api graphql \
             -f query='query($owner:String!,$name:String!,$number:Int!){
               repository(owner:$owner,name:$name){
                 pullRequest(number:$number){
                   headRefOid
-                  reviewThreads(first:50){nodes{
+                  reviewThreads(first:100){nodes{
                     id isResolved isOutdated
                     comments(first:1){nodes{author{login}}}
                   }}
@@ -97,6 +106,12 @@ jobs:
             -F number="$NUMBER" \
             --jq '.data.repository.pullRequest')"
 
+          # isOutdated is a proxy, not a verdict: a thread goes outdated
+          # when the diff line it was anchored to changes or disappears,
+          # which can happen while the finding itself still applies. The
+          # sweep trusts the fresh review that just completed to have
+          # re-flagged anything still relevant on the new diff — the
+          # accepted trade-off for never letting a dead thread block merge.
           STALE="$(echo "$THREADS" | jq '[.reviewThreads.nodes[]
             | select(.isResolved==false and .isOutdated==true)
             | select(.comments.nodes[0].author.login=="github-actions[bot]") | .id]')"

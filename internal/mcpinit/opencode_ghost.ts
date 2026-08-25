@@ -107,6 +107,19 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 			transcriptPath = ""
 		}
 
+		// The plugin-level `directory` is opencode's startup cwd — often
+		// $HOME for desktop launches. The session's own directory is the
+		// project actually being worked in, so lifecycle spawns
+		// (resolve/supersede/reflect) must resolve against it. Fail-open:
+		// any lookup failure keeps the startup cwd.
+		let cwd = directory ?? process.cwd()
+		try {
+			const info = await client.session.get({ path: { id: sessionID } })
+			if (info.data?.directory) cwd = info.data.directory
+		} catch {
+			// keep startup cwd
+		}
+
 		const payload = {
 			contract: {
 				version: CONTRACT_VERSION,
@@ -116,7 +129,7 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 			hook_event_name: "stop",
 			session_id: sessionID,
 			transcript_path: transcriptPath,
-			cwd: directory ?? process.cwd(),
+			cwd,
 			stop_hook_active: false,
 		}
 
@@ -203,7 +216,23 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 			// opencode cannot consume the hook's stdout injection, so this is
 			// the supported path. Fail-open: any error leaves cfg untouched.
 			try {
-				const ctx = await renderStartContext(directory ?? process.cwd())
+				// Prefer the most recently used session's directory over the
+				// startup cwd: desktop launches start opencode in $HOME, but
+				// the injected context should describe the project the user
+				// will actually resume. Empty list or lookup failure falls
+				// back to the startup cwd.
+				let ctxCwd = directory ?? process.cwd()
+				try {
+					const sessions = await client.session.list()
+					if (Array.isArray(sessions.data) && sessions.data.length > 0) {
+						const recent = sessions.data.reduce((a, b) =>
+							(a.time?.updated ?? 0) >= (b.time?.updated ?? 0) ? a : b)
+						if (recent?.directory) ctxCwd = recent.directory
+					}
+				} catch {
+					// keep startup cwd
+				}
+				const ctx = await renderStartContext(ctxCwd)
 				if (ctx && ctx.trim()) {
 					const dir = join(homedir(), ".cache", "ghost")
 					await mkdir(dir, { recursive: true })

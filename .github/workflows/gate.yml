@@ -1,0 +1,22 @@
+name: gate
+
+# Placeholder that satisfies the repository's required "gate" status check
+# (branch protection), which is defined at the repo level. The real merge
+# gate is native conversation resolution: PR-Agent findings land as inline
+# review threads and GitHub blocks merge while any remain unresolved. The
+# Review Loop workflow (pr-loop.yml) sweeps stale threads and signals
+# REQUEST_CHANGES while live findings exist. This workflow must exist on
+# main before the required check is enabled, or every PR hangs on
+# "Expected — waiting for status".
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "merge gate satisfied"
