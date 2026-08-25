@@ -2,13 +2,17 @@ name: PR Agent
 
 on:
   pull_request:
-    # review_requested (not synchronize): a fresh review per push burns Go
-    # quota every commit, and the original plan ("Re-review policy: NOT on
-    # synchronize; manual /review instead") still holds — pr_agent_job is
-    # not a required branch-protection context (workflow_run-triggered
-    # workflows attach to the wrong SHA for that; see pr-loop.yml), so a
-    # stale context on a new head SHA cannot block merge.
-    types: [opened, reopened, ready_for_review, review_requested]
+    # Re-review policy: every code push gets fresh bot eyes (synchronize);
+    # docs-only pushes skip the trigger entirely so they don't burn quota.
+    # Trade-off: a PR whose FIRST push is docs-only gets no automatic
+    # review at all (paths filters apply to opened too) — request one via
+    # /review comment for that case. The merge gate is native conversation
+    # resolution on inline threads; pr_agent_job is not a required
+    # branch-protection context.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+    types: [opened, reopened, ready_for_review, review_requested, synchronize]
   issue_comment:
     types: [created]
 
@@ -110,7 +114,16 @@ jobs:
             Do not report style preferences handled by golangci-lint.
             Verify your findings against the code before posting —
             false positives erode trust. If unsure, say "needs verification"
-            rather than asserting a bug.
+            rather than asserting a bug. Treat issue or PR references in the
+            description as context links, not compliance targets — never
+            grade ticket compliance against them unless they are formally
+            linked issues.
+
+          # Prompt budget for large diffs: default 32000 clipped a 2.5k-line
+          # PR's review (plan doc skipped on token budget). big-pickle holds
+          # 64k (custom_model_max_tokens above), so 48k leaves headroom for
+          # the response while covering full-diff reviews.
+          config.max_model_tokens: "48000"
 
           github_action_config.auto_review: "true"
           # On-demand only (/improve comment): per-finding suggestion
@@ -123,4 +136,4 @@ jobs:
           # and have hallucinated project-specific names. Findings live in
           # the review + inline threads; no description is posted.
           github_action_config.auto_describe: "false"
-          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "review_requested"]'
+          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "review_requested", "synchronize"]'
