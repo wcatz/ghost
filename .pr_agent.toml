@@ -12,6 +12,11 @@ repo_context_max_lines = 500
 # Don't re-post the same suggestion on every push — fingerprint
 # markers deduplicate across runs.
 persistent_inline_comments = true
+# Fail the job loudly when a tool errors out. Observed 2026-08-25: an
+# /improve hung on the Zen endpoint, ai_timeout killed the LLM calls,
+# and the action exited GREEN with zero output — log jumped straight
+# from "Number of PR chunk calls" to completion.
+propagate_tool_errors = true
 
 [best_practices]
 # Auto-detect from best_practices.md at repo root.
