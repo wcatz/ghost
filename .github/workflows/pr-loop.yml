@@ -1,0 +1,123 @@
+# Closes the review loop after PR-Agent runs.
+#
+# Validated mechanics (wcatz/ci-mech-spike, 2026-08-25):
+#   - GITHUB_TOKEN cannot resolve review threads ("not accessible by
+#     integration") — resolutions use the GH_RESOLVE_TOKEN secret, a
+#     fine-grained PAT with Pull requests: read+write on this repo only.
+#     Without the secret this job degrades to reporting-only.
+#   - Outdated unresolved threads still block merge under required
+#     conversation resolution, so stale agent findings must be swept
+#     once a fresh review has re-judged the new diff.
+#   - GITHUB_TOKEN CAN submit REQUEST_CHANGES reviews; it can never
+#     APPROVE. Signal-only: approvals stay out of branch protection.
+#
+# Triggered by workflow_run after each PR Agent completion and by PR
+# comments for manual re-runs. workflow_run executes in default-branch
+# context — fine here, because nothing in this file is (or may become)
+# a required status check: those attach to the wrong SHA.
+
+name: Review Loop
+
+on:
+  workflow_run:
+    workflows: ["PR Agent"]
+    types: [completed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  pull-requests: write
+
+concurrency:
+  group: review-loop-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  loop:
+    if: >-
+      github.event_name == 'workflow_run' ||
+      (github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request != null &&
+        github.event.sender.type != 'Bot')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          NUMBER="$(jq -r '.workflow_run.pull_requests[0].number // empty' "$GITHUB_EVENT_PATH")"
+          if [ -z "$NUMBER" ]; then
+            HEAD_SHA="$(jq -r '.workflow_run.head_sha' "$GITHUB_EVENT_PATH")"
+            NUMBER="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls" --jq '.[0].number // empty')"
+          fi
+          if [ -z "$NUMBER" ] || [ "$NUMBER" = "null" ]; then
+            echo "No PR associated with this run; nothing to do."
+            exit 0
+          fi
+          echo "number=$NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Sweep stale findings, signal on live ones
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESOLVE_TOKEN: ${{ secrets.GH_RESOLVE_TOKEN }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          [ -n "$NUMBER" ] || { echo "no PR"; exit 0; }
+
+          THREADS="$(gh api graphql \
+            -f query='query($owner:String!,$name:String!,$number:Int!){
+              repository(owner:$owner,name:$name){
+                pullRequest(number:$number){
+                  headRefOid
+                  reviewThreads(first:50){nodes{
+                    id isResolved isOutdated
+                    comments(first:1){nodes{author{login}}}
+                  }}
+                }
+              }}' \
+            -f owner="${GITHUB_REPOSITORY%%/*}" \
+            -f name="${GITHUB_REPOSITORY##*/}" \
+            -F number="$NUMBER" \
+            --jq '.data.repository.pullRequest')"
+
+          STALE="$(echo "$THREADS" | jq '[.reviewThreads.nodes[]
+            | select(.isResolved==false and .isOutdated==true)
+            | select(.comments.nodes[0].author.login=="github-actions[bot]") | .id]')"
+
+          LIVE="$(echo "$THREADS" | jq '[.reviewThreads.nodes[]
+            | select(.isResolved==false and .isOutdated==false)
+            | select(.comments.nodes[0].author.login=="github-actions[bot]")]')"
+
+          N_STALE="$(jq length <<<"$STALE")"
+          N_LIVE="$(jq length <<<"$LIVE")"
+
+          if [ "$N_STALE" -gt 0 ]; then
+            if [ -n "$RESOLVE_TOKEN" ]; then
+              RESOLVED=0
+              for id in $(jq -r .[] <<<"$STALE"); do
+                if gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' \
+                     -f id="$id" --jq '.data.resolveReviewThread.thread.isResolved' >/dev/null 2>&1; then
+                  RESOLVED=$((RESOLVED+1))
+                fi
+              done
+              echo "Auto-resolved $RESOLVED/$N_STALE stale finding(s) (superseded by newer review)."
+            else
+              echo "::warning::$N_STALE stale finding(s) need resolution but GH_RESOLVE_TOKEN is not configured."
+            fi
+          fi
+
+          if [ "$N_LIVE" -gt 0 ]; then
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
+              -f event=REQUEST_CHANGES \
+              -f body="PR-Agent has $N_LIVE unresolved finding(s) — see inline threads." >/dev/null 2>&1 \
+              && echo "Requested changes: $N_LIVE live finding(s) block-by-thread." \
+              || echo "Could not set REQUEST_CHANGES state."
+          else
+            echo "No live PR-Agent findings."
+          fi
