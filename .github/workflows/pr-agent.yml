@@ -3,10 +3,12 @@ name: PR Agent
 on:
   pull_request:
     # Re-review policy: every code push gets fresh bot eyes (synchronize);
-    # docs-only pushes skip the trigger entirely so they don't burn quota.
-    # Trade-off: a PR whose FIRST push is docs-only gets no automatic
-    # review at all (paths filters apply to opened too) — request one via
-    # /review comment for that case. The merge gate is native conversation
+    # docs-only pushes skip the trigger so they do not burn Go quota.
+    # Trade-offs: a PR whose FIRST push is docs-only gets no automatic
+    # review until a code-containing push fires synchronize (paths filters
+    # apply to opened too) — request one via /review comment for that
+    # case; likewise a docs-only follow-up push on an existing code PR
+    # does not re-trigger. The merge gate is native conversation
     # resolution on inline threads; pr_agent_job is not a required
     # branch-protection context.
     paths-ignore:
