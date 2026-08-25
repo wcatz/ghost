@@ -10,7 +10,9 @@
 // with the transcript materialized as temp JSONL in the `opencode-messages`
 // format ({info, parts} per line, verbatim client.session.messages
 // serialization). Ghost scans it for save-tool usage. opencode cannot block
-// stops or inject context, so any ghost nudge degrades to a log line there —
+// a stop, so the save-nudge is injected into the live session via
+// client.session.promptAsync (the faithful analog of the claude/codex blocking
+// nudge) so the agent itself acts on it; failures fall back to a log line.
 // fail-open is absolute: every error logs one line and never disturbs the
 // session.
 import type { Plugin } from "@opencode-ai/plugin"
@@ -39,6 +41,18 @@ let sawStatusEvent = false
 const lastFire = new Map<string, number>()
 const DEBOUNCE_MS = 2000
 const MAX_TRACKED_SESSIONS = 256
+
+// Once the save reminder has been injected into a session, don't re-inject it
+// on later idle transitions: the nudge condition stays true until something is
+// actually saved, and re-prompting every idle would be noisy. Bounded like
+// lastFire so long-lived hosts don't grow it without limit.
+const nudgedSessions = new Map<string, true>()
+
+// Builds the agent-facing instruction injected into the live session when the
+// save nudge fires: a clear directive to review the session and persist any
+// discoveries via ghost_memory_save.
+const nudgePrompt = (reason: string): string =>
+	`[Ghost] ${reason} As the assistant, if there are discoveries worth keeping, save them now via ghost_ghost_memory_save. This is an automated reminder — act on it rather than asking the user.`
 
 // Materializes ghost's session-start context block for a directory and returns
 // it, so opencode can inject it passively via instructions (opencode has no
@@ -114,10 +128,11 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 				await log("warn", `ghost: fail-open (spawn: ${e})`)
 			})
 			// opencode cannot block a stop, so the {"decision":"block"} nudge
-			// ghost emits on stdout is re-presented as a non-blocking reminder
-			// through opencode's own log channel — visible, but no terminal
-			// bleed (which raw stderr would cause) and no blocking the host
-			// can't honor.
+			// ghost emits on stdout is captured here and injected into the live
+			// session (client.session.promptAsync) so the agent itself acts on
+			// it — the faithful analog of the claude/codex blocking nudge. If
+			// the injection fails it falls back to a log line. Either way the
+			// nudge never touches stderr, so there is no terminal bleed.
 			let nudge = ""
 			child.stdout?.on("data", (d) => { nudge += d.toString() })
 			// Best-effort local cleanup when we outlive the hook; ghost also
@@ -131,7 +146,22 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 						const parsed = JSON.parse(trimmed)
 						if (typeof parsed?.reason === "string") reason = parsed.reason
 					} catch { /* keep raw payload */ }
-					log("warn", `ghost: ${reason}`).catch(() => {})
+					// Inject the reminder into the live session so the agent
+					// acts on it. Once per session; on failure, fall back to a
+					// log line so the nudge is never silently lost.
+					if (sessionID && !nudgedSessions.has(sessionID)) {
+						nudgedSessions.set(sessionID, true)
+						if (nudgedSessions.size > MAX_TRACKED_SESSIONS) {
+							const oldest = nudgedSessions.keys().next().value
+							if (oldest !== undefined) nudgedSessions.delete(oldest)
+						}
+						client.session.promptAsync({
+							path: { id: sessionID },
+							body: { parts: [{ type: "text", text: nudgePrompt(reason) }] },
+						})
+							.then((r) => { if (r.error) log("warn", `ghost: ${reason}`) })
+							.catch(() => log("warn", `ghost: ${reason}`))
+					}
 				}
 				if (transcriptPath) rm(join(transcriptPath, ".."), { recursive: true, force: true }).catch(() => {})
 			})
