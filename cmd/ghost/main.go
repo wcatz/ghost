@@ -1397,6 +1397,9 @@ func mcpLogConfig(stderrTerminal bool) (io.Writer, slog.Level) {
 	if path := os.Getenv("GHOST_LOG_FILE"); path != "" {
 		if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: cannot open GHOST_LOG_FILE %q: %v\n", path, err)
+			if !stderrTerminal {
+				level = slog.LevelWarn
+			}
 		} else {
 			writer = f
 		}

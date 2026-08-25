@@ -546,3 +546,22 @@ func TestMCPLogConfig_DebugWins(t *testing.T) {
 		t.Fatalf("level = %v, want Debug", level)
 	}
 }
+
+// TestMCPLogConfig_UnopenableFileFallsBackQuiet: a GHOST_LOG_FILE that cannot
+// be opened must not silently restore INFO logging to stderr in client-spawned
+// mode — that would leak the very noise the quiet default removes.
+func TestMCPLogConfig_UnopenableFileFallsBackQuiet(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "adir")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GHOST_LOG_FILE", dir) // existing directory: open for write fails
+	t.Setenv("GHOST_DEBUG", "")
+	writer, level := mcpLogConfig(false)
+	if level != slog.LevelWarn {
+		t.Fatalf("level = %v, want Warn (quiet fallback)", level)
+	}
+	if writer != io.Writer(os.Stderr) {
+		t.Fatal("writer must fall back to stderr")
+	}
+}
