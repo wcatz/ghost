@@ -166,6 +166,27 @@ type Result struct {
 	Created       int // supersedes links written (0 in dry-run)
 	CausesCreated int // CAUSES verdicts (causes links written when apply)
 	Reclassified  int // existing links whose relation changed or was invalidated
+	StaleSkipped  int
+}
+
+// endpointsExist reports whether every given memory ID is still live. Used
+// to detect memories replaced by a concurrent reflect pass between candidate
+// selection and link write.
+func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool, error) {
+	mems, err := store.GetByIDs(ctx, ids)
+	if err != nil {
+		return false, err
+	}
+	got := make(map[string]bool, len(mems))
+	for _, m := range mems {
+		got[m.ID] = true
+	}
+	for _, id := range ids {
+		if !got[id] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // Run selects fresh candidates, unions them with previously-created llm
@@ -184,6 +205,11 @@ type Result struct {
 // update is skipped (skip-if-unchanged) — reclassifying it would repeat the
 // same verdict for no reason. Fresh candidates are always classified
 // regardless, since SelectCandidates already bounds their cost.
+//
+// Pairs whose endpoints are replaced by a concurrent reflect pass (the stop
+// hook spawns both for the same session) are dropped and counted in
+// Result.StaleSkipped rather than failing the pass — the pair no longer
+// exists, so there is nothing to link.
 //
 // If any classification in the batch came from a fallback provider, apply is
 // skipped entirely for the whole batch (mirroring internal/resolve) — a
@@ -257,6 +283,39 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	}
 
 	res := Result{Candidates: len(all)}
+
+	// Existence re-check before any LLM spend: the stop hook spawns
+	// reflect and supersede for the same session, and reflect's
+	// consolidation replaces rows (delete + new IDs) while this pass is
+	// running. A pair whose endpoint already vanished would burn a
+	// classify call and then die on the FK at write time.
+	allIDs := make([]string, 0, len(all)*2)
+	for _, c := range all {
+		allIDs = append(allIDs, c.NewerID, c.OlderID)
+	}
+	aliveMems, err := store.GetByIDs(ctx, allIDs)
+	if err != nil {
+		return res, nil, fmt.Errorf("existence check: %w", err)
+	}
+	aliveSet := make(map[string]bool, len(aliveMems))
+	for _, m := range aliveMems {
+		aliveSet[m.ID] = true
+	}
+	live := all[:0]
+	for _, c := range all {
+		if aliveSet[c.NewerID] && aliveSet[c.OlderID] {
+			live = append(live, c)
+			continue
+		}
+		res.StaleSkipped++
+		if logger != nil {
+			logger.Info("supersede: dropping stale pair (endpoint replaced by a concurrent pass)",
+				"newer", c.NewerID, "older", c.OlderID)
+		}
+	}
+	all = live
+	res.Candidates = len(all)
+
 	var classified []Classified
 	anyFallback := false
 	for _, c := range all {
@@ -293,6 +352,24 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 
 	if apply {
 		for _, c := range classified {
+			// Pre-write existence check: the candidate was alive at
+			// selection (and possibly at the batch check above), but a
+			// concurrent reflect pass may have replaced it during the
+			// classify loop. Writing then would die on the FK and abort
+			// the whole pass; skipping is always correct — the pair no
+			// longer exists, so there is nothing to link.
+			pairAlive, err := endpointsExist(ctx, store, c.NewerID, c.OlderID)
+			if err != nil {
+				return res, nil, fmt.Errorf("stale check %s→%s: %w", c.NewerID, c.OlderID, err)
+			}
+			if !pairAlive {
+				res.StaleSkipped++
+				if logger != nil {
+					logger.Info("supersede: skipping write, endpoint replaced by a concurrent pass",
+						"newer", c.NewerID, "older", c.OlderID)
+				}
+				continue
+			}
 			switch c.Relation {
 			case RelationSupersedes:
 				if err := store.CreateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes), c.Similarity, "llm"); err != nil {

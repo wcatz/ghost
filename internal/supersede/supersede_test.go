@@ -441,3 +441,40 @@ func TestRun_MixedFallbackAndPrimary_SkipsApply(t *testing.T) {
 		t.Errorf("CreateLink must not be called when any candidate in the batch came from a fallback provider, even if others were confirmed via primary; found %d links", len(pairs))
 	}
 }
+
+// TestRun_SkipsPairWhoseEndpointVanishedMidRun reproduces the observed
+// production failure: the stop hook spawns reflect and supersede for the
+// same session, and reflect's consolidation replaces rows while supersede
+// is inside its classify loop. The pair was alive at selection time, so it
+// reaches classification; by write time one endpoint is gone. Run must skip
+// the pair (counting StaleSkipped) instead of dying on the FK constraint —
+// there is nothing to link once the memory no longer exists.
+func TestRun_SkipsPairWhoseEndpointVanishedMidRun(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	v1 := add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
+	v2 := add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
+
+	// Simulate reflect replacing v1 (delete + new row) while supersede is
+	// classifying: on the first Classify call, drop v1 from the store.
+	cls := &mockClassifier{verdict: func(_, _ string) Relation {
+		_ = store.Delete(ctx, v1)
+		return RelationSupersedes
+	}}
+
+	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run must not fail on a mid-run replaced endpoint: %v", err)
+	}
+	if res.Created != 0 {
+		t.Errorf("got Created=%d, want 0 (endpoint gone before write)", res.Created)
+	}
+	if res.StaleSkipped != 1 {
+		t.Errorf("got StaleSkipped=%d, want 1", res.StaleSkipped)
+	}
+	pairs, _ := store.SupersedesWithin(ctx, []string{v1, v2})
+	if len(pairs) != 0 {
+		t.Errorf("found %d links for a deleted endpoint; want none", len(pairs))
+	}
+}
