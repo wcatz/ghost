@@ -76,25 +76,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          # Kimi K2.7 Code via opencode Go subscription.
-          # OpenAI-compatible endpoint, so litellm's openai provider +
-          # api_base override routes there (PR-Agent "OpenAI like API" docs).
+          # Big Pickle via opencode Zen — free stealth reasoning model
+          # (opencode's deliberate-analysis model), chosen for review
+          # quality and to dodge the Go endpoint's recurring hang days.
           OPENAI__KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
-          OPENAI__API_BASE: https://opencode.ai/zen/go/v1
+          OPENAI__API_BASE: https://opencode.ai/zen/v1
 
-          # openai/ prefix routes through litellm's OpenAI-compatible path;
-          # kimi-k2.7-code is the Go endpoint's model id.
-          config.model: "openai/kimi-k2.7-code"
-          # Fallback rides a different provider lane (DeepSeek vs Moonshot
-          # hosting) so an unhealthy Kimi endpoint doesn't fail the run.
-          # Both accept temperature=1 and are inside the Go subscription.
+          # openai/ prefix routes through litellm's OpenAI-compatible path.
+          config.model: "openai/big-pickle"
+          # Fallback rides a different provider lane (DeepSeek) on the same
+          # Zen endpoint so an unhealthy pickle host doesn't fail the run.
           config.fallback_models: '["openai/deepseek-v4-flash"]'
           # Not in PR-Agent's MAX_TOKENS catalog → must set explicitly.
-          # Conservative slice of K2.7's context window; plenty for any diff.
           config.custom_model_max_tokens: "65536"
-          # K2.7 Code on the Go endpoint only accepts temperature=1
-          # (PR-Agent's default 0.2 is rejected with invalid_request_error).
-          config.temperature: "1"
+          # No temperature override: 1 was a Kimi-Go quirk; PR-Agent's
+          # default 0.2 keeps reviews deterministic.
           # Hard cap per LLM call — a hung endpoint must fail fast, not
           # park the runner for 10 minutes.
           config.ai_timeout: "90"
