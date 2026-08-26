@@ -39,6 +39,24 @@ func writeStub(t *testing.T, binDir, name string) string {
 	return path
 }
 
+// TestRenderOpencodeGhostPlugin_ConfigSessionListIsBounded guards against a
+// reintroduced deadlock: the plugin's config() hook calls client.session.list()
+// to find the most-recently-used session directory, but that's an RPC back
+// into opencode's own server, which is still coming up during config()
+// resolution. An unbounded await there stalls config() — and all of
+// opencode's startup, since nothing past config() runs until it resolves —
+// forever, with the ghost MCP server never even spawned. See the 2026-08-25
+// "opencode won't load" investigation: reproduced on two machines (one memory
+// -starved, one idle with 67GB free), confirmed via GHOST_LOG_FILE+GHOST_DEBUG
+// that ghost was never invoked during the hang, and confirmed disabling only
+// this plugin fixed it.
+func TestRenderOpencodeGhostPlugin_ConfigSessionListIsBounded(t *testing.T) {
+	src := renderOpencodeGhostPlugin("/usr/local/bin/ghost")
+	if !strings.Contains(src, "withTimeout(client.session.list()") {
+		t.Error("client.session.list() in config() must be wrapped in a timeout — an unbounded await there deadlocks opencode's own startup (config() never returns, so ghost's MCP entry is never even read)")
+	}
+}
+
 func TestRunOpencode_NoClaudeRequired(t *testing.T) {
 	home, xdg := setupOpencodeTestEnv(t)
 	want := renderOpencodeGhostPlugin(filepath.Join(home, "bin", "ghost"))
