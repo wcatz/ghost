@@ -263,11 +263,11 @@ Because the mirror is one-way, edits inside the vault are informational only and
 
 ## MCP surface
 
-19 tools, 4 resources:
+20 tools, 4 resources, 2 prompts:
 
 | Group | Tools |
 |---|---|
-| Memory | `ghost_memory_save` `ghost_memory_search` `ghost_search_all` `ghost_memories_list` `ghost_memory_update` `ghost_memory_delete` `ghost_memory_pin` `ghost_memory_promote` `ghost_save_global` `ghost_resolve` |
+| Memory | `ghost_memory_save` `ghost_memory_search` `ghost_search_all` `ghost_memories_list` `ghost_memory_update` `ghost_memory_delete` `ghost_memory_pin` `ghost_memory_promote` `ghost_save_global` `ghost_resolve` `ghost_project_delete` |
 | Context | `ghost_project_context` `ghost_list_projects` `ghost_health` |
 | Tasks | `ghost_task_create` `ghost_task_list` `ghost_task_update` `ghost_task_complete` |
 | Decisions | `ghost_decision_record` `ghost_decisions_list` |
@@ -275,6 +275,8 @@ Because the mirror is one-way, edits inside the vault are informational only and
 `ghost_resolve` scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own model via MCP sampling when the client supports it, falling back to a subscription-billed `claude -p` call otherwise (dry-run only on that fallback) — no Anthropic API credits spent either way. Args: `project` (required), `apply` (default false: dry-run preview only; pass `true` to stamp `resolved_at` on confirmed memories).
 
 Resources: project context, global memories, project decisions, project tasks — pin them in clients that support it to survive context compaction.
+
+Prompts: `recall_project` (injects project context into the conversation), `record_decision` (guides structured decision recording).
 
 The server ships with embedded instructions that teach the agent when to save, which categories to use, and how to leverage cross-project search — it works proactively without configuration. Full architecture notes in [docs/architecture.md](docs/architecture.md).
 
