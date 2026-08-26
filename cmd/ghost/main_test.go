@@ -657,3 +657,32 @@ func TestRunProjectMergeCore(t *testing.T) {
 		}
 	})
 }
+
+func TestRunProjectMergeCore_RefusesGlobal(t *testing.T) {
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	store := memory.NewStore(db, logger)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "proj", "/tmp/proj", "test-project"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject _global: %v", err)
+	}
+
+	for _, tc := range []struct{ oldArg, newArg string }{
+		{"_global", "test-project"},
+		{"global", "test-project"}, // resolves to _global by name
+		{"test-project", "_global"},
+	} {
+		var out bytes.Buffer
+		err := runProjectMergeCore(ctx, store, &out, tc.oldArg, tc.newArg)
+		if err == nil || !strings.Contains(err.Error(), "_global") {
+			t.Errorf("merge %q -> %q: expected _global refusal, got: %v", tc.oldArg, tc.newArg, err)
+		}
+	}
+}

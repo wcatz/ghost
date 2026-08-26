@@ -243,7 +243,14 @@ func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error 
 
 // MergeProject reassigns all child records from oldID to newID, then deletes
 // the old project row. Use this to unify duplicate project entries.
+// Refuses _global on either side, mirroring DeleteProject: merging away from
+// _global would delete its project row and silently stop global injection
+// everywhere; merging into it would dump an arbitrary bucket into every
+// session's context.
 func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
+	if oldID == "_global" || newID == "_global" {
+		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.mergeProjectLocked(ctx, oldID, newID)
