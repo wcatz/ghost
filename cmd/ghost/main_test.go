@@ -419,10 +419,10 @@ func TestBuildClassifyProvider_KeySetBuildsRegardless(t *testing.T) {
 func TestRunAllClients(t *testing.T) {
 	t.Run("continues past failures and reports them", func(t *testing.T) {
 		targets := []clientTarget{
-			{"ok-first", func(w io.Writer, dryRun bool) error { return nil }},
-			{"boom", func(w io.Writer, dryRun bool) error { return fmt.Errorf("kaput") }},
-			{"ok-last", func(w io.Writer, dryRun bool) error { return nil }},
-			{"boom2", func(w io.Writer, dryRun bool) error { return fmt.Errorf("kaput too") }},
+			{"ok-first", "", func(w io.Writer, dryRun bool) error { return nil }},
+			{"boom", "", func(w io.Writer, dryRun bool) error { return fmt.Errorf("kaput") }},
+			{"ok-last", "", func(w io.Writer, dryRun bool) error { return nil }},
+			{"boom2", "", func(w io.Writer, dryRun bool) error { return fmt.Errorf("kaput too") }},
 		}
 		var stdout, stderr bytes.Buffer
 		failed := runAllClients(&stdout, &stderr, false, targets)
@@ -445,8 +445,8 @@ func TestRunAllClients(t *testing.T) {
 	})
 	t.Run("all succeed returns empty", func(t *testing.T) {
 		targets := []clientTarget{
-			{"a", func(w io.Writer, dryRun bool) error { return nil }},
-			{"b", func(w io.Writer, dryRun bool) error { return nil }},
+			{"a", "", func(w io.Writer, dryRun bool) error { return nil }},
+			{"b", "", func(w io.Writer, dryRun bool) error { return nil }},
 		}
 		var stdout, stderr bytes.Buffer
 		if failed := runAllClients(&stdout, &stderr, true, targets); len(failed) != 0 {
