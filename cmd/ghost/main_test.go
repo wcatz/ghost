@@ -484,6 +484,49 @@ func targetNames(targets []clientTarget) []string {
 	return names
 }
 
+// TestDetectClients verifies that detectClients returns only the names of
+// clients whose binaries are findable on PATH.
+func TestDetectClients(t *testing.T) {
+	// Create a temp dir with stub binaries for two of the four clients.
+	dir := t.TempDir()
+	writeStub(t, dir, "opencode")
+	writeStub(t, dir, "goose")
+
+	// Override PATH to include only our temp dir.
+	t.Setenv("PATH", dir)
+
+	got := detectClients()
+	want := []string{"opencode", "goose"}
+	if len(got) != len(want) {
+		t.Fatalf("detectClients() = %v, want %v", got, want)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Errorf("detectClients()[%d] = %q, want %q", i, got[i], name)
+		}
+	}
+}
+
+// TestDetectClients_EmptyPath verifies that detectClients returns nil when
+// no client binaries are on PATH.
+func TestDetectClients_EmptyPath(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	got := detectClients()
+	if len(got) != 0 {
+		t.Fatalf("detectClients() = %v, want empty", got)
+	}
+}
+
+// writeStub creates an executable stub script at binDir/name.
+func writeStub(t *testing.T, binDir, name string) string {
+	t.Helper()
+	path := filepath.Join(binDir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // TestMCPLogConfig_QuietWhenSpawned guards the #373 fix: a client-spawned
 // server (stderr not a terminal) must drop routine INFO logs from stderr so
 // MCP clients that surface stderr don't leak them into the UI.
