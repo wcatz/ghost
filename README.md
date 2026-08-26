@@ -420,5 +420,20 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 ## Review pipeline
 
-PRs are reviewed automatically on every push. Findings land as inline threads that
-must be resolved before merge; findings superseded by a newer review auto-resolve.
+PRs are reviewed automatically on every push. The pipeline uses [PR-Agent](https://github.com/The-PR-Agent/pr-agent) self-hosted on GitHub Actions, powered by Big Pickle via the opencode zen endpoint (`https://opencode.ai/zen/v1`), with DeepSeek V4 Flash as a fallback.
+
+**What it does:**
+- `/review` posts a persistent review comment with score, effort estimate, and up to 5 findings (inline on diff lines)
+- `/improve` posts committable code suggestions as GitHub suggestion blocks (top 4 per run)
+- Reviews are anchored to the default branch via `apply_repo_settings` (fetches `.pr_agent.toml` and context files)
+
+**What it doesn't do:**
+- Ticket compliance analysis is disabled (`require_ticket_analysis_review = false`) — the native grading mislabeled clean PRs and the merge gate is conversation resolution
+- The intro line ("Here are some key observations...") is disabled (`enable_intro_text = false`)
+- Auto-describe is disabled — findings live in the review, not in the PR description
+
+**Extra instructions** enforce 3 lenses beyond diff-vs-issue matching: invariant parity (cross-checking guard clauses against sibling mutators), protected resources (_global project, DB rows, subprocess env), and behavior preservation at modified call sites.
+
+**Review identity:** Reviews post as the Review Loop GitHub App (`review-sweeper`) when the app token is available; falls back to `github-actions` when secrets are absent.
+
+**Concurrency:** one agent run per PR per event type. Bot comments fire `issue_comment` runs; a shared group with event-type splitting prevents the bot from cancelling its own in-flight review.
