@@ -1,0 +1,109 @@
+name: evalcycle
+
+# Graded staleness-pipeline eval (`eval/cycle`) — MANUAL ONLY, never a
+# pull_request gate: the supersede/resolve/reflect stages call real LLMs via
+# the opencode CLI path, cost real credits, and are nondeterministic (observed
+# resolve R wobble ±0.25 across identical inputs), so exact-match gating is
+# meaningless. Runs gate on metric FLOORS (-floors) set well below observed
+# values (2026-08-21 deepseek-tier runs: supersede P 0.71-0.83 / R 0.62,
+# resolve P 1.00 / R 0.42-0.67) — low enough to tolerate model wobble, tight
+# enough to catch gross breakage like a classifier path failing to zero.
+#
+# Auth: opencode credentials are materialized from the OPENCODE_AUTH_JSON
+# Actions secret into a file passed to -opencode-auth-file; the harness seeds
+# it inside its scratch XDG_DATA_HOME so the sandboxed `opencode` subprocess
+# finds it (ai.OpenCodeClient scrubs XDG_CONFIG_HOME and ambient API keys but
+# passes XDG_DATA_HOME through untouched — auth lives under
+# $XDG_DATA_HOME/opencode/auth.json). Without the secret the run falls back to
+# opencode's anonymous build tier; floors then decide if that's gradeable.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "GHOST_OPENCODE_MODEL pin for the opencode subprocess (empty = opencode default)"
+        required: false
+        default: ""
+      floors:
+        description: "Comma-separated metric=min floors over stage P/R"
+        required: false
+        default: "supersede_precision=0.60,supersede_recall=0.45,resolve_precision=0.85,resolve_recall=0.30"
+      skip_reflect:
+        description: "Skip consolidation stage (supersede+resolve only)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  cycle:
+    name: graded staleness cycle (LLM stages)
+    runs-on: ubuntu-latest
+    # Harness-internal stage deadlines bound LLM time (8m supersede + 8m
+    # resolve + up to 2x15m reflect on the SQLITE_BUSY retry path) plus the
+    # 3m embedding-drain gate, binary builds, and tool installs.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama
+        run: |
+          ollama serve > /tmp/ollama.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "ollama serve did not become ready in time"; cat /tmp/ollama.log; exit 1
+
+      - name: Pull embedding model
+        # Must match the embedding model used by the drain gate's vector count
+        # expectations — see longmemeval.yml for why the tagged pull matters.
+        run: ollama pull nomic-embed-text:v1.5
+
+      - name: Install opencode
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Materialize opencode auth from secret
+        env:
+          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+        run: |
+          if [ -n "$OPENCODE_AUTH_JSON" ]; then
+            mkdir -p "$HOME/.ghost-eval"
+            printf '%s' "$OPENCODE_AUTH_JSON" > "$HOME/.ghost-eval/opencode-auth.json"
+            chmod 600 "$HOME/.ghost-eval/opencode-auth.json"
+          else
+            echo "OPENCODE_AUTH_JSON not set — running on opencode's anonymous build tier"
+          fi
+
+      - name: Run graded eval cycle
+        env:
+          GHOST_OPENCODE_MODEL: ${{ inputs.model }}
+          EVAL_FLOORS: ${{ inputs.floors }}
+          EVAL_SKIP_REFLECT: ${{ inputs.skip_reflect }}
+        run: |
+          args=( -repo . -ollama http://localhost:11434 )
+          [ -n "$EVAL_FLOORS" ] && args+=( -floors "$EVAL_FLOORS" )
+          [ -f "$HOME/.ghost-eval/opencode-auth.json" ] && args+=( -opencode-auth-file "$HOME/.ghost-eval/opencode-auth.json" )
+          [ "$EVAL_SKIP_REFLECT" = "true" ] && args+=( -skip-reflect )
+          go run ./eval/cycle "${args[@]}"
+
+      - name: Upload report and raw stage outputs
+        # Floor violations fail the run AFTER the report is written, so the
+        # artifact exists exactly when triage needs it.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: evalcycle-results-${{ github.run_id }}
+          path: eval/cycle/results/
+          if-no-files-found: warn
