@@ -419,10 +419,10 @@ func TestBuildClassifyProvider_KeySetBuildsRegardless(t *testing.T) {
 func TestRunAllClients(t *testing.T) {
 	t.Run("continues past failures and reports them", func(t *testing.T) {
 		targets := []clientTarget{
-			{"ok-first", func(w io.Writer, dryRun bool) error { return nil }},
-			{"boom", func(w io.Writer, dryRun bool) error { return fmt.Errorf("kaput") }},
-			{"ok-last", func(w io.Writer, dryRun bool) error { return nil }},
-			{"boom2", func(w io.Writer, dryRun bool) error { return fmt.Errorf("kaput too") }},
+			{"ok-first", "", func(w io.Writer, dryRun bool) error { return nil }},
+			{"boom", "", func(w io.Writer, dryRun bool) error { return fmt.Errorf("kaput") }},
+			{"ok-last", "", func(w io.Writer, dryRun bool) error { return nil }},
+			{"boom2", "", func(w io.Writer, dryRun bool) error { return fmt.Errorf("kaput too") }},
 		}
 		var stdout, stderr bytes.Buffer
 		failed := runAllClients(&stdout, &stderr, false, targets)
@@ -445,8 +445,8 @@ func TestRunAllClients(t *testing.T) {
 	})
 	t.Run("all succeed returns empty", func(t *testing.T) {
 		targets := []clientTarget{
-			{"a", func(w io.Writer, dryRun bool) error { return nil }},
-			{"b", func(w io.Writer, dryRun bool) error { return nil }},
+			{"a", "", func(w io.Writer, dryRun bool) error { return nil }},
+			{"b", "", func(w io.Writer, dryRun bool) error { return nil }},
 		}
 		var stdout, stderr bytes.Buffer
 		if failed := runAllClients(&stdout, &stderr, true, targets); len(failed) != 0 {
@@ -482,6 +482,49 @@ func targetNames(targets []clientTarget) []string {
 		names[i] = t.name
 	}
 	return names
+}
+
+// TestDetectClients verifies that detectClients returns only the names of
+// clients whose binaries are findable on PATH.
+func TestDetectClients(t *testing.T) {
+	// Create a temp dir with stub binaries for two of the four clients.
+	dir := t.TempDir()
+	writeStub(t, dir, "opencode")
+	writeStub(t, dir, "goose")
+
+	// Override PATH to include only our temp dir.
+	t.Setenv("PATH", dir)
+
+	got := detectClients()
+	want := []string{"opencode", "goose"}
+	if len(got) != len(want) {
+		t.Fatalf("detectClients() = %v, want %v", got, want)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Errorf("detectClients()[%d] = %q, want %q", i, got[i], name)
+		}
+	}
+}
+
+// TestDetectClients_EmptyPath verifies that detectClients returns nil when
+// no client binaries are on PATH.
+func TestDetectClients_EmptyPath(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	got := detectClients()
+	if len(got) != 0 {
+		t.Fatalf("detectClients() = %v, want empty", got)
+	}
+}
+
+// writeStub creates an executable stub script at binDir/name.
+func writeStub(t *testing.T, binDir, name string) string {
+	t.Helper()
+	path := filepath.Join(binDir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // TestMCPLogConfig_QuietWhenSpawned guards the #373 fix: a client-spawned
