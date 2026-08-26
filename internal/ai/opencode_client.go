@@ -63,7 +63,7 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	// XDG_CONFIG_HOME at a fresh empty dir so the child does not load the
 	// user's global opencode config (which would start Ghost's own MCP server
 	// against this process's SQLite DB) and strips ANTHROPIC_API_KEY.
-	args := []string{"run", "--format", "json", "--pure"}
+	args := []string{"run", "--format", "json", "--pure", "--title", "[ghost]"}
 	if model := os.Getenv("GHOST_OPENCODE_MODEL"); model != "" {
 		args = append(args, "-m", model)
 	}
