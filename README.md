@@ -286,7 +286,7 @@ The server ships with embedded instructions that teach the agent when to save, w
 
 ```text
 ghost mcp                         # Run MCP server on stdio (used by your MCP client)
-ghost mcp init [--client claude|opencode|codex|goose|all] [--dry-run]  # Configure MCP client (auto-detects when --client omitted)
+ghost mcp init [--client claude|opencode|codex|goose|all] [--dry-run]  # Configure MCP client integration (default: Claude Code)
 ghost mcp status [--client claude|opencode|codex|goose]                # Deep health checks (incl. Ollama reachability, model presence)
 ghost hook <event> --source <host>   # Contract-v1 lifecycle hook (session-start, stop, session-end)
 ghost reflect <project> [flags]      # Memory consolidation (dry-run by default; --apply, --restore, --tier, --source)
@@ -302,7 +302,7 @@ ghost upgrade                        # Self-update from GitHub Releases (linux/m
 ghost version                        # Print version
 ```
 
-`ghost mcp init` auto-detects which MCP clients are on PATH and installs for all of them. When only one is found, it installs for that one; when multiple are found, it installs for all; when none are found, it errors with install instructions. Use `--client` to override and target a specific client (e.g. `--client opencode` installs a single lifecycle plugin to `~/.config/opencode/plugins/ghost-opencode.ts` that self-registers the MCP server and bridges stop events — opencode's own config file is never modified; re-running init repairs an outdated plugin in place).
+`ghost mcp init` and `ghost mcp status` default to Claude Code; `--client opencode` targets opencode instead, installing a single lifecycle plugin to `~/.config/opencode/plugins/ghost-opencode.ts` that self-registers the MCP server and bridges stop events (opencode's own config file is never modified; re-running init repairs an outdated plugin in place).
 
 When `reflection.auto_resolve` is enabled in config (default off), the stop hook also spawns `ghost resolve <project> --apply` as a detached background process after each session, so resolved-evidence memories get marked automatically without waiting for a manual run. This never blocks the hook itself — the spawn is fire-and-forget, logged to `resolve.log` in the ghost data directory. If the Anthropic API is out of credit at spawn time, the spawned process fails and logs the failure; it does not degrade to a lower-quality answer.
 

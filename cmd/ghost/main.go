@@ -176,30 +176,18 @@ func parseMCPClient(args []string) (string, error) {
 
 // clientTarget pairs a display name with its `mcp init` installer.
 type clientTarget struct {
-	name   string
-	binary string // binary name to detect on PATH
-	run    func(w io.Writer, dryRun bool) error
+	name string
+	run  func(w io.Writer, dryRun bool) error
 }
 
 // mcpInitTargets lists every installable client in run order.
 func mcpInitTargets() []clientTarget {
 	return []clientTarget{
-		{"claude", "claude", mcpinit.Run},
-		{"opencode", "opencode", mcpinit.RunOpencode},
-		{"codex", "codex", mcpinit.RunCodex},
-		{"goose", "goose", mcpinit.RunGoose},
+		{"claude", mcpinit.Run},
+		{"opencode", mcpinit.RunOpencode},
+		{"codex", mcpinit.RunCodex},
+		{"goose", mcpinit.RunGoose},
 	}
-}
-
-// detectClients returns the names of clients whose binaries are found on PATH.
-func detectClients() []string {
-	var found []string
-	for _, t := range mcpInitTargets() {
-		if _, err := exec.LookPath(t.binary); err == nil {
-			found = append(found, t.name)
-		}
-	}
-	return found
 }
 
 // runAllClients installs ghost into every target sequentially, continuing past
@@ -219,45 +207,22 @@ func runAllClients(stdout, stderr io.Writer, dryRun bool, targets []clientTarget
 }
 
 // runMCPInit configures an MCP client to use Ghost as its memory system.
-// When --client is omitted, detects which clients are on PATH and installs
-// for all of them (or just the one found). --client all installs into every
-// supported client unconditionally.
+// Defaults to Claude Code; --client opencode targets opencode instead; --client
+// all installs into every supported client sequentially.
 func runMCPInit() {
 	client, err := parseMCPClient(os.Args[3:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	if client == "" {
+		client = "claude"
+	}
 
 	dryRun := false
 	for _, a := range os.Args[3:] {
 		if a == "--dry-run" {
 			dryRun = true
-		}
-	}
-
-	// Auto-detect when --client is omitted.
-	if client == "" {
-		detected := detectClients()
-		switch len(detected) {
-		case 0:
-			fmt.Fprintf(os.Stderr, "error: no supported MCP client found on PATH\n"+
-				"  Install one of: Claude Code, opencode, codex, goose\n"+
-				"  Or specify explicitly: ghost mcp init --client <name>\n")
-			os.Exit(1)
-		case 1:
-			client = detected[0]
-		default:
-			fmt.Fprintf(os.Stderr, "Detected clients: %s\n"+
-				"  Installing for all detected clients.\n"+
-				"  Use --client to target a specific one.\n\n",
-				strings.Join(detected, ", "))
-			failed := runAllClients(os.Stdout, os.Stderr, dryRun, mcpInitTargetsFor(detected))
-			if len(failed) > 0 {
-				fmt.Fprintf(os.Stderr, "\ncompleted with failures: %s\n", strings.Join(failed, ", "))
-				os.Exit(1)
-			}
-			return
 		}
 	}
 
@@ -285,21 +250,6 @@ func runMCPInit() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-// mcpInitTargetsFor returns clientTargets filtered to the given names.
-func mcpInitTargetsFor(names []string) []clientTarget {
-	nameSet := make(map[string]bool, len(names))
-	for _, n := range names {
-		nameSet[n] = true
-	}
-	var targets []clientTarget
-	for _, t := range mcpInitTargets() {
-		if nameSet[t.name] {
-			targets = append(targets, t)
-		}
-	}
-	return targets
 }
 
 // runMCPStatus checks the health of the Ghost ↔ MCP client integration.
@@ -1433,7 +1383,6 @@ Usage:
 Commands:
   mcp                         Start MCP server on stdio (used by Claude Code)
   mcp init [--client claude|opencode|codex|goose|all] [--dry-run]  Configure MCP client integration
-                                                         (auto-detects when --client is omitted)
   mcp status [--client claude|opencode|codex|goose]                Check MCP client integration health
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
   supersede <project> [flags] Link superseded memories (dry-run by default, --apply to write)
