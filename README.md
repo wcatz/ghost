@@ -282,15 +282,18 @@ The server ships with embedded instructions that teach the agent when to save, w
 
 ```text
 ghost mcp                    # Run MCP server on stdio (used by your MCP client)
-ghost mcp init [--client claude|opencode|codex|goose] [--dry-run]  # Configure MCP client integration (default: Claude Code)
+ghost mcp init [--client claude|opencode|codex|goose|all] [--dry-run]  # Configure MCP client integration (default: Claude Code)
 ghost mcp status [--client claude|opencode|codex|goose]    # Deep health checks (incl. Ollama reachability, model presence)
 ghost hook <event> --source <host>  # Contract-v1 lifecycle hook (session-start, stop, session-end)
 ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
 ghost resolve <project>      # De-weight resolved-evidence memories from injection (dry-run by default; --apply)
 ghost supersede <project>    # Link superseded memories (dry-run by default; --apply, --threshold)
+ghost project delete <name> [flags]  # Permanently delete a project and everything under it (dry-run by default; --apply + name re-type to confirm)
+ghost project merge <old> <new>      # Merge one project into another: child records are reassigned to the survivor, memory IDs/links/pins preserved
 ghost bench [--sweep]        # Retrieval-quality benchmark on the built-in dataset
 ghost obsidian export        # Mirror memories to an Obsidian vault (one-way; --out, --project)
 ghost obsidian sync          # Keep the vault mirror fresh (--interval; polls for DB changes)
+ghost context [--cwd <dir>]  # Print the passive session-start context block (for opencode)
 ghost upgrade                # Self-update from GitHub Releases (linux/macOS; Windows: re-download)
 ghost version                # Print version
 ```

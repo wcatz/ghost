@@ -1389,6 +1389,8 @@ Commands:
   resolve <project> [flags]   Mark resolved evidence memories (dry-run by default, --apply to write)
   project delete <name> [flags]  Permanently delete a project and everything under it
                               (dry-run by default, --apply + name re-type to confirm)
+  project merge <old> <new>   Merge one project into another; child records move to the
+                              survivor with memory IDs, links, and pin state preserved
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
   obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
   context [--cwd <dir>]       Print the passive session-start context block (for opencode)
