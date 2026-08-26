@@ -192,8 +192,8 @@ func spawnResolveIfConfigured(cwd, source string) {
 	defer db.Close() //nolint:errcheck
 
 	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	projectID, projectName, err := store.ResolveProject(context.Background(), cwd)
-	if err != nil || projectID == "" || projectName == "" {
+	projectID, projectName := resolveSessionProject(context.Background(), store, cwd)
+	if projectID == "" || projectName == "" {
 		return
 	}
 
@@ -272,8 +272,8 @@ func spawnSupersedeIfConfigured(cwd, source string) {
 	defer db.Close() //nolint:errcheck
 
 	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	projectID, projectName, err := store.ResolveProject(context.Background(), cwd)
-	if err != nil || projectID == "" || projectName == "" {
+	projectID, projectName := resolveSessionProject(context.Background(), store, cwd)
+	if projectID == "" || projectName == "" {
 		return
 	}
 
@@ -360,8 +360,8 @@ func spawnReflectIfConfigured(cwd, source string) {
 	defer db.Close() //nolint:errcheck
 
 	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	projectID, projectName, err := store.ResolveProject(context.Background(), cwd)
-	if err != nil || projectID == "" || projectName == "" {
+	projectID, projectName := resolveSessionProject(context.Background(), store, cwd)
+	if projectID == "" || projectName == "" {
 		return
 	}
 

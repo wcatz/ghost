@@ -4105,3 +4105,35 @@ func TestStoreUpsert_StrengthenDirectionForSupersede(t *testing.T) {
 		t.Fatalf("supersede orientation would pick the wrong row as newer: got %s, want B (%s)", firstID, idB)
 	}
 }
+
+func TestMergeProject_RefusesGlobal(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "target", "/tmp/target", "target"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject _global: %v", err)
+	}
+
+	t.Run("as source refuses like DeleteProject", func(t *testing.T) {
+		err := s.MergeProject(ctx, "_global", "target")
+		if err == nil || !strings.Contains(err.Error(), "_global") {
+			t.Fatalf("expected _global refusal, got: %v", err)
+		}
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM projects WHERE id = '_global'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Fatalf("_global project row disturbed after refused merge: count=%d", n)
+		}
+	})
+
+	t.Run("as target refuses", func(t *testing.T) {
+		err := s.MergeProject(ctx, "target", "_global")
+		if err == nil || !strings.Contains(err.Error(), "_global") {
+			t.Fatalf("expected _global refusal, got: %v", err)
+		}
+	})
+}

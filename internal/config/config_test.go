@@ -84,6 +84,65 @@ func TestDataDir_WithXDGDataHome(t *testing.T) {
 	}
 }
 
+func TestLoad_RoutingDefaultProjectEnv(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY", "GHOST_ROUTING_DEFAULT_PROJECT"})
+
+	t.Setenv("GHOST_ROUTING_DEFAULT_PROJECT", "infrastructure")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Routing.DefaultProject != "infrastructure" {
+		t.Errorf("expected routing.default_project=infrastructure from env, got %q", cfg.Routing.DefaultProject)
+	}
+}
+
+func TestLoad_DefaultProjectFromYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY", "GHOST_ROUTING_DEFAULT_PROJECT"})
+
+	cfgDir := filepath.Join(tmpDir, "ghost")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yamlCfg := "routing:\n  default_project: infrastructure\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte(yamlCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Routing.DefaultProject != "infrastructure" {
+		t.Errorf("expected routing.default_project=infrastructure from yaml, got %q", cfg.Routing.DefaultProject)
+	}
+}
+
+func TestLoad_DefaultProjectEmptyByDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY", "GHOST_ROUTING_DEFAULT_PROJECT"})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.Routing.DefaultProject != "" {
+		t.Errorf("expected routing.default_project empty by default, got %q", cfg.Routing.DefaultProject)
+	}
+}
+
 func TestLoad_GhostEnvOverrides(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
