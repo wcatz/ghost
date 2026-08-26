@@ -249,7 +249,7 @@ func failOnFloors(floors map[string]float64, rep ReportData) error {
 		fmt.Printf("FLOOR VIOLATION: %s\n", v)
 	}
 	if len(violations) > 0 {
-		return fmt.Errorf("%d floor violation(s)", len(violations))
+		return fmt.Errorf("%d floor violation(s):\n%s", len(violations), strings.Join(violations, "\n"))
 	}
 	return nil
 }

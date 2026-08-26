@@ -25,7 +25,7 @@ on:
         required: false
         default: ""
       floors:
-        description: "Comma-separated metric=min floors over stage P/R"
+        description: "Comma-separated metric=min floors over stage P/R. Clearing this disables gating entirely — the run passes regardless of stage quality."
         required: false
         default: "supersede_precision=0.60,supersede_recall=0.45,resolve_precision=0.85,resolve_recall=0.30"
       skip_reflect:
