@@ -580,3 +580,80 @@ func TestMCPLogConfig_UnopenableFileFallsBackQuiet(t *testing.T) {
 		t.Fatal("no file opened, closer must be nil")
 	}
 }
+
+func TestRunProjectMergeCore(t *testing.T) {
+	newStore := func(t *testing.T) *memory.Store {
+		t.Helper()
+		db, err := memory.OpenDB(":memory:")
+		if err != nil {
+			t.Fatalf("OpenDB: %v", err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+		s := memory.NewStore(db, logger)
+		if err := s.EnsureProject(context.Background(), "old-proj", "/tmp/old", "old-name"); err != nil {
+			t.Fatalf("EnsureProject old: %v", err)
+		}
+		if err := s.EnsureProject(context.Background(), "new-proj", "/tmp/new", "new-name"); err != nil {
+			t.Fatalf("EnsureProject new: %v", err)
+		}
+		return s
+	}
+
+	t.Run("merges by name and preserves memory IDs", func(t *testing.T) {
+		store := newStore(t)
+		ctx := context.Background()
+		id, err := store.Create(ctx, "old-proj", memory.Memory{
+			Category: "fact", Content: "a fact that must survive the merge", Source: "manual", Importance: 0.5, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		var out bytes.Buffer
+		if err := runProjectMergeCore(ctx, store, &out, "old-name", "new-name"); err != nil {
+			t.Fatalf("runProjectMergeCore: %v", err)
+		}
+
+		got, err := store.GetAll(ctx, "new-proj", 10)
+		if err != nil {
+			t.Fatalf("GetAll after merge: %v", err)
+		}
+		found := false
+		for _, m := range got {
+			if m.ID == id {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("memory %s missing from new-proj after merge", id)
+		}
+		for _, m := range got {
+			if m.ID == id && m.ProjectID != "new-proj" {
+				t.Errorf("memory project_id = %q, want new-proj", m.ProjectID)
+			}
+		}
+		oldID, _, _ := store.ResolveProject(ctx, "old-name")
+		if oldID != "" {
+			t.Errorf("old project still resolves after merge: %q", oldID)
+		}
+	})
+
+	t.Run("same project refused", func(t *testing.T) {
+		store := newStore(t)
+		var out bytes.Buffer
+		err := runProjectMergeCore(context.Background(), store, &out, "new-name", "new-proj")
+		if err == nil || !strings.Contains(err.Error(), "itself") {
+			t.Fatalf("expected self-merge refusal, got: %v", err)
+		}
+	})
+
+	t.Run("unknown project errors with known listing", func(t *testing.T) {
+		store := newStore(t)
+		var out bytes.Buffer
+		err := runProjectMergeCore(context.Background(), store, &out, "nope", "new-name")
+		if err == nil || !strings.Contains(err.Error(), `project "nope" not found`) {
+			t.Fatalf("expected not-found error, got: %v", err)
+		}
+	})
+}

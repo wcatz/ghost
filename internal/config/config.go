@@ -32,6 +32,15 @@ type Config struct {
 	Reflection ReflectionConfig `koanf:"reflection"`
 	Linking    LinkingConfig    `koanf:"linking"`
 	Obsidian   ObsidianConfig   `koanf:"obsidian"`
+	Routing    RoutingConfig    `koanf:"routing"`
+}
+
+// RoutingConfig steers sessions whose cwd matches no known project.
+type RoutingConfig struct {
+	// DefaultProject is the project (name or id, resolved at use time) that
+	// home-dir and filesystem-root sessions fall back to for memory context.
+	// Empty disables the fallback entirely — the historical default.
+	DefaultProject string `koanf:"default_project"`
 }
 
 // APIConfig holds Claude API settings (used by reflection only).
@@ -101,6 +110,7 @@ var defaults = map[string]interface{}{
 	"obsidian.vault_dir":         "",
 	"obsidian.interval":          "30s",
 	"obsidian.auto_sync":         false,
+	"routing.default_project":    "",
 }
 
 // Load reads configuration with layered precedence.
@@ -153,6 +163,7 @@ func Load() (*Config, error) {
 		"GHOST_REFLECTION_AUTO_RESOLVE":   "reflection.auto_resolve",
 		"GHOST_REFLECTION_AUTO_SUPERSEDE": "reflection.auto_supersede",
 		"GHOST_OLLAMA_URL":                "embedding.ollama_url",
+		"GHOST_ROUTING_DEFAULT_PROJECT":   "routing.default_project",
 	}
 	for envKey, koanfKey := range envOverrides {
 		if val := os.Getenv(envKey); val != "" {

@@ -75,7 +75,12 @@ func main() {
 				runProjectDelete()
 				return
 			}
+			if len(os.Args) > 2 && os.Args[2] == "merge" {
+				runProjectMerge()
+				return
+			}
 			fmt.Fprintln(os.Stderr, "Usage: ghost project delete <name-or-id> [--apply]")
+			fmt.Fprintln(os.Stderr, "       ghost project merge <old-name-or-id> <new-name-or-id>")
 			os.Exit(1)
 		case "upgrade":
 			runUpgrade()
@@ -1045,6 +1050,74 @@ Irreversible. Refuses to delete _global.`)
 	ctx := context.Background()
 
 	if err := runProjectDeleteCore(ctx, store, os.Stdout, os.Stdin, projectName, apply); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runProjectMergeCore implements the merge behind `ghost project merge`.
+// Both arguments resolve through ResolveProject (id, name, path-prefix, or
+// basename); merging reassigns every child record to the surviving project —
+// preserving memory IDs, links, and pin state — and deletes the old project
+// row. Non-destructive to records, so no confirmation gate (unlike delete).
+func runProjectMergeCore(ctx context.Context, store *memory.Store, out io.Writer, oldArg, newArg string) error {
+	oldID, oldName := resolveForMerge(ctx, store, oldArg)
+	newID, newName := resolveForMerge(ctx, store, newArg)
+	if oldID == "" {
+		return fmt.Errorf("project %q not found; known projects: %s", oldArg, strings.Join(knownProjectNames(ctx, store), ", "))
+	}
+	if newID == "" {
+		return fmt.Errorf("project %q not found; known projects: %s", newArg, strings.Join(knownProjectNames(ctx, store), ", "))
+	}
+	if oldID == newID {
+		return fmt.Errorf("refusing to merge a project into itself (%q)", oldID)
+	}
+	if _, err := fmt.Fprintf(out, "Merging %q (%s) into %q (%s)\n", oldName, oldID, newName, newID); err != nil {
+		return err
+	}
+	if err := store.MergeProject(ctx, oldID, newID); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(out, "merged: all records from %q now belong to %q\n", oldName, newName)
+	return err
+}
+
+func resolveForMerge(ctx context.Context, store *memory.Store, arg string) (string, string) {
+	id, name, err := store.ResolveProject(ctx, arg)
+	if err != nil {
+		return "", ""
+	}
+	return id, name
+}
+
+func knownProjectNames(ctx context.Context, store *memory.Store) []string {
+	names, err := store.ListProjectNames(ctx)
+	if err != nil {
+		return nil
+	}
+	return names
+}
+
+// runProjectMerge implements `ghost project merge <old> <new>`.
+func runProjectMerge() {
+	args := os.Args[3:]
+	var positional []string
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", a)
+			os.Exit(1)
+		}
+		positional = append(positional, a)
+	}
+	if len(positional) != 2 {
+		fmt.Fprintln(os.Stderr, "Usage: ghost project merge <old-name-or-id> <new-name-or-id>")
+		os.Exit(1)
+	}
+
+	_, _, store := bootstrap(os.Stderr, cliLogLevel())
+	defer store.Close() //nolint:errcheck
+
+	if err := runProjectMergeCore(context.Background(), store, os.Stdout, positional[0], positional[1]); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}

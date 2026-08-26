@@ -405,10 +405,12 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	}
 	defer db.Close() //nolint:errcheck
 
-	// Resolve cwd to a project: id, name, path-prefix, then basename fallback (see Store.ResolveProject).
+	// Resolve cwd to a project: id, name, path-prefix, then basename fallback
+	// (see Store.ResolveProject); home-dir/root sessions additionally fall
+	// back to routing.default_project when configured (issue #391).
 	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	projectID, project, err = store.ResolveProject(context.Background(), cwd)
-	if err != nil || projectID == "" {
+	projectID, project = resolveSessionProject(context.Background(), store, cwd)
+	if projectID == "" {
 		return
 	}
 
