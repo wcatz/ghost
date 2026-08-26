@@ -23,11 +23,14 @@ permissions:
   issues: write
   pull-requests: write
 
-# One agent run per PR at a time: a duplicate trigger (e.g. the same /review
-# comment delivered twice by a client retry) replaces the in-flight run
-# instead of racing it and burning double quota.
+# One agent run per PR per event type at a time. The group MUST split on
+# event name: the bot's own comments fire issue_comment runs, and a shared
+# group let that (guaranteed-skipped — Bot senders are filtered) run cancel
+# the in-flight pull_request run mid-improve (observed 2026-08-26 on #397).
+# Cross-type overlap is possible after this change but rare and bounded by
+# ai_timeout + the runner cap.
 concurrency:
-  group: pr-agent-${{ github.event.issue.number || github.event.pull_request.number }}
+  group: pr-agent-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -73,17 +76,39 @@ jobs:
     runs-on: ubuntu-latest
     # Hard cap: litellm's ai_timeout does not bound a hung streamed call —
     # observed 651s before the upstream 500 came back. Kill at the runner.
-    # 90s per LLM call x several sequential calls can legitimately exceed
-    # 8 minutes (a full review died at exactly 8m24s), so allow 10.
-    timeout-minutes: 10
+    # auto_improve adds sequential per-finding LLM calls after review; three
+    # historical cap-blows landed at ~8.5m under the old 10m limit, so 25m
+    # covers review + top-4 suggestions with headroom while still bounding
+    # a pathological hang.
+    timeout-minutes: 25
     steps:
+      - name: Mint bot identity token
+        id: apptoken
+        # Reviews post as the Review Loop GitHub App instead of
+        # github-actions. Falls back to the runner token when the App
+        # secrets are absent — functionality intact, identity degrades.
+        if: ${{ vars.USE_BOT_IDENTITY != 'false' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          # client-id (not app-id): v3 deprecates app-id input
+          client-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Warn on degraded identity
+        # The mint step above swallows its own failure (continue-on-error);
+        # surface the degradation loudly or debugging "why is the bot
+        # github-actions?" means spelunking step logs.
+        if: ${{ steps.apptoken.outputs.token == '' }}
+        run: echo "::warning::App token unavailable — reviews will post as github-actions"
+
       - name: PR Agent action step
         id: pragent
         # Pinned to a commit SHA (not a mutable tag) for supply-chain
         # hardening — matches repo convention of pinning tool versions.
         uses: the-pr-agent/pr-agent@4ebd5c5333c6ef21509e7304d27969eb825e6f22
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.apptoken.outputs.token || secrets.GITHUB_TOKEN }}
 
           # Big Pickle via opencode Zen — free stealth reasoning model
           # (opencode's deliberate-analysis model), chosen for review
@@ -128,12 +153,12 @@ jobs:
           config.max_model_tokens: "48000"
 
           github_action_config.auto_review: "true"
-          # On-demand only (/improve comment): per-finding suggestion
-          # generation is sequential LLM calls and blew the 10-min runner
-          # cap three runs straight when always-on. Also, do NOT auto-commit
-          # to PR branches — that needs pull-requests: write and surprises
-          # authors.
-          github_action_config.auto_improve: "false"
+          # Always-on: every PR gets inline committable suggestions.
+          # Sequential per-finding LLM calls are why this was on-demand
+          # (three 10-min cap-blows); the 25m runner cap plus num_code_
+          # suggestions=4 keeps worst-case wall time bounded. Not a merge
+          # gate — latency is cosmetic.
+          github_action_config.auto_improve: "true"
           # Off: the generated walkthrough summaries are verbose LLM slop
           # and have hallucinated project-specific names. Findings live in
           # the review + inline threads; no description is posted.
