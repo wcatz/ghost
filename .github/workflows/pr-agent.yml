@@ -142,12 +142,12 @@ jobs:
           config.max_model_tokens: "48000"
 
           github_action_config.auto_review: "true"
-          # On-demand only (/improve comment): per-finding suggestion
-          # generation is sequential LLM calls and blew the 10-min runner
-          # cap three runs straight when always-on. Also, do NOT auto-commit
-          # to PR branches — that needs pull-requests: write and surprises
-          # authors.
-          github_action_config.auto_improve: "false"
+          # Always-on: every PR gets inline committable suggestions.
+          # Sequential per-finding LLM calls are why this was on-demand
+          # (three 10-min cap-blows); the 25m runner cap plus num_code_
+          # suggestions=4 keeps worst-case wall time bounded. Not a merge
+          # gate — latency is cosmetic.
+          github_action_config.auto_improve: "true"
           # Off: the generated walkthrough summaries are verbose LLM slop
           # and have hallucinated project-specific names. Findings live in
           # the review + inline threads; no description is posted.

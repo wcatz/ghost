@@ -40,8 +40,22 @@ require_can_be_split_review = true
 # Compliance checks alone miss invariant-class bugs. Observed 2026-08-26
 # (#394): a PR exposed Store.MergeProject via a new CLI command and scored
 # 92/fully-compliant while missing that DeleteProject refuses _global but
-# MergeProject did not. These lenses direct attention at exactly that class.
+# MergeProject did not. The format contract produces a verdict-first card
+# (brainstorm 2026-08-26); the lenses direct attention at exactly that class.
 extra_instructions = """
+Output format (mandatory): open with a verdict card exactly in this shape:
+'## <emoji> Verdict: <approve|approve with nits|comment|request changes> — <one-line why>',
+then '**Findings:** N 🔴 · N 🟡 · N 🟢 | Effort: 🔵🔵⚪⚪⚪',
+then a six-row markdown lens table (Tests, Security, Error handling,
+Invariant parity, Protected resources, Behavior preservation) whose Result
+column is '✅' or '⚠️ N', then a '### Findings' list ordered 🔴→🟡→🟢 where
+each finding is '<severity> **file:line** — what is wrong → why it matters →
+concrete fix'. Severity: 🔴 blocker (correctness/race/data-loss),
+🟡 should-fix, 🟢 nit. Put ticket compliance analysis, effort breakdown,
+and focus areas inside a '<details><summary>Ticket compliance · full
+analysis</summary>' block after Findings. The card must be readable in
+under 15 seconds.
+
 Beyond diff-vs-issue compliance, apply these lenses and report findings per lens:
 1. Invariant parity: when a PR adds a caller of an existing internal API (new CLI command, MCP tool, or store method), read that API's full implementation chain down to the deepest layer it touches, and compare its guard clauses against sibling mutators on the same resource (e.g. DeleteProject refuses _global — any new destructive or reassigning operation on projects must refuse it too).
 2. Protected resources: the _global project row, production DB rows, subprocess env keys. Verify refusal paths exist at the deepest implementation layer, not only at the wrapper the PR introduced.
@@ -56,3 +70,6 @@ commitable_code_suggestions = true
 dual_publishing_score_threshold = 7
 # Filter low-confidence suggestions — biggest noise reducer.
 suggestions_score_threshold = 3
+# Budget: top-N suggestions per run keeps auto-improve inside the 25m
+# runner cap (each suggestion is a sequential LLM call).
+num_code_suggestions = 4
