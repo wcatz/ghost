@@ -73,17 +73,31 @@ jobs:
     runs-on: ubuntu-latest
     # Hard cap: litellm's ai_timeout does not bound a hung streamed call —
     # observed 651s before the upstream 500 came back. Kill at the runner.
-    # 90s per LLM call x several sequential calls can legitimately exceed
-    # 8 minutes (a full review died at exactly 8m24s), so allow 10.
-    timeout-minutes: 10
+    # auto_improve adds sequential per-finding LLM calls after review; three
+    # historical cap-blows landed at ~8.5m under the old 10m limit, so 25m
+    # covers review + top-4 suggestions with headroom while still bounding
+    # a pathological hang.
+    timeout-minutes: 25
     steps:
+      - name: Mint bot identity token
+        id: apptoken
+        # Reviews post as the Review Loop GitHub App instead of
+        # github-actions. Falls back to the runner token when the App
+        # secrets are absent — functionality intact, identity degrades.
+        if: ${{ vars.USE_BOT_IDENTITY != 'false' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
       - name: PR Agent action step
         id: pragent
         # Pinned to a commit SHA (not a mutable tag) for supply-chain
         # hardening — matches repo convention of pinning tool versions.
         uses: the-pr-agent/pr-agent@4ebd5c5333c6ef21509e7304d27969eb825e6f22
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.apptoken.outputs.token || secrets.GITHUB_TOKEN }}
 
           # Big Pickle via opencode Zen — free stealth reasoning model
           # (opencode's deliberate-analysis model), chosen for review
