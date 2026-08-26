@@ -118,7 +118,7 @@ Claude Code's built-in memory is a markdown file with a limited load window ([~2
 | Search | None (linear load) | Full-text + optional local vector search |
 | Categorization | None | 8 categories with importance scores |
 | Dedup | None (appends forever) | FTS-based upsert — merges on save |
-| Consolidation | None | Haiku LLM or local Jaccard tier |
+| Consolidation | None (Dreams, managed) | Anthropic API, CLI fallback, or local Jaccard |
 | Time decay | None (stale facts persist equally) | Category-aware: conventions never decay, gotchas fade |
 | Cross-project | None (siloed per repository) | `ghost_search_all` + `_global` project |
 | Memory graph | None | Auto-linked related memories, graph view in Obsidian |
@@ -208,7 +208,9 @@ Pinned memories are fully exempt from decay — they score at raw importance reg
 
 ### Consolidation you can undo
 
-`ghost reflect` merges duplicates, prunes noise, and promotes cross-project knowledge to global scope. Tiered: Claude Haiku first (needs an API key; cost scales with memory count — roughly $0.001 for a typical project, an estimate from Haiku 4.5's per-token pricing, not a measurement), falling back to a fully offline SQLite tier (Jaccard ≥ 0.5, same-category merges). Because an LLM rewriting your memory store is scary, the guardrails are layered:
+`ghost reflect` merges duplicates, prunes noise, and promotes cross-project knowledge to global scope. Tiered: Anthropic API (Haiku) first, then a CLI tier (claude, opencode, codex, or goose — whichever is on PATH), falling back to a fully offline SQLite tier (Jaccard >= 0.5, same-category merges). When `--source` is set (e.g. `--source opencode`), the API tier is skipped entirely and the matching CLI binary is used directly.
+
+Because an LLM rewriting your memory store is scary, the guardrails are layered:
 
 - **Dry run by default** — see the diff before `--apply`
 - **Auto-snapshot before every replace**, keeping the 3 most recent per project; `ghost reflect --restore` is the undo button
