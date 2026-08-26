@@ -3,6 +3,7 @@ package obsidian
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -118,7 +119,9 @@ func TestSyncRetriesFailedExport(t *testing.T) {
 	if _, err := writeStore.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "second memory", Importance: 0.7, Source: "mcp"}); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { return strings.Contains(buf.String(), "export failed") })
+	waitForDebug(t, "export failed log after injected ReadDir failure", func() bool {
+		return strings.Contains(buf.String(), "export failed")
+	}, func() string { return buf.String() })
 
 	// Fix the vault. NO further commits: only a retained baseline retries.
 	readDirFn.Store(os.ReadDir)
@@ -153,6 +156,11 @@ func (l *logBuffer) String() string {
 
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
+	waitForDebug(t, "condition", cond, nil)
+}
+
+func waitForDebug(t *testing.T, what string, cond func() bool, debug func() string) {
+	t.Helper()
 	// Generous deadline: these tests drive a real 50ms ticker, and under
 	// `go test -race ./...` scheduler contention can delay a tick well past a
 	// tight bound. A passing condition is met in well under a second; the
@@ -165,5 +173,9 @@ func waitFor(t *testing.T, cond func() bool) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("condition not met within %s", deadline)
+	msg := fmt.Sprintf("%s: not met within %s", what, deadline)
+	if debug != nil {
+		msg += "\nlog buffer:\n" + debug()
+	}
+	t.Fatal(msg)
 }
