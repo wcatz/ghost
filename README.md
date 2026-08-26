@@ -118,7 +118,7 @@ Claude Code's built-in memory is a markdown file with a limited load window ([~2
 | Search | None (linear load) | Full-text + optional local vector search |
 | Categorization | None | 8 categories with importance scores |
 | Dedup | None (appends forever) | FTS-based upsert — merges on save |
-| Consolidation | None | Haiku LLM or local Jaccard tier |
+| Consolidation | None (Dreams, managed) | Anthropic API, CLI fallback, or local Jaccard |
 | Time decay | None (stale facts persist equally) | Category-aware: conventions never decay, gotchas fade |
 | Cross-project | None (siloed per repository) | `ghost_search_all` + `_global` project |
 | Memory graph | None | Auto-linked related memories, graph view in Obsidian |
@@ -147,7 +147,7 @@ Mem0 and Zep are excellent products, but self-hosting them means running a servi
 
 ### Where does my data go?
 
-One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`) — this path is the same on every OS, including Windows (i.e. `%USERPROFILE%\.local\share\ghost`, not `%AppData%`); only the config file follows the OS-native convention (see Configuration below). Ghost makes no network calls in normal operation, with three exceptions you control: **localhost** Ollama for embeddings (optional), the Claude API *only if* you run `ghost reflect` with the Haiku tier (needs `ANTHROPIC_API_KEY`; the SQLite tier is fully offline), and the GitHub API *only if* you run `ghost upgrade`. That's the complete list.
+One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`) — this path is the same on every OS, including Windows (i.e. `%USERPROFILE%\.local\share\ghost`, not `%AppData%`); only the config file follows the OS-native convention (see Configuration below). Ghost makes no network calls in normal operation, with three exceptions you control: **localhost** Ollama for embeddings (optional), the Anthropic API when `ANTHROPIC_API_KEY` is set and no CLI binary (claude/opencode/codex/goose) is available for consolidation, resolve, or supersede, and the GitHub API *only if* you run `ghost upgrade`. That's the complete list.
 
 ### What exactly gets injected into my agent's context?
 
@@ -174,7 +174,7 @@ Switching *in* is just as easy: `ghost mcp init` imports Claude Code memories, a
 
 ### What does it cost to run?
 
-$0/month. No metered API in the hot path. The only paid call in the entire codebase is the optional Haiku consolidation tier — and it has a free offline fallback.
+$0/month. No metered API in the hot path. When `ANTHROPIC_API_KEY` is set and no CLI binary is available, consolidate/resolve/supersede use the Anthropic API (cost scales with memory count — roughly $0.001 for a typical project); otherwise they fall back to a free CLI call (claude, opencode, codex, or goose) or the fully offline SQLite tier.
 
 ## How it works
 
@@ -208,7 +208,9 @@ Pinned memories are fully exempt from decay — they score at raw importance reg
 
 ### Consolidation you can undo
 
-`ghost reflect` merges duplicates, prunes noise, and promotes cross-project knowledge to global scope. Tiered: Claude Haiku first (needs an API key; cost scales with memory count — roughly $0.001 for a typical project, an estimate from Haiku 4.5's per-token pricing, not a measurement), falling back to a fully offline SQLite tier (Jaccard ≥ 0.5, same-category merges). Because an LLM rewriting your memory store is scary, the guardrails are layered:
+`ghost reflect` merges duplicates, prunes noise, and promotes cross-project knowledge to global scope. Tiered: Anthropic API (Haiku) first, then a CLI tier (claude, opencode, codex, or goose — whichever is on PATH), falling back to a fully offline SQLite tier (Jaccard >= 0.5, same-category merges). When `--source` is set (e.g. `--source opencode`), the API tier is skipped entirely and the matching CLI binary is used directly.
+
+Because an LLM rewriting your memory store is scary, the guardrails are layered:
 
 - **Dry run by default** — see the diff before `--apply`
 - **Auto-snapshot before every replace**, keeping the 3 most recent per project; `ghost reflect --restore` is the undo button
@@ -263,11 +265,11 @@ Because the mirror is one-way, edits inside the vault are informational only and
 
 ## MCP surface
 
-19 tools, 4 resources:
+20 tools, 4 resources, 2 prompts:
 
 | Group | Tools |
 |---|---|
-| Memory | `ghost_memory_save` `ghost_memory_search` `ghost_search_all` `ghost_memories_list` `ghost_memory_update` `ghost_memory_delete` `ghost_memory_pin` `ghost_memory_promote` `ghost_save_global` `ghost_resolve` |
+| Memory | `ghost_memory_save` `ghost_memory_search` `ghost_search_all` `ghost_memories_list` `ghost_memory_update` `ghost_memory_delete` `ghost_memory_pin` `ghost_memory_promote` `ghost_save_global` `ghost_resolve` `ghost_project_delete` |
 | Context | `ghost_project_context` `ghost_list_projects` `ghost_health` |
 | Tasks | `ghost_task_create` `ghost_task_list` `ghost_task_update` `ghost_task_complete` |
 | Decisions | `ghost_decision_record` `ghost_decisions_list` |
@@ -276,26 +278,28 @@ Because the mirror is one-way, edits inside the vault are informational only and
 
 Resources: project context, global memories, project decisions, project tasks — pin them in clients that support it to survive context compaction.
 
+Prompts: `recall_project` (injects project context into the conversation), `record_decision` (guides structured decision recording).
+
 The server ships with embedded instructions that teach the agent when to save, which categories to use, and how to leverage cross-project search — it works proactively without configuration. Full architecture notes in [docs/architecture.md](docs/architecture.md).
 
 ## CLI
 
 ```text
-ghost mcp                    # Run MCP server on stdio (used by your MCP client)
+ghost mcp                         # Run MCP server on stdio (used by your MCP client)
 ghost mcp init [--client claude|opencode|codex|goose|all] [--dry-run]  # Configure MCP client integration (default: Claude Code)
-ghost mcp status [--client claude|opencode|codex|goose]    # Deep health checks (incl. Ollama reachability, model presence)
-ghost hook <event> --source <host>  # Contract-v1 lifecycle hook (session-start, stop, session-end)
-ghost reflect <project>      # Memory consolidation (dry-run by default; --apply, --restore, --tier)
-ghost resolve <project>      # De-weight resolved-evidence memories from injection (dry-run by default; --apply)
-ghost supersede <project>    # Link superseded memories (dry-run by default; --apply, --threshold)
-ghost project delete <name> [flags]  # Permanently delete a project and everything under it (dry-run by default; --apply + name re-type to confirm)
-ghost project merge <old> <new>      # Merge one project into another: child records are reassigned to the survivor, memory IDs/links/pins preserved
-ghost bench [--sweep]        # Retrieval-quality benchmark on the built-in dataset
-ghost obsidian export        # Mirror memories to an Obsidian vault (one-way; --out, --project)
-ghost obsidian sync          # Keep the vault mirror fresh (--interval; polls for DB changes)
-ghost context [--cwd <dir>]  # Print the passive session-start context block (for opencode)
-ghost upgrade                # Self-update from GitHub Releases (linux/macOS; Windows: re-download)
-ghost version                # Print version
+ghost mcp status [--client claude|opencode|codex|goose]                # Deep health checks (incl. Ollama reachability, model presence)
+ghost hook <event> --source <host>   # Contract-v1 lifecycle hook (session-start, stop, session-end)
+ghost reflect <project> [flags]      # Memory consolidation (dry-run by default; --apply, --restore, --tier, --source)
+ghost resolve <project> [flags]      # De-weight resolved-evidence memories (dry-run by default; --apply, --source)
+ghost supersede <project> [flags]    # Link superseded memories (dry-run by default; --apply, --threshold, --source)
+ghost project delete <name> [flags]  # Permanently delete a project (dry-run by default; --apply + name re-type to confirm)
+ghost project merge <old> <new>      # Merge one project into another; child records move to the survivor
+ghost context [--cwd <dir>]          # Print the passive session-start context block (for opencode)
+ghost bench [--sweep]                # Retrieval-quality benchmark on the built-in dataset
+ghost obsidian export                # Mirror memories to an Obsidian vault (one-way; --out, --project)
+ghost obsidian sync                  # Keep the vault mirror fresh (--interval; polls for DB changes)
+ghost upgrade                        # Self-update from GitHub Releases (linux/macOS; Windows: re-download)
+ghost version                        # Print version
 ```
 
 `ghost mcp init` and `ghost mcp status` default to Claude Code; `--client opencode` targets opencode instead, installing a single lifecycle plugin to `~/.config/opencode/plugins/ghost-opencode.ts` that self-registers the MCP server and bridges stop events (opencode's own config file is never modified; re-running init repairs an outdated plugin in place).
@@ -309,7 +313,7 @@ Ghost works with zero config. When you want to change something, layers are (lat
 1. Compiled defaults
 2. `/etc/ghost/config.yaml`
 3. `~/.config/ghost/config.yaml` (honors `$XDG_CONFIG_HOME` when set; on Windows, absent an `XDG_CONFIG_HOME` override, this resolves to `%AppData%\ghost\config.yaml`)
-4. `GHOST_*` environment variables, plus `ANTHROPIC_API_KEY` for the Haiku reflection tier
+4. `GHOST_*` environment variables, plus `ANTHROPIC_API_KEY` (used by reflect/resolve/supersede when no CLI binary is available)
 
 ```yaml
 embedding:
@@ -322,6 +326,8 @@ linking:
 ```
 
 Note: env-var names map underscores to config dots, so keys that themselves contain underscores (e.g. `embedding.ollama_url`, `obsidian.vault_dir`) need an explicit shortcut rather than the generic `GHOST_*` mapping; `GHOST_OLLAMA_URL` and `GHOST_OBSIDIAN_VAULT_DIR` are provided for exactly that. Running Ghost inside a VM with Ollama on the host? Point it at the host's gateway IP instead of hand-editing the config file, e.g. `GHOST_OLLAMA_URL=http://10.0.2.2:11434` (the default host-gateway address for UTM/QEMU on macOS; other hypervisors use their own convention, such as `host.docker.internal` for Docker Desktop).
+
+**OpenCode integration:** set `GHOST_OPENCODE_MODEL` to pin the model for opencode-backed tiers (e.g. `GHOST_OPENCODE_MODEL=big-pickle`). The opencode backend runs `opencode run --pure --title "[ghost]"` per LLM call — headless sessions are titled `[ghost]` so they're filterable in opencode's session search. Authentication is handled by opencode's own provider config; Ghost does not need `OPENCODE_API_KEY` directly.
 
 ## Benchmarks
 
@@ -414,5 +420,20 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 ## Review pipeline
 
-PRs are reviewed automatically on every push. Findings land as inline threads that
-must be resolved before merge; findings superseded by a newer review auto-resolve.
+PRs are reviewed automatically on every push. The pipeline uses [PR-Agent](https://github.com/The-PR-Agent/pr-agent) self-hosted on GitHub Actions, powered by Big Pickle via the opencode zen endpoint (`https://opencode.ai/zen/v1`), with DeepSeek V4 Flash as a fallback.
+
+**What it does:**
+- `/review` posts a persistent review comment with score, effort estimate, and up to 5 findings (inline on diff lines)
+- `/improve` posts committable code suggestions as GitHub suggestion blocks (top 4 per run)
+- Reviews are anchored to the default branch via `apply_repo_settings` (fetches `.pr_agent.toml` and context files)
+
+**What it doesn't do:**
+- Ticket compliance analysis is disabled (`require_ticket_analysis_review = false`) — the native grading mislabeled clean PRs and the merge gate is conversation resolution
+- The intro line ("Here are some key observations...") is disabled (`enable_intro_text = false`)
+- Auto-describe is disabled — findings live in the review, not in the PR description
+
+**Extra instructions** enforce 3 lenses beyond diff-vs-issue matching: invariant parity (cross-checking guard clauses against sibling mutators), protected resources (_global project, DB rows, subprocess env), and behavior preservation at modified call sites.
+
+**Review identity:** Reviews post as the Review Loop GitHub App (`review-sweeper`) when the app token is available; falls back to `github-actions` when secrets are absent.
+
+**Concurrency:** one agent run per PR per event type. Bot comments fire `issue_comment` runs; a shared group with event-type splitting prevents the bot from cancelling its own in-flight review.
