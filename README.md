@@ -147,7 +147,7 @@ Mem0 and Zep are excellent products, but self-hosting them means running a servi
 
 ### Where does my data go?
 
-One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`) — this path is the same on every OS, including Windows (i.e. `%USERPROFILE%\.local\share\ghost`, not `%AppData%`); only the config file follows the OS-native convention (see Configuration below). Ghost makes no network calls in normal operation, with three exceptions you control: **localhost** Ollama for embeddings (optional), the Claude API *only if* you run `ghost reflect` with the Haiku tier (needs `ANTHROPIC_API_KEY`; the SQLite tier is fully offline), and the GitHub API *only if* you run `ghost upgrade`. That's the complete list.
+One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`) — this path is the same on every OS, including Windows (i.e. `%USERPROFILE%\.local\share\ghost`, not `%AppData%`); only the config file follows the OS-native convention (see Configuration below). Ghost makes no network calls in normal operation, with four exceptions you control: **localhost** Ollama for embeddings (optional), the Anthropic API when `ANTHROPIC_API_KEY` is set and no CLI binary (claude/opencode/codex/goose) is available for consolidation, resolve, or supersede, the GitHub API *only if* you run `ghost upgrade`, and localhost Ollama for the optional Haiku reflection tier. That's the complete list.
 
 ### What exactly gets injected into my agent's context?
 
@@ -174,7 +174,7 @@ Switching *in* is just as easy: `ghost mcp init` imports Claude Code memories, a
 
 ### What does it cost to run?
 
-$0/month. No metered API in the hot path. The only paid call in the entire codebase is the optional Haiku consolidation tier — and it has a free offline fallback.
+$0/month. No metered API in the hot path. When `ANTHROPIC_API_KEY` is set and no CLI binary is available, consolidate/resolve/supersede use the Anthropic API (cost scales with memory count — roughly $0.001 for a typical project); otherwise they fall back to a free CLI call (claude, opencode, codex, or goose) or the fully offline SQLite tier.
 
 ## How it works
 
@@ -313,7 +313,7 @@ Ghost works with zero config. When you want to change something, layers are (lat
 1. Compiled defaults
 2. `/etc/ghost/config.yaml`
 3. `~/.config/ghost/config.yaml` (honors `$XDG_CONFIG_HOME` when set; on Windows, absent an `XDG_CONFIG_HOME` override, this resolves to `%AppData%\ghost\config.yaml`)
-4. `GHOST_*` environment variables, plus `ANTHROPIC_API_KEY` for the Haiku reflection tier
+4. `GHOST_*` environment variables, plus `ANTHROPIC_API_KEY` (used by reflect/resolve/supersede when no CLI binary is available)
 
 ```yaml
 embedding:
