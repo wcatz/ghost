@@ -10,6 +10,8 @@
 //	    [--project acme-migration] [--repo .] [--keep] [--skip-reflect]
 //	    [--drain-timeout 3m] [--ollama http://localhost:11434]
 //	    [--results-dir eval/cycle/results]
+//	    [--floors "supersede_precision=0.60,..."]
+//	    [--opencode-auth-file path/to/auth.json]
 //
 // Every ghost process runs with XDG_DATA_HOME/XDG_CONFIG_HOME inside a
 // throwaway temp dir and with ANTHROPIC_API_KEY stripped, so nothing touches
@@ -43,6 +45,9 @@ type config struct {
 	ollamaURL   string
 	resultsDir  string
 	gradeOnly   string // existing scratch dir: re-grade only (no ghost processes)
+	floors      string // comma-separated metric=min floors over stage P/R
+	authFile    string // opencode auth.json to seed into the scratch data dir
+	floorMap    map[string]float64
 }
 
 func main() {
@@ -56,7 +61,15 @@ func main() {
 	flag.StringVar(&cfg.ollamaURL, "ollama", "http://localhost:11434", "Ollama base URL for the reachability check")
 	flag.StringVar(&cfg.resultsDir, "results-dir", "eval/cycle/results", "directory for dated reports")
 	flag.StringVar(&cfg.gradeOnly, "grade-only", "", "existing kept scratch dir: re-grade final state + saved raw outputs, run nothing")
+	flag.StringVar(&cfg.floors, "floors", "", "comma-separated metric=min floors over stage P/R, e.g. \"supersede_precision=0.60,resolve_recall=0.30\" (keys: supersede_precision, supersede_recall, resolve_precision, resolve_recall); a violation fails the run after the report is written")
+	flag.StringVar(&cfg.authFile, "opencode-auth-file", "", "path to an opencode auth.json copied into the scratch data dir so sandboxed LLM stages authenticate (empty: local runs need none)")
 	flag.Parse()
+	floors, err := parseFloors(cfg.floors)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+	cfg.floorMap = floors
 	if err := run(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -87,6 +100,9 @@ func run(cfg config) error {
 		if err := os.MkdirAll(filepath.Join(scratch, sub), 0o700); err != nil {
 			return err
 		}
+	}
+	if err := seedOpencodeAuth(scratch, cfg.authFile); err != nil {
+		return err
 	}
 	env := scratchEnv(scratch)
 
@@ -207,6 +223,34 @@ func run(cfg config) error {
 	if cfg.keep {
 		fmt.Printf("scratch kept: %s\n", scratch)
 	}
+	return failOnFloors(cfg.floorMap, rep)
+}
+
+// stageMetrics flattens the graded stages into the key map -floors checks.
+func stageMetrics(rep ReportData) map[string]float64 {
+	return map[string]float64{
+		"supersede_precision": rep.Supersede.Precision(),
+		"supersede_recall":    rep.Supersede.Recall(),
+		"resolve_precision":   rep.Resolve.Precision(),
+		"resolve_recall":      rep.Resolve.Recall(),
+	}
+}
+
+// failOnFloors returns an error describing every floor violation so CI fails
+// AFTER the report is written — artifacts must exist for triage even when the
+// grade is bad. Floors are never exact-match assertions: LLM stages are
+// nondeterministic (observed resolve R wobble ±0.25 across identical inputs).
+func failOnFloors(floors map[string]float64, rep ReportData) error {
+	if len(floors) == 0 {
+		return nil
+	}
+	violations := checkFloors(stageMetrics(rep), floors)
+	for _, v := range violations {
+		fmt.Printf("FLOOR VIOLATION: %s\n", v)
+	}
+	if len(violations) > 0 {
+		return fmt.Errorf("%d floor violation(s):\n%s", len(violations), strings.Join(violations, "\n"))
+	}
 	return nil
 }
 
@@ -265,7 +309,7 @@ func gradeOnlyRun(cfg config) error {
 		return err
 	}
 	fmt.Printf("report written: %s\n", path)
-	return nil
+	return failOnFloors(cfg.floorMap, rep)
 }
 
 // writeRaw persists one stage's raw CLI output next to the report so misses
