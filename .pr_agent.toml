@@ -23,6 +23,17 @@ propagate_tool_errors = true
 enable_global_best_practices = true
 
 [pr_reviewer]
+# Drop the canned "Here are some key observations to aid the review
+# process:" opener — pure noise, the table speaks for itself.
+enable_intro_text = false
+
+# Disable the native 🎫 ticket-compliance section (require_ticket_
+# analysis_review defaults true): when a PR formally links an issue it
+# grades diff-vs-ticket and mislabels clean PRs "Partially compliant"
+# (observed 2026-08-26 on #399 with all requirements fulfilled). The
+# merge gate is conversation resolution, not bot grading.
+require_ticket_analysis_review = false
+
 # Anchor key issues as inline comments on diff lines instead of
 # listing them only in the summary table (matches the old CodeRabbit
 # comment style more closely).
