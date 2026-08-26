@@ -73,6 +73,25 @@ const renderStartContext = (cwd: string): Promise<string> =>
 		child.on("close", () => resolve(out))
 	})
 
+// Races a promise against a deadline, resolving to `fallback` if the deadline
+// wins. The loser is left to settle on its own — never awaited, never thrown
+// away forcibly, just ignored. Needed because `config()` runs during
+// opencode's own startup: an RPC back into the SDK client (e.g.
+// client.session.list()) can depend on server state that isn't up yet, and
+// without a bound it stalls config() — and therefore all of opencode's
+// startup, since nothing past config() runs until it resolves — forever.
+const withTimeout = <T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> =>
+	new Promise((resolve) => {
+		const timer = setTimeout(() => resolve(fallback), ms)
+		promise.then((v) => {
+			clearTimeout(timer)
+			resolve(v)
+		}, () => {
+			clearTimeout(timer)
+			resolve(fallback)
+		})
+	})
+
 export const GhostPlugin: Plugin = async ({ client, directory }) => {
 	const log = async (level: "info" | "warn" | "error", message: string) => {
 		try {
@@ -223,7 +242,11 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 				// back to the startup cwd.
 				let ctxCwd = directory ?? process.cwd()
 				try {
-					const sessions = await client.session.list()
+					// This RPC round-trips through opencode's own server, which
+					// is still coming up during config() — bound it so a slow or
+					// not-yet-ready server degrades to the startup cwd instead of
+					// stalling config() (and all of opencode's startup) forever.
+					const sessions = await withTimeout(client.session.list(), 1500, { data: [] as unknown[] })
 					if (Array.isArray(sessions.data) && sessions.data.length > 0) {
 						const recent = sessions.data.reduce((a, b) =>
 							(a.time?.updated ?? 0) >= (b.time?.updated ?? 0) ? a : b)
