@@ -327,6 +327,8 @@ linking:
 
 Note: env-var names map underscores to config dots, so keys that themselves contain underscores (e.g. `embedding.ollama_url`, `obsidian.vault_dir`) need an explicit shortcut rather than the generic `GHOST_*` mapping; `GHOST_OLLAMA_URL` and `GHOST_OBSIDIAN_VAULT_DIR` are provided for exactly that. Running Ghost inside a VM with Ollama on the host? Point it at the host's gateway IP instead of hand-editing the config file, e.g. `GHOST_OLLAMA_URL=http://10.0.2.2:11434` (the default host-gateway address for UTM/QEMU on macOS; other hypervisors use their own convention, such as `host.docker.internal` for Docker Desktop).
 
+**OpenCode integration:** set `GHOST_OPENCODE_MODEL` to pin the model for opencode-backed tiers (e.g. `GHOST_OPENCODE_MODEL=big-pickle`). The opencode backend runs `opencode run --pure --title "[ghost]"` per LLM call — headless sessions are titled `[ghost]` so they're filterable in opencode's session search. Authentication is handled by opencode's own provider config; Ghost does not need `OPENCODE_API_KEY` directly.
+
 ## Benchmarks
 
 Every Ghost number below is reproducible with the in-repo harnesses, and shipped with per-question logs — the competitor figures in the comparison table further down are externally sourced and not reproducible from this repo. Retrieval-only metrics are deterministic given the embedding cache; end-to-end scores are recorded runs (model-pinned, single-run — rerun variance is possible but small at temperature 0). Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
