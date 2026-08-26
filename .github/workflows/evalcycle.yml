@@ -9,19 +9,21 @@ name: evalcycle
 # resolve P 1.00 / R 0.42-0.67) — low enough to tolerate model wobble, tight
 # enough to catch gross breakage like a classifier path failing to zero.
 #
-# Auth: opencode credentials are materialized from the OPENCODE_AUTH_JSON
-# Actions secret into a file passed to -opencode-auth-file; the harness seeds
-# it inside its scratch XDG_DATA_HOME so the sandboxed `opencode` subprocess
-# finds it (ai.OpenCodeClient scrubs XDG_CONFIG_HOME and ambient API keys but
-# passes XDG_DATA_HOME through untouched — auth lives under
-# $XDG_DATA_HOME/opencode/auth.json). Without the secret the run falls back to
-# opencode's anonymous build tier; floors then decide if that's gradeable.
+# Auth: pass the existing opencode credential as the OPENCODE_GO_API_KEY
+# Actions secret; it flows into OPENCODE_API_KEY on the run step. The harness
+# → ghost → opencode subprocess chain carries it through automatically
+# (ai.stripLLMKeys strips ANTHROPIC/OPENAI/GOOSE keys but passes OPENCODE_*
+# by design). With the key set, opencode defaults to the account's Go-endpoint
+# model (opencode-go/ox-alpha-free); without it, runs fall back to opencode's
+# anonymous build tier (big-pickle) and floors decide if that's gradeable.
+# Model pins must be provider-scoped: `opencode-go/ox-alpha-free`, not bare
+# `ox-alpha-free`.
 
 on:
   workflow_dispatch:
     inputs:
       model:
-        description: "GHOST_OPENCODE_MODEL pin for the opencode subprocess (empty = opencode default)"
+        description: "GHOST_OPENCODE_MODEL pin, provider-scoped (e.g. opencode-go/ox-alpha-free); empty = opencode default"
         required: false
         default: ""
       floors:
@@ -74,27 +76,17 @@ jobs:
           curl -fsSL https://opencode.ai/install | bash
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
-      - name: Materialize opencode auth from secret
-        env:
-          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
-        run: |
-          if [ -n "$OPENCODE_AUTH_JSON" ]; then
-            mkdir -p "$HOME/.ghost-eval"
-            printf '%s' "$OPENCODE_AUTH_JSON" > "$HOME/.ghost-eval/opencode-auth.json"
-            chmod 600 "$HOME/.ghost-eval/opencode-auth.json"
-          else
-            echo "OPENCODE_AUTH_JSON not set — running on opencode's anonymous build tier"
-          fi
-
       - name: Run graded eval cycle
         env:
           GHOST_OPENCODE_MODEL: ${{ inputs.model }}
           EVAL_FLOORS: ${{ inputs.floors }}
           EVAL_SKIP_REFLECT: ${{ inputs.skip_reflect }}
+          # Secret holds the opencode credential (the same value exported as
+          # OPENCODE_API_KEY locally). Unset -> anonymous build tier fallback.
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
         run: |
           args=( -repo . -ollama http://localhost:11434 )
           [ -n "$EVAL_FLOORS" ] && args+=( -floors "$EVAL_FLOORS" )
-          [ -f "$HOME/.ghost-eval/opencode-auth.json" ] && args+=( -opencode-auth-file "$HOME/.ghost-eval/opencode-auth.json" )
           [ "$EVAL_SKIP_REFLECT" = "true" ] && args+=( -skip-reflect )
           go run ./eval/cycle "${args[@]}"
 
