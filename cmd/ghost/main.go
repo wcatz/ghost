@@ -261,27 +261,28 @@ func runMCPInit() {
 		}
 	}
 
-	switch client {
-	case "all":
+	if client == "all" {
 		failed := runAllClients(os.Stdout, os.Stderr, dryRun, mcpInitTargets())
 		if len(failed) > 0 {
 			fmt.Fprintf(os.Stderr, "\ncompleted with failures: %s\n", strings.Join(failed, ", "))
 			os.Exit(1)
 		}
 		return
-	case "opencode":
-		err = mcpinit.RunOpencode(os.Stdout, dryRun)
-	case "codex":
-		err = mcpinit.RunCodex(os.Stdout, dryRun)
-	case "goose":
-		err = mcpinit.RunGoose(os.Stdout, dryRun)
-	case "claude":
-		err = mcpinit.Run(os.Stdout, dryRun)
-	default:
-		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected claude, opencode, codex, goose, or all)\n", client)
+	}
+
+	// Look up the installer from the target registry — no hardcoded switch
+	// needed; adding a new client to mcpInitTargets() is sufficient.
+	target, ok := mcpInitTargetByName(client)
+	if !ok {
+		var names []string
+		for _, t := range mcpInitTargets() {
+			names = append(names, t.name)
+		}
+		fmt.Fprintf(os.Stderr, "error: unknown client %q (expected %s, or all)\n",
+			client, strings.Join(names, ", "))
 		os.Exit(1)
 	}
-	if err != nil {
+	if err := target.run(os.Stdout, dryRun); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -300,6 +301,19 @@ func mcpInitTargetsFor(names []string) []clientTarget {
 		}
 	}
 	return targets
+}
+
+// mcpInitTargetByName returns the clientTarget with the given name, or false
+// if no such target exists. This keeps the name→installer mapping in one
+// place (mcpInitTargets) so adding a new client never requires touching the
+// switch statement.
+func mcpInitTargetByName(name string) (clientTarget, bool) {
+	for _, t := range mcpInitTargets() {
+		if t.name == name {
+			return t, true
+		}
+	}
+	return clientTarget{}, false
 }
 
 // runMCPStatus checks the health of the Ghost ↔ MCP client integration.
