@@ -37,6 +37,17 @@ require_score_review = true
 require_todo_scan = true
 require_can_be_split_review = true
 
+# Compliance checks alone miss invariant-class bugs. Observed 2026-08-26
+# (#394): a PR exposed Store.MergeProject via a new CLI command and scored
+# 92/fully-compliant while missing that DeleteProject refuses _global but
+# MergeProject did not. These lenses direct attention at exactly that class.
+extra_instructions = """
+Beyond diff-vs-issue compliance, apply these lenses and report findings per lens:
+1. Invariant parity: when a PR adds a caller of an existing internal API (new CLI command, MCP tool, or store method), read that API's full implementation chain down to the deepest layer it touches, and compare its guard clauses against sibling mutators on the same resource (e.g. DeleteProject refuses _global — any new destructive or reassigning operation on projects must refuse it too).
+2. Protected resources: the _global project row, production DB rows, subprocess env keys. Verify refusal paths exist at the deepest implementation layer, not only at the wrapper the PR introduced.
+3. Behavior preservation at modified call sites: confirm replacement error-handling logic covers the same failure modes as before (e.g. an `err != nil` check replaced by an empty-string check must be equivalent for every path that previously returned err).
+"""
+
 [pr_code_suggestions]
 # Post high-confidence suggestions as committable inline code comments
 # (GitHub suggestion blocks the author can accept with one click).

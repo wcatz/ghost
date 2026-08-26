@@ -32,3 +32,8 @@
 - Strip API keys from subprocess environments (ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOSE_PROVIDER__API_KEY)
 - Never log or commit secrets
 - SOPS-encrypted secrets only — never git restore encrypted files
+
+## Project Invariants
+- The `_global` project is protected: every destructive or reassigning project operation (`DeleteProject`, `MergeProject`, any future op that deletes project rows or moves child records) must refuse `_global` on either side, with the refusal implemented at the store layer so all callers inherit it
+- New callers of existing store/provider APIs inherit that API's guard clauses — when exposing one through a new CLI command or MCP tool, read the full implementation first and preserve its refusals at the deepest layer
+- Error-handling replacements at call sites must cover the same failure modes they replace (an empty-string miss-check is only equivalent to `err != nil` if every error path also returns empty)
