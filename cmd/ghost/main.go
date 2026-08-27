@@ -911,9 +911,8 @@ cli.opencode_binary) — requires one of the two.`)
 // keyword prefilter proposes candidates; Haiku adjudicates each with a crisp
 // conclusion-vs-evidence question biased to KEEP. Dry-run by default; --apply
 // writes resolved_at. Re-runnable and reversible: any later Upsert/UpdateMemory
-// of a memory clears its resolved_at. Standalone command, never a hook — the
-// stop-hook contract forbids DB access on that path. See the
-// resolution-classifier spec.
+// of a memory clears its resolved_at. The stop hook spawns this as a
+// detached --apply process (internal/mcpinit/stophook.go).
 func runResolve() {
 	var projectName string
 	var source string
@@ -1449,6 +1448,7 @@ Commands:
   mcp init [--client claude|opencode|codex|goose|all] [--dry-run]  Configure MCP client integration
                                                          (auto-detects when --client is omitted)
   mcp status [--client claude|opencode|codex|goose]                Check MCP client integration health
+  hook <event> [--source <host>]  Lifecycle hook for MCP clients (session-start, stop)
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
   supersede <project> [flags] Link superseded memories (dry-run by default, --apply to write)
   resolve <project> [flags]   Mark resolved evidence memories (dry-run by default, --apply to write)

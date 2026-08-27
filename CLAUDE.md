@@ -3,15 +3,15 @@
 ## Stack
 - Go 1.26+ CLI application
 - SQLite with FTS5 for memory persistence (modernc.org/sqlite — pure Go, no CGO)
-- Claude API (manual HTTP client) — used by reflection only
+- Claude API (manual HTTP client) — used by reflection, resolve, and supersede
 - MCP server via modelcontextprotocol/go-sdk (stdio transport)
 
 ## Architecture
-- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, resolve, supersede, project, obsidian, bench, upgrade, version
+- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, resolve, supersede, project, obsidian, bench, upgrade, version, context
 - `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + resolve + supersede); `Provider` seam (`anthropicClient`/`SamplingProvider`) with `FallbackProvider` credit-exhaustion fallover for resolve/supersede
 - `internal/memory/` — SQLite CRUD, FTS5 search, vector search, time-decay scoring
 - `internal/mcpserver/` — MCP server: 20 tools + 4 resources + 2 prompts (`recall_project`, `record_decision`)
-- `internal/mcpinit/` — `ghost mcp init`, `ghost mcp status`, `ghost hook <event> --source <host>` (contract-v1 lifecycle dispatch; installers: claude-code, opencode plugin-only, codex TOML+hooks.json, goose Agent-Plugins package; goose field aliasing lives in hostevent.Parse)
+- `internal/mcpinit/` — `ghost mcp init`, `ghost mcp status`, `ghost hook <event> --source <host>` (contract-v1 lifecycle dispatch; installers: claude-code, opencode plugin, codex TOML+hooks.json, goose Agent-Plugins package; goose field aliasing lives in hostevent.Parse)
 - `internal/claudeimport/` — One-time import of Claude Code auto-memory on first contact
 - `internal/embedding/` — Ollama async vectorization worker
 - `internal/linking/` — Background worker linking similar memories into a graph
