@@ -43,7 +43,7 @@ type RoutingConfig struct {
 	DefaultProject string `koanf:"default_project"`
 }
 
-// APIConfig holds Claude API settings (used by reflection only).
+// APIConfig holds Claude API settings (used by reflection, resolve, and supersede classifiers).
 type APIConfig struct {
 	Key string `koanf:"key"`
 }

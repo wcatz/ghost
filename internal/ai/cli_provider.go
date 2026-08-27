@@ -7,25 +7,26 @@ import (
 )
 
 // errNoCLIBackend is returned when no subprocess LLM binary is available.
-var errNoCLIBackend = errors.New("no CLI LLM backend available (install claude or opencode)")
+var errNoCLIBackend = errors.New("no CLI LLM backend available (install claude, opencode, codex, or goose)")
 
-// cliBackend is the shared capability of the two subprocess LLM clients.
+// cliBackend is the shared capability of the subprocess LLM clients.
 type cliBackend interface {
 	Reflect(ctx context.Context, prompt string) (string, TokenUsage, error)
 	Classify(ctx context.Context, systemPrompt, userContent string) (string, error)
 }
 
-// CLIProvider resolves the best available CLI backend — claude first, then
-// opencode — and delegates to it, so callers need no knowledge of which binary
-// is installed. It satisfies reflection's reflector interface and ai.Provider,
-// so it drops in wherever CLIClient is used.
+// CLIProvider resolves the best available CLI backend — priority: claude >
+// opencode > codex > goose — and delegates to it, so callers need no knowledge
+// of which binary is installed. It satisfies reflection's reflector interface
+// and ai.Provider, so it drops in wherever CLIClient is used.
 type CLIProvider struct {
 	backend cliBackend
 	name    string
 }
 
 // NewCLIProvider picks the best backend available on PATH: claude if present,
-// else opencode if present, else an unavailable provider.
+// else opencode if present, else codex if present, else goose if present,
+// else an unavailable provider.
 func NewCLIProvider() *CLIProvider {
 	return NewCLIProviderWithBinaries("", "", "", "")
 }
@@ -70,7 +71,7 @@ func NewCLIProviderWithBinaries(claudeBinary, opencodeBinary, codexBinary, goose
 	return &CLIProvider{backend: nil, name: "none"}
 }
 
-// Name reports which backend was selected ("cli", "opencode", or "none").
+// Name reports which backend was selected ("cli", "opencode", "codex", "goose", or "none").
 func (p *CLIProvider) Name() string { return p.name }
 
 // Available reports whether any subprocess LLM backend is on PATH.

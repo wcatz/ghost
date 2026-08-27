@@ -75,10 +75,6 @@ type MemoryStore interface {
 	MergeProject(ctx context.Context, oldID, newID string) error
 	DeleteProject(ctx context.Context, input string, apply bool) (memory.DeleteProjectSummary, error)
 
-	// Conversation persistence
-	CreateConversation(ctx context.Context, projectID, mode string) (string, error)
-	AppendMessage(ctx context.Context, conversationID, role, content string) error
-
 	// State
 	IncrementInteraction(ctx context.Context, projectID string) (int, error)
 	GetLearnedContext(ctx context.Context, projectID string) (string, error)

@@ -1,5 +1,10 @@
-// internal/ai/provider.go
 package ai
+
+// Package ai provides LLM backends for Ghost: Anthropic HTTP client, 4 CLI
+// subprocess adapters (claude/opencode/codex/goose), MCP sampling provider,
+// source-aware routing, and the FallbackProvider for credit-exhaustion fallover.
+//
+// Key types: Client, Reflector, Provider, Classifier, TokenUsage, CostForUsage.
 
 import (
 	"context"

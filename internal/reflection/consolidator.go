@@ -1,5 +1,11 @@
 package reflection
 
+// Package reflection performs memory consolidation: HaikuConsolidator (Anthropic API)
+// for intelligent merge, tier_sqlite.go (Jaccard similarity) for deterministic
+// fallback, and TieredConsolidator that tries tiers in priority order with a quality
+// gate rejecting LLM tiers that fall below the 30% threshold. Mechanical tiers
+// are exempt from the quality gate.
+
 import (
 	"context"
 	"fmt"

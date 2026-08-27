@@ -1,4 +1,5 @@
-// Package mcpinit configures Claude Code to use Ghost as its memory system.
+// Package mcpinit configures MCP clients (Claude Code, opencode, codex, goose)
+// to use Ghost as their memory system.
 package mcpinit
 
 import (
@@ -23,6 +24,7 @@ var ghostPermissions = []string{
 	"mcp__ghost__ghost_memory_search",
 	"mcp__ghost__ghost_memory_update",
 	"mcp__ghost__ghost_project_context",
+	"mcp__ghost__ghost_project_delete",
 	"mcp__ghost__ghost_resolve",
 	"mcp__ghost__ghost_save_global",
 	"mcp__ghost__ghost_search_all",

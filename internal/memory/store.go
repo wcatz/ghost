@@ -1,5 +1,11 @@
 package memory
 
+// Package memory provides the SQLite-backed persistence layer for Ghost memories,
+// including CRUD operations, FTS5 search, hybrid vector/FTS retrieval, time-decay
+// scoring with category-aware decay, pin exemptions, project lifecycle management,
+// tasks, decisions, memory links (supersedes/contradicts/elaborates/causes), and
+// cost/token tracking.
+
 import (
 	"context"
 	"database/sql"
@@ -739,7 +745,7 @@ const DecayRankingSQL = `
 `
 
 // GetTopMemories returns the top N memories ranked by composite score
-// with category-aware time decay and pinned boost.
+// with category-aware time decay and pinned exemption.
 func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1373,34 +1379,6 @@ func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedCont
 	return err
 }
 
-// --- Conversation persistence ---
-
-// CreateConversation starts a new conversation.
-func (s *Store) CreateConversation(ctx context.Context, projectID, mode string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var id string
-	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO conversations (project_id, mode)
-		VALUES (?, ?)
-		RETURNING id
-	`, projectID, mode).Scan(&id)
-	return id, err
-}
-
-// AppendMessage adds a message to a conversation.
-func (s *Store) AppendMessage(ctx context.Context, conversationID, role, content string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO messages (conversation_id, role, content)
-		VALUES (?, ?, ?)
-	`, conversationID, role, content)
-	return err
-}
-
 // RecordUsage saves token usage for cost tracking.
 func (s *Store) RecordUsage(ctx context.Context, projectID, model string, usage TokenUsage) error {
 	s.mu.Lock()
@@ -1527,6 +1505,7 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 
 // sanitizeFTS strips FTS5 special operators from text to prevent query injection.
 // Extracts plain words and quotes each one so they're treated as literals.
+//
 // upsertMergeThreshold is the minimum Jaccard similarity between full token
 // sets for Upsert to treat two memories as duplicates. Matches the 0.5 gate
 // reflection's SQLite tier uses (internal/reflection/tier_sqlite.go), so

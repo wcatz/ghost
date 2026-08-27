@@ -6,9 +6,8 @@
 // Design mirrors internal/supersede: a cheap local prefilter proposes
 // candidates, an LLM Classifier adjudicates each with a crisp one-word
 // question (biased to KEEP), and — with apply — the confirmed set is stamped
-// via SetResolved. The real Classifier will live behind an LLM implementation
-// added in a later task. The command is a standalone `ghost resolve` batch,
-// never a hook: the stop hook contract forbids DB access on that path
+// via SetResolved. The LLM Classifier implementation lives in haiku.go.
+// The stop hook spawns `ghost resolve --apply` as a detached background process
 // (internal/mcpinit/stophook.go). The pass is re-runnable and idempotent —
 // already-resolved rows are excluded by ResolveCandidates.
 package resolve

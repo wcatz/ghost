@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// Client is a Claude API client with streaming and tool_use support.
+// Client is a Claude API client for non-streaming reflection calls.
 type Client struct {
 	apiKey     string
 	httpClient *http.Client
