@@ -89,7 +89,7 @@ jobs:
         # secrets are absent — functionality intact, identity degrades.
         if: ${{ vars.USE_BOT_IDENTITY != 'false' }}
         continue-on-error: true
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@v3.2.0
         with:
           # client-id (not app-id): v3 deprecates app-id input
           client-id: ${{ secrets.GH_APP_ID }}
