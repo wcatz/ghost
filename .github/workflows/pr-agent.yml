@@ -106,7 +106,7 @@ jobs:
         id: pragent
         # Pinned to a commit SHA (not a mutable tag) for supply-chain
         # hardening — matches repo convention of pinning tool versions.
-        uses: the-pr-agent/pr-agent@4ebd5c5333c6ef21509e7304d27969eb825e6f22
+        uses: the-pr-agent/pr-agent@ab6ec54bfeb37933ddb74259338752e9272016c6
         env:
           GITHUB_TOKEN: ${{ steps.apptoken.outputs.token || secrets.GITHUB_TOKEN }}
 
