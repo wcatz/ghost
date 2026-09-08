@@ -453,6 +453,11 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	}
 	defer rows.Close() //nolint:errcheck
 
+	// Reference "now" captured once, immediately after the query, so the
+	// Go-side decay scoring below uses the same instant the SQL ranking used
+	// for julianday('now') — no per-candidate clock drift between the two.
+	now := time.Now()
+
 	type candidate struct {
 		mem        sessionMemory
 		importance float64
@@ -470,7 +475,14 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 		// have a larger cap (sessionMemoriesCap=15 vs. globalsCap=8), so a
 		// smaller per-item budget keeps total section bytes comparable.
 		content = truncateUTF8(content, 200)
-		t, _ := time.Parse("2006-01-02 15:04:05", createdAt)
+		t, err := time.Parse("2006-01-02 15:04:05", createdAt)
+		if err != nil {
+			// created_at is always written by SQLite's datetime('now'), which
+			// matches the layout above; on the off chance a hand-inserted row
+			// has a different shape, treat it as fresh rather than year-0001
+			// (which would inflate age and wrongly floor its decay).
+			t = now
+		}
 		cands = append(cands, candidate{
 			mem:        sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1},
 			importance: importance,
@@ -488,7 +500,8 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	// reproduces the historical rank-only selection.
 	behaviorFloor := 0
 	injection := config.InjectionConfig{BehaviorFloor: 8, BehaviorCategories: []string{"gotcha", "convention", "preference", "decision"}}
-	if cfg, cfgErr := config.Load(); cfgErr == nil {
+	cfg, cfgErr := config.Load()
+	if cfgErr == nil {
 		injection = cfg.Injection
 	}
 	if injection.BehaviorFloor > 0 {
@@ -513,7 +526,7 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 				w = cfgW
 			}
 		}
-		return c.importance * memory.DecayFactor(c.mem.Category, c.mem.Pinned, float64(time.Since(c.createdAt).Hours()/24.0)) * w
+		return c.importance * memory.DecayFactor(c.mem.Category, c.mem.Pinned, float64(now.Sub(c.createdAt).Hours()/24.0)) * w
 	}
 
 	chosen := make([]sessionMemory, 0, sessionMemoriesCap)
@@ -565,7 +578,7 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 
 	if len(memories) > sessionMemoriesCap {
 		demotionThreshold := memory.DefaultDemotionThreshold
-		if cfg, cfgErr := config.Load(); cfgErr == nil {
+		if cfgErr == nil {
 			demotionThreshold = cfg.Linking.DemotionThreshold
 		}
 		ids := make([]string, len(memories))
