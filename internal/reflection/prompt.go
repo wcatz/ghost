@@ -93,6 +93,8 @@ Produce a JSON object with two fields:
    - Tags: when carrying a memory forward, keep its existing tags (shown as tags:[...] above); when merging memories, union their tags. Only invent tags for memories that have none — and derive them from THAT memory's content, never from neighboring memories
    - Aim for 10-25 high-quality memories, not 50 repetitive ones
    - Scope: most memories are "project". Mark as "global" ONLY if the knowledge applies across ALL repositories — examples: user preferences, cross-repo workflows (deploying from one repo to another), personal tooling choices, SSH hosts, infrastructure topology. Project-specific architecture, patterns, or conventions are always "project".
+   - Anti-fabrication: the input above is the ONLY source of truth. Never invent specifics that do not appear in it — commit SHAs, version numbers, file paths, package names, feature names, ports, hosts, or model names. If you cannot verify an identifier in the input, omit it or describe the fact generically ("a fix was applied", not "fixed in fdf4583"). A plausible-looking but unverified SHA, feature, or version is a hallucination.
+   - Project-scoping: every emitted memory must be about the project named under "Project" above. Do not import facts about other projects, repositories, or tools from your own knowledge — the corpus only contains this project plus explicit "global" user preferences that were already present in the input. If a memory is not traceable to the input data, drop it rather than emit it.
 
 Return ONLY the JSON object, no other text.`)
 
