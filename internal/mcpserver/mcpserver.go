@@ -968,9 +968,9 @@ func (s *Server) registerTools() {
 		}, nil, nil
 	})
 
-	// ghost_resolve — scan a project for resolved-evidence memories via MCP
-	// sampling (the calling session's own model), optionally stamping
-	// resolved_at on the confirmed set.
+	// ghost_resolve — scan a project for resolved-evidence memories using the
+	// calling session's own CLI harness, optionally stamping resolved_at on
+	// the confirmed set.
 	type ghostResolveArgs struct {
 		Project string `json:"project" jsonschema:"the project to scan for resolved-evidence memories"`
 		Apply   bool   `json:"apply,omitempty" jsonschema:"stamp resolved_at on confirmed memories (default false: dry-run preview only)"`
@@ -978,7 +978,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_resolve",
 		Title:       "Resolve stale evidence",
-		Description: "Scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own model via MCP sampling when the client supports it, falling back to a subscription-billed `claude -p` call otherwise (dry-run only on that fallback). No Anthropic API credits spent either way. Dry-run by default; pass apply:true to stamp resolved_at.",
+		Description: "Scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own CLI harness — the backend is picked from the MCP client's identity (an opencode session classifies via opencode, a claude session via claude, etc.), falling back to the best CLI on PATH for unknown clients. Subscription-billed; no Anthropic API credits spent. Dry-run by default; pass apply:true to stamp resolved_at.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			OpenWorldHint:   boolPtr(false),
@@ -998,15 +998,24 @@ func (s *Server) registerTools() {
 		if !ok {
 			return nil, nil, fmt.Errorf("ghost_resolve: store does not support resolve operations")
 		}
-		// req.Session is never nil here: every ServerRequest the go-sdk
-		// dispatches to a tool handler is constructed from a live
-		// *ServerSession (see mcp.ServerRequest's construction sites in
-		// shared.go/server.go) — there is no headless-invocation path for an
-		// MCP tool. The claude CLI fallback is always a fallback, never a
-		// full-trust primary, so an apply:true request can never write a
-		// CLI-only classification (see resolve.Run's anyFallback guard).
-		samplingProvider := ai.NewSamplingProvider(req.Session)
-		provider := ai.NewAlwaysFallbackProvider(samplingProvider, ai.NewCLIClient(), true)
+		// Session-scoped classifier: pick the CLI backend from the calling
+		// client's identity (req.Session.InitializeParams().ClientInfo.Name),
+		// so an opencode session classifies via the opencode binary, a claude
+		// session via claude, etc. — mirroring headless's source-aware
+		// routing (ai.SourceForClientName → NewSourceProviderForSource).
+		// Unknown clients fall back to the best CLI on PATH. MCP sampling was
+		// retired here per spec 2026-07-28 (SEP-2577 deprecates Sampling) —
+		// see docs/superpowers/specs/2026-08-24-resolve-sampling-path-design.md.
+		// No binary at all is a clean tool error, never a silent degradation.
+		var clientName string
+		if p := req.Session.InitializeParams(); p != nil && p.ClientInfo != nil {
+			clientName = p.ClientInfo.Name
+		}
+		cli := ai.NewSourceProviderForSource(ai.SourceForClientName(clientName))
+		if !cli.Available() {
+			return nil, nil, fmt.Errorf("ghost_resolve requires a `claude`, `opencode`, `codex`, or `goose` binary on PATH (or via cli.*_binary config)")
+		}
+		provider := ai.NewFallbackProvider(cli, nil, false)
 		cls := resolve.NewResolutionClassifier(provider)
 		res, confirmed, err := resolve.Run(ctx, rs, cls, projectID, args.Apply, s.logger)
 		if err != nil {
@@ -1022,9 +1031,6 @@ func (s *Server) registerTools() {
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %s %d\n",
 			args.Project, res.Loaded, res.Candidates, res.Confirmed, verb, count)
-		if res.SkippedApply {
-			sb.WriteString("  apply skipped: classification used the claude CLI fallback (MCP sampling unavailable on this client) — rerun once sampling works to actually stamp resolved_at\n")
-		}
 		for _, m := range confirmed {
 			fmt.Fprintf(&sb, "  %s  [%s]  %s\n", shortID(m.ID), m.Category, firstLine(m.Content, 70))
 		}

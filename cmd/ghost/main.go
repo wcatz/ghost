@@ -778,8 +778,7 @@ Flags:
 // buildClassifyProvider builds the Provider resolve/supersede classify
 // against: the direct Anthropic API when ANTHROPIC_API_KEY is configured,
 // falling back to a subscription-billed CLI call (claude first, then
-// opencode — see ai.CLIProvider) on credit exhaustion (dry-run-only, matching
-// the sampling-provider convention for a degraded secondary — see
+// opencode — see ai.CLIProvider) on credit exhaustion (dry-run-only — see
 // ai.FallbackProvider); or that same CLI provider as the sole, full-write
 // primary when no key is configured at all, so these commands work without
 // spending API credits as long as `claude` or `opencode` is available.

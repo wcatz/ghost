@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 )
 
 var errUnknownSource = errors.New("unknown source: no CLI backend available for this host")
@@ -89,4 +90,28 @@ func (p *SourceProvider) Classify(ctx context.Context, systemPrompt, userContent
 		return "", errUnknownSource
 	}
 	return p.backend.Classify(ctx, systemPrompt, userContent)
+}
+
+// clientSourceNames maps an MCP client's self-reported name
+// (InitializeParams.ClientInfo.Name) to the source token
+// NewSourceProviderForSource understands. Matching is case-insensitive
+// substring-based so minor naming variance ("Claude Desktop", "claude-code")
+// still resolves. Adding a new client is one table row here.
+var clientSourceNames = []struct{ name, source string }{
+	{"opencode", "opencode"},
+	{"claude", "claude-code"},
+	{"codex", "codex"},
+	{"goose", "goose"},
+}
+
+// SourceForClientName maps an MCP client's reported name to a source token,
+// or "" for unknown names (callers then use best-available-on-PATH).
+func SourceForClientName(clientName string) string {
+	lower := strings.ToLower(clientName)
+	for _, c := range clientSourceNames {
+		if strings.Contains(lower, c.name) {
+			return c.source
+		}
+	}
+	return ""
 }
