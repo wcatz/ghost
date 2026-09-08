@@ -282,6 +282,27 @@ against the real `ghost` project database (43 memories):
   machine implements MCP sampling to complete the test. Re-test once/if a
   connected MCP client adds sampling support.
 
+## Session-injection budget (category-priority + compact render) — SHIPPED
+
+`TestBenchInjectionBudget` (internal/mcpinit/injectionbudget_test.go) drives the
+real `loadSessionContext`/`formatSessionContext` pipeline over a 57-memory
+representative corpus skewed so the descriptive categories (14 architecture +
+12 facts) would otherwise crowd the rank-only top-15 and starve the behavioral
+slots. Measured under the default `injection.behavior_floor: 8`:
+
+| metric | value |
+|---|---|
+| selected memories (cap) | 15 |
+| behavioral hit (gotcha/convention/preference/decision) | **8/8** (floor 8 met) |
+| compact render | **732 bytes** |
+| legacy render (32-hex ID per line) | 852 bytes |
+| byte saving | **120 bytes (~14%)** |
+
+This evidences that the trade is a net win: the category-priority selection hits
+its behavioral floor even when high-importance descriptive rows dominate the
+raw decay ranking, while the compact render shrinks (never grows) the injected
+block. Ran 2026-09-08 on the category-aware-injection worktree.
+
 ## Reporting rules (all phases)
 
 1. Harness, datasets, and judge prompts live in this repo.
