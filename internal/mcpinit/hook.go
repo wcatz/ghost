@@ -499,7 +499,7 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	// rank-only ordering. behavior_floor=0 disables the bias entirely and
 	// reproduces the historical rank-only selection.
 	behaviorFloor := 0
-	injection := config.InjectionConfig{BehaviorFloor: 8, BehaviorCategories: []string{"gotcha", "convention", "preference", "decision"}}
+	injection := config.DefaultInjectionConfig()
 	cfg, cfgErr := config.Load()
 	if cfgErr == nil {
 		injection = cfg.Injection

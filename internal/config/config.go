@@ -96,6 +96,17 @@ type InjectionConfig struct {
 	CategoryWeights    map[string]float64 `koanf:"category_weights"`
 }
 
+// DefaultInjectionConfig returns the compiled injection defaults. It mirrors the
+// injection.* entries in the defaults map so callers that need a fallback when
+// Load() fails (e.g. the SessionStart hook's read-only path) never diverge from
+// the layered defaults.
+func DefaultInjectionConfig() InjectionConfig {
+	return InjectionConfig{
+		BehaviorFloor:      8,
+		BehaviorCategories: []string{"gotcha", "convention", "preference", "decision"},
+	}
+}
+
 // ObsidianConfig controls the Obsidian vault mirror (ghost obsidian export|sync).
 type ObsidianConfig struct {
 	VaultDir string `koanf:"vault_dir"` // empty = ~/Documents/GhostVault, resolved by the CLI
