@@ -63,3 +63,22 @@
 #   vault_dir: ""                    # or set GHOST_OBSIDIAN_VAULT_DIR
 #   interval: "30s"                  # sync poll cadence (Go duration, e.g. "1m")
 #   auto_sync: false                 # true = auto-start sync from session-start
+
+# --- Session Injection ---
+# How the SessionStart hook picks which project memories to inject. The hook
+# injects a condensed selection (default 15) so the token budget is spent on
+# high-signal, hard-to-derive categories (gotcha/convention/preference/decision)
+# rather than descriptive architecture/fact notes the model can reconstruct by
+# reading source. behavior_floor reserves that many of the slots for behavioral
+# categories when the project has them; the rest are filled from the overall
+# decayed-score ranking. Set behavior_floor to 0 to disable the bias and get
+# the historical rank-only selection.
+# injection:
+#   behavior_floor: 8              # 0 = disable category bias (legacy behavior)
+#   behavior_categories:           # what counts as "behavioral" for the floor
+#     - gotcha
+#     - convention
+#     - preference
+#     - decision
+#   category_weights: {}           # optional per-category ordering boost in pass 1,
+#                                  # e.g. {gotcha: 1.2} (default all 1.0)

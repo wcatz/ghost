@@ -432,3 +432,30 @@ func TestObsidianDefaults(t *testing.T) {
 		t.Error("AutoSync default = true, want false (opt-in only)")
 	}
 }
+
+func TestInjectionConfigDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Injection.BehaviorFloor != 8 {
+		t.Errorf("injection.behavior_floor = %d, want 8", cfg.Injection.BehaviorFloor)
+	}
+	want := map[string]bool{"gotcha": true, "convention": true, "preference": true, "decision": true}
+	if len(cfg.Injection.BehaviorCategories) != len(want) {
+		t.Errorf("behavior_categories = %v, want 4 entries", cfg.Injection.BehaviorCategories)
+		return
+	}
+	for _, c := range cfg.Injection.BehaviorCategories {
+		if !want[c] {
+			t.Errorf("unexpected behavior category %q", c)
+		}
+	}
+	if cfg.Injection.CategoryWeights != nil {
+		t.Errorf("category_weights default should be nil, got %v", cfg.Injection.CategoryWeights)
+	}
+}

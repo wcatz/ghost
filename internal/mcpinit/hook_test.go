@@ -994,8 +994,23 @@ func TestSessionInjectionUsesDecayRanking(t *testing.T) {
 	}
 	_ = db.Close()
 
+	// Opt out of the category-behavior floor. The fixture's whole point is
+	// decay-ranking parity (rank-only selection): an old, high-importance
+	// gotcha decays below every fresh fact and must be the row trimmed by the
+	// cap. Under the default behavior floor the gotcha would instead be
+	// promoted into a behavioral slot — which is TestSessionInjectionBehaviorFloor's
+	// job to assert — so set behavior_floor=0 here to pin the legacy rank-only
+	// path exactly.
+	cfgDir := filepath.Join(t.TempDir(), "ghost")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	cfgPath := filepath.Join(cfgDir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("injection:\n  behavior_floor: 0\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 	t.Setenv("XDG_DATA_HOME", xdgHome)
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", filepath.Dir(cfgDir))
 
 	input, _ := json.Marshal(map[string]string{"cwd": projDir})
 	var out strings.Builder
@@ -1007,6 +1022,74 @@ func TestSessionInjectionUsesDecayRanking(t *testing.T) {
 	}
 	if !strings.Contains(result, "FACTMARKER") {
 		t.Errorf("expected fact rows (score 0.2) to survive the cap; got:\n%s", result)
+	}
+	if !strings.Contains(result, "15 shown of 16 total — 1 not shown") {
+		t.Errorf("expected cap of 15 with 1 not-shown, got:\n%s", result)
+	}
+}
+
+// TestSessionInjectionBehaviorFloor: under the DEFAULT behavior floor (8),
+// behavioral categories (gotcha/convention/preference/decision) are promoted
+// ahead of the rank-only ordering. The fixture is the same gotcha-vs-facts
+// setup as TestSessionInjectionUsesDecayRanking (which sets behavior_floor=0
+// to disable the bias); here, with the default floor active, the decayed
+// gotcha must survive the 15-cap even though it ranks below every fact by
+// raw decayed score — it is reserved a behavioral slot. This pins the other
+// half of the feature: the category bias is ON by default.
+func TestSessionInjectionBehaviorFloor(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	for i := 0; i < 15; i++ {
+		id := fmt.Sprintf("factfil%02d", i)
+		if _, err := db.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES (?, 'p1', 'fact', ?, ?, ?)`,
+			id, fmt.Sprintf("FACTMARKER%02d content", i), "manual", 0.2,
+		); err != nil {
+			t.Fatalf("insert fact filler %d: %v", i, err)
+		}
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source, importance, created_at)
+		 VALUES ('gotcha01', 'p1', 'gotcha', 'GOTCHAMARKER old high-importance', 'manual', 0.9, datetime('now', '-400 days'))`,
+	); err != nil {
+		t.Fatalf("insert gotcha: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir})
+	var out strings.Builder
+	runSessionStartHook(t, string(input), &out)
+	result := out.String()
+
+	if !strings.Contains(result, "GOTCHAMARKER") {
+		t.Errorf("expected decayed gotcha to be promoted into a behavioral slot under the default floor; got:\n%s", result)
+	}
+	if !strings.Contains(result, "FACTMARKER") {
+		t.Errorf("expected fact rows to still survive the cap; got:\n%s", result)
 	}
 	if !strings.Contains(result, "15 shown of 16 total — 1 not shown") {
 		t.Errorf("expected cap of 15 with 1 not-shown, got:\n%s", result)
@@ -1223,11 +1306,12 @@ func TestHandleSessionStartHook_ClearUnaffected(t *testing.T) {
 	}
 }
 
-// TestHandleSessionStartHook_FullIDsShown: memory and task IDs must be shown
-// in full — a truncated ID (e.g. 8 chars of a UUID) doesn't exact-match
-// against any store method (Delete, UpdateMemory, TogglePin, CompleteTask,
-// UpdateTask all do `WHERE id = ?`), so a truncated display is unusable with
-// the very tools that consume it.
+// TestHandleSessionStartHook_FullIDsShown: under the compact memory format the
+// memory ID is intentionally omitted (content only) — the memory body is what
+// the injected context needs, and a full ID stays findable via the search
+// tools. Task IDs are still shown in full: a truncated task ID (e.g. 8 chars
+// of a UUID) doesn't exact-match any store method (CompleteTask, UpdateTask
+// all do `WHERE id = ?`), so a truncated task ID would be unusable.
 func TestHandleSessionStartHook_FullIDsShown(t *testing.T) {
 	xdgHome := t.TempDir()
 	ghostDir := filepath.Join(xdgHome, "ghost")
@@ -1276,11 +1360,11 @@ func TestHandleSessionStartHook_FullIDsShown(t *testing.T) {
 	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
-	if !strings.Contains(result, memID) {
-		t.Errorf("memory ID must be shown in full (%s); got:\n%s", memID, result)
+	if strings.Contains(result, memID) {
+		t.Errorf("memory ID must NOT be shown under compact formatting (%s); got:\n%s", memID, result)
 	}
-	if strings.Contains(result, memID[:8]) && !strings.Contains(result, memID) {
-		t.Errorf("memory ID appears truncated; got:\n%s", result)
+	if !strings.Contains(result, "full-id gotcha") {
+		t.Errorf("memory content must still be shown under compact formatting; got:\n%s", result)
 	}
 	if !strings.Contains(result, taskID) {
 		t.Errorf("task ID must be shown in full (%s); got:\n%s", taskID, result)

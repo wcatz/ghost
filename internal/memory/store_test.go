@@ -3599,7 +3599,7 @@ func memoryCreatedAt(t *testing.T, s *Store, id string) string {
 	return createdAt
 }
 
-// TestDecaySQLParity pins decayFactor (Go) to the exact DecayRankingSQL
+// TestDecaySQLParity pins DecayFactor (Go) to the exact DecayRankingSQL
 // expression by evaluating both over a grid of categories × ages × pinned.
 // This is the drift guard between the SQL constant (GetTopMemories +
 // session-start hook) and the Go function (search ranking) — if one is ever
@@ -3641,7 +3641,7 @@ func TestDecaySQLParity(t *testing.T) {
 				if goAge < 0 {
 					goAge = 0
 				}
-				goFactor := decayFactor(cat, pinned, goAge)
+				goFactor := DecayFactor(cat, pinned, goAge)
 
 				if math.Abs(sqlFactor-goFactor) > eps {
 					t.Errorf("category=%s age=%d pinned=%v: SQL=%v Go=%v (diff %v)",

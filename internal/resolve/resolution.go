@@ -1,4 +1,4 @@
-// internal/resolve/haiku.go
+// internal/resolve/resolution.go
 package resolve
 
 import (
@@ -14,19 +14,24 @@ type classifyProvider interface {
 	Classify(ctx context.Context, systemPrompt, userContent string) (ai.ClassifyResult, error)
 }
 
-// HaikuClassifier answers the conclusion-vs-evidence question with a single
+// ResolutionClassifier answers the conclusion-vs-evidence question with a single
 // fast classify call per memory. It is biased to KEEP: a false RESOLVED buries
 // a still-useful memory (dropping it from injection), whereas a missed one
 // merely leaves the status quo — so anything short of an explicit RESOLVED is
 // KEEP.
-type HaikuClassifier struct {
+//
+// The name is deliberately provider- and model-agnostic: it only needs a
+// classifyProvider with a Classify method (typically *ai.FallbackProvider),
+// which any backing LLM — the Anthropic API, a `claude` subprocess, the opencode
+// CLI, or MCP sampling — can satisfy. It is not tied to a specific model tier.
+type ResolutionClassifier struct {
 	client classifyProvider
 }
 
-// NewHaikuClassifier wraps a classifyProvider (typically *ai.FallbackProvider)
+// NewResolutionClassifier wraps a classifyProvider (typically *ai.FallbackProvider)
 // as a Classifier.
-func NewHaikuClassifier(client classifyProvider) *HaikuClassifier {
-	return &HaikuClassifier{client: client}
+func NewResolutionClassifier(client classifyProvider) *ResolutionClassifier {
+	return &ResolutionClassifier{client: client}
 }
 
 const classifySystemPrompt = `You decide whether a memory note is RESOLVED evidence or should be KEPT.
@@ -48,7 +53,7 @@ Respond with exactly one word: RESOLVED or KEEP.`
 // IsResolved returns true iff the classifier explicitly answers RESOLVED, and
 // whether that answer came from a fallback provider (see FallbackProvider) —
 // callers use the latter to withhold writes on a degraded-quality answer.
-func (h *HaikuClassifier) IsResolved(ctx context.Context, content string) (resolved bool, fromFallback bool, err error) {
+func (h *ResolutionClassifier) IsResolved(ctx context.Context, content string) (resolved bool, fromFallback bool, err error) {
 	result, err := h.client.Classify(ctx, classifySystemPrompt, "NOTE: "+quoteData(content))
 	if err != nil {
 		return false, false, err

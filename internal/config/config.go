@@ -31,6 +31,7 @@ type Config struct {
 	Embedding  EmbeddingConfig  `koanf:"embedding"`
 	Reflection ReflectionConfig `koanf:"reflection"`
 	Linking    LinkingConfig    `koanf:"linking"`
+	Injection  InjectionConfig  `koanf:"injection"`
 	Obsidian   ObsidianConfig   `koanf:"obsidian"`
 	Routing    RoutingConfig    `koanf:"routing"`
 }
@@ -84,6 +85,28 @@ type LinkingConfig struct {
 	DemotionThreshold float64 `koanf:"demotion_threshold"`
 }
 
+// InjectionConfig controls how the SessionStart hook selects which project
+// memories to inject. It biases the limited slot budget toward high-signal,
+// hard-to-derive categories (gotcha/convention/preference/decision) without
+// growing the total footprint. behavior_floor of 0 disables the bias entirely
+// (pure DecayRankingSQL selection, the historical behavior).
+type InjectionConfig struct {
+	BehaviorFloor      int                `koanf:"behavior_floor"`
+	BehaviorCategories []string           `koanf:"behavior_categories"`
+	CategoryWeights    map[string]float64 `koanf:"category_weights"`
+}
+
+// DefaultInjectionConfig returns the compiled injection defaults. It mirrors the
+// injection.* entries in the defaults map so callers that need a fallback when
+// Load() fails (e.g. the SessionStart hook's read-only path) never diverge from
+// the layered defaults.
+func DefaultInjectionConfig() InjectionConfig {
+	return InjectionConfig{
+		BehaviorFloor:      8,
+		BehaviorCategories: []string{"gotcha", "convention", "preference", "decision"},
+	}
+}
+
 // ObsidianConfig controls the Obsidian vault mirror (ghost obsidian export|sync).
 type ObsidianConfig struct {
 	VaultDir string `koanf:"vault_dir"` // empty = ~/Documents/GhostVault, resolved by the CLI
@@ -93,24 +116,26 @@ type ObsidianConfig struct {
 
 // defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{
-	"embedding.enabled":          true,
-	"embedding.ollama_url":       "http://localhost:11434",
-	"embedding.model":            "nomic-embed-text:v1.5",
-	"embedding.dimensions":       768,
-	"reflection.auto_resolve":    false,
-	"reflection.auto_supersede":  false,
-	"reflection.auto_reflect":    false,
-	"cli.claude_binary":          "",
-	"cli.opencode_binary":        "",
-	"cli.codex_binary":           "",
-	"cli.goose_binary":           "",
-	"linking.enabled":            true,
-	"linking.threshold":          0.70,
-	"linking.demotion_threshold": 0.90,
-	"obsidian.vault_dir":         "",
-	"obsidian.interval":          "30s",
-	"obsidian.auto_sync":         false,
-	"routing.default_project":    "",
+	"embedding.enabled":             true,
+	"embedding.ollama_url":          "http://localhost:11434",
+	"embedding.model":               "nomic-embed-text:v1.5",
+	"embedding.dimensions":          768,
+	"reflection.auto_resolve":       false,
+	"reflection.auto_supersede":     false,
+	"reflection.auto_reflect":       false,
+	"cli.claude_binary":             "",
+	"cli.opencode_binary":           "",
+	"cli.codex_binary":              "",
+	"cli.goose_binary":              "",
+	"linking.enabled":               true,
+	"linking.threshold":             0.70,
+	"linking.demotion_threshold":    0.90,
+	"injection.behavior_floor":      8,
+	"injection.behavior_categories": []string{"gotcha", "convention", "preference", "decision"},
+	"obsidian.vault_dir":            "",
+	"obsidian.interval":             "30s",
+	"obsidian.auto_sync":            false,
+	"routing.default_project":       "",
 }
 
 // Load reads configuration with layered precedence.

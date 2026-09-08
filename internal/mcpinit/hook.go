@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/config"
@@ -221,7 +222,7 @@ func formatSessionContext(projectID, project string, memories []sessionMemory, l
 			fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
 		}
 		for _, m := range memories {
-			fmt.Fprintf(&sb, "- [%s] `%s` %s\n", m.Category, m.ID, quoteData(m.Content))
+			fmt.Fprintf(&sb, "- [%s] %s\n", m.Category, quoteData(m.Content))
 		}
 	}
 
@@ -436,35 +437,148 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	// never drift apart. The query itself isn't issued through a Store method
 	// because this function deliberately uses its own lightweight, read-only
 	// *sql.DB connection (see the sessionMemory doc comment above), not
-	// Store's read-write handle. Over-fetches (2x cap) so near-duplicate
-	// demotion below can drop matches without under-returning.
+	// Store's read-write handle. Over-fetches (3x cap) so the two-pass
+	// category selection and near-duplicate demotion below can drop matches
+	// without under-returning. importance and created_at are fetched (not
+	// just id/category/content/pinned) so pass-1's behavioral ordering can
+	// re-score with memory.DecayFactor and category weights in Go.
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned FROM memories
+		SELECT id, category, content, pinned, importance, created_at FROM memories
 		WHERE project_id = ? AND resolved_at IS NULL
 		ORDER BY (`+memory.DecayRankingSQL+`) DESC
 		LIMIT ?
-	`, projectID, sessionMemoriesCap*2)
+	`, projectID, sessionMemoriesCap*3)
 	if err != nil {
 		return
 	}
 	defer rows.Close() //nolint:errcheck
 
+	// Reference "now" captured once, immediately after the query, so the
+	// Go-side decay scoring below uses the same instant the SQL ranking used
+	// for julianday('now') — no per-candidate clock drift between the two.
+	now := time.Now()
+
+	type candidate struct {
+		mem        sessionMemory
+		importance float64
+		createdAt  time.Time
+	}
+	var cands []candidate
 	for rows.Next() {
-		var id, cat, content string
+		var id, cat, content, createdAt string
 		var pinnedInt int
-		if err := rows.Scan(&id, &cat, &content, &pinnedInt); err != nil {
+		var importance float64
+		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &importance, &createdAt); err != nil {
 			continue
 		}
 		// 200 bytes per item (vs. globals' 300 above) — project memories
 		// have a larger cap (sessionMemoriesCap=15 vs. globalsCap=8), so a
 		// smaller per-item budget keeps total section bytes comparable.
 		content = truncateUTF8(content, 200)
-		memories = append(memories, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1})
+		t, err := time.Parse("2006-01-02 15:04:05", createdAt)
+		if err != nil {
+			// created_at is always written by SQLite's datetime('now'), which
+			// matches the layout above; on the off chance a hand-inserted row
+			// has a different shape, treat it as fresh rather than year-0001
+			// (which would inflate age and wrongly floor its decay).
+			t = now
+		}
+		cands = append(cands, candidate{
+			mem:        sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1},
+			importance: importance,
+			createdAt:  t,
+		})
 	}
+
+	// Two-pass category-priority selection. Pass 1 reserves up to
+	// behavior_floor slots for "behavioral" categories (gotcha/convention/
+	// preference/decision by default) — high-signal, hard-to-derive notes the
+	// model cannot reconstruct by reading source — ordered by decay score ×
+	// category weight. Pass 2 fills the remaining budget from every candidate
+	// (behavioral or not) by plain decay score, so the pool still leans on the
+	// rank-only ordering. behavior_floor=0 disables the bias entirely and
+	// reproduces the historical rank-only selection.
+	behaviorFloor := 0
+	injection := config.DefaultInjectionConfig()
+	cfg, cfgErr := config.Load()
+	if cfgErr == nil {
+		injection = cfg.Injection
+	}
+	if injection.BehaviorFloor > 0 {
+		behaviorFloor = injection.BehaviorFloor
+		if behaviorFloor > sessionMemoriesCap {
+			behaviorFloor = sessionMemoriesCap
+		}
+	}
+	weights := make(map[string]float64, len(injection.CategoryWeights))
+	if len(injection.CategoryWeights) > 0 {
+		weights = injection.CategoryWeights
+	}
+	behavioral := make(map[string]bool, len(injection.BehaviorCategories))
+	for _, c := range injection.BehaviorCategories {
+		behavioral[c] = true
+	}
+
+	score := func(c candidate, weighted bool) float64 {
+		w := 1.0
+		if weighted {
+			if cfgW, ok := weights[c.mem.Category]; ok {
+				w = cfgW
+			}
+		}
+		return c.importance * memory.DecayFactor(c.mem.Category, c.mem.Pinned, float64(now.Sub(c.createdAt).Hours()/24.0)) * w
+	}
+
+	chosen := make([]sessionMemory, 0, sessionMemoriesCap)
+	used := make(map[string]bool, len(cands)+1)
+	if behaviorFloor > 0 {
+		for {
+			best := -1
+			var bestScore float64
+			for i := range cands {
+				if used[cands[i].mem.ID] || !behavioral[cands[i].mem.Category] {
+					continue
+				}
+				s := score(cands[i], true)
+				if best == -1 || s > bestScore {
+					best, bestScore = i, s
+				}
+			}
+			if best == -1 || len(chosen) >= behaviorFloor {
+				break
+			}
+			used[cands[best].mem.ID] = true
+			chosen = append(chosen, cands[best].mem)
+		}
+	}
+	// Pass 2: fill the remainder across all candidates by plain decay score.
+	// Fill past the cap (up to 2x, matching the original over-fetch) so the
+	// near-duplicate demotion step below still has headroom to drop a demoted
+	// row and backfill a distinct one, rather than pre-truncating at the cap.
+	poolCap := sessionMemoriesCap * 2
+	for len(chosen) < poolCap {
+		best := -1
+		var bestScore float64
+		for i := range cands {
+			if used[cands[i].mem.ID] {
+				continue
+			}
+			s := score(cands[i], false)
+			if best == -1 || s > bestScore {
+				best, bestScore = i, s
+			}
+		}
+		if best == -1 {
+			break
+		}
+		used[cands[best].mem.ID] = true
+		chosen = append(chosen, cands[best].mem)
+	}
+	memories = chosen
 
 	if len(memories) > sessionMemoriesCap {
 		demotionThreshold := memory.DefaultDemotionThreshold
-		if cfg, cfgErr := config.Load(); cfgErr == nil {
+		if cfgErr == nil {
 			demotionThreshold = cfg.Linking.DemotionThreshold
 		}
 		ids := make([]string, len(memories))
