@@ -23,6 +23,12 @@ propagate_tool_errors = true
 enable_global_best_practices = true
 
 [pr_reviewer]
+# Review comments post under this heading (PR-Agent >= 0.44.0; the 🔍
+# suffix is hardcoded upstream in format_pr_review_header, so the rendered
+# form is "## PR Sweeper 🧹 🔍"). The name keeps the bot's purpose —
+# sweeping for bugs — while dropping the generic "PR Reviewer Guide".
+review_heading = "PR Sweeper 🧹"
+
 # Drop the canned "Here are some key observations to aid the review
 # process:" opener — pure noise, the table speaks for itself.
 enable_intro_text = false
