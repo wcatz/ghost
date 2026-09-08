@@ -27,8 +27,8 @@ import (
 func representativeCorpus(t *testing.T, db *sql.DB, projectID string) {
 	t.Helper()
 	type seed struct {
-		cat, content string
-		importance   float64
+		cat        string
+		importance float64
 	}
 	// 57 rows: strong behavioral presence (gotcha/convention/preference/
 	// decision) plus descriptive categories (architecture/fact/dependency) —
