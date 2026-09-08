@@ -13,7 +13,7 @@ import (
 // `opencode` CLI (ai.NewOpenCodeClientWithBinary) — subscription-billed, no
 // ANTHROPIC_API_KEY required. cfg.CLI.OpenCodeBinary overrides the "opencode"
 // PATH lookup, matching cmd/ghost/main.go's own opencode-tier resolution.
-func buildClassifier() (*supersede.HaikuClassifier, error) {
+func buildClassifier() (*supersede.RelationClassifier, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
@@ -30,5 +30,5 @@ func buildClassifier() (*supersede.HaikuClassifier, error) {
 		return nil, fmt.Errorf("memoryagentbench requires the `%s` binary on PATH (or %s): %w", binary, hint, err)
 	}
 	provider := ai.NewFallbackProvider(ai.NewOpenCodeClientWithBinary(binary), nil, false)
-	return supersede.NewHaikuClassifier(provider), nil
+	return supersede.NewRelationClassifier(provider), nil
 }

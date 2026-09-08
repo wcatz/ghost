@@ -14,21 +14,26 @@ type classifyProvider interface {
 	Classify(ctx context.Context, systemPrompt, userContent string) (ai.ClassifyResult, error)
 }
 
-// HaikuClassifier classifies a NEWER/OLDER memory pair with a single fast
+// RelationClassifier classifies a NEWER/OLDER memory pair with a single fast
 // classify call per candidate pair. The prompt forces a 3-way choice so a
 // decision that merely *cites* still-valid evidence (CAUSES) is never
 // conflated with a genuine same-fact replacement (SUPERSEDES): conflating the
 // two would bury independently useful memories under supersede-demote
 // ranking. When uncertain the prompt biases toward NEITHER — writing no link
 // is cheaper to recover from than a false SUPERSEDES or false CAUSES.
-type HaikuClassifier struct {
+//
+// The name is deliberately provider- and model-agnostic: RelationClassifier
+// only needs a classifyProvider with a Classify method (typically
+// *ai.FallbackProvider), which any backing LLM — the Anthropic API, a `claude`
+// subprocess, the opencode CLI, or MCP sampling — can satisfy.
+type RelationClassifier struct {
 	client classifyProvider
 }
 
-// NewHaikuClassifier wraps a classifyProvider (typically *ai.FallbackProvider)
+// NewRelationClassifier wraps a classifyProvider (typically *ai.FallbackProvider)
 // as a Classifier.
-func NewHaikuClassifier(client classifyProvider) *HaikuClassifier {
-	return &HaikuClassifier{client: client}
+func NewRelationClassifier(client classifyProvider) *RelationClassifier {
+	return &RelationClassifier{client: client}
 }
 
 const classifySystemPrompt = `You decide the relationship between a NEWER note and an OLDER note. Choose exactly one:
@@ -49,7 +54,7 @@ Respond with exactly one word: SUPERSEDES, CAUSES, or NEITHER.`
 // degraded-quality answer. An unparseable response is a fatal error, not a
 // silent NEITHER default — a silent default would mask a broken prompt or
 // model regression as normal, uneventful traffic.
-func (h *HaikuClassifier) Classify(ctx context.Context, newer, older string) (Relation, bool, error) {
+func (h *RelationClassifier) Classify(ctx context.Context, newer, older string) (Relation, bool, error) {
 	content := "OLDER: " + quoteData(older) + "\nNEWER: " + quoteData(newer)
 	result, err := h.client.Classify(ctx, classifySystemPrompt, content)
 	if err != nil {

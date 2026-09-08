@@ -141,7 +141,7 @@ func main() {
 // backdated timestamps), embeds everything, runs the real supersede
 // classifier with apply=true, then scores every question under both
 // ablation conditions against that same post-supersede store.
-func runDemo(ctx context.Context, d Demo, cls *supersede.HaikuClassifier, embedder *cachedEmbedder,
+func runDemo(ctx context.Context, d Demo, cls *supersede.RelationClassifier, embedder *cachedEmbedder,
 	threshold float64, logger *slog.Logger, outFile *os.File) (demoResult, error) {
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {

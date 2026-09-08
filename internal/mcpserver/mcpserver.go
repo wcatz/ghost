@@ -1007,7 +1007,7 @@ func (s *Server) registerTools() {
 		// CLI-only classification (see resolve.Run's anyFallback guard).
 		samplingProvider := ai.NewSamplingProvider(req.Session)
 		provider := ai.NewAlwaysFallbackProvider(samplingProvider, ai.NewCLIClient(), true)
-		cls := resolve.NewHaikuClassifier(provider)
+		cls := resolve.NewResolutionClassifier(provider)
 		res, confirmed, err := resolve.Run(ctx, rs, cls, projectID, args.Apply, s.logger)
 		if err != nil {
 			return nil, nil, fmt.Errorf("ghost_resolve: %w", err)

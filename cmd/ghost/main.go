@@ -873,7 +873,7 @@ cli.opencode_binary) — requires one of the two.`)
 		fmt.Fprintf(os.Stderr, "error: ghost supersede %v\n", err)
 		os.Exit(1)
 	}
-	cls := supersede.NewHaikuClassifier(provider)
+	cls := supersede.NewRelationClassifier(provider)
 	res, classified, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -961,7 +961,7 @@ cli.claude_binary / cli.opencode_binary) — requires one of the two.`)
 		fmt.Fprintf(os.Stderr, "error: ghost resolve %v\n", err)
 		os.Exit(1)
 	}
-	cls := resolve.NewHaikuClassifier(provider)
+	cls := resolve.NewResolutionClassifier(provider)
 	res, confirmed, err := resolve.Run(ctx, store, cls, projectID, apply, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
