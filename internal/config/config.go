@@ -31,6 +31,7 @@ type Config struct {
 	Embedding  EmbeddingConfig  `koanf:"embedding"`
 	Reflection ReflectionConfig `koanf:"reflection"`
 	Linking    LinkingConfig    `koanf:"linking"`
+	Injection  InjectionConfig  `koanf:"injection"`
 	Obsidian   ObsidianConfig   `koanf:"obsidian"`
 	Routing    RoutingConfig    `koanf:"routing"`
 }
@@ -84,6 +85,17 @@ type LinkingConfig struct {
 	DemotionThreshold float64 `koanf:"demotion_threshold"`
 }
 
+// InjectionConfig controls how the SessionStart hook selects which project
+// memories to inject. It biases the limited slot budget toward high-signal,
+// hard-to-derive categories (gotcha/convention/preference/decision) without
+// growing the total footprint. behavior_floor of 0 disables the bias entirely
+// (pure DecayRankingSQL selection, the historical behavior).
+type InjectionConfig struct {
+	BehaviorFloor      int                `koanf:"behavior_floor"`
+	BehaviorCategories []string           `koanf:"behavior_categories"`
+	CategoryWeights    map[string]float64 `koanf:"category_weights"`
+}
+
 // ObsidianConfig controls the Obsidian vault mirror (ghost obsidian export|sync).
 type ObsidianConfig struct {
 	VaultDir string `koanf:"vault_dir"` // empty = ~/Documents/GhostVault, resolved by the CLI
@@ -107,6 +119,8 @@ var defaults = map[string]interface{}{
 	"linking.enabled":            true,
 	"linking.threshold":          0.70,
 	"linking.demotion_threshold": 0.90,
+	"injection.behavior_floor":    8,
+	"injection.behavior_categories": []string{"gotcha", "convention", "preference", "decision"},
 	"obsidian.vault_dir":         "",
 	"obsidian.interval":          "30s",
 	"obsidian.auto_sync":         false,
