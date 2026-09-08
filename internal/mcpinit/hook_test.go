@@ -1306,11 +1306,12 @@ func TestHandleSessionStartHook_ClearUnaffected(t *testing.T) {
 	}
 }
 
-// TestHandleSessionStartHook_FullIDsShown: memory and task IDs must be shown
-// in full — a truncated ID (e.g. 8 chars of a UUID) doesn't exact-match
-// against any store method (Delete, UpdateMemory, TogglePin, CompleteTask,
-// UpdateTask all do `WHERE id = ?`), so a truncated display is unusable with
-// the very tools that consume it.
+// TestHandleSessionStartHook_FullIDsShown: under the compact memory format the
+// memory ID is intentionally omitted (content only) — the memory body is what
+// the injected context needs, and a full ID stays findable via the search
+// tools. Task IDs are still shown in full: a truncated task ID (e.g. 8 chars
+// of a UUID) doesn't exact-match any store method (CompleteTask, UpdateTask
+// all do `WHERE id = ?`), so a truncated task ID would be unusable.
 func TestHandleSessionStartHook_FullIDsShown(t *testing.T) {
 	xdgHome := t.TempDir()
 	ghostDir := filepath.Join(xdgHome, "ghost")
@@ -1359,11 +1360,11 @@ func TestHandleSessionStartHook_FullIDsShown(t *testing.T) {
 	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
-	if !strings.Contains(result, memID) {
-		t.Errorf("memory ID must be shown in full (%s); got:\n%s", memID, result)
+	if strings.Contains(result, memID) {
+		t.Errorf("memory ID must NOT be shown under compact formatting (%s); got:\n%s", memID, result)
 	}
-	if strings.Contains(result, memID[:8]) && !strings.Contains(result, memID) {
-		t.Errorf("memory ID appears truncated; got:\n%s", result)
+	if !strings.Contains(result, "full-id gotcha") {
+		t.Errorf("memory content must still be shown under compact formatting; got:\n%s", result)
 	}
 	if !strings.Contains(result, taskID) {
 		t.Errorf("task ID must be shown in full (%s); got:\n%s", taskID, result)

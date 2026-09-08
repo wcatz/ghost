@@ -222,7 +222,7 @@ func formatSessionContext(projectID, project string, memories []sessionMemory, l
 			fmt.Fprintf(&sb, "**Memories (%d shown):**\n", len(memories))
 		}
 		for _, m := range memories {
-			fmt.Fprintf(&sb, "- [%s] `%s` %s\n", m.Category, m.ID, quoteData(m.Content))
+			fmt.Fprintf(&sb, "- [%s] %s\n", m.Category, quoteData(m.Content))
 		}
 	}
 
