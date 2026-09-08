@@ -29,7 +29,7 @@ func TestDecayFactor_MatchesSQLSemantics(t *testing.T) {
 	}
 	const eps = 1e-9
 	for _, c := range cases {
-		got := decayFactor(c.category, c.pinned, c.ageDays)
+		got := DecayFactor(c.category, c.pinned, c.ageDays)
 		if math.Abs(got-c.want) > eps {
 			t.Errorf("decayFactor(%q, pinned=%v, age=%.1f) = %v, want %v",
 				c.category, c.pinned, c.ageDays, got, c.want)

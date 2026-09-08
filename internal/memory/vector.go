@@ -253,7 +253,7 @@ func parseCreatedAt(s string) time.Time {
 // (decision, gotcha, dependency, ...) decay with tau 30 and a 0.15 floor. The
 // SQL-vs-Go parity test (store_test.go) guards against drift between this and
 // the SQL constant.
-func decayFactor(category string, pinned bool, ageDays float64) float64 {
+func DecayFactor(category string, pinned bool, ageDays float64) float64 {
 	if pinned {
 		return 1.0
 	}
@@ -310,8 +310,8 @@ func decayRank(results []Memory, scores map[string]float64, p SearchParams, limi
 	// Reorder the window by base × decay (ordering only, never membership).
 	if p.DecayEnabled {
 		sort.SliceStable(scored, func(i, j int) bool {
-			fi := scored[i].base * decayFactor(scored[i].m.Category, scored[i].m.Pinned, ageDays(scored[i].m.CreatedAt, now))
-			fj := scored[j].base * decayFactor(scored[j].m.Category, scored[j].m.Pinned, ageDays(scored[j].m.CreatedAt, now))
+			fi := scored[i].base * DecayFactor(scored[i].m.Category, scored[i].m.Pinned, ageDays(scored[i].m.CreatedAt, now))
+			fj := scored[j].base * DecayFactor(scored[j].m.Category, scored[j].m.Pinned, ageDays(scored[j].m.CreatedAt, now))
 			if fi != fj {
 				return fi > fj
 			}
