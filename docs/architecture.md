@@ -67,8 +67,6 @@ internal/
     export.go              Export memories to Markdown vault
     sync.go                Keep vault mirror fresh (PRAGMA data_version polling)
     render.go              Render memory blocks as Markdown
-  linking/                 Memory auto-linking
-    worker.go              Sweeps embedded memories, links cosine neighbors ≥ threshold
   claudeimport/            One-time import of Claude Code auto-memory files
     import.go              Scans ~/.claude/projects/*/memory/*.md, upserts into Ghost
   reflection/              Memory consolidation
