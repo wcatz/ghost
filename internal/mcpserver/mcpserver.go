@@ -578,7 +578,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_project_context",
 		Title:       "Get Project Context",
-		Description: "Get Ghost's accumulated knowledge about a project: top memories, global memories, and learned context. NOT needed at session start (hook already injects this). Use when switching projects mid-session or after saving 3+ memories to see updated context.",
+		Description: "Get Ghost's accumulated knowledge about a project: top memories, global memories, and learned context. NOT needed at session start — the hook already injects a condensed, category-priority selection (behavioral categories such as gotcha/convention/preference/decision bias the slot budget). Use when switching projects mid-session or after saving 3+ memories to see updated context.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
