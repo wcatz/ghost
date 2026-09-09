@@ -48,7 +48,12 @@ func (h *HaikuConsolidator) Consolidate(ctx context.Context, input ReflectionInp
 	if err != nil {
 		return ReflectionResult{}, err
 	}
-	return parseReflectionResponse(responseText)
+	result, err := parseReflectionResponse(responseText)
+	if err != nil {
+		return ReflectionResult{}, err
+	}
+	dropFabricatedMemories(&result, input)
+	return result, nil
 }
 
 func parseReflectionResponse(text string) (ReflectionResult, error) {
