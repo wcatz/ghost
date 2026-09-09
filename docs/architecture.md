@@ -27,7 +27,7 @@ ghost project merge <old> <new>   Merge one project into another; child records 
 ```
 cmd/ghost/main.go          CLI entrypoint + subcommand dispatch
 internal/
-  ai/                      LLM backends: Anthropic HTTP client + 4 CLI backends (claude, opencode, codex, goose) + sampling provider + source-aware routing; client.go: Reflect(); models.go: Message/TokenUsage; cost.go: per-model pricing; used by reflection, resolve, and supersede
+  ai/                      LLM backends: Anthropic HTTP client + 4 CLI backends (claude, opencode, codex, goose) + source-aware routing; client.go: Reflect(); models.go: Message/TokenUsage; cost.go: per-model pricing; used by reflection, resolve, and supersede
     models.go              Message, ContentBlock, SystemBlock, TokenUsage
     cost.go                Per-model pricing, CostForUsage()
   config/                  Layered configuration (koanf)

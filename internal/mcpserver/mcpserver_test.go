@@ -7,12 +7,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 
-	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
@@ -1357,97 +1355,14 @@ func TestResourceSubscription_RejectsUnknownURI(t *testing.T) {
 	}
 }
 
-// discoverlessTransport wraps a client-side mcp.Transport to drop any
-// outgoing "server/discover" call (SEP-2575) before it reaches the wire,
-// answering it locally with CodeMethodNotFound instead. This reproduces
-// every real-world MCP client today: none of them send server/discover yet,
-// so they negotiate the legacy initialize handshake, under which
-// ServerSession.CreateMessage remains synchronous — matching ghost_resolve's
-// current sampling-based design.
-//
-// (Filtering supported versions server-side via mcp.ProtocolVersionSupporter
-// was tried first and rejected: Server.discover unconditionally records
-// InitializeParams as a side effect, so the client's graceful fallback to a
-// legacy initialize on the same connection is rejected as a "duplicate
-// initialize request" by the SDK. Dropping discover before the server ever
-// sees it avoids that entirely, and is arguably more faithful to reality:
-// no shipped client currently issues the probe at all.)
-//
-// go-sdk 1.7.0 forbids synchronous CreateMessage entirely once a client
-// negotiates >= 2026-07-28 (see assertServerInitiatedRequestAllowed in the
-// SDK's server.go) — ai.SamplingProvider would need a SEP-2322 rewrite
-// (InputRequests/InputRequiredResult) to keep working once real clients
-// adopt that protocol. Tracked as a follow-up; not yet required.
-type discoverlessTransport struct {
-	mcp.Transport
-}
-
-func (t discoverlessTransport) Connect(ctx context.Context) (mcp.Connection, error) {
-	conn, err := t.Transport.Connect(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &discoverlessConn{
-		Connection: conn,
-		pending:    make(chan jsonrpc.Message, 4),
-		real:       make(chan discoverlessReadResult),
-	}, nil
-}
-
-// discoverlessConn intercepts "server/discover" so tests can run against a
-// go-sdk client that probes for it, without the real connection ever seeing
-// (or needing to answer) that request. Read must never block exclusively on
-// the real connection: the SDK dispatches incoming messages via a single
-// goroutine that calls Read in a loop, and that call can start blocking on
-// the real connection before Write has enqueued the synthetic response —
-// leaving nothing to wake it, since the discover request was never actually
-// sent. A background reader plus select avoids that race.
-type discoverlessConn struct {
-	mcp.Connection
-	pending  chan jsonrpc.Message
-	real     chan discoverlessReadResult
-	realOnce sync.Once
-}
-
-type discoverlessReadResult struct {
-	msg jsonrpc.Message
-	err error
-}
-
-func (c *discoverlessConn) Write(ctx context.Context, msg jsonrpc.Message) error {
-	if req, ok := msg.(*jsonrpc.Request); ok && req.Method == "server/discover" {
-		c.pending <- &jsonrpc.Response{
-			ID:    req.ID,
-			Error: &jsonrpc.Error{Code: jsonrpc.CodeMethodNotFound, Message: "server/discover not supported"},
-		}
-		return nil
-	}
-	return c.Connection.Write(ctx, msg)
-}
-
-func (c *discoverlessConn) Read(ctx context.Context) (jsonrpc.Message, error) {
-	c.realOnce.Do(func() {
-		go func() {
-			for {
-				m, err := c.Connection.Read(ctx)
-				c.real <- discoverlessReadResult{msg: m, err: err}
-				if err != nil {
-					return
-				}
-			}
-		}()
-	})
-	select {
-	case m := <-c.pending:
-		return m, nil
-	case r := <-c.real:
-		return r.msg, r.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
+// TestGhostResolve_DryRunByDefault covers the plain dry-run path: a fake
+// `claude` CLI on PATH classifies (unknown client name falls back to the best
+// CLI on PATH), the seeded memory is confirmed as resolved evidence, and the
+// dry run must not write resolved_at.
 func TestGhostResolve_DryRunByDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires a POSIX shell")
+	}
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	srv := New(store, logger, "test")
@@ -1458,27 +1373,17 @@ func TestGhostResolve_DryRunByDefault(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	serverTransport, clientInMemTransport := mcp.NewInMemoryTransports()
-	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
-		t.Fatalf("server Connect: %v", err)
+	// Fake `claude` binary on PATH, answering RESOLVED so the classifier
+	// confirms the seeded memory (see internal/ai/cli_client_test.go for the
+	// same pattern used within the ai package).
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "claude")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s' RESOLVED\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude binary: %v", err)
 	}
-	var clientTransport mcp.Transport = discoverlessTransport{clientInMemTransport}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	// The MCP sampling handler stands in for the calling session's own model:
-	// answer RESOLVED so the classifier confirms the seeded memory and the
-	// dry-run path has a non-zero count to report.
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, &mcp.ClientOptions{
-		CreateMessageHandler: func(context.Context, *mcp.CreateMessageRequest) (*mcp.CreateMessageResult, error) {
-			return &mcp.CreateMessageResult{
-				Content: &mcp.TextContent{Text: "RESOLVED"},
-			}, nil
-		},
-	})
-	session, err := client.Connect(ctx, clientTransport, nil)
-	if err != nil {
-		t.Fatalf("client Connect: %v", err)
-	}
-	t.Cleanup(func() { _ = session.Close() })
+	session := connectedClient(t, srv)
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_resolve",
@@ -1515,18 +1420,13 @@ func TestGhostResolve_DryRunByDefault(t *testing.T) {
 	}
 }
 
-// TestGhostResolve_FallsBackToCLIWhenSamplingUnavailable covers a client that
-// never registers a sampling handler at all — no CreateMessageHandler set, so
-// the go-sdk client never advertises the Sampling capability and answers any
-// inbound sampling/createMessage call with the standard JSON-RPC "Method not
-// found" error. This is not a contrived error: it is the exact failure
-// reproduced live against a real Claude Code (VSCode extension) session while
-// investigating this bug — ghost_resolve hard-failed instead of falling back.
-// It must now fall through to the claude CLI and still report a dry-run
-// preview: a fallback classification is never trusted enough to auto-apply,
-// even when the caller passes apply:true (see resolve.Run's anyFallback
-// guard).
-func TestGhostResolve_FallsBackToCLIWhenSamplingUnavailable(t *testing.T) {
+// TestGhostResolve_UsesSessionHarness covers the session-scoped backend
+// selection: an MCP client that reports itself as `opencode` must classify via
+// the opencode binary even though `claude` sorts first in the PATH fallback
+// order. Both fake binaries are on PATH and answer differently — claude says
+// KEEP, opencode says RESOLVED — so a confirmed result proves opencode (the
+// session's own harness) was the one consulted.
+func TestGhostResolve_UsesSessionHarness(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary requires a POSIX shell")
 	}
@@ -1540,9 +1440,66 @@ func TestGhostResolve_FallsBackToCLIWhenSamplingUnavailable(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	// Fake `claude` binary on PATH, standing in for ai.NewCLIClient()'s
-	// hardcoded "claude" lookup (see internal/ai/cli_client_test.go for the
-	// same pattern used within the ai package).
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\nprintf '%s' KEEP\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude binary: %v", err)
+	}
+	// opencode answers with its JSON-lines format (see
+	// internal/ai/opencode_client_test.go's fakeOpenCodeBinary).
+	if err := os.WriteFile(filepath.Join(dir, "opencode"), []byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"RESOLVED\"}}'\n"), 0o755); err != nil {
+		t.Fatalf("write fake opencode binary: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server Connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "opencode", Version: "0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_resolve",
+		Arguments: map[string]any{"project": "test-project"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_resolve: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("ghost_resolve returned an error result: %+v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(text.Text, "1 confirmed evidence") {
+		t.Errorf("expected opencode (RESOLVED) to confirm the memory, got %q", text.Text)
+	}
+}
+
+// TestGhostResolve_AppliesWithCLI covers the write path: a fake `claude` CLI
+// classifies RESOLVED and apply:true must stamp resolved_at — the CLI is a
+// full-trust primary now that MCP sampling is retired (see
+// docs/superpowers/specs/2026-08-24-resolve-sampling-path-design.md), so the
+// seeded memory must no longer be an eligible resolve candidate afterwards.
+func TestGhostResolve_AppliesWithCLI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires a POSIX shell")
+	}
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	const content = "root cause: fixed in v2, no further action needed"
+	if _, _, _, err := store.Upsert(ctx, "abc123", "gotcha", content, "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "claude")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s' RESOLVED\n"), 0o755); err != nil {
@@ -1550,19 +1507,7 @@ func TestGhostResolve_FallsBackToCLIWhenSamplingUnavailable(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	serverTransport, clientInMemTransport := mcp.NewInMemoryTransports()
-	if _, err := srv.mcp.Connect(ctx, serverTransport, nil); err != nil {
-		t.Fatalf("server Connect: %v", err)
-	}
-	var clientTransport mcp.Transport = discoverlessTransport{clientInMemTransport}
-
-	// No CreateMessageHandler — this client does not support sampling at all.
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
-	session, err := client.Connect(ctx, clientTransport, nil)
-	if err != nil {
-		t.Fatalf("client Connect: %v", err)
-	}
-	t.Cleanup(func() { _ = session.Close() })
+	session := connectedClient(t, srv)
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_resolve",
@@ -1572,32 +1517,64 @@ func TestGhostResolve_FallsBackToCLIWhenSamplingUnavailable(t *testing.T) {
 		t.Fatalf("CallTool ghost_resolve: %v", err)
 	}
 	if result.IsError {
-		t.Fatalf("ghost_resolve returned an error result (fallback did not engage): %+v", result.Content)
+		t.Fatalf("ghost_resolve returned an error result: %+v", result.Content)
 	}
 	text, ok := result.Content[0].(*mcp.TextContent)
 	if !ok {
 		t.Fatalf("expected TextContent, got %T", result.Content[0])
 	}
-	// apply:true was requested (verb reflects the request, not the outcome),
-	// but the write itself must be skipped: 1 confirmed evidence, 0 actually
-	// resolved, because resolve.Run refuses to trust a fallback-sourced
-	// classification with a write.
-	if !strings.Contains(text.Text, "1 confirmed evidence, resolved 0") {
-		t.Errorf("expected confirmed-but-not-written output, got %q", text.Text)
+	if !strings.Contains(text.Text, "resolved 1") {
+		t.Errorf("expected applied write output, got %q", text.Text)
 	}
 
 	cands, err := store.ResolveCandidates(ctx, "abc123")
 	if err != nil {
 		t.Fatalf("ResolveCandidates: %v", err)
 	}
-	found := false
 	for _, m := range cands {
 		if m.Content == content {
-			found = true
+			t.Error("expected seeded memory to be stamped resolved_at after apply:true — it must no longer be a candidate")
 		}
 	}
-	if !found {
-		t.Error("expected seeded memory to remain an eligible resolve candidate — fallback apply must not have written resolved_at")
+}
+
+// TestGhostResolve_RequiresCLIBinary covers the no-CLI failure mode: with no
+// claude/opencode/codex/goose binary anywhere on PATH, the tool must return a
+// clean error naming the requirement instead of silently degrading.
+func TestGhostResolve_RequiresCLIBinary(t *testing.T) {
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	const content = "root cause: fixed in v2, no further action needed"
+	if _, _, _, err := store.Upsert(ctx, "abc123", "gotcha", content, "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// Empty PATH: exec.LookPath fails for every CLI backend.
+	t.Setenv("PATH", t.TempDir())
+
+	session := connectedClient(t, srv)
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_resolve",
+		Arguments: map[string]any{"project": "test-project"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_resolve: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error result when no CLI binary is available, got %+v", result.Content)
+	}
+	var sb strings.Builder
+	for _, c := range result.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			sb.WriteString(tc.Text)
+		}
+	}
+	if !strings.Contains(sb.String(), "requires a `claude`") {
+		t.Errorf("expected error to name the required CLI binaries, got %q", sb.String())
 	}
 }
 

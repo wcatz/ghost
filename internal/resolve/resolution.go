@@ -23,7 +23,8 @@ type classifyProvider interface {
 // The name is deliberately provider- and model-agnostic: it only needs a
 // classifyProvider with a Classify method (typically *ai.FallbackProvider),
 // which any backing LLM — the Anthropic API, a `claude` subprocess, the opencode
-// CLI, or MCP sampling — can satisfy. It is not tied to a specific model tier.
+// CLI, or a codex/goose binary — can satisfy. It is not tied to a specific
+// model tier.
 type ResolutionClassifier struct {
 	client classifyProvider
 }

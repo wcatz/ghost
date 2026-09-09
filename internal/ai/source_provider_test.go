@@ -104,3 +104,24 @@ func TestSourceProviderGooseRoutesToRealBackend(t *testing.T) {
 		t.Error("expected available")
 	}
 }
+
+func TestSourceForClientName(t *testing.T) {
+	tests := []struct {
+		clientName string
+		want       string
+	}{
+		{"opencode", "opencode"},
+		{"OpenCode", "opencode"},
+		{"claude-code", "claude-code"},
+		{"Claude Desktop", "claude-code"},
+		{"codex", "codex"},
+		{"goose", "goose"},
+		{"some-unknown-client", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := SourceForClientName(tt.clientName); got != tt.want {
+			t.Errorf("SourceForClientName(%q) = %q, want %q", tt.clientName, got, tt.want)
+		}
+	}
+}

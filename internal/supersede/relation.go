@@ -25,7 +25,7 @@ type classifyProvider interface {
 // The name is deliberately provider- and model-agnostic: RelationClassifier
 // only needs a classifyProvider with a Classify method (typically
 // *ai.FallbackProvider), which any backing LLM — the Anthropic API, a `claude`
-// subprocess, the opencode CLI, or MCP sampling — can satisfy.
+// subprocess, the opencode CLI, or a codex/goose binary — can satisfy.
 type RelationClassifier struct {
 	client classifyProvider
 }
