@@ -162,9 +162,9 @@ func cleanupTransientTranscript(p hostevent.Payload) {
 // already running for that project. Opt-in via reflection.auto_resolve
 // (default false) — most users never want an unattended write pass. Every
 // failure path returns silently: this must never block or fail the stop hook.
-// If the Anthropic API is out of credit, the spawned process itself fails
-// fast and logs the failure to resolve.log — no local fallback runs in this
-// path, so auto-resolve simply does nothing until credits are restored.
+// If no LLM CLI binary is reachable, the spawned process itself fails fast and
+// logs the failure to resolve.log — no local fallback runs in this path, so
+// auto-resolve simply does nothing until a harness becomes available.
 // Known limitation: resolution here depends on Store.ResolveProject's
 // path/basename match against the stored project row; a cwd with no matching
 // project is a silent no-op, same as an unconfigured user.
@@ -204,7 +204,7 @@ func spawnResolveIfConfigured(cwd, source string) {
 	// isAlive false above is only a fast path to skip locking in the common
 	// case (no resolve running at all). It is NOT sufficient on its own: two
 	// stop hooks firing close together for the same project could both pass
-	// it and both decide to spawn a paid-API, DB-writing process. claimPidFile
+	// it and both decide to spawn a DB-writing process. claimPidFile
 	// re-checks liveness under an OS-level lock, serializing the
 	// check-then-write against every other caller on the machine, so exactly
 	// one of them wins the claim.
@@ -242,9 +242,9 @@ func spawnResolveIfConfigured(cwd, source string) {
 // already running for that project. Opt-in via reflection.auto_supersede
 // (default false) — most users never want an unattended write pass. Every
 // failure path returns silently: this must never block or fail the stop hook.
-// If the Anthropic API is out of credit, the spawned process itself fails
-// fast and logs the failure to supersede.log — no local fallback runs in this
-// path, so auto-supersede simply does nothing until credits are restored.
+// If no LLM CLI binary is reachable, the spawned process itself fails fast and
+// logs the failure to supersede.log — no local fallback runs in this path, so
+// auto-supersede simply does nothing until a harness becomes available.
 // Known limitation: resolution here depends on Store.ResolveProject's
 // path/basename match against the stored project row; a cwd with no matching
 // project is a silent no-op, same as an unconfigured user.
@@ -284,7 +284,7 @@ func spawnSupersedeIfConfigured(cwd, source string) {
 	// isAlive false above is only a fast path to skip locking in the common
 	// case (no supersede running at all). It is NOT sufficient on its own: two
 	// stop hooks firing close together for the same project could both pass
-	// it and both decide to spawn a paid-API, DB-writing process. claimPidFile
+	// it and both decide to spawn a DB-writing process. claimPidFile
 	// re-checks liveness under an OS-level lock, serializing the
 	// check-then-write against every other caller on the machine, so exactly
 	// one of them wins the claim.
@@ -325,7 +325,7 @@ func spawnSupersedeIfConfigured(cwd, source string) {
 //
 // Unlike the resolve/supersede twins, this adds a no-LLM guard: consolidation
 // is only worth an unattended write when a real LLM tier is available. Without
-// an API key or a claude/opencode binary, --tier auto would fall through to the
+// a claude/opencode/codex/goose binary, --tier auto would fall through to the
 // Jaccard-only sqlite tier and rewrite every non-manual memory for no quality
 // gain, so the spawn is skipped entirely — before the DB is even opened, so
 // this stays a cheap read-only no-op.
@@ -337,7 +337,7 @@ func spawnReflectIfConfigured(cwd, source string) {
 	if err != nil || !cfg.Reflection.AutoReflect {
 		return
 	}
-	if cfg.API.Key == "" && !ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary).Available() {
+	if !ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary).Available() {
 		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
 		if !sp.Available() {
 			slog.Warn("reflect: skipping — no CLI binary available", "source", source)
