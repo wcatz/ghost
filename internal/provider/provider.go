@@ -81,10 +81,6 @@ type MemoryStore interface {
 	GetLearnedContext(ctx context.Context, projectID string) (string, error)
 	UpdateLearnedContext(ctx context.Context, projectID, learnedContext, summary string) error
 
-	// Cost tracking
-	RecordUsage(ctx context.Context, projectID, model string, usage memory.TokenUsage) error
-	GetMonthlyCost(ctx context.Context, year, month int) (memory.MonthlyCost, error)
-
 	// Lifecycle
 	Close() error
 }

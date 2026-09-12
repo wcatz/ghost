@@ -3,8 +3,7 @@ package memory
 // Package memory provides the SQLite-backed persistence layer for Ghost memories,
 // including CRUD operations, FTS5 search, hybrid vector/FTS retrieval, time-decay
 // scoring with category-aware decay, pin exemptions, project lifecycle management,
-// tasks, decisions, memory links (supersedes/contradicts/elaborates/causes), and
-// cost/token tracking.
+// tasks, decisions, memory links (supersedes/contradicts/elaborates/causes).
 
 import (
 	"context"
@@ -17,8 +16,6 @@ import (
 	"sync"
 	"time"
 	"unicode"
-
-	"github.com/wcatz/ghost/internal/ai"
 )
 
 // Memory represents a single discrete memory.
@@ -1377,93 +1374,6 @@ func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedCont
 		WHERE project_id = ?
 	`, learnedContext, summary, projectID)
 	return err
-}
-
-// RecordUsage saves token usage for cost tracking.
-func (s *Store) RecordUsage(ctx context.Context, projectID, model string, usage TokenUsage) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO token_usage (project_id, model, input_tokens, output_tokens, cache_creation, cache_read, cost_usd)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, projectID, model, usage.InputTokens, usage.OutputTokens, usage.CacheCreation, usage.CacheRead, usage.CostUSD)
-	if err != nil {
-		return fmt.Errorf("record usage: %w", err)
-	}
-	return nil
-}
-
-// TokenUsage for cost tracking.
-type TokenUsage struct {
-	InputTokens   int
-	OutputTokens  int
-	CacheCreation int
-	CacheRead     int
-	CostUSD       float64
-}
-
-// ModelCost holds cost for a single model within a monthly summary.
-type ModelCost struct {
-	Model string  `json:"model"`
-	Cost  float64 `json:"cost"`
-}
-
-// MonthlyCost holds aggregated cost data for a calendar month.
-type MonthlyCost struct {
-	Year         int         `json:"year"`
-	Month        int         `json:"month"`
-	TotalCost    float64     `json:"total_cost"`
-	TotalSavings float64     `json:"total_savings"`
-	ByModel      []ModelCost `json:"by_model"`
-}
-
-// GetMonthlyCost returns aggregated cost data for the given month across all projects,
-// including per-model breakdown and cache savings.
-func (s *Store) GetMonthlyCost(ctx context.Context, year, month int) (MonthlyCost, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	start := fmt.Sprintf("%04d-%02d-01", year, month)
-	var end string
-	if month == 12 {
-		end = fmt.Sprintf("%04d-01-01", year+1)
-	} else {
-		end = fmt.Sprintf("%04d-%02d-01", year, month+1)
-	}
-
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT model,
-		       COALESCE(SUM(cost_usd), 0),
-		       COALESCE(SUM(input_tokens), 0),
-		       COALESCE(SUM(output_tokens), 0),
-		       COALESCE(SUM(cache_creation), 0),
-		       COALESCE(SUM(cache_read), 0)
-		FROM token_usage
-		WHERE created_at >= ? AND created_at < ?
-		GROUP BY model
-	`, start, end)
-	if err != nil {
-		return MonthlyCost{}, err
-	}
-	defer func() { _ = rows.Close() }()
-
-	mc := MonthlyCost{Year: year, Month: month}
-	for rows.Next() {
-		var model string
-		var cost float64
-		var input, output, cacheWrite, cacheRead int
-		if err := rows.Scan(&model, &cost, &input, &output, &cacheWrite, &cacheRead); err != nil {
-			return MonthlyCost{}, err
-		}
-		mc.TotalCost += cost
-		mc.ByModel = append(mc.ByModel, ModelCost{Model: model, Cost: cost})
-
-		// Compute what cost would have been without caching for this model.
-		noCacheCost := ai.CostWithoutCacheForUsage(input, output, cacheWrite, cacheRead, model)
-		mc.TotalSavings += noCacheCost - cost
-	}
-	return mc, rows.Err()
 }
 
 func scanMemories(rows *sql.Rows) ([]Memory, error) {
