@@ -6,7 +6,8 @@
 // Design mirrors internal/supersede: a cheap local prefilter proposes
 // candidates, an LLM Classifier adjudicates each with a crisp one-word
 // question (biased to KEEP), and — with apply — the confirmed set is stamped
-// via SetResolved. The LLM Classifier implementation lives in haiku.go.
+// via SetResolved. The LLM Classifier implementation lives in resolution.go;
+// the hosting binary supplies a CLI-harness provider (see internal/ai).
 // The stop hook spawns `ghost resolve --apply` as a detached background process
 // (internal/mcpinit/stophook.go). The pass is re-runnable and idempotent —
 // already-resolved rows are excluded by ResolveCandidates.
@@ -44,11 +45,11 @@ var resolveKeywords = []string{
 
 // Classifier decides whether a memory's content is resolved evidence (true) or
 // a terminal conclusion / still-active knowledge (false). The LLM
-// implementation lives in haiku.go; tests inject a deterministic fake. It is
+// implementation lives in resolution.go; tests inject a deterministic fake. It is
 // biased to KEEP (return false when uncertain): a false resolve buries a useful
 // memory, a missed resolve merely leaves the status quo.
 type Classifier interface {
-	IsResolved(ctx context.Context, content string) (resolved bool, fromFallback bool, err error)
+	IsResolved(ctx context.Context, content string) (resolved bool, err error)
 }
 
 // resolveStore is the subset of *memory.Store the pass needs; narrowed for
@@ -64,14 +65,6 @@ type Result struct {
 	Candidates int // survived the keyword prefilter and were classified
 	Confirmed  int // classified as resolved evidence
 	Resolved   int // rows written (0 in dry-run)
-
-	// SkippedApply is true iff apply was requested and withheld because at
-	// least one classification came from a fallback provider AND at least one
-	// candidate was confirmed. Fallback classification with nothing confirmed
-	// leaves this false — there was no write to withhold. Callers should
-	// surface a true value explicitly — a silent Resolved=0 otherwise looks
-	// indistinguishable from "nothing to resolve."
-	SkippedApply bool
 }
 
 // Prefilter keeps only memories whose content contains a resolution keyword.
@@ -108,29 +101,16 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	}
 
 	var confirmed []memory.Memory
-	anyFallback := false
 	for _, m := range cands {
-		ok, fromFallback, err := cls.IsResolved(ctx, m.Content)
+		ok, err := cls.IsResolved(ctx, m.Content)
 		if err != nil {
 			return res, nil, fmt.Errorf("classify %s: %w", m.ID, err)
-		}
-		if fromFallback {
-			anyFallback = true
 		}
 		if !ok {
 			continue
 		}
 		res.Confirmed++
 		confirmed = append(confirmed, m)
-	}
-
-	if apply && anyFallback && len(confirmed) > 0 {
-		res.SkippedApply = true
-		if logger != nil {
-			logger.Warn("resolve: candidates classified via fallback provider, apply skipped — rerun once primary is available",
-				"confirmed", res.Confirmed)
-		}
-		return res, confirmed, nil
 	}
 
 	if apply && len(confirmed) > 0 {
