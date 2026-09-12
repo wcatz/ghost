@@ -102,7 +102,7 @@ both on (shipped default)              1.000                  0.929
 
 The trap is untouched in both cases: under decay its distractors are `fact` (never-decay, so decay never fires), and under demote they are *not* supersession pairs (no `supersedes` edge, so the demote never fires). That is the free lunch the blanket-recency frontier proved a global prior can't be.
 
-**Both halves now ship. Creation:** `ghost supersede <project> [--apply]` (`internal/supersede`) proposes newer→older candidate pairs from cosine-similar memories (tighter than the 0.70 'related' floor), confirms each with a single Haiku call, and writes star `supersedes` links (`source='llm'`). It is re-runnable and self-heals after reflection cascade-deletes links (`ReplaceNonManual` reinserts memories with new IDs — a re-run rebuilds the links, exactly as the cosine worker rebuilds 'related'). The cosine worker is rejected as the creator itself — symmetric similarity can't assign direction (the failure that got the graph bonus disabled), so similarity only *proposes* and the LLM *confirms + directs*. The classifier prompt is biased toward NO (a false supersedes buries a valid memory), and on a labeled set of genuine-vs-parallel pairs it scored 8/8 (`TestHaikuClassifierLive`, run manually with an API key; skipped in CI).
+**Both halves now ship. Creation:** `ghost supersede <project> [--apply]` (`internal/supersede`) proposes newer→older candidate pairs from cosine-similar memories (tighter than the 0.70 'related' floor), confirms each with a single CLI-harness classify call, and writes star `supersedes` links (`source='llm'`). It is re-runnable and self-heals after reflection cascade-deletes links (`ReplaceNonManual` reinserts memories with new IDs — a re-run rebuilds the links, exactly as the cosine worker rebuilds 'related'). The cosine worker is rejected as the creator itself — symmetric similarity can't assign direction (the failure that got the graph bonus disabled), so similarity only *proposes* and the LLM *confirms + directs*. The classifier prompt is biased toward NO (a false supersedes buries a valid memory), and on a labeled set of genuine-vs-parallel pairs it scored 8/8 (`TestRelationClassifierLive`, run manually against a CLI harness; skipped when none is installed).
 
 **Consumption has now graduated; creation stays opt-in.** `DefaultSearchParams` ships `DecayEnabled: true` and `SupersedeDemote: true`, so production `SearchHybrid` / `SearchHybridAll` (i.e. `ghost_memory_search` and `ghost_search_all`, including their FTS-only fallbacks) apply decay reordering and consume `supersedes` links. Creation of `supersedes` links remains opt-in — links only exist if the user ran `ghost supersede --apply` — so the demote is still a hard no-op for anyone who has not asked for it, and the numbers above are what back the flip: decay alone moves staleness fresh-wins 0.083 → 1.000 with recency-trap correct-wins unchanged at 0.929 (`TestDecayFrontier`); the demote does the same 0.083 → 1.000 with trap flat at 0.929 (`TestSupersedeDemoteClearsFrontier`). Either half alone clears the frontier, and both on keeps it cleared. It was flipped because an eval run found the opposite failure: a memory the user had explicitly marked as replaced still outranked its replacement in live search. `TestProductionSearchDemotesSuperseded` (internal/memory) guards the production entry points; `SearchHybridParams` still takes explicit params for the sweep harness.
 
@@ -247,6 +247,13 @@ Generation + judge both through `--provider opencode --model opencode-go/deepsee
 
 ## Classifier fallback verification (2026-07-26)
 
+> Historical record. The credit-exhaustion seam this section validates
+> (`FallbackProvider`/`ErrCreditExhausted`, `internal/ai/provider_test.go`,
+> `internal/ai/fallback_provider_test.go`) was removed in the harness-only
+> memory-management change (2026-09-12). The fail-fast property lives on, but
+> guards a missing CLI binary instead of exhausted API credit; reproduce at
+> the CLI level by removing `claude`/`opencode`/`codex`/`goose` from PATH.
+
 The headless CLI path (`ghost resolve`/`ghost supersede`, and the stop hook's
 auto-resolve) cannot be driven into a real `ErrCreditExhausted` from outside
 the process: `internal/ai.APIURL` is a compile-time constant, not a config
@@ -268,7 +275,7 @@ against the real `ghost` project database (43 memories):
   `anthropicClient` provider): worked end-to-end — 21 kept after prefilter,
   13 confirmed evidence on dry-run, 12 actually stamped on `--apply` (one
   candidate re-classified out at write time by `SetResolved`'s own
-  eligibility re-check, expected non-determinism across two separate Haiku
+  eligibility re-check, expected non-determinism across two separate classification
   calls, not a bug).
 - **`ghost_resolve` MCP tool / sampling path**: connected live, tool
   correctly registered and reachable (`project`/`apply` args validated), but

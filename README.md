@@ -95,11 +95,11 @@ ghost mcp init --client goose
 docker run -i -e XDG_DATA_HOME=/data -v ghost-data:/data ghcr.io/wcatz/ghost:latest
 ```
 
-`-i` matters — MCP speaks over stdio, and `XDG_DATA_HOME=/data` is what makes the volume actually hold `ghost.db`. For consolidation, run `reflect` against the same volume (the MCP server itself never uses the API key):
+`-i` matters — MCP speaks over stdio, and `XDG_DATA_HOME=/data` is what makes the volume actually hold `ghost.db`. For consolidation, run `reflect` against the same volume (the MCP server itself never calls an API):
 
 ```bash
 docker run -i -e XDG_DATA_HOME=/data -v ghost-data:/data \
-  -e ANTHROPIC_API_KEY=sk-ant-... ghcr.io/wcatz/ghost:latest reflect myproject --apply
+  ghcr.io/wcatz/ghost:latest reflect myproject --apply
 ```
 
 ## Why not just use built-in memory?
@@ -118,7 +118,7 @@ Claude Code's built-in memory is a markdown file with a limited load window ([~2
 | Search | None (linear load) | Full-text + optional local vector search |
 | Categorization | None | 8 categories with importance scores |
 | Dedup | None (appends forever) | FTS-based upsert — merges on save |
-| Consolidation | None (Dreams, managed) | Anthropic API, CLI fallback, or local Jaccard |
+| Consolidation | None (Dreams, managed) | CLI harness or local Jaccard |
 | Time decay | None (stale facts persist equally) | Category-aware: conventions never decay, gotchas fade |
 | Cross-project | None (siloed per repository) | `ghost_search_all` + `_global` project |
 | Memory graph | None | Auto-linked related memories, graph view in Obsidian |
@@ -147,7 +147,7 @@ Mem0 and Zep are excellent products, but self-hosting them means running a servi
 
 ### Where does my data go?
 
-One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`) — this path is the same on every OS, including Windows (i.e. `%USERPROFILE%\.local\share\ghost`, not `%AppData%`); only the config file follows the OS-native convention (see Configuration below). Ghost makes no network calls in normal operation, with three exceptions you control: **localhost** Ollama for embeddings (optional), the Anthropic API when `ANTHROPIC_API_KEY` is set and no CLI binary (claude/opencode/codex/goose) is available for consolidation, resolve, or supersede, and the GitHub API *only if* you run `ghost upgrade`. That's the complete list.
+One SQLite file under `~/.local/share/ghost` (or `$XDG_DATA_HOME/ghost`) — this path is the same on every OS, including Windows (i.e. `%USERPROFILE%\.local\share\ghost`, not `%AppData%`); only the config file follows the OS-native convention (see Configuration below). Ghost makes no network calls in normal operation, with three exceptions you control: **localhost** Ollama for embeddings (optional), an LLM call through the calling client's own CLI harness (claude/opencode/codex/goose) when you run reflect/resolve/supersede, and the GitHub API *only if* you run `ghost upgrade`. That's the complete list.
 
 ### What exactly gets injected into my agent's context?
 
@@ -174,7 +174,7 @@ Switching *in* is just as easy: `ghost mcp init` imports Claude Code memories, a
 
 ### What does it cost to run?
 
-$0/month. No metered API in the hot path. When `ANTHROPIC_API_KEY` is set and no CLI binary is available, consolidate/resolve/supersede use the Anthropic API (cost scales with memory count — roughly $0.001 for a typical project); otherwise they fall back to a free CLI call (claude, opencode, codex, or goose) or the fully offline SQLite tier.
+$0/month. No metered API in the hot path. Consolidate/resolve/supersede run through your own CLI harness — `claude`, `opencode`, `codex`, or `goose` on PATH, billed to that CLI's subscription — or the fully offline SQLite tier.
 
 ## How it works
 
@@ -208,7 +208,7 @@ Pinned memories are fully exempt from decay — they score at raw importance reg
 
 ### Consolidation you can undo
 
-`ghost reflect` merges duplicates, prunes noise, and promotes cross-project knowledge to global scope. Tiered: Anthropic API (Haiku) first, then a CLI tier (claude, opencode, codex, or goose — whichever is on PATH), falling back to a fully offline SQLite tier (Jaccard >= 0.5, same-category merges). When `--source` is set (e.g. `--source opencode`), the API tier is skipped entirely and the matching CLI binary is used directly.
+`ghost reflect` merges duplicates, prunes noise, and promotes cross-project knowledge to global scope. Tiered: a CLI-harness tier (claude, opencode, codex, or goose — whichever is on PATH), then a fully offline SQLite tier (Jaccard >= 0.5, same-category merges). When `--source` is set (e.g. `--source opencode`), the matching CLI binary is used directly.
 
 Because an LLM rewriting your memory store is scary, the guardrails are layered:
 
@@ -274,7 +274,7 @@ Because the mirror is one-way, edits inside the vault are informational only and
 | Tasks | `ghost_task_create` `ghost_task_list` `ghost_task_update` `ghost_task_complete` |
 | Decisions | `ghost_decision_record` `ghost_decisions_list` |
 
-`ghost_resolve` scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own model via MCP sampling when the client supports it, falling back to a subscription-billed `claude -p` call otherwise (dry-run only on that fallback) — no Anthropic API credits spent either way. Args: `project` (required), `apply` (default false: dry-run preview only; pass `true` to stamp `resolved_at` on confirmed memories).
+`ghost_resolve` scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own CLI harness — the backend is picked from the client's identity (an opencode session uses the opencode binary, claude uses claude, etc.), so classification is subscription-billed to that CLI like a normal session and no Anthropic API credits are ever spent. Args: `project` (required), `apply` (default false: dry-run preview only; pass `true` to stamp `resolved_at` on confirmed memories).
 
 Resources: project context, global memories, project decisions, project tasks — pin them in clients that support it to survive context compaction.
 
@@ -304,7 +304,7 @@ ghost version                        # Print version
 
 `ghost mcp init` auto-detects which MCP clients are on PATH and installs for all of them. When only one is found, it installs for that one; when multiple are found, it installs for all; when none are found, it errors with install instructions. Use `--client` to override and target a specific client (e.g. `--client opencode` installs a single lifecycle plugin to `~/.config/opencode/plugins/ghost-opencode.ts` that self-registers the MCP server and bridges stop events — opencode's own config file is never modified; re-running init repairs an outdated plugin in place).
 
-When `reflection.auto_resolve` is enabled in config (default off), the stop hook also spawns `ghost resolve <project> --apply` as a detached background process after each session, so resolved-evidence memories get marked automatically without waiting for a manual run. This never blocks the hook itself — the spawn is fire-and-forget, logged to `resolve.log` in the ghost data directory. If the Anthropic API is out of credit at spawn time, the spawned process fails and logs the failure; it does not degrade to a lower-quality answer.
+When `reflection.auto_resolve` is enabled in config (default off), the stop hook also spawns `ghost resolve <project> --apply` as a detached background process after each session, so resolved-evidence memories get marked automatically without waiting for a manual run. This never blocks the hook itself — the spawn is fire-and-forget, logged to `resolve.log` in the ghost data directory. If no CLI harness is reachable at spawn time, the spawned process fails and logs the failure; it does not degrade to a lower-quality answer.
 
 ## Configuration
 
@@ -313,7 +313,7 @@ Ghost works with zero config. When you want to change something, layers are (lat
 1. Compiled defaults
 2. `/etc/ghost/config.yaml`
 3. `~/.config/ghost/config.yaml` (honors `$XDG_CONFIG_HOME` when set; on Windows, absent an `XDG_CONFIG_HOME` override, this resolves to `%AppData%\ghost\config.yaml`)
-4. `GHOST_*` environment variables, plus `ANTHROPIC_API_KEY` (used by reflect/resolve/supersede when no CLI binary is available)
+4. `GHOST_*` environment variables
 
 ```yaml
 embedding:
@@ -358,7 +358,7 @@ hybrid           0.857   0.964   1.000    1.000    0.989
 
 - **Hybrid fusion beats both single legs here** (NDCG@10 0.989 vs 0.965 full-text, 0.946 vector) — CI asserts that relationship on every PR. Across both benchmarks, fusion is the robustness play: vectors win conversational recall, keywords win exact identifiers.
 - **We ran the ablations, found our own regression, and removed it.** An additive graph-expansion ranking bonus hurt retrieval — a public LongMemEval-S kill experiment showed its recoveries were a strict subset of a deeper vector-k's, with no headroom at production depth — so it was removed entirely rather than kept disabled. The link graph itself is retained for the Obsidian mirror and `supersedes` ranking. `ghost bench --sweep` grid-searches the fusion parameters if you want to check our tuning.
-- **The staleness suite** ("prod ran Postgres 14, we migrated to 16" — does search rank the fresh fact first?) runs report-only in CI. A *recency-trap* fixture (older memory is the correct answer) proved a blanket age-only prior can't be the default: it's a cliff, every weight that fixes staleness destroys old-but-still-correct retrieval. The fix that survives it is *category-aware*: search now applies the time-decay factor (pinned / preference / convention / fact never decay; pattern/architecture τ=45; decision/gotcha/dependency τ=30) to reorder the result window, so the staleness suite's updated-deployment facts (`dependency` category) flip fresh-wins **0.083 → 1.000** while the trap's `fact` memories stay flat at **0.929** — the free lunch the blanket prior couldn't achieve. Decay is ordering-only (it never drops a relevant memory). Both halves ship: `ghost supersede` creates `supersedes` links (cosine proposes, Haiku confirms — 8/8 on a labeled set), and `DefaultSearchParams` ships `DecayEnabled: true` + `SupersedeDemote: true`, so production search (`ghost_memory_search`, `ghost_search_all`) is time-aware and consumes `supersedes` links by default. Link creation stays opt-in: the demote is a hard no-op until you run `ghost supersede --apply`. Publishing the negative result, the reason, *and* the fix that survives it is the point.
+- **The staleness suite** ("prod ran Postgres 14, we migrated to 16" — does search rank the fresh fact first?) runs report-only in CI. A *recency-trap* fixture (older memory is the correct answer) proved a blanket age-only prior can't be the default: it's a cliff, every weight that fixes staleness destroys old-but-still-correct retrieval. The fix that survives it is *category-aware*: search now applies the time-decay factor (pinned / preference / convention / fact never decay; pattern/architecture τ=45; decision/gotcha/dependency τ=30) to reorder the result window, so the staleness suite's updated-deployment facts (`dependency` category) flip fresh-wins **0.083 → 1.000** while the trap's `fact` memories stay flat at **0.929** — the free lunch the blanket prior couldn't achieve. Decay is ordering-only (it never drops a relevant memory). Both halves ship: `ghost supersede` creates `supersedes` links (cosine proposes, a CLI-harness classify call confirms — 8/8 on a labeled set), and `DefaultSearchParams` ships `DecayEnabled: true` + `SupersedeDemote: true`, so production search (`ghost_memory_search`, `ghost_search_all`) is time-aware and consumes `supersedes` links by default. Link creation stays opt-in: the demote is a hard no-op until you run `ghost supersede --apply`. Publishing the negative result, the reason, *and* the fix that survives it is the point.
 
 **End-to-end LongMemEval-S** (retrieve → generate → judge — DeepSeek v4 Pro as both generator and judge, **500 questions** including 30 abstention, `topk_context=5`):
 

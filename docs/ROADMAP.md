@@ -144,9 +144,7 @@ are good practice regardless, but not worth building speculatively.
 - [ ] Documented right-to-erasure path — note `memory_snapshots` is in direct
   tension with "final deletion" and needs an explicit carve-out
 - [ ] Data Processing Agreement / subprocessor disclosure before offering the
-  Haiku reflection tier to any enterprise customer
-- [ ] Secrets manager for `ANTHROPIC_API_KEY` in shared deployments (Vault, or
-  k8s External Secrets) instead of a bare env var
+  reflection tier to any enterprise customer
 
 **Explicit non-goal until there's a paying customer requiring it:** actual
 SOC 2 / ISO / HIPAA attestation. These are organizational, not code,
@@ -235,7 +233,7 @@ right now the bottleneck is adoption, not pricing structure.
   cross-platform binary, but worth watching for FTS5/write-throughput edge
   cases if usage patterns ever get more concurrent than "one dev, one
   binary."
-- **`ghost supersede`'s Haiku classifier is validated on only 8/8 labeled
+- **`ghost supersede`'s relation classifier is validated on only 8/8 labeled
   examples.** Fine as an initial signal, too small an n to lean on as a
   benchmark claim — revisit with a larger labeled set before citing it
   more heavily.
