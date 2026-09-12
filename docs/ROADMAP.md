@@ -38,8 +38,12 @@ Horizons, roughly:
   is walled inside each product — none of them read each other. That's
   Ghost's actual differentiator (local + cross-client), and it should be
   stated outright, not left for the reader to infer from a feature table.
-- [ ] **Wire LongMemEval-S into CI** (see Part 3) so the flagship benchmark
-  claim is continuously regression-guarded, not just a one-time run.
+- [x] **Wire LongMemEval-S into CI** — shipped PRs #193/#211/#213:
+  `.github/workflows/longmemeval.yml` gates PRs on the fts floor
+  (R@5 ≥ 0.74, NDCG@10 ≥ 0.72, path-filtered to `internal/memory/**`,
+  `bench/longmemeval/**`); hybrid (R@5 ≥ 0.91) is manual
+  `workflow_dispatch`-only because the cold embedding pass is too slow to
+  gate or schedule. See docs/benchmarks.md "Phase 1".
 
 ---
 
@@ -74,8 +78,11 @@ on volume — win on rigor and citations instead).
 
 ## Part 3 — Now: benchmark infrastructure
 
-Goal: `LongMemEval-S` runs in CI the same way `ghost bench --sweep` already
-does for the smaller dataset.
+**Status: shipped.** `LongMemEval-S` now runs in CI (see the Part 1 checkbox
+above). Phase 1 (retrieval-only), Phase 2 (`ghost bench`), Phase 3 (staleness
+suite), and Phase 4 (end-to-end retrieve→generate→judge) numbers are all
+published in docs/benchmarks.md. What remains below is the design rationale
+and one optional alternative.
 
 - Runs retrieval-only (no LLM judge) — **no paid API calls required**.
 - Dataset is open on Hugging Face, no gating — pull `longmemeval_s_cleaned.json`.
@@ -85,8 +92,9 @@ does for the smaller dataset.
   the natural home for the job.
 - Workflow sketch: checkout → install Ollama → pull embed model → download
   dataset → run harness → fail PR on regression, same pattern as the existing
-  dev-facts `ghost bench` CI gate.
-- **Optional persistent alternative:** Oracle Cloud "Always Free" Ampere A1
+  dev-facts `ghost bench` CI gate. (Implemented; hybrid halves the Ollama
+  step out because the cold pass is hours-long.)
+- **Optional persistent alternative (not pursued):** Oracle Cloud "Always Free" Ampere A1
   (4 OCPU / 24GB RAM, ARM, free indefinitely as of 2026) if a long-lived
   Ollama instance is preferred over ephemeral CI runs. Caveats: those
   instances are in high demand and may need a retry loop to provision, and
