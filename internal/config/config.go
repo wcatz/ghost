@@ -4,7 +4,7 @@
 //  1. Compiled defaults
 //  2. /etc/ghost/config.yaml          (system-wide)
 //  3. ~/.config/ghost/config.yaml     (user-global)
-//  4. GHOST_* environment variables (plus ANTHROPIC_API_KEY)
+//  4. GHOST_* environment variables
 //  5. CLI flag overrides (applied by caller after Load)
 package config
 
@@ -26,7 +26,6 @@ var exampleConfig []byte
 
 // Config holds the global ghost configuration.
 type Config struct {
-	API        APIConfig        `koanf:"api"`
 	CLI        CLIConfig        `koanf:"cli"`
 	Embedding  EmbeddingConfig  `koanf:"embedding"`
 	Reflection ReflectionConfig `koanf:"reflection"`
@@ -44,17 +43,12 @@ type RoutingConfig struct {
 	DefaultProject string `koanf:"default_project"`
 }
 
-// APIConfig holds Claude API settings (used by reflection, resolve, and supersede classifiers).
-type APIConfig struct {
-	Key string `koanf:"key"`
-}
-
-// CLIConfig holds explicit paths to the subprocess LLM binaries backing the
-// reflect CLI tier. An empty value means "resolve from PATH"; a set path
-// overrides PATH lookup. This matters for auto_reflect: the Stop hook process's
-// PATH is often not the interactive shell's, so a binary installed under
-// ~/.opencode/bin (or similar) is invisible to exec.LookPath unless its path is
-// configured explicitly here.
+// CLIConfig holds explicit paths to the subprocess LLM binaries backing
+// classification and consolidation. An empty value means "resolve from PATH";
+// a set path overrides PATH lookup. This matters for auto_reflect: the Stop
+// hook process's PATH is often not the interactive shell's, so a binary
+// installed under ~/.opencode/bin (or similar) is invisible to exec.LookPath
+// unless its path is configured explicitly here.
 type CLIConfig struct {
 	ClaudeBinary   string `koanf:"claude_binary"`
 	OpenCodeBinary string `koanf:"opencode_binary"`
@@ -140,7 +134,7 @@ var defaults = map[string]interface{}{
 
 // Load reads configuration with layered precedence.
 // After Load returns, the caller may apply CLI flag overrides by mutating
-// fields directly (e.g. cfg.API.ModelQuality = *modelFlag).
+// fields directly.
 func Load() (*Config, error) {
 	k := koanf.New(".")
 
@@ -160,19 +154,12 @@ func Load() (*Config, error) {
 	}
 
 	// Layer 4: GHOST_* environment variables.
-	// e.g. GHOST_API_KEY → api.key, GHOST_DEFAULTS_MODE → defaults.mode
+	// e.g. GHOST_CLI_CLAUDE_BINARY → cli.claude_binary (see envOverrides below).
 	if err := k.Load(env.Provider("GHOST_", ".", func(s string) string {
 		return strings.ToLower(strings.ReplaceAll(
 			strings.TrimPrefix(s, "GHOST_"), "_", "."))
 	}), nil); err != nil {
 		return nil, err
-	}
-
-	// Also support the standard ANTHROPIC_API_KEY.
-	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		_ = k.Load(confmap.Provider(map[string]interface{}{
-			"api.key": key,
-		}, "."), nil)
 	}
 
 	// Explicit env overrides for keys with underscores in koanf tags.

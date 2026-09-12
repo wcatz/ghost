@@ -363,31 +363,28 @@ func stubBinary(t *testing.T, payload string) string {
 	return path
 }
 
-func slogDiscard() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}
-
-// TestBuildClassifyProvider_NoKeyNoBackendErrors: with no API key and no
-// resolvable claude/opencode binary, building the classifier must fail loudly.
-func TestBuildClassifyProvider_NoKeyNoBackendErrors(t *testing.T) {
+// TestBuildClassifyProvider_NoBackendErrors: with no resolvable claude/
+// opencode/codex/goose binary, building the classifier must fail loudly.
+func TestBuildClassifyProvider_NoBackendErrors(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // empty dir defeats bare-name LookPath lookups
 	cfg := &config.Config{}
-	_, err := buildClassifyProvider(cfg, slogDiscard())
-	if err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+	_, err := buildClassifyProvider(cfg)
+	if err == nil || !strings.Contains(err.Error(), "`claude`") {
 		t.Fatalf("want backend error, got %v", err)
 	}
 }
 
-// TestBuildClassifyProvider_NoKeyFallsToOpencodeStub: with no API key and no
-// claude binary but an explicit opencode binary configured, the returned
-// provider must classify through that opencode binary (the harness's
-// zero-Anthropic-spend path).
-func TestBuildClassifyProvider_NoKeyFallsToOpencodeStub(t *testing.T) {
+// TestBuildClassifyProvider_UsesConfiguredOpencodeStub: with no binary on
+// PATH but an explicit opencode binary configured, the returned provider
+// must classify through that opencode binary (the harness's zero-Anthropic-
+// spend path). buildClassifyProvider returns ai.Provider whose Classify is a
+// plain string verdict.
+func TestBuildClassifyProvider_UsesConfiguredOpencodeStub(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	stub := stubBinary(t, `{"type":"text","part":{"type":"text","text":"STUB_CLASSIFY_OK"}}`)
 	cfg := &config.Config{}
 	cfg.CLI.OpenCodeBinary = stub
-	p, err := buildClassifyProvider(cfg, slogDiscard())
+	p, err := buildClassifyProvider(cfg)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -395,21 +392,8 @@ func TestBuildClassifyProvider_NoKeyFallsToOpencodeStub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("classify: %v", err)
 	}
-	if out.Text != "STUB_CLASSIFY_OK" || out.FromFallback {
-		t.Fatalf("got %+v", out)
-	}
-}
-
-// TestBuildClassifyProvider_KeySetBuildsRegardless: with an API key set the
-// provider builds even when no CLI backend exists (API primary), preserving
-// pre-change behavior.
-func TestBuildClassifyProvider_KeySetBuildsRegardless(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	cfg := &config.Config{}
-	cfg.API.Key = "sk-test"
-	p, err := buildClassifyProvider(cfg, slogDiscard())
-	if err != nil || p == nil {
-		t.Fatalf("build: p=%v err=%v", p, err)
+	if out != "STUB_CLASSIFY_OK" {
+		t.Fatalf("got %q, want STUB_CLASSIFY_OK", out)
 	}
 }
 

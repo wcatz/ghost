@@ -11,7 +11,7 @@ import (
 
 // buildClassifier builds the real supersede classifier backed by the
 // `opencode` CLI (ai.NewOpenCodeClientWithBinary) — subscription-billed, no
-// ANTHROPIC_API_KEY required. cfg.CLI.OpenCodeBinary overrides the "opencode"
+// API key required. cfg.CLI.OpenCodeBinary overrides the "opencode"
 // PATH lookup, matching cmd/ghost/main.go's own opencode-tier resolution.
 func buildClassifier() (*supersede.RelationClassifier, error) {
 	cfg, err := config.Load()
@@ -29,6 +29,5 @@ func buildClassifier() (*supersede.RelationClassifier, error) {
 		}
 		return nil, fmt.Errorf("memoryagentbench requires the `%s` binary on PATH (or %s): %w", binary, hint, err)
 	}
-	provider := ai.NewFallbackProvider(ai.NewOpenCodeClientWithBinary(binary), nil, false)
-	return supersede.NewRelationClassifier(provider), nil
+	return supersede.NewRelationClassifier(ai.NewOpenCodeClientWithBinary(binary)), nil
 }

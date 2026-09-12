@@ -1,5 +1,7 @@
 # Autonomous Reflect — Design
 
+> **SUPERSEDED (2026-09-12):** the Anthropic API / FallbackProvider credit-exhaustion seam is removed wholesale — see `2026-09-12-harness-only-memory-management-design.md`. The file is kept for history.
+
 **Status:** Implemented (2026-08-19).
 **Author:** Wayne
 **Builds on:** #297 "feat: autonomous memory lifecycle — auto reflect, supersede, and resolve"; #312 "fix(resolve): fall back to claude CLI when MCP sampling is unavailable".

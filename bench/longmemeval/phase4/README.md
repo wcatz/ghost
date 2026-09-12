@@ -50,8 +50,9 @@ checkout with `--longmemeval-src` or the `$LONGMEMEVAL_SRC` env var.
 ## Keys (never logged)
 
 - `openai`  → `OPENAI_API_KEY`
-- `anthropic` → `ANTHROPIC_API_KEY`, or falls back to `api.key` in
-  `~/.config/ghost/config.yaml` so Ghost's own key can be reused.
+- `anthropic` → `ANTHROPIC_API_KEY`, or reads `api.key` under `[api]` in
+  `~/.config/ghost/config.yaml` only if the user still has a legacy config
+  file; new installs have none (mainline Ghost no longer uses `api.*`).
 
 The driver never prints a key and never dumps the request headers.
 

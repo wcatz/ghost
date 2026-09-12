@@ -16,12 +16,11 @@ import (
 // indefinitely, since resolve/supersede classify candidates one at a time.
 const defaultTimeout = 5 * time.Minute
 
-// CLIClient drives Claude via the `claude` CLI (a `claude -p` subprocess)
-// instead of the direct Anthropic HTTP API, so it bills to the caller's
-// Claude Code subscription rather than API credits. It implements the same
-// Reflect/Classify shapes as Client (reflectClient / Provider), so it can
-// substitute for the direct API client anywhere ANTHROPIC_API_KEY would
-// otherwise be required.
+// CLIClient drives Claude via the `claude` CLI (a `claude -p` subprocess).
+// It bills to the caller's Claude Code subscription rather than API credits.
+// It implements the same Reflect/Classify shapes as the other CLI adapters
+// (the cliBackend interface), so it serves reflect/resolve/supersede without
+// any API key.
 //
 // ANTHROPIC_API_KEY is stripped from the subprocess environment: if present,
 // it would override subscription/OAuth login and bill the call as

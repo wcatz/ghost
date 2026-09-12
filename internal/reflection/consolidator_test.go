@@ -556,8 +556,8 @@ func TestContainment(t *testing.T) {
 	}
 }
 
-func TestHaikuConsolidator_NilClient(t *testing.T) {
-	h := NewHaikuConsolidator(nil)
+func TestLlmConsolidator_NilClient(t *testing.T) {
+	h := NewLlmConsolidator(nil)
 	if h.Available(context.Background()) {
 		t.Error("should not be available with nil client")
 	}

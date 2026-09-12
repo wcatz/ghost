@@ -12,7 +12,8 @@ import (
 // method lived here until the assistant-era streaming client was removed;
 // reflection is the only LLM consumer.)
 type LLMProvider interface {
-	// Reflect calls a fast model (e.g., Haiku) for memory extraction/reflection.
+	// Reflect calls a fast model for memory extraction/reflection (via the
+	// calling client's CLI harness — claude/opencode/codex/goose subprocess).
 	Reflect(ctx context.Context, prompt string) (string, ai.TokenUsage, error)
 }
 
@@ -79,10 +80,6 @@ type MemoryStore interface {
 	IncrementInteraction(ctx context.Context, projectID string) (int, error)
 	GetLearnedContext(ctx context.Context, projectID string) (string, error)
 	UpdateLearnedContext(ctx context.Context, projectID, learnedContext, summary string) error
-
-	// Cost tracking
-	RecordUsage(ctx context.Context, projectID, model string, usage memory.TokenUsage) error
-	GetMonthlyCost(ctx context.Context, year, month int) (memory.MonthlyCost, error)
 
 	// Lifecycle
 	Close() error

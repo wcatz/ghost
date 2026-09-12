@@ -1646,59 +1646,6 @@ func TestStoreLearnedContext(t *testing.T) {
 	}
 }
 
-func TestStoreRecordUsage(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	usage := TokenUsage{
-		InputTokens:   1000,
-		OutputTokens:  500,
-		CacheCreation: 200,
-		CacheRead:     100,
-		CostUSD:       0.05,
-	}
-
-	if err := s.RecordUsage(ctx, testProject, "claude-opus-4-6", usage); err != nil {
-		t.Fatalf("RecordUsage: %v", err)
-	}
-
-	// Verify by reading directly from DB.
-	var inputTokens, outputTokens int
-	var costUSD float64
-	err := s.db.QueryRowContext(ctx, `
-		SELECT input_tokens, output_tokens, cost_usd FROM token_usage
-		WHERE project_id = ? LIMIT 1
-	`, testProject).Scan(&inputTokens, &outputTokens, &costUSD)
-	if err != nil {
-		t.Fatalf("query token_usage: %v", err)
-	}
-	if inputTokens != 1000 {
-		t.Errorf("expected 1000 input tokens, got %d", inputTokens)
-	}
-	if outputTokens != 500 {
-		t.Errorf("expected 500 output tokens, got %d", outputTokens)
-	}
-	if costUSD != 0.05 {
-		t.Errorf("expected cost 0.05, got %f", costUSD)
-	}
-}
-
-func TestStoreRecordUsage_ClosedDB(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	if err := s.db.Close(); err != nil {
-		t.Fatalf("close db: %v", err)
-	}
-
-	err := s.RecordUsage(ctx, testProject, "claude-opus-4-6", TokenUsage{InputTokens: 1})
-	if err == nil {
-		t.Fatal("expected error from RecordUsage on closed DB, got nil")
-	}
-	if !strings.Contains(err.Error(), "record usage") {
-		t.Errorf("expected error to contain %q, got %q", "record usage", err.Error())
-	}
-}
-
 func TestStoreSetOnSave(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -2294,11 +2241,6 @@ func seedFullProject(t *testing.T, s *Store, ctx context.Context, projectID stri
 	if _, _, err := s.RecordDecision(ctx, projectID, "seed decision", "did the thing", "because", nil, nil); err != nil {
 		t.Fatalf("seed decision: %v", err)
 	}
-	for i := 0; i < 3; i++ {
-		if err := s.RecordUsage(ctx, projectID, "claude-opus-4-6", TokenUsage{InputTokens: 10, OutputTokens: 5}); err != nil {
-			t.Fatalf("seed token_usage %d: %v", i, err)
-		}
-	}
 	for i := 0; i < 6; i++ {
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT INTO audit_log (action, project_id) VALUES ('test-action', ?)`, projectID,
@@ -2384,8 +2326,8 @@ func TestDeleteProject_DryRunCountsAndWritesNothing(t *testing.T) {
 	if summary.Decisions != 1 {
 		t.Errorf("Decisions = %d, want 1", summary.Decisions)
 	}
-	if summary.TokenUsage != 3 {
-		t.Errorf("TokenUsage = %d, want 3", summary.TokenUsage)
+	if summary.TokenUsage != 0 {
+		t.Errorf("TokenUsage = %d, want 0", summary.TokenUsage)
 	}
 	if summary.AuditLog != 6 {
 		t.Errorf("AuditLog = %d, want 6", summary.AuditLog)
@@ -2398,8 +2340,8 @@ func TestDeleteProject_DryRunCountsAndWritesNothing(t *testing.T) {
 	if n := countRows(t, s, "tasks", testProject); n != 2 {
 		t.Errorf("tasks after dry-run = %d, want 2 (unchanged)", n)
 	}
-	if n := countRows(t, s, "token_usage", testProject); n != 3 {
-		t.Errorf("token_usage after dry-run = %d, want 3 (unchanged)", n)
+	if n := countRows(t, s, "token_usage", testProject); n != 0 {
+		t.Errorf("token_usage after dry-run = %d, want 0 (unchanged)", n)
 	}
 	if _, _, err := s.ResolveProject(ctx, testProject); err != nil {
 		t.Fatalf("ResolveProject after dry-run: %v", err)
@@ -2443,7 +2385,7 @@ func TestDeleteProject_ApplyRemovesEverythingIncludingOrphanTables(t *testing.T)
 		t.Fatalf("DeleteProject apply: %v", err)
 	}
 	if summary.Memories != 5 || summary.MemoryLinks != 4 || summary.Tasks != 2 ||
-		summary.Decisions != 1 || summary.TokenUsage != 3 || summary.AuditLog != 6 {
+		summary.Decisions != 1 || summary.TokenUsage != 0 || summary.AuditLog != 6 {
 		t.Fatalf("unexpected summary: %+v", summary)
 	}
 
@@ -2522,7 +2464,7 @@ func TestDeleteProject_IsolatesOtherProjects(t *testing.T) {
 		t.Fatalf("DeleteProject: %v", err)
 	}
 
-	expected := map[string]int{"memories": 5, "tasks": 2, "decisions": 1, "token_usage": 3, "audit_log": 6}
+	expected := map[string]int{"memories": 5, "tasks": 2, "decisions": 1, "token_usage": 0, "audit_log": 6}
 	for table, want := range expected {
 		if n := countRows(t, s, table, otherProject); n != want {
 			t.Errorf("%s for %s after deleting %s = %d, want %d (should be untouched)", table, otherProject, testProject, n, want)

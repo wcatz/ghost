@@ -71,7 +71,7 @@ client guide, and (for corroboration) the Python SDK's deprecation table.
 
 | Path | Composition | Writes |
 | --- | --- | --- |
-| Headless (`ghost resolve`, stop-hook detached spawn) | `buildClassifyProvider` (cmd/ghost/main.go:616): Anthropic primary when `ANTHROPIC_API_KEY` set, CLI (`claude`→`opencode`) secondary, dry-run-only on fallback; **CLI as sole full-write primary when no key** | allowed unless any answer came from the fallback (`internal/resolve/resolve.go:128`) |
+| Headless (`ghost resolve`, stop-hook detached spawn) | `buildClassifyProvider` (cmd/ghost/main.go): CLI cascade (claude→opencode→codex→goose) as sole full-write primary; **fails fast when no CLI binary is on PATH** | allowed |
 | Live session (`ghost_resolve` MCP tool) | `ai.NewAlwaysFallbackProvider(ai.NewSamplingProvider(req.Session), ai.NewCLIClient(), true)` (internal/mcpserver/mcpserver.go:1008) — sampling primary, `claude -p` fallback, dry-run-only on fallback | allowed **only** when sampling answered |
 
 Two incidental facts fall out of reading this code:
