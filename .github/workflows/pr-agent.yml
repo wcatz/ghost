@@ -3,13 +3,13 @@ name: PR Agent
 on:
   pull_request:
     # Re-review policy: every code push gets fresh bot eyes (synchronize);
-    # docs-only pushes skip the trigger so they do not burn Go quota.
+    # docs-only pushes skip the trigger so they do not burn quota.
     # Trade-offs: a PR whose FIRST push is docs-only gets no automatic
     # review until a code-containing push fires synchronize (paths filters
     # apply to opened too) — request one via /review comment for that
     # case; likewise a docs-only follow-up push on an existing code PR
     # does not re-trigger. The merge gate is native conversation
-    # resolution on inline threads; pr_agent_job is not a required
+    # resolution on inline threads; the review job is not a required
     # branch-protection context.
     paths-ignore:
       - '**/*.md'
@@ -26,24 +26,21 @@ permissions:
 # One agent run per PR per event type at a time. The group MUST split on
 # event name: the bot's own comments fire issue_comment runs, and a shared
 # group let that (guaranteed-skipped — Bot senders are filtered) run cancel
-# the in-flight pull_request run mid-improve (observed 2026-08-26 on #397).
-# Cross-type overlap is possible after this change but rare and bounded by
-# ai_timeout + the runner cap.
+# the in-flight pull_request run mid-review. Cross-type overlap is possible
+# after this change but rare and bounded by the 15m review timeout.
 concurrency:
   group: pr-agent-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   config:
-    # Same-repo / trust resolution before the agent job (which holds
-    # OPENCODE_GO_API_KEY) is allowed to run:
+    # Same-repo / trust resolution before the review job is allowed to run:
     # - issue_comment fires on fork-PR comments in the base repo, so a PR's
     #   head repo must be checked via the API.
-    # - Plain-issue comments have no PR for PR-Agent to act on — skip rather
-    #   than spinning up a no-op agent run.
+    # - Plain-issue comments have no PR for the reviewer to act on — skip
+    #   rather than spinning up a no-op review run.
     # Comment commands are limited to trusted authors so drive-by comments on
-    # this public repo cannot burn subscription quota; PR authors here are
-    # always OWNER/MEMBER/COLLABORATOR.
+    # this public repo cannot burn runner time.
     if: >-
       github.event.sender.type != 'Bot' && (
         github.event_name == 'pull_request' ||
@@ -52,6 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       same-repo: ${{ steps.pr.outputs.same-repo }}
+      pr-number: ${{ steps.pr.outputs.pr-number }}
     steps:
       - id: pr
         env:
@@ -63,6 +61,7 @@ jobs:
             exit 0
           fi
           NUMBER="$(jq -r '.pull_request.number // .issue.number' "$GITHUB_EVENT_PATH")"
+          echo "pr-number=$NUMBER" >> "$GITHUB_OUTPUT"
           head_repo="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER" --jq '.head.repo.full_name')"
           if [ "$head_repo" = "$GITHUB_REPOSITORY" ]; then
             echo "same-repo=true" >> "$GITHUB_OUTPUT"
@@ -70,17 +69,14 @@ jobs:
             echo "same-repo=false" >> "$GITHUB_OUTPUT"
           fi
 
-  pr_agent_job:
+  review:
     needs: config
     if: needs.config.outputs.same-repo == 'true'
     runs-on: ubuntu-latest
-    # Hard cap: litellm's ai_timeout does not bound a hung streamed call —
-    # observed 651s before the upstream 500 came back. Kill at the runner.
-    # auto_improve adds sequential per-finding LLM calls after review; three
-    # historical cap-blows landed at ~8.5m under the old 10m limit, so 25m
-    # covers review + top-4 suggestions with headroom while still bounding
-    # a pathological hang.
-    timeout-minutes: 25
+    # Hard cap: a hung model call or huge diff must die at the runner, not
+    # park it for 10 minutes. 15m covers checkout + install + review with
+    # headroom while still bounding a pathological hang.
+    timeout-minutes: 15
     steps:
       - name: Mint bot identity token
         id: apptoken
@@ -102,65 +98,56 @@ jobs:
         if: ${{ steps.apptoken.outputs.token == '' }}
         run: echo "::warning::App token unavailable — reviews will post as github-actions"
 
-      - name: PR Agent action step
-        id: pragent
-        # Pinned to a commit SHA (not a mutable tag) for supply-chain
-        # hardening — matches repo convention of pinning tool versions.
-        uses: the-pr-agent/pr-agent@ab6ec54bfeb37933ddb74259338752e9272016c6
+      - uses: actions/checkout@v6
+        with:
+          # Full history so the review prompt can reference `gh pr diff`
+          # against the base without a shallow-clone workaround.
+          fetch-depth: 0
+
+      # No API key anywhere: big-pickle rides the opencode free tier, which
+      # only works through the CLI process (the /zen REST endpoint rejects
+      # it with "OpenCode's free tier can only be used in OpenCode").
+      # GITHUB_TOKEN below is used only to fetch the PR and post the review.
+      - name: Install opencode
+        # Supply-chain trade-off, stated deliberately: the previous PR-Agent
+        # action was pinned to a commit SHA; the opencode CLI offers no SHA
+        # pin and installs latest. Bounded risk (short-lived runner, no
+        # secrets in env) but not zero — revisit if opencode ships checksums.
+        run: curl -fsSL https://opencode.ai/install | bash
+
+      - name: Checkout PR head
         env:
-          GITHUB_TOKEN: ${{ steps.apptoken.outputs.token || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.config.outputs.pr-number }}
+        run: |
+          gh pr checkout "$PR_NUMBER"
 
-          # Big Pickle via opencode Zen — free stealth reasoning model
-          # (opencode's deliberate-analysis model), chosen for review
-          # quality and to dodge the Go endpoint's recurring hang days.
-          OPENAI__KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
-          OPENAI__API_BASE: https://opencode.ai/zen/v1
+      - name: Review PR with opencode big-pickle
+        id: review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.config.outputs.pr-number }}
+        run: |
+          TITLE="$(gh pr view "$PR_NUMBER" --json title --jq .title)"
+          DIFF="$(gh pr diff "$PR_NUMBER")"
+          # Cap the inline diff against argv limits (ARG_MAX ~2MB); the
+          # agent still has the full checkout to read for context.
+          if [ "${#DIFF}" -gt 1000000 ]; then
+            DIFF="$(printf '%s' "$DIFF" | head -c 1000000)"
+            DIFF="${DIFF}"$'\n[truncated after 1MB - full diff available in this checkout]'
+          fi
+          opencode run -m opencode/big-pickle \
+            "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO). Review PR #${PR_NUMBER} \"${TITLE}\". Read the actual code in this checkout, not just the diff. Cover: correctness bugs, race conditions, error handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those. Verify each finding against the code before asserting — if unsure, say \"needs verification\" rather than asserting a bug. Begin with a one-line verdict, then a numbered list of findings ordered by severity (blocker / should-fix / nit), each with file:line, what is wrong, why it matters, and a concrete fix." \
+            "$DIFF" > review.md
+          if [ -s review.md ]; then
+            echo "wrote $(wc -l < review.md) lines"
+          else
+            echo "::error::opencode produced no review output"
+            exit 1
+          fi
 
-          # openai/ prefix routes through litellm's OpenAI-compatible path.
-          config.model: "openai/big-pickle"
-          # Fallback rides a different provider lane (DeepSeek) on the same
-          # Zen endpoint so an unhealthy pickle host doesn't fail the run.
-          config.fallback_models: '["openai/deepseek-v4-flash"]'
-          # Not in PR-Agent's MAX_TOKENS catalog → must set explicitly.
-          config.custom_model_max_tokens: "65536"
-          # No temperature override: 1 was a Kimi-Go quirk; PR-Agent's
-          # default 0.2 keeps reviews deterministic.
-          # Hard cap per LLM call — a hung endpoint must fail fast, not
-          # park the runner for 10 minutes.
-          config.ai_timeout: "90"
-
-          # Reviewer scope: bugs and real regressions, not style nits.
-          # CLAUDE.md and best_practices.md are fed as repo context (see
-          # .pr_agent.toml repo_context_files), so the model has full
-          # project architecture and conventions.
-          pr_reviewer.extra_instructions: >-
-            This is a Go CLI project (Go 1.26+, modernc.org/sqlite, no CGO).
-            You have full project context from CLAUDE.md and best_practices.md.
-            Focus on correctness bugs, race conditions, error handling gaps,
-            and breaking changes to MCP tool contracts or the SQLite schema.
-            Do not report style preferences handled by golangci-lint.
-            Verify your findings against the code before posting —
-            false positives erode trust. If unsure, say "needs verification"
-            rather than asserting a bug. Treat issue or PR references in the
-            description as context links, not compliance targets — never
-            grade ticket compliance against them unless they are formally
-            linked issues.
-
-          # Prompt budget for large diffs: default 32000 clipped a 2.5k-line
-          # PR's review (plan doc skipped on token budget). big-pickle holds
-          # 64k (custom_model_max_tokens above), so 48k leaves headroom for
-          # the response while covering full-diff reviews.
-          config.max_model_tokens: "48000"
-
-          github_action_config.auto_review: "true"
-          # Always-on: every PR gets inline committable suggestions.
-          # Sequential per-finding LLM calls are why this was on-demand
-          # (three 10-min cap-blows); the 25m runner cap plus num_code_
-          # suggestions=4 keeps worst-case wall time bounded. Not a merge
-          # gate — latency is cosmetic.
-          github_action_config.auto_improve: "true"
-          # Off: the generated walkthrough summaries are verbose LLM slop
-          # and have hallucinated project-specific names. Findings live in
-          # the review + inline threads; no description is posted.
-          github_action_config.auto_describe: "false"
-          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review", "review_requested", "synchronize"]'
+      - name: Post review
+        env:
+          GH_TOKEN: ${{ steps.apptoken.outputs.token || github.token }}
+          PR_NUMBER: ${{ needs.config.outputs.pr-number }}
+        run: gh pr review "$PR_NUMBER" --comment --body-file review.md
