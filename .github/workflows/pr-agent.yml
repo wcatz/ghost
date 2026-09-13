@@ -8,9 +8,10 @@ on:
     # review until a code-containing push fires synchronize (paths filters
     # apply to opened too) — request one via /review comment for that
     # case; likewise a docs-only follow-up push on an existing code PR
-    # does not re-trigger. The merge gate is native conversation
-    # resolution on inline threads; the review job is not a required
-    # branch-protection context.
+    # does not re-trigger. This job is informational — main's branch
+    # protection requires build-and-test + lint only (no approval count,
+    # no conversation resolution), so the bot reviews are a signal, never
+    # a passing-merge gate.
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
@@ -109,11 +110,11 @@ jobs:
       # it with "OpenCode's free tier can only be used in OpenCode").
       # GITHUB_TOKEN below is used only to fetch the PR and post the review.
       - name: Install opencode
-        # Supply-chain trade-off, stated deliberately: the previous PR-Agent
-        # action was pinned to a commit SHA; the opencode CLI offers no SHA
-        # pin and installs latest. Bounded risk (short-lived runner, no
-        # secrets in env) but not zero — revisit if opencode ships checksums.
-        run: curl -fsSL https://opencode.ai/install | bash
+        # Supply-chain trade-off, stated deliberately: the opencode CLI has
+        # no SHA pin, but its installer supports `-v <version>` — pin the
+        # tested release (the version of the first green CI run) instead of
+        # silently tracking latest. Revisit if opencode ships checksums.
+        run: curl -fsSL https://opencode.ai/install | bash -s -- -v 1.18.30
 
       - name: Checkout PR head
         env:
@@ -136,18 +137,24 @@ jobs:
           # has no such limit; the agent reads it with bounded context.
           gh pr diff "$PR_NUMBER" > pr.diff
           opencode run -m opencode/big-pickle \
-            "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO). Review PR #${PR_NUMBER} \"${TITLE}\". The diff is in ./pr.diff — read it. Read the actual code in this checkout, not just the diff. Do NOT run commands, do NOT propose verification steps, and do NOT narrate your process — produce the analysis immediately. Cover: correctness bugs, race conditions, error handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those. Verify each finding against the code before asserting — if unsure, say \"needs verification\" rather than asserting a bug. Begin with a one-line verdict, then a numbered list of findings ordered by severity (blocker / should-fix / nit), each with file:line, what is wrong, why it matters, and a concrete fix." \
-            > review.md
+            "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO). Review PR #${PR_NUMBER} \"${TITLE}\". The diff is in ./pr.diff — read it. Read the actual code in this checkout, not just the diff. Do NOT run commands, do NOT propose verification steps, and do NOT narrate your process — produce the analysis immediately. Cover: correctness bugs, race conditions, error handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those. Verify each finding against the code before asserting — if unsure, say \"needs verification\" rather than asserting a bug. The FIRST line of your reply MUST be exactly \"verdict: <blocker|should-fix|nit>\" or \"verdict: clean\", on its own line — this exact token is consumed programmatically, so do not bold or decorate it. Then a numbered list of findings ordered by severity, each with file:line, what is wrong, why it matters, and a concrete fix." \
+            > review.md 2>&1 || true
           # Strip ANSI (clone progress bars / a TTY banner can leak to
-          # stdout) and fail loudly if the model handed back prose with no
-          # verdict — an empty or narrative-only body shouldn't post.
-          sed -i 's/\x1B\[[0-9;]*[mGK]//g' review.md
-          if ! grep -qiE '^verdict:' review.md; then
+          # stdout), then fail loudly if the model handed back prose with
+          # no verdict — an empty or narrative-only body shouldn't post.
+          sed -i 's/\x1B\[[0-9;?]*[A-Za-z]//g' review.md
+          # Tolerate leading blank lines and the odd leading '*' from a
+          # bold attempt, but the verdict token must be a first-class line.
+          if ! grep -qiE '^[[:space:]]*\*{0,2}[[:space:]]*verdict:' review.md; then
             echo "::error::opencode review missing a verdict line"
             cat review.md
             exit 1
           fi
-          echo "wrote $(wc -l < review.md) lines"
+          # Cap the body at 60 KiB: GitHub review bodies reject at 64 KiB
+          # (65536), and a verbose review with code fences easily overruns.
+          head -c 60000 review.md > review.capped
+          mv review.capped review.md
+          echo "wrote $(wc -c < review.md) bytes"
 
       - name: Post review
         env:
