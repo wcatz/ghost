@@ -23,11 +23,11 @@ permissions:
   issues: write
   pull-requests: write
 
-# One agent run per PR per event type at a time. The group MUST split on
-# event name: the bot's own comments fire issue_comment runs, and a shared
-# group let that (guaranteed-skipped — Bot senders are filtered) run cancel
-# the in-flight pull_request run mid-review. Cross-type overlap is possible
-# after this change but rare and bounded by the 15m review timeout.
+# One agent run per PR per event type at a time. Split on event name
+# because a human-triggered /review comment (issue_comment) can overlap an
+# in-flight pull_request review of the same PR; the bot's own posts emit
+# pull_request_review events, which this workflow does not subscribe to, so
+# it cannot re-trigger itself.
 concurrency:
   group: pr-agent-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: true
@@ -129,22 +129,25 @@ jobs:
           PR_NUMBER: ${{ needs.config.outputs.pr-number }}
         run: |
           TITLE="$(gh pr view "$PR_NUMBER" --json title --jq .title)"
-          DIFF="$(gh pr diff "$PR_NUMBER")"
-          # Cap the inline diff against argv limits (ARG_MAX ~2MB); the
-          # agent still has the full checkout to read for context.
-          if [ "${#DIFF}" -gt 1000000 ]; then
-            DIFF="$(printf '%s' "$DIFF" | head -c 1000000)"
-            DIFF="${DIFF}"$'\n[truncated after 1MB - full diff available in this checkout]'
-          fi
+          # File-based diff, not argv: execve caps a single argument at
+          # MAX_ARG_STRLEN (32*PAGE_SIZE = 131072 B on 4K-page runners),
+          # so any diff over ~128 KiB would die with E2BIG ("Argument list
+          # too long") and head-truncation would only re-raise it. A file
+          # has no such limit; the agent reads it with bounded context.
+          gh pr diff "$PR_NUMBER" > pr.diff
           opencode run -m opencode/big-pickle \
-            "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO). Review PR #${PR_NUMBER} \"${TITLE}\". Read the actual code in this checkout, not just the diff. Do NOT run commands, do NOT propose verification steps, and do NOT narrate your process — produce the analysis immediately. Cover: correctness bugs, race conditions, error handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those. Verify each finding against the code before asserting — if unsure, say \"needs verification\" rather than asserting a bug. Begin with a one-line verdict, then a numbered list of findings ordered by severity (blocker / should-fix / nit), each with file:line, what is wrong, why it matters, and a concrete fix." \
-            "$DIFF" > review.md
-          if [ -s review.md ]; then
-            echo "wrote $(wc -l < review.md) lines"
-          else
-            echo "::error::opencode produced no review output"
+            "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO). Review PR #${PR_NUMBER} \"${TITLE}\". The diff is in ./pr.diff — read it. Read the actual code in this checkout, not just the diff. Do NOT run commands, do NOT propose verification steps, and do NOT narrate your process — produce the analysis immediately. Cover: correctness bugs, race conditions, error handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those. Verify each finding against the code before asserting — if unsure, say \"needs verification\" rather than asserting a bug. Begin with a one-line verdict, then a numbered list of findings ordered by severity (blocker / should-fix / nit), each with file:line, what is wrong, why it matters, and a concrete fix." \
+            > review.md
+          # Strip ANSI (clone progress bars / a TTY banner can leak to
+          # stdout) and fail loudly if the model handed back prose with no
+          # verdict — an empty or narrative-only body shouldn't post.
+          sed -i 's/\x1B\[[0-9;]*[mGK]//g' review.md
+          if ! grep -qiE '^verdict:' review.md; then
+            echo "::error::opencode review missing a verdict line"
+            cat review.md
             exit 1
           fi
+          echo "wrote $(wc -l < review.md) lines"
 
       - name: Post review
         env:
