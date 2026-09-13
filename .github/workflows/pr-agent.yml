@@ -24,13 +24,14 @@ permissions:
   issues: write
   pull-requests: write
 
-# One agent run per PR per event type at a time. Split on event name
-# because a human-triggered /review comment (issue_comment) can overlap an
-# in-flight pull_request review of the same PR; the bot's own posts emit
-# pull_request_review events, which this workflow does not subscribe to, so
-# it cannot re-trigger itself.
+# One agent run per PR at a time. The group is keyed on the PR number
+# alone (not event name): the bot's own posts emit pull_request_review
+# events, which this workflow does not subscribe to, and its issue_comment
+# sender is filtered as a Bot — so the only way a second run can start is an
+# actual push or a human /review comment. cancel-in-progress kills the stale
+# one so we never double-post conflicting reviews for the same PR.
 concurrency:
-  group: pr-agent-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}
+  group: pr-agent-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
@@ -101,9 +102,10 @@ jobs:
 
       - uses: actions/checkout@v6
         with:
-          # Full history so the review prompt can reference `gh pr diff`
-          # against the base without a shallow-clone workaround.
-          fetch-depth: 0
+          # Single-depth: `gh pr diff` is API-backed (GET pulls/{n} with the
+          # .diff media type), so no local history is needed; the model only
+          # reads the checked-out head tree after `gh pr checkout`.
+          fetch-depth: 1
 
       # No API key anywhere: big-pickle rides the opencode free tier, which
       # only works through the CLI process (the /zen REST endpoint rejects
@@ -125,6 +127,10 @@ jobs:
 
       - name: Review PR with opencode big-pickle
         id: review
+        # Bound the model call itself, not just the job: a hung opencode run
+        # should fail this step (and surface a red check) rather than occupy
+        # the whole 15m job slot. The job cap is the backstop.
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ needs.config.outputs.pr-number }}
@@ -136,24 +142,34 @@ jobs:
           # too long") and head-truncation would only re-raise it. A file
           # has no such limit; the agent reads it with bounded context.
           gh pr diff "$PR_NUMBER" > pr.diff
-          opencode run -m opencode/big-pickle \
-            "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO). Review PR #${PR_NUMBER} \"${TITLE}\". The diff is in ./pr.diff — read it. Read the actual code in this checkout, not just the diff. Do NOT run commands, do NOT propose verification steps, and do NOT narrate your process — produce the analysis immediately. Cover: correctness bugs, race conditions, error handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those. Verify each finding against the code before asserting — if unsure, say \"needs verification\" rather than asserting a bug. The FIRST line of your reply MUST be exactly \"verdict: <blocker|should-fix|nit>\" or \"verdict: clean\", on its own line — this exact token is consumed programmatically, so do not bold or decorate it. Then a numbered list of findings ordered by severity, each with file:line, what is wrong, why it matters, and a concrete fix." \
-            > review.md 2>&1 || true
-          # Strip ANSI (clone progress bars / a TTY banner can leak to
-          # stdout), then fail loudly if the model handed back prose with
-          # no verdict — an empty or narrative-only body shouldn't post.
-          sed -i 's/\x1B\[[0-9;?]*[A-Za-z]//g' review.md
-          # Tolerate leading blank lines and the odd leading '*' from a
-          # bold attempt, but the verdict token must be a first-class line.
-          if ! grep -qiE '^[[:space:]]*\*{0,2}[[:space:]]*verdict:' review.md; then
-            echo "::error::opencode review missing a verdict line"
+          # JSON event stream, not raw stdout: the formatted TUI emits tool
+          # trace lines ("→ Read x", "> build") to stdout that would land in
+          # review.md and break the first-line verdict contract. The last
+          # text event's part.text is the model's final answer only.
+          opencode run -m opencode/big-pickle --format json \
+            "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO). Review PR #${PR_NUMBER} \"${TITLE}\". The diff is in ./pr.diff — read it. Read the actual code in this checkout, not just the diff. Do NOT run commands, do NOT propose verification steps, and do NOT narrate your process — produce the analysis immediately. Cover: correctness bugs, race conditions, error handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those. Verify each finding against the code before asserting — if unsure, say \"needs verification\" rather than asserting a bug. The FIRST line of your reply MUST be exactly \"verdict: <blocker|should-fix|nit|clean>\", on its own line — this exact token is consumed programmatically, so do not bold or decorate it. Then a numbered list of findings ordered by severity, each with file:line, what is wrong, why it matters, and a concrete fix." \
+            > events.jsonl
+          # opencode's non-zero exit fails the step (bash -e) with its
+          # stderr surfaced in the live log; a silent no-review only
+          # happens if it prints nothing and exits 0, which the jq
+          # extraction below turns into a loud "no review text" error.
+          # Extract the final answer: the last text event's part.text.
+          # Slice to 60000 chars (not bytes) so a rune never splits before
+          # GitHub's ~64 KiB review-body limit.
+          jq -rs '[.[] | select(.type == "text") | .part.text? | select(type == "string" and length > 0)] | last // "" | .[0:60000]' events.jsonl > review.md.tmp
+          if [ ! -s review.md.tmp ]; then
+            echo "::error::opencode produced no review text"
+            cat events.jsonl
+            exit 1
+          fi
+          mv review.md.tmp review.md
+          # Fail loudly if the model handed back prose with no verdict —
+          # an empty or narrative-only body shouldn't post.
+          if ! grep -qiE '^[[:space:]]*\*{0,2}[[:space:]]*verdict:[[:space:]]+(blocker|should-fix|nit|clean)' review.md; then
+            echo "::error::opencode review missing a valid verdict token"
             cat review.md
             exit 1
           fi
-          # Cap the body at 60 KiB: GitHub review bodies reject at 64 KiB
-          # (65536), and a verbose review with code fences easily overruns.
-          head -c 60000 review.md > review.capped
-          mv review.capped review.md
           echo "wrote $(wc -c < review.md) bytes"
 
       - name: Post review
