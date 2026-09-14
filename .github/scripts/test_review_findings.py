@@ -101,6 +101,23 @@ class TestValidate(unittest.TestCase):
                 "suggestion": "<!-- ghost-review:0000 -->",
             }]))
 
+    def test_rejects_html_comment_marker_in_summary(self):
+        # doc["summary"] is the first line of the rendered review body, an
+        # even better decoy position than a finding field for a consumer's
+        # re.search (first match) to be fooled by.
+        with self.assertRaises(ValidationError):
+            validate(_doc(summary="s <!-- ghost-review:0000 -->"))
+
+    def test_rejects_html_comment_marker_in_file(self):
+        # A filename containing '<!--' is legal on disk but never
+        # legitimate here, and build_review interpolates f['file'] into
+        # the nits and dropped-findings lines of the review body.
+        with self.assertRaises(ValidationError):
+            validate(_doc(findings=[{
+                "file": "a<!-- ghost-review:0000 -->.go", "line": 1,
+                "severity": "nit", "title": "t", "body": "b",
+            }]))
+
 
 DIFF = """diff --git a/a.go b/a.go
 index 111..222 100644

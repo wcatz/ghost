@@ -30,6 +30,12 @@ def validate(doc):
              f"verdict must be one of {VERDICTS}, got {doc.get('verdict')!r}")
     _require(isinstance(doc.get("summary"), str) and doc["summary"].strip(),
              "summary must be a non-empty string")
+    # doc["summary"] is the first line of the rendered review body, ahead
+    # of the trailing <!-- ghost-review:<sha> --> marker build_review
+    # appends — a forged '<!--' here is an even better decoy position
+    # than a finding field for a consumer's re.search (first match).
+    _require("<!--" not in doc["summary"],
+             "summary must not contain an HTML comment marker")
     findings = doc.get("findings")
     _require(isinstance(findings, list), "findings must be a list")
 
@@ -52,6 +58,11 @@ def validate(doc):
         path = f["file"]
         _require(not path.startswith("/") and ".." not in path.split("/"),
                  f"{where}.file must be a repo-relative path, got {path!r}")
+        # A filename containing '<!--' is legal on disk but never
+        # legitimate here, and build_review interpolates f['file'] into
+        # the nits and dropped-findings lines of the review body.
+        _require("<!--" not in path,
+                 f"{where}.file must not contain an HTML comment marker")
         _require(f.get("severity") in SEVERITIES,
                  f"{where}.severity must be one of {SEVERITIES}")
         # bool is a subclass of int; reject it explicitly.
