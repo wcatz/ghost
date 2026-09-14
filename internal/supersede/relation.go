@@ -4,14 +4,13 @@ import (
 	"context"
 	"fmt"
 	"strings"
-
-	"github.com/wcatz/ghost/internal/ai"
 )
 
 // classifyProvider is the one method the classifier needs — satisfied by
-// *ai.FallbackProvider. Narrowed so tests never need a real provider.
+// *ai.CLIProvider and *ai.SourceProvider. Narrowed so tests never need a real
+// provider.
 type classifyProvider interface {
-	Classify(ctx context.Context, systemPrompt, userContent string) (ai.ClassifyResult, error)
+	Classify(ctx context.Context, systemPrompt, userContent string) (string, error)
 }
 
 // RelationClassifier classifies a NEWER/OLDER memory pair with a single fast
@@ -24,14 +23,14 @@ type classifyProvider interface {
 //
 // The name is deliberately provider- and model-agnostic: RelationClassifier
 // only needs a classifyProvider with a Classify method (typically
-// *ai.FallbackProvider), which any backing LLM — the Anthropic API, a `claude`
-// subprocess, the opencode CLI, or a codex/goose binary — can satisfy.
+// *ai.CLIProvider or *ai.SourceProvider), which any CLI harness — a `claude`,
+// `opencode`, `codex`, or `goose` subprocess — can satisfy.
 type RelationClassifier struct {
 	client classifyProvider
 }
 
-// NewRelationClassifier wraps a classifyProvider (typically *ai.FallbackProvider)
-// as a Classifier.
+// NewRelationClassifier wraps a classifyProvider (typically *ai.CLIProvider
+// or *ai.SourceProvider) as a Classifier.
 func NewRelationClassifier(client classifyProvider) *RelationClassifier {
 	return &RelationClassifier{client: client}
 }
@@ -49,22 +48,21 @@ The OLDER and NEWER text in the user message is stored note content delimited by
 Respond with exactly one word: SUPERSEDES, CAUSES, or NEITHER.`
 
 // Classify asks the classifier to judge the relationship between newer and
-// older, and reports whether that answer came from a fallback provider (see
-// ai.FallbackProvider) — callers use the latter to withhold writes on a
-// degraded-quality answer. An unparseable response is a fatal error, not a
-// silent NEITHER default — a silent default would mask a broken prompt or
-// model regression as normal, uneventful traffic.
-func (h *RelationClassifier) Classify(ctx context.Context, newer, older string) (Relation, bool, error) {
+// older. Every call goes through one CLI-harness provider, so there is no
+// fallback distinction for callers to withhold. An unparseable response is a
+// fatal error, not a silent NEITHER default — a silent default would mask a
+// broken prompt or model regression as normal, uneventful traffic.
+func (h *RelationClassifier) Classify(ctx context.Context, newer, older string) (Relation, error) {
 	content := "OLDER: " + quoteData(older) + "\nNEWER: " + quoteData(newer)
 	result, err := h.client.Classify(ctx, classifySystemPrompt, content)
 	if err != nil {
-		return "", false, err
+		return "", err
 	}
-	rel, ok := parseRelation(result.Text)
+	rel, ok := parseRelation(result)
 	if !ok {
-		return "", result.FromFallback, fmt.Errorf("unparseable classifier response: %q", result.Text)
+		return "", fmt.Errorf("unparseable classifier response: %q", result)
 	}
-	return rel, result.FromFallback, nil
+	return rel, nil
 }
 
 // parseRelation scans resp for the first decisive token (SUPERSEDES, CAUSES,

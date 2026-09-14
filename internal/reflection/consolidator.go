@@ -1,7 +1,8 @@
 package reflection
 
-// Package reflection performs memory consolidation: HaikuConsolidator (Anthropic API)
-// for intelligent merge, tier_sqlite.go (Jaccard similarity) for deterministic
+// Package reflection performs memory consolidation: LlmConsolidator (a
+// subscription-billed CLI harness — claude, opencode, codex, or goose) for
+// intelligent merge, tier_sqlite.go (Jaccard similarity) for deterministic
 // fallback, and TieredConsolidator that tries tiers in priority order with a quality
 // gate rejecting LLM tiers that fall below the 30% threshold. Mechanical tiers
 // are exempt from the quality gate.
@@ -14,7 +15,7 @@ import (
 )
 
 // Consolidator performs memory consolidation. Each tier implements this
-// differently: Haiku uses the Anthropic API for intelligent consolidation,
+// differently: LLM uses a CLI harness for intelligent consolidation,
 // and SQLite uses Jaccard similarity for mechanical deduplication.
 type Consolidator interface {
 	Name() string
@@ -36,7 +37,7 @@ type TieredConsolidator struct {
 }
 
 // NewTieredConsolidator creates a consolidator that tries each tier in order.
-// Tiers should be ordered from highest quality to lowest (e.g. haiku, sqlite).
+// Tiers should be ordered from highest quality to lowest (e.g. llm, sqlite).
 func NewTieredConsolidator(tiers []Consolidator, logger *slog.Logger) *TieredConsolidator {
 	return &TieredConsolidator{
 		tiers:  tiers,

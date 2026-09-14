@@ -3,23 +3,23 @@
 ## Stack
 - Go 1.26+ CLI application
 - SQLite with FTS5 for memory persistence (modernc.org/sqlite — pure Go, no CGO)
-- Claude API (manual HTTP client) — used by reflection, resolve, and supersede
+- CLI harness callers (claude/opencode/codex/goose subprocesses, subscription-billed) — used by reflection, resolve, and supersede
 - MCP server via modelcontextprotocol/go-sdk (stdio transport)
 
 ## Architecture
 - `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, resolve, supersede, project, obsidian, bench, upgrade, version, context
-- `internal/ai/` — Claude API client (non-streaming Reflect call, used by reflection + resolve + supersede); `Provider` seam (`anthropicClient`/`SamplingProvider`) with `FallbackProvider` credit-exhaustion fallover for resolve/supersede
+- `internal/ai/` — CLI-harness providers (`CLIClient`/`OpenCodeClient`/`SourceProvider`) used by reflection + resolve + supersede — no Anthropic HTTP API client
 - `internal/memory/` — SQLite CRUD, FTS5 search, vector search, time-decay scoring
 - `internal/mcpserver/` — MCP server: 20 tools + 4 resources + 2 prompts (`recall_project`, `record_decision`)
 - `internal/mcpinit/` — `ghost mcp init`, `ghost mcp status`, `ghost hook <event> --source <host>` (contract-v1 lifecycle dispatch; installers: claude-code, opencode plugin, codex TOML+hooks.json, goose Agent-Plugins package; goose field aliasing lives in hostevent.Parse)
 - `internal/claudeimport/` — One-time import of Claude Code auto-memory on first contact
 - `internal/embedding/` — Ollama async vectorization worker
 - `internal/linking/` — Background worker linking similar memories into a graph
-- `internal/resolve/` — `ghost resolve`: LLM-classified de-weighting of resolved-evidence memories (drops from ranked injection, stays searchable); classifies via `ai.FallbackProvider` (see Classifier fallback below)
+- `internal/resolve/` — `ghost resolve`: LLM-classified de-weighting of resolved-evidence memories (drops from ranked injection, stays searchable); classifies via CLI harness (see Classifier backend below)
 - `internal/supersede/` — `ghost supersede`: LLM-classified 'supersedes' link creation over live memories
 - `internal/bench/` — `ghost bench`: retrieval-quality benchmark harness (graded dataset + sweep + staleness/recency suites)
 - `internal/obsidian/` — One-way Markdown vault mirror (`ghost obsidian export|sync`)
-- `internal/reflection/` — Memory consolidation: HaikuConsolidator + SQLiteConsolidator
+- `internal/reflection/` — Memory consolidation: LlmConsolidator + SQLiteConsolidator
 - `internal/provider/` — Interface contracts: LLMProvider, MemoryStore
 - `internal/config/` — Layered YAML + env config (koanf)
 - `internal/selfupdate/` — `ghost upgrade` self-update from GitHub Releases
@@ -32,8 +32,8 @@
 - Global memories: `_global` project, included in every project's context
 - Hybrid search: 70% vector (cosine, Ollama) + 30% FTS5, RRF fusion — falls back to FTS5-only
 - Memory links: `memory_links` edge table auto-populated by cosine similarity (internal/linking worker); links cascade-delete with memories and self-heal after reflection. A graph-expansion ranking bonus was evaluated and removed — dominated by a deeper vector-k (links and the vector leg are both cosine); the link graph is retained for Obsidian export and supersedes ranking (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`).
-- Resolution classifier: `ghost resolve` runs a keyword prefilter then a single KEEP-biased Haiku call per candidate to mark `resolved_at`, dropping resolved-evidence memories (changelogs, cost estimates, closed experiment notes) from ranked injection while keeping them searchable. Dry-run by default, `--apply` writes; a partial classify pass fails fatally rather than applying incomplete results. Never invoked from the stop hook's synchronous path (that path forbids DB access); the stop hook's detached `--apply` spawn and the standalone batch command are the only callers. See `docs/superpowers/specs/2026-07-26-resolution-classifier-design.md`.
-- Classifier fallback: `resolve`/`supersede` classify via `ai.FallbackProvider` — Anthropic primary, falls to a secondary only on `ai.ErrCreditExhausted`. The headless CLI path (`ghost resolve`/`ghost supersede`, and the stop hook's auto-resolve) wires no secondary, so it fails fast with a clear message on credit exhaustion instead of degrading. The live-session `ghost_resolve` MCP tool classifies via the calling session's own CLI harness — the backend is picked from the MCP client's reported identity (an opencode session uses the opencode binary, claude uses claude, etc.; unknown clients fall back to the best CLI on PATH), and a missing binary is a clean tool error. MCP sampling was retired from this path per spec 2026-07-28 (SEP-2577 deprecates Sampling) — see `docs/superpowers/specs/2026-08-24-resolve-sampling-path-design.md`. A fallback answer never auto-applies a write (`--apply` is skipped with a log line) — see `docs/superpowers/plans/2026-07-26-classifier-fallback.md`.
+- Resolution classifier: `ghost resolve` runs a keyword prefilter then a single KEEP-biased CLI-harness classify call per candidate (`claude`/`opencode`/`codex`/`goose` subprocess) to mark `resolved_at`, dropping resolved-evidence memories (changelogs, cost estimates, closed experiment notes) from ranked injection while keeping them searchable. Dry-run by default, `--apply` writes; a partial classify pass fails fatally rather than applying incomplete results. Never invoked from the stop hook's synchronous path (that path forbids DB access); the stop hook's detached `--apply` spawn and the standalone batch command are the only callers. See `docs/superpowers/specs/2026-07-26-resolution-classifier-design.md`.
+- Classifier backend: `resolve`/`supersede` classify via the calling session's own CLI harness — the backend is picked from the MCP client's reported identity (an opencode session uses the opencode binary, claude uses claude, etc.) via `ai.SourceProvider`, or from the CLIProvider cascade (claude→opencode→codex→goose) on the headless CLI path; a machine with no CLI binary fails fast with a clear message. MCP sampling was retired from this path per SEP-2577 — see `docs/superpowers/specs/2026-08-24-resolve-sampling-path-design.md`.
 
 ## Critical Rules
 - Always `go vet ./...` before committing

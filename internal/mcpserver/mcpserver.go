@@ -1015,8 +1015,7 @@ func (s *Server) registerTools() {
 		if !cli.Available() {
 			return nil, nil, fmt.Errorf("ghost_resolve requires a `claude`, `opencode`, `codex`, or `goose` binary on PATH (or via cli.*_binary config)")
 		}
-		provider := ai.NewFallbackProvider(cli, nil, false)
-		cls := resolve.NewResolutionClassifier(provider)
+		cls := resolve.NewResolutionClassifier(cli)
 		res, confirmed, err := resolve.Run(ctx, rs, cls, projectID, args.Apply, s.logger)
 		if err != nil {
 			return nil, nil, fmt.Errorf("ghost_resolve: %w", err)

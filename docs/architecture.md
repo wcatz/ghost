@@ -40,7 +40,7 @@ internal/
     worker.go              Sweeps embedded memories, links cosine neighbors ≥ threshold
   supersede/               ghost supersede — 'supersedes' link creation
     supersede.go           Candidate selection (cosine proposes, created_at directs), Run()
-    haiku.go               LLM classifier for 3-way SUPERSEDES/CAUSES/NEITHER classification
+    relation.go            LLM classifier for 3-way SUPERSEDES/CAUSES/NEITHER classification
   bench/                   ghost bench — retrieval-quality benchmark harness
     dataset.go             JSONL dataset loading + seeding with embedding fixtures
     runner.go              Graded conditions (fts/vector/hybrid)
@@ -71,7 +71,7 @@ internal/
     import.go              Scans ~/.claude/projects/*/memory/*.md, upserts into Ghost
   reflection/              Memory consolidation
     consolidator.go        Consolidator interface + TieredConsolidator
-    tier_haiku.go          Haiku LLM consolidation (requires ANTHROPIC_API_KEY or use CLI tier)
+    tier_llm.go            LLM consolidation via the calling client's CLI harness (claude/opencode/codex/goose)
     tier_sqlite.go         Local Jaccard similarity consolidation (free, always available)
     prompt.go              BuildReflectionPrompt()
   provider/                Interface contracts
@@ -123,8 +123,8 @@ MCP client session opens
 ghost reflect <project> --apply
   → store.GetAll()           # existing memories
   → TieredConsolidator.Consolidate()
-      → HaikuConsolidator (if configured with Anthropic key or via CLI)
-          → Anthropic API (haiku model)
+      → LlmConsolidator via the calling client's CLI harness
+          → claude/opencode/codex/goose subprocess (subscription-billed)
       → SQLiteConsolidator (fallback)
           → Jaccard token similarity, merge >50% overlap
   → quality gate: reject if < 30% of existing memories returned

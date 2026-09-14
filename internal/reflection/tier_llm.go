@@ -9,40 +9,42 @@ import (
 	"github.com/wcatz/ghost/internal/ai"
 )
 
-// reflector is the subset of LLMProvider needed for Haiku consolidation.
+// reflector is the subset of LLMProvider needed for LLM consolidation.
 type reflector interface {
 	Reflect(ctx context.Context, prompt string) (string, ai.TokenUsage, error)
 }
 
-// HaikuConsolidator uses an LLM (direct Anthropic API by default) for
-// consolidation. Highest quality tier.
-type HaikuConsolidator struct {
+// LlmConsolidator uses an LLM (a subscription-billed CLI harness — claude,
+// opencode, codex, or goose — or a source-matched provider) for consolidation.
+// Highest quality tier.
+type LlmConsolidator struct {
 	client reflector
 	name   string
 }
 
-// NewHaikuConsolidator wraps an existing LLM client that has a Reflect method.
-func NewHaikuConsolidator(client reflector) *HaikuConsolidator {
-	return &HaikuConsolidator{client: client, name: "haiku"}
+// NewLlmConsolidator wraps an existing LLM client that has a Reflect method.
+// The tier reports its name as "llm".
+func NewLlmConsolidator(client reflector) *LlmConsolidator {
+	return &LlmConsolidator{client: client, name: "llm"}
 }
 
-// NewNamedConsolidator is NewHaikuConsolidator with an explicit tier name —
-// used when client is a subscription-billed provider (e.g. ai.CLIClient)
-// rather than the direct Anthropic API, so Name() reports which one ran.
-func NewNamedConsolidator(client reflector, name string) *HaikuConsolidator {
-	return &HaikuConsolidator{client: client, name: name}
+// NewNamedConsolidator is NewLlmConsolidator with an explicit tier name —
+// used when the caller wants Name() to report the concrete harness (e.g.
+// "cli", "opencode", or a source name) rather than the generic "llm".
+func NewNamedConsolidator(client reflector, name string) *LlmConsolidator {
+	return &LlmConsolidator{client: client, name: name}
 }
 
-func (h *HaikuConsolidator) Name() string { return h.name }
+func (h *LlmConsolidator) Name() string { return h.name }
 
 // Mechanical is false: this is an LLM tier, never exempt from the quality gate.
-func (h *HaikuConsolidator) Mechanical() bool { return false }
+func (h *LlmConsolidator) Mechanical() bool { return false }
 
-func (h *HaikuConsolidator) Available(_ context.Context) bool {
+func (h *LlmConsolidator) Available(_ context.Context) bool {
 	return h.client != nil
 }
 
-func (h *HaikuConsolidator) Consolidate(ctx context.Context, input ReflectionInput) (ReflectionResult, error) {
+func (h *LlmConsolidator) Consolidate(ctx context.Context, input ReflectionInput) (ReflectionResult, error) {
 	prompt := BuildReflectionPrompt(input)
 	responseText, _, err := h.client.Reflect(ctx, prompt)
 	if err != nil {

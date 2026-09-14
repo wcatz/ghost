@@ -393,9 +393,10 @@ func TestSpawnReflectIfConfigured_NoOpWhenDisabled(t *testing.T) {
 }
 
 func TestSpawnReflectIfConfigured_NoOpWithoutLLM(t *testing.T) {
-	// auto_reflect enabled, but no LLM is available (no API key, no claude, no
-	// opencode on PATH). The no-LLM guard must return before config.DataDir, so
-	// no Jaccard-only reflect ever spawns and no data dir is created.
+// auto_reflect enabled, but no LLM harness is available (no claude, no
+// opencode/codex/goose on PATH, and nothing configured via cli.*_binary). The
+// no-LLM guard must return before config.DataDir, so no Jaccard-only reflect
+// ever spawns and no data dir is created.
 	dataHome := isolatedHome(t)
 	cfgDir := os.Getenv("XDG_CONFIG_HOME")
 	if err := os.MkdirAll(filepath.Join(cfgDir, "ghost"), 0o755); err != nil {

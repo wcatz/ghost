@@ -5,13 +5,15 @@
 #   1. Compiled defaults
 #   2. /etc/ghost/config.yaml
 #   3. ~/.config/ghost/config.yaml  (this file)
-#   4. GHOST_* environment variables (plus ANTHROPIC_API_KEY)
+#   4. GHOST_* environment variables
 
-# --- Claude API ---
-# Required only for memory consolidation (ghost reflect --tier haiku).
-# Not needed for basic MCP usage.
-# api:
-#   key: ""                          # or set ANTHROPIC_API_KEY env var
+# --- Subprocess LLM binaries ---
+# All LLM-backed operations (reflection, resolve, supersede) shell out to a
+# CLI harness — `claude`, `opencode`, `codex`, or `goose` — billing to that
+# CLI's subscription. Ghost has no direct Anthropic HTTP API client, so no API
+# key config exists. By default the binaries are resolved from PATH; set these
+# to explicit paths when they live somewhere not on the Stop hook process's
+# PATH (e.g. ~/.opencode/bin).
 
 # --- Local Embeddings (Ollama) ---
 # Enables hybrid FTS5 + vector search. Requires Ollama running locally.
@@ -36,12 +38,11 @@
 #                              # injection; stricter than threshold since
 #                              # "related" isn't the same bar as "redundant"
 
-# --- Subprocess LLM binaries (reflect CLI tier) ---
-# The reflect CLI tier shells out to `claude -p` or `opencode run`. By default
-# the binaries are resolved from PATH; set these to explicit paths when they live
-# somewhere not on the Stop hook process's PATH (e.g. ~/.opencode/bin is often
-# only added to interactive shells). Without this, auto_reflect silently never
-# fires even when the binary is installed.
+# --- Subprocess LLM binary paths ---
+# Same as the defaults above: the harness path override applies to every
+# LLM-backed operation (reflection, resolve, supersede), not just one tier.
+# Without this, auto_reflect/auto_resolve silently never fire when the binary
+# is invisible to the Stop hook process's PATH.
 # cli:
 #   claude_binary: ""                 # e.g. "/opt/homebrew/bin/claude"
 #   opencode_binary: ""               # e.g. "/Users/you/.opencode/bin/opencode"

@@ -17,29 +17,11 @@ type fakeClassifier struct {
 	err   error
 }
 
-func (f fakeClassifier) IsResolved(_ context.Context, content string) (bool, bool, error) {
+func (f fakeClassifier) IsResolved(_ context.Context, content string) (bool, error) {
 	if f.err != nil && (f.errOn == "" || f.errOn == content) {
-		return false, false, f.err
+		return false, f.err
 	}
-	return f.drop[content], false, nil
-}
-
-// fallbackClassifier is a Classifier used to exercise the apply-skip
-// guardrail when an answer came from a fallback provider. When byContent is
-// set, fromFallback is looked up per-candidate by content (all such
-// candidates are treated as resolved); otherwise the fixed resolved/
-// fromFallback fields apply to every call.
-type fallbackClassifier struct {
-	resolved     bool
-	fromFallback bool
-	byContent    map[string]bool
-}
-
-func (f *fallbackClassifier) IsResolved(_ context.Context, content string) (bool, bool, error) {
-	if f.byContent != nil {
-		return true, f.byContent[content], nil
-	}
-	return f.resolved, f.fromFallback, nil
+	return f.drop[content], nil
 }
 
 // fakeStore satisfies resolveStore with in-memory candidates.
@@ -121,9 +103,6 @@ func TestRunResolvesConfirmedEvidence(t *testing.T) {
 	if res.Resolved != 1 {
 		t.Errorf("res.Resolved = %d, want 1", res.Resolved)
 	}
-	if res.SkippedApply {
-		t.Error("SkippedApply must be false when apply succeeds with no fallback involved")
-	}
 }
 
 func TestRunFailsFatallyOnClassifierError(t *testing.T) {
@@ -142,90 +121,6 @@ func TestRunFailsFatallyOnClassifierError(t *testing.T) {
 	}
 	if len(store.resolved) != 0 {
 		t.Errorf("store.resolved = %v, want empty — a partial pass must never be applied", store.resolved)
-	}
-}
-
-// TestRun_FallbackClassificationButNothingConfirmed_DoesNotReportSkip covers
-// an edge case found by live-testing the ghost_resolve fallback fix: the real
-// claude CLI fallback classified a seeded memory as KEEP, not RESOLVED, so
-// there was nothing to apply — but the pre-fix condition set SkippedApply
-// (and logged "apply skipped") purely because fromFallback was true,
-// regardless of whether anything was actually confirmed. That's misleading:
-// "apply skipped" implies something was found and withheld, not "found
-// nothing." SkippedApply must only report true when a real write was
-// withheld.
-func TestRun_FallbackClassificationButNothingConfirmed_DoesNotReportSkip(t *testing.T) {
-	store := &fakeStore{
-		candidates: []memory.Memory{{ID: "m1", Content: "resolved: shipped in v1"}},
-	}
-	cls := &fallbackClassifier{resolved: false, fromFallback: true}
-
-	res, confirmed, err := Run(context.Background(), store, cls, "proj1", true, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res.SkippedApply {
-		t.Error("SkippedApply must be false when nothing was confirmed, even if classification used a fallback")
-	}
-	if len(confirmed) != 0 {
-		t.Errorf("got %d confirmed, want 0", len(confirmed))
-	}
-	if store.setResolvedCalled {
-		t.Error("SetResolved must not be called when nothing was confirmed")
-	}
-}
-
-func TestRun_FallbackClassification_SkipsApply(t *testing.T) {
-	store := &fakeStore{
-		candidates: []memory.Memory{{ID: "m1", Content: "resolved: shipped in v1"}},
-	}
-	cls := &fallbackClassifier{resolved: true, fromFallback: true}
-
-	res, confirmed, err := Run(context.Background(), store, cls, "proj1", true, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res.Resolved != 0 {
-		t.Errorf("got Resolved=%d, want 0 (apply must be skipped on fallback)", res.Resolved)
-	}
-	if !res.SkippedApply {
-		t.Error("expected SkippedApply=true so callers can surface the skip explicitly")
-	}
-	if len(confirmed) != 1 {
-		t.Errorf("got %d confirmed, want 1 (dry-run preview still returned)", len(confirmed))
-	}
-	if store.setResolvedCalled {
-		t.Error("SetResolved must not be called when any candidate came from a fallback provider")
-	}
-}
-
-func TestRun_MixedFallbackAndPrimary_SkipsApply(t *testing.T) {
-	store := &fakeStore{
-		candidates: []memory.Memory{
-			{ID: "primary", Content: "resolved: shipped via primary in v1"},
-			{ID: "fallback", Content: "resolved: shipped via fallback in v2"},
-		},
-	}
-	cls := &fallbackClassifier{byContent: map[string]bool{
-		"resolved: shipped via primary in v1":  false, // confirmed via primary
-		"resolved: shipped via fallback in v2": true,  // confirmed via fallback
-	}}
-
-	res, confirmed, err := Run(context.Background(), store, cls, "proj1", true, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(confirmed) != 2 {
-		t.Errorf("got %d confirmed, want 2 (dry-run preview still returned)", len(confirmed))
-	}
-	if res.Resolved != 0 {
-		t.Errorf("got Resolved=%d, want 0 (any fallback in the batch must skip apply)", res.Resolved)
-	}
-	if !res.SkippedApply {
-		t.Error("expected SkippedApply=true so callers can surface the skip explicitly")
-	}
-	if store.setResolvedCalled {
-		t.Error("SetResolved must not be called when any candidate in the batch came from a fallback provider, even if another was confirmed via primary")
 	}
 }
 

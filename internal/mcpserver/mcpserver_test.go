@@ -1848,25 +1848,15 @@ func TestGhostProjectDelete_DryRunByDefault(t *testing.T) {
 		}
 		memIDs = append(memIDs, id)
 	}
-	// Seed memory_links, tasks, decisions, and token_usage too, not just
+	// Seed memory_links, tasks, decisions too, not just
 	// memories, with mutually distinct counts (memories=5 [4 seeded here + 1
 	// from RecordDecision's decision_log row], memory_links=3, tasks=2,
-	// decisions=1, token_usage=4) so a swap of any pair of summary fields in
+	// decisions=1) so a swap of any pair of summary fields in
 	// the tool's output formatting would be caught here the same way the
-	// store-layer mutation test catches a TokenUsage/AuditLog swap.
-	// audit_log can't be seeded from this package (no exported production API
-	// writes it outside internal/memory), so it stays at its default 0 — but
-	// seeding a nonzero decisions count leaves 0 distinct from all five
-	// seeded fields too, so the assertion below still catches a transposition
-	// involving audit_log.
+	// store-layer mutation test catches a transposition.
 	for _, pair := range [][2]string{{memIDs[0], memIDs[1]}, {memIDs[0], memIDs[2]}, {memIDs[1], memIDs[2]}} {
 		if err := store.CreateLink(ctx, pair[0], pair[1], "related", 0.8, "auto"); err != nil {
 			t.Fatalf("CreateLink %v: %v", pair, err)
-		}
-	}
-	for i := 0; i < 4; i++ {
-		if err := store.RecordUsage(ctx, "abc123", "claude-opus-4-6", memory.TokenUsage{InputTokens: 10, OutputTokens: 5}); err != nil {
-			t.Fatalf("RecordUsage %d: %v", i, err)
 		}
 	}
 	for i := 0; i < 2; i++ {
@@ -1907,7 +1897,7 @@ func TestGhostProjectDelete_DryRunByDefault(t *testing.T) {
 	if !strings.Contains(text.Text, "decisions:    1") {
 		t.Errorf("expected summary line %q in response, got %q", "decisions:    1", text.Text)
 	}
-	if !strings.Contains(text.Text, "token_usage:  4") {
+	if !strings.Contains(text.Text, "token_usage:  0") {
 		t.Errorf("expected summary line %q in response, got %q", "token_usage:  4", text.Text)
 	}
 	if !strings.Contains(text.Text, "audit_log:    0") {

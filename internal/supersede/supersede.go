@@ -65,12 +65,10 @@ const (
 
 // Classifier decides the relationship between a newer and an older memory:
 // a same-fact replacement (SUPERSEDES), a decision citing supporting evidence
-// that stays valid (CAUSES), or neither. It also reports whether the answer
-// came from a fallback provider (see ai.FallbackProvider) — callers use that
-// to withhold writes on a degraded-quality answer. The LLM implementation
-// lives in the CLI layer; tests inject a deterministic mock.
+// that stays valid (CAUSES), or neither. The LLM implementation lives in the
+// CLI layer; tests inject a deterministic mock.
 type Classifier interface {
-	Classify(ctx context.Context, newer, older string) (relation Relation, fromFallback bool, err error)
+	Classify(ctx context.Context, newer, older string) (relation Relation, err error)
 }
 
 // vectorStore is the subset of *memory.Store the pass needs; narrowed for
@@ -211,12 +209,6 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 // Result.StaleSkipped rather than failing the pass — the pair no longer
 // exists, so there is nothing to link.
 //
-// If any classification in the batch came from a fallback provider, apply is
-// skipped entirely for the whole batch (mirroring internal/resolve) — a
-// degraded-quality verdict should never silently write or invalidate a link;
-// the dry-run-style preview is still returned so callers can report what
-// would have happened.
-//
 // CreateLink and InvalidateLink are both idempotent no-ops when there's
 // nothing to change, so re-running Run converges and self-heals after
 // reflection's cascade-delete of links. A classifier error on one pair is
@@ -317,14 +309,10 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	res.Candidates = len(all)
 
 	var classified []Classified
-	anyFallback := false
 	for _, c := range all {
-		verdict, fromFallback, err := cls.Classify(ctx, c.NewerContent, c.OlderContent)
+		verdict, err := cls.Classify(ctx, c.NewerContent, c.OlderContent)
 		if err != nil {
 			return res, nil, fmt.Errorf("classify %s→%s: %w", c.NewerID, c.OlderID, err)
-		}
-		if fromFallback {
-			anyFallback = true
 		}
 		classified = append(classified, Classified{Candidate: c, Relation: verdict})
 
@@ -340,14 +328,6 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 		if wasReclassify && verdict != RelationSupersedes {
 			res.Reclassified++
 		}
-	}
-
-	if apply && anyFallback {
-		if logger != nil {
-			logger.Warn("supersede: candidates classified via fallback provider, apply skipped — rerun once primary is available",
-				"confirmed", res.Confirmed, "causes", res.CausesCreated)
-		}
-		return res, classified, nil
 	}
 
 	if apply {

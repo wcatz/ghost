@@ -27,7 +27,7 @@ func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Unset any env vars that could interfere.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_EMBEDDING_ENABLED", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_EMBEDDING_ENABLED"})
 
 	cfg, err := Load()
 	if err != nil {
@@ -40,23 +40,6 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if cfg.Embedding.Dimensions != 768 {
 		t.Errorf("expected embedding.dimensions=768, got %d", cfg.Embedding.Dimensions)
-	}
-	// API key should be empty when no env or config files provide it.
-	if cfg.API.Key != "" {
-		t.Errorf("expected empty api.key, got %q", cfg.API.Key)
-	}
-}
-
-func TestLoad_AnthropicAPIKey(t *testing.T) {
-	t.Setenv("ANTHROPIC_API_KEY", "sk-test-key-12345")
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-
-	if cfg.API.Key != "sk-test-key-12345" {
-		t.Errorf("expected api.key=sk-test-key-12345, got %q", cfg.API.Key)
 	}
 }
 
@@ -88,7 +71,7 @@ func TestLoad_RoutingDefaultProjectEnv(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY", "GHOST_ROUTING_DEFAULT_PROJECT"})
+	unsetEnvVars(t, []string{"GHOST_ROUTING_DEFAULT_PROJECT"})
 
 	t.Setenv("GHOST_ROUTING_DEFAULT_PROJECT", "infrastructure")
 
@@ -106,7 +89,7 @@ func TestLoad_DefaultProjectFromYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY", "GHOST_ROUTING_DEFAULT_PROJECT"})
+	unsetEnvVars(t, []string{"GHOST_ROUTING_DEFAULT_PROJECT"})
 
 	cfgDir := filepath.Join(tmpDir, "ghost")
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
@@ -131,7 +114,7 @@ func TestLoad_DefaultProjectEmptyByDefault(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY", "GHOST_ROUTING_DEFAULT_PROJECT"})
+	unsetEnvVars(t, []string{"GHOST_ROUTING_DEFAULT_PROJECT"})
 
 	cfg, err := Load()
 	if err != nil {
@@ -149,10 +132,9 @@ func TestLoad_GhostEnvOverrides(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear any interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_EMBEDDING_MODEL", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_EMBEDDING_MODEL"})
 
 	// Set GHOST_* overrides.
-	t.Setenv("GHOST_API_KEY", "sk-ghost-override")
 	t.Setenv("GHOST_EMBEDDING_MODEL", "custom-embed-model")
 
 	cfg, err := Load()
@@ -160,9 +142,6 @@ func TestLoad_GhostEnvOverrides(t *testing.T) {
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	if cfg.API.Key != "sk-ghost-override" {
-		t.Errorf("expected api.key from GHOST_API_KEY, got %q", cfg.API.Key)
-	}
 	if cfg.Embedding.Model != "custom-embed-model" {
 		t.Errorf("expected embedding.model=custom-embed-model from env, got %q", cfg.Embedding.Model)
 	}
@@ -174,7 +153,7 @@ func TestLoad_ExplicitEnvOverrides(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_LINKING_ENABLED", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_LINKING_ENABLED"})
 
 	t.Setenv("GHOST_LINKING_ENABLED", "false")
 
@@ -192,9 +171,6 @@ func TestLoad_ObsidianVaultDirEnvOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-
-	// Clear interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY"})
 
 	// The generic _ → . transformer would map this to obsidian.vault.dir,
 	// missing the obsidian.vault_dir key — the explicit override must catch it.
@@ -214,9 +190,6 @@ func TestLoad_OllamaURLEnvOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-
-	// Clear interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "ANTHROPIC_API_KEY"})
 
 	// The generic _ → . transformer would map this to embedding.ollama.url,
 	// missing the embedding.ollama_url key — the explicit override must catch it.
@@ -238,7 +211,7 @@ func TestLoad_YAMLFileOverride(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_EMBEDDING_MODEL", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_EMBEDDING_MODEL"})
 
 	// Create a config file in the user config dir.
 	configDir := filepath.Join(tmpDir, "ghost")
@@ -247,8 +220,6 @@ func TestLoad_YAMLFileOverride(t *testing.T) {
 	}
 	configFile := filepath.Join(configDir, "config.yaml")
 	yamlContent := `
-api:
-  key: "sk-from-yaml"
 embedding:
   model: "custom-embed-model"
 linking:
@@ -266,9 +237,6 @@ reflection:
 		t.Fatalf("Load() error: %v", err)
 	}
 
-	if cfg.API.Key != "sk-from-yaml" {
-		t.Errorf("api.key = %q, want %q", cfg.API.Key, "sk-from-yaml")
-	}
 	if cfg.Embedding.Model != "custom-embed-model" {
 		t.Errorf("embedding.model = %q, want %q", cfg.Embedding.Model, "custom-embed-model")
 	}
@@ -294,7 +262,7 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_API_KEY", "GHOST_EMBEDDING_MODEL", "ANTHROPIC_API_KEY"})
+	unsetEnvVars(t, []string{"GHOST_EMBEDDING_MODEL"})
 
 	// YAML file sets embedding.model to "yaml-model".
 	configDir := filepath.Join(tmpDir, "ghost")

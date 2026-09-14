@@ -459,7 +459,7 @@ func runReflect() {
 		fmt.Fprintln(os.Stderr, `Usage: ghost reflect <project> [flags]
 
 Flags:
-  --tier string   Consolidation tier: auto, haiku, cli, opencode, sqlite (default "auto")
+  --tier string   Consolidation tier: auto, cli, opencode, sqlite (default "auto")
   --apply         Save results (default is dry-run/preview only)
   --restore       Undo the last consolidation from snapshot
   --require-llm   Fail instead of falling back to the Jaccard-only sqlite tier
@@ -487,10 +487,10 @@ Flags:
 
 	var consolidator reflection.Consolidator
 
-	// Source-aware auto tier: when --source is set and tier is "auto", prefer
-	// the source-matched CLI backend directly, skipping API entirely. This
-	// lets the stop-hook or cron reflect use the same CLI that served the
-	// session, avoiding ANTHROPIC_API_KEY when not needed.
+	// Source-aware auto tier: when --source is set and tier is "auto", use
+	// the source-matched CLI backend directly — the same CLI harness that
+	// served the session. This lets the stop-hook or cron reflect run
+	// subscription-billed consolidation with no API key.
 	if tierValue == "auto" && source != "" {
 		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
 		if sp.Available() {
@@ -508,12 +508,10 @@ Flags:
 	if consolidator == nil {
 		switch tierValue {
 		case "haiku":
-			if cfg.API.Key == "" {
-				fmt.Fprintln(os.Stderr, "error: haiku tier requires ANTHROPIC_API_KEY")
-				os.Exit(1)
-			}
-			client := ai.NewClient(cfg.API.Key, logger)
-			consolidator = reflection.NewHaikuConsolidator(client)
+			// Removed: Ghost's memory management no longer calls the Anthropic
+			// API. Use --tier auto (default), --tier cli, or --tier opencode.
+			fmt.Fprintln(os.Stderr, "error: haiku tier removed — Ghost's memory management no longer calls the Anthropic API; use --tier auto (default) or --tier cli")
+			os.Exit(1)
 		case "cli":
 			binary := "claude"
 			if cfg.CLI.ClaudeBinary != "" {
@@ -549,21 +547,18 @@ Flags:
 			}
 			consolidator = reflection.NewSQLiteConsolidator()
 		default: // "auto"
+			// Cascade every available CLI harness (claude, opencode, codex,
+			// goose) ahead of the SQLite floor — the whole memory-management
+			// stack is harness-only now, with the offline Jaccard tier as the
+			// final fallback.
 			var tiers []reflection.Consolidator
-			if cfg.API.Key != "" {
-				client := ai.NewClient(cfg.API.Key, logger)
-				tiers = append(tiers, reflection.NewHaikuConsolidator(client))
-			}
 			if cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary); cli.Available() {
 				tiers = append(tiers, reflection.NewNamedConsolidator(cli, cli.Name()))
 			}
 			// --require-llm is the autonomous-reflect guard: it must never silently
 			// degrade to the Jaccard-only sqlite tier (which would rewrite every
-			// non-manual memory with no consolidation quality). A stale/exhausted
-			// ANTHROPIC_API_KEY is a false positive for "has an LLM", so the cheap
-			// stop-hook pre-check can't be trusted; this flag is the real guard at
-			// the write site — no LLM tier available (or all fail) => exit non-zero
-			// without touching the DB.
+			// non-manual memory with no consolidation quality). no LLM tier
+			// available (or all fail) => exit non-zero without touching the DB.
 			if !requireLLM {
 				tiers = append(tiers, reflection.NewSQLiteConsolidator())
 			}
@@ -776,47 +771,38 @@ Flags:
 }
 
 // buildClassifyProvider builds the Provider resolve/supersede classify
-// against: the direct Anthropic API when ANTHROPIC_API_KEY is configured,
-// falling back to a subscription-billed CLI call (claude first, then
-// opencode — see ai.CLIProvider) on credit exhaustion (dry-run-only — see
-// ai.FallbackProvider); or that same CLI provider as the sole, full-write
-// primary when no key is configured at all, so these commands work without
-// spending API credits as long as `claude` or `opencode` is available.
-func buildClassifyProvider(cfg *config.Config, logger *slog.Logger) (*ai.FallbackProvider, error) {
+// against: a cascade of subscription-billed CLI harnesses (claude, opencode,
+// codex, goose — see ai.CLIProvider). The Anthropic HTTP API no longer exists,
+// so these commands only need a CLI binary on PATH (or configured via
+// cli.*_binary).
+func buildClassifyProvider(cfg *config.Config) (ai.Provider, error) {
 	cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
-	if cfg.API.Key == "" {
-		if !cli.Available() {
-			return nil, errors.New("requires ANTHROPIC_API_KEY or a `claude`/`opencode` binary (on PATH or via cli.claude_binary/cli.opencode_binary)")
-		}
-		return ai.NewFallbackProvider(cli, nil, false), nil
-	}
-	primary := ai.NewAnthropicProvider(ai.NewClient(cfg.API.Key, logger))
 	if !cli.Available() {
-		return ai.NewFallbackProvider(primary, nil, false), nil
+		return nil, fmt.Errorf("requires a `claude`, `opencode`, `codex`, or `goose` binary on PATH (or via cli.claude_binary/cli.opencode_binary/cli.codex_binary/cli.goose_binary)")
 	}
-	return ai.NewFallbackProvider(primary, cli, true), nil
+	return cli, nil
 }
 
-// buildClassifyProviderForSource wraps buildClassifyProvider when --source is
-// set: routes through the matching CLI backend instead of the default
-// API-first fallback chain.
-func buildClassifyProviderForSource(cfg *config.Config, source string, logger *slog.Logger) (*ai.FallbackProvider, error) {
+// buildClassifyProviderForSource routes classification through the CLI harness
+// matching the --source session when set, falling back to the default cascade
+// otherwise.
+func buildClassifyProviderForSource(cfg *config.Config, source string) (ai.Provider, error) {
 	if source != "" {
 		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
 		if !sp.Available() {
 			return nil, fmt.Errorf("source %q: no CLI binary available", source)
 		}
-		return ai.NewFallbackProvider(sp, nil, false), nil
+		return sp, nil
 	}
-	return buildClassifyProvider(cfg, logger)
+	return buildClassifyProvider(cfg)
 }
 
 // runSupersede implements `ghost supersede <project> [--apply]` — the creation
 // half of staleness-aware ranking. It proposes newer→older 'supersedes' links
-// over the project's live memories (cosine-similar candidates, Haiku-confirmed)
-// and, with --apply, writes them. Dry-run by default. Re-runnable: it self-heals
-// after `ghost reflect` cascade-deletes links. Consumed by search only when
-// SupersedeDemote is set. See docs/benchmarks.md Phase 3.
+// over the project's live memories (cosine-similar candidates, CLI-harness
+// confirmed) and, with --apply, writes them. Dry-run by default. Re-runnable:
+// it self-heals after `ghost reflect` cascade-deletes links. Consumed by
+// search only when SupersedeDemote is set. See docs/benchmarks.md Phase 3.
 func runSupersede() {
 	var projectName string
 	var source string
@@ -855,10 +841,10 @@ Flags:
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
   --source string     Host source for CLI selection (e.g. claude-code, opencode)
 
-Classifies each candidate as supersedes, causes, or neither. Uses
-ANTHROPIC_API_KEY if set; otherwise falls back to a subscription-billed
-'claude' or 'opencode' CLI call (paths configurable via cli.claude_binary /
-cli.opencode_binary) — requires one of the two.`)
+Classifies each candidate as supersedes, causes, or neither. Runs through a
+subscription-billed CLI harness ('claude', 'opencode', 'codex', or 'goose' —
+first available on PATH or via cli.*_binary config; set --source to route by
+host).`)
 		os.Exit(1)
 	}
 
@@ -867,7 +853,7 @@ cli.opencode_binary) — requires one of the two.`)
 	ctx := context.Background()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
-	provider, err := buildClassifyProviderForSource(cfg, source, logger)
+	provider, err := buildClassifyProviderForSource(cfg, source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: ghost supersede %v\n", err)
 		os.Exit(1)
@@ -907,11 +893,11 @@ cli.opencode_binary) — requires one of the two.`)
 // runResolve is the CLI entry for `ghost resolve`. It marks resolved-evidence
 // memories (concluded work: findings, changelog notes, PR locators) so they
 // drop out of session-start injection while staying searchable. Cheap local
-// keyword prefilter proposes candidates; Haiku adjudicates each with a crisp
-// conclusion-vs-evidence question biased to KEEP. Dry-run by default; --apply
-// writes resolved_at. Re-runnable and reversible: any later Upsert/UpdateMemory
-// of a memory clears its resolved_at. The stop hook spawns this as a
-// detached --apply process (internal/mcpinit/stophook.go).
+// keyword prefilter proposes candidates; the hosting CLI harness adjudicates
+// each with a crisp conclusion-vs-evidence question biased to KEEP. Dry-run
+// by default; --apply writes resolved_at. Re-runnable and reversible: any
+// later Upsert/UpdateMemory of a memory clears its resolved_at. The stop hook
+// spawns this as a detached --apply process (internal/mcpinit/stophook.go).
 func runResolve() {
 	var projectName string
 	var source string
@@ -944,9 +930,9 @@ Flags:
   --source string Host source for CLI selection (e.g. claude-code, opencode)
 
 Marks resolved-evidence memories so they drop from session-start injection
-(still searchable). Uses ANTHROPIC_API_KEY if set; otherwise falls back to a
-subscription-billed 'claude' or 'opencode' CLI call (paths configurable via
-cli.claude_binary / cli.opencode_binary) — requires one of the two.`)
+(still searchable). Runs through a subscription-billed CLI harness ('claude',
+'opencode', 'codex', or 'goose' — first available on PATH or via cli.*_binary
+config; set --source to route by host).`)
 		os.Exit(1)
 	}
 
@@ -955,7 +941,7 @@ cli.claude_binary / cli.opencode_binary) — requires one of the two.`)
 	ctx := context.Background()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
-	provider, err := buildClassifyProviderForSource(cfg, source, logger)
+	provider, err := buildClassifyProviderForSource(cfg, source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: ghost resolve %v\n", err)
 		os.Exit(1)
@@ -1464,7 +1450,7 @@ Commands:
   version                     Print version
 
 Flags (reflect):
-  --tier string   Consolidation tier: auto, haiku, cli, opencode, sqlite (default "auto")
+  --tier string   Consolidation tier: auto, cli, opencode, sqlite (default "auto")
   --apply         Save results
   --restore       Undo last consolidation
 
