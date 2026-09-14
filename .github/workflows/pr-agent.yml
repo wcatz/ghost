@@ -15,7 +15,7 @@ on:
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
-    types: [opened, reopened, ready_for_review, review_requested, synchronize]
+    types: [opened, reopened, synchronize]
   issue_comment:
     types: [created]
 
@@ -315,21 +315,28 @@ jobs:
           # for App or github-actions authorship.
           # Exit contract (deliberate, used below): 0 = marker found, 1 =
           # definitively not posted, 2 = UNKNOWN (listing failed or no head
-          # recorded). The match is computed inside jq with -e so a real
-          # match cannot be lost to SIGPIPE under pipefail (grep -q closes
-          # the pipe while jq is still writing and the pipeline exits 141);
-          # gh's exit status is not hidden, and a transient listing failure
-          # is reported as unknown rather than fabricating "not posted".
+          # recorded). gh runs alone first (no pipe), so a transient gh
+          # failure returns 2 — it is NOT masked as jq's "no match" (which
+          # would read as 1 and wrongly re-post). gh api --paginate also
+          # concatenates each page's top-level array ('[{..}][{..}]'), which
+          # is not a single JSON document, so jq flattens with 'add' before
+          # matching. Only the two known states are returned; anything else
+          # (e.g. jq parse error on corrupt input) is surfaced loudly by the
+          # caller instead of being quietly treated as "not posted".
           already_posted() {
             [ -n "$reviewed" ] || return 2
-            # gh api + --paginate: gh pr view --json reviews returns at most
-            # one page (~100 reviews), after which the marker lookup would
-            # silently miss and the retry path could double-post on a churny
-            # PR. Paginated API reads the full review list.
-            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate \
-              | jq -e --arg s "$reviewed" \
-                'any(.[]; (.body // "") | contains("<!-- bot-review:" + $s + " -->"))' \
-                >/dev/null
+            local body
+            if ! body="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate)"; then
+              return 2
+            fi
+            local rc=0
+            jq -e --arg s "$reviewed" \
+              'add | any(.[]; (.body // "") | contains("<!-- bot-review:" + $s + " -->"))' \
+              <<<"$body" >/dev/null || rc=$?
+            [ "$rc" = 0 ] && return 0
+            [ "$rc" = 1 ] && return 1
+            echo "::error::already_posted: jq failed unexpectedly (rc=$rc) on the reviews payload — aborting to avoid a duplicate or lost review"
+            exit 1
           }
           # Compare the reviewed head against the PR's CURRENT head. A /review
           # run that started at head X takes minutes of model time, so a push
@@ -345,10 +352,19 @@ jobs:
             echo "" >> review.md
             echo "_note: PR head moved to ${current:0:7} since this review was generated against ${reviewed:0:7} — line numbers may be stale._" >> review.md
           fi
-          if already_posted; then
+          rc=0
+          already_posted || rc=$?
+          if [ "$rc" = 0 ]; then
             echo "skip: self-review already posted for head ${reviewed:0:7}"
             exit 0
           fi
+          # UNKNOWN at the pre-post check fails OPEN toward delivery (post):
+          # an otherwise-finished review must not be lost to a transient
+          # listing failure — a rare duplicate comment is cosmetic, a lost
+          # review is not. The retry path below, where a duplicate would
+          # actually be created, is the one that fails closed. Say so
+          # instead of being silent.
+          [ "$rc" = 2 ] && echo "::warning::could not verify prior reviews (review listing error); posting anyway — delivery over dedup"
           # Brand the body so a later same-head run (or our own retry) can
           # self-dedup.
           printf '\n<!-- bot-review:%s -->\n' "$reviewed" >> review.md
@@ -370,6 +386,8 @@ jobs:
               0) echo "first post committed despite client error — not re-posting" ;;
               1) post_review || exit 1 ;;
               2) echo "::error::retry aborted: could not verify whether the first post landed (review listing failed); not re-posting to avoid a duplicate. Re-run the pipeline to finish this review."
+                 exit 1 ;;
+              *) echo "::error::already_posted returned unexpected status $rc — aborting retry explicitly"
                  exit 1 ;;
             esac
           fi

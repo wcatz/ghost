@@ -45,28 +45,75 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Derive owner/name from the running repo — no hardcoded
+          # repository(owner:"...",name:"...") that silently breaks on a
+          # rename or a reuse (and emits zero findings, which looks like the
+          # gate legitimately said "nothing to learn").
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          NAME="${GITHUB_REPOSITORY##*/}"
+          pr_skipped=0
+          reviews_fetched=0
+          : > findings.txt
           gh api graphql \
-            -f query='query{
-              repository(owner:"wcatz",name:"ghost"){
+            -f query='query($owner:String!,$name:String!){
+              repository(owner:$owner,name:$name){
                 pullRequests(first:25,states:MERGED,orderBy:{field:UPDATED_AT,direction:DESC}){
-                  nodes{
-                    number title mergedAt
-                    reviews(first:100){
-                      nodes{
-                        body
+                  nodes{ number title mergedAt }
+                }
+              }}' \
+            -F owner="$OWNER" -F name="$NAME" \
+            | jq -r '.data.repository.pullRequests.nodes[] | @base64' > prs.b64
+          while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            rec="$(printf '%s' "$line" | base64 -d)"
+            num="$(printf '%s' "$rec" | jq -r .number)"
+            title="$(printf '%s' "$rec" | jq -r .title)"
+            merged="$(printf '%s' "$rec" | jq -r .mergedAt)"
+            # Only PRs merged within the last 30 days feed today's sample.
+            inwin="$(printf '%s' "$rec" | jq -r '[.mergedAt|fromdateiso8601 >= (now - 60*60*24*30)]|any')"
+            if [ "$inwin" = "false" ]; then pr_skipped=$((pr_skipped+1)); continue; fi
+            # Paginate the reviews of each PR: reviews(first:100) would
+            # silently drop bodies beyond the first page on a churny PR —
+            # precisely the long-running PRs that accumulate the most
+            # findings. Loop on the cursor up to 30 pages/PR.
+            after=null
+            npages=0
+            while [ "$npages" -lt 30 ]; do
+              RESP="$(gh api graphql \
+                -f query='query($owner:String!,$name:String!,$num:Int!,$after:String){
+                  repository(owner:$owner,name:$name){
+                    pullRequest(number:$num){
+                      reviews(first:100,after:$after){
+                        pageInfo{ hasNextPage endCursor }
+                        nodes{ body }
                       }
                     }
-                  }
-                }
-              }}' > prs.json
-          jq -r '
-            .data.repository.pullRequests.nodes[]
-            | select((.mergedAt | fromdateiso8601) > (now - 60*60*24*30))
-            | . as $pr
-            | .reviews.nodes[]
-            | select((.body // "") | contains("<!-- bot-review:"))
-            | "--- FINDING (PR #\($pr.number) \($pr.title)) ---\n\(.body)\n"
-          ' prs.json > findings.txt
+                  }}' \
+                -F owner="$OWNER" -F name="$NAME" -F num="$num" -F after="$after")"
+              # Base64 each body from jq so multi-line bodies survive as a
+              # single unbroken record on one line; decode before matching.
+              b64lines="$(printf '%s' "$RESP" | jq -r '.data.repository.pullRequest.reviews.nodes[]? | (.body // "") | @base64')"
+              if [ -n "$b64lines" ]; then
+                while IFS= read -r b64; do
+                  [ -n "$b64" ] || continue
+                  b="$(printf '%s' "$b64" | base64 -d)"
+                  case "$b" in
+                    *"<!-- bot-review:"*)
+                      printf -- '--- FINDING (PR #%s %s, merged %s) ---\n%s\n' \
+                        "$num" "$title" "$merged" "$b" >> findings.txt
+                      reviews_fetched=$((reviews_fetched+1))
+                      ;;
+                  esac
+                done <<< "$b64lines"
+              fi
+              npages=$((npages+1))
+              hasnext="$(printf '%s' "$RESP" | jq -r '.data.repository.pullRequest.reviews.pageInfo.hasNextPage // false')"
+              [ "$hasnext" = "true" ] || break
+              after="$(printf '%s' "$RESP" | jq -r '.data.repository.pullRequest.reviews.pageInfo.endCursor // empty')"
+              [ -n "$after" ] || break
+            done
+          done < prs.b64
+          echo "corpus: $reviews_fetched marker reviews, $pr_skipped older PRs skipped"
           echo "findings bytes: $(wc -c < findings.txt)"
           head -c 40000 findings.txt > findings_capped.txt
           mv findings_capped.txt findings.txt
@@ -133,7 +180,11 @@ jobs:
           RAW="$(opencode run -m opencode/big-pickle "$PROMPT")" \
             || { echo "::error::opencode distill failed — not skipping, surfacing as a failure"; exit 1; }
           RAW_BYTES="$(printf '%s' "$RAW" | wc -c)"
-          CONTENT="$(printf '%s' "$RAW" | head -c 8000)"
+          # Bash substring (byte-based), NOT `printf | head -c 8000`: the
+          # pipe version kills the step with SIGPIPE (141) under pipefail
+          # exactly when the response exceeds the pipe buffer — the one case
+          # this warning is meant to survive.
+          CONTENT="${RAW:0:8000}"
           if [ -z "$CONTENT" ]; then
             echo "::error::opencode distill returned empty output — not treating as 'nothing to add'; surfacing for investigation"
             exit 1
@@ -146,9 +197,15 @@ jobs:
             echo "Nothing new to add."
             exit 0
           fi
-          echo "proposals<<EOF" >> "$GITHUB_OUTPUT"
+          # GITHUB_OUTPUT heredoc delimiter must be unique: a model output
+          # line that is exactly the delimiter would truncate the value and
+          # let the rest be parsed as more output commands. Embed a
+          # timestamp+pid token the model cannot predict, and write only the
+          # exact token back.
+          DELIM="ghdistill_$(date +%s%N)_$$"
+          echo "proposals<<$DELIM" >> "$GITHUB_OUTPUT"
           echo "$CONTENT" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "$DELIM" >> "$GITHUB_OUTPUT"
 
       - name: Open draft PR with proposed additions
         if: steps.distill.outputs.proposals != ''
