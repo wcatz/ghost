@@ -94,3 +94,55 @@ jobs:
             -o -name opencode.json -o -name opencode.jsonc \
             -o -name .opencode \) -exec rm -rf {} + 2>/dev/null || true
           rm -rf .git
+
+      - name: Review with opencode big-pickle
+        timeout-minutes: 15
+        run: |
+          cd "${GITHUB_WORKSPACE}"
+          # Hard-fail rather than hand a credential to a model fed
+          # untrusted input. A set-but-EMPTY var is harmless, so the test
+          # is on the value.
+          for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN \
+                   ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE; do
+            if [ -n "${!v}" ]; then
+              echo "::error::credential \$$v present in the model step — refusing to run"
+              exit 1
+            fi
+          done
+
+          # Capture stdout to a file; the model writes NOTHING to disk (no
+          # --auto, so it has no approved write tool). post_review.py
+          # recovers the JSON from the reply via extract_findings().
+          #
+          # --format json emits raw JSON events rather than a single blob,
+          # so the reply text is spread across events; extract_findings
+          # scans the whole stream for balanced objects, which is why it
+          # tolerates that shape where #421's parts[-1] did not.
+          opencode run -m opencode/big-pickle --format json \
+            "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO).
+
+          Read ./pr.title, ./pr.diff, and ./.review-context/conventions.md. The diff is authoritative for changed lines; do NOT re-derive it. Read the changed files in this checkout to verify each finding. Do NOT run commands and do NOT narrate your process.
+
+          Cover: correctness bugs, race conditions, error-handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those.
+
+          Reply with ONLY a JSON document matching exactly this schema — no preamble, no explanation, no markdown fence. Do NOT attempt to write any file; you have no write access. Print the JSON and nothing else:
+
+          {\"verdict\": \"blocker|should-fix|nit|clean\",
+           \"summary\": \"one paragraph, plain English, what this PR does\",
+           \"findings\": [{\"file\": \"repo/relative/path.go\", \"line\": 42, \"end_line\": 44, \"severity\": \"blocker|should-fix|nit\", \"title\": \"short label\", \"body\": \"what is wrong, why it matters, the concrete fix\"}]}
+
+          Rules: 'line' must be a line that appears in ./pr.diff as added or context — never a line outside it. 'end_line' is optional and must be >= 'line'. Use severity 'nit' for anything that does not affect correctness. If you find nothing, emit verdict 'clean' with an empty findings array. Verify each finding against the code before asserting it; omit anything you cannot verify." \
+            > model-reply.txt
+
+          [ -s model-reply.txt ] || { echo "::error::model produced no output at all"; exit 1; }
+          echo "model reply: $(wc -c < model-reply.txt) bytes"
+
+      - name: Post review
+        env:
+          GH_TOKEN: ${{ steps.apptoken.outputs.token || github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          cd "${GITHUB_WORKSPACE}"
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/post_review.py" \
+            "${GITHUB_REPOSITORY}" "${PR_NUMBER}" "$(cat pr.head)" \
+            model-reply.txt pr.diff
