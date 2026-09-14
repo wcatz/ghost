@@ -22,7 +22,8 @@ Do not re-derive these; they were run against the real repo, not asserted.
 | actionlint is clean on `main`'s current workflows | exit 0 |
 | actionlint over all of #421's workflows finds exactly 1 issue | the `gate.yml` one that took CI down |
 | actionlint auto-discovery silently passes outside a git root | same binary, same file: 0 findings, exit 0 — hence the explicit-path guard in Task 1 |
-| The Tasks 2–4 Python is correct as written | all 21 tests pass, `Ran 21 tests ... OK` |
+| The Tasks 2–4b Python is correct as written | all 32 tests pass, `Ran 32 tests ... OK` |
+| `extract_findings` recovers JSON from prose, fences, escaped quotes, multi-object streams | 11 dedicated tests, incl. failure cases (pure prose, truncated JSON, empty) |
 | `parse_hunks` handles real diffs | 3 real diffs (80 KB / 7 KB / 95 KB), 33 files, no `a/`–`b/` prefix leaks, no non-positive lines |
 | `parse_hunks` never anchors past EOF | 32 files cross-checked against their content at `main`: every anchorable line number exists |
 
