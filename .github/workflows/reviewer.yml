@@ -58,15 +58,22 @@ jobs:
       # at Post review with ENOENT (observed on PR #418, run 34869517878).
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          # The base BRANCH tip, not base.sha. The event payload's
+          # The DEFAULT branch, not base.sha and not base_ref.
+          #
           # base.sha is the base tip as of the PR's last sync, which for
           # an older PR can predate the scripts entirely: #416 and #417
-          # resolved it to e29cc2c, the commit before .github/scripts
-          # existed, and were silently skipped instead of reviewed
-          # (run 34884927202). Both refs are equally trusted — every
-          # commit on the base branch is — so pinning bought nothing and
-          # cost correctness.
-          ref: ${{ github.base_ref }}
+          # resolved it to e29cc2c, before .github/scripts existed, and
+          # were skipped instead of reviewed (run 34884927202).
+          #
+          # base_ref is no better: for a PR stacked on a feature branch
+          # cut before the scripts landed, the target branch tip also
+          # predates them, and this step would fail a PR whose author
+          # cannot fix it by pushing.
+          #
+          # The default branch is where these scripts live and is exactly
+          # as trusted as any other base commit, so it is the one ref
+          # that is both always current and always present.
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
           persist-credentials: false
           sparse-checkout: .github/scripts
@@ -150,10 +157,10 @@ jobs:
           # Move the trusted scripts out of the workspace before the head
           # tree lands on top of them and before the model runs against it.
           rm -rf "${RUNNER_TEMP}/base-scripts"
-          # Now that the checkout above tracks the base BRANCH tip, this
-          # can only fire if the base branch itself has no
-          # .github/scripts — a misconfiguration, not an artefact of an
-          # old PR. So it fails rather than skips.
+          # Reading from the default branch, this can only fire if the
+          # default branch has no .github/scripts — a genuine
+          # misconfiguration, not an artefact of an old PR or an older
+          # base branch. So it fails rather than skips.
           #
           # Skipping here was actively harmful: with no review posted
           # there are no findings, so the sweeper's review-gate came out
