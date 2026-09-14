@@ -151,6 +151,15 @@ MARKER = "<!-- ghost-review:{sha} -->"
 
 _LABEL = {"blocker": "🔴 blocker", "should-fix": "🟠 should-fix", "nit": "🔵 nit"}
 
+# 'clean' is a verdict but never a finding severity, so it lives here
+# rather than in _LABEL, which _render_comment indexes by severity.
+_VERDICT_LABEL = dict(_LABEL, clean="🟢 clean")
+
+
+def _count(n, noun):
+    """'1 nit' / '2 nits' — the old '2 nit(s)' read like a form field."""
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
 
 def partition(findings):
     """Split findings into (blocking, nits) per the severity policy."""
@@ -200,6 +209,35 @@ def _anchor(f, hunks):
     return comment
 
 
+def _render_list(findings, label=True):
+    """One finding per bullet: title and location on the first line, the
+    explanation as an indented paragraph under it.
+
+    The old single-line form ran a ~120-word body onto the same line as
+    the file and title, which is what made a review with two nits
+    unscannable.
+
+    label=False for a list that is already all one severity (the nits
+    section) — repeating "🔵 nit" on every bullet there is noise. The
+    dropped list mixes severities, so it keeps them.
+    """
+    out = []
+    for f in findings:
+        tag = f"{_LABEL[f['severity']]} " if label else ""
+        out += [f"- {tag}**{f['title']}** — `{f['file']}:{f['line']}`",
+                "",
+                _indent(f["body"]),
+                ""]
+    return out[:-1] if out else out
+
+
+def _indent(body):
+    """Indent a finding body under its bullet, without leaving a line of
+    trailing spaces where the body has a blank line."""
+    return "\n".join("  " + ln if ln.strip() else ""
+                     for ln in body.strip().splitlines())
+
+
 def build_review(doc, commit_id, hunks):
     """Return (review_payload, dropped_findings).
 
@@ -216,25 +254,31 @@ def build_review(doc, commit_id, hunks):
         else:
             comments.append(anchored)
 
-    body = [doc["summary"], ""]
-    body.append(f"**Verdict:** `{doc['verdict']}` — "
-                f"{len(comments)} inline finding(s), {len(nits)} nit(s).")
+    # Verdict first. Someone scanning the PR page wants the call before
+    # the paragraph explaining it, and the summary is long enough that
+    # putting the verdict under it costs a scroll.
+    tally = [t for t in (
+        _count(len(comments), "inline finding") if comments else "",
+        _count(len(nits), "nit") if nits else "",
+        _count(len(dropped), "unanchored finding") if dropped else "",
+    ) if t]
+    verdict = _VERDICT_LABEL.get(doc["verdict"], f"`{doc['verdict']}`")
+    body = [f"**{verdict}** — "
+            + (", ".join(tally) if tally else "nothing to fix") + ".",
+            "", doc["summary"]]
 
     if nits:
-        body += ["", "<details><summary>Nits "
-                 f"({len(nits)}) — non-blocking</summary>", ""]
-        for f in nits:
-            loc = f"`{f['file']}:{f['line']}`"
-            body.append(f"- {loc} **{f['title']}** — {f['body']}")
+        body += ["", "<details><summary>"
+                 f"{_count(len(nits), 'nit')} — non-blocking</summary>", ""]
+        body += _render_list(nits, label=False)
         body += ["", "</details>"]
 
     if dropped:
-        body += ["", f"**{len(dropped)} finding(s) could not be anchored** "
-                 "to a line in this diff and are reported here instead:", ""]
-        for f in dropped:
-            loc = f"`{f['file']}:{f['line']}`"
-            body.append(f"- {_LABEL[f['severity']]} {loc} "
-                        f"**{f['title']}** — {f['body']}")
+        body += ["", f"**{_count(len(dropped), 'finding')} could not be "
+                 "anchored** to a line in this diff, so "
+                 + ("it is" if len(dropped) == 1 else "they are")
+                 + " reported here instead:", ""]
+        body += _render_list(dropped)
 
     body += ["", MARKER.format(sha=commit_id)]
 
