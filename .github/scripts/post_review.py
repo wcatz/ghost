@@ -118,7 +118,16 @@ def main(argv):
         input=json.dumps(payload), text=True, capture_output=True, check=False,
     )
     if proc.returncode != 0:
-        print(f"::error::posting the review failed: {proc.stderr.strip()}",
+        # GitHub's Reviews API can return a 422 whose body echoes back
+        # field-level validation errors, and every field in our payload is
+        # model-derived — so hostile content can round-trip through the
+        # API and reach this line, same class as the other two sites, with
+        # GitHub as the courier. This is also the line that reports a
+        # genuine posting failure, so it is neutralised to a single line
+        # rather than dropped, and bounded so a pathological response
+        # can't flood the log.
+        print(f"::error::posting the review failed: "
+              f"{_log_safe(proc.stderr.strip(), limit=2000)}",
               file=sys.stderr)
         return 1
 

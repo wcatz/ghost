@@ -145,6 +145,46 @@ class TestInjectionReproducer(unittest.TestCase):
         # The forged text must still be present, just neutralised.
         self.assertTrue(any("> ::error::FORGED" in l for l in lines))
 
+    def test_gh_api_failure_stderr_forges_no_command(self):
+        # The third vulnerable site: GitHub's Reviews API can return a 422
+        # with field-level validation errors echoing back model-derived
+        # payload content, and that response text (proc.stderr) was printed
+        # raw into the "posting the review failed" ::error:: line. This is
+        # the line that reports a genuine posting failure, so a forged
+        # ::stop-commands:: here would conceal the very failure it names.
+        doc = {
+            "verdict": "clean", "summary": "ok", "findings": [],
+        }
+        diff_text = (
+            "diff --git a/a.go b/a.go\nindex 111..222 100644\n"
+            "--- a/a.go\n+++ b/a.go\n@@ -1,1 +1,1 @@\n package main\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            reply_path = os.path.join(d, "reply.txt")
+            diff_path = os.path.join(d, "pr.diff")
+            with open(reply_path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(doc))
+            with open(diff_path, "w", encoding="utf-8") as fh:
+                fh.write(diff_text)
+
+            with patch("post_review.subprocess.run") as run:
+                run.return_value.returncode = 1
+                run.return_value.stderr = (
+                    "gh: Validation Failed (HTTP 422)\nbody:\n"
+                    "::stop-commands::pwned\n::add-mask::secret")
+                buf = io.StringIO()
+                with redirect_stderr(buf):
+                    rc = main(["post_review.py", "org/repo", "1", "abc123",
+                               reply_path, diff_path])
+        self.assertEqual(rc, 1)
+        lines = buf.getvalue().splitlines()
+        cmd_lines = [l for l in lines if l.startswith("::")]
+        self.assertEqual(len(cmd_lines), 1)
+        self.assertTrue(cmd_lines[0].startswith("::error::posting the review failed"))
+        for forged in ("::stop-commands::", "::add-mask::"):
+            self.assertFalse(any(l.startswith(forged) for l in lines),
+                              f"{forged} reached line start")
+
 
 class TestCaps(unittest.TestCase):
     def _run_with(self, findings, diff_text):
