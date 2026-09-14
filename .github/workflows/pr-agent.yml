@@ -19,9 +19,12 @@ on:
   issue_comment:
     types: [created]
 
-# Least privilege: the model step has NO scoped token (see job below),
-# and nothing here writes issues — only the final post needs pull-request
-# write, which is granted via the app token passed to that single step.
+# Least privilege where it matters: the runner/app token with write scope
+# is never available to the model step. All jobs carry the workflow-level
+# pull-requests: write (posting needs it), but the model step gets NO
+# GITHUB_TOKEN at all and the checkout used persist-credentials: false, so
+# an injected instruction in the diff has no write-capable credential to
+# reach. Nothing here writes issues.
 permissions:
   contents: read
   pull-requests: write
@@ -185,6 +188,9 @@ jobs:
           # sensitive it can reach or post with. An injected instruction in
           # the diff therefore cannot escalate to the runner token.
         run: |
+          # Anchor to the checkout root regardless of any repo-wide
+          # defaults.run.working-directory.
+          cd "${GITHUB_WORKSPACE}"
           # JSON event stream, not raw stdout: the formatted TUI emits tool
           # trace lines ("→ Read x", "> build") to stdout that would land in
           # review.md and break the first-line verdict contract. The last
