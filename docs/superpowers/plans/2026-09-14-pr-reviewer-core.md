@@ -4,7 +4,7 @@
 
 **Goal:** A PR reviewer that posts line-anchored, severity-gated review threads from opencode CLI output, sweeps stale threads, and converges instead of oscillating.
 
-**Architecture:** The model emits `findings.json` — a strict schema — and every downstream decision is deterministic Python in `.github/scripts/`, unit-tested off-CI. The workflows stay thin: assemble context, run the model, hand JSON to a tested script. Three convergence inputs (incremental diff, existing thread state, base-ref conventions) are gathered in the prepare step before `.git` is deleted.
+**Architecture:** The model emits a strict-schema findings document on stdout — it is given no write tools — and every downstream decision is deterministic Python in `.github/scripts/`, unit-tested off-CI. The workflows stay thin: assemble context, run the model, hand JSON to a tested script. Three convergence inputs (incremental diff, existing thread state, base-ref conventions) are gathered in the prepare step before `.git` is deleted.
 
 **Tech Stack:** GitHub Actions, opencode CLI (`opencode/big-pickle`, free tier), Python 3 stdlib only (`unittest`, `json`, `re`), `gh` CLI, GitHub GraphQL + Reviews REST API.
 
@@ -63,7 +63,8 @@ opencode would auto-load them outside our prompt control. They go to
 | File | Responsibility |
 |---|---|
 | `.github/scripts/review_findings.py` | Schema validation, diff-hunk parsing, severity partition, anchor resolution, review-payload construction. Pure functions, no I/O against GitHub. |
-| `.github/scripts/test_review_findings.py` | `unittest` suite for the above. |
+| `.github/scripts/test_review_findings.py` | `unittest` suite for validation, hunks, partition, payload. |
+| `.github/scripts/test_extract.py` | `unittest` suite for recovering the JSON from the model's stdout. |
 | `.github/scripts/post_review.py` | Thin I/O wrapper: reads files, calls `review_findings`, POSTs via `gh api`. |
 | `.github/workflows/reviewer.yml` | Trigger, context assembly, model invocation, post. |
 | `.github/workflows/sweeper.yml` | Stale-thread resolution + `REQUEST_CHANGES` signal (restored from `pr-loop.yml`). |
@@ -687,6 +688,173 @@ git commit -s -m "ci: build severity-gated review payloads from findings"
 
 ---
 
+## Task 4b: extract the findings document from the model reply
+
+**The model is given no write tools.** Its only output channel is stdout. That
+is deliberate: `opencode run` defaults to `--auto false`, so file writes need
+permission approval that a non-interactive CI run cannot give, and granting
+`--auto` would hand shell and write capability to a model whose input is an
+attacker-controllable diff. Keeping the model write-less is both the working
+configuration and the stronger security boundary — it is why PR #421 ended up
+scraping stdout, and the mistake there was scraping it badly (`parts[-1]`
+takes one event and silently loses a reply split across several).
+
+So the JSON has to be recovered from prose. This task makes that robust and
+tested rather than a regex guess, with schema validation (Task 2) as the gate
+behind it.
+
+**Files:**
+- Modify: `.github/scripts/review_findings.py`
+- Create: `.github/scripts/test_extract.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `.github/scripts/test_extract.py`:
+
+```python
+import unittest
+from review_findings import ValidationError, extract_findings
+
+DOC = '{"verdict":"clean","summary":"ok","findings":[]}'
+
+
+class TestExtract(unittest.TestCase):
+    def test_bare_json(self):
+        self.assertEqual(extract_findings(DOC)["verdict"], "clean")
+
+    def test_json_with_prose_before_and_after(self):
+        t = f"Let me review this.\n\n{DOC}\n\nHope that helps!"
+        self.assertEqual(extract_findings(t)["verdict"], "clean")
+
+    def test_fenced_json_block(self):
+        t = f"Here is the result:\n\n```json\n{DOC}\n```\n"
+        self.assertEqual(extract_findings(t)["verdict"], "clean")
+
+    def test_prefers_the_last_verdict_object(self):
+        t = f'draft: {{"verdict":"nit","summary":"x","findings":[]}}\nfinal: {DOC}'
+        self.assertEqual(extract_findings(t)["verdict"], "clean")
+
+    def test_ignores_non_verdict_objects(self):
+        t = f'{{"note":"thinking"}} {DOC} {{"unrelated":true}}'
+        self.assertEqual(extract_findings(t)["verdict"], "clean")
+
+    def test_handles_braces_inside_strings(self):
+        d = '{"verdict":"nit","summary":"use {} not new Object()","findings":[]}'
+        self.assertEqual(extract_findings(d)["summary"], "use {} not new Object()")
+
+    def test_handles_escaped_quotes(self):
+        d = '{"verdict":"nit","summary":"say \\"hi\\"","findings":[]}'
+        self.assertEqual(extract_findings(d)["summary"], 'say "hi"')
+
+    def test_nested_objects_in_findings(self):
+        d = ('{"verdict":"should-fix","summary":"s","findings":'
+             '[{"file":"a.go","line":1,"severity":"nit","title":"t","body":"b"}]}')
+        self.assertEqual(len(extract_findings(d)["findings"]), 1)
+
+    def test_raises_on_pure_prose(self):
+        with self.assertRaises(ValidationError):
+            extract_findings("I reviewed the PR and found three issues.")
+
+    def test_raises_on_truncated_json(self):
+        with self.assertRaises(ValidationError):
+            extract_findings('{"verdict":"clean","summary":"ok"')
+
+    def test_raises_on_empty(self):
+        with self.assertRaises(ValidationError):
+            extract_findings("")
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+```bash
+cd .github/scripts && python3 -m unittest test_extract -v
+```
+
+Expected: FAIL with `ImportError: cannot import name 'extract_findings'`.
+
+- [ ] **Step 3: Write the implementation**
+
+Append to `.github/scripts/review_findings.py`:
+
+```python
+def extract_findings(text):
+    """Pull the findings document out of a model's free-form reply.
+
+    The model has no write tools by design — its only output channel is
+    stdout — so the JSON has to be recovered from whatever prose, fenced
+    blocks, or event wrappers surround it. Scans for balanced top-level
+    JSON objects and returns the LAST one that carries a 'verdict' key,
+    which survives a model that reasons in prose before answering, wraps
+    the answer in ```json, or restates a partial object mid-explanation.
+
+    Raises ValidationError when nothing usable is present, so a garbled
+    reply fails the job loudly instead of posting a degraded review.
+    """
+    import json as _json
+
+    candidates = []
+    depth = 0
+    start = None
+    in_str = False
+    esc = False
+
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    candidates.append(text[start:i + 1])
+                    start = None
+
+    for blob in reversed(candidates):
+        try:
+            doc = _json.loads(blob)
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and "verdict" in doc:
+            return doc
+
+    raise ValidationError(
+        "no JSON object with a 'verdict' key found in the model reply "
+        f"({len(candidates)} balanced object(s) scanned, "
+        f"{len(text)} chars)")
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+```bash
+cd .github/scripts && python3 -m unittest discover -p 'test_*.py' -v
+```
+
+Expected: 32 tests, all PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add .github/scripts/review_findings.py .github/scripts/test_extract.py
+git commit -s -m "ci: extract the findings document from model stdout"
+```
+
+---
+
 ## Task 5: run the script tests in CI
 
 Tests that only run locally are tests that rot.
@@ -712,7 +880,7 @@ In `.github/workflows/ci.yml`, in the `lint` job after the actionlint step:
 cd .github/scripts && python3 -m unittest discover -p 'test_*.py' -v
 ```
 
-Expected: 21 tests, OK.
+Expected: 32 tests, OK.
 
 - [ ] **Step 3: Commit**
 
@@ -734,38 +902,40 @@ Create `.github/scripts/post_review.py`:
 
 ```python
 #!/usr/bin/env python3
-"""Read findings.json + pr.diff, build a review payload, POST it via gh.
+"""Read the model's raw reply + pr.diff, build a review payload, POST it.
 
 Exits non-zero on a malformed document — a bad review is never posted in
 degraded form. Usage:
 
-    post_review.py <repo> <pr_number> <commit_id> <findings.json> <pr.diff>
+    post_review.py <repo> <pr_number> <commit_id> <reply.txt> <pr.diff>
 """
 
 import json
 import subprocess
 import sys
 
-from review_findings import ValidationError, build_review, parse_hunks, validate
+from review_findings import (ValidationError, build_review, extract_findings,
+                             parse_hunks, validate)
 
 
 def main(argv):
     if len(argv) != 6:
         print(__doc__, file=sys.stderr)
         return 2
-    repo, number, commit_id, findings_path, diff_path = argv[1:]
+    repo, number, commit_id, reply_path, diff_path = argv[1:]
 
-    with open(findings_path, encoding="utf-8") as fh:
-        try:
-            doc = json.load(fh)
-        except json.JSONDecodeError as exc:
-            print(f"::error::model did not emit valid JSON: {exc}", file=sys.stderr)
-            return 1
+    with open(reply_path, encoding="utf-8", errors="replace") as fh:
+        reply = fh.read()
 
     try:
+        doc = extract_findings(reply)
         validate(doc)
     except ValidationError as exc:
-        print(f"::error::findings.json failed validation: {exc}", file=sys.stderr)
+        print(f"::error::unusable model reply: {exc}", file=sys.stderr)
+        # Surface a bounded excerpt so the failure is diagnosable from the
+        # Actions log without re-running the model.
+        print(f"::group::model reply (first 2000 chars)\n{reply[:2000]}\n::endgroup::",
+              file=sys.stderr)
         return 1
 
     with open(diff_path, encoding="utf-8") as fh:
@@ -799,12 +969,12 @@ if __name__ == "__main__":
 
 ```bash
 cd .github/scripts
-echo '{"verdict":"nope","summary":"x","findings":[]}' > /tmp/bad.json
+echo '{"verdict":"nope","summary":"x","findings":[]}' > /tmp/bad.txt
 echo '' > /tmp/empty.diff
-python3 post_review.py wcatz/ghost 1 abc /tmp/bad.json /tmp/empty.diff; echo "exit=$?"
+python3 post_review.py wcatz/ghost 1 abc /tmp/bad.txt /tmp/empty.diff; echo "exit=$?"
 ```
 
-Expected: `::error::findings.json failed validation: verdict must be one of
+Expected: `::error::unusable model reply: verdict must be one of
 ('blocker', 'should-fix', 'nit', 'clean'), got 'nope'` and `exit=1`.
 
 - [ ] **Step 3: Verify it rejects non-JSON**
@@ -815,7 +985,9 @@ printf 'I reviewed the PR and found some issues.\n' > /tmp/prose.txt
 python3 post_review.py wcatz/ghost 1 abc /tmp/prose.txt /tmp/empty.diff; echo "exit=$?"
 ```
 
-Expected: `::error::model did not emit valid JSON: ...` and `exit=1`.
+Expected: `::error::unusable model reply: no JSON object with a 'verdict' key
+found in the model reply (0 balanced object(s) scanned, 40 chars)` and
+`exit=1`, followed by the bounded reply excerpt.
 
 - [ ] **Step 4: Commit**
 
@@ -976,6 +1148,14 @@ git commit -s -m "ci: add reviewer workflow context assembly"
             fi
           done
 
+          # Capture stdout to a file; the model writes NOTHING to disk (no
+          # --auto, so it has no approved write tool). post_review.py
+          # recovers the JSON from the reply via extract_findings().
+          #
+          # --format json emits raw JSON events rather than a single blob,
+          # so the reply text is spread across events; extract_findings
+          # scans the whole stream for balanced objects, which is why it
+          # tolerates that shape where #421's parts[-1] did not.
           opencode run -m opencode/big-pickle --format json \
             "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO).
 
@@ -983,16 +1163,17 @@ git commit -s -m "ci: add reviewer workflow context assembly"
 
           Cover: correctness bugs, race conditions, error-handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those.
 
-          Write ONLY a JSON document to ./findings.json matching exactly this schema, and print nothing else:
+          Reply with ONLY a JSON document matching exactly this schema — no preamble, no explanation, no markdown fence. Do NOT attempt to write any file; you have no write access. Print the JSON and nothing else:
 
           {\"verdict\": \"blocker|should-fix|nit|clean\",
            \"summary\": \"one paragraph, plain English, what this PR does\",
            \"findings\": [{\"file\": \"repo/relative/path.go\", \"line\": 42, \"end_line\": 44, \"severity\": \"blocker|should-fix|nit\", \"title\": \"short label\", \"body\": \"what is wrong, why it matters, the concrete fix\"}]}
 
           Rules: 'line' must be a line that appears in ./pr.diff as added or context — never a line outside it. 'end_line' is optional and must be >= 'line'. Use severity 'nit' for anything that does not affect correctness. If you find nothing, emit verdict 'clean' with an empty findings array. Verify each finding against the code before asserting it; omit anything you cannot verify." \
-            > events.jsonl
+            > model-reply.txt
 
-          [ -s findings.json ] || { echo "::error::model produced no findings.json"; exit 1; }
+          [ -s model-reply.txt ] || { echo "::error::model produced no output at all"; exit 1; }
+          echo "model reply: $(wc -c < model-reply.txt) bytes"
 
       - name: Post review
         env:
@@ -1002,7 +1183,7 @@ git commit -s -m "ci: add reviewer workflow context assembly"
           cd "${GITHUB_WORKSPACE}"
           python3 "${GITHUB_WORKSPACE}/.github/scripts/post_review.py" \
             "${GITHUB_REPOSITORY}" "${PR_NUMBER}" "$(cat pr.head)" \
-            findings.json pr.diff
+            model-reply.txt pr.diff
 ```
 
 Note: `.github/scripts/` survives the injection sweep (it matches none of the
@@ -1441,7 +1622,8 @@ git rm .github/workflows/pr-agent.yml .github/workflows/pr-loop.yml .pr_agent.to
 - [ ] **Step 3: Update the README pipeline section**
 
 Replace any description of the PR-Agent pipeline with the new one: `reviewer.yml`
-produces severity-gated inline threads from `findings.json`; `sweeper.yml`
+produces severity-gated inline threads from the model's structured findings
+document; `sweeper.yml`
 resolves stale threads and signals `REQUEST_CHANGES`;
 `required_conversation_resolution` on `main` is the merge gate.
 
