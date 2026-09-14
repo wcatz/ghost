@@ -17,8 +17,17 @@
 #     bot can always clear because it owns it. An unresolved thread that
 #     has gone outdated does not count toward the gate, so stale findings
 #     stop mattering instead of needing to be swept.
-#   - GITHUB_TOKEN CAN submit REQUEST_CHANGES reviews. Signal-only:
-#     approvals stay out of branch protection entirely.
+#   - GITHUB_TOKEN CAN submit REQUEST_CHANGES reviews, and this workflow
+#     deliberately does not. Under "Require a pull request before
+#     merging", an outstanding CHANGES_REQUESTED blocks merge even with
+#     required_approving_review_count: 0 — and neither GITHUB_TOKEN nor
+#     the App can dismiss it, exactly as neither can resolve a thread.
+#     Posting one creates a gate the bot cannot clear, which is the same
+#     trap that made conversation resolution unusable. The check run is
+#     the gate; a redundant blocking review is not a signal, it is a
+#     deadlock. Measured on PR #431: reviewDecision=CHANGES_REQUESTED
+#     from github-actions held the PR at BLOCKED after conversation
+#     resolution had already been switched off.
 #
 # Triggered by workflow_run after each Reviewer workflow completion and by
 # PR comments for manual re-runs. workflow_run executes in default-branch
@@ -272,11 +281,7 @@ jobs:
           fi
 
           if [ "$N_LIVE" -gt 0 ]; then
-            gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
-              -f event=REQUEST_CHANGES \
-              -f body="The reviewer has $N_LIVE unresolved finding(s) — see inline threads." >/dev/null 2>&1 \
-              && echo "Requested changes: $N_LIVE live finding(s)." \
-              || echo "Could not set REQUEST_CHANGES state."
+            echo "$N_LIVE live reviewer finding(s) — the review-gate check below will fail."
           else
             echo "No live reviewer findings."
           fi
