@@ -69,3 +69,45 @@ All raised against PR #423 and all confirmed real:
    the review *before* the checksum-guarded recovery in Install could run.
 
 Findings 3 and 4 concern `actions/cache` semantics the author had wrong.
+
+## Severity partition, verified live
+
+**Fixture:** `.github/scripts/fixtures/nit_probe.go` (`//go:build ignore`)
+**Measured on:** PR #425, Reviewer run 34861183180, head `2c17f21`
+
+Every finding produced up to this point had been `should-fix`, so the
+`nit` half of the severity policy — the README's claim that nits go in a
+collapsed body block and never block merge — had unit tests behind it
+(`test_review_findings.py::test_nits_never_become_comments`) but no live
+evidence. The fixture plants one correctness bug and two purely cosmetic
+issues to force a mixed review.
+
+The model classified all three correctly: `blocker` for the index-before-
+length-check, `nit` for the stuttering type name and the redundant `else`.
+
+**Inline comments (`pulls/425/comments`) — one, the blocker only:**
+
+```
+.github/scripts/fixtures/nit_probe.go:20 :: **🔴 blocker — index out of bounds before length check**
+```
+
+**Review body — both nits, collapsed and non-blocking:**
+
+```
+**Verdict:** `should-fix` — 1 inline finding(s), 2 nit(s).
+
+<details><summary>Nits (2) — non-blocking</summary>
+
+- `.github/scripts/fixtures/nit_probe.go:22` **stuttering type name** — ...
+- `.github/scripts/fixtures/nit_probe.go:31` **redundant else after return** — ...
+
+</details>
+```
+
+Neither nit produced an inline thread, so neither can hold the merge gate
+under `required_conversation_resolution`. The step log alone cannot show
+this: `posted review: N inline finding(s)` omits the nit count entirely, so
+a working partition and a review with no nits at all log identically. The
+two API reads above are the evidence.
+
+Recorded verbatim because the probe branch was deleted with the PR.
