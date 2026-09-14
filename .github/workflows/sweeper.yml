@@ -160,15 +160,28 @@ jobs:
           if [ "$N_STALE" -gt 0 ]; then
             if [ -n "$APP_TOKEN" ]; then
               RESOLVED=0
+              RESOLVE_ERR="$(mktemp)"
               for id in $(jq -r .[] <<<"$STALE"); do
                 # shellcheck disable=SC2016
                 if GH_TOKEN="$APP_TOKEN" gh api graphql \
                      -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' \
-                     -f id="$id" --jq '.data.resolveReviewThread.thread.isResolved' >/dev/null 2>&1; then
+                     -f id="$id" --jq '.data.resolveReviewThread.thread.isResolved' \
+                     >/dev/null 2>>"$RESOLVE_ERR"; then
                   RESOLVED=$((RESOLVED+1))
                 fi
               done
               echo "Auto-resolved $RESOLVED/$N_STALE stale finding(s) (superseded by newer review)."
+              # A partial or total failure used to be reported only as a
+              # ratio: run 34875887374 printed "Auto-resolved 0/1" and gave
+              # no way to tell a permissions problem from a stale thread id.
+              # The threads stay unresolved and keep blocking merge, so this
+              # is the opposite of a silent-success case — say why.
+              # gh's error text is prefixed so it cannot forge a ::command.
+              if [ "$RESOLVED" -lt "$N_STALE" ]; then
+                echo "::warning::$((N_STALE - RESOLVED)) stale thread(s) could not be resolved and will keep blocking merge — check that the App grant is Pull requests: read & write AND that the installation has accepted it"
+                sed -n '1,5p' "$RESOLVE_ERR" | sed 's/^/> /'
+              fi
+              rm -f "$RESOLVE_ERR"
             else
               echo "::warning::$N_STALE stale finding(s) await resolution — configure the GH_APP_ID / GH_APP_PRIVATE_KEY secrets to enable auto-resolve."
             fi
