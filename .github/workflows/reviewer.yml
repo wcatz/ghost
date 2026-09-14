@@ -52,18 +52,51 @@ jobs:
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: Prepare review context
+        id: context
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           cd "${GITHUB_WORKSPACE}"
           gh pr checkout "$PR_NUMBER"
+          # gh pr checkout fetches at fetch-depth 1; the prior reviewed
+          # commit is not present in a shallow clone, so the incremental
+          # diff below would always fall back to a full review.
+          git fetch --unshallow origin 2>/dev/null || git fetch --deepen=50 origin || true
           git config --local --unset-all http.extraheader 2>/dev/null || true
           git config --local --remove-section 'http.https://github.com/' 2>/dev/null || true
 
           gh pr view "$PR_NUMBER" --json title --jq .title > pr.title
           gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid > pr.head
-          gh pr diff "$PR_NUMBER" > pr.diff
+          # Review only what changed since the last review. The marker is
+          # written into the review body by build_review(); reading it back
+          # keeps this independent of the summary comment (phase 4).
+          #
+          # `gh api --paginate` applies --jq to EACH page separately and
+          # concatenates the results, so a PR with more than one page of
+          # reviews (30 per page) would emit one SHA per page; `tail -n 1`
+          # keeps the most recent one. Without it a busy PR — exactly the
+          # case this fixes — would always fall back to a full review.
+          LAST_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+            --paginate --jq '[.[] | .body
+              | capture("<!-- ghost-review:(?<sha>[0-9a-f]{7,40}) -->")?.sha]
+              | last // empty' 2>/dev/null | tail -n 1 || true)"
+
+          if [ -n "$LAST_SHA" ] && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
+            echo "incremental review: ${LAST_SHA}..HEAD"
+            git diff "${LAST_SHA}" HEAD > pr.diff
+          else
+            echo "full review (no usable prior marker)"
+            gh pr diff "$PR_NUMBER" > pr.diff
+          fi
+
+          # An incremental diff can be empty when a push changed nothing
+          # reviewable (e.g. a rebase with no content change). Skip rather
+          # than burn a model run on an empty diff.
+          if [ ! -s pr.diff ]; then
+            echo "no reviewable change since ${LAST_SHA}; skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
 
           # Conventions come from the BASE ref, which is not
           # attacker-controllable, unlike the PR head tree. They are
@@ -137,6 +170,7 @@ jobs:
           rm -rf .git
 
       - name: Review with opencode big-pickle
+        if: steps.context.outputs.skip != 'true'
         timeout-minutes: 15
         run: |
           cd "${GITHUB_WORKSPACE}"
@@ -179,6 +213,7 @@ jobs:
           echo "model reply: $(wc -c < model-reply.txt) bytes"
 
       - name: Mint bot identity token
+        if: steps.context.outputs.skip != 'true'
         id: apptoken
         # Minted here, immediately before it's needed, rather than at job
         # start: this keeps the App token off disk for the entire time the
@@ -194,6 +229,7 @@ jobs:
         run: echo "::warning::App token unavailable — reviews will post as github-actions"
 
       - name: Post review
+        if: steps.context.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ steps.apptoken.outputs.token || github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
