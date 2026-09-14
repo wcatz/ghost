@@ -2,15 +2,32 @@
 #
 # Validated mechanics (wcatz/ci-mech-spike, 2026-08-25):
 #   - GITHUB_TOKEN cannot resolve review threads ("not accessible by
-#     integration") and cannot submit APPROVED reviews. Resolutions go
-#     through a GitHub App installation token (GH_APP_ID +
-#     GH_APP_PRIVATE_KEY secrets, Pull requests: read+write on this repo
-#     only). Without those secrets this job degrades to report-only.
-#   - Outdated unresolved threads still block merge under required
-#     conversation resolution, so stale agent findings must be swept
-#     once a fresh review has re-judged the new diff.
-#   - GITHUB_TOKEN CAN submit REQUEST_CHANGES reviews. Signal-only:
-#     approvals stay out of branch protection entirely.
+#     integration") and cannot submit APPROVED reviews.
+#   - Neither can the App. Measured 2026-09-14 (PR #430, run 34877374970):
+#     with Pull requests: Read & write granted and the installation scoped
+#     to this repo, the App token reports viewerCanResolve=false and
+#     viewerCanReply=true on its own thread, while the repo owner reports
+#     viewerCanResolve=true. GitHub gates resolution on repository write
+#     access, which the Pull requests permission does not confer. Granting
+#     Contents: write would confer it — and would also let a token minted
+#     in the same pipeline that runs a model on untrusted diffs push code,
+#     so it is deliberately not granted.
+#   - Therefore merge is NOT gated on conversation resolution. It is gated
+#     on the `review-gate` check run this workflow publishes, which the
+#     bot can always clear because it owns it. An unresolved thread that
+#     has gone outdated does not count toward the gate, so stale findings
+#     stop mattering instead of needing to be swept.
+#   - GITHUB_TOKEN CAN submit REQUEST_CHANGES reviews, and this workflow
+#     deliberately does not. Under "Require a pull request before
+#     merging", an outstanding CHANGES_REQUESTED blocks merge even with
+#     required_approving_review_count: 0 — and neither GITHUB_TOKEN nor
+#     the App can dismiss it, exactly as neither can resolve a thread.
+#     Posting one creates a gate the bot cannot clear, which is the same
+#     trap that made conversation resolution unusable. The check run is
+#     the gate; a redundant blocking review is not a signal, it is a
+#     deadlock. Measured on PR #431: reviewDecision=CHANGES_REQUESTED
+#     from github-actions held the PR at BLOCKED after conversation
+#     resolution had already been switched off.
 #
 # Triggered by workflow_run after each Reviewer workflow completion and by
 # PR comments for manual re-runs. workflow_run executes in default-branch
@@ -28,6 +45,9 @@ on:
 
 permissions:
   pull-requests: write
+  # Publishing the merge gate. GITHUB_TOKEN can create check runs with
+  # this scope; no App identity is involved in gating.
+  checks: write
 
 concurrency:
   group: sweeper-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number }}
@@ -35,16 +55,14 @@ concurrency:
 
 jobs:
   loop:
-    # conclusion must be 'success': types:[completed] also fires on
-    # failure, cancelled and startup_failure. The sweep's whole premise
-    # (see the isOutdated note below) is that a fresh review has just
-    # re-judged the new diff — after a failed or cancelled review there
-    # is no such judgement, and resolving stale threads then would clear
-    # the merge gate on the strength of a review that never ran. Failing
-    # closed leaves the threads blocking, which is the safe direction.
+    # Runs on EVERY workflow_run conclusion, not just success. A required
+    # check that is never published reads as "Expected — waiting for
+    # status" and blocks the PR with no way to clear it, so the gate has
+    # to be written even when the review failed, was cancelled, or was
+    # skipped. What the conclusion still decides is the VALUE of the gate
+    # and whether stale threads may be swept — see the step below.
     if: >-
-      (github.event_name == 'workflow_run' &&
-        github.event.workflow_run.conclusion == 'success') ||
+      github.event_name == 'workflow_run' ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
         github.event.sender.type != 'Bot')
@@ -90,13 +108,67 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           APP_TOKEN: ${{ steps.app-token.outputs.token }}
           NUMBER: ${{ steps.pr.outputs.number }}
+          WF_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
           [ -n "$NUMBER" ] || { echo "no PR"; exit 0; }
 
-          # Cursor-paginated: first:100 alone silently skipped threads past
-          # 100, letting stale findings survive the sweep and keep blocking
-          # merge via required conversation resolution until a human
-          # resolved them. The page cap bounds a pathological repo
+          # Publishes the `review-gate` check run on the PR head.
+          #
+          # An earlier version swallowed its own failure and was only
+          # called on the happy path, which broke the very rule this file
+          # is built around: a required check that is never published
+          # reads as "Expected — waiting for status" and blocks the PR
+          # with nothing a re-run can clear. A transient failure in the
+          # headRefOid query or in any thread page trips `set -e` and
+          # aborts the step, so the final call alone was never a
+          # guarantee. Publication is therefore enforced from the EXIT
+          # trap and a failed publish now fails loudly.
+          GATE_WRITTEN=0
+          HEADREF=""
+          PAGES_FILE=""
+
+          set_gate() {
+            jq -n --arg sha "$1" --arg concl "$2" \
+                  --arg title "$3" --arg summary "$4" \
+              '{name:"review-gate", head_sha:$sha, status:"completed",
+                conclusion:$concl, output:{title:$title, summary:$summary}}' \
+              | gh api "repos/$GITHUB_REPOSITORY/check-runs" \
+                  --method POST --input - >/dev/null || {
+              echo "::error::could not publish the review-gate check run"
+              return 1
+            }
+            GATE_WRITTEN=1
+            echo "review-gate: $2 — $3"
+          }
+
+          on_exit() {
+            rc=$?
+            if [ -n "$PAGES_FILE" ]; then rm -f "$PAGES_FILE"; fi
+            if [ "$GATE_WRITTEN" != 1 ]; then
+              if [ -n "$HEADREF" ]; then
+                # Fail closed and visibly: the sweep did not finish, so
+                # its verdict is unknown, but the check still exists and
+                # a re-run can replace it.
+                set_gate "$HEADREF" failure \
+                  "The sweeper did not complete" \
+                  "The sweep aborted before it could evaluate this PR's findings, so the gate fails closed. Re-run the Sweeper workflow, or push a new commit." || true
+              else
+                # Nothing can be published without a head SHA. The step
+                # has already failed, so the job is red — which is at
+                # least visible, unlike a check that never appears.
+                echo "::error::the sweeper aborted before resolving the PR head SHA, so no review-gate check could be published for this commit"
+              fi
+            fi
+            exit "$rc"
+          }
+          trap on_exit EXIT
+
+          # Cursor-paginated: first:100 alone silently skipped threads
+          # past 100. That now matters more than it used to — an
+          # uncounted live thread does not merely linger, it makes N_LIVE
+          # too low and the review-gate check pass on a PR that still has
+          # open findings. Failing to see a finding must never read as
+          # not having one. The page cap bounds a pathological repo
           # (20 pages x 100 threads) so the loop can never run away.
           # shellcheck disable=SC2016
           HEADREF="$(gh api graphql \
@@ -106,8 +178,21 @@ jobs:
             -F number="$NUMBER" \
             --jq '.data.repository.pullRequest.headRefOid')"
 
+          # No judgement was produced for this commit, so the gate fails
+          # closed. It is still WRITTEN — leaving it unpublished would
+          # read as "Expected — waiting for status" forever, which blocks
+          # the PR with nothing a re-run can clear.
+          case "${GITHUB_EVENT_NAME}:${WF_CONCLUSION}" in
+            workflow_run:success|workflow_run:skipped|issue_comment:*) ;;
+            *)
+              set_gate "$HEADREF" failure \
+                "The review did not complete (${WF_CONCLUSION})" \
+                "The Reviewer workflow ended as \`${WF_CONCLUSION}\`, so this commit was never judged. Re-run the Reviewer or push a new commit."
+              exit 0
+              ;;
+          esac
+
           PAGES_FILE="$(mktemp)"
-          trap 'rm -f "$PAGES_FILE"' EXIT
           CURSOR_ARG=()
           for _ in $(seq 1 20); do
             # shellcheck disable=SC2016
@@ -157,7 +242,25 @@ jobs:
           N_STALE="$(jq length <<<"$STALE")"
           N_LIVE="$(jq length <<<"$LIVE")"
 
-          if [ "$N_STALE" -gt 0 ]; then
+          # A stale thread may only be swept when a review actually
+          # judged this commit. workflow_run:skipped reaches this point so
+          # the gate still gets published, but a skipped review produced
+          # no judgement — resolving on its strength would clear findings
+          # nothing re-checked. That loss is permanent, not cosmetic:
+          # reviewer.yml feeds resolved threads back to the model as
+          # dismissed, so a still-valid finding swept here is never
+          # re-raised. This is the guard the old success-only job `if`
+          # used to provide; publishing the gate on every conclusion took
+          # it away, so it is restored explicitly here.
+          SWEEP_OK=1
+          if [ "$GITHUB_EVENT_NAME" = "workflow_run" ] \
+             && [ "$WF_CONCLUSION" != "success" ]; then
+            SWEEP_OK=0
+          fi
+
+          if [ "$N_STALE" -gt 0 ] && [ "$SWEEP_OK" != 1 ]; then
+            echo "not sweeping $N_STALE stale thread(s): the Reviewer ended as '${WF_CONCLUSION}', so nothing judged this commit."
+          elif [ "$N_STALE" -gt 0 ]; then
             if [ -n "$APP_TOKEN" ]; then
               RESOLVED=0
               for id in $(jq -r .[] <<<"$STALE"); do
@@ -169,17 +272,31 @@ jobs:
                 fi
               done
               echo "Auto-resolved $RESOLVED/$N_STALE stale finding(s) (superseded by newer review)."
+              if [ "$RESOLVED" -lt "$N_STALE" ]; then
+                echo "note: $((N_STALE - RESOLVED)) stale thread(s) stayed unresolved — the App cannot resolve threads (measured: viewerCanResolve=false under Pull requests: read+write; see the header). This does not block merge: an outdated thread is not live, so it carries no weight in the review-gate check."
+              fi
             else
               echo "::warning::$N_STALE stale finding(s) await resolution — configure the GH_APP_ID / GH_APP_PRIVATE_KEY secrets to enable auto-resolve."
             fi
           fi
 
           if [ "$N_LIVE" -gt 0 ]; then
-            gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
-              -f event=REQUEST_CHANGES \
-              -f body="The reviewer has $N_LIVE unresolved finding(s) — see inline threads." >/dev/null 2>&1 \
-              && echo "Requested changes: $N_LIVE live finding(s)." \
-              || echo "Could not set REQUEST_CHANGES state."
+            echo "$N_LIVE live reviewer finding(s) — the review-gate check below will fail."
           else
             echo "No live reviewer findings."
+          fi
+
+          # The merge gate. Live means unresolved AND not outdated, so a
+          # finding clears it in either of the two ways that should clear
+          # it: the author fixes the code (the thread goes outdated) or a
+          # human resolves the thread. Nothing here needs a capability the
+          # bot lacks.
+          if [ "$N_LIVE" -gt 0 ]; then
+            set_gate "$HEADREF" failure \
+              "$N_LIVE unresolved reviewer finding(s)" \
+              "The reviewer has $N_LIVE finding(s) that are still open against the current diff. Address the code, or resolve the thread if the finding is wrong. The gate re-evaluates on the next review."
+          else
+            set_gate "$HEADREF" success \
+              "No unresolved reviewer findings" \
+              "Every reviewer finding on this PR is either resolved or outdated against the current diff."
           fi
