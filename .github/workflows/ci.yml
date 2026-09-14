@@ -61,8 +61,27 @@ jobs:
       - name: Review-script unit tests
         # stdlib-only unittest; ubuntu-latest ships python3, so no setup
         # step and no dependency install.
+        #
+        # unittest discover's own exit code is not a sufficient guard on its
+        # own — whether zero tests collected counts as a failure has varied
+        # across Python versions — so the "Ran N tests" line is asserted
+        # explicitly here, the same way the actionlint step above guards its
+        # own zero-files case with an explicit count. No `shell:` key is set
+        # anywhere in this file, so this runs under Actions' default
+        # `bash -e {0}` — no pipefail — which is why output is captured via
+        # command substitution instead of a pipe.
         working-directory: .github/scripts
-        run: python3 -m unittest discover -p 'test_*.py' -v
+        run: |
+          set +e
+          OUTPUT=$(python3 -m unittest discover -p 'test_*.py' -v 2>&1)
+          STATUS=$?
+          set -e
+          echo "$OUTPUT"
+          if ! grep -qE 'Ran [1-9][0-9]* test' <<<"$OUTPUT"; then
+            echo "::error::unittest discover reported no tests ran — check for a renamed or missing test_*.py file"
+            exit 1
+          fi
+          exit "$STATUS"
 
       - uses: actions/setup-go@v7
         with:
