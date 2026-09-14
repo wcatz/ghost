@@ -82,13 +82,6 @@ jobs:
       same-repo: ${{ steps.pr.outputs.same-repo }}
       pr-number: ${{ steps.pr.outputs.pr-number }}
     steps:
-      - name: TEMP expr semantics probe
-        run: |
-          echo "and_sentinel: ${{ true && 'manual' }}"
-          echo "or_sentinel:  ${{ 0 || 42 }}"
-          echo "chain_pr:     ${{ ((false) && 'manual') || ((true) && 'auto') || 'noop' }}"
-          echo "chain_cmd:    ${{ ((true) && 'manual') || ((true) && 'auto') || 'noop' }}"
-          echo "chain_none:   ${{ ((false) && 'manual') || ((false) && 'auto') || 'noop' }}"
       - id: pr
         env:
           GH_TOKEN: ${{ github.token }}
@@ -112,8 +105,9 @@ jobs:
     if: needs.config.outputs.same-repo == 'true'
     runs-on: ubuntu-latest
     # Hard cap: a hung model call or huge diff must die at the runner, not
-    # park it for 10 minutes. 15m covers checkout + install + review with
-    # headroom while still bounding a pathological hang.
+    # park it for 10 minutes. 20m covers the 10m model budget plus install,
+    # checkout, prep, and a posting retry with headroom, while still
+    # bounding a pathological hang.
     timeout-minutes: 20
     steps:
       - name: Mint bot identity token
@@ -205,7 +199,7 @@ jobs:
         # Budget reality check (measured): free-tier big-pickle takes 2-5
         # minutes on even a small PR, and the tokenless run must explore via
         # reads instead of gh. 10m is the observed worst case with headroom;
-        # the 15m job cap remains the backstop. A shorter cap (5m) failed
+        # the 20m job cap remains the backstop. A shorter cap (5m) failed
         # routinely on a live repo.
         timeout-minutes: 10
         env:
@@ -267,8 +261,10 @@ jobs:
           first_nonblank="$(grep -m1 -vE '^[[:space:]]*$' review.md || true)"
           strict="$(printf '%s' "$first_nonblank" | grep -qiE '^\*{0,2}[[:space:]]*verdict:[[:space:]]+(blocker|should-fix|nit|clean)' && echo yes || echo no)"
           # Loose match tolerates wrappers ("verdict: clean", 'verdict = clean',
-          # a stray code fence) so a good review is recognized as such.
-          loose="$(grep -oiE 'verdict[[:space:]]*[:=-][[:space:]]*(blocker|should-fix|nit|clean)' review.md | head -1 || true)"
+          # a stray code fence) so a good review is recognized as such. The
+          # separator is OPTIONAL (:,-,=, or bare space) — a wobbled "verdict
+          # clean" must fall to the warning path, never the hard-fail drop.
+          loose="$(grep -oiE 'verdict[[:space:]]*[:=-]?[[:space:]]*(blocker|should-fix|nit|clean)' review.md | head -1 || true)"
           if [ "$strict" = "yes" ]; then
             echo "verdict gate: strict pass"
           elif [ -n "$loose" ]; then
@@ -286,6 +282,22 @@ jobs:
           PR_NUMBER: ${{ needs.config.outputs.pr-number }}
         run: |
           cd "${GITHUB_WORKSPACE}"
+          reviewed="$(cat pr.head 2>/dev/null || true)"
+          # Dedup: concurrency lanes are split by event type, so a /review
+          # comment landing while an in-flight synchronize auto-run is
+          # mid-model completes independently — without a guard both would
+          # post a full review for the same head (READ ME: exact-one per
+          # head). The posted body embeds an invisible marker
+          # <!-- bot-review:<sha> -->, so check existing review bodies for
+          # a marker matching the head this run reviewed and skip if found.
+          # Identity-agnostic: works for App or github-actions authorship.
+          if [ -n "$reviewed" ] && \
+             gh pr view "$PR_NUMBER" --json reviews --jq --arg s "$reviewed" \
+               '.reviews[] | select((.body // "") | contains("<!-- bot-review:" + $s + " -->"))' \
+               | grep -q . 2>/dev/null; then
+            echo "skip: self-review already posted for head ${reviewed:0:7}"
+            exit 0
+          fi
           # Compare the reviewed head against the PR's CURRENT head. A /review
           # run that started at head X takes minutes of model time, so a push
           # to Y can land in between; a pull_request run is already gated to
@@ -296,11 +308,12 @@ jobs:
           # of an otherwise-finished review — an empty 'current' just skips
           # the staleness label.
           current="$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
-          reviewed="$(cat pr.head 2>/dev/null || true)"
           if [ -n "$reviewed" ] && [ -n "$current" ] && [ "$current" != "$reviewed" ]; then
             echo "" >> review.md
             echo "_note: PR head moved to ${current:0:7} since this review was generated against ${reviewed:0:7} — line numbers may be stale._" >> review.md
           fi
+          # Brand the body so a later same-head run can self-dedup.
+          printf '\n<!-- bot-review:%s -->\n' "$reviewed" >> review.md
           # Retry the posting once on a transient network/API failure so a
           # flake cannot silently destroy a finished review; a persistent
           # failure still surfaces as a red step.
