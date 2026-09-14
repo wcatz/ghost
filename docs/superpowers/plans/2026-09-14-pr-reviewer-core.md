@@ -1687,12 +1687,12 @@ gh pr close 420 --comment "The PR-Agent action is removed; bump no longer applie
 
 ## Definition of done
 
-- [ ] `actionlint` and the Python unit tests run in the `lint` job on every PR
-- [ ] A real PR receives severity-gated inline threads from `review-sweeper[bot]`
-- [ ] `nit` findings appear in a collapsed block and do not block merge
-- [ ] `blocker`/`should-fix` findings block merge via `required_conversation_resolution`
-- [ ] `sweeper.yml` resolves stale threads and posts `REQUEST_CHANGES` on live ones
-- [ ] A re-run against unchanged code posts zero duplicate findings
-- [ ] An empty incremental diff skips the model run
-- [ ] Fixture recall is recorded in the results doc
-- [ ] `pr-agent.yml`, `pr-loop.yml`, and `.pr_agent.toml` are gone; #420 and #421 closed
+- [x] `actionlint` and the Python unit tests run in the `lint` job on every PR — `lint` pass on PR #422 head `71438eb`, run 34855752142. Note `ci.yml` triggers on `pull_request: branches: [main]`, so a PR stacked onto a feature branch does not run it; #423's workflow changes get their first CI lint when GitHub retargets that PR to `main`.
+- [x] A real PR receives severity-gated inline threads from `review-sweeper[bot]` — PR #423 run 34855768054 (2 inline findings), PR #425 run 34861183180 (1 blocker thread)
+- [x] `nit` findings appear in a collapsed block and do not block merge — verified live on PR #425, run 34861183180: 2 nits in the collapsed body block, 0 inline threads for them (see `2026-09-14-pr-reviewer-fixture-results.md`)
+- [ ] `blocker`/`should-fix` findings block merge via `required_conversation_resolution` — **not verifiable yet.** `required_conversation_resolution: true` is confirmed on `main`, and the reviewer does create unresolved threads, but both open PRs target feature branches, where no protection applies (#423 reports `mergeStateStatus=UNSTABLE`, not `BLOCKED`). First provable on a PR whose base is `main`.
+- [ ] `sweeper.yml` resolves stale threads and posts `REQUEST_CHANGES` on live ones — **not verifiable yet.** `workflow_run` workflows only execute from the default branch, so the sweeper cannot run until this lands on `main`.
+- [x] A re-run against unchanged code posts zero duplicate findings — PR #423 run 34857252809: `posted review: 0 inline finding(s)` on the second pass
+- [x] An empty incremental diff skips the model run — run 34859894426: `no reviewable change since c0623bd...; skipping`; Review/Mint/Post all `skipped`, job green
+- [x] Fixture recall is recorded in the results doc — `2026-09-14-pr-reviewer-fixture-results.md`: 3/3 recall, 0 fixture false positives, 4/4 true positives on real code, 1 false positive rejected with log evidence, plus the severity-partition run
+- [x] `pr-agent.yml`, `pr-loop.yml`, and `.pr_agent.toml` are gone; #420 and #421 closed — deleted in `443ad53`. The `pr_agent_job` check still reports on #422 because the deletion lives on the workflows branch and the workflow file is still on `main`; it stops running once this merges.
