@@ -58,6 +58,12 @@ jobs:
           echo "actionlint scanning ${#FILES[@]} workflow file(s)"
           /tmp/actionlint -color "${FILES[@]}"
 
+      - name: Review-script unit tests
+        # stdlib-only unittest; ubuntu-latest ships python3, so no setup
+        # step and no dependency install.
+        working-directory: .github/scripts
+        run: python3 -m unittest discover -p 'test_*.py' -v
+
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
