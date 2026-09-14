@@ -331,7 +331,14 @@ jobs:
               return 2
             fi
             local rc=0
-            jq -e --arg s "$reviewed" \
+            # -s slurp: gh api --paginate may emit one array OR (multi-page)
+            # several concatenated arrays; slurping flattens every page into
+            # one outer array, then 'add' concatenates them into a single
+            # reviews array before matching. (Plain 'add' on an array of
+            # OBJECTS would keywise-merge them, and a subsequent .[] would
+            # then iterate mixed-typed merged values — .body on an id
+            # number, exactly the rc=5 seen on run 34800256653.)
+            jq -e -s --arg s "$reviewed" \
               'add | any(.[]; (.body // "") | contains("<!-- bot-review:" + $s + " -->"))' \
               <<<"$body" >/dev/null || rc=$?
             [ "$rc" = 0 ] && return 0
