@@ -93,3 +93,90 @@ def parse_hunks(diff_text):
             new_line += 1
         # '-' lines consume no RIGHT-side number; '\' (no newline) is inert.
     return hunks
+
+
+MARKER = "<!-- ghost-review:{sha} -->"
+
+_LABEL = {"blocker": "🔴 blocker", "should-fix": "🟠 should-fix", "nit": "🔵 nit"}
+
+
+def partition(findings):
+    """Split findings into (blocking, nits) per the severity policy."""
+    blocking = [f for f in findings if f.get("severity") in BLOCKING]
+    nits = [f for f in findings if f.get("severity") == "nit"]
+    return blocking, nits
+
+
+def _render_comment(f):
+    parts = [f"**{_LABEL[f['severity']]} — {f['title']}**", "", f["body"]]
+    if f.get("suggestion") is not None:
+        parts += ["", "```suggestion", f["suggestion"].rstrip("\n"), "```"]
+    return "\n".join(parts)
+
+
+def _anchor(f, hunks):
+    """Return a Reviews-API comment dict, or None if it is not in the diff."""
+    lines = hunks.get(f["file"])
+    if not lines:
+        return None
+    start = f["line"]
+    end = f.get("end_line") or start
+    if start not in lines or end not in lines:
+        return None
+    comment = {
+        "path": f["file"],
+        "line": end,
+        "side": "RIGHT",
+        "body": _render_comment(f),
+    }
+    if end != start:
+        comment["start_line"] = start
+        comment["start_side"] = "RIGHT"
+    return comment
+
+
+def build_review(doc, commit_id, hunks):
+    """Return (review_payload, dropped_findings).
+
+    Blocking findings become inline comments; nits and un-anchorable
+    findings go in the review body so nothing is silently lost.
+    """
+    blocking, nits = partition(doc["findings"])
+
+    comments, dropped = [], []
+    for f in blocking:
+        anchored = _anchor(f, hunks)
+        if anchored is None:
+            dropped.append(f)
+        else:
+            comments.append(anchored)
+
+    body = [doc["summary"], ""]
+    body.append(f"**Verdict:** `{doc['verdict']}` — "
+                f"{len(comments)} inline finding(s), {len(nits)} nit(s).")
+
+    if nits:
+        body += ["", "<details><summary>Nits "
+                 f"({len(nits)}) — non-blocking</summary>", ""]
+        for f in nits:
+            loc = f"`{f['file']}:{f['line']}`"
+            body.append(f"- {loc} **{f['title']}** — {f['body']}")
+        body += ["", "</details>"]
+
+    if dropped:
+        body += ["", f"**{len(dropped)} finding(s) could not be anchored** "
+                 "to a line in this diff and are reported here instead:", ""]
+        for f in dropped:
+            loc = f"`{f['file']}:{f['line']}`"
+            body.append(f"- {_LABEL[f['severity']]} {loc} "
+                        f"**{f['title']}** — {f['body']}")
+
+    body += ["", MARKER.format(sha=commit_id)]
+
+    payload = {
+        "commit_id": commit_id,
+        "body": "\n".join(body),
+        "event": "COMMENT",
+        "comments": comments,
+    }
+    return payload, dropped

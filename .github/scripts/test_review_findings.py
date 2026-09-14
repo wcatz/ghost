@@ -1,6 +1,6 @@
 import unittest
 
-from review_findings import ValidationError, validate, parse_hunks
+from review_findings import ValidationError, validate, parse_hunks, build_review, partition
 
 
 def _doc(**over):
@@ -116,6 +116,81 @@ class TestParseHunks(unittest.TestCase):
 
     def test_empty_diff_yields_no_hunks(self):
         self.assertEqual(parse_hunks(""), {})
+
+
+class TestPartition(unittest.TestCase):
+    def test_splits_blocking_from_nits(self):
+        findings = [
+            {"severity": "blocker"}, {"severity": "should-fix"},
+            {"severity": "nit"},
+        ]
+        blocking, nits = partition(findings)
+        self.assertEqual([f["severity"] for f in blocking],
+                         ["blocker", "should-fix"])
+        self.assertEqual([f["severity"] for f in nits], ["nit"])
+
+
+class TestBuildReview(unittest.TestCase):
+    def setUp(self):
+        self.hunks = {"a.go": {1, 2, 3, 4, 5}}
+
+    def _f(self, **over):
+        f = {"file": "a.go", "line": 3, "severity": "should-fix",
+             "title": "Unchecked error", "body": "Exec's error is dropped."}
+        f.update(over)
+        return f
+
+    def test_anchors_a_single_line_finding(self):
+        doc = {"verdict": "should-fix", "summary": "s",
+               "findings": [self._f()]}
+        payload, dropped = build_review(doc, "abc123", self.hunks)
+        self.assertEqual(payload["event"], "COMMENT")
+        self.assertEqual(payload["commit_id"], "abc123")
+        self.assertEqual(len(payload["comments"]), 1)
+        c = payload["comments"][0]
+        self.assertEqual((c["path"], c["line"], c["side"]), ("a.go", 3, "RIGHT"))
+        self.assertNotIn("start_line", c)
+        self.assertEqual(dropped, [])
+
+    def test_anchors_a_multi_line_finding_with_start_line(self):
+        doc = {"verdict": "should-fix", "summary": "s",
+               "findings": [self._f(line=2, end_line=4)]}
+        payload, _ = build_review(doc, "abc123", self.hunks)
+        c = payload["comments"][0]
+        self.assertEqual((c["start_line"], c["line"]), (2, 4))
+        self.assertEqual(c["start_side"], "RIGHT")
+
+    def test_nits_never_become_comments(self):
+        doc = {"verdict": "nit", "summary": "s",
+               "findings": [self._f(severity="nit")]}
+        payload, _ = build_review(doc, "abc123", self.hunks)
+        self.assertEqual(payload["comments"], [])
+        self.assertIn("Unchecked error", payload["body"])
+
+    def test_out_of_diff_anchor_is_dropped_not_posted(self):
+        doc = {"verdict": "should-fix", "summary": "s",
+               "findings": [self._f(line=99)]}
+        payload, dropped = build_review(doc, "abc123", self.hunks)
+        self.assertEqual(payload["comments"], [])
+        self.assertEqual(len(dropped), 1)
+        self.assertIn("could not be anchored", payload["body"])
+
+    def test_unknown_file_is_dropped(self):
+        doc = {"verdict": "should-fix", "summary": "s",
+               "findings": [self._f(file="nope.go")]}
+        _, dropped = build_review(doc, "abc123", self.hunks)
+        self.assertEqual(len(dropped), 1)
+
+    def test_suggestion_renders_a_fenced_block(self):
+        doc = {"verdict": "should-fix", "summary": "s",
+               "findings": [self._f(suggestion="\tif err != nil {\n")]}
+        payload, _ = build_review(doc, "abc123", self.hunks)
+        self.assertIn("```suggestion", payload["comments"][0]["body"])
+
+    def test_body_carries_the_reviewed_sha_marker(self):
+        doc = {"verdict": "clean", "summary": "All good.", "findings": []}
+        payload, _ = build_review(doc, "deadbeef", self.hunks)
+        self.assertIn("<!-- ghost-review:deadbeef -->", payload["body"])
 
 
 if __name__ == "__main__":
