@@ -20,7 +20,10 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Must stay above the model step's own timeout plus the ~3 min of
+    # checkout/install/prepare ahead of it, or the job ceiling kills the
+    # run first and the step timeout never fires.
+    timeout-minutes: 35
     # Fork PRs get a read-only token and no repo secrets by GitHub's design,
     # so the App mint below would fail and the whole pipeline would run
     # anyway, wasting an LLM invocation to reach a guaranteed failure at
@@ -386,7 +389,11 @@ jobs:
 
       - name: Review with opencode big-pickle
         if: steps.context.outputs.skip != 'true'
-        timeout-minutes: 15
+        # 15 was cutting it fine: run 34892821126 took 12m51s. The
+        # read-only agent reads more than the write-capable one did (21
+        # tool calls against 9 on a comparable diff) because it has no
+        # shortcut, so a larger diff would have tripped it.
+        timeout-minutes: 25
         run: |
           cd "${GITHUB_WORKSPACE}"
           # Hard-fail rather than hand a credential to a model fed
