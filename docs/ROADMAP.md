@@ -92,8 +92,9 @@ and one optional alternative.
   the natural home for the job.
 - Workflow sketch: checkout → install Ollama → pull embed model → download
   dataset → run harness → fail PR on regression, same pattern as the existing
-  dev-facts `ghost bench` CI gate. (Implemented; hybrid halves the Ollama
-  step out because the cold pass is hours-long.)
+  dev-facts `ghost bench` CI gate. (Implemented; the PR gate runs
+  fts-only and needs no Ollama, while hybrid stays manual
+  (`workflow_dispatch`) because its cold embedding pass is hours-long.)
 - **Optional persistent alternative (not pursued):** Oracle Cloud "Always Free" Ampere A1
   (4 OCPU / 24GB RAM, ARM, free indefinitely as of 2026) if a long-lived
   Ollama instance is preferred over ephemeral CI runs. Caveats: those
