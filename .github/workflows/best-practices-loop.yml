@@ -210,16 +210,18 @@ jobs:
             exit 1
           fi
           echo "distill disk assertion passed: no credential in .git/config"
-          # Same masked-pipe hazard as pr-agent: runner shell is 'bash -e'
-          # without pipefail, so pipe `bash` empty stdin on a failed curl
-          # would exit 0 and the real failure would surface later as a
-          # confusing "command not found". -o + && short-circuits instead.
-          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/oc-install.sh https://opencode.ai/install \
-            && bash /tmp/oc-install.sh -v 1.18.30
-          # Verify on disk, not `command -v`: the installer's $GITHUB_PATH
-          # export only reaches SUBSEQUENT steps, so a same-step lookup
-          # would fail even on a good install.
-          [ -x "$HOME/.opencode/bin/opencode" ] || { echo "::error::opencode binary missing after install ($HOME/.opencode/bin/opencode)"; exit 1; }
+          # Binary downloaded directly from GitHub Releases with SHA256
+          # verification — no unpinned curl|bash. GitHub ubuntu-latest runners
+          # are x86_64; the asset is opencode-linux-x64.tar.gz.
+          mkdir -p "$HOME/.opencode/bin"
+          OC_VERSION=1.18.30
+          OC_SHA256=55007246858165496ff85ba1c2b648f7421e8e2013bf4189a680c9ff8e699d17
+          OC_URL="https://github.com/anomalyco/opencode/releases/download/v${OC_VERSION}/opencode-linux-x64.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/opencode.tar.gz "$OC_URL"
+          echo "${OC_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/opencode.tar.gz -C "$HOME/.opencode/bin" opencode
+          chmod +x "$HOME/.opencode/bin/opencode"
+          [ -x "$HOME/.opencode/bin/opencode" ] || { echo "::error::opencode binary missing after install"; exit 1; }
           CURRENT="$(python3 -c 'import sys; d=sys.stdin.buffer.read()[:40000].decode("utf-8","ignore"); sys.stdout.buffer.write(d.encode("utf-8"))' < best_practices.md)"
           FINDINGS="$(cat findings.txt)"
           # execve caps a single argument at MAX_ARG_STRLEN (128 KiB on
