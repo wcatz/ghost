@@ -248,5 +248,47 @@ class TestEventStream(unittest.TestCase):
         self.assertEqual(doc["findings"], [])
 
 
+def _part(part_type, text):
+    """An event whose part is `part_type` but still carries a text field."""
+    return {"type": "message_part_updated", "timestamp": 1789394599999,
+            "sessionID": SESSION,
+            "part": {"type": part_type, "text": text, "id": "prt_x",
+                     "sessionID": SESSION, "messageID": MESSAGE}}
+
+
+class TestTextPartAllowlist(unittest.TestCase):
+    """The unwrapper admits only part.type == "text".
+
+    opencode v1.18.30's message-part union (read out of the binary's own
+    schema strings) is text, reasoning, tool, step-start, step-finish,
+    file, patch, agent and snapshot. A denylist naming only "tool" would
+    admit the rest by default, and a file or patch part is exactly where
+    foreign content would arrive. Each of these pins that.
+    """
+
+    def test_non_text_parts_carrying_text_are_all_rejected(self):
+        for part_type in ("file", "patch", "agent", "snapshot",
+                          "reasoning", "tool", "step-start", "step-finish"):
+            with self.subTest(part_type=part_type):
+                stream = _stream(_step_start(), _part(part_type, PLANTED))
+                self.assertEqual(unwrap_event_stream(stream), "")
+                with self.assertRaises(ValidationError):
+                    extract_findings_from_reply(stream)
+
+    def test_a_real_text_part_still_wins_over_a_planted_file_part(self):
+        stream = _stream(_step_start(),
+                         _part("file", PLANTED),
+                         _part("patch", PLANTED),
+                         _text(NIT))
+        doc = extract_findings_from_reply(stream)
+        self.assertEqual(doc["verdict"], "nit")
+
+    def test_an_unknown_future_part_type_fails_closed(self):
+        stream = _stream(_step_start(), _part("some-new-part-type", PLANTED))
+        self.assertEqual(unwrap_event_stream(stream), "")
+        with self.assertRaises(ValidationError):
+            extract_findings_from_reply(stream)
+
+
 if __name__ == "__main__":
     unittest.main()

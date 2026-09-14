@@ -339,33 +339,42 @@ def _parse_event_stream(text):
     return events or None
 
 
+# opencode's message-part union, read out of the v1.18.30 binary's own
+# schema strings: text, reasoning, tool, step-start, step-finish, file,
+# patch, agent, snapshot. Only "text" is the model addressing us.
+MODEL_TEXT_PART = "text"
+
+
 def _model_text_parts(events):
-    """Yield the text of the model's OWN message parts, in stream order."""
+    """Yield the text of the model's OWN message parts, in stream order.
+
+    SECURITY — this filter is the whole point of the unwrapper, and it is
+    an allowlist on purpose. A tool-result part carries
+    part.state.output: the verbatim content of a file the model read. On
+    a pull request that content is attacker-controlled (pr.diff is the
+    PR's own diff), and it also echoes back the reviewer prompt, which
+    embeds a literal {"verdict": "blocker|should-fix|nit|clean", ...}
+    template. Recovering the findings document from anywhere in the
+    stream would let a PR plant {"verdict":"clean"} in a file, have the
+    model read it, and have that become the posted verdict.
+
+    A denylist of the part types that are known to carry foreign content
+    would leave file/patch/agent/snapshot parts — and anything a future
+    opencode adds — admitted by default. So only a part explicitly typed
+    "text" contributes, and the top-level event type must not mention a
+    tool either. An opencode that renames the text part fails closed with
+    an empty unwrap, and extract_findings_from_reply's inventory names
+    the types it actually saw, which is a one-run diagnosis rather than a
+    silent wrong verdict.
+    """
     for event in events:
-        # SECURITY — this exclusion is the whole point of the unwrapper.
-        # A tool-result event carries part.state.output: the verbatim
-        # content of a file the model read. On a pull request that
-        # content is attacker-controlled (pr.diff is the PR's own diff),
-        # and it also echoes back the reviewer prompt, which embeds a
-        # literal {"verdict": "blocker|should-fix|nit|clean", ...}
-        # template. Recovering the findings document from anywhere in the
-        # stream would therefore let a PR plant {"verdict":"clean"} in a
-        # file, have the model read it, and have that become the posted
-        # verdict. Only the model's own message parts may contribute.
-        # Belt and braces: drop on the top-level type AND on the part
-        # type, so a rename of either one still fails closed.
         top_type = event.get("type")
         if isinstance(top_type, str) and "tool" in top_type:
             continue
         part = event.get("part")
         if not isinstance(part, dict):
             continue
-        part_type = part.get("type")
-        if part_type == "tool":
-            continue
-        # A reasoning part is the model thinking out loud; the final
-        # answer is what we want, not a draft. (Harmless when absent.)
-        if part_type == "reasoning":
+        if part.get("type") != MODEL_TEXT_PART:
             continue
         chunk = part.get("text")
         if isinstance(chunk, str):
