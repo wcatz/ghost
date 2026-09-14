@@ -44,7 +44,14 @@ jobs:
           OC_VERSION=1.18.30
           OC_SHA256=55007246858165496ff85ba1c2b648f7421e8e2013bf4189a680c9ff8e699d17
           OC_URL="https://github.com/anomalyco/opencode/releases/download/v${OC_VERSION}/opencode-linux-x64.tar.gz"
-          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/opencode.tar.gz "$OC_URL"
+          # --retry: the release CDN returns transient 5xx. Run
+          # 34857548998 died on `curl: (22) ... error: 504` and took the
+          # whole review with it. curl retries 408/429/5xx by default;
+          # --retry-connrefused adds the refused-connection case. The
+          # SHA256 check below is what makes retrying safe.
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            --retry 5 --retry-delay 2 --retry-connrefused \
+            -o /tmp/opencode.tar.gz "$OC_URL"
           echo "${OC_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c -
           tar -xzf /tmp/opencode.tar.gz -C "$HOME/.opencode/bin" opencode
           chmod +x "$HOME/.opencode/bin/opencode"
