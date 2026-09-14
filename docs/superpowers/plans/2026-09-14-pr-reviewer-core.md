@@ -27,6 +27,7 @@ Do not re-derive these; they were run against the real repo, not asserted.
 | The stdout channel carries real model output on an x86_64 runner | #421's review of 2026-09-14T04:59:07Z: 4,241 chars, first line `verdict: nit` |
 | The model's write path is unverified (NOT disproven) | `--auto` defaults false; a local probe was invalid — aarch64 host vs the pinned linux-x64 build |
 | `parse_hunks` handles real diffs | 3 real diffs (80 KB / 7 KB / 95 KB), 33 files, no `a/`–`b/` prefix leaks, no non-positive lines |
+| `ci.yml` runs under `bash -e`, NOT `-eo pipefail` | no `shell:` or `defaults.run.shell` in the file; GitHub uses `-eo pipefail` only when `shell: bash` is set explicitly. Verified both forms against the count line: `-e` → exit 0, `-eo pipefail` → exit 2 |
 | `parse_hunks` never anchors past EOF | 32 files cross-checked against their content at `main`: every anchorable line number exists |
 
 Two facts that shape the plan and were also checked:
@@ -147,18 +148,23 @@ In `.github/workflows/ci.yml`, inside the `lint` job's `steps:`, after checkout:
             "https://github.com/rhysd/actionlint/releases/download/v${AL_VERSION}/actionlint_${AL_VERSION}_linux_amd64.tar.gz"
           echo "${AL_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
           tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
-          # Explicit paths, NOT bare `actionlint`. Auto-discovery resolves
-          # workflows relative to a git project root; run it where that
-          # lookup fails and it scans nothing, finds nothing, and exits 0 —
-          # a vacuously green check. Verified 2026-09-14: the same binary
-          # that flags PR #421's `administration: read` when handed the
-          # file reports zero findings when auto-discovery comes up empty.
-          # A literal unexpanded glob makes the binary error on a missing
-          # file, so a wrong working directory fails loudly.
-          COUNT="$(ls .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null | wc -l)"
-          [ "$COUNT" -gt 0 ] || { echo "::error::actionlint found no workflow files to scan"; exit 1; }
-          echo "actionlint scanning $COUNT workflow file(s)"
-          /tmp/actionlint -color .github/workflows/*.yml
+          # Count and scan the SAME set by construction. nullglob makes a
+          # non-matching pattern expand to nothing instead of a literal, so
+          # a repo with only .yml (like this one today) and one with .yaml
+          # both work, and the guard below cannot disagree with what is
+          # actually scanned.
+          shopt -s nullglob
+          FILES=(.github/workflows/*.yml .github/workflows/*.yaml)
+          shopt -u nullglob
+          # Explicit paths, NOT bare `actionlint`: auto-discovery resolves
+          # workflows relative to a git project root, and where that lookup
+          # fails it scans nothing, finds nothing and exits 0 — a vacuously
+          # green check. Verified 2026-09-14: the same binary that flags PR
+          # #421's `administration: read` when handed the file reports zero
+          # findings when auto-discovery comes up empty.
+          [ "${#FILES[@]}" -gt 0 ] || { echo "::error::actionlint found no workflow files to scan"; exit 1; }
+          echo "actionlint scanning ${#FILES[@]} workflow file(s)"
+          /tmp/actionlint -color "${FILES[@]}"
 ```
 
 - [ ] **Step 4: Verify it runs clean against the current workflows**
