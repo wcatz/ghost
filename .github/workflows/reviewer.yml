@@ -43,11 +43,30 @@ jobs:
       # repo, so a cache entry is not trustworthy input, and the existing
       # SHA256 check below runs on every path — hit or miss — which makes
       # a poisoned entry fail closed instead of executing.
+      #
+      # continue-on-error: without it this step trades one fatal
+      # transient-infra dependency (the CDN) for another (the cache
+      # service), and the cache one fails BEFORE the checksum-guarded
+      # recovery in Install can run. A failed restore is fully
+      # recoverable — Install just downloads — so it must not end the
+      # review.
+      #
+      # The key carries the expected SHA256 prefix, not just the version.
+      # actions/cache never overwrites an existing key and skips its save
+      # on an exact hit, so a fixed key is a one-way door: re-issue the
+      # 1.18.30 artifact and the key would still match the stale entry
+      # forever. Rotating the SHA rotates the key. Residual, accepted
+      # limitation: a poisoned entry under the current key is restored,
+      # fails the checksum, is re-downloaded, and cannot be re-saved
+      # (the key already exists), so the cache degrades to a permanent
+      # miss — the pre-cache behaviour, never an execution of foreign
+      # bytes.
       - name: Cache the opencode tarball
+        continue-on-error: true
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: /tmp/opencode.tar.gz
-          key: opencode-tarball-linux-x64-1.18.30
+          key: opencode-tarball-linux-x64-1.18.30-5500724685816549
 
       - name: Install opencode
         # Binary from GitHub Releases with SHA256 verification — no
