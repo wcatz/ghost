@@ -360,5 +360,57 @@ class TestBuildReview(unittest.TestCase):
         self.assertIn("<!-- ghost-review:deadbeef -->", payload["body"])
 
 
+class TestReviewBodyLayout(unittest.TestCase):
+    """The rendered body is what a human actually reads on the PR page."""
+
+    def setUp(self):
+        self.hunks = {"a.go": {1, 2, 3, 4, 5}}
+
+    def _f(self, **over):
+        f = {"file": "a.go", "line": 3, "severity": "nit",
+             "title": "Wording", "body": "Reads oddly."}
+        f.update(over)
+        return f
+
+    def _body(self, verdict, findings, summary="Summary text."):
+        doc = {"verdict": verdict, "summary": summary, "findings": findings}
+        return build_review(doc, "abc123", self.hunks)[0]["body"]
+
+    def test_verdict_precedes_the_summary(self):
+        body = self._body("nit", [self._f()])
+        self.assertLess(body.index("nit"), body.index("Summary text."))
+        self.assertTrue(body.startswith("**"), body[:40])
+
+    def test_clean_says_nothing_to_fix_rather_than_zero_counts(self):
+        body = self._body("clean", [])
+        self.assertIn("nothing to fix", body)
+        self.assertNotIn("0 ", body)
+
+    def test_counts_are_pluralised_not_parenthesised(self):
+        one = self._body("nit", [self._f()])
+        two = self._body("nit", [self._f(), self._f(line=4)])
+        self.assertIn("1 nit.", one)
+        self.assertIn("2 nits.", two)
+        self.assertNotIn("(s)", one + two)
+
+    def test_nits_omit_the_label_but_dropped_findings_keep_it(self):
+        body = self._body("should-fix", [
+            self._f(),
+            self._f(severity="should-fix", line=99, title="Off-diff"),
+        ])
+        nits, dropped = body.split("</details>")
+        self.assertNotIn("\U0001f535", nits)
+        self.assertIn("\U0001f7e0 should-fix", dropped)
+
+    def test_a_finding_body_sits_under_its_bullet_not_beside_it(self):
+        body = self._body("nit", [self._f(body="Line one.")])
+        self.assertIn("- **Wording** \u2014 `a.go:3`\n\n  Line one.", body)
+
+    def test_a_blank_line_inside_a_body_carries_no_trailing_spaces(self):
+        body = self._body("nit", [self._f(body="First.\n\nSecond.")])
+        self.assertNotIn("  \n", body)
+        self.assertIn("\n  First.\n\n  Second.", body)
+
+
 if __name__ == "__main__":
     unittest.main()
