@@ -74,6 +74,24 @@ def validate(doc):
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
+def _unquote_git_path(target):
+    """Undo git's core.quotePath=true C-style quoting of a diff path.
+
+    A non-ASCII (or otherwise "unusual") filename is rendered by git as a
+    double-quoted string with UTF-8 bytes octal-escaped, e.g.
+    "b/caf\\303\\251.txt" for café.txt. Left as-is, the quotes/backslashes/
+    octal escapes stay in the key and findings against that file can never
+    anchor.
+    """
+    if target.startswith('"') and target.endswith('"'):
+        target = (target[1:-1]
+                  .encode("latin-1", "backslashreplace")
+                  .decode("unicode_escape")
+                  .encode("latin-1")
+                  .decode("utf-8", "replace"))
+    return target
+
+
 def parse_hunks(diff_text):
     """Map repo-relative path -> set of RIGHT-side line numbers in the diff.
 
@@ -84,17 +102,27 @@ def parse_hunks(diff_text):
     hunks = {}
     path = None
     new_line = 0
+    saw_dash_header = False
 
     for raw in diff_text.splitlines():
         if raw.startswith("diff --git "):
             path, new_line = None, 0
+            saw_dash_header = False
             continue
         if raw.startswith("--- "):
+            saw_dash_header = True
             continue
-        if raw.startswith("+++ "):
-            target = raw[4:].strip()
+        if saw_dash_header and raw.startswith("+++ "):
+            # Only treat a line as the '+++' file header when the line
+            # immediately before it was the '--- ' header. Otherwise an
+            # added line whose own text starts with '++ ' becomes
+            # '+++ ...' once the diff's leading '+' marker is prepended,
+            # and would be mistaken for a bogus new file header.
+            saw_dash_header = False
+            target = _unquote_git_path(raw[4:].strip())
             path = None if target == "/dev/null" else re.sub(r"^b/", "", target)
             continue
+        saw_dash_header = False
         m = _HUNK_RE.match(raw)
         if m:
             new_line = int(m.group(1))

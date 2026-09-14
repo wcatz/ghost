@@ -1,4 +1,7 @@
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 
 from review_findings import ValidationError, validate, parse_hunks, build_review, partition
@@ -143,6 +146,109 @@ class TestParseHunks(unittest.TestCase):
 
     def test_empty_diff_yields_no_hunks(self):
         self.assertEqual(parse_hunks(""), {})
+
+    def test_added_line_starting_with_plus_plus_plus_is_not_a_fake_header(self):
+        # An added line whose own text starts with '++ ' becomes '+++ ...'
+        # once the diff's leading '+' marker is prepended. The old code
+        # tested raw.startswith("+++ ") unconditionally, so this line was
+        # mistaken for a new file header and silently truncated the real
+        # file's hunk (and fabricated a bogus 'something' entry).
+        diff = (
+            "--- a/docs/example.md\n"
+            "+++ b/docs/example.md\n"
+            "@@ -1,2 +1,5 @@\n"
+            " # Example\n"
+            "+Here is sample diff output:\n"
+            "+++ something\n"
+            "+more real content after the fake header\n"
+        )
+        hunks = parse_hunks(diff)
+        self.assertEqual(hunks, {"docs/example.md": {1, 2, 3, 4}})
+        self.assertNotIn("something", hunks)
+
+    def test_handles_multiple_hunks_in_one_file(self):
+        diff = (
+            "diff --git a/a.go b/a.go\n"
+            "index 111..222 100644\n"
+            "--- a/a.go\n"
+            "+++ b/a.go\n"
+            "@@ -1,2 +1,3 @@\n"
+            " package main\n"
+            "+import \"fmt\"\n"
+            " \n"
+            "@@ -10,2 +11,3 @@ func x() {\n"
+            " \ta := 1\n"
+            "+\tb := 2\n"
+            " \t_ = a\n"
+        )
+        self.assertEqual(parse_hunks(diff)["a.go"], {1, 2, 3, 11, 12, 13})
+
+    def test_handles_a_rename_with_content_changes(self):
+        diff = (
+            "diff --git a/old_name.go b/new_name.go\n"
+            "similarity index 87%\n"
+            "rename from old_name.go\n"
+            "rename to new_name.go\n"
+            "index 111..222 100644\n"
+            "--- a/old_name.go\n"
+            "+++ b/new_name.go\n"
+            "@@ -1,3 +1,3 @@\n"
+            " package main\n"
+            "-func old() {}\n"
+            "+func renamed() {}\n"
+        )
+        hunks = parse_hunks(diff)
+        self.assertEqual(hunks["new_name.go"], {1, 2})
+        self.assertNotIn("old_name.go", hunks)
+
+    def test_git_quoted_non_ascii_path_keys_the_plain_filename(self):
+        # With git's default core.quotePath=true, a non-ASCII filename is
+        # rendered as a double-quoted, C-escaped path, e.g.
+        # +++ "b/caf\303\251.txt" for café.txt. Verified against a REAL
+        # git repository/diff, not a hand-typed fixture.
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ)
+            env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+            env["GIT_CONFIG_SYSTEM"] = "/dev/null"
+            env["GIT_AUTHOR_NAME"] = "Test"
+            env["GIT_AUTHOR_EMAIL"] = "test@test.invalid"
+            env["GIT_COMMITTER_NAME"] = "Test"
+            env["GIT_COMMITTER_EMAIL"] = "test@test.invalid"
+
+            def run(*args):
+                return subprocess.run(
+                    ["git", *args], cwd=d, env=env,
+                    capture_output=True, text=True)
+
+            fname = "café.txt"
+            steps = [
+                ["init", "-q", "-b", "main"],
+                ["config", "core.quotePath", "true"],
+                ["config", "commit.gpgsign", "false"],
+            ]
+            for step in steps:
+                r = run(*step)
+                self.assertEqual(r.returncode, 0, r.stderr)
+
+            with open(os.path.join(d, fname), "w", encoding="utf-8") as fh:
+                fh.write("hello\n")
+            r = run("add", fname)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            r = run("commit", "-q", "-m", "init")
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+            with open(os.path.join(d, fname), "a", encoding="utf-8") as fh:
+                fh.write("world\n")
+            r = run("diff", "--", fname)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            diff_text = r.stdout
+
+            # Confirm git actually quoted the path (this would otherwise
+            # pass vacuously if core.quotePath were ignored on this box).
+            self.assertIn(r"caf\303\251.txt", diff_text)
+
+            hunks = parse_hunks(diff_text)
+            self.assertIn("café.txt", hunks)
 
 
 class TestPartition(unittest.TestCase):
