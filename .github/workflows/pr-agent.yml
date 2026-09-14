@@ -222,11 +222,12 @@ jobs:
           mv review.md.tmp review.md
           # The verdict token must be the FIRST non-blank line — a review
           # that opens with narrative and buries the verdict is a contract
-          # break. This job is informational, so a near-miss never discards
-          # a good review: only a genuinely empty run hard-fails (above).
-          # Strict first-line pass → post. Verdict recognized anywhere →
-          # post with a degradation warning. Anything else → still post,
-          # but loudly, so a contract-break is visible instead of silent.
+          # break. Triage: strict first-line pass → post clean. Verdict
+          # token present anywhere (wrapped/prefixed) → post with a
+          # warning — a good review that wobbled on line 1 is never
+          # dropped. No verdict token at all → HARD FAIL and dump the body
+          # to logs instead of posting: an unclassifiable body must not
+          # appear as the bot's authoritative review comment.
           first_nonblank="$(grep -m1 -vE '^[[:space:]]*$' review.md || true)"
           strict="$(printf '%s' "$first_nonblank" | grep -qiE '^\*{0,2}[[:space:]]*verdict:[[:space:]]+(blocker|should-fix|nit|clean)' && echo yes || echo no)"
           # Loose match tolerates wrappers ("verdict: clean", 'verdict = clean',
@@ -237,7 +238,9 @@ jobs:
           elif [ -n "$loose" ]; then
             echo "::warning::verdict present but not on the first line — posting"
           else
-            echo "::warning::no verdict token recognized — posting unreviewable body"
+            echo "::error::no verdict token in review body — refusing to post an unclassifiable body"
+            cat review.md
+            exit 1
           fi
           echo "wrote $(wc -c < review.md) bytes"
 
