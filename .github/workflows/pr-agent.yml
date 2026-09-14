@@ -50,7 +50,7 @@ permissions:
 # comment sender is filtered as a Bot, so it never re-triggers either lane.
 concurrency:
   group: >-
-    pr-agent-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}-${{ (github.event_name == 'issue_comment' && github.event.sender.type != 'Bot' && contains('OWNER MEMBER COLLABORATOR', github.event.comment.author_association) && (github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, '/review –')) && 'manual') || (github.event_name == 'pull_request' && 'auto') || 'noop' }}
+    pr-agent-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}-${{ (github.event_name == 'issue_comment' && github.event.sender.type != 'Bot' && contains('OWNER MEMBER COLLABORATOR', github.event.comment.author_association) && (github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, '/review –') || startsWith(github.event.comment.body, '/review —')) && 'manual') || (github.event_name == 'pull_request' && 'auto') || 'noop' }}
   cancel-in-progress: true
 
 jobs:
@@ -73,6 +73,7 @@ jobs:
           github.event_name == 'issue_comment' &&
           (github.event.comment.body == '/review' ||
            startsWith(github.event.comment.body, '/review –') ||
+           startsWith(github.event.comment.body, '/review —') ||
            startsWith(github.event.comment.body, '/review ')) &&
           contains('OWNER MEMBER COLLABORATOR', github.event.comment.author_association)
         )
@@ -103,10 +104,14 @@ jobs:
             # requester with a green-but-doing-nothing run: the review job
             # deliberately never runs on fork heads (they are not covered by
             # the arrival security posture), so make the non-action explicit.
-            if [ "${{ github.event_name }}" = "issue_comment" ]; then
-              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-                -f body="Review skipped: this PR's head is in $head_repo (a fork). Reviews only run on same-repository PRs." \
-                >/dev/null 2>&1 || true
+            # Posted as a pr REVIEW comment, not an issues/{n}/comments call:
+            # this workflow holds contents: read + pull-requests: write, and
+            # the issues endpoint needs issues: write (a 403 would otherwise
+            # be swallowed silently by the redirect to stderr).
+            if [ "$GITHUB_EVENT_NAME" = "issue_comment" ]; then
+              gh pr review "$NUMBER" --comment \
+                --body "Review skipped: this PR's head is in $head_repo (a fork). Reviews only run on same-repository PRs." \
+                || echo "::warning::could not post fork-skip notice (permissions or transient API failure)"
             fi
           fi
 
@@ -307,21 +312,20 @@ jobs:
           # concurrency lanes are split by event type, so an in-flight
           # synchronize auto-run plus a /review, or a re-typed /review on the
           # same head, would otherwise double-post. Identity-agnostic: works
-          # for App or github-actions authorship. NOTE: --arg goes to jq, not
-          # to gh (cli/cli#6326) — pipe gh's stdout into a real jq so the
-          # guard actually fires; the old form silently never matched.
-          # Residual: this is check-then-post, not serialized across lanes,
-          # so two runs that both pass the check before either's POST lands
-          # can still double-post for the same head. The window is one API
-          # round-trip and is accepted as the cost of lane separation (the
-          # lanes cannot share a concurrency key: the key is computed at run
-          # creation, before the review head is known).
+          # for App or github-actions authorship.
+          # Exit contract (deliberate, used below): 0 = marker found, 1 =
+          # definitively not posted, 2 = UNKNOWN (listing failed or no head
+          # recorded). The match is computed inside jq with -e so a real
+          # match cannot be lost to SIGPIPE under pipefail (grep -q closes
+          # the pipe while jq is still writing and the pipeline exits 141);
+          # gh's exit status is not hidden, and a transient listing failure
+          # is reported as unknown rather than fabricating "not posted".
           already_posted() {
-            [ -n "$reviewed" ] || return 1
-            gh pr view "$PR_NUMBER" --json reviews --jq '.reviews' 2>/dev/null \
-              | jq -r --arg s "$reviewed" \
-                '.[] | select((.body // "") | contains("<!-- bot-review:" + $s + " -->"))' \
-              | grep -q .
+            [ -n "$reviewed" ] || return 2
+            gh pr view "$PR_NUMBER" --json reviews \
+              | jq -e --arg s "$reviewed" \
+                'any(.[]; (.body // "") | contains("<!-- bot-review:" + $s + " -->"))' \
+                >/dev/null
           }
           # Compare the reviewed head against the PR's CURRENT head. A /review
           # run that started at head X takes minutes of model time, so a push
@@ -356,9 +360,12 @@ jobs:
           # surfaces as a red step.
           if ! post_review; then
             sleep 15
-            if already_posted; then
-              echo "first post committed despite client error — not re-posting"
-            else
-              post_review || exit 1
-            fi
+            rc=0
+            already_posted || rc=$?
+            case "$rc" in
+              0) echo "first post committed despite client error — not re-posting" ;;
+              1) post_review || exit 1 ;;
+              2) echo "::error::retry aborted: could not verify whether the first post landed (review listing failed); not re-posting to avoid a duplicate. Re-run the pipeline to finish this review."
+                 exit 1 ;;
+            esac
           fi

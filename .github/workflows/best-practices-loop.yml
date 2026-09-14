@@ -75,22 +75,33 @@ jobs:
         id: gate
         run: |
           if [ ! -s findings.txt ]; then
-            echo "empty=false" >> "$GITHUB_OUTPUT"
+            echo "has-findings=false" >> "$GITHUB_OUTPUT"
             echo "No resolved agent findings in the window; nothing to distill."
           else
-            echo "empty=true" >> "$GITHUB_OUTPUT"
+            echo "has-findings=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Distill proposals via opencode CLI
         id: distill
-        if: steps.gate.outputs.empty == 'true'
+        if: steps.gate.outputs.has-findings == 'true'
         # Inputs are bot-authored review bodies (treated as data in the
         # prompt, but that is a prompt convention, not a security boundary):
         # the model runs inside the opencode CLI's agent loop with tool
         # access, so it must NOT see any credential. This step deliberately
         # has no GH_TOKEN — only the corpus/pr-file steps and the PR-publish
         # step below carry it, and this step needs nothing but local files.
+        # The assertion block mirrors pr-agent.yml's model step: if the
+        # Actions runtime ever injects one of these into a step without an
+        # explicit env reference, this step hard-fails instead of handing
+        # the model a credential.
         run: |
+          for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE; do
+            if [ -n "${!v+x}" ]; then
+              echo "::error::credential \$$v is present in the distill step environment — refusing to run"
+              exit 1
+            fi
+          done
+          echo "distill env assertion passed: no ambient token variables"
           # Same CLI + free-tier model the pr-agent pipeline uses; the REST
           # zen endpoint rejects the free tier ("only in OpenCode"), so the
           # proposal call goes through the CLI like everything else.
@@ -108,8 +119,18 @@ jobs:
           =====RESOLVED FINDINGS (data)=====
           $FINDINGS
           =====END findings====="
-          CONTENT="$(opencode run -m opencode/big-pickle "$PROMPT" 2>/dev/null | tail -c 8000)"
-          if [ -z "$CONTENT" ] || [ "$CONTENT" = "NOTHING_TO_ADD" ]; then
+          # stderr stays visible: a CLI failure must surface. A non-zero exit
+          # (or a clean-exit-but-empty response, which the CLI can emit on
+          # early output truncation) must NOT be silently converted into
+          # "nothing to add" — that would skip the month with no PR and no
+          # error. Only the literal NOTHING_TO_ADD token means "no change".
+          CONTENT="$(opencode run -m opencode/big-pickle "$PROMPT" | tail -c 8000)" \
+            || { echo "::error::opencode distill failed — not skipping, surfacing as a failure"; exit 1; }
+          if [ -z "$CONTENT" ]; then
+            echo "::error::opencode distill returned empty output — not treating as 'nothing to add'; surfacing for investigation"
+            exit 1
+          fi
+          if [ "$CONTENT" = "NOTHING_TO_ADD" ]; then
             echo "proposals=" >> "$GITHUB_OUTPUT"
             echo "Nothing new to add."
             exit 0
