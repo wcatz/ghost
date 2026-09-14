@@ -1,0 +1,23 @@
+# Pre-existing shellcheck findings in workflows that predate the reviewer
+# pipeline. Scoped per-file and per-code deliberately: any NEW workflow, and
+# any new run: block in a file not listed here, still gets full shellcheck
+# scrutiny. Only style/info/warning codes are listed — no error-severity
+# finding is suppressed anywhere.
+#
+#   SC2129  best-practices-loop.yml  prefer { ...; } >> file to repeated >>
+#   SC2034  evalcycle / longmemeval  loop variable `i` unused
+#   SC2016  pr-loop.yml              single quotes round a GraphQL query, intended
+#
+# Verified 2026-09-14 by running actionlint v1.7.12 with shellcheck 0.11.0 on
+# PATH: without this file the lint job fails with exactly these six findings;
+# with it, exit 0. Note actionlint only runs shellcheck when the binary is
+# present, so a local run without shellcheck installed is NOT equivalent to CI.
+paths:
+  .github/workflows/best-practices-loop.yml:
+    ignore: ['SC2129']
+  .github/workflows/evalcycle.yml:
+    ignore: ['SC2034']
+  .github/workflows/longmemeval.yml:
+    ignore: ['SC2034']
+  .github/workflows/pr-loop.yml:
+    ignore: ['SC2016']

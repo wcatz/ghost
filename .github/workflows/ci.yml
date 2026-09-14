@@ -26,6 +26,71 @@ jobs:
           # --new-from-rev=origin/main needs main's tip in the local history.
           fetch-depth: 0
 
+      - name: actionlint
+        # Workflow-file validity is not covered by golangci-lint. PR #421
+        # shipped both an invalid `administration:` permissions key (which
+        # makes Actions reject the whole file at parse time — 0 jobs, no
+        # log) and a column-0 comment that broke YAML indentation. Both are
+        # statically detectable; neither was caught before merge.
+        #
+        # Pinned release + SHA256, matching the repo's supply-chain
+        # convention for third-party binaries.
+        #
+        # actionlint runs shellcheck over every run: block WHEN THE
+        # SHELLCHECK BINARY IS PRESENT, and ubuntu-latest ships it. A local
+        # run on a machine without shellcheck silently skips those checks
+        # and is NOT equivalent to this job — the first real run of this
+        # step failed on six findings a local pass had not surfaced.
+        # Install shellcheck before trusting a local result. Pre-existing
+        # findings are scoped per-file in .github/actionlint.yaml.
+        run: |
+          AL_VERSION=1.7.12
+          AL_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          curl --retry 3 --retry-connrefused -fsSL --proto '=https' --tlsv1.2 \
+            -o /tmp/actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v${AL_VERSION}/actionlint_${AL_VERSION}_linux_amd64.tar.gz"
+          echo "${AL_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          # Count and scan the SAME set by construction. nullglob makes a
+          # non-matching pattern expand to nothing instead of a literal, so
+          # a repo with only .yml (like this one today) and one with .yaml
+          # both work, and the guard below cannot disagree with what is
+          # actually scanned.
+          shopt -s nullglob
+          FILES=(.github/workflows/*.yml .github/workflows/*.yaml)
+          shopt -u nullglob
+          # Explicit paths, not bare `actionlint`: this pins the scanned set
+          # to .github/workflows/*.{yml,yaml} rather than relying on
+          # actionlint's own project auto-discovery, and the count line below
+          # is positive evidence of what was actually scanned.
+          [ "${#FILES[@]}" -gt 0 ] || { echo "::error::actionlint found no workflow files to scan"; exit 1; }
+          echo "actionlint scanning ${#FILES[@]} workflow file(s)"
+          /tmp/actionlint -color "${FILES[@]}"
+
+      - name: Review-script unit tests
+        # stdlib-only unittest; ubuntu-latest ships python3, so no setup
+        # step and no dependency install.
+        #
+        # unittest discover's own exit code is not a sufficient guard on its
+        # own — whether zero tests collected counts as a failure has varied
+        # across Python versions — so the "Ran N tests" line is asserted
+        # explicitly here, the same way the actionlint step above guards its
+        # own zero-files case with an explicit count. No `shell:` key is set
+        # anywhere in this file, so this runs under Actions' default
+        # `bash -e {0}` — no pipefail — which is why output is captured via
+        # command substitution instead of a pipe.
+        working-directory: .github/scripts
+        run: |
+          set +e
+          OUTPUT=$(python3 -m unittest discover -p 'test_*.py' -v 2>&1)
+          STATUS=$?
+          set -e
+          echo "$OUTPUT"
+          if ! grep -qE 'Ran [1-9][0-9]* test' <<<"$OUTPUT"; then
+            echo "::error::unittest discover reported no tests ran — check for a renamed or missing test_*.py file"
+            exit 1
+          fi
+          exit "$STATUS"
+
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
