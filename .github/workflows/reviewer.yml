@@ -140,10 +140,18 @@ jobs:
           # Move the trusted scripts out of the workspace before the head
           # tree lands on top of them and before the model runs against it.
           rm -rf "${RUNNER_TEMP}/base-scripts"
-          [ -d .base-scripts/.github/scripts ] || {
-            echo "::error::base-ref scripts checkout is missing — refusing to fall back to the PR's own copy"
-            exit 1
-          }
+          # A base ref predating the scripts has nothing trusted to post
+          # with. Failing here would red-X a class that worked before this
+          # change — a PR stacked on an older feature branch still has the
+          # scripts in its head tree, which is where they used to be read
+          # from. Skip instead: same reasoning as the fork and Dependabot
+          # skips above, and this runs before the model, so it costs no
+          # LLM invocation. Never fall back to the PR's own copy.
+          if [ ! -d .base-scripts/.github/scripts ]; then
+            echo "::warning::base ref ${GITHUB_BASE_REF} has no .github/scripts — skipping; there is no trusted copy to post with"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           mv .base-scripts/.github/scripts "${RUNNER_TEMP}/base-scripts"
           rm -rf .base-scripts
           gh pr checkout "$PR_NUMBER"
