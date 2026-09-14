@@ -30,22 +30,27 @@ permissions:
   pull-requests: write
 
 # One agent run per trigger per PR at a time. The GROUP is computed from
-# the event and, for issue_comment, from the comment BODY — because
-# WORKFLOW-LEVEL concurrency is entered when a run is created, BEFORE any
-# job `if:` is evaluated, every issue_comment triggers a run that lands in
-# some group. So casual comments must not share a key with in-flight
-# /review runs: they get a throwaway 'noop' group (their run ends in ~1s
-# when the config job skips) and so can never cancel a human-triggered
-# review. Lane separation does double duty:
+# the event and, for issue_comment, from the comment BODY and author —
+# because WORKFLOW-LEVEL concurrency is entered when a run is created,
+# BEFORE any job `if:` is evaluated, every issue_comment triggers a run
+# that lands in some group. So non-command comments must not share a key
+# with in-flight /review runs: they get a throwaway 'noop' group (their
+# run ends in ~1s when the config job skips) and so can never cancel a
+# human-triggered review. The manual-lane predicate mirrors the config
+# job's /review gate EXACTLY (same body forms, same trusted-authors list,
+# same bot-sender filter): a drive-by comment like '/review:' or '/review?'
+# — even from a NONE-association or Bot sender — falls through to 'noop',
+# not 'manual', so it can never kill a collaborator's in-flight review.
+# Lane separation does double duty:
 #   - A push (pull_request -> 'auto') never cancels a /review run
 #     (issue_comment -> 'manual' or 'noop'), and vice versa.
 #   - cancel-in-progress is then safe: a newer push cancels only a stale
-#     auto run; a second /review cancels only an older /review.
+#     auto run; a second genuine /review cancels only an older /review.
 # The bot's own posts emit pull_request_review (unsubscribed) and its
 # comment sender is filtered as a Bot, so it never re-triggers either lane.
 concurrency:
   group: >-
-    pr-agent-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}-${{ github.event_name == 'issue_comment' && (startsWith(github.event.comment.body, '/review') && 'manual' || 'noop') || 'auto' }}
+    pr-agent-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}-${{ (github.event_name == 'issue_comment' && github.event.sender.type != 'Bot' && contains('OWNER MEMBER COLLABORATOR', github.event.comment.author_association) && (github.event.comment.body == '/review' || startsWith(github.event.comment.body, '/review ') || startsWith(github.event.comment.body, '/review –')) && 'manual') || (github.event_name == 'pull_request' && 'auto') || 'noop' }}
   cancel-in-progress: true
 
 jobs:
@@ -205,6 +210,12 @@ jobs:
           # can read the public tree and emit text; there is nothing
           # sensitive it can reach or post with. An injected instruction in
           # the diff therefore cannot escalate to the runner token.
+          # Empirically verified: a step with the job's exact permissions
+          # (contents: read + pull-requests: write) and no explicit token
+          # reference has NO GITHUB_TOKEN / GH_TOKEN / ACTIONS_RUNTIME_TOKEN
+          # / ACTIONS_ID_TOKEN_REQUEST_TOKEN / AWS_WEB_IDENTITY_TOKEN_FILE
+          # in its process env (probe workflow run 34795417438 — presence
+          # only, values never echoed).
         run: |
           # Anchor to the checkout root regardless of any repo-wide
           # defaults.run.working-directory.
