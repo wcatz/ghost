@@ -15,6 +15,13 @@ on:
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
+    # Path filters (paths-ignore above) only apply to opened/reopened/
+    # synchronize; ready_for_review and review_requested bypass them and
+    # would burn a full model run on a docs-only PR, so they are
+    # deliberately dropped. Consequence (documented): a draft->ready
+    # transition or GitHub's "request review" button does NOT trigger a
+    # review — opened/reopened/synchronize cover every code change, and a
+    # /review comment covers explicit requests.
     types: [opened, reopened, synchronize]
   issue_comment:
     types: [created]
@@ -210,6 +217,16 @@ jobs:
           # MCP servers. Strip those before the model sees the tree; the
           # diff and title stay in pr.diff/pr.title.
           rm -rf .opencode opencode.json opencode.jsonc AGENTS.md CLAUDE.md .claude .mcp.json
+          # Working-tree removal alone is NOT enough: the model step has
+          # shell tool access inside the git checkout, so a malicious PR's
+          # instruction files remain reachable via `git show`/`git log` from
+          # the PR-head refs and commit history. Delete the entire .git
+          # store: without refs, none of those files can be recovered, and
+          # the reviewer needs only pr.diff/pr.title plus the file tree
+          # (no git operations). This is what makes the "cannot steer its
+          # own review" claim actually true at the ref level, not just the
+          # working-tree level.
+          rm -rf .git
 
       - name: Review PR with opencode big-pickle
         id: review

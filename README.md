@@ -431,9 +431,11 @@ model — no API key or other credential is needed or stored.
   environment. It posts one persistent review comment gated on a first-line
   `verdict: <blocker|should-fix|nit|clean>` token.
 - Repo instruction files from the PR head tree (`AGENTS.md`, `CLAUDE.md`,
-  `opencode.json`, `.opencode/`) are stripped before the model runs, so a
-  crafted PR cannot steer its own review; the title is read from a file, never
-  interpolated into a shell argument.
+  `opencode.json`, `.opencode/`) are stripped before the model runs, and
+  the entire `.git` store is removed so those files cannot be recovered
+  through the PR-head refs or history (`git show`) by the model's shell
+  tools; the title is read from a file, never interpolated into a shell
+  argument.
 - Humans can request a review on demand with a `/review` comment, restricted
   to `OWNER`/`MEMBER`/`COLLABORATOR` authors. A casual comment can never
   cancel an in-flight `/review` run (concurrency lanes are keyed on the exact
