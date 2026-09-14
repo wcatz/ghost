@@ -1,0 +1,56 @@
+# THROWAWAY. Diagnoses whether the review-sweeper App token is permitted
+# to resolve review threads. Read-only: viewerCanResolve is a field, not a
+# mutation. Delete this file with its branch.
+name: App token probe
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  probe:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mint app token
+        id: apptoken
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Ask the App token what it may do
+        env:
+          APP_TOKEN: ${{ steps.apptoken.outputs.token }}
+        run: |
+          if [ -z "$APP_TOKEN" ]; then
+            echo "PROBE: mint FAILED — no token"
+            exit 0
+          fi
+          echo "PROBE: mint ok"
+
+          echo "PROBE: identity + installation permissions"
+          GH_TOKEN="$APP_TOKEN" gh api /installation/repositories \
+            --jq '"PROBE: repos=\(.total_count) names=\([.repositories[].full_name]|join(","))"' \
+            2>&1 | sed 's/^/> /' | head -5
+
+          echo "PROBE: per-thread resolve permission on PR 426"
+          # shellcheck disable=SC2016
+          GH_TOKEN="$APP_TOKEN" gh api graphql -f query='
+            query($owner:String!,$name:String!,$number:Int!){
+              viewer{login}
+              repository(owner:$owner,name:$name){
+                pullRequest(number:$number){
+                  reviewThreads(first:20){
+                    nodes{ id isResolved isOutdated viewerCanResolve viewerCanReply }}}}}' \
+            -f owner=wcatz -f name=ghost -F number=426 \
+            --jq '"PROBE: viewer=\(.data.viewer.login)",
+                  (.data.repository.pullRequest.reviewThreads.nodes[]
+                   | "PROBE: thread \(.id) resolved=\(.isResolved) outdated=\(.isOutdated) canResolve=\(.viewerCanResolve) canReply=\(.viewerCanReply)")' \
+            2>&1 | sed 's/^/> /' | head -20
