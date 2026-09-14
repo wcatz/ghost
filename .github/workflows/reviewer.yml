@@ -89,10 +89,23 @@ jobs:
           # The head tree is attacker-controllable and opencode auto-loads
           # instruction files from it hierarchically. Strip recursively,
           # then delete .git so they cannot be recovered via git show.
+          # -iname (not -name): runner filesystems are case-sensitive, and
+          # e.g. Agents.md/claude.md would otherwise survive this sweep.
           find . -path ./.review-context -prune -o \
-            \( -name AGENTS.md -o -name CLAUDE.md -o -name .mcp.json \
-            -o -name opencode.json -o -name opencode.jsonc \
-            -o -name .opencode \) -exec rm -rf {} + 2>/dev/null || true
+            \( -iname AGENTS.md -o -iname CLAUDE.md -o -iname .mcp.json \
+            -o -iname opencode.json -o -iname opencode.jsonc \
+            -o -iname .opencode \) -exec rm -rf {} + 2>/dev/null || true
+
+          # A symlink under a name the sweep above doesn't match can still
+          # point outside this checkout; `find` without -L doesn't descend
+          # into it, so it survives untouched and content from outside the
+          # checkout can be read through it and quoted into a posted
+          # finding. Symlinks are removed wholesale rather than resolved
+          # and classified: a reviewer does not need to follow symlinks to
+          # read a diff, and classification (readlink -f, symlink chains,
+          # races) is exactly the kind of thing that gets an edge case
+          # wrong.
+          find . -path ./.review-context -prune -o -type l -exec rm -f {} + 2>/dev/null || true
           rm -rf .git
 
       - name: Review with opencode big-pickle
