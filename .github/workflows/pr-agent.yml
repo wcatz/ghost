@@ -98,6 +98,16 @@ jobs:
             echo "same-repo=true" >> "$GITHUB_OUTPUT"
           else
             echo "same-repo=false" >> "$GITHUB_OUTPUT"
+            # A trusted author's /review on a fork PR silently no-ops via the
+            # review job's same-repo gate. Say so instead of leaving the
+            # requester with a green-but-doing-nothing run: the review job
+            # deliberately never runs on fork heads (they are not covered by
+            # the arrival security posture), so make the non-action explicit.
+            if [ "${{ github.event_name }}" = "issue_comment" ]; then
+              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                -f body="Review skipped: this PR's head is in $head_repo (a fork). Reviews only run on same-repository PRs." \
+                >/dev/null 2>&1 || true
+            fi
           fi
 
   review:
@@ -211,17 +221,25 @@ jobs:
           # is no write-scoped token on disk in .git/config to extract. It
           # can read the public tree and emit text; there is nothing
           # sensitive it can reach or post with. An injected instruction in
-          # the diff therefore cannot escalate to the runner token.
-          # Empirically verified: a step with the job's exact permissions
-          # (contents: read + pull-requests: write) and no explicit token
-          # reference has NO GITHUB_TOKEN / GH_TOKEN / ACTIONS_RUNTIME_TOKEN
-          # / ACTIONS_ID_TOKEN_REQUEST_TOKEN / AWS_WEB_IDENTITY_TOKEN_FILE
-          # in its process env (probe workflow run 34795417438 — presence
-          # only, values never echoed).
+          # the diff therefore cannot escalate to the runner token. The
+          # assertion block at the top of run: is the load-bearing,
+          # re-runnable form of that claim (the probe workflow run
+          # 34795417438 proved the absence once; every run now re-proves it
+          # before launching the model).
         run: |
           # Anchor to the checkout root regardless of any repo-wide
           # defaults.run.working-directory.
           cd "${GITHUB_WORKSPACE}"
+          # If the Actions runtime ever starts injecting any of these into
+          # a step without an explicit env reference, this step hard-fails
+          # instead of silently giving the model a credential.
+          for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE; do
+            if [ -n "${!v+x}" ]; then
+              echo "::error::credential \$$v is present in the model step environment — refusing to run"
+              exit 1
+            fi
+          done
+          echo "model env assertion passed: no ambient token variables"
           # The title is NEVER interpolated into shell argv: PR titles can
           # contain ", ', $, ` and backslashes, which would break quoting
           # (or inject shell) in this step. The model reads the title from
@@ -292,6 +310,12 @@ jobs:
           # for App or github-actions authorship. NOTE: --arg goes to jq, not
           # to gh (cli/cli#6326) — pipe gh's stdout into a real jq so the
           # guard actually fires; the old form silently never matched.
+          # Residual: this is check-then-post, not serialized across lanes,
+          # so two runs that both pass the check before either's POST lands
+          # can still double-post for the same head. The window is one API
+          # round-trip and is accepted as the cost of lane separation (the
+          # lanes cannot share a concurrency key: the key is computed at run
+          # creation, before the review head is known).
           already_posted() {
             [ -n "$reviewed" ] || return 1
             gh pr view "$PR_NUMBER" --json reviews --jq '.reviews' 2>/dev/null \
