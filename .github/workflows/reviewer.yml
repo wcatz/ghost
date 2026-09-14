@@ -74,9 +74,13 @@ jobs:
           #
           # `gh api --paginate` applies --jq to EACH page separately and
           # concatenates the results, so a PR with more than one page of
-          # reviews (30 per page) would emit one SHA per page; `tail -n 1`
-          # keeps the most recent one. Without it a busy PR — exactly the
-          # case this fixes — would always fall back to a full review.
+          # reviews emits one SHA per page and LAST_SHA would become a
+          # multi-line string that `git cat-file -e` rejects, silently
+          # forcing a full review forever. `tail -n 1` keeps the newest.
+          # gh sets per_page=100 when paginating (verified against
+          # pulls/421/reviews: 32 reviews -> 1 page; per_page=10 -> 4
+          # separate --jq outputs), so this only bites past 100 reviews —
+          # rare, but PR #421 reached 32 unattended.
           LAST_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
             --paginate --jq '[.[] | .body
               | capture("<!-- ghost-review:(?<sha>[0-9a-f]{7,40}) -->")?.sha]
