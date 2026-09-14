@@ -180,3 +180,60 @@ def build_review(doc, commit_id, hunks):
         "comments": comments,
     }
     return payload, dropped
+
+
+def extract_findings(text):
+    """Pull the findings document out of a model's free-form reply.
+
+    The model has no write tools by design — its only output channel is
+    stdout — so the JSON has to be recovered from whatever prose, fenced
+    blocks, or event wrappers surround it. Scans for balanced top-level
+    JSON objects and returns the LAST one that carries a 'verdict' key,
+    which survives a model that reasons in prose before answering, wraps
+    the answer in ```json, or restates a partial object mid-explanation.
+
+    Raises ValidationError when nothing usable is present, so a garbled
+    reply fails the job loudly instead of posting a degraded review.
+    """
+    import json as _json
+
+    candidates = []
+    depth = 0
+    start = None
+    in_str = False
+    esc = False
+
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    candidates.append(text[start:i + 1])
+                    start = None
+
+    for blob in reversed(candidates):
+        try:
+            doc = _json.loads(blob)
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and "verdict" in doc:
+            return doc
+
+    raise ValidationError(
+        "no JSON object with a 'verdict' key found in the model reply "
+        f"({len(candidates)} balanced object(s) scanned, "
+        f"{len(text)} chars)")
