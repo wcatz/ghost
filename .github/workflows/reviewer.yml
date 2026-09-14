@@ -148,7 +148,12 @@ jobs:
           # skips above, and this runs before the model, so it costs no
           # LLM invocation. Never fall back to the PR's own copy.
           if [ ! -d .base-scripts/.github/scripts ]; then
-            echo "::warning::base ref ${GITHUB_BASE_REF} has no .github/scripts — skipping; there is no trusted copy to post with"
+            # % is a legal ref-name character and Actions decodes %25/%0A/%0D
+            # in a workflow-command message, so a branch named
+            # 'x%0A::stop-commands::y' would inject a command here. Escaping
+            # % alone covers it: a real newline cannot occur in a ref name.
+            base_ref_safe="${GITHUB_BASE_REF//%/%25}"
+            echo "::warning::base ref ${base_ref_safe} has no .github/scripts — skipping; there is no trusted copy to post with"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
