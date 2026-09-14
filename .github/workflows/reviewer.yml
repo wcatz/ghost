@@ -221,23 +221,24 @@ jobs:
             exit 1
           }
 
-          # opencode/big-pickle is a codename, not a version: every other
-          # entry in the catalog is shaped like claude-opus-4-8 or
-          # glm-5.3. A codenamed endpoint can be rotated out from under
-          # us, and the run then dies with the gateway's own
-          # "Unexpected server error", which names nothing. Say what
-          # actually happened instead.
+          # opencode/big-pickle is a codename where the rest of the
+          # catalog carries a version (opencode/claude-opus-4-8,
+          # opencode/glm-5.3), and it is the anonymous tier, which is why
+          # this step needs no credential. A codenamed free endpoint can
+          # be rotated out from under us, and the run then dies with the
+          # gateway's own "Unexpected server error", which names nothing.
           #
-          # Polarity is deliberate. A catalog we CAN read that lacks the
-          # model is a hard fail; a catalog we cannot read at all is a
-          # warning, because the run itself still fails loudly if the
-          # model is really gone, and a flaky `opencode models` must not
-          # be able to block every review.
+          # This check only improves that message. It never decides
+          # whether the review runs: `opencode models` at 1.18.30 prints
+          # one provider-qualified id per bare line, but that is an
+          # observed format, not a contract, and a version bump could
+          # change it. Hard-failing on an unmatched id would then block
+          # every review on the repo to guard against a rotation that
+          # already fails loudly on its own. So: warn, and let the run
+          # produce the real verdict.
           if catalog=$(opencode models 2>/dev/null) && [ -n "$catalog" ]; then
-            if ! printf '%s\n' "$catalog" | grep -qxF "$MODEL"; then
-              echo "::error::${MODEL} is not in the opencode model catalog — it was most likely rotated or retired. Pick a replacement and update MODEL in this step — it is the only place the model is named."
-              exit 1
-            fi
+            printf '%s\n' "$catalog" | grep -qxF "$MODEL" \
+              || echo "::warning::${MODEL} is not in the opencode model catalog. Either it was rotated or retired — if the review step now fails with an opaque gateway error, that is why, and MODEL in this step is the only place to change it — or 'opencode models' no longer prints one provider-qualified id per line, in which case this preflight is stale and the review below is unaffected."
           else
             echo "::warning::could not read the opencode model catalog — skipping the ${MODEL} preflight"
           fi
