@@ -214,10 +214,11 @@ jobs:
         id: review
         # Budget reality check (measured): free-tier big-pickle takes 2-5
         # minutes on even a small PR, and the tokenless run must explore via
-        # reads instead of gh. 10m is the observed worst case with headroom;
-        # the 20m job cap remains the backstop. A shorter cap (5m) failed
-        # routinely on a live repo.
-        timeout-minutes: 10
+        # reads instead of gh. Runs have since measured >10m on workflow-
+        # heavy PRs (run 34799605950 timed out at exactly 10m), so the cap
+        # is 15m; the 20m job cap remains the backstop. A shorter cap (5m)
+        # failed routinely on a live repo.
+        timeout-minutes: 15
         env:
           PR_NUMBER: ${{ needs.config.outputs.pr-number }}
           # Security posture: the model is free to read files and even run
