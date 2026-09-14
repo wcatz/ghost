@@ -444,16 +444,19 @@ model — no API key or other credential is needed or stored.
 **What it doesn't do:**
 - No `/improve` suggestions, no inline diff threads — exactly one review
   comment per run.
-- The bot's review is informational: main's branch protection requires
-  `build-and-test` and `lint` only, so it is a signal, never a merge gate.
-  This is a live-repo fact, not a claim recoverable from source — verified
-  against the branch-protection API on 2026-09-14 (`required_status_checks`
-  = `build-and-test` + `lint`; `required_conversation_resolution` null;
-  `required_approving_review_count` 0; no repository or org rulesets). If
-  you ever move or tighten that protection, update `gate.yml` and this
-  claim together; the conversation-resolution gate the old PR-Agent era
-  relied on cannot exist under the verified config, which is why the
-  thread-sweeping `pr-loop.yml` was deleted.
+- The bot's review is informational: it posts exactly one `--comment`
+  review with no inline threads, so it never creates an unresolved
+  conversation and never blocks a merge. Branch protection on main
+  (verified against the live API on 2026-09-14 — note the correct field
+  is `required_conversation_resolution`; an earlier typo'd key always
+  read null and seeded a wrong claim) is: `required_status_checks` =
+  `build-and-test` + `lint`; `required_conversation_resolution` enabled;
+  `required_approving_review_count` 0; no repository or org rulesets.
+  Because the pipeline emits no threads, it is a signal, never a merge
+  gate — which is why the thread-sweeping `pr-loop.yml` (a PR-Agent-era
+  mechanism) was deleted. If you ever change that protection, update
+  `gate.yml` and this claim together; `gate.yml`'s `probe-protection`
+  job exists to catch exactly that drift.
 
 **Review identity:** Reviews post as the review-sweeper GitHub App when the
 App token is available; falls back to `github-actions` when the secrets are

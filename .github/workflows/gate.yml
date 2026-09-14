@@ -1,17 +1,27 @@
 name: gate
 
 # Placeholder for the repository's configured "gate" status check (branch
-# protection). Verified via the branch-protection API: main currently
-# requires only build-and-test + lint as status checks, with no required
-# conversation resolution and no required approving reviews. The bot
-# review pipeline (.github/workflows/pr-agent.yml) posts informational
-# review comments only and is not a merge gate. This workflow exists to
-# satisfy the legacy "gate" check name so the check never hangs on
-# "Expected — waiting for status"; keep it a trivially-green placeholder
-# unless protection is reconfigured.
+# protection). Verified against the branch-protection API on 2026-09-14
+# (with the CORRECT field, required_conversation_resolution — an earlier
+# typo'd key "conversation_resolution" always read null and seeded a wrong
+# claim): main currently requires build-and-test + lint as status checks,
+# HAS required_conversation_resolution enabled, no required approving
+# reviews, and zero rulesets. The bot review pipeline
+# (.github/workflows/pr-agent.yml) posts exactly one informational review
+# comment per run with no inline threads, so it produces no unresolved
+# conversations and never blocks a merge — the thread-sweeping pr-loop.yml
+# was safe to delete. This workflow satisfies the legacy "gate" check name
+# so the check never hangs on "Expected — waiting for status".
 on:
   pull_request:
     branches: [main]
+  # probe-protection watches for drift between the DOCUMENTED policy and
+  # the live one (in either direction): the bot pipeline and pr-loop.yml's
+  # deletion both assume the exact config below. If protection ever
+  # changes, this weekly run (and every PR) surfaces it instead of
+  # silently relying on a stale claim.
+  schedule:
+    - cron: '0 6 * * 1'
 
 permissions:
   contents: read
@@ -21,3 +31,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo "merge gate satisfied"
+
+  probe-protection:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          JSON="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN:-}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null)" \
+            || { echo "::warning::probe-protection: could not read branch protection (401/403?) — skipping; re-verified manually on 2026-09-14"; exit 0; }
+          if printf '%s' "$JSON" | jq -e \
+            '.required_conversation_resolution.enabled == true \
+             and (.required_pull_request_reviews.required_approving_review_count // 0) == 0 \
+             and ([.required_status_checks.contexts[] | select(. == "build-and-test" or . == "lint")] | length) == 2 \
+             and (.required_status_checks.contexts | length) == 2' >/dev/null; then
+            echo "probe-protection: main matches the documented config (build-and-test + lint, conversation resolution required, no approval gate)"
+          else
+            echo "::error::branch protection on main DRIFTED from the documented config — the bot-review pipeline and the pr-loop.yml deletion assume it (see README). Update gate.yml + README together when you intentionally change protection."
+            exit 1
+          fi

@@ -158,8 +158,11 @@ jobs:
       - name: Warn on degraded identity
         # The mint step above swallows its own failure (continue-on-error);
         # surface the degradation loudly or debugging "why is the bot
-        # github-actions?" means spelunking step logs.
-        if: ${{ steps.apptoken.outputs.token == '' }}
+        # github-actions?" means spelunking step logs. Gate on outcome ==
+        # failure, NOT on an empty token: when USE_BOT_IDENTITY=false the
+        # mint is intentionally skipped (outcome=skipped) and the empty
+        # token is the expected state, not a degradation.
+        if: ${{ steps.apptoken.outcome == 'failure' && steps.apptoken.outputs.token == '' }}
         run: echo "::warning::App token unavailable — reviews will post as github-actions"
 
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
