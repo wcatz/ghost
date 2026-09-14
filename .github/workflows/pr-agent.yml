@@ -56,7 +56,9 @@ jobs:
         github.event_name == 'pull_request' ||
         (
           github.event_name == 'issue_comment' &&
-          startsWith(github.event.comment.body, '/review') &&
+          (github.event.comment.body == '/review' ||
+           startsWith(github.event.comment.body, '/review –') ||
+           startsWith(github.event.comment.body, '/review ')) &&
           contains('OWNER MEMBER COLLABORATOR', github.event.comment.author_association)
         )
       )
@@ -137,7 +139,7 @@ jobs:
         # no SHA pin, but its installer supports `-v <version>` — pin the
         # tested release (the version of the first green CI run) instead of
         # silently tracking latest. Revisit if opencode ships checksums.
-        run: curl -fsSL https://opencode.ai/install | bash -s -- -v 1.18.30
+        run: curl -fsSL --proto '=https' --tlsv1.2 https://opencode.ai/install | bash -s -- -v 1.18.30
 
       - name: Prepare review context
         # Checkout the PR head and capture the diff BEFORE the model gets
@@ -149,6 +151,12 @@ jobs:
           PR_NUMBER: ${{ needs.config.outputs.pr-number }}
         run: |
           gh pr checkout "$PR_NUMBER"
+          # gh authenticates its fetch via a credential helper subprocess,
+          # it does NOT persist the token; belt-and-suspenders: scrub any
+          # http auth section from local git config so no bearer material
+          # could survive into the tokenless model step below.
+          git config --local --unset-all http.extraheader 2>/dev/null || true
+          git config --local --remove-section 'http.https://github.com/' 2>/dev/null || true
           # Write the title to a file, not $GITHUB_ENV: an env line cannot
           # carry a title with newlines, and the model step below reads it.
           gh pr view "$PR_NUMBER" --json title --jq .title > pr.title
@@ -199,7 +207,7 @@ jobs:
           # CJK/em-dash runes ≈ 240 KB → gh pr review 422s, run silently
           # lost). Trim to 60000 bytes, dropping only a trailing partial
           # rune so review.md is always valid UTF-8 and always under the cap.
-          python3 -c 'import json; parts = [e["part"]["text"] for e in (json.loads(l) for l in open("events.jsonl")) if e.get("type") == "text" and isinstance(e.get("part", {}).get("text"), str) and e["part"]["text"].strip()]; open("review.md.tmp", "w").write((parts[-1] if parts else "").encode("utf-8")[:60000].decode("utf-8", "ignore"))'
+          python3 -c 'import json; parts = [e["part"]["text"] for e in (json.loads(l) for l in open("events.jsonl") if l.strip().startswith("{")) if e.get("type") == "text" and isinstance((e.get("part") or {}).get("text"), str) and e["part"]["text"].strip()]; a = parts[-1] if parts else ""; b = a.encode("utf-8")[:60000].decode("utf-8", "ignore"); b += "\n\n_[truncated by CI — full review exceeds GitHub'"'"'s 64 KiB body cap]_" if len(a.encode("utf-8")) > 60000 else ""; open("review.md.tmp", "w").write(b); print("truncated" if len(a.encode("utf-8")) > 60000 else "ok")'
           if [ ! -s review.md.tmp ]; then
             echo "::error::opencode produced no review text"
             cat events.jsonl
@@ -208,20 +216,22 @@ jobs:
           mv review.md.tmp review.md
           # The verdict token must be the FIRST non-blank line — a review
           # that opens with narrative and buries the verdict is a contract
-          # break. A real finding: near-misses (code-fenced or prefixed
-          # verdict) currently discard the whole run; the gate below treats
-          # "verdict present somewhere" as a warning-level degrade (still
-          # posts) and only hard-fails when no verdict token exists at all.
+          # break. This job is informational, so a near-miss never discards
+          # a good review: only a genuinely empty run hard-fails (above).
+          # Strict first-line pass → post. Verdict recognized anywhere →
+          # post with a degradation warning. Anything else → still post,
+          # but loudly, so a contract-break is visible instead of silent.
           first_nonblank="$(grep -m1 -vE '^[[:space:]]*$' review.md || true)"
-          verdict_anywhere="$(grep -oiE '\*{0,2}[[:space:]]*verdict:[[:space:]]+(blocker|should-fix|nit|clean)' review.md | head -1 || true)"
-          if printf '%s' "$first_nonblank" | grep -qiE '^\*{0,2}[[:space:]]*verdict:[[:space:]]+(blocker|should-fix|nit|clean)'; then
+          strict="$(printf '%s' "$first_nonblank" | grep -qiE '^\*{0,2}[[:space:]]*verdict:[[:space:]]+(blocker|should-fix|nit|clean)' && echo yes || echo no)"
+          # Loose match tolerates wrappers ("verdict: clean", 'verdict = clean',
+          # a stray code fence) so a good review is recognized as such.
+          loose="$(grep -oiE 'verdict[[:space:]]*[:=-][[:space:]]*(blocker|should-fix|nit|clean)' review.md | head -1 || true)"
+          if [ "$strict" = "yes" ]; then
             echo "verdict gate: strict pass"
-          elif [ -n "$verdict_anywhere" ]; then
-            echo "::warning::verdict token present but NOT on the first line — posting degraded review"
+          elif [ -n "$loose" ]; then
+            echo "::warning::verdict present but not on the first line — posting"
           else
-            echo "::error::opencode review contains no verdict token"
-            cat review.md
-            exit 1
+            echo "::warning::no verdict token recognized — posting unreviewable body"
           fi
           echo "wrote $(wc -c < review.md) bytes"
 
