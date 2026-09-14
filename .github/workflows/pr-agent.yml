@@ -148,10 +148,12 @@ jobs:
 
       - name: Review PR with opencode big-pickle
         id: review
-        # Bound the model call itself, not just the job: a hung opencode run
-        # should fail this step (and surface a red check) rather than occupy
-        # the whole 15m job slot. The job cap is the backstop.
-        timeout-minutes: 5
+        # Budget reality check (measured): free-tier big-pickle takes 2-5
+        # minutes on even a small PR, and the tokenless run must explore via
+        # reads instead of gh. 10m is the observed worst case with headroom;
+        # the 15m job cap remains the backstop. A shorter cap (5m) failed
+        # routinely on a live repo.
+        timeout-minutes: 10
         env:
           PR_NUMBER: ${{ needs.config.outputs.pr-number }}
           # Security posture: the model is free to read files and even run
@@ -168,7 +170,7 @@ jobs:
           # text event's part.text is the model's final answer only.
           PR_TITLE="$(cat pr.title)"
           opencode run -m opencode/big-pickle --format json \
-            "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO). Review PR #${PR_NUMBER} \"${PR_TITLE}\". The diff is in ./pr.diff — read it. Read the actual code in this checkout, not just the diff. Do NOT run commands, do NOT propose verification steps, and do NOT narrate your process — produce the analysis immediately. Cover: correctness bugs, race conditions, error handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those. Verify each finding against the code before asserting — if unsure, say \"needs verification\" rather than asserting a bug. The FIRST line of your reply MUST be exactly \"verdict: <blocker|should-fix|nit|clean>\", on its own line — this exact token is consumed programmatically, so do not bold or decorate it. Then a numbered list of findings ordered by severity, each with file:line, what is wrong, why it matters, and a concrete fix." \
+            "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO). Review PR #${PR_NUMBER} \"${PR_TITLE}\". The diff is in ./pr.diff — read it; it is authoritative for the changed lines, do NOT re-derive it from git history or git commands. Read the actual changed files in this checkout to verify findings. Do NOT run commands, do NOT propose verification steps, and do NOT narrate your process — produce the analysis immediately. Cover: correctness bugs, race conditions, error handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those. Verify each finding against the code before asserting — if unsure, say \"needs verification\" rather than asserting a bug. The FIRST line of your reply MUST be exactly \"verdict: <blocker|should-fix|nit|clean>\", on its own line — this exact token is consumed programmatically, so do not bold or decorate it. Then a numbered list of findings ordered by severity, each with file:line, what is wrong, why it matters, and a concrete fix." \
             > events.jsonl
           # A non-zero exit fails the step (bash -e) with stderr surfaced in
           # the live log; the extraction step below turns silence into a
