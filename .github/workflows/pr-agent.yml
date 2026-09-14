@@ -15,10 +15,10 @@ on:
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
-    # Path filters (paths-ignore above) only apply to opened/reopened/
-    # synchronize; ready_for_review and review_requested bypass them and
-    # would burn a full model run on a docs-only PR, so they are
-    # deliberately dropped. Consequence (documented): a draft->ready
+    # Path filters (paths-ignore above) only apply to opened/synchronize;
+    # reopened is NOT filtered. ready_for_review and review_requested
+    # bypass them and would burn a full model run on a docs-only PR, so
+    # they are deliberately dropped. Consequence (documented): a draft->ready
     # transition or GitHub's "request review" button does NOT trigger a
     # review — opened/reopened/synchronize cover every code change, and a
     # /review comment covers explicit requests.

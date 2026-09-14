@@ -273,12 +273,11 @@ jobs:
           if [ "$RAW_BYTES" -gt 8000 ]; then
             echo "::warning::distill response was $RAW_BYTES bytes; kept the head 8 KB (proposals preserved). Verify the last candidate is complete before approving the draft PR."
           fi
-          # NOTHING_TO_ADD comparison. Trim trailing whitespace first: the
-          # model's most realistic near-miss is a trailing space after the
-          # token, and the exact match would otherwise emit a draft PR whose
-          # body IS the literal "NOTHING_TO_ADD" (command substitution only
-          # strips trailing *newlines*).
-          CONTENT="$(printf '%s' "$CONTENT" | sed 's/[[:space:]]*$//')"
+          # NOTHING_TO_ADD comparison. Normalize: strip leading/trailing backticks,
+          # '>', and whitespace — the model sometimes wraps the sentinel in
+          # markdown code fences or block quotes, and the exact match would
+          # otherwise emit a draft PR whose body is the literal sentinel.
+          CONTENT="$(printf '%s' "$CONTENT" | sed -E 's/^[[:space:]>`]+//; s/[[:space:]>`]+$//')"
           if [ "$CONTENT" = "NOTHING_TO_ADD" ]; then
             echo "proposals=" >> "$GITHUB_OUTPUT"
             echo "Nothing new to add."
@@ -346,37 +345,39 @@ jobs:
               echo "::warning::remote branch $BRANCH already exists on PR #$ALREADY (concurrent run) — not pushing or opening a PR"
               exit 0
             fi
-            # Still branch-without-PR. Wait for a live concurrent dispatch to
-            # finish its push→pr-create window (cancel-in-progress: false
-            # makes the race reachable) before condemning the month. A closed
-            # PR does NOT satisfy the wait: closed PRs are matches from prior
-            # months whose branch was never cleaned up, and skipping them is
-            # exactly the permanent-stall bug the --state open fix prevents.
+            # Still branch-without-PR. Wait briefly for a live concurrent
+            # dispatch to finish its push→pr-create window
+            # (cancel-in-progress: false makes the race reachable).
             tries=0
             while [ "$tries" -lt 3 ]; do
               sleep 20
               ALREADY="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number // empty')"
-              if [ -n "$ALREADY" ]; then
-                echo "::warning::remote branch $BRANCH now has PR #$ALREADY (concurrent run finished) — not pushing or opening a PR"
-                exit 0
-              fi
+              [ -n "$ALREADY" ] && { echo "::warning::remote branch $BRANCH now has PR #$ALREADY (concurrent run finished) — not pushing or opening a PR"; exit 0; }
               tries=$((tries+1))
             done
-            echo "::error::remote branch $BRANCH exists with no open PR after ~60s — a prior run crashed between push and pr create; delete the stale branch (or run gh pr create) and re-run"
-            exit 1
+            # ...and, if still nothing, ADOPT the orphan instead of failing:
+            # the branch name embeds the month and is owned EXCLUSIVELY by
+            # this pipeline, so a branch-tip with no PR can only be a run
+            # that crashed between push and pr create — it constitutes this
+            # month's content, and force-pushing ours over it is safe by
+            # construction. The alternative (hard-failing) bricks the month:
+            # every rerun would hit this same dead end until a human cleans
+            # up the branch.
+            echo "::warning::remote branch $BRANCH has no open PR after ~60s — adopting it as an orphaned run of this pipeline and continuing"
+            push_mode=force
+          else
+            push_mode=normal
           fi
-          ALREADY="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number // empty')"
-          if [ -n "$ALREADY" ]; then
-            echo "::warning::a PR for $BRANCH already exists (#$ALREADY) — not creating another"
-            exit 0
-          fi
-          if ! git push origin "$BRANCH"; then
-            # The ls-remote pre-check only shrinks the window: two
-            # concurrent dispatches can BOTH pass it, and the losing run
-            # dies on a non-fast-forward push. That is fine IF the winner's
-            # PR exists — re-check and exit 0 (that is the concurrent-run
-            # completion, not our failure); only fail if the branch is not
-            # there (a genuine push problem).
+          if [ "$push_mode" = force ]; then
+            # The ls-remote pre-check only shrinks the window: a concurrent
+            # dispatch that was mid-push can still race our force-push, but
+            # both carry this month's distillation and the final PR-by-branch
+            # guard below prevents a duplicate PR either way.
+            git push --force origin "$BRANCH" || { echo "::error::adoption force-push failed"; exit 1; }
+          elif ! git push origin "$BRANCH"; then
+            # Normal push rejected (usually a concurrent run won the race):
+            # if the remote branch now exists, that run completed — not our
+            # failure. Only fail when the branch is genuinely absent.
             # Anchored to the fully-qualified ref: an unanchored substring
             # would false-positive on any related branch whose name merely
             # CONTAINS the monthly branch (e.g. a leftover

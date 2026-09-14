@@ -32,20 +32,33 @@ jobs:
     steps:
       - run: echo "merge gate satisfied"
 
+  # schedule-only: this job exists to turn the branch-protection CLAIM
+  # (README + the comment above) into a periodically CHECKED one, not to
+  # police every PR. Reading /branches/{branch}/protection requires admin
+  # read — the per-job GITHUB_TOKEN at contents: read CANNOT do it (403).
+  # Without an admin-scoped credential, this job MUST fail by design: an
+  # unverifiable claim is red, never greenwashed by the old warn-and-pass.
   probe-protection:
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - run: |
-          JSON="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN:-}" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>/dev/null)" \
-            || { echo "::warning::probe-protection: could not read branch protection (401/403?) — skipping; re-verified manually on 2026-09-14"; exit 0; }
+          JSON="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>&1)" || \
+            { echo "::error::probe-protection: cannot read branch protection (GITHUB_TOKEN lacks admin read; got: $?) — cannot verify the documented policy, so this job is red by design. To enable verification, grant the Review Sweeper GitHub App 'Administration: Read' on wcatz/ghost (or wire an admin PAT secret into this workflow)."; exit 1; }
+          if printf '%s' "$JSON" | jq -e '.errors? // empty' >/dev/null; then
+            echo "::error::GitHub API returned errors: $(printf '%s' "$JSON" | jq -c '.errors')"
+            exit 1
+          fi
           if printf '%s' "$JSON" | jq -e \
             '.required_conversation_resolution.enabled == true \
              and (.required_pull_request_reviews.required_approving_review_count // 0) == 0 \
-             and ([.required_status_checks.contexts[] | select(. == "build-and-test" or . == "lint")] | length) == 2 \
-             and (.required_status_checks.contexts | length) == 2' >/dev/null; then
+             and (.required_status_checks?.contexts | length) == 2 \
+             and ([.required_status_checks.contexts[] | select(. == "build-and-test" or . == "lint")] | length) == 2' >/dev/null; then
             echo "probe-protection: main matches the documented config (build-and-test + lint, conversation resolution required, no approval gate)"
           else
-            echo "::error::branch protection on main DRIFTED from the documented config — the bot-review pipeline and the pr-loop.yml deletion assume it (see README). Update gate.yml + README together when you intentionally change protection."
+            echo "::error::branch protection on main DRIFTED from the documented policy (or its shape changed): $(printf '%s' "$JSON" | jq -c '.') — the bot-review pipeline and the pr-loop.yml deletion assume it (see README). Update gate.yml + README together when you intentionally change protection."
             exit 1
           fi
