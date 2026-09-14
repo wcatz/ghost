@@ -29,16 +29,23 @@ permissions:
   contents: read
   pull-requests: write
 
-# One agent run per trigger per PR at a time. Key separately on
-# github.event_name: a human-triggered /review comment (issue_comment)
-# must NOT cancel an in-flight pull_request auto-review between model
-# completion and post, or the freshest review silently disappears. The
-# bot's own posts emit pull_request_review (unsubscribed) and its comment
-# sender is filtered as a Bot, so it never re-triggers either lane. The
-# issue_comment lane is only for a human typing "/review" (see the config
-# job's gate), never for casual comments.
+# One agent run per trigger per PR at a time. The GROUP is computed from
+# the event and, for issue_comment, from the comment BODY — because
+# WORKFLOW-LEVEL concurrency is entered when a run is created, BEFORE any
+# job `if:` is evaluated, every issue_comment triggers a run that lands in
+# some group. So casual comments must not share a key with in-flight
+# /review runs: they get a throwaway 'noop' group (their run ends in ~1s
+# when the config job skips) and so can never cancel a human-triggered
+# review. Lane separation does double duty:
+#   - A push (pull_request -> 'auto') never cancels a /review run
+#     (issue_comment -> 'manual' or 'noop'), and vice versa.
+#   - cancel-in-progress is then safe: a newer push cancels only a stale
+#     auto run; a second /review cancels only an older /review.
+# The bot's own posts emit pull_request_review (unsubscribed) and its
+# comment sender is filtered as a Bot, so it never re-triggers either lane.
 concurrency:
-  group: pr-agent-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}
+  group: >-
+    pr-agent-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}-${{ github.event_name == 'issue_comment' && (startsWith(github.event.comment.body, '/review') && 'manual' || 'noop') || 'auto' }}
   cancel-in-progress: true
 
 jobs:
@@ -170,6 +177,10 @@ jobs:
           # too long") and head-truncation would only re-raise it. A file
           # has no such limit; the agent reads it with bounded context.
           gh pr diff "$PR_NUMBER" > pr.diff
+          # Record the exact head commit this review is being generated
+          # against, so the Post step can detect and label a /review run
+          # whose head moved between generation and posting.
+          gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid > pr.head
           # The PR head tree is attacker-controllable and opencode would
           # auto-load repo instruction files from it (AGENTS.md, CLAUDE.md,
           # opencode.json, .opencode/). A crafted PR could steer the
@@ -257,4 +268,15 @@ jobs:
           PR_NUMBER: ${{ needs.config.outputs.pr-number }}
         run: |
           cd "${GITHUB_WORKSPACE}"
+          # Compare the reviewed head against the PR's CURRENT head. A /review
+          # run that started at head X takes minutes of model time, so a push
+          # to Y can land in between; a pull_request run is already gated to
+          # the live head by its synchronize trigger. Label the stale case
+          # rather than silently posting line numbers for a dead head.
+          current="$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)"
+          reviewed="$(cat pr.head 2>/dev/null || true)"
+          if [ -n "$reviewed" ] && [ -n "$current" ] && [ "$current" != "$reviewed" ]; then
+            echo "" >> review.md
+            echo "_note: PR head moved to ${current:0:7} since this review was generated against ${reviewed:0:7} — line numbers may be stale._" >> review.md
+          fi
           gh pr review "$PR_NUMBER" --comment --body-file review.md
