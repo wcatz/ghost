@@ -19,19 +19,14 @@ jobs:
   review:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    # Fork PRs get a read-only token and no repo secrets by GitHub's design,
+    # so the App mint below would fail and the whole pipeline would run
+    # anyway, wasting an LLM invocation to reach a guaranteed failure at
+    # Post review. Skip renders as skipped, not a red X. Making fork PRs
+    # work would require pull_request_target, which would run base-repo
+    # secrets against attacker-controlled code — a deliberate non-goal.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - name: Mint bot identity token
-        id: apptoken
-        continue-on-error: true
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.GH_APP_ID }}
-          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-
-      - name: Warn on degraded identity
-        if: ${{ steps.apptoken.outcome == 'failure' && steps.apptoken.outputs.token == '' }}
-        run: echo "::warning::App token unavailable — reviews will post as github-actions"
-
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 1
@@ -149,6 +144,21 @@ jobs:
 
           [ -s model-reply.txt ] || { echo "::error::model produced no output at all"; exit 1; }
           echo "model reply: $(wc -c < model-reply.txt) bytes"
+
+      - name: Mint bot identity token
+        id: apptoken
+        # Minted here, immediately before it's needed, rather than at job
+        # start: this keeps the App token off disk for the entire time the
+        # model step is running on attacker-controlled input.
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Warn on degraded identity
+        if: ${{ steps.apptoken.outcome == 'failure' && steps.apptoken.outputs.token == '' }}
+        run: echo "::warning::App token unavailable — reviews will post as github-actions"
 
       - name: Post review
         env:
