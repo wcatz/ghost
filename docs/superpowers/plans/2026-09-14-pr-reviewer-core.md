@@ -1690,7 +1690,16 @@ gh pr close 420 --comment "The PR-Agent action is removed; bump no longer applie
 - [x] `actionlint` and the Python unit tests run in the `lint` job on every PR — `lint` pass on PR #422 head `71438eb`, run 34855752142. Note `ci.yml` triggers on `pull_request: branches: [main]`, so a PR stacked onto a feature branch does not run it; #423's workflow changes get their first CI lint when GitHub retargets that PR to `main`.
 - [x] A real PR receives severity-gated inline threads from `review-sweeper[bot]` — PR #423 run 34855768054 (2 inline findings), PR #425 run 34861183180 (1 blocker thread)
 - [x] `nit` findings appear in a collapsed block and do not block merge — verified live on PR #425, run 34861183180: 2 nits in the collapsed body block, 0 inline threads for them (see `2026-09-14-pr-reviewer-fixture-results.md`)
-- [x] `blocker`/`should-fix` findings block merge via `required_conversation_resolution` — proven the moment #423 was retargeted to `main`: with four unresolved `review-sweeper[bot]` threads its `mergeStateStatus` went from `UNSTABLE` to `BLOCKED`. On a feature-branch base no protection applies, so this is only ever observable on a PR whose base is `main`.
+- [x] `blocker`/`should-fix` findings block merge via `required_conversation_resolution` —
+  measured on #423 at head `2ca846f`, base `main`, with every check green
+  (`lint`, `build-and-test`, `gate`, `review`, CodeQL all SUCCESS):
+  `mergeable=MERGEABLE`, `mergeStateStatus=BLOCKED`, `unresolved=4`. The four
+  unresolved `review-sweeper[bot]` threads are the only remaining gate.
+  Take the reading *after* the required checks report: missing checks also
+  produce `BLOCKED`, so a `BLOCKED` observed while `build-and-test` and
+  `lint` are still absent proves nothing about the conversation gate. On a
+  feature-branch base no protection applies at all, so this is only ever
+  observable on a PR whose base is `main`.
 - [ ] `sweeper.yml` resolves stale threads and posts `REQUEST_CHANGES` on live ones — **not verifiable yet.** `workflow_run` workflows only execute from the default branch, so the sweeper cannot run until this lands on `main`.
 - [x] A re-run against unchanged code posts zero duplicate findings — PR #423 run 34857252809: `posted review: 0 inline finding(s)` on the second pass
 - [x] An empty incremental diff skips the model run — run 34859894426: `no reviewable change since c0623bd...; skipping`; Review/Mint/Post all `skipped`, job green
