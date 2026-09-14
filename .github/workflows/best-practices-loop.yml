@@ -36,7 +36,10 @@ concurrency:
 jobs:
   distill:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Distill runs the same free-tier model as pr-agent.yml, whose runs
+    # measurably exceeded 10m on workflow-heavy inputs (run 34799605950);
+    # with an 80 KB corpus the monthly run needs the same budget + headroom.
+    timeout-minutes: 25
     steps:
       - name: Checkout
         # SHA-pinned like pr-agent.yml (this job runs the model on a
@@ -139,6 +142,10 @@ jobs:
       - name: Distill proposals via opencode CLI
         id: distill
         if: steps.gate.outputs.has_findings == 'true'
+        # Step-level cap on the model call: an 80 KB corpus against the free
+        # tier has measured >10m, so cap it at 15m with the 25m job cap as
+        # the total backstop (matches pr-agent.yml's numbers).
+        timeout-minutes: 15
         # Inputs are bot-authored review bodies (treated as data in the
         # prompt, but that is a prompt convention, not a security boundary):
         # the model runs inside the opencode CLI's agent loop with tool
@@ -204,6 +211,10 @@ jobs:
           # exactly when the response exceeds the pipe buffer — the one case
           # this warning is meant to survive.
           CONTENT="${RAW:0:8000}"
+          # A byte cut at 8000 can split a multi-byte UTF-8 rune; drop the
+          # partial tail so the PR body and best_practices.md stay valid
+          # UTF-8 (GitHub 422s on invalid runes in the body).
+          CONTENT="$(printf '%s' "$CONTENT" | python3 -c 'import sys; sys.stdout.write(sys.stdin.buffer.read().decode("utf-8","ignore"))')"
           if [ -z "$CONTENT" ]; then
             echo "::error::opencode distill returned empty output — not treating as 'nothing to add'; surfacing for investigation"
             exit 1
