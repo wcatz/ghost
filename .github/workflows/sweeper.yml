@@ -1,4 +1,4 @@
-# Closes the review loop after PR-Agent runs.
+# Closes the review loop after the Reviewer workflow runs.
 #
 # Validated mechanics (wcatz/ci-mech-spike, 2026-08-25):
 #   - GITHUB_TOKEN cannot resolve review threads ("not accessible by
@@ -169,9 +169,9 @@ jobs:
           if [ "$N_LIVE" -gt 0 ]; then
             gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
               -f event=REQUEST_CHANGES \
-              -f body="PR-Agent has $N_LIVE unresolved finding(s) — see inline threads." >/dev/null 2>&1 \
+              -f body="The reviewer has $N_LIVE unresolved finding(s) — see inline threads." >/dev/null 2>&1 \
               && echo "Requested changes: $N_LIVE live finding(s)." \
               || echo "Could not set REQUEST_CHANGES state."
           else
-            echo "No live PR-Agent findings."
+            echo "No live reviewer findings."
           fi
