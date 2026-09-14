@@ -420,7 +420,7 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 ## Review pipeline
 
-PRs are reviewed automatically on every push by two workflows, powered by Big Pickle through the opencode CLI.
+PRs are reviewed automatically by two workflows, powered by Big Pickle through the opencode CLI. A push that touches only Markdown or `docs/` does not trigger a review at all (`paths-ignore`), so existing threads on such a PR stay as they are.
 
 **`reviewer.yml`** runs on `pull_request` and posts a single review built from the model's structured findings document:
 
