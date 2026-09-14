@@ -89,14 +89,19 @@ jobs:
             title="$(printf '%s' "$rec" | jq -r .title)"
             merged="$(printf '%s' "$rec" | jq -r .mergedAt)"
             # Only PRs merged within the last 30 days feed today's sample.
+            # A jq error on an unparseable mergedAt yields EMPTY output (not
+            # "false"), so a any()!=true skip is the only branch that covers
+            # both 'valid but old' and 'invalid' — and it must actually
+            # skip (a header with an empty merged date would otherwise leak
+            # into findings.txt with no tell).
             inwin="$(printf '%s' "$rec" | jq -r '[.mergedAt|fromdateiso8601 >= (now - 60*60*24*30)]|any')"
-            # An unparseable mergedAt evaluates to null and silently reads
-            # as "older than the window" — the PR drops out of the corpus
-            # with no tell. Emit the skip so a slimmed month is explainable.
-            if [ -z "$inwin" ] || [ "$inwin" = "null" ]; then
-              echo "::warning::PR #$num mergedAt '$merged' not parseable — skipped from corpus"
+            if [ "$inwin" != "true" ]; then
+              if [ -z "$inwin" ] || [ "$inwin" = "null" ]; then
+                echo "::warning::PR #$num mergedAt '$merged' not parseable — skipped from corpus"
+              fi
+              pr_skipped=$((pr_skipped+1))
+              continue
             fi
-            if [ "$inwin" = "false" ]; then pr_skipped=$((pr_skipped+1)); continue; fi
             # Paginate the reviews of each PR: reviews(first:100) would
             # silently drop bodies beyond the first page on a churny PR —
             # precisely the long-running PRs that accumulate the most
@@ -258,6 +263,12 @@ jobs:
           if [ "$RAW_BYTES" -gt 8000 ]; then
             echo "::warning::distill response was $RAW_BYTES bytes; kept the head 8 KB (proposals preserved). Verify the last candidate is complete before approving the draft PR."
           fi
+          # NOTHING_TO_ADD comparison. Trim trailing whitespace first: the
+          # model's most realistic near-miss is a trailing space after the
+          # token, and the exact match would otherwise emit a draft PR whose
+          # body IS the literal "NOTHING_TO_ADD" (command substitution only
+          # strips trailing *newlines*).
+          CONTENT="$(printf '%s' "$CONTENT" | sed 's/[[:space:]]*$//')"
           if [ "$CONTENT" = "NOTHING_TO_ADD" ]; then
             echo "proposals=" >> "$GITHUB_OUTPUT"
             echo "Nothing new to add."
@@ -313,7 +324,7 @@ jobs:
           # both remote branch and PR-by-branch BEFORE pushing: the earlier
           # placement (after push) meant the losing run died on a
           # non-fast-forward push before its own re-check ever ran.
-          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+          if git ls-remote --heads origin "$BRANCH" | grep -q "refs/heads/$BRANCH$"; then
             # Branch exists. If it has an open PR, a concurrent dispatch won
             # the race — nothing to do. If it does NOT, the branch is either
             # the work of an in-flight concurrent run that has pushed but has
@@ -355,7 +366,11 @@ jobs:
             # PR exists — re-check and exit 0 (that is the concurrent-run
             # completion, not our failure); only fail if the branch is not
             # there (a genuine push problem).
-            if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+# Anchored to the fully-qualified ref: an unanchored substring would
+            # false-positive on any related branch whose name merely
+            # CONTAINS the monthly branch (e.g. a leftover
+            # chore/best-practices-2026-09-x) and dead-guard the month.
+            if git ls-remote --heads origin "$BRANCH" | grep -q "refs/heads/$BRANCH$"; then
               echo "::warning::push was rejected but remote branch $BRANCH now exists — a concurrent run pushed it; not failing"
               exit 0
             fi
