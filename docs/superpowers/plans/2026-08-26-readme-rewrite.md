@@ -1,5 +1,17 @@
 # README Rewrite Plan
 
+> **Archived — executed 2026-08-26.** This is a record of what was done,
+> not current documentation. Its unchecked boxes are an artefact of the
+> archive: every task here already landed in `README.md`. Text quoted
+> below describes the codebase as it stood in August 2026 and has since
+> been overtaken in at least three places — `ghost_resolve` no longer
+> uses MCP sampling (retired per the 2026-07-28 spec; see
+> `docs/superpowers/specs/2026-08-24-resolve-sampling-path-design.md`),
+> the consolidation-tier wording misstates the Haiku tier, and the
+> PR-Agent pipeline it describes has been replaced by `reviewer.yml` and
+> `sweeper.yml`. `CLAUDE.md` and the README are authoritative for current
+> behaviour; this file is deliberately left as written.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Rewrite the README to reflect Ghost's current architecture — opencode as the primary LLM path, 20 MCP tools + 2 prompts, and the self-hosted PR-Agent review pipeline.
