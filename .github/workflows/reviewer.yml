@@ -58,7 +58,15 @@ jobs:
       # at Post review with ENOENT (observed on PR #418, run 34869517878).
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # The base BRANCH tip, not base.sha. The event payload's
+          # base.sha is the base tip as of the PR's last sync, which for
+          # an older PR can predate the scripts entirely: #416 and #417
+          # resolved it to e29cc2c, the commit before .github/scripts
+          # existed, and were silently skipped instead of reviewed
+          # (run 34884927202). Both refs are equally trusted — every
+          # commit on the base branch is — so pinning bought nothing and
+          # cost correctness.
+          ref: ${{ github.base_ref }}
           fetch-depth: 1
           persist-credentials: false
           sparse-checkout: .github/scripts
@@ -142,22 +150,26 @@ jobs:
           # Move the trusted scripts out of the workspace before the head
           # tree lands on top of them and before the model runs against it.
           rm -rf "${RUNNER_TEMP}/base-scripts"
-          # A base ref predating the scripts has nothing trusted to post
-          # with. Failing here would red-X a class that worked before this
-          # change — a PR stacked on an older feature branch still has the
-          # scripts in its head tree, which is where they used to be read
-          # from. Skip instead: same reasoning as the fork and Dependabot
-          # skips above, and this runs before the model, so it costs no
-          # LLM invocation. Never fall back to the PR's own copy.
+          # Now that the checkout above tracks the base BRANCH tip, this
+          # can only fire if the base branch itself has no
+          # .github/scripts — a misconfiguration, not an artefact of an
+          # old PR. So it fails rather than skips.
+          #
+          # Skipping here was actively harmful: with no review posted
+          # there are no findings, so the sweeper's review-gate came out
+          # green and an unreviewed PR satisfied a required check. That
+          # is worse than a red X — it is a gate that reads as "nothing
+          # wrong" when it means "nothing looked". Failing makes the
+          # sweeper publish a failing gate instead.
+          #
+          # % is a legal ref-name character and Actions decodes %25/%0A/%0D
+          # in a workflow-command message, so a branch named
+          # 'x%0A::stop-commands::y' would inject a command here. Escaping
+          # % alone covers it: a real newline cannot occur in a ref name.
           if [ ! -d .base-scripts/.github/scripts ]; then
-            # % is a legal ref-name character and Actions decodes %25/%0A/%0D
-            # in a workflow-command message, so a branch named
-            # 'x%0A::stop-commands::y' would inject a command here. Escaping
-            # % alone covers it: a real newline cannot occur in a ref name.
             base_ref_safe="${GITHUB_BASE_REF//%/%25}"
-            echo "::warning::base ref ${base_ref_safe} has no .github/scripts — skipping; there is no trusted copy to post with"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "::error::base branch ${base_ref_safe} has no .github/scripts — refusing to review with an untrusted copy, and refusing to pass silently"
+            exit 1
           fi
           mv .base-scripts/.github/scripts "${RUNNER_TEMP}/base-scripts"
           rm -rf .base-scripts
