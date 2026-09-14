@@ -49,6 +49,24 @@ class TestExtract(unittest.TestCase):
         with self.assertRaises(ValidationError):
             extract_findings("")
 
+    def test_deeply_nested_json_raises_validation_error_not_recursion_error(self):
+        # Adversarial reproducer: 200,000 levels of nesting under "verdict".
+        # json.loads (and the old hand-rolled scanner's json.loads call on
+        # the balanced top-level span) overflows the C stack and raises
+        # RecursionError, which the old `except ValueError` around it never
+        # caught, so it escaped uncaught instead of failing as ValidationError.
+        text = '{"verdict":' + '{"a":' * 200000 + '1' + '}' * 200000 + '}'
+        with self.assertRaises(ValidationError):
+            extract_findings(text)
+
+    def test_recovers_valid_json_after_a_stray_quote_in_prose(self):
+        # One unbalanced double-quote in the model's prose used to flip the
+        # hand-rolled scanner's in-string flag for the rest of the document,
+        # discarding an otherwise-valid trailing JSON object.
+        t = ('The docstring says "todo: fix this later.\n\n'
+             '{"verdict":"clean","summary":"ok","findings":[]}')
+        self.assertEqual(extract_findings(t)["verdict"], "clean")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,6 +6,7 @@ of its arguments so it can be unit-tested off-CI. post_review.py does the
 I/O.
 """
 
+import json
 import re
 
 VERDICTS = ("blocker", "should-fix", "nit", "clean")
@@ -187,53 +188,57 @@ def extract_findings(text):
 
     The model has no write tools by design — its only output channel is
     stdout — so the JSON has to be recovered from whatever prose, fenced
-    blocks, or event wrappers surround it. Scans for balanced top-level
-    JSON objects and returns the LAST one that carries a 'verdict' key,
-    which survives a model that reasons in prose before answering, wraps
-    the answer in ```json, or restates a partial object mid-explanation.
+    blocks, or event wrappers surround it. Tries a standard-library JSON
+    decode anchored at every '{' in the reply, independently of every
+    other position, and returns the LAST such decode that produced a
+    dict with a 'verdict' key — which survives a model that reasons in
+    prose before answering, wraps the answer in ```json, or restates a
+    partial object mid-explanation. Because each attempt is local (no
+    shared string/escape state across the whole reply), one unbalanced
+    quote earlier in the model's prose cannot discard a valid object
+    that follows it.
 
     Raises ValidationError when nothing usable is present, so a garbled
     reply fails the job loudly instead of posting a degraded review.
+
+    Deviation from a literal "try every '{' independently" scan: once a
+    position decodes successfully, the scan resumes after that object
+    instead of also probing the positions inside it — otherwise a
+    document with N nested braces costs O(N) decode attempts each
+    doing O(N) work. And a RecursionError (the C JSON decoder's stack
+    guard, hit by adversarially deep nesting) aborts the whole scan
+    immediately rather than being retried one character over: nearly
+    every remaining position in such a reply is just as deeply nested,
+    so retrying them one by one is a multi-minute stall for the same
+    verdict (ValidationError), not a chance at a different answer.
     """
-    import json as _json
-
+    decoder = json.JSONDecoder()
     candidates = []
-    depth = 0
-    start = None
-    in_str = False
-    esc = False
+    tried = 0
+    i = 0
+    n = len(text)
 
-    for i, ch in enumerate(text):
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
+    while i < n:
+        if text[i] != "{":
+            i += 1
             continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start is not None:
-                    candidates.append(text[start:i + 1])
-                    start = None
-
-    for blob in reversed(candidates):
+        tried += 1
         try:
-            doc = _json.loads(blob)
+            doc, end = decoder.raw_decode(text, i)
+        except RecursionError:
+            raise ValidationError(
+                "model reply contains JSON nested too deeply to parse "
+                f"safely ({tried} '{{' position(s) tried, {n} chars)")
         except ValueError:
+            i += 1
             continue
         if isinstance(doc, dict) and "verdict" in doc:
-            return doc
+            candidates.append(doc)
+        i = end
+
+    if candidates:
+        return candidates[-1]
 
     raise ValidationError(
         "no JSON object with a 'verdict' key found in the model reply "
-        f"({len(candidates)} balanced object(s) scanned, "
-        f"{len(text)} chars)")
+        f"({tried} '{{' position(s) tried, {n} chars)")
