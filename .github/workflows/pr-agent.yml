@@ -184,7 +184,19 @@ jobs:
         # no SHA pin, but its installer supports `-v <version>` — pin the
         # tested release (the version of the first green CI run) instead of
         # silently tracking latest. Revisit if opencode ships checksums.
-        run: curl -fsSL --proto '=https' --tlsv1.2 https://opencode.ai/install | bash -s -- -v 1.18.30
+        run: |
+          # Download THEN run, with &&: the runner's default shell is
+          # 'bash -e' WITHOUT pipefail, so the piped form masks a download
+          # failure as an empty stdin (green step, no opencode). The -o form
+          # short-circuits on curl's own non-zero exit.
+          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/oc-install.sh https://opencode.ai/install \
+            && bash /tmp/oc-install.sh -v 1.18.30
+          # Prove the binary is on PATH here: a green Install with a missing
+          # binary would only surface as "command not found" in the model
+          # step, where the failure is misattributable. Version pin in the
+          # log is also the supply-chain evidence.
+          command -v opencode >/dev/null || { echo "::error::opencode not on PATH after install"; exit 1; }
+          opencode --version
 
       - name: Prepare review context
         # Checkout the PR head and capture the diff BEFORE the model gets
@@ -396,6 +408,12 @@ jobs:
             echo "" >> review.md
             echo "_note: PR head moved to ${current:0:7} since this review was generated against ${reviewed:0:7} — line numbers may be stale._" >> review.md
           fi
+          # A missing pr.head degrades the dedup marker to '<!-- bot-review:
+          # -->' (matches nothing and lets every later run re-post). Prepare
+          # writes pr.head before the model runs, so absence here is a real
+          # pipeline break, not a race: fail instead of posting an undedupable
+          # marker.
+          [ -n "$reviewed" ] || { echo "::error::pr.head is empty — cannot dedup or staleness-label; refusing to post"; exit 1; }
           rc=0
           already_posted || rc=$?
           if [ "$rc" = 0 ]; then
@@ -415,6 +433,24 @@ jobs:
           post_review() {
             gh --repo "$GITHUB_REPOSITORY" pr review "$PR_NUMBER" --comment --body-file review.md
           }
+          # Second, pre-post already_posted: the first check above ran while
+          # the review was still being assembled, so a same-head run in the
+          # OTHER lane (a synchronize auto-run vs a manual /review — separate
+          # concurrency groups by design) can have posted in that window.
+          # Re-check immediately before the post shrinks the race to the
+          # final API call. RESIDUAL: two runs that both clear THIS check in
+          # the same instant still both post — one duplicate review for a
+          # head; the marker dedups the next identical post and the duplicate
+          # is cosmetic, which is accepted and documented (rounds 18/21/23).
+          # A separate post job would serialize this completely but adds
+          # artifact passing and a fresh token-bearing job — rejected.
+          rc=0
+          already_posted || rc=$?
+          if [ "$rc" = 0 ]; then
+            echo "skip: self-review already posted for head ${reviewed:0:7} (posted during assembly)"
+            exit 0
+          fi
+          [ "$rc" = 2 ] && echo "::warning::pre-post verification could not list reviews; posting anyway — delivery over dedup"
           # Retry exactly once on a transient network/API failure so a flake
           # cannot silently destroy a finished review. Re-check the marker
           # before retrying: if the first call actually committed server-side
