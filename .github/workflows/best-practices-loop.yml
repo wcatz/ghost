@@ -90,6 +90,12 @@ jobs:
             merged="$(printf '%s' "$rec" | jq -r .mergedAt)"
             # Only PRs merged within the last 30 days feed today's sample.
             inwin="$(printf '%s' "$rec" | jq -r '[.mergedAt|fromdateiso8601 >= (now - 60*60*24*30)]|any')"
+            # An unparseable mergedAt evaluates to null and silently reads
+            # as "older than the window" — the PR drops out of the corpus
+            # with no tell. Emit the skip so a slimmed month is explainable.
+            if [ -z "$inwin" ] || [ "$inwin" = "null" ]; then
+              echo "::warning::PR #$num mergedAt '$merged' not parseable — skipped from corpus"
+            fi
             if [ "$inwin" = "false" ]; then pr_skipped=$((pr_skipped+1)); continue; fi
             # Paginate the reviews of each PR: reviews(first:100) would
             # silently drop bodies beyond the first page on a churny PR —
@@ -282,6 +288,15 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Restore the write-scoped credential FIRST: persist-credentials:
+          # false left git without one, and every ls-remote/gh probe below
+          # must authenticate — public repos happen to work anonymously, but
+          # a private one would silently report "no branch" and dead-guard
+          # the concurrency checks entirely. Restoring at the top of this
+          # step is safe: the model step has finished, and GH_TOKEN is
+          # already in this step's env by design.
+          git config --local http.https://github.com/.extraheader \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           git checkout -b "$BRANCH"
           {
             cat best_practices.md
@@ -299,29 +314,40 @@ jobs:
           # placement (after push) meant the losing run died on a
           # non-fast-forward push before its own re-check ever ran.
           if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
-            # Branch exists. If it has a PR, a concurrent dispatch won the
-            # race — nothing to do. If it does NOT, a prior run crashed
-            # between push and pr create and every later run would silently
-            # exit 0 with no PR all month: that is the broken-attempt case
-            # the liveness intent demands surface loudly, not greenly.
-            ALREADY="$(gh pr list --state all --head "$BRANCH" --json number --jq '.[0].number // empty')"
+            # Branch exists. If it has an open PR, a concurrent dispatch won
+            # the race — nothing to do. If it does NOT, the branch is either
+            # the work of an in-flight concurrent run that has pushed but has
+            # not yet created its PR, or a prior run that crashed between
+            # push and pr create.
+            ALREADY="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number // empty')"
             if [ -n "$ALREADY" ]; then
               echo "::warning::remote branch $BRANCH already exists on PR #$ALREADY (concurrent run) — not pushing or opening a PR"
               exit 0
             fi
-            echo "::error::remote branch $BRANCH exists but has NO PR — a prior run crashed between push and pr create; delete the stale branch (or run gh pr create) and re-run"
+            # Still branch-without-PR. Wait for a live concurrent dispatch to
+            # finish its push→pr-create window (cancel-in-progress: false
+            # makes the race reachable) before condemning the month. A closed
+            # PR does NOT satisfy the wait: closed PRs are matches from prior
+            # months whose branch was never cleaned up, and skipping them is
+            # exactly the permanent-stall bug the --state open fix prevents.
+            tries=0
+            while [ "$tries" -lt 3 ]; do
+              sleep 20
+              ALREADY="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number // empty')"
+              if [ -n "$ALREADY" ]; then
+                echo "::warning::remote branch $BRANCH now has PR #$ALREADY (concurrent run finished) — not pushing or opening a PR"
+                exit 0
+              fi
+              tries=$((tries+1))
+            done
+            echo "::error::remote branch $BRANCH exists with no open PR after ~60s — a prior run crashed between push and pr create; delete the stale branch (or run gh pr create) and re-run"
             exit 1
           fi
-          ALREADY="$(gh pr list --state all --head "$BRANCH" --json number --jq '.[0].number // empty')"
+          ALREADY="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number // empty')"
           if [ -n "$ALREADY" ]; then
             echo "::warning::a PR for $BRANCH already exists (#$ALREADY) — not creating another"
             exit 0
           fi
-          # persist-credentials: false means git has no credential for push;
-          # restore it explicitly HERE, only after the model step has
-          # finished (the agent must never see a credential, but push may).
-          git config --local http.https://github.com/.extraheader \
-            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           if ! git push origin "$BRANCH"; then
             # The ls-remote pre-check only shrinks the window: two
             # concurrent dispatches can BOTH pass it, and the losing run
@@ -339,7 +365,7 @@ jobs:
           # Final guard: between the ls-remote and the create the other run
           # may have created its PR. Re-check by branch after the push and
           # fail-soft instead of creating a duplicate draft PR.
-          ALREADY="$(gh pr list --state all --head "$BRANCH" --json number --jq '.[0].number // empty')"
+          ALREADY="$(gh pr list --state open --head "$BRANCH" --json number --jq '.[0].number // empty')"
           if [ -n "$ALREADY" ]; then
             echo "::warning::a PR for $BRANCH was created concurrently (#$ALREADY) — not creating a duplicate"
             exit 0
