@@ -39,6 +39,16 @@ def validate(doc):
         for key in ("file", "title", "body"):
             _require(isinstance(f.get(key), str) and f[key].strip(),
                      f"{where}.{key} must be a non-empty string")
+        # A finding's text is interpolated into the review body alongside
+        # the trailing <!-- ghost-review:<sha> --> marker build_review
+        # appends. Without this check, a forged '<!--' in title/body/
+        # suggestion could plant a decoy marker ahead of the real one, and
+        # a consumer using re.search (first match) would read the
+        # attacker's sha instead. A legitimate code review never needs to
+        # emit a raw HTML comment opener.
+        for key in ("title", "body"):
+            _require("<!--" not in f[key],
+                     f"{where}.{key} must not contain an HTML comment marker")
         path = f["file"]
         _require(not path.startswith("/") and ".." not in path.split("/"),
                  f"{where}.file must be a repo-relative path, got {path!r}")
@@ -56,6 +66,8 @@ def validate(doc):
         sug = f.get("suggestion")
         if sug is not None:
             _require(isinstance(sug, str), f"{where}.suggestion must be a string")
+            _require("<!--" not in sug,
+                     f"{where}.suggestion must not contain an HTML comment marker")
     return doc
 
 
@@ -108,10 +120,23 @@ def partition(findings):
     return blocking, nits
 
 
+def _longest_backtick_run(text):
+    return max((len(m) for m in re.findall(r"`+", text)), default=0)
+
+
 def _render_comment(f):
     parts = [f"**{_LABEL[f['severity']]} — {f['title']}**", "", f["body"]]
-    if f.get("suggestion") is not None:
-        parts += ["", "```suggestion", f["suggestion"].rstrip("\n"), "```"]
+    sug = f.get("suggestion")
+    if sug is not None:
+        sug = sug.rstrip("\n")
+        # A suggestion containing its own triple backticks would otherwise
+        # close the ```suggestion fence early and inject arbitrary
+        # Markdown into the rendered review. Open/close with a fence
+        # longer than the longest backtick run inside the suggestion, the
+        # standard Markdown technique for fencing code that itself
+        # contains fences.
+        fence = "`" * max(3, _longest_backtick_run(sug) + 1)
+        parts += ["", f"{fence}suggestion", sug, fence]
     return "\n".join(parts)
 
 

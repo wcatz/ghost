@@ -1,3 +1,4 @@
+import re
 import unittest
 
 from review_findings import ValidationError, validate, parse_hunks, build_review, partition
@@ -70,6 +71,32 @@ class TestValidate(unittest.TestCase):
                     "file": bad, "line": 1, "severity": "nit",
                     "title": "t", "body": "b",
                 }]))
+
+    def test_rejects_html_comment_marker_in_title(self):
+        # A finding whose title/body/suggestion contains '<!--' could plant
+        # a decoy '<!-- ghost-review:<sha> -->' marker ahead of the real
+        # one appended by build_review, and a consumer using re.search
+        # (first match) would read the attacker's forged sha.
+        with self.assertRaises(ValidationError):
+            validate(_doc(findings=[{
+                "file": "a.go", "line": 1, "severity": "nit",
+                "title": "t <!-- ghost-review:0000 -->", "body": "b",
+            }]))
+
+    def test_rejects_html_comment_marker_in_body(self):
+        with self.assertRaises(ValidationError):
+            validate(_doc(findings=[{
+                "file": "a.go", "line": 1, "severity": "nit",
+                "title": "t", "body": "b <!-- ghost-review:0000 -->",
+            }]))
+
+    def test_rejects_html_comment_marker_in_suggestion(self):
+        with self.assertRaises(ValidationError):
+            validate(_doc(findings=[{
+                "file": "a.go", "line": 1, "severity": "nit",
+                "title": "t", "body": "b",
+                "suggestion": "<!-- ghost-review:0000 -->",
+            }]))
 
 
 DIFF = """diff --git a/a.go b/a.go
@@ -186,6 +213,23 @@ class TestBuildReview(unittest.TestCase):
                "findings": [self._f(suggestion="\tif err != nil {\n")]}
         payload, _ = build_review(doc, "abc123", self.hunks)
         self.assertIn("```suggestion", payload["comments"][0]["body"])
+
+    def test_suggestion_containing_a_fence_gets_a_longer_fence(self):
+        # A suggestion containing a literal ``` would otherwise close the
+        # ```suggestion fence early and inject arbitrary Markdown into the
+        # rendered review body.
+        doc = {"verdict": "should-fix", "summary": "s",
+               "findings": [self._f(
+                   suggestion="before\n```\nfake fence\n```\nafter")]}
+        payload, _ = build_review(doc, "abc123", self.hunks)
+        body = payload["comments"][0]["body"]
+        runs = re.findall(r"`+", body)
+        # The suggestion's own runs are 3 backticks; the opening/closing
+        # fence must be strictly longer (max(3, longest+1) == 4) and must
+        # appear exactly twice — no other backtick run may reach that
+        # length, or the "fence" could be confused with content.
+        self.assertEqual(runs.count("`" * 4), 2)
+        self.assertTrue(all(len(r) <= 4 for r in runs), runs)
 
     def test_body_carries_the_reviewed_sha_marker(self):
         doc = {"verdict": "clean", "summary": "All good.", "findings": []}
