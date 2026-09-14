@@ -191,12 +191,14 @@ jobs:
           # short-circuits on curl's own non-zero exit.
           curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/oc-install.sh https://opencode.ai/install \
             && bash /tmp/oc-install.sh -v 1.18.30
-          # Prove the binary is on PATH here: a green Install with a missing
-          # binary would only surface as "command not found" in the model
-          # step, where the failure is misattributable. Version pin in the
-          # log is also the supply-chain evidence.
-          command -v opencode >/dev/null || { echo "::error::opencode not on PATH after install"; exit 1; }
-          opencode --version
+          # The installer adds ~/.opencode/bin to $GITHUB_PATH, which only
+          # applies to SUBSEQUENT steps — `command -v` would fail here even
+          # on a good install. Verify the binary on disk instead, and print
+          # the pinned version as the supply-chain evidence. A green Install
+          # with a missing binary otherwise surfaces only as "command not
+          # found" in the model step, where it's misattributable.
+          [ -x "$HOME/.opencode/bin/opencode" ] || { echo "::error::opencode binary missing after install ($HOME/.opencode/bin/opencode)"; exit 1; }
+          "$HOME/.opencode/bin/opencode" --version
 
       - name: Prepare review context
         # Checkout the PR head and capture the diff BEFORE the model gets
