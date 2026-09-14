@@ -1,0 +1,96 @@
+name: Reviewer
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: reviewer-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Mint bot identity token
+        id: apptoken
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Warn on degraded identity
+        if: ${{ steps.apptoken.outcome == 'failure' && steps.apptoken.outputs.token == '' }}
+        run: echo "::warning::App token unavailable — reviews will post as github-actions"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          # The model step must not reach any write-scoped credential, not
+          # via env and not via .git/config http.extraheader.
+          persist-credentials: false
+
+      - name: Install opencode
+        # Binary from GitHub Releases with SHA256 verification — no
+        # unpinned curl|bash. The PATH export is REQUIRED: the old
+        # curl|bash installer wrote $GITHUB_PATH itself, and dropping it
+        # is what gave PR #421 "opencode: command not found" (exit 127).
+        run: |
+          mkdir -p "$HOME/.opencode/bin"
+          OC_VERSION=1.18.30
+          OC_SHA256=55007246858165496ff85ba1c2b648f7421e8e2013bf4189a680c9ff8e699d17
+          OC_URL="https://github.com/anomalyco/opencode/releases/download/v${OC_VERSION}/opencode-linux-x64.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/opencode.tar.gz "$OC_URL"
+          echo "${OC_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/opencode.tar.gz -C "$HOME/.opencode/bin" opencode
+          chmod +x "$HOME/.opencode/bin/opencode"
+          "$HOME/.opencode/bin/opencode" --version
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare review context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          cd "${GITHUB_WORKSPACE}"
+          gh pr checkout "$PR_NUMBER"
+          git config --local --unset-all http.extraheader 2>/dev/null || true
+          git config --local --remove-section 'http.https://github.com/' 2>/dev/null || true
+
+          gh pr view "$PR_NUMBER" --json title --jq .title > pr.title
+          gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid > pr.head
+          gh pr diff "$PR_NUMBER" > pr.diff
+
+          # Conventions come from the BASE ref, which is not
+          # attacker-controllable, unlike the PR head tree. They are
+          # extracted to files here because .git is deleted below, and are
+          # deliberately NOT named CLAUDE.md/AGENTS.md: the injection sweep
+          # would delete them, and opencode would auto-load them outside
+          # our prompt's control.
+          mkdir -p .review-context
+          git fetch --depth=1 origin "${GITHUB_BASE_REF}" 2>/dev/null || true
+          for f in best_practices.md CLAUDE.md; do
+            git show "origin/${GITHUB_BASE_REF}:${f}" 2>/dev/null \
+              >> .review-context/conventions.md || true
+          done
+          [ -s .review-context/conventions.md ] \
+            || echo "(no repo conventions found on the base ref)" \
+               > .review-context/conventions.md
+
+          # The head tree is attacker-controllable and opencode auto-loads
+          # instruction files from it hierarchically. Strip recursively,
+          # then delete .git so they cannot be recovered via git show.
+          find . -path ./.review-context -prune -o \
+            \( -name AGENTS.md -o -name CLAUDE.md -o -name .mcp.json \
+            -o -name opencode.json -o -name opencode.jsonc \
+            -o -name .opencode \) -exec rm -rf {} + 2>/dev/null || true
+          rm -rf .git
