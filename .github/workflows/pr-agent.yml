@@ -189,10 +189,11 @@ jobs:
           gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid > pr.head
           # The PR head tree is attacker-controllable and opencode would
           # auto-load repo instruction files from it (AGENTS.md, CLAUDE.md,
-          # opencode.json, .opencode/). A crafted PR could steer the
-          # reviewer ("always emit verdict: clean"). Strip those before the
-          # model sees the tree; the diff and title stay in pr.diff/pr.title.
-          rm -rf .opencode opencode.json opencode.jsonc AGENTS.md CLAUDE.md .claude
+          # opencode.json, .opencode/, .mcp.json). A crafted PR could steer
+          # the reviewer ("always emit verdict: clean") or declare its own
+          # MCP servers. Strip those before the model sees the tree; the
+          # diff and title stay in pr.diff/pr.title.
+          rm -rf .opencode opencode.json opencode.jsonc AGENTS.md CLAUDE.md .claude .mcp.json
 
       - name: Review PR with opencode big-pickle
         id: review
@@ -283,21 +284,21 @@ jobs:
         run: |
           cd "${GITHUB_WORKSPACE}"
           reviewed="$(cat pr.head 2>/dev/null || true)"
-          # Dedup: concurrency lanes are split by event type, so a /review
-          # comment landing while an in-flight synchronize auto-run is
-          # mid-model completes independently — without a guard both would
-          # post a full review for the same head (READ ME: exact-one per
-          # head). The posted body embeds an invisible marker
-          # <!-- bot-review:<sha> -->, so check existing review bodies for
-          # a marker matching the head this run reviewed and skip if found.
-          # Identity-agnostic: works for App or github-actions authorship.
-          if [ -n "$reviewed" ] && \
-             gh pr view "$PR_NUMBER" --json reviews --jq --arg s "$reviewed" \
-               '.reviews[] | select((.body // "") | contains("<!-- bot-review:" + $s + " -->"))' \
-               | grep -q . 2>/dev/null; then
-            echo "skip: self-review already posted for head ${reviewed:0:7}"
-            exit 0
-          fi
+          # Dedup helper: does any existing review body carry a marker for
+          # this head? The posted body embeds <!-- bot-review:<sha> -->, and
+          # concurrency lanes are split by event type, so an in-flight
+          # synchronize auto-run plus a /review, or a re-typed /review on the
+          # same head, would otherwise double-post. Identity-agnostic: works
+          # for App or github-actions authorship. NOTE: --arg goes to jq, not
+          # to gh (cli/cli#6326) — pipe gh's stdout into a real jq so the
+          # guard actually fires; the old form silently never matched.
+          already_posted() {
+            [ -n "$reviewed" ] || return 1
+            gh pr view "$PR_NUMBER" --json reviews --jq '.reviews' 2>/dev/null \
+              | jq -r --arg s "$reviewed" \
+                '.[] | select((.body // "") | contains("<!-- bot-review:" + $s + " -->"))' \
+              | grep -q .
+          }
           # Compare the reviewed head against the PR's CURRENT head. A /review
           # run that started at head X takes minutes of model time, so a push
           # to Y can land in between; a pull_request run is already gated to
@@ -312,10 +313,28 @@ jobs:
             echo "" >> review.md
             echo "_note: PR head moved to ${current:0:7} since this review was generated against ${reviewed:0:7} — line numbers may be stale._" >> review.md
           fi
-          # Brand the body so a later same-head run can self-dedup.
+          if already_posted; then
+            echo "skip: self-review already posted for head ${reviewed:0:7}"
+            exit 0
+          fi
+          # Brand the body so a later same-head run (or our own retry) can
+          # self-dedup.
           printf '\n<!-- bot-review:%s -->\n' "$reviewed" >> review.md
-          # Retry the posting once on a transient network/API failure so a
-          # flake cannot silently destroy a finished review; a persistent
-          # failure still surfaces as a red step.
-          gh pr review "$PR_NUMBER" --comment --body-file review.md \
-            || { sleep 15; gh pr review "$PR_NUMBER" --comment --body-file review.md; }
+          post_review() {
+            gh pr review "$PR_NUMBER" --comment --body-file review.md
+          }
+          # Retry exactly once on a transient network/API failure so a flake
+          # cannot silently destroy a finished review. Re-check the marker
+          # before retrying: if the first call actually committed server-side
+          # but gh failed on the response (drop/timeout), review.md is now a
+          # duplicate — a marker present means the first post landed, so the
+          # retry must be skipped, not repeated. A persistent failure still
+          # surfaces as a red step.
+          if ! post_review; then
+            sleep 15
+            if already_posted; then
+              echo "first post committed despite client error — not re-posting"
+            else
+              post_review || exit 1
+            fi
+          fi
