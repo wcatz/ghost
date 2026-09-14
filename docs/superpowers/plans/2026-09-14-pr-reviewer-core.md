@@ -21,7 +21,7 @@ Do not re-derive these; they were run against the real repo, not asserted.
 | actionlint catches the `administration:` key that broke #421 | v1.7.12, exit 1, `unknown permission scope "administration"` at `gate.yml:46` |
 | actionlint is clean on `main`'s current workflows | exit 0 |
 | actionlint over all of #421's workflows finds exactly 1 issue | the `gate.yml` one that took CI down |
-| actionlint auto-discovery silently passes outside a git root | same binary, same file: 0 findings, exit 0 — hence the explicit-path guard in Task 1 |
+| actionlint FAILS LOUDLY when auto-discovery finds nothing | `no project was found in any parent directories of "..."`, exit 3 (`command.go` ExitStatusFailure). An earlier claim in this table that it silently exits 0 was WRONG — it came from grepping the output for `^\.github` and reading "no matching lines" as "no findings" without checking the exit code. Explicit paths are still used in Task 1, but for a different reason: they pin the scanned set and make the count line positive evidence of what ran |
 | The Tasks 2–4b Python is correct as written | all 32 tests pass, `Ran 32 tests ... OK` |
 | `extract_findings` recovers JSON from prose, fences, escaped quotes, multi-object streams | 11 dedicated tests, incl. failure cases (pure prose, truncated JSON, empty) |
 | The stdout channel carries real model output on an x86_64 runner | #421's review of 2026-09-14T04:59:07Z: 4,241 chars, first line `verdict: nit` |
@@ -85,7 +85,7 @@ so every later task is protected by it.
 **Files:**
 - Modify: `.github/workflows/ci.yml` (the `lint` job)
 
-- [ ] **Step 1: Write a deliberately invalid workflow to prove the check catches it**
+- [x] **Step 1: Write a deliberately invalid workflow to prove the check catches it**
 
 Create `/tmp/bad-workflow-test.yml`:
 
@@ -103,7 +103,7 @@ jobs:
       - run: echo hi
 ```
 
-- [ ] **Step 2: Run actionlint against it locally to confirm it fails**
+- [x] **Step 2: Run actionlint against it locally to confirm it fails**
 
 ```bash
 go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 /tmp/bad-workflow-test.yml
@@ -127,7 +127,7 @@ Run against PR #421's workflow set it produces exactly one finding — the
 `gate.yml:46` `administration: read` that took CI down. `main`'s current
 workflows produce zero.
 
-- [ ] **Step 3: Add the actionlint step to the lint job**
+- [x] **Step 3: Add the actionlint step to the lint job**
 
 In `.github/workflows/ci.yml`, inside the `lint` job's `steps:`, after checkout:
 
@@ -144,7 +144,10 @@ In `.github/workflows/ci.yml`, inside the `lint` job's `steps:`, after checkout:
         run: |
           AL_VERSION=1.7.12
           AL_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/actionlint.tar.gz \
+          # --retry: `lint` is a required check, so a transient Releases
+          # 5xx would otherwise redden every open PR with no code defect.
+          curl --retry 3 --retry-connrefused -fsSL --proto '=https' --tlsv1.2 \
+            -o /tmp/actionlint.tar.gz \
             "https://github.com/rhysd/actionlint/releases/download/v${AL_VERSION}/actionlint_${AL_VERSION}_linux_amd64.tar.gz"
           echo "${AL_SHA256}  /tmp/actionlint.tar.gz" | sha256sum -c -
           tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
@@ -156,18 +159,16 @@ In `.github/workflows/ci.yml`, inside the `lint` job's `steps:`, after checkout:
           shopt -s nullglob
           FILES=(.github/workflows/*.yml .github/workflows/*.yaml)
           shopt -u nullglob
-          # Explicit paths, NOT bare `actionlint`: auto-discovery resolves
-          # workflows relative to a git project root, and where that lookup
-          # fails it scans nothing, finds nothing and exits 0 — a vacuously
-          # green check. Verified 2026-09-14: the same binary that flags PR
-          # #421's `administration: read` when handed the file reports zero
-          # findings when auto-discovery comes up empty.
+          # Explicit paths, not bare `actionlint`: this pins the scanned set
+          # to .github/workflows/*.{yml,yaml} rather than relying on
+          # actionlint's own project auto-discovery, and the count line below
+          # is positive evidence of what was actually scanned.
           [ "${#FILES[@]}" -gt 0 ] || { echo "::error::actionlint found no workflow files to scan"; exit 1; }
           echo "actionlint scanning ${#FILES[@]} workflow file(s)"
           /tmp/actionlint -color "${FILES[@]}"
 ```
 
-- [ ] **Step 4: Verify it runs clean against the current workflows**
+- [x] **Step 4: Verify it runs clean against the current workflows**
 
 ```bash
 go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
@@ -177,7 +178,7 @@ Expected: exit 0. If existing workflows have pre-existing findings, fix only
 genuine errors; add `# actionlint-ignore` or a `.actionlint.yaml` exclusion for
 style-only noise rather than expanding scope.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add .github/workflows/ci.yml
