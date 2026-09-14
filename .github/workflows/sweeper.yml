@@ -103,19 +103,56 @@ jobs:
         run: |
           [ -n "$NUMBER" ] || { echo "no PR"; exit 0; }
 
-          # Publishes the `review-gate` check run on the PR head. Factored
-          # out because every exit path below has to write the gate: a
-          # required check that is never published cannot be cleared.
+          # Publishes the `review-gate` check run on the PR head.
+          #
+          # An earlier version swallowed its own failure and was only
+          # called on the happy path, which broke the very rule this file
+          # is built around: a required check that is never published
+          # reads as "Expected — waiting for status" and blocks the PR
+          # with nothing a re-run can clear. A transient failure in the
+          # headRefOid query or in any thread page trips `set -e` and
+          # aborts the step, so the final call alone was never a
+          # guarantee. Publication is therefore enforced from the EXIT
+          # trap and a failed publish now fails loudly.
+          GATE_WRITTEN=0
+          HEADREF=""
+          PAGES_FILE=""
+
           set_gate() {
             jq -n --arg sha "$1" --arg concl "$2" \
                   --arg title "$3" --arg summary "$4" \
               '{name:"review-gate", head_sha:$sha, status:"completed",
                 conclusion:$concl, output:{title:$title, summary:$summary}}' \
               | gh api "repos/$GITHUB_REPOSITORY/check-runs" \
-                  --method POST --input - >/dev/null \
-              && echo "review-gate: $2 — $3" \
-              || echo "::warning::could not publish the review-gate check run"
+                  --method POST --input - >/dev/null || {
+              echo "::error::could not publish the review-gate check run"
+              return 1
+            }
+            GATE_WRITTEN=1
+            echo "review-gate: $2 — $3"
           }
+
+          on_exit() {
+            rc=$?
+            if [ -n "$PAGES_FILE" ]; then rm -f "$PAGES_FILE"; fi
+            if [ "$GATE_WRITTEN" != 1 ]; then
+              if [ -n "$HEADREF" ]; then
+                # Fail closed and visibly: the sweep did not finish, so
+                # its verdict is unknown, but the check still exists and
+                # a re-run can replace it.
+                set_gate "$HEADREF" failure \
+                  "The sweeper did not complete" \
+                  "The sweep aborted before it could evaluate this PR's findings, so the gate fails closed. Re-run the Sweeper workflow, or push a new commit." || true
+              else
+                # Nothing can be published without a head SHA. The step
+                # has already failed, so the job is red — which is at
+                # least visible, unlike a check that never appears.
+                echo "::error::the sweeper aborted before resolving the PR head SHA, so no review-gate check could be published for this commit"
+              fi
+            fi
+            exit "$rc"
+          }
+          trap on_exit EXIT
 
           # Cursor-paginated: first:100 alone silently skipped threads
           # past 100. That now matters more than it used to — an
@@ -147,7 +184,6 @@ jobs:
           esac
 
           PAGES_FILE="$(mktemp)"
-          trap 'rm -f "$PAGES_FILE"' EXIT
           CURSOR_ARG=()
           for _ in $(seq 1 20); do
             # shellcheck disable=SC2016
