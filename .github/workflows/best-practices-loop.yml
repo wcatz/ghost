@@ -197,15 +197,14 @@ jobs:
           # early output truncation) must NOT be silently converted into
           # "nothing to add" — that would skip the month with no PR and no
           # error. Only the literal NOTHING_TO_ADD token means "no change".
-          # The capture truncates from the HEAD, not the tail: the proposals
-          # (and NOTHING_TO_ADD, which is tiny) live at the start, so a
-          # verbose run must keep them and drop the trailing ramble — an
-          # over-limit response is a loud ::warning so the truncated-then-
-          # emitted candidate tail can be checked by the human approver,
-          # instead of a silent partial list or a silently lost month.
-          RAW="$(opencode run -m opencode/big-pickle "$PROMPT")" \
+          # The model's answer is extracted from --format json events the
+          # SAME way pr-agent.yml does (last non-blank text event), so any
+          # framing/prose the CLI puts on stdout can never be mistaken for
+          # the answer or defeat the NOTHING_TO_ADD exact-match.
+          RAW="$(opencode run -m opencode/big-pickle --format json "$PROMPT")" \
             || { echo "::error::opencode distill failed — not skipping, surfacing as a failure"; exit 1; }
-          RAW_BYTES="$(printf '%s' "$RAW" | wc -c)"
+          CONTENT="$(printf '%s' "$RAW" | python3 -c 'import json,sys; parts=[e["part"]["text"] for e in (json.loads(l) for l in sys.stdin if l.strip().startswith("{")) if e.get("type")=="text" and isinstance((e.get("part") or {}).get("text"),str) and e["part"]["text"].strip()]; sys.stdout.write(parts[-1] if parts else "")')"
+          RAW_BYTES="$(printf '%s' "$CONTENT" | wc -c)"
           # Bash substring, NOT `printf | head -c 8000`: the pipe version kills
           # the step with SIGPIPE (141) under pipefail exactly when the
           # response exceeds the pipe buffer — the one case this warning is
@@ -214,7 +213,7 @@ jobs:
           # true byte cap (an ASCII-typical distill reply is the same
           # either way, but rune-dense output would otherwise dodge the
           # RAW_BYTES warning).
-          CONTENT="$(LC_ALL=C; printf '%s' "${RAW:0:8000}")"
+          CONTENT="$(LC_ALL=C; printf '%s' "${CONTENT:0:8000}")"
           # A byte cut at 8000 can split a multi-byte UTF-8 rune; drop the
           # partial tail so the PR body and best_practices.md stay valid
           # UTF-8 (GitHub 422s on invalid runes in the body).
@@ -286,7 +285,20 @@ jobs:
           # finished (the agent must never see a credential, but push may).
           git config --local http.https://github.com/.extraheader \
             "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
-          git push origin "$BRANCH"
+          if ! git push origin "$BRANCH"; then
+            # The ls-remote pre-check only shrinks the window: two
+            # concurrent dispatches can BOTH pass it, and the losing run
+            # dies on a non-fast-forward push. That is fine IF the winner's
+            # PR exists — re-check and exit 0 (that is the concurrent-run
+            # completion, not our failure); only fail if the branch is not
+            # there (a genuine push problem).
+            if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+              echo "::warning::push was rejected but remote branch $BRANCH now exists — a concurrent run pushed it; not failing"
+              exit 0
+            fi
+            echo "::error::git push failed and remote branch $BRANCH does not exist"
+            exit 1
+          fi
           # Final guard: between the ls-remote and the create the other run
           # may have created its PR. Re-check by branch after the push and
           # fail-soft instead of creating a duplicate draft PR.

@@ -116,7 +116,13 @@ jobs:
             # the issues endpoint needs issues: write (a 403 would otherwise
             # be swallowed silently by the redirect to stderr).
             if [ "$GITHUB_EVENT_NAME" = "issue_comment" ]; then
-              gh pr review "$NUMBER" --comment \
+              # --repo is required: this job has NO checkout, so there is no
+              # .git for gh to resolve the repository from — without it gh
+              # dies with "not a git repository" and the notice silently
+              # lands in the swallowed || echo ::warning (observed failure
+              # shape on run 34803592671). gh api takes no --repo; pr review
+              # does.
+              gh --repo "$GITHUB_REPOSITORY" pr review "$NUMBER" --comment \
                 --body "Review skipped: this PR's head is in $head_repo (a fork). Reviews only run on same-repository PRs." \
                 || echo "::warning::could not post fork-skip notice (permissions or transient API failure)"
             fi
@@ -212,11 +218,14 @@ jobs:
           gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid > pr.head
           # The PR head tree is attacker-controllable and opencode would
           # auto-load repo instruction files from it (AGENTS.md, CLAUDE.md,
-          # opencode.json, .opencode/, .mcp.json). A crafted PR could steer
-          # the reviewer ("always emit verdict: clean") or declare its own
-          # MCP servers. Strip those before the model sees the tree; the
-          # diff and title stay in pr.diff/pr.title.
-          rm -rf .opencode opencode.json opencode.jsonc AGENTS.md CLAUDE.md .claude .mcp.json
+          # opencode.json, .opencode/, .mcp.json) — INCLUDING nested copies
+          # opencode reads hierarchically as the agent navigates into
+          # subdirectories "where the changed files are". Strip recursively,
+          # not just at the root; the prompt sends the model into precisely
+          # the subtrees a malicious PR would plant instruction files in.
+          find . \( -name AGENTS.md -o -name CLAUDE.md -o \
+            -name .mcp.json -o -name opencode.json -o -name opencode.jsonc \
+            -o -name .opencode \) -exec rm -rf {} + 2>/dev/null || true
           # Working-tree removal alone is NOT enough: the model step has
           # shell tool access inside the git checkout, so a malicious PR's
           # instruction files remain reachable via `git show`/`git log` from
