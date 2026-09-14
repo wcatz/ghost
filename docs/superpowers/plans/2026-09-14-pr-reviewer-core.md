@@ -24,6 +24,7 @@ Do not re-derive these; they were run against the real repo, not asserted.
 | actionlint FAILS LOUDLY when auto-discovery finds nothing | `no project was found in any parent directories of "..."`, exit 3 (`command.go` ExitStatusFailure). An earlier claim in this table that it silently exits 0 was WRONG — it came from grepping the output for `^\.github` and reading "no matching lines" as "no findings" without checking the exit code. Explicit paths are still used in Task 1, but for a different reason: they pin the scanned set and make the count line positive evidence of what ran |
 | The Tasks 2–4b Python is correct as written | all 32 tests pass, `Ran 32 tests ... OK` |
 | `extract_findings` recovers JSON from prose, fences, escaped quotes, multi-object streams | 11 dedicated tests, incl. failure cases (pure prose, truncated JSON, empty) |
+| The transform layer is hardened against adversarial input | 12 adversarial tests added after review found 5 reproduced defects: uncaught `RecursionError`, marker forgery via 5 different fields, ```suggestion fence breakout, a stray prose quote discarding a valid reply, `+++` header confusion, and unusable git-quoted paths. Suite 32 -> 44 |
 | The stdout channel carries real model output on an x86_64 runner | #421's review of 2026-09-14T04:59:07Z: 4,241 chars, first line `verdict: nit` |
 | The model's write path is unverified (NOT disproven) | `--auto` defaults false; a local probe was invalid — aarch64 host vs the pinned linux-x64 build |
 | `parse_hunks` handles real diffs | 3 real diffs (80 KB / 7 KB / 95 KB), 33 files, no `a/`–`b/` prefix leaks, no non-positive lines |
@@ -874,7 +875,7 @@ def extract_findings(text):
 cd .github/scripts && python3 -m unittest discover -p 'test_*.py' -v
 ```
 
-Expected: 32 tests, all PASS.
+Expected: 44 tests, all PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -910,7 +911,7 @@ In `.github/workflows/ci.yml`, in the `lint` job after the actionlint step:
 cd .github/scripts && python3 -m unittest discover -p 'test_*.py' -v
 ```
 
-Expected: 32 tests, OK.
+Expected: 44 tests, OK.
 
 - [ ] **Step 3: Commit**
 
@@ -1016,8 +1017,9 @@ python3 post_review.py wcatz/ghost 1 abc /tmp/prose.txt /tmp/empty.diff; echo "e
 ```
 
 Expected: `::error::unusable model reply: no JSON object with a 'verdict' key
-found in the model reply (0 balanced object(s) scanned, 40 chars)` and
-`exit=1`, followed by the bounded reply excerpt.
+found in the model reply (0 '{' position(s) tried, 41 chars)` and `exit=1`,
+followed by the bounded reply excerpt. (41, not 40: `printf` writes a
+trailing newline.)
 
 - [ ] **Step 4: Commit**
 
