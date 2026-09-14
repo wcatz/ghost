@@ -108,6 +108,12 @@ jobs:
           # .diff media type), so no local history is needed; the model only
           # reads the checked-out head tree after `gh pr checkout`.
           fetch-depth: 1
+          # Do NOT persist the token into .git/config (the default). The
+          # model step below must not be able to reach ANY write-scoped
+          # credential — not via env, not via the checkout's http.extraheader.
+          # gh pr checkout/view in the Prepare step authenticates with the
+          # GH_TOKEN passed explicitly to that step alone.
+          persist-credentials: false
 
       # No API key anywhere: big-pickle rides the opencode free tier, which
       # only works through the CLI process (the /zen REST endpoint rejects
@@ -148,13 +154,13 @@ jobs:
         timeout-minutes: 5
         env:
           PR_NUMBER: ${{ needs.config.outputs.pr-number }}
-          # The model is a tool-using agent fed the untrusted PR diff and
-          # working tree. Deny bash/gh so a prompt-injection in the diff
-          # cannot reach the network or mutate state: it can only read
-          # files and emit text. WITHOUT this, the Write-scoped runner/app
-          # token sitting in the same job could be exercised by an injected
-          # instruction.
-          OPENCODE_PERMISSION: '{"bash":{"*":"deny"},"gh":{"*":"deny"}}'
+          # Security posture: the model is free to read files and even run
+          # tools, but its environment holds NO credential — no GH_TOKEN,
+          # and the checkout above used persist-credentials: false, so there
+          # is no write-scoped token on disk in .git/config to extract. It
+          # can read the public tree and emit text; there is nothing
+          # sensitive it can reach or post with. An injected instruction in
+          # the diff therefore cannot escalate to the runner token.
         run: |
           # JSON event stream, not raw stdout: the formatted TUI emits tool
           # trace lines ("→ Read x", "> build") to stdout that would land in
