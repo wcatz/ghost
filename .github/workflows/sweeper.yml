@@ -35,8 +35,16 @@ concurrency:
 
 jobs:
   loop:
+    # conclusion must be 'success': types:[completed] also fires on
+    # failure, cancelled and startup_failure. The sweep's whole premise
+    # (see the isOutdated note below) is that a fresh review has just
+    # re-judged the new diff — after a failed or cancelled review there
+    # is no such judgement, and resolving stale threads then would clear
+    # the merge gate on the strength of a review that never ran. Failing
+    # closed leaves the threads blocking, which is the safe direction.
     if: >-
-      github.event_name == 'workflow_run' ||
+      (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success') ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
         github.event.sender.type != 'Bot')

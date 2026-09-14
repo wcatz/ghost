@@ -123,49 +123,64 @@ jobs:
           # this the reviewer re-derives findings from scratch every push
           # and oscillates (PR #421: 32 reviews, verdict flipping between
           # clean and should-fix on identical code).
+          # Cursor-paginated for the same reason sweeper.yml is: a bare
+          # first:100 silently drops everything past the hundredth
+          # thread. There the cost is a stale thread blocking merge
+          # forever; here it is the reviewer losing memory of findings it
+          # already made and re-raising them — the exact oscillation
+          # prior-threads.json exists to prevent. The 20-page cap bounds
+          # a pathological PR so the loop cannot run away.
+          #
           # A failed query and a PR with no prior threads both used to
           # print "[]", so a broken query was indistinguishable from a
           # clean slate — the reviewer would silently lose its memory and
           # nothing in the log would say so. Report the two separately.
-          # shellcheck disable=SC2016
-          if gh api graphql -f query='
-            query($owner:String!,$name:String!,$number:Int!){
-              repository(owner:$owner,name:$name){
-                pullRequest(number:$number){
-                  reviewThreads(first:100){
-                    nodes{
-                      isResolved
-                      comments(first:1){nodes{author{login} path line body}}
-                    }}}}}' \
-            -f owner="${GITHUB_REPOSITORY%%/*}" \
-            -f name="${GITHUB_REPOSITORY##*/}" \
-            -F number="$PR_NUMBER" \
-            --jq '[.data.repository.pullRequest.reviewThreads.nodes[]
-                   | select((.comments.nodes[0].author.login // "")
-                       | startswith("github-actions") or startswith("review-sweeper"))
-                   | {resolved: .isResolved,
-                      path: .comments.nodes[0].path,
-                      line: .comments.nodes[0].line,
-                      title: (.comments.nodes[0].body | split("\n")[0])}]' \
-            > .review-context/prior-threads.json 2>.review-context/pt.err; then
-            # gh can exit 0 and still emit nothing; the model must never
-            # be handed a zero-length file.
-            if [ -s .review-context/prior-threads.json ]; then
-              echo "prior threads: $(jq 'length' .review-context/prior-threads.json \
-                2>/dev/null || echo '?') bot thread(s)"
-            else
-              echo "prior threads: none open on this PR"
-              echo '[]' > .review-context/prior-threads.json
-            fi
+          PT_PAGES="$(mktemp)"
+          PT_ERR="$(mktemp)"
+          PT_OK=1
+          PT_CURSOR=()
+          for _ in $(seq 1 20); do
+            # shellcheck disable=SC2016
+            PT_PAGE="$(gh api graphql -f query='
+              query($owner:String!,$name:String!,$number:Int!,$cursor:String){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$number){
+                    reviewThreads(first:100,after:$cursor){
+                      nodes{
+                        isResolved
+                        comments(first:1){nodes{author{login} path line body}}
+                      }
+                      pageInfo{hasNextPage endCursor}
+                    }}}}' \
+              -f owner="${GITHUB_REPOSITORY%%/*}" \
+              -f name="${GITHUB_REPOSITORY##*/}" \
+              -F number="$PR_NUMBER" "${PT_CURSOR[@]}" \
+              --jq '.data.repository.pullRequest.reviewThreads' \
+              2>>"$PT_ERR")" || { PT_OK=0; break; }
+            printf '%s\n' "$PT_PAGE" >> "$PT_PAGES"
+            [ "$(jq -r '.pageInfo.hasNextPage' <<<"$PT_PAGE")" != "true" ] && break
+            PT_CURSOR=(-f cursor="$(jq -r '.pageInfo.endCursor' <<<"$PT_PAGE")")
+          done
+
+          if [ "$PT_OK" = 1 ] && jq -n '[inputs | .nodes[]
+                 | select((.comments.nodes[0].author.login // "")
+                     | startswith("github-actions") or startswith("review-sweeper"))
+                 | {resolved: .isResolved,
+                    path: .comments.nodes[0].path,
+                    line: .comments.nodes[0].line,
+                    title: (.comments.nodes[0].body | split("\n")[0])}]' \
+                 "$PT_PAGES" > .review-context/prior-threads.json 2>>"$PT_ERR"; then
+            echo "prior threads: $(jq 'length' .review-context/prior-threads.json \
+              2>/dev/null || echo '?') bot thread(s)"
           else
             echo "::warning::prior-threads query FAILED — this review cannot see its own open threads and may re-raise them"
             # Prefixed with '> ': gh error text can quote a branch name,
             # and a line starting with '::' would otherwise be executed
             # as a workflow command.
-            sed -n '1,5p' .review-context/pt.err | sed 's/^/> /'
+            sed -n '1,5p' "$PT_ERR" | sed 's/^/> /'
             echo '[]' > .review-context/prior-threads.json
           fi
-          rm -f .review-context/pt.err
+          rm -f "$PT_PAGES" "$PT_ERR"
 
           # The head tree is attacker-controllable and opencode auto-loads
           # instruction files from it hierarchically. Strip recursively,
