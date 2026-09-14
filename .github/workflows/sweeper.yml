@@ -197,7 +197,25 @@ jobs:
           N_STALE="$(jq length <<<"$STALE")"
           N_LIVE="$(jq length <<<"$LIVE")"
 
-          if [ "$N_STALE" -gt 0 ]; then
+          # A stale thread may only be swept when a review actually
+          # judged this commit. workflow_run:skipped reaches this point so
+          # the gate still gets published, but a skipped review produced
+          # no judgement — resolving on its strength would clear findings
+          # nothing re-checked. That loss is permanent, not cosmetic:
+          # reviewer.yml feeds resolved threads back to the model as
+          # dismissed, so a still-valid finding swept here is never
+          # re-raised. This is the guard the old success-only job `if`
+          # used to provide; publishing the gate on every conclusion took
+          # it away, so it is restored explicitly here.
+          SWEEP_OK=1
+          if [ "$GITHUB_EVENT_NAME" = "workflow_run" ] \
+             && [ "$WF_CONCLUSION" != "success" ]; then
+            SWEEP_OK=0
+          fi
+
+          if [ "$N_STALE" -gt 0 ] && [ "$SWEEP_OK" != 1 ]; then
+            echo "not sweeping $N_STALE stale thread(s): the Reviewer ended as '${WF_CONCLUSION}', so nothing judged this commit."
+          elif [ "$N_STALE" -gt 0 ]; then
             if [ -n "$APP_TOKEN" ]; then
               RESOLVED=0
               for id in $(jq -r .[] <<<"$STALE"); do
