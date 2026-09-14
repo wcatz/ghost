@@ -322,7 +322,11 @@ jobs:
           # is reported as unknown rather than fabricating "not posted".
           already_posted() {
             [ -n "$reviewed" ] || return 2
-            gh pr view "$PR_NUMBER" --json reviews \
+            # gh api + --paginate: gh pr view --json reviews returns at most
+            # one page (~100 reviews), after which the marker lookup would
+            # silently miss and the retry path could double-post on a churny
+            # PR. Paginated API reads the full review list.
+            gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate \
               | jq -e --arg s "$reviewed" \
                 'any(.[]; (.body // "") | contains("<!-- bot-review:" + $s + " -->"))' \
                 >/dev/null

@@ -124,11 +124,22 @@ jobs:
           # early output truncation) must NOT be silently converted into
           # "nothing to add" — that would skip the month with no PR and no
           # error. Only the literal NOTHING_TO_ADD token means "no change".
-          CONTENT="$(opencode run -m opencode/big-pickle "$PROMPT" | tail -c 8000)" \
+          # The capture truncates from the HEAD, not the tail: the proposals
+          # (and NOTHING_TO_ADD, which is tiny) live at the start, so a
+          # verbose run must keep them and drop the trailing ramble — an
+          # over-limit response is a loud ::warning so the truncated-then-
+          # emitted candidate tail can be checked by the human approver,
+          # instead of a silent partial list or a silently lost month.
+          RAW="$(opencode run -m opencode/big-pickle "$PROMPT")" \
             || { echo "::error::opencode distill failed — not skipping, surfacing as a failure"; exit 1; }
+          RAW_BYTES="$(printf '%s' "$RAW" | wc -c)"
+          CONTENT="$(printf '%s' "$RAW" | head -c 8000)"
           if [ -z "$CONTENT" ]; then
             echo "::error::opencode distill returned empty output — not treating as 'nothing to add'; surfacing for investigation"
             exit 1
+          fi
+          if [ "$RAW_BYTES" -gt 8000 ]; then
+            echo "::warning::distill response was $RAW_BYTES bytes; kept the head 8 KB (proposals preserved). Verify the last candidate is complete before approving the draft PR."
           fi
           if [ "$CONTENT" = "NOTHING_TO_ADD" ]; then
             echo "proposals=" >> "$GITHUB_OUTPUT"
