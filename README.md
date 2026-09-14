@@ -424,7 +424,9 @@ PRs are reviewed automatically by two workflows, powered by Big Pickle through t
 
 **`reviewer.yml`** runs on `pull_request` and posts a single review built from the model's structured findings document:
 
-- Findings are severity-gated. `blocker` and `should-fix` become inline threads on the diff, which block merge under `required_conversation_resolution`. `nit` findings go into a collapsed block in the review body and never block.
+- Findings are severity-gated. `blocker` and `should-fix` become inline threads on the diff; `nit` findings go into a collapsed block in the review body.
+- Merge is gated on the `review-gate` check run, not on conversation resolution. `sweeper.yml` publishes it on every review: `failure` while any bot thread is unresolved **and** not outdated, `success` otherwise. A finding therefore clears the gate either way it should — the author fixes the code and the thread goes outdated, or a human resolves the thread as wrong.
+- Gating this way is deliberate. The App cannot resolve review threads: measured on PR #430, an installation token with `Pull requests: Read & write` reports `viewerCanResolve=false` on its own thread while the repo owner reports `true`. GitHub gates resolution on repository write access, which that permission does not confer. Granting `Contents: write` would confer it — and would also let a token minted in the pipeline that runs a model on untrusted diffs push code. A check run the bot owns outright avoids the trade entirely.
 - Only the diff since the last review is examined. Each review body carries a `<!-- ghost-review:<sha> -->` marker; the next run reads it back and diffs `<sha>..HEAD`. A push that changes nothing reviewable skips the model run entirely.
 - Open and resolved threads from earlier rounds are fed back into the prompt, so the reviewer does not re-raise a finding it already made or one that was already dismissed.
 - Repo conventions come from `CLAUDE.md` and `best_practices.md` on the **base** ref, never from the PR head.

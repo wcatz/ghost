@@ -2,13 +2,21 @@
 #
 # Validated mechanics (wcatz/ci-mech-spike, 2026-08-25):
 #   - GITHUB_TOKEN cannot resolve review threads ("not accessible by
-#     integration") and cannot submit APPROVED reviews. Resolutions go
-#     through a GitHub App installation token (GH_APP_ID +
-#     GH_APP_PRIVATE_KEY secrets, Pull requests: read+write on this repo
-#     only). Without those secrets this job degrades to report-only.
-#   - Outdated unresolved threads still block merge under required
-#     conversation resolution, so stale agent findings must be swept
-#     once a fresh review has re-judged the new diff.
+#     integration") and cannot submit APPROVED reviews.
+#   - Neither can the App. Measured 2026-09-14 (PR #430, run 34877374970):
+#     with Pull requests: Read & write granted and the installation scoped
+#     to this repo, the App token reports viewerCanResolve=false and
+#     viewerCanReply=true on its own thread, while the repo owner reports
+#     viewerCanResolve=true. GitHub gates resolution on repository write
+#     access, which the Pull requests permission does not confer. Granting
+#     Contents: write would confer it — and would also let a token minted
+#     in the same pipeline that runs a model on untrusted diffs push code,
+#     so it is deliberately not granted.
+#   - Therefore merge is NOT gated on conversation resolution. It is gated
+#     on the `review-gate` check run this workflow publishes, which the
+#     bot can always clear because it owns it. An unresolved thread that
+#     has gone outdated does not count toward the gate, so stale findings
+#     stop mattering instead of needing to be swept.
 #   - GITHUB_TOKEN CAN submit REQUEST_CHANGES reviews. Signal-only:
 #     approvals stay out of branch protection entirely.
 #
@@ -28,6 +36,9 @@ on:
 
 permissions:
   pull-requests: write
+  # Publishing the merge gate. GITHUB_TOKEN can create check runs with
+  # this scope; no App identity is involved in gating.
+  checks: write
 
 concurrency:
   group: sweeper-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number }}
@@ -35,16 +46,14 @@ concurrency:
 
 jobs:
   loop:
-    # conclusion must be 'success': types:[completed] also fires on
-    # failure, cancelled and startup_failure. The sweep's whole premise
-    # (see the isOutdated note below) is that a fresh review has just
-    # re-judged the new diff — after a failed or cancelled review there
-    # is no such judgement, and resolving stale threads then would clear
-    # the merge gate on the strength of a review that never ran. Failing
-    # closed leaves the threads blocking, which is the safe direction.
+    # Runs on EVERY workflow_run conclusion, not just success. A required
+    # check that is never published reads as "Expected — waiting for
+    # status" and blocks the PR with no way to clear it, so the gate has
+    # to be written even when the review failed, was cancelled, or was
+    # skipped. What the conclusion still decides is the VALUE of the gate
+    # and whether stale threads may be swept — see the step below.
     if: >-
-      (github.event_name == 'workflow_run' &&
-        github.event.workflow_run.conclusion == 'success') ||
+      github.event_name == 'workflow_run' ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
         github.event.sender.type != 'Bot')
@@ -90,13 +99,30 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           APP_TOKEN: ${{ steps.app-token.outputs.token }}
           NUMBER: ${{ steps.pr.outputs.number }}
+          WF_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
           [ -n "$NUMBER" ] || { echo "no PR"; exit 0; }
 
-          # Cursor-paginated: first:100 alone silently skipped threads past
-          # 100, letting stale findings survive the sweep and keep blocking
-          # merge via required conversation resolution until a human
-          # resolved them. The page cap bounds a pathological repo
+          # Publishes the `review-gate` check run on the PR head. Factored
+          # out because every exit path below has to write the gate: a
+          # required check that is never published cannot be cleared.
+          set_gate() {
+            jq -n --arg sha "$1" --arg concl "$2" \
+                  --arg title "$3" --arg summary "$4" \
+              '{name:"review-gate", head_sha:$sha, status:"completed",
+                conclusion:$concl, output:{title:$title, summary:$summary}}' \
+              | gh api "repos/$GITHUB_REPOSITORY/check-runs" \
+                  --method POST --input - >/dev/null \
+              && echo "review-gate: $2 — $3" \
+              || echo "::warning::could not publish the review-gate check run"
+          }
+
+          # Cursor-paginated: first:100 alone silently skipped threads
+          # past 100. That now matters more than it used to — an
+          # uncounted live thread does not merely linger, it makes N_LIVE
+          # too low and the review-gate check pass on a PR that still has
+          # open findings. Failing to see a finding must never read as
+          # not having one. The page cap bounds a pathological repo
           # (20 pages x 100 threads) so the loop can never run away.
           # shellcheck disable=SC2016
           HEADREF="$(gh api graphql \
@@ -105,6 +131,20 @@ jobs:
             -f name="${GITHUB_REPOSITORY##*/}" \
             -F number="$NUMBER" \
             --jq '.data.repository.pullRequest.headRefOid')"
+
+          # No judgement was produced for this commit, so the gate fails
+          # closed. It is still WRITTEN — leaving it unpublished would
+          # read as "Expected — waiting for status" forever, which blocks
+          # the PR with nothing a re-run can clear.
+          case "${GITHUB_EVENT_NAME}:${WF_CONCLUSION}" in
+            workflow_run:success|workflow_run:skipped|issue_comment:*) ;;
+            *)
+              set_gate "$HEADREF" failure \
+                "The review did not complete (${WF_CONCLUSION})" \
+                "The Reviewer workflow ended as \`${WF_CONCLUSION}\`, so this commit was never judged. Re-run the Reviewer or push a new commit."
+              exit 0
+              ;;
+          esac
 
           PAGES_FILE="$(mktemp)"
           trap 'rm -f "$PAGES_FILE"' EXIT
@@ -169,6 +209,9 @@ jobs:
                 fi
               done
               echo "Auto-resolved $RESOLVED/$N_STALE stale finding(s) (superseded by newer review)."
+              if [ "$RESOLVED" -lt "$N_STALE" ]; then
+                echo "note: $((N_STALE - RESOLVED)) stale thread(s) stayed unresolved — the App cannot resolve threads (measured: viewerCanResolve=false under Pull requests: read+write; see the header). This does not block merge: an outdated thread is not live, so it carries no weight in the review-gate check."
+              fi
             else
               echo "::warning::$N_STALE stale finding(s) await resolution — configure the GH_APP_ID / GH_APP_PRIVATE_KEY secrets to enable auto-resolve."
             fi
@@ -182,4 +225,19 @@ jobs:
               || echo "Could not set REQUEST_CHANGES state."
           else
             echo "No live reviewer findings."
+          fi
+
+          # The merge gate. Live means unresolved AND not outdated, so a
+          # finding clears it in either of the two ways that should clear
+          # it: the author fixes the code (the thread goes outdated) or a
+          # human resolves the thread. Nothing here needs a capability the
+          # bot lacks.
+          if [ "$N_LIVE" -gt 0 ]; then
+            set_gate "$HEADREF" failure \
+              "$N_LIVE unresolved reviewer finding(s)" \
+              "The reviewer has $N_LIVE finding(s) that are still open against the current diff. Address the code, or resolve the thread if the finding is wrong. The gate re-evaluates on the next review."
+          else
+            set_gate "$HEADREF" success \
+              "No unresolved reviewer findings" \
+              "Every reviewer finding on this PR is either resolved or outdated against the current diff."
           fi
