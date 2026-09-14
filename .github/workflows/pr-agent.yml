@@ -345,7 +345,11 @@ jobs:
           already_posted() {
             [ -n "$reviewed" ] || return 2
             local body
-            if ! body="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate)"; then
+            # --repo mandatory here: Prepare deleted .git, and gh resolves
+            # the default repository by probing git remotes — without it,
+            # every gh call in this step subprocesses git and dies with
+            # "not a git repository" (the anti-steering removal breaks gh).
+            if ! body="$(gh --repo "$GITHUB_REPOSITORY" api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate)"; then
               return 2
             fi
             local rc=0
@@ -373,7 +377,7 @@ jobs:
           # already closed after the model finished must NOT abort the post
           # of an otherwise-finished review — an empty 'current' just skips
           # the staleness label.
-          current="$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
+          current="$(gh --repo "$GITHUB_REPOSITORY" pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
           if [ -n "$reviewed" ] && [ -n "$current" ] && [ "$current" != "$reviewed" ]; then
             echo "" >> review.md
             echo "_note: PR head moved to ${current:0:7} since this review was generated against ${reviewed:0:7} — line numbers may be stale._" >> review.md
@@ -395,7 +399,7 @@ jobs:
           # self-dedup.
           printf '\n<!-- bot-review:%s -->\n' "$reviewed" >> review.md
           post_review() {
-            gh pr review "$PR_NUMBER" --comment --body-file review.md
+            gh --repo "$GITHUB_REPOSITORY" pr review "$PR_NUMBER" --comment --body-file review.md
           }
           # Retry exactly once on a transient network/API failure so a flake
           # cannot silently destroy a finished review. Re-check the marker
