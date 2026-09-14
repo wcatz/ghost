@@ -444,6 +444,14 @@ model — no API key or other credential is needed or stored.
   comment per run.
 - The bot's review is informational: main's branch protection requires
   `build-and-test` and `lint` only, so it is a signal, never a merge gate.
+  This is a live-repo fact, not a claim recoverable from source — verified
+  against the branch-protection API on 2026-09-14 (`required_status_checks`
+  = `build-and-test` + `lint`; `required_conversation_resolution` null;
+  `required_approving_review_count` 0; no repository or org rulesets). If
+  you ever move or tighten that protection, update `gate.yml` and this
+  claim together; the conversation-resolution gate the old PR-Agent era
+  relied on cannot exist under the verified config, which is why the
+  thread-sweeping `pr-loop.yml` was deleted.
 
 **Review identity:** Reviews post as the review-sweeper GitHub App when the
 App token is available; falls back to `github-actions` when the secrets are

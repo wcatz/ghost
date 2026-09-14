@@ -120,10 +120,11 @@ jobs:
     if: needs.config.outputs.same-repo == 'true'
     runs-on: ubuntu-latest
     # Hard cap: a hung model call or huge diff must die at the runner, not
-    # park it for 10 minutes. 20m covers the 10m model budget plus install,
-    # checkout, prep, and a posting retry with headroom, while still
-    # bounding a pathological hang.
-    timeout-minutes: 20
+    # park it for a quarter hour. 25m covers the 15m model budget plus
+    # install, checkout, prep, and a posting retry with headroom, while
+    # still bounding a pathological hang. (The model step cap was raised to
+    # 15m after run 34799605950 measured >10m; the job cap grew with it.)
+    timeout-minutes: 25
     steps:
       - name: Mint bot identity token
         id: apptoken
@@ -216,7 +217,7 @@ jobs:
         # minutes on even a small PR, and the tokenless run must explore via
         # reads instead of gh. Runs have since measured >10m on workflow-
         # heavy PRs (run 34799605950 timed out at exactly 10m), so the cap
-        # is 15m; the 20m job cap remains the backstop. A shorter cap (5m)
+        # is 15m; the 25m job cap remains the backstop. A shorter cap (5m)
         # failed routinely on a live repo.
         timeout-minutes: 15
         env:
