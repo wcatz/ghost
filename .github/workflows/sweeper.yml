@@ -1,4 +1,4 @@
-# Closes the review loop after PR-Agent runs.
+# Closes the review loop after the Reviewer workflow runs.
 #
 # Validated mechanics (wcatz/ci-mech-spike, 2026-08-25):
 #   - GITHUB_TOKEN cannot resolve review threads ("not accessible by
@@ -12,16 +12,16 @@
 #   - GITHUB_TOKEN CAN submit REQUEST_CHANGES reviews. Signal-only:
 #     approvals stay out of branch protection entirely.
 #
-# Triggered by workflow_run after each PR Agent completion and by PR
-# comments for manual re-runs. workflow_run executes in default-branch
+# Triggered by workflow_run after each Reviewer workflow completion and by
+# PR comments for manual re-runs. workflow_run executes in default-branch
 # context — fine here, because nothing in this file is (or may become)
 # a required status check: those attach to the wrong SHA.
 
-name: Review Loop
+name: Sweeper
 
 on:
   workflow_run:
-    workflows: ["PR Agent"]
+    workflows: ["Reviewer"]
     types: [completed]
   issue_comment:
     types: [created]
@@ -30,13 +30,21 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: review-loop-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number }}
+  group: sweeper-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
   loop:
+    # conclusion must be 'success': types:[completed] also fires on
+    # failure, cancelled and startup_failure. The sweep's whole premise
+    # (see the isOutdated note below) is that a fresh review has just
+    # re-judged the new diff — after a failed or cancelled review there
+    # is no such judgement, and resolving stale threads then would clear
+    # the merge gate on the strength of a review that never ran. Failing
+    # closed leaves the threads blocking, which is the safe direction.
     if: >-
-      github.event_name == 'workflow_run' ||
+      (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success') ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
         github.event.sender.type != 'Bot')
@@ -68,8 +76,8 @@ jobs:
       - name: Mint app token
         id: app-token
         if: env.HAS_APP == 'true'
-        # Pinned SHA (not a mutable tag) — same supply-chain convention as
-        # the pr-agent action pin. This action mints a token carrying
+        # Pinned SHA (not a mutable tag) — same supply-chain convention
+        # as every other action pin here. This action mints a token carrying
         # whatever permissions the review-sweeper App has, so it is the
         # highest-value pin in this pipeline.
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
@@ -90,6 +98,7 @@ jobs:
           # merge via required conversation resolution until a human
           # resolved them. The page cap bounds a pathological repo
           # (20 pages x 100 threads) so the loop can never run away.
+          # shellcheck disable=SC2016
           HEADREF="$(gh api graphql \
             -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){headRefOid}}}' \
             -f owner="${GITHUB_REPOSITORY%%/*}" \
@@ -101,6 +110,7 @@ jobs:
           trap 'rm -f "$PAGES_FILE"' EXIT
           CURSOR_ARG=()
           for _ in $(seq 1 20); do
+            # shellcheck disable=SC2016
             PAGE="$(gh api graphql \
               -f query='query($owner:String!,$name:String!,$number:Int!,$cursor:String){
                 repository(owner:$owner,name:$name){
@@ -127,7 +137,6 @@ jobs:
             '{headRefOid: $head,
               reviewThreads: {nodes: [inputs | .nodes[]]}}' \
             "$PAGES_FILE" 2>/dev/null || echo '{"headRefOid":"","reviewThreads":{"nodes":[]}}')"
-          rm -f "$NODES_FILE"
 
           # isOutdated is a proxy, not a verdict: a thread goes outdated
           # when the diff line it was anchored to changes or disappears,
@@ -137,11 +146,13 @@ jobs:
           # accepted trade-off for never letting a dead thread block merge.
           STALE="$(echo "$THREADS" | jq '[.reviewThreads.nodes[]
             | select(.isResolved==false and .isOutdated==true)
-            | select((.comments.nodes[0].author.login // "") | startswith("github-actions")) | .id]')"
+            | select((.comments.nodes[0].author.login // "")
+              | startswith("github-actions") or startswith("review-sweeper")) | .id]')"
 
           LIVE="$(echo "$THREADS" | jq '[.reviewThreads.nodes[]
             | select(.isResolved==false and .isOutdated==false)
-            | select((.comments.nodes[0].author.login // "") | startswith("github-actions"))]')"
+            | select((.comments.nodes[0].author.login // "")
+              | startswith("github-actions") or startswith("review-sweeper"))]')"
 
           N_STALE="$(jq length <<<"$STALE")"
           N_LIVE="$(jq length <<<"$LIVE")"
@@ -150,6 +161,7 @@ jobs:
             if [ -n "$APP_TOKEN" ]; then
               RESOLVED=0
               for id in $(jq -r .[] <<<"$STALE"); do
+                # shellcheck disable=SC2016
                 if GH_TOKEN="$APP_TOKEN" gh api graphql \
                      -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' \
                      -f id="$id" --jq '.data.resolveReviewThread.thread.isResolved' >/dev/null 2>&1; then
@@ -165,9 +177,9 @@ jobs:
           if [ "$N_LIVE" -gt 0 ]; then
             gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
               -f event=REQUEST_CHANGES \
-              -f body="PR-Agent has $N_LIVE unresolved finding(s) — see inline threads." >/dev/null 2>&1 \
+              -f body="The reviewer has $N_LIVE unresolved finding(s) — see inline threads." >/dev/null 2>&1 \
               && echo "Requested changes: $N_LIVE live finding(s)." \
               || echo "Could not set REQUEST_CHANGES state."
           else
-            echo "No live PR-Agent findings."
+            echo "No live reviewer findings."
           fi

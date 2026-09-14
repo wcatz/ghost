@@ -1,0 +1,333 @@
+name: Reviewer
+
+on:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: reviewer-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # Fork PRs get a read-only token and no repo secrets by GitHub's design,
+    # so the App mint below would fail and the whole pipeline would run
+    # anyway, wasting an LLM invocation to reach a guaranteed failure at
+    # Post review. Skip renders as skipped, not a red X. Making fork PRs
+    # work would require pull_request_target, which would run base-repo
+    # secrets against attacker-controlled code — a deliberate non-goal.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          # The model step must not reach any write-scoped credential, not
+          # via env and not via .git/config http.extraheader.
+          persist-credentials: false
+
+      # The release CDN 504s from Actions runners often enough to kill
+      # reviews outright (runs 34857548998 and 34857888005 both died on
+      # it, the second after six retries over 10s, while the same URL
+      # served 200 from outside Actions). A cache hit skips the network
+      # entirely. Caching the TARBALL rather than the unpacked binary is
+      # deliberate: the Actions cache is writable by any branch in this
+      # repo, so a cache entry is not trustworthy input, and the existing
+      # SHA256 check below runs on every path — hit or miss — which makes
+      # a poisoned entry fail closed instead of executing.
+      #
+      # continue-on-error: without it this step trades one fatal
+      # transient-infra dependency (the CDN) for another (the cache
+      # service), and the cache one fails BEFORE the checksum-guarded
+      # recovery in Install can run. A failed restore is fully
+      # recoverable — Install just downloads — so it must not end the
+      # review.
+      #
+      # The key carries the expected SHA256 prefix, not just the version.
+      # actions/cache never overwrites an existing key and skips its save
+      # on an exact hit, so a fixed key is a one-way door: re-issue the
+      # 1.18.30 artifact and the key would still match the stale entry
+      # forever. Rotating the SHA rotates the key. Residual, accepted
+      # limitation: a poisoned entry under the current key is restored,
+      # fails the checksum, is re-downloaded, and cannot be re-saved
+      # (the key already exists), so the cache degrades to a permanent
+      # miss — the pre-cache behaviour, never an execution of foreign
+      # bytes.
+      - name: Cache the opencode tarball
+        continue-on-error: true
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /tmp/opencode.tar.gz
+          key: opencode-tarball-linux-x64-1.18.30-5500724685816549
+
+      - name: Install opencode
+        # Binary from GitHub Releases with SHA256 verification — no
+        # unpinned curl|bash. The PATH export is REQUIRED: the old
+        # curl|bash installer wrote $GITHUB_PATH itself, and dropping it
+        # is what gave PR #421 "opencode: command not found" (exit 127).
+        run: |
+          mkdir -p "$HOME/.opencode/bin"
+          OC_VERSION=1.18.30
+          OC_SHA256=55007246858165496ff85ba1c2b648f7421e8e2013bf4189a680c9ff8e699d17
+          OC_URL="https://github.com/anomalyco/opencode/releases/download/v${OC_VERSION}/opencode-linux-x64.tar.gz"
+          # A restored cache entry is untrusted input: drop it rather
+          # than let a bad one wedge the pipeline until the cache expires.
+          if [ -f /tmp/opencode.tar.gz ] \
+             && ! echo "${OC_SHA256}  /tmp/opencode.tar.gz" \
+                  | sha256sum -c - >/dev/null 2>&1; then
+            echo "::warning::cached opencode tarball failed its checksum — re-downloading"
+            rm -f /tmp/opencode.tar.gz
+          fi
+          if [ ! -f /tmp/opencode.tar.gz ]; then
+            # curl retries 408/429/5xx by default; --retry-connrefused
+            # adds the refused-connection case. ~60s of budget, because a
+            # 10s budget was measured to be too short.
+            curl -fsSL --proto '=https' --tlsv1.2 \
+              --retry 10 --retry-delay 6 --retry-connrefused \
+              -o /tmp/opencode.tar.gz "$OC_URL"
+          fi
+          # Unconditional: this is the check that makes both the download
+          # and the cache safe.
+          echo "${OC_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/opencode.tar.gz -C "$HOME/.opencode/bin" opencode
+          chmod +x "$HOME/.opencode/bin/opencode"
+          "$HOME/.opencode/bin/opencode" --version
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: Prepare review context
+        id: context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          cd "${GITHUB_WORKSPACE}"
+          gh pr checkout "$PR_NUMBER"
+          # gh pr checkout fetches at fetch-depth 1; the prior reviewed
+          # commit is not present in a shallow clone, so the incremental
+          # diff below would always fall back to a full review.
+          git fetch --unshallow origin 2>/dev/null || git fetch --deepen=50 origin || true
+          git config --local --unset-all http.extraheader 2>/dev/null || true
+          git config --local --remove-section 'http.https://github.com/' 2>/dev/null || true
+
+          gh pr view "$PR_NUMBER" --json title --jq .title > pr.title
+          gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid > pr.head
+          # Review only what changed since the last review. The marker is
+          # written into the review body by build_review(); reading it back
+          # keeps this independent of the summary comment (phase 4).
+          #
+          # `gh api --paginate` applies --jq to EACH page separately and
+          # concatenates the results, so a PR with more than one page of
+          # reviews emits one SHA per page and LAST_SHA would become a
+          # multi-line string that `git cat-file -e` rejects, silently
+          # forcing a full review forever. `tail -n 1` keeps the newest.
+          # gh sets per_page=100 when paginating (verified against
+          # pulls/421/reviews: 32 reviews -> 1 page; per_page=10 -> 4
+          # separate --jq outputs), so this only bites past 100 reviews —
+          # rare, but PR #421 reached 32 unattended.
+          LAST_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+            --paginate --jq '[.[] | .body
+              | capture("<!-- ghost-review:(?<sha>[0-9a-f]{7,40}) -->")?.sha]
+              | last // empty' 2>/dev/null | tail -n 1 || true)"
+
+          if [ -n "$LAST_SHA" ] && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
+            echo "incremental review: ${LAST_SHA}..HEAD"
+            git diff "${LAST_SHA}" HEAD > pr.diff
+          else
+            echo "full review (no usable prior marker)"
+            gh pr diff "$PR_NUMBER" > pr.diff
+          fi
+
+          # An incremental diff can be empty when a push changed nothing
+          # reviewable (e.g. a rebase with no content change). Skip rather
+          # than burn a model run on an empty diff.
+          if [ ! -s pr.diff ]; then
+            echo "no reviewable change since ${LAST_SHA}; skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Conventions come from the BASE ref, which is not
+          # attacker-controllable, unlike the PR head tree. They are
+          # extracted to files here because .git is deleted below, and are
+          # deliberately NOT named CLAUDE.md/AGENTS.md: the injection sweep
+          # would delete them, and opencode would auto-load them outside
+          # our prompt's control.
+          mkdir -p .review-context
+          git fetch --depth=1 origin "${GITHUB_BASE_REF}" 2>/dev/null || true
+          for f in best_practices.md CLAUDE.md; do
+            git show "origin/${GITHUB_BASE_REF}:${f}" 2>/dev/null \
+              >> .review-context/conventions.md || true
+          done
+          [ -s .review-context/conventions.md ] \
+            || echo "(no repo conventions found on the base ref)" \
+               > .review-context/conventions.md
+
+          # Existing bot threads become prompt input so the model does not
+          # re-raise what is already open or already dismissed. Without
+          # this the reviewer re-derives findings from scratch every push
+          # and oscillates (PR #421: 32 reviews, verdict flipping between
+          # clean and should-fix on identical code).
+          # Cursor-paginated for the same reason sweeper.yml is: a bare
+          # first:100 silently drops everything past the hundredth
+          # thread. There the cost is a stale thread blocking merge
+          # forever; here it is the reviewer losing memory of findings it
+          # already made and re-raising them — the exact oscillation
+          # prior-threads.json exists to prevent. The 20-page cap bounds
+          # a pathological PR so the loop cannot run away.
+          #
+          # A failed query and a PR with no prior threads both used to
+          # print "[]", so a broken query was indistinguishable from a
+          # clean slate — the reviewer would silently lose its memory and
+          # nothing in the log would say so. Report the two separately.
+          PT_PAGES="$(mktemp)"
+          PT_ERR="$(mktemp)"
+          PT_OK=1
+          PT_CURSOR=()
+          for _ in $(seq 1 20); do
+            # shellcheck disable=SC2016
+            PT_PAGE="$(gh api graphql -f query='
+              query($owner:String!,$name:String!,$number:Int!,$cursor:String){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$number){
+                    reviewThreads(first:100,after:$cursor){
+                      nodes{
+                        isResolved
+                        comments(first:1){nodes{author{login} path line body}}
+                      }
+                      pageInfo{hasNextPage endCursor}
+                    }}}}' \
+              -f owner="${GITHUB_REPOSITORY%%/*}" \
+              -f name="${GITHUB_REPOSITORY##*/}" \
+              -F number="$PR_NUMBER" "${PT_CURSOR[@]}" \
+              --jq '.data.repository.pullRequest.reviewThreads' \
+              2>>"$PT_ERR")" || { PT_OK=0; break; }
+            printf '%s\n' "$PT_PAGE" >> "$PT_PAGES"
+            [ "$(jq -r '.pageInfo.hasNextPage' <<<"$PT_PAGE")" != "true" ] && break
+            PT_CURSOR=(-f cursor="$(jq -r '.pageInfo.endCursor' <<<"$PT_PAGE")")
+          done
+
+          if [ "$PT_OK" = 1 ] && jq -n '[inputs | .nodes[]
+                 | select((.comments.nodes[0].author.login // "")
+                     | startswith("github-actions") or startswith("review-sweeper"))
+                 | {resolved: .isResolved,
+                    path: .comments.nodes[0].path,
+                    line: .comments.nodes[0].line,
+                    title: (.comments.nodes[0].body | split("\n")[0])}]' \
+                 "$PT_PAGES" > .review-context/prior-threads.json 2>>"$PT_ERR"; then
+            echo "prior threads: $(jq 'length' .review-context/prior-threads.json \
+              2>/dev/null || echo '?') bot thread(s)"
+          else
+            echo "::warning::prior-threads query FAILED — this review cannot see its own open threads and may re-raise them"
+            # Prefixed with '> ': gh error text can quote a branch name,
+            # and a line starting with '::' would otherwise be executed
+            # as a workflow command.
+            sed -n '1,5p' "$PT_ERR" | sed 's/^/> /'
+            echo '[]' > .review-context/prior-threads.json
+          fi
+          rm -f "$PT_PAGES" "$PT_ERR"
+
+          # The head tree is attacker-controllable and opencode auto-loads
+          # instruction files from it hierarchically. Strip recursively,
+          # then delete .git so they cannot be recovered via git show.
+          # -iname (not -name): runner filesystems are case-sensitive, and
+          # e.g. Agents.md/claude.md would otherwise survive this sweep.
+          find . -path ./.review-context -prune -o \
+            \( -iname AGENTS.md -o -iname CLAUDE.md -o -iname .mcp.json \
+            -o -iname opencode.json -o -iname opencode.jsonc \
+            -o -iname .opencode \) -exec rm -rf {} + 2>/dev/null || true
+
+          # A symlink under a name the sweep above doesn't match can still
+          # point outside this checkout; `find` without -L doesn't descend
+          # into it, so it survives untouched and content from outside the
+          # checkout can be read through it and quoted into a posted
+          # finding. Symlinks are removed wholesale rather than resolved
+          # and classified: a reviewer does not need to follow symlinks to
+          # read a diff, and classification (readlink -f, symlink chains,
+          # races) is exactly the kind of thing that gets an edge case
+          # wrong.
+          find . -path ./.review-context -prune -o -type l -exec rm -f {} + 2>/dev/null || true
+          rm -rf .git
+
+      - name: Review with opencode big-pickle
+        if: steps.context.outputs.skip != 'true'
+        timeout-minutes: 15
+        run: |
+          cd "${GITHUB_WORKSPACE}"
+          # Hard-fail rather than hand a credential to a model fed
+          # untrusted input. A set-but-EMPTY var is harmless, so the test
+          # is on the value.
+          for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN \
+                   ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE; do
+            if [ -n "${!v}" ]; then
+              echo "::error::credential \$$v present in the model step — refusing to run"
+              exit 1
+            fi
+          done
+
+          # Capture stdout to a file; the model writes NOTHING to disk (no
+          # --auto, so it has no approved write tool). post_review.py
+          # recovers the JSON from the reply via extract_findings().
+          #
+          # --format json emits raw JSON events rather than a single blob,
+          # so the reply text is spread across events; extract_findings
+          # scans the whole stream for balanced objects, which is why it
+          # tolerates that shape where #421's parts[-1] did not.
+          opencode run -m opencode/big-pickle --format json \
+            "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO).
+
+          Read ./pr.title, ./pr.diff, and ./.review-context/conventions.md. The diff is authoritative for changed lines; do NOT re-derive it. Read the changed files in this checkout to verify each finding. Do NOT run commands and do NOT narrate your process. Also read ./.review-context/prior-threads.json — findings you already raised on this PR. Entries with \"resolved\": false are STILL OPEN: do not raise them again. Entries with \"resolved\": true were dismissed: do not raise them again unless the code changed in a way that makes the original concern newly valid.
+
+          Cover: correctness bugs, race conditions, error-handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those.
+
+          Reply with ONLY a JSON document matching exactly this schema — no preamble, no explanation, no markdown fence. Do NOT attempt to write any file; you have no write access. Print the JSON and nothing else:
+
+          {\"verdict\": \"blocker|should-fix|nit|clean\",
+           \"summary\": \"one paragraph, plain English, what this PR does\",
+           \"findings\": [{\"file\": \"repo/relative/path.go\", \"line\": 42, \"end_line\": 44, \"severity\": \"blocker|should-fix|nit\", \"title\": \"short label\", \"body\": \"what is wrong, why it matters, the concrete fix\"}]}
+
+          Rules: 'line' must be a line that appears in ./pr.diff as added or context — never a line outside it. 'end_line' is optional and must be >= 'line'. Use severity 'nit' for anything that does not affect correctness. If you find nothing, emit verdict 'clean' with an empty findings array. Verify each finding against the code before asserting it; omit anything you cannot verify." \
+            > model-reply.txt
+
+          [ -s model-reply.txt ] || { echo "::error::model produced no output at all"; exit 1; }
+          echo "model reply: $(wc -c < model-reply.txt) bytes"
+          # Event-type inventory. --format json emits JSONL, and the
+          # answer lives in a message part, not at the top level; this
+          # line names which part type carries it so a failed extraction
+          # is diagnosable without another round trip. Indented, so a
+          # crafted type string cannot start a '::' workflow command.
+          jq -r '"\(.type)|\(.part.type // "-")"' model-reply.txt 2>/dev/null \
+            | sort | uniq -c | sed 's/^/  /' || true
+
+      - name: Mint bot identity token
+        if: steps.context.outputs.skip != 'true'
+        id: apptoken
+        # Minted here, immediately before it's needed, rather than at job
+        # start: this keeps the App token off disk for the entire time the
+        # model step is running on attacker-controlled input.
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Warn on degraded identity
+        if: ${{ steps.apptoken.outcome == 'failure' && steps.apptoken.outputs.token == '' }}
+        run: echo "::warning::App token unavailable — reviews will post as github-actions"
+
+      - name: Post review
+        if: steps.context.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.apptoken.outputs.token || github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          cd "${GITHUB_WORKSPACE}"
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/post_review.py" \
+            "${GITHUB_REPOSITORY}" "${PR_NUMBER}" "$(cat pr.head)" \
+            model-reply.txt pr.diff

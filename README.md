@@ -420,20 +420,17 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 ## Review pipeline
 
-PRs are reviewed automatically on every push. The pipeline uses [PR-Agent](https://github.com/The-PR-Agent/pr-agent) self-hosted on GitHub Actions, powered by Big Pickle via the opencode zen endpoint (`https://opencode.ai/zen/v1`), with DeepSeek V4 Flash as a fallback.
+PRs are reviewed automatically by two workflows, powered by Big Pickle through the opencode CLI. A push that touches only Markdown or `docs/` does not trigger a review at all (`paths-ignore`), so existing threads on such a PR stay as they are.
 
-**What it does:**
-- `/review` posts a persistent review comment with score, effort estimate, and up to 5 findings (inline on diff lines)
-- `/improve` posts committable code suggestions as GitHub suggestion blocks (top 4 per run)
-- Reviews are anchored to the default branch via `apply_repo_settings` (fetches `.pr_agent.toml` and context files)
+**`reviewer.yml`** runs on `pull_request` and posts a single review built from the model's structured findings document:
 
-**What it doesn't do:**
-- Ticket compliance analysis is disabled (`require_ticket_analysis_review = false`) — the native grading mislabeled clean PRs and the merge gate is conversation resolution
-- The intro line ("Here are some key observations...") is disabled (`enable_intro_text = false`)
-- Auto-describe is disabled — findings live in the review, not in the PR description
+- Findings are severity-gated. `blocker` and `should-fix` become inline threads on the diff, which block merge under `required_conversation_resolution`. `nit` findings go into a collapsed block in the review body and never block.
+- Only the diff since the last review is examined. Each review body carries a `<!-- ghost-review:<sha> -->` marker; the next run reads it back and diffs `<sha>..HEAD`. A push that changes nothing reviewable skips the model run entirely.
+- Open and resolved threads from earlier rounds are fed back into the prompt, so the reviewer does not re-raise a finding it already made or one that was already dismissed.
+- Repo conventions come from `CLAUDE.md` and `best_practices.md` on the **base** ref, never from the PR head.
 
-**Extra instructions** enforce 3 lenses beyond diff-vs-issue matching: invariant parity (cross-checking guard clauses against sibling mutators), protected resources (_global project, DB rows, subprocess env), and behavior preservation at modified call sites.
+**`sweeper.yml`** runs after each Reviewer completion. It resolves bot threads that the latest review no longer stands behind — an unresolved stale thread blocks merge just as hard as a live one — and posts `REQUEST_CHANGES` while any live finding remains.
 
-**Review identity:** Reviews post as the Review Loop GitHub App (`review-sweeper`) when the app token is available; falls back to `github-actions` when secrets are absent.
+**Review identity:** reviews post as the Review Loop GitHub App (`review-sweeper`) when the app token is available, falling back to `github-actions`. The App is required for thread resolution: `GITHUB_TOKEN` cannot resolve review threads or submit `APPROVED`, though it can submit `REQUEST_CHANGES`.
 
-**Concurrency:** one agent run per PR per event type. Bot comments fire `issue_comment` runs; a shared group with event-type splitting prevents the bot from cancelling its own in-flight review.
+**Untrusted input handling:** the model runs against attacker-controlled content, so it is given no credential at all — the step asserts at runtime that no token is in its environment, and the App token is minted only after the model has finished. Before the model runs, the checkout is stripped of everything that could steer it: instruction files (`AGENTS.md`, `CLAUDE.md`, `.mcp.json`, `opencode.json*`, `.opencode`, matched case-insensitively), every symlink, and `.git` itself. Fork PRs are skipped rather than run with reduced permissions.

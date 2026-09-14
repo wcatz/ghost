@@ -6,12 +6,18 @@
 #
 #   SC2129  best-practices-loop.yml  prefer { ...; } >> file to repeated >>
 #   SC2034  evalcycle / longmemeval  loop variable `i` unused
-#   SC2016  pr-loop.yml              single quotes round a GraphQL query, intended
+#
+# sweeper.yml and reviewer.yml are deliberately absent: their intended
+# single-quoted GraphQL queries carry inline `# shellcheck disable=SC2016`
+# comments at the call site, which says why at the line it applies to
+# instead of hiding a whole file's SC2016 behind a config entry.
 #
 # Verified 2026-09-14 by running actionlint v1.7.12 with shellcheck 0.11.0 on
-# PATH: without this file the lint job fails with exactly these six findings;
-# with it, exit 0. Note actionlint only runs shellcheck when the binary is
-# present, so a local run without shellcheck installed is NOT equivalent to CI.
+# PATH: without this file the lint job fails with exactly these three findings
+# (SC2129 in best-practices-loop.yml, SC2034 in evalcycle.yml and
+# longmemeval.yml); with it, exit 0. Note actionlint only runs shellcheck when
+# the binary is present, so a local run without shellcheck installed is NOT
+# equivalent to CI.
 paths:
   .github/workflows/best-practices-loop.yml:
     ignore: ['SC2129']
@@ -19,5 +25,3 @@ paths:
     ignore: ['SC2034']
   .github/workflows/longmemeval.yml:
     ignore: ['SC2034']
-  .github/workflows/pr-loop.yml:
-    ignore: ['SC2016']
