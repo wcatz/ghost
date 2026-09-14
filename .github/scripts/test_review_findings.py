@@ -1,6 +1,6 @@
 import unittest
 
-from review_findings import ValidationError, validate
+from review_findings import ValidationError, validate, parse_hunks
 
 
 def _doc(**over):
@@ -70,6 +70,52 @@ class TestValidate(unittest.TestCase):
                     "file": bad, "line": 1, "severity": "nit",
                     "title": "t", "body": "b",
                 }]))
+
+
+DIFF = """diff --git a/a.go b/a.go
+index 111..222 100644
+--- a/a.go
++++ b/a.go
+@@ -1,3 +1,5 @@
+ package main
++
++func added() {}
+
+ func kept() {}
+diff --git a/b.go b/b.go
+index 333..444 100644
+--- a/b.go
++++ b/b.go
+@@ -10,2 +10,3 @@ func x() {
+ 	a := 1
++	b := 2
+ 	_ = a
+diff --git a/gone.go b/gone.go
+deleted file mode 100644
+index 555..000
+--- a/gone.go
++++ /dev/null
+@@ -1,2 +0,0 @@
+-package main
+-func dead() {}
+"""
+
+
+class TestParseHunks(unittest.TestCase):
+    def test_maps_added_and_context_lines_per_file(self):
+        hunks = parse_hunks(DIFF)
+        self.assertEqual(hunks["a.go"], {1, 2, 3, 4, 5})
+        self.assertEqual(hunks["b.go"], {10, 11, 12})
+
+    def test_ignores_deleted_files(self):
+        self.assertNotIn("gone.go", parse_hunks(DIFF))
+
+    def test_does_not_confuse_the_minus_header_with_a_removed_line(self):
+        # '--- a/a.go' starts with '-' but is a header, not a deletion.
+        self.assertIn(1, parse_hunks(DIFF)["a.go"])
+
+    def test_empty_diff_yields_no_hunks(self):
+        self.assertEqual(parse_hunks(""), {})
 
 
 if __name__ == "__main__":

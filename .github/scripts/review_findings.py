@@ -56,3 +56,40 @@ def validate(doc):
         if sug is not None:
             _require(isinstance(sug, str), f"{where}.suggestion must be a string")
     return doc
+
+
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def parse_hunks(diff_text):
+    """Map repo-relative path -> set of RIGHT-side line numbers in the diff.
+
+    GitHub only accepts review comments anchored to a line that appears in
+    the diff, which means added ('+') or context (' ') lines. Deleted files
+    (+++ /dev/null) contribute nothing.
+    """
+    hunks = {}
+    path = None
+    new_line = 0
+
+    for raw in diff_text.splitlines():
+        if raw.startswith("diff --git "):
+            path, new_line = None, 0
+            continue
+        if raw.startswith("--- "):
+            continue
+        if raw.startswith("+++ "):
+            target = raw[4:].strip()
+            path = None if target == "/dev/null" else re.sub(r"^b/", "", target)
+            continue
+        m = _HUNK_RE.match(raw)
+        if m:
+            new_line = int(m.group(1))
+            continue
+        if path is None or new_line == 0:
+            continue
+        if raw.startswith("+") or raw.startswith(" ") or raw == "":
+            hunks.setdefault(path, set()).add(new_line)
+            new_line += 1
+        # '-' lines consume no RIGHT-side number; '\' (no newline) is inert.
+    return hunks
