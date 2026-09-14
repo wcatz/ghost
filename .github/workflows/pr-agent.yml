@@ -31,7 +31,9 @@ permissions:
 # must NOT cancel an in-flight pull_request auto-review between model
 # completion and post, or the freshest review silently disappears. The
 # bot's own posts emit pull_request_review (unsubscribed) and its comment
-# sender is filtered as a Bot, so it never re-triggers either lane.
+# sender is filtered as a Bot, so it never re-triggers either lane. The
+# issue_comment lane is only for a human typing "/review" (see the config
+# job's gate), never for casual comments.
 concurrency:
   group: pr-agent-${{ github.event_name }}-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: true
@@ -43,12 +45,20 @@ jobs:
     #   head repo must be checked via the API.
     # - Plain-issue comments have no PR for the reviewer to act on — skip
     #   rather than spinning up a no-op review run.
+    # - The issue_comment lane acts only on a "/review" command comment
+    #   (the old PR-Agent gesture). Everyday maintenance comments ("lgtm",
+    #   "thanks", "🎉") must NOT burn a free-tier run or post an
+    #   unsolicited duplicate review.
     # Comment commands are limited to trusted authors so drive-by comments on
     # this public repo cannot burn runner time.
     if: >-
       github.event.sender.type != 'Bot' && (
         github.event_name == 'pull_request' ||
-        contains('OWNER MEMBER COLLABORATOR', github.event.comment.author_association)
+        (
+          github.event_name == 'issue_comment' &&
+          startsWith(github.event.comment.body, '/review') &&
+          contains('OWNER MEMBER COLLABORATOR', github.event.comment.author_association)
+        )
       )
     runs-on: ubuntu-latest
     outputs:
@@ -89,7 +99,10 @@ jobs:
         # secrets are absent — functionality intact, identity degrades.
         if: ${{ vars.USE_BOT_IDENTITY != 'false' }}
         continue-on-error: true
-        uses: actions/create-github-app-token@v3.2.0
+        # SHA-pinned: the repo's stated supply-chain convention, and the
+        # only place hash-pinning is free to do (the installer, below, is
+        # tag-pinned curl|bash by deliberate trade-off).
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           # client-id (not app-id): v3 deprecates app-id input
           client-id: ${{ secrets.GH_APP_ID }}
@@ -102,7 +115,7 @@ jobs:
         if: ${{ steps.apptoken.outputs.token == '' }}
         run: echo "::warning::App token unavailable — reviews will post as github-actions"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           # Single-depth: `gh pr diff` is API-backed (GET pulls/{n} with the
           # .diff media type), so no local history is needed; the model only
@@ -181,9 +194,12 @@ jobs:
           # The model's final answer is the LAST non-blank text event.
           # Whitespace-only parts ('\n\n' step paddings) are skipped so they
           # cannot win the top slot and trip the verdict gate on a good
-          # review. Slice to 60000 code points (not bytes) so a rune never
-          # splits before GitHub's ~64 KiB review-body limit.
-          jq -rs '[.[] | select(.type == "text") | .part.text? | select(type == "string") | select(test("[^[:space:]]"))] | last // "" | .[0:60000]' events.jsonl > review.md.tmp
+          # review. GitHub caps review bodies at ~64 KiB of UTF-8 BYTES:
+          # slicing jq by code points is wrong for a rune-dense review (60000
+          # CJK/em-dash runes ≈ 240 KB → gh pr review 422s, run silently
+          # lost). Trim to 60000 bytes, dropping only a trailing partial
+          # rune so review.md is always valid UTF-8 and always under the cap.
+          python3 -c 'import json; parts = [e["part"]["text"] for e in (json.loads(l) for l in open("events.jsonl")) if e.get("type") == "text" and isinstance(e.get("part", {}).get("text"), str) and e["part"]["text"].strip()]; open("review.md.tmp", "w").write((parts[-1] if parts else "").encode("utf-8")[:60000].decode("utf-8", "ignore"))'
           if [ ! -s review.md.tmp ]; then
             echo "::error::opencode produced no review text"
             cat events.jsonl
@@ -192,10 +208,18 @@ jobs:
           mv review.md.tmp review.md
           # The verdict token must be the FIRST non-blank line — a review
           # that opens with narrative and buries the verdict is a contract
-          # break, not a judgement call.
+          # break. A real finding: near-misses (code-fenced or prefixed
+          # verdict) currently discard the whole run; the gate below treats
+          # "verdict present somewhere" as a warning-level degrade (still
+          # posts) and only hard-fails when no verdict token exists at all.
           first_nonblank="$(grep -m1 -vE '^[[:space:]]*$' review.md || true)"
-          if ! printf '%s' "$first_nonblank" | grep -qiE '^\*{0,2}[[:space:]]*verdict:[[:space:]]+(blocker|should-fix|nit|clean)'; then
-            echo "::error::opencode review missing a verdict token on the first line"
+          verdict_anywhere="$(grep -oiE '\*{0,2}[[:space:]]*verdict:[[:space:]]+(blocker|should-fix|nit|clean)' review.md | head -1 || true)"
+          if printf '%s' "$first_nonblank" | grep -qiE '^\*{0,2}[[:space:]]*verdict:[[:space:]]+(blocker|should-fix|nit|clean)'; then
+            echo "verdict gate: strict pass"
+          elif [ -n "$verdict_anywhere" ]; then
+            echo "::warning::verdict token present but NOT on the first line — posting degraded review"
+          else
+            echo "::error::opencode review contains no verdict token"
             cat review.md
             exit 1
           fi
