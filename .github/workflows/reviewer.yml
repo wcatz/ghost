@@ -123,8 +123,12 @@ jobs:
           # this the reviewer re-derives findings from scratch every push
           # and oscillates (PR #421: 32 reviews, verdict flipping between
           # clean and should-fix on identical code).
+          # A failed query and a PR with no prior threads both used to
+          # print "[]", so a broken query was indistinguishable from a
+          # clean slate — the reviewer would silently lose its memory and
+          # nothing in the log would say so. Report the two separately.
           # shellcheck disable=SC2016
-          gh api graphql -f query='
+          if gh api graphql -f query='
             query($owner:String!,$name:String!,$number:Int!){
               repository(owner:$owner,name:$name){
                 pullRequest(number:$number){
@@ -143,13 +147,25 @@ jobs:
                       path: .comments.nodes[0].path,
                       line: .comments.nodes[0].line,
                       title: (.comments.nodes[0].body | split("\n")[0])}]' \
-            > .review-context/prior-threads.json 2>/dev/null \
-            || echo '[]' > .review-context/prior-threads.json
-          # A zero-length file is possible when gh exits 0 but jq emits
-          # nothing; the model must never be handed an empty file.
-          [ -s .review-context/prior-threads.json ] \
-            || echo '[]' > .review-context/prior-threads.json
-          echo "prior threads: $(wc -c < .review-context/prior-threads.json) bytes"
+            > .review-context/prior-threads.json 2>.review-context/pt.err; then
+            # gh can exit 0 and still emit nothing; the model must never
+            # be handed a zero-length file.
+            if [ -s .review-context/prior-threads.json ]; then
+              echo "prior threads: $(jq 'length' .review-context/prior-threads.json \
+                2>/dev/null || echo '?') bot thread(s)"
+            else
+              echo "prior threads: none open on this PR"
+              echo '[]' > .review-context/prior-threads.json
+            fi
+          else
+            echo "::warning::prior-threads query FAILED — this review cannot see its own open threads and may re-raise them"
+            # Prefixed with '> ': gh error text can quote a branch name,
+            # and a line starting with '::' would otherwise be executed
+            # as a workflow command.
+            sed -n '1,5p' .review-context/pt.err | sed 's/^/> /'
+            echo '[]' > .review-context/prior-threads.json
+          fi
+          rm -f .review-context/pt.err
 
           # The head tree is attacker-controllable and opencode auto-loads
           # instruction files from it hierarchically. Strip recursively,
@@ -215,6 +231,13 @@ jobs:
 
           [ -s model-reply.txt ] || { echo "::error::model produced no output at all"; exit 1; }
           echo "model reply: $(wc -c < model-reply.txt) bytes"
+          # Event-type inventory. --format json emits JSONL, and the
+          # answer lives in a message part, not at the top level; this
+          # line names which part type carries it so a failed extraction
+          # is diagnosable without another round trip. Indented, so a
+          # crafted type string cannot start a '::' workflow command.
+          jq -r '"\(.type)|\(.part.type // "-")"' model-reply.txt 2>/dev/null \
+            | sort | uniq -c | sed 's/^/  /' || true
 
       - name: Mint bot identity token
         if: steps.context.outputs.skip != 'true'
