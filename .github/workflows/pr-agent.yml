@@ -345,11 +345,13 @@ jobs:
           already_posted() {
             [ -n "$reviewed" ] || return 2
             local body
-            # --repo mandatory here: Prepare deleted .git, and gh resolves
-            # the default repository by probing git remotes — without it,
-            # every gh call in this step subprocesses git and dies with
-            # "not a git repository" (the anti-steering removal breaks gh).
-            if ! body="$(gh --repo "$GITHUB_REPOSITORY" api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate)"; then
+            # Post runs after Prepare deleted .git, and gh resolves the default
+            # repository by probing git remotes; without it, repo-less gh
+            # subcommands subprocess git and die with "not a git repository"
+            # (run 34803592671). gh api takes NO --repo flag — the endpoint
+            # below is already absolute, so it needs no repo resolution; the
+            # pr view / pr review calls carry --repo explicitly.
+            if ! body="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate)"; then
               return 2
             fi
             local rc=0
