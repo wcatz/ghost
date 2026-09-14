@@ -13,10 +13,17 @@ import subprocess
 import sys
 
 from review_findings import (MARKER, ValidationError, build_review,
-                             extract_findings, parse_hunks, validate)
+                             extract_findings_from_reply, parse_hunks,
+                             validate)
 
 MAX_COMMENTS = 30
 MAX_BODY_CHARS = 60000
+# Excerpt budget for a failed reply. An opencode event stream starts with
+# tool noise, so the head alone never shows the model's answer; the tail is
+# where a truncated or off-contract answer actually is.
+EXCERPT_HEAD = 1000
+EXCERPT_TAIL = 1500
+EXCERPT_WHOLE = 2000
 
 
 def _log_safe(text, limit=None, multiline=False):
@@ -56,16 +63,30 @@ def main(argv):
         reply = fh.read()
 
     try:
-        doc = extract_findings(reply)
+        doc = extract_findings_from_reply(reply)
         validate(doc)
     except ValidationError as exc:
         print(f"::error::unusable model reply: {exc}", file=sys.stderr)
         # Surface a bounded excerpt so the failure is diagnosable from the
         # Actions log without re-running the model. Prefix every line so a
         # newline in the model's reply cannot forge or suppress commands.
-        excerpt = _log_safe(reply, limit=2000, multiline=True)
-        print(f"::group::model reply (first 2000 chars)\n{excerpt}\n::endgroup::",
-              file=sys.stderr)
+        # A reply short enough to show whole is shown whole, unchanged.
+        if len(reply) <= EXCERPT_WHOLE:
+            excerpt = _log_safe(reply, limit=EXCERPT_WHOLE, multiline=True)
+            print(f"::group::model reply (first {EXCERPT_WHOLE} chars)\n"
+                  f"{excerpt}\n::endgroup::", file=sys.stderr)
+        else:
+            # Slice before _log_safe: its own `limit` truncates from the
+            # head, so the tail has to be cut here to be a tail at all.
+            head = _log_safe(reply[:EXCERPT_HEAD], multiline=True)
+            tail = _log_safe(reply[-EXCERPT_TAIL:], multiline=True)
+            # The separators are '> '-prefixed like the excerpt itself so
+            # they can never be read as workflow commands either.
+            print(f"::group::model reply ({len(reply)} chars: first "
+                  f"{EXCERPT_HEAD} and last {EXCERPT_TAIL})\n"
+                  f"> --- first {EXCERPT_HEAD} chars ---\n{head}\n"
+                  f"> --- last {EXCERPT_TAIL} chars ---\n{tail}\n"
+                  f"::endgroup::", file=sys.stderr)
         return 1
 
     # Same decoding policy as the reply above: a pr.diff containing invalid
