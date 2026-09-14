@@ -12,8 +12,8 @@
 #   - GITHUB_TOKEN CAN submit REQUEST_CHANGES reviews. Signal-only:
 #     approvals stay out of branch protection entirely.
 #
-# Triggered by workflow_run after each PR Agent completion and by PR
-# comments for manual re-runs. workflow_run executes in default-branch
+# Triggered by workflow_run after each Reviewer workflow completion and by
+# PR comments for manual re-runs. workflow_run executes in default-branch
 # context — fine here, because nothing in this file is (or may become)
 # a required status check: those attach to the wrong SHA.
 
