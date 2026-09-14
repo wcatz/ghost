@@ -44,7 +44,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - run: |
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
           JSON="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/branches/main/protection" 2>&1)" || \
             { echo "::error::probe-protection: cannot read branch protection (GITHUB_TOKEN lacks admin read; got: $?) — cannot verify the documented policy, so this job is red by design. To enable verification, grant the Review Sweeper GitHub App 'Administration: Read' on wcatz/ghost (or wire an admin PAT secret into this workflow)."; exit 1; }
