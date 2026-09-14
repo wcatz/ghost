@@ -420,20 +420,35 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 ## Review pipeline
 
-PRs are reviewed automatically on every push. The pipeline uses [PR-Agent](https://github.com/The-PR-Agent/pr-agent) self-hosted on GitHub Actions, powered by Big Pickle via the opencode zen endpoint (`https://opencode.ai/zen/v1`), with DeepSeek V4 Flash as a fallback.
+PRs are reviewed automatically on every code push. The pipeline is a GitHub
+Actions workflow (`.github/workflows/pr-agent.yml`) that runs the
+[opencode](https://opencode.ai) CLI with the free `opencode/big-pickle`
+model — no API key or other credential is needed or stored.
 
 **What it does:**
-- `/review` posts a persistent review comment with score, effort estimate, and up to 5 findings (inline on diff lines)
-- `/improve` posts committable code suggestions as GitHub suggestion blocks (top 4 per run)
-- Reviews are anchored to the default branch via `apply_repo_settings` (fetches `.pr_agent.toml` and context files)
+- On every code push (`synchronize`) it checks out the PR head, captures the
+  diff to a file, and runs the reviewer with no network credential in its
+  environment. It posts one persistent review comment gated on a first-line
+  `verdict: <blocker|should-fix|nit|clean>` token.
+- Repo instruction files from the PR head tree (`AGENTS.md`, `CLAUDE.md`,
+  `opencode.json`, `.opencode/`) are stripped before the model runs, so a
+  crafted PR cannot steer its own review; the title is read from a file, never
+  interpolated into a shell argument.
+- Humans can request a review on demand with a `/review` comment, restricted
+  to `OWNER`/`MEMBER`/`COLLABORATOR` authors. A casual comment can never
+  cancel an in-flight `/review` run (concurrency lanes are keyed on the exact
+  command form).
 
 **What it doesn't do:**
-- Ticket compliance analysis is disabled (`require_ticket_analysis_review = false`) — the native grading mislabeled clean PRs and the merge gate is conversation resolution
-- The intro line ("Here are some key observations...") is disabled (`enable_intro_text = false`)
-- Auto-describe is disabled — findings live in the review, not in the PR description
+- No `/improve` suggestions, no inline diff threads — exactly one review
+  comment per run.
+- The bot's review is informational: main's branch protection requires
+  `build-and-test` and `lint` only, so it is a signal, never a merge gate.
 
-**Extra instructions** enforce 3 lenses beyond diff-vs-issue matching: invariant parity (cross-checking guard clauses against sibling mutators), protected resources (_global project, DB rows, subprocess env), and behavior preservation at modified call sites.
+**Review identity:** Reviews post as the review-sweeper GitHub App when the
+App token is available; falls back to `github-actions` when the secrets are
+absent.
 
-**Review identity:** Reviews post as the Review Loop GitHub App (`review-sweeper`) when the app token is available; falls back to `github-actions` when secrets are absent.
-
-**Concurrency:** one agent run per PR per event type. Bot comments fire `issue_comment` runs; a shared group with event-type splitting prevents the bot from cancelling its own in-flight review.
+**Supply chain:** the workflow is deliberately opinionated — `opencode` is
+pinned to a tested release, GitHub actions are SHA-pinned, and the model step
+runs with no credential in its environment.

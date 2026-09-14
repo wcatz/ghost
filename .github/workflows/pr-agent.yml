@@ -82,6 +82,13 @@ jobs:
       same-repo: ${{ steps.pr.outputs.same-repo }}
       pr-number: ${{ steps.pr.outputs.pr-number }}
     steps:
+      - name: TEMP expr semantics probe
+        run: |
+          echo "and_sentinel: ${{ true && 'manual' }}"
+          echo "or_sentinel:  ${{ 0 || 42 }}"
+          echo "chain_pr:     ${{ ((false) && 'manual') || ((true) && 'auto') || 'noop' }}"
+          echo "chain_cmd:    ${{ ((true) && 'manual') || ((true) && 'auto') || 'noop' }}"
+          echo "chain_none:   ${{ ((false) && 'manual') || ((false) && 'auto') || 'noop' }}"
       - id: pr
         env:
           GH_TOKEN: ${{ github.token }}
@@ -107,7 +114,7 @@ jobs:
     # Hard cap: a hung model call or huge diff must die at the runner, not
     # park it for 10 minutes. 15m covers checkout + install + review with
     # headroom while still bounding a pathological hang.
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Mint bot identity token
         id: apptoken
@@ -283,11 +290,19 @@ jobs:
           # run that started at head X takes minutes of model time, so a push
           # to Y can land in between; a pull_request run is already gated to
           # the live head by its synchronize trigger. Label the stale case
-          # rather than silently posting line numbers for a dead head.
-          current="$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)"
+          # rather than silently posting line numbers for a dead head. The
+          # fetch is best-effort (|| true): a transient API failure or a PR
+          # already closed after the model finished must NOT abort the post
+          # of an otherwise-finished review — an empty 'current' just skips
+          # the staleness label.
+          current="$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid 2>/dev/null || true)"
           reviewed="$(cat pr.head 2>/dev/null || true)"
           if [ -n "$reviewed" ] && [ -n "$current" ] && [ "$current" != "$reviewed" ]; then
             echo "" >> review.md
             echo "_note: PR head moved to ${current:0:7} since this review was generated against ${reviewed:0:7} — line numbers may be stale._" >> review.md
           fi
-          gh pr review "$PR_NUMBER" --comment --body-file review.md
+          # Retry the posting once on a transient network/API failure so a
+          # flake cannot silently destroy a finished review; a persistent
+          # failure still surfaces as a red step.
+          gh pr review "$PR_NUMBER" --comment --body-file review.md \
+            || { sleep 15; gh pr review "$PR_NUMBER" --comment --body-file review.md; }
