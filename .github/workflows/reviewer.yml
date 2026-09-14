@@ -81,6 +81,39 @@ jobs:
             || echo "(no repo conventions found on the base ref)" \
                > .review-context/conventions.md
 
+          # Existing bot threads become prompt input so the model does not
+          # re-raise what is already open or already dismissed. Without
+          # this the reviewer re-derives findings from scratch every push
+          # and oscillates (PR #421: 32 reviews, verdict flipping between
+          # clean and should-fix on identical code).
+          # shellcheck disable=SC2016
+          gh api graphql -f query='
+            query($owner:String!,$name:String!,$number:Int!){
+              repository(owner:$owner,name:$name){
+                pullRequest(number:$number){
+                  reviewThreads(first:100){
+                    nodes{
+                      isResolved
+                      comments(first:1){nodes{author{login} path line body}}
+                    }}}}}' \
+            -f owner="${GITHUB_REPOSITORY%%/*}" \
+            -f name="${GITHUB_REPOSITORY##*/}" \
+            -F number="$PR_NUMBER" \
+            --jq '[.data.repository.pullRequest.reviewThreads.nodes[]
+                   | select((.comments.nodes[0].author.login // "")
+                       | startswith("github-actions") or startswith("review-sweeper"))
+                   | {resolved: .isResolved,
+                      path: .comments.nodes[0].path,
+                      line: .comments.nodes[0].line,
+                      title: (.comments.nodes[0].body | split("\n")[0])}]' \
+            > .review-context/prior-threads.json 2>/dev/null \
+            || echo '[]' > .review-context/prior-threads.json
+          # A zero-length file is possible when gh exits 0 but jq emits
+          # nothing; the model must never be handed an empty file.
+          [ -s .review-context/prior-threads.json ] \
+            || echo '[]' > .review-context/prior-threads.json
+          echo "prior threads: $(wc -c < .review-context/prior-threads.json) bytes"
+
           # The head tree is attacker-controllable and opencode auto-loads
           # instruction files from it hierarchically. Strip recursively,
           # then delete .git so they cannot be recovered via git show.
@@ -129,7 +162,7 @@ jobs:
           opencode run -m opencode/big-pickle --format json \
             "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO).
 
-          Read ./pr.title, ./pr.diff, and ./.review-context/conventions.md. The diff is authoritative for changed lines; do NOT re-derive it. Read the changed files in this checkout to verify each finding. Do NOT run commands and do NOT narrate your process.
+          Read ./pr.title, ./pr.diff, and ./.review-context/conventions.md. The diff is authoritative for changed lines; do NOT re-derive it. Read the changed files in this checkout to verify each finding. Do NOT run commands and do NOT narrate your process. Also read ./.review-context/prior-threads.json — findings you already raised on this PR. Entries with \"resolved\": false are STILL OPEN: do not raise them again. Entries with \"resolved\": true were dismissed: do not raise them again unless the code changed in a way that makes the original concern newly valid.
 
           Cover: correctness bugs, race conditions, error-handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those.
 
