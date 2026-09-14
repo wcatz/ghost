@@ -25,7 +25,14 @@ jobs:
     # Post review. Skip renders as skipped, not a red X. Making fork PRs
     # work would require pull_request_target, which would run base-repo
     # secrets against attacker-controlled code — a deliberate non-goal.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # Dependabot PRs are same-repo, so the fork test above passes, but
+    # GitHub still hands them a read-only token and withholds repo
+    # secrets. The App mint would degrade and Post review would then
+    # 403 — a red X on every dependency bump. Skip for the same reason
+    # fork PRs are skipped: a guaranteed failure is not worth an LLM run.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -33,6 +40,27 @@ jobs:
           # The model step must not reach any write-scoped credential, not
           # via env and not via .git/config http.extraheader.
           persist-credentials: false
+
+      # post_review.py runs with the App token in its environment, so it has
+      # to come from the base branch and never from the PR. The checkout
+      # above is the pull_request MERGE ref, which already carries the PR's
+      # own edits, so copying the scripts out of it would not do: a same-repo
+      # PR that edits post_review.py would get its edited version executed as
+      # review-sweeper[bot]. Reading the trusted copy from base.sha is the
+      # same defence the `git show "origin/${GITHUB_BASE_REF}:..."` read in
+      # Prepare already applies to the conventions file.
+      #
+      # It also fixes a plain bug: `gh pr checkout` below replaces the
+      # workspace with the head tree, and a branch cut before the scripts
+      # landed on main has no .github/scripts at all — the review then dies
+      # at Post review with ENOENT (observed on PR #418, run 34869517878).
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+          path: .base-scripts
 
       # The release CDN 504s from Actions runners often enough to kill
       # reviews outright (runs 34857548998 and 34857888005 both died on
@@ -109,6 +137,15 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           cd "${GITHUB_WORKSPACE}"
+          # Move the trusted scripts out of the workspace before the head
+          # tree lands on top of them and before the model runs against it.
+          rm -rf "${RUNNER_TEMP}/base-scripts"
+          [ -d .base-scripts/.github/scripts ] || {
+            echo "::error::base-ref scripts checkout is missing — refusing to fall back to the PR's own copy"
+            exit 1
+          }
+          mv .base-scripts/.github/scripts "${RUNNER_TEMP}/base-scripts"
+          rm -rf .base-scripts
           gh pr checkout "$PR_NUMBER"
           # gh pr checkout fetches at fetch-depth 1; the prior reviewed
           # commit is not present in a shallow clone, so the incremental
@@ -328,6 +365,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           cd "${GITHUB_WORKSPACE}"
-          python3 "${GITHUB_WORKSPACE}/.github/scripts/post_review.py" \
+          python3 "${RUNNER_TEMP}/base-scripts/post_review.py" \
             "${GITHUB_REPOSITORY}" "${PR_NUMBER}" "$(cat pr.head)" \
             model-reply.txt pr.diff
