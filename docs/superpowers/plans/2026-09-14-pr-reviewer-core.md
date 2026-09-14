@@ -1175,10 +1175,23 @@ git push
 gh pr checks --watch
 ```
 
-Expected: the second review posts **zero** new inline comments (every finding
-is already an open thread). If it re-posts the same findings, the prompt
-input is not being read — check that `prior-threads.json` is non-empty in the
-prepare-step log before proceeding to Task 11.
+Assert these three things, in this order — the first two are mechanical and
+must hold; the third is the behavioural goal and is softer:
+
+1. `prior-threads.json` is non-empty in the prepare-step log. If it is `[]`,
+   the GraphQL query or the author filter is wrong — fix that before judging
+   the model.
+2. The prompt in the model step's log contains the `prior-threads.json`
+   sentence. If not, the edit did not land.
+3. The second review posts **fewer** inline comments than the first, ideally
+   zero.
+
+Do not treat a non-zero count in (3) as a hard failure while (1) and (2) hold.
+Task 11 has not landed yet, so this run still reviews the **full** PR diff, and
+convergence here rests entirely on the model honouring one prompt clause — a
+free-tier model partially ignoring it is expected, and the incremental diff in
+Task 11 is the structural fix that does not depend on the model's cooperation.
+Record the before/after counts; they are the baseline for judging Task 11.
 
 ---
 
@@ -1253,7 +1266,24 @@ git push
 gh pr checks --watch
 ```
 
-Expected in the log: `incremental review: <sha>..HEAD`.
+Expected in the log: **either** `incremental review: <sha>..HEAD` **or**
+`full review (no usable prior marker)`. Both are correct outcomes — do not
+debug the second one on its own.
+
+`gh pr checkout` fetches the head branch; the prior head commit is only
+reachable if it is still an ancestor. After a force-push or rebase it may exist
+nowhere locally, `git cat-file -e` fails, and the full-diff fallback is the
+intended behaviour. Only investigate if you see `full review` on a run where
+the PR was updated by an ordinary fast-forward push — that would mean the
+marker itself is not being written or not being parsed. Check with:
+
+```bash
+gh api "repos/wcatz/ghost/pulls/$(gh pr view --json number --jq .number)/reviews" \
+  --jq '.[].body | capture("<!-- ghost-review:(?<sha>[0-9a-f]+) -->")?.sha'
+```
+
+Expected: one SHA per prior review. An empty result means `build_review()` is
+not emitting the marker — a Task 4 regression, not a Task 11 bug.
 
 Then verify the skip path:
 
