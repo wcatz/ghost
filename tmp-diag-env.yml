@@ -1,0 +1,23 @@
+name: diag env probe
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check ambient env tokens
+        run: |
+          for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE; do
+            if [ -n "${!v+x}" ]; then
+              echo "$v: PRESENT (length ${#v})"
+            else
+              echo "$v: absent"
+            fi
+          done
+          echo "--- env keys containing TOKEN/CRED/KEY (names only) ---"
+          env | cut -d= -f1 | grep -iE 'token|cred|secret|_key' | sort
