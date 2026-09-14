@@ -366,8 +366,8 @@ jobs:
             # PR exists — re-check and exit 0 (that is the concurrent-run
             # completion, not our failure); only fail if the branch is not
             # there (a genuine push problem).
-# Anchored to the fully-qualified ref: an unanchored substring would
-            # false-positive on any related branch whose name merely
+            # Anchored to the fully-qualified ref: an unanchored substring
+            # would false-positive on any related branch whose name merely
             # CONTAINS the monthly branch (e.g. a leftover
             # chore/best-practices-2026-09-x) and dead-guard the month.
             if git ls-remote --heads origin "$BRANCH" | grep -q "refs/heads/$BRANCH$"; then
