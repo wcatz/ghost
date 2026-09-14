@@ -147,6 +147,64 @@ jobs:
           "$HOME/.opencode/bin/opencode" --version
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
+      - name: Install the read-only reviewer agent
+        # Restricts the model to tools that only READ. This is what stops
+        # the model routing its answer through a tool call: run
+        # 34878398658 emitted the whole findings document as a tool part's
+        # payload, post_review.py refused to read tool output (that output
+        # echoes the attacker-controlled diff, so the text-part allowlist
+        # is deliberate), and the review failed with "no JSON object with
+        # a 'verdict' key". With no write/patch/edit/bash/task/todowrite
+        # tool registered there is no such channel to reach for.
+        #
+        # $HOME, NOT the workspace: "Prepare review context" runs
+        # `gh pr checkout`, which replaces the tree, and then sweeps
+        # .opencode directories out of it as untrusted input. A
+        # workspace-local agent file would be destroyed by the first and
+        # forgeable by the PR through the second. XDG_CONFIG_HOME is
+        # unset on the runner, so opencode falls back to ~/.config —
+        # verified locally with `env -u XDG_CONFIG_HOME`.
+        #
+        # The tools map is belt and braces: the "*" wildcard denies
+        # anything the binary gains in a future version, and every tool
+        # id the 1.18.30 binary knows is then listed explicitly, because
+        # the wildcard's semantics are not documented.
+        run: |
+          mkdir -p "$HOME/.config/opencode/agent"
+          cat > "$HOME/.config/opencode/agent/ghost-reviewer.md" <<'AGENT_EOF'
+          ---
+          description: Read-only PR reviewer for the ghost codebase
+          mode: primary
+          tools:
+            "*": false
+            read: true
+            grep: true
+            glob: true
+            list: true
+            write: false
+            edit: false
+            patch: false
+            bash: false
+            task: false
+            todowrite: false
+            webfetch: false
+            question: false
+            invalid: false
+          ---
+          You review code and print your answer as plain text. You have no
+          tool that can write, edit, patch, run a command, fetch a URL, or
+          record a task, and no way to ask a question — this is a
+          non-interactive run. Never attempt to emit your answer through a
+          tool call: your final message must itself be the answer.
+          AGENT_EOF
+          # A silently unregistered agent would fall back to the default
+          # tool set, which is the bug this step exists to prevent.
+          opencode agent list | grep -q '^ghost-reviewer' || {
+            echo "::error::ghost-reviewer agent did not register — refusing to review with the default (write-capable) tool set"
+            opencode agent list || true
+            exit 1
+          }
+
       - name: Prepare review context
         id: context
         env:
@@ -342,22 +400,24 @@ jobs:
             fi
           done
 
-          # Capture stdout to a file; the model writes NOTHING to disk (no
-          # --auto, so it has no approved write tool). post_review.py
-          # recovers the JSON from the reply via extract_findings().
+          # Capture stdout to a file; the model writes NOTHING to disk
+          # (--agent ghost-reviewer registers read-only tools only).
+          # post_review.py recovers the JSON from the reply via
+          # extract_findings().
           #
           # --format json emits raw JSON events rather than a single blob,
           # so the reply text is spread across events; extract_findings
           # scans the whole stream for balanced objects, which is why it
           # tolerates that shape where #421's parts[-1] did not.
-          opencode run -m opencode/big-pickle --format json \
+          opencode run -m opencode/big-pickle --agent ghost-reviewer \
+            --format json \
             "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO).
 
           Read ./pr.title, ./pr.diff, and ./.review-context/conventions.md. The diff is authoritative for changed lines; do NOT re-derive it. Read the changed files in this checkout to verify each finding. Do NOT run commands and do NOT narrate your process. Also read ./.review-context/prior-threads.json — findings you already raised on this PR. Entries with \"resolved\": false are STILL OPEN: do not raise them again. Entries with \"resolved\": true were dismissed: do not raise them again unless the code changed in a way that makes the original concern newly valid.
 
           Cover: correctness bugs, race conditions, error-handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those.
 
-          Reply with ONLY a JSON document matching exactly this schema — no preamble, no explanation, no markdown fence. Do NOT attempt to write any file; you have no write access. Print the JSON and nothing else:
+          Reply with ONLY a JSON document matching exactly this schema — no preamble, no explanation, no markdown fence. Your FINAL message must be the JSON itself, printed as text. Do NOT put the answer in a tool call, and do NOT attempt to write it to a file — you have no tool that can write. Print the JSON and nothing else:
 
           {\"verdict\": \"blocker|should-fix|nit|clean\",
            \"summary\": \"one paragraph, plain English, what this PR does\",
@@ -373,9 +433,12 @@ jobs:
           # Event-type inventory. --format json emits JSONL, and the
           # answer lives in a message part, not at the top level; this
           # line names which part type carries it so a failed extraction
-          # is diagnosable without another round trip. Indented, so a
-          # crafted type string cannot start a '::' workflow command.
-          jq -r '"\(.type)|\(.part.type // "-")"' model-reply.txt 2>/dev/null \
+          # is diagnosable without another round trip. The tool name is
+          # in there too: run 34878398658 failed with the answer inside a
+          # tool part, and the log did not say which tool, which cost a
+          # round trip. Indented, so a crafted type string cannot start
+          # a '::' workflow command.
+          jq -r '"\(.type)|\(.part.type // "-")|\(.part.tool // "-")"' model-reply.txt 2>/dev/null \
             | sort | uniq -c | sed 's/^/  /' || true
 
       - name: Mint bot identity token
