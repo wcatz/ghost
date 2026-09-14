@@ -35,6 +35,14 @@ jobs:
         #
         # Pinned release + SHA256, matching the repo's supply-chain
         # convention for third-party binaries.
+        #
+        # actionlint runs shellcheck over every run: block WHEN THE
+        # SHELLCHECK BINARY IS PRESENT, and ubuntu-latest ships it. A local
+        # run on a machine without shellcheck silently skips those checks
+        # and is NOT equivalent to this job — the first real run of this
+        # step failed on six findings a local pass had not surfaced.
+        # Install shellcheck before trusting a local result. Pre-existing
+        # findings are scoped per-file in .github/actionlint.yaml.
         run: |
           AL_VERSION=1.7.12
           AL_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
