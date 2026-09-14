@@ -2,9 +2,11 @@ name: Reviewer
 
 on:
   pull_request:
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
+    # No paths filter. Docs were excluded on the theory that prose has
+    # nothing to review, but this repo's docs make checkable claims about
+    # the code — run numbers, file paths, API shapes, "X is wired to Y" —
+    # and those go stale silently. The prompt below reviews a prose diff
+    # as documentation rather than as Go.
     types: [opened, reopened, synchronize]
 
 permissions:
@@ -291,6 +293,8 @@ jobs:
           {\"verdict\": \"blocker|should-fix|nit|clean\",
            \"summary\": \"one paragraph, plain English, what this PR does\",
            \"findings\": [{\"file\": \"repo/relative/path.go\", \"line\": 42, \"end_line\": 44, \"severity\": \"blocker|should-fix|nit\", \"title\": \"short label\", \"body\": \"what is wrong, why it matters, the concrete fix\"}]}
+
+          For a change to Markdown or other prose, review it as documentation, not as Go: flag claims the code in this checkout contradicts, references to files, symbols or commands that no longer exist, and statements that contradict another part of the same document. Prose style, wording and formatting are 'nit' at most, and say nothing at all if the only issue is taste.
 
           Rules: 'line' must be a line that appears in ./pr.diff as added or context — never a line outside it. 'end_line' is optional and must be >= 'line'. Use severity 'nit' for anything that does not affect correctness. If you find nothing, emit verdict 'clean' with an empty findings array. Verify each finding against the code before asserting it; omit anything you cannot verify." \
             > model-reply.txt
