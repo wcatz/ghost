@@ -265,9 +265,12 @@ jobs:
           cd "${GITHUB_WORKSPACE}"
           # If the Actions runtime ever starts injecting any of these into
           # a step without an explicit env reference, this step hard-fails
-          # instead of silently giving the model a credential.
+          # instead of silently giving the model a credential. A cred that
+          # is SET-BUT-EMPTY is harmless (nothing to exfiltrate) and the
+          # runner may set such vars even with minimal permissions, so the
+          # test is on the VALUE being non-empty — not on mere presence.
           for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE; do
-            if [ -n "${!v+x}" ]; then
+            if [ -n "${!v}" ]; then
               echo "::error::credential \$$v is present in the model step environment — refusing to run"
               exit 1
             fi

@@ -65,15 +65,23 @@ jobs:
           pr_skipped=0
           reviews_fetched=0
           : > findings.txt
-          gh api graphql \
+          PRLIST="$(gh api graphql \
             -f query='query($owner:String!,$name:String!){
               repository(owner:$owner,name:$name){
                 pullRequests(first:25,states:MERGED,orderBy:{field:UPDATED_AT,direction:DESC}){
                   nodes{ number title mergedAt }
                 }
               }}' \
-            -F owner="$OWNER" -F name="$NAME" \
-            | jq -r '.data.repository.pullRequests.nodes[] | @base64' > prs.b64
+            -F owner="$OWNER" -F name="$NAME")"
+          # gh api graphql exits 0 on HTTP 200 EVEN when the body carries an
+          # errors array; jq then yields nothing and a one-off API failure
+          # would look like "nothing to distill" on the monthly run. Guard
+          # both sides: nonzero exit AND no .errors AND present .data.
+          if ! printf '%s' "$PRLIST" | jq -e '.errors? == null and .data.repository.pullRequests != null' >/dev/null; then
+            echo "::error::corpus PR-list query failed: $(printf '%s' "$PRLIST" | jq -c '.errors // .data // .')"
+            exit 1
+          fi
+          printf '%s' "$PRLIST" | jq -r '.data.repository.pullRequests.nodes[] | @base64' > prs.b64
           while IFS= read -r line; do
             [ -n "$line" ] || continue
             rec="$(printf '%s' "$line" | base64 -d)"
@@ -101,6 +109,13 @@ jobs:
                     }
                   }}' \
                 -F owner="$OWNER" -F name="$NAME" -F num="$num" -F after="$after")"
+              # Same HTTP-200-with-errors hazard as the PR-list call: a
+              # transient GraphQL error on this PR must NOT read as "no
+              # marker reviews on it" and silently slim the sample.
+              if ! printf '%s' "$RESP" | jq -e '.errors? == null and .data.repository.pullRequest.reviews != null' >/dev/null; then
+                echo "::error::corpus reviews query failed for PR #$num: $(printf '%s' "$RESP" | jq -c '.errors // .data // .')"
+                exit 1
+              fi
               # Base64 each body from jq so multi-line bodies survive as a
               # single unbroken record on one line; decode before matching.
               b64lines="$(printf '%s' "$RESP" | jq -r '.data.repository.pullRequest.reviews.nodes[]? | (.body // "") | @base64')"
@@ -126,7 +141,10 @@ jobs:
           done < prs.b64
           echo "corpus: $reviews_fetched marker reviews, $pr_skipped older PRs skipped"
           echo "findings bytes: $(wc -c < findings.txt)"
-          head -c 40000 findings.txt > findings_capped.txt
+          # Byte cap WITHOUT splitting a UTF-8 rune (mirrors the distill
+          # step's 8000-byte guard): a mid-rune cut would put invalid UTF-8
+          # into the prompt argv.
+          python3 -c 'import sys; d=sys.stdin.buffer.read()[:40000].decode("utf-8","ignore"); sys.stdout.buffer.write(d.encode("utf-8"))' < findings.txt > findings_capped.txt
           mv findings_capped.txt findings.txt
 
       - name: Skip when nothing to learn from
@@ -157,8 +175,11 @@ jobs:
         # explicit env reference, this step hard-fails instead of handing
         # the model a credential.
         run: |
+          # (same reasoning as pr-agent.yml: a SET-BUT-EMPTY variable is
+          # harmless and the runner may set one even at minimal permissions;
+          # only a non-empty write-scoped token is a credential to refuse).
           for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE; do
-            if [ -n "${!v+x}" ]; then
+            if [ -n "${!v}" ]; then
               echo "::error::credential \$$v is present in the distill step environment — refusing to run"
               exit 1
             fi
@@ -272,8 +293,18 @@ jobs:
           # placement (after push) meant the losing run died on a
           # non-fast-forward push before its own re-check ever ran.
           if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
-            echo "::warning::remote branch $BRANCH already exists (concurrent run) — not pushing or opening a PR"
-            exit 0
+            # Branch exists. If it has a PR, a concurrent dispatch won the
+            # race — nothing to do. If it does NOT, a prior run crashed
+            # between push and pr create and every later run would silently
+            # exit 0 with no PR all month: that is the broken-attempt case
+            # the liveness intent demands surface loudly, not greenly.
+            ALREADY="$(gh pr list --state all --head "$BRANCH" --json number --jq '.[0].number // empty')"
+            if [ -n "$ALREADY" ]; then
+              echo "::warning::remote branch $BRANCH already exists on PR #$ALREADY (concurrent run) — not pushing or opening a PR"
+              exit 0
+            fi
+            echo "::error::remote branch $BRANCH exists but has NO PR — a prior run crashed between push and pr create; delete the stale branch (or run gh pr create) and re-run"
+            exit 1
           fi
           ALREADY="$(gh pr list --state all --head "$BRANCH" --json number --jq '.[0].number // empty')"
           if [ -n "$ALREADY" ]; then
