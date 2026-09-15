@@ -19,6 +19,9 @@ func TestDetectLanguage(t *testing.T) {
 		{"pyproject.toml", "Python"},
 		{"Gemfile", "Ruby"},
 		{"composer.json", "PHP"},
+		// Glob-branch markers (*.csproj/*.sln) exercise the filepath.Glob path.
+		{"foo.csproj", "C#"},
+		{"App.sln", "C#"},
 	}
 	for _, tc := range cases {
 		dir := t.TempDir()
