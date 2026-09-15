@@ -49,8 +49,12 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 		}
 	}
 
-	// Project info.
-	_, _ = fmt.Fprintf(&sb, "\n## Project\n- Name: %s\n- Language: %s\n", input.ProjectName, input.ProjectLanguage)
+	// Project info. Language is omitted rather than rendered blank when it
+	// could not be detected, so the prompt never asserts an empty fact.
+	_, _ = fmt.Fprintf(&sb, "\n## Project\n- Name: %s\n", input.ProjectName)
+	if input.ProjectLanguage != "" {
+		_, _ = fmt.Fprintf(&sb, "- Language: %s\n", input.ProjectLanguage)
+	}
 
 	// Current learned context.
 	sb.WriteString("\n## Current Learned Context\n")

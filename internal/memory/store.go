@@ -171,6 +171,25 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 	return projects, rows.Err()
 }
 
+// GetProjectPath returns the filesystem path recorded for a project. Callers
+// use it to inspect the working tree (e.g. reflection's git context); a
+// missing project is an error, but callers that treat the path as optional
+// can ignore it.
+func (s *Store) GetProjectPath(ctx context.Context, id string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var path string
+	err := s.db.QueryRowContext(ctx, `SELECT path FROM projects WHERE id = ?`, id).Scan(&path)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("project %s not found", id)
+	}
+	if err != nil {
+		return "", fmt.Errorf("get project path: %w", err)
+	}
+	return path, nil
+}
+
 // EnsureProject creates a project record if it doesn't exist.
 // When called with an absolute path, it auto-merges any same-name project
 // that was created with a non-absolute path (e.g., by MCP using name-as-ID).
