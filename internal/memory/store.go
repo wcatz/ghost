@@ -277,6 +277,10 @@ func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) err
 		`UPDATE decisions SET project_id = ? WHERE project_id = ?`,
 		`UPDATE token_usage SET project_id = ? WHERE project_id = ?`,
 		`UPDATE audit_log SET project_id = ? WHERE project_id = ?`,
+		// Snapshots too: memory_snapshots.project_id is ON DELETE CASCADE, so
+		// omitting this would let the DELETE FROM projects below silently
+		// destroy the merged project's entire undo history.
+		`UPDATE memory_snapshots SET project_id = ? WHERE project_id = ?`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt, newID, oldID); err != nil {
