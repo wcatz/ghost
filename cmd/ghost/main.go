@@ -500,6 +500,11 @@ Flags:
 				tiers = append(tiers, reflection.NewSQLiteConsolidator())
 			}
 			consolidator = reflection.NewTieredConsolidator(tiers, logger)
+		} else {
+			// Falling through silently here hides a misconfiguration: the
+			// caller asked for the source-matched backend and would otherwise
+			// see no indication that a different CLI was used instead.
+			fmt.Fprintf(os.Stderr, "warning: no CLI backend matches --source %q; falling back to the default tier cascade\n", source)
 		}
 	}
 

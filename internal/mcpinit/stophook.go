@@ -221,10 +221,12 @@ func spawnResolveIfConfigured(cwd, source string) {
 
 	exe, err := os.Executable()
 	if err != nil {
+		slog.Warn("lifecycle spawn: cannot locate the ghost binary", "error", err)
 		return
 	}
 	logFile, err := os.OpenFile(filepath.Join(dataDir, "resolve.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
+		slog.Warn("lifecycle spawn: cannot open resolve log", "error", err)
 		return
 	}
 	defer logFile.Close() //nolint:errcheck
@@ -237,6 +239,7 @@ func spawnResolveIfConfigured(cwd, source string) {
 	cmd.Stderr = logFile
 	detachProcess(cmd)
 	if err := cmd.Start(); err != nil {
+		slog.Warn("lifecycle spawn: starting the detached process failed", "error", err)
 		return
 	}
 	token, haveToken := processStartTime(cmd.Process.Pid)
@@ -301,10 +304,12 @@ func spawnSupersedeIfConfigured(cwd, source string) {
 
 	exe, err := os.Executable()
 	if err != nil {
+		slog.Warn("lifecycle spawn: cannot locate the ghost binary", "error", err)
 		return
 	}
 	logFile, err := os.OpenFile(filepath.Join(dataDir, "supersede.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
+		slog.Warn("lifecycle spawn: cannot open supersede log", "error", err)
 		return
 	}
 	defer logFile.Close() //nolint:errcheck
@@ -317,6 +322,7 @@ func spawnSupersedeIfConfigured(cwd, source string) {
 	cmd.Stderr = logFile
 	detachProcess(cmd)
 	if err := cmd.Start(); err != nil {
+		slog.Warn("lifecycle spawn: starting the detached process failed", "error", err)
 		return
 	}
 	token, haveToken := processStartTime(cmd.Process.Pid)
@@ -382,10 +388,12 @@ func spawnReflectIfConfigured(cwd, source string) {
 
 	exe, err := os.Executable()
 	if err != nil {
+		slog.Warn("lifecycle spawn: cannot locate the ghost binary", "error", err)
 		return
 	}
 	logFile, err := os.OpenFile(filepath.Join(dataDir, "reflect.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
+		slog.Warn("lifecycle spawn: cannot open reflect log", "error", err)
 		return
 	}
 	defer logFile.Close() //nolint:errcheck
@@ -398,6 +406,7 @@ func spawnReflectIfConfigured(cwd, source string) {
 	cmd.Stderr = logFile
 	detachProcess(cmd)
 	if err := cmd.Start(); err != nil {
+		slog.Warn("lifecycle spawn: starting the detached process failed", "error", err)
 		return
 	}
 	token, haveToken := processStartTime(cmd.Process.Pid)
