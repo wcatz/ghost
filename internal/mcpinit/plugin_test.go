@@ -88,3 +88,27 @@ func TestFinalizePluginWritesMarker(t *testing.T) {
 		t.Errorf("second run should be skipped by the marker, got %q", second.String())
 	}
 }
+
+// TestFinalizePluginNoMarkerWhenAutoMemoryFails pins the reviewer-caught
+// contract: if disabling Claude's built-in file memory cannot be persisted,
+// the marker must NOT be written, so the next session retries instead of
+// silently leaving the competing memory enabled forever.
+func TestFinalizePluginNoMarkerWhenAutoMemoryFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// Make ~/.claude a regular file, so settings save's MkdirAll fails.
+	if err := os.WriteFile(filepath.Join(home, ".claude"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	t.Setenv(pluginDataEnv, dataDir)
+
+	var buf bytes.Buffer
+	finalizePlugin(&buf)
+	if _, err := os.Stat(filepath.Join(dataDir, finalizeMarkerName)); err == nil {
+		t.Fatal("marker must not be written when the auto-memory step failed")
+	}
+	if !strings.Contains(buf.String(), "will retry next session") {
+		t.Errorf("expected a retry diagnostic, got %q", buf.String())
+	}
+}

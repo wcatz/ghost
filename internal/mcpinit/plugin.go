@@ -127,7 +127,11 @@ func finalizePlugin(stderr io.Writer) {
 
 	_, _ = fmt.Fprintln(stderr, "ghost plugin: finalizing first-run wiring")
 
-	// Step 1: disable Claude Code's competing file memory.
+	// Step 1: disable Claude Code's competing file memory. This is the one step
+	// whose failure would otherwise be permanent: the marker would skip it on
+	// every later session, leaving Claude's built-in file memory enabled and
+	// competing with Ghost. Track success and gate the marker on it.
+	autoMemoryOK := false
 	if path, err := settingsPath(); err != nil {
 		_, _ = fmt.Fprintf(stderr, "ghost plugin finalize: settings path: %v\n", err)
 	} else if sf, err := loadSettings(path); err != nil {
@@ -136,12 +140,14 @@ func finalizePlugin(stderr io.Writer) {
 		_, _ = fmt.Fprintf(stderr, "ghost plugin finalize: auto-memory: %v\n", err)
 	} else if err := sf.save(); err != nil {
 		_, _ = fmt.Fprintf(stderr, "ghost plugin finalize: save settings: %v\n", err)
+	} else {
+		autoMemoryOK = true
 	}
 
-	// Steps 2 and 3: import Claude Code memories, then redirect each known
-	// project's MEMORY.md at Ghost. importMemories returns the project list
-	// writeRedirects needs; an import failure still leaves any already-known
-	// projects redirectable, so redirects run only when the list is available.
+	// Steps 2 and 3 are idempotent and self-healing (memories also auto-import
+	// on the first ghost_project_context call), so their failures are logged
+	// but do not block finalization. importMemories returns the project list
+	// writeRedirects needs, so redirects run only when that list is available.
 	projects, err := importMemories(stderr, false)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "ghost plugin finalize: import memories: %v\n", err)
@@ -149,9 +155,14 @@ func finalizePlugin(stderr io.Writer) {
 		writeRedirects(stderr, projects, false)
 	}
 
-	// Marker last: written only after the idempotent steps ran, so a crash
-	// mid-finalize retries next session instead of being skipped forever.
+	// Marker last, and only if the one non-self-healing step succeeded. A
+	// failed auto-memory step leaves the marker unwritten so the next session
+	// retries; a crash mid-finalize behaves the same way.
 	if marker == "" {
+		return
+	}
+	if !autoMemoryOK {
+		_, _ = fmt.Fprintln(stderr, "ghost plugin finalize: auto-memory step failed; will retry next session")
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(marker), 0755); err != nil {
