@@ -507,10 +507,18 @@ func TestClaimPidFile_PlaceholderCarriesToken(t *testing.T) {
 
 // TestSafeProjectIDComponent pins the pid-path hardening: project ids arrive
 // from callers (an MCP client can send any project_id, and EnsureProject stores
-// it verbatim), so a value that could traverse out of the data directory or
-// reshape the filename must be rejected before a path is built from it.
+// it verbatim), so a value that could reshape the path must be rejected before
+// a filename is built from it — but only path-hostile characters, because
+// rejecting spaces or non-ASCII names would silently disable auto-consolidation
+// for a legitimate existing project.
 func TestSafeProjectIDComponent(t *testing.T) {
-	valid := []string{"ghost", "my-proj_1.2", "a", "Project-123"}
+	valid := []string{
+		"ghost", "my-proj_1.2", "a", "Project-123",
+		"my project",    // spaces are legal in a filename
+		"プロジェクト名",       // non-ASCII must keep working
+		"proj (v2)",     // punctuation is fine
+		"v1..2-release", // ".." inside a name is not traversal
+	}
 	for _, id := range valid {
 		if !safeProjectIDComponent(id) {
 			t.Errorf("safeProjectIDComponent(%q) = false, want true", id)
@@ -526,10 +534,9 @@ func TestSafeProjectIDComponent(t *testing.T) {
 		"a/b",
 		`a\b`,
 		"a/../b",
-		"has space",
-		"café",
-		"tab\ttab",
 		"nul\x00byte",
+		"tab\ttab", // control characters are unusable in filenames on Windows
+		"bell\x07", // any control rune, not just NUL
 	}
 	for _, id := range invalid {
 		if safeProjectIDComponent(id) {

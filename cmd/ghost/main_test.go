@@ -798,3 +798,53 @@ func TestLifecyclePhasesTimeoutFromConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestParseLifecycleArgs pins the argv contract that keeps the coordinator from
+// running its write phases against the wrong project. The misroute this guards
+// is concrete: the hook used to pass the project positionally, so a project
+// literally named "--source" realigned the argv and lifecycle ran for whatever
+// followed, while the pid file was claimed for the real project. Dash-prefixed
+// names are now rejected outright, because the phase subcommands' parsers would
+// read them as flags and fail one phase at a time.
+func TestParseLifecycleArgs(t *testing.T) {
+	ok := []struct {
+		args    []string
+		project string
+		source  string
+	}{
+		{[]string{"--project", "ghost"}, "ghost", ""},
+		{[]string{"--project", "my project", "--source", "opencode"}, "my project", "opencode"},
+		{[]string{"ghost"}, "ghost", ""}, // positional still works for manual use
+		{[]string{"ghost", "--source", "cli"}, "ghost", "cli"},
+	}
+	for _, tc := range ok {
+		project, source, err := parseLifecycleArgs(tc.args)
+		if err != nil {
+			t.Errorf("parseLifecycleArgs(%v) error: %v", tc.args, err)
+			continue
+		}
+		if project != tc.project || source != tc.source {
+			t.Errorf("parseLifecycleArgs(%v) = (%q, %q), want (%q, %q)",
+				tc.args, project, source, tc.project, tc.source)
+		}
+	}
+
+	bad := [][]string{
+		{},                                   // no project
+		{"--project"},                        // missing value
+		{"--source", "x"},                    // no project
+		{"--bogus"},                          // unknown flag
+		{"a", "b"},                           // extra positional
+		{"--project", "a", "b"},              // extra positional after flag
+		{"--project", "a", "--project", "b"}, // duplicate flag must not last-win
+		{"--project", "a", "--source", "s", "--source", "t"}, // duplicate --source
+		{"--project", "--source"},                            // dash-prefixed project is rejected, not misrouted
+		{"--project", "-dashy"},                              // dash-prefixed project
+		{"-dashy"},                                           // dash-prefixed positional
+	}
+	for _, args := range bad {
+		if _, _, err := parseLifecycleArgs(args); err == nil {
+			t.Errorf("parseLifecycleArgs(%v) = nil error, want an error", args)
+		}
+	}
+}

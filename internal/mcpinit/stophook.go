@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -163,23 +164,32 @@ func cleanupTransientTranscript(p hostevent.Payload) {
 }
 
 // safeProjectIDComponent reports whether id can be embedded in a filename
-// inside the data dir. Project ids originate from callers (an MCP client can
-// send any project_id), so anything that could traverse or reshape the path is
-// rejected: only ASCII letters, digits, '-', '_' and '.' are allowed, and a
-// value that is or contains ".." is not.
+// inside the data dir. Project ids originate from callers — an MCP client can
+// send any project_id, and EnsureProject stores it verbatim — so the check
+// rejects what could reshape the path (empty, ".", "..", path separators) and
+// what a filename cannot hold (control characters, and on Windows the reserved
+// :*?"<>| set). Everything else is a legitimate id and must keep working:
+// rejecting spaces or non-ASCII names would silently switch off
+// auto-consolidation for an existing project, which is a worse failure than the
+// narrow path issue this guards.
 func safeProjectIDComponent(id string) bool {
-	if id == "" || id == "." || id == ".." || strings.Contains(id, "..") {
+	if id == "" || id == "." || id == ".." {
 		return false
 	}
-	for _, r := range id {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '-', r == '_', r == '.':
-		default:
-			return false
-		}
+	// Control characters are unusable in a filename on Windows and have no
+	// legitimate place in an id anywhere, so reject them unconditionally
+	// (this covers NUL).
+	if strings.ContainsFunc(id, func(r rune) bool { return r < 0x20 }) {
+		return false
 	}
-	return true
+	if strings.ContainsAny(id, `\/`) {
+		return false
+	}
+	// Windows additionally forbids these in a filename component.
+	if runtime.GOOS == "windows" && strings.ContainsAny(id, `:*?"<>|`) {
+		return false
+	}
+	return filepath.Base(id) == id
 }
 
 // spawnLifecycleIfConfigured starts `ghost lifecycle <project>` as a single
@@ -277,7 +287,7 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 	}
 	defer logFile.Close() //nolint:errcheck
 
-	cmd := exec.Command(exe, "lifecycle", projectName)
+	cmd := exec.Command(exe, "lifecycle", "--project", projectName)
 	if source != "" {
 		cmd.Args = append(cmd.Args, "--source", source)
 	}

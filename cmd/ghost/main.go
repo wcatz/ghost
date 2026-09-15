@@ -441,25 +441,9 @@ func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName 
 //
 // Internal subcommand: not listed in help.
 func runLifecycle() {
-	args := os.Args[2:]
-	var projectName, source string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--source":
-			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "error: --source requires a value")
-				os.Exit(1)
-			}
-			source = args[i+1]
-			i++
-		default:
-			if projectName == "" {
-				projectName = args[i]
-			}
-		}
-	}
-	if projectName == "" {
-		fmt.Fprintln(os.Stderr, "usage: ghost lifecycle <project> [--source <src>]")
+	projectName, source, err := parseLifecycleArgs(os.Args[2:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -532,6 +516,58 @@ func runLifecycle() {
 		}
 		fmt.Fprintf(os.Stderr, "lifecycle: %s completed in %s\n", ph.name, time.Since(start).Round(time.Second))
 	}
+}
+
+// parseLifecycleArgs parses the internal lifecycle subcommand's arguments. The
+// project comes from --project when given, so a project whose name begins with
+// a dash — or is literally "--source" — cannot be misread as a flag: without
+// that, the hook's argv realigned and the write phases ran against a different
+// project than the one whose pid file was claimed. A lone positional is still
+// accepted for manual use. Anything unexpected is an error rather than being
+// ignored, because a silently misparsed project is a wrong-project write.
+func parseLifecycleArgs(args []string) (project, source string, err error) {
+	projectSet, sourceSet := false, false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--project":
+			if projectSet {
+				return "", "", fmt.Errorf("--project given more than once")
+			}
+			if i+1 >= len(args) {
+				return "", "", fmt.Errorf("--project requires a value")
+			}
+			project, projectSet = args[i+1], true
+			i++
+		case "--source":
+			if sourceSet {
+				return "", "", fmt.Errorf("--source given more than once")
+			}
+			if i+1 >= len(args) {
+				return "", "", fmt.Errorf("--source requires a value")
+			}
+			source, sourceSet = args[i+1], true
+			i++
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return "", "", fmt.Errorf("unknown flag %q", args[i])
+			}
+			if projectSet {
+				return "", "", fmt.Errorf("unexpected extra argument %q", args[i])
+			}
+			project, projectSet = args[i], true
+		}
+	}
+	if !projectSet || project == "" {
+		return "", "", fmt.Errorf("--project is required (usage: ghost lifecycle --project <name> [--source <src>])")
+	}
+	// The phases are run as `ghost reflect|resolve|supersede <project> ...`, and
+	// those parsers read a dash-leading element as a flag, so a dash-prefixed
+	// name cannot be run by them. Reject it here with a clear message rather
+	// than spawning a chain that is guaranteed to fail phase by phase.
+	if strings.HasPrefix(project, "-") {
+		return "", "", fmt.Errorf("project %q begins with %q, which the reflect/resolve/supersede subcommands would read as a flag; rename the project to use auto-consolidation", project, "-")
+	}
+	return project, source, nil
 }
 
 // phaseGracePeriod is how long a phase has to exit after its deadline's
