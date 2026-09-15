@@ -1215,8 +1215,8 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 
 	// Identify which existing rows this replace may delete, and which emitted
-	// memory can reuse one. A row whose content the consolidator re-emits is
-	// updated in place instead of being deleted and re-inserted: a fresh ID
+	// memory can reuse one. A row whose content the consolidator re-emits
+	// unchanged is updated in place instead of being deleted and re-inserted: a fresh ID
 	// would cascade its memory_embeddings and memory_links away (both are ON
 	// DELETE CASCADE), so identical content used to mean a re-embedded memory
 	// and a lost link graph on every reflection. Rows saved concurrently with
@@ -1283,15 +1283,18 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		if concurrent[c.id] {
 			continue
 		}
-		key := strings.TrimSpace(c.content)
-		reusable[key] = append(reusable[key], c.id)
+		reusable[c.content] = append(reusable[c.content], c.id)
 	}
 	reuseFor := make(map[int]string, len(memories))
 	for i, m := range memories {
-		key := strings.TrimSpace(m.Content)
-		if ids := reusable[key]; len(ids) > 0 {
+		// Matching is exact, not trimmed: reuse preserves the existing
+		// embedding, so it is only valid when the stored text is byte-identical
+		// to what the consolidator emitted. A whitespace-only difference takes
+		// the insert path instead, which leaves the memory to be re-embedded
+		// rather than keeping a vector that no longer describes its content.
+		if ids := reusable[m.Content]; len(ids) > 0 {
 			reuseFor[i] = ids[0]
-			reusable[key] = ids[1:]
+			reusable[m.Content] = ids[1:]
 		}
 	}
 

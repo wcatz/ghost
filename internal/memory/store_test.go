@@ -4321,3 +4321,41 @@ func memoryIDs(mems []Memory) []string {
 	}
 	return ids
 }
+
+// TestReplaceNonManualWhitespaceDifferenceDoesNotReuse pins the exact-match
+// rule: reuse keeps the row's existing embedding, so it is only valid when the
+// text is byte-identical. A whitespace-only change must take the insert path
+// instead of leaving a vector that no longer describes the content.
+func TestReplaceNonManualWhitespaceDifferenceDoesNotReuse(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "trailing space here", Source: "reflection",
+		Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.StoreEmbedding(ctx, id, []float32{1, 0, 0}, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+
+	replacement := []Memory{
+		{Category: "fact", Content: "trailing space here ", Importance: 0.5, Tags: []string{}},
+	}
+	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected exactly 1 memory, got %d", len(all))
+	}
+	if all[0].ID == id {
+		t.Error("whitespace-differing content reused the row, leaving a stale embedding attached")
+	}
+}
