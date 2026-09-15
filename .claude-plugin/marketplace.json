@@ -1,0 +1,24 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ghost",
+  "description": "Ghost — a local-first MCP memory server for Claude Code. One binary, one SQLite file, no cloud.",
+  "owner": {
+    "name": "Wayne Cataldo",
+    "email": "waynecataldo@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "ghost",
+      "description": "MCP memory server for Claude Code: project context injection, memory save/search, and automatic consolidation. Bundles the platform binary.",
+      "author": {
+        "name": "Wayne Cataldo",
+        "email": "waynecataldo@gmail.com"
+      },
+      "homepage": "https://github.com/wcatz/ghost",
+      "source": {
+        "source": "archive",
+        "url": "https://github.com/wcatz/ghost/releases/latest/download/ghost-plugin.zip"
+      }
+    }
+  ]
+}

@@ -32,6 +32,16 @@ func Status(w io.Writer) (bool, error) {
 		}
 	}
 
+	// A plugin-managed integration does not go through `claude mcp get`: its
+	// MCP server, hooks, and permissions are declarative in the plugin, and its
+	// bundled binary lives in the plugin cache. Report that, rather than the
+	// standalone registration checks below, which would all read as failures.
+	if PluginInstalled() {
+		_, _ = fmt.Fprintln(w, "  ✓ integration managed by the ghost Claude Code plugin")
+		_, _ = fmt.Fprintln(w, "    registration, hooks, and permissions are declarative — update with `/plugin update` in Claude Code")
+		return true, nil
+	}
+
 	// 1. Ghost binary.
 	ghostBin := findBinary("ghost")
 	check(ghostBin != "",

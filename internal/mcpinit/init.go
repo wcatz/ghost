@@ -20,6 +20,17 @@ import (
 // Run executes the 9-step Claude Code integration setup.
 // When dryRun is true, it reports what would change without modifying anything.
 func Run(w io.Writer, dryRun bool) error {
+	// A Claude Code plugin install owns the MCP registration, hooks, and
+	// permissions declaratively, so init must defer rather than double-wire
+	// and fight it. PluginInstalled (not RunningAsPlugin) also catches the
+	// case where the user runs the standalone binary while a plugin is
+	// installed.
+	if PluginInstalled() {
+		_, _ = fmt.Fprintln(w, "The ghost Claude Code plugin manages this integration — skipping `ghost mcp init` wiring (use `/plugin update` in Claude Code to update it).")
+		_, _ = fmt.Fprintln(w, "To switch to init-managed wiring, uninstall the plugin first.")
+		return nil
+	}
+
 	if dryRun {
 		_, _ = fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
 	}
