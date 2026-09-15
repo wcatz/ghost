@@ -102,9 +102,7 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 	}
 
 	source := string(p.HostSource())
-	spawnResolveIfConfigured(p.CWD, source)
-	spawnSupersedeIfConfigured(p.CWD, source)
-	spawnReflectIfConfigured(p.CWD, source)
+	spawnLifecycleIfConfigured(p.CWD, source)
 
 	if !nudge || p.TranscriptPath == "" {
 		return
@@ -164,197 +162,42 @@ func cleanupTransientTranscript(p hostevent.Payload) {
 	_ = os.RemoveAll(dir)
 }
 
-// spawnResolveIfConfigured starts `ghost resolve <project> --apply` as a
+// spawnLifecycleIfConfigured starts `ghost lifecycle <project>` as a single
 // detached background process for the project matching cwd, if one isn't
-// already running for that project. Opt-in via reflection.auto_resolve
-// (default false) — most users never want an unattended write pass. Every
-// failure path returns silently: this must never block or fail the stop hook.
-// If no LLM CLI binary is reachable, the spawned process itself fails fast and
-// logs the failure to resolve.log — no local fallback runs in this path, so
-// auto-resolve simply does nothing until a harness becomes available.
-// Known limitation: resolution here depends on Store.ResolveProject's
-// path/basename match against the stored project row; a cwd with no matching
-// project is a silent no-op, same as an unconfigured user.
-func spawnResolveIfConfigured(cwd, source string) {
-	if cwd == "" {
-		return
-	}
-	cfg, err := config.Load()
-	if err != nil || !cfg.Reflection.AutoResolve {
-		return
-	}
-
-	dataDir, err := config.DataDir()
-	if err != nil {
-		return
-	}
-	dbPath := filepath.Join(dataDir, "ghost.db")
-	if _, err := os.Stat(dbPath); err != nil {
-		return
-	}
-	db, err := sql.Open("sqlite", roDSN(dbPath))
-	if err != nil {
-		return
-	}
-	defer db.Close() //nolint:errcheck
-
-	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	projectID, projectName := resolveSessionProject(context.Background(), store, cwd)
-	if projectID == "" || projectName == "" {
-		return
-	}
-
-	pidPath := filepath.Join(dataDir, "resolve-"+projectID+".pid")
-	if isAlive(pidPath) {
-		return
-	}
-	// isAlive false above is only a fast path to skip locking in the common
-	// case (no resolve running at all). It is NOT sufficient on its own: two
-	// stop hooks firing close together for the same project could both pass
-	// it and both decide to spawn a DB-writing process. claimPidFile
-	// re-checks liveness under an OS-level lock, serializing the
-	// check-then-write against every other caller on the machine, so exactly
-	// one of them wins the claim.
-	if !claimPidFile(pidPath) {
-		return
-	}
-
-	exe, err := os.Executable()
-	if err != nil {
-		slog.Warn("lifecycle spawn: cannot locate the ghost binary", "error", err)
-		return
-	}
-	logFile, err := os.OpenFile(filepath.Join(dataDir, "resolve.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		slog.Warn("lifecycle spawn: cannot open resolve log", "error", err)
-		return
-	}
-	defer logFile.Close() //nolint:errcheck
-
-	cmd := exec.Command(exe, "resolve", projectName, "--apply")
-	if source != "" {
-		cmd.Args = append(cmd.Args, "--source", source)
-	}
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	detachProcess(cmd)
-	if err := cmd.Start(); err != nil {
-		slog.Warn("lifecycle spawn: starting the detached process failed", "error", err)
-		return
-	}
-	token, haveToken := processStartTime(cmd.Process.Pid)
-	_ = atomicWritePID(pidPath, cmd.Process.Pid, token, haveToken)
-	_ = cmd.Process.Release()
-}
-
-// spawnSupersedeIfConfigured starts `ghost supersede <project> --apply` as a
-// detached background process for the project matching cwd, if one isn't
-// already running for that project. Opt-in via reflection.auto_supersede
-// (default false) — most users never want an unattended write pass. Every
-// failure path returns silently: this must never block or fail the stop hook.
-// If no LLM CLI binary is reachable, the spawned process itself fails fast and
-// logs the failure to supersede.log — no local fallback runs in this path, so
-// auto-supersede simply does nothing until a harness becomes available.
-// Known limitation: resolution here depends on Store.ResolveProject's
-// path/basename match against the stored project row; a cwd with no matching
-// project is a silent no-op, same as an unconfigured user.
-func spawnSupersedeIfConfigured(cwd, source string) {
-	if cwd == "" {
-		return
-	}
-	cfg, err := config.Load()
-	if err != nil || !cfg.Reflection.AutoSupersede {
-		return
-	}
-
-	dataDir, err := config.DataDir()
-	if err != nil {
-		return
-	}
-	dbPath := filepath.Join(dataDir, "ghost.db")
-	if _, err := os.Stat(dbPath); err != nil {
-		return
-	}
-	db, err := sql.Open("sqlite", roDSN(dbPath))
-	if err != nil {
-		return
-	}
-	defer db.Close() //nolint:errcheck
-
-	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	projectID, projectName := resolveSessionProject(context.Background(), store, cwd)
-	if projectID == "" || projectName == "" {
-		return
-	}
-
-	pidPath := filepath.Join(dataDir, "supersede-"+projectID+".pid")
-	if isAlive(pidPath) {
-		return
-	}
-	// isAlive false above is only a fast path to skip locking in the common
-	// case (no supersede running at all). It is NOT sufficient on its own: two
-	// stop hooks firing close together for the same project could both pass
-	// it and both decide to spawn a DB-writing process. claimPidFile
-	// re-checks liveness under an OS-level lock, serializing the
-	// check-then-write against every other caller on the machine, so exactly
-	// one of them wins the claim.
-	if !claimPidFile(pidPath) {
-		return
-	}
-
-	exe, err := os.Executable()
-	if err != nil {
-		slog.Warn("lifecycle spawn: cannot locate the ghost binary", "error", err)
-		return
-	}
-	logFile, err := os.OpenFile(filepath.Join(dataDir, "supersede.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		slog.Warn("lifecycle spawn: cannot open supersede log", "error", err)
-		return
-	}
-	defer logFile.Close() //nolint:errcheck
-
-	cmd := exec.Command(exe, "supersede", projectName, "--apply")
-	if source != "" {
-		cmd.Args = append(cmd.Args, "--source", source)
-	}
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	detachProcess(cmd)
-	if err := cmd.Start(); err != nil {
-		slog.Warn("lifecycle spawn: starting the detached process failed", "error", err)
-		return
-	}
-	token, haveToken := processStartTime(cmd.Process.Pid)
-	_ = atomicWritePID(pidPath, cmd.Process.Pid, token, haveToken)
-	_ = cmd.Process.Release()
-}
-
-// spawnReflectIfConfigured starts `ghost reflect <project> --apply` as a
-// detached background process for the project matching cwd, if one isn't
-// already running for that project. Opt-in via reflection.auto_reflect
-// (default false). Every failure path returns silently: this must never block
-// or fail the stop hook.
+// already running for that project. That process runs the enabled phases in
+// order — reflect, then resolve, then supersede — so consolidation can never
+// rewrite rows while resolve or supersede is classifying them. Spawned as
+// three independent processes they raced, which surfaced as foreign-key aborts
+// and lost resolved_at stamps. One PID file now guards all three phases.
 //
-// Unlike the resolve/supersede twins, this adds a no-LLM guard: consolidation
-// is only worth an unattended write when a real LLM tier is available. Without
-// a claude/opencode/codex/goose binary, --tier auto would fall through to the
-// Jaccard-only sqlite tier and rewrite every non-manual memory for no quality
-// gain, so the spawn is skipped entirely — before the DB is even opened, so
-// this stays a cheap read-only no-op.
-func spawnReflectIfConfigured(cwd, source string) {
+// Opt in per phase via reflection.auto_reflect / auto_resolve / auto_supersede
+// (all default false). Every failure path returns silently: this must never
+// block or fail the stop hook.
+func spawnLifecycleIfConfigured(cwd, source string) {
 	if cwd == "" {
 		return
 	}
 	cfg, err := config.Load()
-	if err != nil || !cfg.Reflection.AutoReflect {
+	if err != nil {
 		return
 	}
-	if !ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary).Available() {
-		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
-		if !sp.Available() {
-			slog.Warn("reflect: skipping — no CLI binary available", "source", source)
-			return
+	if !cfg.Reflection.AutoReflect && !cfg.Reflection.AutoResolve && !cfg.Reflection.AutoSupersede {
+		return
+	}
+	// Consolidation is only worth an unattended write when a real LLM tier is
+	// available: without one, --tier auto would fall through to the Jaccard-only
+	// sqlite tier and rewrite every non-manual memory for no quality gain. When
+	// reflect is the only enabled phase, skip the whole spawn before the DB is
+	// even opened, so this stays a cheap read-only no-op. When resolve or
+	// supersede are also enabled they still run — the coordinator skips its own
+	// reflect phase in that case.
+	if cfg.Reflection.AutoReflect && !cfg.Reflection.AutoResolve && !cfg.Reflection.AutoSupersede {
+		if !ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary).Available() {
+			sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
+			if !sp.Available() {
+				slog.Warn("lifecycle: skipping — no CLI binary available", "source", source)
+				return
+			}
 		}
 	}
 
@@ -378,10 +221,15 @@ func spawnReflectIfConfigured(cwd, source string) {
 		return
 	}
 
-	pidPath := filepath.Join(dataDir, "reflect-"+projectID+".pid")
+	pidPath := filepath.Join(dataDir, "lifecycle-"+projectID+".pid")
 	if isAlive(pidPath) {
 		return
 	}
+	// isAlive false is only a fast path to skip locking in the common case (no
+	// lifecycle running at all). It is NOT sufficient on its own: two stop hooks
+	// firing close together for the same project could both pass it and both
+	// start a write pass. claimPidFile re-checks liveness under an OS-level
+	// lock, so exactly one of them wins the claim.
 	if !claimPidFile(pidPath) {
 		return
 	}
@@ -391,14 +239,14 @@ func spawnReflectIfConfigured(cwd, source string) {
 		slog.Warn("lifecycle spawn: cannot locate the ghost binary", "error", err)
 		return
 	}
-	logFile, err := os.OpenFile(filepath.Join(dataDir, "reflect.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	logFile, err := os.OpenFile(filepath.Join(dataDir, "lifecycle.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
-		slog.Warn("lifecycle spawn: cannot open reflect log", "error", err)
+		slog.Warn("lifecycle spawn: cannot open log", "error", err)
 		return
 	}
 	defer logFile.Close() //nolint:errcheck
 
-	cmd := exec.Command(exe, "reflect", projectName, "--apply", "--require-llm")
+	cmd := exec.Command(exe, "lifecycle", projectName)
 	if source != "" {
 		cmd.Args = append(cmd.Args, "--source", source)
 	}

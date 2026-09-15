@@ -10,9 +10,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
@@ -710,6 +712,89 @@ func TestRunProjectMergeCore_RefusesGlobal(t *testing.T) {
 		err := runProjectMergeCore(ctx, store, &out, tc.oldArg, tc.newArg)
 		if err == nil || !strings.Contains(err.Error(), "_global") {
 			t.Errorf("merge %q -> %q: expected _global refusal, got: %v", tc.oldArg, tc.newArg, err)
+		}
+	}
+}
+
+// TestLifecyclePhasesOrder pins the ordering contract that the single-process
+// coordinator exists to enforce: reflect (a rewrite) must run before resolve
+// (stamps resolved_at) and supersede (links rows).
+func TestLifecyclePhasesOrder(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Reflection.AutoReflect = true
+	cfg.Reflection.AutoResolve = true
+	cfg.Reflection.AutoSupersede = true
+
+	phases := lifecyclePhases(cfg, "proj", true)
+	got := make([]string, 0, len(phases))
+	for _, p := range phases {
+		got = append(got, p.name)
+	}
+	want := []string{"reflect", "resolve", "supersede"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("phase order = %v, want %v", got, want)
+	}
+	if !reflect.DeepEqual(phases[0].args, []string{"reflect", "proj", "--apply", "--require-llm"}) {
+		t.Errorf("reflect args = %v", phases[0].args)
+	}
+	if !reflect.DeepEqual(phases[1].args, []string{"resolve", "proj", "--apply"}) {
+		t.Errorf("resolve args = %v", phases[1].args)
+	}
+	if !reflect.DeepEqual(phases[2].args, []string{"supersede", "proj", "--apply"}) {
+		t.Errorf("supersede args = %v", phases[2].args)
+	}
+}
+
+// TestLifecyclePhasesSkipsReflectWithoutLLM: without a real LLM tier an
+// unattended consolidation would rewrite every non-manual memory through the
+// Jaccard-only sqlite tier, so the reflect phase must be dropped while the
+// non-LLM phases still run.
+func TestLifecyclePhasesSkipsReflectWithoutLLM(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Reflection.AutoReflect = true
+	cfg.Reflection.AutoResolve = true
+	cfg.Reflection.AutoSupersede = true
+
+	phases := lifecyclePhases(cfg, "proj", false)
+	got := make([]string, 0, len(phases))
+	for _, p := range phases {
+		got = append(got, p.name)
+	}
+	want := []string{"resolve", "supersede"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("phase order without LLM = %v, want %v", got, want)
+	}
+}
+
+func TestLifecyclePhasesEmptyWhenAllDisabled(t *testing.T) {
+	if phases := lifecyclePhases(&config.Config{}, "proj", true); len(phases) != 0 {
+		t.Fatalf("expected no phases when everything is disabled, got %v", phases)
+	}
+}
+
+// TestLifecyclePhasesTimeoutFromConfig: zero explicitly disables the phase
+// bound (the loaded default is a generous 60 minutes), and any configured value
+// propagates to every phase.
+func TestLifecyclePhasesTimeoutFromConfig(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Reflection.AutoReflect = true
+	cfg.Reflection.AutoResolve = true
+	cfg.Reflection.AutoSupersede = true
+
+	for _, p := range lifecyclePhases(cfg, "proj", true) {
+		if p.timeout != 0 {
+			t.Errorf("phase %s timeout = %v, want 0 (bound disabled)", p.name, p.timeout)
+		}
+	}
+
+	cfg.Reflection.LifecycleTimeoutMinutes = 45
+	phases := lifecyclePhases(cfg, "proj", true)
+	if len(phases) != 3 {
+		t.Fatalf("expected 3 phases, got %d", len(phases))
+	}
+	for _, p := range phases {
+		if p.timeout != 45*time.Minute {
+			t.Errorf("phase %s timeout = %v, want 45m", p.name, p.timeout)
 		}
 	}
 }

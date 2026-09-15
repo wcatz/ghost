@@ -257,10 +257,10 @@ func TestRunHostEvent_StopStillGuardedWhenActive(t *testing.T) {
 func TestRunHostEvent_FailsOpenOnEmptyTranscriptPathEvenWithCWD(t *testing.T) {
 	// RunHostEvent must stay silent on stdout and return promptly when
 	// transcript_path is empty, even once cwd is populated and a spawn attempt
-	// is made first — proving the spawnResolveIfConfigured call didn't
+	// is made first — proving the spawnLifecycleIfConfigured call didn't
 	// introduce a hang or panic on the hot path. This does NOT assert
-	// spawnResolveIfConfigured was a no-op (see
-	// TestSpawnResolveIfConfigured_NoOpWhenDisabled for that); the early
+	// spawnLifecycleIfConfigured was a no-op (see
+	// TestSpawnLifecycleIfConfigured_NoOpWhenDisabled for that); the early
 	// return below is guaranteed independently of spawn behavior.
 	isolatedHome(t)
 	var buf bytes.Buffer
@@ -327,7 +327,7 @@ func TestRunHostEvent_NudgeEmittedForAllHosts(t *testing.T) {
 // config.DataDir can never see the developer's real
 // ~/.config/ghost/config.yaml, real GHOST_REFLECTION_AUTO_RESOLVE-style
 // overrides, or ~/.local/share/ghost/ghost.db. Without this, tests that
-// exercise spawnResolveIfConfigured would only be hermetic by accident of the
+// exercise spawnLifecycleIfConfigured would only be hermetic by accident of the
 // machine and environment they happen to run in.
 func isolatedHome(t *testing.T) string {
 	t.Helper()
@@ -347,56 +347,28 @@ func isolatedHome(t *testing.T) string {
 	return dataHome
 }
 
-func TestSpawnResolveIfConfigured_NoOpWhenDisabled(t *testing.T) {
-	// With no config file present, reflection.auto_resolve defaults to false
-	// (internal/config/config.go's defaults map). spawnResolveIfConfigured
-	// must return immediately after that check — before ever calling
-	// config.DataDir (which creates ~/.local/share/ghost), let alone touching
-	// ghost.db, the pidfile, or resolve.log.
+func TestSpawnLifecycleIfConfigured_NoOpWhenDisabled(t *testing.T) {
+	// With no config file present, reflection.auto_reflect / auto_resolve /
+	// auto_supersede all default to false (internal/config/config.go's defaults
+	// map). spawnLifecycleIfConfigured must return immediately after that check
+	// — before ever calling config.DataDir (which creates
+	// ~/.local/share/ghost), let alone touching ghost.db, the pidfile, or
+	// lifecycle.log.
 	dataHome := isolatedHome(t)
 
-	spawnResolveIfConfigured("/tmp/does-not-matter", "")
+	spawnLifecycleIfConfigured("/tmp/does-not-matter", "")
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
-		t.Errorf("expected ghost data dir to never be created when auto_resolve is disabled, stat err = %v", err)
+		t.Errorf("expected ghost data dir to never be created when every phase is disabled, stat err = %v", err)
 	}
 }
 
-func TestSpawnSupersedeIfConfigured_NoOpWhenDisabled(t *testing.T) {
-	// With no config file present, reflection.auto_supersede defaults to false
-	// (internal/config/config.go's defaults map). spawnSupersedeIfConfigured
-	// must return immediately after that check — before ever calling
-	// config.DataDir (which creates ~/.local/share/ghost), let alone touching
-	// ghost.db, the pidfile, or supersede.log.
-	dataHome := isolatedHome(t)
-
-	spawnSupersedeIfConfigured("/tmp/does-not-matter", "")
-
-	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
-		t.Errorf("expected ghost data dir to never be created when auto_supersede is disabled, stat err = %v", err)
-	}
-}
-
-func TestSpawnReflectIfConfigured_NoOpWhenDisabled(t *testing.T) {
-	// With no config file present, reflection.auto_reflect defaults to false
-	// (internal/config/config.go's defaults map). spawnReflectIfConfigured must
-	// return immediately after that check — before ever calling config.DataDir
-	// (which creates ~/.local/share/ghost), let alone touching ghost.db, the
-	// pidfile, or reflect.log.
-	dataHome := isolatedHome(t)
-
-	spawnReflectIfConfigured("/tmp/does-not-matter", "")
-
-	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
-		t.Errorf("expected ghost data dir to never be created when auto_reflect is disabled, stat err = %v", err)
-	}
-}
-
-func TestSpawnReflectIfConfigured_NoOpWithoutLLM(t *testing.T) {
-// auto_reflect enabled, but no LLM harness is available (no claude, no
-// opencode/codex/goose on PATH, and nothing configured via cli.*_binary). The
-// no-LLM guard must return before config.DataDir, so no Jaccard-only reflect
-// ever spawns and no data dir is created.
+func TestSpawnLifecycleIfConfigured_NoOpWithoutLLM(t *testing.T) {
+	// auto_reflect enabled, but no LLM harness is available (no claude, no
+	// opencode/codex/goose on PATH, and nothing configured via cli.*_binary).
+	// When reflect is the only enabled phase the no-LLM guard must return
+	// before config.DataDir, so no Jaccard-only reflect ever spawns and no
+	// data dir is created.
 	dataHome := isolatedHome(t)
 	cfgDir := os.Getenv("XDG_CONFIG_HOME")
 	if err := os.MkdirAll(filepath.Join(cfgDir, "ghost"), 0o755); err != nil {
@@ -407,10 +379,35 @@ func TestSpawnReflectIfConfigured_NoOpWithoutLLM(t *testing.T) {
 	}
 	t.Setenv("PATH", t.TempDir()) // no claude, no opencode
 
-	spawnReflectIfConfigured("/tmp/does-not-matter", "")
+	spawnLifecycleIfConfigured("/tmp/does-not-matter", "")
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected no ghost data dir when no LLM is available, stat err = %v", err)
+	}
+}
+
+func TestSpawnLifecycleIfConfigured_ProceedsWhenResolveEnabledWithoutLLM(t *testing.T) {
+	// resolve and supersede have no local fallback and need no LLM guard, so
+	// the no-LLM guard must not block them: with only auto_resolve enabled the
+	// spawn path must get past the flag check and create the data dir. It then
+	// stops at the missing ghost.db, so nothing is actually spawned.
+	dataHome := isolatedHome(t)
+	cfgDir := os.Getenv("XDG_CONFIG_HOME")
+	if err := os.MkdirAll(filepath.Join(cfgDir, "ghost"), 0o755); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "ghost", "config.yaml"), []byte("reflection:\n  auto_resolve: true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("PATH", t.TempDir())
+
+	spawnLifecycleIfConfigured("/tmp/does-not-matter", "")
+
+	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); err != nil {
+		t.Errorf("expected the resolve phase to reach config.DataDir, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataHome, "ghost", "lifecycle.log")); !os.IsNotExist(err) {
+		t.Errorf("nothing should have been spawned without a database, log stat err = %v", err)
 	}
 }
 
