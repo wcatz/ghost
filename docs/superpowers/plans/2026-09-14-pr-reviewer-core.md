@@ -1,5 +1,46 @@
 # PR Reviewer Core (Phases 1–3) Implementation Plan
 
+> **Archived — executed 2026-09-15.** A record of what was done, not
+> current documentation. Its unchecked boxes are an artefact of the
+> archive: all thirteen tasks landed, each verified against the shipped
+> tree rather than assumed — `actionlint` in `ci.yml` (Task 1),
+> `validate` / `parse_hunks` / `partition` / `build_review` /
+> `extract_findings` in `.github/scripts/review_findings.py` (2, 3, 4,
+> 4b), the script suite in CI (5), `post_review.py` (6),
+> `reviewer.yml` (7, 8), `sweeper.yml` (9), `prior-threads.json` in the
+> prepare step (10), the `<!-- ghost-review:<sha> -->` marker (11),
+> `.github/scripts/fixtures/` (12), and `pr-agent.yml` / `pr-loop.yml`
+> deleted (13).
+>
+> Four things ship differently from what this plan describes. The
+> workflows and `CLAUDE.md` are authoritative; the body below is left as
+> written.
+>
+> 1. **The model is restricted by an agent, not by the absence of
+>    `--auto`.** Task 4b and the Architecture note above both assert the
+>    model "is given no write tools" because `--auto` defaults false.
+>    That was never verified, and run `34878398658` disproved it: the
+>    findings document arrived inside a tool part, which `post_review.py`
+>    refuses to read. The model now runs as `--agent ghost-reviewer`,
+>    whose tools map grants `read`/`grep`/`glob`/`list` and denies
+>    everything else. Measured on the next run: 21 tool calls, all inside
+>    that set.
+> 2. **The scripts execute from the default branch, not the workspace.**
+>    Tasks 7 and 8 run `.github/scripts/` out of the checkout, but
+>    `gh pr checkout` replaces the tree — so the scripts vanished
+>    (ENOENT) and, worse, the copy handed the App token came from the
+>    untrusted branch. A second sparse checkout of the default branch is
+>    moved to `$RUNNER_TEMP` before the head tree lands.
+> 3. **Merge is gated on a check run, not on conversation resolution.**
+>    Measured on PR #430: an installation token with
+>    `Pull requests: Read & write` reports `viewerCanResolve=false` on
+>    its own thread. The bot cannot resolve what it raises, so the
+>    sweeper publishes a `review-gate` check run it owns outright.
+> 4. **The sweeper never posts `REQUEST_CHANGES`.** An outstanding
+>    changes-requested review blocks merge even at
+>    `required_approving_review_count: 0`, and the bot cannot dismiss its
+>    own review — the same trap as thread resolution.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A PR reviewer that posts line-anchored, severity-gated review threads from opencode CLI output, sweeps stale threads, and converges instead of oscillating.
