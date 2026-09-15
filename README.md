@@ -13,16 +13,7 @@ Your agent's memory, on your disk — no cloud, no accounts, no subscription. On
 
 ---
 
-**Ghost beats every published competitor on LongMemEval-S** (500-question blended, retrieve → generate → judge):
-
-| System | Score | Generator | Source |
-|--------|-------|-----------|--------|
-| **Ghost (hybrid)** | **96.2%** | DeepSeek V4 Pro | This repo |
-| Mem0 | 94.4% | Not specified | [mem0.ai/research](https://mem0.ai/research) — "managed platform, proprietary optimizations not in OSS SDK" |
-| Hindsight | 91.4% | Gemini-3 Pro | [arxiv 2512.12818](https://arxiv.org/abs/2512.12818) — independently validated by Virginia Tech + Washington Post |
-| Supermemory | 85.2% | Gemini-3 | [supermemory.ai/research](https://supermemory.ai/research/longmembench/) — self-reported |
-
-**Read carefully:** these numbers are **not directly comparable** across rows — each uses a different generator and judge. Within the same generator+judge pair, differences are meaningful; across pairs, they're directional only. Full methodology and retrieval-only benchmarks further down in [Benchmarks](#benchmarks).
+**Ghost beats every published competitor on LongMemEval-S** — 96.2% on the 500-question blended set (retrieve → generate → judge). Each published figure uses a different generator and judge, so they are directional rather than head-to-head: the table, the caveats, and the full methodology are in [Benchmarks](#benchmarks).
 
 ---
 
@@ -94,13 +85,11 @@ docker run -i -e XDG_DATA_HOME=/data -v ghost-data:/data \
   ghcr.io/wcatz/ghost:latest reflect myproject --apply
 ```
 
-## Why not just use built-in memory?
-
-ChatGPT, Claude, Gemini, and Copilot all ship native memory now — but each one is walled off inside its own product. Nothing you teach ChatGPT carries over to Claude Code, and nothing Claude Code learns carries over to Cursor or Goose. Ghost's bet isn't "better than any single one of those" — it's *one* memory, across every MCP client, that lives on your own disk: a local SQLite file you can query, back up, and delete, instead of a separate silo per product. See [Why Ghost?](#why-ghost) below for the specific comparison against Claude Code's built-in memory.
-
 ## Why Ghost?
 
 Coding agents forget everything between sessions. You re-explain your architecture, your conventions, and that one gotcha with the staging database — every single day.
+
+ChatGPT, Claude, Gemini, and Copilot all ship native memory now — but each one is walled off inside its own product. Nothing you teach ChatGPT carries over to Claude Code, and nothing Claude Code learns carries over to Cursor or Goose. Ghost's bet isn't "better than any single one of those" — it's *one* memory, across every MCP client, that lives on your own disk: a local SQLite file you can query, back up, and delete, instead of a separate silo per product.
 
 Claude Code's built-in memory is a markdown file with a limited load window ([~200 lines](https://code.claude.com/docs/en/memory)). No search, no categories, no dedup, and memory is siloed per repository. Ghost replaces it with a real memory system:
 
@@ -323,7 +312,7 @@ Note: env-var names map underscores to config dots, so keys that themselves cont
 
 ## Benchmarks
 
-Every Ghost number below is reproducible with the in-repo harnesses, and shipped with per-question logs — the competitor figures in the comparison table at the top of this README are externally sourced and not reproducible from this repo. Retrieval-only metrics are deterministic given the embedding cache; end-to-end scores are recorded runs (model-pinned, single-run — rerun variance is possible but small at temperature 0). Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
+Every Ghost number below is reproducible with the in-repo harnesses, and shipped with per-question logs — the competitor figures in the comparison table below are externally sourced and not reproducible from this repo. Retrieval-only metrics are deterministic given the embedding cache; end-to-end scores are recorded runs (model-pinned, single-run — rerun variance is possible but small at temperature 0). Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
 
 **LongMemEval-S** ([the consensus long-term-memory benchmark](https://arxiv.org/abs/2410.10813); cleaned variant, session-level retrieval against the official evidence labels, all 470 answerable questions, no LLM judge):
 
@@ -373,7 +362,16 @@ Per-category, hybrid vs FTS-only (the delta shows where vector search earns its 
 
 The biggest lifts land on vocabulary-mismatch classes — `single-session-assistant` (+30pp) and `multi-session` (+20pp) — exactly where embeddings fix what FTS misses. Not leaderboard-comparable (DeepSeek v4 Pro, not GPT-4o), but the retrieval → answer pipeline is identical to the official harness.
 
-**Competitor comparison:** the table at the top of this README, with the caveat that goes with it — those numbers are not directly comparable across rows.
+**Competitor comparison** (500-question blended, all systems):
+
+| System | Score | Generator | Source |
+|--------|-------|-----------|--------|
+| **Ghost (hybrid)** | **96.2%** | DeepSeek V4 Pro | This repo |
+| Mem0 | 94.4% | Not specified | [mem0.ai/research](https://mem0.ai/research) — "managed platform, proprietary optimizations not in OSS SDK" |
+| Hindsight | 91.4% | Gemini-3 Pro | [arxiv 2512.12818](https://arxiv.org/abs/2512.12818) — independently validated by Virginia Tech + Washington Post |
+| Supermemory | 85.2% | Gemini-3 | [supermemory.ai/research](https://supermemory.ai/research/longmembench/) — self-reported |
+
+**Read carefully:** these numbers are **not directly comparable** across rows — each uses a different generator and judge. Within the same generator+judge pair, differences are meaningful; across pairs, they're directional only.
 
 Reproduce: see [`bench/longmemeval/phase4/`](bench/longmemeval/phase4/). Full methodology, the `ghost bench` parameter sweep, and the staleness-suite deep dive: [docs/benchmarks.md](docs/benchmarks.md).
 
