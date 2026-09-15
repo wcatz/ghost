@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync/atomic"
 )
 
@@ -69,36 +70,42 @@ const (
 	// gateMinInput is the smallest input the gate applies to at all; below it
 	// the store's empty-set guard is the only protection needed.
 	gateMinInput = 6
-	// gateStrictInputMax is the largest input that gets the strict retention
-	// floor. Up to here, a result keeping under the floor is treated as
-	// truncated.
+	// gateStrictInputMax is the largest input that gets the strict 30% floor.
+	// Up to here, a result keeping under the floor is treated as truncated.
 	gateStrictInputMax = 60
 	// gateBacklogInputMax is the input size at which the floor reaches its
-	// lowest value. Beyond it the floor no longer decays.
+	// lowest value. Beyond it the minimum stops relaxing.
 	gateBacklogInputMax = 200
 	// gateStrictRetentionFloor is the fraction a small input must retain.
 	gateStrictRetentionFloor = 0.30
-	// gateBacklogRetentionFloor is the fraction a large backlog must retain.
-	// It is a gross-truncation backstop, not a quality bar: at this scale the
-	// anti-hallucination work is done by dropFabricatedMemories (which runs on
-	// every LLM result, tier_llm.go) and the non-empty guarantee, because
-	// retention alone cannot distinguish a good large-backlog consolidation
-	// from a bad one.
-	gateBacklogRetentionFloor = 0.05
+	// gateBacklogMinOutput is the absolute minimum number of memories a large
+	// backlog consolidation must return. It is absolute, not a fraction: the
+	// prompt targets 10-25 memories regardless of input size, so a percentage
+	// floor would demand more output than the prompt ever asks for once the
+	// backlog is large (5% of 1000 = 50 > 25) and reject every valid run,
+	// stranding it in the O(n^2) SQLite tier. The anti-hallucination work at
+	// this scale is done by dropFabricatedMemories (which runs on every LLM
+	// result, tier_llm.go) and the non-empty guarantee.
+	gateBacklogMinOutput = 5
+	// gateStrictInputMinOutput is the output the strict floor demands at
+	// gateStrictInputMax (0.30 x 60 = 18) — the anchor for interpolation.
+	gateStrictInputMinOutput = 18
 )
 
-// retentionFloor returns the minimum fraction of input memories an LLM
-// consolidation must retain to pass the quality gate, decaying linearly from
-// the strict small-input floor to the backlog floor as the input grows.
-func retentionFloor(inputCount int) float64 {
+// gateMinOutput returns the minimum number of memories an LLM consolidation
+// must return to pass the quality gate for a given input size. It is strict
+// (30% of input) on small inputs, where a sliver means a truncated response,
+// and relaxes to a small absolute minimum on a large backlog, where the prompt
+// itself aims for 10-25 memories no matter how many went in.
+func gateMinOutput(inputCount int) int {
 	if inputCount <= gateStrictInputMax {
-		return gateStrictRetentionFloor
+		return int(math.Ceil(float64(inputCount) * gateStrictRetentionFloor))
 	}
 	if inputCount >= gateBacklogInputMax {
-		return gateBacklogRetentionFloor
+		return gateBacklogMinOutput
 	}
 	frac := float64(inputCount-gateStrictInputMax) / float64(gateBacklogInputMax-gateStrictInputMax)
-	return gateStrictRetentionFloor + frac*(gateBacklogRetentionFloor-gateStrictRetentionFloor)
+	return gateStrictInputMinOutput + int(math.Round(frac*float64(gateBacklogMinOutput-gateStrictInputMinOutput)))
 }
 
 func (t *TieredConsolidator) Available(ctx context.Context) bool {
@@ -126,22 +133,21 @@ func (t *TieredConsolidator) Consolidate(ctx context.Context, input ReflectionIn
 		}
 
 		// Quality gate: if the input was large enough to expect a real
-		// consolidation and the tier returned an implausibly small fraction of
-		// it, treat the result as truncated and fall through. The floor is
-		// scale-aware (see retentionFloor): strict on small inputs, low on
-		// large backlogs where heavy compression is the correct answer. The
-		// mechanical fallback (SQLite Jaccard dedup) is always accepted — it is
-		// deterministic and cannot truncate or hallucinate. LLM tiers are never
-		// exempt by position: with --require-llm the sqlite tier is omitted
-		// from the list, so the last tier may be a real LLM whose truncated
-		// output must still be rejected.
+		// consolidation and the tier returned fewer memories than the
+		// scale-aware minimum, treat the result as truncated and fall through.
+		// The minimum is strict on small inputs and a small absolute count on a
+		// large backlog (see gateMinOutput). The mechanical fallback (SQLite
+		// Jaccard dedup) is always accepted — it is deterministic and cannot
+		// truncate or hallucinate. LLM tiers are never exempt by position: with
+		// --require-llm the sqlite tier is omitted from the list, so the last
+		// tier may be a real LLM whose truncated output must still be rejected.
 		inputCount := len(input.ExistingMemories)
-		if inputCount >= gateMinInput && float64(len(result.Memories)) < float64(inputCount)*retentionFloor(inputCount) && !tier.Mechanical() {
+		if inputCount >= gateMinInput && len(result.Memories) < gateMinOutput(inputCount) && !tier.Mechanical() {
 			t.logger.Warn("consolidator returned too few memories, trying next tier",
 				"tier", tier.Name(),
 				"input", inputCount,
 				"output", len(result.Memories),
-				"floor", retentionFloor(inputCount),
+				"min_output", gateMinOutput(inputCount),
 			)
 			lastErr = fmt.Errorf("%s: quality gate failed (%d/%d memories)", tier.Name(), len(result.Memories), inputCount)
 			continue

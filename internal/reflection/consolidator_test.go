@@ -563,22 +563,25 @@ func TestLlmConsolidator_NilClient(t *testing.T) {
 	}
 }
 
-// TestRetentionFloor pins the scale-aware quality-gate floor: strict on small
-// inputs, decaying linearly to the backlog floor.
-func TestRetentionFloor(t *testing.T) {
+// TestGateMinOutput pins the scale-aware quality-gate minimum: strict 30% on
+// small inputs, relaxing to a small absolute count on a large backlog (so a
+// valid large consolidation is not rejected for keeping fewer than a
+// percentage the prompt never asks for).
+func TestGateMinOutput(t *testing.T) {
 	cases := []struct {
 		input int
-		want  float64
+		want  int
 	}{
-		{6, 0.30},
-		{60, 0.30},
-		{130, 0.175}, // midpoint of 60..200: 0.30 + 0.5*(0.05-0.30)
-		{200, 0.05},
-		{1000, 0.05},
+		{6, 2},
+		{10, 3},
+		{60, 18},
+		{130, 11},
+		{200, 5},
+		{1000, 5},
 	}
 	for _, tc := range cases {
-		if got := retentionFloor(tc.input); got < tc.want-1e-9 || got > tc.want+1e-9 {
-			t.Errorf("retentionFloor(%d) = %v, want %v", tc.input, got, tc.want)
+		if got := gateMinOutput(tc.input); got != tc.want {
+			t.Errorf("gateMinOutput(%d) = %d, want %d", tc.input, got, tc.want)
 		}
 	}
 }

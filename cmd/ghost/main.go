@@ -589,13 +589,16 @@ Flags:
 		fmt.Fprintf(os.Stderr, "error: get timestamp: %v\n", err)
 		os.Exit(1)
 	}
-	// Load every memory, not a capped page: ReplaceNonManual deletes the whole
-	// non-manual/unpinned/unresolved set for the project, so the consolidation
-	// input must cover exactly that set. A LIMIT here silently dropped the
-	// overflow (memories beyond the cap were deleted by the replace but never
-	// seen by the consolidator, surviving only in the snapshot), which is
-	// reachable as soon as a project exceeds the cap. An oversized input now
-	// fails in the consolidator (nothing written) instead of losing memories.
+	// Load every memory, not a capped page: ReplaceNonManual replaces the whole
+	// non-manual/unpinned/unresolved set for the project, so the input must
+	// cover exactly that set. A LIMIT silently dropped the overflow (memories
+	// beyond the cap were deleted by the replace but never seen by the
+	// consolidator, surviving only in the snapshot), reachable as soon as a
+	// project exceeds the cap. GetAll applies no source/pinned filter, so the
+	// loop below excludes manual, pinned, and resolved rows — ReplaceNonManual
+	// preserves all three and inserts the consolidator output alongside, so
+	// feeding them in would duplicate each as a fresh reflection row on every
+	// apply.
 	existingMemories, err := store.GetAll(ctx, projectID, -1)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: get memories: %v\n", err)
@@ -613,7 +616,19 @@ Flags:
 			resolvedCount++
 			continue
 		}
+		if m.Pinned || m.Source == "manual" {
+			continue
+		}
 		live = append(live, m)
+	}
+	// Bound the prompt. The consolidator rewrites its entire input in one call,
+	// so an enormous project would either blow the model's context or, without
+	// --require-llm, fall through to the O(n^2) SQLite tier and stall. Refuse
+	// loudly rather than emit a partial or truncated result.
+	const maxConsolidationInput = 2000
+	if len(live) > maxConsolidationInput {
+		fmt.Fprintf(os.Stderr, "error: project %s has %d consolidatable memories, above the %d limit for a single consolidation — nothing written\n", projectName, len(live), maxConsolidationInput)
+		os.Exit(1)
 	}
 	currentContext, _ := store.GetLearnedContext(ctx, projectID)
 
