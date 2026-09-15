@@ -49,7 +49,10 @@ func shaLikeToken(tok string) bool {
 // healthy consolidation pass. Each drop is logged, because a silently
 // discarded memory is indistinguishable from the model never emitting it —
 // the operator cannot tell a clean run from a truncated one.
-func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput) {
+func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	known := make(map[string]bool)
 	for _, m := range input.ExistingMemories {
 		for _, tok := range shaLikeRe.FindAllString(m.Content, -1) {
@@ -78,7 +81,7 @@ func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput) {
 			kept = append(kept, m)
 			continue
 		}
-		slog.Warn("reflection dropped a memory with a fabricated commit SHA",
+		logger.Warn("reflection dropped a memory with a fabricated commit SHA",
 			"category", m.Category, "tokens", strings.Join(unknown, ","),
 			"preview", previewContent(m.Content))
 	}
@@ -87,12 +90,13 @@ func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput) {
 
 // previewContent renders content as a single-line, length-bounded preview for
 // log output, so a dropped memory can be identified without dumping the whole
-// body into the log.
+// body into the log. Truncation is by rune, not byte, so the cut never lands
+// mid-rune and emits invalid UTF-8 (memory content is arbitrary text).
 func previewContent(content string) string {
 	const max = 160
 	flat := strings.Join(strings.Fields(content), " ")
-	if len(flat) > max {
-		return flat[:max] + "…"
+	if r := []rune(flat); len(r) > max {
+		return string(r[:max]) + "…"
 	}
 	return flat
 }

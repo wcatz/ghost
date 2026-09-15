@@ -40,6 +40,14 @@ type TieredConsolidator struct {
 // NewTieredConsolidator creates a consolidator that tries each tier in order.
 // Tiers should be ordered from highest quality to lowest (e.g. llm, sqlite).
 func NewTieredConsolidator(tiers []Consolidator, logger *slog.Logger) *TieredConsolidator {
+	// Hand the configured logger to tiers that can accept one, so their
+	// diagnostics reach the same sink the tiered consolidator logs to
+	// (GHOST_LOG_FILE / level filtering) instead of the global default.
+	for _, tier := range tiers {
+		if ls, ok := tier.(interface{ SetLogger(*slog.Logger) }); ok {
+			ls.SetLogger(logger)
+		}
+	}
 	return &TieredConsolidator{
 		tiers:  tiers,
 		logger: logger,

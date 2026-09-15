@@ -47,7 +47,7 @@ func TestDropFabricatedMemories_DropsUnknownSHA(t *testing.T) {
 			{Category: "fact", Content: "Graph expansion removed in 0a1f004"},
 		},
 	}
-	dropFabricatedMemories(result, input)
+	dropFabricatedMemories(result, input, nil)
 	if len(result.Memories) != 2 {
 		t.Fatalf("expected 2 surviving memories, got %d", len(result.Memories))
 	}
@@ -69,7 +69,7 @@ func TestDropFabricatedMemories_KeepsKnownSHA(t *testing.T) {
 			{Category: "fact", Content: "Regression fixed in d6b63b7"},
 		},
 	}
-	dropFabricatedMemories(result, input)
+	dropFabricatedMemories(result, input, nil)
 	if len(result.Memories) != 1 {
 		t.Fatalf("expected traceable SHA to survive, got %d memories", len(result.Memories))
 	}
@@ -84,7 +84,7 @@ func TestDropFabricatedMemories_SHAFromCommitsIsKnown(t *testing.T) {
 	input := ReflectionInput{
 		LastCommits: []string{"3329c5a fix(resolve): retire MCP sampling"},
 	}
-	dropFabricatedMemories(result, input)
+	dropFabricatedMemories(result, input, nil)
 	if len(result.Memories) != 1 {
 		t.Fatalf("expected commit-derived SHA to survive, got %d memories", len(result.Memories))
 	}
@@ -101,7 +101,7 @@ func TestDropFabricatedMemories_IgnoresNonSHATokens(t *testing.T) {
 			{Category: "fact", Content: "old content"},
 		},
 	}
-	dropFabricatedMemories(result, input)
+	dropFabricatedMemories(result, input, nil)
 	if len(result.Memories) != 1 {
 		t.Fatalf("expected non-SHA tokens to survive, got %d memories", len(result.Memories))
 	}
@@ -125,19 +125,18 @@ func TestBuildReflectionPrompt_ForbidsFabrication(t *testing.T) {
 
 // TestDropFabricatedMemories_LogsDrop pins the surfacing fix: a dropped memory
 // used to vanish with no trace, making a fabricated-output run look identical
-// to a clean one.
+// to a clean one. It passes an explicit logger, so it also pins that drops go
+// to the caller's configured sink rather than the package-global default.
 func TestDropFabricatedMemories_LogsDrop(t *testing.T) {
 	var buf bytes.Buffer
-	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(old) })
+	lg := slog.New(slog.NewTextHandler(&buf, nil))
 
 	result := &ReflectionResult{
 		Memories: []ReflectMemory{
 			{Category: "gotcha", Content: "the fix landed in fdf4583", Importance: 0.7},
 		},
 	}
-	dropFabricatedMemories(result, ReflectionInput{})
+	dropFabricatedMemories(result, ReflectionInput{}, lg)
 
 	if len(result.Memories) != 0 {
 		t.Fatalf("expected the fabricated memory to be dropped, got %d", len(result.Memories))
