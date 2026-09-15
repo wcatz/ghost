@@ -1,6 +1,7 @@
 package mcpinit
 
 import (
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,13 +42,22 @@ func ensureObsidianSyncRunning() {
 	if isAlive(pidPath) {
 		return
 	}
+	// isAlive false is only a fast path: two hooks firing close together would
+	// both pass it and both spawn a vault-writing process. claimPidFile
+	// re-checks under an OS-level lock so exactly one wins, matching the
+	// resolve/supersede/reflect lifecycle spawns.
+	if !claimPidFile(pidPath) {
+		return
+	}
 
 	exe, err := os.Executable()
 	if err != nil {
+		slog.Warn("obsidian sync spawn: cannot locate the ghost binary", "error", err)
 		return
 	}
 	logFile, err := os.OpenFile(filepath.Join(dataDir, "obsidian-sync.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
+		slog.Warn("obsidian sync spawn: cannot open log", "error", err)
 		return
 	}
 	defer logFile.Close() //nolint:errcheck
@@ -59,6 +69,7 @@ func ensureObsidianSyncRunning() {
 	// receive signals sent to Claude Code's process group.
 	detachProcess(cmd)
 	if err := cmd.Start(); err != nil {
+		slog.Warn("obsidian sync spawn: starting the detached process failed", "error", err)
 		return
 	}
 	token, haveToken := processStartTime(cmd.Process.Pid)

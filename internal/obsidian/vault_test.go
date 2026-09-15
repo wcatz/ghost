@@ -3,6 +3,8 @@ package obsidian
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -54,6 +56,56 @@ func TestWriteIfChanged(t *testing.T) {
 	w3, _ := writeIfChanged(p, "hello2")
 	if !w3 {
 		t.Fatal("changed content must rewrite")
+	}
+}
+
+// TestWriteIfChangedConcurrentTempIsolation pins the unique-temp fix: a fixed
+// temp name let two concurrent writers share one path, so a reader could see a
+// partially written or interleaved note (and a rename could hit a missing
+// file). Payloads are large enough that interleaving corrupts the result
+// rather than coincidentally matching.
+func TestWriteIfChangedConcurrentTempIsolation(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "a.md")
+	payloads := []string{
+		strings.Repeat("A", 4096) + "one",
+		strings.Repeat("B", 4096) + "two",
+		strings.Repeat("C", 4096) + "three",
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(payloads)*50)
+	for i := 0; i < 50; i++ {
+		for _, pl := range payloads {
+			wg.Add(1)
+			go func(pl string) {
+				defer wg.Done()
+				if _, err := writeIfChanged(p, pl); err != nil {
+					errs <- err
+				}
+			}(pl)
+		}
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent write failed: %v", err)
+	}
+
+	got, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatalf("read final: %v", err)
+	}
+	for _, pl := range payloads {
+		if string(got) == pl {
+			goto consistent
+		}
+	}
+	t.Fatalf("final content is not exactly one payload (interleaved write), len=%d", len(got))
+consistent:
+	leftovers, _ := filepath.Glob(filepath.Join(dir, "*.ghost-tmp*"))
+	if len(leftovers) != 0 {
+		t.Fatalf("temp files left behind: %v", leftovers)
 	}
 }
 
