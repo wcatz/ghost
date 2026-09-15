@@ -441,25 +441,9 @@ func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName 
 //
 // Internal subcommand: not listed in help.
 func runLifecycle() {
-	args := os.Args[2:]
-	var projectName, source string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--source":
-			if i+1 >= len(args) {
-				fmt.Fprintln(os.Stderr, "error: --source requires a value")
-				os.Exit(1)
-			}
-			source = args[i+1]
-			i++
-		default:
-			if projectName == "" {
-				projectName = args[i]
-			}
-		}
-	}
-	if projectName == "" {
-		fmt.Fprintln(os.Stderr, "usage: ghost lifecycle <project> [--source <src>]")
+	projectName, source, err := parseLifecycleArgs(os.Args[2:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -532,6 +516,44 @@ func runLifecycle() {
 		}
 		fmt.Fprintf(os.Stderr, "lifecycle: %s completed in %s\n", ph.name, time.Since(start).Round(time.Second))
 	}
+}
+
+// parseLifecycleArgs parses the internal lifecycle subcommand's arguments. The
+// project comes from --project when given, so a project whose name begins with
+// a dash — or is literally "--source" — cannot be misread as a flag: without
+// that, the hook's argv realigned and the write phases ran against a different
+// project than the one whose pid file was claimed. A lone positional is still
+// accepted for manual use. Anything unexpected is an error rather than being
+// ignored, because a silently misparsed project is a wrong-project write.
+func parseLifecycleArgs(args []string) (project, source string, err error) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--project":
+			if i+1 >= len(args) {
+				return "", "", fmt.Errorf("--project requires a value")
+			}
+			project = args[i+1]
+			i++
+		case "--source":
+			if i+1 >= len(args) {
+				return "", "", fmt.Errorf("--source requires a value")
+			}
+			source = args[i+1]
+			i++
+		default:
+			if strings.HasPrefix(args[i], "-") {
+				return "", "", fmt.Errorf("unknown flag %q", args[i])
+			}
+			if project != "" {
+				return "", "", fmt.Errorf("unexpected extra argument %q", args[i])
+			}
+			project = args[i]
+		}
+	}
+	if project == "" {
+		return "", "", fmt.Errorf("--project is required (usage: ghost lifecycle --project <name> [--source <src>])")
+	}
+	return project, source, nil
 }
 
 // phaseGracePeriod is how long a phase has to exit after its deadline's
