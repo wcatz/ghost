@@ -526,32 +526,46 @@ func runLifecycle() {
 // accepted for manual use. Anything unexpected is an error rather than being
 // ignored, because a silently misparsed project is a wrong-project write.
 func parseLifecycleArgs(args []string) (project, source string, err error) {
+	projectSet, sourceSet := false, false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--project":
+			if projectSet {
+				return "", "", fmt.Errorf("--project given more than once")
+			}
 			if i+1 >= len(args) {
 				return "", "", fmt.Errorf("--project requires a value")
 			}
-			project = args[i+1]
+			project, projectSet = args[i+1], true
 			i++
 		case "--source":
+			if sourceSet {
+				return "", "", fmt.Errorf("--source given more than once")
+			}
 			if i+1 >= len(args) {
 				return "", "", fmt.Errorf("--source requires a value")
 			}
-			source = args[i+1]
+			source, sourceSet = args[i+1], true
 			i++
 		default:
 			if strings.HasPrefix(args[i], "-") {
 				return "", "", fmt.Errorf("unknown flag %q", args[i])
 			}
-			if project != "" {
+			if projectSet {
 				return "", "", fmt.Errorf("unexpected extra argument %q", args[i])
 			}
-			project = args[i]
+			project, projectSet = args[i], true
 		}
 	}
-	if project == "" {
+	if !projectSet || project == "" {
 		return "", "", fmt.Errorf("--project is required (usage: ghost lifecycle --project <name> [--source <src>])")
+	}
+	// The phases are run as `ghost reflect|resolve|supersede <project> ...`, and
+	// those parsers read a dash-leading element as a flag, so a dash-prefixed
+	// name cannot be run by them. Reject it here with a clear message rather
+	// than spawning a chain that is guaranteed to fail phase by phase.
+	if strings.HasPrefix(project, "-") {
+		return "", "", fmt.Errorf("project %q begins with %q, which the reflect/resolve/supersede subcommands would read as a flag; rename the project or run those phases directly", project, "-")
 	}
 	return project, source, nil
 }

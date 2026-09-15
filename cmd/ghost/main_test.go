@@ -803,7 +803,9 @@ func TestLifecyclePhasesTimeoutFromConfig(t *testing.T) {
 // running its write phases against the wrong project. The misroute this guards
 // is concrete: the hook used to pass the project positionally, so a project
 // literally named "--source" realigned the argv and lifecycle ran for whatever
-// followed, while the pid file was claimed for the real project.
+// followed, while the pid file was claimed for the real project. Dash-prefixed
+// names are now rejected outright, because the phase subcommands' parsers would
+// read them as flags and fail one phase at a time.
 func TestParseLifecycleArgs(t *testing.T) {
 	ok := []struct {
 		args    []string
@@ -812,9 +814,6 @@ func TestParseLifecycleArgs(t *testing.T) {
 	}{
 		{[]string{"--project", "ghost"}, "ghost", ""},
 		{[]string{"--project", "my project", "--source", "opencode"}, "my project", "opencode"},
-		// The regression case: a project named "--source" must stay the project.
-		{[]string{"--project", "--source", "--source", "claude-code"}, "--source", "claude-code"},
-		{[]string{"--project", "-dashy"}, "-dashy", ""},
 		{[]string{"ghost"}, "ghost", ""}, // positional still works for manual use
 		{[]string{"ghost", "--source", "cli"}, "ghost", "cli"},
 	}
@@ -831,12 +830,17 @@ func TestParseLifecycleArgs(t *testing.T) {
 	}
 
 	bad := [][]string{
-		{},                      // no project
-		{"--project"},           // missing value
-		{"--source", "x"},       // no project
-		{"--bogus"},             // unknown flag
-		{"a", "b"},              // extra positional
-		{"--project", "a", "b"}, // extra positional after flag
+		{},                                   // no project
+		{"--project"},                        // missing value
+		{"--source", "x"},                    // no project
+		{"--bogus"},                          // unknown flag
+		{"a", "b"},                           // extra positional
+		{"--project", "a", "b"},              // extra positional after flag
+		{"--project", "a", "--project", "b"}, // duplicate flag must not last-win
+		{"--project", "a", "--source", "s", "--source", "t"}, // duplicate --source
+		{"--project", "--source"},                            // dash-prefixed project is rejected, not misrouted
+		{"--project", "-dashy"},                              // dash-prefixed project
+		{"-dashy"},                                           // dash-prefixed positional
 	}
 	for _, args := range bad {
 		if _, _, err := parseLifecycleArgs(args); err == nil {

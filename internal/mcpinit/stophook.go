@@ -175,7 +175,10 @@ func safeProjectIDComponent(id string) bool {
 	if id == "" || id == "." || id == ".." {
 		return false
 	}
-	if strings.ContainsRune(id, 0) {
+	// Control characters are unusable in a filename on Windows and have no
+	// legitimate place in an id anywhere, so reject them unconditionally
+	// (this covers NUL).
+	if strings.ContainsFunc(id, func(r rune) bool { return r < 0x20 }) {
 		return false
 	}
 	if strings.ContainsAny(id, `\/`) {

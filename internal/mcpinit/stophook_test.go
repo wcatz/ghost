@@ -535,6 +535,8 @@ func TestSafeProjectIDComponent(t *testing.T) {
 		`a\b`,
 		"a/../b",
 		"nul\x00byte",
+		"tab\ttab", // control characters are unusable in filenames on Windows
+		"bell\x07", // any control rune, not just NUL
 	}
 	for _, id := range invalid {
 		if safeProjectIDComponent(id) {
