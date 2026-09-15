@@ -110,7 +110,7 @@ aggressive, so it should be reviewed as a diff and applied deliberately
 - The released binary documents `--tier haiku` / `ANTHROPIC_API_KEY`; the docs no longer
   do. Resolved by shipping a release from `main`.
 - `ghost mcp status` prints `✗ permissions: 19/20` on an otherwise current install until
-  `ghost mcp init` re-runs — the new `ghost_ghost_project_delete` permission is only
+  `ghost mcp init` re-runs — the new `mcp__ghost__ghost_project_delete` permission is only
   granted by init. Recoverable (the tool says what to run) but it is a red mark on first
   run after an upgrade.
 - Codex needs a manual `/hooks` trust step; documented, easy to miss.
