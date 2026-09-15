@@ -3,6 +3,7 @@ package supersede
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -401,5 +402,49 @@ func TestRun_SkipsPairWhoseEndpointVanishedMidRun(t *testing.T) {
 	pairs, _ := store.SupersedesWithin(ctx, []string{v1, v2})
 	if len(pairs) != 0 {
 		t.Errorf("found %d links for a deleted endpoint; want none", len(pairs))
+	}
+}
+
+// mockClassifierErr is mockClassifier with an error channel, for the
+// unclassifiable-verdict path.
+type mockClassifierErr struct {
+	fn func(newer, older string) (Relation, error)
+}
+
+func (m *mockClassifierErr) Classify(_ context.Context, newer, older string) (Relation, error) {
+	return m.fn(newer, older)
+}
+
+// TestRunSkipsUnclassifiablePairAndContinues pins the fix for a live failure:
+// a single "CORRECTS" answer aborted a 9-minute pass AFTER links for earlier
+// pairs had been written, so the graph never converged whenever the model
+// phrased a verdict the parser did not know. The pass must skip and count the
+// pair, and keep going.
+func TestRunSkipsUnclassifiablePairAndContinues(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
+	add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
+	add(t, store, db, "kubernetes now on 1.31", []float32{0.98, 0.02, 0}, "2026-07-01 00:00:00")
+
+	// Classify receives CONTENT, not IDs. Make exactly one pair unclassifiable.
+	cls := &mockClassifierErr{fn: func(newer, older string) (Relation, error) {
+		if (newer == "kubernetes now on 1.31" && older == "kubernetes upgraded to 1.29") ||
+			(newer == "kubernetes upgraded to 1.29" && older == "kubernetes now on 1.31") {
+			return "", errors.New(`unparseable classifier response: "CORRECTS"`)
+		}
+		return RelationSupersedes, nil
+	}}
+
+	res, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default())
+	if err != nil {
+		t.Fatalf("Run must not abort on one unclassifiable pair: %v", err)
+	}
+	if res.Unclassified != 1 {
+		t.Errorf("Unclassified = %d, want 1", res.Unclassified)
+	}
+	if res.Created != 2 {
+		t.Errorf("Created = %d, want 2 (the remaining pairs still wrote)", res.Created)
 	}
 }

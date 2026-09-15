@@ -38,6 +38,13 @@ func TestRelationClassifierParsesResponse(t *testing.T) {
 		{"causes", RelationCauses},
 		{"NEITHER", RelationNeither},
 		{"The answer is NEITHER, clearly.", RelationNeither},
+		// Natural single-word synonyms: the prompt asks for SUPERSEDES, but a
+		// live run answered "CORRECTS" and the whole pass aborted.
+		{"CORRECTS", RelationSupersedes},
+		{"corrected.", RelationSupersedes},
+		{"REPLACES", RelationSupersedes},
+		{"UPDATED", RelationSupersedes},
+		{"caused", RelationCauses},
 	}
 	for _, c := range cases {
 		fp := &fakeProvider{resp: c.resp}

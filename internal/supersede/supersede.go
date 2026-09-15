@@ -165,6 +165,7 @@ type Result struct {
 	CausesCreated int // CAUSES verdicts (causes links written when apply)
 	Reclassified  int // existing links whose relation changed or was invalidated
 	StaleSkipped  int
+	Unclassified  int // pairs skipped because the classifier answer was unparseable
 }
 
 // endpointsExist reports whether every given memory ID is still live. Used
@@ -312,7 +313,18 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	for _, c := range all {
 		verdict, err := cls.Classify(ctx, c.NewerContent, c.OlderContent)
 		if err != nil {
-			return res, nil, fmt.Errorf("classify %s→%s: %w", c.NewerID, c.OlderID, err)
+			// One odd answer must not abort the pass. It used to: a single
+			// unparseable verdict ended a 9-minute run after links for earlier
+			// pairs had already been written, so the graph never converged
+			// whenever the model phrased an answer the parser did not know.
+			// Skip the pair, count it, and keep going — the count is reported,
+			// so a systematically broken prompt still shows up loudly.
+			res.Unclassified++
+			if logger != nil {
+				logger.Warn("supersede: skipping pair with an unclassifiable verdict",
+					"newer", c.NewerID, "older", c.OlderID, "error", err)
+			}
+			continue
 		}
 		classified = append(classified, Classified{Candidate: c, Relation: verdict})
 

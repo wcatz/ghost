@@ -65,9 +65,32 @@ func (h *RelationClassifier) Classify(ctx context.Context, newer, older string) 
 	return rel, nil
 }
 
+// relationSynonyms maps the natural single-word answers a model reaches for
+// onto the three verdicts. The prompt asks for SUPERSEDES/CAUSES/NEITHER, but
+// models routinely answer with a plain English synonym: a "CORRECTS" reply to
+// a newer note that corrects an older one aborted an entire 9-minute supersede
+// pass before this existed (the response was treated as unparseable).
+var relationSynonyms = map[string]Relation{
+	"SUPERSEDE": RelationSupersedes,
+	"CORRECT":   RelationSupersedes,
+	"CORRECTS":  RelationSupersedes,
+	"CORRECTED": RelationSupersedes,
+	"REPLACE":   RelationSupersedes,
+	"REPLACES":  RelationSupersedes,
+	"REPLACED":  RelationSupersedes,
+	"UPDATE":    RelationSupersedes,
+	"UPDATES":   RelationSupersedes,
+	"UPDATED":   RelationSupersedes,
+	"CAUSE":     RelationCauses,
+	"CAUSED":    RelationCauses,
+	"NONE":      RelationNeither,
+	"UNRELATED": RelationNeither,
+}
+
 // parseRelation scans resp for the first decisive token (SUPERSEDES, CAUSES,
-// or NEITHER), guarding against a rambling reply that merely mentions one in
-// passing — we check the first decisive token, not substring containment.
+// or NEITHER, or a recognized synonym), guarding against a rambling reply that
+// merely mentions one in passing — we check the first decisive token, not
+// substring containment.
 func parseRelation(resp string) (Relation, bool) {
 	for _, field := range strings.Fields(strings.ToUpper(resp)) {
 		t := strings.Trim(field, ".,!\"'`:;")
@@ -78,6 +101,10 @@ func parseRelation(resp string) (Relation, bool) {
 			return RelationCauses, true
 		case "NEITHER":
 			return RelationNeither, true
+		default:
+			if rel, ok := relationSynonyms[t]; ok {
+				return rel, true
+			}
 		}
 	}
 	return "", false
