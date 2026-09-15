@@ -41,6 +41,13 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Embedding.Dimensions != 768 {
 		t.Errorf("expected embedding.dimensions=768, got %d", cfg.Embedding.Dimensions)
 	}
+	// The lifecycle phase bound must be finite by default: the stop hook keeps
+	// one per-project PID file keyed to the parent's liveness, so an unbounded
+	// hang would wedge auto-consolidation for that project until manual
+	// intervention.
+	if cfg.Reflection.LifecycleTimeoutMinutes != 60 {
+		t.Errorf("expected reflection.lifecycle_timeout_minutes=60, got %d", cfg.Reflection.LifecycleTimeoutMinutes)
+	}
 }
 
 func TestDataDir_WithXDGDataHome(t *testing.T) {

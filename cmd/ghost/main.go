@@ -490,21 +490,41 @@ func runLifecycle() {
 		if source != "" {
 			phaseArgs = append(phaseArgs, "--source", source)
 		}
-		ctx, cancel := context.WithCancel(context.Background())
+		// One context per branch, so nothing is created and then abandoned.
+		var ctx context.Context
+		var cancel context.CancelFunc
 		if ph.timeout > 0 {
 			ctx, cancel = context.WithTimeout(context.Background(), ph.timeout)
+		} else {
+			ctx, cancel = context.WithCancel(context.Background())
 		}
 		cmd := exec.CommandContext(ctx, exe, phaseArgs...)
 		// A deadline must not SIGKILL a phase mid-write or orphan the CLI
 		// harness it spawned: the phase runs in its own process group, gets a
-		// SIGTERM first, and is only killed if it misses the grace period.
+		// SIGTERM first, and only the whole group is force-killed if it misses
+		// the grace period.
 		setPhaseProcessGroup(cmd)
 		cmd.Cancel = func() error { return terminatePhaseProcess(cmd) }
-		cmd.WaitDelay = 30 * time.Second
+		// WaitDelay is a backstop for Wait itself; the group-wide escalation is
+		// the watchdog below, because WaitDelay would kill only the direct child
+		// and leave a harness grandchild that ignored SIGTERM orphaned.
+		cmd.WaitDelay = phaseGracePeriod + 5*time.Second
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
+
+		phaseDone := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				time.Sleep(phaseGracePeriod)
+				killPhaseProcess(cmd)
+			case <-phaseDone:
+			}
+		}()
+
 		start := time.Now()
 		runErr := cmd.Run()
+		close(phaseDone)
 		cancel()
 		if runErr != nil {
 			fmt.Fprintf(os.Stderr, "lifecycle: %s failed after %s (continuing): %v\n", ph.name, time.Since(start).Round(time.Second), runErr)
@@ -513,6 +533,10 @@ func runLifecycle() {
 		fmt.Fprintf(os.Stderr, "lifecycle: %s completed in %s\n", ph.name, time.Since(start).Round(time.Second))
 	}
 }
+
+// phaseGracePeriod is how long a phase has to exit after its deadline's
+// SIGTERM before its whole process group is force-killed.
+const phaseGracePeriod = 30 * time.Second
 
 // lifecyclePhase is one step of the auto-consolidation chain: a ghost
 // subcommand, its arguments, and the outer bound on how long it may run. A
@@ -530,12 +554,13 @@ type lifecyclePhase struct {
 // Jaccard-only rewrite for no quality gain). Extracted from runLifecycle so the
 // ordering is unit-testable without spawning processes.
 //
-// Every phase shares reflection.lifecycle_timeout_minutes, which defaults to 0
-// (no bound): a hard cap is opt-in because these phases ran unbounded when they
-// were spawned as independent processes, and a cap that is too tight makes a
-// long but legitimate pass (resolve classifies one candidate per CLI-harness
-// call, several seconds each) get killed and restarted every session without
-// ever completing.
+// Every phase shares reflection.lifecycle_timeout_minutes, which defaults to a
+// generous 60 minutes: unbounded is unsafe because the stop hook keeps one
+// per-project PID file keyed to this parent's liveness, so a single hung phase
+// would silently disable auto-consolidation for that project until the process
+// was killed by hand. The bound is long enough that a legitimately slow pass
+// (resolve classifies one candidate per CLI-harness call, several seconds each)
+// completes; set the value to 0 to remove the bound entirely.
 func lifecyclePhases(cfg *config.Config, projectName string, llmOK bool) []lifecyclePhase {
 	timeout := time.Duration(cfg.Reflection.LifecycleTimeoutMinutes) * time.Minute
 	var phases []lifecyclePhase

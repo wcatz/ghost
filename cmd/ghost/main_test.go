@@ -772,9 +772,9 @@ func TestLifecyclePhasesEmptyWhenAllDisabled(t *testing.T) {
 	}
 }
 
-// TestLifecyclePhasesTimeoutFromConfig: the phase cap is opt-in. Zero — the
-// default — must mean no bound, because these phases ran unbounded before they
-// were serialized, and a too-tight cap kills a legitimately long pass.
+// TestLifecyclePhasesTimeoutFromConfig: zero explicitly disables the phase
+// bound (the loaded default is a generous 60 minutes), and any configured value
+// propagates to every phase.
 func TestLifecyclePhasesTimeoutFromConfig(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Reflection.AutoReflect = true
@@ -783,7 +783,7 @@ func TestLifecyclePhasesTimeoutFromConfig(t *testing.T) {
 
 	for _, p := range lifecyclePhases(cfg, "proj", true) {
 		if p.timeout != 0 {
-			t.Errorf("phase %s timeout = %v, want 0 (unbounded) by default", p.name, p.timeout)
+			t.Errorf("phase %s timeout = %v, want 0 (bound disabled)", p.name, p.timeout)
 		}
 	}
 

@@ -62,10 +62,14 @@ type ReflectionConfig struct {
 	AutoSupersede bool `koanf:"auto_supersede"`
 	AutoReflect   bool `koanf:"auto_reflect"`
 	// LifecycleTimeoutMinutes bounds each phase of the auto-consolidation
-	// chain (reflect, resolve, supersede). 0 — the default — applies no bound,
-	// matching how the phases ran when they were spawned as three independent
-	// processes; a positive value caps a phase, which is only desirable on a
-	// machine where a hung phase must not block the next session's run.
+	// chain (reflect, resolve, supersede). The default is generous but finite
+	// (see defaults): the stop hook guards the chain with one per-project PID
+	// file keyed to the detached parent's liveness, so a phase that hung with
+	// no bound would wedge auto-consolidation for that project until the
+	// process was killed by hand. A bound lets a stuck run expire and be
+	// retried next session. Set 0 to disable the bound entirely; the timeout
+	// is a graceful SIGTERM to the phase's process group first, escalating
+	// only if the grace period expires.
 	LifecycleTimeoutMinutes int `koanf:"lifecycle_timeout_minutes"`
 }
 
@@ -123,7 +127,7 @@ var defaults = map[string]interface{}{
 	"reflection.auto_resolve":              false,
 	"reflection.auto_supersede":            false,
 	"reflection.auto_reflect":              false,
-	"reflection.lifecycle_timeout_minutes": 0,
+	"reflection.lifecycle_timeout_minutes": 60,
 	"cli.claude_binary":                    "",
 	"cli.opencode_binary":                  "",
 	"cli.codex_binary":                     "",

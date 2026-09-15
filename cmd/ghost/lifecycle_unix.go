@@ -16,8 +16,7 @@ func setPhaseProcessGroup(cmd *exec.Cmd) {
 }
 
 // terminatePhaseProcess asks the phase's whole process group to shut down
-// gracefully. exec.CommandContext calls this on deadline expiry; its WaitDelay
-// escalates to a kill if the group has not exited in time.
+// gracefully.
 func terminatePhaseProcess(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return nil
@@ -27,4 +26,18 @@ func terminatePhaseProcess(cmd *exec.Cmd) error {
 		return cmd.Process.Signal(syscall.SIGTERM)
 	}
 	return nil
+}
+
+// killPhaseProcess force-kills the phase's whole process group. WaitDelay's
+// own escalation calls Process.Kill, which reaches only the direct child —
+// a harness grandchild that ignored SIGTERM would then survive as an orphan,
+// so the watchdog uses this instead.
+func killPhaseProcess(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	// ESRCH (the group already exited) is the expected race and is ignored.
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		_ = cmd.Process.Kill()
+	}
 }
