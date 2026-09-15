@@ -162,6 +162,26 @@ func cleanupTransientTranscript(p hostevent.Payload) {
 	_ = os.RemoveAll(dir)
 }
 
+// safeProjectIDComponent reports whether id can be embedded in a filename
+// inside the data dir. Project ids originate from callers (an MCP client can
+// send any project_id), so anything that could traverse or reshape the path is
+// rejected: only ASCII letters, digits, '-', '_' and '.' are allowed, and a
+// value that is or contains ".." is not.
+func safeProjectIDComponent(id string) bool {
+	if id == "" || id == "." || id == ".." || strings.Contains(id, "..") {
+		return false
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // spawnLifecycleIfConfigured starts `ghost lifecycle <project>` as a single
 // detached background process for the project matching cwd, if one isn't
 // already running for that project. That process runs the enabled phases in
@@ -221,6 +241,17 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 		return
 	}
 
+	// The project id is interpolated into a filename inside dataDir, and ids
+	// are not constrained by the store: an MCP client may pass an arbitrary
+	// project_id, which EnsureProject then uses verbatim. A value containing
+	// path separators or ".." would move the pid file (and its .tmp sibling,
+	// and the liveness reads) outside the data directory, so refuse rather
+	// than build a path from it. Fail open: the hook must never block.
+	if !safeProjectIDComponent(projectID) {
+		slog.Warn("lifecycle spawn: refusing a project id that is not a safe filename component",
+			"project_id", projectID)
+		return
+	}
 	pidPath := filepath.Join(dataDir, "lifecycle-"+projectID+".pid")
 	if isAlive(pidPath) {
 		return
