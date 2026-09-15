@@ -1214,43 +1214,123 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		return fmt.Errorf("snapshot memories: %w", err)
 	}
 
-	// Collect memories saved concurrently with the consolidation round trip —
-	// the consolidator never saw them, so the delete below must not be their
-	// end. >= (not >) errs toward a rare same-second duplicate, which the next
-	// reflection merges, rather than toward silent loss.
-	var preserved []Memory
+	// Identify which existing rows this replace may delete, and which emitted
+	// memory can reuse one. A row whose content the consolidator re-emits is
+	// updated in place instead of being deleted and re-inserted: a fresh ID
+	// would cascade its memory_embeddings and memory_links away (both are ON
+	// DELETE CASCADE), so identical content used to mean a re-embedded memory
+	// and a lost link graph on every reflection. Rows saved concurrently with
+	// the consolidation round trip are kept in place for the same reason.
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, content FROM memories
+		WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL
+	`, projectID)
+	if err != nil {
+		return fmt.Errorf("list replaceable memories: %w", err)
+	}
+	type replaceCandidate struct {
+		id      string
+		content string
+	}
+	var candidates []replaceCandidate
+	for rows.Next() {
+		var c replaceCandidate
+		if err := rows.Scan(&c.id, &c.content); err != nil {
+			rows.Close() //nolint:errcheck
+			return fmt.Errorf("scan replaceable memory: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	rowsErr := rows.Err()
+	rows.Close() //nolint:errcheck
+	if rowsErr != nil {
+		return fmt.Errorf("iterate replaceable memories: %w", rowsErr)
+	}
+
+	// Memories saved during the round trip never reached the consolidator, so
+	// they must survive untouched — same predicate as before, but matched by
+	// ID so the row itself is never deleted. >= (not >) errs toward a rare
+	// same-second duplicate, which the next reflection merges, rather than
+	// toward silent loss.
+	concurrent := make(map[string]bool)
 	if consolidatedSince != "" {
-		rows, err := tx.QueryContext(ctx, `
-			SELECT category, content, importance, source, tags
-			FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
+		crows, err := tx.QueryContext(ctx, `
+			SELECT id FROM memories
+			WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
 		`, projectID, consolidatedSince)
 		if err != nil {
 			return fmt.Errorf("find concurrent memories: %w", err)
 		}
-		for rows.Next() {
-			var m Memory
-			var tags string
-			if err := rows.Scan(&m.Category, &m.Content, &m.Importance, &m.Source, &tags); err != nil {
-				rows.Close() //nolint:errcheck
+		for crows.Next() {
+			var id string
+			if err := crows.Scan(&id); err != nil {
+				crows.Close() //nolint:errcheck
 				return fmt.Errorf("scan concurrent memory: %w", err)
 			}
-			_ = json.Unmarshal([]byte(tags), &m.Tags)
-			preserved = append(preserved, m)
+			concurrent[id] = true
 		}
-		rowsErr := rows.Err()
-		rows.Close() //nolint:errcheck
-		if rowsErr != nil {
-			return fmt.Errorf("iterate concurrent memories: %w", rowsErr)
+		crowsErr := crows.Err()
+		crows.Close() //nolint:errcheck
+		if crowsErr != nil {
+			return fmt.Errorf("iterate concurrent memories: %w", crowsErr)
 		}
 	}
 
-	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL`, projectID)
-	if err != nil {
-		return fmt.Errorf("delete old memories: %w", err)
+	// Content -> reusable row IDs. Concurrent rows are excluded: they are kept
+	// as they are, never claimed by an emitted memory.
+	reusable := make(map[string][]string)
+	for _, c := range candidates {
+		if concurrent[c.id] {
+			continue
+		}
+		key := strings.TrimSpace(c.content)
+		reusable[key] = append(reusable[key], c.id)
+	}
+	reuseFor := make(map[int]string, len(memories))
+	for i, m := range memories {
+		key := strings.TrimSpace(m.Content)
+		if ids := reusable[key]; len(ids) > 0 {
+			reuseFor[i] = ids[0]
+			reusable[key] = ids[1:]
+		}
 	}
 
-	for _, m := range memories {
+	var deleteIDs []string
+	for _, ids := range reusable {
+		deleteIDs = append(deleteIDs, ids...)
+	}
+	if len(deleteIDs) > 0 {
+		stmt, err := tx.PrepareContext(ctx, `DELETE FROM memories WHERE id = ?`)
+		if err != nil {
+			return fmt.Errorf("prepare delete replaced memory: %w", err)
+		}
+		for _, id := range deleteIDs {
+			if _, err := stmt.ExecContext(ctx, id); err != nil {
+				stmt.Close() //nolint:errcheck
+				return fmt.Errorf("delete replaced memory: %w", err)
+			}
+		}
+		stmt.Close() //nolint:errcheck
+	}
+
+	reused := 0
+	for i, m := range memories {
 		tags, _ := json.Marshal(m.Tags)
+		if id := reuseFor[i]; id != "" {
+			// created_at is reset deliberately: consolidated knowledge counts
+			// as refreshed (issue #279). The row identity — and with it its
+			// embeddings, links, and access stats — survives.
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE memories
+				SET category = ?, content = ?, importance = ?, source = 'reflection', tags = ?,
+				    created_at = datetime('now'), updated_at = datetime('now')
+				WHERE id = ?
+			`, m.Category, m.Content, m.Importance, string(tags), id); err != nil {
+				return fmt.Errorf("update reused memory: %w", err)
+			}
+			reused++
+			continue
+		}
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags)
 			VALUES (?, ?, ?, 'reflection', ?, ?)
@@ -1260,21 +1340,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 	}
 
-	// Re-insert the concurrently-saved memories with their original source, so
-	// the next reflection sees them as ordinary consolidation input.
-	for _, m := range preserved {
-		tags, _ := json.Marshal(m.Tags)
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO memories (project_id, category, content, source, importance, tags)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, projectID, m.Category, m.Content, m.Source, m.Importance, string(tags))
-		if err != nil {
-			return fmt.Errorf("insert preserved memory: %w", err)
-		}
-	}
-	if len(preserved) > 0 {
-		s.logger.Info("preserved concurrently-saved memories across reflection replace",
-			"project_id", projectID, "count", len(preserved))
+	if s.logger != nil && (reused > 0 || len(concurrent) > 0) {
+		s.logger.Info("preserved memory identity across reflection replace",
+			"project_id", projectID, "reused", reused, "concurrent_kept", len(concurrent))
 	}
 
 	// Prune old snapshots — keep only the 3 most recent per project. Order by
