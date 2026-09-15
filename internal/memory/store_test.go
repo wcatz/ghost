@@ -4177,7 +4177,8 @@ func TestReplaceNonManualSnapshotIDsUnique(t *testing.T) {
 	if err := s.ReplaceNonManual(ctx, testProject, mems, ""); err != nil {
 		t.Fatalf("first ReplaceNonManual: %v", err)
 	}
-	if err := s.ReplaceNonManual(ctx, testProject, mems, ""); err != nil {
+	mems2 := []Memory{{Category: "fact", Content: "second generation fact", Importance: 0.5, Tags: []string{}}}
+	if err := s.ReplaceNonManual(ctx, testProject, mems2, ""); err != nil {
 		t.Fatalf("second ReplaceNonManual: %v", err)
 	}
 
@@ -4188,5 +4189,27 @@ func TestReplaceNonManualSnapshotIDsUnique(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("expected 2 distinct snapshot IDs, got %d (same-second collision)", n)
+	}
+
+	// RestoreSnapshot must choose the most recent snapshot deterministically:
+	// the state before the second replace (mems), not the first (seed).
+	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+	restored, err := s.GetAll(ctx, testProject, 50)
+	if err != nil {
+		t.Fatalf("GetAll after restore: %v", err)
+	}
+	var sawFirst, sawSecond bool
+	for _, m := range restored {
+		switch m.Content {
+		case "snapshot uniqueness fact":
+			sawFirst = true
+		case "second generation fact":
+			sawSecond = true
+		}
+	}
+	if !sawFirst || sawSecond {
+		t.Errorf("restore picked the wrong snapshot: sawFirst=%v sawSecond=%v", sawFirst, sawSecond)
 	}
 }

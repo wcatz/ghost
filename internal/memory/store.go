@@ -1258,13 +1258,16 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			"project_id", projectID, "count", len(preserved))
 	}
 
-	// Prune old snapshots — keep only the 3 most recent per project.
+	// Prune old snapshots — keep only the 3 most recent per project. Order by
+	// snapshot_id, not created_at: snapshot_id embeds UnixNano, while
+	// created_at is only second-precision, so same-second snapshots would
+	// otherwise prune in arbitrary order.
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM memory_snapshots
 		WHERE project_id = ? AND snapshot_id NOT IN (
 			SELECT DISTINCT snapshot_id FROM memory_snapshots
 			WHERE project_id = ?
-			ORDER BY created_at DESC
+			ORDER BY snapshot_id DESC
 			LIMIT 3
 		)
 	`, projectID, projectID)
@@ -1282,12 +1285,16 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Find the latest snapshot.
+	// Find the latest snapshot. Order by snapshot_id (embeds UnixNano), not
+	// created_at (second-precision, so same-second snapshots order
+	// arbitrarily). Older Unix()-suffixed IDs sort before newer
+	// UnixNano()-suffixed ones because the shorter numeric suffix is a prefix
+	// of the longer, so mixed-vintage databases still order correctly.
 	var snapshotID string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT snapshot_id FROM memory_snapshots
 		WHERE project_id = ?
-		ORDER BY created_at DESC
+		ORDER BY snapshot_id DESC
 		LIMIT 1
 	`, projectID).Scan(&snapshotID)
 	if err == sql.ErrNoRows {
