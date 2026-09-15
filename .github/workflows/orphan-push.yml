@@ -1,0 +1,61 @@
+name: orphan-push
+
+# A push to a branch whose pull request has already closed gets no review
+# and no warning. reviewer.yml is `on: pull_request`, and a closed PR
+# raises no event, so the commits simply sit there looking fine — the last
+# green review-gate is still on the PR, and nothing contradicts it.
+#
+# This is not hypothetical. On 2026-09-15, #435 merged while two further
+# commits were in flight. GitHub had deleted the branch on merge, so the
+# push silently RECREATED it, no workflow ran, and the drift fixes in
+# those commits were nearly lost.
+#
+# Fails loudly in exactly that case and stays quiet otherwise: a new
+# branch with no pull request yet is ordinary work, not a mistake.
+
+on:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  orphan-push:
+    # A branch deletion arrives as a push event too, and every deleted
+    # branch has a closed PR behind it. Without this the check would fail
+    # on routine post-merge cleanup.
+    if: github.event.deleted != true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse commits on a branch whose pull requests have all closed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          # A branch name is user-controlled and reaches a ::warning:: below;
+          # % is the one character that can start a workflow-command escape.
+          branch_safe="${BRANCH//%/%25}"
+
+          if ! prs=$(gh pr list --repo "$REPO" --head "$BRANCH" \
+                       --state all --json number,state \
+                       --jq '.[] | "\(.state) \(.number)"'); then
+            echo "::warning::could not list pull requests for ${branch_safe} — skipping the orphan-push check rather than failing a push on an API error"
+            exit 0
+          fi
+
+          if [ -z "$prs" ]; then
+            echo "no pull request for ${branch_safe} yet — nothing to check"
+            exit 0
+          fi
+
+          if printf '%s\n' "$prs" | grep -q '^OPEN '; then
+            echo "open pull request for ${branch_safe} — reviewer.yml covers these commits"
+            exit 0
+          fi
+
+          closed=$(printf '%s\n' "$prs" | awk '{printf "%s#%s", sep, $2; sep=", "}')
+          echo "::error::every pull request for this branch is already closed (${closed}) — these commits will NOT be reviewed, because reviewer.yml runs on pull_request and a closed pull request raises no event. Open a new pull request for them."
+          exit 1
