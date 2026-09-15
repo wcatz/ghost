@@ -38,9 +38,10 @@ func openSnapshot(t *testing.T, path string) *sql.DB {
 		t.Fatalf("open %s: %v", path, err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	// Ping forces the connection, so the WAL check below reflects the same
-	// window in which the reads happen.
-	if err := db.PingContext(context.Background()); err != nil {
+	// Ping forces the connection (sql.Open is lazy) so the WAL check below
+	// reflects the same window in which the reads happen. Bound to the test
+	// context so a blocking driver surfaces at the test deadline.
+	if err := db.PingContext(t.Context()); err != nil {
 		t.Fatalf("connect %s: %v", path, err)
 	}
 	requireNoWAL(t, path)
@@ -49,7 +50,6 @@ func openSnapshot(t *testing.T, path string) *sql.DB {
 		t.Fatalf("read schema version of %s: %v", path, err)
 	}
 	t.Logf("%s schema user_version=%d", path, v)
-	requireNoWAL(t, path)
 	return db
 }
 
@@ -150,6 +150,12 @@ func TestVerifyLiveCopy(t *testing.T) {
 	if aerr != nil {
 		t.Fatalf("after rows: %v", aerr)
 	}
+
+	// Re-check after the reads: this is the window in which a writer could
+	// dirty either snapshot mid-read, which immutable reads would silently
+	// ignore (the check inside openSnapshot only covers the schema probe).
+	requireNoWAL(t, beforePath)
+	requireNoWAL(t, afterPath)
 
 	drops := AuditGuardedDrops(ReflectionInput{ExistingMemories: before}, result)
 	t.Logf("before(live)=%d  survivors(project+_global)=%d  uncovered guarded=%d",
