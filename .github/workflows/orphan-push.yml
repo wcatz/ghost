@@ -13,9 +13,23 @@ name: orphan-push
 # Fails loudly in exactly that case and stays quiet otherwise: a new
 # branch with no pull request yet is ordinary work, not a mistake.
 
+# The pull_request trigger is what lets a failure clear itself. Opening a
+# PR is the remedy this check asks for, and it fires no push event — so
+# without it the fix leaves a permanent red mark on the very PR that
+# applied it. Re-running here finds the now-open PR and passes.
+#
+# It also gives the one known race a way to heal. best-practices-loop.yml
+# pushes its branch (line 143) before `gh pr create` (line 144), and its
+# prior-PR guard only looks for OPEN ones — so a same-month re-run after a
+# closed draft can push to a branch whose only PR is closed. In practice
+# runner start-up is far slower than the second between those two lines,
+# so the PR exists before this job queries; if it ever loses that race,
+# the pull_request run that follows turns the check green.
 on:
   push:
     branches-ignore: [main]
+  pull_request:
+    types: [opened, reopened]
 
 permissions:
   contents: read
@@ -32,7 +46,9 @@ jobs:
       - name: Refuse commits on a branch whose pull requests have all closed
         env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ github.ref_name }}
+          # On pull_request, ref_name is "<number>/merge" — a ref, not a
+          # branch, and no PR has it as a head. head_ref is the branch.
+          BRANCH: ${{ github.head_ref || github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
           # A branch name is user-controlled and reaches a ::warning:: below;
