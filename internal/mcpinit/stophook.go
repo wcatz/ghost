@@ -55,6 +55,13 @@ func RunHostEvent(eventArg, sourceArg string, stdin io.Reader, stdout io.Writer,
 		if cap, _ := hostevent.CapabilityFor(payload.HostSource()); !cap.InjectContext {
 			return
 		}
+		// A plugin install owns its own wiring, so `ghost mcp init` never ran;
+		// finish the one-time operations a plugin manifest cannot express
+		// (auto-memory, memory import, redirects) before injecting context.
+		// stderr-only — stdout here is the injected context.
+		if RunningAsPlugin() {
+			finalizePlugin(stderr)
+		}
 		runSessionStart(payload.Raw, stdout)
 	case hostevent.EventStop:
 		runStop(payload, stdout, stderr, true)

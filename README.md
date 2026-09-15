@@ -30,6 +30,15 @@ ghost mcp init
 
 Then start a session. Ghost injects your project's context automatically and starts remembering.
 
+**Prefer zero install steps?** Ghost also ships as a Claude Code plugin that bundles the binary — no `go install`, no `ghost mcp init`:
+
+```text
+/plugin marketplace add wcatz/ghost
+/plugin install ghost@ghost        # prompts once for your platform
+```
+
+The plugin declares the MCP server and both hooks itself, then finalizes on your first session (disables Claude's built-in file memory, imports existing memories, writes project redirects). Updates flow through `/plugin update`. `ghost mcp init` remains the path for opencode, codex, goose, and manual MCP setups.
+
 **Using opencode (with Ollama)?** Skip the Claude Code init entirely — register Ghost as an MCP server:
 
 ```bash

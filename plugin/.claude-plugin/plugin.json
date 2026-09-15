@@ -1,0 +1,29 @@
+{
+  "name": "ghost",
+  "displayName": "Ghost Memory",
+  "version": "0.0.0",
+  "description": "Local-first MCP memory server for Claude Code: one SQLite file, hybrid search, automatic consolidation. Bundles the ghost binary, so there is nothing else to install.",
+  "author": {
+    "name": "Wayne Cataldo",
+    "email": "waynecataldo@gmail.com"
+  },
+  "homepage": "https://github.com/wcatz/ghost",
+  "repository": "https://github.com/wcatz/ghost",
+  "license": "Apache-2.0",
+  "keywords": [
+    "memory",
+    "mcp",
+    "sqlite",
+    "context",
+    "knowledge-base"
+  ],
+  "defaultEnabled": true,
+  "userConfig": {
+    "platform": {
+      "type": "string",
+      "title": "Your platform",
+      "description": "One of: darwin-arm64, darwin-amd64, linux-arm64, linux-amd64, windows-arm64, windows-amd64",
+      "required": true
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ghost": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/${user_config.platform}/ghost",
+      "args": ["mcp"]
+    }
+  }
+}

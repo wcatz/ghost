@@ -81,3 +81,33 @@ jobs:
           tags: |
             ghcr.io/wcatz/ghost:${{ steps.version.outputs.version }}
             ghcr.io/wcatz/ghost:latest
+
+  # The Claude Code plugin is one archive covering all six platform binaries,
+  # published as a release asset so the marketplace entry (which points at
+  # releases/latest/download/ghost-plugin.zip) never needs a per-release edit.
+  # Runs after `release` because it attaches to the release GoReleaser creates.
+  plugin:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Assemble the plugin tree
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          scripts/assemble-plugin.sh "$VERSION" dist/ghost-plugin
+          # Contents at the archive root, so Claude Code finds
+          # .claude-plugin/plugin.json without a wrapper directory.
+          (cd dist/ghost-plugin && zip -qr ../ghost-plugin.zip .)
+          unzip -l dist/ghost-plugin.zip | head -20
+
+      - name: Attach the plugin archive to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/ghost-plugin.zip --clobber

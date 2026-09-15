@@ -1186,6 +1186,14 @@ func firstLine(s string, n int) string {
 
 // runUpgrade downloads and installs the latest ghost release.
 func runUpgrade() {
+	// A plugin-managed binary is replaced by the plugin manager, not by us:
+	// writing into the plugin cache would fight `/plugin update` and be undone
+	// on the next plugin update. Refuse rather than guess.
+	if mcpinit.RunningAsPlugin() {
+		fmt.Println("This ghost binary is managed by the Claude Code plugin — update it with `/plugin update` in Claude Code, not `ghost upgrade`.")
+		return
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: cannot determine binary path: %v\n", err)
