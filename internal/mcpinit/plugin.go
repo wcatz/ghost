@@ -125,17 +125,17 @@ func finalizePlugin(stderr io.Writer) {
 		}
 	}
 
-	fmt.Fprintln(stderr, "ghost plugin: finalizing first-run wiring")
+	_, _ = fmt.Fprintln(stderr, "ghost plugin: finalizing first-run wiring")
 
 	// Step 1: disable Claude Code's competing file memory.
 	if path, err := settingsPath(); err != nil {
-		fmt.Fprintf(stderr, "ghost plugin finalize: settings path: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "ghost plugin finalize: settings path: %v\n", err)
 	} else if sf, err := loadSettings(path); err != nil {
-		fmt.Fprintf(stderr, "ghost plugin finalize: load settings: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "ghost plugin finalize: load settings: %v\n", err)
 	} else if err := ensureAutoMemoryDisabled(stderr, sf, false); err != nil {
-		fmt.Fprintf(stderr, "ghost plugin finalize: auto-memory: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "ghost plugin finalize: auto-memory: %v\n", err)
 	} else if err := sf.save(); err != nil {
-		fmt.Fprintf(stderr, "ghost plugin finalize: save settings: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "ghost plugin finalize: save settings: %v\n", err)
 	}
 
 	// Steps 2 and 3: import Claude Code memories, then redirect each known
@@ -144,7 +144,7 @@ func finalizePlugin(stderr io.Writer) {
 	// projects redirectable, so redirects run only when the list is available.
 	projects, err := importMemories(stderr, false)
 	if err != nil {
-		fmt.Fprintf(stderr, "ghost plugin finalize: import memories: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "ghost plugin finalize: import memories: %v\n", err)
 	} else {
 		writeRedirects(stderr, projects, false)
 	}
@@ -155,11 +155,11 @@ func finalizePlugin(stderr io.Writer) {
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(marker), 0755); err != nil {
-		fmt.Fprintf(stderr, "ghost plugin finalize: create marker dir: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "ghost plugin finalize: create marker dir: %v\n", err)
 		return
 	}
 	stamp := time.Now().UTC().Format(time.RFC3339) + "\n"
 	if err := os.WriteFile(marker, []byte(stamp), 0644); err != nil {
-		fmt.Fprintf(stderr, "ghost plugin finalize: write marker: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "ghost plugin finalize: write marker: %v\n", err)
 	}
 }
