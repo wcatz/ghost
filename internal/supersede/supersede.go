@@ -27,6 +27,7 @@ package supersede
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -313,18 +314,24 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	for _, c := range all {
 		verdict, err := cls.Classify(ctx, c.NewerContent, c.OlderContent)
 		if err != nil {
-			// One odd answer must not abort the pass. It used to: a single
-			// unparseable verdict ended a 9-minute run after links for earlier
-			// pairs had already been written, so the graph never converged
-			// whenever the model phrased an answer the parser did not know.
-			// Skip the pair, count it, and keep going — the count is reported,
-			// so a systematically broken prompt still shows up loudly.
-			res.Unclassified++
-			if logger != nil {
-				logger.Warn("supersede: skipping pair with an unclassifiable verdict",
-					"newer", c.NewerID, "older", c.OlderID, "error", err)
+			// An odd *phrasing* must not abort the pass: a single unparseable
+			// verdict ended a 9-minute run after links for earlier pairs had
+			// already been written, so the graph never converged whenever the
+			// model used wording the parser did not know. Skip that pair and
+			// count it (reported by the caller).
+			//
+			// Any OTHER error — a dead harness, an API outage, exhausted
+			// credit — stays fatal: skipping every pair would write nothing and
+			// still report success, blaming the model for a transport failure.
+			if errors.Is(err, errUnparseableVerdict) {
+				res.Unclassified++
+				if logger != nil {
+					logger.Warn("supersede: skipping pair with an unclassifiable verdict",
+						"newer", c.NewerID, "older", c.OlderID, "error", err)
+				}
+				continue
 			}
-			continue
+			return res, nil, fmt.Errorf("classify %s→%s: %w", c.NewerID, c.OlderID, err)
 		}
 		classified = append(classified, Classified{Candidate: c, Relation: verdict})
 

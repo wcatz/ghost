@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"testing"
@@ -432,7 +433,7 @@ func TestRunSkipsUnclassifiablePairAndContinues(t *testing.T) {
 	cls := &mockClassifierErr{fn: func(newer, older string) (Relation, error) {
 		if (newer == "kubernetes now on 1.31" && older == "kubernetes upgraded to 1.29") ||
 			(newer == "kubernetes upgraded to 1.29" && older == "kubernetes now on 1.31") {
-			return "", errors.New(`unparseable classifier response: "CORRECTS"`)
+			return "", fmt.Errorf("%w: %q", errUnparseableVerdict, "CORRECTS")
 		}
 		return RelationSupersedes, nil
 	}}
@@ -446,5 +447,23 @@ func TestRunSkipsUnclassifiablePairAndContinues(t *testing.T) {
 	}
 	if res.Created != 2 {
 		t.Errorf("Created = %d, want 2 (the remaining pairs still wrote)", res.Created)
+	}
+}
+
+// TestRunTreatsProviderOutageAsFatal: only an unparseable verdict may be
+// skipped. A transport failure (dead harness, API outage, exhausted credit)
+// must still abort the pass — otherwise every pair is "skipped", nothing is
+// written, and the CLI reports success while blaming the model.
+func TestRunTreatsProviderOutageAsFatal(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
+	add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
+
+	cls := &mockClassifierErr{fn: func(_, _ string) (Relation, error) {
+		return "", errors.New("opencode run: exit status 1")
+	}}
+	if _, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default()); err == nil {
+		t.Fatal("a provider outage must abort the pass, not be counted as unclassifiable")
 	}
 }

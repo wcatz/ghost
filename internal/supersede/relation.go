@@ -2,9 +2,17 @@ package supersede
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// errUnparseableVerdict marks a classifier reply that contains no recognizable
+// verdict. It is a sentinel because the caller must distinguish it from a
+// transport failure: an odd phrasing is worth skipping and counting, while a
+// dead harness or an API outage must stay fatal, or the pass would write
+// nothing and still report success.
+var errUnparseableVerdict = errors.New("unparseable classifier response")
 
 // classifyProvider is the one method the classifier needs — satisfied by
 // *ai.CLIProvider and *ai.SourceProvider. Narrowed so tests never need a real
@@ -60,7 +68,7 @@ func (h *RelationClassifier) Classify(ctx context.Context, newer, older string) 
 	}
 	rel, ok := parseRelation(result)
 	if !ok {
-		return "", fmt.Errorf("unparseable classifier response: %q", result)
+		return "", fmt.Errorf("%w: %q", errUnparseableVerdict, result)
 	}
 	return rel, nil
 }
@@ -92,7 +100,8 @@ var relationSynonyms = map[string]Relation{
 // merely mentions one in passing — we check the first decisive token, not
 // substring containment.
 func parseRelation(resp string) (Relation, bool) {
-	for _, field := range strings.Fields(strings.ToUpper(resp)) {
+	fields := strings.Fields(strings.ToUpper(resp))
+	for _, field := range fields {
 		t := strings.Trim(field, ".,!\"'`:;")
 		switch t {
 		case "SUPERSEDES":
@@ -101,10 +110,15 @@ func parseRelation(resp string) (Relation, bool) {
 			return RelationCauses, true
 		case "NEITHER":
 			return RelationNeither, true
-		default:
-			if rel, ok := relationSynonyms[t]; ok {
-				return rel, true
-			}
+		}
+	}
+	// Synonyms are trusted only when the whole reply is that one word. As bare
+	// stems they collide with ordinary prose — "The correct answer is NEITHER"
+	// would otherwise decide SUPERSEDES on the word "correct" before reaching
+	// the canonical token, silently burying a still-valid memory.
+	if len(fields) == 1 {
+		if rel, ok := relationSynonyms[strings.Trim(fields[0], ".,!\"'`:;")]; ok {
+			return rel, true
 		}
 	}
 	return "", false

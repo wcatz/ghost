@@ -45,6 +45,10 @@ func TestRelationClassifierParsesResponse(t *testing.T) {
 		{"REPLACES", RelationSupersedes},
 		{"UPDATED", RelationSupersedes},
 		{"caused", RelationCauses},
+		// Regression: bare stems must not win over a canonical token later in
+		// prose — "correct" would have decided SUPERSEDES here.
+		{"The correct answer is NEITHER, clearly.", RelationNeither},
+		{"The right fix is to UPDATE the pin, so NEITHER applies.", RelationNeither},
 	}
 	for _, c := range cases {
 		fp := &fakeProvider{resp: c.resp}
