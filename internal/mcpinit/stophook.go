@@ -166,8 +166,9 @@ func cleanupTransientTranscript(p hostevent.Payload) {
 // safeProjectIDComponent reports whether id can be embedded in a filename
 // inside the data dir. Project ids originate from callers — an MCP client can
 // send any project_id, and EnsureProject stores it verbatim — so the check
-// rejects only what could reshape the path: empty, ".", "..", a NUL byte, and
-// path separators. Everything else is a legitimate id and must keep working:
+// rejects what could reshape the path (empty, ".", "..", path separators) and
+// what a filename cannot hold (control characters, and on Windows the reserved
+// :*?"<>| set). Everything else is a legitimate id and must keep working:
 // rejecting spaces or non-ASCII names would silently switch off
 // auto-consolidation for an existing project, which is a worse failure than the
 // narrow path issue this guards.

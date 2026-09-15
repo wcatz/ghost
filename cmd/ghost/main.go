@@ -565,7 +565,7 @@ func parseLifecycleArgs(args []string) (project, source string, err error) {
 	// name cannot be run by them. Reject it here with a clear message rather
 	// than spawning a chain that is guaranteed to fail phase by phase.
 	if strings.HasPrefix(project, "-") {
-		return "", "", fmt.Errorf("project %q begins with %q, which the reflect/resolve/supersede subcommands would read as a flag; rename the project or run those phases directly", project, "-")
+		return "", "", fmt.Errorf("project %q begins with %q, which the reflect/resolve/supersede subcommands would read as a flag; rename the project to use auto-consolidation", project, "-")
 	}
 	return project, source, nil
 }
