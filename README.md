@@ -11,8 +11,6 @@ Your agent's memory, on your disk — no cloud, no accounts, no subscription. On
 [![Go](https://img.shields.io/github/go-mod/go-version/wcatz/ghost)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-<!-- TODO: asciinema demo — `ghost mcp init` + a session-start context injection -->
-
 ---
 
 **Ghost beats every published competitor on LongMemEval-S** (500-question blended, retrieve → generate → judge):
@@ -69,12 +67,6 @@ Re-running the command upgrades an existing install in place.
 
 ```json
 { "mcpServers": { "ghost": { "type": "stdio", "command": "ghost", "args": ["mcp"] } } }
-```
-
-**Using opencode?** Don't edit any config — `ghost mcp init --client opencode` installs a single plugin (`~/.config/opencode/plugins/ghost-opencode.ts`) that registers the MCP server itself (via opencode's plugin config hook) and bridges session-idle events to ghost's stop hook:
-
-```bash
-ghost mcp init --client opencode   # installs the plugin; restart opencode after
 ```
 
 **Using codex?** `ghost mcp init --client codex` merges `[mcp_servers.ghost]` into `~/.codex/config.toml` (textually — your comments survive) and wires SessionStart/Stop/SessionEnd into `~/.codex/hooks.json`. Then run `/hooks` inside codex once and approve the ghost entries — codex silently skips untrusted hooks.
@@ -381,16 +373,7 @@ Per-category, hybrid vs FTS-only (the delta shows where vector search earns its 
 
 The biggest lifts land on vocabulary-mismatch classes — `single-session-assistant` (+30pp) and `multi-session` (+20pp) — exactly where embeddings fix what FTS misses. Not leaderboard-comparable (DeepSeek v4 Pro, not GPT-4o), but the retrieval → answer pipeline is identical to the official harness.
 
-**Competitor comparison** (500-question blended, all systems):
-
-| System | Score | Generator | Source |
-|--------|-------|-----------|--------|
-| **Ghost (hybrid)** | **96.2%** | DeepSeek V4 Pro | This repo |
-| Mem0 | 94.4% | Not specified | [mem0.ai/research](https://mem0.ai/research) — "managed platform, proprietary optimizations not in OSS SDK" |
-| Hindsight | 91.4% | Gemini-3 Pro | [arxiv 2512.12818](https://arxiv.org/abs/2512.12818) — independently validated by Virginia Tech + Washington Post |
-| Supermemory | 85.2% | Gemini-3 | [supermemory.ai/research](https://supermemory.ai/research/longmembench/) — self-reported |
-
-**Read carefully:** These numbers are **not directly comparable** across rows — each uses a different generator and judge. Within the same generator+judge pair, differences are meaningful; across pairs, they're directional only.
+**Competitor comparison:** the table at the top of this README, with the caveat that goes with it — those numbers are not directly comparable across rows.
 
 Reproduce: see [`bench/longmemeval/phase4/`](bench/longmemeval/phase4/). Full methodology, the `ghost bench` parameter sweep, and the staleness-suite deep dive: [docs/benchmarks.md](docs/benchmarks.md).
 
