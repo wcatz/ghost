@@ -2,9 +2,17 @@ package supersede
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// errUnparseableVerdict marks a classifier reply that contains no recognizable
+// verdict. It is a sentinel because the caller must distinguish it from a
+// transport failure: an odd phrasing is worth skipping and counting, while a
+// dead harness or an API outage must stay fatal, or the pass would write
+// nothing and still report success.
+var errUnparseableVerdict = errors.New("unparseable classifier response")
 
 // classifyProvider is the one method the classifier needs — satisfied by
 // *ai.CLIProvider and *ai.SourceProvider. Narrowed so tests never need a real
@@ -49,9 +57,13 @@ Respond with exactly one word: SUPERSEDES, CAUSES, or NEITHER.`
 
 // Classify asks the classifier to judge the relationship between newer and
 // older. Every call goes through one CLI-harness provider, so there is no
-// fallback distinction for callers to withhold. An unparseable response is a
-// fatal error, not a silent NEITHER default — a silent default would mask a
-// broken prompt or model regression as normal, uneventful traffic.
+// fallback distinction for callers to withhold.
+//
+// A reply with no recognizable verdict returns errUnparseableVerdict wrapped in
+// the error: the caller skips and counts that pair (Run increments
+// Result.Unclassified) rather than defaulting silently to NEITHER, which would
+// mask a broken prompt as uneventful traffic. Transport failures — a dead
+// harness, an outage — are plain errors and stay fatal to the pass.
 func (h *RelationClassifier) Classify(ctx context.Context, newer, older string) (Relation, error) {
 	content := "OLDER: " + quoteData(older) + "\nNEWER: " + quoteData(newer)
 	result, err := h.client.Classify(ctx, classifySystemPrompt, content)
@@ -60,16 +72,42 @@ func (h *RelationClassifier) Classify(ctx context.Context, newer, older string) 
 	}
 	rel, ok := parseRelation(result)
 	if !ok {
-		return "", fmt.Errorf("unparseable classifier response: %q", result)
+		return "", fmt.Errorf("%w: %q", errUnparseableVerdict, result)
 	}
 	return rel, nil
 }
 
-// parseRelation scans resp for the first decisive token (SUPERSEDES, CAUSES,
-// or NEITHER), guarding against a rambling reply that merely mentions one in
-// passing — we check the first decisive token, not substring containment.
+// relationSynonyms maps the natural single-word answers a model reaches for
+// onto the three verdicts. The prompt asks for SUPERSEDES/CAUSES/NEITHER, but
+// models routinely answer with a plain English synonym: a "CORRECTS" reply to
+// a newer note that corrects an older one aborted an entire 9-minute supersede
+// pass before this existed (the response was treated as unparseable).
+var relationSynonyms = map[string]Relation{
+	"SUPERSEDE": RelationSupersedes,
+	"CORRECT":   RelationSupersedes,
+	"CORRECTS":  RelationSupersedes,
+	"CORRECTED": RelationSupersedes,
+	"REPLACE":   RelationSupersedes,
+	"REPLACES":  RelationSupersedes,
+	"REPLACED":  RelationSupersedes,
+	"UPDATE":    RelationSupersedes,
+	"UPDATES":   RelationSupersedes,
+	"UPDATED":   RelationSupersedes,
+	"CAUSE":     RelationCauses,
+	"CAUSED":    RelationCauses,
+	"NONE":      RelationNeither,
+	"UNRELATED": RelationNeither,
+}
+
+// parseRelation scans resp for the first decisive canonical token (SUPERSEDES,
+// CAUSES or NEITHER), guarding against a rambling reply that merely mentions
+// one in passing — we check the first decisive token, not substring
+// containment. A recognized synonym counts only when the whole reply is that
+// single word: as bare stems they collide with ordinary prose, where "the
+// correct answer is NEITHER" would otherwise decide SUPERSEDES on "correct".
 func parseRelation(resp string) (Relation, bool) {
-	for _, field := range strings.Fields(strings.ToUpper(resp)) {
+	fields := strings.Fields(strings.ToUpper(resp))
+	for _, field := range fields {
 		t := strings.Trim(field, ".,!\"'`:;")
 		switch t {
 		case "SUPERSEDES":
@@ -78,6 +116,15 @@ func parseRelation(resp string) (Relation, bool) {
 			return RelationCauses, true
 		case "NEITHER":
 			return RelationNeither, true
+		}
+	}
+	// Synonyms are trusted only when the whole reply is that one word. As bare
+	// stems they collide with ordinary prose — "The correct answer is NEITHER"
+	// would otherwise decide SUPERSEDES on the word "correct" before reaching
+	// the canonical token, silently burying a still-valid memory.
+	if len(fields) == 1 {
+		if rel, ok := relationSynonyms[strings.Trim(fields[0], ".,!\"'`:;")]; ok {
+			return rel, true
 		}
 	}
 	return "", false

@@ -27,6 +27,7 @@ package supersede
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -165,6 +166,7 @@ type Result struct {
 	CausesCreated int // CAUSES verdicts (causes links written when apply)
 	Reclassified  int // existing links whose relation changed or was invalidated
 	StaleSkipped  int
+	Unclassified  int // pairs skipped because the classifier answer was unparseable
 }
 
 // endpointsExist reports whether every given memory ID is still live. Used
@@ -211,10 +213,11 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 //
 // CreateLink and InvalidateLink are both idempotent no-ops when there's
 // nothing to change, so re-running Run converges and self-heals after
-// reflection's cascade-delete of links. A classifier error on one pair is
-// fatal (the caller decides whether a partial pass is acceptable); a
-// link-write error is fatal so a half-written pair is never silently left
-// behind.
+// reflection's cascade-delete of links. A pair whose verdict is unparseable is
+// skipped and counted (Result.Unclassified); any other classifier error — a
+// dead harness, an outage — is fatal so a transport failure cannot look like a
+// successful, empty pass. A link-write error is fatal so a half-written pair is
+// never silently left behind.
 func Run(ctx context.Context, store vectorStore, cls Classifier, projectID string, threshold float32, apply bool, logger *slog.Logger) (Result, []Classified, error) {
 	fresh, err := SelectCandidates(ctx, store, projectID, threshold)
 	if err != nil {
@@ -312,6 +315,23 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	for _, c := range all {
 		verdict, err := cls.Classify(ctx, c.NewerContent, c.OlderContent)
 		if err != nil {
+			// An odd *phrasing* must not abort the pass: a single unparseable
+			// verdict ended a 9-minute run after links for earlier pairs had
+			// already been written, so the graph never converged whenever the
+			// model used wording the parser did not know. Skip that pair and
+			// count it (reported by the caller).
+			//
+			// Any OTHER error — a dead harness, an API outage, exhausted
+			// credit — stays fatal: skipping every pair would write nothing and
+			// still report success, blaming the model for a transport failure.
+			if errors.Is(err, errUnparseableVerdict) {
+				res.Unclassified++
+				if logger != nil {
+					logger.Warn("supersede: skipping pair with an unclassifiable verdict",
+						"newer", c.NewerID, "older", c.OlderID, "error", err)
+				}
+				continue
+			}
 			return res, nil, fmt.Errorf("classify %s→%s: %w", c.NewerID, c.OlderID, err)
 		}
 		classified = append(classified, Classified{Candidate: c, Relation: verdict})

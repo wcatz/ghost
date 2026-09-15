@@ -1101,6 +1101,9 @@ host).`)
 	}
 	fmt.Printf("%s: %d candidate pairs, %d supersedes, %d causes, %d reclassified, %s\n",
 		projectName, res.Candidates, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+	if res.Unclassified > 0 {
+		fmt.Printf("  %d pair(s) skipped: unclassifiable verdict (logged; the pass still completed)\n", res.Unclassified)
+	}
 	for _, c := range classified {
 		switch c.Relation {
 		case supersede.RelationSupersedes:
