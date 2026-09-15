@@ -3368,11 +3368,16 @@ func TestGetTopMemoriesExcludesResolved(t *testing.T) {
 	}
 }
 
+// TestUnresolveOnWrite pins when a resolve verdict is undone: only a content
+// change counts as the memory being reasserted. A metadata-only edit (tags,
+// importance, category) and an Upsert strengthen (which never overwrites the
+// target's content) must both leave resolved_at intact — otherwise a stray
+// retag resurrects resolved evidence into ranked injection.
 func TestUnresolveOnWrite(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	// UpdateMemory clears resolved_at.
+	// A content change reasserts the memory: resolved_at clears.
 	id, err := s.Create(ctx, testProject, Memory{
 		Category: "gotcha", Content: "resumed via update", Source: "manual", Importance: 0.5,
 	})
@@ -3388,7 +3393,22 @@ func TestUnresolveOnWrite(t *testing.T) {
 	}
 	assertActive(t, s, testProject, id)
 
-	// Upsert of a near-duplicate (strengthen branch) clears resolved_at.
+	// A metadata-only edit does NOT clear it.
+	mid, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "metadata-only edit target", Source: "manual", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create metadata-only target: %v", err)
+	}
+	if _, err := s.SetResolved(ctx, []string{mid}); err != nil {
+		t.Fatalf("SetResolved metadata-only target: %v", err)
+	}
+	if err := s.UpdateMemory(ctx, testProject, mid, nil, nil, nil, []string{"retagged"}); err != nil {
+		t.Fatalf("UpdateMemory metadata-only: %v", err)
+	}
+	assertResolved(t, s, testProject, mid)
+
+	// Upsert of a near-duplicate (strengthen branch) does NOT clear it.
 	uid, _, _, err := s.Upsert(ctx, testProject, "gotcha", "duplicate detection strengthen path here", "manual", 0.5, nil)
 	if err != nil {
 		t.Fatalf("upsert create: %v", err)
@@ -3403,7 +3423,7 @@ func TestUnresolveOnWrite(t *testing.T) {
 	if dupOf != uid {
 		t.Fatalf("upsert dup did not link to existing row: dupOf=%s want %s", dupOf, uid)
 	}
-	assertActive(t, s, testProject, uid)
+	assertResolved(t, s, testProject, uid)
 }
 
 // assertActive fails if the memory's resolved_at is not NULL.
@@ -3417,6 +3437,20 @@ func assertActive(t *testing.T, s *Store, projectID, id string) {
 	}
 	if resolvedAt.Valid {
 		t.Errorf("memory %s should be active (resolved_at NULL), got %q", id, resolvedAt.String)
+	}
+}
+
+// assertResolved fails if the memory's resolved_at is NULL.
+func assertResolved(t *testing.T, s *Store, projectID, id string) {
+	t.Helper()
+	var resolvedAt sql.NullString
+	if err := s.db.QueryRow(
+		`SELECT resolved_at FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
+	).Scan(&resolvedAt); err != nil {
+		t.Fatalf("read resolved_at for %s: %v", id, err)
+	}
+	if !resolvedAt.Valid {
+		t.Errorf("memory %s should stay resolved, got NULL", id)
 	}
 }
 

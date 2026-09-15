@@ -59,18 +59,42 @@ func (h *ResolutionClassifier) IsResolved(ctx context.Context, content string) (
 	if err != nil {
 		return false, err
 	}
-	// Bias to KEEP: only an explicit "resolved" counts, and only the first
-	// decisive token is honored so a rambling reply can't smuggle a flip.
+	// Bias to KEEP: only an explicit, un-negated "resolved" counts. A preceding
+	// negation ("not resolved", "never resolved") or a negated form
+	// ("unresolved", "not-resolved") must NOT be read as RESOLVED — otherwise a
+	// single word flips a live memory out of ranked injection.
+	prev := ""
 	for _, field := range strings.Fields(strings.ToLower(result)) {
 		t := strings.Trim(field, ".,!\"'`:;—-")
-		if t == "resolved" {
-			return true, nil
+		if t == "" {
+			continue
 		}
-		if t == "keep" {
+		switch {
+		case t == "keep":
+			return false, nil
+		case t == "resolved" || t == "resolve":
+			if isNegation(prev) {
+				return false, nil
+			}
+			return true, nil
+		case strings.HasSuffix(t, "resolved"):
+			// "unresolved", "non-resolved", "not-resolved": a negated form.
 			return false, nil
 		}
+		prev = t
 	}
 	return false, nil
+}
+
+// isNegation reports whether a token negates the word that follows it.
+func isNegation(t string) bool {
+	switch t {
+	case "not", "no", "never", "none", "cannot", "can't",
+		"isn't", "wasn't", "aren't", "weren't",
+		"don't", "doesn't", "didn't", "won't", "wouldn't":
+		return true
+	}
+	return strings.HasSuffix(t, "n't")
 }
 
 // quoteData wraps untrusted stored text in «...» data delimiters, first
