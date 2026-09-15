@@ -11,20 +11,9 @@ Your agent's memory, on your disk — no cloud, no accounts, no subscription. On
 [![Go](https://img.shields.io/github/go-mod/go-version/wcatz/ghost)](go.mod)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-<!-- TODO: asciinema demo — `ghost mcp init` + a session-start context injection -->
-
 ---
 
-**Ghost beats every published competitor on LongMemEval-S** (500-question blended, retrieve → generate → judge):
-
-| System | Score | Generator | Source |
-|--------|-------|-----------|--------|
-| **Ghost (hybrid)** | **96.2%** | DeepSeek V4 Pro | This repo |
-| Mem0 | 94.4% | Not specified | [mem0.ai/research](https://mem0.ai/research) — "managed platform, proprietary optimizations not in OSS SDK" |
-| Hindsight | 91.4% | Gemini-3 Pro | [arxiv 2512.12818](https://arxiv.org/abs/2512.12818) — independently validated by Virginia Tech + Washington Post |
-| Supermemory | 85.2% | Gemini-3 | [supermemory.ai/research](https://supermemory.ai/research/longmembench/) — self-reported |
-
-**Read carefully:** these numbers are **not directly comparable** across rows — each uses a different generator and judge. Within the same generator+judge pair, differences are meaningful; across pairs, they're directional only. Full methodology and retrieval-only benchmarks further down in [Benchmarks](#benchmarks).
+**Ghost beats every published competitor on LongMemEval-S** — 96.2% on the 500-question blended set (retrieve → generate → judge). Each published figure uses a different generator and judge, so they are directional rather than head-to-head: the table, the caveats, and the full methodology are in [Benchmarks](#benchmarks).
 
 ---
 
@@ -71,12 +60,6 @@ Re-running the command upgrades an existing install in place.
 { "mcpServers": { "ghost": { "type": "stdio", "command": "ghost", "args": ["mcp"] } } }
 ```
 
-**Using opencode?** Don't edit any config — `ghost mcp init --client opencode` installs a single plugin (`~/.config/opencode/plugins/ghost-opencode.ts`) that registers the MCP server itself (via opencode's plugin config hook) and bridges session-idle events to ghost's stop hook:
-
-```bash
-ghost mcp init --client opencode   # installs the plugin; restart opencode after
-```
-
 **Using codex?** `ghost mcp init --client codex` merges `[mcp_servers.ghost]` into `~/.codex/config.toml` (textually — your comments survive) and wires SessionStart/Stop/SessionEnd into `~/.codex/hooks.json`. Then run `/hooks` inside codex once and approve the ghost entries — codex silently skips untrusted hooks.
 
 ```bash
@@ -102,13 +85,11 @@ docker run -i -e XDG_DATA_HOME=/data -v ghost-data:/data \
   ghcr.io/wcatz/ghost:latest reflect myproject --apply
 ```
 
-## Why not just use built-in memory?
-
-ChatGPT, Claude, Gemini, and Copilot all ship native memory now — but each one is walled off inside its own product. Nothing you teach ChatGPT carries over to Claude Code, and nothing Claude Code learns carries over to Cursor or Goose. Ghost's bet isn't "better than any single one of those" — it's *one* memory, across every MCP client, that lives on your own disk: a local SQLite file you can query, back up, and delete, instead of a separate silo per product. See [Why Ghost?](#why-ghost) below for the specific comparison against Claude Code's built-in memory.
-
 ## Why Ghost?
 
 Coding agents forget everything between sessions. You re-explain your architecture, your conventions, and that one gotcha with the staging database — every single day.
+
+ChatGPT, Claude, Gemini, and Copilot all ship native memory now — but each one is walled off inside its own product. Nothing you teach ChatGPT carries over to Claude Code, and nothing Claude Code learns carries over to Cursor or Goose. Ghost's bet isn't "better than any single one of those" — it's *one* memory, across every MCP client, that lives on your own disk: a local SQLite file you can query, back up, and delete, instead of a separate silo per product.
 
 Claude Code's built-in memory is a markdown file with a limited load window ([~200 lines](https://code.claude.com/docs/en/memory)). No search, no categories, no dedup, and memory is siloed per repository. Ghost replaces it with a real memory system:
 
@@ -186,7 +167,7 @@ Ghost is a memory pipeline: **Save → Embed → Link → Search → Consolidate
 
 ### Hybrid search
 
-Full-text (FTS5) and vector results are fused with Reciprocal Rank Fusion (k=60), weighted 70% vector / 30% FTS. A background worker links similar memories (cosine ≥ 0.70) into a graph, which powers the Obsidian mirror's graph view and future link-aware features; links self-heal after consolidation rewrites memories. An experimental graph-expansion ranking bonus exists but ships disabled — our own benchmark sweep (`ghost bench --sweep`) showed it demoting exact matches, so it stays off until a redesign beats that measurement ([methodology](docs/benchmarks.md)).
+Full-text (FTS5) and vector results are fused with Reciprocal Rank Fusion (k=60), weighted 70% vector / 30% FTS. A background worker links similar memories (cosine ≥ 0.70) into a graph, which powers the Obsidian mirror's graph view and near-duplicate demotion (related edges at ≥ 0.90); links self-heal after consolidation rewrites memories. A graph-expansion ranking bonus was tried and removed — a public LongMemEval-S kill experiment showed a deeper vector-k dominated it ([methodology](docs/benchmarks.md)).
 
 Vectors come from a local Ollama instance (`nomic-embed-text:v1.5`, 768 dims) if one is running. **No Ollama? No error, no setup step** — Ghost is fully functional with FTS5-only search and quietly upgrades to hybrid the moment Ollama appears:
 
@@ -226,7 +207,7 @@ Beyond memories: tasks (`pending`/`active`/`done`/`blocked`), decision records w
 
 Saving a memory is the beginning, not the end. Ghost tracks what happened *after* you saved — which facts got replaced, which findings turned out to be intermediate, which memories are near-duplicates of each other — and uses that to keep search results honest:
 
-- **Resolve** (`ghost resolve`) — marks resolved-evidence memories (changelog entries, cost estimates, closed experiment notes) with `resolved_at`, dropping them from ranked injection while keeping them searchable. Uses MCP Sampling for zero-credit classification in live sessions; the CLI path uses an API key.
+- **Resolve** (`ghost resolve`) — marks resolved-evidence memories (changelog entries, cost estimates, closed experiment notes) with `resolved_at`, dropping them from ranked injection while keeping them searchable. Classification runs through a CLI harness — in a live session, the one that called it — so it bills to that CLI's subscription. No API key is involved; Ghost strips `ANTHROPIC_API_KEY` and friends from the subprocess it spawns.
 - **Supersede** (`ghost supersede`) — creates directed `supersedes` links between memories (newer replaces older). A single LLM call classifies each candidate pair as SUPERSEDES / CAUSES / NEITHER. Re-runnable and self-healing after consolidation rewrites memories.
 - **Demote** — when a superseded memory and its replacement both appear in search results, the older one is sunk below every present superseder. Targeted demotion on genuine replacement pairs only (a blanket age-only recency prior destroys old-but-correct retrieval — measured, published, ship-off). Flips staleness fresh-wins from 0.083 to 1.000 while leaving unrelated retrieval untouched (see [staleness suite](docs/benchmarks.md#phase-3--staleness-suite-the-flagship)).
 - **Link** — a background worker auto-links related memories (cosine ≥ 0.70) into a graph. Links power the Obsidian mirror's graph view, supersedes ranking, and near-duplicate demotion at injection time.
@@ -331,7 +312,7 @@ Note: env-var names map underscores to config dots, so keys that themselves cont
 
 ## Benchmarks
 
-Every Ghost number below is reproducible with the in-repo harnesses, and shipped with per-question logs — the competitor figures in the comparison table further down are externally sourced and not reproducible from this repo. Retrieval-only metrics are deterministic given the embedding cache; end-to-end scores are recorded runs (model-pinned, single-run — rerun variance is possible but small at temperature 0). Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
+Every Ghost number below is reproducible with the in-repo harnesses, and shipped with per-question logs — the competitor figures in the comparison table below are externally sourced and not reproducible from this repo. Retrieval-only metrics are deterministic given the embedding cache; end-to-end scores are recorded runs (model-pinned, single-run — rerun variance is possible but small at temperature 0). Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
 
 **LongMemEval-S** ([the consensus long-term-memory benchmark](https://arxiv.org/abs/2410.10813); cleaned variant, session-level retrieval against the official evidence labels, all 470 answerable questions, no LLM judge):
 
@@ -390,7 +371,7 @@ The biggest lifts land on vocabulary-mismatch classes — `single-session-assist
 | Hindsight | 91.4% | Gemini-3 Pro | [arxiv 2512.12818](https://arxiv.org/abs/2512.12818) — independently validated by Virginia Tech + Washington Post |
 | Supermemory | 85.2% | Gemini-3 | [supermemory.ai/research](https://supermemory.ai/research/longmembench/) — self-reported |
 
-**Read carefully:** These numbers are **not directly comparable** across rows — each uses a different generator and judge. Within the same generator+judge pair, differences are meaningful; across pairs, they're directional only.
+**Read carefully:** these numbers are **not directly comparable** across rows — each uses a different generator and judge. Within the same generator+judge pair, differences are meaningful; across pairs, they're directional only.
 
 Reproduce: see [`bench/longmemeval/phase4/`](bench/longmemeval/phase4/). Full methodology, the `ghost bench` parameter sweep, and the staleness-suite deep dive: [docs/benchmarks.md](docs/benchmarks.md).
 
@@ -404,7 +385,7 @@ Skipped deliberately: LOCOMO (publicly audited answer-key and judge problems) an
 
 Ghost is a solo project, built because I wanted my own agents to stop forgetting, and used daily on real infrastructure work. What you can verify rather than trust:
 
-- Pure Go, `CGO_ENABLED=0`, 8 direct dependencies (SQLite via `modernc.org/sqlite` — no C toolchain anywhere); a static binary around 12.5 MB
+- Pure Go, `CGO_ENABLED=0`, 8 direct dependencies (SQLite via `modernc.org/sqlite` — no C toolchain anywhere); a static binary of 13-14 MB depending on platform
 - ~1:1 test-to-code ratio; CI runs `go vet`, `golangci-lint`, and race-enabled tests on every PR and push to main
 - Releases for 6 OS/arch targets built by GoReleaser with checksums, plus a multi-arch Docker image
 
