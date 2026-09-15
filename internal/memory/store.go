@@ -406,8 +406,9 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 		return DeleteProjectSummary{}, fmt.Errorf("commit delete: %w", err)
 	}
 
-	// This log line is the only durable record of what was removed once the
-	// project's own audit_log rows are gone, so it carries the full summary.
+	// This log line is the durable record of what was removed. (audit_log is a
+	// legacy table with no production writer — it is counted and deleted here
+	// for older databases, not because deletions are otherwise recorded there.)
 	s.logger.Info("deleted project", "project_id", id, "project_name", name,
 		"memories", summary.Memories, "memory_links", summary.MemoryLinks,
 		"tasks", summary.Tasks, "decisions", summary.Decisions,
@@ -1184,7 +1185,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// memory it emits corresponds to a pinned/resolved one it never saw as
 	// such, so preservation has to mean "don't touch it" rather than "carry the
 	// flag through"). See issue #318.
-	snapshotID := fmt.Sprintf("%s-%d", projectID, time.Now().Unix())
+	snapshotID := fmt.Sprintf("%s-%d", projectID, time.Now().UnixNano())
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags)
 		SELECT ?, project_id, category, content, importance, source, tags

@@ -4160,3 +4160,33 @@ func TestMergeProject_RefusesGlobal(t *testing.T) {
 		}
 	})
 }
+
+// TestReplaceNonManualSnapshotIDsUnique pins the snapshot-ID collision fix:
+// two replaces in the same earlier-second (Unix()) shared one snapshot_id,
+// merging distinct pre-replace states and defeating the 3-most-recent prune.
+func TestReplaceNonManualSnapshotIDsUnique(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	mems := []Memory{{Category: "fact", Content: "snapshot uniqueness fact", Importance: 0.5, Tags: []string{}}}
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "seed before first replace", Source: "mcp", Importance: 0.5,
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := s.ReplaceNonManual(ctx, testProject, mems, ""); err != nil {
+		t.Fatalf("first ReplaceNonManual: %v", err)
+	}
+	if err := s.ReplaceNonManual(ctx, testProject, mems, ""); err != nil {
+		t.Fatalf("second ReplaceNonManual: %v", err)
+	}
+
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(DISTINCT snapshot_id) FROM memory_snapshots WHERE project_id = ?`, testProject).Scan(&n); err != nil {
+		t.Fatalf("count snapshots: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 distinct snapshot IDs, got %d (same-second collision)", n)
+	}
+}
