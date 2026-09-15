@@ -644,9 +644,18 @@ Flags:
 	}
 	fmt.Println("Running consolidation...")
 
+	// Recent git activity and a language hint ground the prompt and give the
+	// fabrication guard a set of SHAs that legitimately exist in the repo.
+	// Both are best-effort: a project with no recorded path, no repository, or
+	// no git binary simply contributes nothing.
+	projectPath, _ := store.GetProjectPath(ctx, projectID)
+	lastCommits, projectLanguage := reflection.CollectGitContext(projectPath)
+
 	input := reflection.ReflectionInput{
 		ExistingMemories: live,
 		CurrentContext:   currentContext,
+		LastCommits:      lastCommits,
+		ProjectLanguage:  projectLanguage,
 		ProjectName:      projectName,
 	}
 

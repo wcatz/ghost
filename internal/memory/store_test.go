@@ -4213,3 +4213,21 @@ func TestReplaceNonManualSnapshotIDsUnique(t *testing.T) {
 		t.Errorf("restore picked the wrong snapshot: sawFirst=%v sawSecond=%v", sawFirst, sawSecond)
 	}
 }
+
+// TestGetProjectPath pins the getter reflection uses to locate a project's
+// working tree for git context.
+func TestGetProjectPath(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	path, err := s.GetProjectPath(ctx, testProject)
+	if err != nil {
+		t.Fatalf("GetProjectPath: %v", err)
+	}
+	if path != "/tmp/test" {
+		t.Errorf("GetProjectPath = %q, want /tmp/test", path)
+	}
+	if _, err := s.GetProjectPath(ctx, "no-such-project"); err == nil {
+		t.Error("expected an error for an unknown project")
+	}
+}
