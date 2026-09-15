@@ -3,6 +3,8 @@ package reflection
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"io/fs"
 	"net/url"
 	"os"
 	"testing"
@@ -21,28 +23,53 @@ func roDSN(path string) string {
 }
 
 // openSnapshot opens a database snapshot for verification. It refuses a
-// non-empty -wal first: immutable reads ignore the WAL, so certifying against a
+// non-empty -wal: immutable reads ignore the WAL, so certifying against a
 // database with uncheckpointed frames would silently read stale contents. It
 // also reports the schema version, because these queries name columns
 // (pinned, resolved_at) that an older database may not have yet.
+//
+// The -wal check runs after the connection is established (sql.Open is lazy),
+// immediately before the first read, and a stat error other than "not exist"
+// is fatal rather than silently skipping the guard.
 func openSnapshot(t *testing.T, path string) *sql.DB {
 	t.Helper()
-	if fi, err := os.Stat(path + "-wal"); err == nil && fi.Size() > 0 {
-		t.Fatalf("%s has a %d-byte WAL; immutable reads would ignore its committed frames. "+
-			"Take a fresh snapshot (sqlite3 %s \".backup <dest>\") or checkpoint it before certifying.",
-			path, fi.Size(), path)
-	}
 	db, err := sql.Open("sqlite", roDSN(path))
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	// Ping forces the connection, so the WAL check below reflects the same
+	// window in which the reads happen.
+	if err := db.PingContext(context.Background()); err != nil {
+		t.Fatalf("connect %s: %v", path, err)
+	}
+	requireNoWAL(t, path)
 	var v int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
 		t.Fatalf("read schema version of %s: %v", path, err)
 	}
 	t.Logf("%s schema user_version=%d", path, v)
+	requireNoWAL(t, path)
 	return db
+}
+
+// requireNoWAL fails if path has uncheckpointed frames. Errors other than
+// "not exist" are fatal: silently skipping the guard would defeat it.
+func requireNoWAL(t *testing.T, path string) {
+	t.Helper()
+	fi, err := os.Stat(path + "-wal")
+	switch {
+	case err == nil && fi.Size() > 0:
+		t.Fatalf("%s has a %d-byte WAL; immutable reads would ignore its committed frames. "+
+			"Take a fresh snapshot (sqlite3 %s \".backup <dest>\") or checkpoint it before certifying.",
+			path, fi.Size(), path)
+	case err == nil:
+		return
+	case errors.Is(err, fs.ErrNotExist):
+		return
+	default:
+		t.Fatalf("stat %s-wal: %v", path, err)
+	}
 }
 
 // TestVerifyLiveCopy is a manual verification harness, skipped unless the env
