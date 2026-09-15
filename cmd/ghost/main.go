@@ -446,10 +446,12 @@ func runLifecycle() {
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--source":
-			if i+1 < len(args) {
-				source = args[i+1]
-				i++
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "error: --source requires a value")
+				os.Exit(1)
 			}
+			source = args[i+1]
+			i++
 		default:
 			if projectName == "" {
 				projectName = args[i]
@@ -488,8 +490,17 @@ func runLifecycle() {
 		if source != "" {
 			phaseArgs = append(phaseArgs, "--source", source)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), ph.timeout)
+		ctx, cancel := context.WithCancel(context.Background())
+		if ph.timeout > 0 {
+			ctx, cancel = context.WithTimeout(context.Background(), ph.timeout)
+		}
 		cmd := exec.CommandContext(ctx, exe, phaseArgs...)
+		// A deadline must not SIGKILL a phase mid-write or orphan the CLI
+		// harness it spawned: the phase runs in its own process group, gets a
+		// SIGTERM first, and is only killed if it misses the grace period.
+		setPhaseProcessGroup(cmd)
+		cmd.Cancel = func() error { return terminatePhaseProcess(cmd) }
+		cmd.WaitDelay = 30 * time.Second
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		start := time.Now()
@@ -504,7 +515,8 @@ func runLifecycle() {
 }
 
 // lifecyclePhase is one step of the auto-consolidation chain: a ghost
-// subcommand, its arguments, and the outer bound on how long it may run.
+// subcommand, its arguments, and the outer bound on how long it may run. A
+// zero timeout means no bound.
 type lifecyclePhase struct {
 	name    string
 	args    []string
@@ -517,16 +529,24 @@ type lifecyclePhase struct {
 // links rows. Reflect is dropped when llmOK is false (no real LLM tier means a
 // Jaccard-only rewrite for no quality gain). Extracted from runLifecycle so the
 // ordering is unit-testable without spawning processes.
+//
+// Every phase shares reflection.lifecycle_timeout_minutes, which defaults to 0
+// (no bound): a hard cap is opt-in because these phases ran unbounded when they
+// were spawned as independent processes, and a cap that is too tight makes a
+// long but legitimate pass (resolve classifies one candidate per CLI-harness
+// call, several seconds each) get killed and restarted every session without
+// ever completing.
 func lifecyclePhases(cfg *config.Config, projectName string, llmOK bool) []lifecyclePhase {
+	timeout := time.Duration(cfg.Reflection.LifecycleTimeoutMinutes) * time.Minute
 	var phases []lifecyclePhase
 	if cfg.Reflection.AutoReflect && llmOK {
-		phases = append(phases, lifecyclePhase{"reflect", []string{"reflect", projectName, "--apply", "--require-llm"}, 15 * time.Minute})
+		phases = append(phases, lifecyclePhase{"reflect", []string{"reflect", projectName, "--apply", "--require-llm"}, timeout})
 	}
 	if cfg.Reflection.AutoResolve {
-		phases = append(phases, lifecyclePhase{"resolve", []string{"resolve", projectName, "--apply"}, 5 * time.Minute})
+		phases = append(phases, lifecyclePhase{"resolve", []string{"resolve", projectName, "--apply"}, timeout})
 	}
 	if cfg.Reflection.AutoSupersede {
-		phases = append(phases, lifecyclePhase{"supersede", []string{"supersede", projectName, "--apply"}, 10 * time.Minute})
+		phases = append(phases, lifecyclePhase{"supersede", []string{"supersede", projectName, "--apply"}, timeout})
 	}
 	return phases
 }

@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
@@ -768,5 +769,32 @@ func TestLifecyclePhasesSkipsReflectWithoutLLM(t *testing.T) {
 func TestLifecyclePhasesEmptyWhenAllDisabled(t *testing.T) {
 	if phases := lifecyclePhases(&config.Config{}, "proj", true); len(phases) != 0 {
 		t.Fatalf("expected no phases when everything is disabled, got %v", phases)
+	}
+}
+
+// TestLifecyclePhasesTimeoutFromConfig: the phase cap is opt-in. Zero — the
+// default — must mean no bound, because these phases ran unbounded before they
+// were serialized, and a too-tight cap kills a legitimately long pass.
+func TestLifecyclePhasesTimeoutFromConfig(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Reflection.AutoReflect = true
+	cfg.Reflection.AutoResolve = true
+	cfg.Reflection.AutoSupersede = true
+
+	for _, p := range lifecyclePhases(cfg, "proj", true) {
+		if p.timeout != 0 {
+			t.Errorf("phase %s timeout = %v, want 0 (unbounded) by default", p.name, p.timeout)
+		}
+	}
+
+	cfg.Reflection.LifecycleTimeoutMinutes = 45
+	phases := lifecyclePhases(cfg, "proj", true)
+	if len(phases) != 3 {
+		t.Fatalf("expected 3 phases, got %d", len(phases))
+	}
+	for _, p := range phases {
+		if p.timeout != 45*time.Minute {
+			t.Errorf("phase %s timeout = %v, want 45m", p.name, p.timeout)
+		}
 	}
 }

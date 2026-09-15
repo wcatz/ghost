@@ -61,6 +61,12 @@ type ReflectionConfig struct {
 	AutoResolve   bool `koanf:"auto_resolve"`
 	AutoSupersede bool `koanf:"auto_supersede"`
 	AutoReflect   bool `koanf:"auto_reflect"`
+	// LifecycleTimeoutMinutes bounds each phase of the auto-consolidation
+	// chain (reflect, resolve, supersede). 0 — the default — applies no bound,
+	// matching how the phases ran when they were spawned as three independent
+	// processes; a positive value caps a phase, which is only desirable on a
+	// machine where a hung phase must not block the next session's run.
+	LifecycleTimeoutMinutes int `koanf:"lifecycle_timeout_minutes"`
 }
 
 // EmbeddingConfig holds local embedding settings.
@@ -110,26 +116,27 @@ type ObsidianConfig struct {
 
 // defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{
-	"embedding.enabled":             true,
-	"embedding.ollama_url":          "http://localhost:11434",
-	"embedding.model":               "nomic-embed-text:v1.5",
-	"embedding.dimensions":          768,
-	"reflection.auto_resolve":       false,
-	"reflection.auto_supersede":     false,
-	"reflection.auto_reflect":       false,
-	"cli.claude_binary":             "",
-	"cli.opencode_binary":           "",
-	"cli.codex_binary":              "",
-	"cli.goose_binary":              "",
-	"linking.enabled":               true,
-	"linking.threshold":             0.70,
-	"linking.demotion_threshold":    0.90,
-	"injection.behavior_floor":      8,
-	"injection.behavior_categories": []string{"gotcha", "convention", "preference", "decision"},
-	"obsidian.vault_dir":            "",
-	"obsidian.interval":             "30s",
-	"obsidian.auto_sync":            false,
-	"routing.default_project":       "",
+	"embedding.enabled":                    true,
+	"embedding.ollama_url":                 "http://localhost:11434",
+	"embedding.model":                      "nomic-embed-text:v1.5",
+	"embedding.dimensions":                 768,
+	"reflection.auto_resolve":              false,
+	"reflection.auto_supersede":            false,
+	"reflection.auto_reflect":              false,
+	"reflection.lifecycle_timeout_minutes": 0,
+	"cli.claude_binary":                    "",
+	"cli.opencode_binary":                  "",
+	"cli.codex_binary":                     "",
+	"cli.goose_binary":                     "",
+	"linking.enabled":                      true,
+	"linking.threshold":                    0.70,
+	"linking.demotion_threshold":           0.90,
+	"injection.behavior_floor":             8,
+	"injection.behavior_categories":        []string{"gotcha", "convention", "preference", "decision"},
+	"obsidian.vault_dir":                   "",
+	"obsidian.interval":                    "30s",
+	"obsidian.auto_sync":                   false,
+	"routing.default_project":              "",
 }
 
 // Load reads configuration with layered precedence.
@@ -166,16 +173,17 @@ func Load() (*Config, error) {
 	// koanf's _ → . transformer would map e.g. GHOST_OBSIDIAN_VAULT_DIR
 	// to obsidian.vault.dir instead of obsidian.vault_dir.
 	envOverrides := map[string]string{
-		"GHOST_OBSIDIAN_VAULT_DIR":        "obsidian.vault_dir",
-		"GHOST_CLI_CLAUDE_BINARY":         "cli.claude_binary",
-		"GHOST_CLI_OPENCODE_BINARY":       "cli.opencode_binary",
-		"GHOST_CLI_CODEX_BINARY":          "cli.codex_binary",
-		"GHOST_CLI_GOOSE_BINARY":          "cli.goose_binary",
-		"GHOST_REFLECTION_AUTO_REFLECT":   "reflection.auto_reflect",
-		"GHOST_REFLECTION_AUTO_RESOLVE":   "reflection.auto_resolve",
-		"GHOST_REFLECTION_AUTO_SUPERSEDE": "reflection.auto_supersede",
-		"GHOST_OLLAMA_URL":                "embedding.ollama_url",
-		"GHOST_ROUTING_DEFAULT_PROJECT":   "routing.default_project",
+		"GHOST_OBSIDIAN_VAULT_DIR":                   "obsidian.vault_dir",
+		"GHOST_CLI_CLAUDE_BINARY":                    "cli.claude_binary",
+		"GHOST_CLI_OPENCODE_BINARY":                  "cli.opencode_binary",
+		"GHOST_CLI_CODEX_BINARY":                     "cli.codex_binary",
+		"GHOST_CLI_GOOSE_BINARY":                     "cli.goose_binary",
+		"GHOST_REFLECTION_AUTO_REFLECT":              "reflection.auto_reflect",
+		"GHOST_REFLECTION_AUTO_RESOLVE":              "reflection.auto_resolve",
+		"GHOST_REFLECTION_AUTO_SUPERSEDE":            "reflection.auto_supersede",
+		"GHOST_REFLECTION_LIFECYCLE_TIMEOUT_MINUTES": "reflection.lifecycle_timeout_minutes",
+		"GHOST_OLLAMA_URL":                           "embedding.ollama_url",
+		"GHOST_ROUTING_DEFAULT_PROJECT":              "routing.default_project",
 	}
 	for envKey, koanfKey := range envOverrides {
 		if val := os.Getenv(envKey); val != "" {

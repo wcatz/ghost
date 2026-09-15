@@ -227,6 +227,7 @@ linking:
   demotion_threshold: 0.95
 reflection:
   auto_resolve: true
+  lifecycle_timeout_minutes: 30
 `
 	if err := os.WriteFile(configFile, []byte(yamlContent), 0o600); err != nil {
 		t.Fatal(err)
@@ -248,6 +249,9 @@ reflection:
 	}
 	if !cfg.Reflection.AutoResolve {
 		t.Errorf("reflection.auto_resolve = %v, want true", cfg.Reflection.AutoResolve)
+	}
+	if cfg.Reflection.LifecycleTimeoutMinutes != 30 {
+		t.Errorf("reflection.lifecycle_timeout_minutes = %d, want 30", cfg.Reflection.LifecycleTimeoutMinutes)
 	}
 
 	// Unaffected defaults should remain.
