@@ -178,7 +178,7 @@ Ghost is a memory pipeline: **Save → Embed → Link → Search → Consolidate
 
 ### Hybrid search
 
-Full-text (FTS5) and vector results are fused with Reciprocal Rank Fusion (k=60), weighted 70% vector / 30% FTS. A background worker links similar memories (cosine ≥ 0.70) into a graph, which powers the Obsidian mirror's graph view, `supersedes` ranking, and near-duplicate demotion; links self-heal after consolidation rewrites memories. A graph-expansion ranking bonus was tried and removed — our own sweep (`ghost bench --sweep`) showed a deeper vector-k dominated it ([methodology](docs/benchmarks.md)).
+Full-text (FTS5) and vector results are fused with Reciprocal Rank Fusion (k=60), weighted 70% vector / 30% FTS. A background worker links similar memories (cosine ≥ 0.70) into a graph, which powers the Obsidian mirror's graph view and near-duplicate demotion (related edges at ≥ 0.90); links self-heal after consolidation rewrites memories. A graph-expansion ranking bonus was tried and removed — a public LongMemEval-S kill experiment showed a deeper vector-k dominated it ([methodology](docs/benchmarks.md)).
 
 Vectors come from a local Ollama instance (`nomic-embed-text:v1.5`, 768 dims) if one is running. **No Ollama? No error, no setup step** — Ghost is fully functional with FTS5-only search and quietly upgrades to hybrid the moment Ollama appears:
 
@@ -323,7 +323,7 @@ Note: env-var names map underscores to config dots, so keys that themselves cont
 
 ## Benchmarks
 
-Every Ghost number below is reproducible with the in-repo harnesses, and shipped with per-question logs — the competitor figures in the comparison table further down are externally sourced and not reproducible from this repo. Retrieval-only metrics are deterministic given the embedding cache; end-to-end scores are recorded runs (model-pinned, single-run — rerun variance is possible but small at temperature 0). Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
+Every Ghost number below is reproducible with the in-repo harnesses, and shipped with per-question logs — the competitor figures in the comparison table at the top of this README are externally sourced and not reproducible from this repo. Retrieval-only metrics are deterministic given the embedding cache; end-to-end scores are recorded runs (model-pinned, single-run — rerun variance is possible but small at temperature 0). Full methodology in [docs/benchmarks.md](docs/benchmarks.md).
 
 **LongMemEval-S** ([the consensus long-term-memory benchmark](https://arxiv.org/abs/2410.10813); cleaned variant, session-level retrieval against the official evidence labels, all 470 answerable questions, no LLM judge):
 
