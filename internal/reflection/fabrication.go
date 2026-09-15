@@ -1,6 +1,7 @@
 package reflection
 
 import (
+	"log/slog"
 	"regexp"
 	"strings"
 )
@@ -45,7 +46,9 @@ func shaLikeToken(tok string) bool {
 // (this repo has recorded bogus-SHA fabrications, e.g. "fdf4583" for a
 // change actually made in 0a1f004). The memory is dropped rather than the
 // whole run failing: one contaminated memory must not nuke an otherwise
-// healthy consolidation pass.
+// healthy consolidation pass. Each drop is logged, because a silently
+// discarded memory is indistinguishable from the model never emitting it —
+// the operator cannot tell a clean run from a truncated one.
 func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput) {
 	known := make(map[string]bool)
 	for _, m := range input.ExistingMemories {
@@ -65,16 +68,31 @@ func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput) {
 
 	kept := result.Memories[:0]
 	for _, m := range result.Memories {
-		suspect := false
+		var unknown []string
 		for _, tok := range shaLikeRe.FindAllString(m.Content, -1) {
 			if shaLikeToken(tok) && !known[strings.ToLower(tok)] {
-				suspect = true
-				break
+				unknown = append(unknown, tok)
 			}
 		}
-		if !suspect {
+		if len(unknown) == 0 {
 			kept = append(kept, m)
+			continue
 		}
+		slog.Warn("reflection dropped a memory with a fabricated commit SHA",
+			"category", m.Category, "tokens", strings.Join(unknown, ","),
+			"preview", previewContent(m.Content))
 	}
 	result.Memories = kept
+}
+
+// previewContent renders content as a single-line, length-bounded preview for
+// log output, so a dropped memory can be identified without dumping the whole
+// body into the log.
+func previewContent(content string) string {
+	const max = 160
+	flat := strings.Join(strings.Fields(content), " ")
+	if len(flat) > max {
+		return flat[:max] + "…"
+	}
+	return flat
 }

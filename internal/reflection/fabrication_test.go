@@ -1,6 +1,8 @@
 package reflection
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -118,5 +120,30 @@ func TestBuildReflectionPrompt_ForbidsFabrication(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q", want)
 		}
+	}
+}
+
+// TestDropFabricatedMemories_LogsDrop pins the surfacing fix: a dropped memory
+// used to vanish with no trace, making a fabricated-output run look identical
+// to a clean one.
+func TestDropFabricatedMemories_LogsDrop(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	result := &ReflectionResult{
+		Memories: []ReflectMemory{
+			{Category: "gotcha", Content: "the fix landed in fdf4583", Importance: 0.7},
+		},
+	}
+	dropFabricatedMemories(result, ReflectionInput{})
+
+	if len(result.Memories) != 0 {
+		t.Fatalf("expected the fabricated memory to be dropped, got %d", len(result.Memories))
+	}
+	out := buf.String()
+	if !strings.Contains(out, "fdf4583") || !strings.Contains(out, "fabricated") {
+		t.Fatalf("drop was not surfaced to the log: %q", out)
 	}
 }

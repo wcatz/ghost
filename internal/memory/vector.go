@@ -81,7 +81,7 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT e.memory_id, e.embedding
+		SELECT e.memory_id, e.embedding, e.model
 		FROM memory_embeddings e
 		JOIN memories m ON m.id = e.memory_id
 		WHERE m.project_id = ? OR m.project_id = '_global'
@@ -92,19 +92,33 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 	defer rows.Close() //nolint:errcheck
 
 	var entries []vecEntry
+	// Embeddings are stored per-model. A dimension mismatch means the rows
+	// were written by a different model than the one producing queryVec, and
+	// skipping them silently turns changed-model setups into "vector search
+	// found nothing" with no explanation.
+	mismatched, mismatchedModel := 0, ""
 	for rows.Next() {
-		var id string
+		var id, model string
 		var blob []byte
-		if err := rows.Scan(&id, &blob); err != nil {
+		if err := rows.Scan(&id, &blob, &model); err != nil {
 			return nil, err
 		}
 		vec := bytesToFloat32s(blob)
 		if len(vec) == len(queryVec) {
 			entries = append(entries, vecEntry{memoryID: id, embedding: vec})
+			continue
+		}
+		mismatched++
+		if mismatchedModel == "" {
+			mismatchedModel = model
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if mismatched > 0 && s.logger != nil {
+		s.logger.Warn("vector search skipped embeddings whose dimension does not match the query — the embedding model likely changed; re-embed to restore vector recall",
+			"skipped", mismatched, "usable", len(entries), "query_dims", len(queryVec), "stored_model", mismatchedModel)
 	}
 
 	// Compute cosine similarity for each entry, dropping non-positive scores: a
@@ -445,7 +459,7 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	defer s.mu.RUnlock()
 
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT memory_id, embedding FROM memory_embeddings
+		SELECT memory_id, embedding, model FROM memory_embeddings
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("load embeddings: %w", err)
@@ -453,19 +467,33 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	defer rows.Close() //nolint:errcheck
 
 	var entries []vecEntry
+	// Embeddings are stored per-model. A dimension mismatch means the rows
+	// were written by a different model than the one producing queryVec, and
+	// skipping them silently turns changed-model setups into "vector search
+	// found nothing" with no explanation.
+	mismatched, mismatchedModel := 0, ""
 	for rows.Next() {
-		var id string
+		var id, model string
 		var blob []byte
-		if err := rows.Scan(&id, &blob); err != nil {
+		if err := rows.Scan(&id, &blob, &model); err != nil {
 			return nil, err
 		}
 		vec := bytesToFloat32s(blob)
 		if len(vec) == len(queryVec) {
 			entries = append(entries, vecEntry{memoryID: id, embedding: vec})
+			continue
+		}
+		mismatched++
+		if mismatchedModel == "" {
+			mismatchedModel = model
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	if mismatched > 0 && s.logger != nil {
+		s.logger.Warn("vector search skipped embeddings whose dimension does not match the query — the embedding model likely changed; re-embed to restore vector recall",
+			"skipped", mismatched, "usable", len(entries), "query_dims", len(queryVec), "stored_model", mismatchedModel)
 	}
 
 	scored := make([]ScoredMemory, 0, len(entries))
