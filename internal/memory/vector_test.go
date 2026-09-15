@@ -864,3 +864,38 @@ func TestProductionSearchDemotesSuperseded(t *testing.T) {
 		t.Errorf("ghost_search_all must demote superseded too; got %s first", allProjects[0].ID)
 	}
 }
+
+// TestSearchVectorDropsNonPositiveSimilarity: RRF weights by rank alone, so a
+// non-positive cosine candidate must be dropped before fusion rather than claim
+// the full vector weight.
+func TestSearchVectorDropsNonPositiveSimilarity(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	pos := makeMemory(t, s, "positive similarity memory")
+	neg := makeMemory(t, s, "negative similarity memory")
+
+	q := []float32{1, 0, 0}
+	if err := s.StoreEmbedding(ctx, pos, q, "test"); err != nil {
+		t.Fatalf("StoreEmbedding pos: %v", err)
+	}
+	if err := s.StoreEmbedding(ctx, neg, []float32{-1, 0, 0}, "test"); err != nil {
+		t.Fatalf("StoreEmbedding neg: %v", err)
+	}
+
+	got, err := s.SearchVector(ctx, testProject, q, 10)
+	if err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	var sawPos bool
+	for _, sc := range got {
+		if sc.MemoryID == neg {
+			t.Errorf("negative-similarity candidate %s must be dropped, got %+v", neg, got)
+		}
+		if sc.MemoryID == pos {
+			sawPos = true
+		}
+	}
+	if !sawPos {
+		t.Errorf("positive-similarity candidate %s missing from %+v", pos, got)
+	}
+}

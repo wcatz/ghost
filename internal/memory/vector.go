@@ -107,12 +107,14 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 		return nil, err
 	}
 
-	// Compute cosine similarity for each entry.
-	scored := make([]ScoredMemory, len(entries))
-	for i, e := range entries {
-		scored[i] = ScoredMemory{
-			MemoryID: e.memoryID,
-			Score:    cosineSimilarity(queryVec, e.embedding),
+	// Compute cosine similarity for each entry, dropping non-positive scores: a
+	// cosine of 0 or below is not a match, and RRF awards weight by rank alone,
+	// so a meaningless rank-1 candidate would otherwise claim the full vector
+	// weight and enter the fused window.
+	scored := make([]ScoredMemory, 0, len(entries))
+	for _, e := range entries {
+		if sim := cosineSimilarity(queryVec, e.embedding); sim > minVectorSimilarity {
+			scored = append(scored, ScoredMemory{MemoryID: e.memoryID, Score: sim})
 		}
 	}
 
@@ -125,6 +127,12 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 	}
 	return scored, nil
 }
+
+// minVectorSimilarity is the cosine floor below which a vector candidate is
+// discarded before fusion. Only non-positive scores are dropped today — the
+// conservative choice, since RRF already ranks by position and a higher floor
+// risks evicting genuinely weak semantic matches.
+const minVectorSimilarity float32 = 0
 
 // ScoredMemory pairs a memory ID with a relevance score.
 type ScoredMemory struct {
@@ -364,7 +372,7 @@ func (s *Store) fuseAndRank(ctx context.Context, ftsResults []Memory, vecResults
 	}
 
 	memories = decayRank(memories, scores, p, limit, time.Now().UTC())
-	return s.demoteSuperseded(ctx, memories, p), nil
+	return s.demoteResults(ctx, memories, p), nil
 }
 
 // SearchHybrid combines FTS5 keyword search with vector similarity using
@@ -384,7 +392,7 @@ func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string,
 
 	// If no vector, return FTS results directly.
 	if queryVec == nil {
-		return s.demoteSuperseded(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
+		return s.demoteResults(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
 	}
 
 	// Vector results.
@@ -395,7 +403,7 @@ func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string,
 
 	// If only FTS worked, return that.
 	if len(vecResults) == 0 {
-		return s.demoteSuperseded(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
+		return s.demoteResults(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
 	}
 
 	return s.fuseAndRank(ctx, ftsResults, vecResults, limit, p)
@@ -460,9 +468,11 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 		return nil, err
 	}
 
-	scored := make([]ScoredMemory, len(entries))
-	for i, e := range entries {
-		scored[i] = ScoredMemory{MemoryID: e.memoryID, Score: cosineSimilarity(queryVec, e.embedding)}
+	scored := make([]ScoredMemory, 0, len(entries))
+	for _, e := range entries {
+		if sim := cosineSimilarity(queryVec, e.embedding); sim > minVectorSimilarity {
+			scored = append(scored, ScoredMemory{MemoryID: e.memoryID, Score: sim})
+		}
 	}
 	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
 	if len(scored) > limit {
@@ -484,7 +494,7 @@ func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []fl
 	// fused path does — otherwise cross-project search silently ranks
 	// superseded memories above their replacements whenever Ollama is down.
 	if queryVec == nil {
-		return s.demoteSuperseded(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
+		return s.demoteResults(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
 	}
 
 	vecResults, err := s.SearchVectorAll(ctx, queryVec, limit*2)
@@ -493,7 +503,7 @@ func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []fl
 	}
 
 	if len(vecResults) == 0 {
-		return s.demoteSuperseded(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
+		return s.demoteResults(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
 	}
 
 	return s.fuseAndRank(ctx, ftsResults, vecResults, limit, p)

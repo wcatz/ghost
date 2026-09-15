@@ -981,6 +981,11 @@ func TestSanitizeFTS(t *testing.T) {
 			input: "one two three four five six seven eight nine ten eleven twelve",
 			want:  `"one" OR "two" OR "three" OR "four" OR "five" OR "six" OR "seven" OR "eight" OR "nine" OR "ten"`,
 		},
+		{
+			name:  "preserves a trailing prefix star outside the quotes",
+			input: "sqlite* helm",
+			want:  `"sqlite"* OR "helm"`,
+		},
 	}
 
 	for _, tc := range tests {
@@ -995,14 +1000,26 @@ func TestSanitizeFTS(t *testing.T) {
 
 // TestSanitizeFTSNWiderCap verifies Upsert's duplicate-recall probe (which
 // calls sanitizeFTSN(content, 30)) gets a wider word cap than plain search
-// (sanitizeFTS, capped at 10) — see sanitizeFTSN's doc comment for why the
-// caps must differ.
+// (sanitizeFTS, capped at 10) — see sanitizeFTSN's doc comment and
+// ftsSearchWordLimit for why the caps must differ.
 func TestSanitizeFTSNWiderCap(t *testing.T) {
 	input := "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twentyone twentytwo twentythree twentyfour twentyfive twentysix twentyseven twentyeight twentynine thirty thirtyone thirtytwo"
 	want := `"one" OR "two" OR "three" OR "four" OR "five" OR "six" OR "seven" OR "eight" OR "nine" OR "ten" OR "eleven" OR "twelve" OR "thirteen" OR "fourteen" OR "fifteen" OR "sixteen" OR "seventeen" OR "eighteen" OR "nineteen" OR "twenty" OR "twentyone" OR "twentytwo" OR "twentythree" OR "twentyfour" OR "twentyfive" OR "twentysix" OR "twentyseven" OR "twentyeight" OR "twentynine" OR "thirty"`
 	got := sanitizeFTSN(input, 30)
 	if got != want {
 		t.Errorf("sanitizeFTSN(%q, 30)\n  got:  %s\n  want: %s", input, got, want)
+	}
+}
+
+// TestSanitizeFTSDefaultCap pins the default search cap: 35 terms in, 30 out.
+func TestSanitizeFTSDefaultCap(t *testing.T) {
+	var terms []string
+	for i := 1; i <= 35; i++ {
+		terms = append(terms, fmt.Sprintf("t%d", i))
+	}
+	got := sanitizeFTS(strings.Join(terms, " "))
+	if n := strings.Count(got, " OR ") + 1; n != ftsSearchWordLimit {
+		t.Errorf("sanitizeFTS returned %d terms, want %d", n, ftsSearchWordLimit)
 	}
 }
 
