@@ -186,7 +186,7 @@ Ghost is a memory pipeline: **Save → Embed → Link → Search → Consolidate
 
 ### Hybrid search
 
-Full-text (FTS5) and vector results are fused with Reciprocal Rank Fusion (k=60), weighted 70% vector / 30% FTS. A background worker links similar memories (cosine ≥ 0.70) into a graph, which powers the Obsidian mirror's graph view and future link-aware features; links self-heal after consolidation rewrites memories. An experimental graph-expansion ranking bonus exists but ships disabled — our own benchmark sweep (`ghost bench --sweep`) showed it demoting exact matches, so it stays off until a redesign beats that measurement ([methodology](docs/benchmarks.md)).
+Full-text (FTS5) and vector results are fused with Reciprocal Rank Fusion (k=60), weighted 70% vector / 30% FTS. A background worker links similar memories (cosine ≥ 0.70) into a graph, which powers the Obsidian mirror's graph view, `supersedes` ranking, and near-duplicate demotion; links self-heal after consolidation rewrites memories. A graph-expansion ranking bonus was tried and removed — our own sweep (`ghost bench --sweep`) showed a deeper vector-k dominated it ([methodology](docs/benchmarks.md)).
 
 Vectors come from a local Ollama instance (`nomic-embed-text:v1.5`, 768 dims) if one is running. **No Ollama? No error, no setup step** — Ghost is fully functional with FTS5-only search and quietly upgrades to hybrid the moment Ollama appears:
 
@@ -226,7 +226,7 @@ Beyond memories: tasks (`pending`/`active`/`done`/`blocked`), decision records w
 
 Saving a memory is the beginning, not the end. Ghost tracks what happened *after* you saved — which facts got replaced, which findings turned out to be intermediate, which memories are near-duplicates of each other — and uses that to keep search results honest:
 
-- **Resolve** (`ghost resolve`) — marks resolved-evidence memories (changelog entries, cost estimates, closed experiment notes) with `resolved_at`, dropping them from ranked injection while keeping them searchable. Uses MCP Sampling for zero-credit classification in live sessions; the CLI path uses an API key.
+- **Resolve** (`ghost resolve`) — marks resolved-evidence memories (changelog entries, cost estimates, closed experiment notes) with `resolved_at`, dropping them from ranked injection while keeping them searchable. Classification runs through a CLI harness — in a live session, the one that called it — so it bills to that CLI's subscription. No API key is involved; Ghost strips `ANTHROPIC_API_KEY` and friends from the subprocess it spawns.
 - **Supersede** (`ghost supersede`) — creates directed `supersedes` links between memories (newer replaces older). A single LLM call classifies each candidate pair as SUPERSEDES / CAUSES / NEITHER. Re-runnable and self-healing after consolidation rewrites memories.
 - **Demote** — when a superseded memory and its replacement both appear in search results, the older one is sunk below every present superseder. Targeted demotion on genuine replacement pairs only (a blanket age-only recency prior destroys old-but-correct retrieval — measured, published, ship-off). Flips staleness fresh-wins from 0.083 to 1.000 while leaving unrelated retrieval untouched (see [staleness suite](docs/benchmarks.md#phase-3--staleness-suite-the-flagship)).
 - **Link** — a background worker auto-links related memories (cosine ≥ 0.70) into a graph. Links power the Obsidian mirror's graph view, supersedes ranking, and near-duplicate demotion at injection time.
@@ -404,7 +404,7 @@ Skipped deliberately: LOCOMO (publicly audited answer-key and judge problems) an
 
 Ghost is a solo project, built because I wanted my own agents to stop forgetting, and used daily on real infrastructure work. What you can verify rather than trust:
 
-- Pure Go, `CGO_ENABLED=0`, 8 direct dependencies (SQLite via `modernc.org/sqlite` — no C toolchain anywhere); a static binary around 12.5 MB
+- Pure Go, `CGO_ENABLED=0`, 8 direct dependencies (SQLite via `modernc.org/sqlite` — no C toolchain anywhere); a static binary of 13-14 MB depending on platform
 - ~1:1 test-to-code ratio; CI runs `go vet`, `golangci-lint`, and race-enabled tests on every PR and push to main
 - Releases for 6 OS/arch targets built by GoReleaser with checksums, plus a multi-arch Docker image
 
