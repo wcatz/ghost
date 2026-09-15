@@ -4231,3 +4231,131 @@ func TestGetProjectPath(t *testing.T) {
 		t.Error("expected an error for an unknown project")
 	}
 }
+
+// TestReplaceNonManualPreservesIdentity pins the identity fix: a memory the
+// consolidator re-emits with unchanged content used to be deleted and
+// re-inserted under a fresh ID, and because memory_embeddings and memory_links
+// are ON DELETE CASCADE, every reflection cost that memory its embedding and
+// its links (and its access stats).
+func TestReplaceNonManualPreservesIdentity(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	targetID, err := s.Create(ctx, testProject, Memory{
+		Category: "preference", Content: "manual anchor memory", Source: "manual",
+		Importance: 0.8, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create manual anchor: %v", err)
+	}
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "identical content survives", Source: "reflection",
+		Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.StoreEmbedding(ctx, id, []float32{1, 0, 0}, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO memory_links (source_id, target_id, relation) VALUES (?, ?, 'related')`,
+		id, targetID); err != nil {
+		t.Fatalf("insert link: %v", err)
+	}
+
+	// Re-emit the same content (category change only, which must be applied).
+	replacement := []Memory{
+		{Category: "convention", Content: "identical content survives", Importance: 0.9, Tags: []string{}},
+	}
+	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	var got *Memory
+	for i := range all {
+		if all[i].ID == id {
+			got = &all[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("memory %s was not preserved; IDs are now %v", id, memoryIDs(all))
+	}
+	if got.Content != "identical content survives" {
+		t.Errorf("content = %q, want %q", got.Content, "identical content survives")
+	}
+	if got.Category != "convention" || got.Importance != 0.9 {
+		t.Errorf("rewrite not applied: category=%q importance=%v", got.Category, got.Importance)
+	}
+	if got.Source != "reflection" {
+		t.Errorf("source = %q, want reflection", got.Source)
+	}
+
+	var embeddings int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memory_embeddings WHERE memory_id = ?`, id).Scan(&embeddings); err != nil {
+		t.Fatalf("count embeddings: %v", err)
+	}
+	if embeddings != 1 {
+		t.Errorf("embedding for %s was cascaded away (count=%d)", id, embeddings)
+	}
+
+	var links int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memory_links WHERE source_id = ? OR target_id = ?`, id, id).Scan(&links); err != nil {
+		t.Fatalf("count links: %v", err)
+	}
+	if links != 1 {
+		t.Errorf("link for %s was cascaded away (count=%d)", id, links)
+	}
+}
+
+func memoryIDs(mems []Memory) []string {
+	ids := make([]string, 0, len(mems))
+	for _, m := range mems {
+		ids = append(ids, m.ID)
+	}
+	return ids
+}
+
+// TestReplaceNonManualWhitespaceDifferenceDoesNotReuse pins the exact-match
+// rule: reuse keeps the row's existing embedding, so it is only valid when the
+// text is byte-identical. A whitespace-only change must take the insert path
+// instead of leaving a vector that no longer describes the content.
+func TestReplaceNonManualWhitespaceDifferenceDoesNotReuse(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "trailing space here", Source: "reflection",
+		Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := s.StoreEmbedding(ctx, id, []float32{1, 0, 0}, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+
+	replacement := []Memory{
+		{Category: "fact", Content: "trailing space here ", Importance: 0.5, Tags: []string{}},
+	}
+	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("expected exactly 1 memory, got %d", len(all))
+	}
+	if all[0].ID == id {
+		t.Error("whitespace-differing content reused the row, leaving a stale embedding attached")
+	}
+}
