@@ -366,8 +366,8 @@ func TestTieredConsolidator_QualityGateAcceptsMechanicalTier(t *testing.T) {
 	}
 
 	sparse := &stubConsolidator{
-		name:      "sqlite",
-		available: true,
+		name:       "sqlite",
+		available:  true,
 		mechanical: true,
 		result: ReflectionResult{
 			LearnedContext: "sparse-ctx",
@@ -563,14 +563,85 @@ func TestLlmConsolidator_NilClient(t *testing.T) {
 	}
 }
 
+// TestGateMinOutput pins the scale-aware quality-gate minimum: strict 30% on
+// small inputs, relaxing to a small absolute count on a large backlog (so a
+// valid large consolidation is not rejected for keeping fewer than a
+// percentage the prompt never asks for).
+func TestGateMinOutput(t *testing.T) {
+	cases := []struct {
+		input int
+		want  int
+	}{
+		{6, 2},
+		{10, 3},
+		{60, 18},
+		{130, 11},
+		{200, 5},
+		{1000, 5},
+	}
+	for _, tc := range cases {
+		if got := gateMinOutput(tc.input); got != tc.want {
+			t.Errorf("gateMinOutput(%d) = %d, want %d", tc.input, got, tc.want)
+		}
+	}
+}
+
+// TestTieredConsolidator_QualityGateAcceptsLargeBacklogConsolidation guards the
+// regression that motivated the scale-aware floor: a 172-memory incident log
+// consolidating to ~24 distinct facts (14%) is the correct answer, but the old
+// flat 30% floor rejected it on every run, so that project never
+// auto-consolidated.
+func TestTieredConsolidator_QualityGateAcceptsLargeBacklogConsolidation(t *testing.T) {
+	inputs := make([]memory.Memory, 172)
+	for i := range inputs {
+		inputs[i] = memory.Memory{Category: "gotcha", Content: "incident note", Importance: 0.8}
+	}
+	outputs := make([]ReflectMemory, 24)
+	for i := range outputs {
+		outputs[i] = ReflectMemory{Category: "gotcha", Content: "distinct fact", Importance: 0.8, Tags: []string{}}
+	}
+
+	llm := &stubConsolidator{
+		name:      "cli",
+		available: true,
+		result:    ReflectionResult{LearnedContext: "ctx", Memories: outputs},
+	}
+	tc := NewTieredConsolidator([]Consolidator{llm}, slog.Default())
+	if _, err := tc.Consolidate(context.Background(), ReflectionInput{ExistingMemories: inputs}); err != nil {
+		t.Fatalf("large-backlog consolidation must pass the gate, got %v", err)
+	}
+}
+
+// TestTieredConsolidator_QualityGateRejectsTruncatedBacklog keeps the
+// truncation backstop: 200 -> 2 is 1%, below even the backlog floor (5%), so it
+// is still rejected.
+func TestTieredConsolidator_QualityGateRejectsTruncatedBacklog(t *testing.T) {
+	inputs := make([]memory.Memory, 200)
+	for i := range inputs {
+		inputs[i] = memory.Memory{Category: "gotcha", Content: "incident note", Importance: 0.8}
+	}
+	llm := &stubConsolidator{
+		name:      "cli",
+		available: true,
+		result: ReflectionResult{LearnedContext: "truncated", Memories: []ReflectMemory{
+			{Category: "gotcha", Content: "one", Importance: 0.8, Tags: []string{}},
+			{Category: "gotcha", Content: "two", Importance: 0.8, Tags: []string{}},
+		}},
+	}
+	tc := NewTieredConsolidator([]Consolidator{llm}, slog.Default())
+	if _, err := tc.Consolidate(context.Background(), ReflectionInput{ExistingMemories: inputs}); err == nil {
+		t.Fatal("expected error: 200 -> 2 is below the backlog floor and must be rejected")
+	}
+}
+
 // --- stubs ---
 
 type stubConsolidator struct {
-	name      string
-	available bool
+	name       string
+	available  bool
 	mechanical bool
-	result    ReflectionResult
-	err       error
+	result     ReflectionResult
+	err        error
 }
 
 func (s *stubConsolidator) Name() string                     { return s.name }
