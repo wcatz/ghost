@@ -54,7 +54,7 @@ user PATH. Open a new terminal afterward, then run `ghost mcp init`.
 
 Re-running the command upgrades an existing install in place.
 
-**Using Cursor, Goose, or another MCP client?** Ghost speaks standard MCP over stdio — point any client at the binary:
+**Using Cursor or another MCP client?** Ghost speaks standard MCP over stdio. `ghost mcp init` has no installer for Cursor, so add the server by hand:
 
 ```json
 { "mcpServers": { "ghost": { "type": "stdio", "command": "ghost", "args": ["mcp"] } } }

@@ -21,6 +21,25 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Verify server.json matches the tag
+        # server.json is what an MCP registry reads, so a stale version there
+        # publishes a stale artifact regardless of what the release actually
+        # built. Gate the release on it rather than letting it drift silently
+        # (it once read 0.15.0 while the release was 0.29.0).
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          FILE_VERSION=$(jq -r '.version' server.json)
+          IDENTIFIER=$(jq -r '.packages[0].identifier' server.json)
+          if [ "$FILE_VERSION" != "$VERSION" ]; then
+            echo "::error::server.json version ($FILE_VERSION) does not match tag ($VERSION) — bump server.json in the release commit before tagging."
+            exit 1
+          fi
+          if [ "$IDENTIFIER" != "ghcr.io/wcatz/ghost:${VERSION}" ]; then
+            echo "::error::server.json identifier ($IDENTIFIER) does not match ghcr.io/wcatz/ghost:${VERSION}"
+            exit 1
+          fi
+          echo "server.json matches release ${VERSION}"
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:

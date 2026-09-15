@@ -115,6 +115,33 @@ jobs:
         # 'latest' can change scan behavior without a repository change.
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
+  # The MCP-registry manifest (server.json) is release metadata, not Go code,
+  # so nothing else in CI notices when it drifts — it sat at 0.15.0 while the
+  # latest release was 0.29.0 for exactly that reason. This job pins its two
+  # version fields to each other; release.yml additionally pins them to the
+  # tag being released.
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate server.json
+        run: |
+          jq -e . server.json >/dev/null
+          VERSION=$(jq -r '.version' server.json)
+          IDENTIFIER=$(jq -r '.packages[0].identifier' server.json)
+          # Bare semver only — the git tag carries the leading "v", the
+          # manifest must not.
+          if ! grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' <<<"$VERSION"; then
+            echo "::error::server.json version '$VERSION' is not bare semver (expected e.g. 0.29.0)"
+            exit 1
+          fi
+          if [ "$IDENTIFIER" != "ghcr.io/wcatz/ghost:${VERSION}" ]; then
+            echo "::error::server.json packages[0].identifier ('$IDENTIFIER') must be ghcr.io/wcatz/ghost:${VERSION}"
+            exit 1
+          fi
+          echo "server.json consistent at ${VERSION}"
+
   # Heavy leg: race-instrumented compile dominates wall time, so it runs
   # concurrently with lint. The job name is a required branch-protection
   # context — do not rename casually.
