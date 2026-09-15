@@ -589,7 +589,14 @@ Flags:
 		fmt.Fprintf(os.Stderr, "error: get timestamp: %v\n", err)
 		os.Exit(1)
 	}
-	existingMemories, err := store.GetAll(ctx, projectID, 200)
+	// Load every memory, not a capped page: ReplaceNonManual deletes the whole
+	// non-manual/unpinned/unresolved set for the project, so the consolidation
+	// input must cover exactly that set. A LIMIT here silently dropped the
+	// overflow (memories beyond the cap were deleted by the replace but never
+	// seen by the consolidator, surviving only in the snapshot), which is
+	// reachable as soon as a project exceeds the cap. An oversized input now
+	// fails in the consolidator (nothing written) instead of losing memories.
+	existingMemories, err := store.GetAll(ctx, projectID, -1)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: get memories: %v\n", err)
 		os.Exit(1)
