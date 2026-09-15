@@ -659,8 +659,7 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 
 		if _, err = tx.ExecContext(ctx, `
 			UPDATE memories
-			SET importance = ?, access_count = access_count + 1,
-			    resolved_at = NULL
+			SET importance = ?, access_count = access_count + 1
 			WHERE id = ? AND project_id = ?
 		`, newImportance, existingID, projectID); err != nil {
 			return "", "", 0, fmt.Errorf("strengthen memory: %w", err)
@@ -1038,12 +1037,20 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 		newTags = string(b)
 	}
 
+	// resolved_at is a resolve pass's verdict, not part of the editable fields.
+	// Only a content change may clear it — a metadata-only edit (tags,
+	// importance, category) must not resurrect resolved evidence into ranked
+	// injection. Content edits are treated as the memory being reasserted.
+	clearResolved := 0
+	if newContent != curContent {
+		clearResolved = 1
+	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE memories
 		SET content = ?, category = ?, importance = ?, tags = ?, updated_at = datetime('now'),
-		    resolved_at = NULL
+		    resolved_at = CASE WHEN ? THEN NULL ELSE resolved_at END
 		WHERE id = ?
-	`, newContent, newCategory, newImportance, newTags, id); err != nil {
+	`, newContent, newCategory, newImportance, newTags, clearResolved, id); err != nil {
 		return fmt.Errorf("update memory: %w", err)
 	}
 

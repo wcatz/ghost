@@ -55,3 +55,27 @@ func TestIsResolvedWrapsContentAsData(t *testing.T) {
 		t.Errorf("content not wrapped in data delimiters; user content:\n%s", fp.lastUserContent)
 	}
 }
+
+// TestIsResolvedRejectsNegatedResolved guards the KEEP bias: a model reply that
+// negates "resolved" must not be read as RESOLVED, which would bury a live
+// memory out of ranked injection on a single stray word.
+func TestIsResolvedRejectsNegatedResolved(t *testing.T) {
+	for _, resp := range []string{
+		"not resolved",
+		"NOT RESOLVED",
+		"never resolved",
+		"isn't resolved",
+		"unresolved",
+		"not-resolved",
+		"non-resolved",
+	} {
+		fp := &fakeProvider{resp: resp}
+		got, err := NewResolutionClassifier(fp).IsResolved(context.Background(), "content")
+		if err != nil {
+			t.Fatalf("IsResolved(%q): %v", resp, err)
+		}
+		if got {
+			t.Errorf("IsResolved(%q) = true, want false (KEEP)", resp)
+		}
+	}
+}
