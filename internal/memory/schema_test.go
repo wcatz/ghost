@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -60,5 +62,61 @@ func TestOpenDBInMemory(t *testing.T) {
 	var n int
 	if err := db.QueryRow(`SELECT count(*) FROM projects`).Scan(&n); err != nil {
 		t.Fatalf("schema not initialized on :memory:: %v", err)
+	}
+}
+
+// TestOpenDBRefusesNewerSchema: a database stamped with a newer schema must be
+// refused, not opened read-write against a schema the binary cannot interpret.
+func TestOpenDBRefusesNewerSchema(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion+1)); err != nil {
+		t.Fatalf("bump user_version: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := OpenDB(dbPath); err == nil {
+		t.Fatal("expected OpenDB to refuse a database newer than the binary")
+	}
+}
+
+// TestBackupBeforeMigrate: the pre-migration copy must exist and contain the
+// data as it was before any migration step.
+func TestBackupBeforeMigrate(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.Exec(`INSERT INTO projects (id, name, path) VALUES ('p', 'p', '/p')`); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	if err := backupBeforeMigrate(db, dbPath); err != nil {
+		t.Fatalf("backupBeforeMigrate: %v", err)
+	}
+
+	matches, _ := filepath.Glob(dbPath + ".pre-migrate-*")
+	if len(matches) != 1 {
+		t.Fatalf("expected exactly one backup file, got %v", matches)
+	}
+
+	bdb, err := sql.Open("sqlite", "file:"+matches[0])
+	if err != nil {
+		t.Fatalf("open backup: %v", err)
+	}
+	defer func() { _ = bdb.Close() }()
+	var n int
+	if err := bdb.QueryRow(`SELECT count(*) FROM projects WHERE id = 'p'`).Scan(&n); err != nil {
+		t.Fatalf("query backup: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("backup does not contain the pre-migration row: count=%d", n)
 	}
 }

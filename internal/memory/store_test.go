@@ -2190,6 +2190,36 @@ func TestMergeProject_SameID(t *testing.T) {
 	}
 }
 
+// TestMergeProject_ReassignsSnapshots pins the regression: memory_snapshots
+// .project_id is ON DELETE CASCADE, so a merge that reassigns every other child
+// table but not snapshots silently destroys the merged project's undo history
+// when the old project row is deleted.
+func TestMergeProject_ReassignsSnapshots(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "test", "test", "dup-project"); err != nil {
+		t.Fatalf("EnsureProject dup: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags)
+		 VALUES ('snap-1', 'test', 'fact', 'c', 0.7, 'reflection', '[]')`); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+
+	if err := s.MergeProject(ctx, "test", testProject); err != nil {
+		t.Fatalf("MergeProject: %v", err)
+	}
+
+	var pid string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT project_id FROM memory_snapshots WHERE snapshot_id = 'snap-1'`).Scan(&pid); err != nil {
+		t.Fatalf("snapshot lost by merge: %v", err)
+	}
+	if pid != testProject {
+		t.Errorf("snapshot project_id = %q, want %q", pid, testProject)
+	}
+}
+
 // seedFullProject creates four memories, four memory-link pairs, two tasks,
 // one decision (which also creates its own linked memory row,
 // source='decision_log', bringing the memory total to 5), three token_usage

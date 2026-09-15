@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -231,7 +233,21 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("read schema version: %w", err)
 	}
+	// A database written by a newer ghost has columns, constraints, or tables
+	// this binary does not know about. Opening it read-write would let this
+	// binary corrupt state it cannot interpret, so refuse instead.
+	if version > schemaVersion {
+		_ = db.Close()
+		return nil, fmt.Errorf("database schema v%d is newer than this ghost build (v%d) — upgrade ghost before opening it", version, schemaVersion)
+	}
 	if version < schemaVersion {
+		// Migration steps rebuild and DROP tables, so a bug in a step is
+		// unrecoverable without a copy. Fail closed: if the backup cannot be
+		// written, do not migrate.
+		if err := backupBeforeMigrate(db, dbPath); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("pre-migration backup: %w", err)
+		}
 		if err := migrate(db, version); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("migrate schema v%d→v%d: %w", version, schemaVersion, err)
@@ -239,4 +255,23 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	}
 
 	return db, nil
+}
+
+// backupBeforeMigrate writes a one-shot copy of dbPath beside it before any
+// migration step runs, named "<db>.pre-migrate-<unix>". In-memory databases are
+// skipped. A failure aborts the open rather than proceeding without a fallback
+// — the caller decides whether an un-migratable database is acceptable, and the
+// only alternative is an unrecoverable destructive migration.
+func backupBeforeMigrate(db *sql.DB, dbPath string) error {
+	if dbPath == ":memory:" {
+		return nil
+	}
+	backup := fmt.Sprintf("%s.pre-migrate-%d", dbPath, time.Now().Unix())
+	if _, err := os.Stat(backup); err == nil {
+		return fmt.Errorf("backup path already exists: %s", backup)
+	}
+	if _, err := db.Exec(`VACUUM INTO ?`, backup); err != nil {
+		return fmt.Errorf("vacuum into %s: %w", backup, err)
+	}
+	return nil
 }
