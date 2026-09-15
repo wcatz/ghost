@@ -404,7 +404,7 @@ func (s *Server) registerTools() {
 	// ghost_memory_search — search memories by keyword or semantic query.
 	type searchArgs struct {
 		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'platform-ops', 'web-app')"`
-		Query     string `json:"query" jsonschema:"Search query — natural language or FTS5 (e.g. 'helm deploy', 'sqlite*', 'auth AND token')"`
+		Query     string `json:"query" jsonschema:"Search query — natural language or FTS5 (e.g. 'helm deploy', 'sqlite*'; trailing * is a prefix match, terms are OR'd)"`
 		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
 	}
@@ -412,7 +412,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_search",
 		Title:       "Search Memories",
-		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'). When category is set, the search fetches limit*3 results then post-filters — results may be incomplete if that category is sparse in the index. For exhaustive category browsing use ghost_memories_list. Example: project_id='ghost', query='approval flow', category='architecture'.",
+		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. When category is set, the search fetches limit*3 results then post-filters — results may be incomplete if that category is sparse in the index. For exhaustive category browsing use ghost_memories_list. Example: project_id='ghost', query='approval flow', category='architecture'.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -1776,12 +1776,27 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID string) (str
 		sb.WriteString(learned)
 	}
 
-	// Include global memories (preferences, conventions) that apply to all projects.
+	// Include global memories (preferences, conventions) that apply to all
+	// projects. GetTopMemories above already mixes '_global' rows into the
+	// project list, so skip any global already shown there rather than
+	// repeating the highest-value preferences in the token budget.
 	if projectID != "_global" {
+		seen := make(map[string]bool, len(memories))
+		for _, m := range memories {
+			seen[m.ID] = true
+		}
 		globals, gErr := s.store.GetTopMemories(ctx, "_global", 15)
-		if gErr == nil && len(globals) > 0 {
-			sb.WriteString("\n\n## Global (applies to all projects)\n\n")
-			sb.WriteString(formatMemories(globals))
+		if gErr == nil {
+			var extra []memory.Memory
+			for _, g := range globals {
+				if !seen[g.ID] {
+					extra = append(extra, g)
+				}
+			}
+			if len(extra) > 0 {
+				sb.WriteString("\n\n## Global (applies to all projects)\n\n")
+				sb.WriteString(formatMemories(extra))
+			}
 		}
 	}
 
@@ -1838,7 +1853,11 @@ func formatMemories(memories []memory.Memory) string {
 		// Content is wrapped in «...» data delimiters: it is free text the
 		// agent itself (or an indirect-injection source it summarized) wrote —
 		// stored data, not a new instruction, however imperative it reads.
-		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, quoteData(m.Content))
+		resolved := ""
+		if m.ResolvedAt != nil {
+			resolved = " [resolved]"
+		}
+		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, quoteData(m.Content))
 	}
 	return sb.String()
 }

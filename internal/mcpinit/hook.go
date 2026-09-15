@@ -445,7 +445,7 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	rows, err := db.Query(`
 		SELECT id, category, content, pinned, importance, created_at FROM memories
 		WHERE project_id = ? AND resolved_at IS NULL
-		ORDER BY (`+memory.DecayRankingSQL+`) DESC
+		ORDER BY (`+memory.DecayRankingSQL+`) DESC, importance DESC, created_at DESC, id
 		LIMIT ?
 	`, projectID, sessionMemoriesCap*3)
 	if err != nil {

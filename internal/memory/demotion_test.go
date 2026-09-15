@@ -123,3 +123,59 @@ func TestDemotionPenaltiesQueryErrorPropagates(t *testing.T) {
 		t.Fatal("expected error from DemotionPenalties on closed db, got nil")
 	}
 }
+
+// TestDemotionPenaltiesIncludesDuplicateEdges: Upsert's 'duplicate' edges are
+// exempt from the cosine strength threshold (their strength is a Jaccard
+// score), so a lexically near-identical pair is demoted even though the linker
+// never wrote a >=0.90 'related' edge for it.
+func TestDemotionPenaltiesIncludesDuplicateEdges(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a := makeMemory(t, s, "deploy uses postgres sixteen")
+	b := makeMemory(t, s, "deploy uses postgres sixteen")
+
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO memory_links (source_id, target_id, relation, strength, source)
+		 VALUES (?, ?, 'duplicate', 0.5, 'auto')`, b, a); err != nil {
+		t.Fatalf("insert duplicate link: %v", err)
+	}
+
+	// Rank order [b, a]: the lower-ranked member (a) must be penalized.
+	penalty, err := DemotionPenalties(ctx, s.db, []string{b, a}, map[string]bool{}, DefaultDemotionThreshold)
+	if err != nil {
+		t.Fatalf("DemotionPenalties: %v", err)
+	}
+	if penalty[a] != 1 {
+		t.Errorf("expected duplicate edge to penalize lower-ranked %s, got penalty=%v", a, penalty)
+	}
+}
+
+// TestNearDuplicateDemoteReordersSearchWindow verifies the search path's
+// demotion actually reorders the window: with [B, A, other] and a B-A
+// duplicate edge, A (lower-ranked) sinks below the unrelated memory.
+func TestNearDuplicateDemoteReordersSearchWindow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a := makeMemory(t, s, "alpha duplicate")
+	b := makeMemory(t, s, "alpha duplicate")
+	other := makeMemory(t, s, "unrelated fact")
+
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO memory_links (source_id, target_id, relation, strength, source)
+		 VALUES (?, ?, 'duplicate', 0.5, 'auto')`, b, a); err != nil {
+		t.Fatalf("insert duplicate link: %v", err)
+	}
+
+	in := []Memory{{ID: b}, {ID: a}, {ID: other}}
+	out := s.demoteNearDuplicates(ctx, in)
+	if len(out) != 3 {
+		t.Fatalf("demotion changed membership: %v", out)
+	}
+	if out[0].ID != b {
+		t.Errorf("duplicate winner should stay first, got %s", out[0].ID)
+	}
+	if out[2].ID != a {
+		t.Errorf("duplicate loser should sink below the unrelated memory, got order %s,%s,%s",
+			out[0].ID, out[1].ID, out[2].ID)
+	}
+}

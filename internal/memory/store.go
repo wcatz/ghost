@@ -753,7 +753,7 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 		FROM memories
 		WHERE (project_id = ? OR project_id = '_global')
 		  AND resolved_at IS NULL
-		ORDER BY (`+DecayRankingSQL+`) DESC
+		ORDER BY (`+DecayRankingSQL+`) DESC, importance DESC, created_at DESC, id
 		LIMIT ?
 	`, projectID, limit*2)
 	if err != nil {
@@ -1550,11 +1550,19 @@ func mergeScore(a, b map[string]bool) float64 {
 	return 0
 }
 
-// sanitizeFTS sanitizes text into an FTS5 OR-query, capped at 10 words. Used
-// on the search path (SearchFTS, SearchFTSAll) — kept at the original cap so
-// retrieval-quality behavior (see TestBenchRegressionFloors) is unaffected.
+// ftsSearchWordLimit caps how many query terms reach the FTS leg. It is
+// deliberately 10, not larger: raising it (tested at 15/20/25/30) broadens the
+// OR query enough that FTS-only NDCG@10 rises to 0.992 while fused hybrid
+// stays 0.989, inverting the regression guard that fusion must beat either
+// single leg (internal/bench TestBenchRegressionFloors). Recovering a
+// natural-language query's tail terms needs term *selection*
+// (stopword/identifier ranking), not a bigger cap.
+const ftsSearchWordLimit = 10
+
+// sanitizeFTS sanitizes text into an FTS5 OR-query. Used on the search path
+// (SearchFTS, SearchFTSAll); capped by ftsSearchWordLimit.
 func sanitizeFTS(text string) string {
-	return sanitizeFTSN(text, 10)
+	return sanitizeFTSN(text, ftsSearchWordLimit)
 }
 
 // sanitizeFTSN sanitizes text into an FTS5 OR-query, capped at maxWords.
@@ -1566,6 +1574,11 @@ func sanitizeFTSN(text string, maxWords int) string {
 	// Remove FTS5 operators and punctuation, keep only words.
 	var words []string
 	for _, word := range strings.Fields(text) {
+		// A trailing '*' is an FTS5 prefix operator. Capture it before the edge
+		// trim (which would strip it) and re-attach it outside the quotes as
+		// "term"*, so the 'sqlite*' syntax advertised in the tool description
+		// actually works instead of degrading to an exact-token match.
+		prefix := strings.HasSuffix(word, "*")
 		// Strip non-alphanumeric characters from edges only — interior
 		// punctuation (192.168.9.150, sealed-secrets) is preserved so FTS5's
 		// tokenizer can still split and match exact identifiers.
@@ -1578,7 +1591,11 @@ func sanitizeFTSN(text string, maxWords int) string {
 			// otherwise it unbalances the "..." wrapper and lets the token
 			// re-enter raw FTS5 query grammar instead of staying a literal.
 			escaped := strings.ReplaceAll(clean, `"`, `""`)
-			words = append(words, `"`+escaped+`"`)
+			term := `"` + escaped + `"`
+			if prefix {
+				term += "*"
+			}
+			words = append(words, term)
 		}
 	}
 	if len(words) == 0 {
