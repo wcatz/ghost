@@ -54,8 +54,25 @@ func writeIfChanged(path, content string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return false, err
 	}
-	tmp := path + ".ghost-tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+	// A fixed temp name collides when two syncs write the same note at once
+	// (a manual run plus the auto-sync worker), so the rename could publish a
+	// partially interleaved file. Use a unique temp file in the same
+	// directory — rename stays atomic and last-writer-wins is well defined.
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".ghost-tmp-*")
+	if err != nil {
+		return false, err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) //nolint:errcheck // no-op once the rename succeeds
+	if err := f.Chmod(0o644); err != nil {
+		f.Close() //nolint:errcheck
+		return false, err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		f.Close() //nolint:errcheck
+		return false, err
+	}
+	if err := f.Close(); err != nil {
 		return false, err
 	}
 	return true, os.Rename(tmp, path)
