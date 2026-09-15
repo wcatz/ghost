@@ -1,6 +1,7 @@
 package reflection
 
 import (
+	"log/slog"
 	"regexp"
 	"strings"
 )
@@ -45,8 +46,13 @@ func shaLikeToken(tok string) bool {
 // (this repo has recorded bogus-SHA fabrications, e.g. "fdf4583" for a
 // change actually made in 0a1f004). The memory is dropped rather than the
 // whole run failing: one contaminated memory must not nuke an otherwise
-// healthy consolidation pass.
-func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput) {
+// healthy consolidation pass. Each drop is logged, because a silently
+// discarded memory is indistinguishable from the model never emitting it —
+// the operator cannot tell a clean run from a truncated one.
+func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	known := make(map[string]bool)
 	for _, m := range input.ExistingMemories {
 		for _, tok := range shaLikeRe.FindAllString(m.Content, -1) {
@@ -65,16 +71,32 @@ func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput) {
 
 	kept := result.Memories[:0]
 	for _, m := range result.Memories {
-		suspect := false
+		var unknown []string
 		for _, tok := range shaLikeRe.FindAllString(m.Content, -1) {
 			if shaLikeToken(tok) && !known[strings.ToLower(tok)] {
-				suspect = true
-				break
+				unknown = append(unknown, tok)
 			}
 		}
-		if !suspect {
+		if len(unknown) == 0 {
 			kept = append(kept, m)
+			continue
 		}
+		logger.Warn("reflection dropped a memory with a fabricated commit SHA",
+			"category", m.Category, "tokens", strings.Join(unknown, ","),
+			"preview", previewContent(m.Content))
 	}
 	result.Memories = kept
+}
+
+// previewContent renders content as a single-line, length-bounded preview for
+// log output, so a dropped memory can be identified without dumping the whole
+// body into the log. Truncation is by rune, not byte, so the cut never lands
+// mid-rune and emits invalid UTF-8 (memory content is arbitrary text).
+func previewContent(content string) string {
+	const max = 160
+	flat := strings.Join(strings.Fields(content), " ")
+	if r := []rune(flat); len(r) > max {
+		return string(r[:max]) + "…"
+	}
+	return flat
 }

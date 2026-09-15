@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/wcatz/ghost/internal/ai"
@@ -20,6 +21,19 @@ type reflector interface {
 type LlmConsolidator struct {
 	client reflector
 	name   string
+	logger *slog.Logger
+}
+
+// SetLogger lets the tiered consolidator route this tier's diagnostics through
+// the configured sink (GHOST_LOG_FILE / level filtering) instead of the
+// package-global default. Nil is the unset state; log() falls back.
+func (h *LlmConsolidator) SetLogger(l *slog.Logger) { h.logger = l }
+
+func (h *LlmConsolidator) log() *slog.Logger {
+	if h.logger == nil {
+		return slog.Default()
+	}
+	return h.logger
 }
 
 // NewLlmConsolidator wraps an existing LLM client that has a Reflect method.
@@ -54,7 +68,7 @@ func (h *LlmConsolidator) Consolidate(ctx context.Context, input ReflectionInput
 	if err != nil {
 		return ReflectionResult{}, err
 	}
-	dropFabricatedMemories(&result, input)
+	dropFabricatedMemories(&result, input, h.log())
 	return result, nil
 }
 

@@ -1,8 +1,11 @@
 package memory
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -14,18 +17,18 @@ func TestDecayFactor_MatchesSQLSemantics(t *testing.T) {
 		ageDays  float64
 		want     float64
 	}{
-		{"decision", false, 0, 1.0},                    // brand new → no decay
-		{"decision", false, 30, 0.5},                   // tau=30: 1/(1+30/30)
-		{"gotcha", false, 30, 0.5},                     // same tier as decision
-		{"dependency", false, 90, 0.25},                // tau=30: 1/(1+90/30), above 0.15 floor
-		{"pattern", false, 45, 0.5},                    // tau=45: 1/(1+45/45)
-		{"architecture", false, 100, 45.0 / 145.0},     // tau=45: 1/(1+100/45), above 0.3 floor
-		{"preference", false, 1000, 1.0},               // never decays
-		{"convention", false, 1000, 1.0},               // never decays
-		{"fact", false, 1000, 1.0},                     // never decays
-		{"decision", true, 1000, 1.0},                  // pinned → exempt
-		{"gotcha", true, 30, 1.0},                      // pinned beats decay
-		{"decision", false, -5, 1.2},                   // negative age: SQL doesn't clamp, factor > 1
+		{"decision", false, 0, 1.0},                // brand new → no decay
+		{"decision", false, 30, 0.5},               // tau=30: 1/(1+30/30)
+		{"gotcha", false, 30, 0.5},                 // same tier as decision
+		{"dependency", false, 90, 0.25},            // tau=30: 1/(1+90/30), above 0.15 floor
+		{"pattern", false, 45, 0.5},                // tau=45: 1/(1+45/45)
+		{"architecture", false, 100, 45.0 / 145.0}, // tau=45: 1/(1+100/45), above 0.3 floor
+		{"preference", false, 1000, 1.0},           // never decays
+		{"convention", false, 1000, 1.0},           // never decays
+		{"fact", false, 1000, 1.0},                 // never decays
+		{"decision", true, 1000, 1.0},              // pinned → exempt
+		{"gotcha", true, 30, 1.0},                  // pinned beats decay
+		{"decision", false, -5, 1.2},               // negative age: SQL doesn't clamp, factor > 1
 	}
 	const eps = 1e-9
 	for _, c := range cases {
@@ -897,5 +900,41 @@ func TestSearchVectorDropsNonPositiveSimilarity(t *testing.T) {
 	}
 	if !sawPos {
 		t.Errorf("positive-similarity candidate %s missing from %+v", pos, got)
+	}
+}
+
+// TestVectorSearchDimensionMismatchIsSurfaced pins the surfacing fix: when the
+// embedding model changes, stored vectors no longer match the query dimension
+// and every row is skipped — previously indistinguishable from an empty index.
+func TestVectorSearchDimensionMismatchIsSurfaced(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var buf bytes.Buffer
+	store := NewStore(db, slog.New(slog.NewTextHandler(&buf, nil)))
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "test-proj", "/test", "test"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	id := createTestMemory(t, store, ctx, "some memory")
+	if err := store.StoreEmbedding(ctx, id, []float32{1, 0, 0}, "stale-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+
+	results, err := store.SearchVector(ctx, "test-proj", []float32{1, 0}, 10)
+	if err != nil {
+		t.Fatalf("SearchVector: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results for mismatched dimensions, got %d", len(results))
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "dimension") || !strings.Contains(out, "stale-model") {
+		t.Fatalf("dimension mismatch was not surfaced: %q", out)
 	}
 }
