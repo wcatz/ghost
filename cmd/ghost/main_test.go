@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -711,5 +712,61 @@ func TestRunProjectMergeCore_RefusesGlobal(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "_global") {
 			t.Errorf("merge %q -> %q: expected _global refusal, got: %v", tc.oldArg, tc.newArg, err)
 		}
+	}
+}
+
+// TestLifecyclePhasesOrder pins the ordering contract that the single-process
+// coordinator exists to enforce: reflect (a rewrite) must run before resolve
+// (stamps resolved_at) and supersede (links rows).
+func TestLifecyclePhasesOrder(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Reflection.AutoReflect = true
+	cfg.Reflection.AutoResolve = true
+	cfg.Reflection.AutoSupersede = true
+
+	phases := lifecyclePhases(cfg, "proj", true)
+	got := make([]string, 0, len(phases))
+	for _, p := range phases {
+		got = append(got, p.name)
+	}
+	want := []string{"reflect", "resolve", "supersede"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("phase order = %v, want %v", got, want)
+	}
+	if !reflect.DeepEqual(phases[0].args, []string{"reflect", "proj", "--apply", "--require-llm"}) {
+		t.Errorf("reflect args = %v", phases[0].args)
+	}
+	if !reflect.DeepEqual(phases[1].args, []string{"resolve", "proj", "--apply"}) {
+		t.Errorf("resolve args = %v", phases[1].args)
+	}
+	if !reflect.DeepEqual(phases[2].args, []string{"supersede", "proj", "--apply"}) {
+		t.Errorf("supersede args = %v", phases[2].args)
+	}
+}
+
+// TestLifecyclePhasesSkipsReflectWithoutLLM: without a real LLM tier an
+// unattended consolidation would rewrite every non-manual memory through the
+// Jaccard-only sqlite tier, so the reflect phase must be dropped while the
+// non-LLM phases still run.
+func TestLifecyclePhasesSkipsReflectWithoutLLM(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Reflection.AutoReflect = true
+	cfg.Reflection.AutoResolve = true
+	cfg.Reflection.AutoSupersede = true
+
+	phases := lifecyclePhases(cfg, "proj", false)
+	got := make([]string, 0, len(phases))
+	for _, p := range phases {
+		got = append(got, p.name)
+	}
+	want := []string{"resolve", "supersede"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("phase order without LLM = %v, want %v", got, want)
+	}
+}
+
+func TestLifecyclePhasesEmptyWhenAllDisabled(t *testing.T) {
+	if phases := lifecyclePhases(&config.Config{}, "proj", true); len(phases) != 0 {
+		t.Fatalf("expected no phases when everything is disabled, got %v", phases)
 	}
 }

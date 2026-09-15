@@ -70,6 +70,9 @@ func main() {
 		case "resolve":
 			runResolve()
 			return
+		case "lifecycle":
+			runLifecycle()
+			return
 		case "project":
 			if len(os.Args) > 2 && os.Args[2] == "delete" {
 				runProjectDelete()
@@ -422,6 +425,110 @@ func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName 
 		os.Exit(1)
 	}
 	return projectID
+}
+
+// runLifecycle runs the enabled auto-consolidation phases for one project, in
+// order, inside a single process: reflect (which rewrites memories), then
+// resolve (which stamps resolved_at), then supersede (which links memories).
+//
+// Each phase is a separate `ghost` child process, so a failure in one phase
+// cannot corrupt the next, and a failing phase does not abort the remaining
+// ones — the stop hook spawns this detached and never reads its exit status,
+// so this log is the only record. Running them sequentially here is the whole
+// point: spawned as three independent processes they raced, and reflect's
+// rewrite could replace rows while supersede was classifying them (foreign-key
+// aborts and lost resolved_at stamps).
+//
+// Internal subcommand: not listed in help.
+func runLifecycle() {
+	args := os.Args[2:]
+	var projectName, source string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--source":
+			if i+1 < len(args) {
+				source = args[i+1]
+				i++
+			}
+		default:
+			if projectName == "" {
+				projectName = args[i]
+			}
+		}
+	}
+	if projectName == "" {
+		fmt.Fprintln(os.Stderr, "usage: ghost lifecycle <project> [--source <src>]")
+		os.Exit(1)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: load config: %v\n", err)
+		os.Exit(1)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: locate ghost binary: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Consolidation is only worth an unattended write when a real LLM tier is
+	// reachable: without one, reflect's --tier auto would fall through to the
+	// Jaccard-only sqlite tier and rewrite every non-manual memory for no
+	// quality gain. resolve/supersede have no local fallback, so a missing
+	// harness simply makes their phase fail fast and be logged.
+	llmOK := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary).Available() ||
+		ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary).Available()
+
+	if cfg.Reflection.AutoReflect && !llmOK {
+		fmt.Fprintln(os.Stderr, "lifecycle: skipping reflect — no CLI binary available")
+	}
+	for _, ph := range lifecyclePhases(cfg, projectName, llmOK) {
+		phaseArgs := append([]string{}, ph.args...)
+		if source != "" {
+			phaseArgs = append(phaseArgs, "--source", source)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), ph.timeout)
+		cmd := exec.CommandContext(ctx, exe, phaseArgs...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		start := time.Now()
+		runErr := cmd.Run()
+		cancel()
+		if runErr != nil {
+			fmt.Fprintf(os.Stderr, "lifecycle: %s failed after %s (continuing): %v\n", ph.name, time.Since(start).Round(time.Second), runErr)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "lifecycle: %s completed in %s\n", ph.name, time.Since(start).Round(time.Second))
+	}
+}
+
+// lifecyclePhase is one step of the auto-consolidation chain: a ghost
+// subcommand, its arguments, and the outer bound on how long it may run.
+type lifecyclePhase struct {
+	name    string
+	args    []string
+	timeout time.Duration
+}
+
+// lifecyclePhases returns the enabled phases in execution order: reflect, then
+// resolve, then supersede. The order is the contract — consolidation rewrites
+// memories, so it has to finish before resolve stamps resolved_at or supersede
+// links rows. Reflect is dropped when llmOK is false (no real LLM tier means a
+// Jaccard-only rewrite for no quality gain). Extracted from runLifecycle so the
+// ordering is unit-testable without spawning processes.
+func lifecyclePhases(cfg *config.Config, projectName string, llmOK bool) []lifecyclePhase {
+	var phases []lifecyclePhase
+	if cfg.Reflection.AutoReflect && llmOK {
+		phases = append(phases, lifecyclePhase{"reflect", []string{"reflect", projectName, "--apply", "--require-llm"}, 15 * time.Minute})
+	}
+	if cfg.Reflection.AutoResolve {
+		phases = append(phases, lifecyclePhase{"resolve", []string{"resolve", projectName, "--apply"}, 5 * time.Minute})
+	}
+	if cfg.Reflection.AutoSupersede {
+		phases = append(phases, lifecyclePhase{"supersede", []string{"supersede", projectName, "--apply"}, 10 * time.Minute})
+	}
+	return phases
 }
 
 // runReflect manually triggers memory consolidation for a project.
