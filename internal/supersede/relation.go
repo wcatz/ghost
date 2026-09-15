@@ -57,9 +57,13 @@ Respond with exactly one word: SUPERSEDES, CAUSES, or NEITHER.`
 
 // Classify asks the classifier to judge the relationship between newer and
 // older. Every call goes through one CLI-harness provider, so there is no
-// fallback distinction for callers to withhold. An unparseable response is a
-// fatal error, not a silent NEITHER default — a silent default would mask a
-// broken prompt or model regression as normal, uneventful traffic.
+// fallback distinction for callers to withhold.
+//
+// A reply with no recognizable verdict returns errUnparseableVerdict wrapped in
+// the error: the caller skips and counts that pair (Run increments
+// Result.Unclassified) rather than defaulting silently to NEITHER, which would
+// mask a broken prompt as uneventful traffic. Transport failures — a dead
+// harness, an outage — are plain errors and stay fatal to the pass.
 func (h *RelationClassifier) Classify(ctx context.Context, newer, older string) (Relation, error) {
 	content := "OLDER: " + quoteData(older) + "\nNEWER: " + quoteData(newer)
 	result, err := h.client.Classify(ctx, classifySystemPrompt, content)
@@ -95,10 +99,12 @@ var relationSynonyms = map[string]Relation{
 	"UNRELATED": RelationNeither,
 }
 
-// parseRelation scans resp for the first decisive token (SUPERSEDES, CAUSES,
-// or NEITHER, or a recognized synonym), guarding against a rambling reply that
-// merely mentions one in passing — we check the first decisive token, not
-// substring containment.
+// parseRelation scans resp for the first decisive canonical token (SUPERSEDES,
+// CAUSES or NEITHER), guarding against a rambling reply that merely mentions
+// one in passing — we check the first decisive token, not substring
+// containment. A recognized synonym counts only when the whole reply is that
+// single word: as bare stems they collide with ordinary prose, where "the
+// correct answer is NEITHER" would otherwise decide SUPERSEDES on "correct".
 func parseRelation(resp string) (Relation, bool) {
 	fields := strings.Fields(strings.ToUpper(resp))
 	for _, field := range fields {

@@ -213,10 +213,11 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 //
 // CreateLink and InvalidateLink are both idempotent no-ops when there's
 // nothing to change, so re-running Run converges and self-heals after
-// reflection's cascade-delete of links. A classifier error on one pair is
-// fatal (the caller decides whether a partial pass is acceptable); a
-// link-write error is fatal so a half-written pair is never silently left
-// behind.
+// reflection's cascade-delete of links. A pair whose verdict is unparseable is
+// skipped and counted (Result.Unclassified); any other classifier error — a
+// dead harness, an outage — is fatal so a transport failure cannot look like a
+// successful, empty pass. A link-write error is fatal so a half-written pair is
+// never silently left behind.
 func Run(ctx context.Context, store vectorStore, cls Classifier, projectID string, threshold float32, apply bool, logger *slog.Logger) (Result, []Classified, error) {
 	fresh, err := SelectCandidates(ctx, store, projectID, threshold)
 	if err != nil {
