@@ -504,3 +504,36 @@ func TestClaimPidFile_PlaceholderCarriesToken(t *testing.T) {
 		t.Errorf("processStartTime succeeded (token=%q) but placeholder token is %q (haveToken=%v): %q", wantToken, token, haveToken, content)
 	}
 }
+
+// TestSafeProjectIDComponent pins the pid-path hardening: project ids arrive
+// from callers (an MCP client can send any project_id, and EnsureProject stores
+// it verbatim), so a value that could traverse out of the data directory or
+// reshape the filename must be rejected before a path is built from it.
+func TestSafeProjectIDComponent(t *testing.T) {
+	valid := []string{"ghost", "my-proj_1.2", "a", "Project-123"}
+	for _, id := range valid {
+		if !safeProjectIDComponent(id) {
+			t.Errorf("safeProjectIDComponent(%q) = false, want true", id)
+		}
+	}
+
+	invalid := []string{
+		"",
+		".",
+		"..",
+		"../../etc/cron.d/evil",
+		"lifecycle-../evil",
+		"a/b",
+		`a\b`,
+		"a/../b",
+		"has space",
+		"café",
+		"tab\ttab",
+		"nul\x00byte",
+	}
+	for _, id := range invalid {
+		if safeProjectIDComponent(id) {
+			t.Errorf("safeProjectIDComponent(%q) = true, want false", id)
+		}
+	}
+}
