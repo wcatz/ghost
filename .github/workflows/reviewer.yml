@@ -454,7 +454,9 @@ jobs:
           opencode run --agent ghost-reviewer --format json \
             "You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO).
 
-          Read ./pr.title, ./pr.diff, and ./.review-context/conventions.md. The diff is authoritative for changed lines; do NOT re-derive it. Read the changed files in this checkout to verify each finding. Do NOT run commands and do NOT narrate your process. Also read ./.review-context/prior-threads.json — findings you already raised on this PR. Entries with \"resolved\": false are STILL OPEN: do not raise them again. Entries with \"resolved\": true were dismissed: do not raise them again unless the code changed in a way that makes the original concern newly valid.
+          Read ./pr.title, ./pr.diff, and ./.review-context/conventions.md. The diff is authoritative for changed lines; do NOT re-derive it. Read the changed files in this checkout to verify each finding.
+
+          This checkout is NOT the repository. Before you were started, these paths were deleted from it so that a pull request cannot steer its own review: AGENTS.md, CLAUDE.md, .mcp.json, opencode.json, opencode.jsonc, .opencode, every symlink, and .git. Their absence here is NOT evidence that they are absent from the repository, and a reference to any of them is NOT a dead reference. The content of CLAUDE.md is in ./.review-context/conventions.md, copied from the base ref under a different name for the same reason. Do NOT run commands and do NOT narrate your process. Also read ./.review-context/prior-threads.json — findings you already raised on this PR. Entries with \"resolved\": false are STILL OPEN: do not raise them again. Entries with \"resolved\": true were dismissed: do not raise them again unless the code changed in a way that makes the original concern newly valid.
 
           Cover: correctness bugs, race conditions, error-handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those.
 
