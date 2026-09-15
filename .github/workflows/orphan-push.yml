@@ -18,13 +18,10 @@ name: orphan-push
 # without it the fix leaves a permanent red mark on the very PR that
 # applied it. Re-running here finds the now-open PR and passes.
 #
-# It also gives the one known race a way to heal. best-practices-loop.yml
-# pushes its branch (line 143) before `gh pr create` (line 144), and its
-# prior-PR guard only looks for OPEN ones — so a same-month re-run after a
-# closed draft can push to a branch whose only PR is closed. In practice
-# runner start-up is far slower than the second between those two lines,
-# so the PR exists before this job queries; if it ever loses that race,
-# the pull_request run that follows turns the check green.
+# The path it heals is the one above: a branch deleted on merge, then
+# recreated by a push. There the failure is certain, not racy — every
+# pull request for that branch is already closed — and opening a new one
+# is both the fix and the thing that turns the check green.
 on:
   push:
     branches-ignore: [main]
