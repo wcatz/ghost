@@ -117,18 +117,24 @@ func (d *Dir) Release() {
 // Reap removes stale per-invocation directories from the scratch root. It
 // scans only the root's direct entries and never the root itself.
 //
-// An entry whose ownerFile names a pid that is not alive is removed. An entry
-// without a readable marker — including one being written right now — is
-// removed only once its mtime is older than maxAge, so a directory still being
-// set up is not torn out from under its owner. Symlinks are left alone
-// entirely: the root is Ghost-owned, but a link can point anywhere, and
-// removing one must never follow it.
+// Only entries demonstrably created by Ghost are eligible for removal: one
+// with a readable ownerFile marker, or — for a markerless entry, including one
+// whose marker is being written right now — one whose name has exactly the
+// shape Open creates. A markerless entry is removed only once its mtime is
+// older than maxAge. Anything else, such as a foreign file or directory that
+// happens to live under the root, is left alone: $GHOST_SCRATCH_DIR may point
+// at a shared directory, and Ghost must never delete what it did not create.
+// Symlinks are left alone entirely: the root is Ghost-owned, but a link can
+// point anywhere, and removing one must never follow it.
 //
 // Liveness mirrors internal/mcpinit's pid check (signal 0, which tests
-// existence without signaling). A pid since reused by an unrelated process
-// merely delays reaping a leaked directory until the age backstop, which is
-// acceptable for scratch: the directory occupies space, not correctness, and
-// the next reap after that process exits collects it.
+// existence without signaling), but it only protects an entry within maxAge.
+// maxAge is a hard ceiling on every entry: one whose marker names an alive
+// process is collected once it exceeds maxAge, so a pid reused by an unrelated
+// long-lived process can spare a leaked directory only until then — nothing
+// can be pinned indefinitely. No legitimate invocation lives that long (the
+// lifecycle bounds every phase with a timeout), so the ceiling cannot tear a
+// live invocation's scratch directory out from under its child.
 //
 // Removal failures and entries that vanish mid-scan are ignored — several
 // Ghost processes (one MCP server per client session) may reap concurrently,
@@ -158,12 +164,19 @@ func Reap(maxAge time.Duration) (int, error) {
 		if info.Mode()&os.ModeSymlink != 0 {
 			continue // never follow or remove links
 		}
+		stale := now.Sub(info.ModTime()) > maxAge
 		if pid, ok := ownerPID(path); ok {
-			if processAlive(pid) {
+			// The marker proves ownership; liveness only shields a live
+			// invocation inside the age ceiling.
+			if processAlive(pid) && !stale {
 				continue
 			}
-		} else if now.Sub(info.ModTime()) <= maxAge {
-			continue
+		} else {
+			// No marker: only Open's exact name shape proves this is Ghost's,
+			// and only the age backstop justifies removal.
+			if !isScratchDirName(entry.Name()) || !stale {
+				continue
+			}
 		}
 		if err := os.RemoveAll(path); err == nil {
 			removed++
@@ -173,8 +186,9 @@ func Reap(maxAge time.Duration) (int, error) {
 }
 
 // ownerPID reads the pid from dir's ownerFile marker. ok is false when the
-// marker is missing, unreadable, or malformed, in which case only the mtime
-// age backstop may collect the directory.
+// marker is missing, unreadable, or malformed; without a marker, Reap collects
+// the directory only when its name matches the Open shape and the mtime age
+// backstop has passed.
 func ownerPID(dir string) (int, bool) {
 	data, err := os.ReadFile(filepath.Join(dir, ownerFile))
 	if err != nil {
@@ -192,6 +206,33 @@ func ownerPID(dir string) (int, bool) {
 		return pid, true
 	}
 	return 0, false
+}
+
+// isScratchDirName reports whether name has exactly the shape Open creates:
+// <decimal pid>-<16 lowercase hex chars>. It exists because Reap must only
+// remove entries it can prove Ghost created — an override root may be shared —
+// so for a markerless entry the name is the only ownership evidence there is.
+// The match is deliberately strict (no sign, spaces, extra dashes, or
+// uppercase hex) so a foreign name cannot accidentally qualify.
+func isScratchDirName(name string) bool {
+	pid, rest, found := strings.Cut(name, "-")
+	if !found || pid == "" {
+		return false
+	}
+	for _, r := range pid {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	if len(rest) != 16 {
+		return false
+	}
+	for _, r := range rest {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // processAlive reports whether pid names a running process, mirroring
