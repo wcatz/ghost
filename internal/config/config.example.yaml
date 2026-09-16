@@ -52,6 +52,14 @@
 # reflection:
 #   auto_reflect: false               # run ghost reflect --apply automatically on session stop
 #   auto_resolve: false               # run ghost resolve automatically after reflect
+#   auto_supersede: false             # run ghost supersede automatically after reflect
+#                                     # (the enabled phases run in order: reflect, resolve, supersede)
+#   lifecycle_timeout_minutes: 60     # bound each phase; 0 disables. Keep it above
+#                                     # consolidation_timeout_minutes.
+#   consolidation_timeout_minutes: 10 # bound ONE reflect consolidation call; 0 disables.
+#                                     # Raise it for large projects: a big backlog can take
+#                                     # minutes on a CLI harness, and the kill is fatal on the
+#                                     # autonomous path (--require-llm has no fallback tier).
 
 # --- Obsidian Vault Mirror ---
 # One-way Markdown mirror of memories, decisions, and tasks
