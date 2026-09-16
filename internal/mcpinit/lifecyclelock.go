@@ -1,17 +1,21 @@
 package mcpinit
 
 import (
+	"context"
+	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // pidInFile returns the pid recorded in pidPath, or 0 when the file is missing
-// or malformed. It reads only the pid, ignoring the creation-time token that
-// isProcessAlive uses.
+// or malformed. Only the pid is read; the creation-time token that
+// isProcessAlive uses is irrelevant for the ownership check in release.
 func pidInFile(pidPath string) int {
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
@@ -25,34 +29,56 @@ func pidInFile(pidPath string) int {
 	return pid
 }
 
-// AcquireLifecycleLock ensures this process holds the per-project lifecycle
-// claim before it runs the phases.
+// AcquireLifecycleLock claims the per-project lifecycle lock for the project
+// named by project, which may be a name, id, or path (as Store.ResolveProject
+// accepts).
 //
-// The stop hook claims the file on the child's behalf before spawning it (it
-// writes the child's pid after Start), so a spawned coordinator normally finds
-// the file already holding its own pid and proceeds without re-claiming — that
-// is why the self-pid case is a success rather than a conflict. A coordinator
-// no hook spawned, i.e. a manual `ghost lifecycle`, claims the file itself, so
-// it can no longer overlap a hook-spawned run for the same project (observed
-// while verifying: two reflect/supersede chains ran for one project at once).
+// The identifier is resolved to the project ID before the lock path is built,
+// so a manual `ghost lifecycle --project <name>` and a hook-spawned run (which
+// passes the ID) contend for the SAME file. The resolved ID is also validated
+// as a safe filename component: project ids are unconstrained by the store, so
+// a crafted identifier could otherwise make the pid path escape the data dir.
 //
-// Returns (release, true) when this process holds the claim, (nil, false) when
-// another live run holds it. It fails OPEN on any setup error: a lifecycle that
-// cannot compute its lock path must still run, since the phases are convergent
-// and a skipped maintenance run is worse than a rare overlap.
-func AcquireLifecycleLock(projectID string) (func(), bool) {
+// The lock is claimed only by the coordinator process itself. The hook does not
+// pre-claim on the child's behalf: it cannot know the child's pid until after
+// Start, and a claim written between Start and that write would make the child
+// see a foreign (parent) pid and abort — silently dropping the whole
+// reflect/resolve/supersede cycle. Making the child the sole claimer removes
+// that window; a redundant spawn simply loses the claim and exits.
+//
+// Returns (release, true, nil) when this process holds the claim;
+// (nil, false, nil) when another live run holds it; and (noop, true, err)
+// when the lock could not be evaluated at all — the caller should warn and
+// continue, because the phases are convergent and skipping maintenance is
+// worse than a rare overlap.
+func AcquireLifecycleLock(project string) (func(), bool, error) {
 	noop := func() {}
+
 	dataDir, err := config.DataDir()
 	if err != nil {
-		return noop, true
+		return noop, true, fmt.Errorf("locate data dir: %w", err)
 	}
-	pidPath := filepath.Join(dataDir, "lifecycle-"+projectID+".pid")
+	db, err := sql.Open("sqlite", roDSN(filepath.Join(dataDir, "ghost.db")))
+	if err != nil {
+		return noop, true, fmt.Errorf("open database: %w", err)
+	}
+	defer db.Close() //nolint:errcheck
 
-	if pidInFile(pidPath) == os.Getpid() {
-		return noop, true // the hook already claimed this run
+	id, _, err := memory.NewStore(db, nil).ResolveProject(context.Background(), project)
+	if err != nil {
+		return noop, true, fmt.Errorf("resolve project %q: %w", project, err)
 	}
+	if id == "" {
+		// Unknown project: nothing to lock, and the phases will report it.
+		return noop, true, nil
+	}
+	if !safeProjectIDComponent(id) {
+		return noop, true, fmt.Errorf("project id %q is not a safe filename component", id)
+	}
+
+	pidPath := filepath.Join(dataDir, "lifecycle-"+id+".pid")
 	if !claimPidFile(pidPath) {
-		return nil, false
+		return nil, false, nil
 	}
 	return func() {
 		// Remove the claim only while it is still ours; a later run re-claiming
@@ -60,5 +86,5 @@ func AcquireLifecycleLock(projectID string) (func(), bool) {
 		if pidInFile(pidPath) == os.Getpid() {
 			_ = os.Remove(pidPath)
 		}
-	}, true
+	}, true, nil
 }

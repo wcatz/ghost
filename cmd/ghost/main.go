@@ -447,12 +447,16 @@ func runLifecycle() {
 		os.Exit(1)
 	}
 
-	// Hold the per-project lifecycle claim for the whole chain. The stop hook
-	// claims it before spawning (writing this process's pid), so a spawned
-	// coordinator finds its own pid and proceeds; a manual run claims it here
-	// and therefore cannot overlap a hook-spawned one.
-	release, ok := mcpinit.AcquireLifecycleLock(projectName)
-	if !ok {
+	// Hold the per-project lifecycle claim for the whole chain. The claim is
+	// keyed on the RESOLVED project id, so a manual run by name and a
+	// hook-spawned run (which passes the id) contend for the same file. A lock
+	// that cannot be evaluated at all is a warning, not a stop: the phases are
+	// convergent, and a skipped maintenance run is worse than a rare overlap.
+	release, ok, lockErr := mcpinit.AcquireLifecycleLock(projectName)
+	switch {
+	case lockErr != nil:
+		fmt.Fprintf(os.Stderr, "lifecycle: warning: could not take the per-project lock (%v); continuing unlocked\n", lockErr)
+	case !ok:
 		fmt.Fprintf(os.Stderr, "lifecycle: another lifecycle is already running for project %s; exiting\n", projectName)
 		return
 	}
