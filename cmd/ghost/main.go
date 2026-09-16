@@ -30,6 +30,7 @@ import (
 	"github.com/wcatz/ghost/internal/obsidian"
 	"github.com/wcatz/ghost/internal/reflection"
 	"github.com/wcatz/ghost/internal/resolve"
+	"github.com/wcatz/ghost/internal/scratch"
 	"github.com/wcatz/ghost/internal/selfupdate"
 	"github.com/wcatz/ghost/internal/supersede"
 )
@@ -484,6 +485,17 @@ func runLifecycle() {
 	if cfg.Reflection.AutoReflect && !llmOK {
 		fmt.Fprintln(os.Stderr, "lifecycle: skipping reflect — no CLI binary available")
 	}
+
+	// Stale per-invocation scratch dirs from crashed harness children would
+	// otherwise accumulate between lifecycles; reap before this run's own
+	// children start creating new ones. A reap failure is a warning, not a
+	// stop: the phases are the point of this process and they converge.
+	if removed, reapErr := scratch.Reap(24 * time.Hour); reapErr != nil {
+		fmt.Fprintf(os.Stderr, "lifecycle: warning: scratch reap failed: %v\n", reapErr)
+	} else {
+		fmt.Fprintf(os.Stderr, "lifecycle: scratch reap removed=%d\n", removed)
+	}
+
 	for _, ph := range lifecyclePhases(cfg, projectName, llmOK) {
 		phaseArgs := append([]string{}, ph.args...)
 		if source != "" {

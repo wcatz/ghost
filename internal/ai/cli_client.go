@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -68,8 +67,8 @@ func (c *CLIClient) run(ctx context.Context, prompt string, extraArgs ...string)
 	}
 	args := append([]string{"-p", "--setting-sources", "project,local"}, extraArgs...)
 	args = append(args, prompt)
-	cmd := exec.CommandContext(ctx, c.binary, args...)
-	cmd.Env = stripLLMKeys(os.Environ())
+	cmd, release, _ := harnessCommand(ctx, c.binary, args, stripLLMKeys(os.Environ()), "claude")
+	defer release()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

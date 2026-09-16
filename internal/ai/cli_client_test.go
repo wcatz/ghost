@@ -30,6 +30,9 @@ func fakeClaudeBinary(t *testing.T, script string) string {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary requires a POSIX shell")
 	}
+	// run() opens a scratch dir on every invocation; pin the root to the
+	// test's temp dir so the real data dir is never touched.
+	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
 	dir := t.TempDir()
 	path := filepath.Join(dir, "claude")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
