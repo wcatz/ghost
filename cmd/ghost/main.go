@@ -911,6 +911,35 @@ Flags:
 		return
 	}
 
+	// Guarded-drop audit (#337): gotcha/dependency/preference/convention
+	// memories must be merged, never deleted outright. Refusing the whole
+	// consolidation preserved fidelity but meant a rich project was never
+	// consolidated at all (measured: 1 success in 13 attempts on a 220-memory
+	// project), so the dropped memories are now retained VERBATIM instead: the
+	// zero-loss invariant still holds and the rest of the consolidation
+	// applies. Because the retained content is byte-identical to the stored
+	// memory, ReplaceNonManual reuses its row and its embedding/links survive
+	// (#452). --allow-drops keeps its meaning: accept the deletions.
+	guardedDrops := reflection.AuditGuardedDrops(input, result)
+	if len(guardedDrops) > 0 {
+		fmt.Fprintf(os.Stderr, "WARNING: %d guarded-category memory(ies) had no surviving merge target:\n", len(guardedDrops))
+		for _, d := range guardedDrops {
+			truncated := d.Content
+			if len(truncated) > 100 {
+				truncated = truncated[:100] + "..."
+			}
+			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, truncated)
+		}
+		if allowDrops {
+			fmt.Fprintf(os.Stderr, "  --allow-drops set: these %d memories will be DELETED\n", len(guardedDrops))
+		} else {
+			retained := reflection.RetainGuardedDrops(guardedDrops)
+			result.Memories = append(result.Memories, retained...)
+			projectMems = append(projectMems, retained...)
+			fmt.Fprintf(os.Stderr, "  retained %d verbatim — nothing dropped\n", len(retained))
+		}
+	}
+
 	var existingNonManual int
 	for _, m := range live {
 		if m.Source != "manual" {
@@ -922,25 +951,6 @@ Flags:
 			len(projectMems), existingNonManual)
 		if len(globalMems) > 0 {
 			fmt.Fprintf(os.Stderr, "  (%d memories classified as global — check scope accuracy)\n", len(globalMems))
-		}
-	}
-
-	// Guarded-drop audit (#337): gotcha/dependency/preference/convention
-	// memories must be merged, never deleted outright. Dry-run reports them;
-	// --apply refuses to write unless --allow-drops is set.
-	guardedDrops := reflection.AuditGuardedDrops(input, result)
-	if len(guardedDrops) > 0 {
-		fmt.Fprintf(os.Stderr, "WARNING: %d guarded-category memory(ies) would be deleted without a merge:\n", len(guardedDrops))
-		for _, d := range guardedDrops {
-			truncated := d.Content
-			if len(truncated) > 100 {
-				truncated = truncated[:100] + "..."
-			}
-			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, truncated)
-		}
-		if apply && !allowDrops {
-			fmt.Fprintln(os.Stderr, "error: refusing to apply — re-run with --allow-drops to accept these deletions")
-			os.Exit(1)
 		}
 	}
 

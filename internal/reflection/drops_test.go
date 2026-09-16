@@ -62,3 +62,59 @@ func TestAuditGuardedDrops_IgnoresUnguardedCategories(t *testing.T) {
 		t.Fatalf("want only the preference flagged, got %+v", drops)
 	}
 }
+
+// TestRetainGuardedDrops_CarriesFieldsVerbatim: retention must not launder the
+// memory. Content stays byte-identical so ReplaceNonManual's exact-content
+// reuse matches the original row and its embedding/links survive (#452), and
+// importance/tags survive so re-insertion does not reweight or untag it.
+func TestRetainGuardedDrops_CarriesFieldsVerbatim(t *testing.T) {
+	drops := []DroppedGuarded{{
+		Category:   "gotcha",
+		Content:    "SSH to the Hetzner bastion goes through port 2222, not 22",
+		Importance: 0.9,
+		Tags:       []string{"ssh", "port"},
+	}}
+	retained := RetainGuardedDrops(drops)
+	if len(retained) != 1 {
+		t.Fatalf("want 1 retained memory, got %d", len(retained))
+	}
+	m := retained[0]
+	if m.Category != "gotcha" {
+		t.Errorf("category = %q, want gotcha", m.Category)
+	}
+	if m.Content != drops[0].Content {
+		t.Errorf("content not verbatim: %q", m.Content)
+	}
+	if m.Importance != 0.9 {
+		t.Errorf("importance = %v, want 0.9", m.Importance)
+	}
+	if len(m.Tags) != 2 || m.Tags[0] != "ssh" || m.Tags[1] != "port" {
+		t.Errorf("tags = %v, want [ssh port]", m.Tags)
+	}
+}
+
+// TestRetainGuardedDrops_ZeroLoss is the invariant retention exists for: after
+// retaining every flagged drop, no guarded input is uncovered. This is what
+// lets reflect APPLY on a rich project instead of refusing (the pre-#458
+// behaviour measured 1 success in 13 attempts).
+func TestRetainGuardedDrops_ZeroLoss(t *testing.T) {
+	input := ReflectionInput{ExistingMemories: []memory.Memory{
+		mem("gotcha", "SSH to the Hetzner bastion goes through port 2222, not 22"),
+		mem("dependency", "gouroboros v0.204.3 has the zero-Normalize bug; v0.204.7 fixes it"),
+		mem("fact", "Production runs in region fsn1"),
+	}}
+	// A consolidator that drops both guarded memories and keeps only the fact.
+	result := ReflectionResult{Memories: []ReflectMemory{
+		{Category: "fact", Content: "Production runs in region fsn1 behind Cloudflare"},
+	}}
+
+	drops := AuditGuardedDrops(input, result)
+	if len(drops) != 2 {
+		t.Fatalf("want 2 guarded drops before retention, got %d: %+v", len(drops), drops)
+	}
+	result.Memories = append(result.Memories, RetainGuardedDrops(drops)...)
+
+	if remaining := AuditGuardedDrops(input, result); len(remaining) != 0 {
+		t.Fatalf("retention left %d guarded memories uncovered: %+v", len(remaining), remaining)
+	}
+}
