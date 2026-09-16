@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "ghost",
-  "description": "Ghost — a local-first MCP memory server for Claude Code. One binary, one SQLite file, no cloud.",
+  "description": "Ghost — a local-first MCP memory server for Claude Code on macOS and Linux. One binary, one SQLite file, no cloud.",
   "owner": {
     "name": "Wayne Cataldo",
     "email": "waynecataldo@gmail.com"
@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "ghost",
-      "description": "MCP memory server for Claude Code: project context injection, memory save/search, and automatic consolidation. Bundles the platform binary.",
+      "description": "MCP memory server for Claude Code on macOS and Linux: project context injection, memory save/search, and automatic consolidation. Bundles the platform binary. (Windows: use `ghost mcp init`.)",
       "author": {
         "name": "Wayne Cataldo",
         "email": "waynecataldo@gmail.com"

@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "ghost": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/${user_config.platform}/ghost",
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/ghost-launcher",
       "args": ["mcp"]
     }
   }
