@@ -17,6 +17,9 @@ func fakeOpenCodeBinary(t *testing.T, script string) string {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary requires a POSIX shell")
 	}
+	// run() opens a scratch dir on every invocation; pin the root to the
+	// test's temp dir so the real data dir is never touched.
+	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
 	dir := t.TempDir()
 	path := filepath.Join(dir, "opencode")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
@@ -119,8 +122,8 @@ func TestOpenCodeClient_ScrubsEnv(t *testing.T) {
 	bin := fakeOpenCodeBinary(t, `
 if [ -n "$ANTHROPIC_API_KEY" ]; then echo "LEAKED API KEY" >&2; exit 1; fi
 case "$XDG_CONFIG_HOME" in
-  *ghost-opencode-*) ;;
-  *) echo "XDG_CONFIG_HOME not scrubbed: $XDG_CONFIG_HOME" >&2; exit 1;;
+  "$GHOST_SCRATCH_DIR"/*) ;;
+  *) echo "XDG_CONFIG_HOME not confined to the scratch root: $XDG_CONFIG_HOME" >&2; exit 1;;
 esac
 printf '%s\n' '{"type":"text","part":{"type":"text","text":"OK"}}'
 `)
@@ -172,31 +175,40 @@ func TestOpenCodeClient_NoEnvNoModelFlag(t *testing.T) {
 // every invocation, and a single lifecycle spawns hundreds of processes, so
 // inheriting the shared temp dir accumulates gigabytes until the filesystem
 // fills and every LLM-backed phase silently fails. The child's temp-dir
-// variables must therefore point at the per-invocation scratch dir, which the
-// returned cleanup removes.
+// variables must therefore point at the per-invocation scratch dir under
+// Ghost's owned root, which the returned cleanup removes.
 func TestSubprocessEnvConfinesTempDir(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
 	decoy := t.TempDir()
 	for _, key := range tempDirKeys {
 		t.Setenv(key, decoy)
 	}
 	t.Setenv("XDG_CONFIG_HOME", decoy)
 
-	client := &OpenCodeClient{}
-	env, cleanup, err := client.subprocessEnv()
+	client := &OpenCodeClient{binary: "opencode"}
+	cmd, cleanup, err := client.subprocessEnv(context.Background(), []string{"run"})
 	if err != nil {
 		t.Fatalf("subprocessEnv: %v", err)
 	}
-	scratch := envValue(env, "XDG_CONFIG_HOME")
-	if scratch == "" {
+	env := cmd.Env
+	scratchDir := envValue(env, "XDG_CONFIG_HOME")
+	if scratchDir == "" {
 		t.Fatal("XDG_CONFIG_HOME not set")
 	}
-	if scratch == decoy {
+	if scratchDir == decoy {
 		t.Fatal("XDG_CONFIG_HOME still points at the inherited value")
+	}
+	if got := filepath.Dir(scratchDir); got != root {
+		t.Errorf("scratch dir parent = %q, want the owned root %q", got, root)
+	}
+	if cmd.Dir != scratchDir {
+		t.Errorf("cmd.Dir = %q, want the scratch dir %q", cmd.Dir, scratchDir)
 	}
 
 	for _, key := range tempDirKeys {
-		if got := envValue(env, key); got != scratch {
-			t.Errorf("%s = %q, want the scratch dir %q", key, got, scratch)
+		if got := envValue(env, key); got != scratchDir {
+			t.Errorf("%s = %q, want the scratch dir %q", key, got, scratchDir)
 		}
 	}
 	// Each variable must appear once: a stale inherited entry would win or lose
@@ -212,13 +224,127 @@ func TestSubprocessEnvConfinesTempDir(t *testing.T) {
 			t.Errorf("%s appears %d times, want exactly 1", key, count)
 		}
 	}
-	if _, err := os.Stat(scratch); err != nil {
+	if _, err := os.Stat(scratchDir); err != nil {
 		t.Fatalf("scratch dir missing before cleanup: %v", err)
 	}
 	cleanup()
-	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
-		t.Errorf("scratch dir %s survived cleanup (err=%v)", scratch, err)
+	if _, err := os.Stat(scratchDir); !os.IsNotExist(err) {
+		t.Errorf("scratch dir %s survived cleanup (err=%v)", scratchDir, err)
 	}
+	cleanup() // must be safe to call twice
+}
+
+// TestHarnessCommandConfinesEveryClient pins that all four harness clients run
+// through the one confinement helper: each gets a working directory directly
+// under GHOST_SCRATCH_DIR and exactly one copy of every temp-dir variable,
+// pinned there — including when the inherited value uses different case, which
+// must be overridden rather than shadowed. No harness is spawned; this is a
+// pure env- and command-building assertion.
+func TestHarnessCommandConfinesEveryClient(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	decoy := t.TempDir()
+	env := []string{
+		"PATH=/usr/bin",
+		"tmpdir=" + decoy,
+		"TMP=" + decoy,
+		"TEMP=" + decoy,
+	}
+	for _, harness := range []string{"claude", "codex", "goose", "opencode"} {
+		t.Run(harness, func(t *testing.T) {
+			cmd, release, ok := harnessCommand(context.Background(), "true", nil, env, harness)
+			if !ok {
+				t.Fatal("scratch confinement unexpectedly unavailable")
+			}
+			defer release()
+			if got := filepath.Dir(cmd.Dir); got != root {
+				t.Errorf("cmd.Dir = %q, want a direct child of the root %q", cmd.Dir, root)
+			}
+			for _, key := range tempDirKeys {
+				if got := envValue(cmd.Env, key); got != cmd.Dir {
+					t.Errorf("%s = %q, want the scratch dir %q", key, got, cmd.Dir)
+				}
+				count := 0
+				for _, kv := range cmd.Env {
+					if k, _, _ := strings.Cut(kv, "="); strings.EqualFold(k, key) {
+						count++
+					}
+				}
+				if count != 1 {
+					t.Errorf("%s appears %d times, want exactly 1", key, count)
+				}
+			}
+		})
+	}
+}
+
+// TestHarnessCommandFallsBackWhenScratchUnavailable proves the degradation is
+// a fallback, not a failure: with an unusable scratch root the command is
+// still built and inherits the caller's environment and working directory —
+// the pre-scratch behavior — and release is a safe no-op.
+func TestHarnessCommandFallsBackWhenScratchUnavailable(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GHOST_SCRATCH_DIR", filepath.Join(blocker, "scratch"))
+
+	env := []string{"PATH=/usr/bin", "TMPDIR=/inherited"}
+	cmd, release, ok := harnessCommand(context.Background(), "true", nil, env, "claude")
+	if ok {
+		t.Fatal("harnessCommand reported confinement with an unusable scratch root")
+	}
+	release()
+	release() // must be safe to call twice
+	if cmd.Dir != "" {
+		t.Errorf("cmd.Dir = %q, want the inherited working directory", cmd.Dir)
+	}
+	if got := envValue(cmd.Env, "TMPDIR"); got != "/inherited" {
+		t.Errorf("TMPDIR = %q, want the inherited value", got)
+	}
+}
+
+// TestSubprocessEnvFallsBackToTempDirWhenScratchUnavailable covers the opencode
+// fallback specifically: an unusable scratch root must not fail the run, and
+// the child still gets an empty config home and temp dir — a MkdirTemp under
+// the inherited temp dir, exactly the pre-scratch arrangement — removed by the
+// returned cleanup.
+func TestSubprocessEnvFallsBackToTempDirWhenScratchUnavailable(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GHOST_SCRATCH_DIR", filepath.Join(blocker, "scratch"))
+	tmp := t.TempDir()
+	for _, key := range tempDirKeys {
+		t.Setenv(key, tmp)
+	}
+
+	client := &OpenCodeClient{binary: "opencode"}
+	cmd, cleanup, err := client.subprocessEnv(context.Background(), []string{"run"})
+	if err != nil {
+		t.Fatalf("subprocessEnv: %v", err)
+	}
+	dir := envValue(cmd.Env, "XDG_CONFIG_HOME")
+	if dir == "" || !strings.Contains(dir, "ghost-opencode-") {
+		t.Fatalf("fallback config dir = %q, want a ghost-opencode- MkdirTemp dir", dir)
+	}
+	if cmd.Dir != os.TempDir() {
+		t.Errorf("cmd.Dir = %q, want os.TempDir() %q", cmd.Dir, os.TempDir())
+	}
+	for _, key := range tempDirKeys {
+		if got := envValue(cmd.Env, key); got != dir {
+			t.Errorf("%s = %q, want the fallback dir %q", key, got, dir)
+		}
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("fallback dir missing before cleanup: %v", err)
+	}
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("fallback dir %s survived cleanup (err=%v)", dir, err)
+	}
+	cleanup() // must be safe to call twice
 }
 
 // envValue returns the value of key in an environment slice, or "".

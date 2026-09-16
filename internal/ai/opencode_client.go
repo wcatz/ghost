@@ -56,26 +56,24 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	// --format json emits a JSON-lines stream; --pure skips plugins. The prompt
 	// is the last argument. GHOST_OPENCODE_MODEL, when set, pins the model via
 	// `-m` — the child's config dir is scrubbed below, so without it opencode
-	// would always run its built-in default model. cmd.Dir is a neutral temp
-	// dir so the subprocess does not load the repo's CLAUDE.md/AGENTS.md,
-	// project opencode.json, or git context — the reflect prompt is
-	// self-contained. subprocessEnv (below) additionally points
-	// XDG_CONFIG_HOME at a fresh empty dir so the child does not load the
-	// user's global opencode config (which would start Ghost's own MCP server
-	// against this process's SQLite DB) and strips ANTHROPIC_API_KEY.
+	// would always run its built-in default model. subprocessEnv (below)
+	// confines the child to a Ghost-owned scratch dir, which doubles as the
+	// neutral working directory (so the subprocess does not load the repo's
+	// CLAUDE.md/AGENTS.md, project opencode.json, or git context — the reflect
+	// prompt is self-contained) and as a fresh empty XDG_CONFIG_HOME (so the
+	// child does not load the user's global opencode config, which would start
+	// Ghost's own MCP server against this process's SQLite DB), and strips
+	// ANTHROPIC_API_KEY.
 	args := []string{"run", "--format", "json", "--pure", "--title", "[ghost]"}
 	if model := os.Getenv("GHOST_OPENCODE_MODEL"); model != "" {
 		args = append(args, "-m", model)
 	}
 	args = append(args, prompt)
-	cmd := exec.CommandContext(ctx, c.binary, args...)
-	cmd.Dir = os.TempDir()
-	env, cleanup, err := c.subprocessEnv()
+	cmd, cleanup, err := c.subprocessEnv(ctx, args)
 	if err != nil {
 		return "", err
 	}
 	defer cleanup()
-	cmd.Env = env
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -85,13 +83,15 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	return parseOpenCodeOutput(stdout.String())
 }
 
-// subprocessEnv builds the environment for the opencode subprocess: it points
-// XDG_CONFIG_HOME and the temp-dir variables at a fresh empty dir (so the child
-// loads no global opencode config — no Ghost MCP server, no user plugins — and
-// keeps its droppings there) and strips ANTHROPIC_API_KEY, mirroring
-// CLIClient's stripAPIKey. The child consequently runs on opencode's built-in
-// default model rather than the user's configured `model` key, which is an
-// acceptable, documented trade for not re-opening this process's DB.
+// subprocessEnv builds the opencode child command and environment. It routes
+// through harnessCommand, so the child's working directory and temp-dir
+// variables point at a fresh Ghost-owned scratch dir (see harnessCommand), and
+// then scrubs config state: XDG_CONFIG_HOME is pointed at that same fresh
+// empty dir so the child loads no global opencode config — no Ghost MCP
+// server, no user plugins — and stripLLMKeys removes ANTHROPIC_API_KEY,
+// mirroring CLIClient's stripAPIKey. The child consequently runs on opencode's
+// built-in default model rather than the user's configured `model` key, which
+// is an acceptable, documented trade for not re-opening this process's DB.
 //
 // Pinning the temp-dir variables matters beyond tidiness: opencode writes a
 // hidden JIT-cache shared object (~4.7 MiB) into its temp dir on every
@@ -101,26 +101,46 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 // lifecycle measured ~1.4 GB) until the filesystem fills, at which point every
 // LLM-backed phase fails and maintenance silently becomes a no-op. The scratch
 // dir is removed by the returned cleanup, so the cache dies with it.
-func (c *OpenCodeClient) subprocessEnv() ([]string, func(), error) {
-	scratch, err := os.MkdirTemp("", "ghost-opencode-")
-	if err != nil {
-		return nil, nil, err
-	}
-	env := make([]string, 0, len(os.Environ())+4)
+//
+// When the scratch root is unusable, harnessCommand has already logged a WARN;
+// this falls back to the pre-scratch arrangement — a MkdirTemp dir under the
+// inherited temp dir as both config home and temp dir, with cmd.Dir set to
+// os.TempDir() — so a broken data dir degrades visibly instead of failing the
+// run. The returned cleanup is safe to call more than once in both paths.
+func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string) (*exec.Cmd, func(), error) {
+	base := make([]string, 0, len(os.Environ())+1)
 	for _, kv := range os.Environ() {
 		if strings.HasPrefix(kv, "XDG_CONFIG_HOME=") {
 			continue // replaced by the scrub dir below
 		}
+		base = append(base, kv)
+	}
+
+	cmd, release, ok := harnessCommand(ctx, c.binary, args, base, "opencode")
+	if ok {
+		cmd.Env = stripLLMKeys(append(cmd.Env, "XDG_CONFIG_HOME="+cmd.Dir))
+		return cmd, release, nil
+	}
+
+	dir, err := os.MkdirTemp("", "ghost-opencode-")
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	cmd.Dir = os.TempDir()
+	env := make([]string, 0, len(base)+len(tempDirKeys)+1)
+	for _, kv := range base {
 		if isTempDirKey(kv) {
-			continue // replaced below so the child's cache lives in the scratch
+			continue // replaced below so the child's cache lives in the MkdirTemp dir
 		}
 		env = append(env, kv)
 	}
-	env = append(env, "XDG_CONFIG_HOME="+scratch)
+	env = append(env, "XDG_CONFIG_HOME="+dir)
 	for _, key := range tempDirKeys {
-		env = append(env, key+"="+scratch)
+		env = append(env, key+"="+dir)
 	}
-	return stripLLMKeys(env), func() { _ = os.RemoveAll(scratch) }, nil
+	cmd.Env = stripLLMKeys(env)
+	return cmd, func() { _ = os.RemoveAll(dir) }, nil
 }
 
 // tempDirKeys are the variables that steer a child's temporary files — and so

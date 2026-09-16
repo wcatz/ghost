@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 )
 
@@ -38,8 +37,8 @@ func (c *CodexClient) run(ctx context.Context, prompt string) (string, error) {
 	}
 	args := []string{"exec", "--sandbox", "read-only"}
 	args = append(args, prompt)
-	cmd := exec.CommandContext(ctx, c.binary, args...)
-	cmd.Env = stripLLMKeys(os.Environ())
+	cmd, release, _ := harnessCommand(ctx, c.binary, args, stripLLMKeys(os.Environ()), "codex")
+	defer release()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

@@ -11,13 +11,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/scratch"
 )
 
-// Run executes the 9-step Claude Code integration setup.
+// Run executes the 10-step Claude Code integration setup.
 // When dryRun is true, it reports what would change without modifying anything.
 func Run(w io.Writer, dryRun bool) error {
 	// A Claude Code plugin install owns the MCP registration, hooks, and
@@ -39,50 +41,54 @@ func Run(w io.Writer, dryRun bool) error {
 	// install-first problem that re-running init cannot fix, and the
 	// claude-missing error carries its own next-step guidance (alternative
 	// clients) that the generic re-run hint would bury.
-	_, _ = fmt.Fprintln(w, "[1/9] Checking prerequisites...")
+	_, _ = fmt.Fprintln(w, "[1/10] Checking prerequisites...")
 	ghostBin, claudeBin, err := checkPrereqs(w, "claude")
 	if err != nil {
 		return err
 	}
 
-	// Step 2: Config file.
-	_, _ = fmt.Fprintln(w, "\n[2/9] Ensuring config file...")
+	// Step 2: Scratch space.
+	_, _ = fmt.Fprintln(w, "\n[2/10] Preparing scratch space...")
+	ensureScratchSpace(w, dryRun)
+
+	// Step 3: Config file.
+	_, _ = fmt.Fprintln(w, "\n[3/10] Ensuring config file...")
 	if err := ensureConfigBootstrap(w, dryRun); err != nil {
 		return retryHint(err)
 	}
 
-	// Step 3: MCP server registration.
-	_, _ = fmt.Fprintln(w, "\n[3/9] Registering MCP server...")
+	// Step 4: MCP server registration.
+	_, _ = fmt.Fprintln(w, "\n[4/10] Registering MCP server...")
 	if err := registerMCP(w, ghostBin, claudeBin, dryRun); err != nil {
 		return retryHint(err)
 	}
 
-	// Step 4: Tool permissions.
-	_, _ = fmt.Fprintln(w, "\n[4/9] Adding tool permissions...")
+	// Step 5: Tool permissions.
+	_, _ = fmt.Fprintln(w, "\n[5/10] Adding tool permissions...")
 	settingsFile, err := ensurePermissions(w)
 	if err != nil {
 		return retryHint(err)
 	}
 
-	// Step 5: SessionStart hook.
-	_, _ = fmt.Fprintln(w, "\n[5/9] Configuring SessionStart hook...")
+	// Step 6: SessionStart hook.
+	_, _ = fmt.Fprintln(w, "\n[6/10] Configuring SessionStart hook...")
 	if err := ensureHook(w, settingsFile, ghostBin); err != nil {
 		return retryHint(err)
 	}
 
-	// Step 6: Stop hook.
-	_, _ = fmt.Fprintln(w, "\n[6/9] Configuring Stop hook...")
+	// Step 7: Stop hook.
+	_, _ = fmt.Fprintln(w, "\n[7/10] Configuring Stop hook...")
 	if err := ensureStopHook(w, settingsFile, ghostBin); err != nil {
 		return retryHint(err)
 	}
 
-	// Step 7: Disable Claude Code's built-in file memory.
-	_, _ = fmt.Fprintln(w, "\n[7/9] Disabling Claude Code built-in memory...")
+	// Step 8: Disable Claude Code's built-in file memory.
+	_, _ = fmt.Fprintln(w, "\n[8/10] Disabling Claude Code built-in memory...")
 	if err := ensureAutoMemoryDisabled(w, settingsFile, dryRun); err != nil {
 		return retryHint(err)
 	}
 
-	// Save settings (steps 4-7 all modify it).
+	// Save settings (steps 5-8 all modify it).
 	if dryRun {
 		_, _ = fmt.Fprintln(w, "\n  (skipping settings write — dry run)")
 	} else {
@@ -91,15 +97,15 @@ func Run(w io.Writer, dryRun bool) error {
 		}
 	}
 
-	// Step 8: Import Claude Code memories.
-	_, _ = fmt.Fprintln(w, "\n[8/9] Importing Claude Code memories...")
+	// Step 9: Import Claude Code memories.
+	_, _ = fmt.Fprintln(w, "\n[9/10] Importing Claude Code memories...")
 	projects, err := importMemories(w, dryRun)
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "  ! import error: %v (continuing)\n", err)
 	}
 
-	// Step 9: Project memory redirects.
-	_, _ = fmt.Fprintln(w, "\n[9/9] Writing project memory redirects...")
+	// Step 10: Project memory redirects.
+	_, _ = fmt.Fprintln(w, "\n[10/10] Writing project memory redirects...")
 	writeRedirects(w, projects, dryRun)
 
 	if dryRun {
@@ -142,6 +148,30 @@ func ensureConfigBootstrap(w io.Writer, dryRun bool) error {
 // retryHint wraps an error with a re-run suggestion.
 func retryHint(err error) error {
 	return fmt.Errorf("%w\n  Re-run `ghost mcp init` to retry", err)
+}
+
+// ensureScratchSpace makes sure Ghost's owned scratch root (internal/scratch)
+// exists and reaps per-invocation directories left behind by crashed harness
+// children, so the root cannot grow without bound between lifecycles. Scratch
+// upkeep is best-effort: a failure is reported and init continues, because the
+// harnesses themselves fall back to the inherited temp dir when scratch is
+// unavailable, and init failing over cleanup would be worse than the leak.
+func ensureScratchSpace(w io.Writer, dryRun bool) {
+	if dryRun {
+		_, _ = fmt.Fprintln(w, "  ~ would prepare the scratch root and reap stale dirs")
+		return
+	}
+	root, err := scratch.Root()
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "  ! scratch root unavailable: %v (continuing)\n", err)
+		return
+	}
+	removed, err := scratch.Reap(24 * time.Hour)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "  ! scratch root %s not reaped: %v (continuing)\n", root, err)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "  ✓ scratch root %s (reaped %d stale dirs)\n", root, removed)
 }
 
 // checkPrereqs verifies the binaries required for the given client target.
