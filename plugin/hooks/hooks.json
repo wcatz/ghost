@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/${user_config.platform}/ghost",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/ghost-launcher",
             "args": ["hook", "session-start", "--source", "claude-code"]
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/${user_config.platform}/ghost",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/ghost-launcher",
             "args": ["hook", "stop", "--source", "claude-code"]
           }
         ]

@@ -5,9 +5,9 @@
 # the release version into the plugin manifest. Called by the release workflow;
 # runnable by hand for local validation.
 #
-# The plugin is one artifact covering all six goreleaser platforms: the user
-# picks their platform once (user_config.platform) and Claude Code substitutes
-# it into the MCP and hook commands. See
+# The plugin is one artifact covering all six goreleaser platforms: a POSIX
+# launcher (bin/ghost-launcher) resolves the host platform from uname at runtime
+# and execs the matching bundled binary, so no userConfig value is required. See
 # docs/superpowers/specs/2026-08-20-ghost-claude-plugin-design.md.
 #
 # Usage: scripts/assemble-plugin.sh <version> <out-dir>
@@ -29,6 +29,14 @@ read -r -a PLATFORMS <<<"${PLATFORMS:-darwin-arm64 darwin-amd64 linux-arm64 linu
 rm -rf "$OUT"
 mkdir -p "$OUT"
 cp -R "$ROOT/plugin/." "$OUT/"
+
+# The MCP server and hooks exec the launcher directly, so it must carry the
+# exec bit through the archive. A plain copy preserves it, but restore it
+# explicitly so a checkout or staging step that drops modes cannot ship a
+# non-executable entry point.
+LAUNCHER="$OUT/bin/ghost-launcher"
+chmod +x "$LAUNCHER"
+[ -x "$LAUNCHER" ] || { echo "error: assembled launcher is not executable: $LAUNCHER" >&2; exit 1; }
 
 # Stamp the release version so `/plugin update` sees each release as new.
 MANIFEST="$OUT/.claude-plugin/plugin.json"

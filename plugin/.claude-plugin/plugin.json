@@ -17,13 +17,5 @@
     "context",
     "knowledge-base"
   ],
-  "defaultEnabled": true,
-  "userConfig": {
-    "platform": {
-      "type": "string",
-      "title": "Your platform",
-      "description": "One of: darwin-arm64, darwin-amd64, linux-arm64, linux-amd64, windows-arm64, windows-amd64",
-      "required": true
-    }
-  }
+  "defaultEnabled": true
 }

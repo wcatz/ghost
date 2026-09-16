@@ -1,0 +1,60 @@
+#!/bin/sh
+#
+# ghost-launcher — resolve the bundled, platform-specific ghost binary for the
+# host at runtime and exec it with the caller's arguments.
+#
+# Why this exists: Claude Code substitutes ${user_config.platform} into MCP and
+# hook commands only when that option has a value, and a fresh marketplace
+# install has no value for it. Measured on claude 2.1.273: `claude plugin
+# install ghost` succeeds but reports "1 userConfig option not yet set (1
+# required)", and .mcp.json keeps the literal
+# "${CLAUDE_PLUGIN_ROOT}/bin/${user_config.platform}/ghost", so the MCP server
+# does not start until the user runs /plugin configure. A userConfig `default`
+# does not help either: the schema accepts it, but the install does not
+# materialise it (settings.json pluginConfigs stays empty). Deriving the
+# platform from uname removes the failure mode instead of documenting it; the
+# per-platform binaries stay where they are, at bin/<os>-<arch>/ghost[.exe].
+#
+# Native Windows (cmd/PowerShell) cannot execute a POSIX shell script, so this
+# entry point covers POSIX hosts: macOS, Linux, WSL, and MSYS/MinGW/Cygwin.
+# The Windows mappings are handled here for those POSIX layers.
+
+set -eu
+
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+os=$(uname -s 2>/dev/null || echo unknown)
+arch=$(uname -m 2>/dev/null || echo unknown)
+
+case "$os" in
+  Darwin) os_name=darwin ;;
+  Linux) os_name=linux ;;
+  MINGW*|MSYS*|CYGWIN*) os_name=windows ;;
+  *)
+    echo "ghost-launcher: unsupported operating system '$os'; run the bundled binary directly from $DIR/<os>-<arch>/" >&2
+    exit 1
+    ;;
+esac
+
+case "$arch" in
+  arm64|aarch64) arch_name=arm64 ;;
+  x86_64|amd64) arch_name=amd64 ;;
+  *)
+    echo "ghost-launcher: unsupported architecture '$arch'" >&2
+    exit 1
+    ;;
+esac
+
+platform="$os_name-$arch_name"
+bin="$DIR/$platform/ghost"
+
+if [ "$os_name" = "windows" ]; then
+  bin="$bin.exe"
+fi
+
+if [ ! -x "$bin" ]; then
+  echo "ghost-launcher: bundled binary not found or not executable: $bin" >&2
+  exit 1
+fi
+
+exec "$bin" "$@"
