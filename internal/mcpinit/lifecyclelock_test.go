@@ -2,10 +2,12 @@ package mcpinit
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -95,7 +97,17 @@ func TestAcquireLifecycleLock(t *testing.T) {
 	if _, ok, err := AcquireLifecycleLock("../../evil"); err == nil || !ok {
 		t.Errorf("unsafe project id must fail open with an error (ok=%v err=%v)", ok, err)
 	}
-	if entries, err := filepath.Glob(filepath.Join(dataHome, "*", "*evil*")); err != nil || len(entries) > 2 {
-		t.Errorf("unsafe id produced path entries outside the data dir: %v (%v)", entries, err)
+	// Nothing anywhere under the data dir may be named after the unsafe id: a
+	// pid file, its .tmp sibling, or its .lock must never have been created.
+	if err := filepath.WalkDir(dataHome, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.Contains(d.Name(), "evil") {
+			t.Errorf("unsafe project id produced a path: %s", p)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
