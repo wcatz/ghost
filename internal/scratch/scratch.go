@@ -128,13 +128,15 @@ func (d *Dir) Release() {
 // point anywhere, and removing one must never follow it.
 //
 // Liveness mirrors internal/mcpinit's pid check (signal 0, which tests
-// existence without signaling), but it only protects an entry within maxAge.
-// maxAge is a hard ceiling on every entry: one whose marker names an alive
-// process is collected once it exceeds maxAge, so a pid reused by an unrelated
-// long-lived process can spare a leaked directory only until then — nothing
-// can be pinned indefinitely. No legitimate invocation lives that long (the
-// lifecycle bounds every phase with a timeout), so the ceiling cannot tear a
-// live invocation's scratch directory out from under its child.
+// existence without signaling) and is the primary shield: when the marker
+// parses and its pid is alive the entry is skipped unconditionally, with no
+// age ceiling and no mtime consultation. A leaked directory can therefore
+// persist while its recorded pid is reused by a live unrelated process, which
+// is accepted because (a) it holds at most one invocation's droppings — it is
+// disk, not correctness — and (b) it is collected as soon as that pid exits.
+// No age ceiling applies to a live owner because phase timeouts can be
+// configured to 0 (unbounded), so a ceiling could delete a live invocation's
+// scratch directory; an unconditional shield cannot.
 //
 // Removal failures and entries that vanish mid-scan are ignored — several
 // Ghost processes (one MCP server per client session) may reap concurrently,
@@ -166,9 +168,10 @@ func Reap(maxAge time.Duration) (int, error) {
 		}
 		stale := now.Sub(info.ModTime()) > maxAge
 		if pid, ok := ownerPID(path); ok {
-			// The marker proves ownership; liveness only shields a live
-			// invocation inside the age ceiling.
-			if processAlive(pid) && !stale {
+			// The marker proves ownership, and a live owner is shielded
+			// unconditionally: phase timeouts may be unbounded, so any age
+			// ceiling could tear a running invocation's scratch away.
+			if processAlive(pid) {
 				continue
 			}
 		} else {

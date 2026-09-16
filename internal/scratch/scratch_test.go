@@ -163,7 +163,7 @@ func TestReap_ClassifiesEntries(t *testing.T) {
 	}{
 		{"dead owner removed", "entry", "pid=" + strconv.Itoa(deadPid) + "\ntoken=aa\n", nil, true},
 		{"live owner fresh spared", "entry", liveMarker, nil, false},
-		{"live owner past the age ceiling removed", "entry", liveMarker, &oldTime, true},
+		{"live owner old mtime spared", "entry", liveMarker, &oldTime, false},
 		{"malformed pid scratch-shaped old removed", scratchName, "pid=notanumber\ntoken=cc\n", &oldTime, true},
 		{"malformed pid scratch-shaped fresh spared", scratchName, "pid=notanumber\ntoken=dd\n", nil, false},
 		{"missing marker scratch-shaped old removed", scratchName, "", &oldTime, true},
