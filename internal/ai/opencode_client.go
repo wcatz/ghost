@@ -86,25 +86,61 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 }
 
 // subprocessEnv builds the environment for the opencode subprocess: it points
-// XDG_CONFIG_HOME at a fresh empty dir (so the child loads no global opencode
-// config — no Ghost MCP server, no user plugins) and strips ANTHROPIC_API_KEY,
-// mirroring CLIClient's stripAPIKey. The child consequently runs on opencode's
-// built-in default model rather than the user's configured `model` key, which
-// is an acceptable, documented trade for not re-opening this process's DB.
+// XDG_CONFIG_HOME and the temp-dir variables at a fresh empty dir (so the child
+// loads no global opencode config — no Ghost MCP server, no user plugins — and
+// keeps its droppings there) and strips ANTHROPIC_API_KEY, mirroring
+// CLIClient's stripAPIKey. The child consequently runs on opencode's built-in
+// default model rather than the user's configured `model` key, which is an
+// acceptable, documented trade for not re-opening this process's DB.
+//
+// Pinning the temp-dir variables matters beyond tidiness: opencode writes a
+// hidden JIT-cache shared object (~4.7 MiB) into its temp dir on every
+// invocation, and Ghost spawns one process per consolidation, per resolve
+// candidate, and per supersede candidate PAIR — hundreds per lifecycle. Left
+// in the shared temp dir those accumulate indefinitely (a single dingo
+// lifecycle measured ~1.4 GB) until the filesystem fills, at which point every
+// LLM-backed phase fails and maintenance silently becomes a no-op. The scratch
+// dir is removed by the returned cleanup, so the cache dies with it.
 func (c *OpenCodeClient) subprocessEnv() ([]string, func(), error) {
 	scratch, err := os.MkdirTemp("", "ghost-opencode-")
 	if err != nil {
 		return nil, nil, err
 	}
-	env := make([]string, 0, len(os.Environ())+1)
+	env := make([]string, 0, len(os.Environ())+4)
 	for _, kv := range os.Environ() {
 		if strings.HasPrefix(kv, "XDG_CONFIG_HOME=") {
 			continue // replaced by the scrub dir below
 		}
+		if isTempDirKey(kv) {
+			continue // replaced below so the child's cache lives in the scratch
+		}
 		env = append(env, kv)
 	}
 	env = append(env, "XDG_CONFIG_HOME="+scratch)
+	for _, key := range tempDirKeys {
+		env = append(env, key+"="+scratch)
+	}
 	return stripLLMKeys(env), func() { _ = os.RemoveAll(scratch) }, nil
+}
+
+// tempDirKeys are the variables that steer a child's temporary files — and so
+// opencode's per-invocation JIT cache — on each platform.
+var tempDirKeys = []string{"TMPDIR", "TMP", "TEMP"}
+
+// isTempDirKey reports whether kv assigns one of tempDirKeys. The comparison is
+// case-insensitive to match Windows, where the same variable may appear as
+// TEMP or Temp.
+func isTempDirKey(kv string) bool {
+	key, _, found := strings.Cut(kv, "=")
+	if !found {
+		return false
+	}
+	for _, candidate := range tempDirKeys {
+		if strings.EqualFold(key, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 // opencodeEvent is the minimal shape of one JSON line in `opencode run --format
