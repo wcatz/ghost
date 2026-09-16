@@ -166,3 +166,67 @@ func TestOpenCodeClient_NoEnvNoModelFlag(t *testing.T) {
 		t.Fatalf("unexpected -m flag: %q", text)
 	}
 }
+
+// TestSubprocessEnvConfinesTempDir pins the fix for the opencode JIT-cache
+// leak: opencode writes a hidden ~4.7 MiB shared object into its temp dir on
+// every invocation, and a single lifecycle spawns hundreds of processes, so
+// inheriting the shared temp dir accumulates gigabytes until the filesystem
+// fills and every LLM-backed phase silently fails. The child's temp-dir
+// variables must therefore point at the per-invocation scratch dir, which the
+// returned cleanup removes.
+func TestSubprocessEnvConfinesTempDir(t *testing.T) {
+	decoy := t.TempDir()
+	for _, key := range tempDirKeys {
+		t.Setenv(key, decoy)
+	}
+	t.Setenv("XDG_CONFIG_HOME", decoy)
+
+	client := &OpenCodeClient{}
+	env, cleanup, err := client.subprocessEnv()
+	if err != nil {
+		t.Fatalf("subprocessEnv: %v", err)
+	}
+	scratch := envValue(env, "XDG_CONFIG_HOME")
+	if scratch == "" {
+		t.Fatal("XDG_CONFIG_HOME not set")
+	}
+	if scratch == decoy {
+		t.Fatal("XDG_CONFIG_HOME still points at the inherited value")
+	}
+
+	for _, key := range tempDirKeys {
+		if got := envValue(env, key); got != scratch {
+			t.Errorf("%s = %q, want the scratch dir %q", key, got, scratch)
+		}
+	}
+	// Each variable must appear once: a stale inherited entry would win or lose
+	// depending on the reader.
+	for _, key := range tempDirKeys {
+		count := 0
+		for _, kv := range env {
+			if k, _, _ := strings.Cut(kv, "="); strings.EqualFold(k, key) {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("%s appears %d times, want exactly 1", key, count)
+		}
+	}
+	if _, err := os.Stat(scratch); err != nil {
+		t.Fatalf("scratch dir missing before cleanup: %v", err)
+	}
+	cleanup()
+	if _, err := os.Stat(scratch); !os.IsNotExist(err) {
+		t.Errorf("scratch dir %s survived cleanup (err=%v)", scratch, err)
+	}
+}
+
+// envValue returns the value of key in an environment slice, or "".
+func envValue(env []string, key string) string {
+	for _, kv := range env {
+		if k, v, found := strings.Cut(kv, "="); found && strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
+}
