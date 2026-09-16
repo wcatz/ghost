@@ -262,16 +262,14 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 			"project_id", projectID)
 		return
 	}
+	// Best-effort fast path: skip spawning when a lifecycle is visibly running.
+	// It is deliberately NOT a claim — the coordinator claims the file itself
+	// (AcquireLifecycleLock), because the hook cannot write the child's pid
+	// before Start and a claim written in between would make the child see a
+	// foreign pid and abort. Two hooks firing together may therefore both spawn;
+	// one child wins the claim and the other exits.
 	pidPath := filepath.Join(dataDir, "lifecycle-"+projectID+".pid")
 	if isAlive(pidPath) {
-		return
-	}
-	// isAlive false is only a fast path to skip locking in the common case (no
-	// lifecycle running at all). It is NOT sufficient on its own: two stop hooks
-	// firing close together for the same project could both pass it and both
-	// start a write pass. claimPidFile re-checks liveness under an OS-level
-	// lock, so exactly one of them wins the claim.
-	if !claimPidFile(pidPath) {
 		return
 	}
 
@@ -287,7 +285,11 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 	}
 	defer logFile.Close() //nolint:errcheck
 
-	cmd := exec.Command(exe, "lifecycle", "--project", projectName)
+	// Pass the project ID, not the name: the coordinator keys its own lifecycle
+	// claim on the same value, so the pid file the hook just claimed for this
+	// child is the one the child checks. The phase subcommands resolve an id
+	// as readily as a name (Store.ResolveProject tries id first).
+	cmd := exec.Command(exe, "lifecycle", "--project", projectID)
 	if source != "" {
 		cmd.Args = append(cmd.Args, "--source", source)
 	}
@@ -298,8 +300,6 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 		slog.Warn("lifecycle spawn: starting the detached process failed", "error", err)
 		return
 	}
-	token, haveToken := processStartTime(cmd.Process.Pid)
-	_ = atomicWritePID(pidPath, cmd.Process.Pid, token, haveToken)
 	_ = cmd.Process.Release()
 }
 

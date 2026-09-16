@@ -447,6 +447,21 @@ func runLifecycle() {
 		os.Exit(1)
 	}
 
+	// Hold the per-project lifecycle claim for the whole chain. The claim is
+	// keyed on the RESOLVED project id, so a manual run by name and a
+	// hook-spawned run (which passes the id) contend for the same file. A lock
+	// that cannot be evaluated at all is a warning, not a stop: the phases are
+	// convergent, and a skipped maintenance run is worse than a rare overlap.
+	release, ok, lockErr := mcpinit.AcquireLifecycleLock(projectName)
+	switch {
+	case lockErr != nil:
+		fmt.Fprintf(os.Stderr, "lifecycle: warning: could not take the per-project lock (%v); continuing unlocked\n", lockErr)
+	case !ok:
+		fmt.Fprintf(os.Stderr, "lifecycle: another lifecycle is already running for project %s; exiting\n", projectName)
+		return
+	}
+	defer release()
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: load config: %v\n", err)
