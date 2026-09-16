@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wcatz/ghost/internal/procstat"
 )
 
 // writeOwnerDir creates a scratch-dir stand-in named name under root with an
@@ -100,6 +102,13 @@ func TestOpen_CreatesPrivateDirWithOwnerMarker(t *testing.T) {
 	if !strings.Contains(string(marker), "token=") {
 		t.Errorf("marker %q missing token", marker)
 	}
+	// The creation-time token is what lets Reap detect a recycled pid; it must
+	// be recorded whenever the platform can supply it.
+	if start, ok := procstat.StartTime(os.Getpid()); ok {
+		if want := "start=" + start; !strings.Contains(string(marker), want) {
+			t.Errorf("marker %q missing %q", marker, want)
+		}
+	}
 }
 
 // TestOpen_IgnoresInheritedTempDir pins the whole point of the owned root: a
@@ -148,29 +157,48 @@ func TestReap_ClassifiesEntries(t *testing.T) {
 	// 4<<20), so no live process can own it. Tests must never use a real pid
 	// such as 1, which is always alive.
 	const deadPid = 1 << 30
-	liveMarker := "pid=" + strconv.Itoa(os.Getpid()) + "\ntoken=bb\n"
+	livePid := os.Getpid()
+	liveStart, haveStart := procstat.StartTime(livePid)
 	oldTime := time.Now().Add(-2 * time.Hour)
 	// scratchName has exactly the shape Open creates: without a readable
 	// marker, the name is the only ownership evidence Reap accepts.
 	const scratchName = "123-0123456789abcdef"
+
+	// markerFor builds an owner marker the way Open writes it: pid and random
+	// token, plus the creation-time token only when start is non-empty (a
+	// legacy marker written before start tokens existed).
+	markerFor := func(pid int, start string) string {
+		marker := "pid=" + strconv.Itoa(pid) + "\ntoken=bb\n"
+		if start != "" {
+			marker += "start=" + start + "\n"
+		}
+		return marker
+	}
 
 	tests := []struct {
 		name       string
 		dirName    string
 		marker     string
 		mtime      *time.Time
+		needToken  bool
 		wantRemove bool
 	}{
-		{"dead owner removed", "entry", "pid=" + strconv.Itoa(deadPid) + "\ntoken=aa\n", nil, true},
-		{"live owner fresh spared", "entry", liveMarker, nil, false},
-		{"live owner old mtime spared", "entry", liveMarker, &oldTime, false},
-		{"malformed pid scratch-shaped old removed", scratchName, "pid=notanumber\ntoken=cc\n", &oldTime, true},
-		{"malformed pid scratch-shaped fresh spared", scratchName, "pid=notanumber\ntoken=dd\n", nil, false},
-		{"missing marker scratch-shaped old removed", scratchName, "", &oldTime, true},
-		{"missing marker scratch-shaped fresh spared", scratchName, "", nil, false},
+		{"dead owner removed", "entry", markerFor(deadPid, "stale-token"), nil, false, true},
+		{"live owner with matching token fresh spared", "entry", markerFor(livePid, liveStart), nil, true, false},
+		{"live owner with matching token old mtime spared", "entry", markerFor(livePid, liveStart), &oldTime, true, false},
+		{"live owner with mismatched token removed", "entry", markerFor(livePid, "definitely-not-the-real-token"), nil, true, true},
+		{"legacy live owner fresh spared", "entry", markerFor(livePid, ""), nil, false, false},
+		{"legacy live owner old removed", "entry", markerFor(livePid, ""), &oldTime, false, true},
+		{"malformed pid scratch-shaped old removed", scratchName, "pid=notanumber\ntoken=cc\n", &oldTime, false, true},
+		{"malformed pid scratch-shaped fresh spared", scratchName, "pid=notanumber\ntoken=dd\n", nil, false, false},
+		{"missing marker scratch-shaped old removed", scratchName, "", &oldTime, false, true},
+		{"missing marker scratch-shaped fresh spared", scratchName, "", nil, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.needToken && !haveStart {
+				t.Skip("process start tokens are unavailable on this platform")
+			}
 			root := t.TempDir()
 			t.Setenv("GHOST_SCRATCH_DIR", root)
 			dir := writeOwnerDir(t, root, tt.dirName, tt.marker)

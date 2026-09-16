@@ -24,13 +24,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/procstat"
 )
 
 // envDir names the environment variable that overrides the scratch root. An
@@ -38,9 +37,19 @@ import (
 // root to the process's current directory.
 const envDir = "GHOST_SCRATCH_DIR"
 
-// ownerFile is the marker written inside every per-invocation directory. It
-// records the pid that created the directory and a random token identifying
-// the invocation, one key=value per line.
+// ownerFile is the marker written inside every per-invocation directory, one
+// key=value per line:
+//
+//	pid=<creating pid>
+//	token=<random per-invocation token>
+//	start=<process creation-time token, when the platform can supply one>
+//
+// The start line carries the same PID-reuse token internal/mcpinit records in
+// its .pid files (internal/procstat): Reap compares it against the live
+// process's token so a pid the OS recycled after the owner died is detected
+// instead of being mistaken for a live owner. A marker without the line is
+// legacy (written before tokens, or on a platform that cannot supply one) and
+// falls back to Reap's age backstop.
 const ownerFile = ".owner"
 
 // Root returns the scratch root, creating it (0700) if needed. The root is
@@ -73,8 +82,14 @@ type Dir struct {
 
 // Open creates a fresh per-invocation directory directly under the root,
 // named <pid>-<random-hex>, and writes the ownerFile marker inside it with the
-// creating pid and a random token. The marker lets Reap tell a directory whose
-// owner is still running from one abandoned by a crash.
+// creating pid, a random per-invocation token, and — when the platform can
+// supply it — the process's creation-time token. The marker lets Reap tell a
+// directory whose owner is still running from one abandoned by a crash, and
+// the creation-time token additionally lets it tell a live owner from a pid
+// the OS recycled after the owner exited. If the token cannot be read, the
+// marker is written without it (legacy form): harmless while this process
+// lives, and Reap's age backstop collects the directory once its pid is gone
+// or recycled.
 //
 // Open touches nothing in the inherited temp dir, so it succeeds even when
 // TMPDIR points at a full or nonexistent filesystem — the failure mode Ghost's
@@ -88,11 +103,15 @@ func Open() (*Dir, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scratch token: %w", err)
 	}
-	path := filepath.Join(root, strconv.Itoa(os.Getpid())+"-"+token)
+	pid := os.Getpid()
+	path := filepath.Join(root, strconv.Itoa(pid)+"-"+token)
 	if err := os.Mkdir(path, 0o700); err != nil {
 		return nil, fmt.Errorf("scratch dir: %w", err)
 	}
-	marker := "pid=" + strconv.Itoa(os.Getpid()) + "\ntoken=" + token + "\n"
+	marker := "pid=" + strconv.Itoa(pid) + "\ntoken=" + token + "\n"
+	if start, ok := procstat.StartTime(pid); ok {
+		marker += "start=" + start + "\n"
+	}
 	if err := os.WriteFile(filepath.Join(path, ownerFile), []byte(marker), 0o600); err != nil {
 		_ = os.RemoveAll(path)
 		return nil, fmt.Errorf("scratch owner marker: %w", err)
@@ -127,16 +146,23 @@ func (d *Dir) Release() {
 // Symlinks are left alone entirely: the root is Ghost-owned, but a link can
 // point anywhere, and removing one must never follow it.
 //
-// Liveness mirrors internal/mcpinit's pid check (signal 0, which tests
-// existence without signaling) and is the primary shield: when the marker
-// parses and its pid is alive the entry is skipped unconditionally, with no
-// age ceiling and no mtime consultation. A leaked directory can therefore
-// persist while its recorded pid is reused by a live unrelated process, which
-// is accepted because (a) it holds at most one invocation's droppings — it is
-// disk, not correctness — and (b) it is collected as soon as that pid exits.
-// No age ceiling applies to a live owner because phase timeouts can be
-// configured to 0 (unbounded), so a ceiling could delete a live invocation's
-// scratch directory; an unconditional shield cannot.
+// A marked entry is owned and live only when its pid is alive AND its
+// creation-time token matches the one Open recorded — the same pid-reuse token
+// internal/mcpinit uses for .pid files. A dead pid, or a live pid whose token
+// differs (the OS recycled it to an unrelated process), means the directory is
+// abandoned and it is removed regardless of age. A marker with no start line
+// predates tokens: it is not shielded on liveness alone and is removed once
+// older than maxAge, so the transition cannot pin old leaks forever. A genuine
+// live owner — pid alive, token matching — is shielded unconditionally, with
+// no age ceiling and no mtime consultation, because phase timeouts can be
+// configured to 0 (unbounded), so any ceiling could delete a live
+// invocation's scratch directory.
+//
+// The bound is therefore honest: a pid the OS recycled is detected by the
+// token mismatch and collected immediately, a directory abandoned by a dead
+// owner is collected on the next reap, and a live owner's leaked directories
+// last only as long as that owner lives — its exit turns them into the
+// dead-pid case for the next reap.
 //
 // Removal failures and entries that vanish mid-scan are ignored — several
 // Ghost processes (one MCP server per client session) may reap concurrently,
@@ -167,19 +193,28 @@ func Reap(maxAge time.Duration) (int, error) {
 			continue // never follow or remove links
 		}
 		stale := now.Sub(info.ModTime()) > maxAge
-		if pid, ok := ownerPID(path); ok {
-			// The marker proves ownership, and a live owner is shielded
-			// unconditionally: phase timeouts may be unbounded, so any age
-			// ceiling could tear a running invocation's scratch away.
-			if processAlive(pid) {
-				continue
-			}
-		} else {
+		pid, start, ok := ownerMarker(path)
+		switch {
+		case !ok:
 			// No marker: only Open's exact name shape proves this is Ghost's,
 			// and only the age backstop justifies removal.
 			if !isScratchDirName(entry.Name()) || !stale {
 				continue
 			}
+		case !procstat.IsAlive(pid, start, start != ""):
+			// Dead pid, or a live pid whose creation-time token does not match
+			// the recorded one: the owner is gone and its pid was recycled.
+			// Abandoned — remove regardless of age.
+		case start == "":
+			// Legacy marker (no start token) with a live pid: not shielded on
+			// liveness alone, so the age backstop collects it.
+			if !stale {
+				continue
+			}
+		default:
+			// Genuine live owner: shield unconditionally, because phase
+			// timeouts can be unbounded.
+			continue
 		}
 		if err := os.RemoveAll(path); err == nil {
 			removed++
@@ -188,27 +223,33 @@ func Reap(maxAge time.Duration) (int, error) {
 	return removed, nil
 }
 
-// ownerPID reads the pid from dir's ownerFile marker. ok is false when the
-// marker is missing, unreadable, or malformed; without a marker, Reap collects
-// the directory only when its name matches the Open shape and the mtime age
-// backstop has passed.
-func ownerPID(dir string) (int, bool) {
+// ownerMarker reads dir's ownerFile marker. ok is false when the marker is
+// missing, unreadable, or has no usable pid; without one, Reap collects the
+// directory only when its name matches the Open shape and the mtime age
+// backstop has passed. start is the recorded process creation-time token, or
+// "" for a legacy marker written without one.
+func ownerMarker(dir string) (pid int, start string, ok bool) {
 	data, err := os.ReadFile(filepath.Join(dir, ownerFile))
 	if err != nil {
-		return 0, false
+		return 0, "", false
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
-		if !found || key != "pid" {
+		if !found {
 			continue
 		}
-		pid, err := strconv.Atoi(value)
-		if err != nil || pid <= 0 {
-			return 0, false
+		switch key {
+		case "pid":
+			p, err := strconv.Atoi(value)
+			if err != nil || p <= 0 {
+				return 0, "", false
+			}
+			pid, ok = p, true
+		case "start":
+			start = value
 		}
-		return pid, true
 	}
-	return 0, false
+	return pid, start, ok
 }
 
 // isScratchDirName reports whether name has exactly the shape Open creates:
@@ -236,24 +277,6 @@ func isScratchDirName(name string) bool {
 		}
 	}
 	return true
-}
-
-// processAlive reports whether pid names a running process, mirroring
-// internal/mcpinit's isProcessAlive on POSIX. Windows' Process.Signal does not
-// support signal 0, but FindProcess there already opens the process and fails
-// when it is gone, so reaching the platform check means alive.
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	if runtime.GOOS == "windows" {
-		return true
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 // randomHex returns n random bytes as lowercase hex.
