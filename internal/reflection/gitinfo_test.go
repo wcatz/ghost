@@ -85,9 +85,17 @@ func TestCollectGitContextCommits(t *testing.T) {
 	if !strings.Contains(commits[0], "add module file") {
 		t.Errorf("commit line %q is missing the subject", commits[0])
 	}
+	// The producer must emit a SHA-shaped field: shaLikeRe's word-anchored
+	// 7-40 hex characters. It must NOT be required to satisfy shaLikeToken,
+	// which additionally demands both a digit and a letter so that ordinary
+	// numbers (764824073, 20260116) and words (defaced) are never mistaken for
+	// SHAs and dropped. git abbreviations made of a single character class —
+	// all digits (e.g. 6457253, ~3.7% of hashes) or all letters — are
+	// therefore invisible to the guard by design; asserting otherwise makes
+	// this test fail on those runs for a false negative, not a producer bug.
 	sha := strings.Fields(commits[0])[0]
-	if !shaLikeToken(sha) {
-		t.Errorf("commit SHA %q is not recognized as a SHA token, so it would not whitelist anything", sha)
+	if shaLikeRe.FindString(sha) != sha {
+		t.Errorf("commit SHA %q is not a 7-40 character hex token", sha)
 	}
 }
 
