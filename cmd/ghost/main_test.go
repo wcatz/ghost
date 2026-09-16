@@ -848,3 +848,34 @@ func TestParseLifecycleArgs(t *testing.T) {
 		}
 	}
 }
+
+// TestConsolidationContext pins the bound that replaced a hardcoded 3 minutes.
+// The important case is zero/negative: WithTimeout(parent, 0) would cancel the
+// call immediately, so "unset" must mean unbounded instead.
+func TestConsolidationContext(t *testing.T) {
+	if _, ok := mustCtx(t, 0).Deadline(); ok {
+		t.Fatal("zero minutes must not set a deadline")
+	}
+
+	ctx5, cancel5 := consolidationContext(context.Background(), 5)
+	defer cancel5()
+	dl, ok := ctx5.Deadline()
+	if !ok {
+		t.Fatal("5 minutes must set a deadline")
+	}
+	if d := time.Until(dl); d < 4*time.Minute || d > 6*time.Minute {
+		t.Errorf("deadline %v is not ~5 minutes away", d)
+	}
+
+	if _, ok := mustCtx(t, -1).Deadline(); ok {
+		t.Error("negative minutes must not set a deadline")
+	}
+}
+
+// mustCtx returns the context for the given minutes without leaking its cancel.
+func mustCtx(t *testing.T, minutes int) context.Context {
+	t.Helper()
+	ctx, cancel := consolidationContext(context.Background(), minutes)
+	t.Cleanup(cancel)
+	return ctx
+}

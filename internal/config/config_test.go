@@ -48,6 +48,12 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Reflection.LifecycleTimeoutMinutes != 60 {
 		t.Errorf("expected reflection.lifecycle_timeout_minutes=60, got %d", cfg.Reflection.LifecycleTimeoutMinutes)
 	}
+	// A single consolidation call gets its own, longer bound: the hardcoded 3
+	// minutes it replaced was hit by large projects, and a kill there is fatal
+	// on the autonomous --require-llm path.
+	if cfg.Reflection.ConsolidationTimeoutMinutes != 10 {
+		t.Errorf("expected reflection.consolidation_timeout_minutes=10, got %d", cfg.Reflection.ConsolidationTimeoutMinutes)
+	}
 }
 
 func TestDataDir_WithXDGDataHome(t *testing.T) {
@@ -235,6 +241,7 @@ linking:
 reflection:
   auto_resolve: true
   lifecycle_timeout_minutes: 30
+  consolidation_timeout_minutes: 7
 `
 	if err := os.WriteFile(configFile, []byte(yamlContent), 0o600); err != nil {
 		t.Fatal(err)
@@ -259,6 +266,9 @@ reflection:
 	}
 	if cfg.Reflection.LifecycleTimeoutMinutes != 30 {
 		t.Errorf("reflection.lifecycle_timeout_minutes = %d, want 30", cfg.Reflection.LifecycleTimeoutMinutes)
+	}
+	if cfg.Reflection.ConsolidationTimeoutMinutes != 7 {
+		t.Errorf("reflection.consolidation_timeout_minutes = %d, want 7", cfg.Reflection.ConsolidationTimeoutMinutes)
 	}
 
 	// Unaffected defaults should remain.

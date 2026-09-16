@@ -570,6 +570,21 @@ func parseLifecycleArgs(args []string) (project, source string, err error) {
 	return project, source, nil
 }
 
+// consolidationContext bounds a single consolidation call by
+// reflection.consolidation_timeout_minutes. It exists because the bound used to
+// be a hardcoded 3 minutes, which a large project's prompt hits (the opencode
+// backend takes about that long for ~190 memories), and a kill there is fatal
+// on the autonomous --require-llm path, which has no fallback tier.
+//
+// Zero or negative means NO bound: context.WithTimeout(parent, 0) would cancel
+// the call immediately, which is the opposite of what "unset" should mean.
+func consolidationContext(parent context.Context, minutes int) (context.Context, context.CancelFunc) {
+	if minutes <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, time.Duration(minutes)*time.Minute)
+}
+
 // phaseGracePeriod is how long a phase has to exit after its deadline's
 // SIGTERM before its whole process group is force-killed.
 const phaseGracePeriod = 30 * time.Second
@@ -847,7 +862,7 @@ Flags:
 		ProjectName:      projectName,
 	}
 
-	consolidateCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	consolidateCtx, cancel := consolidationContext(ctx, cfg.Reflection.ConsolidationTimeoutMinutes)
 	defer cancel()
 
 	result, err := consolidator.Consolidate(consolidateCtx, input)
