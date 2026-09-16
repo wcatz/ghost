@@ -13,11 +13,14 @@
 # does not help either: the schema accepts it, but the install does not
 # materialise it (settings.json pluginConfigs stays empty). Deriving the
 # platform from uname removes the failure mode instead of documenting it; the
-# per-platform binaries stay where they are, at bin/<os>-<arch>/ghost[.exe].
+# per-platform binaries stay where they are, at bin/<os>-<arch>/ghost.
 #
-# Native Windows (cmd/PowerShell) cannot execute a POSIX shell script, so this
-# entry point covers POSIX hosts: macOS, Linux, WSL, and MSYS/MinGW/Cygwin.
-# The Windows mappings are handled here for those POSIX layers.
+# The artifact ships macOS and Linux binaries only. Native Windows
+# (cmd/PowerShell) cannot execute a POSIX shell script, and Claude Code
+# substitutes one command for every host (there is no per-OS .mcp.json or
+# hooks.json), so no Windows entry point can live in this artifact. Windows
+# users install the standalone binary and run `ghost mcp init` instead;
+# restoring plugin support needs a compiled launcher (task 7FFBDD03).
 
 set -eu
 
@@ -29,9 +32,8 @@ arch=$(uname -m 2>/dev/null || echo unknown)
 case "$os" in
   Darwin) os_name=darwin ;;
   Linux) os_name=linux ;;
-  MINGW*|MSYS*|CYGWIN*) os_name=windows ;;
   *)
-    echo "ghost-launcher: unsupported operating system '$os'; run the bundled binary directly from $DIR/<os>-<arch>/" >&2
+    echo "ghost-launcher: unsupported operating system '$os'; this plugin ships macOS and Linux binaries only (Windows users: run 'ghost mcp init' with the standalone binary)" >&2
     exit 1
     ;;
 esac
@@ -47,10 +49,6 @@ esac
 
 platform="$os_name-$arch_name"
 bin="$DIR/$platform/ghost"
-
-if [ "$os_name" = "windows" ]; then
-  bin="$bin.exe"
-fi
 
 if [ ! -x "$bin" ]; then
   echo "ghost-launcher: bundled binary not found or not executable: $bin" >&2

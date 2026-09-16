@@ -2,7 +2,7 @@
   "name": "ghost",
   "displayName": "Ghost Memory",
   "version": "0.0.0",
-  "description": "Local-first MCP memory server for Claude Code: one SQLite file, hybrid search, automatic consolidation. Bundles the ghost binary, so there is nothing else to install.",
+  "description": "Local-first MCP memory server for Claude Code on macOS and Linux: one SQLite file, hybrid search, automatic consolidation. Bundles the platform binary, so there is nothing else to install. (Windows: use `ghost mcp init` with the standalone binary.)",
   "author": {
     "name": "Wayne Cataldo",
     "email": "waynecataldo@gmail.com"

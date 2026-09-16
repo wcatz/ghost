@@ -5,9 +5,12 @@
 # the release version into the plugin manifest. Called by the release workflow;
 # runnable by hand for local validation.
 #
-# The plugin is one artifact covering all six goreleaser platforms: a POSIX
-# launcher (bin/ghost-launcher) resolves the host platform from uname at runtime
-# and execs the matching bundled binary, so no userConfig value is required. See
+# The plugin is one artifact covering the goreleaser darwin/linux platforms: a
+# POSIX launcher (bin/ghost-launcher) resolves the host platform from uname at
+# runtime and execs the matching bundled binary, so no userConfig value is
+# required. Windows is deliberately not shipped: native Windows cannot exec the
+# POSIX launcher and Claude Code has no per-OS MCP/hook command, so Windows
+# users use `ghost mcp init` (task 7FFBDD03 tracks restoring it). See
 # docs/superpowers/specs/2026-08-20-ghost-claude-plugin-design.md.
 #
 # Usage: scripts/assemble-plugin.sh <version> <out-dir>
@@ -24,7 +27,7 @@ OUT="${2:?usage: assemble-plugin.sh <version> <out-dir>}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-read -r -a PLATFORMS <<<"${PLATFORMS:-darwin-arm64 darwin-amd64 linux-arm64 linux-amd64 windows-arm64 windows-amd64}"
+read -r -a PLATFORMS <<<"${PLATFORMS:-darwin-arm64 darwin-amd64 linux-arm64 linux-amd64}"
 
 rm -rf "$OUT"
 mkdir -p "$OUT"
