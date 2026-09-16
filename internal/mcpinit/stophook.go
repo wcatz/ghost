@@ -287,7 +287,11 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 	}
 	defer logFile.Close() //nolint:errcheck
 
-	cmd := exec.Command(exe, "lifecycle", "--project", projectName)
+	// Pass the project ID, not the name: the coordinator keys its own lifecycle
+	// claim on the same value, so the pid file the hook just claimed for this
+	// child is the one the child checks. The phase subcommands resolve an id
+	// as readily as a name (Store.ResolveProject tries id first).
+	cmd := exec.Command(exe, "lifecycle", "--project", projectID)
 	if source != "" {
 		cmd.Args = append(cmd.Args, "--source", source)
 	}

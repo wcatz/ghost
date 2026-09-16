@@ -447,6 +447,17 @@ func runLifecycle() {
 		os.Exit(1)
 	}
 
+	// Hold the per-project lifecycle claim for the whole chain. The stop hook
+	// claims it before spawning (writing this process's pid), so a spawned
+	// coordinator finds its own pid and proceeds; a manual run claims it here
+	// and therefore cannot overlap a hook-spawned one.
+	release, ok := mcpinit.AcquireLifecycleLock(projectName)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "lifecycle: another lifecycle is already running for project %s; exiting\n", projectName)
+		return
+	}
+	defer release()
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: load config: %v\n", err)
