@@ -19,6 +19,13 @@ var shaLikeRe = regexp.MustCompile(`(?i)\b[0-9a-f]{7,40}\b`)
 // The digit requirement excludes pure-letter English words ("defaced",
 // "deadbeef"); the letter requirement excludes pure-digit numbers (network
 // magics, ports) that are facts, not hashes.
+// shaLikeToken reports whether tok is a SHA-looking token the fabrication
+// guard can reason about. It requires both a digit and a letter, so hex-shaped
+// non-SHAs — numbers (764824073, 20260116) and words (defaced, deadbeef) — are
+// never mistaken for SHAs and dropped. The cost is a false negative when a
+// real abbreviation is made of a single character class (all digits, e.g.
+// 6457253, or all letters): drops are destructive, so the guard errs toward
+// missing a fabrication rather than discarding a real memory.
 func shaLikeToken(tok string) bool {
 	if len(tok) < 7 || len(tok) > 40 {
 		return false
