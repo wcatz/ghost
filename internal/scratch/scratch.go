@@ -42,15 +42,24 @@ const envDir = "GHOST_SCRATCH_DIR"
 //
 //	pid=<creating pid>
 //	token=<random per-invocation token>
-//	start=<process creation-time token, when the platform can supply one>
+//	start=<process creation-time token, or "none" when unavailable>
 //
 // The start line carries the same PID-reuse token internal/mcpinit records in
 // its .pid files (internal/procstat): Reap compares it against the live
 // process's token so a pid the OS recycled after the owner died is detected
-// instead of being mistaken for a live owner. A marker without the line is
-// legacy (written before tokens, or on a platform that cannot supply one) and
-// falls back to Reap's age backstop.
+// instead of being mistaken for a live owner. The startNone sentinel is
+// distinct from a missing line: it says the platform cannot supply tokens at
+// all, so Reap still shields a live owner unconditionally. Only a marker with
+// no start line at all (written before tokens existed) falls back to Reap's
+// age backstop.
 const ownerFile = ".owner"
+
+// startNone is the ownerFile start line's sentinel for a platform (or read)
+// where procstat.StartTime cannot supply a creation-time token. Without it, a
+// marker from such a platform would be indistinguishable from a true legacy
+// marker and would lose the unconditional shield while its owner is alive —
+// exactly the shield Open's callers rely on.
+const startNone = "none"
 
 // Root returns the scratch root, creating it (0700) if needed. The root is
 // $GHOST_SCRATCH_DIR when set and non-empty, otherwise <dataDir>/scratch. The
@@ -82,14 +91,19 @@ type Dir struct {
 
 // Open creates a fresh per-invocation directory directly under the root,
 // named <pid>-<random-hex>, and writes the ownerFile marker inside it with the
-// creating pid, a random per-invocation token, and — when the platform can
-// supply it — the process's creation-time token. The marker lets Reap tell a
-// directory whose owner is still running from one abandoned by a crash, and
-// the creation-time token additionally lets it tell a live owner from a pid
-// the OS recycled after the owner exited. If the token cannot be read, the
-// marker is written without it (legacy form): harmless while this process
-// lives, and Reap's age backstop collects the directory once its pid is gone
-// or recycled.
+// creating pid, a random per-invocation token, and the process's
+// creation-time token. The marker lets Reap tell a directory whose owner is
+// still running from one abandoned by a crash, and the creation-time token
+// additionally lets it tell a live owner from a pid the OS recycled after the
+// owner exited.
+//
+// When the token cannot be read — an unsupported platform, an unreadable proc
+// entry — the marker records the explicit startNone sentinel instead of
+// omitting the line. That is NOT a legacy marker: it says liveness is all
+// this process can prove, so Reap keeps shielding the directory while the pid
+// is alive and removes it once the pid is dead. (Only a marker written before
+// tokens existed has no start line, and only that form falls back to the age
+// backstop.)
 //
 // Open touches nothing in the inherited temp dir, so it succeeds even when
 // TMPDIR points at a full or nonexistent filesystem — the failure mode Ghost's
@@ -108,15 +122,24 @@ func Open() (*Dir, error) {
 	if err := os.Mkdir(path, 0o700); err != nil {
 		return nil, fmt.Errorf("scratch dir: %w", err)
 	}
-	marker := "pid=" + strconv.Itoa(pid) + "\ntoken=" + token + "\n"
-	if start, ok := procstat.StartTime(pid); ok {
-		marker += "start=" + start + "\n"
-	}
+	start, haveStart := procstat.StartTime(pid)
+	marker := ownerMarkerText(pid, token, start, haveStart)
 	if err := os.WriteFile(filepath.Join(path, ownerFile), []byte(marker), 0o600); err != nil {
 		_ = os.RemoveAll(path)
 		return nil, fmt.Errorf("scratch owner marker: %w", err)
 	}
 	return &Dir{path: path}, nil
+}
+
+// ownerMarkerText builds the .owner marker content. When haveStart is false
+// the start line carries the startNone sentinel rather than being omitted, so
+// Reap can tell a platform that cannot supply tokens (shield a live pid) from
+// a true pre-token legacy marker (age backstop only).
+func ownerMarkerText(pid int, token, start string, haveStart bool) string {
+	if !haveStart {
+		start = startNone
+	}
+	return "pid=" + strconv.Itoa(pid) + "\ntoken=" + token + "\nstart=" + start + "\n"
 }
 
 // Path returns the directory's absolute path.
@@ -146,17 +169,20 @@ func (d *Dir) Release() {
 // Symlinks are left alone entirely: the root is Ghost-owned, but a link can
 // point anywhere, and removing one must never follow it.
 //
-// A marked entry is owned and live only when its pid is alive AND its
-// creation-time token matches the one Open recorded — the same pid-reuse token
-// internal/mcpinit uses for .pid files. A dead pid, or a live pid whose token
-// differs (the OS recycled it to an unrelated process), means the directory is
-// abandoned and it is removed regardless of age. A marker with no start line
-// predates tokens: it is not shielded on liveness alone and is removed once
-// older than maxAge, so the transition cannot pin old leaks forever. A genuine
-// live owner — pid alive, token matching — is shielded unconditionally, with
-// no age ceiling and no mtime consultation, because phase timeouts can be
-// configured to 0 (unbounded), so any ceiling could delete a live
-// invocation's scratch directory.
+// A marked entry is owned and live only when its pid is alive AND, when the
+// marker carries a creation-time token, that token still matches the live
+// process's — the same pid-reuse token internal/mcpinit uses for .pid files. A
+// dead pid, or a live pid whose token differs (the OS recycled it to an
+// unrelated process), means the directory is abandoned and it is removed
+// regardless of age. A startNone sentinel means the platform cannot supply
+// tokens: liveness alone is all that marker can prove, so a live pid is still
+// shielded unconditionally and a dead one is removed. Only a marker with no
+// start line at all predates tokens: it is not shielded on liveness alone and
+// is removed once older than maxAge, so the transition cannot pin old leaks
+// forever. A genuine live owner — pid alive with a matching token, or with the
+// sentinel — is shielded unconditionally, with no age ceiling and no mtime
+// consultation, because phase timeouts can be configured to 0 (unbounded), so
+// any ceiling could delete a live invocation's scratch directory.
 //
 // The bound is therefore honest: a pid the OS recycled is detected by the
 // token mismatch and collected immediately, a directory abandoned by a dead
@@ -201,20 +227,26 @@ func Reap(maxAge time.Duration) (int, error) {
 			if !isScratchDirName(entry.Name()) || !stale {
 				continue
 			}
-		case !procstat.IsAlive(pid, start, start != ""):
-			// Dead pid, or a live pid whose creation-time token does not match
-			// the recorded one: the owner is gone and its pid was recycled.
-			// Abandoned — remove regardless of age.
+		case start == startNone:
+			// The platform cannot supply creation-time tokens, so liveness is
+			// all this marker can prove. haveToken=false is IsAlive's explicit
+			// no-token mode (signal 0 / STILL_ACTIVE), not a fake token, and a
+			// live owner is shielded unconditionally.
+			if procstat.IsAlive(pid, "", false) {
+				continue
+			}
 		case start == "":
-			// Legacy marker (no start token) with a live pid: not shielded on
-			// liveness alone, so the age backstop collects it.
+			// True pre-token legacy marker: liveness alone does not shield it;
+			// only the age backstop does.
 			if !stale {
 				continue
 			}
 		default:
-			// Genuine live owner: shield unconditionally, because phase
-			// timeouts can be unbounded.
-			continue
+			// Token present: alive and matching is a live owner; dead or a
+			// recycled pid (token mismatch) is abandoned.
+			if procstat.IsAlive(pid, start, true) {
+				continue
+			}
 		}
 		if err := os.RemoveAll(path); err == nil {
 			removed++
@@ -226,8 +258,9 @@ func Reap(maxAge time.Duration) (int, error) {
 // ownerMarker reads dir's ownerFile marker. ok is false when the marker is
 // missing, unreadable, or has no usable pid; without one, Reap collects the
 // directory only when its name matches the Open shape and the mtime age
-// backstop has passed. start is the recorded process creation-time token, or
-// "" for a legacy marker written without one.
+// backstop has passed. start is the recorded process creation-time token, the
+// startNone sentinel when the writer could not read one, or "" for a true
+// legacy marker written before start lines existed.
 func ownerMarker(dir string) (pid int, start string, ok bool) {
 	data, err := os.ReadFile(filepath.Join(dir, ownerFile))
 	if err != nil {

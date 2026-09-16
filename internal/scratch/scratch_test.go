@@ -103,11 +103,40 @@ func TestOpen_CreatesPrivateDirWithOwnerMarker(t *testing.T) {
 		t.Errorf("marker %q missing token", marker)
 	}
 	// The creation-time token is what lets Reap detect a recycled pid; it must
-	// be recorded whenever the platform can supply it.
+	// be recorded whenever the platform can supply it, and the explicit
+	// sentinel must be recorded when it cannot — a missing line would be
+	// mistaken for a true legacy marker and lose the live-owner shield.
 	if start, ok := procstat.StartTime(os.Getpid()); ok {
 		if want := "start=" + start; !strings.Contains(string(marker), want) {
 			t.Errorf("marker %q missing %q", marker, want)
 		}
+	} else if !strings.Contains(string(marker), "start="+startNone) {
+		t.Errorf("marker %q missing sentinel %q", marker, startNone)
+	}
+}
+
+// TestOwnerMarkerText pins the marker-writing helper's two shapes directly,
+// including the ok=false path that cannot be forced through Open on a platform
+// where StartTime succeeds: an unavailable token is written as the explicit
+// sentinel, never as a missing line.
+func TestOwnerMarkerText(t *testing.T) {
+	tests := []struct {
+		name      string
+		start     string
+		haveStart bool
+		wantStart string
+	}{
+		{"token available", "boot-12345", true, "boot-12345"},
+		{"token unavailable", "", false, startNone},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			marker := ownerMarkerText(4242, "aabbccddeeff0011", tt.start, tt.haveStart)
+			want := "pid=4242\ntoken=aabbccddeeff0011\nstart=" + tt.wantStart + "\n"
+			if marker != want {
+				t.Errorf("ownerMarkerText = %q, want %q", marker, want)
+			}
+		})
 	}
 }
 
@@ -164,9 +193,10 @@ func TestReap_ClassifiesEntries(t *testing.T) {
 	// marker, the name is the only ownership evidence Reap accepts.
 	const scratchName = "123-0123456789abcdef"
 
-	// markerFor builds an owner marker the way Open writes it: pid and random
-	// token, plus the creation-time token only when start is non-empty (a
-	// legacy marker written before start tokens existed).
+	// markerFor builds an owner marker: pid and random token, plus a start
+	// line when start is non-empty. An empty start omits the line entirely,
+	// which is the true pre-token legacy form — Open itself always writes
+	// either a token or the startNone sentinel.
 	markerFor := func(pid int, start string) string {
 		marker := "pid=" + strconv.Itoa(pid) + "\ntoken=bb\n"
 		if start != "" {
@@ -187,6 +217,8 @@ func TestReap_ClassifiesEntries(t *testing.T) {
 		{"live owner with matching token fresh spared", "entry", markerFor(livePid, liveStart), nil, true, false},
 		{"live owner with matching token old mtime spared", "entry", markerFor(livePid, liveStart), &oldTime, true, false},
 		{"live owner with mismatched token removed", "entry", markerFor(livePid, "definitely-not-the-real-token"), nil, true, true},
+		{"sentinel live owner old mtime spared", "entry", markerFor(livePid, startNone), &oldTime, false, false},
+		{"sentinel dead owner removed", "entry", markerFor(deadPid, startNone), nil, false, true},
 		{"legacy live owner fresh spared", "entry", markerFor(livePid, ""), nil, false, false},
 		{"legacy live owner old removed", "entry", markerFor(livePid, ""), &oldTime, false, true},
 		{"malformed pid scratch-shaped old removed", scratchName, "pid=notanumber\ntoken=cc\n", &oldTime, false, true},
