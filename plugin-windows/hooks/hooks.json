@@ -1,0 +1,27 @@
+{
+  "description": "Ghost lifecycle wiring: inject project memory at session start, and nudge a save (plus run consolidation) when the session goes idle.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/ghost.exe",
+            "args": ["hook", "session-start", "--source", "claude-code"]
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/ghost.exe",
+            "args": ["hook", "stop", "--source", "claude-code"]
+          }
+        ]
+      }
+    ]
+  }
+}

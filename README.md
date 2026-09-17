@@ -34,7 +34,9 @@ Then start a session. Ghost injects your project's context automatically and sta
 
 ```text
 /plugin marketplace add wcatz/ghost
-/plugin install ghost@ghost        # prompts once for your platform
+/plugin install ghost@ghost                   # macOS and Linux (incl. WSL)
+/plugin install ghost-windows-amd64@ghost     # native Windows, x64 (most PCs)
+/plugin install ghost-windows-arm64@ghost     # native Windows on ARM
 ```
 
 The plugin declares the MCP server and both hooks itself, then finalizes on your first session (disables Claude's built-in file memory, imports existing memories, writes project redirects). Updates flow through `/plugin update`. `ghost mcp init` remains the path for opencode, codex, goose, and manual MCP setups.

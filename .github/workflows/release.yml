@@ -82,9 +82,13 @@ jobs:
             ghcr.io/wcatz/ghost:${{ steps.version.outputs.version }}
             ghcr.io/wcatz/ghost:latest
 
-  # The Claude Code plugin is one archive covering all six platform binaries,
-  # published as a release asset so the marketplace entry (which points at
-  # releases/latest/download/ghost-plugin.zip) never needs a per-release edit.
+  # The Claude Code plugin ships as three archives. The macOS/Linux archive
+  # bundles all four POSIX binaries behind one launcher. Native Windows gets
+  # one single-arch archive per architecture, because Claude Code serves every
+  # host from one .mcp.json/hooks.json command and a native .exe cannot serve
+  # both windows-amd64 and windows-arm64. All are published as release assets
+  # so the marketplace entries (which point at
+  # releases/latest/download/*.zip) never need a per-release edit.
   # Runs after `release` because it attaches to the release GoReleaser creates.
   plugin:
     needs: release
@@ -98,7 +102,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Assemble the plugin tree
+      - name: Assemble the plugin trees
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           scripts/assemble-plugin.sh "$VERSION" dist/ghost-plugin
@@ -106,8 +110,18 @@ jobs:
           # .claude-plugin/plugin.json without a wrapper directory.
           (cd dist/ghost-plugin && zip -qr ../ghost-plugin.zip .)
           unzip -l dist/ghost-plugin.zip | head -20
+          for arch in amd64 arm64; do
+            scripts/assemble-plugin-windows.sh "$arch" "$VERSION" "dist/ghost-plugin-windows-$arch"
+            (cd "dist/ghost-plugin-windows-$arch" && zip -qr "../ghost-plugin-windows-$arch.zip" .)
+            unzip -l "dist/ghost-plugin-windows-$arch.zip" | head -20
+          done
 
-      - name: Attach the plugin archive to the release
+      - name: Attach the plugin archives to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${GITHUB_REF_NAME}" dist/ghost-plugin.zip --clobber
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist/ghost-plugin.zip \
+            dist/ghost-plugin-windows-amd64.zip \
+            dist/ghost-plugin-windows-arm64.zip \
+            --clobber

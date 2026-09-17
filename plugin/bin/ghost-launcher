@@ -15,12 +15,15 @@
 # platform from uname removes the failure mode instead of documenting it; the
 # per-platform binaries stay where they are, at bin/<os>-<arch>/ghost.
 #
-# The artifact ships macOS and Linux binaries only. Native Windows
-# (cmd/PowerShell) cannot execute a POSIX shell script, and Claude Code
-# substitutes one command for every host (there is no per-OS .mcp.json or
-# hooks.json), so no Windows entry point can live in this artifact. Windows
-# users install the standalone binary and run `ghost mcp init` instead;
-# restoring plugin support needs a compiled launcher (task 7FFBDD03).
+# Native Windows (cmd/PowerShell) cannot execute a POSIX shell script. Claude
+# Code serves every host from one .mcp.json/hooks.json command — there is no
+# per-OS command (anthropics/claude-code#15562, closed as not planned) — and a
+# single .exe cannot serve both windows-amd64 and windows-arm64, so native
+# Windows is served by two separate zero-config marketplace entries,
+# ghost-windows-amd64 and ghost-windows-arm64, each bundling one native
+# .exe. This launcher covers macOS and Linux (including WSL, which reports
+# Linux); native Windows users who install this entry instead get the message
+# below.
 
 set -eu
 
@@ -33,7 +36,7 @@ case "$os" in
   Darwin) os_name=darwin ;;
   Linux) os_name=linux ;;
   *)
-    echo "ghost-launcher: unsupported operating system '$os'; this plugin ships macOS and Linux binaries only (Windows users: run 'ghost mcp init' with the standalone binary)" >&2
+    echo "ghost-launcher: unsupported operating system '$os'; this plugin ships macOS and Linux binaries only (native Windows: install ghost-windows-amd64 or ghost-windows-arm64 from the 'ghost' marketplace, or run 'ghost mcp init' with the standalone binary)" >&2
     exit 1
     ;;
 esac

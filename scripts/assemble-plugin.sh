@@ -8,10 +8,10 @@
 # The plugin is one artifact covering the goreleaser darwin/linux platforms: a
 # POSIX launcher (bin/ghost-launcher) resolves the host platform from uname at
 # runtime and execs the matching bundled binary, so no userConfig value is
-# required. Windows is deliberately not shipped: native Windows cannot exec the
-# POSIX launcher and Claude Code has no per-OS MCP/hook command, so Windows
-# users use `ghost mcp init` (task 7FFBDD03 tracks restoring it). See
-# docs/superpowers/specs/2026-08-20-ghost-claude-plugin-design.md.
+# required. Native Windows cannot exec the POSIX launcher, so it ships as two
+# separate per-architecture archives assembled by the sibling
+# scripts/assemble-plugin-windows.sh (see that script's header for why).
+# See docs/superpowers/specs/2026-08-20-ghost-claude-plugin-design.md.
 #
 # Usage: scripts/assemble-plugin.sh <version> <out-dir>
 #   <version>  release version without the leading "v" (e.g. 0.30.0)
