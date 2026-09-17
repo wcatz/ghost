@@ -53,7 +53,7 @@ func TestPluginMarkerPath(t *testing.T) {
 // plugin family: installed_plugins.json keys are "<plugin>@<marketplace>",
 // and native Windows is served by the per-arch entries
 // "ghost-windows-amd64"/"ghost-windows-arm64", so the check must match the
-// whole ghost family rather than only the exact "ghost" name.
+// exact Ghost-managed names, not any plugin whose name starts with "ghost-".
 func TestPluginInstalledRegistryNames(t *testing.T) {
 	cases := []struct {
 		key  string
@@ -65,6 +65,8 @@ func TestPluginInstalledRegistryNames(t *testing.T) {
 		{"GHOST-Windows-AMD64@ghost", true},
 		{"something-else@ghost", false},
 		{"ghostwriter@ghost", false},
+		{"ghost-tools@somewhere", false},
+		{"ghost-windows-386@ghost", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key, func(t *testing.T) {

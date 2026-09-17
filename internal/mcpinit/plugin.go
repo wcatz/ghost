@@ -83,10 +83,12 @@ func PluginInstalled() bool {
 		// Keys are "<plugin>@<marketplace>". The POSIX plugin is "ghost";
 		// native Windows is served by the per-arch entries
 		// "ghost-windows-amd64" and "ghost-windows-arm64", each bundling one
-		// .exe. Match the whole ghost family so a standalone `ghost mcp init`
-		// defers to any of them instead of double-wiring.
+		// .exe. Match that exact set (case-insensitively) so a standalone
+		// `ghost mcp init` defers to any Ghost-managed install without
+		// claiming unrelated plugins whose names merely start with "ghost-".
 		name, _, _ := strings.Cut(key, "@")
-		if strings.EqualFold(name, "ghost") || strings.HasPrefix(strings.ToLower(name), "ghost-") {
+		switch strings.ToLower(name) {
+		case "ghost", "ghost-windows-amd64", "ghost-windows-arm64":
 			return true
 		}
 	}
