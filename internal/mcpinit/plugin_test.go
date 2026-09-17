@@ -49,6 +49,43 @@ func TestPluginMarkerPath(t *testing.T) {
 	}
 }
 
+// TestPluginInstalledRegistryNames pins the coexistence contract for the
+// plugin family: installed_plugins.json keys are "<plugin>@<marketplace>",
+// and native Windows is served by the per-arch entries
+// "ghost-windows-amd64"/"ghost-windows-arm64", so the check must match the
+// whole ghost family rather than only the exact "ghost" name.
+func TestPluginInstalledRegistryNames(t *testing.T) {
+	cases := []struct {
+		key  string
+		want bool
+	}{
+		{"ghost@ghost", true},
+		{"ghost-windows-amd64@ghost", true},
+		{"ghost-windows-arm64@ghost", true},
+		{"GHOST-Windows-AMD64@ghost", true},
+		{"something-else@ghost", false},
+		{"ghostwriter@ghost", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv(pluginRootEnv, "")
+			dir := filepath.Join(home, ".claude", "plugins")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			doc := `{"version":2,"plugins":{"` + tc.key + `":[]}}`
+			if err := os.WriteFile(filepath.Join(dir, "installed_plugins.json"), []byte(doc), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got := PluginInstalled(); got != tc.want {
+				t.Errorf("PluginInstalled() with %q = %v, want %v", tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestFinalizePluginMarkerSkips pins the marker contract: once the finalize
 // marker exists, a later session must do nothing at all.
 func TestFinalizePluginMarkerSkips(t *testing.T) {

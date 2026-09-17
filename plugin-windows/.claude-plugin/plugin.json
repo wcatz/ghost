@@ -1,0 +1,21 @@
+{
+  "name": "ghost-windows",
+  "displayName": "Ghost Memory (Windows)",
+  "version": "0.0.0",
+  "description": "Local-first MCP memory server for Claude Code on native Windows: one SQLite file, hybrid search, automatic consolidation. Each archive bundles one native ghost.exe; install the marketplace entry for this PC's architecture (ghost-windows-amd64 for most PCs, ghost-windows-arm64 for Windows on ARM). Without the plugin, install the standalone binary from install.ps1 and run `ghost mcp init`.",
+  "author": {
+    "name": "Wayne Cataldo",
+    "email": "waynecataldo@gmail.com"
+  },
+  "homepage": "https://github.com/wcatz/ghost",
+  "repository": "https://github.com/wcatz/ghost",
+  "license": "Apache-2.0",
+  "keywords": [
+    "memory",
+    "mcp",
+    "sqlite",
+    "context",
+    "knowledge-base"
+  ],
+  "defaultEnabled": true
+}

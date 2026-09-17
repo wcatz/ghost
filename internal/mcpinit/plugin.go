@@ -80,9 +80,13 @@ func PluginInstalled() bool {
 		return false
 	}
 	for key := range doc.Plugins {
-		// Keys are "<plugin>@<marketplace>"; the plugin name is "ghost".
+		// Keys are "<plugin>@<marketplace>". The POSIX plugin is "ghost";
+		// native Windows is served by the per-arch entries
+		// "ghost-windows-amd64" and "ghost-windows-arm64", each bundling one
+		// .exe. Match the whole ghost family so a standalone `ghost mcp init`
+		// defers to any of them instead of double-wiring.
 		name, _, _ := strings.Cut(key, "@")
-		if strings.EqualFold(name, "ghost") {
+		if strings.EqualFold(name, "ghost") || strings.HasPrefix(strings.ToLower(name), "ghost-") {
 			return true
 		}
 	}
