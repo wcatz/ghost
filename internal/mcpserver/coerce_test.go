@@ -61,6 +61,11 @@ func TestOptFloat32(t *testing.T) {
 		{"garbage", "abc", nil, true},
 		{"bool", true, nil, true},
 		{"json.Number", json.Number("0.25"), ptr32(0.25), false},
+		{"string NaN", "NaN", nil, true},
+		{"string +Inf", "+Inf", nil, true},
+		{"string -Inf", "-Inf", nil, true},
+		{"json.Number NaN", json.Number("NaN"), nil, true},
+		{"json.Number Inf", json.Number("Infinity"), nil, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

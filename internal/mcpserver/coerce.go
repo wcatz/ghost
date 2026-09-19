@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -116,12 +117,18 @@ func toFloat64(v any, name string) (*float64, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s must be a number, got %q", name, t.String())
 		}
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, fmt.Errorf("%s must be a finite number, got %q", name, t.String())
+		}
 		return &f, nil
 	case string:
 		trimmed := strings.TrimSpace(t)
 		f, err := strconv.ParseFloat(trimmed, 64)
 		if err != nil {
 			return nil, fmt.Errorf("%s must be a number, got %q", name, t)
+		}
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, fmt.Errorf("%s must be a finite number, got %q", name, trimmed)
 		}
 		return &f, nil
 	case *float32:
