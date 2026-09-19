@@ -55,7 +55,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch' || inputs.condition != 'hybrid'
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - uses: actions/setup-go@v7
         with:
@@ -101,7 +101,7 @@ jobs:
     # entry (a prior manual run that completed), repeat runs finish in minutes.
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       - uses: actions/setup-go@v7
         with:
