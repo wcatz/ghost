@@ -117,20 +117,14 @@ func toFloat64(v any, name string) (*float64, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s must be a number, got %q", name, t.String())
 		}
-		if math.IsNaN(f) || math.IsInf(f, 0) {
-			return nil, fmt.Errorf("%s must be a finite number, got %q", name, t.String())
-		}
-		return &f, nil
+		return finiteFloat64(f, name, t.String())
 	case string:
 		trimmed := strings.TrimSpace(t)
 		f, err := strconv.ParseFloat(trimmed, 64)
 		if err != nil {
 			return nil, fmt.Errorf("%s must be a number, got %q", name, t)
 		}
-		if math.IsNaN(f) || math.IsInf(f, 0) {
-			return nil, fmt.Errorf("%s must be a finite number, got %q", name, trimmed)
-		}
-		return &f, nil
+		return finiteFloat64(f, name, trimmed)
 	case *float32:
 		if t == nil {
 			return nil, nil
@@ -151,4 +145,15 @@ func toFloat64(v any, name string) (*float64, error) {
 	default:
 		return nil, fmt.Errorf("%s must be a number, got %v (%T)", name, v, v)
 	}
+}
+
+// finiteFloat64 rejects non-finite values while preserving the caller's
+// pointer-to-value shape. ParseFloat and json.Number.Float64 return NaN and
+// ±Inf with a nil error, and NaN skips both < and > in the caller's clamping,
+// so a stringified "NaN" would otherwise slip past an importance range check.
+func finiteFloat64(f float64, name, raw string) (*float64, error) {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return nil, fmt.Errorf("%s must be a finite number, got %q", name, raw)
+	}
+	return &f, nil
 }
