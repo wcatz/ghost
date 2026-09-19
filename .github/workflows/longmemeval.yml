@@ -66,7 +66,7 @@ jobs:
 
       - name: Restore LongMemEval-S dataset cache
         id: cache-dataset
-        uses: actions/cache@v6
+        uses: actions/cache@v6.1.0
         with:
           path: ${{ env.DATASET_PATH }}
           key: longmemeval-s-cleaned-v1
@@ -114,7 +114,7 @@ jobs:
 
       - name: Restore LongMemEval-S dataset cache
         id: cache-dataset
-        uses: actions/cache@v6
+        uses: actions/cache@v6.1.0
         with:
           path: ${{ env.DATASET_PATH }}
           key: longmemeval-s-cleaned-v1
@@ -132,7 +132,7 @@ jobs:
       # lets each dispatch resume from the latest snapshot and warm the cache
       # incrementally across runs.
       - name: Restore embedding cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@v6.1.0
         with:
           path: ${{ env.EMBED_CACHE_PATH }}
           key: longmemeval-embed-cache-v1-${{ github.run_id }}
@@ -183,7 +183,7 @@ jobs:
         # the run step fails or the job hits its timeout — the next dispatch
         # then resumes via restore-keys instead of starting cold again.
         if: always()
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@v6.1.0
         with:
           path: ${{ env.EMBED_CACHE_PATH }}
           key: longmemeval-embed-cache-v1-${{ github.run_id }}
