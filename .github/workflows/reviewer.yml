@@ -114,7 +114,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: /tmp/opencode.tar.gz
-          key: opencode-tarball-linux-x64-1.18.30-5500724685816549
+          key: opencode-tarball-linux-x64-1.18.31-e9312be75ed803b7
 
       - name: Install opencode
         # Binary from GitHub Releases with SHA256 verification — no
@@ -123,8 +123,14 @@ jobs:
         # is what gave PR #421 "opencode: command not found" (exit 127).
         run: |
           mkdir -p "$HOME/.opencode/bin"
-          OC_VERSION=1.18.30
-          OC_SHA256=55007246858165496ff85ba1c2b648f7421e8e2013bf4189a680c9ff8e699d17
+          # The anonymous free tier ratchets on client version: on
+          # 2026-09-19, 1.18.30 began failing every call with a 403
+          # FreeTierError ("OpenCode's free tier can only be used from
+          # within OpenCode") while 1.18.31 succeeded at cost 0. If the
+          # review step dies fast with that error, bump OC_VERSION and
+          # OC_SHA256 here (and the cache key above) before anything else.
+          OC_VERSION=1.18.31
+          OC_SHA256=e9312be75ed803b7415fc2aeabda1f4fe938912a39673762dc0c38c0e11ebde4
           OC_URL="https://github.com/anomalyco/opencode/releases/download/v${OC_VERSION}/opencode-linux-x64.tar.gz"
           # A restored cache entry is untrusted input: drop it rather
           # than let a bad one wedge the pipeline until the cache expires.
