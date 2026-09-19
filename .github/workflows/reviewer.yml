@@ -180,7 +180,7 @@ jobs:
         #
         # The tools map is belt and braces: the "*" wildcard denies
         # anything the binary gains in a future version, and every tool
-        # id the 1.18.30 binary knows is then listed explicitly, because
+        # id the pinned binary knows is then listed explicitly, because
         # the wildcard's semantics are not documented.
         run: |
           # THE model pin. Verified: frontmatter `model:` is honoured with
