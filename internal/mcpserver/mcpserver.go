@@ -272,12 +272,15 @@ func (s *Server) projectExists(ctx context.Context, id string) (bool, error) {
 // updateArgs is package-level (unlike most tool arg structs) so the extracted
 // applyMemoryUpdate method can take it.
 type updateArgs struct {
-	ProjectID  string   `json:"project_id" jsonschema:"Project name the memory belongs to (required for ownership check)"`
-	MemoryID   string   `json:"memory_id" jsonschema:"ID of the memory to update"`
-	Content    string   `json:"content,omitempty" jsonschema:"New content. Omit to keep current value."`
-	Category   string   `json:"category,omitempty" jsonschema:"New category. Omit to keep current value."`
-	Importance *float32 `json:"importance,omitempty" jsonschema:"New importance 0.0-1.0. Omit to keep current value."`
-	Tags       []string `json:"tags,omitempty" jsonschema:"Replacement tags. Omit to keep current tags; pass [] to clear."`
+	ProjectID string `json:"project_id" jsonschema:"Project name the memory belongs to (required for ownership check)"`
+	MemoryID  string `json:"memory_id" jsonschema:"ID of the memory to update"`
+	Content   string `json:"content,omitempty" jsonschema:"New content. Omit to keep current value."`
+	Category  string `json:"category,omitempty" jsonschema:"New category. Omit to keep current value."`
+	// Importance/Tags are untyped so schema validation cannot reject
+	// stringified values some clients send for union-typed fields; see
+	// coerce.go. Keep the accepted shapes stated in the descriptions.
+	Importance any    `json:"importance,omitempty" jsonschema:"New importance number 0.0-1.0 (e.g. 0.8). Omit to keep current value."`
+	Tags       any    `json:"tags,omitempty" jsonschema:"Replacement tags as an array of strings (e.g. [\"a\",\"b\"]). Omit to keep current tags; pass [] to clear."`
 }
 
 // applyMemoryUpdate validates and applies a partial memory update, returning
@@ -312,6 +315,15 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, args updateArgs) (string
 		return "", fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, args.ProjectID)
 	}
 
+	importance, err := optFloat32(args.Importance, "importance")
+	if err != nil {
+		return "", err
+	}
+	tags, err := optStringSlice(args.Tags, "tags")
+	if err != nil {
+		return "", err
+	}
+
 	var changed []string
 	var content, category *string
 	truncated := false
@@ -327,23 +339,23 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, args updateArgs) (string
 		category = &args.Category
 		changed = append(changed, "category")
 	}
-	if args.Importance != nil {
-		v := *args.Importance
+	if importance != nil {
+		v := *importance
 		if v < 0 {
 			v = 0
 		}
 		if v > 1 {
 			v = 1
 		}
-		args.Importance = &v
+		importance = &v
 		changed = append(changed, "importance")
 	}
-	if args.Tags != nil {
-		args.Tags = validateTags(args.Tags)
+	if tags != nil {
+		tags = validateTags(tags)
 		changed = append(changed, "tags")
 	}
 
-	if err := s.store.UpdateMemory(ctx, resolvedProjectID, args.MemoryID, content, category, args.Importance, args.Tags); err != nil {
+	if err := s.store.UpdateMemory(ctx, resolvedProjectID, args.MemoryID, content, category, importance, tags); err != nil {
 		return "", fmt.Errorf("update failed: %w", err)
 	}
 	s.notifyProjectResource(ctx, resolvedProjectID, "context")
@@ -490,11 +502,13 @@ func (s *Server) registerTools() {
 
 	// ghost_memory_save — save a new memory.
 	type saveArgs struct {
-		ProjectID  string   `json:"project_id" jsonschema:"Project name to save under (e.g. 'ghost'). Use the name from the session hook heading."`
-		Content    string   `json:"content" jsonschema:"The memory content to save"`
-		Category   string   `json:"category,omitempty" jsonschema:"architecture|decision|pattern|convention|gotcha|dependency|preference|fact (default: fact)"`
-		Importance *float32 `json:"importance,omitempty" jsonschema:"Importance score 0.0-1.0 (default 0.7)"`
-		Tags       []string `json:"tags,omitempty" jsonschema:"Optional tags for categorization"`
+		ProjectID string `json:"project_id" jsonschema:"Project name to save under (e.g. 'ghost'). Use the name from the session hook heading."`
+		Content   string `json:"content" jsonschema:"The memory content to save"`
+		Category  string `json:"category,omitempty" jsonschema:"architecture|decision|pattern|convention|gotcha|dependency|preference|fact (default: fact)"`
+		// Importance/Tags: see coerce.go — untyped so stringified client
+		// values survive schema validation and are normalized in-handler.
+		Importance any `json:"importance,omitempty" jsonschema:"Importance score, a number 0.0-1.0 (e.g. 0.7). Default 0.7"`
+		Tags       any `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -516,11 +530,18 @@ func (s *Server) registerTools() {
 		if !validCategories[args.Category] {
 			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
 		}
-		importance := defaultImportance(args.Importance, 0.7)
-		if args.Tags == nil {
-			args.Tags = []string{}
+		importance, err := defaultImportanceArg(args.Importance, 0.7)
+		if err != nil {
+			return nil, nil, err
 		}
-		args.Tags = validateTags(args.Tags)
+		tags, err := optStringSlice(args.Tags, "tags")
+		if err != nil {
+			return nil, nil, err
+		}
+		if tags == nil {
+			tags = []string{}
+		}
+		tags = validateTags(tags)
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
@@ -543,7 +564,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
 
-		id, duplicateOf, score, err := s.store.Upsert(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, args.Tags)
+		id, duplicateOf, score, err := s.store.Upsert(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -855,10 +876,11 @@ func (s *Server) registerTools() {
 
 	// ghost_save_global — save a cross-project memory.
 	type saveGlobalArgs struct {
-		Content    string   `json:"content" jsonschema:"The memory content to save"`
-		Category   string   `json:"category,omitempty" jsonschema:"Category (default: fact)"`
-		Importance *float32 `json:"importance,omitempty" jsonschema:"Importance 0.0-1.0 (default 0.8)"`
-		Tags       []string `json:"tags,omitempty" jsonschema:"Optional tags"`
+		Content  string `json:"content" jsonschema:"The memory content to save"`
+		Category string `json:"category,omitempty" jsonschema:"Category (default: fact)"`
+		// Importance/Tags: see coerce.go.
+		Importance any `json:"importance,omitempty" jsonschema:"Importance, a number 0.0-1.0 (e.g. 0.8). Default 0.8"`
+		Tags       any `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -880,11 +902,18 @@ func (s *Server) registerTools() {
 		if !validCategories[args.Category] {
 			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
 		}
-		importance := defaultImportance(args.Importance, 0.8)
-		if args.Tags == nil {
-			args.Tags = []string{}
+		importance, err := defaultImportanceArg(args.Importance, 0.8)
+		if err != nil {
+			return nil, nil, err
 		}
-		args.Tags = validateTags(args.Tags)
+		tags, err := optStringSlice(args.Tags, "tags")
+		if err != nil {
+			return nil, nil, err
+		}
+		if tags == nil {
+			tags = []string{}
+		}
+		tags = validateTags(tags)
 
 		globalTruncated := false
 		if len(args.Content) > maxContentLen {
@@ -895,7 +924,7 @@ func (s *Server) registerTools() {
 		if err := s.store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
 			return nil, nil, fmt.Errorf("ensure global project: %w", err)
 		}
-		id, duplicateOf, score, err := s.store.Upsert(ctx, "_global", args.Category, args.Content, "mcp", importance, args.Tags)
+		id, duplicateOf, score, err := s.store.Upsert(ctx, "_global", args.Category, args.Content, "mcp", importance, tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -926,7 +955,9 @@ func (s *Server) registerTools() {
 		ProjectID   string `json:"project_id" jsonschema:"Project name (e.g. 'ghost')"`
 		Title       string `json:"title" jsonschema:"Task title"`
 		Description string `json:"description,omitempty" jsonschema:"Task description"`
-		Priority    *int   `json:"priority,omitempty" jsonschema:"Priority 0-4 (0=critical, 2=normal, 4=low). Default: 2 (normal)"`
+		// Priority: see coerce.go — untyped so stringified client values
+		// survive schema validation and are normalized in-handler.
+		Priority any `json:"priority,omitempty" jsonschema:"Priority 0-4, an integer (0=critical, 2=normal, 4=low). Default: 2 (normal)"`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -952,8 +983,12 @@ func (s *Server) registerTools() {
 		}
 		args.ProjectID = resolved
 		priority := 2 // default: normal
-		if args.Priority != nil {
-			priority = *args.Priority
+		p, err := optInt(args.Priority, "priority")
+		if err != nil {
+			return nil, nil, err
+		}
+		if p != nil {
+			priority = *p
 			if priority < 0 || priority > 4 {
 				priority = 2
 			}
@@ -1121,13 +1156,15 @@ func (s *Server) registerTools() {
 
 	// ghost_decision_record — record a decision with rationale.
 	type decisionRecordArgs struct {
-		ProjectID    string   `json:"project_id" jsonschema:"Project ID or name"`
-		Title        string   `json:"title" jsonschema:"Decision title (e.g., 'Use SQLite for storage')"`
-		Decision     string   `json:"decision" jsonschema:"What was decided"`
-		Rationale    string   `json:"rationale" jsonschema:"Why this was chosen"`
-		Alternatives []string `json:"alternatives,omitempty" jsonschema:"Array of strings — what was considered and rejected (not a single string)"`
-		Tags         []string `json:"tags,omitempty" jsonschema:"Tags for categorization"`
-		Supersedes   string   `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings."`
+		ProjectID string `json:"project_id" jsonschema:"Project ID or name"`
+		Title     string `json:"title" jsonschema:"Decision title (e.g., 'Use SQLite for storage')"`
+		Decision  string `json:"decision" jsonschema:"What was decided"`
+		Rationale string `json:"rationale" jsonschema:"Why this was chosen"`
+		// Alternatives/Tags: see coerce.go — untyped so stringified client
+		// arrays survive schema validation and are normalized in-handler.
+		Alternatives any    `json:"alternatives,omitempty" jsonschema:"Array of strings — what was considered and rejected (not a single string)"`
+		Tags         any    `json:"tags,omitempty" jsonschema:"Tags for categorization as an array of strings"`
+		Supersedes   string `json:"supersedes,omitempty" jsonschema:"decision_id of a prior decision this one reverses or replaces (from ghost_decisions_list). That decision is marked superseded and drops below live decisions in future listings."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -1145,11 +1182,15 @@ func (s *Server) registerTools() {
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
 		args.Decision = truncateUTF8(args.Decision, maxContentLen)
 		args.Rationale = truncateUTF8(args.Rationale, maxContentLen)
-		if len(args.Alternatives) > maxAlternatives {
-			args.Alternatives = args.Alternatives[:maxAlternatives]
+		alternatives, err := optStringSlice(args.Alternatives, "alternatives")
+		if err != nil {
+			return nil, nil, err
 		}
-		for i, alt := range args.Alternatives {
-			args.Alternatives[i] = truncateUTF8(alt, maxTitleLen)
+		if len(alternatives) > maxAlternatives {
+			alternatives = alternatives[:maxAlternatives]
+		}
+		for i, alt := range alternatives {
+			alternatives[i] = truncateUTF8(alt, maxTitleLen)
 		}
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
@@ -1159,13 +1200,17 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("project %q not found", args.ProjectID)
 		}
 		args.ProjectID = resolved
-		if args.Alternatives == nil {
-			args.Alternatives = []string{}
+		if alternatives == nil {
+			alternatives = []string{}
 		}
-		if args.Tags == nil {
-			args.Tags = []string{}
+		tags, err := optStringSlice(args.Tags, "tags")
+		if err != nil {
+			return nil, nil, err
 		}
-		args.Tags = validateTags(args.Tags)
+		if tags == nil {
+			tags = []string{}
+		}
+		tags = validateTags(tags)
 		// Pass "" for path — MCP callers don't have filesystem paths. Mirrors
 		// ghost_memory_save: without this, a decision recorded for a project
 		// that has never saved a memory yet fails with a raw FK-constraint
@@ -1174,7 +1219,7 @@ func (s *Server) registerTools() {
 		if err := s.store.EnsureProject(ctx, args.ProjectID, "", args.ProjectID); err != nil {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
-		decisionID, memoryID, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, args.Alternatives, args.Tags)
+		decisionID, memoryID, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
@@ -1399,9 +1444,11 @@ func (s *Server) registerTools() {
 	// ghost_task_update — update a task's status, priority, or description.
 	// Priority and description are optional — omitting them preserves current values.
 	type taskUpdateArgs struct {
-		TaskID      string  `json:"task_id" jsonschema:"Task ID to update — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
-		Status      string  `json:"status,omitempty" jsonschema:"New status: pending, active, blocked, done (omit to preserve current)"`
-		Priority    *int    `json:"priority,omitempty" jsonschema:"Priority 0-4 (0=critical, 2=normal, 4=low). Omit to keep current value."`
+		TaskID   string `json:"task_id" jsonschema:"Task ID to update — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
+		Status   string `json:"status,omitempty" jsonschema:"New status: pending, active, blocked, done (omit to preserve current)"`
+		// Priority: see coerce.go — untyped so stringified client values
+		// survive schema validation and are normalized in-handler.
+		Priority    any     `json:"priority,omitempty" jsonschema:"Priority 0-4, an integer (0=critical, 2=normal, 4=low). Omit to keep current value."`
 		Description *string `json:"description,omitempty" jsonschema:"Updated description. Omit to keep current value."`
 	}
 
@@ -1430,9 +1477,13 @@ func (s *Server) registerTools() {
 			status = &args.Status
 		}
 
-		if args.Priority != nil && (*args.Priority < 0 || *args.Priority > 4) {
+		priority, err := optInt(args.Priority, "priority")
+		if err != nil {
+			return nil, nil, err
+		}
+		if priority != nil && (*priority < 0 || *priority > 4) {
 			normalized := 2
-			args.Priority = &normalized
+			priority = &normalized
 		}
 		if args.Description != nil {
 			truncated := truncateUTF8(*args.Description, maxContentLen)
@@ -1442,7 +1493,7 @@ func (s *Server) registerTools() {
 		// UpdateTask does its own read-merge-write under one lock, so a
 		// concurrent update between a separate read and this write can't be
 		// silently overwritten.
-		updated, err := s.store.UpdateTask(ctx, args.TaskID, status, args.Priority, args.Description)
+		updated, err := s.store.UpdateTask(ctx, args.TaskID, status, priority, args.Description)
 		if err != nil {
 			return nil, nil, fmt.Errorf("update task: %w", err)
 		}

@@ -114,7 +114,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: /tmp/opencode.tar.gz
-          key: opencode-tarball-linux-x64-1.18.30-5500724685816549
+          key: opencode-tarball-linux-x64-1.18.31-e9312be75ed803b7
 
       - name: Install opencode
         # Binary from GitHub Releases with SHA256 verification — no
@@ -123,8 +123,18 @@ jobs:
         # is what gave PR #421 "opencode: command not found" (exit 127).
         run: |
           mkdir -p "$HOME/.opencode/bin"
-          OC_VERSION=1.18.30
-          OC_SHA256=55007246858165496ff85ba1c2b648f7421e8e2013bf4189a680c9ff8e699d17
+          # The anonymous free tier ratchets on client version: on
+          # 2026-09-19, 1.18.30 began failing every call with a 403
+          # FreeTierError ("OpenCode's free tier can only be used from
+          # within OpenCode") while 1.18.31 succeeded at cost 0 — but only
+          # for a default agent; custom agents with a tools map or a
+          # permission override were still rejected (moved to the paid go
+          # tier below).
+          # If a future bump fails fast with that error again, bump
+          # OC_VERSION and OC_SHA256 here (and the cache key above) before
+          # anything else.
+          OC_VERSION=1.18.31
+          OC_SHA256=e9312be75ed803b7415fc2aeabda1f4fe938912a39673762dc0c38c0e11ebde4
           OC_URL="https://github.com/anomalyco/opencode/releases/download/v${OC_VERSION}/opencode-linux-x64.tar.gz"
           # A restored cache entry is untrusted input: drop it rather
           # than let a bad one wedge the pipeline until the cache expires.
@@ -170,14 +180,29 @@ jobs:
         #
         # The tools map is belt and braces: the "*" wildcard denies
         # anything the binary gains in a future version, and every tool
-        # id the 1.18.30 binary knows is then listed explicitly, because
+        # id the pinned binary knows is then listed explicitly, because
         # the wildcard's semantics are not documented.
         run: |
           # THE model pin. Verified: frontmatter `model:` is honoured with
           # no -m flag. Keeping it here rather than on the run command
           # puts it next to the tool restrictions, so rotating the model
           # is a one-line edit in one place.
-          MODEL=opencode/big-pickle
+          #
+          # MODEL is on the account's Go endpoint, NOT the anonymous tier.
+          # The anonymous free tier (opencode/big-pickle) began refusing
+          # every request in September 2026 — but only when the client sent
+          # a custom agent. Locally on 2026-09-19, 1.18.31 + big-pickle
+          # answered "OK" at cost 0 with a default agent and was rejected
+          # (403 FreeTierError "OpenCode's free tier can only be used from
+          # within OpenCode") the moment the request carried a `tools:` map
+          # or a permission override — i.e. exactly the read-only agent this
+          # workflow installs. The same run against the big-pickle model
+          # through the account's aka opencode-go endpoint (key set via
+          # OPENCODE_API_KEY) succeeded with the identical agent file.
+          # Pinning the go endpoint keeps the read-only tool restriction —
+          # the whole point of the agent — on a tier that does not reject
+          # custom tool maps.
+          MODEL=opencode-go/kimi-k2.7-code
           mkdir -p "$HOME/.config/opencode/agent"
           AGENT=$HOME/.config/opencode/agent/ghost-reviewer.md
           # Only the model line interpolates. The rest stays in a QUOTED
@@ -221,12 +246,13 @@ jobs:
             exit 1
           }
 
-          # opencode/big-pickle is a codename where the rest of the
-          # catalog carries a version (opencode/claude-opus-4-8,
-          # opencode/glm-5.3), and it is the anonymous tier, which is why
-          # this step needs no credential. A codenamed free endpoint can
-          # be rotated out from under us, and the run then dies with the
-          # gateway's own "Unexpected server error", which names nothing.
+          # The Go-endpoint model id is provider-scoped (opencode-go/...,
+          # not a bare codename), like the catalog's opencode/* ids. The
+          # preflight also depends on the OPENCODE_API_KEY being set — with
+          # no key the catalog shows only the anonymous tier, opencode-go/*
+          # is absent, and this spurious warning fires. That is expected;
+          # the Review step below fails loudly on a missing key, and this
+          # warning exists to name a rotated model, not to police the key.
           #
           # This check only improves that message. It never decides
           # whether the review runs: `opencode models` at 1.18.30 prints
@@ -429,6 +455,17 @@ jobs:
         # tool calls against 9 on a comparable diff) because it has no
         # shortcut, so a larger diff would have tripped it.
         timeout-minutes: 25
+        # The model is on the account's Go endpoint; this key is what
+        # selects it (verified 2026-09-19: the same read-only agent ran
+        # against opencode-go/kimi-k2.7-code via OPENCODE_API_KEY where the
+        # anonymous tier 403'd on the tools map). It is an inference-scoped
+        # key, not a repo/GitHub credential — the guard below deliberately
+        # does not trip on it, and ai.stripLLMKeys (evalcycle's identical
+        # injection path) passes OPENCODE_* through by design. The HANDOFF
+        # is confined to this step: it cannot flow into Post review because
+        # GitHub never merges step-level env across steps.
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
         run: |
           cd "${GITHUB_WORKSPACE}"
           # Hard-fail rather than hand a credential to a model fed
