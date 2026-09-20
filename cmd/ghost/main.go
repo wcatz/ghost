@@ -1245,11 +1245,15 @@ config; set --source to route by host).`)
 		return id
 	}
 	fmt.Printf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %s %d\n",
-		projectName, res.Loaded, res.Candidates, res.Confirmed, verb, count)
+		projectName, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected, verb, count)
+	if res.Superseded > 0 || res.Corrected > 0 {
+		fmt.Printf("  (%d via supersedes links, %d via correction pairing, %d via LLM)\n",
+			res.Superseded, res.Corrected, res.Confirmed)
+	}
 	for _, m := range confirmed {
 		fmt.Printf("  %s  [%s]  %s\n", short(m.ID), m.Category, firstLine(m.Content, 70))
 	}
-	if !apply && res.Confirmed > 0 {
+	if !apply && res.Confirmed+res.Superseded+res.Corrected > 0 {
 		fmt.Println("\nRe-run with --apply to mark these resolved.")
 	}
 }

@@ -27,6 +27,7 @@ func (f fakeClassifier) IsResolved(_ context.Context, content string) (bool, err
 // fakeStore satisfies resolveStore with in-memory candidates.
 type fakeStore struct {
 	candidates        []memory.Memory
+	links             []memory.Link
 	resolved          []string
 	err               error // when set, returned by SetResolved instead of writing
 	setResolvedCalled bool
@@ -42,6 +43,9 @@ func (s *fakeStore) SetResolved(_ context.Context, ids []string) (int, error) {
 	}
 	s.resolved = append(s.resolved, ids...)
 	return len(ids), nil
+}
+func (s *fakeStore) LinksByRelationSource(_ context.Context, _, _, _ string) ([]memory.Link, error) {
+	return s.links, nil
 }
 
 func TestPrefilterKeepsOnlyPlausible(t *testing.T) {
@@ -146,5 +150,110 @@ func TestPrefilterCatchesEstimateAndPostmortemPhrasings(t *testing.T) {
 				t.Errorf("prefilter dropped resolved-evidence memory %s: %q", m.ID, m.Content)
 			}
 		}
+	}
+}
+
+// TestRunSupersedesEdgePiggyback: the older endpoint of a live
+// 'supersedes'/'llm' link is demoted deterministically — no LLM call — even
+// though its content carries no resolution keyword.
+func TestRunSupersedesEdgePiggyback(t *testing.T) {
+	older := memory.Memory{ID: "older", Category: "gotcha",
+		Content: "Reward snapshot import miscalculates: unrelated live-looking gotcha without keywords"}
+	newer := memory.Memory{ID: "newer", Category: "gotcha",
+		Content: "superseded the snapshot import row; never use the old calculation on import"}
+	store := &fakeStore{
+		candidates: []memory.Memory{older, newer},
+		links: []memory.Link{{
+			SourceID: "newer", TargetID: "older", Relation: "supersedes", Source: "llm",
+		}},
+	}
+	// Never called: the classifier returns KEEP for everything, but the piggyback
+	// shouldn't need it.
+	cls := fakeClassifier{drop: map[string]bool{}}
+
+	res, confirmed, err := Run(context.Background(), store, cls, "proj", false, nil)
+	if err != nil {
+		t.Fatalf("Run dry: %v", err)
+	}
+	if res.Superseded != 1 {
+		t.Fatalf("res.Superseded = %d, want 1", res.Superseded)
+	}
+	if len(confirmed) != 1 || confirmed[0].ID != "older" {
+		t.Fatalf("confirmed = %v, want [older]", confirmed)
+	}
+
+	res, _, err = Run(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Run apply: %v", err)
+	}
+	if len(store.resolved) != 1 || store.resolved[0] != "older" {
+		t.Fatalf("apply wrote %v, want [older]", store.resolved)
+	}
+	if res.Resolved != 1 {
+		t.Errorf("res.Resolved = %d, want 1", res.Resolved)
+	}
+}
+
+// TestRunCorrectionPairing: a newer correction demotes an OLDER prefilter-passing
+// candidate sharing rare subject tokens, while the correction itself and an
+// unrelated live memory stay KEEP.
+func TestRunCorrectionPairing(t *testing.T) {
+	older := memory.Memory{ID: "old-report", Category: "gotcha", UpdatedAt: "2026-09-19 20:00:00",
+		Content: "root cause: ledgerstate/imported_reward_inputs.go never sets CalculationVersion on imported reward_snapshot rows; unusable (closed)"}
+	correction := memory.Memory{ID: "correction", Category: "gotcha", UpdatedAt: "2026-09-19 21:00:00",
+		Content: "CORRECTION/RESOLUTION to the imported reward_snapshot P0: the bug IS ALREADY FIXED ON MAIN. Commit d646e680 adds CalculationVersion to ledgerstate/imported_reward_inputs.go. NO PR IS NEEDED FROM US."}
+	unrelated := memory.Memory{ID: "live", Category: "gotcha", UpdatedAt: "2026-09-19 22:00:00",
+		Content: "active pool operator: rotate blslib keys monthly; keep offline signing keys cold"}
+	// old-report and correction share ≥3 rare subject tokens
+	// (ledgerstate/imported_reward_inputs.go, calculationversion, reward_snapshot,
+	// imported), so pairing fires; "live" shares none and stays KEEP.
+	store := &fakeStore{candidates: []memory.Memory{older, correction, unrelated}}
+	// LLM would keep everything; only deterministic pairing demotes.
+	cls := fakeClassifier{drop: map[string]bool{}}
+
+	res, confirmed, err := Run(context.Background(), store, cls, "proj", false, nil)
+	if err != nil {
+		t.Fatalf("Run dry: %v", err)
+	}
+	if res.Corrected != 1 {
+		t.Fatalf("res.Corrected = %d, want 1", res.Corrected)
+	}
+	got := map[string]bool{}
+	for _, m := range confirmed {
+		got[m.ID] = true
+	}
+	if !got["old-report"] {
+		t.Errorf("confirmed = %v, want old-report demoted", confirmed)
+	}
+	if got["correction"] || got["live"] {
+		t.Errorf("confirmed = %v, correction/live must stay KEEP", confirmed)
+	}
+}
+
+// TestRunCorrectionPairingSkipsLiveGotcha: F6AB3B79 regression — a memory
+// sharing rare tokens with a correction but NOT passing the prefilter is never
+// demoted; only prefilter-passing candidates are.
+func TestRunCorrectionPairingSkipsLiveGotcha(t *testing.T) {
+	live := memory.Memory{ID: "live", Category: "gotcha", UpdatedAt: "2026-09-01 00:00:00",
+		Content: "re-bootstrap gotcha: ledgerstate/imported_reward_inputs.go mithril CalculationVersion never set on imported reward_snapshot rows — dingo-core-mithril-sync restarts"}
+	correction := memory.Memory{ID: "correction", Category: "gotcha", UpdatedAt: "2026-09-19 00:00:00",
+		Content: "CORRECTION/RESOLUTION to the imported reward_snapshot P0: the bug IS ALREADY FIXED ON MAIN. Commit d646e680 adds CalculationVersion to ledgerstate/imported_reward_inputs.go. NO PR IS NEEDED FROM US."}
+	// "live" is strictly OLDER than the correction and shares its rare tokens,
+	// but passes no resolution keyword, so it is not a candidate and must survive.
+	store := &fakeStore{candidates: []memory.Memory{live, correction}}
+	cls := fakeClassifier{drop: map[string]bool{}}
+
+	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Corrected != 0 {
+		t.Errorf("res.Corrected = %d, want 0 (live gotcha must not be demoted)", res.Corrected)
+	}
+	if len(confirmed) != 0 {
+		t.Errorf("confirmed = %v, want nothing demoted", confirmed)
+	}
+	if len(store.resolved) != 0 {
+		t.Errorf("applied %v, want nothing written", store.resolved)
 	}
 }
