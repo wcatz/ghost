@@ -37,12 +37,14 @@ type embedderDiagnostics interface {
 func boolPtr(b bool) *bool { return &b }
 
 // resolveCapableStore narrows provider.MemoryStore's concrete backing store to
-// the two methods ghost_resolve needs (ResolveCandidates, SetResolved). These
-// aren't part of provider.MemoryStore, so s.store is type-asserted to this
-// interface at call time; *memory.Store satisfies it.
+// the methods ghost_resolve needs (ResolveCandidates, SetResolved, and the
+// supersedes-link read for deterministic demotion). These aren't part of
+// provider.MemoryStore, so s.store is type-asserted to this interface at call
+// time; *memory.Store satisfies it.
 type resolveCapableStore interface {
 	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
 	SetResolved(ctx context.Context, ids []string) (int, error)
+	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 }
 
 // shortID truncates an ID to 8 characters for compact preview (used for both
@@ -1064,7 +1066,11 @@ func (s *Server) registerTools() {
 		}
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %s %d\n",
-			args.Project, res.Loaded, res.Candidates, res.Confirmed, verb, count)
+			args.Project, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected, verb, count)
+		if res.Superseded > 0 || res.Corrected > 0 {
+			fmt.Fprintf(&sb, "  (%d via supersedes links, %d via correction pairing, %d via LLM)\n",
+				res.Superseded, res.Corrected, res.Confirmed)
+		}
 		for _, m := range confirmed {
 			fmt.Fprintf(&sb, "  %s  [%s]  %s\n", shortID(m.ID), m.Category, firstLine(m.Content, 70))
 		}
@@ -1444,8 +1450,8 @@ func (s *Server) registerTools() {
 	// ghost_task_update — update a task's status, priority, or description.
 	// Priority and description are optional — omitting them preserves current values.
 	type taskUpdateArgs struct {
-		TaskID   string `json:"task_id" jsonschema:"Task ID to update — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
-		Status   string `json:"status,omitempty" jsonschema:"New status: pending, active, blocked, done (omit to preserve current)"`
+		TaskID string `json:"task_id" jsonschema:"Task ID to update — full ID or unique short prefix (e.g. the 8-char ID shown by ghost_task_list)"`
+		Status string `json:"status,omitempty" jsonschema:"New status: pending, active, blocked, done (omit to preserve current)"`
 		// Priority: see coerce.go — untyped so stringified client values
 		// survive schema validation and are normalized in-handler.
 		Priority    any     `json:"priority,omitempty" jsonschema:"Priority 0-4, an integer (0=critical, 2=normal, 4=low). Omit to keep current value."`

@@ -57,13 +57,16 @@ type Classifier interface {
 type resolveStore interface {
 	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
 	SetResolved(ctx context.Context, ids []string) (int, error)
+	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 }
 
 // Result summarizes a pass.
 type Result struct {
 	Loaded     int // candidates returned by the store (already category/pin/NULL filtered)
-	Candidates int // survived the keyword prefilter and were classified
-	Confirmed  int // classified as resolved evidence
+	Candidates int // survived the keyword prefilter (demoted + then classified)
+	Confirmed  int // classified as resolved evidence by the LLM
+	Superseded int // older endpoint of a live 'supersedes'/'llm' link, demoted deterministically
+	Corrected  int // older prefilter-passing memory tied to a correction, demoted deterministically
 	Resolved   int // rows written (0 in dry-run)
 }
 
@@ -83,15 +86,30 @@ func Prefilter(mems []memory.Memory) []memory.Memory {
 	return out
 }
 
-// Run loads eligible candidates, prefilters them, classifies each, and — when
-// apply is true — stamps resolved_at on every confirmed memory in one batch.
-// Dry-run (apply=false) writes nothing but returns the confirmed set for
-// preview. A classifier error on any memory is fatal so a partial pass is never
-// silently applied.
+// Run loads eligible candidates, applies two deterministic demotion signals,
+// prefilters the rest, classifies each candidate, and — when apply is true —
+// stamps resolved_at on every confirmed memory in one batch. Dry-run
+// (apply=false) writes nothing but returns the confirmed set for preview. A
+// classifier error on any memory is fatal so a partial pass is never silently
+// applied.
+//
+// Deterministic demotions (no LLM call, so no extra CLI spend):
+//
+//   - Supersedes-edge piggyback: the older endpoint of a live 'supersedes'/'llm'
+//     link is already-adjudicated evidence — supersede's LLM decided the newer
+//     replaces the older, so resolve acts on that verdict instead of re-asking.
+//   - Correction pairing: an explicit correction memory ("CORRECTION/RESOLUTION",
+//     "already fixed on main", "no PR is needed") demotes the OLDER
+//     prefilter-passing memories sharing its rare subject tokens. The correction
+//     itself stays live; only the claims it invalidates are demoted.
 func Run(ctx context.Context, store resolveStore, cls Classifier, projectID string, apply bool, logger *slog.Logger) (Result, []memory.Memory, error) {
 	loaded, err := store.ResolveCandidates(ctx, projectID)
 	if err != nil {
 		return Result{}, nil, fmt.Errorf("load candidates: %w", err)
+	}
+	byID := make(map[string]memory.Memory, len(loaded))
+	for _, m := range loaded {
+		byID[m.ID] = m
 	}
 	cands := Prefilter(loaded)
 	res := Result{Loaded: len(loaded), Candidates: len(cands)}
@@ -100,8 +118,48 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 			"loaded", len(loaded), "kept", len(cands), "skipped", len(loaded)-len(cands))
 	}
 
-	var confirmed []memory.Memory
+	confirmed := make([]memory.Memory, 0, len(cands))
+	confirmedSet := make(map[string]bool, len(cands))
+	addConfirmed := func(m memory.Memory) {
+		if confirmedSet[m.ID] {
+			return
+		}
+		confirmedSet[m.ID] = true
+		confirmed = append(confirmed, m)
+	}
+
+	// Mechanism 1: supersedes-edge piggyback. The link source is the NEWER
+	// memory ('supersedes' is written newer→older), so its TargetID is the older
+	// now-obsolete claim. Only demote links whose older endpoint is still an
+	// eligible candidate (unresolved, unpinned, non-exempt category) — anything
+	// else is already handled or out of scope.
+	links, err := store.LinksByRelationSource(ctx, projectID, "supersedes", "llm")
+	if err != nil {
+		return res, nil, fmt.Errorf("load supersedes links: %w", err)
+	}
+	for _, l := range links {
+		older, ok := byID[l.TargetID]
+		if !ok {
+			continue
+		}
+		res.Superseded++
+		addConfirmed(older)
+	}
+
+	// Mechanism 2: correction pairing. correctionPairTargets already returns
+	// only prefilter-passing loaded candidates, so each is demoted deterministically.
+	for _, m := range correctionPairTargets(loaded, cands) {
+		res.Corrected++
+		addConfirmed(m)
+	}
+
+	// Classify the remaining prefilter candidates; deterministically-demoted
+	// memories are excluded so a concurrent verdict can't land twice.
+	var llmConfirmed int
 	for _, m := range cands {
+		if confirmedSet[m.ID] {
+			continue
+		}
 		ok, err := cls.IsResolved(ctx, m.Content)
 		if err != nil {
 			return res, nil, fmt.Errorf("classify %s: %w", m.ID, err)
@@ -110,7 +168,12 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 			continue
 		}
 		res.Confirmed++
-		confirmed = append(confirmed, m)
+		llmConfirmed++
+		addConfirmed(m)
+	}
+	if logger != nil {
+		logger.Info("resolve classified",
+			"confirmed", llmConfirmed, "superseded", res.Superseded, "corrected", res.Corrected)
 	}
 
 	if apply && len(confirmed) > 0 {
