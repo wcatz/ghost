@@ -4,13 +4,15 @@
 // predicate on the injection/browse queries.
 //
 // Design mirrors internal/supersede: a cheap local prefilter proposes
-// candidates, an LLM Classifier adjudicates each with a crisp one-word
-// question (biased to KEEP), and — with apply — the confirmed set is stamped
-// via SetResolved. The LLM Classifier implementation lives in resolution.go;
-// the hosting binary supplies a CLI-harness provider (see internal/ai).
-// The stop hook spawns `ghost resolve --apply` as a detached background process
-// (internal/mcpinit/stophook.go). The pass is re-runnable and idempotent —
-// already-resolved rows are excluded by ResolveCandidates.
+// candidates, an LLM Classifier adjudicates them in batches of up to eight with
+// a numbered KEEP/RESOLVED question (biased to KEEP), and — with apply — the
+// confirmed set is stamped via SetResolved while newly-judged KEEP verdicts are
+// cached by content hash in memories.resolve_kept_hash so a converged project
+// makes no classifier calls at all. The LLM Classifier implementation lives in
+// resolution.go; the hosting binary supplies a CLI-harness provider (see
+// internal/ai). The stop hook spawns `ghost resolve --apply` as a detached
+// background process (internal/mcpinit/stophook.go). The pass is re-runnable
+// and idempotent — already-resolved rows are excluded by ResolveCandidates.
 package resolve
 
 import (
@@ -56,9 +58,11 @@ type Classifier interface {
 }
 
 // ContentHash is the KEEP-cache key: resolve's question is content-only, so a
-// tag or importance edit must not invalidate a cached verdict.
+// tag or importance edit must not invalidate a cached verdict. The "v1\x00"
+// prefix versions the key — a future prompt/rubric change that could flip
+// verdicts bumps it to reset every cached KEEP in one step.
 func ContentHash(content string) string {
-	sum := sha256.Sum256([]byte(content))
+	sum := sha256.Sum256([]byte("v1\x00" + content))
 	return hex.EncodeToString(sum[:])
 }
 

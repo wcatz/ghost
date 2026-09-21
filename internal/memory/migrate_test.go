@@ -234,6 +234,41 @@ func TestMigrateFreshDBHasResolvedAt(t *testing.T) {
 	}
 }
 
+// TestMigrateFreshDBHasResolveKeptHash: a brand-new database (initSQL path, no
+// legacy schema involved) must have resolve_kept_hash from the start — guards
+// against the column silently going missing from initSQL while migrateV7 still
+// exists to paper over it on upgraded databases — and it must default to the
+// empty (never-judged) hash.
+func TestMigrateFreshDBHasResolveKeptHash(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(`SELECT resolve_kept_hash FROM memories LIMIT 0`); err != nil {
+		t.Fatalf("resolve_kept_hash column missing on fresh db: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/fresh-p1', 'p1')`,
+	); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'fresh note')`,
+	); err != nil {
+		t.Fatalf("seed memory: %v", err)
+	}
+	var hash string
+	if err := db.QueryRow(`SELECT resolve_kept_hash FROM memories WHERE id = 'm1'`).Scan(&hash); err != nil {
+		t.Fatalf("read default: %v", err)
+	}
+	if hash != "" {
+		t.Errorf("default resolve_kept_hash = %q, want empty", hash)
+	}
+}
+
 // TestMigrateHandMigratedDB: a database whose tables already match the current
 // schema but whose user_version is still 0 (hand-migrated) must be stamped
 // without a rebuild — the introspection guards skip work that is already done.
@@ -452,8 +487,9 @@ func TestMigrateAddsResolvedAt(t *testing.T) {
 }
 
 // TestMigrateV6AddsReflectInputSig exercises the one-shot upgrade every
-// existing v5 database takes: migrateV6 must ALTER the old ghost_state shape,
-// not rely on initSQL's fresh-database column.
+// existing v5 database takes — through v6 and on into the later steps (the
+// seed carries the tables those steps touch): migrateV6 must ALTER the old
+// ghost_state shape, not rely on initSQL's fresh-database column.
 func TestMigrateV6AddsReflectInputSig(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ghost.db")
 	db, err := sql.Open("sqlite", dbPath)
@@ -506,7 +542,7 @@ func TestMigrateV6AddsReflectInputSig(t *testing.T) {
 	}
 
 	if err := migrate(db, 5); err != nil {
-		t.Fatalf("migrate v5->v6: %v", err)
+		t.Fatalf("migrate v5->current: %v", err)
 	}
 	if v := schemaVersionOf(t, db); v != schemaVersion {
 		t.Errorf("user_version = %d, want %d", v, schemaVersion)

@@ -21,7 +21,10 @@ type fakeClassifier struct {
 	// errors.
 	errOn string
 	err   error
-	calls int
+	// truncate, when set, drops the last verdict so a classifier returning
+	// fewer verdicts than contents can be exercised.
+	truncate bool
+	calls    int
 }
 
 func (f *fakeClassifier) IsResolvedBatch(_ context.Context, contents []string) ([]bool, error) {
@@ -36,6 +39,9 @@ func (f *fakeClassifier) IsResolvedBatch(_ context.Context, contents []string) (
 	out := make([]bool, len(contents))
 	for i, c := range contents {
 		out[i] = f.drop[c]
+	}
+	if f.truncate && len(out) > 0 {
+		out = out[:len(out)-1]
 	}
 	return out, nil
 }
@@ -449,6 +455,70 @@ func TestRunDeterministicDemotionsIgnoreCache(t *testing.T) {
 	}
 	if len(confirmed) != 1 || confirmed[0].ID != "older" {
 		t.Fatalf("confirmed = %v, want [older]", confirmed)
+	}
+}
+
+// TestRunMixedCachedAndUncachedCandidates: cache hits are skipped while the
+// rest go through one batched call; counts and writes stay per-candidate.
+func TestRunMixedCachedAndUncachedCandidates(t *testing.T) {
+	cached := memory.Memory{ID: "cached", Content: "kill experiment closed, removed"}
+	drop := memory.Memory{ID: "drop", Content: "fixed in PR #210, dead ranking bonus removed"}
+	keep := memory.Memory{ID: "keep", Content: "postmortem concluded, no follow-up"}
+	store := &fakeStore{
+		candidates: []memory.Memory{cached, drop, keep},
+		kept:       map[string]string{cached.ID: ContentHash(cached.Content)},
+	}
+	cls := &fakeClassifier{drop: map[string]bool{drop.Content: true}}
+
+	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if cls.calls != 1 {
+		t.Errorf("classifier calls = %d, want 1 for the two uncached notes", cls.calls)
+	}
+	if res.Skipped != 1 || res.Confirmed != 1 || res.Resolved != 1 {
+		t.Fatalf("skipped=%d confirmed=%d resolved=%d, want 1/1/1", res.Skipped, res.Confirmed, res.Resolved)
+	}
+	if len(confirmed) != 1 || confirmed[0].ID != "drop" {
+		t.Fatalf("confirmed = %v, want [drop]", confirmed)
+	}
+	if len(store.resolved) != 1 || store.resolved[0] != "drop" {
+		t.Fatalf("resolved = %v, want [drop]", store.resolved)
+	}
+	if len(store.markedKept) != 1 || len(store.markedKept[0]) != 1 {
+		t.Fatalf("markedKept = %v, want one KEEP hash", store.markedKept)
+	}
+	if got := store.markedKept[0]["keep"]; got != ContentHash(keep.Content) {
+		t.Errorf("cached hash = %q, want %q", got, ContentHash(keep.Content))
+	}
+	if _, ok := store.markedKept[0]["cached"]; ok {
+		t.Errorf("cache hit must not be re-recorded: %v", store.markedKept[0])
+	}
+}
+
+// TestRunFailsFatallyOnVerdictCountMismatch: a classifier that returns fewer
+// verdicts than candidates must abort the pass rather than leave notes unjudged
+// (or panic indexing).
+func TestRunFailsFatallyOnVerdictCountMismatch(t *testing.T) {
+	store := &fakeStore{candidates: []memory.Memory{
+		{ID: "a", Content: "kill experiment finding: removed"},
+		{ID: "b", Content: "fixed in PR #210, removed"},
+	}}
+	cls := &fakeClassifier{drop: map[string]bool{}, truncate: true}
+
+	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
+	if err == nil {
+		t.Fatalf("Run: want verdict-count error, got nil (res=%+v confirmed=%v)", res, confirmed)
+	}
+	if !strings.Contains(err.Error(), "classifier returned 1 verdict(s)") {
+		t.Errorf("error = %v, want a verdict-count mismatch", err)
+	}
+	if len(store.resolved) != 0 {
+		t.Errorf("partial pass must not be applied: %v", store.resolved)
+	}
+	if len(store.markedKept) != 0 {
+		t.Errorf("partial pass must not cache KEEPs: %v", store.markedKept)
 	}
 }
 

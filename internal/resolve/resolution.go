@@ -225,7 +225,8 @@ func (h *ResolutionClassifier) classifyChunk(ctx context.Context, chunk []string
 }
 
 // parseBatchVerdicts maps numbered reply lines onto n KEEP/RESOLVED verdicts.
-// Missing or garbled entries default to false (KEEP), preserving the
+// Each line is judged by parseBatchVerdict (strict first-field parsing), and
+// missing or garbled entries default to false (KEEP), preserving the
 // classifier's bias that only an explicit, un-negated RESOLVED resolves a note.
 // ok is false when no line was recognized at all or when a duplicated note
 // number invalidated the whole reply — IsResolvedBatch's single-note fallback
@@ -246,7 +247,7 @@ func parseBatchVerdicts(resp string, n int) (verdicts []bool, ok bool) {
 			continue
 		}
 		seen[num-1] = true
-		resolved, recognizedLine := parseReply(rest)
+		resolved, recognizedLine := parseBatchVerdict(rest)
 		if recognizedLine {
 			recognized++
 		}
@@ -256,6 +257,38 @@ func parseBatchVerdicts(resp string, n int) (verdicts []bool, ok bool) {
 		return make([]bool, n), false
 	}
 	return out, true
+}
+
+// parseBatchVerdict parses the remainder of a numbered batch line ("RESOLVED",
+// "**KEEP** because ..."). Unlike parseReply it trusts only the FIRST field of
+// the line, not any word in it: a model that prefixes reasoning to a numbered
+// line ("1. This was resolved, but keep it") must not decide the note from a
+// word buried in prose — a false RESOLVED drops a live memory from ranked
+// injection. A negation followed by "resolved" is a recognized KEEP (so a
+// chunk of "not resolved" lines does not trip the zero-recognized fallback);
+// negated forms ("unresolved", "not-resolved") are KEEP too.
+func parseBatchVerdict(rest string) (resolved, recognized bool) {
+	rest = strings.TrimLeft(rest, "*_#` ")
+	fields := strings.Fields(strings.ToLower(rest))
+	if len(fields) == 0 {
+		return false, false
+	}
+	first := strings.Trim(fields[0], ".,!\"'`:;—-*")
+	switch {
+	case first == "keep":
+		return false, true
+	case first == "resolved" || first == "resolve":
+		return true, true
+	case strings.HasSuffix(first, "resolved"):
+		return false, true
+	}
+	if isNegation(first) && len(fields) > 1 {
+		second := strings.Trim(fields[1], ".,!\"'`:;—-*")
+		if second == "resolved" || second == "resolve" {
+			return false, true
+		}
+	}
+	return false, false
 }
 
 // missingVerdicts returns the 1-based note numbers whose numbered reply line
@@ -270,7 +303,7 @@ func missingVerdicts(resp string, n int) []int {
 		if !ok || num < 1 || num > n {
 			continue
 		}
-		if _, recognized := parseReply(rest); recognized {
+		if _, recognized := parseBatchVerdict(rest); recognized {
 			seen[num-1] = true
 		}
 	}

@@ -366,6 +366,71 @@ func TestParseBatchVerdicts(t *testing.T) {
 	}
 }
 
+// TestParseBatchVerdictProseDoesNotDecide guards the KEEP bias on the batched
+// surface: a numbered line whose verdict is buried in prose must not resolve
+// the note. The companion KEEP line keeps the reply recognized so the parser
+// itself is exercised (no single-note fallback).
+func TestParseBatchVerdictProseDoesNotDecide(t *testing.T) {
+	probes := []string{
+		"1: This was resolved, but keep it",
+		"1: Not a resolved item; keep for now",
+		"1: The experiment resolved the issue but the gotcha still matters",
+		"1: no longer resolved",
+	}
+	for _, probe := range probes {
+		got, ok := parseBatchVerdicts(probe+"\n2: KEEP", 2)
+		if !ok {
+			t.Errorf("parseBatchVerdicts(%q): reply unexpectedly unparseable", probe)
+			continue
+		}
+		if got[0] {
+			t.Errorf("parseBatchVerdicts(%q) resolved note 1 from a word buried in prose; want KEEP", probe)
+		}
+		if got[1] {
+			t.Errorf("parseBatchVerdicts(%q): note 2 must stay KEEP, got true", probe)
+		}
+	}
+}
+
+func TestParseBatchVerdictStrictLineRules(t *testing.T) {
+	// A canonical first field decides, including a trailing explanation.
+	if got, ok := parseBatchVerdicts("1: RESOLVED because the PR merged", 1); !ok || !got[0] {
+		t.Errorf("canonical RESOLVED with trailing prose: got %v ok=%v, want [true] ok=true", got, ok)
+	}
+	// An emphasized verdict still parses.
+	if got, ok := parseBatchVerdicts("1: **KEEP**", 1); !ok || got[0] {
+		t.Errorf("bold KEEP: got %v ok=%v, want [false] ok=true", got, ok)
+	}
+	// A leading negation plus RESOLVED is a recognized KEEP, so a chunk of
+	// "not resolved" lines cannot trip the zero-recognized fallback.
+	if got, ok := parseBatchVerdicts("1: not resolved", 1); !ok || got[0] {
+		t.Errorf("negated RESOLVED: got %v ok=%v, want [false] ok=true", got, ok)
+	}
+	// A word that merely ends in -resolvable is neither verdict and
+	// contributes to the zero-recognized fallback.
+	if got, ok := parseBatchVerdicts("1: unresolvable prose", 1); ok || got[0] {
+		t.Errorf("non-verdict prose: got %v ok=%v, want [false] ok=false", got, ok)
+	}
+}
+
+// TestIsResolvedBatchProseDoesNotResolve runs the strict line parser through
+// the batched classifier: a prose line must not decide, and a recognized KEEP
+// line in the same reply must prevent the single-note fallback.
+func TestIsResolvedBatchProseDoesNotResolve(t *testing.T) {
+	fp := &fakeProvider{resp: "1: This was resolved, but keep it\n2: KEEP\n"}
+	cls := NewResolutionClassifier(fp)
+	got, err := cls.IsResolvedBatch(context.Background(), []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("IsResolvedBatch: %v", err)
+	}
+	if len(got) != 2 || got[0] || got[1] {
+		t.Fatalf("got %v, want [false false]", got)
+	}
+	if fp.calls != 1 {
+		t.Errorf("provider calls = %d, want 1 (recognized KEEP line, no fallback)", fp.calls)
+	}
+}
+
 func TestSplitNumberedLine(t *testing.T) {
 	cases := []struct {
 		line string
