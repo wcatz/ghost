@@ -16,9 +16,11 @@ type fakeProvider struct {
 	err             error
 	lastSystem      string
 	lastUserContent string
+	calls           int
 }
 
 func (f *fakeProvider) Classify(_ context.Context, systemPrompt, userContent string) (string, error) {
+	f.calls++
 	f.lastSystem = systemPrompt
 	f.lastUserContent = userContent
 	if f.err != nil {
@@ -89,6 +91,119 @@ func TestRelationClassifierPropagatesProviderError(t *testing.T) {
 	_, err := cls.Classify(context.Background(), "newer", "older")
 	if err == nil {
 		t.Fatal("want error propagated from provider, got nil")
+	}
+}
+
+func TestRelationClassifierBatchMapsNumberedLines(t *testing.T) {
+	fp := &fakeProvider{resp: "2: CAUSES\n1: SUPERSEDES\n"}
+	cls := NewRelationClassifier(fp)
+	pairs := []Candidate{
+		{NewerContent: "n1", OlderContent: "o1"},
+		{NewerContent: "n2", OlderContent: "o2"},
+	}
+	got, err := cls.ClassifyBatch(context.Background(), pairs)
+	if err != nil {
+		t.Fatalf("ClassifyBatch: %v", err)
+	}
+	if len(got) != 2 || got[0] != RelationSupersedes || got[1] != RelationCauses {
+		t.Fatalf("got %v, want [supersedes causes]", got)
+	}
+	if fp.calls != 1 {
+		t.Errorf("provider calls = %d, want 1 batched call", fp.calls)
+	}
+	if !strings.Contains(fp.lastUserContent, "1.\nOLDER: «o1»\nNEWER: «n1»") {
+		t.Errorf("batch content not numbered/delimited as expected:\n%s", fp.lastUserContent)
+	}
+}
+
+func TestRelationClassifierBatchMissingLineIsUnclassified(t *testing.T) {
+	fp := &fakeProvider{resp: "1: SUPERSEDES\n3: NEITHER\n"}
+	cls := NewRelationClassifier(fp)
+	pairs := []Candidate{
+		{NewerContent: "a", OlderContent: "a"},
+		{NewerContent: "b", OlderContent: "b"},
+		{NewerContent: "c", OlderContent: "c"},
+	}
+	got, err := cls.ClassifyBatch(context.Background(), pairs)
+	if err != nil {
+		t.Fatalf("ClassifyBatch: %v", err)
+	}
+	if got[1] != "" {
+		t.Errorf("missing line 2 should stay unclassified, got %q", got[1])
+	}
+	if got[0] != RelationSupersedes || got[2] != RelationNeither {
+		t.Errorf("got %v, want [supersedes \"\" neither]", got)
+	}
+}
+
+func TestRelationClassifierBatchChunksBySize(t *testing.T) {
+	fp := &fakeProvider{resp: "1: NEITHER\n2: NEITHER"}
+	cls := NewRelationClassifier(fp)
+	cls.batchSize = 2
+	pairs := []Candidate{
+		{NewerContent: "a", OlderContent: "a"},
+		{NewerContent: "b", OlderContent: "b"},
+		{NewerContent: "c", OlderContent: "c"},
+		{NewerContent: "d", OlderContent: "d"},
+		{NewerContent: "e", OlderContent: "e"},
+	}
+	got, err := cls.ClassifyBatch(context.Background(), pairs)
+	if err != nil {
+		t.Fatalf("ClassifyBatch: %v", err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("got %d verdicts, want 5", len(got))
+	}
+	// 5 pairs at batchSize 2 → 2 batched calls + 1 single-pair tail.
+	if fp.calls != 3 {
+		t.Errorf("provider calls = %d, want 3 (2 batches + 1 single tail)", fp.calls)
+	}
+	if cls.Calls() != 3 {
+		t.Errorf("Calls() = %d, want 3", cls.Calls())
+	}
+}
+
+func TestRelationClassifierBatchFallsBackWhenNothingParses(t *testing.T) {
+	// The model ignores the numbering and answers one word; every pair must
+	// still get a verdict via the single-pair path.
+	fp := &fakeProvider{resp: "NEITHER"}
+	cls := NewRelationClassifier(fp)
+	pairs := []Candidate{
+		{NewerContent: "a", OlderContent: "a"},
+		{NewerContent: "b", OlderContent: "b"},
+		{NewerContent: "c", OlderContent: "c"},
+	}
+	got, err := cls.ClassifyBatch(context.Background(), pairs)
+	if err != nil {
+		t.Fatalf("ClassifyBatch: %v", err)
+	}
+	for i, r := range got {
+		if r != RelationNeither {
+			t.Errorf("verdict[%d] = %q, want neither via fallback", i, r)
+		}
+	}
+	if fp.calls != 1+len(pairs) {
+		t.Errorf("provider calls = %d, want %d (1 unparseable batch + %d singles)", fp.calls, 1+len(pairs), len(pairs))
+	}
+}
+
+func TestRelationClassifierBatchTransportErrorIsFatal(t *testing.T) {
+	cls := NewRelationClassifier(&fakeProvider{err: errors.New("api down")})
+	cls.batchSize = 2
+	_, err := cls.ClassifyBatch(context.Background(), []Candidate{
+		{NewerContent: "a", OlderContent: "a"},
+		{NewerContent: "b", OlderContent: "b"},
+	})
+	if err == nil {
+		t.Fatal("want transport error propagated, got nil")
+	}
+}
+
+func TestRelationClassifierBatchEmpty(t *testing.T) {
+	cls := NewRelationClassifier(&fakeProvider{resp: "NEITHER"})
+	got, err := cls.ClassifyBatch(context.Background(), nil)
+	if err != nil || got != nil {
+		t.Errorf("empty batch = (%v, %v), want (nil, nil)", got, err)
 	}
 }
 
