@@ -785,6 +785,20 @@ func TestReflectSkipDecision(t *testing.T) {
 	}
 }
 
+func TestConsolidatableFilters(t *testing.T) {
+	now := "2026-09-21 00:00:00"
+	mems := []memory.Memory{
+		{ID: "keep", CreatedAt: now},
+		{ID: "resolved", ResolvedAt: &now},
+		{ID: "pinned", Pinned: true},
+		{ID: "manual", Source: "manual"},
+	}
+	got := consolidatable(mems)
+	if len(got) != 1 || got[0].ID != "keep" {
+		t.Fatalf("consolidatable = %+v, want only keep", got)
+	}
+}
+
 func TestLifecyclePhasesEmptyWhenAllDisabled(t *testing.T) {
 	if phases := lifecyclePhases(&config.Config{}, "proj", true); len(phases) != 0 {
 		t.Fatalf("expected no phases when everything is disabled, got %v", phases)

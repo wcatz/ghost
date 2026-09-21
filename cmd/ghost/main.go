@@ -1044,6 +1044,7 @@ Flags:
 		fmt.Printf("Upserted %d global memories\n", len(globalMems))
 	}
 
+	var preserved []string
 	if len(projectMems) > 0 {
 		dbMemories := make([]memory.Memory, len(projectMems))
 		for i, m := range projectMems {
@@ -1057,7 +1058,8 @@ Flags:
 			}
 		}
 
-		if err := store.ReplaceNonManual(ctx, projectID, dbMemories, consolidatedSince); err != nil {
+		preserved, err = store.ReplaceNonManual(ctx, projectID, dbMemories, consolidatedSince)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 			os.Exit(1)
 		}
@@ -1076,10 +1078,14 @@ Flags:
 		}
 	}
 
-	// Record the post-apply fingerprint so the next --skip-unchanged run can
-	// skip without an LLM call. Re-read rather than reusing `live`: the replace
-	// may merge/reuse rows, so only the stored state is authoritative.
-	if postMemories, err := store.GetAll(ctx, projectID, -1); err != nil {
+	// A save that raced the LLM round trip is preserved untouched by
+	// ReplaceNonManual and is merged by the NEXT reflection. Recording a
+	// fingerprint over the post-apply corpus would absorb that survivor and make
+	// --skip-unchanged skip the merge, so record nothing when one happened; the
+	// next run re-consolidates and merges it.
+	if len(preserved) > 0 {
+		fmt.Fprintf(os.Stderr, "note: %d memory(ies) were saved during consolidation and preserved; not recording the skip fingerprint so the next run merges them\n", len(preserved))
+	} else if postMemories, err := store.GetAll(ctx, projectID, -1); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: record reflect signature: reload memories: %v\n", err)
 	} else if err := store.SetReflectInputSignature(ctx, projectID, reflection.InputSignature(consolidatable(postMemories))); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: record reflect signature: %v\n", err)

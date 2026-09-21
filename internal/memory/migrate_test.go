@@ -451,6 +451,79 @@ func TestMigrateAddsResolvedAt(t *testing.T) {
 	}
 }
 
+// TestMigrateV6AddsReflectInputSig exercises the one-shot upgrade every
+// existing v5 database takes: migrateV6 must ALTER the old ghost_state shape,
+// not rely on initSQL's fresh-database column.
+func TestMigrateV6AddsReflectInputSig(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open v5 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	v5 := []string{
+		`CREATE TABLE projects (
+    id          TEXT PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`CREATE TABLE ghost_state (
+    project_id          TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    interaction_count   INTEGER NOT NULL DEFAULT 0,
+    learned_context     TEXT DEFAULT '',
+    last_reflection_at  TEXT,
+    reflection_summary  TEXT DEFAULT '',
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v5-p1', 'p1')`,
+		`INSERT INTO ghost_state (project_id, learned_context) VALUES ('p1', 'pre-migration context')`,
+		`PRAGMA user_version = 5`,
+	}
+	for _, s := range v5 {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed v5 db: %v", err)
+		}
+	}
+
+	if err := migrate(db, 5); err != nil {
+		t.Fatalf("migrate v5->v6: %v", err)
+	}
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	exists, err := columnExists(tx, "ghost_state", "reflect_input_sig")
+	_ = tx.Rollback() //nolint:errcheck
+	if err != nil {
+		t.Fatalf("columnExists: %v", err)
+	}
+	if !exists {
+		t.Fatal("reflect_input_sig column missing after migrateV6")
+	}
+
+	// The migrated row defaults to the empty fingerprint and its other columns
+	// survive.
+	var sig, learned string
+	if err := db.QueryRow(
+		`SELECT reflect_input_sig, learned_context FROM ghost_state WHERE project_id = 'p1'`,
+	).Scan(&sig, &learned); err != nil {
+		t.Fatalf("read migrated row: %v", err)
+	}
+	if sig != "" {
+		t.Errorf("reflect_input_sig = %q, want empty", sig)
+	}
+	if learned != "pre-migration context" {
+		t.Errorf("learned_context = %q, want preserved value", learned)
+	}
+}
+
 // v2WithLinksSQL is a schemaVersion-2 database: memories, memory_links (old
 // CHECK — no 'duplicate'), and the surrounding tables current initSQL creates.
 // Distinct from legacySQL, which predates memory_links entirely.

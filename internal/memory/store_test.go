@@ -473,7 +473,7 @@ func TestStoreReplaceNonManual(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("empty set guard", func(t *testing.T) {
-		err := s.ReplaceNonManual(ctx, testProject, []Memory{}, "")
+		_, err := s.ReplaceNonManual(ctx, testProject, []Memory{}, "")
 		if err == nil {
 			t.Fatal("expected error for empty set")
 		}
@@ -509,7 +509,7 @@ func TestStoreReplaceNonManual(t *testing.T) {
 		replacement := []Memory{
 			{Category: "fact", Content: "New consolidated fact", Importance: 0.6, Tags: []string{}},
 		}
-		if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+		if _, err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -566,7 +566,7 @@ func TestStoreReplaceNonManual(t *testing.T) {
 		replacement := []Memory{
 			{Category: "fact", Content: "consolidator output, stale snapshot", Importance: 0.6, Tags: []string{}},
 		}
-		if err := s.ReplaceNonManual(ctx, testProject, replacement, since); err != nil {
+		if _, err := s.ReplaceNonManual(ctx, testProject, replacement, since); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -612,7 +612,7 @@ func TestStoreReplaceNonManual(t *testing.T) {
 		replacement := []Memory{
 			{Category: "fact", Content: "new consolidated fact", Importance: 0.6, Tags: []string{}},
 		}
-		if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+		if _, err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
 			t.Fatalf("ReplaceNonManual: %v", err)
 		}
 
@@ -667,7 +667,7 @@ func TestStoreRestoreSnapshot(t *testing.T) {
 	replacement := []Memory{
 		{Category: "fact", Content: "new consolidated fact", Importance: 0.6, Tags: []string{}},
 	}
-	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -727,7 +727,7 @@ func TestStoreReplaceNonManual_PreservesResolved(t *testing.T) {
 	replacement := []Memory{
 		{Category: "fact", Content: "new consolidated fact", Importance: 0.6, Tags: []string{}},
 	}
-	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -759,6 +759,76 @@ func TestStoreReplaceNonManual_PreservesResolved(t *testing.T) {
 	}
 }
 
+// TestReplaceNonManualReportsPreservedSurvivors: a memory saved during the
+// consolidation round trip is preserved by ReplaceNonManual and must be
+// reported, so the reflect caller can avoid recording a skip fingerprint that
+// would absorb it and make --skip-unchanged skip the next merge.
+func TestReplaceNonManualReportsPreservedSurvivors(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("concurrent memory is reported and kept", func(t *testing.T) {
+		s := testStore(t)
+		survivorID, err := s.Create(ctx, testProject, Memory{
+			Category: "gotcha", Content: "saved during the round trip", Source: "mcp", Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("Create survivor: %v", err)
+		}
+
+		preserved, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+			{Category: "fact", Content: "consolidator output", Importance: 0.6},
+		}, "2000-01-01 00:00:00")
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if len(preserved) != 1 || preserved[0] != survivorID {
+			t.Fatalf("preserved = %v, want [%s]", preserved, survivorID)
+		}
+		all, err := s.GetAll(ctx, testProject, 100)
+		if err != nil {
+			t.Fatalf("GetAll: %v", err)
+		}
+		found := false
+		for _, m := range all {
+			if m.ID == survivorID {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("survivor %s was not kept", survivorID)
+		}
+	})
+
+	t.Run("non-concurrent memory is neither reported nor kept", func(t *testing.T) {
+		s := testStore(t)
+		oldID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "pre-consolidation memory", Source: "reflection", Importance: 0.5,
+		})
+		if err != nil {
+			t.Fatalf("Create pre-existing: %v", err)
+		}
+
+		preserved, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+			{Category: "fact", Content: "consolidator output", Importance: 0.6},
+		}, "2999-01-01 00:00:00")
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if len(preserved) != 0 {
+			t.Fatalf("preserved = %v, want none", preserved)
+		}
+		all, err := s.GetAll(ctx, testProject, 100)
+		if err != nil {
+			t.Fatalf("GetAll: %v", err)
+		}
+		for _, m := range all {
+			if m.ID == oldID {
+				t.Errorf("non-concurrent memory %s should have been replaced", oldID)
+			}
+		}
+	})
+}
+
 // TestStoreRestoreSnapshot_PreservesResolved guards the restore leg of #318:
 // --restore must not delete a resolved memory that reflection never touched.
 func TestStoreRestoreSnapshot_PreservesResolved(t *testing.T) {
@@ -784,7 +854,7 @@ func TestStoreRestoreSnapshot_PreservesResolved(t *testing.T) {
 	replacement := []Memory{
 		{Category: "fact", Content: "new consolidated fact", Importance: 0.6, Tags: []string{}},
 	}
-	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
@@ -2748,7 +2818,7 @@ func TestSeedGlobalMemories(t *testing.T) {
 	replaceMems := []Memory{
 		{ProjectID: "_global", Category: "fact", Content: "some new fact", Source: "reflection", Importance: 0.5},
 	}
-	if err := s.ReplaceNonManual(ctx, "_global", replaceMems, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, "_global", replaceMems, ""); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -3941,7 +4011,7 @@ func TestReplaceNonManualResetsCreatedAt(t *testing.T) {
 	replacement := []Memory{
 		{Category: "fact", Content: "new consolidated fact", Importance: 0.6, Tags: []string{}},
 	}
-	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -4197,11 +4267,11 @@ func TestReplaceNonManualSnapshotIDsUnique(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	if err := s.ReplaceNonManual(ctx, testProject, mems, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, mems, ""); err != nil {
 		t.Fatalf("first ReplaceNonManual: %v", err)
 	}
 	mems2 := []Memory{{Category: "fact", Content: "second generation fact", Importance: 0.5, Tags: []string{}}}
-	if err := s.ReplaceNonManual(ctx, testProject, mems2, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, mems2, ""); err != nil {
 		t.Fatalf("second ReplaceNonManual: %v", err)
 	}
 
@@ -4291,7 +4361,7 @@ func TestReplaceNonManualPreservesIdentity(t *testing.T) {
 	replacement := []Memory{
 		{Category: "convention", Content: "identical content survives", Importance: 0.9, Tags: []string{}},
 	}
-	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
@@ -4367,7 +4437,7 @@ func TestReplaceNonManualWhitespaceDifferenceDoesNotReuse(t *testing.T) {
 	replacement := []Memory{
 		{Category: "fact", Content: "trailing space here ", Importance: 0.5, Tags: []string{}},
 	}
-	if err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
+	if _, err := s.ReplaceNonManual(ctx, testProject, replacement, ""); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
