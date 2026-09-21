@@ -734,7 +734,7 @@ func TestLifecyclePhasesOrder(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("phase order = %v, want %v", got, want)
 	}
-	if !reflect.DeepEqual(phases[0].args, []string{"reflect", "proj", "--apply", "--require-llm"}) {
+	if !reflect.DeepEqual(phases[0].args, []string{"reflect", "proj", "--apply", "--require-llm", "--skip-unchanged"}) {
 		t.Errorf("reflect args = %v", phases[0].args)
 	}
 	if !reflect.DeepEqual(phases[1].args, []string{"resolve", "proj", "--apply"}) {

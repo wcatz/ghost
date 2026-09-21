@@ -643,7 +643,7 @@ func lifecyclePhases(cfg *config.Config, projectName string, llmOK bool) []lifec
 	timeout := time.Duration(cfg.Reflection.LifecycleTimeoutMinutes) * time.Minute
 	var phases []lifecyclePhase
 	if cfg.Reflection.AutoReflect && llmOK {
-		phases = append(phases, lifecyclePhase{"reflect", []string{"reflect", projectName, "--apply", "--require-llm"}, timeout})
+		phases = append(phases, lifecyclePhase{"reflect", []string{"reflect", projectName, "--apply", "--require-llm", "--skip-unchanged"}, timeout})
 	}
 	if cfg.Reflection.AutoResolve {
 		phases = append(phases, lifecyclePhase{"resolve", []string{"resolve", projectName, "--apply"}, timeout})

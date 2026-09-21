@@ -32,6 +32,8 @@ type ReflectMemory struct {
 }
 
 // BuildReflectionPrompt assembles the reflection prompt from project history.
+// Any change to the fields rendered below for ExistingMemories must be mirrored
+// in InputSignature, which fingerprints them for the --skip-unchanged gate.
 func BuildReflectionPrompt(input ReflectionInput) string {
 	var sb strings.Builder
 
