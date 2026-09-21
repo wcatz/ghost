@@ -1152,8 +1152,8 @@ host).`)
 		}
 		return id
 	}
-	fmt.Printf("%s: %d candidate pairs, %d supersedes, %d causes, %d reclassified, %s\n",
-		projectName, res.Candidates, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+	fmt.Printf("%s: %d candidate pairs in %d classify call(s), %d supersedes, %d causes, %d reclassified, %s\n",
+		projectName, res.Candidates, cls.Calls(), res.Confirmed, res.CausesCreated, res.Reclassified, verb)
 	if res.Unclassified > 0 {
 		fmt.Printf("  %d pair(s) skipped: unclassifiable verdict (logged; the pass still completed)\n", res.Unclassified)
 	}

@@ -23,8 +23,9 @@ type classifyProvider interface {
 	Classify(ctx context.Context, systemPrompt, userContent string) (string, error)
 }
 
-// RelationClassifier classifies a NEWER/OLDER memory pair with a single fast
-// classify call per candidate pair. The prompt forces a 3-way choice so a
+// RelationClassifier classifies NEWER/OLDER memory pairs, batching up to
+// batchSize pairs per fast classify call (see ClassifyBatch). The prompt
+// forces a 3-way choice so a
 // decision that merely *cites* still-valid evidence (CAUSES) is never
 // conflated with a genuine same-fact replacement (SUPERSEDES): conflating the
 // two would bury independently useful memories under supersede-demote
