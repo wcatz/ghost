@@ -8,7 +8,9 @@
 // Design: cosine similarity proposes same-subject candidate pairs (cheap,
 // local), updated_at gives direction (newer/older — SQLite's
 // 'YYYY-MM-DD HH:MM:SS' timestamps compare lexicographically), and an LLM
-// Classifier makes a 3-way SUPERSEDES/CAUSES/NEITHER call for each pair, since
+// Classifier makes a 3-way SUPERSEDES/CAUSES/NEITHER judgment for each pair —
+// batched up to classifyBatchSize pairs per harness call so a large project's
+// pass does not pay one process spawn and full rubric per pair — since
 // "replaces a stale claim" and "is caused by / follows from" are distinct
 // relations that a binary confirm/reject can't tell apart. SUPERSEDES writes
 // a newer->older 'supersedes' link (source 'llm'); CAUSES writes an
@@ -27,7 +29,6 @@ package supersede
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
@@ -64,12 +65,14 @@ const (
 	RelationNeither Relation = "neither"
 )
 
-// Classifier decides the relationship between a newer and an older memory:
-// a same-fact replacement (SUPERSEDES), a decision citing supporting evidence
-// that stays valid (CAUSES), or neither. The LLM implementation lives in the
-// CLI layer; tests inject a deterministic mock.
+// Classifier decides the relationship for candidate pairs: a same-fact
+// replacement (SUPERSEDES), a decision citing supporting evidence that stays
+// valid (CAUSES), or neither. It returns one verdict per pair, in the same
+// order; Relation("") marks a pair whose verdict could not be parsed. The LLM
+// implementation (RelationClassifier) batches pairs across as few harness
+// calls as possible; tests inject a deterministic mock.
 type Classifier interface {
-	Classify(ctx context.Context, newer, older string) (relation Relation, err error)
+	ClassifyBatch(ctx context.Context, pairs []Candidate) ([]Relation, error)
 }
 
 // vectorStore is the subset of *memory.Store the pass needs; narrowed for
@@ -310,29 +313,36 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	}
 	all = live
 	res.Candidates = len(all)
+	if len(all) == 0 {
+		return res, nil, nil
+	}
 
 	var classified []Classified
-	for _, c := range all {
-		verdict, err := cls.Classify(ctx, c.NewerContent, c.OlderContent)
-		if err != nil {
+	relations, err := cls.ClassifyBatch(ctx, all)
+	if err != nil {
+		return res, nil, fmt.Errorf("classify %d candidate pair(s): %w", len(all), err)
+	}
+	if len(relations) != len(all) {
+		return res, nil, fmt.Errorf("classifier returned %d verdicts for %d pairs", len(relations), len(all))
+	}
+	for i, c := range all {
+		verdict := relations[i]
+		if verdict == "" {
 			// An odd *phrasing* must not abort the pass: a single unparseable
 			// verdict ended a 9-minute run after links for earlier pairs had
 			// already been written, so the graph never converged whenever the
 			// model used wording the parser did not know. Skip that pair and
 			// count it (reported by the caller).
 			//
-			// Any OTHER error — a dead harness, an API outage, exhausted
-			// credit — stays fatal: skipping every pair would write nothing and
-			// still report success, blaming the model for a transport failure.
-			if errors.Is(err, errUnparseableVerdict) {
-				res.Unclassified++
-				if logger != nil {
-					logger.Warn("supersede: skipping pair with an unclassifiable verdict",
-						"newer", c.NewerID, "older", c.OlderID, "error", err)
-				}
-				continue
+			// A transport failure stays fatal inside ClassifyBatch: skipping
+			// every pair would write nothing and still report success,
+			// blaming the model for a transport failure.
+			res.Unclassified++
+			if logger != nil {
+				logger.Warn("supersede: skipping pair with an unclassifiable verdict",
+					"newer", c.NewerID, "older", c.OlderID)
 			}
-			return res, nil, fmt.Errorf("classify %s→%s: %w", c.NewerID, c.OlderID, err)
+			continue
 		}
 		classified = append(classified, Classified{Candidate: c, Relation: verdict})
 

@@ -242,10 +242,10 @@ right now the bottleneck is adoption, not pricing structure.
   cross-platform binary, but worth watching for FTS5/write-throughput edge
   cases if usage patterns ever get more concurrent than "one dev, one
   binary."
-- **`ghost supersede`'s relation classifier is validated on only 8/8 labeled
-  examples.** Fine as an initial signal, too small an n to lean on as a
-  benchmark claim — revisit with a larger labeled set before citing it
-  more heavily.
+- **`ghost supersede`'s relation classifier is validated on only 10 labeled
+  examples (10/10 single-pair and batched in local runs).** Fine as an
+  initial signal, too small an n to lean on as a benchmark claim — revisit
+  with a larger labeled set before citing it more heavily.
 - **Content schema is TEXT-only.** No path for spatial/multimodal data —
   relevant if Part 7b is ever pursued, irrelevant otherwise.
 

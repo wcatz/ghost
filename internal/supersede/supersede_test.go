@@ -13,17 +13,25 @@ import (
 )
 
 // mockClassifier returns a verdict per an injected rule — no LLM. calls
-// records every (newer, older) content pair passed to Classify, so tests can
-// assert a specific pair was (or wasn't) invoked — e.g. the skip-if-unchanged
-// test.
+// records every (newer, older) content pair passed to ClassifyBatch, so tests
+// can assert a specific pair was (or wasn't) invoked — e.g. the
+// skip-if-unchanged test.
 type mockClassifier struct {
-	verdict func(newer, older string) Relation
-	calls   []struct{ Newer, Older string }
+	verdict       func(newer, older string) Relation
+	calls         []struct{ Newer, Older string }
+	batchCalls    int
+	lastBatchSize int
 }
 
-func (m *mockClassifier) Classify(_ context.Context, newer, older string) (Relation, error) {
-	m.calls = append(m.calls, struct{ Newer, Older string }{newer, older})
-	return m.verdict(newer, older), nil
+func (m *mockClassifier) ClassifyBatch(_ context.Context, pairs []Candidate) ([]Relation, error) {
+	m.batchCalls++
+	m.lastBatchSize = len(pairs)
+	out := make([]Relation, len(pairs))
+	for i, p := range pairs {
+		m.calls = append(m.calls, struct{ Newer, Older string }{p.NewerContent, p.OlderContent})
+		out[i] = m.verdict(p.NewerContent, p.OlderContent)
+	}
+	return out, nil
 }
 
 // seed builds an in-memory store, returns it plus the raw db so tests can
@@ -412,8 +420,19 @@ type mockClassifierErr struct {
 	fn func(newer, older string) (Relation, error)
 }
 
-func (m *mockClassifierErr) Classify(_ context.Context, newer, older string) (Relation, error) {
-	return m.fn(newer, older)
+func (m *mockClassifierErr) ClassifyBatch(_ context.Context, pairs []Candidate) ([]Relation, error) {
+	out := make([]Relation, len(pairs))
+	for i, p := range pairs {
+		rel, err := m.fn(p.NewerContent, p.OlderContent)
+		if err != nil {
+			if errors.Is(err, errUnparseableVerdict) {
+				continue // stays Relation(""); Run counts it as unclassified
+			}
+			return nil, err // transport failure: fatal, as before
+		}
+		out[i] = rel
+	}
+	return out, nil
 }
 
 // TestRunSkipsUnclassifiablePairAndContinues pins the fix for a live failure:
@@ -465,5 +484,58 @@ func TestRunTreatsProviderOutageAsFatal(t *testing.T) {
 	}}
 	if _, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default()); err == nil {
 		t.Fatal("a provider outage must abort the pass, not be counted as unclassifiable")
+	}
+}
+
+// TestRunClassifiesAllPairsInOneBatchCall pins the batching contract: Run
+// hands the whole candidate set to one ClassifyBatch call and lets the
+// classifier own chunking, instead of looping a call per pair.
+func TestRunClassifiesAllPairsInOneBatchCall(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
+	add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
+	add(t, store, db, "kubernetes now on 1.31", []float32{0.98, 0.02, 0}, "2026-07-01 00:00:00")
+
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
+	if _, _, err := Run(ctx, store, cls, "p", 0.9, true, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if cls.batchCalls != 1 || cls.lastBatchSize != 3 {
+		t.Errorf("want 1 batch call carrying 3 pairs, got %d call(s), last size %d", cls.batchCalls, cls.lastBatchSize)
+	}
+}
+
+// mockShortClassifier returns fewer verdicts than pairs — a contract violation
+// Run must reject instead of panicking on an out-of-range index.
+type mockShortClassifier struct{}
+
+func (mockShortClassifier) ClassifyBatch(context.Context, []Candidate) ([]Relation, error) {
+	return nil, nil
+}
+
+func TestRunRejectsVerdictCountMismatch(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
+	add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
+	if _, _, err := Run(ctx, store, mockShortClassifier{}, "p", 0.9, true, nil); err == nil {
+		t.Fatal("want error when the classifier returns fewer verdicts than pairs, got nil")
+	}
+}
+
+// TestRunEmptyCandidateSetSkipsClassifier pins that a pass with no candidates
+// (everything filtered or stale) makes no classifier call at all, so a future
+// Classifier implementation that rejects empty input cannot turn a no-op pass
+// fatal.
+func TestRunEmptyCandidateSetSkipsClassifier(t *testing.T) {
+	store, _ := seed(t)
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
+	res, _, err := Run(context.Background(), store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Candidates != 0 || cls.batchCalls != 0 {
+		t.Errorf("want 0 candidates and 0 classifier calls, got %d and %d", res.Candidates, cls.batchCalls)
 	}
 }
