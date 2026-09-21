@@ -250,6 +250,14 @@ git add internal/supersede/relation.go internal/supersede/relation_test.go
 git commit -m "feat(supersede): parse numbered batch verdict lines"
 ```
 
+> **Post-review revision:** `parseBatchRelations` calls a stricter
+> `parseBatchVerdict` that considers only the first field of a line's
+> remainder (synonyms only when the whole remainder is one word) instead of
+> scanning every field with `parseRelation`. Whole-line scanning let a numbered
+> reasoning preamble ("1. This newer note supersedes ...") decide a pair and,
+> by first-wins, discard the real verdict line — a false SUPERSEDES risk. With
+> the stricter parse such lines are left unclassified (counted).
+
 ---
 
 ### Task 2: `ClassifyBatch` on `RelationClassifier`

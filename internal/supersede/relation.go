@@ -143,23 +143,56 @@ func quoteData(s string) string {
 // number outside 1..n is ignored, and the first line for a number wins, so a
 // duplicated or injected number cannot flip an earlier verdict.
 func parseBatchRelations(resp string, n int) []Relation {
+	if n <= 0 {
+		return nil
+	}
 	out := make([]Relation, n)
 	for _, line := range strings.Split(resp, "\n") {
 		num, rest, ok := splitNumberedLine(line)
 		if !ok || num < 1 || num > n || out[num-1] != "" {
 			continue
 		}
-		if rel, ok := parseRelation(rest); ok {
+		if rel, ok := parseBatchVerdict(rest); ok {
 			out[num-1] = rel
 		}
 	}
 	return out
 }
 
+// parseBatchVerdict parses the remainder of a numbered batch line ("SUPERSEDES",
+// "**CAUSES** because ..."). Unlike parseRelation it trusts only the FIRST
+// field of the line, not any word in it: a model that prefixes reasoning to a
+// numbered line ("1. This newer note supersedes ... only nominally") must not
+// decide the pair from a word buried in prose — with first-wins, that would
+// silently discard the real verdict line that follows, and a false SUPERSEDES
+// buries a live memory. Synonyms count only when the whole remainder is that
+// one word, matching parseRelation's rule.
+func parseBatchVerdict(rest string) (Relation, bool) {
+	fields := strings.Fields(strings.ToUpper(rest))
+	if len(fields) == 0 {
+		return "", false
+	}
+	first := strings.Trim(fields[0], ".,!\"'`:;*")
+	switch first {
+	case "SUPERSEDES":
+		return RelationSupersedes, true
+	case "CAUSES":
+		return RelationCauses, true
+	case "NEITHER":
+		return RelationNeither, true
+	}
+	if len(fields) == 1 {
+		if rel, ok := relationSynonyms[first]; ok {
+			return rel, true
+		}
+	}
+	return "", false
+}
+
 // splitNumberedLine splits "3: SUPERSEDES" (or "3. ...", "3) ...") into its
-// number and remainder. Leading markdown emphasis/bullets are stripped because
-// harnesses frequently decorate numbered lists. Lines without a leading number
-// are not batch verdict lines and are ignored.
+// number and remainder. Leading markdown emphasis/heading characters are
+// stripped because harnesses frequently decorate numbered lists. Lines without
+// a leading number are not batch verdict lines and are ignored.
 func splitNumberedLine(line string) (int, string, bool) {
 	line = strings.TrimSpace(line)
 	line = strings.TrimLeft(line, "*_#` ")

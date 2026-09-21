@@ -130,27 +130,47 @@ func TestParseBatchRelations(t *testing.T) {
 	if got[0] != "" {
 		t.Errorf("garbage must stay unclassified, got %v", got[0])
 	}
+
+	// A numbered reasoning preamble must not decide the pair from a word
+	// buried in it; the genuine verdict line that follows still wins.
+	got = parseBatchRelations("1. This newer note supersedes the older one only nominally\n1: NEITHER", 1)
+	if got[0] != RelationNeither {
+		t.Errorf("prose preamble decided the pair: got %v, want neither", got[0])
+	}
+
+	// A trailing explanation after the verdict still parses.
+	got = parseBatchRelations("1: SUPERSEDES because the port changed", 1)
+	if got[0] != RelationSupersedes {
+		t.Errorf("verdict with trailing explanation: got %v, want supersedes", got[0])
+	}
+
+	// Synonyms still count when the line is just the synonym.
+	got = parseBatchRelations("1: CORRECTS", 1)
+	if got[0] != RelationSupersedes {
+		t.Errorf("batch synonym: got %v, want supersedes", got[0])
+	}
 }
 
 func TestSplitNumberedLine(t *testing.T) {
 	cases := []struct {
 		line string
 		num  int
+		rest string
 		ok   bool
 	}{
-		{"3: SUPERSEDES", 3, true},
-		{"1. neither", 1, true},
-		{"2) CAUSES", 2, true},
-		{"12: SUPERSEDES", 12, true},
-		{"**3:** NEITHER", 3, true},
-		{"Here are the verdicts:", 0, false},
-		{"SUPERSEDES", 0, false},
-		{"1 SUPERSEDES", 0, false},
+		{"3: SUPERSEDES", 3, " SUPERSEDES", true},
+		{"1. neither", 1, " neither", true},
+		{"2) CAUSES", 2, " CAUSES", true},
+		{"12: SUPERSEDES", 12, " SUPERSEDES", true},
+		{"**3:** NEITHER", 3, "** NEITHER", true},
+		{"Here are the verdicts:", 0, "", false},
+		{"SUPERSEDES", 0, "", false},
+		{"1 SUPERSEDES", 0, "", false},
 	}
 	for _, c := range cases {
-		num, _, ok := splitNumberedLine(c.line)
-		if ok != c.ok || (ok && num != c.num) {
-			t.Errorf("splitNumberedLine(%q) = (%d, ok=%v), want (%d, ok=%v)", c.line, num, ok, c.num, c.ok)
+		num, rest, ok := splitNumberedLine(c.line)
+		if ok != c.ok || (ok && (num != c.num || rest != c.rest)) {
+			t.Errorf("splitNumberedLine(%q) = (%d, %q, ok=%v), want (%d, %q, ok=%v)", c.line, num, rest, ok, c.num, c.rest, c.ok)
 		}
 	}
 }
