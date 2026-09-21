@@ -38,6 +38,8 @@ func TestRelationClassifierParsesResponse(t *testing.T) {
 		{"causes", RelationCauses},
 		{"NEITHER", RelationNeither},
 		{"The answer is NEITHER, clearly.", RelationNeither},
+		{"**SUPERSEDES**", RelationSupersedes},
+		{"**NEITHER**", RelationNeither},
 		// Natural single-word synonyms: the prompt asks for SUPERSEDES, but a
 		// live run answered "CORRECTS" and the whole pass aborted.
 		{"CORRECTS", RelationSupersedes},
@@ -95,6 +97,61 @@ func TestQuoteDataNeutralizesEmbeddedDelimiters(t *testing.T) {
 	out := quoteData(in)
 	if strings.Count(out, "«") != 1 || strings.Count(out, "»") != 1 {
 		t.Errorf("quoteData must produce exactly one opening/closing delimiter pair, got %q", out)
+	}
+}
+
+func TestParseBatchRelations(t *testing.T) {
+	// Lines map by number, not position.
+	got := parseBatchRelations("2: CAUSES\n1: SUPERSEDES\n", 2)
+	if got[0] != RelationSupersedes || got[1] != RelationCauses {
+		t.Errorf("out-of-order lines: got %v, want [supersedes causes]", got)
+	}
+
+	// Missing entry stays unclassified; out-of-range numbers are ignored.
+	got = parseBatchRelations("1: NEITHER\n9: SUPERSEDES\n", 2)
+	if got[0] != RelationNeither || got[1] != "" {
+		t.Errorf("missing/out-of-range: got %v, want [neither \"\"]", got)
+	}
+
+	// Duplicate number: the first line wins.
+	got = parseBatchRelations("1: SUPERSEDES\n1: NEITHER", 1)
+	if got[0] != RelationSupersedes {
+		t.Errorf("duplicate number must keep the first verdict, got %v", got[0])
+	}
+
+	// Prose lines and markdown decoration are tolerated.
+	got = parseBatchRelations("Here are the verdicts:\n**1: CAUSES**", 1)
+	if got[0] != RelationCauses {
+		t.Errorf("decorated line: got %v, want causes", got[0])
+	}
+
+	// Garbage stays unclassified.
+	got = parseBatchRelations("I'm not sure, maybe both?", 1)
+	if got[0] != "" {
+		t.Errorf("garbage must stay unclassified, got %v", got[0])
+	}
+}
+
+func TestSplitNumberedLine(t *testing.T) {
+	cases := []struct {
+		line string
+		num  int
+		ok   bool
+	}{
+		{"3: SUPERSEDES", 3, true},
+		{"1. neither", 1, true},
+		{"2) CAUSES", 2, true},
+		{"12: SUPERSEDES", 12, true},
+		{"**3:** NEITHER", 3, true},
+		{"Here are the verdicts:", 0, false},
+		{"SUPERSEDES", 0, false},
+		{"1 SUPERSEDES", 0, false},
+	}
+	for _, c := range cases {
+		num, _, ok := splitNumberedLine(c.line)
+		if ok != c.ok || (ok && num != c.num) {
+			t.Errorf("splitNumberedLine(%q) = (%d, ok=%v), want (%d, ok=%v)", c.line, num, ok, c.num, c.ok)
+		}
 	}
 }
 
