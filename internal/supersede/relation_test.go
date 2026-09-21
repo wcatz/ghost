@@ -411,6 +411,9 @@ func TestRelationClassifierLiveBatch(t *testing.T) {
 		t.Skip("no LLM CLI (claude/opencode/codex/goose) available; skipping live batch test")
 	}
 	cls := NewRelationClassifier(cli)
+	// batchSize 3 (not the shipped 8) keeps one bad chunk from sinking eight
+	// labeled cases; the production 8-pair prompt is covered by the
+	// TestRelationClassifierBatch* unit tests and real passes.
 	cls.batchSize = 3
 
 	pairs := make([]Candidate, len(liveRelationCases))
@@ -420,6 +423,9 @@ func TestRelationClassifierLiveBatch(t *testing.T) {
 	got, err := cls.ClassifyBatch(ctx, pairs)
 	if err != nil {
 		t.Fatalf("ClassifyBatch: %v", err)
+	}
+	if len(got) != len(liveRelationCases) {
+		t.Fatalf("got %d verdicts for %d pairs", len(got), len(liveRelationCases))
 	}
 	correct := 0
 	for i, c := range liveRelationCases {
@@ -434,6 +440,13 @@ func TestRelationClassifierLiveBatch(t *testing.T) {
 	acc := float64(correct) / float64(len(liveRelationCases))
 	t.Logf("batched relation classifier accuracy: %d/%d = %.2f in %d call(s)",
 		correct, len(liveRelationCases), acc, cls.Calls())
+	// The batched path must not have silently fallen back: 10 pairs at
+	// batchSize 3 is 3 batched calls + 1 single-pair tail. More calls means
+	// the numbered prompt/parser did not work and accuracy was measured on
+	// the fallback path instead.
+	if cls.Calls() != 4 {
+		t.Errorf("batched path fell back: %d calls for 10 pairs at batchSize 3, want 4", cls.Calls())
+	}
 	if acc < 0.75 {
 		t.Errorf("batched classifier accuracy %.2f below 0.75", acc)
 	}
