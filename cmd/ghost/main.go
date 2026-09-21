@@ -1135,6 +1135,7 @@ host).`)
 		os.Exit(1)
 	}
 	cls := supersede.NewRelationClassifier(provider)
+	cls.SetLogger(logger)
 	res, classified, err := supersede.Run(ctx, store, cls, projectID, threshold, apply, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

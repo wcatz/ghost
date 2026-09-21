@@ -331,19 +331,11 @@ func (h *RelationClassifier) classifyChunk(ctx context.Context, chunk []Candidat
 		return nil, err
 	}
 	rels := parseBatchRelations(resp, len(chunk))
-	if h.logger != nil {
-		var missing []int
-		for i, r := range rels {
-			if r == "" {
-				missing = append(missing, i+1)
-			}
-		}
-		if len(missing) > 0 {
-			h.logger.Warn("supersede: batch reply missing verdicts",
-				"pairs", missing, "reply", strings.TrimSpace(resp))
-		}
-	}
 	if !hasVerdict(rels) {
+		if h.logger != nil {
+			h.logger.Warn("supersede: batch reply unparseable; falling back to per-pair classification",
+				"reply", strings.TrimSpace(resp))
+		}
 		for i := range chunk {
 			rel, err := h.Classify(ctx, chunk[i].NewerContent, chunk[i].OlderContent)
 			if err != nil {
@@ -354,9 +346,22 @@ func (h *RelationClassifier) classifyChunk(ctx context.Context, chunk []Candidat
 					}
 					continue
 				}
-				return nil, err
+				return nil, fmt.Errorf("%s→%s: %w", chunk[i].NewerID, chunk[i].OlderID, err)
 			}
 			rels[i] = rel
+		}
+		return rels, nil
+	}
+	if h.logger != nil {
+		var missing []int
+		for i, r := range rels {
+			if r == "" {
+				missing = append(missing, i+1)
+			}
+		}
+		if len(missing) > 0 {
+			h.logger.Warn("supersede: batch reply missing verdicts",
+				"pairs", missing, "reply", strings.TrimSpace(resp))
 		}
 	}
 	return rels, nil

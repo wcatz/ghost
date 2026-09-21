@@ -222,6 +222,9 @@ func TestRelationClassifierBatchTransportErrorIsFatal(t *testing.T) {
 	if err == nil {
 		t.Fatal("want transport error propagated, got nil")
 	}
+	if !strings.Contains(err.Error(), "pairs 1-2") {
+		t.Errorf("transport error must identify the failing chunk, got: %v", err)
+	}
 }
 
 func TestRelationClassifierBatchEmpty(t *testing.T) {

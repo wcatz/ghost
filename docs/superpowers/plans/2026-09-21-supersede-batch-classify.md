@@ -827,7 +827,7 @@ git commit -m "perf(supersede): classify candidate pairs in one batched call"
 > **Post-review revision (Task 3):** fatal classify errors now identify the
 > failing chunk range and first pair (`pairs N-M (newer→older): ...`), and
 > unparseable batch lines are logged with the raw reply via an optional
-> `RelationClassifier.SetLogger` (the CLI wires it in Task 4) — the two
+> `RelationClassifier.SetLogger`, wired from `runSupersede` — the two
 > diagnostics the old per-pair loop carried. A pass with zero candidates
 > returns before calling the classifier, and `Classify`'s doc now states it is
 > the single-pair path behind `ClassifyBatch`'s fallback.
