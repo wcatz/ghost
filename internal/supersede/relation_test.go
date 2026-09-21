@@ -226,6 +226,9 @@ func TestRelationClassifierBatchLonePairUsesSinglePrompt(t *testing.T) {
 	if fp.lastSystem != classifySystemPrompt {
 		t.Errorf("lone pair must use the single-pair prompt, got system prompt:\n%s", fp.lastSystem)
 	}
+	if fp.calls != 1 {
+		t.Errorf("lone pair must not pay a batch call plus fallback: provider calls = %d, want 1", fp.calls)
+	}
 }
 
 func TestQuoteDataNeutralizesEmbeddedDelimiters(t *testing.T) {
