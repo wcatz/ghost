@@ -12,8 +12,8 @@ import (
 
 // InputSignature fingerprints the consolidation input so an unchanged corpus
 // can skip a full-corpus LLM call (ghost reflect --skip-unchanged). It covers
-// exactly the fields BuildReflectionPrompt renders for each consolidatable
-// memory, so any prompt-visible mutation invalidates the gate.
+// every prompt-rendered field except the deliberate exclusions below, so any
+// prompt-visible mutation invalidates the gate.
 //
 // Deliberately excluded:
 //   - learned_context: the consolidator's own output, so including it would

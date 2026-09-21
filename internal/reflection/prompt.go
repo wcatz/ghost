@@ -33,7 +33,9 @@ type ReflectMemory struct {
 
 // BuildReflectionPrompt assembles the reflection prompt from project history.
 // Any change to the fields rendered below for ExistingMemories must be mirrored
-// in InputSignature, which fingerprints them for the --skip-unchanged gate.
+// in InputSignature, which fingerprints them for the --skip-unchanged gate. The
+// access count (used:N) is deliberately NOT mirrored: ordinary reads increment
+// it, so including it would break the gate on sessions that saved nothing.
 func BuildReflectionPrompt(input ReflectionInput) string {
 	var sb strings.Builder
 
