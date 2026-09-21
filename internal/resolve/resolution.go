@@ -99,16 +99,16 @@ func (h *ResolutionClassifier) IsResolved(ctx context.Context, content string) (
 }
 
 // parseReply scans a classify reply for the first decisive KEEP/RESOLVED token.
-// recognized is false when the reply contains neither, which both callers treat
-// as KEEP (the classifier's stated bias) — the batch path additionally uses it
-// to detect a reply that yielded no verdicts at all.
+// recognized is false when the reply contains neither. It is the single-note
+// path only (batch lines use parseBatchVerdict); IsResolved ignores recognized,
+// treating an unrecognized reply as KEEP.
 //
-// Bias to KEEP: only an explicit, un-negated "resolved" counts. A preceding
-// negation ("not resolved", "never resolved") or a negated form
-// ("unresolved", "not-resolved") must NOT be read as RESOLVED — otherwise a
-// single word flips a live memory out of ranked injection.
+// A negation anywhere earlier in the reply negates a later "resolved" —
+// "no longer resolved" and "not a resolved issue" must both read as KEEP, or a
+// false RESOLVED drops a live memory from ranked injection. A verdict that
+// appears before any negation still resolves.
 func parseReply(result string) (resolved, recognized bool) {
-	prev := ""
+	negated := false
 	for _, field := range strings.Fields(strings.ToLower(result)) {
 		t := strings.Trim(field, ".,!\"'`:;—-*")
 		if t == "" {
@@ -118,7 +118,7 @@ func parseReply(result string) (resolved, recognized bool) {
 		case t == "keep":
 			return false, true
 		case t == "resolved" || t == "resolve":
-			if isNegation(prev) {
+			if negated {
 				return false, true
 			}
 			return true, true
@@ -126,7 +126,9 @@ func parseReply(result string) (resolved, recognized bool) {
 			// "unresolved", "non-resolved", "not-resolved": a negated form.
 			return false, true
 		}
-		prev = t
+		if isNegation(t) {
+			negated = true
+		}
 	}
 	return false, false
 }

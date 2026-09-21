@@ -50,6 +50,8 @@ func TestIsResolvedParsesResolved(t *testing.T) {
 		{"", false},                // empty → KEEP bias
 		{"I think... KEEP", false}, // first decisive token wins
 		{"unsure, but RESOLVED", true},
+		// A verdict that appears before any negation still resolves.
+		{"RESOLVED, no doubt", true},
 	}
 	for _, c := range cases {
 		fp := &fakeProvider{resp: c.resp}
@@ -87,6 +89,12 @@ func TestIsResolvedRejectsNegatedResolved(t *testing.T) {
 		"unresolved",
 		"not-resolved",
 		"non-resolved",
+		// A negation does not have to be adjacent to "resolved": "no longer
+		// resolved" and "not a resolved issue" must both read as KEEP, or a
+		// false RESOLVED drops a live memory from ranked injection.
+		"no longer resolved",
+		"not a resolved issue",
+		"this was not resolved",
 	} {
 		fp := &fakeProvider{resp: resp}
 		got, err := NewResolutionClassifier(fp).IsResolved(context.Background(), "content")
