@@ -274,16 +274,30 @@ func TestParseBatchRelations(t *testing.T) {
 		t.Errorf("missing/out-of-range: got %v, want [neither \"\"]", got)
 	}
 
-	// Duplicate number: the first line wins.
+	// A duplicated pair number is ambiguous (a fresh reply cannot legitimately
+	// answer one pair twice) and invalidates the whole reply, so an injected
+	// or echoed line cannot win by coming first.
 	got = parseBatchRelations("1: SUPERSEDES\n1: NEITHER", 1)
-	if got[0] != RelationSupersedes {
-		t.Errorf("duplicate number must keep the first verdict, got %v", got[0])
+	if got[0] != "" {
+		t.Errorf("duplicate number must invalidate the reply, got %v", got[0])
 	}
 
 	// Prose lines and markdown decoration are tolerated.
 	got = parseBatchRelations("Here are the verdicts:\n**1: CAUSES**", 1)
 	if got[0] != RelationCauses {
 		t.Errorf("decorated line: got %v, want causes", got[0])
+	}
+	got = parseBatchRelations("**1:** NEITHER", 1)
+	if got[0] != RelationNeither {
+		t.Errorf("bold number+separator: got %v, want neither", got[0])
+	}
+	got = parseBatchRelations("- 1: CAUSES", 1)
+	if got[0] != RelationCauses {
+		t.Errorf("bulleted line: got %v, want causes", got[0])
+	}
+	got = parseBatchRelations("1: #CAUSES", 1)
+	if got[0] != RelationCauses {
+		t.Errorf("heading-decorated verdict: got %v, want causes", got[0])
 	}
 
 	// Garbage stays unclassified.
@@ -292,11 +306,13 @@ func TestParseBatchRelations(t *testing.T) {
 		t.Errorf("garbage must stay unclassified, got %v", got[0])
 	}
 
-	// A numbered reasoning preamble must not decide the pair from a word
-	// buried in it; the genuine verdict line that follows still wins.
+	// A numbered reasoning preamble plus a second line for the same number is
+	// a duplicate: the whole reply is invalidated, so neither a word buried in
+	// the prose nor an ambiguous line decides the pair — ClassifyBatch's
+	// fallback re-judges it in isolation.
 	got = parseBatchRelations("1. This newer note supersedes the older one only nominally\n1: NEITHER", 1)
-	if got[0] != RelationNeither {
-		t.Errorf("prose preamble decided the pair: got %v, want neither", got[0])
+	if got[0] != "" {
+		t.Errorf("duplicate number after a prose preamble must invalidate the reply, got %v", got[0])
 	}
 
 	// A trailing explanation after the verdict still parses.
@@ -324,6 +340,9 @@ func TestSplitNumberedLine(t *testing.T) {
 		{"2) CAUSES", 2, " CAUSES", true},
 		{"12: SUPERSEDES", 12, " SUPERSEDES", true},
 		{"**3:** NEITHER", 3, "** NEITHER", true},
+		{"**3**: NEITHER", 3, " NEITHER", true},
+		{"- 1: NEITHER", 1, " NEITHER", true},
+		{"+ 2: CAUSES", 2, " CAUSES", true},
 		{"Here are the verdicts:", 0, "", false},
 		{"SUPERSEDES", 0, "", false},
 		{"1 SUPERSEDES", 0, "", false},
@@ -412,8 +431,8 @@ func TestRelationClassifierLiveBatch(t *testing.T) {
 	}
 	cls := NewRelationClassifier(cli)
 	// batchSize 3 (not the shipped 8) keeps one bad chunk from sinking eight
-	// labeled cases; the production 8-pair prompt is covered by the
-	// TestRelationClassifierBatch* unit tests and real passes.
+	// labeled cases; the batched prompt format is unit-covered (fake providers)
+	// and the 8-pair prompt is exercised by real passes.
 	cls.batchSize = 3
 
 	pairs := make([]Candidate, len(liveRelationCases))

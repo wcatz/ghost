@@ -176,21 +176,38 @@ func quoteData(s string) string {
 
 // parseBatchRelations maps numbered reply lines ("3: SUPERSEDES") onto the
 // verdicts for n pairs. Missing or garbled entries stay Relation(""). A line
-// number outside 1..n is ignored, and the first line for a number wins, so a
-// duplicated or injected number cannot flip an earlier verdict.
+// number outside 1..n is ignored. A repeated pair number invalidates the whole
+// reply (see the guard below), so a copied or injected numbered line cannot
+// decide a pair.
 func parseBatchRelations(resp string, n int) []Relation {
 	if n <= 0 {
 		return nil
 	}
 	out := make([]Relation, n)
+	seen := make([]bool, n)
+	duplicate := false
 	for _, line := range strings.Split(resp, "\n") {
 		num, rest, ok := splitNumberedLine(line)
-		if !ok || num < 1 || num > n || out[num-1] != "" {
+		if !ok || num < 1 || num > n {
 			continue
 		}
+		if seen[num-1] {
+			duplicate = true
+			continue
+		}
+		seen[num-1] = true
 		if rel, ok := parseBatchVerdict(rest); ok {
 			out[num-1] = rel
 		}
+	}
+	if duplicate {
+		// A repeated pair number is not the one-line-per-pair contract: either
+		// the reply is garbled/truncated, or the model echoed a numbered line
+		// out of the untrusted data block. Under first-wins the earlier copy
+		// (possibly the injected one) would decide the pair, so treat the
+		// whole reply as unparseable and let ClassifyBatch's single-pair
+		// fallback re-judge every pair in isolation.
+		return make([]Relation, n)
 	}
 	return out
 }
@@ -204,6 +221,10 @@ func parseBatchRelations(resp string, n int) []Relation {
 // buries a live memory. Synonyms count only when the whole remainder is that
 // one word, matching parseRelation's rule.
 func parseBatchVerdict(rest string) (Relation, bool) {
+	// The number/separator may be emphasized (`**1:**`), and the verdict
+	// itself may be wrapped (`*CAUSES*`); strip leading decoration so the
+	// first meaningful field decides.
+	rest = strings.TrimLeft(rest, "*_#` ")
 	fields := strings.Fields(strings.ToUpper(rest))
 	if len(fields) == 0 {
 		return "", false
@@ -231,7 +252,9 @@ func parseBatchVerdict(rest string) (Relation, bool) {
 // a leading number are not batch verdict lines and are ignored.
 func splitNumberedLine(line string) (int, string, bool) {
 	line = strings.TrimSpace(line)
-	line = strings.TrimLeft(line, "*_#` ")
+	// Models decorate list items freely: bullets, headings, emphasis around
+	// the number and the separator (`- 1: X`, `**3:** X`, `**3**: X`).
+	line = strings.TrimLeft(line, "-+*_#` ")
 	i := 0
 	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
 		i++
@@ -239,7 +262,14 @@ func splitNumberedLine(line string) (int, string, bool) {
 	if i == 0 || i >= len(line) {
 		return 0, "", false
 	}
-	switch line[i] {
+	j := i
+	for j < len(line) && (line[j] == '*' || line[j] == '_' || line[j] == '#' || line[j] == '`') {
+		j++
+	}
+	if j >= len(line) {
+		return 0, "", false
+	}
+	switch line[j] {
 	case ':', '.', ')':
 	default:
 		return 0, "", false
@@ -248,7 +278,7 @@ func splitNumberedLine(line string) (int, string, bool) {
 	if err != nil {
 		return 0, "", false
 	}
-	return num, line[i+1:], true
+	return num, line[j+1:], true
 }
 
 // Calls reports how many provider classify calls this classifier has made,
