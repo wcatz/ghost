@@ -15,6 +15,8 @@ package resolve
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -43,13 +45,21 @@ var resolveKeywords = []string{
 	"completed",
 }
 
-// Classifier decides whether a memory's content is resolved evidence (true) or
-// a terminal conclusion / still-active knowledge (false). The LLM
-// implementation lives in resolution.go; tests inject a deterministic fake. It is
-// biased to KEEP (return false when uncertain): a false resolve buries a useful
-// memory, a missed resolve merely leaves the status quo.
+// Classifier decides whether each memory's content is resolved evidence (true)
+// or a terminal conclusion / still-active knowledge (false). The LLM
+// implementation lives in resolution.go; tests inject a deterministic fake. It
+// is biased to KEEP (return false when uncertain): a false resolve buries a
+// useful memory, a missed resolve merely leaves the status quo. Batched so one
+// call adjudicates many notes; the KEEP-cache skip happens in Run.
 type Classifier interface {
-	IsResolved(ctx context.Context, content string) (resolved bool, err error)
+	IsResolvedBatch(ctx context.Context, contents []string) ([]bool, error)
+}
+
+// ContentHash is the KEEP-cache key: resolve's question is content-only, so a
+// tag or importance edit must not invalidate a cached verdict.
+func ContentHash(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
 }
 
 // resolveStore is the subset of *memory.Store the pass needs; narrowed for
@@ -58,6 +68,8 @@ type resolveStore interface {
 	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
 	SetResolved(ctx context.Context, ids []string) (int, error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
+	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
+	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
 }
 
 // Result summarizes a pass.
@@ -67,6 +79,7 @@ type Result struct {
 	Confirmed  int // classified as resolved evidence by the LLM
 	Superseded int // older endpoint of a live 'supersedes'/'llm' link, demoted deterministically
 	Corrected  int // older prefilter-passing memory tied to a correction, demoted deterministically
+	Skipped    int // candidates skipped via the KEEP cache
 	Resolved   int // rows written (0 in dry-run)
 }
 
@@ -87,11 +100,12 @@ func Prefilter(mems []memory.Memory) []memory.Memory {
 }
 
 // Run loads eligible candidates, applies two deterministic demotion signals,
-// prefilters the rest, classifies each candidate, and — when apply is true —
-// stamps resolved_at on every confirmed memory in one batch. Dry-run
-// (apply=false) writes nothing but returns the confirmed set for preview. A
-// classifier error on any memory is fatal so a partial pass is never silently
-// applied.
+// prefilters the rest, skips candidates whose content already earned a KEEP
+// verdict (the content-hash cache), classifies the remainder in batches, and —
+// when apply is true — stamps resolved_at on every confirmed memory in one
+// batch and records the newly-judged KEEP hashes. Dry-run (apply=false) writes
+// nothing but returns the confirmed set for preview. A classifier error on any
+// batch is fatal so a partial pass is never silently applied.
 //
 // Deterministic demotions (no LLM call, so no extra CLI spend):
 //
@@ -154,40 +168,80 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	}
 
 	// Classify the remaining prefilter candidates; deterministically-demoted
-	// memories are excluded so a concurrent verdict can't land twice.
-	var llmConfirmed int
+	// memories are excluded so a concurrent verdict can't land twice. The KEEP
+	// cache drops candidates whose content already earned a KEEP verdict, so a
+	// converged project makes no calls at all. The key is the content hash:
+	// resolve's question is content-only, so tag/importance edits do not
+	// invalidate a cached verdict.
+	keptHashes, err := store.ResolveKeptHashes(ctx, projectID)
+	if err != nil {
+		return res, nil, fmt.Errorf("load resolve kept hashes: %w", err)
+	}
+	var pending []memory.Memory
+	var pendingContents []string
 	for _, m := range cands {
 		if confirmedSet[m.ID] {
 			continue
 		}
-		ok, err := cls.IsResolved(ctx, m.Content)
-		if err != nil {
-			return res, nil, fmt.Errorf("classify %s: %w", m.ID, err)
-		}
-		if !ok {
+		if keptHashes[m.ID] == ContentHash(m.Content) {
+			res.Skipped++
 			continue
 		}
-		res.Confirmed++
-		llmConfirmed++
-		addConfirmed(m)
+		pending = append(pending, m)
+		pendingContents = append(pendingContents, m.Content)
+	}
+
+	// newKept collects KEEP verdicts to cache; written only on apply.
+	newKept := make(map[string]string)
+	var llmConfirmed int
+	if len(pendingContents) > 0 {
+		verdicts, err := cls.IsResolvedBatch(ctx, pendingContents)
+		if err != nil {
+			return res, nil, fmt.Errorf("classify %d candidate(s): %w", len(pendingContents), err)
+		}
+		if len(verdicts) != len(pendingContents) {
+			return res, nil, fmt.Errorf("classify %d candidate(s): classifier returned %d verdict(s)", len(pendingContents), len(verdicts))
+		}
+		for i, m := range pending {
+			if !verdicts[i] {
+				newKept[m.ID] = ContentHash(m.Content)
+				continue
+			}
+			res.Confirmed++
+			llmConfirmed++
+			addConfirmed(m)
+		}
 	}
 	if logger != nil {
 		logger.Info("resolve classified",
-			"confirmed", llmConfirmed, "superseded", res.Superseded, "corrected", res.Corrected)
+			"confirmed", llmConfirmed, "superseded", res.Superseded,
+			"corrected", res.Corrected, "cached", res.Skipped)
 	}
 
-	if apply && len(confirmed) > 0 {
-		ids := make([]string, len(confirmed))
-		for i, m := range confirmed {
-			ids[i] = m.ID
+	if apply {
+		if len(confirmed) > 0 {
+			ids := make([]string, len(confirmed))
+			for i, m := range confirmed {
+				ids[i] = m.ID
+			}
+			n, err := store.SetResolved(ctx, ids)
+			if err != nil {
+				return res, nil, fmt.Errorf("set resolved: %w", err)
+			}
+			res.Resolved = n
+			if logger != nil {
+				logger.Info("resolve applied", "resolved", res.Resolved)
+			}
 		}
-		n, err := store.SetResolved(ctx, ids)
-		if err != nil {
-			return res, nil, fmt.Errorf("set resolved: %w", err)
-		}
-		res.Resolved = n
-		if logger != nil {
-			logger.Info("resolve applied", "resolved", res.Resolved)
+		if len(newKept) > 0 {
+			if err := store.MarkResolveKept(ctx, projectID, newKept); err != nil {
+				// The resolved rows are already correct; losing derived cache
+				// state only costs a re-classify next pass, so warn rather
+				// than fail a pass whose primary effect landed.
+				if logger != nil {
+					logger.Warn("resolve kept cache write failed", "error", err)
+				}
+			}
 		}
 	}
 	return res, confirmed, nil

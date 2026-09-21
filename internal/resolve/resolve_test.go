@@ -1,27 +1,43 @@
 package resolve
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// fakeClassifier resolves any memory whose content is in the drop set.
+// fakeClassifier returns KEEP for everything except contents in drop, and
+// counts how many times the batch path was invoked (one count per
+// IsResolvedBatch call, whatever the chunking).
 type fakeClassifier struct {
 	drop map[string]bool
-	// errOn, when set, is the content for which IsResolved returns err instead
-	// of a normal answer. If err is set and errOn is empty, every call errors.
+	// errOn, when set, is the content for which IsResolvedBatch returns err
+	// instead of a normal answer. If err is set and errOn is empty, every call
+	// errors.
 	errOn string
 	err   error
+	calls int
 }
 
-func (f fakeClassifier) IsResolved(_ context.Context, content string) (bool, error) {
-	if f.err != nil && (f.errOn == "" || f.errOn == content) {
-		return false, f.err
+func (f *fakeClassifier) IsResolvedBatch(_ context.Context, contents []string) ([]bool, error) {
+	f.calls++
+	if f.err != nil {
+		for _, c := range contents {
+			if f.errOn == "" || f.errOn == c {
+				return nil, f.err
+			}
+		}
 	}
-	return f.drop[content], nil
+	out := make([]bool, len(contents))
+	for i, c := range contents {
+		out[i] = f.drop[c]
+	}
+	return out, nil
 }
 
 // fakeStore satisfies resolveStore with in-memory candidates.
@@ -31,6 +47,9 @@ type fakeStore struct {
 	resolved          []string
 	err               error // when set, returned by SetResolved instead of writing
 	setResolvedCalled bool
+	kept              map[string]string   // pre-seeded resolve KEEP cache
+	markedKept        []map[string]string // hashes passed to MarkResolveKept, one per call
+	markErr           error               // when set, returned by MarkResolveKept
 }
 
 func (s *fakeStore) ResolveCandidates(_ context.Context, _ string) ([]memory.Memory, error) {
@@ -46,6 +65,20 @@ func (s *fakeStore) SetResolved(_ context.Context, ids []string) (int, error) {
 }
 func (s *fakeStore) LinksByRelationSource(_ context.Context, _, _, _ string) ([]memory.Link, error) {
 	return s.links, nil
+}
+func (s *fakeStore) ResolveKeptHashes(_ context.Context, _ string) (map[string]string, error) {
+	out := make(map[string]string, len(s.kept))
+	for id, hash := range s.kept {
+		out[id] = hash
+	}
+	return out, nil
+}
+func (s *fakeStore) MarkResolveKept(_ context.Context, _ string, hashes map[string]string) error {
+	if s.markErr != nil {
+		return s.markErr
+	}
+	s.markedKept = append(s.markedKept, hashes)
+	return nil
 }
 
 func TestPrefilterKeepsOnlyPlausible(t *testing.T) {
@@ -73,7 +106,7 @@ func TestRunResolvesConfirmedEvidence(t *testing.T) {
 		{ID: "drop", Content: "kill experiment finding: 7.3% cross-session links, removed"},
 		{ID: "noise", Content: "unrelated architecture note about workers"},
 	}}
-	cls := fakeClassifier{drop: map[string]bool{
+	cls := &fakeClassifier{drop: map[string]bool{
 		"kill experiment finding: 7.3% cross-session links, removed": true,
 	}}
 
@@ -116,7 +149,7 @@ func TestRunFailsFatallyOnClassifierError(t *testing.T) {
 	}}
 	// Both survive the prefilter (both contain keywords); classification fails
 	// partway through the batch on the second one.
-	cls := fakeClassifier{errOn: "kill experiment finding: 7.3% cross-session links, removed",
+	cls := &fakeClassifier{errOn: "kill experiment finding: 7.3% cross-session links, removed",
 		err: errors.New("boom")}
 
 	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
@@ -169,7 +202,7 @@ func TestRunSupersedesEdgePiggyback(t *testing.T) {
 	}
 	// Never called: the classifier returns KEEP for everything, but the piggyback
 	// shouldn't need it.
-	cls := fakeClassifier{drop: map[string]bool{}}
+	cls := &fakeClassifier{drop: map[string]bool{}}
 
 	res, confirmed, err := Run(context.Background(), store, cls, "proj", false, nil)
 	if err != nil {
@@ -209,7 +242,7 @@ func TestRunCorrectionPairing(t *testing.T) {
 	// imported), so pairing fires; "live" shares none and stays KEEP.
 	store := &fakeStore{candidates: []memory.Memory{older, correction, unrelated}}
 	// LLM would keep everything; only deterministic pairing demotes.
-	cls := fakeClassifier{drop: map[string]bool{}}
+	cls := &fakeClassifier{drop: map[string]bool{}}
 
 	res, confirmed, err := Run(context.Background(), store, cls, "proj", false, nil)
 	if err != nil {
@@ -241,7 +274,7 @@ func TestRunCorrectionPairingSkipsLiveGotcha(t *testing.T) {
 	// "live" is strictly OLDER than the correction and shares its rare tokens,
 	// but passes no resolution keyword, so it is not a candidate and must survive.
 	store := &fakeStore{candidates: []memory.Memory{live, correction}}
-	cls := fakeClassifier{drop: map[string]bool{}}
+	cls := &fakeClassifier{drop: map[string]bool{}}
 
 	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
 	if err != nil {
@@ -255,5 +288,192 @@ func TestRunCorrectionPairingSkipsLiveGotcha(t *testing.T) {
 	}
 	if len(store.resolved) != 0 {
 		t.Errorf("applied %v, want nothing written", store.resolved)
+	}
+}
+
+// TestRunSkipsCachedKeepVerdicts: a candidate whose content hash matches the
+// recorded KEEP hash never reaches the classifier, in dry-run or apply.
+func TestRunSkipsCachedKeepVerdicts(t *testing.T) {
+	content := "kill experiment finding: 7.3% cross-session links, removed"
+	store := &fakeStore{
+		candidates: []memory.Memory{{ID: "kept", Content: content}},
+		kept:       map[string]string{"kept": ContentHash(content)},
+	}
+	cls := &fakeClassifier{drop: map[string]bool{}}
+
+	res, confirmed, err := Run(context.Background(), store, cls, "proj", false, nil)
+	if err != nil {
+		t.Fatalf("Run dry: %v", err)
+	}
+	if cls.calls != 0 {
+		t.Errorf("classifier calls = %d, want 0 for a cached KEEP", cls.calls)
+	}
+	if res.Skipped != 1 {
+		t.Errorf("res.Skipped = %d, want 1", res.Skipped)
+	}
+	if len(confirmed) != 0 {
+		t.Errorf("confirmed = %v, want nothing (cached KEEP stays KEEP)", confirmed)
+	}
+
+	res, _, err = Run(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Run apply: %v", err)
+	}
+	if cls.calls != 0 {
+		t.Errorf("classifier calls on apply = %d, want 0", cls.calls)
+	}
+	if len(store.resolved) != 0 {
+		t.Errorf("apply wrote %v, want nothing", store.resolved)
+	}
+	if len(store.markedKept) != 0 {
+		t.Errorf("cached skips must not be re-recorded: markedKept = %v", store.markedKept)
+	}
+}
+
+// TestRunRecordsKeepHashesOnlyOnApply: a cache miss goes through one batched
+// call; false verdicts are hash-cached only when apply is set, so dry-run
+// remains side-effect-free.
+func TestRunRecordsKeepHashesOnlyOnApply(t *testing.T) {
+	keepContent := "kill experiment finding: 7.3% cross-session links, removed"
+	dropContent := "fixed in PR #210, dead ranking bonus removed"
+	store := &fakeStore{candidates: []memory.Memory{
+		{ID: "keep", Content: keepContent},
+		{ID: "drop", Content: dropContent},
+	}}
+	cls := &fakeClassifier{drop: map[string]bool{dropContent: true}}
+
+	res, _, err := Run(context.Background(), store, cls, "proj", false, nil)
+	if err != nil {
+		t.Fatalf("Run dry: %v", err)
+	}
+	if cls.calls != 1 {
+		t.Errorf("classifier calls = %d, want 1 batched call", cls.calls)
+	}
+	if res.Skipped != 0 {
+		t.Errorf("res.Skipped = %d, want 0 on a cache miss", res.Skipped)
+	}
+	if len(store.markedKept) != 0 {
+		t.Errorf("dry run recorded %v, want nothing", store.markedKept)
+	}
+
+	_, _, err = Run(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Run apply: %v", err)
+	}
+	if len(store.markedKept) != 1 || len(store.markedKept[0]) != 1 {
+		t.Fatalf("apply markedKept = %v, want exactly one KEEP hash", store.markedKept)
+	}
+	if got := store.markedKept[0]["keep"]; got != ContentHash(keepContent) {
+		t.Errorf("recorded hash = %q, want %q", got, ContentHash(keepContent))
+	}
+	if _, ok := store.markedKept[0]["drop"]; ok {
+		t.Errorf("resolved verdict must not be KEEP-cached: %v", store.markedKept[0])
+	}
+}
+
+// TestRunNeverCachesResolvedVerdicts: a RESOLVED verdict is written via
+// SetResolved, never into the KEEP cache.
+func TestRunNeverCachesResolvedVerdicts(t *testing.T) {
+	content := "kill experiment finding: 7.3% cross-session links, removed"
+	store := &fakeStore{candidates: []memory.Memory{{ID: "drop", Content: content}}}
+	cls := &fakeClassifier{drop: map[string]bool{content: true}}
+
+	res, _, err := Run(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Run apply: %v", err)
+	}
+	if res.Confirmed != 1 || res.Resolved != 1 {
+		t.Fatalf("confirmed=%d resolved=%d, want 1/1", res.Confirmed, res.Resolved)
+	}
+	if len(store.resolved) != 1 || store.resolved[0] != "drop" {
+		t.Fatalf("resolved = %v, want [drop]", store.resolved)
+	}
+	if len(store.markedKept) != 0 {
+		t.Errorf("resolved verdicts must not be KEEP-cached: markedKept = %v", store.markedKept)
+	}
+}
+
+// TestRunReclassifiesChangedContent: a stored hash for different content does
+// not match, so the candidate is classified again.
+func TestRunReclassifiesChangedContent(t *testing.T) {
+	store := &fakeStore{
+		candidates: []memory.Memory{{ID: "m", Content: "fixed in PR #210, dead ranking bonus removed"}},
+		kept:       map[string]string{"m": ContentHash("an older version of this note")},
+	}
+	cls := &fakeClassifier{drop: map[string]bool{}}
+
+	res, _, err := Run(context.Background(), store, cls, "proj", false, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if cls.calls != 1 {
+		t.Errorf("classifier calls = %d, want 1 (hash mismatch re-classifies)", cls.calls)
+	}
+	if res.Skipped != 0 {
+		t.Errorf("res.Skipped = %d, want 0", res.Skipped)
+	}
+}
+
+// TestRunDeterministicDemotionsIgnoreCache: the supersedes-edge piggyback is
+// confirmed before the cache lookup, so it counts as Superseded (not Skipped)
+// and needs no classifier call even when the cache holds a stale entry.
+func TestRunDeterministicDemotionsIgnoreCache(t *testing.T) {
+	older := memory.Memory{ID: "older", Category: "gotcha",
+		Content: "Reward snapshot import miscalculates: unrelated live-looking gotcha without keywords"}
+	// Neither note carries a resolution keyword, so the only candidate the
+	// piggyback demotes is the link's older endpoint and no note reaches the
+	// classifier.
+	newer := memory.Memory{ID: "newer", Category: "gotcha",
+		Content: "the snapshot import row was replaced; never use the old calculation on import"}
+	store := &fakeStore{
+		candidates: []memory.Memory{older, newer},
+		links: []memory.Link{{
+			SourceID: "newer", TargetID: "older", Relation: "supersedes", Source: "llm",
+		}},
+		kept: map[string]string{"older": ContentHash(older.Content)},
+	}
+	cls := &fakeClassifier{drop: map[string]bool{}}
+
+	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Superseded != 1 {
+		t.Fatalf("res.Superseded = %d, want 1", res.Superseded)
+	}
+	if res.Skipped != 0 {
+		t.Errorf("res.Skipped = %d, want 0 (piggyback wins over the cache)", res.Skipped)
+	}
+	if cls.calls != 0 {
+		t.Errorf("classifier calls = %d, want 0 for a deterministic demotion", cls.calls)
+	}
+	if len(confirmed) != 1 || confirmed[0].ID != "older" {
+		t.Fatalf("confirmed = %v, want [older]", confirmed)
+	}
+}
+
+// TestRunMarkResolveKeptErrorDoesNotFailThePass: the resolved rows are already
+// correct when the cache write fails; losing derived state only costs a
+// re-classify next pass, so the pass warns and continues.
+func TestRunMarkResolveKeptErrorDoesNotFailThePass(t *testing.T) {
+	store := &fakeStore{
+		candidates: []memory.Memory{
+			{ID: "keep", Content: "kill experiment finding: 7.3% cross-session links, removed"},
+		},
+		markErr: errors.New("disk full"),
+	}
+	cls := &fakeClassifier{drop: map[string]bool{}}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	res, _, err := Run(context.Background(), store, cls, "proj", true, logger)
+	if err != nil {
+		t.Fatalf("Run must not fail on a cache-write error: %v", err)
+	}
+	if res.Confirmed != 0 || res.Resolved != 0 {
+		t.Errorf("confirmed=%d resolved=%d, want 0/0", res.Confirmed, res.Resolved)
+	}
+	if !strings.Contains(buf.String(), "resolve kept cache write failed") {
+		t.Errorf("expected a warning about the failed cache write, log:\n%s", buf.String())
 	}
 }
