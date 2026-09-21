@@ -1485,6 +1485,42 @@ func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedCont
 	return err
 }
 
+// GetReflectInputSignature returns the fingerprint of the memory set that
+// produced the last applied consolidation for projectID, or "" when none was
+// recorded.
+func (s *Store) GetReflectInputSignature(ctx context.Context, projectID string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var sig string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(reflect_input_sig, '') FROM ghost_state WHERE project_id = ?`, projectID).Scan(&sig)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get reflect signature: %w", err)
+	}
+	return sig, nil
+}
+
+// SetReflectInputSignature records the fingerprint of the memory set that just
+// produced an applied consolidation.
+func (s *Store) SetReflectInputSignature(ctx context.Context, projectID, sig string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE ghost_state
+		SET reflect_input_sig = ?, updated_at = datetime('now')
+		WHERE project_id = ?
+	`, sig, projectID)
+	if err != nil {
+		return fmt.Errorf("set reflect signature: %w", err)
+	}
+	return nil
+}
+
 func scanMemories(rows *sql.Rows) ([]Memory, error) {
 	var memories []Memory
 	for rows.Next() {

@@ -1663,6 +1663,29 @@ func TestStoreLearnedContext(t *testing.T) {
 	}
 }
 
+func TestReflectInputSignatureRoundTrip(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	got, err := s.GetReflectInputSignature(ctx, testProject)
+	if err != nil || got != "" {
+		t.Fatalf("initial = (%q, %v), want empty", got, err)
+	}
+	if err := s.SetReflectInputSignature(ctx, testProject, "sig123"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetReflectInputSignature(ctx, testProject)
+	if err != nil || got != "sig123" {
+		t.Fatalf("round-trip = (%q, %v), want sig123", got, err)
+	}
+	if err := s.SetReflectInputSignature(ctx, testProject, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = s.GetReflectInputSignature(ctx, testProject); got != "" {
+		t.Fatalf("after clear = %q, want empty", got)
+	}
+}
+
 func TestStoreSetOnSave(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
