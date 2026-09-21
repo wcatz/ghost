@@ -336,6 +336,25 @@ func TestSplitNumberedLine(t *testing.T) {
 	}
 }
 
+// liveRelationCases is the labeled set both live classifier tests score
+// against. One table means the single-pair and batched paths are held to the
+// same accuracy bar.
+var liveRelationCases = []struct {
+	newer, older string
+	want         Relation
+}{
+	{"Production database migrated to Postgres 16; the 14 cluster is decommissioned.", "Production database runs Postgres 14.", RelationSupersedes},
+	{"The bastion SSH port moved from 22 to 2222 after the security review.", "The bastion host accepts SSH on port 22.", RelationSupersedes},
+	{"The repository default branch was renamed from master to main.", "The repository default branch is master.", RelationSupersedes},
+	{"cardano-node upgraded to 10.2.0 in production.", "Production cardano-node runs 10.1.4.", RelationSupersedes},
+	{"Decision: reversed the switch to NATS and went back to Postgres LISTEN/NOTIFY.", "Gotcha: NATS delivers at-least-once and can reorder messages under partition rebalance.", RelationCauses},
+	{"Decision: adopted gRPC for the service mesh, citing its HTTP/2 multiplexing.", "gRPC requires HTTP/2.", RelationCauses},
+	{"Staging database is Postgres 16.", "Production database is Postgres 16.", RelationNeither},
+	{"Grafana listens on port 80.", "Prometheus retention is 90 days.", RelationNeither},
+	{"Preview network magic is 2.", "Mainnet network magic is 764824073.", RelationNeither},
+	{"The relay node runs on k3s-mr-slave.", "The block producer runs on k3s-texas.", RelationNeither},
+}
+
 // TestRelationClassifierLive validates the actual prompt against a small labeled
 // set. It needs a working LLM CLI (claude, opencode, codex, or goose), so it is
 // skipped in CI when none answers; run it manually to get a precision signal on
@@ -360,24 +379,8 @@ func TestRelationClassifierLive(t *testing.T) {
 	}
 	cls := NewRelationClassifier(cli)
 
-	cases := []struct {
-		newer, older string
-		want         Relation
-	}{
-		{"Production database migrated to Postgres 16; the 14 cluster is decommissioned.", "Production database runs Postgres 14.", RelationSupersedes},
-		{"The bastion SSH port moved from 22 to 2222 after the security review.", "The bastion host accepts SSH on port 22.", RelationSupersedes},
-		{"The repository default branch was renamed from master to main.", "The repository default branch is master.", RelationSupersedes},
-		{"cardano-node upgraded to 10.2.0 in production.", "Production cardano-node runs 10.1.4.", RelationSupersedes},
-		{"Decision: reversed the switch to NATS and went back to Postgres LISTEN/NOTIFY.", "Gotcha: NATS delivers at-least-once and can reorder messages under partition rebalance.", RelationCauses},
-		{"Decision: adopted gRPC for the service mesh, citing its HTTP/2 multiplexing.", "gRPC requires HTTP/2.", RelationCauses},
-		{"Staging database is Postgres 16.", "Production database is Postgres 16.", RelationNeither},
-		{"Grafana listens on port 80.", "Prometheus retention is 90 days.", RelationNeither},
-		{"Preview network magic is 2.", "Mainnet network magic is 764824073.", RelationNeither},
-		{"The relay node runs on k3s-mr-slave.", "The block producer runs on k3s-texas.", RelationNeither},
-	}
-
 	correct := 0
-	for _, c := range cases {
+	for _, c := range liveRelationCases {
 		got, err := cls.Classify(ctx, c.newer, c.older)
 		if err != nil {
 			t.Fatalf("classify: %v", err)
@@ -390,9 +393,48 @@ func TestRelationClassifierLive(t *testing.T) {
 		}
 		t.Logf("[%s] want=%v got=%v  newer=%q", verdict, c.want, got, c.newer)
 	}
-	acc := float64(correct) / float64(len(cases))
-	t.Logf("relation classifier accuracy on labeled set: %d/%d = %.2f", correct, len(cases), acc)
+	acc := float64(correct) / float64(len(liveRelationCases))
+	t.Logf("relation classifier accuracy on labeled set: %d/%d = %.2f", correct, len(liveRelationCases), acc)
 	if acc < 0.75 {
 		t.Errorf("classifier accuracy %.2f below 0.75 — prompt may need work", acc)
+	}
+}
+
+// TestRelationClassifierLiveBatch runs the same labeled set through the
+// batched path (chunks of 3), validating the numbered-line prompt and parser
+// against a real harness. Skipped when no CLI is available; run manually with
+// GHOST_TEST_SOURCE=opencode to score it.
+func TestRelationClassifierLiveBatch(t *testing.T) {
+	ctx := context.Background()
+	cli := ai.NewSourceProviderForSource(os.Getenv("GHOST_TEST_SOURCE"), "", "", "", "")
+	if !cli.Available() {
+		t.Skip("no LLM CLI (claude/opencode/codex/goose) available; skipping live batch test")
+	}
+	cls := NewRelationClassifier(cli)
+	cls.batchSize = 3
+
+	pairs := make([]Candidate, len(liveRelationCases))
+	for i, c := range liveRelationCases {
+		pairs[i] = Candidate{NewerContent: c.newer, OlderContent: c.older}
+	}
+	got, err := cls.ClassifyBatch(ctx, pairs)
+	if err != nil {
+		t.Fatalf("ClassifyBatch: %v", err)
+	}
+	correct := 0
+	for i, c := range liveRelationCases {
+		verdict := "ok"
+		if got[i] != c.want {
+			verdict = "MISS"
+		} else {
+			correct++
+		}
+		t.Logf("[%s] want=%v got=%v  newer=%q", verdict, c.want, got[i], c.newer)
+	}
+	acc := float64(correct) / float64(len(liveRelationCases))
+	t.Logf("batched relation classifier accuracy: %d/%d = %.2f in %d call(s)",
+		correct, len(liveRelationCases), acc, cls.Calls())
+	if acc < 0.75 {
+		t.Errorf("batched classifier accuracy %.2f below 0.75", acc)
 	}
 }
