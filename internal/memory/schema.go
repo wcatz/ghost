@@ -180,6 +180,17 @@ CREATE TABLE IF NOT EXISTS memory_links (
 CREATE INDEX IF NOT EXISTS idx_links_source ON memory_links(source_id) WHERE invalidated_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_links_target ON memory_links(target_id) WHERE invalidated_at IS NULL;
 
+CREATE TABLE IF NOT EXISTS supersede_checked (
+    newer_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    older_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    newer_hash  TEXT NOT NULL,
+    older_hash  TEXT NOT NULL,
+    checked_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (newer_id, older_id)
+);
+CREATE INDEX IF NOT EXISTS idx_supersede_checked_project ON supersede_checked(project_id);
+
 CREATE TABLE IF NOT EXISTS link_scans (
     memory_id  TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
     scanned_at TEXT NOT NULL DEFAULT (datetime('now'))

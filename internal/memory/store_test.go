@@ -3574,6 +3574,223 @@ func TestMarkResolveKeptScopesToProject(t *testing.T) {
 	}
 }
 
+// TestStoreSupersedeCheckedRoundTrip: MarkSupersedeNeither records
+// {newer,older} -> SupersedeCheck and SupersedeChecked reads them back keyed
+// by the ordered pair; pairs never marked are absent, and an empty mark call
+// is a no-op.
+func TestStoreSupersedeCheckedRoundTrip(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	mk := func(content string) string {
+		t.Helper()
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "gotcha", Content: content, Source: "manual", Importance: 0.6,
+		})
+		if err != nil {
+			t.Fatalf("create %q: %v", content, err)
+		}
+		return id
+	}
+	a := mk("prod database is postgres 16")
+	b := mk("staging database is postgres 16")
+	c := mk("grafana listens on port 80")
+
+	if err := s.MarkSupersedeNeither(ctx, testProject, map[[2]string]SupersedeCheck{}); err != nil {
+		t.Fatalf("MarkSupersedeNeither(empty): %v", err)
+	}
+	got, err := s.SupersedeChecked(ctx, testProject)
+	if err != nil {
+		t.Fatalf("SupersedeChecked(empty): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("empty mark wrote %v, want no entries", got)
+	}
+
+	marked := map[[2]string]SupersedeCheck{
+		{a, b}: {NewerHash: "hash-a", OlderHash: "hash-b"},
+		{b, c}: {NewerHash: "hash-b", OlderHash: "hash-c"},
+	}
+	if err := s.MarkSupersedeNeither(ctx, testProject, marked); err != nil {
+		t.Fatalf("MarkSupersedeNeither: %v", err)
+	}
+	got, err = s.SupersedeChecked(ctx, testProject)
+	if err != nil {
+		t.Fatalf("SupersedeChecked: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("checked = %v, want 2 entries", got)
+	}
+	for key, want := range marked {
+		if got[key] != want {
+			t.Errorf("checked[%v] = %+v, want %+v", key, got[key], want)
+		}
+	}
+}
+
+// TestSupersedeCheckedScopesToProject: the read is project-scoped, so rows
+// recorded for one project never surface for another.
+func TestSupersedeCheckedScopesToProject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if err := s.EnsureProject(ctx, "other-project", "/tmp/other", "other"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	mine, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "mine", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create mine: %v", err)
+	}
+	mineOther, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "mine other", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create mine other: %v", err)
+	}
+	theirs, err := s.Create(ctx, "other-project", Memory{
+		Category: "gotcha", Content: "theirs", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create theirs: %v", err)
+	}
+	theirsOther, err := s.Create(ctx, "other-project", Memory{
+		Category: "gotcha", Content: "theirs other", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create theirs other: %v", err)
+	}
+
+	if err := s.MarkSupersedeNeither(ctx, testProject, map[[2]string]SupersedeCheck{
+		{mine, mineOther}: {NewerHash: "h1", OlderHash: "h2"},
+	}); err != nil {
+		t.Fatalf("MarkSupersedeNeither(test): %v", err)
+	}
+	if err := s.MarkSupersedeNeither(ctx, "other-project", map[[2]string]SupersedeCheck{
+		{theirs, theirsOther}: {NewerHash: "h3", OlderHash: "h4"},
+	}); err != nil {
+		t.Fatalf("MarkSupersedeNeither(other): %v", err)
+	}
+
+	got, err := s.SupersedeChecked(ctx, testProject)
+	if err != nil {
+		t.Fatalf("SupersedeChecked(test): %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("test project checked = %v, want only its own pair", got)
+	}
+	if _, ok := got[[2]string{theirs, theirsOther}]; ok {
+		t.Errorf("other project's pair leaked into %s", testProject)
+	}
+	other, err := s.SupersedeChecked(ctx, "other-project")
+	if err != nil {
+		t.Fatalf("SupersedeChecked(other): %v", err)
+	}
+	if len(other) != 1 {
+		t.Fatalf("other project checked = %v, want only its own pair", other)
+	}
+	if _, ok := other[[2]string{mine, mineOther}]; ok {
+		t.Errorf("test project's pair leaked into other-project")
+	}
+}
+
+// TestMarkSupersedeNeitherCascadesOnMemoryDelete: a checked row is derived
+// state for a pair, so deleting either endpoint (which reflection's
+// ReplaceNonManual path does when it replaces a memory) must cascade the row
+// away — a stale check must not outlive the memory it describes.
+func TestMarkSupersedeNeitherCascadesOnMemoryDelete(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "prod database is postgres 16", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	b, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "staging database is postgres 16", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+
+	if err := s.MarkSupersedeNeither(ctx, testProject, map[[2]string]SupersedeCheck{
+		{a, b}: {NewerHash: "hash-a", OlderHash: "hash-b"},
+	}); err != nil {
+		t.Fatalf("MarkSupersedeNeither: %v", err)
+	}
+	if err := s.Delete(ctx, b); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	got, err := s.SupersedeChecked(ctx, testProject)
+	if err != nil {
+		t.Fatalf("SupersedeChecked: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("checked = %v, want the pair cascaded away with its deleted endpoint", got)
+	}
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM supersede_checked WHERE newer_id = ? AND older_id = ?`, a, b,
+	).Scan(&n); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("supersede_checked still holds %d row(s) after endpoint deletion", n)
+	}
+}
+
+// TestMarkSupersedeNeitherUpsertsHashes: re-marking the same pair refreshes the
+// stored hashes in place rather than erroring on the primary key or
+// accumulating duplicate rows.
+func TestMarkSupersedeNeitherUpsertsHashes(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "prod database is postgres 16", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	b, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "staging database is postgres 16", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	key := [2]string{a, b}
+
+	if err := s.MarkSupersedeNeither(ctx, testProject, map[[2]string]SupersedeCheck{
+		key: {NewerHash: "old-a", OlderHash: "old-b"},
+	}); err != nil {
+		t.Fatalf("MarkSupersedeNeither(first): %v", err)
+	}
+	if err := s.MarkSupersedeNeither(ctx, testProject, map[[2]string]SupersedeCheck{
+		key: {NewerHash: "new-a", OlderHash: "new-b"},
+	}); err != nil {
+		t.Fatalf("MarkSupersedeNeither(second): %v", err)
+	}
+
+	got, err := s.SupersedeChecked(ctx, testProject)
+	if err != nil {
+		t.Fatalf("SupersedeChecked: %v", err)
+	}
+	if want := (SupersedeCheck{NewerHash: "new-a", OlderHash: "new-b"}); got[key] != want {
+		t.Errorf("checked[key] = %+v, want refreshed %+v", got[key], want)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM supersede_checked`).Scan(&n); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("supersede_checked holds %d row(s), want 1 after upsert", n)
+	}
+}
+
 func TestGetTopMemoriesExcludesResolved(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
