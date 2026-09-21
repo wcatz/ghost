@@ -37,14 +37,16 @@ type embedderDiagnostics interface {
 func boolPtr(b bool) *bool { return &b }
 
 // resolveCapableStore narrows provider.MemoryStore's concrete backing store to
-// the methods ghost_resolve needs (ResolveCandidates, SetResolved, and the
-// supersedes-link read for deterministic demotion). These aren't part of
-// provider.MemoryStore, so s.store is type-asserted to this interface at call
-// time; *memory.Store satisfies it.
+// the methods ghost_resolve needs (ResolveCandidates, SetResolved, the
+// supersedes-link read for deterministic demotion, and the KEEP-verdict cache).
+// These aren't part of provider.MemoryStore, so s.store is type-asserted to
+// this interface at call time; *memory.Store satisfies it.
 type resolveCapableStore interface {
 	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
 	SetResolved(ctx context.Context, ids []string) (int, error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
+	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
+	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
 }
 
 // shortID truncates an ID to 8 characters for compact preview (used for both
@@ -1053,6 +1055,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("ghost_resolve requires a `claude`, `opencode`, `codex`, or `goose` binary on PATH (or via cli.*_binary config)")
 		}
 		cls := resolve.NewResolutionClassifier(cli)
+		cls.SetLogger(s.logger)
 		res, confirmed, err := resolve.Run(ctx, rs, cls, projectID, args.Apply, s.logger)
 		if err != nil {
 			return nil, nil, fmt.Errorf("ghost_resolve: %w", err)
@@ -1065,8 +1068,9 @@ func (s *Server) registerTools() {
 			s.notifyProjectResource(ctx, projectID, "context")
 		}
 		var sb strings.Builder
-		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %s %d\n",
-			args.Project, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected, verb, count)
+		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP cached, %s %d (%d classify call(s))\n",
+			args.Project, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
+			res.Skipped, verb, count, cls.Calls())
 		if res.Superseded > 0 || res.Corrected > 0 {
 			fmt.Fprintf(&sb, "  (%d via supersedes links, %d via correction pairing, %d via LLM)\n",
 				res.Superseded, res.Corrected, res.Confirmed)

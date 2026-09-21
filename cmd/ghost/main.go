@@ -1220,10 +1220,12 @@ host).`)
 // memories (concluded work: findings, changelog notes, PR locators) so they
 // drop out of session-start injection while staying searchable. Cheap local
 // keyword prefilter proposes candidates; the hosting CLI harness adjudicates
-// each with a crisp conclusion-vs-evidence question biased to KEEP. Dry-run
-// by default; --apply writes resolved_at. Re-runnable and reversible: any
-// later Upsert/UpdateMemory of a memory clears its resolved_at. The stop hook
-// spawns this as a detached --apply process (internal/mcpinit/stophook.go).
+// them in batches with a crisp conclusion-vs-evidence question biased to KEEP,
+// and KEEP verdicts are cached by content hash so a converged project makes no
+// calls. Dry-run by default; --apply writes resolved_at and the cache.
+// Re-runnable and reversible: any later Upsert/UpdateMemory of a memory clears
+// its resolved_at. The stop hook spawns this as a detached --apply process
+// (internal/mcpinit/stophook.go).
 func runResolve() {
 	var projectName string
 	var source string
@@ -1273,6 +1275,7 @@ config; set --source to route by host).`)
 		os.Exit(1)
 	}
 	cls := resolve.NewResolutionClassifier(provider)
+	cls.SetLogger(logger)
 	res, confirmed, err := resolve.Run(ctx, store, cls, projectID, apply, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -1291,8 +1294,9 @@ config; set --source to route by host).`)
 		}
 		return id
 	}
-	fmt.Printf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %s %d\n",
-		projectName, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected, verb, count)
+	fmt.Printf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP cached, %s %d (%d classify call(s))\n",
+		projectName, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
+		res.Skipped, verb, count, cls.Calls())
 	if res.Superseded > 0 || res.Corrected > 0 {
 		fmt.Printf("  (%d via supersedes links, %d via correction pairing, %d via LLM)\n",
 			res.Superseded, res.Corrected, res.Confirmed)

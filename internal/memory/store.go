@@ -993,6 +993,62 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 	return total, nil
 }
 
+// ResolveKeptHashes returns the content hash recorded when resolve last judged
+// each memory KEEP, keyed by memory ID. Only rows with a recorded hash appear.
+func (s *Store) ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, resolve_kept_hash
+		FROM memories
+		WHERE project_id = ? AND resolve_kept_hash != ''
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve kept hashes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]string)
+	for rows.Next() {
+		var id, hash string
+		if err := rows.Scan(&id, &hash); err != nil {
+			return nil, fmt.Errorf("scan resolve kept hash: %w", err)
+		}
+		out[id] = hash
+	}
+	return out, rows.Err()
+}
+
+// MarkResolveKept records KEEP verdicts (id -> content hash) for memories
+// resolve classified as not-resolved. It deliberately does not touch
+// updated_at: the content did not change, and bumping freshness would perturb
+// the reflect signature and decay ranking. The update is project-scoped, so a
+// stale caller cannot write another project's rows. A no-op on an empty map.
+func (s *Store) MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error {
+	if len(hashes) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin mark resolve kept: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for id, hash := range hashes {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE memories SET resolve_kept_hash = ? WHERE id = ? AND project_id = ?`,
+			hash, id, projectID,
+		); err != nil {
+			return fmt.Errorf("mark resolve kept %s: %w", id, err)
+		}
+	}
+	return tx.Commit()
+}
+
 // Delete removes a specific memory.
 func (s *Store) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
