@@ -1174,6 +1174,10 @@ func (s *Store) CurrentTimestamp(ctx context.Context) (string, error) {
 // ReplaceNonManual atomically replaces all non-manual memories for a project.
 // Manual-sourced memories are preserved. Refuses to replace with an empty set.
 //
+// It returns the IDs of memories preserved because they were saved during the
+// consolidation round trip (the consolidatedSince race) — callers must not
+// treat the post-apply corpus as fully consolidated when this is non-empty.
+//
 // consolidatedSince should be a timestamp (see CurrentTimestamp) captured
 // before the caller fetched the memories it fed to the consolidator. ghost
 // reflect runs as a separate process from the long-lived MCP server, so a
@@ -1182,9 +1186,9 @@ func (s *Store) CurrentTimestamp(ctx context.Context) (string, error) {
 // durably written but never part of what the consolidator saw. Any non-manual
 // memory created at/after that timestamp is preserved through the replace
 // instead. Pass "" to skip the check (tests that don't exercise the race).
-func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string) error {
+func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string) (preserved []string, err error) {
 	if len(memories) == 0 {
-		return fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
+		return nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
 	}
 
 	s.mu.Lock()
@@ -1192,7 +1196,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -1211,7 +1215,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL
 	`, snapshotID, projectID)
 	if err != nil {
-		return fmt.Errorf("snapshot memories: %w", err)
+		return nil, fmt.Errorf("snapshot memories: %w", err)
 	}
 
 	// Identify which existing rows this replace may delete, and which emitted
@@ -1226,7 +1230,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL
 	`, projectID)
 	if err != nil {
-		return fmt.Errorf("list replaceable memories: %w", err)
+		return nil, fmt.Errorf("list replaceable memories: %w", err)
 	}
 	type replaceCandidate struct {
 		id      string
@@ -1237,14 +1241,14 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		var c replaceCandidate
 		if err := rows.Scan(&c.id, &c.content); err != nil {
 			rows.Close() //nolint:errcheck
-			return fmt.Errorf("scan replaceable memory: %w", err)
+			return nil, fmt.Errorf("scan replaceable memory: %w", err)
 		}
 		candidates = append(candidates, c)
 	}
 	rowsErr := rows.Err()
 	rows.Close() //nolint:errcheck
 	if rowsErr != nil {
-		return fmt.Errorf("iterate replaceable memories: %w", rowsErr)
+		return nil, fmt.Errorf("iterate replaceable memories: %w", rowsErr)
 	}
 
 	// Memories saved during the round trip never reached the consolidator, so
@@ -1259,21 +1263,28 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
 		`, projectID, consolidatedSince)
 		if err != nil {
-			return fmt.Errorf("find concurrent memories: %w", err)
+			return nil, fmt.Errorf("find concurrent memories: %w", err)
 		}
 		for crows.Next() {
 			var id string
 			if err := crows.Scan(&id); err != nil {
 				crows.Close() //nolint:errcheck
-				return fmt.Errorf("scan concurrent memory: %w", err)
+				return nil, fmt.Errorf("scan concurrent memory: %w", err)
 			}
 			concurrent[id] = true
 		}
 		crowsErr := crows.Err()
 		crows.Close() //nolint:errcheck
 		if crowsErr != nil {
-			return fmt.Errorf("iterate concurrent memories: %w", crowsErr)
+			return nil, fmt.Errorf("iterate concurrent memories: %w", crowsErr)
 		}
+	}
+
+	// Report the survivors so the caller can avoid recording a skip
+	// fingerprint that would absorb them into the next no-op gate.
+	preserved = make([]string, 0, len(concurrent))
+	for id := range concurrent {
+		preserved = append(preserved, id)
 	}
 
 	// Content -> reusable row IDs. Concurrent rows are excluded: they are kept
@@ -1305,12 +1316,12 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	if len(deleteIDs) > 0 {
 		stmt, err := tx.PrepareContext(ctx, `DELETE FROM memories WHERE id = ?`)
 		if err != nil {
-			return fmt.Errorf("prepare delete replaced memory: %w", err)
+			return nil, fmt.Errorf("prepare delete replaced memory: %w", err)
 		}
 		for _, id := range deleteIDs {
 			if _, err := stmt.ExecContext(ctx, id); err != nil {
 				stmt.Close() //nolint:errcheck
-				return fmt.Errorf("delete replaced memory: %w", err)
+				return nil, fmt.Errorf("delete replaced memory: %w", err)
 			}
 		}
 		stmt.Close() //nolint:errcheck
@@ -1329,7 +1340,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 				    created_at = datetime('now'), updated_at = datetime('now')
 				WHERE id = ?
 			`, m.Category, m.Content, m.Importance, string(tags), id); err != nil {
-				return fmt.Errorf("update reused memory: %w", err)
+				return nil, fmt.Errorf("update reused memory: %w", err)
 			}
 			reused++
 			continue
@@ -1339,7 +1350,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			VALUES (?, ?, ?, 'reflection', ?, ?)
 		`, projectID, m.Category, m.Content, m.Importance, string(tags))
 		if err != nil {
-			return fmt.Errorf("insert memory: %w", err)
+			return nil, fmt.Errorf("insert memory: %w", err)
 		}
 	}
 
@@ -1366,7 +1377,10 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	}
 
 	s.logger.Info("memories snapshotted before replace", "project_id", projectID, "snapshot_id", snapshotID)
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit replace: %w", err)
+	}
+	return preserved, nil
 }
 
 // RestoreSnapshot restores memories from the most recent snapshot for a project.
@@ -1483,6 +1497,42 @@ func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedCont
 		WHERE project_id = ?
 	`, learnedContext, summary, projectID)
 	return err
+}
+
+// GetReflectInputSignature returns the fingerprint of the memory set that
+// produced the last applied consolidation for projectID, or "" when none was
+// recorded.
+func (s *Store) GetReflectInputSignature(ctx context.Context, projectID string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var sig string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(reflect_input_sig, '') FROM ghost_state WHERE project_id = ?`, projectID).Scan(&sig)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get reflect signature: %w", err)
+	}
+	return sig, nil
+}
+
+// SetReflectInputSignature records the fingerprint of the memory set that just
+// produced an applied consolidation.
+func (s *Store) SetReflectInputSignature(ctx context.Context, projectID, sig string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE ghost_state
+		SET reflect_input_sig = ?, updated_at = datetime('now')
+		WHERE project_id = ?
+	`, sig, projectID)
+	if err != nil {
+		return fmt.Errorf("set reflect signature: %w", err)
+	}
+	return nil
 }
 
 func scanMemories(rows *sql.Rows) ([]Memory, error) {

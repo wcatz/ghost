@@ -734,7 +734,7 @@ func TestLifecyclePhasesOrder(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("phase order = %v, want %v", got, want)
 	}
-	if !reflect.DeepEqual(phases[0].args, []string{"reflect", "proj", "--apply", "--require-llm"}) {
+	if !reflect.DeepEqual(phases[0].args, []string{"reflect", "proj", "--apply", "--require-llm", "--skip-unchanged"}) {
 		t.Errorf("reflect args = %v", phases[0].args)
 	}
 	if !reflect.DeepEqual(phases[1].args, []string{"resolve", "proj", "--apply"}) {
@@ -763,6 +763,39 @@ func TestLifecyclePhasesSkipsReflectWithoutLLM(t *testing.T) {
 	want := []string{"resolve", "supersede"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("phase order without LLM = %v, want %v", got, want)
+	}
+}
+
+func TestReflectSkipDecision(t *testing.T) {
+	cases := []struct {
+		skip, apply bool
+		stored, cur string
+		want        bool
+	}{
+		{true, true, "abc", "abc", true},
+		{true, true, "abc", "def", false},
+		{true, true, "", "abc", false},     // nothing recorded yet
+		{true, false, "abc", "abc", false}, // dry-run never skips
+		{false, true, "abc", "abc", false}, // manual run always executes
+	}
+	for _, c := range cases {
+		if got := reflectSkipDecision(c.skip, c.apply, c.stored, c.cur); got != c.want {
+			t.Errorf("reflectSkipDecision(%v,%v,%q,%q) = %v, want %v", c.skip, c.apply, c.stored, c.cur, got, c.want)
+		}
+	}
+}
+
+func TestConsolidatableFilters(t *testing.T) {
+	now := "2026-09-21 00:00:00"
+	mems := []memory.Memory{
+		{ID: "keep", CreatedAt: now},
+		{ID: "resolved", ResolvedAt: &now},
+		{ID: "pinned", Pinned: true},
+		{ID: "manual", Source: "manual"},
+	}
+	got := consolidatable(mems)
+	if len(got) != 1 || got[0].ID != "keep" {
+		t.Fatalf("consolidatable = %+v, want only keep", got)
 	}
 }
 

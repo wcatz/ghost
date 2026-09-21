@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS ghost_state (
     learned_context     TEXT DEFAULT '',
     last_reflection_at  TEXT,
     reflection_summary  TEXT DEFAULT '',
+    reflect_input_sig   TEXT NOT NULL DEFAULT '',
     updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

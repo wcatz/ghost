@@ -202,6 +202,8 @@ Pinned memories are fully exempt from decay — they score at raw importance reg
 
 `ghost reflect` merges duplicates, prunes noise, and promotes cross-project knowledge to global scope. Tiered: a CLI-harness tier (claude, opencode, codex, or goose — whichever is on PATH), then a fully offline SQLite tier (Jaccard >= 0.5, same-category merges). When `--source` is set (e.g. `--source opencode`), the matching CLI binary is used directly.
 
+`--skip-unchanged` skips the LLM call entirely when the consolidatable memory set is unchanged since the last applied consolidation: a fingerprint over the consolidatable set's prompt-visible fields plus id and updated_at as change proxies (access counts excluded) is stored after each successful `--apply`, and a matching fingerprint exits before any model call. The auto lifecycle passes it; manual runs without the flag are unchanged.
+
 Because an LLM rewriting your memory store is scary, the guardrails are layered:
 
 - **Dry run by default** — see the diff before `--apply`
