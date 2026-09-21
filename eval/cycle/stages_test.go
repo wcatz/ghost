@@ -7,7 +7,7 @@ import (
 	"github.com/wcatz/ghost/eval/cycle/corpus"
 )
 
-const supOut = `acme-migration: 3 candidate pairs, 2 supersedes, 1 causes, 0 reclassified, linked
+const supOut = `acme-migration: 3 candidate pairs in 1 classify call(s), 2 supersedes, 1 causes, 0 reclassified, linked
   aabbccdd11223344  supersedes  556677889900aabb
   deadbeefdeadbeef  supersedes  0011223344556677
   feedfacefeedface  causes  1111222233334444

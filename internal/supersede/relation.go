@@ -25,12 +25,12 @@ type classifyProvider interface {
 
 // RelationClassifier classifies NEWER/OLDER memory pairs, batching up to
 // batchSize pairs per fast classify call (see ClassifyBatch). The prompt
-// forces a 3-way choice so a
-// decision that merely *cites* still-valid evidence (CAUSES) is never
-// conflated with a genuine same-fact replacement (SUPERSEDES): conflating the
-// two would bury independently useful memories under supersede-demote
-// ranking. When uncertain the prompt biases toward NEITHER — writing no link
-// is cheaper to recover from than a false SUPERSEDES or false CAUSES.
+// forces a 3-way choice so a decision that merely *cites* still-valid
+// evidence (CAUSES) is never conflated with a genuine same-fact replacement
+// (SUPERSEDES): conflating the two would bury independently useful memories
+// under supersede-demote ranking. When uncertain the prompt biases toward
+// NEITHER — writing no link is cheaper to recover from than a false
+// SUPERSEDES or false CAUSES.
 //
 // The name is deliberately provider- and model-agnostic: RelationClassifier
 // only needs a classifyProvider with a Classify method (typically
@@ -251,7 +251,8 @@ func splitNumberedLine(line string) (int, string, bool) {
 	return num, line[i+1:], true
 }
 
-// Calls reports how many provider classify calls this classifier has made.
+// Calls reports how many provider classify calls this classifier has made,
+// including any single-pair fallback calls.
 // One batched call covers up to batchSize pairs, so compare this against the
 // pair count to see the batching win.
 func (h *RelationClassifier) Calls() int { return h.calls }
