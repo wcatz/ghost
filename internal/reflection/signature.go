@@ -11,8 +11,10 @@ import (
 )
 
 // InputSignature fingerprints the consolidation input so an unchanged corpus
-// can skip a full-corpus LLM call (ghost reflect --skip-unchanged). It covers
-// every prompt-rendered field except the deliberate exclusions below, so any
+// can skip a full-corpus LLM call (ghost reflect --skip-unchanged). Each line
+// carries the fields BuildReflectionPrompt renders — category, importance (at
+// the prompt's own %.1f precision), source, tags, content — plus ID and
+// UpdatedAt, which are not rendered but serve as change proxies, so any
 // prompt-visible mutation invalidates the gate.
 //
 // Deliberately excluded:
@@ -25,7 +27,7 @@ import (
 func InputSignature(mems []memory.Memory) string {
 	lines := make([]string, 0, len(mems))
 	for _, m := range mems {
-		lines = append(lines, fmt.Sprintf("%s|%s|%s|%.2f|%s|%s|%s",
+		lines = append(lines, fmt.Sprintf("%s|%s|%s|%.1f|%s|%s|%s",
 			m.ID, m.UpdatedAt, m.Category, m.Importance, m.Source,
 			strings.Join(m.Tags, ","), m.Content))
 	}

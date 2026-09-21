@@ -40,6 +40,13 @@ func TestInputSignatureInvalidatesOnPromptVisibleChange(t *testing.T) {
 			t.Errorf("changing %s must change the signature", name)
 		}
 	}
+
+	a := memory.Memory{ID: "a", UpdatedAt: "2026-09-01 00:00:00", Category: "fact", Importance: 0.75, Content: "one"}
+	b := a
+	b.Importance = 0.749
+	if InputSignature([]memory.Memory{a}) == InputSignature([]memory.Memory{b}) {
+		t.Error("importance change across the prompt's one-decimal rounding boundary must change the signature")
+	}
 }
 
 func TestInputSignatureIgnoresAccessCount(t *testing.T) {

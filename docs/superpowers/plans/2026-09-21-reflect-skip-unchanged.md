@@ -20,7 +20,7 @@ Task: Ghost `777BB643` (scope updated 2026-09-21).
 
 **Design decisions:**
 
-1. **Fingerprint fields:** `id | updated_at | category | importance | source | tags | content` — exactly what the prompt renders, so any prompt-visible mutation invalidates the gate.
+1. **Fingerprint fields:** `id | updated_at | category | importance | source | tags | content` — the fields the prompt renders plus `id` and `updated_at` as change proxies (not rendered), with learned_context, git commits, and access counts excluded (see #2), so any prompt-visible mutation invalidates the gate.
 2. **Excluded:** `learned_context` (the consolidator's own output — including it would make every apply invalidate its own gate), git commits (best-effort grounding, moves on every commit), access counts (incremented by ordinary reads, so they would break the gate on sessions that saved nothing).
 3. **Stored post-apply**, recomputed over the reloaded consolidatable set — `ReplaceNonManual` may merge/reuse rows, so only stored state is authoritative.
 4. **Flag, not mode:** `--skip-unchanged` is explicit; `lifecyclePhases` adds it to the auto chain; manual runs never skip by accident.
