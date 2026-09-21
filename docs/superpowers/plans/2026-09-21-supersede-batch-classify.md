@@ -984,6 +984,17 @@ git add internal/supersede/relation_test.go
 git commit -m "test(supersede): score the batched classifier against live cases"
 ```
 
+> **Measured (Task 5, 2026-09-21, project `infrastructure`, 55 candidates, dry-run):**
+> classify invocations dropped 55 → 7 (~8x, `ceil(55/8)`), while wall time dropped
+> only 5m52s → ~2m20s (~2.4x): each batched call's larger prompt makes it slower
+> (~6.4s for one pair vs ~18-22s for eight), so the invocation/spawn win is real
+> but the latency win is bounded by prompt size. Candidate counts matched exactly
+> across runs; verdict counts vary run-to-run (LLM nondeterminism), so equality of
+> verdict counts is not a valid regression signal — the deterministic unit tests
+> and the live accuracy tests are. Remaining latency levers (larger batchSize,
+> bounded-concurrency chunks, persisting verdicts across idempotent re-runs) stay
+> in task 4E2D8719.
+
 ---
 
 ### Task 6: Pull request

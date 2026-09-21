@@ -252,7 +252,7 @@ func splitNumberedLine(line string) (int, string, bool) {
 }
 
 // Calls reports how many provider classify calls this classifier has made,
-// including any single-pair fallback calls.
+// including the lone-tail and any single-pair fallback calls.
 // One batched call covers up to batchSize pairs, so compare this against the
 // pair count to see the batching win.
 func (h *RelationClassifier) Calls() int { return h.calls }
