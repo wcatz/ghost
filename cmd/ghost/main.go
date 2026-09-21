@@ -654,12 +654,34 @@ func lifecyclePhases(cfg *config.Config, projectName string, llmOK bool) []lifec
 	return phases
 }
 
+// consolidatable returns the memories reflection may rewrite: non-resolved,
+// unpinned, non-manual rows. ReplaceNonManual preserves exactly the excluded
+// set, so this is the input the consolidator sees — and therefore the set the
+// skip-unchanged fingerprint must cover.
+func consolidatable(mems []memory.Memory) []memory.Memory {
+	out := make([]memory.Memory, 0, len(mems))
+	for _, m := range mems {
+		if m.ResolvedAt != nil || m.Pinned || m.Source == "manual" {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// reflectSkipDecision reports whether a --skip-unchanged run may skip: the
+// flag is set on an apply run and the stored fingerprint matches the current
+// input. Pure so the decision is testable without a store.
+func reflectSkipDecision(skipUnchanged, apply bool, stored, current string) bool {
+	return skipUnchanged && apply && stored != "" && stored == current
+}
+
 // runReflect manually triggers memory consolidation for a project.
 // Defaults to dry-run (preview only). Use --apply to save results.
 // Use --restore to undo the last consolidation from snapshot.
 func runReflect() {
 	var projectName, tierValue, source string
-	var apply, restore, requireLLM, allowDrops bool
+	var apply, restore, requireLLM, allowDrops, skipUnchanged bool
 	tierValue = "auto"
 	for i := 2; i < len(os.Args); i++ {
 		switch {
@@ -676,6 +698,8 @@ func runReflect() {
 			requireLLM = true
 		case os.Args[i] == "--allow-drops":
 			allowDrops = true
+		case os.Args[i] == "--skip-unchanged":
+			skipUnchanged = true
 		case os.Args[i] == "--source" && i+1 < len(os.Args):
 			source = os.Args[i+1]
 			i++
@@ -694,6 +718,8 @@ Flags:
   --restore       Undo the last consolidation from snapshot
   --require-llm   Fail instead of falling back to the Jaccard-only sqlite tier
   --allow-drops   Apply even when guarded-category memories would be deleted without a merge
+  --skip-unchanged Skip when the consolidatable set is unchanged since the last
+                   applied consolidation (used by the auto lifecycle)
   --source string Host source for CLI selection (e.g. claude-code, opencode)`)
 		os.Exit(1)
 	}
@@ -829,8 +855,8 @@ Flags:
 	// cover exactly that set. A LIMIT silently dropped the overflow (memories
 	// beyond the cap were deleted by the replace but never seen by the
 	// consolidator, surviving only in the snapshot), reachable as soon as a
-	// project exceeds the cap. GetAll applies no source/pinned filter, so the
-	// loop below excludes manual, pinned, and resolved rows — ReplaceNonManual
+	// project exceeds the cap. GetAll applies no source/pinned filter, so
+	// consolidatable below excludes manual, pinned, and resolved rows — ReplaceNonManual
 	// preserves all three and inserts the consolidator output alongside, so
 	// feeding them in would duplicate each as a fresh reflection row on every
 	// apply.
@@ -844,17 +870,22 @@ Flags:
 	// re-emitted as fresh unresolved duplicates by the consolidator (see issue
 	// #318). ReplaceNonManual independently excludes them from its delete, so
 	// they are never touched either way.
-	live := make([]memory.Memory, 0, len(existingMemories))
+	live := consolidatable(existingMemories)
 	resolvedCount := 0
 	for _, m := range existingMemories {
 		if m.ResolvedAt != nil {
 			resolvedCount++
-			continue
 		}
-		if m.Pinned || m.Source == "manual" {
-			continue
+	}
+	if skipUnchanged && apply {
+		currentSig := reflection.InputSignature(live)
+		storedSig, err := store.GetReflectInputSignature(ctx, projectID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: read reflect signature: %v\n", err)
+		} else if reflectSkipDecision(skipUnchanged, apply, storedSig, currentSig) {
+			fmt.Printf("reflect: consolidatable set unchanged since the last applied consolidation — skipping (%d memories, no LLM call)\n", len(live))
+			return
 		}
-		live = append(live, m)
 	}
 	// Bound the prompt. The consolidator rewrites its entire input in one call,
 	// so an enormous project would either blow the model's context or, without
@@ -1043,6 +1074,15 @@ Flags:
 				fmt.Fprintf(os.Stderr, "warning: update learned context: %v\n", err)
 			}
 		}
+	}
+
+	// Record the post-apply fingerprint so the next --skip-unchanged run can
+	// skip without an LLM call. Re-read rather than reusing `live`: the replace
+	// may merge/reuse rows, so only the stored state is authoritative.
+	if postMemories, err := store.GetAll(ctx, projectID, -1); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: record reflect signature: reload memories: %v\n", err)
+	} else if err := store.SetReflectInputSignature(ctx, projectID, reflection.InputSignature(consolidatable(postMemories))); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: record reflect signature: %v\n", err)
 	}
 }
 

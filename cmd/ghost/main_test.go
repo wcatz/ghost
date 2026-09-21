@@ -766,6 +766,25 @@ func TestLifecyclePhasesSkipsReflectWithoutLLM(t *testing.T) {
 	}
 }
 
+func TestReflectSkipDecision(t *testing.T) {
+	cases := []struct {
+		skip, apply bool
+		stored, cur string
+		want        bool
+	}{
+		{true, true, "abc", "abc", true},
+		{true, true, "abc", "def", false},
+		{true, true, "", "abc", false},     // nothing recorded yet
+		{true, false, "abc", "abc", false}, // dry-run never skips
+		{false, true, "abc", "abc", false}, // manual run always executes
+	}
+	for _, c := range cases {
+		if got := reflectSkipDecision(c.skip, c.apply, c.stored, c.cur); got != c.want {
+			t.Errorf("reflectSkipDecision(%v,%v,%q,%q) = %v, want %v", c.skip, c.apply, c.stored, c.cur, got, c.want)
+		}
+	}
+}
+
 func TestLifecyclePhasesEmptyWhenAllDisabled(t *testing.T) {
 	if phases := lifecyclePhases(&config.Config{}, "proj", true); len(phases) != 0 {
 		t.Fatalf("expected no phases when everything is disabled, got %v", phases)
