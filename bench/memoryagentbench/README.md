@@ -50,10 +50,12 @@ in by convention).
 - Default `--sources` runs `factconsolidation_sh_6k,factconsolidation_sh_32k`
   only — a few hundred facts each, so the classifier sees at most
   `facts × 8` (`supersede.maxNeighbors`) candidate pairs, deduped: at most
-  that many `opencode run` subprocess calls.
+  `ceil(pairs / 8)` `opencode run` subprocess calls — the classifier batches up
+  to 8 pairs per call, each call carrying a correspondingly larger prompt.
 - `factconsolidation_sh_64k`/`factconsolidation_sh_262k` are reachable via
   `--sources factconsolidation_sh_64k` etc., but scale the haystack ~5x/40x —
-  expect a proportional jump in candidate pairs and `opencode` calls (each is
+  expect a proportional jump in candidate pairs and in `opencode` calls
+  (~`ceil(pairs / 8)`; each is
   a subprocess spawn, so wall-clock — not API cost — is the constraint at
   that scale). Not run by default.
 - Each `opencode run` call has its own 5-minute timeout
@@ -66,7 +68,9 @@ in by convention).
   scratch. The table prints each demo's row as soon as that demo finishes, so
   an earlier demo's numbers survive a later demo's failure — but a demo that
   fails partway through contributes nothing.
-- No CI gate: every run shells out to `opencode` once per candidate pair.
+- No CI gate: every run shells out to `opencode` once per ~8 candidate pairs
+  (batched classification; a fully unparseable chunk falls back to one call per
+  pair).
 - `ghost resolve` is not exercised here — its keyword prefilter
   (`"resolved"`, `"shipped"`, `"deprecated"`, etc.) doesn't match
   FactConsolidation's neutral factual sentences.

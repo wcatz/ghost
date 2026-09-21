@@ -995,6 +995,18 @@ git commit -m "test(supersede): score the batched classifier against live cases"
 > bounded-concurrency chunks, persisting verdicts across idempotent re-runs) stay
 > in task 4E2D8719.
 
+> **Final-review revisions (pre-PR):** `splitNumberedLine`/`parseBatchVerdict`
+> now tolerate decorated numbers and bullets (`**1:** VERDICT`, `**1**: VERDICT`,
+> `- 1: VERDICT`) instead of silently dropping them, and a duplicated pair number
+> now invalidates the whole batch reply (chunk-level fallback) rather than
+> first-wins, so an injected or echoed numbered line cannot decide a pair ahead
+> of the real verdict. `bench/memoryagentbench/README.md`'s per-pair cost model
+> is updated to ~`ceil(pairs / 8)` calls. Accepted residual risk: a single
+> injected verdict line with no legitimate counterpart still depends on the
+> model obeying the rubric and batch guards; single-pair re-verification of
+> SUPERSEDES verdicts was considered and deferred because it would add roughly
+> one call per supersede verdict (14 of 55 pairs on the measured run).
+
 ---
 
 ### Task 6: Pull request
