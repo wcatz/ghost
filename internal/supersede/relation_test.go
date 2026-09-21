@@ -1,8 +1,10 @@
 package supersede
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -139,6 +141,23 @@ func TestRelationClassifierBatchMissingLineIsUnclassified(t *testing.T) {
 	}
 	if fp.calls != 1 {
 		t.Errorf("partial parse must not trigger the fallback: provider calls = %d, want 1", fp.calls)
+	}
+}
+
+func TestRelationClassifierBatchLogsMissingVerdicts(t *testing.T) {
+	fp := &fakeProvider{resp: "1: SUPERSEDES\n"} // verdict for pair 2 missing
+	cls := NewRelationClassifier(fp)
+	var buf bytes.Buffer
+	cls.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+	pairs := []Candidate{
+		{NewerContent: "a", OlderContent: "a"},
+		{NewerContent: "b", OlderContent: "b"},
+	}
+	if _, err := cls.ClassifyBatch(context.Background(), pairs); err != nil {
+		t.Fatalf("ClassifyBatch: %v", err)
+	}
+	if !strings.Contains(buf.String(), "batch reply missing verdicts") {
+		t.Errorf("expected a warning about the missing verdict, log:\n%s", buf.String())
 	}
 }
 

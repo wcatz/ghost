@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 )
@@ -36,8 +37,9 @@ type classifyProvider interface {
 // `opencode`, `codex`, or `goose` subprocess — can satisfy.
 type RelationClassifier struct {
 	client    classifyProvider
-	batchSize int // 0 means classifyBatchSize
-	calls     int // provider calls made; see Calls
+	batchSize int          // 0 means classifyBatchSize
+	calls     int          // provider calls made; see Calls
+	logger    *slog.Logger // optional; receives unparseable-verdict diagnostics
 }
 
 // NewRelationClassifier wraps a classifyProvider (typically *ai.CLIProvider
@@ -91,10 +93,12 @@ const classifyBatchSize = 8
 // fallback distinction for callers to withhold.
 //
 // A reply with no recognizable verdict returns errUnparseableVerdict wrapped in
-// the error: the caller skips and counts that pair (Run increments
-// Result.Unclassified) rather than defaulting silently to NEITHER, which would
-// mask a broken prompt as uneventful traffic. Transport failures — a dead
-// harness, an outage — are plain errors and stay fatal to the pass.
+// the error. It is the single-pair path behind ClassifyBatch's lone-tail and
+// zero-verdict-fallback cases, which map the sentinel to Relation("") for the
+// caller to count (Run increments Result.Unclassified) rather than defaulting
+// silently to NEITHER, which would mask a broken prompt as uneventful traffic.
+// Transport failures — a dead harness, an outage — are plain errors and stay
+// fatal to the pass.
 func (h *RelationClassifier) Classify(ctx context.Context, newer, older string) (Relation, error) {
 	h.calls++
 	content := "OLDER: " + quoteData(older) + "\nNEWER: " + quoteData(newer)
@@ -251,6 +255,13 @@ func splitNumberedLine(line string) (int, string, bool) {
 // pair count to see the batching win.
 func (h *RelationClassifier) Calls() int { return h.calls }
 
+// SetLogger attaches a logger for unparseable-verdict diagnostics. It is
+// optional: without one, unparseable lines are still mapped to Relation("")
+// for the caller to count, but the offending reply is not recorded. The CLI
+// attaches its logger so a garbled batch reply — the detail that diagnosed the
+// original "CORRECTS" abort — reaches the log file.
+func (h *RelationClassifier) SetLogger(l *slog.Logger) { h.logger = l }
+
 // ClassifyBatch classifies one or more pairs, chunking them into calls of at
 // most batchSize pairs, and returns one verdict per pair in the same order. A
 // Relation("") entry means that pair's reply line was missing or garbled; the
@@ -290,17 +301,21 @@ func (h *RelationClassifier) ClassifyBatch(ctx context.Context, pairs []Candidat
 			rel, err := h.Classify(ctx, chunk[0].NewerContent, chunk[0].OlderContent)
 			if err != nil {
 				if errors.Is(err, errUnparseableVerdict) {
+					if h.logger != nil {
+						h.logger.Warn("supersede: unparseable verdict",
+							"newer", chunk[0].NewerID, "older", chunk[0].OlderID, "error", err)
+					}
 					out = append(out, "")
 					continue
 				}
-				return nil, err
+				return nil, fmt.Errorf("%s→%s: %w", chunk[0].NewerID, chunk[0].OlderID, err)
 			}
 			out = append(out, rel)
 			continue
 		}
 		rels, err := h.classifyChunk(ctx, chunk)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("pairs %d-%d (%s→%s): %w", start+1, end, chunk[0].NewerID, chunk[0].OlderID, err)
 		}
 		out = append(out, rels...)
 	}
@@ -316,11 +331,27 @@ func (h *RelationClassifier) classifyChunk(ctx context.Context, chunk []Candidat
 		return nil, err
 	}
 	rels := parseBatchRelations(resp, len(chunk))
+	if h.logger != nil {
+		var missing []int
+		for i, r := range rels {
+			if r == "" {
+				missing = append(missing, i+1)
+			}
+		}
+		if len(missing) > 0 {
+			h.logger.Warn("supersede: batch reply missing verdicts",
+				"pairs", missing, "reply", strings.TrimSpace(resp))
+		}
+	}
 	if !hasVerdict(rels) {
 		for i := range chunk {
 			rel, err := h.Classify(ctx, chunk[i].NewerContent, chunk[i].OlderContent)
 			if err != nil {
 				if errors.Is(err, errUnparseableVerdict) {
+					if h.logger != nil {
+						h.logger.Warn("supersede: unparseable verdict in batch fallback",
+							"newer", chunk[i].NewerID, "older", chunk[i].OlderID, "error", err)
+					}
 					continue
 				}
 				return nil, err

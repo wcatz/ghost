@@ -523,3 +523,19 @@ func TestRunRejectsVerdictCountMismatch(t *testing.T) {
 		t.Fatal("want error when the classifier returns fewer verdicts than pairs, got nil")
 	}
 }
+
+// TestRunEmptyCandidateSetSkipsClassifier pins that a pass with no candidates
+// (everything filtered or stale) makes no classifier call at all, so a future
+// Classifier implementation that rejects empty input cannot turn a no-op pass
+// fatal.
+func TestRunEmptyCandidateSetSkipsClassifier(t *testing.T) {
+	store, _ := seed(t)
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
+	res, _, err := Run(context.Background(), store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Candidates != 0 || cls.batchCalls != 0 {
+		t.Errorf("want 0 candidates and 0 classifier calls, got %d and %d", res.Candidates, cls.batchCalls)
+	}
+}

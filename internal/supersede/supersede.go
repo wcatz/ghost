@@ -313,6 +313,9 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	}
 	all = live
 	res.Candidates = len(all)
+	if len(all) == 0 {
+		return res, nil, nil
+	}
 
 	var classified []Classified
 	relations, err := cls.ClassifyBatch(ctx, all)
