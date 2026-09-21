@@ -216,10 +216,10 @@ func parseBatchRelations(resp string, n int) []Relation {
 // "**CAUSES** because ..."). Unlike parseRelation it trusts only the FIRST
 // field of the line, not any word in it: a model that prefixes reasoning to a
 // numbered line ("1. This newer note supersedes ... only nominally") must not
-// decide the pair from a word buried in prose — with first-wins, that would
-// silently discard the real verdict line that follows, and a false SUPERSEDES
-// buries a live memory. Synonyms count only when the whole remainder is that
-// one word, matching parseRelation's rule.
+// decide the pair from a word buried in prose, and a false SUPERSEDES buries a
+// live memory (a repeated number invalidates the whole reply, so the genuine
+// verdict line is re-judged in isolation). Synonyms count only when the whole
+// remainder is that one word, matching parseRelation's rule.
 func parseBatchVerdict(rest string) (Relation, bool) {
 	// The number/separator may be emphasized (`**1:**`), and the verdict
 	// itself may be wrapped (`*CAUSES*`); strip leading decoration so the
