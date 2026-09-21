@@ -414,6 +414,57 @@ func TestRun_SkipsPairWhoseEndpointVanishedMidRun(t *testing.T) {
 	}
 }
 
+// TestRunStalePairDoesNotRollBackNeitherCacheWrite pins the follow-up to the
+// same concurrent-reflect race: the NEITHER-cache write is a single
+// transaction, so recording a pair whose endpoint vanished mid-pass would hit
+// the FK and roll back every other pair's row — the cache would silently never
+// advance under the race. Only pairs that passed the pre-write existence check
+// may be recorded.
+func TestRunStalePairDoesNotRollBackNeitherCacheWrite(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	aNewContent := "prod database is postgres 16"
+	aOldContent := "staging database is postgres 16"
+	aNew := add(t, store, db, aNewContent, []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	aOld := add(t, store, db, aOldContent, []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
+	bNew := add(t, store, db, "grafana listens on port 80", []float32{0, 1, 0}, "2026-07-01 00:00:00")
+	bOld := add(t, store, db, "grafana listens on port 3000", []float32{0, 0.99, 0}, "2026-01-01 00:00:00")
+
+	// Simulate reflect replacing aOld while supersede is classifying: delete
+	// it from the store during the single ClassifyBatch call.
+	cls := &mockClassifier{verdict: func(newer, older string) Relation {
+		if newer == aNewContent && older == aOldContent {
+			if err := store.Delete(ctx, aOld); err != nil {
+				t.Errorf("delete stale endpoint: %v", err)
+			}
+		}
+		return RelationNeither
+	}}
+
+	res, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default())
+	if err != nil {
+		t.Fatalf("Run must not fail when a stale pair is in the batch: %v", err)
+	}
+	if res.StaleSkipped != 1 {
+		t.Fatalf("StaleSkipped = %d, want 1", res.StaleSkipped)
+	}
+
+	checked, err := store.SupersedeChecked(ctx, "p")
+	if err != nil {
+		t.Fatalf("SupersedeChecked: %v", err)
+	}
+	if _, ok := checked[[2]string{bNew, bOld}]; !ok {
+		t.Errorf("surviving pair's NEITHER row missing: checked=%v (the stale pair's insert must not roll back the cache write)", checked)
+	}
+	if _, ok := checked[[2]string{aNew, aOld}]; ok {
+		t.Errorf("stale pair must not be recorded in the cache: checked=%v", checked)
+	}
+	if len(checked) != 1 {
+		t.Errorf("checked has %d row(s), want exactly the surviving pair", len(checked))
+	}
+}
+
 // mockClassifierErr is mockClassifier with an error channel, for the
 // unclassifiable-verdict path.
 type mockClassifierErr struct {

@@ -16,7 +16,7 @@
 - `internal/embedding/` — Ollama async vectorization worker
 - `internal/linking/` — Background worker linking similar memories into a graph
 - `internal/resolve/` — `ghost resolve`: LLM-classified de-weighting of resolved-evidence memories (drops from ranked injection, stays searchable); classifies via CLI harness (see Classifier backend below)
-- `internal/supersede/` — `ghost supersede`: LLM-classified 'supersedes'/'causes' link creation over live memories, batched 8 candidate pairs per harness call with a content-keyed NEITHER cache (`supersede_checked`, schema v8, cascading FKs) so a converged project makes zero calls
+- `internal/supersede/` — `ghost supersede`: LLM-classified 'supersedes'/'causes' link creation over live memories, batched 8 candidate pairs per harness call with a content-keyed NEITHER cache (`supersede_checked`, schema v8, cascading FKs) so a converged project's fresh candidates make zero calls (live-link pairs are still validated each pass)
 - `internal/bench/` — `ghost bench`: retrieval-quality benchmark harness (graded dataset + sweep + staleness/recency suites)
 - `internal/obsidian/` — One-way Markdown vault mirror (`ghost obsidian export|sync`)
 - `internal/reflection/` — Memory consolidation: LlmConsolidator + SQLiteConsolidator

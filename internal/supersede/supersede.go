@@ -16,9 +16,13 @@
 // a newer->older 'supersedes' link (source 'llm'); CAUSES writes an
 // older->newer 'causes' link (cause precedes effect); NEITHER writes nothing.
 // Fresh NEITHER verdicts are cached by pair and both endpoints' content hashes
-// (supersede_checked, schema v8), so an unchanged pair is skipped on later
-// passes and a converged project makes zero classify calls; reclassify
-// candidates are never cache-skipped.
+// (supersede_checked, schema v8): unchanged fresh pairs are skipped on later
+// passes — a cache skip is equivalent to a NEITHER verdict, so a stale
+// 'causes' link is not invalidated on that pass if the endpoints' text reverted
+// to a previously cached version (graph-only staleness; ranking consumes only
+// 'supersedes') — while live-link pairs (reclassify) are still validated each
+// pass. A converged project therefore makes zero classify calls for its fresh
+// candidates, not zero calls overall.
 // Run() also re-classifies existing 'supersedes'/'llm' links whose endpoints
 // have changed since the link was written, invalidating the link (or
 // flipping it to 'causes') when the verdict no longer matches. The pass is
@@ -227,10 +231,14 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 // update is skipped (skip-if-unchanged) — reclassifying it would repeat the
 // same verdict for no reason. Fresh candidates are classified unless both
 // endpoints' content still matches a cached NEITHER verdict (the content-keyed
-// NEITHER cache, schema v8), so a converged project's pass makes no calls;
-// reclassify candidates are never cache-skipped, keeping link self-healing
-// untouched. Cache rows are recorded on apply only — dry-run stays
-// side-effect-free — and cascade away with their memories via the FK.
+// NEITHER cache, schema v8): a cache skip is treated as a NEITHER verdict, so
+// if a 'causes' link existed and the endpoints' text later reverted to a
+// previously cached version, that link is not invalidated on the skipping pass
+// — graph-only staleness, since ranking consumes only 'supersedes'. Reclassify
+// candidates are never cache-skipped, so live-link pairs are still validated
+// every pass and self-healing is untouched. Cache rows are recorded on apply
+// only — dry-run stays side-effect-free — and cascade away with their memories
+// via the FK.
 //
 // Pairs whose endpoints are replaced by a concurrent reflect pass (the stop
 // hook spawns both for the same session) are dropped and counted in
@@ -407,6 +415,12 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	}
 
 	if apply {
+		// writable tracks the pairs whose endpoints passed the existence
+		// check below. The NEITHER-cache write further down is a single
+		// transaction, so a pair that went stale mid-pass must be excluded
+		// from it: inserting a row for a deleted endpoint would hit the FK
+		// and roll back every other pair's row with it.
+		writable := make(map[[2]string]bool, len(classified))
 		for _, c := range classified {
 			// Pre-write existence check: the candidate was alive at
 			// selection (and possibly at the batch check above), but a
@@ -426,6 +440,7 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 				}
 				continue
 			}
+			writable[[2]string{c.NewerID, c.OlderID}] = true
 			switch c.Relation {
 			case RelationSupersedes:
 				if err := store.CreateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes), c.Similarity, "llm"); err != nil {
@@ -456,16 +471,19 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 		}
 
 		// Record the freshly judged NEITHER verdicts so the next pass skips
-		// them. Cache skips already have a row, reclassify pairs stay
-		// classified (their live link must keep self-healing), and
-		// SUPERSEDES/CAUSES achieved their effect via the links written above;
-		// only a fresh NEITHER verdict is worth caching. A failed cache write
-		// costs a re-classify next pass, like resolve's KEEP cache, so warn
-		// rather than fail a pass whose primary effect landed.
+		// them. Only pairs whose endpoints survived the existence check are
+		// eligible (writable): a stale pair's row would hit the FK and roll
+		// back the whole cache write. Cache skips already have a row,
+		// reclassify pairs stay classified (their live link must keep
+		// self-healing), and SUPERSEDES/CAUSES achieved their effect via the
+		// links written above; only a fresh NEITHER verdict is worth caching.
+		// A failed cache write costs a re-classify next pass, like resolve's
+		// KEEP cache, so warn rather than fail a pass whose primary effect
+		// landed.
 		newNeither := make(map[[2]string]memory.SupersedeCheck)
 		for _, c := range classified {
 			key := [2]string{c.NewerID, c.OlderID}
-			if c.Relation != RelationNeither || !freshKeys[key] || reclassifyByKey[key] {
+			if c.Relation != RelationNeither || !freshKeys[key] || reclassifyByKey[key] || !writable[key] {
 				continue
 			}
 			newNeither[key] = memory.SupersedeCheck{

@@ -1089,6 +1089,13 @@ func (s *Store) SupersedeChecked(ctx context.Context, projectID string) (map[[2]
 // keyed by {newerID, olderID}. A re-mark updates the stored hashes in place so
 // a stale row cannot accumulate beside a refreshed one. A no-op on an empty
 // map.
+//
+// The caller is responsible for projectID matching the pair's memories: unlike
+// MarkResolveKept, this does not re-check ownership per row, so a mismatched
+// call would label a row with the wrong project. That is safe for the only
+// caller today — supersede.Run passes its own projectID and candidate pairs it
+// loaded from that project — and memory IDs are globally unique, so a
+// mislabeled row still cascades away with its endpoints.
 func (s *Store) MarkSupersedeNeither(ctx context.Context, projectID string, checks map[[2]string]SupersedeCheck) error {
 	if len(checks) == 0 {
 		return nil
