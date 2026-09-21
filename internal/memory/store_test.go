@@ -3452,6 +3452,128 @@ func TestSetResolvedRechecksEligibilityAtWriteTime(t *testing.T) {
 	}
 }
 
+// TestStoreResolveKeptHashesRoundTrip: MarkResolveKept records id -> content
+// hash and ResolveKeptHashes reads them back keyed by ID; rows never marked
+// are absent, and an empty mark call is a no-op.
+func TestStoreResolveKeptHashesRoundTrip(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "kill experiment closed, removed", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create a: %v", err)
+	}
+	b, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "postmortem concluded, no follow-up", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create b: %v", err)
+	}
+	unmarked, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "active gotcha stays", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create unmarked: %v", err)
+	}
+
+	if err := s.MarkResolveKept(ctx, testProject, map[string]string{}); err != nil {
+		t.Fatalf("MarkResolveKept(empty): %v", err)
+	}
+	got, err := s.ResolveKeptHashes(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveKeptHashes(empty): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("empty mark wrote %v, want no entries", got)
+	}
+
+	if err := s.MarkResolveKept(ctx, testProject, map[string]string{a: "hash-a", b: "hash-b"}); err != nil {
+		t.Fatalf("MarkResolveKept: %v", err)
+	}
+	got, err = s.ResolveKeptHashes(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveKeptHashes: %v", err)
+	}
+	if len(got) != 2 || got[a] != "hash-a" || got[b] != "hash-b" {
+		t.Fatalf("hashes = %v, want {%s: hash-a, %s: hash-b}", got, a, b)
+	}
+	if _, ok := got[unmarked]; ok {
+		t.Errorf("unmarked memory %s must not appear in the kept-hash map", unmarked)
+	}
+}
+
+// TestMarkResolveKeptDoesNotTouchUpdatedAt: the cache write is derived state
+// for an unchanged memory, so it must not bump updated_at — that would perturb
+// the reflect signature and decay ranking for a non-content change.
+func TestMarkResolveKeptDoesNotTouchUpdatedAt(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "kill experiment closed, removed", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Pin the timestamp to a known value so a same-second write cannot make a
+	// wrongly-bumped updated_at compare equal.
+	if _, err := s.db.Exec(
+		`UPDATE memories SET updated_at = '2000-01-01 00:00:00' WHERE id = ?`, id,
+	); err != nil {
+		t.Fatalf("seed updated_at: %v", err)
+	}
+
+	if err := s.MarkResolveKept(ctx, testProject, map[string]string{id: "hash"}); err != nil {
+		t.Fatalf("MarkResolveKept: %v", err)
+	}
+
+	var updatedAt string
+	if err := s.db.QueryRow(`SELECT updated_at FROM memories WHERE id = ?`, id).Scan(&updatedAt); err != nil {
+		t.Fatalf("read updated_at: %v", err)
+	}
+	if updatedAt != "2000-01-01 00:00:00" {
+		t.Errorf("updated_at = %q, want the seeded value (MarkResolveKept must not touch it)", updatedAt)
+	}
+}
+
+// TestMarkResolveKeptScopesToProject: an ID owned by another project must not
+// be updated, so a stale caller cannot write into the wrong project's rows.
+func TestMarkResolveKeptScopesToProject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if err := s.EnsureProject(ctx, "other-project", "/tmp/other", "other"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	otherID, err := s.Create(ctx, "other-project", Memory{
+		Category: "gotcha", Content: "kill experiment closed, removed", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create other: %v", err)
+	}
+
+	if err := s.MarkResolveKept(ctx, testProject, map[string]string{otherID: "hash"}); err != nil {
+		t.Fatalf("MarkResolveKept: %v", err)
+	}
+
+	got, err := s.ResolveKeptHashes(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveKeptHashes(test): %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("cross-project mark wrote %v into %s, want nothing", got, testProject)
+	}
+	other, err := s.ResolveKeptHashes(ctx, "other-project")
+	if err != nil {
+		t.Fatalf("ResolveKeptHashes(other): %v", err)
+	}
+	if len(other) != 0 {
+		t.Errorf("other project's hashes = %v, want nothing", other)
+	}
+}
+
 func TestGetTopMemoriesExcludesResolved(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

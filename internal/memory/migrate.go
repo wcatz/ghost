@@ -11,7 +11,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 6
+const schemaVersion = 7
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -25,6 +25,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV4,
 	migrateV5,
 	migrateV6,
+	migrateV7,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -242,6 +243,25 @@ func migrateV6(tx *sql.Tx) error {
 	}
 	if _, err := tx.Exec(`ALTER TABLE ghost_state ADD COLUMN reflect_input_sig TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("add ghost_state.reflect_input_sig: %w", err)
+	}
+	return nil
+}
+
+// migrateV7 adds memories.resolve_kept_hash: the content hash recorded when
+// resolve last judged a memory KEEP, so a converged pass can skip re-asking
+// the classifier. A nullable column would work too, but NOT NULL with an empty
+// string default matches the column's meaning — empty means "never judged
+// KEEP" — and needs no special-casing in the store.
+func migrateV7(tx *sql.Tx) error {
+	exists, err := columnExists(tx, "memories", "resolve_kept_hash")
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	if _, err := tx.Exec(`ALTER TABLE memories ADD COLUMN resolve_kept_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add memories.resolve_kept_hash: %w", err)
 	}
 	return nil
 }

@@ -478,6 +478,23 @@ func TestMigrateV6AddsReflectInputSig(t *testing.T) {
     reflection_summary  TEXT DEFAULT '',
     updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 )`,
+		// migrate() now continues past v6 to v7, which ALTERs memories; a real
+		// v5 database always has this table (with resolved_at from v2).
+		`CREATE TABLE memories (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL DEFAULT 'fact',
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL DEFAULT 0.5,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT,
+    source        TEXT NOT NULL DEFAULT 'reflection',
+    tags          TEXT DEFAULT '[]',
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at   TEXT
+)`,
 		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v5-p1', 'p1')`,
 		`INSERT INTO ghost_state (project_id, learned_context) VALUES ('p1', 'pre-migration context')`,
 		`PRAGMA user_version = 5`,
@@ -521,6 +538,87 @@ func TestMigrateV6AddsReflectInputSig(t *testing.T) {
 	}
 	if learned != "pre-migration context" {
 		t.Errorf("learned_context = %q, want preserved value", learned)
+	}
+}
+
+// TestMigrateV7AddsResolveKeptHash exercises the one-shot upgrade every
+// existing v6 database takes: migrateV7 must ALTER the old memories shape, not
+// rely on initSQL's fresh-database column, and migrated rows must default to
+// the empty (never-judged) hash.
+func TestMigrateV7AddsResolveKeptHash(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open v6 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	v6 := []string{
+		`CREATE TABLE projects (
+    id          TEXT PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`CREATE TABLE memories (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL DEFAULT 'fact',
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL DEFAULT 0.5,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT,
+    source        TEXT NOT NULL DEFAULT 'reflection',
+    tags          TEXT DEFAULT '[]',
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at   TEXT
+)`,
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v6-p1', 'p1')`,
+		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'pre-migration note')`,
+		`PRAGMA user_version = 6`,
+	}
+	for _, s := range v6 {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed v6 db: %v", err)
+		}
+	}
+
+	if err := migrate(db, 6); err != nil {
+		t.Fatalf("migrate v6->v7: %v", err)
+	}
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	exists, err := columnExists(tx, "memories", "resolve_kept_hash")
+	_ = tx.Rollback() //nolint:errcheck
+	if err != nil {
+		t.Fatalf("columnExists: %v", err)
+	}
+	if !exists {
+		t.Fatal("resolve_kept_hash column missing after migrateV7")
+	}
+
+	// The migrated row defaults to the empty hash and its other columns
+	// survive.
+	var hash, content string
+	if err := db.QueryRow(
+		`SELECT resolve_kept_hash, content FROM memories WHERE id = 'm1'`,
+	).Scan(&hash, &content); err != nil {
+		t.Fatalf("read migrated row: %v", err)
+	}
+	if hash != "" {
+		t.Errorf("resolve_kept_hash = %q, want empty", hash)
+	}
+	if content != "pre-migration note" {
+		t.Errorf("content = %q, want preserved value", content)
 	}
 }
 
