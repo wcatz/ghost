@@ -15,6 +15,10 @@
 // relations that a binary confirm/reject can't tell apart. SUPERSEDES writes
 // a newer->older 'supersedes' link (source 'llm'); CAUSES writes an
 // older->newer 'causes' link (cause precedes effect); NEITHER writes nothing.
+// Fresh NEITHER verdicts are cached by pair and both endpoints' content hashes
+// (supersede_checked, schema v8), so an unchanged pair is skipped on later
+// passes and a converged project makes zero classify calls; reclassify
+// candidates are never cache-skipped.
 // Run() also re-classifies existing 'supersedes'/'llm' links whose endpoints
 // have changed since the link was written, invalidating the link (or
 // flipping it to 'causes') when the verdict no longer matches. The pass is
