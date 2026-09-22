@@ -266,6 +266,32 @@ func TestParseReflectionResponse_NormalizesScope(t *testing.T) {
 	}
 }
 
+// TestParseReflectionResponse_NormalizesCategory: an invalid category would
+// fail the schema CHECK inside ReplaceNonManual and sink the entire apply
+// transaction — parse must collapse it to the schema default ('fact') the
+// same way invalid scope collapses to 'project'.
+func TestParseReflectionResponse_NormalizesCategory(t *testing.T) {
+	input := `{"learned_context":"ctx","memories":[
+		{"category":"gotcha","content":"valid","importance":0.8,"tags":[]},
+		{"category":"bug","content":"invalid","importance":0.7,"tags":[]},
+		{"category":"","content":"empty","importance":0.6,"tags":[]},
+		{"content":"missing","importance":0.5,"tags":[]}
+	]}`
+
+	result, err := parseReflectionResponse(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Memories[0].Category != "gotcha" {
+		t.Errorf("valid category must be preserved, got %q", result.Memories[0].Category)
+	}
+	for i, want := range []string{"fact", "fact", "fact"} {
+		if result.Memories[i+1].Category != want {
+			t.Errorf("memory %d category = %q, want %q", i+1, result.Memories[i+1].Category, want)
+		}
+	}
+}
+
 // TestParseReflectionResponse_MalformedJSON: unparseable output (e.g. a
 // response truncated mid-JSON) must surface as an error — the old fallback
 // returned it as learned_context with zero memories, which the tiered quality
