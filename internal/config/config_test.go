@@ -454,6 +454,16 @@ func TestLinkingDefaults(t *testing.T) {
 	}
 }
 
+func TestSearchDefaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.Search.MinSimilarity != 0.0 {
+		t.Errorf("expected search.min_similarity=0.0, got %f", cfg.Search.MinSimilarity)
+	}
+}
+
 func TestObsidianDefaults(t *testing.T) {
 	// Isolate from the host: a real ~/.config/ghost/config.yaml or a
 	// GHOST_OBSIDIAN_* var in the environment would otherwise skew defaults.

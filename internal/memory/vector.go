@@ -184,6 +184,15 @@ type SearchParams struct {
 	// and decay only reorders the surviving window. Ship-gated on the
 	// staleness and recency-trap suites — see docs/benchmarks.md Phase 3.
 	DecayReselect bool
+	// MinSimilarity is the cosine floor applied to vector-leg candidates
+	// AFTER SearchVector's non-positive drop and BEFORE fusion. RRF awards by
+	// rank alone, so without a floor every weak positive cosine still claims
+	// a vector rank and can enter the fused window — padding results with
+	// near-misses when the corpus has no true match. FTS candidates are
+	// exempt (they have no cosine). 0 preserves the historical behavior of
+	// only dropping non-positives. Production overrides this from config via
+	// Store.SetVectorMinSimilarity (search.min_similarity).
+	MinSimilarity float32
 }
 
 // DefaultSearchParams returns the production fusion parameters.
@@ -221,7 +230,25 @@ func DefaultSearchParams() SearchParams {
 		RRFK:            60,
 		DecayEnabled:    true,
 		SupersedeDemote: true,
+		MinSimilarity:   0, // historical: only non-positive cosines dropped
 	}
+}
+
+// filterVectorFloor drops vector candidates at or below floor (cosine).
+// Membership-preserving for the FTS leg by construction — only ScoredMemory
+// values are filtered. floor <= 0 is a no-op beyond SearchVector's own
+// non-positive drop.
+func filterVectorFloor(vec []ScoredMemory, floor float32) []ScoredMemory {
+	if floor <= 0 || len(vec) == 0 {
+		return vec
+	}
+	kept := vec[:0:0]
+	for _, sm := range vec {
+		if sm.Score > floor {
+			kept = append(kept, sm)
+		}
+	}
+	return kept
 }
 
 // demoteSuperseded reorders results so a superseded memory falls below every
@@ -402,7 +429,9 @@ func (s *Store) fuseAndRank(ctx context.Context, ftsResults []Memory, vecResults
 // SearchHybrid combines FTS5 keyword search with vector similarity using
 // Reciprocal Rank Fusion (RRF). Falls back to FTS-only if queryVec is nil.
 func (s *Store) SearchHybrid(ctx context.Context, projectID, query string, queryVec []float32, limit int) ([]Memory, error) {
-	return s.SearchHybridParams(ctx, projectID, query, queryVec, limit, DefaultSearchParams())
+	p := DefaultSearchParams()
+	p.MinSimilarity = s.vectorMinSimilarityFloor()
+	return s.SearchHybridParams(ctx, projectID, query, queryVec, limit, p)
 }
 
 // SearchHybridParams is SearchHybrid with explicit fusion parameters. It
@@ -424,6 +453,7 @@ func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string,
 	if err != nil {
 		vecResults = nil // non-fatal, proceed with FTS only
 	}
+	vecResults = filterVectorFloor(vecResults, p.MinSimilarity)
 
 	// If only FTS worked, return that.
 	if len(vecResults) == 0 {
@@ -523,6 +553,7 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 // Falls back to FTS-only when queryVec is nil.
 func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []float32, limit int) ([]Memory, error) {
 	p := DefaultSearchParams()
+	p.MinSimilarity = s.vectorMinSimilarityFloor()
 	ftsResults, err := s.SearchFTSAll(ctx, query, limit*2)
 	if err != nil {
 		ftsResults = nil
@@ -539,6 +570,7 @@ func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []fl
 	if err != nil {
 		vecResults = nil
 	}
+	vecResults = filterVectorFloor(vecResults, p.MinSimilarity)
 
 	if len(vecResults) == 0 {
 		return s.demoteResults(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
