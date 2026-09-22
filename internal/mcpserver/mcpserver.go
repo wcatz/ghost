@@ -36,6 +36,13 @@ type embedderDiagnostics interface {
 
 func boolPtr(b bool) *bool { return &b }
 
+// detectCallingSource is the process/env harness detection used when the MCP
+// client reports an unknown name. It is a package variable so tests can pin the
+// undetected case: the test process's own ancestor chain can legitimately
+// contain a harness (running `go test` from an opencode session), which would
+// otherwise make that case environment-dependent.
+var detectCallingSource = ai.DetectSource
+
 // resolveCapableStore narrows provider.MemoryStore's concrete backing store to
 // the methods ghost_resolve needs (ResolveCandidates, SetResolved, the
 // supersedes-link read for deterministic demotion, and the KEEP-verdict cache).
@@ -283,8 +290,8 @@ type updateArgs struct {
 	// Importance/Tags are untyped so schema validation cannot reject
 	// stringified values some clients send for union-typed fields; see
 	// coerce.go. Keep the accepted shapes stated in the descriptions.
-	Importance any    `json:"importance,omitempty" jsonschema:"New importance number 0.0-1.0 (e.g. 0.8). Omit to keep current value."`
-	Tags       any    `json:"tags,omitempty" jsonschema:"Replacement tags as an array of strings (e.g. [\"a\",\"b\"]). Omit to keep current tags; pass [] to clear."`
+	Importance any `json:"importance,omitempty" jsonschema:"New importance number 0.0-1.0 (e.g. 0.8). Omit to keep current value."`
+	Tags       any `json:"tags,omitempty" jsonschema:"Replacement tags as an array of strings (e.g. [\"a\",\"b\"]). Omit to keep current tags; pass [] to clear."`
 }
 
 // applyMemoryUpdate validates and applies a partial memory update, returning
@@ -1017,7 +1024,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_resolve",
 		Title:       "Resolve stale evidence",
-		Description: "Scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own CLI harness — the backend is picked from the MCP client's identity (an opencode session classifies via opencode, a claude session via claude, etc.), falling back to the best CLI on PATH for unknown clients. Subscription-billed; no Anthropic API credits spent. Dry-run by default; pass apply:true to stamp resolved_at.",
+		Description: "Scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own CLI harness — the backend is picked from the MCP client's identity (an opencode session classifies via opencode, a claude session via claude, etc.), or detected from the process ancestry for unknown clients; an undetectable caller is an error, never a silent fallback to another harness. Subscription-billed; no Anthropic API credits spent. Dry-run by default; pass apply:true to stamp resolved_at.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			OpenWorldHint:   boolPtr(false),
@@ -1042,17 +1049,27 @@ func (s *Server) registerTools() {
 		// so an opencode session classifies via the opencode binary, a claude
 		// session via claude, etc. — mirroring headless's source-aware
 		// routing (ai.SourceForClientName → NewSourceProviderForSource).
-		// Unknown clients fall back to the best CLI on PATH. MCP sampling was
-		// retired here per spec 2026-07-28 (SEP-2577 deprecates Sampling) —
-		// see docs/superpowers/specs/2026-08-24-resolve-sampling-path-design.md.
-		// No binary at all is a clean tool error, never a silent degradation.
+		// Unknown clients fall back to detecting the calling harness from the
+		// environment and process ancestry (the MCP server is spawned by the
+		// client). If neither yields a source, or its binary is missing, the
+		// tool errors — it must never silently classify through a different
+		// harness (e.g. claude) than the caller's. MCP sampling was retired
+		// here per spec 2026-07-28 (SEP-2577 deprecates Sampling) — see
+		// docs/superpowers/specs/2026-08-24-resolve-sampling-path-design.md.
 		var clientName string
 		if p := req.Session.InitializeParams(); p != nil && p.ClientInfo != nil {
 			clientName = p.ClientInfo.Name
 		}
-		cli := ai.NewSourceProviderForSource(ai.SourceForClientName(clientName))
+		source := ai.SourceForClientName(clientName)
+		if source == "" {
+			source = detectCallingSource()
+		}
+		if source == "" {
+			return nil, nil, fmt.Errorf("ghost_resolve: cannot determine the calling harness (MCP client %q is unknown and no claude/opencode/codex/goose ancestor was detected)", clientName)
+		}
+		cli := ai.NewSourceProviderForSource(source)
 		if !cli.Available() {
-			return nil, nil, fmt.Errorf("ghost_resolve requires a `claude`, `opencode`, `codex`, or `goose` binary on PATH (or via cli.*_binary config)")
+			return nil, nil, fmt.Errorf("ghost_resolve: calling harness %q is unavailable (no matching `claude`, `opencode`, `codex`, or `goose` binary on PATH or via cli.*_binary config)", source)
 		}
 		cls := resolve.NewResolutionClassifier(cli)
 		cls.SetLogger(s.logger)
