@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 )
 
@@ -34,6 +35,16 @@ var migrations = []func(*sql.Tx) error{
 // Table rebuilds require foreign_keys=OFF, which is a no-op inside a
 // transaction — so the pragma is toggled on a pinned connection around each
 // step, and foreign_key_check runs before the version stamp is committed.
+//
+// A database can carry PRE-EXISTING foreign-key orphans — child rows whose
+// parent (a memories or projects row) is gone. The migration steps did not
+// create them, but a naive foreign_key_check after a step would abort on them
+// and brick every newer binary (the real v5 DB aborted v0.30.10+ this way).
+// migrate() therefore repairs derived-cache orphans (embedding vectors, link
+// scan markers, supersede verdicts, the auto link graph) up front with a loud
+// warning, and refuses to guess on user-content rows (memories, tasks,
+// decisions, ghost_state, snapshots) — those abort with copy-pasteable DELETE
+// statements instead of silently dropping user data.
 func migrate(db *sql.DB, from int) error {
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
@@ -41,6 +52,14 @@ func migrate(db *sql.DB, from int) error {
 		return fmt.Errorf("pin connection: %w", err)
 	}
 	defer conn.Close() //nolint:errcheck
+
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
+		return fmt.Errorf("foreign keys off: %w", err)
+	}
+	if err := repairPreExistingFKOrphans(ctx, conn); err != nil {
+		_, _ = conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
+		return err
+	}
 
 	for v := from; v < schemaVersion; v++ {
 		if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
@@ -55,9 +74,16 @@ func migrate(db *sql.DB, from int) error {
 			if err := migrations[v](tx); err != nil {
 				return err
 			}
-			var table, rowid, parent, fkid any
-			if err := tx.QueryRow("PRAGMA foreign_key_check").Scan(&table, &rowid, &parent, &fkid); err != sql.ErrNoRows {
-				return fmt.Errorf("foreign_key_check failed: table=%v rowid=%v parent=%v (%v)", table, rowid, parent, err)
+			// Pre-existing orphans were already repaired above, so any
+			// violation here means the migration step itself left the schema
+			// inconsistent — a step bug that must fail loudly, not be masked.
+			stale, err := fkViolations(tx)
+			if err != nil {
+				return fmt.Errorf("foreign_key_check: %w", err)
+			}
+			if len(stale) > 0 {
+				return fmt.Errorf("migration %d introduced %d foreign-key violation(s): %v",
+					v+1, len(stale), stale)
 			}
 			if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", v+1)); err != nil {
 				return fmt.Errorf("stamp user_version: %w", err)
@@ -72,6 +98,89 @@ func migrate(db *sql.DB, from int) error {
 		}
 	}
 	return nil
+}
+
+// cacheFKWhitelist names the tables whose rows are derived caches: embedding
+// vectors, linking scan markers, supersede verdicts, and the auto link graph.
+// A row in one of these whose parent row is gone is meaningless debris — no user
+// content, recomputable by the workers — so a pre-existing orphan there must
+// not abort the migration (which would brick every newer binary). It is deleted
+// with a loud warning instead. Anything NOT in this list is treated as
+// user-content and never auto-deleted.
+var cacheFKWhitelist = map[string]bool{
+	"memory_embeddings": true,
+	"link_scans":        true,
+	"supersede_checked": true,
+	"memory_links":      true,
+}
+
+// repairPreExistingFKOrphans deletes derived-cache rows whose parent row is
+// gone — e.g. a memory_embeddings row for a deleted memory — so a pre-existing
+// orphan cannot abort every migration step and brick the new binary. A
+// violation in a user-content table (memories, tasks, decisions, ghost_state,
+// memory_snapshots) is NOT deleted: migrate() returns an error carrying
+// copy-pasteable DELETE statements so the operator decides. Either way the
+// pre-migration backup (backupBeforeMigrate, run by OpenDB) is already on disk
+// as a last resort.
+func repairPreExistingFKOrphans(ctx context.Context, conn *sql.Conn) error {
+	violations, err := fkViolations(conn)
+	if err != nil {
+		return fmt.Errorf("foreign_key_check: %w", err)
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+	var blocked []string
+	for table, rowids := range violations {
+		if !cacheFKWhitelist[table] {
+			rows := make([]string, 0, len(rowids))
+			for _, rowid := range rowids {
+				rows = append(rows, fmt.Sprintf("DELETE FROM %s WHERE rowid = %d;", table, rowid))
+			}
+			blocked = append(blocked, fmt.Sprintf("%s (%d row(s)): %s", table, len(rowids), strings.Join(rows, " ")))
+			continue
+		}
+		for _, rowid := range rowids {
+			if _, err := conn.ExecContext(ctx,
+				fmt.Sprintf("DELETE FROM %s WHERE rowid = ?", table), rowid,
+			); err != nil {
+				return fmt.Errorf("delete orphaned %s rowid %d: %w", table, rowid, err)
+			}
+		}
+		slog.Warn("migration: deleted pre-existing orphaned rows",
+			"table", table, "rows", len(rowids))
+	}
+	if len(blocked) > 0 {
+		return fmt.Errorf("aborting migration: pre-existing foreign-key orphans in user-content tables: %s",
+			strings.Join(blocked, " "))
+	}
+	return nil
+}
+
+// fkViolations scans PRAGMA foreign_key_check and returns a table→rowids map.
+// The pragma reports violations regardless of the foreign_keys setting, so it
+// works both before migration (repair pass) and inside a step transaction
+// (post-step gate). run accepts a *sql.Conn or *sql.Tx.
+func fkViolations(run interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}) (map[string][]int64, error) {
+	rows, err := run.QueryContext(context.Background(), "PRAGMA foreign_key_check")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+	out := map[string][]int64{}
+	for rows.Next() {
+		var table string
+		var rowid int64
+		var parent string
+		var fkid int
+		if err := rows.Scan(&table, &rowid, &parent, &fkid); err != nil {
+			return nil, err
+		}
+		out[table] = append(out[table], rowid)
+	}
+	return out, rows.Err()
 }
 
 // migrateV1 fixes drift accumulated before versioning existed:
