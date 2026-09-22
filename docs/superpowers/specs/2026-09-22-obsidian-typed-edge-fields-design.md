@@ -13,7 +13,7 @@ Expose Ghost's `memory_links` graph to Obsidian plugins that read typed frontmat
 | Decision | Choice |
 |---|---|
 | Scope | Option A only: typed edge fields in frontmatter. No extra scalar fields (`resolved_at`, `access_count`, …), no JSON Canvas, no Bases `.base` views. |
-| Keys | Append after the existing 10 frontmatter keys, fixed alphabetical order among the five: `causes`, `contradicts`, `elaborates`, `related`, `supersedes`. Present only when non-empty. |
+| Keys | Append after the existing frontmatter keys (11 single-line keys today: `ghost_id` … `source`), fixed alphabetical order among the five: `causes`, `contradicts`, `elaborates`, `related`, `supersedes`. Present only when non-empty. |
 | Value shape | YAML flow list of quoted `[[wikilink]]` strings via the existing `fileFor` map and `yamlScalar`/list-quoting helpers, e.g. `related: ["[[other-note-beef0000]]"]`. |
 | Direction | Directional relations (`supersedes`, `causes`, `contradicts`) emit the field on the **source endpoint only**, pointing at the target. Symmetric-ish relations (`related`, `elaborates`) emit on **both** endpoints, each pointing at the other (matches current `## Related` both-endpoint behavior). |
 | `## Related` prose | Unchanged. Continues to carry every non-invalidated link with relation + strength, including plain short-ID fallback for targets missing from `fileFor`. |
@@ -44,8 +44,8 @@ tags: [embedding, backfill]
 created: 2026-07-06
 updated: 2026-07-08
 source: mcp
-supersedes: ["[[old-note-dead0000]]"]
 related: ["[[other-note-beef0000]]", "[[third-note-cafe0000]]"]
+supersedes: ["[[old-note-dead0000]]"]
 ---
 > [!info] Mirrored from Ghost — edits here are not synced back.
 
@@ -63,7 +63,7 @@ The last `## Related` line is a link whose target is absent from `fileFor` (e.g.
 Invariants preserved:
 
 - `ghost_id` remains the first frontmatter key; every value remains exactly one line (prune's `hasGhostID` scan).
-- Typed keys are appended after `source:` and never re-order the existing 10 keys.
+- Typed keys are appended after `source:` and never re-order the existing frontmatter keys.
 - Empty / unknown / fully-filtered relations omit their key entirely — a note with no qualifying links has the same 11 frontmatter lines as today.
 
 ## Endpoint emission rules
