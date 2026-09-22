@@ -10,6 +10,28 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// validCategories is the single Go-side source of truth for the memories
+// category CHECK constraint in initSQL (and migrate.go's mirrored CHECK).
+// Writers that accept caller-supplied categories (reflection parse, MCP save)
+// validate against this set so an invalid value is normalized or rejected
+// before it can fail the whole INSERT/transaction on the SQL CHECK.
+var validCategories = map[string]bool{
+	"architecture": true,
+	"decision":     true,
+	"pattern":      true,
+	"convention":   true,
+	"gotcha":       true,
+	"dependency":   true,
+	"preference":   true,
+	"fact":         true,
+}
+
+// IsValidCategory reports whether cat is one of the eight canonical memory
+// categories enforced by the schema CHECK.
+func IsValidCategory(cat string) bool {
+	return validCategories[cat]
+}
+
 // initSQL is the schema for the ghost database — the single source of truth.
 // Kept as a Go constant rather than go:embed because embed paths cannot use "..".
 // Note: CREATE TABLE IF NOT EXISTS never migrates an existing database — a new

@@ -14,6 +14,13 @@ type ReflectionInput struct {
 	LastCommits      []string        // recent commit messages
 	ProjectLanguage  string
 	ProjectName      string
+	// OtherProjectNames are known project names OTHER than ProjectName
+	// (caller supplies them, e.g. from Store.ListProjectNames). Used by the
+	// cross-project contamination guard: an emitted memory that names one of
+	// these projects — when that name never appears in the input corpus — is
+	// dropped, because consolidation cannot legitimately learn facts about a
+	// project whose data was never fed in. Empty means the guard is off.
+	OtherProjectNames []string
 }
 
 // ReflectionResult holds the parsed output from a reflection call.

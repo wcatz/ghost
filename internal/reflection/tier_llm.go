@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/wcatz/ghost/internal/ai"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // reflector is the subset of LLMProvider needed for LLM consolidation.
@@ -69,6 +70,7 @@ func (h *LlmConsolidator) Consolidate(ctx context.Context, input ReflectionInput
 		return ReflectionResult{}, err
 	}
 	dropFabricatedMemories(&result, input, h.log())
+	dropForeignProjectMemories(&result, input, h.log())
 	return result, nil
 }
 
@@ -99,7 +101,10 @@ func parseReflectionResponse(text string) (ReflectionResult, error) {
 		return ReflectionResult{}, fmt.Errorf("reflection output is not valid JSON: %w (starts: %q)", err, snippet)
 	}
 
-	// Validate importance ranges and scope.
+	// Validate importance ranges, scope, and category. An invalid category
+	// would fail the schema CHECK inside ReplaceNonManual and sink the whole
+	// apply transaction — normalize to the schema default ('fact') the same
+	// way invalid scope collapses to 'project'.
 	for i := range result.Memories {
 		if result.Memories[i].Importance < 0 {
 			result.Memories[i].Importance = 0
@@ -112,6 +117,9 @@ func parseReflectionResponse(text string) (ReflectionResult, error) {
 		}
 		if result.Memories[i].Scope != "global" {
 			result.Memories[i].Scope = "project"
+		}
+		if !memory.IsValidCategory(result.Memories[i].Category) {
+			result.Memories[i].Category = "fact"
 		}
 	}
 

@@ -943,12 +943,27 @@ Flags:
 	projectPath, _ := store.GetProjectPath(ctx, projectID)
 	lastCommits, projectLanguage := reflection.CollectGitContext(projectPath)
 
+	// Known other-project names feed the cross-project contamination guard:
+	// consolidation only sees this project's data, so an emitted memory that
+	// names another project never mentioned in the input is dropped.
+	otherNames, nameErr := store.ListProjectNames(ctx)
+	if nameErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: list projects for contamination guard: %v\n", nameErr)
+	}
+	filteredNames := make([]string, 0, len(otherNames))
+	for _, n := range otherNames {
+		if n != projectName && n != "_global" {
+			filteredNames = append(filteredNames, n)
+		}
+	}
+
 	input := reflection.ReflectionInput{
-		ExistingMemories: live,
-		CurrentContext:   currentContext,
-		LastCommits:      lastCommits,
-		ProjectLanguage:  projectLanguage,
-		ProjectName:      projectName,
+		ExistingMemories:  live,
+		CurrentContext:    currentContext,
+		LastCommits:       lastCommits,
+		ProjectLanguage:   projectLanguage,
+		ProjectName:       projectName,
+		OtherProjectNames: filteredNames,
 	}
 
 	consolidateCtx, cancel := consolidationContext(ctx, cfg.Reflection.ConsolidationTimeoutMinutes)
