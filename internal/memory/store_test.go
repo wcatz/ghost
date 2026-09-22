@@ -3973,6 +3973,55 @@ func TestGetTopMemoriesBackfillsAfterDemotion(t *testing.T) {
 	}
 }
 
+// TestGetTopMemoriesDemotesSuperseded: injection (GetTopMemories) must agree
+// with the search path — a superseded memory never outranks its co-present
+// replacement. The stale memory is deliberately higher-importance so only the
+// supersede demote can flip the order. Runs under limit (no truncation) to
+// pin that demote reorders even when the whole window survives.
+func TestGetTopMemoriesDemotesSuperseded(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	stale, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "payments service deploys to eu-west-1",
+		Source: "manual", Importance: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("create stale: %v", err)
+	}
+	fresh, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "payments service deploys to us-east-1",
+		Source: "manual", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create fresh: %v", err)
+	}
+
+	top, err := s.GetTopMemories(ctx, testProject, 10)
+	if err != nil {
+		t.Fatalf("GetTopMemories (before): %v", err)
+	}
+	if len(top) < 2 || top[0].ID != stale {
+		t.Fatalf("baseline must rank stale first; got %+v", top)
+	}
+
+	if err := s.CreateLink(ctx, fresh, stale, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+
+	top, err = s.GetTopMemories(ctx, testProject, 10)
+	if err != nil {
+		t.Fatalf("GetTopMemories (after): %v", err)
+	}
+	if len(top) < 2 {
+		t.Fatalf("demote must not drop results: got %d", len(top))
+	}
+	if top[0].ID != fresh || top[1].ID != stale {
+		t.Errorf("superseded memory must rank below its replacement in injection; got %s then %s (fresh=%s stale=%s)",
+			top[0].ID, top[1].ID, fresh, stale)
+	}
+}
+
 func TestSetDemotionThresholdOverridesDefault(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

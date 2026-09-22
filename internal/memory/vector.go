@@ -233,28 +233,17 @@ func (s *Store) demoteSuperseded(ctx context.Context, results []Memory, p Search
 	for i, m := range results {
 		ids[i] = m.ID
 	}
-	pairs, err := s.SupersedesWithin(ctx, ids)
+	s.mu.RLock()
+	penalty, err := SupersedePenalties(ctx, s.db, ids)
+	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Debug("supersede demote: lookup failed", "error", err)
 		return results
 	}
-	if len(pairs) == 0 {
+	if len(penalty) == 0 {
 		return results
 	}
-	present := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		present[id] = true
-	}
-	penalty := make(map[string]int, len(ids))
-	for _, pr := range pairs { // pr = [superseder, superseded]
-		if present[pr[0]] {
-			penalty[pr[1]]++
-		}
-	}
-	sort.SliceStable(results, func(i, j int) bool {
-		return penalty[results[i].ID] < penalty[results[j].ID]
-	})
-	return results
+	return StableDemote(results, func(m Memory) string { return m.ID }, penalty)
 }
 
 // parseCreatedAt parses the SQLite datetime('now') format stored in
