@@ -14,8 +14,12 @@ type SourceProvider struct {
 	name    string
 }
 
-// NewSourceProviderForSource returns a provider matching the host source.
-// Empty/unknown source falls back to best-available-on-PATH.
+// NewSourceProviderForSource returns a provider for the given source token, or
+// an unavailable one ("none") for an empty or unknown source. There is no
+// cascade: silently classifying through a different harness than the caller's
+// would bill the wrong subscription and betray the user's routing choice.
+// Callers resolve the source (--source, or ai.DetectSource) and fail with an
+// actionable error when it is empty.
 func NewSourceProviderForSource(source string, cfgBinaries ...string) *SourceProvider {
 	var claudeBin, opencodeBin, codexBin, gooseBin string
 	if len(cfgBinaries) > 0 {
@@ -40,15 +44,14 @@ func NewSourceProviderForSource(source string, cfgBinaries ...string) *SourcePro
 	case "goose":
 		return resolveCLI(gooseBin, "goose", "goose")
 	default:
-		return fallbackCLI(claudeBin, opencodeBin, codexBin, gooseBin)
+		return &SourceProvider{backend: nil, name: "none"}
 	}
 }
 
-// resolveCLI resolves a specific CLI backend for the given source. Unlike
-// fallbackCLI, it does NOT cascade to other binaries — if the source-specific
-// binary isn't found, the provider is unavailable. This is intentional: when
-// the user's session used claude, we should use claude, not silently switch
-// to opencode.
+// resolveCLI resolves a specific CLI backend for the given source. It does NOT
+// cascade to other binaries — if the source-specific binary isn't found, the
+// provider is unavailable. This is intentional: when the user's session used
+// claude, we should use claude, not silently switch to opencode.
 func resolveCLI(configured, defaultName, providerName string) *SourceProvider {
 	bin := configured
 	if bin == "" {
@@ -68,11 +71,6 @@ func resolveCLI(configured, defaultName, providerName string) *SourceProvider {
 		return &SourceProvider{backend: NewGooseClientWithBinary(bin), name: "goose"}
 	}
 	return &SourceProvider{backend: nil, name: "none"}
-}
-
-func fallbackCLI(claudeBin, opencodeBin, codexBin, gooseBin string) *SourceProvider {
-	p := NewCLIProviderWithBinaries(claudeBin, opencodeBin, codexBin, gooseBin)
-	return &SourceProvider{backend: p.backend, name: p.name}
 }
 
 func (p *SourceProvider) Name() string    { return p.name }
@@ -105,7 +103,9 @@ var clientSourceNames = []struct{ name, source string }{
 }
 
 // SourceForClientName maps an MCP client's reported name to a source token,
-// or "" for unknown names (callers then use best-available-on-PATH).
+// or "" for unknown names. Unknown does not cascade to a default harness:
+// callers then detect the calling harness (ai.DetectSource) or fail with an
+// actionable error.
 func SourceForClientName(clientName string) string {
 	lower := strings.ToLower(clientName)
 	for _, c := range clientSourceNames {

@@ -1086,7 +1086,17 @@ func TestPromoteMemory(t *testing.T) {
 // connectedClient spins up a Server and a Client wired together over an
 // in-memory transport, and returns the connected ClientSession. Callers must
 // close the returned session's connection via t.Cleanup handling in Connect.
+// The client's name is deliberately unknown to ai.SourceForClientName, so
+// tests that need a known harness identity must use connectedClientNamed:
+// ghost_resolve no longer falls back to claude for unknown clients.
 func connectedClient(t *testing.T, srv *Server) *mcp.ClientSession {
+	t.Helper()
+	return connectedClientNamed(t, srv, "test-client")
+}
+
+// connectedClientNamed connects a client that self-reports name, which drives
+// ghost_resolve's session-scoped backend selection.
+func connectedClientNamed(t *testing.T, srv *Server, name string) *mcp.ClientSession {
 	t.Helper()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 
@@ -1095,7 +1105,7 @@ func connectedClient(t *testing.T, srv *Server) *mcp.ClientSession {
 		t.Fatalf("server Connect: %v", err)
 	}
 
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: name, Version: "0"}, nil)
 	session, err := client.Connect(ctx, clientTransport, nil)
 	if err != nil {
 		t.Fatalf("client Connect: %v", err)
@@ -1375,7 +1385,9 @@ func TestGhostResolve_DryRunByDefault(t *testing.T) {
 
 	// Fake `claude` binary on PATH, answering RESOLVED so the classifier
 	// confirms the seeded memory (see internal/ai/cli_client_test.go for the
-	// same pattern used within the ai package).
+	// same pattern used within the ai package). The client reports itself as
+	// claude-code so session routing selects the fake claude: unknown clients
+	// no longer fall back to claude-first PATH ordering.
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "claude")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s' RESOLVED\n"), 0o755); err != nil {
@@ -1383,7 +1395,7 @@ func TestGhostResolve_DryRunByDefault(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	session := connectedClient(t, srv)
+	session := connectedClientNamed(t, srv, "claude-code")
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_resolve",
@@ -1481,9 +1493,10 @@ func TestGhostResolve_UsesSessionHarness(t *testing.T) {
 	}
 }
 
-// TestGhostResolve_AppliesWithCLI covers the write path: a fake `claude` CLI
-// classifies RESOLVED and apply:true must stamp resolved_at — the CLI is a
-// full-trust primary now that MCP sampling is retired (see
+// TestGhostResolve_AppliesWithCLI covers the write path: a client reporting
+// claude-code with a fake `claude` CLI on PATH classifies RESOLVED and
+// apply:true must stamp resolved_at — the CLI is a full-trust primary now that
+// MCP sampling is retired (see
 // docs/superpowers/specs/2026-08-24-resolve-sampling-path-design.md), so the
 // seeded memory must no longer be an eligible resolve candidate afterwards.
 func TestGhostResolve_AppliesWithCLI(t *testing.T) {
@@ -1507,7 +1520,7 @@ func TestGhostResolve_AppliesWithCLI(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	session := connectedClient(t, srv)
+	session := connectedClientNamed(t, srv, "claude-code")
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_resolve",
@@ -1538,9 +1551,9 @@ func TestGhostResolve_AppliesWithCLI(t *testing.T) {
 	}
 }
 
-// TestGhostResolve_RequiresCLIBinary covers the no-CLI failure mode: with no
-// claude/opencode/codex/goose binary anywhere on PATH, the tool must return a
-// clean error naming the requirement instead of silently degrading.
+// TestGhostResolve_RequiresCLIBinary covers the no-CLI failure mode: a client
+// whose harness is known (claude-code) but has no binary anywhere on PATH must
+// get a clean error naming the harness instead of silently degrading.
 func TestGhostResolve_RequiresCLIBinary(t *testing.T) {
 	store := testStore(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -1555,7 +1568,7 @@ func TestGhostResolve_RequiresCLIBinary(t *testing.T) {
 	// Empty PATH: exec.LookPath fails for every CLI backend.
 	t.Setenv("PATH", t.TempDir())
 
-	session := connectedClient(t, srv)
+	session := connectedClientNamed(t, srv, "claude-code")
 
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "ghost_resolve",
@@ -1573,8 +1586,109 @@ func TestGhostResolve_RequiresCLIBinary(t *testing.T) {
 			sb.WriteString(tc.Text)
 		}
 	}
-	if !strings.Contains(sb.String(), "requires a `claude`") {
-		t.Errorf("expected error to name the required CLI binaries, got %q", sb.String())
+	if !strings.Contains(sb.String(), `calling harness "claude-code" is unavailable`) {
+		t.Errorf("expected error to name the unavailable harness, got %q", sb.String())
+	}
+}
+
+// TestGhostResolve_UnknownClientUndetectedErrors covers the silent-claude
+// contract: an unknown MCP client with no detectable harness ancestor must
+// error, even though a `claude` binary is sitting on PATH. The detection seam
+// pins the undetected case because the test process's own ancestor chain can
+// legitimately contain a harness (running `go test` from an opencode session).
+func TestGhostResolve_UnknownClientUndetectedErrors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires a POSIX shell")
+	}
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	const content = "root cause: fixed in v2, no further action needed"
+	if _, _, _, err := store.Upsert(ctx, "abc123", "gotcha", content, "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\nprintf '%s' RESOLVED\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude binary: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	old := detectCallingSource
+	detectCallingSource = func() string { return "" }
+	t.Cleanup(func() { detectCallingSource = old })
+
+	session := connectedClient(t, srv)
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_resolve",
+		Arguments: map[string]any{"project": "test-project"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_resolve: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error result for an undetectable caller, got %+v", result.Content)
+	}
+	var sb strings.Builder
+	for _, c := range result.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			sb.WriteString(tc.Text)
+		}
+	}
+	if !strings.Contains(sb.String(), "cannot determine the calling harness") {
+		t.Errorf("expected undetectable-harness error, got %q", sb.String())
+	}
+}
+
+// TestGhostResolve_DetectedHarnessMissingDoesNotFallBackToClaude is the
+// reported-bug regression: an unknown client in an opencode session (OPENCODE
+// env marker) with only `claude` installed must error naming opencode. The old
+// claude-first fallback would have run claude here and returned success.
+func TestGhostResolve_DetectedHarnessMissingDoesNotFallBackToClaude(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires a POSIX shell")
+	}
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	const content = "root cause: fixed in v2, no further action needed"
+	if _, _, _, err := store.Upsert(ctx, "abc123", "gotcha", content, "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\nprintf '%s' RESOLVED\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude binary: %v", err)
+	}
+	// Only the temp dir is on PATH: the fake claude resolves, opencode cannot.
+	t.Setenv("PATH", dir)
+	t.Setenv("OPENCODE", "1")
+
+	session := connectedClient(t, srv)
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_resolve",
+		Arguments: map[string]any{"project": "test-project"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_resolve: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("expected error result when the detected harness (opencode) is unavailable, got %+v", result.Content)
+	}
+	var sb strings.Builder
+	for _, c := range result.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			sb.WriteString(tc.Text)
+		}
+	}
+	if !strings.Contains(sb.String(), `"opencode"`) {
+		t.Errorf("expected error to name the detected harness, got %q", sb.String())
 	}
 }
 

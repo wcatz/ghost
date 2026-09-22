@@ -16,9 +16,12 @@ type cliBackend interface {
 }
 
 // CLIProvider resolves the best available CLI backend — priority: claude >
-// opencode > codex > goose — and delegates to it, so callers need no knowledge
-// of which binary is installed. It satisfies reflection's reflector interface
-// and ai.Provider, so it drops in wherever CLIClient is used.
+// opencode > codex > goose — and delegates to it. It satisfies reflection's
+// reflector interface and ai.Provider. Its claude-first priority makes it an
+// availability probe and an explicit "best on PATH" choice; it must NOT be
+// used as a routing default for a session's harness, where claude silently
+// winning over the calling harness is exactly the bug SourceProvider guards
+// against.
 type CLIProvider struct {
 	backend cliBackend
 	name    string
@@ -26,7 +29,8 @@ type CLIProvider struct {
 
 // NewCLIProvider picks the best backend available on PATH: claude if present,
 // else opencode if present, else codex if present, else goose if present,
-// else an unavailable provider.
+// else an unavailable provider. Prefer NewSourceProviderForSource when routing
+// to a known caller; this cascade is for explicit best-on-PATH use.
 func NewCLIProvider() *CLIProvider {
 	return NewCLIProviderWithBinaries("", "", "", "")
 }
@@ -35,6 +39,8 @@ func NewCLIProvider() *CLIProvider {
 // Binary paths override the PATH lookup when set (and resolvable), so a binary
 // installed outside the current process's PATH still wins; an empty value falls
 // back to the PATH lookup for that backend. Priority: claude > opencode > codex > goose.
+// It exists as an availability probe and explicit best-on-PATH selector — never
+// as the implicit default for a session-routed command.
 func NewCLIProviderWithBinaries(claudeBinary, opencodeBinary, codexBinary, gooseBinary string) *CLIProvider {
 	if claudeBinary != "" {
 		if _, err := exec.LookPath(claudeBinary); err == nil {

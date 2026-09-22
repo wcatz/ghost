@@ -374,6 +374,16 @@ var liveRelationCases = []struct {
 	{"The relay node runs on k3s-mr-slave.", "The block producer runs on k3s-texas.", RelationNeither},
 }
 
+// liveTestSource prefers GHOST_TEST_SOURCE and otherwise detects the calling
+// harness, so the live labeled-set tests keep running from a session shell
+// instead of silently skipping.
+func liveTestSource() string {
+	if s := os.Getenv("GHOST_TEST_SOURCE"); s != "" {
+		return s
+	}
+	return ai.DetectSource()
+}
+
 // TestRelationClassifierLive validates the actual prompt against a small labeled
 // set. It needs a working LLM CLI (claude, opencode, codex, or goose), so it is
 // skipped in CI when none answers; run it manually to get a precision signal on
@@ -388,11 +398,11 @@ func TestRelationClassifierLive(t *testing.T) {
 	// it routes through the SAME NewSourceProviderForSource seam, so setting
 	// GHOST_TEST_SOURCE=opencode (or claude-code/codex/goose) compels that
 	// harness — "if the session calling is opencode, use opencode". Without a
-	// source var it falls back to the best harness on PATH, and it skips if
-	// none is available. New harnesses are added in one place (the source
-	// switch) and are honored here automatically.
+	// source var it detects the calling harness (ai.DetectSource), and skips
+	// only if neither is available. New harnesses are added in one place (the
+	// source switch) and are honored here automatically.
 	ctx := context.Background()
-	cli := ai.NewSourceProviderForSource(os.Getenv("GHOST_TEST_SOURCE"), "", "", "", "")
+	cli := ai.NewSourceProviderForSource(liveTestSource(), "", "", "", "")
 	if !cli.Available() {
 		t.Skip("no LLM CLI (claude/opencode/codex/goose) available; skipping live classifier test")
 	}
@@ -421,11 +431,11 @@ func TestRelationClassifierLive(t *testing.T) {
 
 // TestRelationClassifierLiveBatch runs the same labeled set through the
 // batched path (chunks of 3), validating the numbered-line prompt and parser
-// against a real harness. Skipped when no CLI is available; run manually with
-// GHOST_TEST_SOURCE=opencode to score it.
+// against a real harness. Skipped when no harness is detected; set
+// GHOST_TEST_SOURCE=opencode to compel one.
 func TestRelationClassifierLiveBatch(t *testing.T) {
 	ctx := context.Background()
-	cli := ai.NewSourceProviderForSource(os.Getenv("GHOST_TEST_SOURCE"), "", "", "", "")
+	cli := ai.NewSourceProviderForSource(liveTestSource(), "", "", "", "")
 	if !cli.Available() {
 		t.Skip("no LLM CLI (claude/opencode/codex/goose) available; skipping live batch test")
 	}
