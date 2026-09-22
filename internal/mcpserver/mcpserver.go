@@ -139,13 +139,6 @@ const (
 	globalMemoriesLimit = 15
 )
 
-// validCategories is the canonical memory-category set, shared by save,
-// save_global, and update handlers.
-var validCategories = map[string]bool{
-	"architecture": true, "decision": true, "pattern": true, "convention": true,
-	"gotcha": true, "dependency": true, "preference": true, "fact": true,
-}
-
 const mcpInstructions = `Ghost is your persistent memory system. It remembers project knowledge across sessions — use it proactively.
 
 ## Session Start
@@ -321,7 +314,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, args updateArgs) (string
 	if args.Content == "" && args.Category == "" && args.Importance == nil && args.Tags == nil {
 		return "", fmt.Errorf("nothing to update — pass at least one of content, category, importance, tags")
 	}
-	if args.Category != "" && !validCategories[args.Category] {
+	if args.Category != "" && !memory.IsValidCategory(args.Category) {
 		return "", fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
 	}
 
@@ -555,7 +548,7 @@ func (s *Server) registerTools() {
 		if args.Category == "" {
 			args.Category = "fact"
 		}
-		if !validCategories[args.Category] {
+		if !memory.IsValidCategory(args.Category) {
 			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
 		}
 		importance, err := defaultImportanceArg(args.Importance, 0.7)
@@ -927,7 +920,7 @@ func (s *Server) registerTools() {
 		if args.Category == "" {
 			args.Category = "fact"
 		}
-		if !validCategories[args.Category] {
+		if !memory.IsValidCategory(args.Category) {
 			return nil, nil, fmt.Errorf("invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", args.Category)
 		}
 		importance, err := defaultImportanceArg(args.Importance, 0.8)
