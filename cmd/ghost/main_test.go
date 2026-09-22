@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -376,7 +378,7 @@ func TestBuildClassifyProviderForSource_EmptySourceErrors(t *testing.T) {
 	t.Setenv("PATH", dir)
 	cfg := &config.Config{}
 	_, err := buildClassifyProviderForSource(cfg, "")
-	if err == nil || !strings.Contains(err.Error(), "cannot determine the calling harness") {
+	if err == nil || !errors.Is(err, ai.ErrUndetectableHarness) {
 		t.Fatalf("want actionable undetectable-harness error, got %v", err)
 	}
 }
@@ -438,7 +440,7 @@ func TestDetectPhaseSource(t *testing.T) {
 		detectCallingSource = func() string { return "" }
 		t.Cleanup(func() { detectCallingSource = old })
 		_, err := detectPhaseSource("")
-		if err == nil || !strings.Contains(err.Error(), "cannot determine the calling harness") {
+		if err == nil || !errors.Is(err, ai.ErrUndetectableHarness) {
 			t.Fatalf("want actionable error, got %v", err)
 		}
 	})

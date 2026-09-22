@@ -1065,7 +1065,7 @@ func (s *Server) registerTools() {
 			source = detectCallingSource()
 		}
 		if source == "" {
-			return nil, nil, fmt.Errorf("ghost_resolve: cannot determine the calling harness (MCP client %q is unknown and no claude/opencode/codex/goose ancestor was detected)", clientName)
+			return nil, nil, fmt.Errorf("ghost_resolve (client %q): %w", clientName, ai.ErrUndetectableHarness)
 		}
 		cli := ai.NewSourceProviderForSource(source)
 		if !cli.Available() {

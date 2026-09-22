@@ -76,10 +76,20 @@ func TestDetectSourceFromProc(t *testing.T) {
 		}
 	})
 
-	t.Run("js runtime checks argv0", func(t *testing.T) {
+	t.Run("js runtime checks the script argument", func(t *testing.T) {
 		root := t.TempDir()
 		writeProcEntry(t, root, 30, 20, "ghost", "")
-		writeProcEntry(t, root, 20, 1, "node", "/usr/local/bin/opencode\x00")
+		writeProcEntry(t, root, 20, 1, "node", "node\x00/usr/local/bin/opencode\x00")
+		writeProcEntry(t, root, 1, 0, "systemd", "")
+		if got := detectSourceFromProc(root, 30); got != "opencode" {
+			t.Errorf("detectSourceFromProc() = %q, want %q", got, "opencode")
+		}
+	})
+
+	t.Run("nodejs runtime is a js runtime", func(t *testing.T) {
+		root := t.TempDir()
+		writeProcEntry(t, root, 30, 20, "ghost", "")
+		writeProcEntry(t, root, 20, 1, "nodejs", "nodejs\x00/usr/local/bin/opencode\x00")
 		writeProcEntry(t, root, 1, 0, "systemd", "")
 		if got := detectSourceFromProc(root, 30); got != "opencode" {
 			t.Errorf("detectSourceFromProc() = %q, want %q", got, "opencode")

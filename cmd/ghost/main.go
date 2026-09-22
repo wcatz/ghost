@@ -1120,12 +1120,6 @@ func applyPhaseModel(model string) {
 	}
 }
 
-// undetectableHarnessError is the shared message for the one failure mode that
-// used to silently route to claude: a caller whose harness cannot be
-// determined. It names the four accepted --source tokens so the fix is
-// actionable.
-const undetectableHarnessError = "cannot determine the calling harness (no --source and no claude/opencode/codex/goose ancestor detected); pass --source claude-code|opencode|codex|goose"
-
 // detectCallingSource is the process/env self-detection used when --source is
 // absent. It is a package variable so tests can pin the undetected case: the
 // test process's own ancestor chain can legitimately contain a harness (running
@@ -1145,7 +1139,7 @@ func detectPhaseSource(flagSource string) (string, error) {
 	}
 	source := detectCallingSource()
 	if source == "" {
-		return "", errors.New(undetectableHarnessError)
+		return "", ai.ErrUndetectableHarness
 	}
 	fmt.Fprintf(os.Stderr, "ghost: using calling harness %q (detected)\n", source)
 	return source, nil
@@ -1159,7 +1153,7 @@ func detectPhaseSource(flagSource string) (string, error) {
 // cli.*_binary).
 func buildClassifyProviderForSource(cfg *config.Config, source string) (ai.Provider, error) {
 	if source == "" {
-		return nil, errors.New(undetectableHarnessError)
+		return nil, ai.ErrUndetectableHarness
 	}
 	sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
 	if !sp.Available() {

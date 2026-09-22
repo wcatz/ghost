@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,11 @@ import (
 	"strconv"
 	"strings"
 )
+
+// ErrUndetectableHarness is returned when no calling harness can be determined.
+// Callers must surface it with an actionable --source hint rather than
+// defaulting to another harness.
+var ErrUndetectableHarness = errors.New("cannot determine the calling harness (no --source and no claude/opencode/codex/goose ancestor detected); pass --source claude-code|opencode|codex|goose")
 
 // DetectSource reports the CLI harness that invoked the current process, or ""
 // when it cannot be determined. Harnesses announce themselves in the
@@ -42,9 +48,10 @@ func detectSourceFromEnv(lookup func(string) string) string {
 }
 
 // jsRuntimes are the process names a JS-packaged harness may appear as in
-// /proc/<pid>/comm. For those, the harness name lives in argv[0] instead:
-// `node /usr/local/bin/opencode` reports comm "node".
-var jsRuntimes = map[string]bool{"node": true, "bun": true, "deno": true}
+// /proc/<pid>/comm. For those, the harness name lives in the script argument
+// instead: `node /usr/local/bin/opencode` reports comm "node" with the harness
+// in argv[1]. Debian/Ubuntu ship the runtime as "nodejs".
+var jsRuntimes = map[string]bool{"node": true, "nodejs": true, "bun": true, "deno": true}
 
 // detectSourceFromProc walks the ancestor chain starting at startPID (the
 // caller's own pid, whose comm is ghost and never matches) and returns the
@@ -68,8 +75,8 @@ func detectSourceFromProc(root string, startPID int) string {
 }
 
 // sourceForProcess maps one /proc entry to a source token: the trimmed comm,
-// or — when comm is a JS runtime — the basename of argv[0] from cmdline, where
-// a script-packaged harness's name actually appears.
+// or — when comm is a JS runtime — the basename of the script argument from
+// cmdline, where a script-packaged harness's name actually appears.
 func sourceForProcess(root string, pid int) string {
 	dir := filepath.Join(root, strconv.Itoa(pid))
 	comm, err := os.ReadFile(filepath.Join(dir, "comm"))
@@ -87,8 +94,14 @@ func sourceForProcess(root string, pid int) string {
 	if err != nil {
 		return ""
 	}
-	argv0 := strings.SplitN(string(cmdline), "\x00", 2)[0]
-	return sourceFromProcessName(filepath.Base(argv0))
+	// argv[0] is the runtime itself (`node`); the script path follows. Scan
+	// every argument so a runtime flag between them cannot hide the script.
+	for _, arg := range strings.Split(string(cmdline), "\x00")[1:] {
+		if s := sourceFromProcessName(filepath.Base(arg)); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // sourceFromProcessName maps a process comm or argv[0] basename to a source
