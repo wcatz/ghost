@@ -31,8 +31,18 @@ type Config struct {
 	Reflection ReflectionConfig `koanf:"reflection"`
 	Linking    LinkingConfig    `koanf:"linking"`
 	Injection  InjectionConfig  `koanf:"injection"`
+	Search     SearchConfig     `koanf:"search"`
 	Obsidian   ObsidianConfig   `koanf:"obsidian"`
 	Routing    RoutingConfig    `koanf:"routing"`
+}
+
+// SearchConfig controls hybrid-search ranking behavior.
+type SearchConfig struct {
+	// MinSimilarity is the cosine floor applied to vector-leg candidates
+	// before RRF fusion. 0 (default) preserves historical behavior of only
+	// dropping non-positive cosines; raise to stop weak semantic matches from
+	// padding the fused window. FTS candidates are exempt.
+	MinSimilarity float64 `koanf:"min_similarity"`
 }
 
 // RoutingConfig steers sessions whose cwd matches no known project.
@@ -163,6 +173,7 @@ var defaults = map[string]interface{}{
 	"injection.behavior_floor":                 8,
 	"injection.behavior_categories":            []string{"gotcha", "convention", "preference", "decision"},
 	"injection.category_caps":                  map[string]interface{}{"gotcha": 4},
+	"search.min_similarity":                    0.0,
 	"obsidian.vault_dir":                       "",
 	"obsidian.interval":                        "30s",
 	"obsidian.auto_sync":                       false,
@@ -218,6 +229,7 @@ func Load() (*Config, error) {
 		"GHOST_REFLECTION_CONSOLIDATION_TIMEOUT_MINUTES": "reflection.consolidation_timeout_minutes",
 		"GHOST_OLLAMA_URL":                               "embedding.ollama_url",
 		"GHOST_ROUTING_DEFAULT_PROJECT":                  "routing.default_project",
+		"GHOST_SEARCH_MIN_SIMILARITY":                    "search.min_similarity",
 	}
 	for envKey, koanfKey := range envOverrides {
 		if val := os.Getenv(envKey); val != "" {

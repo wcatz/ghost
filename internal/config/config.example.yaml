@@ -38,6 +38,14 @@
 #                              # injection; stricter than threshold since
 #                              # "related" isn't the same bar as "redundant"
 
+# --- Search ranking ---
+# Cosine floor applied to the vector leg of hybrid search BEFORE RRF fusion.
+# FTS candidates are exempt. 0 keeps historical behavior (only non-positive
+# cosines dropped); raise to stop weak semantic matches from padding results
+# when the corpus has no true match. Tune against `ghost bench`.
+# search:
+#   min_similarity: 0.0
+
 # --- Subprocess LLM binary paths ---
 # Same as the defaults above: the harness path override applies to every
 # LLM-backed operation (reflection, resolve, supersede), not just one tier.

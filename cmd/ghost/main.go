@@ -1997,6 +1997,7 @@ func bootstrap(logWriter io.Writer, logLevel slog.Level) (*config.Config, *slog.
 
 	store := memory.NewStore(db, logger)
 	store.SetDemotionThreshold(cfg.Linking.DemotionThreshold)
+	store.SetVectorMinSimilarity(float32(cfg.Search.MinSimilarity))
 
 	if err := store.SeedGlobalMemories(context.Background()); err != nil {
 		logger.Warn("seed global memories", "error", err)

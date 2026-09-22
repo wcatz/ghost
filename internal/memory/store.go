@@ -55,6 +55,12 @@ type Store struct {
 	// DemotionPenalties). Defaults to DefaultDemotionThreshold; callers that
 	// have loaded config override it via SetDemotionThreshold.
 	demotionThreshold float64
+
+	// vectorMinSimilarity is the cosine floor applied to the vector leg of
+	// hybrid search (SearchParams.MinSimilarity). Defaults to 0 (historical:
+	// only non-positive cosines dropped); config search.min_similarity
+	// overrides via SetVectorMinSimilarity.
+	vectorMinSimilarity float32
 }
 
 // SetOnSave registers a callback invoked after each successful memory save.
@@ -72,6 +78,22 @@ func (s *Store) SetDemotionThreshold(threshold float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.demotionThreshold = threshold
+}
+
+// SetVectorMinSimilarity overrides the vector-leg cosine floor hybrid search
+// applies before fusion. Call after NewStore once config is loaded; until
+// called, the floor is 0 (only non-positive cosines dropped).
+func (s *Store) SetVectorMinSimilarity(floor float32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.vectorMinSimilarity = floor
+}
+
+// vectorMinSimilarityFloor returns the configured floor under the read lock.
+func (s *Store) vectorMinSimilarityFloor() float32 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.vectorMinSimilarity
 }
 
 // NewStore creates a new memory store from an open database.
