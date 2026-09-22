@@ -727,6 +727,8 @@ Flags:
 	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel())
 	defer store.Close() //nolint:errcheck
 
+	applyPhaseModel(cfg.CLI.ModelReflect)
+
 	ctx := context.Background()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
@@ -1092,6 +1094,16 @@ Flags:
 	}
 }
 
+// applyPhaseModel pins the opencode harness model for this phase process when
+// the config sets one. ai.OpenCodeClient reads GHOST_OPENCODE_MODEL per
+// invocation; each lifecycle phase runs as its own process, so setting it here
+// cannot leak across phases. An empty config leaves any inherited value alone.
+func applyPhaseModel(model string) {
+	if model != "" {
+		_ = os.Setenv("GHOST_OPENCODE_MODEL", model)
+	}
+}
+
 // buildClassifyProvider builds the Provider resolve/supersede classify
 // against: a cascade of subscription-billed CLI harnesses (claude, opencode,
 // codex, goose — see ai.CLIProvider). The Anthropic HTTP API no longer exists,
@@ -1175,6 +1187,7 @@ host).`)
 	ctx := context.Background()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
+	applyPhaseModel(cfg.CLI.ModelSupersede)
 	provider, err := buildClassifyProviderForSource(cfg, source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: ghost supersede %v\n", err)
@@ -1269,6 +1282,7 @@ config; set --source to route by host).`)
 	ctx := context.Background()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
+	applyPhaseModel(cfg.CLI.ModelResolve)
 	provider, err := buildClassifyProviderForSource(cfg, source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: ghost resolve %v\n", err)

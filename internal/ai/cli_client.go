@@ -45,7 +45,7 @@ func NewCLIClientWithBinary(binary string) *CLIClient {
 }
 
 // Reflect satisfies reflection's reflector interface (see
-// internal/reflection/tier_haiku.go). TokenUsage is always zero: subscription
+// internal/reflection/tier_llm.go). TokenUsage is always zero: subscription
 // calls have no per-token API cost to record.
 func (c *CLIClient) Reflect(ctx context.Context, prompt string) (string, TokenUsage, error) {
 	text, err := c.run(ctx, prompt)
