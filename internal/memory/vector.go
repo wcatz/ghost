@@ -177,6 +177,13 @@ type SearchParams struct {
 	// default in production (DefaultSearchParams). See docs/benchmarks.md
 	// Phase 3.
 	SupersedeDemote bool
+	// DecayReselect, when true, changes decayRank membership: keep the top
+	// limit*2 by base score, then select the top limit by base×decay — so a
+	// fresh memory ranked just below the pure-base cut can be rescued.
+	// false (default) is the historical behavior: relevance owns membership
+	// and decay only reorders the surviving window. Ship-gated on the
+	// staleness and recency-trap suites — see docs/benchmarks.md Phase 3.
+	DecayReselect bool
 }
 
 // DefaultSearchParams returns the production fusion parameters.
@@ -278,19 +285,23 @@ func DecayFactor(category string, pinned bool, ageDays float64) float64 {
 	}
 }
 
-// decayRank truncates results to limit by base score, then (when enabled)
-// reorders the surviving window by base score × decayFactor. base is the fused
-// score when scores is non-nil; otherwise it is synthesized from position (the
-// FTS-only paths), base = 1/(RRFK+rank+1). Membership is owned by base score
-// alone — decay reorders but never drops a more-relevant memory, which is what
-// keeps findability intact (a rank-1 relevant fresh answer is never displaced
-// by unrelated younger memories). The tradeoff, accepted by design: a fresh
-// memory ranked below the cut by base score is NOT rescued — decay only lifts
-// fresh versions that are already inside the window. The sort by base happens
-// in both modes — the fused path hydrates via GetByIDs, which does NOT
-// preserve order. Age reads created_at — never updated_at, which Upsert's
-// strengthen path bumps. An unparseable created_at is treated as ancient so a
-// malformed timestamp can never spuriously win.
+// decayRank truncates results to limit, then (when enabled) reorders by base
+// score × decayFactor. base is the fused score when scores is non-nil;
+// otherwise it is synthesized from position (the FTS-only paths),
+// base = 1/(RRFK+rank+1).
+//
+// Membership rules:
+//   - DecayReselect=false (default, historical): truncate to limit by base
+//     alone — relevance owns membership; decay only reorders the surviving
+//     window. A fresh memory ranked below the cut by base is NOT rescued.
+//   - DecayReselect=true: keep the top limit*2 by base, then select the top
+//     limit by base×decay — a fresh memory just below the pure-base cut can
+//     enter the final window. Ship-gated on staleness + recency-trap suites.
+//
+// Age reads created_at — never updated_at, which Upsert's strengthen path
+// bumps. An unparseable created_at is treated as ancient so a malformed
+// timestamp can never spuriously win. The sort by base happens in both modes
+// — the fused path hydrates via GetByIDs, which does NOT preserve order.
 func decayRank(results []Memory, scores map[string]float64, p SearchParams, limit int, now time.Time) []Memory {
 	scored := make([]struct {
 		m    Memory
@@ -307,19 +318,26 @@ func decayRank(results []Memory, scores map[string]float64, p SearchParams, limi
 		}{m, base}
 	}
 
-	// Truncate by base score first: relevance owns membership.
+	// Sort by base first: relevance is the primary key in both modes.
 	sort.SliceStable(scored, func(i, j int) bool {
 		if scored[i].base != scored[j].base {
 			return scored[i].base > scored[j].base
 		}
 		return scored[i].m.ID < scored[j].m.ID
 	})
-	if len(scored) > limit {
-		scored = scored[:limit]
+
+	baseCut := limit
+	if p.DecayReselect && p.DecayEnabled {
+		// Keep a wider base window so decay can choose among more candidates.
+		baseCut = limit * 2
+	}
+	if len(scored) > baseCut {
+		scored = scored[:baseCut]
 	}
 
-	// Reorder the window by base × decay (ordering only, never membership).
 	if p.DecayEnabled {
+		// Reorder by base × decay (ordering; with DecayReselect this also
+		// owns final membership via the subsequent truncate).
 		sort.SliceStable(scored, func(i, j int) bool {
 			fi := scored[i].base * DecayFactor(scored[i].m.Category, scored[i].m.Pinned, ageDays(scored[i].m.CreatedAt, now))
 			fj := scored[j].base * DecayFactor(scored[j].m.Category, scored[j].m.Pinned, ageDays(scored[j].m.CreatedAt, now))
@@ -328,6 +346,9 @@ func decayRank(results []Memory, scores map[string]float64, p SearchParams, limi
 			}
 			return scored[i].m.ID < scored[j].m.ID
 		})
+	}
+	if len(scored) > limit {
+		scored = scored[:limit]
 	}
 
 	out := make([]Memory, len(scored))
