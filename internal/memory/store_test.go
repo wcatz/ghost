@@ -1231,7 +1231,7 @@ func TestStoreGetTopMemories(t *testing.T) {
 		}
 	}
 
-	// Get top 2 — should be ordered by composite score (importance * decay * pin boost).
+	// Get top 2 — ordered by composite score (importance * decay; pinned = decay factor 1.0).
 	top, err := s.GetTopMemories(ctx, testProject, 2)
 	if err != nil {
 		t.Fatalf("GetTopMemories: %v", err)

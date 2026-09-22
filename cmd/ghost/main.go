@@ -641,8 +641,8 @@ type lifecyclePhase struct {
 // per-project PID file keyed to this parent's liveness, so a single hung phase
 // would silently disable auto-consolidation for that project until the process
 // was killed by hand. The bound is long enough that a legitimately slow pass
-// (resolve classifies one candidate per CLI-harness call, several seconds each)
-// completes; set the value to 0 to remove the bound entirely.
+// (resolve classifies up to 8 candidates per CLI-harness call, several seconds
+// each) completes; set the value to 0 to remove the bound entirely.
 func lifecyclePhases(cfg *config.Config, projectName string, llmOK bool) []lifecyclePhase {
 	timeout := time.Duration(cfg.Reflection.LifecycleTimeoutMinutes) * time.Minute
 	var phases []lifecyclePhase
@@ -1299,8 +1299,8 @@ caller is an error, never a fallback to a different harness).`)
 // and KEEP verdicts are cached by content hash so a converged project makes no
 // calls. Dry-run by default; --apply writes resolved_at and the cache.
 // Re-runnable and reversible: any later Upsert/UpdateMemory of a memory clears
-// its resolved_at. The stop hook spawns this as a detached --apply process
-// (internal/mcpinit/stophook.go).
+// its resolved_at. The stop hook spawns `ghost lifecycle` detached
+// (internal/mcpinit/stophook.go); its resolve phase runs this with --apply.
 func runResolve() {
 	var projectName string
 	var source string

@@ -10,9 +10,10 @@
 // cached by content hash in memories.resolve_kept_hash so a converged project
 // makes no classifier calls at all. The LLM Classifier implementation lives in
 // resolution.go; the hosting binary supplies a CLI-harness provider (see
-// internal/ai). The stop hook spawns `ghost resolve --apply` as a detached
-// background process (internal/mcpinit/stophook.go). The pass is re-runnable
-// and idempotent — already-resolved rows are excluded by ResolveCandidates.
+// internal/ai). The stop hook spawns `ghost lifecycle --project <id>` as a
+// detached background process (internal/mcpinit/stophook.go), whose resolve
+// phase runs this command with --apply. The pass is re-runnable and
+// idempotent — already-resolved rows are excluded by ResolveCandidates.
 package resolve
 
 import (
