@@ -343,14 +343,14 @@ hybrid      0.532   0.930   0.973   0.901   0.903     one-time cold embedding ~1
 ```text
 $ ghost bench
 condition          R@1     R@5    R@10   MRR@10  NDCG@10
-fts-only         0.786   0.964   1.000    0.964    0.965
-vector-only      0.786   0.929   0.964    0.952    0.946
-hybrid           0.857   0.964   1.000    1.000    0.989
+fts-only         0.469   0.623   0.689   0.837   0.748
+vector-only      0.486   0.711   0.777   0.876   0.799
+hybrid           0.514   0.696   0.777   0.899   0.817
 
-14 graded queries, 22 memories. Retrieval-only, no LLM judge.
+219 graded queries, 547 memories. Retrieval-only, no LLM judge.
 ```
 
-- **Hybrid fusion beats both single legs here** (NDCG@10 0.989 vs 0.965 full-text, 0.946 vector) — CI asserts that relationship on every PR. Across both benchmarks, fusion is the robustness play: vectors win conversational recall, keywords win exact identifiers.
+- **Hybrid fusion beats both single legs here** (NDCG@10 0.817 vs 0.748 full-text, 0.799 vector) — CI asserts that relationship on every PR. Absolute numbers are lower than the old v1 starter because v2 adds paraphrase queries where lexical overlap is weak; across both benchmarks, fusion is the robustness play: vectors win conversational recall, keywords win exact identifiers.
 - **We ran the ablations, found our own regression, and removed it.** An additive graph-expansion ranking bonus hurt retrieval — a public LongMemEval-S kill experiment showed its recoveries were a strict subset of a deeper vector-k's, with no headroom at production depth — so it was removed entirely rather than kept disabled. The link graph itself is retained for the Obsidian mirror and `supersedes` ranking. `ghost bench --sweep` grid-searches the fusion parameters if you want to check our tuning.
 - **The staleness suite** ("prod ran Postgres 14, we migrated to 16" — does search rank the fresh fact first?) runs report-only in CI. A *recency-trap* fixture (older memory is the correct answer) proved a blanket age-only prior can't be the default: it's a cliff, every weight that fixes staleness destroys old-but-still-correct retrieval. The fix that survives it is *category-aware*: search now applies the time-decay factor (pinned / preference / convention / fact never decay; pattern/architecture τ=45; decision/gotcha/dependency τ=30) to reorder the result window, so the staleness suite's updated-deployment facts (`dependency` category) flip fresh-wins **0.083 → 1.000** while the trap's `fact` memories stay flat at **0.929** — the free lunch the blanket prior couldn't achieve. Decay is ordering-only (it never drops a relevant memory). Both halves ship: `ghost supersede` creates `supersedes` links (cosine proposes, batched CLI-harness classify calls confirm them — both the single-pair and batched paths scored 10/10 on a labeled set in local runs), and `DefaultSearchParams` ships `DecayEnabled: true` + `SupersedeDemote: true`, so production search (`ghost_memory_search`, `ghost_search_all`) is time-aware and consumes `supersedes` links by default. Link creation stays opt-in: the demote is a hard no-op until you run `ghost supersede --apply`. Publishing the negative result, the reason, *and* the fix that survives it is the point.
 

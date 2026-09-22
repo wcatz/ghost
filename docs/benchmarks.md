@@ -38,28 +38,28 @@ Published end-to-end (answer-accuracy) numbers use a GPT-4o judge and a generato
 
 `ghost bench` runs a self-authored graded dataset (in `internal/bench/testdata/`) with a committed real `nomic-embed-text:v1.5` embedding fixture, so CI runs the vector/hybrid conditions with no Ollama. The harness (`internal/bench/`) drives Ghost's production `SearchFTS`/`SearchVector`/`SearchHybrid` over a fresh in-memory store and scores judge-free IR metrics.
 
-Current numbers (v1 dataset: 22 memories spanning all 8 categories, 14 graded queries; retrieval-only, no LLM judge; fully deterministic — reproduce with `ghost bench`):
+Current numbers (v2 dataset: 547 memories spanning all 8 categories, 219 graded queries with heavy paraphrase/vocab-mismatch coverage; retrieval-only, no LLM judge; fully deterministic — reproduce with `go run ./cmd/ghost bench` after rebuild):
 
 ```
 condition          R@1     R@5    R@10   MRR@10  NDCG@10
-fts-only         0.786   0.964   1.000    0.964    0.965
-vector-only      0.786   0.929   0.964    0.952    0.946
-hybrid           0.857   0.964   1.000    1.000    0.989
+fts-only         0.469   0.623   0.689   0.837   0.748
+vector-only      0.486   0.711   0.777   0.876   0.799
+hybrid           0.514   0.696   0.777   0.899   0.817
 ```
 
 Two findings, both honest:
 
-- **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.989) beats both single legs (FTS 0.965, vector 0.946) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI.
+- **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.817) beats both single legs (FTS 0.748, vector 0.799) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI. Absolute numbers are lower than the v1 starter because v2 deliberately adds paraphrase queries where lexical overlap is weak (the FTS leg's R@1 falls to 0.469; vector and hybrid carry those).
 - **The graph-expansion bonus was evaluated and removed.** An additive link-graph bonus (former 0.15 default) lifted semantically-adjacent neighbors above exact matches, and a public LongMemEval-S kill experiment showed its recoveries were a strict subset of a deeper vector-k's, with no headroom at production depth. It shipped at `GraphWeight 0` and has now been removed entirely (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`). The link graph is retained for the Obsidian mirror and `supersedes` ranking.
 
-The dataset is deliberately a v1 starter (all 8 categories represented); growing it toward ~150 memories / ~40 graded queries is planned. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie.
+The v2 dataset overshoots the original ~150/~40 growth target (547/219) to give distractor density room for paraphrase grading. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie.
 
 ### Parameter sweep (`ghost bench --sweep`)
 
-The RRF fusion is parameterized (`memory.SearchParams`), and `ghost bench --sweep` grid-searches the vector-leg weight (FTS = complement) — 6 combinations over the same dataset, one prepared store. Findings from the first sweep (full table: run `ghost bench --sweep`):
+The RRF fusion is parameterized (`memory.SearchParams`), and `ghost bench --sweep` grid-searches the vector-leg weight (FTS = complement) — 6 combinations over the same dataset, one prepared store. Findings on the v2 dataset (full table: run `go run ./cmd/ghost bench --sweep`):
 
-- **Leg weights are robust.** Vec 0.3–0.7 all land within 0.989–0.992 NDCG; only vec ≥ 0.8 degrades. The shipped 70/30 weighting is fine; there is no evidence for changing it from a 14-query dataset.
-- **Outcome: the 70/30 leg weighting ships unchanged, and the graph bonus was removed.** With the leg weights robust across vec 0.3–0.7, there is no evidence to change the shipped 70/30 split. The graph-expansion bonus was removed rather than kept disabled (see the spec linked above); the link graph is still built for the Obsidian mirror and `supersedes`.
+- **Leg weights remain robust, and the default still wins.** On 219 queries, vec 0.70 (shipped default) tops the grid at NDCG 0.817; 0.60/0.80/0.90 are within 0.002; only vec 0.30 degrades (0.785). The earlier v1 sweep's "0.3–0.7 flat" band does not fully carry over — the paraphrase-heavy queries reward a stronger vector leg — but there is still no evidence to move off 70/30.
+- **Outcome: the 70/30 leg weighting ships unchanged, and the graph bonus was removed.** With the leg weights robust across the upper half of the grid, there is no evidence to change the shipped 70/30 split. The graph-expansion bonus was removed rather than kept disabled (see the spec linked above); the link graph is still built for the Obsidian mirror and `supersedes`.
 
 ## Phase 3 — staleness suite (the flagship)
 
