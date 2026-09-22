@@ -333,6 +333,165 @@ func TestMigrateHandMigratedDB(t *testing.T) {
 	}
 }
 
+// TestMigrateRepairsPreExistingCacheOrphans: a v5 database whose only orphans
+// are derived-cache rows — link_scans/memory_embeddings for deleted memories —
+// must migrate cleanly to schemaVersion: the debris is deleted with a warning,
+// the surviving rows are untouched, and the DB opens (it is not bricked).
+func TestMigrateRepairsPreExistingCacheOrphans(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open v5 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	v5 := []string{
+		`CREATE TABLE projects (
+    id          TEXT PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`CREATE TABLE memories (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL DEFAULT 'fact',
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL DEFAULT 0.5,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT,
+    source        TEXT NOT NULL DEFAULT 'reflection',
+    tags          TEXT DEFAULT '[]',
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at   TEXT
+)`,
+		`CREATE TABLE memory_embeddings (
+    memory_id   TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    embedding   BLOB NOT NULL,
+    model       TEXT NOT NULL DEFAULT 'nomic-embed-text',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`CREATE TABLE link_scans (
+    memory_id  TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+    scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`CREATE TABLE ghost_state (
+    project_id          TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    interaction_count   INTEGER NOT NULL DEFAULT 0,
+    learned_context     TEXT DEFAULT '',
+    last_reflection_at  TEXT,
+    reflection_summary  TEXT DEFAULT '',
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v5c-p1', 'p1')`,
+		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'survivor memory')`,
+		`INSERT INTO link_scans (memory_id, scanned_at) VALUES ('deleted-mem', datetime('now'))`,
+		`INSERT INTO memory_embeddings (memory_id, embedding) VALUES ('deleted-mem', X'0102')`,
+		`PRAGMA user_version = 5`,
+	}
+	for _, s := range v5 {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed v5 db: %v", err)
+		}
+	}
+
+	if err := migrate(db, 5); err != nil {
+		t.Fatalf("migrate v5->current with cache orphans: %v", err)
+	}
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	// The orphaned derived rows were deleted (repair path).
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM link_scans`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("link_scans after repair: n=%d err=%v, want 0", n, err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM memory_embeddings`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("memory_embeddings after repair: n=%d err=%v, want 0", n, err)
+	}
+	// The surviving memory row is untouched.
+	if err := db.QueryRow(`SELECT count(*) FROM memories WHERE id = 'm1'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("memories after repair: n=%d err=%v, want 1", n, err)
+	}
+}
+
+// TestMigrateBlocksUserContentOrphans: an orphan in a user-content table (a
+// memories row whose project is gone) must NOT be auto-deleted — migrate fails
+// with copy-pasteable DELETE statements naming the offending rows, so the
+// operator decides. This is the deliberate non-destructive side of the repair:
+// derived-cache debris self-heals, user content never silently disappears.
+func TestMigrateBlocksUserContentOrphans(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open v5 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	v5 := []string{
+		`CREATE TABLE projects (
+    id          TEXT PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`CREATE TABLE memories (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL DEFAULT 'fact',
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL DEFAULT 0.5,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT,
+    source        TEXT NOT NULL DEFAULT 'reflection',
+    tags          TEXT DEFAULT '[]',
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at   TEXT
+)`,
+		`CREATE TABLE ghost_state (
+    project_id          TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    interaction_count   INTEGER NOT NULL DEFAULT 0,
+    learned_context     TEXT DEFAULT '',
+    last_reflection_at  TEXT,
+    reflection_summary  TEXT DEFAULT '',
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v5b-p1', 'p1')`,
+		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'survivor memory')`,
+		`INSERT INTO memories (id, project_id, content) VALUES ('m-orphan', 'gone-project', 'orphaned memory')`,
+		`PRAGMA user_version = 5`,
+	}
+	for _, s := range v5 {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed v5 db: %v", err)
+		}
+	}
+
+	err = migrate(db, 5)
+	if err == nil {
+		t.Fatal("migrate succeeded on DB with a user-content orphan, want error")
+	}
+	if !strings.Contains(err.Error(), "DELETE FROM memories WHERE rowid") {
+		t.Errorf("migrate error lacks copy-pasteable DELETE statements: %v", err)
+	}
+	// Nothing was deleted: the survivor row is intact and so is the orphan
+	// (the operator deletes it deliberately after reading the message).
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM memories`).Scan(&n); err != nil || n != 2 {
+		t.Errorf("memories after blocked migrate: n=%d err=%v, want 2 (nothing auto-deleted)", n, err)
+	}
+	if v := schemaVersionOf(t, db); v != 5 {
+		t.Errorf("user_version = %d, want 5 (migration aborted before stamping)", v)
+	}
+}
+
 // TestMigrateIdempotent: opening an already-migrated database repeatedly is a no-op.
 // v4WithConversationsDB writes a schemaVersion-4 database: the current
 // initSQL shape plus the pre-v5 conversations/messages tables with orphaned
