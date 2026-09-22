@@ -182,6 +182,11 @@ func detectSourceFromPS(run func(name string, args ...string) ([]byte, error), s
 		if jsRuntimes[comm] {
 			out, err := run("ps", "-o", "command=", "-p", strconv.Itoa(pid))
 			if err == nil {
+				// Mirror sourceForProcess: only the script argument (the first
+				// positional token after the runtime) can classify this
+				// process. When it does not name a harness the walk continues
+				// to the next ancestor rather than scanning later arguments —
+				// `node deploy.js /path/codex.js` is not codex.
 				for i, token := range strings.Fields(string(out)) {
 					if i == 0 || strings.HasPrefix(token, "-") {
 						continue
@@ -189,6 +194,7 @@ func detectSourceFromPS(run func(name string, args ...string) ([]byte, error), s
 					if s := sourceFromScriptPath(token); s != "" {
 						return s
 					}
+					break
 				}
 			}
 		}

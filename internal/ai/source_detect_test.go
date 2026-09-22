@@ -128,6 +128,27 @@ func TestDetectSourceFromPS(t *testing.T) {
 		}
 	})
 
+	t.Run("later argument naming a harness is not the script", func(t *testing.T) {
+		run := fakePS(t, map[int]fakeProc{
+			500: {ppid: "400", comm: "ghost", command: "/usr/local/bin/ghost supersede"},
+			400: {ppid: "1", comm: "node", command: "node deploy.js /usr/local/bin/codex.js"},
+		})
+		if got := detectSourceFromPS(run, 500); got != "" {
+			t.Errorf("detectSourceFromPS() = %q, want %q", got, "")
+		}
+	})
+
+	t.Run("walk continues past a non-harness script", func(t *testing.T) {
+		run := fakePS(t, map[int]fakeProc{
+			500: {ppid: "400", comm: "ghost", command: "/usr/local/bin/ghost supersede"},
+			400: {ppid: "300", comm: "node", command: "node deploy.js"},
+			300: {ppid: "1", comm: "opencode", command: "opencode"},
+		})
+		if got := detectSourceFromPS(run, 500); got != "opencode" {
+			t.Errorf("detectSourceFromPS() = %q, want %q", got, "opencode")
+		}
+	})
+
 	t.Run("native comm ancestor", func(t *testing.T) {
 		run := fakePS(t, map[int]fakeProc{
 			500: {ppid: "400", comm: "ghost", command: "/usr/local/bin/ghost supersede"},
