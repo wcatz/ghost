@@ -12,9 +12,9 @@
 
 ## Background and measurement (task B1F8C738)
 
-`opencode/big-pickle` measured on the supersede labeled set: 10/10 and 9/10 single-pair across two live runs (the miss was the subtle NATS CAUSES case — run-to-run variance) and 10/10 batched at batchSize 3. `opencode/claude-haiku-4-5` is NOT entitled (403 "Model access is disabled") — do not use or reference haiku as a candidate.
+`opencode/big-pickle` measured on the supersede labeled set: 10/10 and 9/10 single-pair across two live runs (the miss was the subtle NATS CAUSES case — run-to-run variance) and 10/10 batched at batchSize 3. Measured on the new resolve labeled set (`internal/resolve/live_test.go`, 10 notes = 5 RESOLVED + 5 KEEP incl. a decision record containing the literal word "RESOLVED"): **10/10 single-note and 10/10 batched (batchSize 3, 4 calls), KEEP-side false-RESOLVED 0/5** on 2026-09-22 — resolve's KEEP-biased conclusion-vs-evidence rubric holds on the small model, and the dangerous collapse direction (a KEEP note wrongly resolved and dropped from injection) is clean, so the resolve pin is **validated, no longer provisional**. `opencode/claude-haiku-4-5` is NOT entitled (403 "Model access is disabled") — do not use or reference haiku as a candidate.
 
-**Provisional for resolve:** those measurements are supersede-only, and batched at batchSize 3 while supersede ships at 8. Resolve adjudicates with a KEEP-biased conclusion-vs-evidence rubric, which is unmeasured on a small model — pin resolve to big-pickle only experimentally.
+**Provisional for resolve:** those supersede measurements are now joined by the resolve labeled-set run above (10/10 both paths) — the resolve pin ships with evidence, not on guesswork.
 
 ## File structure
 

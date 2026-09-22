@@ -16,6 +16,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/claudeimport"
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 	"github.com/wcatz/ghost/internal/resolve"
@@ -114,6 +115,14 @@ type Server struct {
 	mcp       *mcp.Server
 	embedder  Embedder
 	projectCh chan<- string // notify embedding worker of new memories
+
+	// resolveCLI carries the configured harness binaries and the
+	// cli.model_resolve pin into the ghost_resolve handler. The MCP server is
+	// long-lived, so the pin is passed at construction time per spawn (never
+	// by mutating GHOST_OPENCODE_MODEL, which would leak across tools and
+	// concurrent calls). Zero value preserves the pre-pin behavior: PATH
+	// lookup, no model pin.
+	resolveCLI config.CLIConfig
 }
 
 // Content length caps enforced on free-text tool arguments. Memory content was
@@ -251,6 +260,14 @@ func (s *Server) notifyProjectResource(ctx context.Context, projectID, suffix st
 func (s *Server) SetEmbedder(e Embedder, projectCh chan<- string) {
 	s.embedder = e
 	s.projectCh = projectCh
+}
+
+// SetResolveCLI hands the loaded CLI config (harness binaries + model pins) to
+// the ghost_resolve handler. Called once from runMCP before Run; the zero
+// value is the no-config state (PATH lookup, no pin), so tests that skip it
+// keep the old behavior.
+func (s *Server) SetResolveCLI(cfg config.CLIConfig) {
+	s.resolveCLI = cfg
 }
 
 // Run starts the MCP server on stdio transport. Blocks until done.
@@ -1053,9 +1070,11 @@ func (s *Server) registerTools() {
 		// environment and process ancestry (the MCP server is spawned by the
 		// client). If neither yields a source, or its binary is missing, the
 		// tool errors — it must never silently classify through a different
-		// harness (e.g. claude) than the caller's. MCP sampling was retired
-		// here per spec 2026-07-28 (SEP-2577 deprecates Sampling) — see
-		// docs/superpowers/specs/2026-08-24-resolve-sampling-path-design.md.
+		// harness (e.g. claude) than the caller's. The configured
+		// cli.model_resolve pin is passed constructor-level (not via env) so a
+		// long-lived server applies it to this spawn only. MCP sampling was
+		// retired here per spec 2026-07-28 (SEP-2577 deprecates Sampling) —
+		// see docs/superpowers/specs/2026-08-24-resolve-sampling-path-design.md.
 		var clientName string
 		if p := req.Session.InitializeParams(); p != nil && p.ClientInfo != nil {
 			clientName = p.ClientInfo.Name
@@ -1067,7 +1086,8 @@ func (s *Server) registerTools() {
 		if source == "" {
 			return nil, nil, fmt.Errorf("ghost_resolve (client %q): %w", clientName, ai.ErrUndetectableHarness)
 		}
-		cli := ai.NewSourceProviderForSource(source)
+		cli := ai.NewSourceProviderForSourceWithModel(source, s.resolveCLI.ModelResolve,
+			s.resolveCLI.ClaudeBinary, s.resolveCLI.OpenCodeBinary, s.resolveCLI.CodexBinary, s.resolveCLI.GooseBinary)
 		if !cli.Available() {
 			return nil, nil, fmt.Errorf("ghost_resolve: calling harness %q is unavailable (no matching `claude`, `opencode`, `codex`, or `goose` binary on PATH or via cli.*_binary config)", source)
 		}

@@ -21,6 +21,18 @@ type SourceProvider struct {
 // Callers resolve the source (--source, or ai.DetectSource) and fail with an
 // actionable error when it is empty.
 func NewSourceProviderForSource(source string, cfgBinaries ...string) *SourceProvider {
+	return newSourceProvider(source, "", cfgBinaries...)
+}
+
+// NewSourceProviderForSourceWithModel is NewSourceProviderForSource plus a
+// constructor-level model pin threaded to the opencode backend only (the other
+// harnesses have no model flag). Used by the long-lived MCP server, where the
+// configured cli.model_resolve must apply without mutating process env.
+func NewSourceProviderForSourceWithModel(source, model string, cfgBinaries ...string) *SourceProvider {
+	return newSourceProvider(source, model, cfgBinaries...)
+}
+
+func newSourceProvider(source, model string, cfgBinaries ...string) *SourceProvider {
 	var claudeBin, opencodeBin, codexBin, gooseBin string
 	if len(cfgBinaries) > 0 {
 		claudeBin = cfgBinaries[0]
@@ -36,13 +48,13 @@ func NewSourceProviderForSource(source string, cfgBinaries ...string) *SourcePro
 	}
 	switch source {
 	case "claude-code":
-		return resolveCLI(claudeBin, "claude", "cli")
+		return resolveCLI(claudeBin, "claude", "cli", model)
 	case "opencode":
-		return resolveCLI(opencodeBin, "opencode", "opencode")
+		return resolveCLI(opencodeBin, "opencode", "opencode", model)
 	case "codex":
-		return resolveCLI(codexBin, "codex", "codex")
+		return resolveCLI(codexBin, "codex", "codex", model)
 	case "goose":
-		return resolveCLI(gooseBin, "goose", "goose")
+		return resolveCLI(gooseBin, "goose", "goose", model)
 	default:
 		return &SourceProvider{backend: nil, name: "none"}
 	}
@@ -51,8 +63,9 @@ func NewSourceProviderForSource(source string, cfgBinaries ...string) *SourcePro
 // resolveCLI resolves a specific CLI backend for the given source. It does NOT
 // cascade to other binaries — if the source-specific binary isn't found, the
 // provider is unavailable. This is intentional: when the user's session used
-// claude, we should use claude, not silently switch to opencode.
-func resolveCLI(configured, defaultName, providerName string) *SourceProvider {
+// claude, we should use claude, not silently switch to opencode. model is
+// threaded to the opencode backend only; the other harnesses ignore it.
+func resolveCLI(configured, defaultName, providerName, model string) *SourceProvider {
 	bin := configured
 	if bin == "" {
 		bin = defaultName
@@ -64,7 +77,7 @@ func resolveCLI(configured, defaultName, providerName string) *SourceProvider {
 	case "cli":
 		return &SourceProvider{backend: NewCLIClientWithBinary(bin), name: "cli"}
 	case "opencode":
-		return &SourceProvider{backend: NewOpenCodeClientWithBinary(bin), name: "opencode"}
+		return &SourceProvider{backend: NewOpenCodeClientWithBinaryAndModel(bin, model), name: "opencode"}
 	case "codex":
 		return &SourceProvider{backend: NewCodexClientWithBinary(bin), name: "codex"}
 	case "goose":

@@ -121,6 +121,10 @@ func runMCP() {
 	defer cancel()
 
 	srv := mcpserver.New(store, logger, version)
+	// Hand the loaded CLI config to ghost_resolve: configured binaries win
+	// over PATH, and cli.model_resolve is applied constructor-level per spawn
+	// (the server is long-lived, so no env mutation).
+	srv.SetResolveCLI(cfg.CLI)
 
 	if cfg.Embedding.Enabled {
 		embedClient := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)
@@ -730,8 +734,6 @@ Flags:
 	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel())
 	defer store.Close() //nolint:errcheck
 
-	applyPhaseModel(cfg.CLI.ModelReflect)
-
 	ctx := context.Background()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
@@ -844,6 +846,17 @@ Flags:
 			consolidator = reflection.NewTieredConsolidator(tiers, logger)
 		}
 	}
+
+	// Pin the harness model now that the tier/source resolves the harness: the
+	// env is read per opencode invocation, so setting it after the consolidator
+	// is built but before it runs is safe, and only here can we tell whether
+	// the pin actually applies (a pin for a non-opencode harness is inert and
+	// warned about above the pin itself).
+	reflectHarness := tierValue
+	if tierValue == "auto" {
+		reflectHarness = source
+	}
+	applyPhaseModel(cfg.CLI.ModelReflect, reflectHarness)
 
 	if !consolidator.Available(ctx) {
 		fmt.Fprintf(os.Stderr, "error: consolidator %q is not available\n", consolidator.Name())
@@ -1111,12 +1124,21 @@ Flags:
 }
 
 // applyPhaseModel pins the opencode harness model for this phase process when
-// the config sets one. ai.OpenCodeClient reads GHOST_OPENCODE_MODEL per
-// invocation; each lifecycle phase runs as its own process, so setting it here
-// cannot leak across phases. An empty config leaves any inherited value alone.
-func applyPhaseModel(model string) {
-	if model != "" {
-		_ = os.Setenv("GHOST_OPENCODE_MODEL", model)
+// the config sets one, and warns when the chosen harness cannot honor the pin.
+// ai.OpenCodeClient reads GHOST_OPENCODE_MODEL per invocation; each lifecycle
+// phase runs as its own process, so setting it here cannot leak across phases.
+// An empty config leaves any inherited value alone. harness is the resolved
+// CLI-harness token ("opencode", "claude-code", "codex", "goose", or the
+// explicit reflect tiers) — a non-empty model with a non-opencode harness is a
+// silently-inert pin (claude/codex/goose have no model flag), surfaced once
+// here rather than ignored.
+func applyPhaseModel(model, harness string) {
+	if model == "" {
+		return
+	}
+	_ = os.Setenv("GHOST_OPENCODE_MODEL", model)
+	if harness != "" && harness != "opencode" {
+		fmt.Fprintf(os.Stderr, "warning: cli.model_* pin %q configured but the %s harness has no model flag; the pin will not apply (only the opencode harness honors model pins)\n", model, harness)
 	}
 }
 
@@ -1227,7 +1249,7 @@ caller is an error, never a fallback to a different harness).`)
 	ctx := context.Background()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
-	applyPhaseModel(cfg.CLI.ModelSupersede)
+	applyPhaseModel(cfg.CLI.ModelSupersede, source)
 	provider, err := buildClassifyProviderForSource(cfg, source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: ghost supersede %v\n", err)
@@ -1332,7 +1354,7 @@ a different harness).`)
 	ctx := context.Background()
 
 	projectID := resolveProjectOrExit(ctx, store, projectName)
-	applyPhaseModel(cfg.CLI.ModelResolve)
+	applyPhaseModel(cfg.CLI.ModelResolve, source)
 	provider, err := buildClassifyProviderForSource(cfg, source)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: ghost resolve %v\n", err)

@@ -128,3 +128,47 @@ func TestSourceForClientName(t *testing.T) {
 		}
 	}
 }
+
+// TestNewSourceProviderForSourceWithModel_ThreadsModel pins that the
+// constructor-level model reaches the opencode backend (and only that backend).
+// The other harnesses have no model flag, so their backends must be constructed
+// as before. This is the MCP server's path for applying cli.model_resolve
+// without mutating process env.
+func TestNewSourceProviderForSourceWithModel_ThreadsModel(t *testing.T) {
+	dir := t.TempDir()
+	claude := filepath.Join(dir, "claude")
+	opencode := filepath.Join(dir, "opencode")
+	if err := os.WriteFile(claude, []byte("#!/bin/sh\nexit 0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(opencode, []byte("#!/bin/sh\nexit 0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// opencode backend: constructor model must be non-empty.
+	p := NewSourceProviderForSourceWithModel("opencode", "opencode/big-pickle", claude, opencode, "", "")
+	oc, ok := p.backend.(*OpenCodeClient)
+	if !ok {
+		t.Fatalf("opencode backend = %T, want *OpenCodeClient", p.backend)
+	}
+	if oc.model != "opencode/big-pickle" {
+		t.Errorf("opencode backend model = %q, want opencode/big-pickle", oc.model)
+	}
+
+	// claude backend: no model field — it must still construct as *CLIClient
+	// (the model is simply not threaded to harnesses that have no model flag).
+	p = NewSourceProviderForSourceWithModel("claude-code", "opencode/big-pickle", claude, opencode, "", "")
+	if _, ok := p.backend.(*CLIClient); !ok {
+		t.Errorf("claude backend = %T, want *CLIClient", p.backend)
+	}
+
+	// Empty model: constructor behaves like the plain constructor.
+	p = NewSourceProviderForSourceWithModel("opencode", "", claude, opencode, "", "")
+	oc, ok = p.backend.(*OpenCodeClient)
+	if !ok {
+		t.Fatalf("opencode backend = %T, want *OpenCodeClient", p.backend)
+	}
+	if oc.model != "" {
+		t.Errorf("opencode backend model = %q, want empty", oc.model)
+	}
+}
