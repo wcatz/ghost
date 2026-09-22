@@ -518,6 +518,11 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	for _, c := range injection.BehaviorCategories {
 		behavioral[c] = true
 	}
+	// Per-category cap on pass-1 reserved slots (injection.category_caps).
+	// Without it a gotcha-heavy corpus fills every guaranteed slot with
+	// gotchas; the default caps gotcha at half the floor so convention/
+	// preference/decision can still claim reserved slots.
+	categoryCaps := injection.CategoryCaps
 
 	score := func(c candidate, weighted bool) float64 {
 		w := 1.0
@@ -532,11 +537,16 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	chosen := make([]sessionMemory, 0, sessionMemoriesCap)
 	used := make(map[string]bool, len(cands)+1)
 	if behaviorFloor > 0 {
+		pass1Count := make(map[string]int, len(behavioral))
 		for {
 			best := -1
 			var bestScore float64
 			for i := range cands {
-				if used[cands[i].mem.ID] || !behavioral[cands[i].mem.Category] {
+				cat := cands[i].mem.Category
+				if used[cands[i].mem.ID] || !behavioral[cat] {
+					continue
+				}
+				if capN, ok := categoryCaps[cat]; ok && capN > 0 && pass1Count[cat] >= capN {
 					continue
 				}
 				s := score(cands[i], true)
@@ -548,6 +558,7 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 				break
 			}
 			used[cands[best].mem.ID] = true
+			pass1Count[cands[best].mem.Category]++
 			chosen = append(chosen, cands[best].mem)
 		}
 	}

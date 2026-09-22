@@ -509,4 +509,7 @@ func TestInjectionConfigDefaults(t *testing.T) {
 	if cfg.Injection.CategoryWeights != nil {
 		t.Errorf("category_weights default should be nil, got %v", cfg.Injection.CategoryWeights)
 	}
+	if cfg.Injection.CategoryCaps["gotcha"] != 4 {
+		t.Errorf("category_caps[gotcha] = %d, want 4", cfg.Injection.CategoryCaps["gotcha"])
+	}
 }

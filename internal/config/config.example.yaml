@@ -99,3 +99,7 @@
 #     - decision
 #   category_weights: {}           # optional per-category ordering boost in pass 1,
 #                                  # e.g. {gotcha: 1.2} (default all 1.0)
+#   category_caps:                 # max pass-1 reserved slots per category
+#     gotcha: 4                    # default: gotcha may take at most half the
+#                                  # floor so a gotcha-heavy corpus cannot fill
+#                                  # every guaranteed slot with gotchas
