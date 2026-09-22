@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 )
@@ -1490,6 +1491,69 @@ func TestGhostResolve_UsesSessionHarness(t *testing.T) {
 	}
 	if !strings.Contains(text.Text, "1 confirmed evidence") {
 		t.Errorf("expected opencode (RESOLVED) to confirm the memory, got %q", text.Text)
+	}
+}
+
+// TestGhostResolve_UsesConfiguredBinaryAndModelPin covers the cli.*_binary +
+// cli.model_resolve path: a fake opencode binary that only answers RESOLVED
+// when invoked with `-m opencode/big-pickle` must be used even though a decoy
+// opencode (answering KEEP) sits on PATH, and the configured pin must be passed
+// constructor-level. The MCP server is long-lived, so the whole test would fail
+// (decoy used, badly) if the pin were threaded via process env instead.
+func TestGhostResolve_UsesConfiguredBinaryAndModelPin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binaries require a POSIX shell")
+	}
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+	// The configured opencode binary lives outside PATH; the decoy on PATH
+	// answers KEEP, so a PATH-resolved harness would not confirm anything.
+	dir := t.TempDir()
+	openBin := filepath.Join(dir, "opencode")
+	script := `#!/bin/sh
+case " $* " in
+  *" -m opencode/big-pickle "*) printf '%s\n' '{"type":"text","part":{"type":"text","text":"RESOLVED"}}';;
+  *) printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}';;
+esac
+`
+	if err := os.WriteFile(openBin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write configured opencode binary: %v", err)
+	}
+	decoyDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(decoyDir, "opencode"), []byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"KEEP\"}}'\n"), 0o755); err != nil {
+		t.Fatalf("write decoy opencode binary: %v", err)
+	}
+	t.Setenv("PATH", decoyDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	srv.SetResolveCLI(config.CLIConfig{
+		OpenCodeBinary: openBin,
+		ModelResolve:   "opencode/big-pickle",
+	})
+
+	ctx := context.Background()
+	const content = "root cause: fixed in v2, no further action needed"
+	if _, _, _, err := store.Upsert(ctx, "abc123", "gotcha", content, "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	session := connectedClientNamed(t, srv, "opencode")
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_resolve",
+		Arguments: map[string]any{"project": "test-project"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_resolve: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("ghost_resolve returned an error result: %+v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(text.Text, "1 confirmed evidence") {
+		t.Errorf("expected configured opencode with the model pin to confirm, got %q", text.Text)
 	}
 }
 

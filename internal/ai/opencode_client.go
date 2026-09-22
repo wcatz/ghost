@@ -19,6 +19,11 @@ import (
 // reflect tier.
 type OpenCodeClient struct {
 	binary string
+	// model pins the model via -m. Constructor-set, it wins over the
+	// GHOST_OPENCODE_MODEL env var: a long-lived MCP server must apply its
+	// configured pin per-tool without mutating the process environment (which
+	// would leak across tools and concurrent calls). Empty falls back to env.
+	model string
 }
 
 // NewOpenCodeClient creates an OpenCodeClient that invokes `opencode` on PATH.
@@ -30,6 +35,13 @@ func NewOpenCodeClient() *OpenCodeClient {
 // binary path (absolute, or a name resolved from PATH).
 func NewOpenCodeClientWithBinary(binary string) *OpenCodeClient {
 	return &OpenCodeClient{binary: binary}
+}
+
+// NewOpenCodeClientWithBinaryAndModel is NewOpenCodeClientWithBinary plus a
+// constructor-level model pin (e.g. "opencode/big-pickle"). When model is
+// non-empty it takes precedence over GHOST_OPENCODE_MODEL for this client only.
+func NewOpenCodeClientWithBinaryAndModel(binary, model string) *OpenCodeClient {
+	return &OpenCodeClient{binary: binary, model: model}
 }
 
 // Reflect satisfies reflection's reflector interface (see
@@ -65,7 +77,11 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	// Ghost's own MCP server against this process's SQLite DB), and strips
 	// ANTHROPIC_API_KEY.
 	args := []string{"run", "--format", "json", "--pure", "--title", "[ghost]"}
-	if model := os.Getenv("GHOST_OPENCODE_MODEL"); model != "" {
+	model := c.model
+	if model == "" {
+		model = os.Getenv("GHOST_OPENCODE_MODEL")
+	}
+	if model != "" {
 		args = append(args, "-m", model)
 	}
 	args = append(args, prompt)

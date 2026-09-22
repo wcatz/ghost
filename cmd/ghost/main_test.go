@@ -448,13 +448,59 @@ func TestDetectPhaseSource(t *testing.T) {
 
 func TestApplyPhaseModel(t *testing.T) {
 	t.Setenv("GHOST_OPENCODE_MODEL", "inherited/model")
-	applyPhaseModel("")
+	applyPhaseModel("", "claude-code")
 	if got := os.Getenv("GHOST_OPENCODE_MODEL"); got != "inherited/model" {
 		t.Errorf("empty config must leave the inherited value, got %q", got)
 	}
-	applyPhaseModel("opencode/big-pickle")
+	applyPhaseModel("opencode/big-pickle", "opencode")
 	if got := os.Getenv("GHOST_OPENCODE_MODEL"); got != "opencode/big-pickle" {
 		t.Errorf("config must pin the model, got %q", got)
+	}
+}
+
+// TestApplyPhaseModelWarnsOnInertPin pins the stderr warning when a configured
+// pin cannot apply: claude/codex/goose have no model flag, so the pin would
+// otherwise be silently ignored. An opencode harness (or no harness, e.g. the
+// offline sqlite tier before the tier/source resolves) must stay silent.
+func TestApplyPhaseModelWarnsOnInertPin(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		model   string
+		harness string
+		wantMsg bool
+	}{
+		{"opencode honors the pin", "opencode/big-pickle", "opencode", false},
+		{"claude-code pin is inert", "opencode/big-pickle", "claude-code", true},
+		{"codex pin is inert", "opencode/big-pickle", "codex", true},
+		{"goose pin is inert", "opencode/big-pickle", "goose", true},
+		{"empty pin never warns", "", "claude-code", false},
+		{"no harness never warns", "opencode/big-pickle", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := os.Stderr
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("pipe: %v", err)
+			}
+			os.Stderr = w
+			t.Cleanup(func() { os.Stderr = old })
+
+			applyPhaseModel(tc.model, tc.harness)
+
+			_ = w.Close()
+			out, err := io.ReadAll(r)
+			if err != nil {
+				t.Fatalf("read stderr: %v", err)
+			}
+			if got := strings.Contains(string(out), "warning: cli.model_* pin"); got != tc.wantMsg {
+				t.Errorf("warning present = %v, want %v (stderr: %q)", got, tc.wantMsg, out)
+			}
+			if tc.model != "" {
+				if got := os.Getenv("GHOST_OPENCODE_MODEL"); got != tc.model {
+					t.Errorf("pin must still be set even when warned, GHOST_OPENCODE_MODEL = %q", got)
+				}
+			}
+		})
 	}
 }
 

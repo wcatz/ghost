@@ -170,6 +170,25 @@ func TestOpenCodeClient_NoEnvNoModelFlag(t *testing.T) {
 	}
 }
 
+// TestOpenCodeClient_ConstructorModelWinsOverEnv verifies that a
+// constructor-level model pin takes precedence over GHOST_OPENCODE_MODEL
+// (important for long-lived MCP servers that must not mutate process env).
+func TestOpenCodeClient_ConstructorModelWinsOverEnv(t *testing.T) {
+	bin := fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`)
+	t.Setenv("GHOST_OPENCODE_MODEL", "deepseek/deepseek-v4")
+	c := NewOpenCodeClientWithBinaryAndModel(bin, "opencode/big-pickle")
+	text, _, err := c.Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if !strings.Contains(text, "-m opencode/big-pickle") {
+		t.Fatalf("expected constructor model flag, got %q", text)
+	}
+	if strings.Contains(text, "deepseek/deepseek-v4") {
+		t.Fatalf("env model must not leak when constructor model is set: %q", text)
+	}
+}
+
 // TestSubprocessEnvConfinesTempDir pins the fix for the opencode JIT-cache
 // leak: opencode writes a hidden ~4.7 MiB shared object into its temp dir on
 // every invocation, and a single lifecycle spawns hundreds of processes, so
