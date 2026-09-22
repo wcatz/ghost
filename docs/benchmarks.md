@@ -106,6 +106,18 @@ The trap is untouched in both cases: under decay its distractors are `fact` (nev
 
 **Consumption has now graduated; creation stays opt-in.** `DefaultSearchParams` ships `DecayEnabled: true` and `SupersedeDemote: true`, so production `SearchHybrid` / `SearchHybridAll` (i.e. `ghost_memory_search` and `ghost_search_all`, including their FTS-only fallbacks) apply decay reordering and consume `supersedes` links. Creation of `supersedes` links remains opt-in — links only exist if the user ran `ghost supersede --apply` — so the demote is still a hard no-op for anyone who has not asked for it, and the numbers above are what back the flip: decay alone moves staleness fresh-wins 0.083 → 1.000 with recency-trap correct-wins unchanged at 0.929 (`TestDecayFrontier`); the demote does the same 0.083 → 1.000 with trap flat at 0.929 (`TestSupersedeDemoteClearsFrontier`). Either half alone clears the frontier, and both on keeps it cleared. It was flipped because an eval run found the opposite failure: a memory the user had explicitly marked as replaced still outranked its replacement in live search. `TestProductionSearchDemotesSuperseded` (internal/memory) guards the production entry points; `SearchHybridParams` still takes explicit params for the sweep harness.
 
+### Decay re-selection (evaluated, NOT default)
+
+`SearchParams.DecayReselect` (default **false**) keeps the top `limit*2` by base score, then selects the top `limit` by `base × decay` — the fix for "a fresh memory ranked below the pure-base cut is never rescued." Probed via `TestDecayReselectProbe` (`GHOST_BENCH_PROBE=1`):
+
+```text
+                  graded hybrid NDCG@10   staleness fresh-found/wins   trap correct-wins
+reselect=false    0.989                   1.000 / 1.000                0.929
+reselect=true     0.989                   0.938 / 0.938                0.929
+```
+
+**Verdict: not defaultable.** The wider base window **regresses staleness** — `default_branch` (both probes) and `vpn_solution` (state probe) lose the fresh version entirely — while graded and trap stay flat. Ship gate requires staleness not to regress; the flag stays off by default and is available for future experiments behind `SearchParams.DecayReselect`. Reorder-only membership (relevance owns the cut) remains the shipped behavior.
+
 ## Phase 4 — end-to-end LongMemEval-S (retrieve → generate → judge) — SHIPPED (DeepSeek v4 Pro)
 
 The pipeline ([`bench/longmemeval/phase4/`](../bench/longmemeval/phase4/)) is four stages: Ghost retrieves (Go, `-retrieval-out ranked.jsonl`), `merge_retrieval.py` folds the ranking into the dataset, and `phase4_run.py` generates hypotheses then judges them. Generation prompt assembly (`prepare_prompt`) and the yes/no grading templates (`get_anscheck_prompt`) are imported **verbatim** from an upstream LongMemEval checkout — only the API client is swapped — so numbers stay reproducible against the published harness. Both stages are append-only and resume-safe. To reproduce any reported score, run the full pipeline:
