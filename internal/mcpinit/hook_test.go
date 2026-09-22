@@ -1159,6 +1159,95 @@ func TestSessionInjectionBehaviorFloor(t *testing.T) {
 	}
 }
 
+// TestSessionInjectionGotchaCap: pass-1 category_caps must bound how many
+// reserved slots a single behavioral category can take. Fixture: 12 fresh
+// high-importance gotchas (enough to fill the entire default floor of 8)
+// plus 6 conventions. Without the cap, pass 1 would select 8 gotchas and
+// conventions would get zero reserved slots; with the default cap of 4,
+// conventions must claim the remaining reserved slots.
+func TestSessionInjectionGotchaCap(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	for i := 0; i < 12; i++ {
+		if _, err := db.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES (?, 'p1', 'gotcha', ?, 'manual', 0.95)`,
+			fmt.Sprintf("got%02d", i), fmt.Sprintf("GOTCHAMARKER%02d warning", i),
+		); err != nil {
+			t.Fatalf("insert gotcha %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 6; i++ {
+		if _, err := db.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES (?, 'p1', 'convention', ?, 'manual', 0.85)`,
+			fmt.Sprintf("conv%02d", i), fmt.Sprintf("CONVEMARKER%02d rule", i),
+		); err != nil {
+			t.Fatalf("insert convention %d: %v", i, err)
+		}
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir})
+	var out strings.Builder
+	runSessionStartHook(t, string(input), &out)
+	result := out.String()
+
+	gotchaCount := strings.Count(result, "GOTCHAMARKER")
+	convCount := strings.Count(result, "CONVEMARKER")
+	if convCount == 0 {
+		t.Errorf("expected category_caps to leave reserved slots for conventions; got 0 CONVEMARKER (gotcha lines=%d):\n%s", gotchaCount, result)
+	}
+	// Pass 1 is the only place the cap applies; pass 2 is plain rank and may
+	// still pull more gotchas by score. Assert the reserved-slot bound: among
+	// the first behaviorFloor(8) injected memories, at most cap(4) are gotchas.
+	behavioralLines := 0
+	gotchaInFloor := 0
+	for _, line := range strings.Split(result, "\n") {
+		if !strings.HasPrefix(line, "- [") {
+			if behavioralLines >= 8 && gotchaInFloor > 0 {
+				break
+			}
+			continue
+		}
+		if behavioralLines >= 8 {
+			break
+		}
+		behavioralLines++
+		if strings.HasPrefix(line, "- [gotcha]") {
+			gotchaInFloor++
+		}
+	}
+	if gotchaInFloor > 4 {
+		t.Errorf("gotcha count in first %d reserved slots = %d, want <= 4 (category_caps):\n%s", behavioralLines, gotchaInFloor, result)
+	}
+	if gotchaInFloor == 0 {
+		t.Errorf("expected some gotchas in the reserved floor (cap is a bound, not a ban):\n%s", result)
+	}
+}
+
 // TestHandleSessionStartHook_SubagentSuppressed: a session carrying a
 // non-empty agent_id is a subagent spawn — it already inherits working
 // context in-band from its parent's prompt, so the hook must emit nothing

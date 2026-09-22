@@ -112,11 +112,15 @@ type LinkingConfig struct {
 // memories to inject. It biases the limited slot budget toward high-signal,
 // hard-to-derive categories (gotcha/convention/preference/decision) without
 // growing the total footprint. behavior_floor of 0 disables the bias entirely
-// (pure DecayRankingSQL selection, the historical behavior).
+// (pure DecayRankingSQL selection, the historical behavior). category_caps
+// bounds how many pass-1 reserved slots a single behavioral category may take,
+// so a gotcha-heavy corpus cannot fill every guaranteed slot with gotchas
+// (a 46% gotcha share would otherwise dominate the floor).
 type InjectionConfig struct {
 	BehaviorFloor      int                `koanf:"behavior_floor"`
 	BehaviorCategories []string           `koanf:"behavior_categories"`
 	CategoryWeights    map[string]float64 `koanf:"category_weights"`
+	CategoryCaps       map[string]int     `koanf:"category_caps"`
 }
 
 // DefaultInjectionConfig returns the compiled injection defaults. It mirrors the
@@ -127,6 +131,7 @@ func DefaultInjectionConfig() InjectionConfig {
 	return InjectionConfig{
 		BehaviorFloor:      8,
 		BehaviorCategories: []string{"gotcha", "convention", "preference", "decision"},
+		CategoryCaps:       map[string]int{"gotcha": 4},
 	}
 }
 
@@ -157,6 +162,7 @@ var defaults = map[string]interface{}{
 	"linking.demotion_threshold":               0.90,
 	"injection.behavior_floor":                 8,
 	"injection.behavior_categories":            []string{"gotcha", "convention", "preference", "decision"},
+	"injection.category_caps":                  map[string]interface{}{"gotcha": 4},
 	"obsidian.vault_dir":                       "",
 	"obsidian.interval":                        "30s",
 	"obsidian.auto_sync":                       false,
