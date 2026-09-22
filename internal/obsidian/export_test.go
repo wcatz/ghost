@@ -503,3 +503,107 @@ func TestFolderNamesCaseCollision(t *testing.T) {
 		t.Errorf("folders still collide case-insensitively: %q vs %q", got[ps[0].ID], got[ps[1].ID])
 	}
 }
+
+// snapshotVault reads every .md under root into relpath → contents, for
+// byte-comparing two export passes.
+func snapshotVault(t *testing.T, root string) map[string]string {
+	t.Helper()
+	got := make(map[string]string)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		got[rel] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// TestExportTypedEdgesDeterministic: a directed + a symmetric link produce
+// typed frontmatter on the source note; a second export of the same store is
+// byte-identical (writeIfChanged no-churn holds with fmEdges in the path).
+func TestExportTypedEdgesDeterministic(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	id1, err := store.Create(ctx, "ghost", memory.Memory{
+		Category: "fact", Content: "New fact that supersedes the old", Importance: 0.8, Source: "mcp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := store.Create(ctx, "ghost", memory.Memory{
+		Category: "fact", Content: "Old fact superseded by the new", Importance: 0.7, Source: "mcp",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateLink(ctx, id1, id2, "supersedes", 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateLink(ctx, id1, id2, "related", 0.5, "auto"); err != nil {
+		t.Fatal(err)
+	}
+
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	first := snapshotVault(t, vault)
+	if len(first) == 0 {
+		t.Fatal("expected notes after first export")
+	}
+
+	// Source note has both typed keys; target note has only related.
+	var srcBody, tgtBody string
+	for rel, content := range first {
+		switch {
+		case strings.Contains(rel, id1[:8]):
+			srcBody = content
+		case strings.Contains(rel, id2[:8]):
+			tgtBody = content
+		}
+	}
+	if srcBody == "" || tgtBody == "" {
+		t.Fatalf("missing source/target notes in snapshot: src=%q tgt=%q", srcBody, tgtBody)
+	}
+	if !strings.Contains(srcBody, "supersedes: ") {
+		t.Errorf("source note must carry supersedes typed field:\n%s", srcBody)
+	}
+	if !strings.Contains(srcBody, "related: ") {
+		t.Errorf("source note must carry related typed field:\n%s", srcBody)
+	}
+	if strings.Contains(tgtBody, "supersedes:") {
+		t.Errorf("target of directed supersedes must not emit supersedes:\n%s", tgtBody)
+	}
+	if !strings.Contains(tgtBody, "related: ") {
+		t.Errorf("target must still emit related typed field:\n%s", tgtBody)
+	}
+
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("second export: %v", err)
+	}
+	second := snapshotVault(t, vault)
+	if len(first) != len(second) {
+		t.Fatalf("re-export changed file count: %d -> %d", len(first), len(second))
+	}
+	for rel, content := range first {
+		if second[rel] != content {
+			t.Errorf("re-export changed %s", rel)
+		}
+	}
+}
