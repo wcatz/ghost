@@ -18,7 +18,7 @@ func byCondition(results []Result) map[string]Result {
 func TestBenchRegressionFloors(t *testing.T) {
 	r := byCondition(runTestdata(t))
 
-	const wantQueries = 14
+	const wantQueries = 219
 	for cond, res := range r {
 		if res.Queries != wantQueries {
 			t.Errorf("%s: scored %d queries, want %d", cond, res.Queries, wantQueries)
@@ -29,9 +29,12 @@ func TestBenchRegressionFloors(t *testing.T) {
 		cond           string
 		ndcg, recall10 float64
 	}{
-		{CondFTS, 0.92, 0.95},
-		{CondVector, 0.90, 0.90},
-		{CondHybrid, 0.95, 0.95},
+		// Observed on the v2 dataset (547 memories / 219 paraphrase-heavy
+		// graded queries): fts 0.748/0.689, vector 0.799/0.777,
+		// hybrid 0.817/0.777. Floors sit just below those.
+		{CondFTS, 0.73, 0.67},
+		{CondVector, 0.78, 0.75},
+		{CondHybrid, 0.80, 0.75},
 	}
 	for _, f := range floors {
 		res := r[f.cond]

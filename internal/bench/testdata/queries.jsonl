@@ -15,3 +15,208 @@
 {"name":"q_git_policy","text":"can I commit a one line fix straight to the main branch","rel":{"no_main_push":3}}
 {"name":"q_why_sqlite","text":"why does Ghost use SQLite instead of a database server","rel":{"decision_sqlite":3,"ghost_sqlite":1}}
 {"name":"q_graph_choice","text":"why did Ghost not use an entity knowledge graph for memory links","rel":{"decision_links":3}}
+{"name": "q_epoch_days", "text": "how long is an epoch in cardano", "rel": {"epoch_length": 3}}
+{"name": "q_bp_exposure", "text": "should the block producer accept public peers", "rel": {"bp_firewall": 3, "relay_public": 1, "relay_topology": 1}}
+{"name": "q_preview_magic", "text": "what network magic does preview use", "rel": {"config_preview": 3}}
+{"name": "q_mithril_boot", "text": "how does a fresh node avoid replaying from genesis", "rel": {"mithril_snapshot": 3}}
+{"name": "q_submit_tx_port", "text": "which port accepts signed transactions for submission", "rel": {"tx_submit_port": 3}}
+{"name": "q_annotated_tags", "text": "why must release tags be annotated not lightweight", "rel": {"semver_tags": 3}}
+{"name": "q_branch_cleanup", "text": "what should happen to a feature branch after the PR merges", "rel": {"branch_naming": 3, "delete_branch_after_merge": 3, "pr_squash": 1}}
+{"name": "q_gpg_commits", "text": "are commits signed on this project", "rel": {"signed_commits": 3}}
+{"name": "q_session_injection", "text": "what does the session-start hook inject into context", "rel": {"hook_session_start": 3, "session_cap_15": 1}}
+{"name": "q_stop_lifecycle", "text": "what runs when the agent session ends", "rel": {"hook_stop_lifecycle": 3, "lifecycle_pid_lock": 1}}
+{"name": "q_tmp_fill", "text": "how does ghost keep from filling the system temp", "rel": {"scratch_root": 3, "scratch_reap_24h": 1}}
+{"name": "q_pick_harness", "text": "how does ghost choose which agent CLI to call", "rel": {"harness_detect": 3, "empty_source_fail": 1}}
+{"name": "q_resolve_cost", "text": "how does resolve avoid calling the LLM for every memory", "rel": {"resolve_batch": 3, "resolve_kept_hash": 1}}
+{"name": "q_reflect_wipe", "text": "what stops reflection from deleting everything", "rel": {"empty_set_guard": 3, "no_empty_replace": 3, "guarded_drop": 1}}
+{"name": "q_bad_category", "text": "what happens if the model invents a memory category", "rel": {"energy_reflect_categories": 3}}
+{"name": "q_foreign_project", "text": "does reflection allow memories about other projects", "rel": {"contamination_guard": 3}}
+{"name": "q_superseded_injection", "text": "can a superseded fact still appear first in session context", "rel": {"supersede_injection": 3, "time_decay_categories": 1}}
+{"name": "q_fts_cap", "text": "why are FTS queries limited to ten terms", "rel": {"fts_term_cap": 3}}
+{"name": "q_ollama_down", "text": "what happens to search when the embedding service is offline", "rel": {"vector_fallback": 3, "ghost_ollama": 1}}
+{"name": "q_decay_rules", "text": "which memory categories never lose rank to age", "rel": {"time_decay_categories": 3, "pinned_exempt": 1}}
+{"name": "q_liveness_db", "text": "why should liveness not check the database", "rel": {"k8s_probes": 3, "readiness_vs_liveness": 1}}
+{"name": "q_pdb_drain", "text": "why is the node drain stuck on pod disruption", "rel": {"pdb_budget": 3}}
+{"name": "q_default_deny", "text": "how are network policies started in a new namespace", "rel": {"network_policy_default": 3}}
+{"name": "q_terraform_drift", "text": "someone changed a cloud resource in the console now what", "rel": {"no_manual_tf": 3, "config_drift_detect": 1}}
+{"name": "q_tf_state", "text": "where should terraform state live", "rel": {"state_remote": 3, "plan_apply_split": 1}}
+{"name": "q_gha_supply", "text": "how do we pin github actions against tampering", "rel": {"pin_actions_sha": 3, "least_action_permissions": 1, "pull_request_target": 1}}
+{"name": "q_gha_untrusted", "text": "is it safe to checkout the PR head in pull_request_target", "rel": {"pull_request_target": 3}}
+{"name": "q_ci_credentials", "text": "how do deploys authenticate to the cloud from CI", "rel": {"oidc_cloud_auth": 3, "environment_protection": 1}}
+{"name": "q_ctx_first", "text": "why must context be the first function argument", "rel": {"context_first_arg": 3}}
+{"name": "q_http_body_leak", "text": "what leaks connections if you forget it on error paths", "rel": {"body_close": 3}}
+{"name": "q_ssrf_redirect", "text": "how do we stop HTTP clients following redirects into the LAN", "rel": {"redirect_policy": 3, "callback_allowlist": 1}}
+{"name": "q_error_is", "text": "why does errors.Is always return false here", "rel": {"error_wrap_context": 3, "typed_errors_wrapped": 1}}
+{"name": "q_goroutine_last_value", "text": "why do all my goroutines see the last loop value", "rel": {"range_capture": 3}}
+{"name": "q_race_map", "text": "what panics when maps are written concurrently", "rel": {"map_concurrent": 3, "atomic_single_discipline": 1}}
+{"name": "q_argon2", "text": "what password hashing should we use", "rel": {"password_hash": 3}}
+{"name": "q_jwt_none", "text": "how do we stop JWT alg none attacks", "rel": {"jwt_algs_allowlist": 3, "jwt_leeway_30": 1}}
+{"name": "q_oauth_open_redirect", "text": "what makes the OAuth redirect validator dangerous if it is a prefix match", "rel": {"oauth_redirect_exact": 3, "pkce_required": 1}}
+{"name": "q_session_cookie", "text": "which cookie flags are mandatory for the session", "rel": {"cookie_flags": 3, "session_rotation": 1}}
+{"name": "q_secret_in_ci", "text": "a secret was committed what happens next", "rel": {"secret_scan_ci": 3, "rotate_after_expose": 3}}
+{"name": "q_circuit", "text": "what pattern keeps a dead dependency from eating the thread pool", "rel": {"circuit_breaker": 3, "timeout_budget": 1}}
+{"name": "q_unbounded_queue", "text": "what turns a slowdown into a full outage on a queue", "rel": {"queue_backpressure": 3, "fairness_limit": 1}}
+{"name": "q_idempotent_consumer", "text": "how do we handle queue redelivery after a crash", "rel": {"idempotent_consumer": 3, "idempotent_webhook_retry": 1}}
+{"name": "q_deploy_guards", "text": "what promotes a canary besides a timer", "rel": {"canary_rollout": 3, "rollback_fast": 1}}
+{"name": "q_zero_downtime_schema", "text": "how do we change the schema under running old code", "rel": {"schema_mig_expand": 3, "migration_forward_only": 1, "index_concurrent": 1}}
+{"name": "q_cache_herd", "text": "what happens when a hot cache key expires at once", "rel": {"cache_stampede": 3}}
+{"name": "q_order_events", "text": "can we order events by timestamp across hosts", "rel": {"clock_skew": 3}}
+{"name": "q_error_budget_use", "text": "what do we pause when the error budget is gone", "rel": {"error_budget": 3, "error_budget_freeze": 1}}
+{"name": "q_blameless", "text": "how should postmortems treat individuals", "rel": {"postmortem_blameless": 3}}
+{"name": "q_alert_first", "text": "should we alert on errors or saturation first", "rel": {"saturation_first": 3, "multiwindow_burn": 1}}
+{"name": "q_label_blowup", "text": "what metric label choice can OOM the scraper", "rel": {"metrics_cardinality": 3, "latency_hist_slo": 1}}
+{"name": "q_log_tokens", "text": "how do tokens end up in log storage despite careful code", "rel": {"redact_pii_logs": 3, "redact_structured": 1}}
+{"name": "q_restore_proof", "text": "how often do we prove backups work", "rel": {"backup_test_freq": 3, "backup_restore_drill": 3}}
+{"name": "q_prod_change", "text": "how do production changes get reviewed", "rel": {"change_mgmt_pr": 3, "two_person_rule": 1, "change_freeze": 1}}
+{"name": "q_api_break", "text": "how do we break a public API safely", "rel": {"api_versioning": 3, "deprecation_window": 1}}
+{"name": "q_double_charge", "text": "how do client retries avoid double-charging", "rel": {"idempotency_keys": 3, "client_retry_jitter": 1}}
+{"name": "q_outbox", "text": "how do we publish an event and change state atomically", "rel": {"outbox_pattern": 3}}
+{"name": "q_model_swap", "text": "what breaks when the embedding model changes", "rel": {"embedding_dim_pin": 3, "batch_embed_cache": 1}}
+{"name": "q_embeddings_leave", "text": "do embeddings leave the machine", "rel": {"ollama_local": 3, "ghost_ollama": 1}}
+{"name": "q_rag_topk", "text": "how many chunks go into the prompt after retrieval", "rel": {"retrieval_topk": 3, "hybrid_rag": 1}}
+{"name": "q_prompt_change", "text": "where do production prompts live", "rel": {"prompt_version": 3, "eval_harness": 1}}
+{"name": "q_ssh_public", "text": "is ssh open to the internet on prod hosts", "rel": {"ssh_bastion": 3, "sudo_limited": 1}}
+{"name": "q_config_inline_secret", "text": "someone pasted a key into config.yaml now what", "rel": {"config_secret_ref": 3, "rotate_after_expose": 1}}
+{"name": "q_config_order", "text": "which config source wins env or file", "rel": {"env_overrides": 3, "boot_validate": 1}}
+{"name": "q_docs_location", "text": "where does design rationale live", "rel": {"adr_records": 3, "docs_as_code": 1}}
+{"name": "q_investigate_first", "text": "before debugging a reported bug what should I check", "rel": {"pr_before_investigate": 3}}
+{"name": "q_claim_done", "text": "what counts as evidence that a fix works", "rel": {"verify_before_claim": 3, "evidence_citations": 1, "mutation_aware": 1}}
+{"name": "q_scope_pr", "text": "how large should one PR be", "rel": {"scope_discipline": 3, "no_driveby_refactor": 1}}
+{"name": "q_tests_required", "text": "when can a change land without tests", "rel": {"tests_not_optional": 3, "run_tests_before_after": 1}}
+{"name": "q_red_main", "text": "main is red what is the policy", "rel": {"pause_on_red": 3, "broken_main_siren": 1}}
+{"name": "q_helmfile_check", "text": "what must I run before applying helmfile to prod", "rel": {"helmfile_diff": 3, "helmfile_selector_required": 1, "helm_diff_gate": 1}}
+{"name": "q_sops_key", "text": "how are secrets encrypted in the infra repo and who can decrypt", "rel": {"sops_age": 3, "sops_age_key_id": 1, "age_key_ci": 1, "sops_ci_key": 1}}
+{"name": "q_k3s_join", "text": "how do nodes join the k3s cluster securely", "rel": {"k3s_tailscale": 3, "k3s_native_tailscale": 1}}
+{"name": "q_runners", "text": "where do CI runners actually run", "rel": {"arc_runners": 3, "arc_self_hosted": 1}}
+{"name": "q_ghost_db_choice", "text": "why a single file database for ghost", "rel": {"decision_sqlite": 3, "ghost_sqlite": 1}}
+{"name": "q_graph_rejected", "text": "why not an entity knowledge graph", "rel": {"decision_links": 3, "graph_expansion_off": 1}}
+{"name": "q_injection_budget", "text": "how many memories get injected at session start", "rel": {"session_cap_15": 3, "hook_session_start": 1}}
+{"name": "q_guiled_data", "text": "how is stored memory prevented from becoming instructions", "rel": {"quote_data_delims": 3}}
+{"name": "q_search_cat", "text": "is ghost_memory_search category filter exhaustive", "rel": {"search_category_approx": 3}}
+{"name": "q_resolved_visible", "text": "do resolved memories still show up in search", "rel": {"resolve_not_in_hook": 3}}
+{"name": "q_reflect_undo", "text": "how do I undo a bad consolidation", "rel": {"restore_snapshot": 3, "ghost_reflect": 1, "dry_run_default": 1}}
+{"name": "q_pin_behavior", "text": "what does pinning a memory actually change", "rel": {"pinned_exempt": 3, "pin_survives_reflect": 1}}
+{"name": "q_task_survive", "text": "do ghost tasks survive across sessions", "rel": {"task_ids_survive": 3}}
+{"name": "q_decision_why", "text": "where do I record why we rejected an alternative", "rel": {"decision_record_tool": 3, "adr_records": 1}}
+{"name": "q_make_targets", "text": "is there a make target for the bench", "rel": {"makefile_no_bench": 3, "bench_no_judge": 1}}
+{"name": "q_module_go_ver", "text": "which go version does the module require", "rel": {"go_module_version": 3}}
+{"name": "q_base_image", "text": "are floating latest base images allowed", "rel": {"no_latest_base": 3, "docker_multi_stage": 1}}
+{"name": "q_codeowners", "text": "whose review is required for workflow changes", "rel": {"codeowners_paths": 3, "review_sla": 1}}
+{"name": "q_runbook_alert", "text": "what annotation must a page-worthy alert have", "rel": {"runbook_alert": 3, "alert_runbook_link": 1}}
+{"name": "q_patch_when", "text": "when does host patching happen", "rel": {"patch_window": 3, "patch_critical_track": 1}}
+{"name": "q_rpo", "text": "what are the documented recovery objectives", "rel": {"dr_rpo_rto": 3, "backup_immutable": 1}}
+{"name": "q_spot_policy", "text": "can production request path run on spot", "rel": {"spot_batch_only": 3}}
+{"name": "q_dashboards_code", "text": "where do grafana dashboards live", "rel": {"dashboard_as_code": 3}}
+{"name": "q_correlation", "text": "how do I follow one request across services", "rel": {"correlation_id": 3, "propagation_w3c": 1}}
+{"name": "q_pprof_expose", "text": "is pprof on the public port", "rel": {"pprof_internal": 3, "flamegraph_incident": 1}}
+{"name": "q_race_merge", "text": "can we merge with a known race failure", "rel": {"race_on_merge": 3}}
+{"name": "q_fuzz_need", "text": "which code needs fuzz tests", "rel": {"fuzz_decoders": 3, "property_roundtrip": 1}}
+{"name": "q_bisect", "text": "how do I find which commit introduced a regression", "rel": {"bisect_regression": 3, "debug_dont_guess": 1}}
+{"name": "q_bugs_need", "text": "what must a bug report include before we start", "rel": {"minimal_repro": 3}}
+{"name": "q_release_hotfix", "text": "how does a hotfix reach main after tagging a release", "rel": {"hotfix_forward_merge": 3, "fix_forward_link": 1}}
+{"name": "q_old_client", "text": "how long do old API clients get support", "rel": {"n_minus_one": 3, "deprecation_window": 1}}
+{"name": "q_admin_audit", "text": "what is written before an admin mutation is acked", "rel": {"audit_trail": 3, "audit_hash_chain": 1}}
+{"name": "q_pii_logs", "text": "what must never appear in logs or metrics", "rel": {"pii_minimize": 3, "redact_pii_logs": 1}}
+{"name": "q_mtls", "text": "is plaintext allowed between internal services", "rel": {"mTLS_internal": 3, "cert_auto_renew": 1}}
+{"name": "q_upload_limits", "text": "what stops a form from filling the disk", "rel": {"file_upload_limits": 3, "presigned_short": 1, "archive_bomb": 1}}
+{"name": "q_csp_rollout", "text": "how is CSP introduced without breaking the app", "rel": {"csp_incremental": 3, "subresource_integrity": 1}}
+{"name": "q_dataloader", "text": "how do we avoid N+1 in graphql", "rel": {"dataloader_batch": 3}}
+{"name": "q_smoke_e2e", "text": "what test gates every deploy", "rel": {"e2e_smoke_gate": 3, "component_by_role": 1, "a11y_gate": 1}}
+{"name": "q_npm_install", "text": "which npm install does CI use", "rel": {"npm_lock_ci": 3, "node_version_file": 1}}
+{"name": "q_exactly_once", "text": "why not exactly once across the bus", "rel": {"exactly_once_rejected": 3, "idempotent_consumer": 1}}
+{"name": "q_dlq", "text": "where do poison queue messages go", "rel": {"dlq_required": 3}}
+{"name": "q_model_promote", "text": "what gates a new model version", "rel": {"model_registry": 3, "canary_model": 1, "eval_harness": 1}}
+{"name": "q_agent_tools", "text": "how is tool access constrained for agents", "rel": {"tool_allowlist": 3, "human_approval": 1}}
+{"name": "q_budget_llm", "text": "how is LLM spend controlled", "rel": {"llm_budget_alert": 3}}
+{"name": "q_search_paraphrase", "text": "does search work when the query does not share words with the memory", "rel": {"hybrid_rag": 1, "ghost_hybrid": 3, "hybrid_rrf_k": 1}}
+{"name": "q_rag_chunk", "text": "how big are retrieval chunks", "rel": {"chunk_size_500": 3}}
+{"name": "q_zero_results", "text": "what do we do with searches that find nothing", "rel": {"zero_result_review": 3, "synonym_config": 1}}
+{"name": "q_search_time", "text": "what is the search latency target", "rel": {"search_slo_100ms": 3, "query_timeout_2s": 1}}
+{"name": "q_index_empty", "text": "why does a new deployment return no search results", "rel": {"cold_index_ready": 3}}
+{"name": "q_dr_search", "text": "are search indexes part of the restore", "rel": {"index_rebuild_dr": 3}}
+{"name": "q_contract", "text": "how do API changes break consumers before merge", "rel": {"contract_tests": 3, "openapi_source": 1}}
+{"name": "q_roundtrip", "text": "how are codec changes verified beyond examples", "rel": {"property_roundtrip": 3, "golden_files": 1}}
+{"name": "q_ci_no_net", "text": "can tests hit the network in CI", "rel": {"integration_no_net": 3, "testdata_tmpdir": 1}}
+{"name": "q_flaky_policy", "text": "what happens to a known flaky test", "rel": {"flake_quarantine": 3, "quarantine_expiry": 1, "flaky_file_issue": 1}}
+{"name": "q_perf_budget", "text": "what blocks a slow UI feature", "rel": {"perf_budget_ui": 3, "bundle_budget": 1}}
+{"name": "q_alert_silent", "text": "how do we know alerting itself is down", "rel": {"deadmans_switch": 3, "silence_expiry": 1}}
+{"name": "q_hist_bucket", "text": "why is the latency SLO unreadable on the histogram", "rel": {"latency_hist_slo": 3}}
+{"name": "q_container_root", "text": "are root containers allowed in prod", "rel": {"container_nonroot": 3, "distroless_runtime": 1, "image_sign": 1}}
+{"name": "q_image_scan", "text": "what blocks a vulnerable image", "rel": {"trivy_gate": 3, "vuln_scan_pr": 1, "cosign_sign": 1}}
+{"name": "q_actions_pin", "text": "how are third-party actions constrained", "rel": {"pin_actions_sha": 3, "cache_branch_scope": 1}}
+{"name": "q_required_check", "text": "what happens if we rename a required check", "rel": {"required_check_rename": 3, "merge_queue": 1}}
+{"name": "q_force_push", "text": "is force push to main ever ok", "rel": {"force_push_policy": 3, "branch_protect": 1}}
+{"name": "q_security_report", "text": "where do security reports go", "rel": {"security_md": 3, "coordinated_disclosure": 1, "response_sla_72": 1}}
+{"name": "q_access_review", "text": "how often is admin access reviewed", "rel": {"access_review_quarterly": 3, "least_privilege": 1, "offboard_fast": 1}}
+{"name": "q_restore_prod_cred", "text": "where should a forensic restore run", "rel": {"restore_isolation": 3, "backup_test_freq": 1}}
+{"name": "q_index_build_lock", "text": "how do we add an index on a hot table", "rel": {"index_concurrent": 3, "explain_before_index": 1}}
+{"name": "q_db_conn_explode", "text": "what causes max_connections exhaustion across replicas", "rel": {"pool_under_max": 3}}
+{"name": "q_spf_fail", "text": "why did outbound mail stop delivering", "rel": {"spf_lookup_limit": 3, "dmarc_none_then_reject": 1, "warmup_email": 1}}
+{"name": "q_webhook_ssr", "text": "how do customer callback URLs become SSRF", "rel": {"callback_allowlist": 3, "callback_https_only": 1}}
+{"name": "q_ws_token_leak", "text": "where do websocket tokens leak", "rel": {"ws_auth_cookie": 3, "ws_backpressure": 1}}
+{"name": "q_kafka_replay_pii", "text": "is it safe to reset offsets to earliest", "rel": {"consumer_offset_pii": 3, "compact_vs_delete": 1}}
+{"name": "q_kafka_throughput", "text": "does adding consumers increase kafka throughput past partitions", "rel": {"consumer_groups": 3, "partition_count_plan": 1}}
+{"name": "q_migrations_down", "text": "do we trust down migrations in prod", "rel": {"migration_forward_only": 3, "snapshot_before_migrate": 1}}
+{"name": "q_staging_pii", "text": "can we copy prod data to staging", "rel": {"seed_anonymize": 3, "data_classify": 1, "retention_schedule": 1}}
+{"name": "q_erasure", "text": "how do we honour a user erase request", "rel": {"erasure_pipeline": 3, "legal_hold_system": 1}}
+{"name": "q_breach_comms", "text": "who drafts breach communications during an incident", "rel": {"breach_comms_ready": 3, "forensic_preserve": 1}}
+{"name": "q_exploit_order", "text": "during an active exploit what first", "rel": {"revoke_before_patch": 3, "rotate_after_expose": 1}}
+{"name": "q_feature_abuse", "text": "what question does design review ask about abuse", "rel": {"abuse_case_review": 3, "threat_model_surface": 1}}
+{"name": "q_breakglass_use", "text": "when can break-glass credentials be used", "rel": {"break_glass_tested": 3, "two_person_rule": 1}}
+{"name": "q_secret_path", "text": "how are runtime secrets addressed", "rel": {"secrets_path_convention": 3, "dynamic_secret_db": 1}}
+{"name": "q_jwks_rotate", "text": "how does JWT key rotation avoid outage", "rel": {"jwks_kid_refresh": 3, "refresh_rotate": 1}}
+{"name": "q_upload_exif", "text": "what happens to metadata in uploaded images", "rel": {"image_reencode": 3, "virus_quarantine": 1}}
+{"name": "q_sse_choice", "text": "when do we prefer SSE over websocket", "rel": {"sse_over_ws": 3}}
+{"name": "q_config_reload", "text": "which config can change without a deploy", "rel": {"dynamic_config_scope": 3, "config_hot_reload": 1, "typed_config": 1}}
+{"name": "q_feature_off", "text": "what is the default for a new feature flag", "rel": {"flag_default_off": 3, "kill_switch_tested": 1}}
+{"name": "q_degrade_order", "text": "what do we disable first under load", "rel": {"graceful_degrade": 3, "load_shed": 1, "priority_queue": 1}}
+{"name": "q_interface_where", "text": "where should a Go interface be declared", "rel": {"interface_consumer": 3, "naming_stutter": 1}}
+{"name": "q_zero_value", "text": "when should a type work without New", "rel": {"zero_value_useful": 3, "option_structs": 1}}
+{"name": "q_time_layout", "text": "why does time.Parse fail on this timestamp", "rel": {"time_parse_layout": 3, "time_utc_server": 1, "duration_units": 1}}
+{"name": "q_windows_build", "text": "why does only the windows build fail", "rel": {"build_tags_windows": 3, "cgo_cross": 1}}
+{"name": "q_private_modules", "text": "why 404 fetching a private go module", "rel": {"goprivate": 3, "go_mod_tidy": 1, "no_vendor": 1}}
+{"name": "q_version_report", "text": "how does the binary know its version at runtime", "rel": {"version_ldflags": 3, "release_matrix": 1}}
+{"name": "q_checksum_install", "text": "what verifies a downloaded release binary", "rel": {"checksum_artifacts": 3}}
+{"name": "q_image_tag_mutable", "text": "can we overwrite a version tag on the registry", "rel": {"image_tags_immutable": 3, "registry_gc": 1}}
+{"name": "q_bus_factor", "text": "what do we do about single-expert deploy paths", "rel": {"bus_factor_docs": 3, "automate_repeat": 1, "toil_quarterly": 1}}
+{"name": "q_incident_sev", "text": "who declares sev1", "rel": {"incident_severity": 3, "status_page": 1, "oncall_handoff": 1}}
+{"name": "q_flame_first", "text": "first step during a latency incident", "rel": {"flamegraph_incident": 3, "continuous_profiling": 1, "alloc_not_inuse": 1}}
+{"name": "q_gc_pressure", "text": "how do we tune go memory under pressure", "rel": {"gc_tuning": 3, "alloc_bench": 1}}
+{"name": "q_hot_key", "text": "how do we fix a single hot key", "rel": {"hot_partition": 3, "shard_key": 1, "single_writer": 1}}
+{"name": "q_search_stale", "text": "why does a just-saved doc not appear in search", "rel": {"search_index_lag": 3, "cold_index_ready": 1}}
+{"name": "q_page_duplicate", "text": "why does pagination skip rows", "rel": {"sort_stability": 3, "deep_pagination": 1, "pagination_cursor": 1}}
+{"name": "q_recs_bury", "text": "does freshness boost bury old stable facts", "rel": {"boost_freshness": 3, "time_decay_categories": 1}}
+{"name": "q_scoring_explain", "text": "how do I see why a result ranked where it did", "rel": {"result_explain": 3, "hybrid_rrf_k": 1}}
+{"name": "q_expr_matches", "text": "how are domain synonyms handled in query", "rel": {"synonym_config": 3, "stopwords_lexical_only": 1, "light_stemming": 1}}
+{"name": "q_personalize", "text": "are results personalized per user", "rel": {"personalization_rejected": 3, "ab_ranking_holdback": 1}}
+{"name": "q_click_train", "text": "does click data retrain the ranker live", "rel": {"click_feedback_offline": 3}}
+{"name": "q_tenant_noisy", "text": "how is a noisy tenant isolated from search", "rel": {"multi_tenant_index": 3, "fairness_limit": 1, "read_only_search_replica": 1}}
+{"name": "q_index_disk", "text": "what happens when an index outgrows its disk", "rel": {"index_size_budget": 3, "index_compact": 1}}
+{"name": "q_events_compat", "text": "how do internal events stay compatible", "rel": {"events_additive_first": 3, "event_schema_version": 1, "any_unknown_ok": 1}}
+{"name": "q_retry_storm", "text": "what prevents synchronized client retries", "rel": {"client_retry_jitter": 3, "circuit_breaker": 1}}
+{"name": "q_bulk_vs_user", "text": "how do bulk jobs avoid starving users", "rel": {"priority_queue": 3, "bulkhead_separate": 1, "load_shed": 1}}
+{"name": "q_gitops_silent_fail", "text": "how do we notice gitops sync failures", "rel": {"gitops_notification": 3, "config_drift_detect": 1}}
+{"name": "q_same_bits_promote", "text": "must staging rebuild the artifact", "rel": {"artifact_promote": 3, "pr_env_preview": 1}}
+{"name": "q_modular_tf", "text": "how do consumers upgrade shared terraform modules", "rel": {"module_semver": 3, "provider_pin": 1}}
+{"name": "q_chart_version", "text": "what fails CI when a chart changes", "rel": {"chart_version_bump": 3, "helm_repo_oci": 1, "values_schema": 1}}
+{"name": "q_crd_order", "text": "what order do crd and operator upgrades go", "rel": {"crd_upgrade": 3, "hook_weight": 1}}
+{"name": "q_namespace_quota", "text": "how is one team stopped from taking the cluster", "rel": {"resource_quota_ns": 3, "rbac_least": 1, "pod_security_baseline": 1}}
+{"name": "q_ci_hang", "text": "what stops a hung job from eating the runner budget", "rel": {"timeout_min_jobs": 3, "workflow_concurrency": 1, "path_filter_docs": 1}}
+{"name": "q_stale_env", "text": "why is my config change ignored", "rel": {"env_overrides": 3, "boot_validate": 1, "typed_config": 1}}
+{"name": "q_inline_key_hist", "text": "a key is in git history now what", "rel": {"config_secret_ref": 3, "rotate_after_expose": 3, "secret_scan_ci": 1}}
+{"name": "q_runbook_steps", "text": "when does a runbook step become code", "rel": {"automate_repeat": 3, "runbook_freshness": 1}}
+{"name": "q_adr_when", "text": "when does a design choice need an ADR", "rel": {"adr_records": 3, "decision_record_tool": 1}}
+{"name": "q_wiki_truth", "text": "is the wiki the source of truth for procedures", "rel": {"docs_as_code": 3, "adr_records": 1}}
+{"name": "q_reflection_categories", "text": "which categories does ghost use for memories", "rel": {"memory_categories_eight": 3}}
+{"name": "q_importance_range", "text": "what is the importance scale", "rel": {"importance_clamp": 3, "access_count_boost": 1}}
+{"name": "q_manual_survive", "text": "do manual notes survive consolidation", "rel": {"pin_survives_reflect": 3, "source_reflection": 1}}
+{"name": "q_mcp_limits", "text": "what are the default and max limits on ghost search tools", "rel": {"memory_search_limit": 3}}
+{"name": "q_worker_interval", "text": "how often are new memories embedded", "rel": {"embedding_interval": 3, "ollama_alive_marker": 1, "health_coverage": 1}}
+{"name": "q_link_thresholds", "text": "when are memory links created versus used for demotion", "rel": {"link_strength_threshold": 3, "dedup_threshold": 1}}
+{"name": "q_upsert_dupes", "text": "what happens when I save near-identical content twice", "rel": {"upsert_merge": 3}}
+{"name": "q_strict_verdict", "text": "why was a keep verdict parsed as resolved", "rel": {"batch_verdict_parse": 3, "resolve_kept_hash": 1}}
+{"name": "q_converged_project", "text": "does supersede call the LLM every run", "rel": {"content_keyed_cache": 3, "supersede_batch": 1}}
+{"name": "q_release_workflow", "text": "what triggers the ghost release workflow", "rel": {"annotated_release_tags": 3}}
+{"name": "q_long_validation", "text": "how do I run long tests without dirtying main", "rel": {"worktree_before_long": 3}}
+{"name": "q_scope_before", "text": "what should I state before editing files", "rel": {"state_scope_before_edit": 3, "scope_discipline": 1}}
+{"name": "q_regression_guard", "text": "what is forbidden when a feature blocks another", "rel": {"never_remove_for_add": 3, "run_tests_before_after": 1}}

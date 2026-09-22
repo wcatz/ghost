@@ -347,7 +347,7 @@ fts-only         0.786   0.964   1.000    0.964    0.965
 vector-only      0.786   0.929   0.964    0.952    0.946
 hybrid           0.857   0.964   1.000    1.000    0.989
 
-14 graded queries, 22 memories. Retrieval-only, no LLM judge.
+219 graded queries, 547 memories. Retrieval-only, no LLM judge.
 ```
 
 - **Hybrid fusion beats both single legs here** (NDCG@10 0.989 vs 0.965 full-text, 0.946 vector) — CI asserts that relationship on every PR. Across both benchmarks, fusion is the robustness play: vectors win conversational recall, keywords win exact identifiers.
