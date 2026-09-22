@@ -727,20 +727,6 @@ Flags:
 		os.Exit(1)
 	}
 
-	// An explicit --source always wins; otherwise the auto tier needs the
-	// calling harness so consolidation runs through the session's own
-	// subscription. Explicit tiers (cli/opencode/sqlite) select their backend
-	// directly and keep working without a detectable caller — in particular
-	// the offline sqlite floor stays available from any shell.
-	if tierValue == "auto" {
-		detected, err := detectPhaseSource(source)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		source = detected
-	}
-
 	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel())
 	defer store.Close() //nolint:errcheck
 
@@ -758,6 +744,22 @@ Flags:
 		}
 		fmt.Printf("Restored %d memories from snapshot for %s\n", n, projectName)
 		return
+	}
+
+	// An explicit --source always wins; otherwise the auto tier needs the
+	// calling harness so consolidation runs through the session's own
+	// subscription. This runs after --restore, which is a pure DB undo and
+	// must work without any harness. Explicit tiers (cli/opencode/sqlite)
+	// select their backend directly and keep working without a detectable
+	// caller — in particular the offline sqlite floor stays available from
+	// any shell.
+	if tierValue == "auto" {
+		detected, err := detectPhaseSource(source)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		source = detected
 	}
 
 	var consolidator reflection.Consolidator
