@@ -46,21 +46,26 @@ func TestSearchHybridAppliesVectorMinSimilarity(t *testing.T) {
 		t.Fatalf("baseline must retrieve weak via vector leg (cosine ~0.1); got %+v", got)
 	}
 
-	// Floor 0.5 drops the weak candidate from the vector leg.
+	// Floor 0.5 drops the weak candidate from the vector leg. Iterate the
+	// full slice: an early return on seeing strong would skip the weak check
+	// whenever strong ranks first (the common case under RRF).
 	p.MinSimilarity = 0.5
 	got, err = s.SearchHybridParams(ctx, testProject, "kubernetes readiness probe", q, 10, p)
 	if err != nil {
 		t.Fatalf("SearchHybridParams floored: %v", err)
 	}
+	var sawStrong bool
 	for _, m := range got {
 		if m.ID == weak {
 			t.Errorf("weak candidate %s must be dropped by MinSimilarity=0.5", weak)
 		}
 		if m.ID == strong {
-			return // strong survived; done
+			sawStrong = true
 		}
 	}
-	t.Errorf("strong candidate must survive the floor; got %+v", got)
+	if !sawStrong {
+		t.Errorf("strong candidate must survive the floor; got %+v", got)
+	}
 }
 
 // TestStoreVectorMinSimilarityDefaultIsZero: unset store keeps historical
