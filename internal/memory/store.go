@@ -1049,6 +1049,81 @@ func (s *Store) MarkResolveKept(ctx context.Context, projectID string, hashes ma
 	return tx.Commit()
 }
 
+// SupersedeCheck is a cached NEITHER verdict for an ordered pair: the content
+// hashes it was judged on. A pair is only skipped while both hashes still
+// match.
+type SupersedeCheck struct {
+	NewerHash string
+	OlderHash string
+}
+
+// SupersedeChecked returns the cached NEITHER verdicts for a project, keyed by
+// {newerID, olderID}. Pairs never judged NEITHER are absent from the map.
+func (s *Store) SupersedeChecked(ctx context.Context, projectID string) (map[[2]string]SupersedeCheck, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT newer_id, older_id, newer_hash, older_hash
+		FROM supersede_checked
+		WHERE project_id = ?
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("supersede checked: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[[2]string]SupersedeCheck)
+	for rows.Next() {
+		var newerID, olderID string
+		var check SupersedeCheck
+		if err := rows.Scan(&newerID, &olderID, &check.NewerHash, &check.OlderHash); err != nil {
+			return nil, fmt.Errorf("scan supersede check: %w", err)
+		}
+		out[[2]string{newerID, olderID}] = check
+	}
+	return out, rows.Err()
+}
+
+// MarkSupersedeNeither records (or refreshes) NEITHER verdicts for a project,
+// keyed by {newerID, olderID}. A re-mark updates the stored hashes in place so
+// a stale row cannot accumulate beside a refreshed one. A no-op on an empty
+// map.
+//
+// The caller is responsible for projectID matching the pair's memories: unlike
+// MarkResolveKept, this does not re-check ownership per row, so a mismatched
+// call would label a row with the wrong project. That is safe for the only
+// caller today — supersede.Run passes its own projectID and candidate pairs it
+// loaded from that project — and memory IDs are globally unique, so a
+// mislabeled row still cascades away with its endpoints.
+func (s *Store) MarkSupersedeNeither(ctx context.Context, projectID string, checks map[[2]string]SupersedeCheck) error {
+	if len(checks) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin mark supersede neither: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	for key, check := range checks {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO supersede_checked (newer_id, older_id, project_id, newer_hash, older_hash)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(newer_id, older_id) DO UPDATE SET
+				newer_hash = excluded.newer_hash,
+				older_hash = excluded.older_hash,
+				checked_at = datetime('now')
+		`, key[0], key[1], projectID, check.NewerHash, check.OlderHash); err != nil {
+			return fmt.Errorf("mark supersede neither %s->%s: %w", key[0], key[1], err)
+		}
+	}
+	return tx.Commit()
+}
+
 // Delete removes a specific memory.
 func (s *Store) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()

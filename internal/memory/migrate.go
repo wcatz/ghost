@@ -11,7 +11,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 7
+const schemaVersion = 8
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -26,6 +26,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV5,
 	migrateV6,
 	migrateV7,
+	migrateV8,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -262,6 +263,34 @@ func migrateV7(tx *sql.Tx) error {
 	}
 	if _, err := tx.Exec(`ALTER TABLE memories ADD COLUMN resolve_kept_hash TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("add memories.resolve_kept_hash: %w", err)
+	}
+	return nil
+}
+
+// migrateV8 adds the supersede_checked table: the content-keyed NEITHER cache
+// for `ghost supersede`, so a converged project skips re-classifying candidate
+// pairs whose endpoints have not changed since they were judged NEITHER. The
+// cascading FKs keep the table derived state — replacing or deleting a memory
+// (as reflection's consolidation does) takes its checked rows with it. New
+// tables copy their DDL here rather than reusing initSQL, per the migrations
+// comment; the guards make the step safe to re-run against a hand-migrated DB.
+func migrateV8(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS supersede_checked (
+    newer_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    older_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    newer_hash  TEXT NOT NULL,
+    older_hash  TEXT NOT NULL,
+    checked_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (newer_id, older_id)
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_supersede_checked_project ON supersede_checked(project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("%q: %w", s[:min(40, len(s))], err)
+		}
 	}
 	return nil
 }

@@ -15,6 +15,14 @@
 // relations that a binary confirm/reject can't tell apart. SUPERSEDES writes
 // a newer->older 'supersedes' link (source 'llm'); CAUSES writes an
 // older->newer 'causes' link (cause precedes effect); NEITHER writes nothing.
+// Fresh NEITHER verdicts are cached by pair and both endpoints' content hashes
+// (supersede_checked, schema v8): unchanged fresh pairs are skipped on later
+// passes — a cache skip is equivalent to a NEITHER verdict, so a stale
+// 'causes' link is not invalidated on that pass if the endpoints' text reverted
+// to a previously cached version (graph-only staleness; ranking consumes only
+// 'supersedes') — while live-link pairs (reclassify) are still validated each
+// pass. A converged project therefore makes zero classify calls for its fresh
+// candidates, not zero calls overall.
 // Run() also re-classifies existing 'supersedes'/'llm' links whose endpoints
 // have changed since the link was written, invalidating the link (or
 // flipping it to 'causes') when the verdict no longer matches. The pass is
@@ -29,6 +37,8 @@ package supersede
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 
@@ -75,6 +85,16 @@ type Classifier interface {
 	ClassifyBatch(ctx context.Context, pairs []Candidate) ([]Relation, error)
 }
 
+// contentHash is the NEITHER-cache key component, mirroring resolve's
+// ContentHash: the classification question is about the notes' text, so a tag
+// or importance edit must not invalidate a cached verdict. The "v1\x00" prefix
+// versions the key — a future prompt/rubric change that could flip verdicts
+// bumps it to reset every cached verdict in one step.
+func contentHash(content string) string {
+	sum := sha256.Sum256([]byte("v1\x00" + content))
+	return hex.EncodeToString(sum[:])
+}
+
 // vectorStore is the subset of *memory.Store the pass needs; narrowed for
 // testability.
 type vectorStore interface {
@@ -85,6 +105,8 @@ type vectorStore interface {
 	CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error
 	InvalidateLink(ctx context.Context, sourceID, targetID, relation string) error
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
+	SupersedeChecked(ctx context.Context, projectID string) (map[[2]string]memory.SupersedeCheck, error)
+	MarkSupersedeNeither(ctx context.Context, projectID string, checks map[[2]string]memory.SupersedeCheck) error
 }
 
 // SelectCandidates returns the deduped ordered candidate pairs for a project:
@@ -169,6 +191,7 @@ type Result struct {
 	CausesCreated int // CAUSES verdicts (causes links written when apply)
 	Reclassified  int // existing links whose relation changed or was invalidated
 	StaleSkipped  int
+	Skipped       int // fresh pairs skipped via the NEITHER cache
 	Unclassified  int // pairs skipped because the classifier answer was unparseable
 }
 
@@ -206,8 +229,16 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 //
 // A pair whose existing 'supersedes' link predates neither endpoint's last
 // update is skipped (skip-if-unchanged) — reclassifying it would repeat the
-// same verdict for no reason. Fresh candidates are always classified
-// regardless, since SelectCandidates already bounds their cost.
+// same verdict for no reason. Fresh candidates are classified unless both
+// endpoints' content still matches a cached NEITHER verdict (the content-keyed
+// NEITHER cache, schema v8): a cache skip is treated as a NEITHER verdict, so
+// if a 'causes' link existed and the endpoints' text later reverted to a
+// previously cached version, that link is not invalidated on the skipping pass
+// — graph-only staleness, since ranking consumes only 'supersedes'. Reclassify
+// candidates are never cache-skipped, so live-link pairs are still validated
+// every pass and self-healing is untouched. Cache rows are recorded on apply
+// only — dry-run stays side-effect-free — and cascade away with their memories
+// via the FK.
 //
 // Pairs whose endpoints are replaced by a concurrent reflect pass (the stop
 // hook spawns both for the same session) are dropped and counted in
@@ -317,50 +348,79 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 		return res, nil, nil
 	}
 
-	var classified []Classified
-	relations, err := cls.ClassifyBatch(ctx, all)
+	// NEITHER-cache partition, after the existence re-check so only live pairs
+	// can be skipped. A fresh pair whose endpoints' text still matches a stored
+	// NEITHER verdict is skipped — no harness call, no write; reclassify pairs
+	// are never skipped, since their job is to revalidate a live link as content
+	// evolves.
+	checked, err := store.SupersedeChecked(ctx, projectID)
 	if err != nil {
-		return res, nil, fmt.Errorf("classify %d candidate pair(s): %w", len(all), err)
+		return res, nil, fmt.Errorf("load supersede checks: %w", err)
 	}
-	if len(relations) != len(all) {
-		return res, nil, fmt.Errorf("classifier returned %d verdicts for %d pairs", len(relations), len(all))
-	}
-	for i, c := range all {
-		verdict := relations[i]
-		if verdict == "" {
-			// An odd *phrasing* must not abort the pass: a single unparseable
-			// verdict ended a 9-minute run after links for earlier pairs had
-			// already been written, so the graph never converged whenever the
-			// model used wording the parser did not know. Skip that pair and
-			// count it (reported by the caller).
-			//
-			// A transport failure stays fatal inside ClassifyBatch: skipping
-			// every pair would write nothing and still report success,
-			// blaming the model for a transport failure.
-			res.Unclassified++
-			if logger != nil {
-				logger.Warn("supersede: skipping pair with an unclassifiable verdict",
-					"newer", c.NewerID, "older", c.OlderID)
-			}
+	var pending []Candidate
+	for _, c := range all {
+		key := [2]string{c.NewerID, c.OlderID}
+		chk, cached := checked[key]
+		if freshKeys[key] && !reclassifyByKey[key] && cached &&
+			chk.NewerHash == contentHash(c.NewerContent) && chk.OlderHash == contentHash(c.OlderContent) {
+			res.Skipped++
 			continue
 		}
-		classified = append(classified, Classified{Candidate: c, Relation: verdict})
+		pending = append(pending, c)
+	}
 
-		key := [2]string{c.NewerID, c.OlderID}
-		wasReclassify := reclassifyByKey[key]
-
-		switch verdict {
-		case RelationSupersedes:
-			res.Confirmed++
-		case RelationCauses:
-			res.CausesCreated++
+	var classified []Classified
+	if len(pending) > 0 {
+		relations, err := cls.ClassifyBatch(ctx, pending)
+		if err != nil {
+			return res, nil, fmt.Errorf("classify %d candidate pair(s): %w", len(pending), err)
 		}
-		if wasReclassify && verdict != RelationSupersedes {
-			res.Reclassified++
+		if len(relations) != len(pending) {
+			return res, nil, fmt.Errorf("classifier returned %d verdicts for %d pairs", len(relations), len(pending))
+		}
+		for i, c := range pending {
+			verdict := relations[i]
+			if verdict == "" {
+				// An odd *phrasing* must not abort the pass: a single unparseable
+				// verdict ended a 9-minute run after links for earlier pairs had
+				// already been written, so the graph never converged whenever the
+				// model used wording the parser did not know. Skip that pair and
+				// count it (reported by the caller).
+				//
+				// A transport failure stays fatal inside ClassifyBatch: skipping
+				// every pair would write nothing and still report success,
+				// blaming the model for a transport failure.
+				res.Unclassified++
+				if logger != nil {
+					logger.Warn("supersede: skipping pair with an unclassifiable verdict",
+						"newer", c.NewerID, "older", c.OlderID)
+				}
+				continue
+			}
+			classified = append(classified, Classified{Candidate: c, Relation: verdict})
+
+			key := [2]string{c.NewerID, c.OlderID}
+			wasReclassify := reclassifyByKey[key]
+
+			switch verdict {
+			case RelationSupersedes:
+				res.Confirmed++
+			case RelationCauses:
+				res.CausesCreated++
+			}
+			if wasReclassify && verdict != RelationSupersedes {
+				res.Reclassified++
+			}
 		}
 	}
 
 	if apply {
+		// writable tracks the pairs whose endpoints passed the existence
+		// check below. The NEITHER-cache write further down is a single
+		// transaction, so a pair that went stale mid-pass must be excluded
+		// from it: inserting a row for a deleted endpoint would hit the FK
+		// and roll back every other pair's row with it.
+		writable := make(map[[2]string]bool, len(classified))
 		for _, c := range classified {
 			// Pre-write existence check: the candidate was alive at
 			// selection (and possibly at the batch check above), but a
@@ -380,6 +440,7 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 				}
 				continue
 			}
+			writable[[2]string{c.NewerID, c.OlderID}] = true
 			switch c.Relation {
 			case RelationSupersedes:
 				if err := store.CreateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes), c.Similarity, "llm"); err != nil {
@@ -406,6 +467,35 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 			}
 			if logger != nil {
 				logger.Debug("supersede classified", "newer", c.NewerID, "older", c.OlderID, "verdict", c.Relation)
+			}
+		}
+
+		// Record the freshly judged NEITHER verdicts so the next pass skips
+		// them. Only pairs whose endpoints survived the existence check are
+		// eligible (writable): a stale pair's row would hit the FK and roll
+		// back the whole cache write. Cache skips already have a row,
+		// reclassify pairs stay classified (their live link must keep
+		// self-healing), and SUPERSEDES/CAUSES achieved their effect via the
+		// links written above; only a fresh NEITHER verdict is worth caching.
+		// A failed cache write costs a re-classify next pass, like resolve's
+		// KEEP cache, so warn rather than fail a pass whose primary effect
+		// landed.
+		newNeither := make(map[[2]string]memory.SupersedeCheck)
+		for _, c := range classified {
+			key := [2]string{c.NewerID, c.OlderID}
+			if c.Relation != RelationNeither || !freshKeys[key] || reclassifyByKey[key] || !writable[key] {
+				continue
+			}
+			newNeither[key] = memory.SupersedeCheck{
+				NewerHash: contentHash(c.NewerContent),
+				OlderHash: contentHash(c.OlderContent),
+			}
+		}
+		if len(newNeither) > 0 {
+			if err := store.MarkSupersedeNeither(ctx, projectID, newNeither); err != nil {
+				if logger != nil {
+					logger.Warn("supersede NEITHER cache write failed", "error", err)
+				}
 			}
 		}
 	}

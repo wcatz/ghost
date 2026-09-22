@@ -269,6 +269,29 @@ func TestMigrateFreshDBHasResolveKeptHash(t *testing.T) {
 	}
 }
 
+// TestMigrateFreshDBHasSupersedeChecked: a brand-new database (initSQL path, no
+// legacy schema involved) must have supersede_checked from the start — guards
+// against the table silently going missing from initSQL while migrateV8 still
+// exists to paper over it on upgraded databases.
+func TestMigrateFreshDBHasSupersedeChecked(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(`SELECT newer_id, older_id, project_id, newer_hash, older_hash FROM supersede_checked LIMIT 0`); err != nil {
+		t.Fatalf("supersede_checked table missing on fresh db: %v", err)
+	}
+	var idx string
+	if err := db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_supersede_checked_project'`,
+	).Scan(&idx); err != nil {
+		t.Fatalf("idx_supersede_checked_project missing on fresh db: %v", err)
+	}
+}
+
 // TestMigrateHandMigratedDB: a database whose tables already match the current
 // schema but whose user_version is still 0 (hand-migrated) must be stamped
 // without a rebuild — the introspection guards skip work that is already done.
@@ -655,6 +678,88 @@ func TestMigrateV7AddsResolveKeptHash(t *testing.T) {
 	}
 	if content != "pre-migration note" {
 		t.Errorf("content = %q, want preserved value", content)
+	}
+}
+
+// TestMigrateV8AddsSupersedeChecked exercises the one-shot upgrade every
+// existing v7 database takes: migrateV8 must create supersede_checked (and its
+// project index), not rely on initSQL's fresh-database DDL.
+func TestMigrateV8AddsSupersedeChecked(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open v7 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	v7 := []string{
+		`CREATE TABLE projects (
+    id          TEXT PRIMARY KEY,
+    path        TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
+		`CREATE TABLE memories (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL DEFAULT 'fact',
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL DEFAULT 0.5,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT,
+    source        TEXT NOT NULL DEFAULT 'reflection',
+    tags          TEXT DEFAULT '[]',
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at   TEXT,
+    resolve_kept_hash TEXT NOT NULL DEFAULT ''
+)`,
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v7-p1', 'p1')`,
+		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'newer note')`,
+		`INSERT INTO memories (id, project_id, content) VALUES ('m2', 'p1', 'older note')`,
+		`PRAGMA user_version = 7`,
+	}
+	for _, s := range v7 {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed v7 db: %v", err)
+		}
+	}
+
+	if err := migrate(db, 7); err != nil {
+		t.Fatalf("migrate v7->v8: %v", err)
+	}
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	var name string
+	if err := db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='supersede_checked'`,
+	).Scan(&name); err != nil {
+		t.Fatalf("supersede_checked table missing after migrateV8: %v", err)
+	}
+	if err := db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_supersede_checked_project'`,
+	).Scan(&name); err != nil {
+		t.Fatalf("idx_supersede_checked_project missing after migrateV8: %v", err)
+	}
+
+	// The migrated table is usable and stores the pair.
+	if _, err := db.Exec(
+		`INSERT INTO supersede_checked (newer_id, older_id, project_id, newer_hash, older_hash) VALUES ('m1', 'm2', 'p1', 'h1', 'h2')`,
+	); err != nil {
+		t.Fatalf("insert after migrateV8: %v", err)
+	}
+	var newerHash string
+	if err := db.QueryRow(
+		`SELECT newer_hash FROM supersede_checked WHERE newer_id = 'm1' AND older_id = 'm2'`,
+	).Scan(&newerHash); err != nil {
+		t.Fatalf("read migrated table: %v", err)
+	}
+	if newerHash != "h1" {
+		t.Errorf("newer_hash = %q, want h1", newerHash)
 	}
 }
 

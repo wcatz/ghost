@@ -414,6 +414,57 @@ func TestRun_SkipsPairWhoseEndpointVanishedMidRun(t *testing.T) {
 	}
 }
 
+// TestRunStalePairDoesNotRollBackNeitherCacheWrite pins the follow-up to the
+// same concurrent-reflect race: the NEITHER-cache write is a single
+// transaction, so recording a pair whose endpoint vanished mid-pass would hit
+// the FK and roll back every other pair's row — the cache would silently never
+// advance under the race. Only pairs that passed the pre-write existence check
+// may be recorded.
+func TestRunStalePairDoesNotRollBackNeitherCacheWrite(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	aNewContent := "prod database is postgres 16"
+	aOldContent := "staging database is postgres 16"
+	aNew := add(t, store, db, aNewContent, []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	aOld := add(t, store, db, aOldContent, []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
+	bNew := add(t, store, db, "grafana listens on port 80", []float32{0, 1, 0}, "2026-07-01 00:00:00")
+	bOld := add(t, store, db, "grafana listens on port 3000", []float32{0, 0.99, 0}, "2026-01-01 00:00:00")
+
+	// Simulate reflect replacing aOld while supersede is classifying: delete
+	// it from the store during the single ClassifyBatch call.
+	cls := &mockClassifier{verdict: func(newer, older string) Relation {
+		if newer == aNewContent && older == aOldContent {
+			if err := store.Delete(ctx, aOld); err != nil {
+				t.Errorf("delete stale endpoint: %v", err)
+			}
+		}
+		return RelationNeither
+	}}
+
+	res, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default())
+	if err != nil {
+		t.Fatalf("Run must not fail when a stale pair is in the batch: %v", err)
+	}
+	if res.StaleSkipped != 1 {
+		t.Fatalf("StaleSkipped = %d, want 1", res.StaleSkipped)
+	}
+
+	checked, err := store.SupersedeChecked(ctx, "p")
+	if err != nil {
+		t.Fatalf("SupersedeChecked: %v", err)
+	}
+	if _, ok := checked[[2]string{bNew, bOld}]; !ok {
+		t.Errorf("surviving pair's NEITHER row missing: checked=%v (the stale pair's insert must not roll back the cache write)", checked)
+	}
+	if _, ok := checked[[2]string{aNew, aOld}]; ok {
+		t.Errorf("stale pair must not be recorded in the cache: checked=%v", checked)
+	}
+	if len(checked) != 1 {
+		t.Errorf("checked has %d row(s), want exactly the surviving pair", len(checked))
+	}
+}
+
 // mockClassifierErr is mockClassifier with an error channel, for the
 // unclassifiable-verdict path.
 type mockClassifierErr struct {
@@ -537,5 +588,249 @@ func TestRunEmptyCandidateSetSkipsClassifier(t *testing.T) {
 	}
 	if res.Candidates != 0 || cls.batchCalls != 0 {
 		t.Errorf("want 0 candidates and 0 classifier calls, got %d and %d", res.Candidates, cls.batchCalls)
+	}
+}
+
+// TestRunSkipsCachedNeitherPairs: a NEITHER verdict is recorded on apply, and
+// the next pass over unchanged endpoints skips the pair with zero classifier
+// calls while still counting it as a candidate.
+func TestRunSkipsCachedNeitherPairs(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	newerContent := "prod database is postgres 16"
+	olderContent := "staging database is postgres 16"
+	newer := add(t, store, db, newerContent, []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	older := add(t, store, db, olderContent, []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
+
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
+	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Skipped != 0 || cls.batchCalls != 1 {
+		t.Fatalf("first pass: skipped=%d calls=%d, want 0/1", res.Skipped, cls.batchCalls)
+	}
+
+	checked, err := store.SupersedeChecked(ctx, "p")
+	if err != nil {
+		t.Fatalf("SupersedeChecked: %v", err)
+	}
+	key := [2]string{newer, older}
+	want := memory.SupersedeCheck{NewerHash: contentHash(newerContent), OlderHash: contentHash(olderContent)}
+	if checked[key] != want {
+		t.Fatalf("recorded check = %+v, want %+v", checked[key], want)
+	}
+
+	cls2 := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
+	res2, _, err := Run(ctx, store, cls2, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run (second): %v", err)
+	}
+	if res2.Skipped != 1 {
+		t.Errorf("second pass skipped=%d, want 1", res2.Skipped)
+	}
+	if cls2.batchCalls != 0 {
+		t.Errorf("second pass made %d classify call(s), want 0", cls2.batchCalls)
+	}
+	if res2.Candidates != 1 {
+		t.Errorf("second pass candidates=%d, want 1 (cached pairs remain candidates)", res2.Candidates)
+	}
+}
+
+// TestRunReclassifiesWhenCachedEndpointChanges: the cache keys on content, so
+// an endpoint whose text changed after the verdict no longer matches and must
+// be re-classified.
+func TestRunReclassifiesWhenCachedEndpointChanges(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	newer := add(t, store, db, "prod database is postgres 16", []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	older := add(t, store, db, "staging database is postgres 16", []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
+
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
+	if _, _, err := Run(ctx, store, cls, "p", 0.9, true, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	checked, err := store.SupersedeChecked(ctx, "p")
+	if err != nil {
+		t.Fatalf("SupersedeChecked: %v", err)
+	}
+	if _, ok := checked[[2]string{newer, older}]; !ok {
+		t.Fatalf("cache row for pair %s->%s missing after the NEITHER pass", newer, older)
+	}
+
+	// Edit the older note's text without touching its embedding or timestamps:
+	// the content hash no longer matches the cached verdict.
+	if _, err := db.ExecContext(ctx,
+		`UPDATE memories SET content = ? WHERE id = ?`, "staging database was ported to mysql", older,
+	); err != nil {
+		t.Fatalf("edit older: %v", err)
+	}
+
+	cls2 := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
+	res, _, err := Run(ctx, store, cls2, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run (after edit): %v", err)
+	}
+	if res.Skipped != 0 {
+		t.Errorf("skipped=%d, want 0 — a changed endpoint must re-classify", res.Skipped)
+	}
+	if cls2.batchCalls != 1 {
+		t.Errorf("classify calls=%d, want 1 after an endpoint change", cls2.batchCalls)
+	}
+}
+
+// TestRunDryRunRecordsNoCache: dry-run must stay side-effect-free — it neither
+// writes links nor records NEITHER verdicts, so a dry pass repeated twice
+// still classifies each time.
+func TestRunDryRunRecordsNoCache(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	add(t, store, db, "prod database is postgres 16", []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	add(t, store, db, "staging database is postgres 16", []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
+
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
+	if _, _, err := Run(ctx, store, cls, "p", 0.9, false, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	checked, err := store.SupersedeChecked(ctx, "p")
+	if err != nil {
+		t.Fatalf("SupersedeChecked: %v", err)
+	}
+	if len(checked) != 0 {
+		t.Fatalf("dry run recorded %v, want nothing", checked)
+	}
+
+	cls2 := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
+	res, _, err := Run(ctx, store, cls2, "p", 0.9, false, nil)
+	if err != nil {
+		t.Fatalf("Run (second dry): %v", err)
+	}
+	if res.Skipped != 0 || cls2.batchCalls != 1 {
+		t.Errorf("second dry pass skipped=%d calls=%d, want 0/1 (dry run wrote no cache)", res.Skipped, cls2.batchCalls)
+	}
+}
+
+// TestRunReclassifyPairClassifiesDespiteCacheRow: the cache applies to fresh
+// candidates only. An existing llm link whose endpoints changed is reclassified
+// on every pass regardless of a matching cache row, because skipping it would
+// freeze link self-healing.
+func TestRunReclassifyPairClassifiesDespiteCacheRow(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	newerContent := "reversed the NATS decision back to Postgres LISTEN/NOTIFY"
+	olderContent := "unrelated gotcha about DNS caching"
+	newer := add(t, store, db, newerContent, []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	older := add(t, store, db, olderContent, []float32{0, 1, 0}, "2026-01-01 00:00:00")
+
+	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	// Backdate the link so the memory's later update is unambiguously newer
+	// and the reclassify path fires.
+	if _, err := db.ExecContext(ctx,
+		`UPDATE memory_links SET created_at = '2020-01-01 00:00:00' WHERE source_id = ? AND target_id = ?`,
+		newer, older,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkSupersedeNeither(ctx, "p", map[[2]string]memory.SupersedeCheck{
+		{newer, older}: {NewerHash: contentHash(newerContent), OlderHash: contentHash(olderContent)},
+	}); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
+	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if cls.batchCalls != 1 {
+		t.Errorf("classify calls=%d, want 1 — reclassify pairs ignore the NEITHER cache", cls.batchCalls)
+	}
+	if res.Skipped != 0 {
+		t.Errorf("skipped=%d, want 0 for a reclassify pair", res.Skipped)
+	}
+}
+
+// TestRunMixedCachedAndUncachedPairs: one batch call carries only the uncached
+// pairs, the cached pair is skipped, and the verdicts still land as links.
+func TestRunMixedCachedAndUncachedPairs(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	aNewContent := "api rate limit raised to 500 rps"
+	aOldContent := "api rate limit is 100 rps"
+	aNew := add(t, store, db, aNewContent, []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	aOld := add(t, store, db, aOldContent, []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
+	bNew := add(t, store, db, "kubernetes now on 1.31", []float32{0, 1, 0}, "2026-07-01 00:00:00")
+	bOld := add(t, store, db, "kubernetes cluster runs 1.27", []float32{0, 0.99, 0}, "2026-01-01 00:00:00")
+
+	if err := store.MarkSupersedeNeither(ctx, "p", map[[2]string]memory.SupersedeCheck{
+		{aNew, aOld}: {NewerHash: contentHash(aNewContent), OlderHash: contentHash(aOldContent)},
+	}); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
+	res, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Candidates != 2 || res.Skipped != 1 {
+		t.Errorf("candidates=%d skipped=%d, want 2/1", res.Candidates, res.Skipped)
+	}
+	if cls.batchCalls != 1 || cls.lastBatchSize != 1 {
+		t.Errorf("want 1 batch call carrying 1 uncached pair, got %d call(s), last size %d", cls.batchCalls, cls.lastBatchSize)
+	}
+	if res.Confirmed != 1 || res.Created != 1 {
+		t.Errorf("confirmed=%d created=%d, want 1/1 for the uncached pair", res.Confirmed, res.Created)
+	}
+	if len(classified) != 1 {
+		t.Errorf("classified=%d, want 1 (the uncached pair)", len(classified))
+	}
+	pairsB, _ := store.SupersedesWithin(ctx, []string{bNew, bOld})
+	if len(pairsB) != 1 {
+		t.Errorf("uncached pair links=%d, want 1", len(pairsB))
+	}
+	pairsA, _ := store.SupersedesWithin(ctx, []string{aNew, aOld})
+	if len(pairsA) != 0 {
+		t.Errorf("cached pair links=%d, want 0 (cache skip writes nothing)", len(pairsA))
+	}
+}
+
+// failingMarkStore wraps a real store so only the NEITHER-cache write fails —
+// used to pin that losing derived cache state does not fail a pass whose
+// primary effect landed.
+type failingMarkStore struct {
+	*memory.Store
+	err    error
+	called bool
+}
+
+func (f *failingMarkStore) MarkSupersedeNeither(context.Context, string, map[[2]string]memory.SupersedeCheck) error {
+	f.called = true
+	return f.err
+}
+
+// TestRunCacheWriteFailureDoesNotFailThePass: mirrors resolve's KEEP-cache
+// choice — a failed cache write costs a re-classify next pass, so the pass
+// warns instead of failing after its link writes already landed.
+func TestRunCacheWriteFailureDoesNotFailThePass(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	add(t, store, db, "prod database is postgres 16", []float32{1, 0, 0}, "2026-07-01 00:00:00")
+	add(t, store, db, "staging database is postgres 16", []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
+
+	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
+	failing := &failingMarkStore{Store: store, err: errors.New("disk full")}
+	res, _, err := Run(ctx, failing, cls, "p", 0.9, true, slog.Default())
+	if err != nil {
+		t.Fatalf("a cache write failure must not fail the pass: %v", err)
+	}
+	if !failing.called {
+		t.Error("MarkSupersedeNeither was never called; the test did not exercise the failure path")
+	}
+	if res.Confirmed != 0 || res.Candidates != 1 {
+		t.Errorf("candidates=%d confirmed=%d, want 1/0", res.Candidates, res.Confirmed)
 	}
 }
