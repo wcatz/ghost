@@ -3,7 +3,7 @@
 ## Stack
 - Go 1.26+ CLI application
 - SQLite with FTS5 for memory persistence (modernc.org/sqlite — pure Go, no CGO)
-- CLI harness callers (claude/opencode/codex/goose subprocesses, subscription-billed) — used by reflection, resolve, and supersede
+- CLI harness callers (claude/opencode/codex/goose subprocesses, subscription-billed) — used by reflection, resolve, and supersede. `cli.model_reflect` / `model_resolve` / `model_supersede` pin the opencode harness model per phase (each phase is its own process; empty = harness default, ignored by claude/codex/goose which have no model flag).
 - MCP server via modelcontextprotocol/go-sdk (stdio transport)
 
 ## Architecture
