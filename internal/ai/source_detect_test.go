@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -29,6 +30,120 @@ func TestDetectSourceFromEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSourceFromScriptPath(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"npm-installed codex", "/home/ada/.local/lib/node_modules/@openai/codex/bin/codex.js", "codex"},
+		{"npm-installed claude-code", "/home/ada/.local/lib/node_modules/@anthropic-ai/claude-code/cli.js", "claude-code"},
+		{"native binary", "/usr/local/bin/opencode", "opencode"},
+		{"unknown script", "/usr/local/bin/some-tool.js", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sourceFromScriptPath(tt.path); got != tt.want {
+				t.Errorf("sourceFromScriptPath(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+// fakePS serves a pid -> `ps -o ppid=,command=` output table. A pid absent
+// from the table fails like ps does for a process that has already exited.
+func fakePS(t *testing.T, outputs map[int]string) func(name string, args ...string) ([]byte, error) {
+	t.Helper()
+	return func(name string, args ...string) ([]byte, error) {
+		if name != "ps" || len(args) != 4 || args[0] != "-o" || args[2] != "-p" {
+			t.Fatalf("unexpected ps invocation: %s %v", name, args)
+		}
+		pid, err := strconv.Atoi(args[3])
+		if err != nil {
+			t.Fatalf("bad -p argument %q: %v", args[3], err)
+		}
+		out, ok := outputs[pid]
+		if !ok {
+			return nil, fmt.Errorf("ps: process %d not found", pid)
+		}
+		return []byte(out), nil
+	}
+}
+
+func TestDetectSourceFromPS(t *testing.T) {
+	t.Run("codex script path ancestor", func(t *testing.T) {
+		run := fakePS(t, map[int]string{
+			500: "400 /usr/local/bin/ghost supersede\n",
+			400: "1 /home/ada/.local/lib/node_modules/@openai/codex/bin/codex.js\n",
+		})
+		if got := detectSourceFromPS(run, 500); got != "codex" {
+			t.Errorf("detectSourceFromPS() = %q, want %q", got, "codex")
+		}
+	})
+
+	t.Run("node script path ancestor", func(t *testing.T) {
+		run := fakePS(t, map[int]string{
+			500: "400 /usr/local/bin/ghost supersede\n",
+			400: "300 node --experimental /home/ada/.local/lib/node_modules/@openai/codex/bin/codex.js\n",
+			300: "1 bash\n",
+		})
+		if got := detectSourceFromPS(run, 500); got != "codex" {
+			t.Errorf("detectSourceFromPS() = %q, want %q", got, "codex")
+		}
+	})
+
+	t.Run("native comm ancestor", func(t *testing.T) {
+		run := fakePS(t, map[int]string{
+			500: "400 /usr/local/bin/ghost supersede\n",
+			400: "300 claude\n",
+			300: "1 bash\n",
+		})
+		if got := detectSourceFromPS(run, 500); got != "claude-code" {
+			t.Errorf("detectSourceFromPS() = %q, want %q", got, "claude-code")
+		}
+	})
+
+	t.Run("plain bash chain", func(t *testing.T) {
+		run := fakePS(t, map[int]string{
+			500: "400 bash\n",
+			400: "300 bash\n",
+			300: "1 bash\n",
+		})
+		if got := detectSourceFromPS(run, 500); got != "" {
+			t.Errorf("detectSourceFromPS() = %q, want %q", got, "")
+		}
+	})
+
+	t.Run("self-parent stops the walk", func(t *testing.T) {
+		run := fakePS(t, map[int]string{500: "500 bash\n"})
+		if got := detectSourceFromPS(run, 500); got != "" {
+			t.Errorf("detectSourceFromPS() = %q, want %q", got, "")
+		}
+	})
+
+	t.Run("malformed output", func(t *testing.T) {
+		for name, out := range map[string]string{
+			"empty":      "",
+			"no command": "400\n",
+			"bad ppid":   "not-a-pid bash\n",
+		} {
+			t.Run(name, func(t *testing.T) {
+				run := fakePS(t, map[int]string{500: out})
+				if got := detectSourceFromPS(run, 500); got != "" {
+					t.Errorf("detectSourceFromPS() = %q, want %q", got, "")
+				}
+			})
+		}
+	})
+
+	t.Run("exited process stops the walk", func(t *testing.T) {
+		run := fakePS(t, map[int]string{})
+		if got := detectSourceFromPS(run, 500); got != "" {
+			t.Errorf("detectSourceFromPS() = %q, want %q", got, "")
+		}
+	})
 }
 
 // writeProcEntry creates a fake /proc/<pid> directory: stat with ppid in field
@@ -73,6 +188,26 @@ func TestDetectSourceFromProc(t *testing.T) {
 		writeProcEntry(t, root, 1, 0, "systemd", "")
 		if got := detectSourceFromProc(root, 20); got != "claude-code" {
 			t.Errorf("detectSourceFromProc() = %q, want %q", got, "claude-code")
+		}
+	})
+
+	t.Run("npm-installed codex script path", func(t *testing.T) {
+		root := t.TempDir()
+		writeProcEntry(t, root, 30, 20, "ghost", "")
+		writeProcEntry(t, root, 20, 1, "node", "node\x00/home/ada/.local/lib/node_modules/@openai/codex/bin/codex.js\x00")
+		writeProcEntry(t, root, 1, 0, "systemd", "")
+		if got := detectSourceFromProc(root, 30); got != "codex" {
+			t.Errorf("detectSourceFromProc() = %q, want %q", got, "codex")
+		}
+	})
+
+	t.Run("runtime flag before script is skipped", func(t *testing.T) {
+		root := t.TempDir()
+		writeProcEntry(t, root, 30, 20, "ghost", "")
+		writeProcEntry(t, root, 20, 1, "node", "node\x00--experimental\x00/usr/local/bin/opencode\x00")
+		writeProcEntry(t, root, 1, 0, "systemd", "")
+		if got := detectSourceFromProc(root, 30); got != "opencode" {
+			t.Errorf("detectSourceFromProc() = %q, want %q", got, "opencode")
 		}
 	})
 

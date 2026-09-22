@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -19,19 +20,28 @@ var ErrUndetectableHarness = errors.New("cannot determine the calling harness (n
 // when it cannot be determined. Harnesses announce themselves in the
 // environment (OPENCODE, CLAUDECODE, CLAUDE_CODE_ENTRYPOINT) when they spawn
 // ghost; when those markers are absent — a manual `ghost supersede` run from a
-// shell inside a harness session — Linux falls back to walking the ancestor
-// process chain. Callers must treat "" as "undetectable" and fail with an
-// actionable error: defaulting to some other harness would bill the wrong
+// shell inside a harness session — Linux falls back to walking /proc and darwin
+// to walking `ps` output. Callers must treat "" as "undetectable" and fail with
+// an actionable error: defaulting to some other harness would bill the wrong
 // subscription and betray the user's routing choice.
 func DetectSource() string {
 	if s := detectSourceFromEnv(os.Getenv); s != "" {
 		return s
 	}
-	// /proc is Linux-only; other platforms get the environment markers only.
-	if runtime.GOOS != "linux" {
-		return ""
+	// /proc is Linux-only; darwin has no /proc, so it walks `ps` instead.
+	switch runtime.GOOS {
+	case "linux":
+		return detectSourceFromProc("/proc", os.Getpid())
+	case "darwin":
+		return detectSourceFromPS(psCommand, os.Getpid())
 	}
-	return detectSourceFromProc("/proc", os.Getpid())
+	return ""
+}
+
+// psCommand is the production runner for detectSourceFromPS: a thin wrapper
+// over exec.Command so tests can inject a fake ancestor chain.
+func psCommand(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).Output()
 }
 
 // detectSourceFromEnv maps harness environment markers to source tokens.
@@ -75,8 +85,8 @@ func detectSourceFromProc(root string, startPID int) string {
 }
 
 // sourceForProcess maps one /proc entry to a source token: the trimmed comm,
-// or — when comm is a JS runtime — the basename of the script argument from
-// cmdline, where a script-packaged harness's name actually appears.
+// or — when comm is a JS runtime — the script path from cmdline, where a
+// script-packaged harness's name actually appears.
 func sourceForProcess(root string, pid int) string {
 	dir := filepath.Join(root, strconv.Itoa(pid))
 	comm, err := os.ReadFile(filepath.Join(dir, "comm"))
@@ -94,10 +104,30 @@ func sourceForProcess(root string, pid int) string {
 	if err != nil {
 		return ""
 	}
-	// argv[0] is the runtime itself (`node`); the script path follows. Scan
-	// every argument so a runtime flag between them cannot hide the script.
+	// argv[0] is the runtime itself (`node`); the script path follows. Skip
+	// flags and empty args, then resolve the first remaining argument — the
+	// script — as a path, so npm-installed harnesses such as
+	// `node .../@openai/codex/bin/codex.js` are recognized.
 	for _, arg := range strings.Split(string(cmdline), "\x00")[1:] {
-		if s := sourceFromProcessName(filepath.Base(arg)); s != "" {
+		if arg == "" || strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return sourceFromScriptPath(arg)
+	}
+	return ""
+}
+
+// sourceFromScriptPath maps a script path to a source token, or "" when no
+// path segment names a known harness. The exact basename is tried first, then
+// every segment with its extension stripped, so npm-installed layouts resolve:
+// `@openai/codex/bin/codex.js` -> codex and
+// `@anthropic-ai/claude-code/cli.js` -> claude-code.
+func sourceFromScriptPath(path string) string {
+	if s := sourceFromProcessName(filepath.Base(path)); s != "" {
+		return s
+	}
+	for _, segment := range strings.Split(path, "/") {
+		if s := sourceFromProcessName(strings.TrimSuffix(segment, filepath.Ext(segment))); s != "" {
 			return s
 		}
 	}
@@ -116,6 +146,45 @@ func sourceFromProcessName(name string) string {
 		return "codex"
 	case "goose":
 		return "goose"
+	}
+	return ""
+}
+
+// detectSourceFromPS walks the ancestor chain on darwin, where /proc does not
+// exist, using `ps -o ppid=,command= -p <pid>`. startPID is the caller's own
+// pid (whose command is ghost and never matches); run is psCommand in
+// production and a fake chain in tests. The command tokens are scanned left to
+// right, skipping flags, so both a native comm (`claude`) and a node script
+// path (`node .../@openai/codex/bin/codex.js`) resolve. The walk stops at pid
+// 1, a self-parent, or maxAncestorHops, bounding a malformed or cyclic tree.
+func detectSourceFromPS(run func(name string, args ...string) ([]byte, error), startPID int) string {
+	const maxAncestorHops = 20
+	pid := startPID
+	for hops := 0; hops < maxAncestorHops && pid > 1; hops++ {
+		out, err := run("ps", "-o", "ppid=,command=", "-p", strconv.Itoa(pid))
+		if err != nil {
+			return ""
+		}
+		fields := strings.Fields(string(out))
+		if len(fields) < 2 {
+			return ""
+		}
+		ppid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			return ""
+		}
+		for _, token := range fields[1:] {
+			if strings.HasPrefix(token, "-") {
+				continue
+			}
+			if s := sourceFromScriptPath(token); s != "" {
+				return s
+			}
+		}
+		if ppid <= 1 || ppid == pid {
+			return ""
+		}
+		pid = ppid
 	}
 	return ""
 }
