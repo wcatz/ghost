@@ -544,3 +544,47 @@ func TestSafeProjectIDComponent(t *testing.T) {
 		}
 	}
 }
+
+// TestRunStop_OpencodeV2Transcript drives the opencode V2 adapter's contract
+// end to end: a V2 session.context transcript with tool use but no ghost save
+// gets the nudge (and its transient dir swept), while a Code Mode save —
+// recorded as an `execute` tool whose inner call is ghost.ghost_memory_save —
+// suppresses it.
+func TestRunStop_OpencodeV2Transcript(t *testing.T) {
+	const (
+		v2Shell = `{"id":"m1","type":"assistant","content":[{"type":"tool","id":"c1","name":"shell","state":{"status":"completed"}}]}`
+		v2Save  = `{"id":"m2","type":"assistant","content":[{"type":"tool","id":"c2","name":"execute","state":{"status":"completed",` +
+			`"metadata":{"toolCalls":[{"tool":"ghost.ghost_memory_save","status":"completed"}]}}}]}`
+	)
+	cases := []struct {
+		name      string
+		lines     []string
+		wantNudge bool
+	}{
+		{"tools without a save nudge", []string{v2Shell}, true},
+		{"code mode save suppresses the nudge", []string{v2Shell, v2Save}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolatedHome(t)
+			dir, err := os.MkdirTemp("", "ghost-v2test-*")
+			if err != nil {
+				t.Fatalf("MkdirTemp: %v", err)
+			}
+			path := filepath.Join(dir, "messages.jsonl")
+			if err := os.WriteFile(path, []byte(strings.Join(tc.lines, "\n")+"\n"), 0o600); err != nil {
+				t.Fatalf("write transcript: %v", err)
+			}
+			input := contractInputFor(t, "Stop", "opencode", "opencode-v2-messages",
+				fmt.Sprintf(`{"session_id":"oc2","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, path))
+			var out bytes.Buffer
+			RunHostEvent("stop", "opencode", strings.NewReader(input), &out, io.Discard)
+			if got := strings.Contains(out.String(), `"decision":"approve"`); got != tc.wantNudge {
+				t.Errorf("nudge emitted = %v, want %v (stdout %q)", got, tc.wantNudge, out.String())
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Errorf("transient V2 transcript dir was not swept: %v", err)
+			}
+		})
+	}
+}
