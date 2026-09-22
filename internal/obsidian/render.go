@@ -4,6 +4,7 @@ package obsidian
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -158,6 +159,75 @@ func fmTags(b *strings.Builder, tags []string) {
 	fmt.Fprintf(b, "tags: [%s]\n", strings.Join(items, ", "))
 }
 
+// edgeRelations is the fixed alphabetical emission order of the five typed
+// frontmatter edge keys. directed=true means the field is written only on
+// the link's source endpoint; directed=false (related, elaborates) writes on
+// both endpoints, matching ## Related's both-endpoint view.
+var edgeRelations = []struct {
+	name     string
+	directed bool
+}{
+	{name: "causes", directed: true},
+	{name: "contradicts", directed: true},
+	{name: "elaborates", directed: false},
+	{name: "related", directed: false},
+	{name: "supersedes", directed: true},
+}
+
+// fmEdges appends typed edge fields for m after the existing frontmatter
+// keys. Targets missing from fileFor are skipped (no dead wikilinks under
+// --project); a relation with zero remaining targets omits its key. Filenames
+// are sorted so re-exports stay byte-identical regardless of GetLinks order.
+func fmEdges(b *strings.Builder, m memory.Memory, links []memory.Link, fileFor map[string]string) {
+	byRel := make(map[string][]string)
+	seen := make(map[string]map[string]bool)
+	for _, l := range links {
+		var directed bool
+		var known bool
+		for _, er := range edgeRelations {
+			if er.name == l.Relation {
+				directed, known = er.directed, true
+				break
+			}
+		}
+		if !known {
+			continue
+		}
+		other := l.TargetID
+		if directed {
+			if l.SourceID != m.ID {
+				continue
+			}
+		} else if other == m.ID {
+			other = l.SourceID
+		}
+		f, ok := fileFor[other]
+		if !ok {
+			continue
+		}
+		if seen[l.Relation] == nil {
+			seen[l.Relation] = make(map[string]bool)
+		}
+		if seen[l.Relation][f] {
+			continue
+		}
+		seen[l.Relation][f] = true
+		byRel[l.Relation] = append(byRel[l.Relation], f)
+	}
+	for _, er := range edgeRelations {
+		targets := byRel[er.name]
+		if len(targets) == 0 {
+			continue
+		}
+		sort.Strings(targets)
+		items := make([]string, 0, len(targets))
+		for _, f := range targets {
+			items = append(items, yamlScalar("[["+strings.TrimSuffix(f, ".md")+"]]", true))
+		}
+		fmt.Fprintf(b, "%s: [%s]\n", er.name, strings.Join(items, ", "))
+	}
+}
+
 func renderMemory(m memory.Memory, links []memory.Link, fileFor map[string]string) string {
 	var b strings.Builder
 	b.WriteString("---\n")
@@ -172,6 +242,7 @@ func renderMemory(m memory.Memory, links []memory.Link, fileFor map[string]strin
 	fm(&b, "created", date(m.CreatedAt))
 	fm(&b, "updated", date(m.UpdatedAt))
 	fm(&b, "source", m.Source)
+	fmEdges(&b, m, links, fileFor)
 	b.WriteString("---\n")
 	b.WriteString(banner)
 	b.WriteString("\n")
