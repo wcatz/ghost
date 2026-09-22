@@ -283,19 +283,21 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 
 	// Clear interfering env vars.
-	unsetEnvVars(t, []string{"GHOST_EMBEDDING_MODEL"})
+	unsetEnvVars(t, []string{"GHOST_EMBEDDING_MODEL", "GHOST_CLI_MODEL_REFLECT", "GHOST_CLI_MODEL_RESOLVE", "GHOST_CLI_MODEL_SUPERSEDE"})
 
-	// YAML file sets embedding.model to "yaml-model".
+	// YAML file sets embedding.model to "yaml-model" and the phase pin to
+	// "yaml-model".
 	configDir := filepath.Join(tmpDir, "ghost")
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("embedding:\n  model: yaml-model\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("embedding:\n  model: yaml-model\ncli:\n  model_resolve: yaml-model\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	// Env var overrides to "env-model".
+	// Env vars override to "env-model".
 	t.Setenv("GHOST_EMBEDDING_MODEL", "env-model")
+	t.Setenv("GHOST_CLI_MODEL_RESOLVE", "env-model")
 
 	cfg, err := Load()
 	if err != nil {
@@ -306,12 +308,20 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	if cfg.Embedding.Model != "env-model" {
 		t.Errorf("embedding.model = %q, want %q (env should override yaml)", cfg.Embedding.Model, "env-model")
 	}
+	// The generic _ → . transformer would map this to cli.model.resolve,
+	// missing the cli.model_resolve key — the explicit override must catch it.
+	if cfg.CLI.ModelResolve != "env-model" {
+		t.Errorf("cli.model_resolve = %q, want %q (explicit env override should override yaml)", cfg.CLI.ModelResolve, "env-model")
+	}
 }
 
 func TestLoad_CLIPhaseModelsFromYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	// Phase model pins now have explicit GHOST_CLI_MODEL_* env overrides, so a
+	// host-exported value would outrank the YAML under test.
+	unsetEnvVars(t, []string{"GHOST_CLI_MODEL_REFLECT", "GHOST_CLI_MODEL_RESOLVE", "GHOST_CLI_MODEL_SUPERSEDE"})
 
 	cfgDir := filepath.Join(tmpDir, "ghost")
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {

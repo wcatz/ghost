@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let each lifecycle phase pin its own harness model — a small/fast model (`opencode/big-pickle`) for resolve and supersede's crisp verdicts, the strong default for reflect's consolidation.
+**Goal:** Let each lifecycle phase pin its own harness model — a small/fast model (`opencode/big-pickle`) for supersede's crisp verdicts (validated), provisionally for resolve (unmeasured), the strong default for reflect's consolidation.
 
 **Architecture:** Three `cli.model_*` config fields; each phase subcommand sets `GHOST_OPENCODE_MODEL` (read per invocation by `ai.OpenCodeClient`, `internal/ai/opencode_client.go`) when its configured model is non-empty. Each lifecycle phase runs in its own process, so the env cannot leak across phases; empty config leaves any inherited value untouched. Model pinning applies to the opencode harness only (the other clients have no model flag).
 
@@ -13,6 +13,8 @@
 ## Background and measurement (task B1F8C738)
 
 `opencode/big-pickle` measured on the supersede labeled set: 10/10 and 9/10 single-pair across two live runs (the miss was the subtle NATS CAUSES case — run-to-run variance) and 10/10 batched at batchSize 3. `opencode/claude-haiku-4-5` is NOT entitled (403 "Model access is disabled") — do not use or reference haiku as a candidate.
+
+**Provisional for resolve:** those measurements are supersede-only, and batched at batchSize 3 while supersede ships at 8. Resolve adjudicates with a KEEP-biased conclusion-vs-evidence rubric, which is unmeasured on a small model — pin resolve to big-pickle only experimentally.
 
 ## File structure
 
@@ -103,7 +105,7 @@ func TestApplyPhaseModel(t *testing.T) {
 - [ ] **Step 3:** commit `docs: document per-phase model pins`; push; open PR:
 
 ```
-gh pr create --title "feat(lifecycle): per-phase harness model pins" --body "Reflect, resolve, and supersede all ran on the same harness model. This adds cli.model_reflect / cli.model_resolve / cli.model_supersede: each phase subcommand pins GHOST_OPENCODE_MODEL for its own process when configured (empty = harness default, ignored by claude/codex/goose which have no model flag). Measured on the labeled supersede set: opencode/big-pickle scores 10/10 and 9/10 single-pair across two live runs (variance on the subtle CAUSES case) and 10/10 batched, so it is a viable small-model tier for the crisp verdict phases while reflect keeps the strong default. Related: Ghost task B1F8C738."
+gh pr create --title "feat(lifecycle): per-phase harness model pins" --body "Reflect, resolve, and supersede all ran on the same harness model. This adds cli.model_reflect / cli.model_resolve / cli.model_supersede: each phase subcommand pins GHOST_OPENCODE_MODEL for its own process when configured (empty = harness default, ignored by claude/codex/goose which have no model flag). Measured on the labeled supersede set: opencode/big-pickle scores 10/10 and 9/10 single-pair across two live runs (variance on the subtle CAUSES case) and 10/10 batched, so it is a viable small-model tier for supersede's crisp verdicts while reflect keeps the strong default; applying it to resolve is provisional (unmeasured). Related: Ghost task B1F8C738."
 ```
 - [ ] **Step 4:** `gh pr checks --watch`; do not merge without the user.
 

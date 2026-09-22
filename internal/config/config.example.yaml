@@ -48,9 +48,12 @@
 #   opencode_binary: ""               # e.g. "/Users/you/.opencode/bin/opencode"
 #   model_reflect: ""                 # pin ghost reflect's opencode harness model,
 #   model_resolve: ""                 # and likewise resolve / supersede, e.g.
-#   model_supersede: ""               # "opencode/big-pickle". Empty = the harness
-#                                     # default. Applies to the opencode backend
-#                                     # only (claude/codex/goose have no model flag).
+#   model_supersede: ""               # "opencode/big-pickle". Empty = any inherited
+#                                     # GHOST_OPENCODE_MODEL, else the harness default.
+#                                     # A configured pin overrides an inherited env
+#                                     # pin for that phase. Applies to the opencode
+#                                     # backend only (claude/codex/goose have no
+#                                     # model flag).
 
 # --- Memory Consolidation ---
 # ghost reflect's tier is chosen via the --tier CLI flag, not config.
