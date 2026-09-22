@@ -54,6 +54,15 @@ type CLIConfig struct {
 	OpenCodeBinary string `koanf:"opencode_binary"`
 	CodexBinary    string `koanf:"codex_binary"`
 	GooseBinary    string `koanf:"goose_binary"`
+
+	// Per-phase harness model pins for the opencode backend (e.g.
+	// "opencode/big-pickle"). Empty means "use the harness default". Each
+	// lifecycle phase runs as its own process, so a pin cannot leak between
+	// phases. Ignored by the claude/codex/goose clients, which have no model
+	// flag.
+	ModelReflect   string `koanf:"model_reflect"`
+	ModelResolve   string `koanf:"model_resolve"`
+	ModelSupersede string `koanf:"model_supersede"`
 }
 
 // ReflectionConfig holds memory consolidation settings.
@@ -193,6 +202,9 @@ func Load() (*Config, error) {
 		"GHOST_CLI_OPENCODE_BINARY":                      "cli.opencode_binary",
 		"GHOST_CLI_CODEX_BINARY":                         "cli.codex_binary",
 		"GHOST_CLI_GOOSE_BINARY":                         "cli.goose_binary",
+		"GHOST_CLI_MODEL_REFLECT":                        "cli.model_reflect",
+		"GHOST_CLI_MODEL_RESOLVE":                        "cli.model_resolve",
+		"GHOST_CLI_MODEL_SUPERSEDE":                      "cli.model_supersede",
 		"GHOST_REFLECTION_AUTO_REFLECT":                  "reflection.auto_reflect",
 		"GHOST_REFLECTION_AUTO_RESOLVE":                  "reflection.auto_resolve",
 		"GHOST_REFLECTION_AUTO_SUPERSEDE":                "reflection.auto_supersede",

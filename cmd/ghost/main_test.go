@@ -399,6 +399,18 @@ func TestBuildClassifyProvider_UsesConfiguredOpencodeStub(t *testing.T) {
 	}
 }
 
+func TestApplyPhaseModel(t *testing.T) {
+	t.Setenv("GHOST_OPENCODE_MODEL", "inherited/model")
+	applyPhaseModel("")
+	if got := os.Getenv("GHOST_OPENCODE_MODEL"); got != "inherited/model" {
+		t.Errorf("empty config must leave the inherited value, got %q", got)
+	}
+	applyPhaseModel("opencode/big-pickle")
+	if got := os.Getenv("GHOST_OPENCODE_MODEL"); got != "opencode/big-pickle" {
+		t.Errorf("config must pin the model, got %q", got)
+	}
+}
+
 // TestRunAllClients verifies the `--client all` orchestration: banners in run
 // order, continue past individual failures, per-failure stderr lines, and the
 // failed-names return that drives the exit code.
