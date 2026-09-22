@@ -34,7 +34,10 @@ func TestSourceProviderForSource(t *testing.T) {
 		{"opencode", "opencode", true},
 		{"codex", "codex", true},
 		{"goose", "goose", true},
-		{"unknown-source", "cli", true}, // falls back to claude
+		// Empty/unknown source must NOT cascade to claude (or anything else):
+		// callers resolve the source or fail, so the provider is unavailable.
+		{"unknown-source", "none", false},
+		{"", "none", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.source, func(t *testing.T) {
@@ -42,8 +45,8 @@ func TestSourceProviderForSource(t *testing.T) {
 			if p.Name() != tt.name {
 				t.Errorf("Name() = %q, want %q", p.Name(), tt.name)
 			}
-			if !p.Available() {
-				t.Error("expected available")
+			if p.Available() != tt.ok {
+				t.Errorf("Available() = %v, want %v", p.Available(), tt.ok)
 			}
 		})
 	}

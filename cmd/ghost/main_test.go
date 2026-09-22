@@ -365,28 +365,33 @@ func stubBinary(t *testing.T, payload string) string {
 	return path
 }
 
-// TestBuildClassifyProvider_NoBackendErrors: with no resolvable claude/
-// opencode/codex/goose binary, building the classifier must fail loudly.
-func TestBuildClassifyProvider_NoBackendErrors(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()) // empty dir defeats bare-name LookPath lookups
+// TestBuildClassifyProviderForSource_EmptySourceErrors: an empty source is the
+// old silent-claude path. It must now fail with the actionable detection error
+// before any backend lookup happens — even with a claude binary on PATH.
+func TestBuildClassifyProviderForSource_EmptySourceErrors(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\nexit 0"), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	t.Setenv("PATH", dir)
 	cfg := &config.Config{}
-	_, err := buildClassifyProvider(cfg)
-	if err == nil || !strings.Contains(err.Error(), "`claude`") {
-		t.Fatalf("want backend error, got %v", err)
+	_, err := buildClassifyProviderForSource(cfg, "")
+	if err == nil || !strings.Contains(err.Error(), "cannot determine the calling harness") {
+		t.Fatalf("want actionable undetectable-harness error, got %v", err)
 	}
 }
 
-// TestBuildClassifyProvider_UsesConfiguredOpencodeStub: with no binary on
-// PATH but an explicit opencode binary configured, the returned provider
-// must classify through that opencode binary (the harness's zero-Anthropic-
-// spend path). buildClassifyProvider returns ai.Provider whose Classify is a
-// plain string verdict.
-func TestBuildClassifyProvider_UsesConfiguredOpencodeStub(t *testing.T) {
+// TestBuildClassifyProviderForSource_UsesConfiguredOpencodeStub: with no binary
+// on PATH but an explicit opencode binary configured and a resolved source, the
+// returned provider must classify through that opencode binary (the harness's
+// zero-Anthropic-spend path). buildClassifyProviderForSource returns
+// ai.Provider whose Classify is a plain string verdict.
+func TestBuildClassifyProviderForSource_UsesConfiguredOpencodeStub(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	stub := stubBinary(t, `{"type":"text","part":{"type":"text","text":"STUB_CLASSIFY_OK"}}`)
 	cfg := &config.Config{}
 	cfg.CLI.OpenCodeBinary = stub
-	p, err := buildClassifyProvider(cfg)
+	p, err := buildClassifyProviderForSource(cfg, "opencode")
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -397,6 +402,46 @@ func TestBuildClassifyProvider_UsesConfiguredOpencodeStub(t *testing.T) {
 	if out != "STUB_CLASSIFY_OK" {
 		t.Fatalf("got %q, want STUB_CLASSIFY_OK", out)
 	}
+}
+
+// TestDetectPhaseSource covers the routing guard for manual reflect/resolve/
+// supersede: an explicit --source wins, otherwise the calling harness is
+// detected, and an undetectable caller is an error rather than a claude
+// default. The undetected case swaps the detection seam because the test
+// process itself can be a descendant of a harness (running `go test` from an
+// opencode session); the flag and env cases use t.Setenv.
+func TestDetectPhaseSource(t *testing.T) {
+	t.Run("explicit flag wins over detection", func(t *testing.T) {
+		t.Setenv("OPENCODE", "1")
+		got, err := detectPhaseSource("claude-code")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "claude-code" {
+			t.Fatalf("got %q, want %q", got, "claude-code")
+		}
+	})
+
+	t.Run("detects the calling harness from the environment", func(t *testing.T) {
+		t.Setenv("OPENCODE", "1")
+		got, err := detectPhaseSource("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "opencode" {
+			t.Fatalf("got %q, want %q", got, "opencode")
+		}
+	})
+
+	t.Run("undetectable caller is an error", func(t *testing.T) {
+		old := detectCallingSource
+		detectCallingSource = func() string { return "" }
+		t.Cleanup(func() { detectCallingSource = old })
+		_, err := detectPhaseSource("")
+		if err == nil || !strings.Contains(err.Error(), "cannot determine the calling harness") {
+			t.Fatalf("want actionable error, got %v", err)
+		}
+	})
 }
 
 func TestApplyPhaseModel(t *testing.T) {

@@ -720,8 +720,25 @@ Flags:
   --allow-drops   Apply even when guarded-category memories would be deleted without a merge
   --skip-unchanged Skip when the consolidatable set is unchanged since the last
                    applied consolidation (used by the auto lifecycle)
-  --source string Host source for CLI selection (e.g. claude-code, opencode)`)
+  --source string CLI harness for the auto tier: claude-code, opencode, codex,
+                   or goose. Defaults to the calling harness (detected from
+                   the environment and process ancestry); an undetectable
+                   caller is an error. Ignored by explicit --tier cli/opencode/sqlite.`)
 		os.Exit(1)
+	}
+
+	// An explicit --source always wins; otherwise the auto tier needs the
+	// calling harness so consolidation runs through the session's own
+	// subscription. Explicit tiers (cli/opencode/sqlite) select their backend
+	// directly and keep working without a detectable caller — in particular
+	// the offline sqlite floor stays available from any shell.
+	if tierValue == "auto" {
+		detected, err := detectPhaseSource(source)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		source = detected
 	}
 
 	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel())
@@ -745,8 +762,8 @@ Flags:
 
 	var consolidator reflection.Consolidator
 
-	// Source-aware auto tier: when --source is set and tier is "auto", use
-	// the source-matched CLI backend directly — the same CLI harness that
+	// Source-aware auto tier: source is always resolved (explicit --source or
+	// detectPhaseSource), so the auto tier runs the same CLI harness that
 	// served the session. This lets the stop-hook or cron reflect run
 	// subscription-billed consolidation with no API key.
 	if tierValue == "auto" && source != "" {
@@ -761,8 +778,8 @@ Flags:
 		} else {
 			// Falling through silently here hides a misconfiguration: the
 			// caller asked for the source-matched backend and would otherwise
-			// see no indication that a different CLI was used instead.
-			fmt.Fprintf(os.Stderr, "warning: no CLI backend matches --source %q; falling back to the default tier cascade\n", source)
+			// see no indication that the offline tier was used instead.
+			fmt.Fprintf(os.Stderr, "warning: no CLI binary matches source %q; falling through to the auto tier's SQLite floor (or failing under --require-llm)\n", source)
 		}
 	}
 
@@ -810,18 +827,15 @@ Flags:
 			}
 			consolidator = reflection.NewSQLiteConsolidator()
 		default: // "auto"
-			// Cascade every available CLI harness (claude, opencode, codex,
-			// goose) ahead of the SQLite floor — the whole memory-management
-			// stack is harness-only now, with the offline Jaccard tier as the
-			// final fallback.
+			// Route through the calling harness resolved by detectPhaseSource
+			// (--source or caller detection) — never the old claude-first
+			// cascade. The offline SQLite tier is the only fallback;
+			// --require-llm is the autonomous-reflect guard and forbids it, so
+			// an unavailable harness exits non-zero without touching the DB.
 			var tiers []reflection.Consolidator
-			if cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary); cli.Available() {
-				tiers = append(tiers, reflection.NewNamedConsolidator(cli, cli.Name()))
+			if sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary); sp.Available() {
+				tiers = append(tiers, reflection.NewNamedConsolidator(sp, sp.Name()))
 			}
-			// --require-llm is the autonomous-reflect guard: it must never silently
-			// degrade to the Jaccard-only sqlite tier (which would rewrite every
-			// non-manual memory with no consolidation quality). no LLM tier
-			// available (or all fail) => exit non-zero without touching the DB.
 			if !requireLLM {
 				tiers = append(tiers, reflection.NewSQLiteConsolidator())
 			}
@@ -1104,31 +1118,52 @@ func applyPhaseModel(model string) {
 	}
 }
 
-// buildClassifyProvider builds the Provider resolve/supersede classify
-// against: a cascade of subscription-billed CLI harnesses (claude, opencode,
-// codex, goose — see ai.CLIProvider). The Anthropic HTTP API no longer exists,
-// so these commands only need a CLI binary on PATH (or configured via
-// cli.*_binary).
-func buildClassifyProvider(cfg *config.Config) (ai.Provider, error) {
-	cli := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
-	if !cli.Available() {
-		return nil, fmt.Errorf("requires a `claude`, `opencode`, `codex`, or `goose` binary on PATH (or via cli.claude_binary/cli.opencode_binary/cli.codex_binary/cli.goose_binary)")
+// undetectableHarnessError is the shared message for the one failure mode that
+// used to silently route to claude: a caller whose harness cannot be
+// determined. It names the four accepted --source tokens so the fix is
+// actionable.
+const undetectableHarnessError = "cannot determine the calling harness (no --source and no claude/opencode/codex/goose ancestor detected); pass --source claude-code|opencode|codex|goose"
+
+// detectCallingSource is the process/env self-detection used when --source is
+// absent. It is a package variable so tests can pin the undetected case: the
+// test process's own ancestor chain can legitimately contain a harness (running
+// `go test` from an opencode session), which would otherwise make that case
+// environment-dependent.
+var detectCallingSource = ai.DetectSource
+
+// detectPhaseSource resolves the CLI-harness source for reflect/resolve/
+// supersede: an explicit --source always wins; otherwise the calling harness is
+// detected from the environment and process ancestry. There is no fallback
+// cascade — an undetectable caller is an error, because silently classifying
+// through a different harness than the session's would bill the wrong
+// subscription and betray the user's routing choice.
+func detectPhaseSource(flagSource string) (string, error) {
+	if flagSource != "" {
+		return flagSource, nil
 	}
-	return cli, nil
+	source := detectCallingSource()
+	if source == "" {
+		return "", errors.New(undetectableHarnessError)
+	}
+	fmt.Fprintf(os.Stderr, "ghost: using calling harness %q (detected)\n", source)
+	return source, nil
 }
 
-// buildClassifyProviderForSource routes classification through the CLI harness
-// matching the --source session when set, falling back to the default cascade
-// otherwise.
+// buildClassifyProviderForSource builds the Provider resolve/supersede classify
+// through: the CLI harness matching the resolved source. An empty source is an
+// error, not a fallback — callers resolve it with detectPhaseSource (--source
+// or caller detection). The Anthropic HTTP API no longer exists, so these
+// commands only need the source's CLI binary on PATH (or configured via
+// cli.*_binary).
 func buildClassifyProviderForSource(cfg *config.Config, source string) (ai.Provider, error) {
-	if source != "" {
-		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
-		if !sp.Available() {
-			return nil, fmt.Errorf("source %q: no CLI binary available", source)
-		}
-		return sp, nil
+	if source == "" {
+		return nil, errors.New(undetectableHarnessError)
 	}
-	return buildClassifyProvider(cfg)
+	sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
+	if !sp.Available() {
+		return nil, fmt.Errorf("source %q: no CLI binary available", source)
+	}
+	return sp, nil
 }
 
 // runSupersede implements `ghost supersede <project> [--apply]` — the creation
@@ -1173,12 +1208,21 @@ func runSupersede() {
 Flags:
   --apply             Write the supersedes/causes links (default is dry-run/preview)
   --threshold float   Min cosine similarity for a candidate pair (default 0.80)
-  --source string     Host source for CLI selection (e.g. claude-code, opencode)
+  --source string     CLI harness to classify through: claude-code, opencode,
+                      codex, or goose. Defaults to the calling harness
+                      (detected from the environment and process ancestry); an
+                      undetectable caller is an error.
 
-Classifies each candidate as supersedes, causes, or neither. Runs through a
-subscription-billed CLI harness ('claude', 'opencode', 'codex', or 'goose' —
-first available on PATH or via cli.*_binary config; set --source to route by
-host).`)
+Classifies each candidate as supersedes, causes, or neither. Runs through the
+subscription-billed CLI harness of the calling session (--source overrides;
+otherwise detected from the environment and process ancestry — an undetectable
+caller is an error, never a fallback to a different harness).`)
+		os.Exit(1)
+	}
+
+	source, err := detectPhaseSource(source)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -1268,12 +1312,22 @@ func runResolve() {
 
 Flags:
   --apply         Stamp resolved_at on confirmed memories (default is dry-run/preview)
-  --source string Host source for CLI selection (e.g. claude-code, opencode)
+  --source string CLI harness to classify through: claude-code, opencode,
+                  codex, or goose. Defaults to the calling harness (detected
+                  from the environment and process ancestry); an undetectable
+                  caller is an error.
 
 Marks resolved-evidence memories so they drop from session-start injection
-(still searchable). Runs through a subscription-billed CLI harness ('claude',
-'opencode', 'codex', or 'goose' — first available on PATH or via cli.*_binary
-config; set --source to route by host).`)
+(still searchable). Runs through the subscription-billed CLI harness of the
+calling session (--source overrides; otherwise detected from the environment
+and process ancestry — an undetectable caller is an error, never a fallback to
+a different harness).`)
+		os.Exit(1)
+	}
+
+	source, err := detectPhaseSource(source)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
