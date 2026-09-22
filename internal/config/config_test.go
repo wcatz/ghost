@@ -308,6 +308,58 @@ func TestLoad_EnvOverridesYAML(t *testing.T) {
 	}
 }
 
+func TestLoad_CLIPhaseModelsFromYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	cfgDir := filepath.Join(tmpDir, "ghost")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	yamlCfg := "cli:\n  model_reflect: opencode/big-pickle\n  model_resolve: opencode/big-pickle\n  model_supersede: opencode/big-pickle\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte(yamlCfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.CLI.ModelReflect != "opencode/big-pickle" {
+		t.Errorf("cli.model_reflect = %q, want %q", cfg.CLI.ModelReflect, "opencode/big-pickle")
+	}
+	if cfg.CLI.ModelResolve != "opencode/big-pickle" {
+		t.Errorf("cli.model_resolve = %q, want %q", cfg.CLI.ModelResolve, "opencode/big-pickle")
+	}
+	if cfg.CLI.ModelSupersede != "opencode/big-pickle" {
+		t.Errorf("cli.model_supersede = %q, want %q", cfg.CLI.ModelSupersede, "opencode/big-pickle")
+	}
+}
+
+func TestLoad_CLIPhaseModelsEmptyByDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	unsetEnvVars(t, []string{"GHOST_CLI_MODEL_REFLECT", "GHOST_CLI_MODEL_RESOLVE", "GHOST_CLI_MODEL_SUPERSEDE"})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.CLI.ModelReflect != "" {
+		t.Errorf("cli.model_reflect default = %q, want empty (harness default)", cfg.CLI.ModelReflect)
+	}
+	if cfg.CLI.ModelResolve != "" {
+		t.Errorf("cli.model_resolve default = %q, want empty (harness default)", cfg.CLI.ModelResolve)
+	}
+	if cfg.CLI.ModelSupersede != "" {
+		t.Errorf("cli.model_supersede default = %q, want empty (harness default)", cfg.CLI.ModelSupersede)
+	}
+}
+
 func TestEnsureConfigFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)

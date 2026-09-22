@@ -54,6 +54,15 @@ type CLIConfig struct {
 	OpenCodeBinary string `koanf:"opencode_binary"`
 	CodexBinary    string `koanf:"codex_binary"`
 	GooseBinary    string `koanf:"goose_binary"`
+
+	// Per-phase harness model pins for the opencode backend (e.g.
+	// "opencode/big-pickle"). Empty means "use the harness default". Each
+	// lifecycle phase runs as its own process, so a pin cannot leak between
+	// phases. Ignored by the claude/codex/goose clients, which have no model
+	// flag.
+	ModelReflect   string `koanf:"model_reflect"`
+	ModelResolve   string `koanf:"model_resolve"`
+	ModelSupersede string `koanf:"model_supersede"`
 }
 
 // ReflectionConfig holds memory consolidation settings.
