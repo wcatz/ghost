@@ -477,6 +477,10 @@ func TestApplyPhaseModelWarnsOnInertPin(t *testing.T) {
 		{"no harness never warns", "opencode/big-pickle", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// Each subtest starts from a known env state and restores on exit:
+			// applyPhaseModel os.Setenvs GHOST_OPENCODE_MODEL, and a leak would
+			// make later tests in the package non-deterministic.
+			t.Setenv("GHOST_OPENCODE_MODEL", "")
 			old := os.Stderr
 			r, w, err := os.Pipe()
 			if err != nil {
