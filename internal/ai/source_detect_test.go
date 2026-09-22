@@ -52,9 +52,21 @@ func TestSourceFromScriptPath(t *testing.T) {
 	}
 }
 
-// fakePS serves a pid -> `ps -o ppid=,command=` output table. A pid absent
-// from the table fails like ps does for a process that has already exited.
-func fakePS(t *testing.T, outputs map[int]string) func(name string, args ...string) ([]byte, error) {
+// fakeProc is one ancestor served by fakePS. ppid is the raw `ps -o ppid=`
+// output so tests can inject malformed values; command is the raw
+// `ps -o command=` output, empty meaning the process vanished before it could
+// be read.
+type fakeProc struct {
+	ppid    string
+	comm    string
+	command string
+}
+
+// fakePS serves a pid -> fakeProc table for the three ps invocations
+// detectSourceFromPS makes. A pid absent from the table fails like ps does for
+// a process that has already exited; a command request with no recorded
+// command fails the same way.
+func fakePS(t *testing.T, procs map[int]fakeProc) func(name string, args ...string) ([]byte, error) {
 	t.Helper()
 	return func(name string, args ...string) ([]byte, error) {
 		if name != "ps" || len(args) != 4 || args[0] != "-o" || args[2] != "-p" {
@@ -64,19 +76,31 @@ func fakePS(t *testing.T, outputs map[int]string) func(name string, args ...stri
 		if err != nil {
 			t.Fatalf("bad -p argument %q: %v", args[3], err)
 		}
-		out, ok := outputs[pid]
+		proc, ok := procs[pid]
 		if !ok {
 			return nil, fmt.Errorf("ps: process %d not found", pid)
 		}
-		return []byte(out), nil
+		switch args[1] {
+		case "ppid=":
+			return []byte(proc.ppid + "\n"), nil
+		case "comm=":
+			return []byte(proc.comm + "\n"), nil
+		case "command=":
+			if proc.command == "" {
+				return nil, fmt.Errorf("ps: command unavailable for %d", pid)
+			}
+			return []byte(proc.command + "\n"), nil
+		}
+		t.Fatalf("unexpected ps format %q", args[1])
+		return nil, nil
 	}
 }
 
 func TestDetectSourceFromPS(t *testing.T) {
 	t.Run("codex script path ancestor", func(t *testing.T) {
-		run := fakePS(t, map[int]string{
-			500: "400 /usr/local/bin/ghost supersede\n",
-			400: "1 /home/ada/.local/lib/node_modules/@openai/codex/bin/codex.js\n",
+		run := fakePS(t, map[int]fakeProc{
+			500: {ppid: "400", comm: "ghost", command: "/usr/local/bin/ghost supersede"},
+			400: {ppid: "1", comm: "node", command: "node /home/ada/.local/lib/node_modules/@openai/codex/bin/codex.js"},
 		})
 		if got := detectSourceFromPS(run, 500); got != "codex" {
 			t.Errorf("detectSourceFromPS() = %q, want %q", got, "codex")
@@ -84,32 +108,54 @@ func TestDetectSourceFromPS(t *testing.T) {
 	})
 
 	t.Run("node script path ancestor", func(t *testing.T) {
-		run := fakePS(t, map[int]string{
-			500: "400 /usr/local/bin/ghost supersede\n",
-			400: "300 node --experimental /home/ada/.local/lib/node_modules/@openai/codex/bin/codex.js\n",
-			300: "1 bash\n",
+		run := fakePS(t, map[int]fakeProc{
+			500: {ppid: "400", comm: "ghost", command: "/usr/local/bin/ghost supersede"},
+			400: {ppid: "300", comm: "node", command: "node /home/ada/.local/lib/node_modules/@openai/codex/bin/codex.js"},
+			300: {ppid: "1", comm: "bash", command: "bash"},
 		})
 		if got := detectSourceFromPS(run, 500); got != "codex" {
 			t.Errorf("detectSourceFromPS() = %q, want %q", got, "codex")
 		}
 	})
 
+	t.Run("runtime flag before script", func(t *testing.T) {
+		run := fakePS(t, map[int]fakeProc{
+			500: {ppid: "400", comm: "ghost", command: "/usr/local/bin/ghost supersede"},
+			400: {ppid: "1", comm: "node", command: "node --experimental /usr/local/bin/opencode"},
+		})
+		if got := detectSourceFromPS(run, 500); got != "opencode" {
+			t.Errorf("detectSourceFromPS() = %q, want %q", got, "opencode")
+		}
+	})
+
 	t.Run("native comm ancestor", func(t *testing.T) {
-		run := fakePS(t, map[int]string{
-			500: "400 /usr/local/bin/ghost supersede\n",
-			400: "300 claude\n",
-			300: "1 bash\n",
+		run := fakePS(t, map[int]fakeProc{
+			500: {ppid: "400", comm: "ghost", command: "/usr/local/bin/ghost supersede"},
+			400: {ppid: "300", comm: "claude", command: "claude"},
+			300: {ppid: "1", comm: "bash", command: "bash"},
 		})
 		if got := detectSourceFromPS(run, 500); got != "claude-code" {
 			t.Errorf("detectSourceFromPS() = %q, want %q", got, "claude-code")
 		}
 	})
 
+	// Regression pin: a non-JS-runtime command mentioning a harness path must
+	// not be classified as that harness.
+	t.Run("bash command mentioning codex path is not codex", func(t *testing.T) {
+		run := fakePS(t, map[int]fakeProc{
+			500: {ppid: "400", comm: "ghost", command: "/usr/local/bin/ghost supersede"},
+			400: {ppid: "1", comm: "bash", command: "bash /home/ada/codex/deploy.sh"},
+		})
+		if got := detectSourceFromPS(run, 500); got != "" {
+			t.Errorf("detectSourceFromPS() = %q, want %q", got, "")
+		}
+	})
+
 	t.Run("plain bash chain", func(t *testing.T) {
-		run := fakePS(t, map[int]string{
-			500: "400 bash\n",
-			400: "300 bash\n",
-			300: "1 bash\n",
+		run := fakePS(t, map[int]fakeProc{
+			500: {ppid: "400", comm: "bash", command: "bash"},
+			400: {ppid: "300", comm: "bash", command: "bash"},
+			300: {ppid: "1", comm: "bash", command: "bash"},
 		})
 		if got := detectSourceFromPS(run, 500); got != "" {
 			t.Errorf("detectSourceFromPS() = %q, want %q", got, "")
@@ -117,20 +163,21 @@ func TestDetectSourceFromPS(t *testing.T) {
 	})
 
 	t.Run("self-parent stops the walk", func(t *testing.T) {
-		run := fakePS(t, map[int]string{500: "500 bash\n"})
+		run := fakePS(t, map[int]fakeProc{
+			500: {ppid: "500", comm: "bash", command: "bash"},
+		})
 		if got := detectSourceFromPS(run, 500); got != "" {
 			t.Errorf("detectSourceFromPS() = %q, want %q", got, "")
 		}
 	})
 
 	t.Run("malformed output", func(t *testing.T) {
-		for name, out := range map[string]string{
-			"empty":      "",
-			"no command": "400\n",
-			"bad ppid":   "not-a-pid bash\n",
+		for name, proc := range map[string]fakeProc{
+			"empty ppid": {ppid: "", comm: "node"},
+			"bad ppid":   {ppid: "not-a-pid", comm: "node"},
 		} {
 			t.Run(name, func(t *testing.T) {
-				run := fakePS(t, map[int]string{500: out})
+				run := fakePS(t, map[int]fakeProc{500: proc})
 				if got := detectSourceFromPS(run, 500); got != "" {
 					t.Errorf("detectSourceFromPS() = %q, want %q", got, "")
 				}
@@ -138,8 +185,18 @@ func TestDetectSourceFromPS(t *testing.T) {
 		}
 	})
 
+	t.Run("js runtime with unreadable command", func(t *testing.T) {
+		run := fakePS(t, map[int]fakeProc{
+			500: {ppid: "400", comm: "ghost", command: "/usr/local/bin/ghost supersede"},
+			400: {ppid: "1", comm: "node", command: ""},
+		})
+		if got := detectSourceFromPS(run, 500); got != "" {
+			t.Errorf("detectSourceFromPS() = %q, want %q", got, "")
+		}
+	})
+
 	t.Run("exited process stops the walk", func(t *testing.T) {
-		run := fakePS(t, map[int]string{})
+		run := fakePS(t, map[int]fakeProc{})
 		if got := detectSourceFromPS(run, 500); got != "" {
 			t.Errorf("detectSourceFromPS() = %q, want %q", got, "")
 		}

@@ -151,34 +151,45 @@ func sourceFromProcessName(name string) string {
 }
 
 // detectSourceFromPS walks the ancestor chain on darwin, where /proc does not
-// exist, using `ps -o ppid=,command= -p <pid>`. startPID is the caller's own
-// pid (whose command is ghost and never matches); run is psCommand in
-// production and a fake chain in tests. The command tokens are scanned left to
-// right, skipping flags, so both a native comm (`claude`) and a node script
-// path (`node .../@openai/codex/bin/codex.js`) resolve. The walk stops at pid
-// 1, a self-parent, or maxAncestorHops, bounding a malformed or cyclic tree.
+// exist, using `ps`. startPID is the caller's own pid (whose comm is ghost and
+// never matches); run is psCommand in production and a fake chain in tests.
+// Each ancestor is classified the way sourceForProcess classifies a /proc
+// entry: comm is matched directly, and only a JS runtime's command line is
+// scanned — skipping the runtime itself and any flags — for a harness script
+// path, so `bash /home/ada/codex/deploy.sh` is not mistaken for codex. The
+// walk stops at pid 1, a self-parent, or maxAncestorHops, bounding a malformed
+// or cyclic tree.
 func detectSourceFromPS(run func(name string, args ...string) ([]byte, error), startPID int) string {
 	const maxAncestorHops = 20
 	pid := startPID
 	for hops := 0; hops < maxAncestorHops && pid > 1; hops++ {
-		out, err := run("ps", "-o", "ppid=,command=", "-p", strconv.Itoa(pid))
+		ppidOut, err := run("ps", "-o", "ppid=", "-p", strconv.Itoa(pid))
 		if err != nil {
 			return ""
 		}
-		fields := strings.Fields(string(out))
-		if len(fields) < 2 {
-			return ""
-		}
-		ppid, err := strconv.Atoi(fields[0])
+		ppid, err := strconv.Atoi(strings.TrimSpace(string(ppidOut)))
 		if err != nil {
 			return ""
 		}
-		for _, token := range fields[1:] {
-			if strings.HasPrefix(token, "-") {
-				continue
-			}
-			if s := sourceFromScriptPath(token); s != "" {
-				return s
+		commOut, err := run("ps", "-o", "comm=", "-p", strconv.Itoa(pid))
+		if err != nil {
+			return ""
+		}
+		comm := strings.TrimSpace(string(commOut))
+		if s := sourceFromProcessName(comm); s != "" {
+			return s
+		}
+		if jsRuntimes[comm] {
+			out, err := run("ps", "-o", "command=", "-p", strconv.Itoa(pid))
+			if err == nil {
+				for i, token := range strings.Fields(string(out)) {
+					if i == 0 || strings.HasPrefix(token, "-") {
+						continue
+					}
+					if s := sourceFromScriptPath(token); s != "" {
+						return s
+					}
+				}
 			}
 		}
 		if ppid <= 1 || ppid == pid {
