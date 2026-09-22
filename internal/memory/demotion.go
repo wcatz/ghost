@@ -94,6 +94,58 @@ func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) [
 	return items
 }
 
+// SupersedePenalties returns a penalty count per candidate ID for 'supersedes'
+// edges whose BOTH endpoints are in ids (same window rule as SupersedesWithin):
+// the superseded ID's penalty is incremented once per present superseder, so a
+// memory with no co-present superseder keeps penalty 0. Batched-lookup shape
+// mirrors DemotionPenalties so injection paths (GetTopMemories, the session
+// hook) can share one query with the search path's demoteSuperseded. No
+// locking: same contract as DemotionPenalties — callers holding Store's
+// s.mu.RLock (GetTopMemories) pass s.db directly; the hook passes its own
+// read-only handle.
+func SupersedePenalties(ctx context.Context, db *sql.DB, ids []string) (map[string]int, error) {
+	if len(ids) < 2 {
+		return nil, nil
+	}
+
+	ph := make([]string, len(ids))
+	args := make([]interface{}, 0, len(ids)*2)
+	for i, id := range ids {
+		ph[i] = "?"
+		args = append(args, id)
+	}
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	list := strings.Join(ph, ",")
+
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
+		SELECT source_id, target_id FROM memory_links
+		WHERE relation = 'supersedes' AND invalidated_at IS NULL
+		  AND source_id IN (%s) AND target_id IN (%s)
+	`, list, list), args...)
+	if err != nil {
+		return nil, fmt.Errorf("supersede penalties: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	penalty := make(map[string]int, len(ids))
+	for rows.Next() {
+		var src, tgt string
+		if err := rows.Scan(&src, &tgt); err != nil {
+			return nil, fmt.Errorf("supersede penalties: %w", err)
+		}
+		// src supersedes tgt: sink the superseded side once per edge.
+		// The query already restricted both endpoints to ids, so src is
+		// present by construction (same rule demoteSuperseded applies).
+		penalty[tgt]++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("supersede penalties: %w", err)
+	}
+	return penalty, nil
+}
+
 // demoteResults applies both targeted, window-scoped demotions to a search
 // result set: a superseded memory sinks below its superseder, and the
 // lower-ranked member of a near-duplicate pair sinks below the other. Both are

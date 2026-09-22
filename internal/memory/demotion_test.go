@@ -27,6 +27,40 @@ func TestDemotionPenaltiesDemotesLowerRanked(t *testing.T) {
 	}
 }
 
+// TestSupersedePenalties: the shared injection/search helper penalizes only
+// the superseded side, and only when both endpoints are in the window —
+// same rule as SupersedesWithin.
+func TestSupersedePenalties(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	stale := makeMemory(t, s, "stale payments region")
+	fresh := makeMemory(t, s, "fresh payments region")
+	outside := makeMemory(t, s, "unrelated memory")
+
+	if err := s.CreateLink(ctx, fresh, stale, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	// Edge whose counterpart is outside the window must not count.
+	if err := s.CreateLink(ctx, outside, stale, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink outside: %v", err)
+	}
+
+	penalty, err := SupersedePenalties(ctx, s.db, []string{fresh, stale})
+	if err != nil {
+		t.Fatalf("SupersedePenalties: %v", err)
+	}
+	if penalty[stale] != 1 {
+		t.Errorf("penalty[stale] = %d, want 1 (only the in-window edge)", penalty[stale])
+	}
+	if penalty[fresh] != 0 {
+		t.Errorf("penalty[fresh] = %d, want 0 (superseder is never sunk)", penalty[fresh])
+	}
+
+	if _, err := SupersedePenalties(ctx, s.db, []string{fresh}); err != nil {
+		t.Fatalf("single-id window: %v", err)
+	}
+}
+
 func TestDemotionPenaltiesIgnoresBelowThreshold(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

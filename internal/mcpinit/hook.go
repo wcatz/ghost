@@ -576,6 +576,23 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	}
 	memories = chosen
 
+	// Supersede demote before the cap, same helper as GetTopMemories and the
+	// search path: membership-preserving reorder so a superseded memory never
+	// outranks its co-present replacement in the injected block (order matters
+	// even when both survive the 15-cap).
+	if len(memories) >= 2 {
+		ids := make([]string, len(memories))
+		for i, m := range memories {
+			ids[i] = m.ID
+		}
+		penalty, penaltyErr := memory.SupersedePenalties(context.Background(), db, ids)
+		if penaltyErr != nil {
+			fmt.Fprintln(os.Stderr, "ghost: session injection supersede demotion lookup failed:", penaltyErr)
+		} else if len(penalty) > 0 {
+			memories = memory.StableDemote(memories, func(m sessionMemory) string { return m.ID }, penalty)
+		}
+	}
+
 	if len(memories) > sessionMemoriesCap {
 		demotionThreshold := memory.DefaultDemotionThreshold
 		if cfgErr == nil {

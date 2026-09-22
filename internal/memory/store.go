@@ -788,6 +788,22 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 		return nil, err
 	}
 
+	// Supersede demote runs whenever the window has a pair to reorder —
+	// membership-preserving, same helper the search path uses — so a
+	// superseded memory cannot outrank its replacement in injection even
+	// when the result fits under limit (order alone still matters).
+	if len(results) >= 2 {
+		ids := make([]string, len(results))
+		for i, m := range results {
+			ids[i] = m.ID
+		}
+		penalty, err := SupersedePenalties(ctx, s.db, ids)
+		if err != nil {
+			s.logger.Debug("get top memories: supersede demotion lookup failed", "error", err)
+		} else if len(penalty) > 0 {
+			results = StableDemote(results, func(m Memory) string { return m.ID }, penalty)
+		}
+	}
 	if len(results) > limit {
 		ids := make([]string, len(results))
 		pinned := make(map[string]bool, len(results))

@@ -1028,6 +1028,69 @@ func TestSessionInjectionUsesDecayRanking(t *testing.T) {
 	}
 }
 
+// TestSessionInjectionDemotesSuperseded: a superseded memory must not
+// outrank its co-present replacement in the injected block — parity with
+// GetTopMemories and the search path. Stale wins on raw importance (0.9 vs
+// 0.5); both are fresh 'fact' rows so decay cannot flip them.
+func TestSessionInjectionDemotesSuperseded(t *testing.T) {
+	xdgHome := t.TempDir()
+	ghostDir := filepath.Join(xdgHome, "ghost")
+	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	dbPath := filepath.Join(ghostDir, "ghost.db")
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'myproj')`, canonical); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	// Stale wins on raw importance (0.9 vs 0.5); both are fresh 'fact' rows
+	// so decay cannot flip them — only the supersede demote can.
+	if _, err := db.Exec(
+		`INSERT INTO memories (id, project_id, category, content, source, importance) VALUES
+		 ('stale1', 'p1', 'fact', 'STALEMARKER payments deploys eu-west-1', 'manual', 0.9),
+		 ('fresh1', 'p1', 'fact', 'FRESHMARKER payments deploys us-east-1', 'manual', 0.5)`,
+	); err != nil {
+		t.Fatalf("insert pair: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memory_links (source_id, target_id, relation, strength, source)
+		 VALUES ('fresh1', 'stale1', 'supersedes', 0.95, 'llm')`,
+	); err != nil {
+		t.Fatalf("insert supersedes link: %v", err)
+	}
+	_ = db.Close()
+
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	input, _ := json.Marshal(map[string]string{"cwd": projDir})
+	var out strings.Builder
+	runSessionStartHook(t, string(input), &out)
+	result := out.String()
+
+	freshAt := strings.Index(result, "FRESHMARKER")
+	staleAt := strings.Index(result, "STALEMARKER")
+	if freshAt < 0 || staleAt < 0 {
+		t.Fatalf("both memories must be injected (demote is membership-preserving); got:\n%s", result)
+	}
+	if freshAt > staleAt {
+		t.Errorf("superseded memory must rank below its replacement in session injection; got stale before fresh:\n%s", result)
+	}
+}
+
 // TestSessionInjectionBehaviorFloor: under the DEFAULT behavior floor (8),
 // behavioral categories (gotcha/convention/preference/decision) are promoted
 // ahead of the rank-only ordering. The fixture is the same gotcha-vs-facts
