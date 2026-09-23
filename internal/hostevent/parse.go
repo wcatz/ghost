@@ -75,7 +75,7 @@ func Parse(data []byte, eventArg, sourceArg string) (Payload, error) {
 		return Payload{}, fmt.Errorf("payload event %q disagrees with argv event %q", p.HookEventName, eventArg)
 	}
 	switch p.Contract.TranscriptFormat {
-	case "", FormatNone, FormatClaudeJSONL, FormatOpencodeMessages, FormatCodexRollout:
+	case "", FormatNone, FormatClaudeJSONL, FormatOpencodeMessages, FormatOpencodeV2Messages, FormatCodexRollout:
 		if p.Contract.TranscriptFormat == "" {
 			p.Contract.TranscriptFormat = FormatNone
 		}

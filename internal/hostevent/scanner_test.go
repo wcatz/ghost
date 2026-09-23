@@ -228,3 +228,81 @@ func TestScanOpencodeMessages_GoldenFixture(t *testing.T) {
 		t.Errorf("golden fixture = %+v, want toolCalls=4 saves=2", got)
 	}
 }
+
+// opencode-v2-messages fixtures: one V2 session.context message per line.
+// V2 exposes MCP servers through Code Mode by default, so a ghost save is an
+// `execute` tool whose metadata.toolCalls names `ghost.<tool>`; with
+// codemode disabled the tool stays native as `ghost_<tool>`.
+const (
+	oc2LineShell = `{"id":"m1","type":"assistant","agent":"build","content":[` +
+		`{"type":"tool","id":"c1","name":"shell","state":{"status":"completed","input":{"command":"git status"}}}]}`
+	oc2LineCodeModeSave = `{"id":"m2","type":"assistant","agent":"build","content":[` +
+		`{"type":"tool","id":"c2","name":"execute","state":{"status":"completed",` +
+		`"input":{"code":"return await tools.ghost.ghost_memory_save({})"},` +
+		`"metadata":{"toolCalls":[{"tool":"ghost.ghost_memory_save","status":"completed"}]}}}]}`
+	oc2LineCodeModeGlobal = `{"id":"m3","type":"assistant","agent":"build","content":[` +
+		`{"type":"tool","id":"c3","name":"execute","state":{"status":"completed",` +
+		`"metadata":{"toolCalls":[{"tool":"ghost.ghost_task_list"},{"tool":"ghost.ghost_save_global"}]}}}]}`
+	oc2LineCodeModeNoSave = `{"id":"m4","type":"assistant","agent":"build","content":[` +
+		`{"type":"tool","id":"c4","name":"execute","state":{"status":"completed",` +
+		`"input":{"code":"// ghost.ghost_memory_save later\nreturn 1"},"metadata":{"toolCalls":[]}}}]}`
+	oc2LineNativeSave = `{"id":"m5","type":"assistant","agent":"build","content":[` +
+		`{"type":"tool","id":"c5","name":"ghost_ghost_memory_save","state":{"status":"completed"}}]}`
+	oc2LineText = `{"id":"m6","type":"assistant","agent":"build","content":[` +
+		`{"type":"text","text":"mentioning tools.ghost.ghost_memory_save in prose does not count"}]}`
+	oc2LineUser    = `{"id":"m7","type":"user","text":"hello","files":[]}`
+	oc2LineCatalog = `{"id":"m8","type":"system","text":"- tools.ghost.ghost_memory_save({...}) // Save a memory"}`
+)
+
+func TestScanOpencodeV2Messages(t *testing.T) {
+	cases := []struct {
+		name          string
+		lines         []string
+		wantToolCalls int
+		wantSaves     int
+	}{
+		{"tools but no saves", []string{oc2LineUser, oc2LineShell, oc2LineText}, 1, 0},
+		{"code mode save counts", []string{oc2LineShell, oc2LineCodeModeSave}, 2, 1},
+		{"code mode global save among other calls", []string{oc2LineCodeModeGlobal}, 1, 1},
+		{"code mentioning the tool without calling it is not a save", []string{oc2LineCodeModeNoSave}, 1, 0},
+		{"native (codemode off) save counts", []string{oc2LineShell, oc2LineNativeSave}, 2, 1},
+		{"prose and catalog mentions are not saves", []string{oc2LineCatalog, oc2LineShell, oc2LineText}, 1, 0},
+		{"v1-shaped line yields nothing", []string{ocLineSave}, 0, 0},
+		{"garbage lines skipped", []string{"garbage not json", oc2LineShell, "{{{{", oc2LineCodeModeSave}, 2, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ScanOpencodeV2Messages(strings.NewReader(strings.Join(tc.lines, "\n") + "\n"))
+			if err != nil {
+				t.Fatalf("ScanOpencodeV2Messages: %v", err)
+			}
+			if got.ToolCalls != tc.wantToolCalls || got.GhostSaves != tc.wantSaves {
+				t.Errorf("ScanOpencodeV2Messages = %+v, want toolCalls=%d saves=%d", got, tc.wantToolCalls, tc.wantSaves)
+			}
+		})
+	}
+
+	res, ok, err := Scan(FormatOpencodeV2Messages, strings.NewReader(oc2LineCodeModeSave))
+	if !ok || err != nil || res.ToolCalls != 1 || res.GhostSaves != 1 {
+		t.Errorf("Scan(opencode-v2-messages) = %+v,%v,%v want 1 tool call, 1 save", res, ok, err)
+	}
+}
+
+// TestScanOpencodeV2Messages_GoldenFixture pins the scanner against a real
+// opencode 2.0.14 session.context transcript: a warm-up `execute`, the Code
+// Mode catalog system message (which names ghost_memory_save in prose), a
+// Code Mode ghost save, a closing text reply, and the idle marker.
+func TestScanOpencodeV2Messages_GoldenFixture(t *testing.T) {
+	f, err := os.Open(filepath.Join("testdata", "opencode-v2-messages", "session.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close() //nolint:errcheck
+	got, err := ScanOpencodeV2Messages(f)
+	if err != nil {
+		t.Fatalf("ScanOpencodeV2Messages: %v", err)
+	}
+	if got.ToolCalls != 2 || got.GhostSaves != 1 {
+		t.Errorf("golden fixture = %+v, want toolCalls=2 saves=1", got)
+	}
+}

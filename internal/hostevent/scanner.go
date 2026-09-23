@@ -9,10 +9,11 @@ import (
 // Transcript formats known to the contract. The scanner registry is keyed by
 // these values; ghost selects a scanner by format, never by source.
 const (
-	FormatNone             = "none"
-	FormatClaudeJSONL      = "claude-jsonl"
-	FormatOpencodeMessages = "opencode-messages"
-	FormatCodexRollout     = "codex-rollout"
+	FormatNone               = "none"
+	FormatClaudeJSONL        = "claude-jsonl"
+	FormatOpencodeMessages   = "opencode-messages"
+	FormatOpencodeV2Messages = "opencode-v2-messages"
+	FormatCodexRollout       = "codex-rollout"
 )
 
 // ScanResult counts assistant tool_use blocks seen in a transcript and how
@@ -33,9 +34,10 @@ type ScanFunc func(io.Reader) (ScanResult, error)
 // an unregistered format would silently disable reflection/resolve/supersede
 // for that host's users.
 var scanners = map[string]ScanFunc{
-	FormatClaudeJSONL:      ScanClaudeJSONL,
-	FormatOpencodeMessages: ScanOpencodeMessages,
-	FormatCodexRollout:     ScanCodexRollout,
+	FormatClaudeJSONL:        ScanClaudeJSONL,
+	FormatOpencodeMessages:   ScanOpencodeMessages,
+	FormatOpencodeV2Messages: ScanOpencodeV2Messages,
+	FormatCodexRollout:       ScanCodexRollout,
 }
 
 // Scan runs the scanner registered for format. ok is false when no scanner is
@@ -214,6 +216,71 @@ func ScanOpencodeMessages(r io.Reader) (ScanResult, error) {
 			if p.Type == "tool" {
 				res.ToolCalls++
 				if ghostSaveToolsOpencode[p.Tool] {
+					res.GhostSaves++
+				}
+			}
+		}
+	})
+	return res, err
+}
+
+// opencodeV2MessageLine is the minimal shape needed to spot tool calls in one
+// opencode-v2-messages JSONL line: a V2 session.context message serialized
+// verbatim by the adapter. Assistant messages carry their tool calls as
+// content entries typed "tool".
+type opencodeV2MessageLine struct {
+	Type    string `json:"type"`
+	Content []struct {
+		Type  string `json:"type"`
+		Name  string `json:"name"`
+		State struct {
+			Metadata struct {
+				ToolCalls []struct {
+					Tool string `json:"tool"`
+				} `json:"toolCalls"`
+			} `json:"metadata"`
+		} `json:"state"`
+	} `json:"content"`
+}
+
+// ghostSaveToolsOpencodeV2 covers both ways V2 exposes an MCP tool. Code
+// Mode (the default) routes calls through the `execute` tool and records each
+// inner call's path as `<server>.<tool>`; with codemode disabled the tool
+// stays native as `<server>_<tool>`, the same normalization V1 used.
+var ghostSaveToolsOpencodeV2 = map[string]bool{
+	"ghost.ghost_memory_save": true,
+	"ghost.ghost_save_global": true,
+	"ghost_ghost_memory_save": true,
+	"ghost_save_global":       true,
+}
+
+// ScanOpencodeV2Messages streams an opencode-v2-messages transcript and counts
+// assistant tool entries, plus how many were Ghost saves. A Code Mode
+// `execute` entry counts once as a tool call; its saves come only from the
+// recorded inner calls (metadata.toolCalls), never from the code text, so
+// code or prose that merely names the tool does not count. Unparseable lines
+// are skipped; read errors abort the scan and are returned.
+func ScanOpencodeV2Messages(r io.Reader) (ScanResult, error) {
+	var res ScanResult
+	err := streamJSONL(r, func(line []byte) {
+		var l opencodeV2MessageLine
+		if err := json.Unmarshal(line, &l); err != nil {
+			return
+		}
+		if l.Type != "assistant" {
+			return
+		}
+		for _, c := range l.Content {
+			if c.Type != "tool" {
+				continue
+			}
+			res.ToolCalls++
+			if ghostSaveToolsOpencodeV2[c.Name] {
+				res.GhostSaves++
+				continue
+			}
+			for _, inner := range c.State.Metadata.ToolCalls {
+				if ghostSaveToolsOpencodeV2[inner.Tool] {
 					res.GhostSaves++
 				}
 			}

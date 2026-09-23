@@ -152,7 +152,7 @@ func cleanupTransientTranscript(p hostevent.Payload) {
 		return
 	}
 	switch p.Contract.TranscriptFormat {
-	case hostevent.FormatOpencodeMessages, hostevent.FormatCodexRollout:
+	case hostevent.FormatOpencodeMessages, hostevent.FormatOpencodeV2Messages, hostevent.FormatCodexRollout:
 	default:
 		return
 	}

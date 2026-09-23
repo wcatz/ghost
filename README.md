@@ -49,7 +49,7 @@ ghost mcp init --client opencode
 ollama pull nomic-embed-text:v1.5
 ```
 
-This installs a single lifecycle plugin to `~/.config/opencode/plugins/ghost-opencode.ts` that does everything: it registers the `ghost` MCP server (via opencode's plugin config hook) **and** bridges session-idle events to ghost's stop hook (memory reflection, resolve, supersede). Your `opencode.json` is never touched. Restart opencode — Ghost's `ghost_*` tools and lifecycle processing go live automatically. Verify with `ghost mcp status --client opencode`.
+This installs a single lifecycle plugin to `~/.config/opencode/plugins/ghost-opencode.ts` that does everything: it registers the `ghost` MCP server (via the plugin config hook on opencode V1, or `mcp.transform` on V2) **and** bridges session-idle events to ghost's stop hook (memory reflection, resolve, supersede). The same file works on both generations: V2 loads its `setup()` entrypoint and reaches the save tool through Code Mode (`tools.ghost.ghost_memory_save`). Your `opencode.json` is never touched. Restart opencode — Ghost's `ghost_*` tools and lifecycle processing go live automatically. Verify with `ghost mcp status --client opencode`.
 
 No Go toolchain? Grab a prebuilt binary from [Releases](https://github.com/wcatz/ghost/releases/latest) — linux, macOS, and Windows, amd64 and arm64, with `checksums.txt`. Building from source needs Go 1.26+ (older toolchains fetch it automatically via `GOTOOLCHAIN=auto`).
 

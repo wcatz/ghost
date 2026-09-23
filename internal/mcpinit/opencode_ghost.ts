@@ -1,7 +1,13 @@
-// ghost-opencode v1 — opencode lifecycle adapter for Ghost
+// ghost-opencode — opencode lifecycle adapter for Ghost
 // (https://github.com/wcatz/ghost). Installed and updated by
 // `ghost mcp init --client opencode`; local edits are overwritten by the next
 // init run.
+//
+// One file serves both opencode generations. V1 loads the GhostPlugin
+// function (as a named export on older releases, or as the default export's
+// server() on 1.18.29+ — the same reference, so it runs once); V2 calls the
+// default export's setup(). The two implementations share helpers but not
+// hooks — the V2 plugin API is a different surface (see setupV2 below).
 //
 // Bridges opencode's idle transition to the ghost host-event contract:
 //
@@ -16,8 +22,9 @@
 // fail-open is absolute: every error logs one line and never disturbs the
 // session.
 import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin as PluginV2 } from "@opencode/plugin"
 import { spawn } from "node:child_process"
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
+import { appendFile, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -291,4 +298,226 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 			}
 		},
 	}
+}
+
+// ---------------------------------------------------------------------------
+// opencode V2
+//
+// V2 differences that shape this implementation (opencode 2.0.x plugin API):
+//   - no config hook: the MCP server is registered through ctx.mcp.transform,
+//     and start context is appended to the system prompt by the session
+//     "context" hook instead of cfg.instructions;
+//   - no event hook: ctx.event.subscribe() is an async iterable, drained in
+//     the background and aborted by the cleanup setup() returns;
+//   - a turn ends with session.execution.{succeeded,failed,interrupted}
+//     (plus session.idle / session.status idle on long-lived servers);
+//   - the transcript comes from ctx.session.context and is materialized in
+//     the opencode-v2-messages format;
+//   - MCP tools default to Code Mode, so the save tool is reached as
+//     tools.ghost.ghost_memory_save inside `execute`, not as a native tool;
+//   - no app.log: diagnostics go to a best-effort file under ~/.cache/ghost.
+
+type ContextV2 = PluginV2.Context
+
+const V2_LOG_FILE = join(homedir(), ".cache", "ghost", "opencode-plugin.log")
+
+const nudgePromptV2 = (reason: string): string =>
+	`[Ghost] ${reason} As the assistant, if there are discoveries worth keeping, save them now with the ghost MCP server's ghost_memory_save tool (tools.ghost.ghost_memory_save in Code Mode). This is an automated reminder — act on it rather than asking the user.`
+
+const V2_STOP_EVENTS = new Set([
+	"session.execution.succeeded",
+	"session.execution.failed",
+	"session.execution.interrupted",
+	"session.idle",
+])
+
+// The start-context block is a per-session snapshot rendered once for the
+// session's own directory; the promise is cached so concurrent model requests
+// share one `ghost context` spawn. FIFO-bounded like lastFire.
+const startContextV2 = new Map<string, Promise<string>>()
+
+const setupV2 = async (ctx: ContextV2) => {
+	// opencode V1 (seen on 1.18.32 `run`) also calls setup() — alongside
+	// server() — with a partial context that has no mcp/session/event/location
+	// domains. server() already covers V1 there, so bail out rather than
+	// half-run (and let the event loop spin on a missing domain).
+	const partial = ctx as Partial<ContextV2> | undefined
+	if (!partial?.mcp || !partial.session || !partial.event || !partial.location) return
+	const ghostBin = process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT
+	const log = async (message: string) => {
+		try {
+			await mkdir(join(homedir(), ".cache", "ghost"), { recursive: true })
+			await appendFile(V2_LOG_FILE, `${new Date().toISOString()} ${message}\n`)
+		} catch {
+			// Logging is best-effort; never let it mask the real outcome.
+		}
+	}
+
+	const sessionDirectory = async (sessionID: string): Promise<string> => {
+		const fallback = ctx.location.directory ?? process.cwd()
+		try {
+			const info = await withTimeout(ctx.session.get({ sessionID }), 1500, undefined)
+			return info?.location?.directory || fallback
+		} catch {
+			return fallback
+		}
+	}
+
+	// MCP self-registration: the plugin alone brings ghost's tools online,
+	// no opencode config edit needed.
+	try {
+		await ctx.mcp.transform((mcp) => {
+			mcp.set("ghost", { type: "local", command: [ghostBin, "mcp"], disabled: false })
+		})
+	} catch (e) {
+		await log(`ghost: fail-open (mcp registration: ${e})`)
+	}
+
+	// Passive start context, appended to every primary request's system
+	// prompt. Fail-open: an empty render adds nothing.
+	try {
+		await ctx.session.hook("context", async (input) => {
+			let pending = startContextV2.get(input.sessionID)
+			if (!pending) {
+				pending = sessionDirectory(input.sessionID).then(renderStartContext).catch(() => "")
+				startContextV2.set(input.sessionID, pending)
+				if (startContextV2.size > MAX_TRACKED_SESSIONS) {
+					const oldest = startContextV2.keys().next().value
+					if (oldest !== undefined) startContextV2.delete(oldest)
+				}
+			}
+			const text = await pending
+			if (!text.trim()) return
+			const hint = "\n\n---\n\n*Snapshot captured at this session's start. Memory saved after startup won't appear here — call `ghost_project_context` (or any ghost MCP tool) for the live view.*\n"
+			input.system.push({ type: "text", text: text + hint })
+		})
+	} catch (e) {
+		await log(`ghost: fail-open (context hook: ${e})`)
+	}
+
+	const fireStopHook = async (sessionID: string) => {
+		if (!sessionID) return
+		const now = Date.now()
+		if (now - (lastFire.get(sessionID) ?? 0) < DEBOUNCE_MS) return
+		lastFire.set(sessionID, now)
+		if (lastFire.size > MAX_TRACKED_SESSIONS) {
+			const oldest = lastFire.keys().next().value
+			if (oldest !== undefined) lastFire.delete(oldest)
+		}
+
+		let transcriptPath = ""
+		try {
+			const messages = await ctx.session.context({ sessionID })
+			if (Array.isArray(messages) && messages.length > 0) {
+				const dir = await mkdtemp(join(tmpdir(), "ghost-"))
+				transcriptPath = join(dir, "messages.jsonl")
+				await writeFile(transcriptPath, messages.map((m) => JSON.stringify(m)).join("\n") + "\n")
+			}
+		} catch (e) {
+			await log(`ghost: fail-open (transcript materialization: ${e})`)
+			transcriptPath = ""
+		}
+
+		const payload = {
+			contract: {
+				version: CONTRACT_VERSION,
+				source: "opencode",
+				transcript_format: transcriptPath ? "opencode-v2-messages" : "none",
+			},
+			hook_event_name: "stop",
+			session_id: sessionID,
+			transcript_path: transcriptPath,
+			cwd: await sessionDirectory(sessionID),
+			stop_hook_active: false,
+		}
+
+		try {
+			const child = spawn(ghostBin, ["hook", "stop", "--source", "opencode"], {
+				stdio: ["pipe", "pipe", "pipe"],
+				detached: true,
+				env: process.env,
+			})
+			child.on("error", (e) => {
+				log(`ghost: fail-open (spawn: ${e})`)
+			})
+			// Same stdout/stderr handling as V1: the nudge ghost prints is
+			// injected into the live session, and stderr is drained (never
+			// inherited — issue #363) and re-routed to the log.
+			let nudge = ""
+			child.stdout?.on("data", (d) => { nudge += d.toString() })
+			let errs = ""
+			child.stderr?.on("data", (d) => { errs += d.toString() })
+			child.on("close", () => {
+				if (errs.trim()) log(`ghost hook stderr: ${errs.trim().slice(0, 500)}`)
+				const trimmed = nudge.trim()
+				if (trimmed && !nudgedSessions.has(sessionID)) {
+					let reason = trimmed
+					try {
+						const parsed = JSON.parse(trimmed)
+						if (typeof parsed?.reason === "string") reason = parsed.reason
+					} catch { /* keep raw payload */ }
+					nudgedSessions.set(sessionID, true)
+					if (nudgedSessions.size > MAX_TRACKED_SESSIONS) {
+						const oldest = nudgedSessions.keys().next().value
+						if (oldest !== undefined) nudgedSessions.delete(oldest)
+					}
+					ctx.session.synthetic({
+						sessionID,
+						text: nudgePromptV2(reason),
+						description: "Ghost save reminder",
+						delivery: "queue",
+						resume: true,
+					}).catch(() => log(`ghost: ${reason}`))
+				}
+				if (transcriptPath) rm(join(transcriptPath, ".."), { recursive: true, force: true }).catch(() => {})
+			})
+			child.stdin.on("error", () => {})
+			child.stdin.end(JSON.stringify(payload))
+			child.unref()
+		} catch (e) {
+			await log(`ghost: fail-open (spawn: ${e})`)
+		}
+	}
+
+	// The event stream is resubscribed whenever it ends or fails without an
+	// abort (e.g. a server-side reconnect), so the stop hook never silently
+	// goes dark for the rest of a long-lived server's life.
+	const abort = new AbortController()
+	const consume = async () => {
+		for await (const event of ctx.event.subscribe({ signal: abort.signal })) {
+			try {
+				const isIdleStatus = event.type === "session.status" && event.data.status.type === "idle"
+				if (!isIdleStatus && !V2_STOP_EVENTS.has(event.type)) continue
+				const sessionID = (event.data as { sessionID?: string }).sessionID ?? ""
+				if (!sessionID) continue
+				// A long-lived V2 server runs one plugin instance per
+				// location, and every instance receives every session's
+				// events; module state is not shared between them. Only the
+				// instance owning the session's location may fire, or each
+				// open project would spawn its own stop hook and nudge.
+				const where = event.location?.directory ?? await sessionDirectory(sessionID)
+				if (where !== ctx.location.directory) continue
+				await fireStopHook(sessionID)
+			} catch (e) {
+				await log(`ghost: fail-open (${e})`)
+			}
+		}
+	}
+	void (async () => {
+		while (!abort.signal.aborted) {
+			try {
+				await consume()
+			} catch (e) {
+				if (!abort.signal.aborted) await log(`ghost: fail-open (event stream: ${e})`)
+			}
+			if (!abort.signal.aborted) await new Promise((r) => setTimeout(r, 1000))
+		}
+	})()
+	return () => abort.abort()
+}
+
+export default {
+	id: "ghost",
+	setup: setupV2,
+	server: GhostPlugin,
 }
