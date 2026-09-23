@@ -53,7 +53,9 @@ if command -v jq >/dev/null 2>&1; then
   jq --arg v "$VERSION" '.version = $v' "$MANIFEST" >"$MANIFEST.tmp"
   mv "$MANIFEST.tmp" "$MANIFEST"
 else
-  sed -i.bak -E 's/"version": "[^"]*"/"version": "'"$VERSION"'"/' "$MANIFEST"
+  # Anchor to top-level indentation like assemble-plugin-windows.sh does:
+  # an unanchored pattern would rewrite every "version" key, not just this one.
+  sed -i.bak -E 's/^  "version": "[^"]*"/  "version": "'"$VERSION"'"/' "$MANIFEST"
   rm -f "$MANIFEST.bak"
 fi
 
