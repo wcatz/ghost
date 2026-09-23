@@ -21,11 +21,14 @@ Providers: `openai` (leaderboard-comparable when gen+judge are gpt-4o) or
 `anthropic` (Claude gen/judge — NOT leaderboard-comparable; documented as an
 internal "Ghost retrieval + Claude, Claude-judged" check).
 
-No secret is ever logged. Keys come from the environment
-(OPENAI_API_KEY / ANTHROPIC_API_KEY); for anthropic, ~/.config/ghost/config.yaml
-(api.key) is a fallback so Ghost's own key can be reused.
+No secret is ever logged. This standalone benchmark may call its selected
+provider directly (OPENAI_API_KEY / ANTHROPIC_API_KEY); that is independent of
+the Ghost runtime, which has no direct Anthropic API client. For the legacy
+Anthropic benchmark path, a platform-appropriate Ghost config path is consulted
+for an old `api.key` entry.
 """
 import argparse
+import functools
 import json
 import os
 import re
@@ -47,9 +50,23 @@ RETRY_STATUS = {429, 500, 502, 503, 529}
 # --------------------------------------------------------------------------
 # key sourcing (never logged)
 # --------------------------------------------------------------------------
+def _ghost_user_config_path():
+    """Return Ghost's platform user config path for the legacy key fallback."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return os.path.join(xdg, "ghost", "config.yaml")
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser(r"~\AppData\Roaming")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.path.expanduser("~/.config")
+    return os.path.join(base, "ghost", "config.yaml")
+
+
 def get_key(provider):
     if provider == "opencode":
-        return ""  # subscription-billed CLI; no key
+        return ""  # OpenCode owns its authentication/billing; no Ghost key is needed.
     if provider == "openai":
         k = os.environ.get("OPENAI_API_KEY")
         if not k:
@@ -59,7 +76,7 @@ def get_key(provider):
     k = os.environ.get("ANTHROPIC_API_KEY")
     if k:
         return k
-    cfg = os.path.expanduser("~/.config/ghost/config.yaml")
+    cfg = _ghost_user_config_path()
     if os.path.exists(cfg):
         in_api = False
         for line in open(cfg):
@@ -70,8 +87,7 @@ def get_key(provider):
                 m = re.match(r"\s+key:\s*(\S+)", line)
                 if m:
                     return m.group(1).strip().strip('"').strip("'")
-    sys.exit("error: ANTHROPIC_API_KEY not set and no api.key in "
-             "~/.config/ghost/config.yaml")
+    sys.exit(f"error: ANTHROPIC_API_KEY not set and no api.key in {cfg}")
 
 
 def get_key_openai_compat():
@@ -161,17 +177,53 @@ def chat(provider, model, key, prompt, max_tokens, api_base_url=None):
     return "".join(b.get("text", "") for b in out["content"] if b.get("type") == "text")
 
 
+@functools.lru_cache(maxsize=8)
+def opencode_major_version(binary="opencode"):
+    """Return OpenCode's major version, or 0 when it cannot be determined."""
+    import subprocess
+    try:
+        proc = subprocess.run([binary, "--version"], capture_output=True,
+                              text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    if proc.returncode != 0:
+        return 0
+    for field in f"{proc.stdout}\n{proc.stderr}".split():
+        match = re.match(r"^v?(\d+)(?:\.|$)", field, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return 0
+
+
+def _opencode_child_env(scratch, max_tokens):
+    """Build a scrubbed environment for an isolated OpenCode subprocess."""
+    blocked = {"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOSE_PROVIDER__API_KEY",
+               "XDG_CONFIG_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR",
+               "OPENCODE_CONFIG_CONTENT"}
+    env = {key: value for key, value in os.environ.items()
+           if key.upper() not in blocked}
+    env["XDG_CONFIG_HOME"] = scratch
+    env["TMPDIR"] = scratch
+    env["TMP"] = scratch
+    env["TEMP"] = scratch
+    if max_tokens is not None:
+        env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(max_tokens)
+    return env
+
+
 def chat_opencode(model, prompt, max_tokens=None):
-    """Run one prompt through the `opencode` CLI (subscription-billed; no API
-    key). Mirrors internal/ai.OpenCodeClient: --pure skips plugins; the child
-    gets a scrubbed XDG_CONFIG_HOME, no ANTHROPIC_API_KEY, and none of
-    OPENCODE_CONFIG / OPENCODE_CONFIG_DIR / OPENCODE_CONFIG_CONTENT, and runs
-    with cwd=scratch so neither the user's global config, this repo's project
-    config (.opencode/, opencode.json), nor launch-environment overrides can
-    change benchmark behavior (--pure alone does not disable project config).
-    Retries transient failures like _post. max_tokens is forwarded via the
-    OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX env var (the CLI has no flag for
-    it); without it, judge calls could return arbitrarily long output."""
+    """Run one prompt through an isolated OpenCode V1/V2 CLI process.
+
+    OpenCode owns its authentication and billing; this benchmark does not
+    require a separate Ghost key. The version probe selects the same flags as
+    Ghost's OpenCode adapter:
+    V1 uses ``--pure`` and V2 uses ``--standalone``. The child receives a
+    scrubbed config and temporary directory, so project/global config and
+    launch-environment overrides cannot change benchmark behavior. Provider
+    keys other than OpenCode's are removed to avoid accidental billing. Retries transient failures like
+    ``_post``; ``max_tokens`` is forwarded through the CLI's environment
+    because the command has no output-token flag.
+    """
     import subprocess
     import tempfile
     import shutil
@@ -179,16 +231,11 @@ def chat_opencode(model, prompt, max_tokens=None):
     for attempt in range(3):
         scratch = None
         try:
-            env = {k: v for k, v in os.environ.items()
-                   if k != "ANTHROPIC_API_KEY"
-                   and not k.startswith("XDG_CONFIG_HOME")
-                   and k not in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR",
-                                 "OPENCODE_CONFIG_CONTENT")}
             scratch = tempfile.mkdtemp(prefix="locomo-opencode-")
-            env["XDG_CONFIG_HOME"] = scratch
-            if max_tokens is not None:
-                env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(max_tokens)
-            cmd = ["opencode", "run", "--format", "json", "--pure"]
+            env = _opencode_child_env(scratch, max_tokens)
+            major = opencode_major_version()
+            cmd = ["opencode", "run", "--format", "json"]
+            cmd.append("--standalone" if major >= 2 else "--pure")
             if model:
                 cmd += ["-m", model]
             cmd.append(prompt)
@@ -205,7 +252,7 @@ def chat_opencode(model, prompt, max_tokens=None):
                 if ev.get("type") == "text" and ev.get("part", {}).get("type") == "text":
                     parts.append(ev["part"].get("text", ""))
             return "".join(parts)
-        except (RuntimeError, subprocess.TimeoutExpired) as e:
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
             last_err = e
             wait = min(2 ** attempt, 30)
             sys.stderr.write(f"  opencode error ({e}), retry in {wait}s "
