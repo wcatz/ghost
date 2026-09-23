@@ -360,25 +360,48 @@ Replace `isUnderPluginCache` in `plugin.go` with:
 // isUnderPluginCache reports whether p lies inside the current user's Claude
 // Code plugin cache. Path separators are normalized to forward slashes so the
 // check is testable cross-platform and holds on Windows, whose paths use
-// backslashes. The prefix is anchored to the resolved home directory so an
-// unrelated path that merely contains /.claude/plugins/ never matches; when
-// the home directory cannot be resolved, the historical substring match
-// stands so the plugin gate never silently weakens.
+// backslashes. The prefix is anchored to the home directory so an unrelated
+// path that merely contains /.claude/plugins/ never matches; when the home
+// directory cannot be resolved, the historical substring match stands so the
+// plugin gate never silently weakens.
+//
+// The anchor is compared in two spellings — the lexical $HOME and its
+// symlink-resolved form — because os.Executable() is symlink-resolved on
+// Linux (and Claude Code may hand either form): a $HOME containing a symlink
+// component must still recognize the cache under either spelling, or a genuine
+// plugin binary would stop being recognized and `ghost upgrade` would overwrite
+// it. Both roots stay anchored to this user's home, so a foreign
+// /.claude/plugins/ root never matches. The gate is deliberately
+// per-current-user: under sudo an exe in another user's cache is not this
+// user's plugin cache, so that cross-user true→false is intended.
 func isUnderPluginCache(p string) bool {
 	s := strings.ReplaceAll(filepath.ToSlash(p), `\`, "/")
-	if home, err := os.UserHomeDir(); err == nil {
-		root := strings.ReplaceAll(filepath.ToSlash(filepath.Join(home, ".claude", "plugins")), `\`, "/")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Home cannot be resolved — historical substring match, unchanged.
+		return strings.Contains(s, pluginCacheDir)
+	}
+	roots := []string{slashJoin(home)}
+	if resolved, rerr := filepath.EvalSymlinks(home); rerr == nil && resolved != home {
+		roots = append(roots, slashJoin(resolved))
+	}
+	for _, root := range roots {
 		if runtime.GOOS == "windows" {
 			// The executable path's casing can differ from %USERPROFILE%.
-			return strings.HasPrefix(strings.ToLower(s), strings.ToLower(root)+"/")
+			if strings.HasPrefix(strings.ToLower(s), strings.ToLower(root)) {
+				return true
+			}
+			continue
 		}
-		return strings.HasPrefix(s, root+"/")
+		if strings.HasPrefix(s, root) {
+			return true
+		}
 	}
-	return strings.Contains(s, pluginCacheDir)
+	return false
 }
 ```
 
-Add `"runtime"` to the file's import block. Keep the `pluginCacheDir` const (the fallback still uses it).
+Add `"runtime"` to the file's import block and add the `slashJoin` helper below `isUnderPluginCache` (the snippet depends on it). Keep the `pluginCacheDir` const (the fallback still uses it).
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -408,7 +431,7 @@ git commit -s -m "fix(plugin): anchor plugin-cache path detection to home"
 Define the suffix once, then apply it to all five description strings (three marketplace entries + two manifests):
 
 ```bash
-SUFFIX=" First-run setup is automatic and persistent: it disables Claude Code's built-in file memory, imports existing Claude memories, and writes MEMORY.md redirects in known projects — these changes remain if you uninstall the plugin. Memory save on session stop is on by default; the LLM consolidation passes (reflect/resolve/supersede) are opt-in and off by default."
+SUFFIX=" First-run setup is automatic and persistent: it disables Claude Code's built-in file memory, imports memories from projects Ghost already knows (others import on first use), and writes MEMORY.md redirects in known projects — these changes remain if you uninstall the plugin. The stop-hook save reminder is on by default; the LLM consolidation passes (`reflect`/`resolve`/`supersede`) are opt-in and off by default."
 jq --arg s "$SUFFIX" '(.plugins[].description) |= . + $s' .claude-plugin/marketplace.json > /tmp/mp.json \
   && mv /tmp/mp.json .claude-plugin/marketplace.json
 jq --arg s "$SUFFIX" '.description += $s' plugin/.claude-plugin/plugin.json > /tmp/p1.json \
@@ -428,7 +451,7 @@ The plugin declares the MCP server and both hooks itself, then finalizes on your
 with:
 
 ```markdown
-The plugin declares the MCP server and both hooks itself, then finalizes on your first session (disables Claude's built-in file memory, imports existing memories, writes project redirects) — these first-run changes persist if you uninstall the plugin. Memory save on session stop is on by default; the LLM consolidation passes (`reflect`/`resolve`/`supersede`) are opt-in and off by default. Updates flow through `/plugin update`.
+The plugin declares the MCP server and both hooks itself, then finalizes on your first session (disables Claude's built-in file memory, imports existing memories, writes project redirects) — these first-run changes persist if you uninstall the plugin. The stop-hook save reminder is on by default; the LLM consolidation passes (`reflect`/`resolve`/`supersede`) are opt-in and off by default. Updates flow through `/plugin update`. `ghost mcp init` remains the path for opencode, codex, goose, and manual MCP setups.
 ```
 
 - [ ] **Step 3: Document the `0.0.0` placeholder in the assemble-script header**
@@ -910,6 +933,17 @@ Append:
   # (zip round-trip, MCP stdio handshake, both hooks, init deferral). Two
   # architectures because a native .exe cannot serve both — matching the
   # two per-arch marketplace entries.
+  #
+  # -run selects the two plugin suites only: the package's other tests
+  # isolate HOME but not USERPROFILE, while production resolves
+  # os.UserHomeDir() (USERPROFILE on Windows), so a whole-package run here
+  # would go red for reasons unrelated to the plugin and write into the
+  # runner's real profile. The full package follows up once test isolation
+  # sets both variables. go test still compiles every test file (including
+  # GOOS=windows-only ones) before -run filters, so build coverage is kept.
+  # No -race: these are OS/ARCH legs — linux's build-and-test owns race.
+  # If windows-11-arm cannot queue for this repo, trim the matrix to
+  # windows-latest.
   windows-plugin:
     strategy:
       fail-fast: false
@@ -924,7 +958,7 @@ Append:
           go-version-file: go.mod
 
       - name: Plugin coupling and e2e tests
-        run: go test -count=1 ./internal/mcpinit/
+        run: go test -count=1 -run 'TestPlugin(NameCoupling|E2E)$' ./internal/mcpinit/
 ```
 
 - [ ] **Step 2: Lint the workflow**

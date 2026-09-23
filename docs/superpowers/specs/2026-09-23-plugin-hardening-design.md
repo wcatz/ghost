@@ -51,24 +51,53 @@ Guards: skip with a clear message when `bash` is not on PATH (`exec.LookPath`).
 ### 2. `isUnderPluginCache` tightening (`A5E6A856c`)
 
 ```go
+// isUnderPluginCache reports whether p lies inside the current user's Claude
+// Code plugin cache. Path separators are normalized to forward slashes so the
+// check is testable cross-platform and holds on Windows, whose paths use
+// backslashes. The prefix is anchored to the home directory so an unrelated
+// path that merely contains /.claude/plugins/ never matches; when the home
+// directory cannot be resolved, the historical substring match stands so the
+// plugin gate never silently weakens.
+//
+// The anchor is compared in two spellings — the lexical $HOME and its
+// symlink-resolved form — because os.Executable() is symlink-resolved on
+// Linux (and Claude Code may hand either form): a $HOME containing a symlink
+// component must still recognize the cache under either spelling, or a genuine
+// plugin binary would stop being recognized and `ghost upgrade` would overwrite
+// it. Both roots stay anchored to this user's home, so a foreign
+// /.claude/plugins/ root never matches. The gate is deliberately
+// per-current-user: under sudo an exe in another user's cache is not this
+// user's plugin cache, so that cross-user true→false is intended.
 func isUnderPluginCache(p string) bool {
-    s := strings.ReplaceAll(filepath.ToSlash(p), `\`, "/")
-    if home, err := os.UserHomeDir(); err == nil {
-        root := strings.ReplaceAll(filepath.ToSlash(filepath.Join(home, ".claude", "plugins")), `\`, "/")
-        if runtime.GOOS == "windows" { // exe casing can differ from %USERPROFILE%
-            s, root = strings.ToLower(s), strings.ToLower(root)
-        }
-        return strings.HasPrefix(s, root+"/")
-    }
-    // Fail-safe: home unresolved — keep the historical substring match, so
-    // behavior in that degenerate case is exactly today's.
-    return strings.Contains(s, pluginCacheDir)
+	s := strings.ReplaceAll(filepath.ToSlash(p), `\`, "/")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Home cannot be resolved — historical substring match, unchanged.
+		return strings.Contains(s, pluginCacheDir)
+	}
+	roots := []string{slashJoin(home)}
+	if resolved, rerr := filepath.EvalSymlinks(home); rerr == nil && resolved != home {
+		roots = append(roots, slashJoin(resolved))
+	}
+	for _, root := range roots {
+		if runtime.GOOS == "windows" {
+			// The executable path's casing can differ from %USERPROFILE%.
+			if strings.HasPrefix(strings.ToLower(s), strings.ToLower(root)) {
+				return true
+			}
+			continue
+		}
+		if strings.HasPrefix(s, root) {
+			return true
+		}
+	}
+	return false
 }
 ```
 
 - Only `$HOME/.claude/plugins/**` counts; a `.claude/plugins/` segment anywhere else (the audit's false-positive `ghost upgrade` refusal) no longer matches.
 - The fallback preserves today's exact behavior when `UserHomeDir` fails, so the gate never silently returns `false` in that case.
-- Tests: existing cases rebuilt from a set test home (`HOME` and `USERPROFILE`, so the table also runs on the Windows leg); new false case for another root; new fallback case with both env vars emptied.
+- Tests: existing cases rebuilt from a set test home (`HOME` and `USERPROFILE`; the windows legs run only the two plugin suites — `-run` in §4 — so the Windows-only case-fold subtest currently runs on no CI leg; it is restored by the whole-package Windows follow-up); new false case for another root; new fallback case with both env vars emptied.
 
 ### 3. Disclosure and `0.0.0` (`A5E6A856a/b/d`)
 
@@ -93,7 +122,7 @@ A platform-independent **e2e test** in `internal/mcpinit` (runs in the ordinary 
 New `ci.yml` job:
 
 ```yaml
-windows:
+windows-plugin:
   strategy:
     fail-fast: false
     matrix:
@@ -116,7 +145,7 @@ The GitHub *download* path (`releases/latest/download/*.zip` fetched by the mark
 
 ## Error handling
 
-- Coupling test: missing `bash` or `go` → `t.Skip` with the reason, never a silent pass.
+- Coupling test: missing `bash` → `t.Skip` with the reason, never a silent pass; a missing `go` hard-fails inside the assemble script (and `go test` implies `go` anyway).
 - E2E under isolated HOME: finalize is fully hermetic (no `~/.claude` exists → settings created in the temp home); a missing marker or finalize output on stdout fails the test, as does a nonzero hook exit.
 - `isUnderPluginCache`: home-unresolvable fallback keeps historical semantics (documented above).
 
