@@ -38,7 +38,7 @@ func goosePackagePath(home, rel string) string {
 
 func TestRunGoose_FreshInstall(t *testing.T) {
 	home, _ := setupGooseTestEnv(t)
-	ghostBin := filepath.Join(home, "bin", "ghost")
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
 	dir := goosePackagePath(home, "")
 
 	var out bytes.Buffer
@@ -118,7 +118,9 @@ func TestRunGoose_FreshInstall(t *testing.T) {
 			continue
 		}
 		action := rules[0].Hooks[0]
-		wantCmd := "'" + ghostBin + "' hook " + argv + " --source goose"
+		// Rendered exactly as production renders it (platform shellQuote);
+		// the quote styles themselves are pinned by TestShellQuote*.
+		wantCmd := shellQuote(ghostBin) + " hook " + argv + " --source goose"
 		if action.Type != "command" || action.Command != wantCmd {
 			t.Errorf("%s command = %+v, want type=command cmd=%q", event, action, wantCmd)
 		}
@@ -139,7 +141,7 @@ func TestRunGoose_FreshInstall(t *testing.T) {
 
 func TestRunGoose_Idempotent(t *testing.T) {
 	home, _ := setupGooseTestEnv(t)
-	ghostBin := filepath.Join(home, "bin", "ghost")
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
 
 	var first bytes.Buffer
 	if err := RunGoose(&first, false); err != nil {
@@ -178,7 +180,7 @@ func TestRunGoose_Idempotent(t *testing.T) {
 
 func TestRunGoose_DriftRepaired(t *testing.T) {
 	home, _ := setupGooseTestEnv(t)
-	ghostBin := filepath.Join(home, "bin", "ghost")
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
 
 	var install bytes.Buffer
 	if err := RunGoose(&install, false); err != nil {
@@ -240,7 +242,7 @@ func TestRunGoose_DryRunWritesNothing(t *testing.T) {
 
 func TestStatusGoose_HealthyAfterInstall(t *testing.T) {
 	home, _ := setupGooseTestEnv(t)
-	ghostBin := filepath.Join(home, "bin", "ghost")
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
 
 	var install bytes.Buffer
 	if err := RunGoose(&install, false); err != nil {

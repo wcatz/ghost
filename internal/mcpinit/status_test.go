@@ -49,7 +49,7 @@ func TestReportStaleIntegrations(t *testing.T) {
 		statusEnv(t)
 		binDir := writeStubGhost(t)
 		t.Setenv("PATH", binDir)
-		installOpencodePluginFile(t, filepath.Join(binDir, "ghost"))
+		installOpencodePluginFile(t, stubPath(binDir, "ghost"))
 
 		var out bytes.Buffer
 		ReportStaleIntegrations(&out)
@@ -266,9 +266,7 @@ func statusEnv(t *testing.T) {
 func writeStubGhost(t *testing.T) string {
 	t.Helper()
 	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "ghost"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write stub ghost: %v", err)
-	}
+	writeStub(t, binDir, "ghost")
 	return binDir
 }
 
@@ -326,7 +324,7 @@ func TestStatusOpencode_CleanSetupHealthy(t *testing.T) {
 	statusEnv(t)
 	binDir := writeStubGhost(t)
 	t.Setenv("PATH", binDir)
-	installOpencodePluginFile(t, filepath.Join(binDir, "ghost"))
+	installOpencodePluginFile(t, stubPath(binDir, "ghost"))
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)
@@ -339,7 +337,7 @@ func TestStatusOpencode_CleanSetupHealthy(t *testing.T) {
 
 	output := out.String()
 	for _, want := range []string{
-		"✓ ghost binary: " + filepath.Join(binDir, "ghost"),
+		"✓ ghost binary: " + stubPath(binDir, "ghost"),
 		"✓ lifecycle plugin installed: ",
 		"- no Ghost database (run ghost first)",
 		"All checks passed.",
@@ -423,7 +421,7 @@ func TestStatusOpencode_EmptyStoreHealthy(t *testing.T) {
 		t.Fatalf("close fresh db: %v", err)
 	}
 
-	installOpencodePluginFile(t, filepath.Join(binDir, "ghost"))
+	installOpencodePluginFile(t, stubPath(binDir, "ghost"))
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)
