@@ -41,6 +41,10 @@ jobs:
           echo "server.json matches release ${VERSION}"
 
       - name: Run GoReleaser
+        # release.draft (goreleaser.yml) makes this create a DRAFT release:
+        # assets upload to the draft, releases/latest keeps serving the
+        # previous release, and the plugin job publishes only after its three
+        # archives attach and verify.
         uses: goreleaser/goreleaser-action@v7
         with:
           version: latest
@@ -87,9 +91,33 @@ jobs:
   # one single-arch archive per architecture, because Claude Code serves every
   # host from one .mcp.json/hooks.json command and a native .exe cannot serve
   # both windows-amd64 and windows-arm64. All are published as release assets
-  # so the marketplace entries (which point at
-  # releases/latest/download/*.zip) never need a per-release edit.
-  # Runs after `release` because it attaches to the release GoReleaser creates.
+  # and the marketplace catalog is repinned below to each release's
+  # version-pinned releases/download/vX.Y.Z URL + sha256 by
+  # scripts/update-marketplace-digest.sh.
+  # Runs after `release` because it attaches to the draft release GoReleaser
+  # creates, then publishes it.
+  #
+  # Failure ordering — every stage is safe to re-run:
+  #   before publish:      release is an unpublished draft; releases/latest
+  #                        still serves the previous release. Re-run safe.
+  #                        Deterministic pre-publish failure: a prerelease
+  #                        tag (e.g. v0.31.0-rc1) passes the v* trigger but
+  #                        is rejected by the digest script's bare-semver
+  #                        gate → the draft can never be pinned; recovery is
+  #                        delete the draft, fix/retag.
+  #   after publish,
+  #   before catalog push: main's catalog still points at valid assets
+  #                        (version-pinned from the second release onward;
+  #                        on the first, releases/latest — which keeps
+  #                        serving the previous release until we publish).
+  #                        Re-run safe.
+  #   after catalog push:  main's catalog pins this release's exact bytes;
+  #                        the digest script is byte-idempotent and the
+  #                        commit step skips when main already matches, so a
+  #                        re-run creates no duplicate commit. Cross-release:
+  #                        an older release's re-run stops at the downgrade
+  #                        guard in the commit step — main is never rolled
+  #                        back to an older catalog.
   plugin:
     needs: release
     runs-on: ubuntu-latest
@@ -108,15 +136,27 @@ jobs:
           scripts/assemble-plugin.sh "$VERSION" dist/ghost-plugin
           # Contents at the archive root, so Claude Code finds
           # .claude-plugin/plugin.json without a wrapper directory.
-          (cd dist/ghost-plugin && zip -qr ../ghost-plugin.zip .)
+          # Deterministic archives so a workflow re-run reproduces
+          # byte-identical zips → stable digests → the re-run-safety
+          # claims below hold: normalize mtimes to the DOS epoch
+          # 1980-01-01 (zip's minimum timestamp), then zip a sorted entry
+          # list with -X so no per-file extra fields (UT/UID/GID) leak in.
+          find dist/ghost-plugin -exec touch -t 198001010000 {} +
+          rm -f dist/ghost-plugin.zip
+          (cd dist/ghost-plugin && find . -print | LC_ALL=C sort | zip -X -q ../ghost-plugin.zip -@)
           unzip -l dist/ghost-plugin.zip | head -20
           for arch in amd64 arm64; do
             scripts/assemble-plugin-windows.sh "$arch" "$VERSION" "dist/ghost-plugin-windows-$arch"
-            (cd "dist/ghost-plugin-windows-$arch" && zip -qr "../ghost-plugin-windows-$arch.zip" .)
+            find "dist/ghost-plugin-windows-$arch" -exec touch -t 198001010000 {} +
+            rm -f "dist/ghost-plugin-windows-$arch.zip"
+            (cd "dist/ghost-plugin-windows-$arch" && find . -print | LC_ALL=C sort | zip -X -q "../ghost-plugin-windows-$arch.zip" -@)
             unzip -l "dist/ghost-plugin-windows-$arch.zip" | head -20
           done
 
       - name: Attach the plugin archives to the release
+        # --clobber is kept deliberately: once the catalog pins a digest
+        # below, a post-pin swap of these assets is detectable as an
+        # install-time sha256 failure instead of landing silently.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -125,3 +165,157 @@ jobs:
             dist/ghost-plugin-windows-amd64.zip \
             dist/ghost-plugin-windows-arm64.zip \
             --clobber
+
+      - name: Pin the marketplace catalog to the attached archives
+        # Rewrites .claude-plugin/marketplace.json (this tag checkout) to
+        # version-pinned releases/download/vX.Y.Z URLs plus each archive's
+        # sha256. The zips are the ones zipped into dist/ above.
+        run: scripts/update-marketplace-digest.sh "${GITHUB_REF_NAME#v}" dist
+
+      - name: Publish the release
+        # First irreversible point. Before it, a failure leaves an
+        # unpublished draft and releases/latest keeps serving the previous
+        # release, so the job can simply be re-run.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${GITHUB_REF_NAME}" --draft=false
+
+      - name: Verify published archive URLs return 200
+        # A release published with a missing or broken asset must fail loudly
+        # here — this is the detector for the /plugin install 404 window:
+        # all six URLs (three version-pinned + three releases/latest) must
+        # return 200 after redirects.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          fail=0
+          for zip in ghost-plugin.zip ghost-plugin-windows-amd64.zip ghost-plugin-windows-arm64.zip; do
+            for url in \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/${zip}" \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/${zip}"; do
+              code="$(curl -sSL --retry 3 --retry-connrefused -o /dev/null -w '%{http_code}' "$url" || true)"
+              if [ "$code" = "200" ]; then
+                echo "200 $url"
+              else
+                echo "::error::expected 200 for ${url}, got ${code:-no response}"
+                fail=1
+              fi
+            done
+          done
+          [ "$fail" -eq 0 ]
+
+      - name: Commit the pinned catalog to main
+        # Authorized by the repo ruleset `main-branch-protection`, whose
+        # bypass actor for non-PR pushes is github-actions[bot] (User id
+        # 41898282, bypass_mode always) — the identity this GITHUB_TOKEN
+        # authenticates as — migrated from classic branch protection
+        # 2026-09-23 with owner approval. (Not the GitHub Actions app id
+        # 15368: GitHub rejects the built-in app as a bypass actor — "must
+        # be part of the ruleset source or owner organization".) The same
+        # ruleset still enforces required checks + PR-before-merge for humans.
+        # Route: contents API, not git ref juggling. This checkout sits at
+        # the tag, so pushing to main with git would need a stash/checkout
+        # dance on the tag tree; the API does one atomic PUT carrying main's
+        # current blob sha, so a concurrent change to main makes the PUT fail
+        # instead of clobbering. Idempotency guard: byte-compare main's copy
+        # against the freshly pinned local file and skip when they match —
+        # the digest script is byte-idempotent, but a naive re-run would
+        # create an identical-content commit.
+        # NOTE: writes made with GITHUB_TOKEN do NOT trigger follow-on
+        # workflow runs, so this digest commit lands without a main CI run;
+        # acceptable because the digest script's assertions + jq validity and
+        # the cmp verify step below are the gate.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PATH_IN_REPO=".claude-plugin/marketplace.json"
+          gh api "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}?ref=main" > /tmp/main-contents.json
+          # Split into two simple commands, not a pipe (and not `&&`): under
+          # Actions' default `bash -e {0}` (no pipefail) a jq failure piped
+          # into base64 is masked by base64's success, and a failing left
+          # side of `&&` does not trigger errexit either. As separate lines
+          # each command is errexit-visible; -e makes jq fail on null/empty.
+          jq -er '.content' /tmp/main-contents.json > /tmp/main-marketplace.b64
+          base64 -d /tmp/main-marketplace.b64 > /tmp/main-marketplace.json
+          if cmp -s /tmp/main-marketplace.json "$PATH_IN_REPO"; then
+            echo "main already pins ${GITHUB_REF_NAME}; skipping catalog commit"
+            exit 0
+          fi
+          # Cross-release guard (sweeper finding): a re-run of an OLD release
+          # after a newer release already repinned main must never downgrade
+          # the catalog. Extract the version main pins now via jq — scoped to
+          # source.url so no description/homepage text can poison it (empty
+          # while main still carries releases/latest URLs) — and skip when it
+          # is newer than this tag. Same version with different bytes falls
+          # through: that is a legitimate re-pin (e.g. --clobber replaced the
+          # assets, so the catalog must follow the new digests).
+          VERSION="${GITHUB_REF_NAME#v}"
+          MAIN_VERSION="$(jq -r '[.plugins[]?.source.url? | strings | select(test("releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/")) | capture("releases/download/v(?<v>[0-9]+\\.[0-9]+\\.[0-9]+)/").v] | .[0] // empty' /tmp/main-marketplace.json || true)"
+          NEWEST="$(printf '%s\n%s\n' "$MAIN_VERSION" "$VERSION" | sort -V | tail -n 1)"
+          if [ -n "$MAIN_VERSION" ] && [ "$MAIN_VERSION" != "$VERSION" ] && [ "$NEWEST" = "$MAIN_VERSION" ]; then
+            echo "main pins newer release v${MAIN_VERSION}; not downgrading to v${VERSION} — skipping catalog commit"
+            exit 0
+          fi
+          BLOB_SHA="$(jq -r '.sha' /tmp/main-contents.json)"
+          CONTENT_B64="$(base64 <"$PATH_IN_REPO" | tr -d '\n')"
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}" \
+            -f message="chore(release): pin plugin archives for ${GITHUB_REF_NAME}"$'\n\n'"Signed-off-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>" \
+            -f content="$CONTENT_B64" \
+            -f sha="$BLOB_SHA" \
+            -f branch="main" >/dev/null
+          echo "committed pinned catalog to main for ${GITHUB_REF_NAME}"
+
+      - name: Verify the catalog on main matches the pinned copy
+        # Runs strictly AFTER the commit step: on a normal release main still
+        # pins the previous release until that commit lands, so a pre-commit
+        # byte-compare could only ever fail. The file on main must be
+        # byte-identical to what this job just verified locally (or, under the
+        # downgrade guard, intentionally pin a newer release than this tag).
+        # Route: contents API, not raw.githubusercontent.com — the same
+        # interface that performed the commit. The raw branch CDN caches for
+        # minutes, so right after a successful PUT it can still serve the
+        # pre-commit file and spuriously fail a release whose catalog commit
+        # already landed; the API is read-your-writes consistent, and its
+        # bytes are the authoritative input to the downgrade guard below.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PATH_IN_REPO=".claude-plugin/marketplace.json"
+          VERSION="${GITHUB_REF_NAME#v}"
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            if gh api "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}?ref=main" > /tmp/verify-contents.json; then
+              # Two simple commands, not a pipe (nor `&&`): `bash -e {0}` has
+              # no pipefail, so a jq failure piped into base64 would be
+              # masked — and `&&` doesn't trip errexit on its left side.
+              jq -er '.content' /tmp/verify-contents.json > /tmp/verify-marketplace.b64
+              base64 -d /tmp/verify-marketplace.b64 > /tmp/verify-marketplace.json
+              if cmp -s /tmp/verify-marketplace.json .claude-plugin/marketplace.json; then
+                echo "main catalog verified against the pinned copy"
+                exit 0
+              fi
+              # Downgrade-guard skip: main intentionally pins a newer release
+              # than this tag, so "differs from the local copy" is the correct
+              # state. Accept it only when the version extracted from
+              # source.url (jq, so no other JSON text can poison it) is
+              # strictly newer; anything older is a stale/divergent state and
+              # keeps retrying until it fails below.
+              MAIN_VERSION="$(jq -r '[.plugins[]?.source.url? | strings | select(test("releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/")) | capture("releases/download/v(?<v>[0-9]+\\.[0-9]+\\.[0-9]+)/").v] | .[0] // empty' /tmp/verify-marketplace.json || true)"
+              NEWEST="$(printf '%s\n%s\n' "$MAIN_VERSION" "$VERSION" | sort -V | tail -n 1)"
+              if [ -n "$MAIN_VERSION" ] && [ "$MAIN_VERSION" != "$VERSION" ] && [ "$NEWEST" = "$MAIN_VERSION" ]; then
+                echo "main intentionally pins newer release v${MAIN_VERSION}; catalog commit was skipped by the downgrade guard"
+                exit 0
+              fi
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "attempt ${attempt}: main catalog not in sync; retrying in 10s"
+              sleep 10
+            fi
+            attempt=$((attempt + 1))
+          done
+          if [ ! -f /tmp/verify-marketplace.json ]; then
+            echo "::error::could not fetch marketplace.json from main via the contents API"
+            exit 1
+          fi
+          echo "::error::marketplace.json on main differs from the pinned local copy"
+          diff -u .claude-plugin/marketplace.json /tmp/verify-marketplace.json || true
+          exit 1
