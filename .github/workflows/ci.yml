@@ -75,9 +75,10 @@ jobs:
         # across Python versions — so the "Ran N tests" line is asserted
         # explicitly here, the same way the actionlint step above guards its
         # own zero-files case with an explicit count. No `shell:` key is set
-        # anywhere in this file, so this runs under Actions' default
+        # for this step, so it runs under the ubuntu runner's default
         # `bash -e {0}` — no pipefail — which is why output is captured via
-        # command substitution instead of a pipe.
+        # command substitution instead of a pipe. (The Windows legs below
+        # default to pwsh; their one `run:` line is shell-agnostic.)
         working-directory: .github/scripts
         run: |
           set +e
@@ -159,3 +160,35 @@ jobs:
 
       - name: Build
         run: go build -o /dev/null ./cmd/ghost
+
+  # Real-Windows verification for the Claude Code plugin: this package owns
+  # the coupling test (runs the assemble scripts) and the plugin e2e suite
+  # (zip round-trip, MCP stdio handshake, both hooks, init deferral). Two
+  # architectures because a native .exe cannot serve both — matching the
+  # two per-arch marketplace entries.
+  #
+  # -run selects the two plugin suites only: the package's other tests
+  # isolate HOME but not USERPROFILE, while production resolves
+  # os.UserHomeDir() (USERPROFILE on Windows), so a whole-package run here
+  # would go red for reasons unrelated to the plugin and write into the
+  # runner's real profile. The full package follows up once test isolation
+  # sets both variables. go test still compiles every test file (including
+  # GOOS=windows-only ones) before -run filters, so build coverage is kept.
+  # No -race: these are OS/ARCH legs — linux's build-and-test owns race.
+  # If windows-11-arm cannot queue for this repo, trim the matrix to
+  # windows-latest.
+  windows-plugin:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Plugin coupling and e2e tests
+        run: go test -count=1 -run 'TestPlugin(NameCoupling|E2E)$' ./internal/mcpinit/

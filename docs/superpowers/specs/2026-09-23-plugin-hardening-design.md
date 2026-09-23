@@ -103,8 +103,10 @@ windows:
     - uses: actions/checkout@v7.0.1
     - uses: actions/setup-go@v7
       with: { go-version-file: go.mod }
-    - run: go test -count=1 ./internal/mcpinit/
+    - run: go test -count=1 -run 'TestPlugin(NameCoupling|E2E)$' ./internal/mcpinit/
 ```
+
+Scope: `-run` selects the two plugin suites — the package's remaining tests isolate `HOME` but not `USERPROFILE`, while production resolves `os.UserHomeDir()` (Windows reads `USERPROFILE`); whole-package Windows runs follow up once test isolation sets both variables. Compilation still covers every test file before `-run` filters.
 
 Grounding (runner-images Windows Server 2025 manifest, verified 2026-09-23): Bash 5.3, jq 1.8.1, Python 3.12 are preinstalled; `windows-11-arm` is GA (free for public repos), which closes the task's ARM64-native remainder alongside x64. `fail-fast: false` keeps one architecture's result visible while the other runs.
 
