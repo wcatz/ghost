@@ -135,9 +135,11 @@ func sourceFromScriptPath(path string) string {
 }
 
 // sourceFromProcessName maps a process comm or argv[0] basename to a source
-// token, or "" when it is not a known harness.
+// token, or "" when it is not a known harness. A trailing ".exe" is folded:
+// Windows binaries carry it, and opencode V2's npm package ships its native
+// binary as bin/opencode.exe on every platform.
 func sourceFromProcessName(name string) string {
-	switch name {
+	switch strings.TrimSuffix(name, ".exe") {
 	case "claude", "claude-code":
 		return "claude-code"
 	case "opencode":
