@@ -1,5 +1,9 @@
 # Source-Aware LLM Provider Selection
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stop using Anthropic API as the default LLM for reflect/resolve/supersede. Instead, use the `source` field from the contract envelope to select the same CLI the user was paying for in their session.

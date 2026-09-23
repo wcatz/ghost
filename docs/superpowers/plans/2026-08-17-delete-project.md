@@ -1,5 +1,9 @@
 # Delete Project Implementation Plan
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a `Store.DeleteProject` method, backing both a `ghost project delete <name>` CLI subcommand and a `ghost_project_delete` MCP tool, that permanently removes a project and everything under it (memories, tags, embeddings, links, tasks, decisions, plus the two tables that don't cascade: token_usage, audit_log) — dry-run by default, explicit apply required, `_global` always refused.

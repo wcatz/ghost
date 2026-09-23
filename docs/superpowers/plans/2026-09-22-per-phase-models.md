@@ -1,5 +1,9 @@
 # Per-Phase Harness Model Implementation Plan
 
+> **Historical record — not current documentation.** This plan predates the
+> explicit `opencode/big-pickle` fallback. See [`../../README.md`](../../README.md)
+> and `docs/configuration.md` for current model precedence.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let each lifecycle phase pin its own harness model — a small/fast model (`opencode/big-pickle`) for supersede's crisp verdicts (validated), provisionally for resolve (unmeasured), the strong default for reflect's consolidation.

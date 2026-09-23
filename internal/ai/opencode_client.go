@@ -15,11 +15,11 @@ import (
 )
 
 // OpenCodeClient drives the `opencode` CLI as a subprocess LLM, the way
-// CLIClient drives `claude -p`. It bills to whatever provider opencode is
-// configured with, so it works with no ANTHROPIC_API_KEY and no `claude`
-// binary. It implements the same Reflect/Classify shapes as CLIClient
-// (reflector / Provider), so it substitutes for the direct API client in the
-// reflect tier.
+// CLIClient drives `claude -p`. It uses whatever authentication and billing
+// opencode is configured with, so Ghost does not need an ANTHROPIC_API_KEY or
+// a `claude` binary. It implements the same Reflect/Classify shapes as
+// CLIClient (reflector / Provider) and is the CLI-backed LLM tier for the
+// current architecture; there is no direct API tier.
 type OpenCodeClient struct {
 	binary string
 	// model pins the model via -m. Constructor-set, it wins over the
@@ -56,8 +56,9 @@ func NewOpenCodeClientWithBinaryAndModel(binary, model string) *OpenCodeClient {
 }
 
 // Reflect satisfies reflection's reflector interface (see
-// internal/reflection/tier_llm.go). TokenUsage is always zero: subscription
-// calls have no per-token API cost to record.
+// internal/reflection/tier_llm.go). TokenUsage is currently always zero: the
+// CLI adapters do not parse provider usage metadata, and the harness owns its
+// own billing rather than Ghost's token accounting.
 func (c *OpenCodeClient) Reflect(ctx context.Context, prompt string) (string, TokenUsage, error) {
 	text, err := c.run(ctx, prompt)
 	return text, TokenUsage{}, err
@@ -65,7 +66,7 @@ func (c *OpenCodeClient) Reflect(ctx context.Context, prompt string) (string, To
 
 // Classify satisfies the Provider interface (see internal/ai/provider.go).
 // opencode run has no --system-prompt flag, so the system prompt is joined into
-// the message — the same join anthropicClient.Classify performs.
+// the user message before the subprocess call.
 func (c *OpenCodeClient) Classify(ctx context.Context, systemPrompt, userContent string) (string, error) {
 	return c.run(ctx, systemPrompt+"\n\n"+userContent)
 }

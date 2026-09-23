@@ -1,3 +1,6 @@
+// ARCHIVED: this workflow predates the CLI-harness migration. Use eval/cycle
+// for the current graded evaluation; this file is retained for history only.
+
 export const meta = {
   name: 'ghost-eval',
   description: 'Real-world eval of Ghost memory quality: live save-decision replay, reflect consolidation, storyline injection/search, stress scenarios, synthesis report',
@@ -36,13 +39,11 @@ if (!/^\d{8}-\d{6}-eval$/.test(trimmedRunId)) {
 const scratchRoot = `/tmp/ghost-eval/${trimmedRunId}`
 log(`Eval run ${trimmedRunId} — scratch root ${scratchRoot} — repo ${REPO}`)
 
-// This suite runs Consolidation/resolve/supersede on the subscription-billed
-// CLI tier (ai.CLIClient — see internal/ai/cli_client.go), not the direct
-// Anthropic API, so a run never spends real API credits. That requires the
-// `claude` binary on PATH; the reflect call below passes `env -u
-// ANTHROPIC_API_KEY` and ghost-wrapped unsets it too, so an ambient key
-// left over in this session's process env (e.g. from before ~/.bashrc's
-// export was removed) can't silently route calls back to the direct API.
+// This archived workflow runs Consolidation/resolve/supersede through the
+// configured CLI harness. It checks for `claude` because that was the harness
+// required by the original workflow; current Ghost can route to any supported
+// source-matched harness. The actor subprocesses unset ANTHROPIC_API_KEY so
+// an ambient key cannot silently select a different billing path.
 const cliCheck = await agent(
   'command -v claude >/dev/null 2>&1 && echo present || echo missing',
   { label: 'check-cli' }
@@ -195,7 +196,7 @@ try {
       return agent(
         `You are grading a memory-consolidation run for the "${projectId}" project.\n\n` +
         `The REAL current memory set (ground truth, before consolidation) is:\n${realMemories}\n\n` +
-        `The output of "ghost reflect ${projectId} --tier haiku" (a dry-run consolidation proposal), including its ` +
+        `The output of "ghost reflect ${projectId} --tier auto" (a dry-run consolidation proposal), including its ` +
         `trailing exit code line, is:\n${reflectOutput}\n\n` +
         `If the exit code is nonzero or the output shows a fatal error rather than a consolidation proposal, do not ` +
         `grade it as a quality issue — set "infraFailure" to true, describe the failure in "notes", and leave the array ` +

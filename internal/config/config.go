@@ -3,7 +3,8 @@
 // Loading order (later layers override earlier):
 //  1. Compiled defaults
 //  2. /etc/ghost/config.yaml          (system-wide)
-//  3. ~/.config/ghost/config.yaml     (user-global)
+//  3. user config path (platform default; for example
+//     ~/.config/ghost/config.yaml on Linux)
 //  4. GHOST_* environment variables
 //  5. CLI flag overrides (applied by caller after Load)
 package config
@@ -196,7 +197,7 @@ func Load() (*Config, error) {
 	// Layer 2: /etc/ghost/config.yaml (system-wide).
 	loadFileIfExists(k, "/etc/ghost/config.yaml", parser)
 
-	// Layer 3: ~/.config/ghost/config.yaml (user-global).
+	// Layer 3: the platform's user config path (user-global).
 	if configDir, err := userConfigDir(); err == nil {
 		loadFileIfExists(k, filepath.Join(configDir, "ghost", "config.yaml"), parser)
 	}
@@ -263,9 +264,8 @@ func DataDir() (string, error) {
 	return dir, nil
 }
 
-// ConfigFilePath returns the path to the user config file
-// (~/.config/ghost/config.yaml), without checking whether it exists or
-// creating it.
+// ConfigFilePath returns the platform's user config path, without checking
+// whether it exists or creating it.
 func ConfigFilePath() (string, error) {
 	configDir, err := userConfigDir()
 	if err != nil {
@@ -274,8 +274,9 @@ func ConfigFilePath() (string, error) {
 	return filepath.Join(configDir, "ghost", "config.yaml"), nil
 }
 
-// EnsureConfigFile creates ~/.config/ghost/config.yaml from the embedded example
-// if it doesn't already exist. Returns the path and whether a new file was created.
+// EnsureConfigFile creates the platform's user config path from the embedded
+// example if it doesn't already exist. Returns the path and whether a new file
+// was created.
 func EnsureConfigFile() (path string, created bool, err error) {
 	path, err = ConfigFilePath()
 	if err != nil {

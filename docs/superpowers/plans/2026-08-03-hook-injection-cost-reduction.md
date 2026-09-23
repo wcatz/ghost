@@ -1,5 +1,9 @@
 # Hook Injection Cost Reduction Implementation Plan
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Cut the token footprint of Ghost's `SessionStart` hook (`internal/mcpinit/hook.go`) by (1) skipping injection entirely for subagent sessions and for `resume`, (2) shrinking the `compact` re-fire to a one-line pointer, (3) demoting/deduping/capping the globals section, and (4) ranking project memories by the same decay formula the MCP tool path already uses so a smaller, tighter cap doesn't drop the wrong memories.

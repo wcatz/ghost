@@ -21,9 +21,9 @@ For the product overview, see [`../README.md`](../README.md). For the implementa
 
 ## Why these benchmarks and not others
 
-- **LongMemEval** ([arXiv 2410.10813](https://arxiv.org/abs/2410.10813), ICLR 2025) is the consensus long-term-memory benchmark as of mid-2026: 500 questions, each with a haystack of chat sessions. The 470 answerable questions carry official evidence labels (`answer_session_ids`); the remaining 30 are abstention cases with no evidence labels, excluded from retrieval scoring. Crucially it supports a **retrieval-only evaluation** using those labels — no LLM judge, no API cost, fully deterministic.
-- **LOCOMO** is skipped deliberately. Public audits found ~6.4% of its answer key wrong, its standard judge accepts a majority of intentionally wrong answers, and trivial baselines (full-context, even filesystem+grep) beat specialized memory systems on it. A 2026 reader discounts LOCOMO numbers; we won't publish one.
-- **Zep's DMR** is skipped — 60-message conversations that fit trivially in any context window; Zep itself moved on from it.
+- **LongMemEval** ([arXiv 2410.10813](https://arxiv.org/abs/2410.10813), ICLR 2025) is the primary long-term-memory benchmark for this project: 500 questions, each with a haystack of chat sessions. The 470 answerable questions carry official evidence labels (`answer_session_ids`); the remaining 30 are abstention cases with no evidence labels, excluded from retrieval scoring. Crucially it supports a **retrieval-only evaluation** using those labels — no LLM judge, no API cost, fully deterministic.
+- **LoCoMo** is not the primary benchmark, but a judge-free comparability layer is shipped below. Public audits found ~6.4% of its answer key wrong, its standard judge accepts a majority of intentionally wrong answers, and trivial baselines (full-context, even filesystem+grep) beat specialized memory systems on it. Ghost therefore reports LoCoMo retrieval as a separate, directional comparison rather than folding it into the primary leaderboard claim.
+- **Zep's DMR** is not used as a Ghost benchmark — 60-message conversations fit trivially in any context window; Zep itself moved on from it.
 
 ## Phase 1 — LongMemEval-S retrieval-only (judge-free) — SHIPPED
 
@@ -40,7 +40,7 @@ hybrid      0.532   0.930   0.973   0.901   0.903     one-time local embedding ~
 
 - **Hybrid session Recall@5 is 93.0%, Recall@10 97.3%** — in the band of the best-reported hybrid retrieval results on -S (~95% R@5 published for hybrid BM25+vector on the original variant) and far above the paper's flat-index baseline (R@5 ≈ 0.64 on -M).
 - **The lift lands exactly where the architecture predicts.** FTS alone nearly solves keyword-friendly classes (`single-session-user` R@10 1.000) but fails vocabulary-mismatch classes; embeddings fix precisely those: `single-session-assistant` R@10 **0.607 → 1.000**, `temporal-reasoning` 0.767 → 0.938.
-- **Honest nuance: on this chat-style benchmark, vector-only ties hybrid** (vector edges R@1/MRR/NDCG, hybrid edges deep recall R@5/R@10). On the dev-facts `ghost bench` dataset below, hybrid beats vector decisively (NDCG 0.989 vs 0.946) — exact identifiers (ports, versions, hostnames) need the keyword leg. Fusion is the robustness play across both data shapes, which is exactly why a memory system for coding agents ships it.
+- **Honest nuance: on this chat-style benchmark, vector-only ties hybrid** (vector edges R@1/MRR/NDCG, hybrid edges deep recall R@5/R@10). On the current v2 `ghost bench` dataset, hybrid beats vector (NDCG 0.817 vs 0.799) — exact identifiers (ports, versions, hostnames) need the keyword leg. Fusion is the robustness play across both data shapes, which is exactly why a memory system for coding agents ships it.
 - **Remaining headroom is at R@1** (0.532 overall; `multi-session` 0.371, `temporal-reasoning` 0.379) — R@10 is close to saturated, so the next win is ranking, not recall.
 - Reproduce: `go run ./bench/longmemeval --data <longmemeval_s_cleaned.json> --condition fts|vector|hybrid --embed-cache <cache.jsonl>`. The append-only content-hash cache makes reruns and interruptions cheap.
 - **CI gating:** only the **fts** floor (`R@5 ≥ 0.74`, `NDCG@10 ≥ 0.72`) is enforced automatically on PRs — it needs no Ollama and finishes fast. The **hybrid** floor (`R@5 ≥ 0.91`, `NDCG@10 ≥ 0.89`) is run **manually** (`workflow_dispatch`) or locally, not on a schedule: the cold embedding pass is CPU-bound (the ~12h above), too slow for any CI cap. Because `nomic-embed-text:v1.5` is deterministic, a cold run computes the same vectors as a warm one, so those hybrid floors are fully established by the warm local numbers here — CI need not re-derive them.
@@ -65,7 +65,7 @@ hybrid           0.514   0.696   0.777   0.899   0.817
 Two findings, both honest:
 
 - **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.817) beats both single legs (FTS 0.748, vector 0.799) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI. Absolute numbers are lower than the v1 starter because v2 deliberately adds paraphrase queries where lexical overlap is weak (the FTS leg's R@1 falls to 0.469; vector and hybrid carry those).
-- **The graph-expansion bonus was evaluated and removed.** An additive link-graph bonus (former 0.15 default) lifted semantically-adjacent neighbors above exact matches, and a public LongMemEval-S kill experiment showed its recoveries were a strict subset of a deeper vector-k's, with no headroom at production depth. It shipped at `GraphWeight 0` and has now been removed entirely (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`). The link graph is retained for the Obsidian mirror and `supersedes` ranking.
+- **The graph-expansion bonus was evaluated and removed.** An additive link-graph bonus (former 0.15 default) lifted semantically-adjacent neighbors above exact matches, and a public LongMemEval-S kill experiment showed its recoveries were a strict subset of a deeper vector-k's, with no headroom at production depth. The former `GraphWeight` setting and the bonus are now removed entirely (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`). The link graph is retained for the Obsidian mirror and `supersedes` ranking.
 
 The v2 dataset overshoots the original ~150/~40 growth target (547/219) to give distractor density room for paraphrase grading. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie.
 
@@ -127,8 +127,8 @@ The trap is untouched in both cases: under decay its distractors are `fact` (nev
 
 ```text
                   graded hybrid NDCG@10   staleness fresh-found/wins   trap correct-wins
-reselect=false    0.989                   1.000 / 1.000                0.929
-reselect=true     0.989                   0.938 / 0.938                0.929
+reselect=false    0.817                   1.000 / 1.000                0.929
+reselect=true     0.817                   0.938 / 0.938                0.929
 ```
 
 **Verdict: not defaultable.** The wider base window **regresses staleness** — `default_branch` (both probes) and `vpn_solution` (state probe) lose the fresh version entirely — while graded and trap stay flat. Ship gate requires staleness not to regress; the flag stays off by default and is available for future experiments behind `SearchParams.DecayReselect`. Reorder-only membership (relevance owns the cut) remains the shipped behavior.
@@ -169,13 +169,15 @@ See the [phase4 README](../bench/longmemeval/phase4/README.md) for full setup (L
 
 ### Supported providers
 
+The provider adapters in Phase 4 are **benchmark-only**. They call the selected provider directly for the standalone generation/judge harness; the Ghost runtime itself does not expose an Anthropic API client and routes memory maintenance through the selected CLI harness. `ANTHROPIC_API_KEY` references in this section therefore describe the benchmark's independent Claude generator/judge, not a Ghost runtime requirement.
+
 | Provider | Endpoint | Notes |
 |----------|----------|-------|
 | `openai` (default) | `api.openai.com` | Leaderboard-comparable with gpt-4o |
 | `openai` + `--api-base-url` | Any OpenAI-compatible | **OpenCode Go** (`https://opencode.ai/zen/go`), DeepSeek direct, etc. |
 | `anthropic` | `api.anthropic.com` | Internal check, not leaderboard-comparable |
 
-OpenCode Go ($10/mo) provides DeepSeek V4 Pro at ~$0.66-1.32/M input tokens (peak/off-peak), fitting the full 500-question benchmark within the $60/mo usage limit. The `--api-base-url` flag routes requests through any OpenAI-compatible endpoint; a `User-Agent` header is included for Cloudflare compatibility, and `GoUsageLimitError` responses auto-sleep until the rate limit resets.
+The recorded run used the OpenCode Go endpoint; provider pricing and usage limits change over time, so re-check them before reproducing. The `--api-base-url` flag routes requests through any OpenAI-compatible endpoint; a `User-Agent` header is included for Cloudflare compatibility, and `GoUsageLimitError` responses auto-sleep until the rate limit resets.
 
 Results (2026-08-20, DeepSeek v4 Pro as both generator and judge, **500 questions** including 30 abstention, `topk_context=5`):
 

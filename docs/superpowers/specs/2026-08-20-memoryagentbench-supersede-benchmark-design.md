@@ -1,5 +1,9 @@
 # MemoryAgentBench Conflict-Resolution Benchmark — Design
 
+> **Historical record — not current documentation.** The production-routing
+> assumptions in this design predate the CLI-harness migration. The current
+> benchmark entry point is `bench/memoryagentbench/README.md`.
+
 ## Goal
 
 Ghost has two supersede-adjacent benchmarks today, and neither exercises the actual classifier:

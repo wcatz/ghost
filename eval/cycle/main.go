@@ -15,9 +15,9 @@
 //
 // Every ghost process runs with XDG_DATA_HOME/XDG_CONFIG_HOME inside a
 // throwaway temp dir and with ANTHROPIC_API_KEY stripped, so nothing touches
-// the production DB and no Anthropic credits are spent: classify/consolidate
-// ride the claude-or-opencode CLI path. Set GHOST_OPENCODE_MODEL to pin the
-// opencode subprocess model.
+// the production DB and classify/consolidate ride the configured CLI path.
+// Set GHOST_OPENCODE_MODEL to pin the opencode subprocess model; when it is
+// empty, the client uses Ghost's explicit opencode/big-pickle default.
 package main
 
 import (
@@ -62,7 +62,7 @@ func main() {
 	flag.StringVar(&cfg.resultsDir, "results-dir", "eval/cycle/results", "directory for dated reports")
 	flag.StringVar(&cfg.gradeOnly, "grade-only", "", "existing kept scratch dir: re-grade final state + saved raw outputs, run nothing")
 	flag.StringVar(&cfg.floors, "floors", "", "comma-separated metric=min floors over stage P/R, e.g. \"supersede_precision=0.60,resolve_recall=0.30\" (keys: supersede_precision, supersede_recall, resolve_precision, resolve_recall); a violation fails the run after the report is written")
-	flag.StringVar(&cfg.authFile, "opencode-auth-file", "", "path to an opencode auth.json copied into the scratch data dir so sandboxed LLM stages authenticate (empty: local runs need none)")
+	flag.StringVar(&cfg.authFile, "opencode-auth-file", "", "optional path to an opencode auth.json copied into the scratch data dir so sandboxed LLM stages authenticate")
 	flag.Parse()
 	floors, err := parseFloors(cfg.floors)
 	if err != nil {
@@ -342,14 +342,14 @@ func reportReflect(rr ReflectReport) {
 
 // scratchEnv builds the child-process env for ghost: inherited vars minus any
 // pre-existing XDG overrides and ANTHROPIC_API_KEY, plus the scratch pair. The
-// strip is what forces classify down the CLI path — zero Anthropic spend.
+// strip prevents a direct Anthropic credential from being inherited; current
+// Ghost still routes memory management through its CLI harness.
 func scratchEnv(scratch string) []string {
 	env := make([]string, 0, len(os.Environ())+2)
 	for _, kv := range os.Environ() {
-		switch {
-		case strings.HasPrefix(kv, "XDG_DATA_HOME="),
-			strings.HasPrefix(kv, "XDG_CONFIG_HOME="),
-			strings.HasPrefix(kv, "ANTHROPIC_API_KEY="):
+		key, _, _ := strings.Cut(kv, "=")
+		switch strings.ToUpper(key) {
+		case "XDG_DATA_HOME", "XDG_CONFIG_HOME", "ANTHROPIC_API_KEY":
 			continue
 		}
 		env = append(env, kv)

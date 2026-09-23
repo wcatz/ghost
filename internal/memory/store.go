@@ -1893,12 +1893,11 @@ func mergeScore(a, b map[string]bool) float64 {
 }
 
 // ftsSearchWordLimit caps how many query terms reach the FTS leg. It is
-// deliberately 10, not larger: raising it (tested at 15/20/25/30) broadens the
-// OR query enough that FTS-only NDCG@10 rises to 0.992 while fused hybrid
-// stays 0.989, inverting the regression guard that fusion must beat either
-// single leg (internal/bench TestBenchRegressionFloors). Recovering a
-// natural-language query's tail terms needs term *selection*
-// (stopword/identifier ranking), not a bigger cap.
+// deliberately 10 for the current v2 benchmark. A larger cap broadens the OR
+// query and changes the measured retrieval trade-off; any future change must
+// be re-run against the current graded dataset rather than relying on older
+// experiment numbers. Recovering a natural-language query's tail terms needs
+// term *selection* (stopword/identifier ranking), not a bigger cap.
 const ftsSearchWordLimit = 10
 
 // sanitizeFTS sanitizes text into an FTS5 OR-query. Used on the search path

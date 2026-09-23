@@ -1,5 +1,9 @@
 # Design: unify time-decay ranking into ghost_memory_search
 
+> **Historical record — design context, not current instructions.** The feature
+> has shipped with evolved defaults and tests. Read the current search source,
+> `docs/benchmarks.md`, and `docs/architecture.md` for the live contract.
+
 Date: 2026-08-20
 Issue: #316
 Status: Approved

@@ -1081,7 +1081,8 @@ func TestSanitizeFTSNWiderCap(t *testing.T) {
 	}
 }
 
-// TestSanitizeFTSDefaultCap pins the default search cap: 35 terms in, 30 out.
+// TestSanitizeFTSDefaultCap pins the default search cap at 10 terms, while
+// Upsert's duplicate-recall probe uses a wider cap of 30.
 func TestSanitizeFTSDefaultCap(t *testing.T) {
 	var terms []string
 	for i := 1; i <= 35; i++ {

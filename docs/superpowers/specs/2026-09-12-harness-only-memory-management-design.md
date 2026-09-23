@@ -1,5 +1,9 @@
 # Harness-only memory management: remove the Anthropic API tier
 
+> **Historical record — not current documentation.** This migration design is
+> retained for rationale. The current architecture is documented in
+> `docs/architecture.md` and implemented in `internal/ai/`.
+
 Date: 2026-09-12
 
 ## Goal
@@ -155,15 +159,16 @@ describe API-credit failure modes (165-167, 245-247, 328).
 - `docs/ROADMAP.md`: lines 147-148, 238.
 - `internal/ai/cli_client.go` doc (the "ANTHROPIC_API_KEY would otherwise be
   required" framing); `internal/ai/opencode_client.go` comments (keep the env
-  stripping — still required so the subprocess bills to subscription — but drop
-  "no ANTHROPIC_API_KEY" framing where it implies API support remains);
+  stripping so a direct API credential cannot leak into a harness subprocess,
+  but describe authentication and billing as harness-owned);
   `bench/memoryagentbench/classifier.go` comment.
-- Mark `docs/superpowers/specs/2026-07-26-classifier-fallback-design.md` and
+- Mark `docs/superpowers/plans/2026-07-26-classifier-fallback.md` and
   `2026-08-19-autonomous-reflect-design.md` superseded by this spec; amend the
   headless row in `2026-08-24-resolve-sampling-path-design.md`.
 - Keep the ANTHROPIC_API_KEY scrubbing in `eval/cycle/main.go`,
-  `cli_client.go` and `opencode_client.go` — that still prevents the subprocess
-  from billing to API credits.
+  `cli_client.go` and `opencode_client.go` — that prevents a direct provider
+  credential from being inherited by the CLI subprocess; each harness still
+  owns its own authentication and billing.
 
 ## Files touched
 

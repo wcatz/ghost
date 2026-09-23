@@ -1,5 +1,9 @@
 # Classifier Fallback (MCP Sampling) Implementation Plan
 
+> **Historical record — not current documentation.** This plan describes the
+> removed direct API, MCP sampling, and `FallbackProvider` design. For current
+> routing and maintenance behavior, see [`../../README.md`](../../README.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give `ghost resolve` and `ghost supersede` a fallback classification path for the live MCP session — a new `ghost_resolve` tool that classifies via the calling session's own model (MCP sampling, free, no Anthropic credits spent) — while the headless CLI path (`ghost resolve`/`ghost supersede`, and the stop-hook auto-trigger) fails fast with a clear "out of credits" message on `ai.ErrCreditExhausted` instead of silently degrading.

@@ -4,7 +4,7 @@ package ai
 // (claude/opencode/codex/goose) plus source-aware routing to the calling
 // client's own harness. There is no direct Anthropic HTTP API client — every
 // memory-management call (reflect, resolve, supersede) runs through a
-// subscription-billed CLI binary or the fully offline SQLite tiers.
+// configured CLI binary or the fully offline SQLite tiers.
 //
 // Key types: Provider, TokenUsage.
 

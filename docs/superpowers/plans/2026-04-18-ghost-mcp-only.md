@@ -1,5 +1,9 @@
 # Ghost: Strip to MCP-Only — Implementation Plan
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Strip Ghost down to a lean MCP memory server (16 tools, 4 resources, session hook, reflect, upgrade), removing all standalone assistant functionality, and release as v0.8.0.

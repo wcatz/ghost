@@ -1,5 +1,9 @@
 # Eval Findings Remediation — Action Plan
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 **Date:** 2026-08-02
 **Source:** `docs/superpowers/reports/2026-08-02-ghost-eval.md`, cross-checked by independent opus and fable brainstorm agents (2 agents × 4 problem areas)
 

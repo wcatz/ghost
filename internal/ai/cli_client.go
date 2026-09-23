@@ -16,10 +16,10 @@ import (
 const defaultTimeout = 5 * time.Minute
 
 // CLIClient drives Claude via the `claude` CLI (a `claude -p` subprocess).
-// It bills to the caller's Claude Code subscription rather than API credits.
+// Authentication and billing belong to the caller's Claude CLI configuration.
 // It implements the same Reflect/Classify shapes as the other CLI adapters
-// (the cliBackend interface), so it serves reflect/resolve/supersede without
-// any API key.
+// (the cliBackend interface), so it serves reflect/resolve/supersede without a
+// Ghost-managed API key.
 //
 // ANTHROPIC_API_KEY is stripped from the subprocess environment: if present,
 // it would override subscription/OAuth login and bill the call as
@@ -45,8 +45,9 @@ func NewCLIClientWithBinary(binary string) *CLIClient {
 }
 
 // Reflect satisfies reflection's reflector interface (see
-// internal/reflection/tier_llm.go). TokenUsage is always zero: subscription
-// calls have no per-token API cost to record.
+// internal/reflection/tier_llm.go). TokenUsage is currently always zero: the
+// CLI adapters do not parse provider usage metadata, and the harness owns its
+// own billing.
 func (c *CLIClient) Reflect(ctx context.Context, prompt string) (string, TokenUsage, error) {
 	text, err := c.run(ctx, prompt)
 	return text, TokenUsage{}, err

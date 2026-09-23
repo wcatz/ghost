@@ -1,5 +1,9 @@
 # Reviewer ground-truth baseline
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 **Date:** 2026-09-14
 **Transport:** opencode 1.18.30, model `opencode/big-pickle`, `--format json`
 **Fixture:** `.github/scripts/fixtures/known_bad.go` (`//go:build ignore`)

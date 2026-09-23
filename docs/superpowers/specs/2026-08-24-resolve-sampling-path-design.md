@@ -1,5 +1,10 @@
 # Resolve's sampling path after the 2026-07-28 Sampling deprecation
 
+> **Historical record — the sampling path is retired.** The sections below
+> document the former design and decision process. Current `ghost_resolve`
+> uses the source-matched CLI harness; see `internal/resolve/` and
+> `docs/architecture.md`.
+
 **Status:** Implemented (2026-09-08) — closes #349.
 **Author:** Wayne (wcatz)
 **Builds on:** #312 (CLI fallback for `ghost_resolve`); `2026-07-26-classifier-fallback.md`; go-sdk 1.7.0 compat fix (SEP-2322 negotiation).

@@ -1,5 +1,10 @@
 # Remove Graph-Expansion Ranking Bonus — Decision & Cleanup
 
+> **Historical record — not current documentation.** The graph-expansion
+> machinery described here was removed from the implementation. The retained
+> rationale is useful for understanding the decision, not for discovering a
+> current configuration field.
+
 **Date:** 2026-07-20
 **Status:** Design (pending implementation)
 **Decision owner:** wcatz

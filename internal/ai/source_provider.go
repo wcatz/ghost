@@ -17,7 +17,7 @@ type SourceProvider struct {
 // NewSourceProviderForSource returns a provider for the given source token, or
 // an unavailable one ("none") for an empty or unknown source. There is no
 // cascade: silently classifying through a different harness than the caller's
-// would bill the wrong subscription and betray the user's routing choice.
+// would use the wrong configured billing path and betray the user's routing choice.
 // Callers resolve the source (--source, or ai.DetectSource) and fail with an
 // actionable error when it is empty.
 func NewSourceProviderForSource(source string, cfgBinaries ...string) *SourceProvider {

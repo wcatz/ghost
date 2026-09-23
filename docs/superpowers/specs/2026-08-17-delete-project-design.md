@@ -1,5 +1,9 @@
 # Delete Project — Design
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 ## Context
 
 Ghost has no way to remove a project and everything under it. `ghost_memory_delete` only removes one memory at a time; `ghost_list_projects` is read-only. There is no CLI or MCP path that wipes a project's memories, tags, links, tasks, decisions, or cost/audit history in one operation.

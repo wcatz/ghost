@@ -1,5 +1,9 @@
 # Obsidian Vault Mirror Implementation Plan
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** `ghost obsidian export|sync` mirrors memories, decisions, and tasks into a plain-Markdown folder Obsidian reads natively — one-way, prune-safe, zero new dependencies.

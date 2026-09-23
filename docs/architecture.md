@@ -10,7 +10,7 @@ Ghost is intentionally:
 - **Pull-based during normal MCP use:** the server exposes tools and resources; it does not inject an LLM call into ordinary memory reads.
 - **CGO-free:** `modernc.org/sqlite` supplies SQLite and FTS5 without a C toolchain.
 - **Host-aware:** lifecycle events are normalized into a small contract shared by Claude Code, opencode, Codex, and Goose.
-- **Source-aware for maintenance:** reflect, resolve, and supersede route through the calling session's CLI harness rather than silently selecting another subscription.
+- **Source-aware for maintenance:** reflect, resolve, and supersede route through the calling session's CLI harness rather than silently selecting another harness or billing path.
 
 ## Runtime modes
 
@@ -82,7 +82,7 @@ The database schema is an embedded Go string constant in `internal/memory/schema
 
 All hook paths converge on `internal/hostevent`, which parses the versioned event envelope and dispatches normalized events. The `scratch` and `procstat` packages keep harness scratch and detached-process liveness handling separate from host adapters.
 
-If a host reports an unknown source, `internal/ai` does not cascade to a default harness. The caller must provide a source or the operation fails with an actionable error. This prevents an opencode or Claude session from silently spending the wrong subscription. OpenCode children receive an explicit `opencode/big-pickle` model unless a per-phase pin or `GHOST_OPENCODE_MODEL` override is supplied; the child config is intentionally scrubbed, so the user's global OpenCode model is not inherited.
+If a host reports an unknown source, `internal/ai` does not cascade to a default harness. The caller must provide a source or the operation fails with an actionable error. This prevents an opencode or Claude session from silently using the wrong harness or billing path. OpenCode children receive an explicit `opencode/big-pickle` model unless a per-phase pin or `GHOST_OPENCODE_MODEL` override is supplied; the child config is intentionally scrubbed, so the user's global OpenCode model is not inherited.
 
 ## Data flow
 
@@ -150,7 +150,7 @@ The main schema tables are:
 | `decisions` | Decisions, rationale, alternatives, and status |
 | `ghost_state` | Per-project learned context and interaction state |
 | `memory_snapshots` | Reflection rollback snapshots |
-| `token_usage` | Harness usage and cost records |
+| `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
 
 ### Retrieval

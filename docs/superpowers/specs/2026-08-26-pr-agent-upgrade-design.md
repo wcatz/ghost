@@ -1,5 +1,9 @@
 # PR-Agent Upgrade: Named Bot Identity, Always-On Suggestions, Scannable Output — Design
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 Date: 2026-08-26. Status: approved in brainstorm; implementation follows.
 
 ## Goal

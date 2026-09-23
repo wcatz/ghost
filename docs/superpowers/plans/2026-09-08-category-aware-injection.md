@@ -1,5 +1,9 @@
 # Category-Aware Session Injection Selection Implementation Plan
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Bias the `SessionStart` hook's 15-slot injection budget toward high-signal, hard-to-derive categories (`gotcha`/`convention`/`preference`/`decision`) without growing the token footprint, and shrink per-memory formatting to a leaner `[category] «content»` shape. Net effect: same or smaller footprint, higher utility per token.

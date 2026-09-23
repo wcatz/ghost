@@ -1,5 +1,9 @@
 # Implementation Plan — Harness-Only Memory Management (removal of the Anthropic API tier)
 
+> **Historical record — not current documentation.** This migration plan is
+> retained as an implementation record. The current architecture is documented
+> in [`../../README.md`](../../README.md) and the source.
+
 Date: 2026-09-12
 Spec: `docs/superpowers/specs/2026-09-12-harness-only-memory-management-design.md`
 Branch: `feat/harness-only-memory-management` (feature branch + DCO-signed `git commit -s`, PR per repo convention).
@@ -702,7 +706,7 @@ docker run -i -e XDG_DATA_HOME=/data -v ghost-data:/data \
 
 ### 4f. Superseded/amended specs
 
-- `docs/superpowers/specs/2026-07-26-classifier-fallback-design.md`: prepend a banner at top: `> **SUPERSEDED (2026-09-12):** the Anthropic API / FallbackProvider credit-exhaustion seam is removed wholesale — see 2026-09-12-harness-only-memory-management. The file is kept for history.`
+- `docs/superpowers/plans/2026-07-26-classifier-fallback.md`: prepend a banner at top: `> **SUPERSEDED (2026-09-12):** the Anthropic API / FallbackProvider credit-exhaustion seam is removed wholesale — see 2026-09-12-harness-only-memory-management. The file is kept for history.`
 - `docs/superpowers/specs/2026-08-19-autonomous-reflect-design.md`: same banner if it references the API tier (verify; it primarily describes the stop-hook spawn + `--require-llm` guard — banner only if it names haiku/API).
 - `docs/superpowers/specs/2026-08-24-resolve-sampling-path-design.md`: in the headless-CLI row of the "backends" table (the row that says "no secondary in headless / fails fast on credit exhaustion"), replace "fails fast on credit exhaustion" → "fails fast when no CLI binary is on PATH". Leave the MCP-sampling-retirement content alone.
 
@@ -714,7 +718,7 @@ docker run -i -e XDG_DATA_HOME=/data -v ghost-data:/data \
 
 ```
 cd /home/wayne/git/ghost
-grep -rn "ANTHROPIC_API_KEY\|Haiku\|haiku\|FallbackProvider" README.md docs CLAUDE.md | grep -v "superseded\|SUPERSEDED\|legacy\|2026-07-26-classifier-fallback-design"   # review each hit
+grep -rn "ANTHROPIC_API_KEY\|Haiku\|haiku\|FallbackProvider" README.md docs CLAUDE.md | grep -v "superseded\|SUPERSEDED\|legacy\|2026-07-26-classifier-fallback"   # review each hit
 go build ./... && go vet ./... && go test ./... -count=1
 git add -A && git commit -s -m "docs: sweep Anthropic-API/Haiku references after harness-only memory management"
 ```

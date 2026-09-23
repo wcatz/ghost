@@ -1,5 +1,9 @@
 # PR-Agent + Kimi K2.7 Code Review Pipeline Implementation Plan
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace rate-limited CodeRabbit as ghost's PR reviewer with PR-Agent running in GitHub Actions, using Kimi K2.7 Code through Wayne's existing opencode Go subscription ($10/mo, already paid).

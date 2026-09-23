@@ -1,5 +1,9 @@
 # Category-Aware Session Injection Selection Design
 
+> **Historical record — not current documentation.** This proposal was
+> implemented and its status text is retained as written. Use the current
+> session-injection code and benchmark results for behavior.
+
 > **Status:** Proposed — not yet implemented.
 > **Related prior work:** `2026-08-03-hook-injection-cost-reduction` (landed) and `2026-08-03-subagent-injection-gating-design` (landed), `2026-08-20-search-time-decay-design` (landed). This feature builds on those but is **new** — none of the prior work re-weights injection *selection* by category; it ranks purely by composite decayed score.
 

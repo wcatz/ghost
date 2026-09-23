@@ -1,5 +1,9 @@
 # Plugin Hardening Pass Implementation Plan
 
+> **Historical record — executed implementation plan.** The work landed in the
+> plugin hardening PR; use the current plugin manifests, tests, and
+> installation guide for supported behavior.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** One PR clustering `34CD5E1E` (three-way plugin-name coupling test), `A5E6A856` (disclosure text, home-anchored cache-path check, `0.0.0` documentation), and `7FFBDD03` (Windows x64/ARM64 automated verification).

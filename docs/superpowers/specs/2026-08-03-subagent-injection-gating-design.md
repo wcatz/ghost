@@ -1,5 +1,9 @@
 # Subagent SessionStart Injection Gating — Design
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 **Goal:** Stop Ghost's `SessionStart` hook from injecting project-context tokens into subagent sessions, since subagents already receive their working context in-band from the parent's prompt and derive near-zero benefit from a second, independent context dump. This is the first of three candidate fixes identified for reducing Ghost's Claude Code usage footprint (~30% of a recent 24h window) toward single digits; the other two (pinned-globals/project-memory shared-budget bug, `ghost reflect` re-trigger de-duping on long sessions) are deliberately deferred until this change is measured.
 
 **Architecture:** Claude Code's `SessionStart` hook stdin payload carries `agent_id` and `agent_type` fields that are populated only when the session belongs to a subagent (spawned via the Agent/Task tool, or a Workflow-tool `agent()` call). `internal/mcpinit/hook.go`'s `HandleSessionStartHook` currently has no branch on session origin — it unconditionally bumps the interaction counter, loads global memories, loads project context, and kicks off Obsidian sync, then writes all of it to stdout. This change adds an early-exit branch: if the parsed stdin shows a non-empty `agent_id`, the hook writes nothing to stdout and performs none of its current side effects, before any database connection is opened.

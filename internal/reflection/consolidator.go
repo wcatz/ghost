@@ -1,8 +1,8 @@
 package reflection
 
 // Package reflection performs memory consolidation: LlmConsolidator (a
-// subscription-billed CLI harness — claude, opencode, codex, or goose) for
-// intelligent merge, tier_sqlite.go (Jaccard similarity) for deterministic
+// configured CLI harness — claude, opencode, codex, or goose) for intelligent
+// merge, tier_sqlite.go (Jaccard similarity) for deterministic
 // fallback, and TieredConsolidator that tries tiers in priority order with a
 // scale-aware quality gate rejecting LLM tiers whose output is implausibly
 // small for the input size. Mechanical tiers are exempt from the quality gate.

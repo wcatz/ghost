@@ -47,20 +47,30 @@ python -m venv venv && ./venv/bin/pip install tiktoken   # + LongMemEval deps
 and `get_anscheck_prompt` (from `src/evaluation/evaluate_qa.py`). Pass the
 checkout with `--longmemeval-src` or the `$LONGMEMEVAL_SRC` env var.
 
-## Keys (never logged)
+## Provider scope and keys (never logged)
 
-- `openai`  → `OPENAI_API_KEY`
-- `anthropic` → `ANTHROPIC_API_KEY`, or reads `api.key` under `[api]` in
-  `~/.config/ghost/config.yaml` only if the user still has a legacy config
-  file; new installs have none (mainline Ghost no longer uses `api.*`).
+This is a **standalone benchmark harness**. Its direct-provider support is
+independent of the Ghost runtime, which has no direct Anthropic API client.
+
+- `openai` → `OPENAI_API_KEY`
+- `anthropic` → `ANTHROPIC_API_KEY`, or reads a legacy `api.key` entry from the
+  platform-appropriate Ghost user config path if one still exists; new Ghost
+  installs do not use `api.*`.
+- `opencode` → OpenCode's own configured authentication; Ghost does not require
+  a separate Anthropic key for this benchmark path.
 
 The driver never prints a key and never dumps the request headers.
 
-## OpenAI-compatible providers (DeepSeek, OpenCode, etc.)
+## OpenAI-compatible providers (DeepSeek, OpenCode Go, etc.)
 
 Use `--provider openai --api-base-url <URL>` to point at any
 OpenAI-compatible API. The driver sends the same `Authorization: Bearer`
 header and chat-completions body; only the base URL changes.
+
+For `--provider opencode`, the driver probes the installed CLI and mirrors
+Ghost's adapter: OpenCode V1 receives `--pure`, while V2 receives
+`--standalone` so the benchmark cannot attach to a user's shared background
+server. The child gets an isolated config and temporary directory.
 
 Examples:
 
@@ -112,7 +122,7 @@ approximate but conservative — Claude's 200k context comfortably exceeds the
   strong judge (e.g. gen `claude-sonnet-5`, judge `claude-opus-4-8`) costs only
   a few dollars extra because the judge emits ~10 tokens per question.
 
-## Cost (no API calls)
+## Cost estimation (the estimator itself makes no API calls)
 
 ```bash
 python cost_estimate.py --dataset merged.json --gen-model claude-sonnet-5 \

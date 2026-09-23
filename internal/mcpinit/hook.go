@@ -302,10 +302,10 @@ const globalsCap = 8
 // second pass at demotion the way project memories do via config override.
 const globalsDemotionThreshold = 0.85
 
-// sessionMemoriesCap mirrors Store.GetTopMemories's default caller limit,
-// lowered from the previous 25 now that ranking below matches its decay
-// formula — a smaller cap is only safe once ranking picks the same top
-// items the MCP tool path would.
+// sessionMemoriesCap is the session-start context cap. It is deliberately
+// smaller than the historical 25-memory context and independent of the
+// caller-supplied limit used by Store.GetTopMemories; the ranking below keeps
+// the session digest bounded while preserving the most useful memories.
 const sessionMemoriesCap = 15
 
 func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int, totalCountKnown bool) {

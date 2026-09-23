@@ -86,7 +86,7 @@ ghost reflect myproject --apply
 | `--skip-unchanged` | Skip the LLM call when the consolidatable set is unchanged since the last applied pass. |
 | `--source <host>` | Explicit harness: `claude-code`, `opencode`, `codex`, or `goose`. |
 
-The `auto` tier uses the explicit source when provided, otherwise detects the calling harness. It does not silently switch to a different subscription. The offline `sqlite` tier remains available for an explicit, local consolidation run.
+The `auto` tier uses the explicit source when provided, otherwise detects the calling harness. It does not silently switch to a different harness or billing path. When a source is known but its CLI binary is unavailable, auto can fall back to SQLite; the offline tier is also available for an explicit local run.
 
 ### `ghost resolve <project>`
 

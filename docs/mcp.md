@@ -6,7 +6,7 @@ Ghost exposes 20 tools, 4 resources, and 2 prompts over standard MCP. The server
 
 | Group | Tool | Purpose |
 |---|---|---|
-| Memory | `ghost_memory_save` | Save or merge a project memory |
+| Memory | `ghost_memory_save` | Save a project memory; likely duplicates are linked and the existing row is strengthened |
 | Memory | `ghost_memory_search` | Search project memories with FTS5 and optional vectors |
 | Memory | `ghost_search_all` | Search across all projects |
 | Memory | `ghost_memories_list` | Browse memories, optionally by category |

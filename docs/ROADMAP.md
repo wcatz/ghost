@@ -30,7 +30,8 @@ Horizons, roughly:
   and any registry that scrapes topics.
 - [ ] **Submit to Anthropic's MCP registry/directory.** Lowest-effort,
   highest-relevance distribution channel available. (prepared: Dockerfile
-  label + server.json in-repo; publish via mcp-publisher after v0.13.0)
+  label + server.json in-repo; publish when the registry's current submission
+  flow and release are ready)
 - [x] **Add a short README section addressing "why not just use \[platform]'s
   built-in memory" head-on**, near the top rather than implied by the
   comparison table. The new **Why Ghost?** section states the cross-client,
@@ -85,9 +86,10 @@ and one optional alternative.
 - Runs retrieval-only (no LLM judge) — **no paid API calls required**.
 - Dataset is open on Hugging Face, no gating — pull `longmemeval_s_cleaned.json`.
 - Embedding step (`nomic-embed-text`, ~137M params) runs fine on CPU.
-- **GitHub Actions is free and unlimited on public-repo standard runners** —
-  no minute cap, unlike the 2,000 min/month private-repo allowance. This is
-  the natural home for the job.
+- **GitHub Actions public-repository runners are the natural home for the job.**
+  They are currently available at no charge to the repository under GitHub's
+  applicable terms, but usage limits and policy can change, so do not treat
+  "free" or "unlimited" as a permanent platform guarantee.
 - Workflow sketch: checkout → install Ollama → pull embed model → download
   dataset → run harness → fail PR on regression, same pattern as the existing
   dev-facts `ghost bench` CI gate. (Implemented; the PR gate runs
@@ -124,16 +126,19 @@ flag on top of it.
   (private-to-me / shared-to-team) on memories. Likely defaults: `preference`
   / `gotcha` private, `decision` / `convention` shared — falls out of the
   existing category system.
-- [ ] **Write-time conflict handling**: extend the existing FTS-overlap
-  dedup/upsert logic (currently a `reflect`-time operation) to run on every
-  concurrent save, not just during consolidation.
+- [ ] **Write-time conflict handling**: extend the existing save-time
+  FTS-overlap duplicate detection and link behavior with conflict semantics
+  for concurrent writers. Single-process saves already run through
+  `MemoryStore.Upsert`; the missing piece is coordination when multiple writers
+  can update the same project.
 - [ ] **Review-gated `reflect --apply` for shared scope** — the
   snapshot/restore machinery already exists; the missing piece is a diff a
   team lead approves before a consolidation lands on shared memory, rather
   than an immediate atomic replace.
 - [ ] **Deployment**: Helm chart, one pod in k3s, PVC or Postgres in place of
   the bare SQLite file, Tailscale for the network boundary, Grafana panels
-  off `token_usage` and `audit_log` (already shaped for this).
+  off `audit_log` and the reserved `token_usage` accounting schema (already
+  shaped for this).
 
 ---
 
@@ -232,10 +237,12 @@ right now the bottleneck is adoption, not pricing structure.
 
 ## Part 8 — Technical debt / audit findings to track
 
-- **No schema migration tooling.** `CREATE TABLE IF NOT EXISTS` never
-  migrates an existing database — already flagged in `schema.go`'s own
-  comments, but there's no versioned migration path or version table yet.
-  Needs one before a schema change actually breaks an early adopter's DB.
+- **Schema migrations are versioned, but migration coverage still needs
+  discipline.** `internal/memory/migrate.go` carries the schema version and
+  step-by-step upgrades, with foreign-key checks and derived-cache repair;
+  `schema.go`'s `CREATE TABLE IF NOT EXISTS` statement alone still does not
+  alter an existing database. Every future schema change must append and test
+  a migration, and broader rollback/repair tooling remains future work.
 - **Pure-Go SQLite (`modernc.org/sqlite`)** — right call for a static
   cross-platform binary, but worth watching for FTS5/write-throughput edge
   cases if usage patterns ever get more concurrent than "one dev, one
