@@ -2,7 +2,8 @@
 
 > Working notes from a July 2026 audit and strategy session. This is a planning
 > document, not a commitment — items move between horizons as real usage and
-> demand show up. Suggested location: `docs/ROADMAP.md`.
+> demand show up. For current behavior, start with [`README.md`](../README.md)
+> and the [documentation index](README.md).
 
 ## How to read this
 
@@ -20,24 +21,21 @@ Horizons, roughly:
 
 > Description + topics applied 2026-07-19.
 
-- [x] **Fix the repo's "About" description.** GitHub's meta description for
-  the repo currently reads *"Memory-first personal assistant daemon"* — stale
-  relative to the README's actual tagline (*"MCP memory server for Claude
-  Code, Cursor, and any MCP client. Pure Go. Single binary."*). This is what
-  shows up in search snippets and social shares, ahead of anyone reading the
-  README itself. Two-minute fix, outsized effect.
+- [x] **Fix the repo's "About" description.** At the time of the July 2026
+  audit, the GitHub meta description read *"Memory-first personal assistant
+  daemon"*, which was stale relative to the README. The repository description
+  should continue to lead with Ghost's local-first, cross-client positioning.
 - [x] **Add GitHub topics**: `mcp`, `mcp-server`, `memory`, `claude-code`,
   `sqlite`, `golang`, `local-first`. Drives discovery via GitHub topic search
   and any registry that scrapes topics.
 - [ ] **Submit to Anthropic's MCP registry/directory.** Lowest-effort,
   highest-relevance distribution channel available. (prepared: Dockerfile
   label + server.json in-repo; publish via mcp-publisher after v0.13.0)
-- [ ] **Add a short README section addressing "why not just use \[platform]'s
+- [x] **Add a short README section addressing "why not just use \[platform]'s
   built-in memory" head-on**, near the top rather than implied by the
-  comparison table. The honest answer: native memory (ChatGPT, Claude, Gemini)
-  is walled inside each product — none of them read each other. That's
-  Ghost's actual differentiator (local + cross-client), and it should be
-  stated outright, not left for the reader to infer from a feature table.
+  comparison table. The new **Why Ghost?** section states the cross-client,
+  local-first differentiator directly; detailed comparisons now live in
+  [`docs/benchmarks.md`](benchmarks.md).
 - [x] **Wire LongMemEval-S into CI** — shipped PRs #193/#211/#213:
   `.github/workflows/longmemeval.yml` gates PRs on the fts floor
   (R@5 ≥ 0.74, NDCG@10 ≥ 0.72, path-filtered to `internal/memory/**`,

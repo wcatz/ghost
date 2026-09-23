@@ -1,206 +1,190 @@
-# Ghost Architecture
+# Ghost architecture
 
-## Runtime
+This document is for contributors and maintainers. For installation and everyday use, start with [`installation.md`](installation.md), [`usage.md`](usage.md), and [`cli.md`](cli.md).
 
-Ghost runs as a single binary with one primary mode:
+## Design goals
 
-```
-ghost mcp              MCP server on stdio (used by Claude Code, Cursor, Goose, opencode)
-ghost mcp init         Configure MCP client integration (four hosts: claude, opencode, codex, goose)
-ghost mcp status       Health check
-ghost hook session-start --source <host>   SessionStart hook (called by MCP clients)
-ghost hook stop --source <host>        Stop hook — save-nudge, blocks stop once (called by MCP clients)
-ghost reflect <project>    Manual memory consolidation
-ghost supersede <project>  LLM-classified 'supersedes' link creation
-ghost obsidian export|sync One-way Markdown vault mirror
-ghost bench [--sweep]      Retrieval-quality benchmark
-ghost upgrade          Self-update from GitHub Releases (sha256-verified)
-ghost version          Print version
-ghost context [--cwd <dir>]       Print the passive session-start context block (for opencode)
-ghost resolve <project>    Mark resolved-evidence memories (dry-run by default, --apply to write)
-ghost project delete <name> [--apply]   Permanently delete a project and everything under it (dry-run by default)
-ghost project merge <old> <new>   Merge one project into another; child records move to the survivor with memory IDs, links, and pin state preserved
-```
+Ghost is intentionally:
 
-## Package Map
+- **Single-writer and local-first:** one SQLite database, normally accessed by one process at a time.
+- **Pull-based during normal MCP use:** the server exposes tools and resources; it does not inject an LLM call into ordinary memory reads.
+- **CGO-free:** `modernc.org/sqlite` supplies SQLite and FTS5 without a C toolchain.
+- **Host-aware:** lifecycle events are normalized into a small contract shared by Claude Code, opencode, Codex, and Goose.
+- **Source-aware for maintenance:** reflect, resolve, and supersede route through the calling session's CLI harness rather than silently selecting another subscription.
 
-```
-cmd/ghost/main.go          CLI entrypoint + subcommand dispatch
-internal/
-  ai/                      LLM backends: Anthropic HTTP client + 4 CLI backends (claude, opencode, codex, goose) + source-aware routing; client.go: Reflect(); models.go: Message/TokenUsage; cost.go: per-model pricing; used by reflection, resolve, and supersede
-    models.go              Message, ContentBlock, SystemBlock, TokenUsage
-    cost.go                Per-model pricing, CostForUsage()
-  config/                  Layered configuration (koanf)
-    config.go              Config struct, Load(), EnsureConfigFile()
-    config.example.yaml    Annotated defaults
-  embedding/               Local vector embeddings
-    client.go              Ollama HTTP client (/api/embed)
-    worker.go              Async batch embedder
-  linking/                 Memory auto-linking
-    worker.go              Sweeps embedded memories, links cosine neighbors ≥ threshold
-  supersede/               ghost supersede — 'supersedes' link creation
-    supersede.go           Candidate selection (cosine proposes, created_at directs), Run()
-    relation.go            LLM classifier for 3-way SUPERSEDES/CAUSES/NEITHER classification
-  bench/                   ghost bench — retrieval-quality benchmark harness
-    dataset.go             JSONL dataset loading + seeding with embedding fixtures
-    runner.go              Graded conditions (fts/vector/hybrid)
-    metrics.go             Recall@k, MRR, NDCG
-    sweep.go               Fusion-parameter grid search
-    staleness.go           Fresh-fact-wins suite (supersede demote proof)
-    recencytrap.go         Older-answer-correct suite (category-aware decay frontier)
-  memory/                  Persistence layer
-    store.go               SQLite CRUD, FTS5 search, time-decay scoring
-    schema.go              DDL (embedded Go string constant — the single source of truth)
-    vector.go              Cosine similarity, hybrid RRF search
-    links.go               Memory links: edge CRUD (related/supersedes/contradicts/elaborates/causes)
-  resolve/                 ghost resolve — keyword prefilter + LLM classify → resolved_at
-  mcpserver/               MCP server (stdio transport)
-    mcpserver.go           20 tools + 4 resources + 2 prompts via go-sdk
-  hostevent/               Normalized host-event contract: envelope parse, capability matrix, transcript scanners
-  mcpinit/                 Host integration setup — contract-v1 lifecycle dispatch, installers (Claude Code, opencode, codex, goose)
-    init.go                ghost mcp init — registers server, imports memories, writes redirects
-    status.go              ghost mcp status — health check
-    opencode_ghost.ts      Embedded opencode lifecycle plugin (session.status→idle → contract)
-    hook.go                ghost hook session-start — injects project context
-    stophook.go            ghost hook stop — save-nudge, blocks stop once when nothing was saved
-  obsidian/                One-way Markdown vault mirror (ghost export → PRAGMA data_version sync)
-    export.go              Export memories to Markdown vault
-    sync.go                Keep vault mirror fresh (PRAGMA data_version polling)
-    render.go              Render memory blocks as Markdown
-  claudeimport/            One-time import of Claude Code auto-memory files
-    import.go              Scans ~/.claude/projects/*/memory/*.md, upserts into Ghost
-  reflection/              Memory consolidation
-    consolidator.go        Consolidator interface + TieredConsolidator
-    tier_llm.go            LLM consolidation via the calling client's CLI harness (claude/opencode/codex/goose)
-    tier_sqlite.go         Local Jaccard similarity consolidation (free, always available)
-    prompt.go              BuildReflectionPrompt()
-  provider/                Interface contracts
-    provider.go            LLMProvider, MemoryStore
-  selfupdate/              Self-update from GitHub releases
-    selfupdate.go          LatestRelease, Download, ExtractBinary, Replace
-  eval/                    End-to-end pipeline grader
-    eval/cycle             Pipeline grader: inject annotated corpus via real MCP save, run supersede/resolve/reflect, grade vs annotations, write Markdown scorecard
-    eval/cycle/corpus      Load/validate JSONL corpus; harness-only annotations never reach the save path
+## Runtime modes
+
+The same binary provides several modes:
+
+```text
+ghost mcp                         MCP server over stdio
+ghost mcp init                    Configure MCP clients
+ghost mcp status                  Check client and store health
+ghost hook <event> --source <host> Normalize a host lifecycle event
+ghost reflect <project>           Consolidate memories
+ghost resolve <project>           Mark resolved evidence
+ghost supersede <project>         Classify replacement relationships
+ghost lifecycle <project>         Run the detached maintenance phases
+ghost project delete|merge        Manage project records
+ghost obsidian export|sync        Mirror the store to Markdown
+ghost context                     Render passive session context
+ghost bench [--sweep]             Run the built-in benchmark
+ghost upgrade                     Update a standalone binary
+ghost version                     Print the version
 ```
 
-## Data Flow
+The MCP server is the primary mode. It starts embedding and linking workers when enabled, but those workers do not make LLM calls.
 
-### MCP Server (primary mode)
-```
-Claude Code / Cursor → stdio JSON-RPC → mcpserver
-                                          ↓
-                        Tools (pull-based, Claude must call):
-                          ghost_memory_search → store.SearchHybrid() or SearchFTS()
-                          ghost_memory_save   → store.Upsert()
-                          ghost_project_context → store.GetTopMemories()
-                          ghost_save_global   → store.Upsert("_global")
-                          ghost_task_create/update/complete → store.CreateTask()...
-                          ghost_decision_record → store.RecordDecision()
-                          ghost_health        → store metadata query
-                          ... 20 tools total
-                                          ↓
-                        Resources (pinnable, survive context compaction):
-                          ghost://project/{id}/context   → GetTopMemories + GetLearnedContext
-                          ghost://project/{id}/decisions → ListDecisions
-                          ghost://project/{id}/tasks     → ListTasks
-                          ghost://memories/global        → GetTopMemories("_global")
-                                          ↓
-                               SQLite (no LLM calls in hot path)
-```
+## Package map
 
-### SessionStart Hook
-```
-MCP client session opens
-  → ghost hook session-start --source claude-code (stdin: JSON with cwd + projectPath)
-  → lookupProject(db, cwd)           # path-prefix match OR name fallback
-  → buildProjectContext(store, id)   # top memories + tasks + decisions + globals
-  → writes markdown to stdout
-  → Claude Code injects into system prompt
-```
+```text
+cmd/ghost/                         CLI entrypoint and command dispatch
 
-### Memory Consolidation (ghost reflect)
-```
-ghost reflect <project> --apply
-  → store.GetAll()           # existing memories
-  → TieredConsolidator.Consolidate()
-      → LlmConsolidator via the calling client's CLI harness
-          → claude/opencode/codex/goose subprocess (subscription-billed)
-      → SQLiteConsolidator (fallback)
-          → Jaccard token similarity, merge >50% overlap
-  → quality gate: reject if < 30% of existing memories returned
-  → store.ReplaceNonManual()  # atomic replace of non-manual memories
-  → store.UpdateLearnedContext()
+internal/ai/                        Source-aware CLI harness adapters
+  provider.go                      Provider and TokenUsage contracts
+  source_detect.go                 Environment/process source detection
+  source_provider.go               Routes to the caller's harness
+  cli_client.go                    Claude-compatible CLI adapter
+  opencode_client.go               OpenCode V1/V2 adapter
+  codex_client.go                  Codex adapter
+  goose_client.go                  Goose adapter
+  scratch.go                       Harness scratch/temp handling
+
+internal/bench/                     Built-in retrieval benchmark and sweeps
+internal/claudeimport/              One-time Claude Code memory import
+internal/config/                    Layered YAML/environment configuration
+internal/embedding/                 Optional Ollama embedding client/worker
+internal/hostevent/                 Normalized host-event contract and scanners
+internal/linking/                   Background related-memory linking worker
+internal/mcpinit/                   Client installers, status checks, hooks
+internal/mcpserver/                 MCP server, tools, resources, prompts
+internal/memory/                    SQLite store, FTS5, vectors, links, schema
+internal/obsidian/                  One-way Markdown vault exporter/sync
+internal/procstat/                  Cross-platform process liveness/start time
+internal/provider/                  MemoryStore and LLMProvider interfaces
+internal/reflection/                Tiered memory consolidation
+internal/resolve/                   Resolved-evidence classifier and cache
+internal/scratch/                   Ghost-owned scratch root cleanup
+internal/selfupdate/                Checksum-verified GitHub release updater
+internal/supersede/                 Directed supersession relation classifier
 ```
 
-## Embedding (optional, Ollama)
+The database schema is an embedded Go string constant in `internal/memory/schema.go`; it is the single source of truth for the store schema.
 
+## Host integration
+
+`internal/mcpinit` owns the host-specific setup paths:
+
+- Claude Code: MCP registration, permissions, SessionStart/Stop hooks, file-memory migration, and redirects.
+- opencode: one lifecycle TypeScript adapter that registers MCP and bridges idle events.
+- Codex: `config.toml` registration plus `hooks.json` entries that require user trust.
+- Goose: an Agent Plugins package with MCP and Open Plugins hooks.
+
+All hook paths converge on `internal/hostevent`, which parses the versioned event envelope and dispatches normalized events. The `scratch` and `procstat` packages keep harness scratch and detached-process liveness handling separate from host adapters.
+
+If a host reports an unknown source, `internal/ai` does not cascade to a default harness. The caller must provide a source or the operation fails with an actionable error. This prevents an opencode or Claude session from silently spending the wrong subscription.
+
+## Data flow
+
+### Normal MCP session
+
+```text
+MCP client
+  → stdio JSON-RPC
+  → internal/mcpserver
+  → provider.MemoryStore
+  → SQLite / FTS5
 ```
-embedding.Worker goroutine:
-  every 2min → store.UnembeddedMemoryIDs()
-             → embedding.Client.Embed(content)  # Ollama /api/embed
-             → store.StoreEmbedding(id, vec)
-             
-Search with embeddings enabled:
-  store.SearchHybrid() → 70% vector (cosine) + 30% FTS5, RRF fusion (k=60)
 
-Search without embeddings:
-  store.SearchFTS() → FTS5 only (porter unicode61 tokenizer)
+The MCP server registers 20 tools, 4 resources, and 2 prompts. Core memory CRUD and search tools do not invoke an LLM; the maintenance-oriented `ghost_resolve` and lifecycle paths can invoke the selected CLI harness. Resources expose project context, decisions, tasks, and global memories for clients that support resource pinning.
 
-linking.Worker goroutine:
-  every 2min → store.UnscannedEmbeddedMemoryIDs()
-             → store.SearchVector(own embedding)   # top cosine neighbors
-             → store.CreateLink(≥ threshold, 'related')
-             → store.MarkLinkScanned()
-  Links cascade-delete with memories and are rebuilt after reflection
-  rewrites them — same self-healing lifecycle as embeddings.
+### Session start
+
+```text
+host SessionStart
+  → ghost hook session-start --source <host>
+  → resolve project by longest path prefix/name
+  → rank and bound the context digest
+  → write the digest to the host
 ```
 
-A link-graph expansion bonus was evaluated and removed (dominated by a deeper vector-k; links and the vector leg are both cosine). The memory_links graph is retained for Obsidian export and supersedes ranking.
+opencode uses `ghost context` because it cannot consume the hook's stdout injection directly. The OpenCode adapter injects that rendered block as instructions instead.
 
-## SQLite Schema
+### Stop and maintenance
+
+```text
+host Stop
+  → ghost hook stop --source <host>
+  → save reminder / bounded host behavior
+  → optional detached ghost lifecycle <project>
+       → reflect
+       → resolve
+       → supersede
+```
+
+The lifecycle is opt-in. A phase failure is logged and does not prevent later phases from running. The reflect phase can use a source-matched CLI harness or an explicitly selected offline tier; the autonomous path requires a real harness when it is configured to rewrite memories.
+
+## Persistence and search
+
+`internal/memory` owns:
+
+- Project and memory CRUD
+- FTS5 indexing and query sanitization
+- Optional vector storage and cosine similarity
+- Reciprocal Rank Fusion for hybrid results
+- Category-aware time-decay ordering
+- Pinned and near-duplicate handling
+- Directed memory links
+- Snapshots, audit history, tasks, decisions, and usage data
+
+The main schema tables are:
 
 | Table | Purpose |
-|-------|---------|
-| `projects` | Project registry (id, path, name) |
-| `memories` | Core store (category, content, importance, tags, source, pinned) |
-| `memories_fts` | FTS5 virtual table (porter unicode61 tokenizer) |
-| `memory_embeddings` | Vector embeddings (float32 blob) |
-| `ghost_state` | Per-project state (interaction count, learned context) |
-| `token_usage` | Per-request token + cost tracking |
-| `tasks` | Task tracker (title, status, priority, description) |
-| `decisions` | Architectural decisions (rationale, alternatives, status) |
-| `memory_links` | Memory graph edges (related/supersedes/contradicts/elaborates/causes; soft-invalidated, cascade-delete) |
-| `link_scans` | Tracks which embedded memories the linking worker has scanned |
-| `memory_snapshots` | Pre-replace backups consumed by `ghost reflect --restore` |
-| `audit_log` | Append-only record of destructive/consolidation operations |
+|---|---|
+| `projects` | Project names, IDs, and paths |
+| `memories` | Core memory content, category, importance, tags, and state |
+| `memories_fts` | FTS5 virtual table |
+| `memory_embeddings` | Float32 embedding vectors |
+| `memory_links` | Related, supersedes, causes, and other graph edges |
+| `tasks` | Cross-session work items |
+| `decisions` | Decisions, rationale, alternatives, and status |
+| `ghost_state` | Per-project learned context and interaction state |
+| `memory_snapshots` | Reflection rollback snapshots |
+| `token_usage` | Harness usage and cost records |
+| `audit_log` | Destructive and consolidation operations |
 
-The schema lives solely in `internal/memory/schema.go` (embedded Go constant).
-Note that `CREATE TABLE IF NOT EXISTS` never migrates an existing database —
-schema changes only reach databases created after the change.
+### Retrieval
 
-## Time-Decay Scoring
+When embeddings are available, search combines:
 
-Memories are scored by `importance × decay_factor`, where
-`decay_factor = max(floor, 1 / (1 + age_days / scale))`:
+- SQLite FTS5 for lexical and exact-identifier matches
+- Cosine-similarity vector candidates for paraphrases
+- Reciprocal Rank Fusion with the shipped 70% vector / 30% FTS weighting
+- Category-aware decay applied to the surviving result window
+- Targeted demotion when a present memory is superseded by another present memory
 
-| Category | Scale (half-life) | Floor |
-|----------|-------------------|-------|
-| preference, convention, fact | none (no decay) | — |
-| architecture, pattern | 45-day | 0.3 |
-| decision, gotcha, dependency | 30-day | 0.15 |
+Without Ollama, the same API remains available with FTS5-only results. Search membership is not discarded solely because of age; decay changes ordering.
 
-Pinned memories are fully exempt from decay — `decay_factor` is forced to `1.0`
-regardless of category or age, so a pinned memory always scores at its raw
-importance. This is a no-op for preference/convention/fact, which already never
-decay. See `DecayRankingSQL` / `GetTopMemories` in `internal/memory/store.go`.
+### Memory lifecycle
 
-## Build
+`reflect` replaces non-manual memories through a tiered consolidator. It snapshots before replacement, rejects empty results, preserves manual memories, and can restore the latest snapshot. `resolve` stamps resolved evidence so it leaves injection but remains searchable. `supersede` creates directed replacement links after source-matched classification.
+
+## Configuration and filesystem layout
+
+`internal/config` loads compiled defaults, `/etc/ghost/config.yaml`, the user config file, and `GHOST_*` environment variables. Commands apply supported flag overrides after loading. The data directory is resolved from `XDG_DATA_HOME` or the user's home directory and contains `ghost.db`.
+
+See [`configuration.md`](configuration.md) for the user-facing contract and [`internal/config/config.example.yaml`](../internal/config/config.example.yaml) for the annotated template.
+
+## Build and release
+
+Ghost is built as a static binary with CGO disabled:
 
 ```bash
-# Pure Go — no CGO (modernc.org/sqlite with FTS5 built-in)
-go build -o ghost ./cmd/ghost
-
-# Release (goreleaser — triggered by git tag)
-# Targets: linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/{amd64,arm64}
-# ldflags: -s -w -X main.version={{.Version}}
+CGO_ENABLED=0 go build -o ghost ./cmd/ghost
 ```
+
+GoReleaser produces Linux, macOS, and Windows binaries for amd64 and arm64, with checksums. The Docker build uses a Go Alpine builder and an Alpine runtime, also with `CGO_ENABLED=0`. CI runs tests, race tests, vetting, linting, vulnerability scanning, and workflow validation.
+
+## Historical design records
+
+The `docs/superpowers/` tree contains archived specifications, plans, and reports. It explains how the architecture reached its current shape but is not the canonical source for current behavior. Start with this page, the source, and the current user documentation.
