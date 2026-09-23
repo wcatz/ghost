@@ -166,7 +166,7 @@ The landed flow is draft-first so the marketplace catalog can never reference an
 3. `scripts/update-marketplace-digest.sh` rewrites each marketplace entry to a version-pinned `releases/download/vX.Y.Z` URL plus the archive's `sha256`.
 4. `gh release edit --draft=false` publishes — the first irreversible point.
 5. Every version-pinned and `releases/latest/download` URL is curl-verified to return 200.
-6. The updated `marketplace.json` is committed to `main` as a bot-signed `chore(release)` commit — skipped when main already matches (re-runs of the same release are idempotent given reproducible archives) and skipped behind a downgrade guard when main already pins a newer version, so an older release's re-run never rolls the catalog back; the `GITHUB_TOKEN` push does not trigger follow-on workflow runs.
+6. The updated `marketplace.json` is committed to `main` as a bot-signed `chore(release)` commit, authorized by the `main-branch-protection` ruleset's bypass for `github-actions[bot]` (User id 41898282, `bypass_mode always`; migrated from classic branch protection 2026-09-23 with owner approval) — skipped when main already matches (re-runs of the same release are idempotent given reproducible archives) and skipped behind a downgrade guard when main already pins a newer version, so an older release's re-run never rolls the catalog back; the `GITHUB_TOKEN` push does not trigger follow-on workflow runs.
 
 Because the URLs are version-pinned, a stale catalog always points at still-valid assets: there is no window in which an entry 404s or mismatches, and a post-publish `gh release upload --clobber` swap of an already-pinned archive becomes an install-time sha256 failure instead of landing silently.
 

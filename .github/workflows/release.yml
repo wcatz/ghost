@@ -204,6 +204,14 @@ jobs:
           [ "$fail" -eq 0 ]
 
       - name: Commit the pinned catalog to main
+        # Authorized by the repo ruleset `main-branch-protection`, whose
+        # bypass actor for non-PR pushes is github-actions[bot] (User id
+        # 41898282, bypass_mode always) — the identity this GITHUB_TOKEN
+        # authenticates as — migrated from classic branch protection
+        # 2026-09-23 with owner approval. (Not the GitHub Actions app id
+        # 15368: GitHub rejects the built-in app as a bypass actor — "must
+        # be part of the ruleset source or owner organization".) The same
+        # ruleset still enforces required checks + PR-before-merge for humans.
         # Route: contents API, not git ref juggling. This checkout sits at
         # the tag, so pushing to main with git would need a stash/checkout
         # dance on the tag tree; the API does one atomic PUT carrying main's
