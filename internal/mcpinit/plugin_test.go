@@ -4,25 +4,119 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
+// TestIsUnderPluginCache pins the home-anchored match: only paths inside the
+// current user's Claude Code plugin cache count, a /.claude/plugins/ segment
+// under some OTHER root never does (it used to false-positive and refuse
+// `ghost upgrade`), and when the home directory cannot be resolved the
+// historical substring match stands.
 func TestIsUnderPluginCache(t *testing.T) {
-	cases := []struct {
-		path string
-		want bool
-	}{
-		{"/home/u/.claude/plugins/ghost/1.0.0/bin/ghost", true},
-		{`C:\Users\u\.claude\plugins\ghost\1.0.0\bin\ghost.exe`, true},
-		{"/usr/local/bin/ghost", false},
-		{"/home/u/.claude/settings.json", false},
-	}
-	for _, tc := range cases {
-		if got := isUnderPluginCache(tc.path); got != tc.want {
-			t.Errorf("isUnderPluginCache(%q) = %v, want %v", tc.path, got, tc.want)
+	t.Run("anchored to the resolved home", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
+		inHome := filepath.ToSlash(filepath.Join(home, ".claude", "plugins", "ghost", "1.0.0", "bin", "ghost"))
+		elsewhere := filepath.ToSlash(filepath.Join(home, "other-root", ".claude", "plugins", "ghost", "1.0.0", "bin", "ghost"))
+		cases := []struct {
+			path string
+			want bool
+		}{
+			{inHome, true},
+			{"/usr/local/bin/ghost", false},
+			{"/home/u/.claude/settings.json", false},
+			// The audit's false positive: same segment, foreign root.
+			{elsewhere, false},
+			// The root itself is not inside it: the prefix must not match
+			// without the trailing segment.
+			{filepath.ToSlash(filepath.Join(home, ".claude", "plugins")), false},
+			// The trailing separator keeps `plugins` from matching
+			// `plugins-evil` — a sibling prefix must not straddle.
+			{filepath.ToSlash(filepath.Join(home, ".claude", "plugins-evil", "bin", "ghost")), false},
 		}
-	}
+		for _, tc := range cases {
+			if got := isUnderPluginCache(tc.path); got != tc.want {
+				t.Errorf("isUnderPluginCache(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		}
+		if runtime.GOOS != "windows" {
+			// On POSIX the match is case-sensitive; on Windows this same
+			// path would be true via the folded branch, so assert it only
+			// off Windows (deleting the runtime.GOOS guard in the
+			// implementation fails here).
+			up := strings.ToUpper(inHome)
+			if isUnderPluginCache(up) {
+				t.Errorf("isUnderPluginCache(%q) = true, want false; the POSIX match must be case-sensitive", up)
+			}
+		}
+	})
+
+	t.Run("windows-shaped paths under the same home", func(t *testing.T) {
+		t.Setenv("HOME", `C:\Users\u`)
+		t.Setenv("USERPROFILE", `C:\Users\u`)
+		if !isUnderPluginCache(`C:\Users\u\.claude\plugins\ghost\1.0.0\bin\ghost.exe`) {
+			t.Error("want true for the plugin cache under the resolved home")
+		}
+		if isUnderPluginCache(`D:\other\.claude\plugins\ghost\bin\ghost.exe`) {
+			t.Error("want false for a foreign root even with backslashes")
+		}
+	})
+
+	t.Run("case-insensitive prefix on Windows", func(t *testing.T) {
+		if runtime.GOOS != "windows" {
+			t.Skip("case-folding branch only runs on Windows; asserted there and pinned as case-sensitive on POSIX above")
+		}
+		t.Setenv("USERPROFILE", `C:\Users\u`)
+		if !isUnderPluginCache(`C:/USERS/U/.CLAUDE/PLUGINS/ghost/1.0.0/bin/ghost.exe`) {
+			t.Error("want true for a differently-cased executable path on Windows")
+		}
+	})
+
+	t.Run("substring fallback when home is unresolvable", func(t *testing.T) {
+		t.Setenv("HOME", "")
+		t.Setenv("USERPROFILE", "")
+		if !isUnderPluginCache("/x/.claude/plugins/ghost/bin/ghost") {
+			t.Error("want historical substring match when UserHomeDir fails")
+		}
+		if isUnderPluginCache("/usr/local/bin/ghost") {
+			t.Error("want false for a non-cache path even in the fallback")
+		}
+	})
+
+	t.Run("symlinked home matches either spelling", func(t *testing.T) {
+		real := t.TempDir()
+		parent := t.TempDir()
+		link := filepath.Join(parent, "home-link")
+		if err := os.Symlink(real, link); err != nil {
+			t.Skipf("cannot create symlink: %v", err)
+		}
+		t.Setenv("HOME", link)
+		t.Setenv("USERPROFILE", link)
+		// Lexical form: $HOME exactly as spelled.
+		lexical := filepath.ToSlash(filepath.Join(link, ".claude", "plugins", "ghost", "bin", "ghost"))
+		if !isUnderPluginCache(lexical) {
+			t.Errorf("isUnderPluginCache(%q) = false, want true for the lexical home spelling", lexical)
+		}
+		// Symlink-resolved form: os.Executable() on Linux resolves through
+		// symlinks, so the cache under the resolved $HOME must match too.
+		resolvedHome, err := filepath.EvalSymlinks(real)
+		if err != nil {
+			t.Fatalf("EvalSymlinks: %v", err)
+		}
+		resolved := filepath.ToSlash(filepath.Join(resolvedHome, ".claude", "plugins", "ghost", "bin", "ghost"))
+		if !isUnderPluginCache(resolved) {
+			t.Errorf("isUnderPluginCache(%q) = false, want true for the symlink-resolved home spelling", resolved)
+		}
+		// A foreign /.claude/plugins/ root — a sibling of the link, so still
+		// not under either spelling of home — stays false.
+		foreign := filepath.ToSlash(filepath.Join(parent, "other-root", ".claude", "plugins", "ghost", "bin", "ghost"))
+		if isUnderPluginCache(foreign) {
+			t.Errorf("isUnderPluginCache(%q) = true, want false for a foreign root", foreign)
+		}
+	})
 }
 
 func TestRunningAsPluginEnv(t *testing.T) {
