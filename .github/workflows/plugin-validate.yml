@@ -1,0 +1,91 @@
+name: plugin-validate
+
+# The 2026-08-20 plugin design calls `claude plugin validate --strict`
+# against the assembled tree "the CI gate" — but until this workflow, no
+# workflow ran it. A schema error in a manifest, hook file, .mcp.json, or
+# the marketplace could merge green and surface only at release or install
+# time. Three layers, cheapest first: assemble both trees (which also
+# smoke-tests the assemble scripts a typo would otherwise break on release
+# day), JSON-parse every shipped file, then run the real validator.
+#
+# Deliberately a separate workflow, not a ci.yml job: this repo's pattern
+# is small focused workflows (gate, orphan-push, reviewer, sweeper), and it
+# keeps this file independently evolvable from ci.yml.
+
+# pull_request only, matching gate.yml — the repo's required-check
+# precedent. Merges to main are already covered run-over-run: every PR that
+# lands has passed this gate on its own merge ref.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Rapid successive pushes replace the pending run instead of queueing
+# duplicates behind it (same shape as ci.yml).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Assemble both plugin trees (assemble-script smoke)
+        # One fast platform per tree is enough: the scripts differ in
+        # manifest stamping and tree copying, not per-platform loops.
+        run: |
+          set -euo pipefail
+          PLATFORMS=linux-amd64 scripts/assemble-plugin.sh 0.0.0 "$RUNNER_TEMP/ghost-plugin"
+          scripts/assemble-plugin-windows.sh amd64 0.0.0 "$RUNNER_TEMP/ghost-plugin-windows"
+
+      - name: JSON-validate every manifest, hook file, MCP config, and the marketplace
+        # jq -e fails on invalid JSON and on non-false top-level output;
+        # each file is printed so a skip can never be silent.
+        # hooks/.mcp.json are checked at source, but `cp -R` makes the assembled
+        # copies byte-identical and the strict-validate step below parses them
+        # (assembled trees + marketplace), so source checks cover what ships.
+        run: |
+          set -euo pipefail
+          for f in \
+            "$RUNNER_TEMP/ghost-plugin/.claude-plugin/plugin.json" \
+            "$RUNNER_TEMP/ghost-plugin-windows/.claude-plugin/plugin.json" \
+            plugin/hooks/hooks.json \
+            plugin-windows/hooks/hooks.json \
+            plugin/.mcp.json \
+            plugin-windows/.mcp.json \
+            .claude-plugin/marketplace.json
+          do
+            echo "jq -e checking $f"
+            jq -e . "$f" >/dev/null
+          done
+
+      - name: Install the Claude Code CLI (pinned)
+        # Pinned to the exact version this gate was proven against
+        # locally (claude --version → 2.1.280, which was also `latest` at
+        # authoring time): `claude plugin validate --strict` is a pure
+        # local schema check and needs no login — verified with an empty
+        # HOME. Pinned, not @latest, so a CLI release cannot turn every
+        # open PR red without a change here; bump deliberately. npm ships
+        # preinstalled on ubuntu runners, so no setup-node is needed. Check for
+        # newer with `npm view @anthropic-ai/claude-code version` when touching
+        # this file.
+        run: |
+          npm install -g @anthropic-ai/claude-code@2.1.280
+          claude --version
+
+      - name: claude plugin validate --strict
+        # No continue-on-error anywhere: if the design's gate cannot run,
+        # the run must be red, not quietly green.
+        run: |
+          set -euo pipefail
+          claude plugin validate --strict "$RUNNER_TEMP/ghost-plugin"
+          claude plugin validate --strict "$RUNNER_TEMP/ghost-plugin-windows"
+          claude plugin validate --strict .claude-plugin/marketplace.json

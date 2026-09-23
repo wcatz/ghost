@@ -210,7 +210,7 @@ The plugin's `SessionStart` hook is Ghost's own binary running `ghost hook sessi
 
 - **Unit tests:** finalize idempotency (marker present/absent, crash-mid-finalize), platform-path validation, upgrade-refusal under a plugin path, stdout-cleanliness (context markdown only, finalize logs on stderr), plugin-mode detection (env var set/unset).
 - **Integration (`claude --plugin-dir ./ghost-plugin`):** local load; set the platform via `claude plugin config set ghost platform=darwin-arm64`; verify MCP server appears in `/plugin`, SessionStart context is injected, finalize marker is written, `autoMemoryEnabled` is false in `settings.json`.
-- **Release CI:** goreleaser builds the six binaries and assembles `ghost-plugin.zip`; a step computes and pins the `sha256` in `marketplace.json`; CI runs `claude plugin validate --strict` against the assembled tree and `go vet ./...`.
+- **Release / PR CI:** goreleaser builds the six binaries and assembles `ghost-plugin.zip`; a step computes and pins the `sha256` in `marketplace.json`; PR CI runs `claude plugin validate --strict` against the assembled trees and `go vet ./...`.
 - **E2E matrix:** one environment per OS (macOS arm64 host, Linux x86_64 + arm64, Windows via the existing QEMU rig) — install the plugin, confirm MCP boots, confirm memory persists across a plugin update (proves the data-dir invariant).
 
 ## Open questions for the implementing agent
