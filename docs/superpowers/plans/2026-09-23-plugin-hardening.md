@@ -431,7 +431,10 @@ git commit -s -m "fix(plugin): anchor plugin-cache path detection to home"
 Define the suffix once, then apply it to all five description strings (three marketplace entries + two manifests):
 
 ```bash
-SUFFIX=" First-run setup is automatic and persistent: it disables Claude Code's built-in file memory, imports memories from projects Ghost already knows (others import on first use), and writes MEMORY.md redirects in known projects — these changes remain if you uninstall the plugin. The stop-hook save reminder is on by default; the LLM consolidation passes (`reflect`/`resolve`/`supersede`) are opt-in and off by default."
+SUFFIX=$(cat <<'EOF'
+ First-run setup is automatic and persistent: it disables Claude Code's built-in file memory, imports memories from projects Ghost already knows (others import on first use), and writes MEMORY.md redirects in known projects — these changes remain if you uninstall the plugin. The stop-hook save reminder is on by default; the LLM consolidation passes (`reflect`/`resolve`/`supersede`) are opt-in and off by default.
+EOF
+)
 jq --arg s "$SUFFIX" '(.plugins[].description) |= . + $s' .claude-plugin/marketplace.json > /tmp/mp.json \
   && mv /tmp/mp.json .claude-plugin/marketplace.json
 jq --arg s "$SUFFIX" '.description += $s' plugin/.claude-plugin/plugin.json > /tmp/p1.json \
