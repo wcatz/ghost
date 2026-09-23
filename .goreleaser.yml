@@ -29,6 +29,7 @@ checksum:
   name_template: "checksums.txt"
 
 release:
+  draft: true
   extra_files:
     - glob: install.ps1
 

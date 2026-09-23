@@ -159,12 +159,16 @@ Install flow:
 
 ### Release pipeline
 
-Goreleaser gains a new archive artifact that assembles the plugin tree from the six binaries the same release already builds:
+The landed flow is draft-first so the marketplace catalog can never reference an asset that does not exist yet (it implements the `sha256` + digest-script promise above):
 
-1. Build all six platform binaries (existing goreleaser builds).
-2. Assemble `ghost-plugin/` — copy each binary into `bin/<os>-<arch>/`, copy the static plugin files (`.claude-plugin/`, `.mcp.json`, `hooks/`).
-3. Zip it as `ghost-plugin.zip` and attach to the release.
-4. Compute the zip's `sha256` and write it into `marketplace.json` (a CI step or a small script in the repo, e.g. `scripts/update-marketplace-digest.sh`). The marketplace file itself is committed separately or updated by the release workflow.
+1. GoReleaser runs with `release.draft: true`: the release is created unpublished, so `releases/latest` keeps serving the previous release.
+2. The `plugin` job assembles and attaches all three archives (`ghost-plugin.zip`, `ghost-plugin-windows-{amd64,arm64}.zip`).
+3. `scripts/update-marketplace-digest.sh` rewrites each marketplace entry to a version-pinned `releases/download/vX.Y.Z` URL plus the archive's `sha256`.
+4. `gh release edit --draft=false` publishes — the first irreversible point.
+5. Every version-pinned and `releases/latest/download` URL is curl-verified to return 200.
+6. The updated `marketplace.json` is committed to `main` as a bot-signed `chore(release)` commit — skipped when main already matches (re-runs of the same release are idempotent) and skipped behind a downgrade guard when main already pins a newer version, so an older release's re-run never rolls the catalog back; the `GITHUB_TOKEN` push does not trigger follow-on workflow runs.
+
+Because the URLs are version-pinned, a stale catalog always points at still-valid assets: there is no window in which an entry 404s or mismatches, and a post-publish `gh release upload --clobber` swap of an already-pinned archive becomes an install-time sha256 failure instead of landing silently.
 
 ### Self-finalize on first session (the zero-init trick)
 
