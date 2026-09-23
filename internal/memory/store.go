@@ -540,8 +540,8 @@ func deleteProjectRowTx(ctx context.Context, tx *sql.Tx, id string) error {
 //     broadly, matching the hook's original lookupProject behavior; the
 //     prefix check is a literal substr comparison, not LIKE, so '%'/'_' in a
 //     stored path can't act as SQL wildcards against input; input and stored
-//     path are both normalized to '/' so native-Windows backslash paths
-//     resolve too)
+//     path are compared both raw and slash-normalized so native-Windows
+//     backslash paths resolve too)
 //  4. name = basename(input)
 func (s *Store) ResolveProject(ctx context.Context, input string) (id, name string, err error) {
 	s.mu.RLock()
@@ -566,8 +566,9 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	if strings.ContainsAny(input, `/\`) {
 		// Literal prefix comparison, not LIKE: a stored path containing '%' or
 		// '_' must not be treated as a SQL wildcard against input.
-		// REPLACE normalizes Windows backslash paths to '/' so both the gate
-		// and the join work on native Windows; SQLite string literals don't
+		// The gate works by detecting '\' as well as '/'; REPLACE below
+		// normalizes the STORED path so the SQL comparisons match slash or
+		// backslash inputs on native Windows. SQLite string literals don't
 		// process backslash escapes, so '\' in SQL is one literal backslash.
 		// Normalization is done with strings.ReplaceAll, not filepath.ToSlash:
 		// ToSlash is a no-op for backslashes off-Windows (it only swaps
