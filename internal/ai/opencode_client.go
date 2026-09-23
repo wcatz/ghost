@@ -113,24 +113,43 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 
 // opencodeMajors caches each opencode binary's major version: Ghost spawns one
 // harness process per consolidation, resolve candidate, and supersede pair, so
-// probing `--version` every time would double the process count.
-var opencodeMajors sync.Map // binary string -> int
+// probing `--version` every time would double the process count. Entries are
+// keyed by the resolved binary's identity (path, size, mtime), so a
+// long-lived Ghost process — the MCP server — re-probes after opencode is
+// upgraded in place instead of reusing a stale flag set.
+var opencodeMajors sync.Map // opencodeBinaryID -> int
+
+type opencodeBinaryID struct {
+	path    string
+	size    int64
+	modTime time.Time
+}
 
 // majorVersion returns the major version of c.binary via `--version`, cached
-// per binary. A failed probe is not cached and reports 0, which keeps the V1
-// invocation — the behavior Ghost had before V2 existed.
+// per binary identity. An unresolvable binary or failed probe is not cached
+// and reports 0, which keeps the V1 invocation — the behavior Ghost had before
+// V2 existed.
 func (c *OpenCodeClient) majorVersion(ctx context.Context) int {
-	if v, ok := opencodeMajors.Load(c.binary); ok {
+	path, err := exec.LookPath(c.binary)
+	if err != nil {
+		return 0
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	id := opencodeBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}
+	if v, ok := opencodeMajors.Load(id); ok {
 		return v.(int)
 	}
 	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(pctx, c.binary, "--version").Output()
+	out, err := exec.CommandContext(pctx, path, "--version").Output()
 	if err != nil {
 		return 0
 	}
 	major := OpencodeMajorVersion(string(out))
-	opencodeMajors.Store(c.binary, major)
+	opencodeMajors.Store(id, major)
 	return major
 }
 

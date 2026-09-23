@@ -431,3 +431,27 @@ func TestOpencodeMajorVersion(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenCodeClient_VersionCacheFollowsBinaryUpgrade: a long-lived Ghost
+// process (the MCP server) must notice an opencode upgrade in place. The
+// version cache is keyed by the resolved binary's identity, so replacing the
+// file (V1 -> V2 here) re-probes instead of reusing stale flags.
+func TestOpenCodeClient_VersionCacheFollowsBinaryUpgrade(t *testing.T) {
+	bin := versionedOpenCodeBinary(t, "1.18.32")
+	c := &OpenCodeClient{binary: bin}
+	text, _, err := c.Reflect(context.Background(), "prompt")
+	if err != nil || !strings.Contains(text, "--pure") {
+		t.Fatalf("before upgrade: args=%q err=%v, want V1 --pure", text, err)
+	}
+
+	upgraded := `#!/bin/sh
+if [ "$1" = "--version" ]; then echo 'opencode v2.0.15'; exit 0; fi
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`
+	if err := os.WriteFile(bin, []byte(upgraded), 0o755); err != nil {
+		t.Fatalf("upgrade fake binary: %v", err)
+	}
+	text, _, err = c.Reflect(context.Background(), "prompt")
+	if err != nil || !strings.Contains(text, "--standalone") || strings.Contains(text, "--pure") {
+		t.Fatalf("after upgrade: args=%q err=%v, want V2 --standalone", text, err)
+	}
+}
