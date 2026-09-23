@@ -1094,6 +1094,173 @@ func TestSanitizeFTSDefaultCap(t *testing.T) {
 	}
 }
 
+// splitFTSTERMs splits a sanitizer result into its emitted terms, unescaped
+// and with any prefix star stripped. Test inputs never embed a literal " OR "
+// inside a term, so splitting on it is safe.
+func splitFTSTERMs(t *testing.T, got string) []string {
+	t.Helper()
+	if got == `""` {
+		return nil
+	}
+	parts := strings.Split(got, " OR ")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if len(p) < 2 || !strings.HasPrefix(p, `"`) {
+			t.Fatalf("malformed term %q in %q", p, got)
+		}
+		p = strings.TrimSuffix(p, "*")
+		p = strings.Trim(p, `"`)
+		out = append(out, strings.ReplaceAll(p, `""`, `"`))
+	}
+	return out
+}
+
+// assertOriginalOrder checks that every emitted term occurs in the query and
+// that the emitted terms appear in original query order.
+func assertOriginalOrder(t *testing.T, query string, terms []string) {
+	t.Helper()
+	fields := strings.Fields(query)
+	idx := make(map[string]int, len(fields))
+	for i, w := range fields {
+		if _, ok := idx[w]; !ok {
+			idx[w] = i
+		}
+	}
+	last := -1
+	for _, term := range terms {
+		i, ok := idx[term]
+		if !ok {
+			t.Fatalf("emitted term %q is not part of query %q", term, query)
+		}
+		if i <= last {
+			t.Errorf("term %q emitted out of original order (position %d after %d) in %v", term, i, last, terms)
+		}
+		last = i
+	}
+}
+
+// TestSanitizeFTSN_SelectsTailTerms is the core term-selection regression:
+// a natural-language query's tail carries its most specific terms, and
+// positional truncation used to discard them before they ever reached FTS.
+// The query below is 13 words; the old first-10 truncation dropped
+// "ghost_windows_arm64 sha256 digest" entirely. Selection must keep the tail,
+// emit exactly ftsSearchWordLimit terms, and preserve original query order.
+func TestSanitizeFTSN_SelectsTailTerms(t *testing.T) {
+	const query = "please can you tell me exactly how to pin the ghost_windows_arm64 sha256 digest"
+	got := sanitizeFTS(query)
+	terms := splitFTSTERMs(t, got)
+	t.Logf("sanitizeFTS(%q) = %s", query, got)
+
+	if len(terms) != ftsSearchWordLimit {
+		t.Errorf("emitted %d terms, want exactly %d", len(terms), ftsSearchWordLimit)
+	}
+	for _, tail := range []string{"ghost_windows_arm64", "sha256", "digest"} {
+		found := false
+		for _, term := range terms {
+			if term == tail {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("tail term %q missing from emitted terms %v — positional truncation discarded the query tail", tail, terms)
+		}
+	}
+	assertOriginalOrder(t, query, terms)
+}
+
+// TestSanitizeFTSN_CountPinUnderSelection pins the emitted count at exactly
+// ftsSearchWordLimit when the query has more non-stopword terms than the cap:
+// selection changes WHICH terms are emitted, never how many. All terms here
+// score equally (plain lowercase content words), so ties fall back to
+// original position — the output is the first maxWords terms.
+func TestSanitizeFTSN_CountPinUnderSelection(t *testing.T) {
+	query := "deploy rollback shard replica cache buffer goroutine channel defer panic recover closure ticker mutex"
+	got := sanitizeFTS(query)
+	want := `"deploy" OR "rollback" OR "shard" OR "replica" OR "cache" OR "buffer" OR "goroutine" OR "channel" OR "defer" OR "panic"`
+	if got != want {
+		t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", query, got, want)
+	}
+	if n := len(splitFTSTERMs(t, got)); n != ftsSearchWordLimit {
+		t.Errorf("emitted %d terms, want exactly %d", n, ftsSearchWordLimit)
+	}
+}
+
+// TestSanitizeFTSN_StopwordSelectionRules pins both directions of the
+// stopword rule:
+//
+//  1. Stops are dropped when >= maxWords higher-value terms exist (they never
+//     crowd content words out of the cap).
+//  2. Stops are kept as filler otherwise — selection never emits fewer than
+//     min(len(terms), maxWords) terms.
+func TestSanitizeFTSN_StopwordSelectionRules(t *testing.T) {
+	t.Run("stops dropped when content words fill the cap", func(t *testing.T) {
+		query := "alpha bravo the charlie delta echo the foxtrot golf hotel the india juliet kilo lima mike november oscar"
+		got := sanitizeFTS(query)
+		want := `"alpha" OR "bravo" OR "charlie" OR "delta" OR "echo" OR "foxtrot" OR "golf" OR "hotel" OR "india" OR "juliet"`
+		if got != want {
+			t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", query, got, want)
+		}
+		if n := len(splitFTSTERMs(t, got)); n != ftsSearchWordLimit {
+			t.Errorf("emitted %d terms, want exactly %d", n, ftsSearchWordLimit)
+		}
+	})
+
+	t.Run("stops fill the cap when content words are scarce", func(t *testing.T) {
+		// 13 terms, only 8 of them content words: all 8 content words plus
+		// the two earliest stopwords must reach FTS (never fewer than
+		// min(len(terms), maxWords) = 10 terms).
+		query := "rotate the kes signing keys and the artifact digest of the release notes"
+		got := sanitizeFTS(query)
+		want := `"rotate" OR "the" OR "kes" OR "signing" OR "keys" OR "and" OR "artifact" OR "digest" OR "release" OR "notes"`
+		if got != want {
+			t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", query, got, want)
+		}
+		if n := len(splitFTSTERMs(t, got)); n != ftsSearchWordLimit {
+			t.Errorf("emitted %d terms, want exactly %d", n, ftsSearchWordLimit)
+		}
+	})
+}
+
+// TestSanitizeFTSKeepsLongQueryTails pins selection on three real >10-word
+// queries from internal/bench/testdata/queries.jsonl. Positional truncation
+// dropped each query's most specific tail terms ("is a prefix match",
+// "signing keys", "decrypt") before they could reach the FTS leg. The t.Logf
+// line is the query-level before/after evidence for the selection change.
+func TestSanitizeFTSKeepsLongQueryTails(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		tail  []string
+	}{
+		{"q_oauth_open_redirect", "what makes the OAuth redirect validator dangerous if it is a prefix match", []string{"prefix", "match"}},
+		{"q_kes", "how often do I need to rotate the block producer signing keys", []string{"signing", "keys"}},
+		{"q_sops_key", "how are secrets encrypted in the infra repo and who can decrypt", []string{"decrypt"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeFTS(tc.query)
+			terms := splitFTSTERMs(t, got)
+			t.Logf("sanitizeFTS(%q) = %s", tc.query, got)
+
+			if len(terms) > ftsSearchWordLimit {
+				t.Errorf("emitted %d terms, cap is %d", len(terms), ftsSearchWordLimit)
+			}
+			for _, tail := range tc.tail {
+				found := false
+				for _, term := range terms {
+					if term == tail {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("tail term %q missing from emitted terms %v — positional truncation discarded the query tail", tail, terms)
+				}
+			}
+			assertOriginalOrder(t, tc.query, terms)
+		})
+	}
+}
+
 func TestStoreTouch(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
