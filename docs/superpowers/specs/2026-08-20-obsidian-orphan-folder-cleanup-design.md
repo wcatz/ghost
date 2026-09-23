@@ -1,5 +1,9 @@
 # Obsidian Export: Orphaned Project Folder Cleanup
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 ## Problem
 
 When a project is deleted from Ghost (via `ghost project delete` or the MCP tool), the Obsidian sync loop detects the DB change and re-exports, but the deleted project's vault folder remains as stale files. The `prune` function only walks folders of projects that still exist in the DB (`subtrees`), so deleted projects' folders are never touched.

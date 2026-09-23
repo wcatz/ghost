@@ -169,7 +169,7 @@ cli:
 
 The three `model_*` settings apply only to the opencode backend. Other harnesses do not receive a model flag. An empty value uses an inherited `GHOST_OPENCODE_MODEL` value, or Ghost's explicit `opencode/big-pickle` default when no environment pin is set. A configured phase pin overrides the inherited value for that phase.
 
-Ghost does not contain a direct Anthropic HTTP client. The selected CLI handles its own authentication and subscription billing.
+Ghost does not contain a direct Anthropic HTTP client. Each selected CLI harness uses its own configured authentication and billing; Ghost does not add a second provider or API key.
 
 ## Obsidian
 

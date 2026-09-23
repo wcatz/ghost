@@ -325,7 +325,7 @@ func TestRunHostEvent_NudgeEmittedForAllHosts(t *testing.T) {
 // isolatedHome points HOME/XDG_CONFIG_HOME/XDG_DATA_HOME at fresh temp dirs
 // and clears GHOST_* / ANTHROPIC_API_KEY env vars, so config.Load and
 // config.DataDir can never see the developer's real
-// ~/.config/ghost/config.yaml, real GHOST_REFLECTION_AUTO_RESOLVE-style
+// platform Ghost user config path, real GHOST_REFLECTION_AUTO_RESOLVE-style
 // overrides, or ~/.local/share/ghost/ghost.db. Without this, tests that
 // exercise spawnLifecycleIfConfigured would only be hermetic by accident of the
 // machine and environment they happen to run in.

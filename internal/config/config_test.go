@@ -465,7 +465,7 @@ func TestSearchDefaults(t *testing.T) {
 }
 
 func TestObsidianDefaults(t *testing.T) {
-	// Isolate from the host: a real ~/.config/ghost/config.yaml or a
+	// Isolate from the host: a real platform Ghost user config or a
 	// GHOST_OBSIDIAN_* var in the environment would otherwise skew defaults.
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)

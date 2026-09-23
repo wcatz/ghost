@@ -1,5 +1,9 @@
 # Memory and publish-readiness audit
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 **Date:** 2026-09-15 · **Branch:** `docs/audit-2026-09-15` · **Scope:** the live memory
 database (`~/.local/share/ghost/ghost.db`, 580 memories across 15 projects), with a
 close read of the `ghost`, `dingo`, and `infra` projects; plus `origin/main`, the

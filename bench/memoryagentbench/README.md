@@ -25,8 +25,9 @@ python3 convert.py --parquet Conflict_Resolution-00000-of-00001.parquet --out de
 ## Run
 
 ```bash
-# requires the `opencode` CLI on PATH (or cli.opencode_binary in
-# ~/.config/ghost/config.yaml) — no ANTHROPIC_API_KEY needed
+# requires the `opencode` CLI on PATH (or `cli.opencode_binary` in the
+# Ghost user config file) — no direct Anthropic key is needed; OpenCode must
+# still have its own configured authentication
 # also requires a local Ollama serving `nomic-embed-text:v1.5` (the same
 # model Ghost uses in production) — pass --ollama <url> if it's not on
 # localhost:11434

@@ -267,7 +267,8 @@
     <h1>Your agent's memory,<br><em>on your disk.</em></h1>
     <p class="sub">
       Ghost gives Claude Code, Cursor, opencode, and any MCP client one persistent memory —
-      a single SQLite file you own. No cloud, no accounts, no subscription, no infrastructure.
+      a single SQLite file you own. Ghost itself adds no cloud service or infrastructure; a selected
+      CLI harness may still use its own account and billing.
     </p>
     <div class="install-snippet">
       <span class="cmt"># two commands, zero dependencies</span><br>
@@ -296,7 +297,7 @@
       </p></div>
       <div class="card"><span class="tag">Structure</span><h3>Eight memory categories</h3><p>
         architecture, decision, pattern, convention, gotcha, dependency, preference, fact —
-        enforced by a database constraint, weighted by importance, deduped on save.
+        enforced by a database constraint, weighted by importance, with near-duplicate links detected on save.
       </p></div>
       <div class="card"><span class="tag">Freshness</span><h3>Category-aware time decay</h3><p>
         Conventions and preferences never fade; stale gotchas do. Superseded facts are demoted
@@ -308,7 +309,8 @@
       </p></div>
       <div class="card"><span class="tag">Consolidation</span><h3>Reflect, with guardrails</h3><p>
         Optional LLM consolidation merges near-duplicates — with an empty-set guard and pinned-memory
-        protection, plus a fully offline Jaccard tier when no API key is present.
+        protection. The SQLite tier is fully offline; it is selected explicitly with <code>--tier sqlite</code>
+        or when an auto run has a known source but cannot use its CLI backend.
       </p></div>
       <div class="card"><span class="tag">Scope</span><h3>Cross-project &amp; global</h3><p>
         One memory across every repository and every MCP client. Project-scoped recall,
@@ -480,13 +482,14 @@
         </table>
         <p style="color:var(--muted);font-size:13.5px;margin-top:14px;">
           Embeddings fix exactly the classes keyword search fails: assistant-session recall goes
-          0.607&nbsp;&rarr;&nbsp;1.000 with vectors. CI enforces regression floors on both legs.
+          0.607&nbsp;&rarr;&nbsp;1.000 with vectors. Pull-request CI enforces the fast FTS floor; the hybrid
+          floor is run locally or manually because its cold embedding pass is much slower.
         </p>
       </div>
 
       <div class="bench-card">
         <h3>Staleness &mdash; acting on current facts</h3>
-        <div class="meta">Deterministic scenario suite modeled on published error taxonomies &middot; runs in CI</div>
+        <div class="meta">Deterministic scenario suite modeled on published error taxonomies &middot; runs in CI as report-only tests</div>
         <table>
           <tr><th>Ranking mode</th><th class="num">Fresh-wins</th><th class="num">Trap correct</th></tr>
           <tr><td>No decay signal (old default)</td><td class="num">0.083</td><td class="num">0.929</td></tr>
@@ -543,21 +546,23 @@
     <p class="lead">
       Cloud memory services mean your codebase's context — architecture decisions, credentials-adjacent
       gotchas, internal hostnames — sits on someone else's servers, metered per request. Ghost was designed so
-      the security review ends quickly: there is simply no channel for data to leave.
+      the security review ends quickly: Ghost itself adds no remote memory service, while explicit LLM-harness
+      calls remain a documented egress path.
     </p>
     <div class="comp-grid">
       <div class="comp-card">
         <h3><span class="dot"></span>Data residency by construction</h3>
         <p>All memories live in <b>one SQLite file under your own home directory</b>. There is no cloud tier, no sync,
-        no account, and no telemetry. Your agents' knowledge never crosses your network boundary — which makes
-        GDPR/CCPA data-mapping trivial: the entire processing location is a path you own.</p>
+        no account, and no telemetry. The Ghost store stays on your machine; when you use an LLM harness,
+        the prompt or context you explicitly send to that harness crosses your network boundary. That makes
+        GDPR/CCPA data-mapping tractable: the store location is a path you own, and each external egress path is explicit.</p>
       </div>
       <div class="comp-card">
         <h3><span class="dot"></span>Auditable, enumerable egress</h3>
-        <p>In normal operation Ghost makes <b>zero network calls</b>. There are exactly three exceptions, all
-        opt-in and documented: localhost Ollama for embeddings, the Anthropic API only if you enable LLM
-        consolidation, and the GitHub API only for self-upgrade. That is the complete list — verifiable in an
-        afternoon of code review, not promised in a DPA.</p>
+        <p>Ghost's normal local memory path makes <b>zero Ghost-owned network calls</b>. The explicit runtime
+        integrations are localhost Ollama for embeddings, the selected CLI harness for memory maintenance,
+        and the GitHub API for self-upgrade. The harness may use a provider's API or subscription according
+        to its own configuration; Ghost does not add a direct Anthropic client.</p>
       </div>
       <div class="comp-card">
         <h3><span class="dot"></span>Inspect what your agent sees</h3>
@@ -634,18 +639,20 @@
         <h3>The ownership model</h3>
         <div class="sub2">Ghost — memory on infrastructure you already control</div>
         <ul>
-          <li><span class="who us">Nothing to verify</span><b>No vendor access exists</b>There is no Ghost-side account,
-          token, or endpoint that could reach your memories. The attack surface for "the vendor" is zero by construction.</li>
+          <li><span class="who us">Nothing to verify</span><b>No Ghost-side vendor access</b>There is no Ghost-side account,
+          token, or endpoint that could reach your memories. An explicitly selected LLM harness is a separate,
+          user-configured egress path and is not a Ghost memory vendor.</li>
           <li><span class="who us">You hold it</span><b>Data custody</b>One SQLite file on company-managed hardware.
           Residency equals wherever IT put it — office, laptop fleet, or private VPC.</li>
-          <li><span class="who us">Your chain only</span><b>No subprocessors</b>No third party touches memory data in normal
-          operation. The complete egress list is three opt-in calls, documented and code-verifiable.</li>
+          <li><span class="who us">Your chain only</span><b>Explicit external paths</b>Ghost has no remote memory
+          subprocessors. Ollama, a selected CLI harness, and the upgrade endpoint are the documented runtime
+          integrations; each uses its own network and billing policy.</li>
           <li><span class="who us">Immediate</span><b>Deletion &amp; retention</b>Delete the file (or a row) and it's gone.
           Erasure is provable in seconds without anyone's ticket queue.</li>
           <li><span class="who us">Yours alone</span><b>Breach scope</b>A compromised laptop exposes that laptop's data —
           same as any other local file. There is no multi-tenant blast radius.</li>
           <li><span class="who us">One-time</span><b>Cost of trust</b>Security review reads one small Go codebase with an
-          embedded schema. No DPA to negotiate; no renewal-time re-assessment.</li>
+          embedded schema. There is no Ghost-side DPA; any separately selected LLM provider remains subject to its own terms.</li>
         </ul>
       </div>
     </div>
@@ -721,7 +728,7 @@
       <div class="step">
         <div class="when">Ongoing — Operate</div>
         <h3>Agents remember as a side effect of working</h3>
-        <p>Decisions, gotchas, and dependencies get saved during normal sessions; near-duplicates merge on save;
+        <p>Decisions, gotchas, and dependencies get saved during normal sessions; near-duplicates are linked on save;
         weekly <code>ghost reflect --apply</code> consolidates; superseded facts demote automatically.
         Nobody fills in a wiki after the fact.</p>
       </div>
@@ -729,8 +736,8 @@
         <div class="when">Quarterly — Govern</div>
         <h3>Compliance runs its cadence against files, not vendors</h3>
         <p>Review the Obsidian graph or query SQLite directly; export the audit log for the security review;
-        verify backups restored; offboarding is deleting one engineer's store. No questionnaire goes to any vendor,
-        because no vendor is in the loop.</p>
+        verify backups restored; offboarding is deleting one engineer's store. Ghost has no memory-vendor
+        questionnaire, while any separately selected LLM harness remains subject to that provider's review.</p>
       </div>
     </div>
   </div>
@@ -749,9 +756,9 @@
     <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));">
       <div class="v-card">
         <h3>Healthcare</h3>
-        <p><b>PHI never has to leave the building.</b> A clinic-deployed memory server keeps patient-workflow
-        knowledge — referral quirks, prior-auth gotchas, payer-specific rules — on premises, so no BAA is needed
-        at the memory layer at all.</p>
+        <p><b>PHI can remain on premises.</b> A clinic-deployed Ghost store keeps patient-workflow
+        knowledge — referral quirks, prior-auth gotchas, payer-specific rules — local. If maintenance invokes
+        an external LLM harness, the prompt/context sent to that harness is a separate egress and provider review.</p>
         <p>Position as <b>HIPAA-ready architecture, never "HIPAA certified"</b>: residency by construction,
         append-only audit log for access reviews, retention TTLs aligned to record policies.</p>
       </div>
@@ -794,9 +801,9 @@
       <details open>
         <summary>Where does my data actually go?</summary>
         <div class="a">One SQLite file under <code>~/.local/share/ghost</code> (or <code>$XDG_DATA_HOME/ghost</code>) — same path on
-        every OS. In normal operation Ghost makes <b>zero network calls</b>. There are exactly three exceptions, all opt-in
-        and documented: localhost Ollama for embeddings, the Anthropic API only if you enable LLM consolidation, and the GitHub
-        API only for self-upgrade.</div>
+        every OS. Ghost's local memory path makes <b>zero Ghost-owned network calls</b>. The explicit runtime integrations are
+        localhost Ollama for embeddings, the selected CLI harness for memory maintenance, and the GitHub API for self-upgrade;
+        a harness may use its own API or subscription authentication.</div>
       </details>
       <details>
         <summary>What exactly gets injected into my agent's context?</summary>
@@ -813,14 +820,15 @@
       <details>
         <summary>Is there a real off switch?</summary>
         <div class="a">Yes, at four levels: remove the MCP entry from your client config (Ghost only runs when spawned over stdio — there's no daemon);
-        set <code>embedding.enabled: false</code>; consolidation never runs unless you invoke <code>ghost reflect</code>, and applies nothing without
-        <code>--apply</code>; delete the data directory and everything is gone. There is nothing else.</div>
+        set <code>embedding.enabled: false</code>; automatic lifecycle phases are opt-in, while manual <code>ghost reflect</code> is
+        dry-run by default and applies nothing without <code>--apply</code>; delete the data directory and everything is gone. There is nothing else.</div>
       </details>
       <details>
         <summary>What does it cost to run?</summary>
-        <div class="a"><b>$0/month.</b> No metered API sits in the hot path — search, save, decay, and injection are all local.
-        The only paid call anywhere in the codebase is the optional Haiku consolidation tier, which has a fully offline fallback tier.
-        Benchmark reproductions cost $3–24 per full run depending on generator+judge choice.</div>
+        <div class="a"><b>$0/month for Ghost itself.</b> Search, save, decay, and injection are local. If you enable
+        maintenance that invokes a CLI harness, that harness's own subscription or provider billing applies; the
+        standalone Phase 4 benchmark can also call its selected generator/judge provider directly. Benchmark
+        reproductions cost $3–24 per full run depending on generator+judge choice.</div>
       </details>
     </div>
   </div>

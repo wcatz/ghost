@@ -12,8 +12,8 @@
 - CLI subprocess clients (CLIClient, OpenCodeClient, CodexClient, GooseClient) all follow the same shape: struct with `binary` field, `Reflect`/`Classify` methods, `run` helper with timeout + env stripping
 - `stripLLMKeys` strips provider API keys from subprocess env — add new keys here when adding CLI backends
 - Stop hook spawns reflect/resolve/supersede as detached processes with `--source` forwarding
-- SourceProvider maps host source strings to CLI backends; fallbackCLI cascades through all backends
-- FallbackProvider wraps primary + optional secondary; credit-exhaustion triggers fallover
+- SourceProvider maps host source strings to CLI backends; `CLIProvider` is the best-on-PATH availability probe, not source-aware routing
+- There is no `FallbackProvider` in the current architecture: a missing or undetectable CLI harness fails fast, while offline consolidation is an explicit SQLite tier
 
 ## Commit Conventions
 - Prefix: `feat(component):`, `fix(component):`, `chore(component):`, `docs:`

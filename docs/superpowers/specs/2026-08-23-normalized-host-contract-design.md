@@ -1,5 +1,9 @@
 # Normalized host-event contract + plugin-first distribution
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 **Status:** Draft (2026-08-23).
 **Author:** Wayne (wcatz)
 **Builds on:** #345 "Wire the stop hook into opencode (currently Claude Code-only)"; `2026-08-20-ghost-claude-plugin-design.md`; `2026-08-17-autonomous-memory-capture-design.md`.

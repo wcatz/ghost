@@ -1,5 +1,9 @@
 # MCP Phase 2 — ghost_memory_update, Stop hook, ghost_memory_promote
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 **Date:** 2026-07-19
 **Task:** `F2A46791` — P3 MCP Phase 2
 **Branch:** `feat/mcp-phase2`

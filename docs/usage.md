@@ -15,7 +15,7 @@ Every memory has:
 - Creation and update timestamps
 - Optional pinned state
 
-Ghost merges near-duplicates on save within the same project and category. A pinned memory is exempt from pruning and time-decay penalties.
+Ghost detects near-duplicates on save within the same project and category. It preserves the new text as a linked row, strengthens the existing row, and records the relationship without overwriting the original. A pinned memory is exempt from pruning and time-decay penalties.
 
 ## Choose a category
 
@@ -89,7 +89,7 @@ ghost reflect myproject --apply
 
 `reflect` can merge duplicates, prune noise, and promote useful cross-project knowledge. It takes a snapshot before replacing memories, refuses to replace the store with an empty result, and preserves manually saved memories. Use `--restore` to restore the most recent snapshot.
 
-The default `auto` tier routes through the calling session's CLI harness and falls back to the offline SQLite/Jaccard tier when appropriate. `--require-llm` disables that fallback and fails if the selected harness is unavailable.
+The default `auto` tier routes through the calling session's CLI harness. When a source is known but its CLI binary is unavailable, it falls back to the offline SQLite/Jaccard tier; if the calling source cannot be detected, it fails rather than guessing. `--require-llm` disables the fallback and fails if the selected harness is unavailable.
 
 ### Mark resolved evidence
 
@@ -109,7 +109,7 @@ ghost supersede myproject --apply
 
 `supersede` proposes semantically similar candidate pairs and asks the selected CLI harness to classify them as `supersedes`, `causes`, or `neither`. Applying the pass writes directed links. Search can then demote a stale memory below the replacement that supersedes it.
 
-All three maintenance operations route through the calling harness when no explicit `--source` is supplied. Ghost fails rather than silently switching to a different subscription or harness. See the [CLI reference](cli.md#memory-maintenance) for all flags.
+All three maintenance operations route through the calling harness when no explicit `--source` is supplied. Ghost fails rather than silently switching to a different harness or billing path. See the [CLI reference](cli.md#memory-maintenance) for all flags.
 
 ## Automatic lifecycle work
 

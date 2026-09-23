@@ -1,5 +1,9 @@
 # Ghost as a Claude Code Plugin — Design
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 ## Context
 
 Ghost currently integrates with Claude Code via `ghost mcp init`, which mutates the user's `~/.claude.json` (MCP server registration), `~/.claude/settings.json` (tool permissions, SessionStart + Stop hooks, `autoMemoryEnabled: false`), writes `MEMORY.md` redirects per known project, and imports Claude Code's existing file memories (`internal/mcpinit/init.go`). This works, but the wiring is fragile: it depends on the `claude` CLI's exact flag surface (`mcp add-json`, `mcp get`, `mcp remove`), hand-quotes hook commands per-platform, and re-runs to heal staleness after upgrades.

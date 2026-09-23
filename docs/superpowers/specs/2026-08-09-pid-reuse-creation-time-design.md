@@ -1,5 +1,9 @@
 # PID-Reuse Detection via Process Creation Time
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 Closes item 3 of #252 (Windows PID-reuse detection), extended to cover the
 identical, previously-accepted gap on POSIX (Linux/macOS signal-0 checks).
 

@@ -1034,7 +1034,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_resolve",
 		Title:       "Resolve stale evidence",
-		Description: "Scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own CLI harness — the backend is picked from the MCP client's identity (an opencode session classifies via opencode, a claude session via claude, etc.), or detected from the process ancestry for unknown clients; an undetectable caller is an error, never a silent fallback to another harness. Subscription-billed; no Anthropic API credits spent. Dry-run by default; pass apply:true to stamp resolved_at.",
+		Description: "Scans a project's memories for resolved-evidence notes (intermediate findings, changelog entries, superseded experiments) using the calling session's own CLI harness — the backend is picked from the MCP client's identity (an opencode session classifies via opencode, a claude session via claude, etc.), or detected from the process ancestry for unknown clients; an undetectable caller is an error, never a silent fallback to another harness. The harness owns its authentication and billing; Ghost does not add a direct Anthropic API call. Dry-run by default; pass apply:true to stamp resolved_at.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			OpenWorldHint:   boolPtr(false),

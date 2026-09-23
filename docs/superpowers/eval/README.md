@@ -1,45 +1,37 @@
 # Ghost Real-World Eval Suite
 
-A one-off diagnostic, not a CI gate. Run on demand to check how Ghost's
-memory system performs against real usage. See
+> **Historical record — not current documentation.** This workflow predates
+> Ghost's CLI-harness migration. Use [`../../README.md`](../../README.md) and
+> [`eval/cycle/`](../../../eval/cycle/) for the current graded evaluation; the commands below are kept
+> for historical reproducibility and may require removed components.
+
+This was a one-off diagnostic, not a CI gate. The archived workflow was used
+on demand to check how Ghost's memory system performed against real usage. See
 `docs/superpowers/specs/2026-07-27-ghost-eval-suite-design.md` for the design
 rationale and `docs/superpowers/plans/2026-07-27-ghost-eval-suite.md` for how
 it was built.
 
-## Running
+## Current replacement
 
-1. Build the binary: `make build` (from the repo root).
-2. Ensure `ANTHROPIC_API_KEY` is set in the environment of the process that
-   will invoke the Workflow tool call below — `ghost reflect --tier haiku`,
-   `ghost resolve`, and `ghost supersede` all require it, and each run spends
-   real API credits. Setting it in `~/.bashrc` or a terminal you open
-   afterward is not sufficient: a running Claude Code session does not
-   re-source shell rc files, so the key must already be exported in the
-   environment this session actually has. The workflow's Setup phase fails
-   fast with a clear error if the key is missing, rather than letting every
-   Consolidation/storyline call fail individually deep into the run.
-3. Invoke the Workflow tool with `scriptPath` set to
-   `docs/superpowers/eval/workflows/ghost-eval.workflow.js` and `args`
-   optionally overriding `replayProjects` (default:
-   `['ghost', 'roller', 'infra']`), `repoPath`, `realDbPath`,
-   `transcriptGlobRoot`, or `keepScratch` (set `true` to skip the final
-   `rm -rf` and leave scratch data in place for post-mortem on failure).
-4. The report lands at `docs/superpowers/reports/YYYY-MM-DD-ghost-eval.md`.
+The maintained graded staleness evaluation is `go run ./eval/cycle`; see
+[`docs/benchmarks.md`](../../benchmarks.md) for its methodology and
+results. It uses the current source-aware CLI routing and does not require
+`ANTHROPIC_API_KEY`.
 
-## Cost
+The Workflow tool invocation described below is retained only for historical
+reproduction. It expects the old Claude actor setup and the former direct-API
+Ghost tier, so it is not a supported current setup guide. In particular,
+`ghost reflect --tier haiku` and `internal/ai/client.go` are no longer valid
+current commands or source paths.
 
-Each full run: N replay agents (one per real project, each reading a full
-transcript) + N consolidation gradings + 4 storylines x 4-5 agents each +
-3 stress-test agents + 1 synthesis agent, plus the `resolve`/`supersede`
-Haiku calls inside the storyline grading steps. Budget accordingly.
+## Historical cost note
 
-Only the `ghost reflect`/`resolve`/`supersede` CLI calls (Consolidation phase
-+ storyline grading steps) spend real API credits — `internal/ai/client.go`
-is a direct Anthropic HTTP client and has no subscription option.
-`claude-eval-session.sh` unsets `ANTHROPIC_API_KEY` before launching each
-`claude -p` actor subprocess (replay/storyline/stress), so those ride your
-Claude Code subscription instead of API credits — do not remove that
-`env -u` or every actor session bills as pay-per-token API usage too.
+The archived workflow spawned multiple headless Claude actor sessions and
+graded memory maintenance with the then-current provider. Its cost depended on
+the authentication and billing configuration of those subprocesses; it is not a
+current Ghost cost estimate. Do not set an Anthropic key to run current Ghost
+maintenance. The independent Phase 4 benchmark may use a direct provider key
+only when explicitly reproducing that benchmark.
 
 ## Isolation mechanism
 

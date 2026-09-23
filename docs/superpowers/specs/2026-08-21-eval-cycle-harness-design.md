@@ -1,5 +1,9 @@
 # Eval Cycle Harness — Design
 
+> **Historical record — not current documentation.** This design predates the
+> current source-aware routing and explicit OpenCode model default. The
+> maintained harness is `eval/cycle/`.
+
 ## Goal
 
 Ghost's staleness pipeline (`ghost supersede` → `ghost resolve` → `ghost reflect`) has unit tests and retrieval benchmarks, but nothing that exercises the full MCP cycle end-to-end against a seeded project and grades the *behavior*: did supersede link the right pairs, did resolve mark exactly the resolved-evidence memories, did reflect merge duplicates without dropping anything important. This harness runs that cycle on demand against a scratch-isolated database with a hand-authored, annotated corpus, and produces a graded scorecard plus a full misclassification listing for human/agent review.

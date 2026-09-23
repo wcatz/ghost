@@ -22,8 +22,8 @@ var ErrUndetectableHarness = errors.New("cannot determine the calling harness (n
 // ghost; when those markers are absent — a manual `ghost supersede` run from a
 // shell inside a harness session — Linux falls back to walking /proc and darwin
 // to walking `ps` output. Callers must treat "" as "undetectable" and fail with
-// an actionable error: defaulting to some other harness would bill the wrong
-// subscription and betray the user's routing choice.
+// an actionable error: defaulting to some other harness would use the wrong
+// configured billing path and betray the user's routing choice.
 func DetectSource() string {
 	if s := detectSourceFromEnv(os.Getenv); s != "" {
 		return s

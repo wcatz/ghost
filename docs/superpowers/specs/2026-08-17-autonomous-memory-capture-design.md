@@ -1,5 +1,9 @@
 # Autonomous memory creation: in-session transcript capture
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 **Status:** Design approved (2026-08-17). Ready for implementation planning.
 **Author:** Wayne (wcatz)
 **Builds on:** #297 "feat: autonomous memory lifecycle — auto reflect, supersede, and resolve"

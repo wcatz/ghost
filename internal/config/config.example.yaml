@@ -1,19 +1,21 @@
 # Ghost — MCP Memory Server Configuration
-# ~/.config/ghost/config.yaml
+# Platform user config path (for example, ~/.config/ghost/config.yaml on
+# Linux; ~/Library/Application Support/ghost/config.yaml on macOS when
+# XDG_CONFIG_HOME is unset; %AppData%\ghost\config.yaml on Windows).
 #
 # Loading order (later overrides earlier):
 #   1. Compiled defaults
 #   2. /etc/ghost/config.yaml
-#   3. ~/.config/ghost/config.yaml  (this file)
+#   3. Platform user config path (this template)
 #   4. GHOST_* environment variables
 
 # --- Subprocess LLM binaries ---
 # All LLM-backed operations (reflection, resolve, supersede) shell out to a
-# CLI harness — `claude`, `opencode`, `codex`, or `goose` — billing to that
-# CLI's subscription. Ghost has no direct Anthropic HTTP API client, so no API
-# key config exists. By default the binaries are resolved from PATH; set these
-# to explicit paths when they live somewhere not on the Stop hook process's
-# PATH (e.g. ~/.opencode/bin).
+# CLI harness — `claude`, `opencode`, `codex`, or `goose` — which owns its
+# authentication and billing. Ghost has no direct Anthropic HTTP API client,
+# so no provider API-key config exists. By default the binaries are resolved
+# from PATH; set these to explicit paths when they live somewhere not on the
+# Stop hook process's PATH (e.g. ~/.opencode/bin).
 
 # --- Local Embeddings (Ollama) ---
 # Enables hybrid FTS5 + vector search. Requires Ollama running locally.

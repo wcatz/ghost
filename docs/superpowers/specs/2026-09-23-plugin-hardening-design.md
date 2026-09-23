@@ -1,5 +1,9 @@
 # Plugin Hardening Pass — Design
 
+> **Historical record — the hardening work shipped.** This design is retained
+> as a record; use the current plugin tests, manifests, and installation guide
+> for supported behavior.
+
 ## Context
 
 The 2026-09-23 Claude Code plugin audit (memory `9C497323942A8B3A56A31E04AFFC41E5`) found three gaps that cluster into one hardening PR:

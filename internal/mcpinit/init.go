@@ -116,8 +116,8 @@ func Run(w io.Writer, dryRun bool) error {
 	return nil
 }
 
-// ensureConfigBootstrap creates the user config file
-// (~/.config/ghost/config.yaml) from the embedded example if it's missing.
+// ensureConfigBootstrap creates the platform's user config file from the
+// embedded example if it's missing.
 // In dry-run mode it reports what would happen without creating anything.
 func ensureConfigBootstrap(w io.Writer, dryRun bool) error {
 	if dryRun {

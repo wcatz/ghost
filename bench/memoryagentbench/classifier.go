@@ -10,9 +10,10 @@ import (
 )
 
 // buildClassifier builds the real supersede classifier backed by the
-// `opencode` CLI (ai.NewOpenCodeClientWithBinary) — subscription-billed, no
-// API key required. cfg.CLI.OpenCodeBinary overrides the "opencode"
-// PATH lookup, matching cmd/ghost/main.go's own opencode-tier resolution.
+// `opencode` CLI (ai.NewOpenCodeClientWithBinary). Ghost does not require a
+// direct Anthropic key, but OpenCode must be authenticated through its own
+// configuration. cfg.CLI.OpenCodeBinary overrides the "opencode" PATH lookup,
+// matching cmd/ghost/main.go's own opencode-tier resolution.
 func buildClassifier() (*supersede.RelationClassifier, error) {
 	cfg, err := config.Load()
 	if err != nil {
@@ -23,7 +24,7 @@ func buildClassifier() (*supersede.RelationClassifier, error) {
 		binary = cfg.CLI.OpenCodeBinary
 	}
 	if _, err := exec.LookPath(binary); err != nil {
-		hint := "set cli.opencode_binary in ~/.config/ghost/config.yaml"
+		hint := "set cli.opencode_binary in the Ghost user config file"
 		if cfg.CLI.OpenCodeBinary != "" {
 			hint = fmt.Sprintf("check that cli.opencode_binary (%s) is a valid, executable path", binary)
 		}

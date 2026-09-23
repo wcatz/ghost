@@ -1,5 +1,9 @@
 # PID-Reuse Detection via Process Creation Time — Implementation Plan
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `isAlive()` in `internal/mcpinit` detect PID reuse (a dead process's PID handed to an unrelated new process) across Linux, macOS, and Windows, closing item 3 of GitHub issue #252.

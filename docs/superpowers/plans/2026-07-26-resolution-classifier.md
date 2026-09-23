@@ -1,5 +1,9 @@
 # Resolution Classifier Implementation Plan
 
+> **Historical record — not current documentation.** This plan predates the
+> shipped schema and CLI-harness architecture. See [`../../README.md`](../../README.md)
+> and the current source for behavior.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** De-weight resolved-work memories from session-start injection by classifying "conclusion vs. evidence" content, dropping the evidence from the injected/ranked surface while keeping it fully searchable.

@@ -1,5 +1,9 @@
 # Ghost Real-World Eval Suite — Design
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 ## Goal
 
 Ghost has quantitative benchmarks (`internal/bench`, LongMemEval-S) for retrieval quality, but nothing that evaluates the *whole* system the way a real user experiences it: does session-start injection actually help, does search surface the right memory when it matters, do `ghost resolve`/`ghost supersede` behave sensibly over a real multi-session arc, and — critically — where does using Ghost's MCP tools actually feel bad? This eval suite produces one honest report combining quantitative scores with qualitative "frustration points" flagged by the agents that hit them, not just pass/fail.

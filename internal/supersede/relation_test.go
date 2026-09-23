@@ -388,9 +388,9 @@ func liveTestSource() string {
 // set. It needs a working LLM CLI (claude, opencode, codex, or goose), so it is
 // skipped in CI when none answers; run it manually to get a precision signal on
 // the classifier (the one piece of the creation path with no deterministic
-// test). The CLI backends bill to the subscription rather than API credits. A
-// false SUPERSEDES buries a still-valid memory, and a false CAUSES
-// misattributes rationale, so the prompt biases toward NEITHER when uncertain —
+// test). The CLI backends own their authentication and billing; Ghost does
+// not make a direct API call. A false SUPERSEDES buries a still-valid memory,
+// and a false CAUSES misattributes rationale, so the prompt biases toward NEITHER when uncertain —
 // a missed link merely leaves the staleness bug unfixed for that pair, which is
 // cheaper to recover from.
 func TestRelationClassifierLive(t *testing.T) {

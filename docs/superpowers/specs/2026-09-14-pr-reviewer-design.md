@@ -1,5 +1,9 @@
 # A CodeRabbit-class PR reviewer on the opencode CLI transport
 
+> **Historical record — the reviewer pipeline has shipped.** This design is
+> retained for rationale; use `.github/workflows/reviewer.yml` and
+> `.github/scripts/` for the current implementation.
+
 **Status:** Designed (2026-09-14) — supersedes the approach in PR #421.
 **Author:** Wayne (wcatz)
 **Builds on:** `2026-08-26-pr-agent-upgrade-design.md`; decision `21731F28F7EA4B9BE58BF2153FA98CF0` (PR-Agent replaced CodeRabbit after rate-limit friction); PR #421's opencode CLI transport work.

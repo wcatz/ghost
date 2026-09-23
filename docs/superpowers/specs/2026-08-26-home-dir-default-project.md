@@ -1,5 +1,9 @@
 # Home-Dir Session Routing → Configurable Default Project — Design
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 Issue: #391. Status: implemented in this spec's branch.
 
 ## Corrected root cause (2026-08-26 investigation)

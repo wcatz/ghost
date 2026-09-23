@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# ARCHIVED: this helper belongs to the pre-CLI-migration real-world eval.
+# Use eval/cycle for the current graded evaluation.
 # Usage: claude-eval-session.sh <unit-run-id> <prompt> <project-basename>
 # Launches one isolated `claude -p` session against the scratch ghost
 # instance for <unit-run-id> (config must already exist — run
@@ -18,12 +20,10 @@
 #
 # ANTHROPIC_API_KEY is deliberately unset before invoking `claude -p` below.
 # If present, it overrides Claude Code's subscription/OAuth login and bills
-# this actor session as pay-per-token API usage instead of the subscription
-# — the opposite of what an eval "session replay" should cost. The Ghost
-# CLI calls this suite's Consolidation phase makes directly (ghost reflect/
-# resolve/supersede, in internal/ai/client.go) are a separate, unavoidable
-# direct HTTP client that always needs the key; only these `claude -p`
-# actor subprocesses can ride the subscription instead.
+# this actor session as pay-per-token API usage instead of the subscription.
+# Ghost's own reflect/resolve/supersede calls now use the configured CLI
+# harness as well; the unset keeps this archived actor session from choosing
+# a different billing path.
 set -euo pipefail
 
 UNIT_RUN_ID="${1:?usage: claude-eval-session.sh <unit-run-id> <prompt> <project-basename>}"

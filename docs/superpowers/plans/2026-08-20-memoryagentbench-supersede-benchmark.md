@@ -1,5 +1,9 @@
 # MemoryAgentBench Supersede Benchmark Implementation Plan
 
+> **Historical record — not current documentation.** This plan preserves the
+> original benchmark implementation. The current benchmark is documented in
+> [`../../../bench/memoryagentbench/README.md`](../../../bench/memoryagentbench/README.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build `bench/memoryagentbench/`, a standalone Go program (plus a small Python conversion script) that runs Ghost's real `ghost supersede` classifier against MemoryAgentBench's `Conflict_Resolution` (`fact_sh`) data and reports retrieval accuracy before/after supersede links exist.
@@ -1321,7 +1325,7 @@ the `opencode` CLI rather than the Anthropic API) against MemoryAgentBench's
 `Conflict_Resolution`
 split ([HF: `ai-hyz/MemoryAgentBench`](https://huggingface.co/datasets/ai-hyz/MemoryAgentBench),
 ICLR 2026), and scores retrieval before/after supersede links exist. See
-[the design doc](../../docs/superpowers/specs/2026-08-20-memoryagentbench-supersede-benchmark-design.md)
+[the design doc](../specs/2026-08-20-memoryagentbench-supersede-benchmark-design.md)
 for the full rationale.
 
 Single-hop (`fact_sh`) only — multi-hop (`fact_mh`) needs a query-decomposition

@@ -51,7 +51,7 @@ Resources: project context, global memories, project decisions, project tasks �
 
 Prompts: `recall_project` (injects project context into the conversation), `record_decision` (guides structured decision recording).
 
-The server ships with embedded instructions that teach the agent when to save, which categories to use, and how to leverage cross-project search — it works proactively without configuration. Full architecture notes in [docs/architecture.md](docs/architecture.md).
+The server ships with embedded instructions that teach the agent when to save, which categories to use, and how to leverage cross-project search — it works proactively without configuration. Full architecture notes in [docs/architecture.md](../../architecture.md).
 ```
 
 - [ ] **Step 2: Verify the tool count matches code**

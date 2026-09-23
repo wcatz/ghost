@@ -99,7 +99,7 @@ Memories are concise, durable notes with one of eight categories:
 - `preference` — a user preference
 - `fact` — general project knowledge
 
-The agent saves memories through MCP tools. Near-duplicates are merged rather than appended blindly, and memories can be pinned, updated, promoted, searched, or deleted.
+The agent saves memories through MCP tools. Near-duplicates are detected within the same project and category: Ghost preserves the new text as a linked row, strengthens the existing row, and records the relationship without overwriting the original. Memories can also be pinned, updated, promoted, searched, or deleted.
 
 ### Projects and global knowledge
 

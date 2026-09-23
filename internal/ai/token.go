@@ -1,9 +1,9 @@
 package ai
 
-// TokenUsage reports the token counts of a CLI-harness call (claude -p
-// --output-format json, opencode run --json, codex/goose equivalents). The
-// json tags keep the wire shape stable — cli_client.go and opencode_client.go
-// parse `usage` from the subprocess's JSON output into this shape.
+// TokenUsage is the provider-neutral wire shape reserved for future token
+// accounting. Current CLI subprocess adapters return a zero value because they
+// do not parse provider usage metadata; the JSON tags preserve the shape for
+// callers and future adapters.
 type TokenUsage struct {
 	InputTokens              int `json:"input_tokens"`
 	OutputTokens             int `json:"output_tokens"`

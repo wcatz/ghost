@@ -1,5 +1,9 @@
 # Resolution Classifier: de-weighting resolved work at injection
 
+> **Historical record — not current documentation.** This design predates the
+> shipped resolution classifier and schema. Current behavior is in
+> `internal/resolve/`, `internal/memory/`, and `docs/benchmarks.md`.
+
 **Status:** Design approved (2026-07-26). Ready for implementation planning.
 **Author:** Wayne (wcatz)
 **Supersedes:** the earlier MMR/diversity approach explored in this thread, which was

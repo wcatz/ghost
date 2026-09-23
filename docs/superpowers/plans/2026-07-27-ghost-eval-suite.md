@@ -1,5 +1,9 @@
 # Ghost Real-World Eval Suite Implementation Plan
 
+> **Historical record — not current documentation.** This runbook predates the
+> CLI-only runtime and must not be treated as a current setup guide. The
+> maintained graded harness is under `eval/cycle/`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a one-off diagnostic Workflow script that evaluates how Ghost's memory system performs against real usage — live-agent save-decision quality, `ghost reflect` consolidation quality, multi-session injection/search behavior, and `ghost resolve`/`supersede` correctness — and produces a dated Markdown report of scores and friction points.

@@ -16,9 +16,9 @@ type reflector interface {
 	Reflect(ctx context.Context, prompt string) (string, ai.TokenUsage, error)
 }
 
-// LlmConsolidator uses an LLM (a subscription-billed CLI harness — claude,
-// opencode, codex, or goose — or a source-matched provider) for consolidation.
-// Highest quality tier.
+// LlmConsolidator uses an LLM (a configured CLI harness — claude, opencode,
+// codex, or goose — or a source-matched provider) for consolidation. Highest
+// quality tier.
 type LlmConsolidator struct {
 	client reflector
 	name   string

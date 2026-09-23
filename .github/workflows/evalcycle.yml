@@ -2,7 +2,8 @@ name: evalcycle
 
 # Graded staleness-pipeline eval (`eval/cycle`) — MANUAL ONLY, never a
 # pull_request gate: the supersede/resolve/reflect stages call real LLMs via
-# the opencode CLI path, cost real credits, and are nondeterministic (observed
+# the opencode CLI path, incur the harness's configured provider/subscription
+# cost, and are nondeterministic (observed
 # resolve R wobble ±0.25 across identical inputs), so exact-match gating is
 # meaningless. Runs gate on metric FLOORS (-floors) set well below observed
 # values (2026-08-21 deepseek-tier runs: supersede P 0.71-0.83 / R 0.62,
@@ -13,17 +14,16 @@ name: evalcycle
 # Actions secret; it flows into OPENCODE_API_KEY on the run step. The harness
 # → ghost → opencode subprocess chain carries it through automatically
 # (ai.stripLLMKeys strips ANTHROPIC/OPENAI/GOOSE keys but passes OPENCODE_*
-# by design). With the key set, opencode defaults to the account's Go-endpoint
-# model (opencode-go/ox-alpha-free); without it, runs fall back to opencode's
-# anonymous build tier (big-pickle) and floors decide if that's gradeable.
-# Model pins must be provider-scoped: `opencode-go/ox-alpha-free`, not bare
-# `ox-alpha-free`.
+# by design). The credential affects the harness's own authentication and
+# billing; it does not change the model Ghost passes. With an empty model input,
+# Ghost explicitly uses opencode/big-pickle. Model pins must be provider-scoped:
+# `opencode-go/ox-alpha-free`, not bare `ox-alpha-free`.
 
 on:
   workflow_dispatch:
     inputs:
       model:
-        description: "GHOST_OPENCODE_MODEL pin, provider-scoped (e.g. opencode-go/ox-alpha-free); empty = opencode default"
+        description: "GHOST_OPENCODE_MODEL pin, provider-scoped (e.g. opencode-go/ox-alpha-free); empty = Ghost's opencode/big-pickle default"
         required: false
         default: ""
       floors:
@@ -82,7 +82,8 @@ jobs:
           EVAL_FLOORS: ${{ inputs.floors }}
           EVAL_SKIP_REFLECT: ${{ inputs.skip_reflect }}
           # Secret holds the opencode credential (the same value exported as
-          # OPENCODE_API_KEY locally). Unset -> anonymous build tier fallback.
+          # OPENCODE_API_KEY locally). Ghost still passes its explicit model when
+          # inputs.model is empty.
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
         run: |
           args=( -repo . -ollama http://localhost:11434 )

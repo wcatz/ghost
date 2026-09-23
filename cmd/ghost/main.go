@@ -750,8 +750,8 @@ Flags:
 
 	// An explicit --source always wins; otherwise the auto tier needs the
 	// calling harness so consolidation runs through the session's own
-	// subscription. This runs after --restore, which is a pure DB undo and
-	// must work without any harness. Explicit tiers (cli/opencode/sqlite)
+	// configured billing path. This runs after --restore, which is a pure DB
+	// undo and must work without any harness. Explicit tiers (cli/opencode/sqlite)
 	// select their backend directly and keep working without a detectable
 	// caller — in particular the offline sqlite floor stays available from
 	// any shell.
@@ -768,8 +768,8 @@ Flags:
 
 	// Source-aware auto tier: source is always resolved (explicit --source or
 	// detectPhaseSource), so the auto tier runs the same CLI harness that
-	// served the session. This lets the stop-hook or cron reflect run
-	// subscription-billed consolidation with no API key.
+	// served the session. This lets the stop-hook or cron reflect run through
+	// the configured harness, whose authentication and billing Ghost leaves alone.
 	if tierValue == "auto" && source != "" {
 		sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
 		if sp.Available() {
@@ -1168,8 +1168,8 @@ var detectCallingSource = ai.DetectSource
 // supersede: an explicit --source always wins; otherwise the calling harness is
 // detected from the environment and process ancestry. There is no fallback
 // cascade — an undetectable caller is an error, because silently classifying
-// through a different harness than the session's would bill the wrong
-// subscription and betray the user's routing choice.
+// through a different harness than the session's would use the wrong
+// configured billing path and betray the user's routing choice.
 func detectPhaseSource(flagSource string) (string, error) {
 	if flagSource != "" {
 		return flagSource, nil
@@ -1247,9 +1247,10 @@ Flags:
                       undetectable caller is an error.
 
 Classifies each candidate as supersedes, causes, or neither. Runs through the
-subscription-billed CLI harness of the calling session (--source overrides;
-otherwise detected from the environment and process ancestry — an undetectable
-caller is an error, never a fallback to a different harness).`)
+configured CLI harness of the calling session (--source overrides; otherwise
+detected from the environment and process ancestry — an undetectable caller is
+an error, never a fallback to a different harness). The harness owns its
+authentication and billing.`)
 		os.Exit(1)
 	}
 
@@ -1351,10 +1352,10 @@ Flags:
                   caller is an error.
 
 Marks resolved-evidence memories so they drop from session-start injection
-(still searchable). Runs through the subscription-billed CLI harness of the
-calling session (--source overrides; otherwise detected from the environment
-and process ancestry — an undetectable caller is an error, never a fallback to
-a different harness).`)
+(still searchable). Runs through the configured CLI harness of the calling
+session (--source overrides; otherwise detected from the environment and
+process ancestry — an undetectable caller is an error, never a fallback to a
+different harness). The harness owns its authentication and billing.`)
 		os.Exit(1)
 	}
 
@@ -1876,7 +1877,7 @@ Commands:
   mcp init [--client claude|opencode|codex|goose|all] [--dry-run]  Configure MCP client integration
                                                          (auto-detects when --client is omitted)
   mcp status [--client claude|opencode|codex|goose]                Check MCP client integration health
-  hook <event> [--source <host>]  Lifecycle hook for MCP clients (session-start, stop)
+  hook <event> [--source <host>]  Lifecycle hook for MCP clients (session-start, stop, session-end)
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
   supersede <project> [flags] Link superseded memories (dry-run by default, --apply to write)
   resolve <project> [flags]   Mark resolved evidence memories (dry-run by default, --apply to write)

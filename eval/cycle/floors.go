@@ -80,8 +80,9 @@ func joinSortedKeys(m map[string]bool) string {
 
 // seedOpencodeAuth copies an opencode auth.json into the scratch data dir so
 // the sandboxed opencode subprocess finds credentials under its overridden
-// XDG_DATA_HOME. Empty path is a no-op so local runs (which need none) stay
-// unchanged. CI passes the auth file materialized from an Actions secret.
+// XDG_DATA_HOME. Empty path is a no-op so local runs can use their existing
+// OpenCode configuration unchanged. The workflow currently supplies
+// OPENCODE_API_KEY; this flag remains useful for other CI or local setups.
 func seedOpencodeAuth(scratch, authFile string) error {
 	if authFile == "" {
 		return nil

@@ -1,5 +1,9 @@
 # Windows one-command installer (`install.ps1`)
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 ## Problem
 
 Filed by Skinner (opencode agent testing Ghost on a UTM Windows VM):

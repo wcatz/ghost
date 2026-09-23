@@ -1,5 +1,9 @@
 # Remove dead conversation-logging and unused reflection-prompt fields
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 ## Context
 
 `internal/memory/schema.go` defines `conversations` and `messages` tables, and

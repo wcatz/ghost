@@ -1,5 +1,9 @@
 # Autonomous Reflect Implementation Plan
 
+> **Historical record — not current documentation.** This plan describes the
+> original autonomous-reflection and OpenCode V1 design. Current behavior is
+> documented in [`../../README.md`](../../README.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give `ghost reflect` a generalized subprocess LLM tier (claude and opencode), auto-trigger it from the Stop hook, and improve the Jaccard fallback dedup.

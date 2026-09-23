@@ -1,5 +1,9 @@
 # Resolve Batching + KEEP Cache Implementation Plan
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Cut `ghost resolve`'s LLM cost — one call per prefilter survivor every pass, with KEEP verdicts never remembered — to batched calls plus a content-keyed KEEP cache that makes converged passes call-free.

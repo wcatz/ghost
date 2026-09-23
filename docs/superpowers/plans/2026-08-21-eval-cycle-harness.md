@@ -1,5 +1,9 @@
 # Eval Cycle Harness Implementation Plan
 
+> **Historical record — not current documentation.** This plan predates the
+> current source-aware routing and explicit Big Pickle default. Use the
+> maintained `eval/cycle/` harness and current documentation.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Repeatable harness that injects an annotated corpus into a scratch-isolated ghost instance, runs supersede → resolve → reflect, grades each stage against annotations, and writes a Markdown scorecard — all LLM calls billed through opencode/claude CLI, zero Anthropic API spend.

@@ -1,5 +1,9 @@
 # Non-Destructive Upsert (Area 1) Implementation Plan
 
+> **Historical record — not current documentation.** This file preserves the
+> design or implementation state at the time it was written. For current Ghost
+> behavior, start with [`docs/README.md`](../../README.md) and the source.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Stop `Store.Upsert` from destructively overwriting memory content on a detected near-duplicate — every save becomes its own row, with a `'duplicate'` `memory_links` edge back to the matched row carrying the match score.
