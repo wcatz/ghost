@@ -74,7 +74,7 @@ done
 # Windows runners (Git Bash) expose only `python`.
 PY="$(command -v python3 || command -v python || true)"
 [ -n "$PY" ] || { echo "error: python3 or python is required to validate the manifest" >&2; exit 1; }
-"$PY" -c "import json,sys; json.load(open('$MANIFEST'))" \
+"$PY" -c 'import json,sys; json.load(open(sys.argv[1]))' "$MANIFEST" \
   || { echo "error: assembled plugin.json is not valid JSON" >&2; exit 1; }
 
 echo "assembled ghost plugin $VERSION at $OUT"
