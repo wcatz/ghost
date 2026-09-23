@@ -7,11 +7,11 @@
     "url": "https://github.com/wcatz/ghost",
     "source": "github"
   },
-  "version": "0.30.16",
+  "version": "0.30.17",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/wcatz/ghost:0.30.16",
+      "identifier": "ghcr.io/wcatz/ghost:0.30.17",
       "transport": {
         "type": "stdio"
       }
