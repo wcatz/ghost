@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -293,8 +294,64 @@ func TestPluginE2E(t *testing.T) {
 		if strings.Contains(out1, "finalizing") || strings.Contains(out1, "ghost plugin finalize") {
 			t.Errorf("finalize banner leaked to stdout: %q", out1)
 		}
+		// diag dumps failure-only resolution diagnostics so the Windows CI
+		// failure distinguishes a path-form divergence (seeded path vs the
+		// hook's re-eval of payload cwd) from a read-only DB open failure
+		// inside the hook — neither is visible in the stdout string alone.
+		// Invoked only from the run-1 marker failure below; green runs stay
+		// silent.
+		diag := func(reason string) {
+			t.Helper()
+			t.Logf("diag: %s", reason)
+			evalCwd, evalErr := filepath.EvalSymlinks(cwd)
+			t.Logf("diag: raw cwd=%q eval(cwd)=%q err=%v", cwd, evalCwd, evalErr)
+			t.Logf("diag: XDG_DATA_HOME=%q HOME=%q", os.Getenv("XDG_DATA_HOME"), os.Getenv("HOME"))
+			dbPath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost", "ghost.db")
+			_, statErr := os.Stat(dbPath)
+			t.Logf("diag: dbPath=%q stat_ok=%v stat_err=%v", dbPath, statErr == nil, statErr)
+			t.Logf("diag: roDSN=%q", roDSN(dbPath))
+
+			// Read-only probe on exactly the DSN the hook uses: an open or
+			// query error here proves family (B); surviving rows with paths
+			// that differ from eval(cwd) point at family (A).
+			db, err := sql.Open("sqlite", roDSN(dbPath))
+			t.Logf("diag: ro open err=%v", err)
+			if err == nil {
+				rows, qerr := db.QueryContext(context.Background(), "SELECT id, path FROM projects")
+				if qerr != nil {
+					t.Logf("diag: projects query err=%v", qerr)
+				} else {
+					for rows.Next() {
+						var id, path string
+						if serr := rows.Scan(&id, &path); serr != nil {
+							t.Logf("diag: row scan err=%v", serr)
+							break
+						}
+						t.Logf("diag: project id=%q path=%q", id, path)
+					}
+					if rerr := rows.Err(); rerr != nil {
+						t.Logf("diag: rows err=%v", rerr)
+					}
+					_ = rows.Close()
+				}
+				_ = db.Close()
+			}
+
+			// Direct resolve on the known-good read-write DSN: if RW resolves
+			// while the roDSN probe errored, family (B) is proven; if RW also
+			// misses and the stored path differs from eval(cwd), family (A).
+			rwdb, err := memory.OpenDB(dbPath)
+			if err != nil {
+				t.Logf("diag: rw open err=%v", err)
+				return
+			}
+			id, _, rerr := memory.NewStore(rwdb, nil).ResolveProject(context.Background(), cwd)
+			t.Logf("diag: direct resolve(input=cwd) => id=%q err=%v", id, rerr)
+			_ = rwdb.Close()
+		}
 		if !strings.Contains(out1, "E2E_SEED_MARKER") {
-			t.Errorf("expected seeded context injected on stdout, got %q", out1)
+			t.Errorf("expected seeded context injected on stdout, got %q; hook stderr=%q", out1, err1)
+			diag("run 1 stdout lacks E2E_SEED_MARKER")
 		}
 		if _, err := os.Stat(filepath.Join(dataDir, finalizeMarkerName)); err != nil {
 			t.Errorf("finalize marker not written: %v", err)
@@ -305,7 +362,7 @@ func TestPluginE2E(t *testing.T) {
 			t.Errorf("marker must skip finalize on the second run, got %q", err2)
 		}
 		if !strings.Contains(out2, "E2E_SEED_MARKER") {
-			t.Errorf("second run should still inject context, got %q", out2)
+			t.Errorf("second run should still inject context, got %q; hook stderr=%q", out2, err2)
 		}
 	})
 
