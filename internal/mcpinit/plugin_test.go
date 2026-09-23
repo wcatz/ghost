@@ -17,8 +17,7 @@ import (
 func TestIsUnderPluginCache(t *testing.T) {
 	t.Run("anchored to the resolved home", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
-		t.Setenv("USERPROFILE", home)
+		setHome(t, home)
 		inHome := filepath.ToSlash(filepath.Join(home, ".claude", "plugins", "ghost", "1.0.0", "bin", "ghost"))
 		elsewhere := filepath.ToSlash(filepath.Join(home, "other-root", ".claude", "plugins", "ghost", "1.0.0", "bin", "ghost"))
 		cases := []struct {
@@ -55,8 +54,7 @@ func TestIsUnderPluginCache(t *testing.T) {
 	})
 
 	t.Run("windows-shaped paths under the same home", func(t *testing.T) {
-		t.Setenv("HOME", `C:\Users\u`)
-		t.Setenv("USERPROFILE", `C:\Users\u`)
+		setHome(t, `C:\Users\u`)
 		if !isUnderPluginCache(`C:\Users\u\.claude\plugins\ghost\1.0.0\bin\ghost.exe`) {
 			t.Error("want true for the plugin cache under the resolved home")
 		}
@@ -76,8 +74,7 @@ func TestIsUnderPluginCache(t *testing.T) {
 	})
 
 	t.Run("substring fallback when home is unresolvable", func(t *testing.T) {
-		t.Setenv("HOME", "")
-		t.Setenv("USERPROFILE", "")
+		setHome(t, "")
 		if !isUnderPluginCache("/x/.claude/plugins/ghost/bin/ghost") {
 			t.Error("want historical substring match when UserHomeDir fails")
 		}
@@ -93,8 +90,7 @@ func TestIsUnderPluginCache(t *testing.T) {
 		if err := os.Symlink(real, link); err != nil {
 			t.Skipf("cannot create symlink: %v", err)
 		}
-		t.Setenv("HOME", link)
-		t.Setenv("USERPROFILE", link)
+		setHome(t, link)
 		// Lexical form: $HOME exactly as spelled.
 		lexical := filepath.ToSlash(filepath.Join(link, ".claude", "plugins", "ghost", "bin", "ghost"))
 		if !isUnderPluginCache(lexical) {
@@ -165,7 +161,7 @@ func TestPluginInstalledRegistryNames(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.key, func(t *testing.T) {
 			home := t.TempDir()
-			t.Setenv("HOME", home)
+			setHome(t, home)
 			t.Setenv(pluginRootEnv, "")
 			dir := filepath.Join(home, ".claude", "plugins")
 			if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -228,7 +224,7 @@ func TestFinalizePluginWritesMarker(t *testing.T) {
 // silently leaving the competing memory enabled forever.
 func TestFinalizePluginNoMarkerWhenAutoMemoryFails(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	// Make ~/.claude a regular file, so settings save's MkdirAll fails.
 	if err := os.WriteFile(filepath.Join(home, ".claude"), []byte("x"), 0644); err != nil {
 		t.Fatal(err)

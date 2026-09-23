@@ -200,11 +200,55 @@ func checkPrereqs(w io.Writer, client string) (ghostBin, claudeBin string, err e
 // Tests override this to stay isolated from host binaries.
 var systemBinDirs = []string{"/opt/homebrew/bin", "/usr/local/bin"}
 
+// windowsBinExts are the extensions that count as executable in findBinary's
+// common-dir fallback on Windows: the native binary plus script wrappers —
+// the PATHEXT set PATH lookups resolve through (.com omitted: nothing we
+// probe ships as .com).
+var windowsBinExts = []string{".exe", ".cmd", ".bat"}
+
+// commonBinCandidates returns the file names findBinary probes inside a common
+// install dir: the bare name on every platform, plus the Windows executable
+// extensions. The home-relative list covers claude's native installer target
+// ~/.local/bin — %USERPROFILE%\.local\bin holding claude.exe on Windows —
+// which is exactly the install a PATH-only lookup misses.
+func commonBinCandidates(name string) []string {
+	candidates := []string{name}
+	if runtime.GOOS == "windows" {
+		for _, ext := range windowsBinExts {
+			candidates = append(candidates, name+ext)
+		}
+	}
+	return candidates
+}
+
+// commonDirExecutable reports whether a probed fallback candidate may be
+// returned. POSIX keeps the exec-bit gate. On Windows executability is
+// conferred by the file extension, not mode bits: os.Stat reports regular
+// files as 0666/0444 there (0111 appears only on directories), so the
+// exec-bit test would reject every candidate — an extensionless file cannot
+// run at all, while a .exe/.cmd/.bat file is executable by existence.
+func commonDirExecutable(p string, st os.FileInfo) bool {
+	if st.IsDir() {
+		return false
+	}
+	if runtime.GOOS != "windows" {
+		return st.Mode().Perm()&0o111 != 0
+	}
+	ext := strings.ToLower(filepath.Ext(p))
+	for _, e := range windowsBinExts {
+		if ext == e {
+			return true
+		}
+	}
+	return false
+}
+
 // findBinary locates name on PATH first, then falls back to common install
 // directories that are typically not on PATH (e.g. ~/.local/bin for the claude
 // native installer, ~/go/bin for go install). Home-relative dirs follow the
 // effective HOME; the systemBinDirs list is absolute, so tests that must stay
-// isolated from host binaries override it.
+// isolated from host binaries override it. On Windows the fallback also
+// probes name.exe/.cmd/.bat, since executability there is by extension.
 func findBinary(name string) string {
 	if p, err := exec.LookPath(name); err == nil {
 		return p
@@ -217,9 +261,11 @@ func findBinary(name string) string {
 		filepath.Join(home, ".local", "bin"),
 		filepath.Join(home, "go", "bin"),
 	}, systemBinDirs...) {
-		p := filepath.Join(dir, name)
-		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode().Perm()&0o111 != 0 {
-			return p
+		for _, candidate := range commonBinCandidates(name) {
+			p := filepath.Join(dir, candidate)
+			if st, err := os.Stat(p); err == nil && commonDirExecutable(p, st) {
+				return p
+			}
 		}
 	}
 	return ""

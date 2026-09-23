@@ -16,7 +16,7 @@ import (
 func setupCodexTestEnv(t *testing.T) (home, xdg string) {
 	t.Helper()
 	home = t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	xdg = t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
@@ -42,7 +42,7 @@ func codexHooksJSON(home string) string {
 
 func TestRunCodex_FreshInstall(t *testing.T) {
 	home, xdg := setupCodexTestEnv(t)
-	ghostBin := filepath.Join(home, "bin", "ghost")
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
 
 	var out bytes.Buffer
 	if err := RunCodex(&out, false); err != nil {
@@ -96,7 +96,9 @@ func TestRunCodex_FreshInstall(t *testing.T) {
 			continue
 		}
 		action := rules[0].Hooks[0]
-		wantCmd := "'" + ghostBin + "' hook " + token + " --source codex"
+		// Rendered exactly as production renders it (platform shellQuote);
+		// the quote styles themselves are pinned by TestShellQuote*.
+		wantCmd := shellQuote(ghostBin) + " hook " + token + " --source codex"
 		if action.Type != "command" || action.Command != wantCmd {
 			t.Errorf("%s command = %+v, want type=command cmd=%q", event, action, wantCmd)
 		}
@@ -179,7 +181,7 @@ func TestRunCodex_Idempotent(t *testing.T) {
 // block plus one separator newline — every pre-existing byte intact.
 func TestRunCodex_TOMLAppendPreservesContent(t *testing.T) {
 	home, _ := setupCodexTestEnv(t)
-	ghostBin := filepath.Join(home, "bin", "ghost")
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
 
 	if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
 		t.Fatal(err)
@@ -215,7 +217,7 @@ args = ["serve"]
 // in place while leaving surrounding tables and comments byte-identical.
 func TestRunCodex_TOMLDriftRepairPreservesNeighbors(t *testing.T) {
 	home, _ := setupCodexTestEnv(t)
-	ghostBin := filepath.Join(home, "bin", "ghost")
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
 
 	if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
 		t.Fatal(err)
@@ -397,7 +399,7 @@ func TestRunCodex_CODEXHomeRelocatesArtifacts(t *testing.T) {
 
 func TestStatusCodex_HealthyAfterInstall(t *testing.T) {
 	home, _ := setupCodexTestEnv(t)
-	ghostBin := filepath.Join(home, "bin", "ghost")
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
 
 	var install bytes.Buffer
 	if err := RunCodex(&install, false); err != nil {

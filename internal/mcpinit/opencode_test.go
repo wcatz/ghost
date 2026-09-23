@@ -5,6 +5,7 @@ import (
 
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -15,7 +16,7 @@ import (
 func setupOpencodeTestEnv(t *testing.T) (home, xdg string) {
 	t.Helper()
 	home = t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	xdg = t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
@@ -29,11 +30,35 @@ func setupOpencodeTestEnv(t *testing.T) (home, xdg string) {
 	return home, xdg
 }
 
-// writeStub creates an executable stub script at binDir/name.
+// stubFileName is the file name a stub of `name` must have for
+// exec.LookPath to resolve it: Windows only matches names against PATHEXT, so
+// an extensionless file can never be found there; POSIX keeps the bare name.
+func stubFileName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".bat"
+	}
+	return name
+}
+
+// stubPath is the exact path writeStub creates in dir — the form
+// exec.LookPath resolves it to on this OS, and therefore the path production
+// embeds when the stub is on PATH.
+func stubPath(dir, name string) string {
+	return filepath.Join(dir, stubFileName(name))
+}
+
+// writeStub creates an executable stub at binDir/name. The stubs exist to be
+// found by exec.LookPath and echoed into rendered config, never run — but the
+// Windows form must still be a real batch file, since PATHEXT governs both
+// discovery and execution there.
 func writeStub(t *testing.T, binDir, name string) string {
 	t.Helper()
-	path := filepath.Join(binDir, name)
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0755); err != nil {
+	content := "#!/bin/sh\n"
+	if runtime.GOOS == "windows" {
+		content = "@echo off\r\nexit /b 0\r\n"
+	}
+	path := stubPath(binDir, name)
+	if err := os.WriteFile(path, []byte(content), 0755); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -59,7 +84,7 @@ func TestRenderOpencodeGhostPlugin_ConfigSessionListIsBounded(t *testing.T) {
 
 func TestRunOpencode_NoClaudeRequired(t *testing.T) {
 	home, xdg := setupOpencodeTestEnv(t)
-	want := renderOpencodeGhostPlugin(filepath.Join(home, "bin", "ghost"))
+	want := renderOpencodeGhostPlugin(stubPath(filepath.Join(home, "bin"), "ghost"))
 
 	var out bytes.Buffer
 	if err := RunOpencode(&out, false); err != nil {
@@ -84,7 +109,7 @@ func TestRunOpencode_NoClaudeRequired(t *testing.T) {
 	if string(data) != want {
 		t.Error("installed plugin should match the rendered embedded source (binary path baked)")
 	}
-	if !strings.Contains(string(data), `const GHOST_BIN_DEFAULT = "`+filepath.Join(home, "bin", "ghost")+`"`) {
+	if !strings.Contains(string(data), `const GHOST_BIN_DEFAULT = "`+stubPath(filepath.Join(home, "bin"), "ghost")+`"`) {
 		t.Error("plugin default must be the resolved absolute binary path")
 	}
 
@@ -173,7 +198,7 @@ func TestRunOpencode_DryRunWritesNothing(t *testing.T) {
 // reporting "already installed".
 func TestRunOpencode_InstallsLifecyclePlugin(t *testing.T) {
 	home, xdg := setupOpencodeTestEnv(t)
-	want := renderOpencodeGhostPlugin(filepath.Join(home, "bin", "ghost"))
+	want := renderOpencodeGhostPlugin(stubPath(filepath.Join(home, "bin"), "ghost"))
 	pluginPath := filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")
 
 	var out bytes.Buffer
@@ -211,7 +236,7 @@ func TestRunOpencode_InstallsLifecyclePlugin(t *testing.T) {
 // file is overwritten with the embedded source by the next init.
 func TestRunOpencode_PluginDriftRestored(t *testing.T) {
 	home, xdg := setupOpencodeTestEnv(t)
-	want := renderOpencodeGhostPlugin(filepath.Join(home, "bin", "ghost"))
+	want := renderOpencodeGhostPlugin(stubPath(filepath.Join(home, "bin"), "ghost"))
 	pluginPath := filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")
 
 	var first bytes.Buffer
@@ -240,7 +265,7 @@ func TestRunOpencode_PluginDriftRestored(t *testing.T) {
 
 func TestCheckPrereqs_ProbesCommonDirs(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	binDir := filepath.Join(home, "bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		t.Fatal(err)
@@ -270,7 +295,7 @@ func TestCheckPrereqs_ProbesCommonDirs(t *testing.T) {
 
 func TestCheckPrereqs_ClaudeMissing(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
 	orig := systemBinDirs
 	systemBinDirs = nil
@@ -302,17 +327,63 @@ func TestCheckPrereqs_ClaudeMissing(t *testing.T) {
 	}
 }
 
+// TestFindBinary_CommonDirFallback pins the PATH-less fallback itself: a
+// binary planted in a common install dir is found under its platform name —
+// the bare POSIX name with its exec bit, claude.exe (the Windows native
+// installer's name under %USERPROFILE%\.local\bin) on Windows, where mode
+// bits never mark a regular file executable.
+func TestFindBinary_CommonDirFallback(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	orig := systemBinDirs
+	systemBinDirs = nil
+	t.Cleanup(func() { systemBinDirs = orig })
+	t.Setenv("PATH", t.TempDir())
+
+	localBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	name := "claude"
+	if runtime.GOOS == "windows" {
+		name = "claude.exe"
+	}
+	stub := filepath.Join(localBin, name)
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := findBinary("claude"); got != stub {
+		t.Errorf("findBinary(claude) = %q, want %q from the common-dir fallback", got, stub)
+	}
+}
+
 // writeOpencodeStub installs a fake opencode that answers --version with
 // version and records every other invocation's argv in a marker file, so a
 // test can assert which subcommands the installer ran.
 func writeOpencodeStub(t *testing.T, binDir, version, mcpOutput string) (calls string) {
 	t.Helper()
 	calls = filepath.Join(t.TempDir(), "calls")
-	script := "#!/bin/sh\n" +
-		"if [ \"$1\" = \"--version\" ]; then echo '" + version + "'; exit 0; fi\n" +
-		"echo \"$*\" >> '" + calls + "'\n" +
-		"echo '" + mcpOutput + "'\n"
-	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte(script), 0755); err != nil {
+	var script string
+	if runtime.GOOS == "windows" {
+		// The sh form's contract as a runnable batch file: --version answers
+		// with version and exits without logging; any other argv is appended
+		// to the calls file, then mcpOutput is printed.
+		script = "@echo off\r\n" +
+			"if \"%~1\"==\"--version\" goto version\r\n" +
+			">>\"" + calls + "\" echo %*\r\n" +
+			"echo " + mcpOutput + "\r\n" +
+			"exit /b 0\r\n" +
+			":version\r\n" +
+			"echo " + version + "\r\n" +
+			"exit /b 0\r\n"
+	} else {
+		script = "#!/bin/sh\n" +
+			"if [ \"$1\" = \"--version\" ]; then echo '" + version + "'; exit 0; fi\n" +
+			"echo \"$*\" >> '" + calls + "'\n" +
+			"echo '" + mcpOutput + "'\n"
+	}
+	if err := os.WriteFile(stubPath(binDir, "opencode"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
 	return calls

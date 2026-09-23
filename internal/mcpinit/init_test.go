@@ -11,6 +11,22 @@ import (
 	"testing"
 )
 
+// absProjectPath returns an absolute project path for this OS. Claude project
+// paths are absolute, and filepath.IsAbs treats a volume-less POSIX path like
+// "/home/test/..." as relative on Windows — writeRedirects skips it there — so
+// the fixture must be rooted the way the current OS spells "absolute".
+func absProjectPath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "git", "myproject")
+}
+
+// projectSlug folds a project path to Claude's directory name the way
+// claudeimport.EncodeProjectPath does (`\`, `:`, and `/` all become `-`),
+// spelled out here so the expectation stays independent of production code.
+func projectSlug(projectPath string) string {
+	return strings.NewReplacer(`\`, "-", ":", "-", "/", "-").Replace(projectPath)
+}
+
 func TestHandleSessionStartHook(t *testing.T) {
 	var out bytes.Buffer
 	runSessionStartHook(t, `{"event":"SessionStart"}`, &out)
@@ -26,16 +42,17 @@ func TestHandleSessionStartHook(t *testing.T) {
 
 func TestWriteRedirects_CreatesFile(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
+	projectPath := absProjectPath(t)
 
 	projects := []projectInfo{
-		{ID: "abc123", Path: "/home/test/git/myproject", Name: "myproject"},
+		{ID: "abc123", Path: projectPath, Name: "myproject"},
 	}
 
 	var out bytes.Buffer
 	writeRedirects(&out, projects, false)
 
-	encoded := strings.ReplaceAll("/home/test/git/myproject", "/", "-")
+	encoded := projectSlug(projectPath)
 	target := filepath.Join(home, ".claude", "projects", encoded, "memory", "MEMORY.md")
 
 	data, err := os.ReadFile(target)
@@ -59,10 +76,11 @@ func TestWriteRedirects_CreatesFile(t *testing.T) {
 
 func TestWriteRedirects_SkipsExisting(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
+	projectPath := absProjectPath(t)
 
 	// Pre-create the redirect file.
-	encoded := strings.ReplaceAll("/home/test/git/myproject", "/", "-")
+	encoded := projectSlug(projectPath)
 	dir := filepath.Join(home, ".claude", "projects", encoded, "memory")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
@@ -72,7 +90,7 @@ func TestWriteRedirects_SkipsExisting(t *testing.T) {
 	}
 
 	projects := []projectInfo{
-		{ID: "abc123", Path: "/home/test/git/myproject", Name: "myproject"},
+		{ID: "abc123", Path: projectPath, Name: "myproject"},
 	}
 
 	var out bytes.Buffer
@@ -86,7 +104,7 @@ func TestWriteRedirects_SkipsExisting(t *testing.T) {
 
 func TestWriteRedirects_SkipsRelativePath(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	projects := []projectInfo{
 		{ID: "abc123", Path: "relative/path", Name: "rel"},
@@ -103,10 +121,11 @@ func TestWriteRedirects_SkipsRelativePath(t *testing.T) {
 
 func TestWriteRedirects_DoesNotClobber(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
+	projectPath := absProjectPath(t)
 
 	// Pre-create a file with user content (not a Ghost redirect).
-	encoded := strings.ReplaceAll("/home/test/git/myproject", "/", "-")
+	encoded := projectSlug(projectPath)
 	dir := filepath.Join(home, ".claude", "projects", encoded, "memory")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
@@ -117,7 +136,7 @@ func TestWriteRedirects_DoesNotClobber(t *testing.T) {
 	}
 
 	projects := []projectInfo{
-		{ID: "abc123", Path: "/home/test/git/myproject", Name: "myproject"},
+		{ID: "abc123", Path: projectPath, Name: "myproject"},
 	}
 
 	var out bytes.Buffer
@@ -137,10 +156,11 @@ func TestWriteRedirects_DoesNotClobber(t *testing.T) {
 
 func TestWriteRedirects_DryRun(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
+	projectPath := absProjectPath(t)
 
 	projects := []projectInfo{
-		{ID: "abc123", Path: "/home/test/git/myproject", Name: "myproject"},
+		{ID: "abc123", Path: projectPath, Name: "myproject"},
 	}
 
 	var out bytes.Buffer
@@ -152,7 +172,7 @@ func TestWriteRedirects_DryRun(t *testing.T) {
 	}
 
 	// Verify no file was created.
-	encoded := strings.ReplaceAll("/home/test/git/myproject", "/", "-")
+	encoded := projectSlug(projectPath)
 	target := filepath.Join(home, ".claude", "projects", encoded, "memory", "MEMORY.md")
 	if _, err := os.Stat(target); err == nil {
 		t.Error("dry run should not create files")
@@ -161,7 +181,7 @@ func TestWriteRedirects_DryRun(t *testing.T) {
 
 func TestEnsureAutoMemoryDisabled_SetsFlag(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	path := filepath.Join(home, ".claude", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -194,7 +214,7 @@ func TestEnsureAutoMemoryDisabled_SetsFlag(t *testing.T) {
 
 func TestEnsureAutoMemoryDisabled_Idempotent(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	path := filepath.Join(home, ".claude", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -222,7 +242,7 @@ func TestEnsureAutoMemoryDisabled_Idempotent(t *testing.T) {
 
 func TestEnsureAutoMemoryDisabled_DryRun(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	path := filepath.Join(home, ".claude", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {

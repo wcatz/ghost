@@ -40,7 +40,7 @@ func TestResolveSessionProject(t *testing.T) {
 
 	t.Run("home cwd falls back to configured default", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		setHome(t, home)
 		t.Setenv("XDG_CONFIG_HOME", home)
 		store := setup(t, "infrastructure")
 		id, name := resolveSessionProject(context.Background(), store, home)
@@ -51,7 +51,7 @@ func TestResolveSessionProject(t *testing.T) {
 
 	t.Run("filesystem root falls back to configured default", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		setHome(t, home)
 		t.Setenv("XDG_CONFIG_HOME", home)
 		store := setup(t, "infrastructure")
 		id, _ := resolveSessionProject(context.Background(), store, "/")
@@ -62,7 +62,7 @@ func TestResolveSessionProject(t *testing.T) {
 
 	t.Run("no default configured behaves as today", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		setHome(t, home)
 		t.Setenv("XDG_CONFIG_HOME", home)
 		store := setup(t, "")
 		id, name := resolveSessionProject(context.Background(), store, home)
@@ -73,7 +73,7 @@ func TestResolveSessionProject(t *testing.T) {
 
 	t.Run("non-home unmatched cwd never routes", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		setHome(t, home)
 		t.Setenv("XDG_CONFIG_HOME", home)
 		store := setup(t, "infrastructure")
 		other := filepath.Join(home, "unrelated")
@@ -88,7 +88,7 @@ func TestResolveSessionProject(t *testing.T) {
 
 	t.Run("configured but nonexistent default degrades to miss", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		setHome(t, home)
 		t.Setenv("XDG_CONFIG_HOME", home)
 		store := setup(t, "does-not-exist")
 		id, name := resolveSessionProject(context.Background(), store, home)

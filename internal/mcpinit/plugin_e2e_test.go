@@ -525,8 +525,7 @@ func TestPluginE2E(t *testing.T) {
 		for _, key := range []string{"ghost@ghost", "ghost-windows-amd64@ghost"} {
 			t.Run(key, func(t *testing.T) {
 				h := t.TempDir()
-				t.Setenv("HOME", h)
-				t.Setenv("USERPROFILE", h)
+				setHome(t, h)
 				t.Setenv(pluginRootEnv, "")
 				reg := filepath.Join(h, ".claude", "plugins")
 				if err := os.MkdirAll(reg, 0o755); err != nil {

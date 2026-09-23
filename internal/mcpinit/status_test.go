@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func TestReportStaleIntegrations(t *testing.T) {
 		statusEnv(t)
 		binDir := writeStubGhost(t)
 		t.Setenv("PATH", binDir)
-		installOpencodePluginFile(t, filepath.Join(binDir, "ghost"))
+		installOpencodePluginFile(t, stubPath(binDir, "ghost"))
 
 		var out bytes.Buffer
 		ReportStaleIntegrations(&out)
@@ -203,6 +204,9 @@ func TestStatus_HookMatchWithQuotedPath(t *testing.T) {
 // be stat'd for a reason other than absence (e.g. a permission error) is
 // surfaced as a failed check instead of being reported as a fresh install.
 func TestStatus_ReportsInaccessibleDatabase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod/geteuid semantics on Windows: Chmod(0o000) only toggles the read-only bit and cannot revoke directory access, and os.Geteuid returns -1, so the EACCES path cannot be produced there")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("permission checks cannot fail as root")
 	}
@@ -248,7 +252,7 @@ func TestStatus_ReportsInaccessibleDatabase(t *testing.T) {
 func statusEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("PATH", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
@@ -262,9 +266,7 @@ func statusEnv(t *testing.T) {
 func writeStubGhost(t *testing.T) string {
 	t.Helper()
 	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "ghost"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write stub ghost: %v", err)
-	}
+	writeStub(t, binDir, "ghost")
 	return binDir
 }
 
@@ -322,7 +324,7 @@ func TestStatusOpencode_CleanSetupHealthy(t *testing.T) {
 	statusEnv(t)
 	binDir := writeStubGhost(t)
 	t.Setenv("PATH", binDir)
-	installOpencodePluginFile(t, filepath.Join(binDir, "ghost"))
+	installOpencodePluginFile(t, stubPath(binDir, "ghost"))
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)
@@ -335,7 +337,7 @@ func TestStatusOpencode_CleanSetupHealthy(t *testing.T) {
 
 	output := out.String()
 	for _, want := range []string{
-		"✓ ghost binary: " + filepath.Join(binDir, "ghost"),
+		"✓ ghost binary: " + stubPath(binDir, "ghost"),
 		"✓ lifecycle plugin installed: ",
 		"- no Ghost database (run ghost first)",
 		"All checks passed.",
@@ -419,7 +421,7 @@ func TestStatusOpencode_EmptyStoreHealthy(t *testing.T) {
 		t.Fatalf("close fresh db: %v", err)
 	}
 
-	installOpencodePluginFile(t, filepath.Join(binDir, "ghost"))
+	installOpencodePluginFile(t, stubPath(binDir, "ghost"))
 
 	var out bytes.Buffer
 	healthy, err := StatusOpencode(&out)
