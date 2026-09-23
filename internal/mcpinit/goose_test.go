@@ -16,7 +16,7 @@ import (
 func setupGooseTestEnv(t *testing.T) (home, xdg string) {
 	t.Helper()
 	home = t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	xdg = t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("XDG_DATA_HOME", t.TempDir())

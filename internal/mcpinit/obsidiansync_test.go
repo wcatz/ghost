@@ -11,7 +11,7 @@ func TestEnsureObsidianSyncRunning_DisabledByDefault(t *testing.T) {
 	// Isolate from the host: obsidian.auto_sync defaults to false, and this
 	// must not touch a real home/config/data dir either way.
 	tmpDir := t.TempDir()
-	t.Setenv("HOME", tmpDir)
+	setHome(t, tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
 	dataDir := filepath.Join(tmpDir, "data")
 	t.Setenv("XDG_DATA_HOME", dataDir)

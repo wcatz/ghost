@@ -340,7 +340,7 @@ func isolatedHome(t *testing.T) string {
 		}
 	}
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setHome(t, dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
 	dataHome := filepath.Join(dir, "data")
 	t.Setenv("XDG_DATA_HOME", dataHome)

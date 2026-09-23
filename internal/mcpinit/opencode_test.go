@@ -15,7 +15,7 @@ import (
 func setupOpencodeTestEnv(t *testing.T) (home, xdg string) {
 	t.Helper()
 	home = t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	xdg = t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
@@ -240,7 +240,7 @@ func TestRunOpencode_PluginDriftRestored(t *testing.T) {
 
 func TestCheckPrereqs_ProbesCommonDirs(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	binDir := filepath.Join(home, "bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		t.Fatal(err)
@@ -270,7 +270,7 @@ func TestCheckPrereqs_ProbesCommonDirs(t *testing.T) {
 
 func TestCheckPrereqs_ClaudeMissing(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
 	orig := systemBinDirs
 	systemBinDirs = nil

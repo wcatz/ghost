@@ -26,7 +26,7 @@ func TestHandleSessionStartHook(t *testing.T) {
 
 func TestWriteRedirects_CreatesFile(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	projects := []projectInfo{
 		{ID: "abc123", Path: "/home/test/git/myproject", Name: "myproject"},
@@ -59,7 +59,7 @@ func TestWriteRedirects_CreatesFile(t *testing.T) {
 
 func TestWriteRedirects_SkipsExisting(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	// Pre-create the redirect file.
 	encoded := strings.ReplaceAll("/home/test/git/myproject", "/", "-")
@@ -86,7 +86,7 @@ func TestWriteRedirects_SkipsExisting(t *testing.T) {
 
 func TestWriteRedirects_SkipsRelativePath(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	projects := []projectInfo{
 		{ID: "abc123", Path: "relative/path", Name: "rel"},
@@ -103,7 +103,7 @@ func TestWriteRedirects_SkipsRelativePath(t *testing.T) {
 
 func TestWriteRedirects_DoesNotClobber(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	// Pre-create a file with user content (not a Ghost redirect).
 	encoded := strings.ReplaceAll("/home/test/git/myproject", "/", "-")
@@ -137,7 +137,7 @@ func TestWriteRedirects_DoesNotClobber(t *testing.T) {
 
 func TestWriteRedirects_DryRun(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	projects := []projectInfo{
 		{ID: "abc123", Path: "/home/test/git/myproject", Name: "myproject"},
@@ -161,7 +161,7 @@ func TestWriteRedirects_DryRun(t *testing.T) {
 
 func TestEnsureAutoMemoryDisabled_SetsFlag(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	path := filepath.Join(home, ".claude", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -194,7 +194,7 @@ func TestEnsureAutoMemoryDisabled_SetsFlag(t *testing.T) {
 
 func TestEnsureAutoMemoryDisabled_Idempotent(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	path := filepath.Join(home, ".claude", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -222,7 +222,7 @@ func TestEnsureAutoMemoryDisabled_Idempotent(t *testing.T) {
 
 func TestEnsureAutoMemoryDisabled_DryRun(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 
 	path := filepath.Join(home, ".claude", "settings.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {

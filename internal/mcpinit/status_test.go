@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -203,6 +204,9 @@ func TestStatus_HookMatchWithQuotedPath(t *testing.T) {
 // be stat'd for a reason other than absence (e.g. a permission error) is
 // surfaced as a failed check instead of being reported as a fresh install.
 func TestStatus_ReportsInaccessibleDatabase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod/geteuid semantics on Windows: Chmod(0o000) only toggles the read-only bit and cannot revoke directory access, and os.Geteuid returns -1, so the EACCES path cannot be produced there")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("permission checks cannot fail as root")
 	}
@@ -248,7 +252,7 @@ func TestStatus_ReportsInaccessibleDatabase(t *testing.T) {
 func statusEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("PATH", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")

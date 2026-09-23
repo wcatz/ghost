@@ -43,11 +43,12 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	for _, kv := range [][2]string{
-		{"HOME", dir},
-		{"XDG_CONFIG_HOME", dir},
-		{"XDG_DATA_HOME", dir},
-	} {
+	kvs := homeVars(dir)
+	kvs = append(kvs,
+		[2]string{"XDG_CONFIG_HOME", dir},
+		[2]string{"XDG_DATA_HOME", dir},
+	)
+	for _, kv := range kvs {
 		if err := os.Setenv(kv[0], kv[1]); err != nil {
 			panic(err)
 		}
