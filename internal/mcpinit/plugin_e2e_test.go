@@ -298,13 +298,14 @@ func TestPluginE2E(t *testing.T) {
 		// failure distinguishes a path-form divergence (seeded path vs the
 		// hook's re-eval of payload cwd) from a read-only DB open failure
 		// inside the hook — neither is visible in the stdout string alone.
-		// Invoked only from the run-1 marker failure below; green runs stay
-		// silent.
+		// family (A) = path-form divergence between seed and hook; (B) =
+		// read-only open/query failure. Invoked only from the marker failure
+		// branches below; green runs stay silent.
 		diag := func(reason string) {
 			t.Helper()
 			t.Logf("diag: %s", reason)
 			evalCwd, evalErr := filepath.EvalSymlinks(cwd)
-			t.Logf("diag: raw cwd=%q eval(cwd)=%q err=%v", cwd, evalCwd, evalErr)
+			t.Logf("diag: rawCwd=%q cwd=%q eval(cwd)=%q err=%v", rawCwd, cwd, evalCwd, evalErr)
 			t.Logf("diag: XDG_DATA_HOME=%q HOME=%q", os.Getenv("XDG_DATA_HOME"), os.Getenv("HOME"))
 			dbPath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost", "ghost.db")
 			_, statErr := os.Stat(dbPath)
@@ -363,6 +364,7 @@ func TestPluginE2E(t *testing.T) {
 		}
 		if !strings.Contains(out2, "E2E_SEED_MARKER") {
 			t.Errorf("second run should still inject context, got %q; hook stderr=%q", out2, err2)
+			diag("run 2 stdout lacks E2E_SEED_MARKER")
 		}
 	})
 
