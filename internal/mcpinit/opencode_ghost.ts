@@ -3,10 +3,11 @@
 // `ghost mcp init --client opencode`; local edits are overwritten by the next
 // init run.
 //
-// One file serves both opencode generations from its default export: V1
-// (1.18.29+) calls server(), V2 calls setup(). The two implementations share
-// helpers but not hooks — the V2 plugin API is a different surface (see
-// setupV2 below).
+// One file serves both opencode generations. V1 loads the GhostPlugin
+// function (as a named export on older releases, or as the default export's
+// server() on 1.18.29+ — the same reference, so it runs once); V2 calls the
+// default export's setup(). The two implementations share helpers but not
+// hooks — the V2 plugin API is a different surface (see setupV2 below).
 //
 // Bridges opencode's idle transition to the ghost host-event contract:
 //
@@ -98,7 +99,7 @@ const withTimeout = <T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 		})
 	})
 
-const GhostPlugin: Plugin = async ({ client, directory }) => {
+export const GhostPlugin: Plugin = async ({ client, directory }) => {
 	const log = async (level: "info" | "warn" | "error", message: string) => {
 		try {
 			await client.app.log({ body: { service: "ghost-opencode", level, message } })
@@ -336,6 +337,12 @@ const V2_STOP_EVENTS = new Set([
 const startContextV2 = new Map<string, Promise<string>>()
 
 const setupV2 = async (ctx: ContextV2) => {
+	// opencode V1 (seen on 1.18.32 `run`) also calls setup() — alongside
+	// server() — with a partial context that has no mcp/session/event/location
+	// domains. server() already covers V1 there, so bail out rather than
+	// half-run (and let the event loop spin on a missing domain).
+	const partial = ctx as Partial<ContextV2> | undefined
+	if (!partial?.mcp || !partial.session || !partial.event || !partial.location) return
 	const ghostBin = process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT
 	const log = async (message: string) => {
 		try {
@@ -472,21 +479,38 @@ const setupV2 = async (ctx: ContextV2) => {
 		}
 	}
 
+	// The event stream is resubscribed whenever it ends or fails without an
+	// abort (e.g. a server-side reconnect), so the stop hook never silently
+	// goes dark for the rest of a long-lived server's life.
 	const abort = new AbortController()
-	void (async () => {
-		try {
-			for await (const event of ctx.event.subscribe({ signal: abort.signal })) {
-				try {
-					const isIdleStatus = event.type === "session.status" && event.data.status.type === "idle"
-					if (!isIdleStatus && !V2_STOP_EVENTS.has(event.type)) continue
-					const data = event.data as { sessionID?: string }
-					await fireStopHook(data.sessionID ?? "")
-				} catch (e) {
-					await log(`ghost: fail-open (${e})`)
-				}
+	const consume = async () => {
+		for await (const event of ctx.event.subscribe({ signal: abort.signal })) {
+			try {
+				const isIdleStatus = event.type === "session.status" && event.data.status.type === "idle"
+				if (!isIdleStatus && !V2_STOP_EVENTS.has(event.type)) continue
+				const sessionID = (event.data as { sessionID?: string }).sessionID ?? ""
+				if (!sessionID) continue
+				// A long-lived V2 server runs one plugin instance per
+				// location, and every instance receives every session's
+				// events; module state is not shared between them. Only the
+				// instance owning the session's location may fire, or each
+				// open project would spawn its own stop hook and nudge.
+				const where = event.location?.directory ?? await sessionDirectory(sessionID)
+				if (where !== ctx.location.directory) continue
+				await fireStopHook(sessionID)
+			} catch (e) {
+				await log(`ghost: fail-open (${e})`)
 			}
-		} catch (e) {
-			if (!abort.signal.aborted) await log(`ghost: fail-open (event stream: ${e})`)
+		}
+	}
+	void (async () => {
+		while (!abort.signal.aborted) {
+			try {
+				await consume()
+			} catch (e) {
+				if (!abort.signal.aborted) await log(`ghost: fail-open (event stream: ${e})`)
+			}
+			if (!abort.signal.aborted) await new Promise((r) => setTimeout(r, 1000))
 		}
 	})()
 	return () => abort.abort()
