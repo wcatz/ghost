@@ -327,6 +327,37 @@ func TestCheckPrereqs_ClaudeMissing(t *testing.T) {
 	}
 }
 
+// TestFindBinary_CommonDirFallback pins the PATH-less fallback itself: a
+// binary planted in a common install dir is found under its platform name —
+// the bare POSIX name with its exec bit, claude.exe (the Windows native
+// installer's name under %USERPROFILE%\.local\bin) on Windows, where mode
+// bits never mark a regular file executable.
+func TestFindBinary_CommonDirFallback(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	orig := systemBinDirs
+	systemBinDirs = nil
+	t.Cleanup(func() { systemBinDirs = orig })
+	t.Setenv("PATH", t.TempDir())
+
+	localBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	name := "claude"
+	if runtime.GOOS == "windows" {
+		name = "claude.exe"
+	}
+	stub := filepath.Join(localBin, name)
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := findBinary("claude"); got != stub {
+		t.Errorf("findBinary(claude) = %q, want %q from the common-dir fallback", got, stub)
+	}
+}
+
 // writeOpencodeStub installs a fake opencode that answers --version with
 // version and records every other invocation's argv in a marker file, so a
 // test can assert which subcommands the installer ran.
