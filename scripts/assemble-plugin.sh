@@ -19,6 +19,12 @@
 #
 # PLATFORMS may be overridden for a fast local check, e.g.
 #   PLATFORMS="linux-amd64" scripts/assemble-plugin.sh 0.0.0 /tmp/ghost-plugin
+#
+# The checked-in plugin manifests carry version 0.0.0 so a source-checkout
+# install (`claude --plugin-dir plugin`) is honest about having no release
+# version; this script stamps the real release version into the assembled
+# copy (assemble-plugin-windows.sh stamps the version and the arch-qualified
+# name into its manifest).
 
 set -euo pipefail
 
@@ -64,8 +70,11 @@ for p in "${PLATFORMS[@]}"; do
     go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$bin" ./cmd/ghost
 done
 
-# The stamped manifest must still be valid JSON.
-python3 -c "import json,sys; json.load(open('$MANIFEST'))" \
+# The stamped manifest must still be valid JSON. Resolve python3 or python:
+# Windows runners (Git Bash) expose only `python`.
+PY="$(command -v python3 || command -v python || true)"
+[ -n "$PY" ] || { echo "error: python3 or python is required to validate the manifest" >&2; exit 1; }
+"$PY" -c 'import json,sys; json.load(open(sys.argv[1]))' "$MANIFEST" \
   || { echo "error: assembled plugin.json is not valid JSON" >&2; exit 1; }
 
 echo "assembled ghost plugin $VERSION at $OUT"

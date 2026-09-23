@@ -1644,6 +1644,51 @@ func TestStoreResolveProject_NoMatch(t *testing.T) {
 	}
 }
 
+// TestStoreResolveProject_WindowsBackslashPath pins the native-Windows
+// resolution path: a stored and input path that use backslashes must resolve
+// (exact path, prefix, and an unmatched path must fall through to ("", "", nil),
+// not an error), because the old branch gate checked only for '/' and silently
+// skipped every backslash path — the bug PR #510's Windows CI legs caught.
+func TestStoreResolveProject_WindowsBackslashPath(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Exact path: stored and input both use backslashes.
+	// `C:\work\exact` is 13 bytes — clears the LENGTH(path) > 10 guard.
+	if err := s.EnsureProject(ctx, "win1", `C:\work\exact`, "win-exact"); err != nil {
+		t.Fatalf("EnsureProject win1: %v", err)
+	}
+	id, name, err := s.ResolveProject(ctx, `C:\work\exact`)
+	if err != nil {
+		t.Fatalf("ResolveProject exact: %v", err)
+	}
+	if id != "win1" || name != "win-exact" {
+		t.Errorf("exact backslash path: got id=%q name=%q, want id=%q name=%q", id, name, "win1", "win-exact")
+	}
+
+	// Prefix: parent stored with backslashes, input descends below it.
+	// `C:\work\repo` is 12 bytes — clears the LENGTH(path) > 10 guard.
+	if err := s.EnsureProject(ctx, "win2", `C:\work\repo`, "win-prefix"); err != nil {
+		t.Fatalf("EnsureProject win2: %v", err)
+	}
+	id, name, err = s.ResolveProject(ctx, `C:\work\repo\sub\deeper`)
+	if err != nil {
+		t.Fatalf("ResolveProject prefix: %v", err)
+	}
+	if id != "win2" || name != "win-prefix" {
+		t.Errorf("backslash prefix: got id=%q name=%q, want id=%q name=%q", id, name, "win2", "win-prefix")
+	}
+
+	// No match: an unmatched backslash path resolves to empty, not an error.
+	id, name, err = s.ResolveProject(ctx, `C:\nowhere\else`)
+	if err != nil {
+		t.Fatalf("ResolveProject no match: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("unmatched backslash path: got id=%q name=%q, want empty", id, name)
+	}
+}
+
 func TestStoreResolveProject_ClosedDB(t *testing.T) {
 	s := testStore(t)
 	s.Close() //nolint:errcheck

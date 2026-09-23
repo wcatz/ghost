@@ -1,0 +1,5 @@
+# Shell scripts must check out with LF: a CRLF checkout makes Git Bash on
+# Windows fail with "`\r': command not found" the first time an assemble or
+# launcher script runs there.
+*.sh text eol=lf
+plugin/bin/ghost-launcher text eol=lf

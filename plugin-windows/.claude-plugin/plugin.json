@@ -2,7 +2,7 @@
   "name": "ghost-windows",
   "displayName": "Ghost Memory (Windows)",
   "version": "0.0.0",
-  "description": "Local-first MCP memory server for Claude Code on native Windows: one SQLite file, hybrid search, automatic consolidation. Each archive bundles one native ghost.exe; install the marketplace entry for this PC's architecture (ghost-windows-amd64 for most PCs, ghost-windows-arm64 for Windows on ARM). Without the plugin, install the standalone binary from install.ps1 and run `ghost mcp init`.",
+  "description": "Local-first MCP memory server for Claude Code on native Windows: one SQLite file, hybrid search, on-demand consolidation. Each archive bundles one native ghost.exe; install the marketplace entry for this PC's architecture (ghost-windows-amd64 for most PCs, ghost-windows-arm64 for Windows on ARM). Without the plugin, install the standalone binary from install.ps1 and run `ghost mcp init`. First-run setup is automatic and persistent: it disables Claude Code's built-in file memory, imports memories from projects Ghost already knows (others import on first use), and writes MEMORY.md redirects in known projects — these changes remain if you uninstall the plugin. The stop-hook save reminder is on by default; the LLM consolidation passes (`reflect`/`resolve`/`supersede`) are opt-in and off by default.",
   "author": {
     "name": "Wayne Cataldo",
     "email": "waynecataldo@gmail.com"

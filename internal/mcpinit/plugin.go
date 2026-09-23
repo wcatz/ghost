@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -48,13 +49,63 @@ func RunningAsPlugin() bool {
 	return isUnderPluginCache(exe)
 }
 
-// isUnderPluginCache reports whether p lies inside Claude Code's plugin cache.
-// Both path separators are normalized to forward slashes so the check is
-// testable cross-platform and holds on Windows, whose paths use backslashes.
+// isUnderPluginCache reports whether p lies inside the current user's Claude
+// Code plugin cache. Path separators are normalized to forward slashes so the
+// check is testable cross-platform and holds on Windows, whose paths use
+// backslashes. The prefix is anchored to the home directory so an unrelated
+// path that merely contains /.claude/plugins/ never matches; when the home
+// directory cannot be resolved, the historical substring match stands so the
+// plugin gate never silently weakens.
+//
+// The anchor is compared in two spellings — the lexical $HOME and its
+// symlink-resolved form — because os.Executable() is symlink-resolved on
+// Linux (and Claude Code may hand either form): a $HOME containing a symlink
+// component must still recognize the cache under either spelling, or a genuine
+// plugin binary would stop being recognized and `ghost upgrade` would overwrite
+// it. Both roots stay anchored to this user's home, so a foreign
+// /.claude/plugins/ root never matches. The gate is deliberately
+// per-current-user: under sudo an exe in another user's cache is not this
+// user's plugin cache, so that cross-user true→false is intended.
 func isUnderPluginCache(p string) bool {
 	s := strings.ReplaceAll(filepath.ToSlash(p), `\`, "/")
-	return strings.Contains(s, pluginCacheDir)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Home cannot be resolved — historical substring match, unchanged.
+		return strings.Contains(s, pluginCacheDir)
+	}
+	roots := []string{slashJoin(home)}
+	if resolved, rerr := filepath.EvalSymlinks(home); rerr == nil && resolved != home {
+		roots = append(roots, slashJoin(resolved))
+	}
+	for _, root := range roots {
+		if runtime.GOOS == "windows" {
+			// The executable path's casing can differ from %USERPROFILE%.
+			if strings.HasPrefix(strings.ToLower(s), strings.ToLower(root)) {
+				return true
+			}
+			continue
+		}
+		if strings.HasPrefix(s, root) {
+			return true
+		}
+	}
+	return false
 }
+
+// slashJoin returns "<base>/.claude/plugins/" with forward slashes, the
+// trailing separator included so the prefix match cannot straddle a
+// directory boundary.
+func slashJoin(base string) string {
+	return strings.ReplaceAll(filepath.ToSlash(filepath.Join(base, ".claude", "plugins")), `\`, "/") + "/"
+}
+
+// managedPluginNames is the exact set of Ghost-managed plugin names that
+// PluginInstalled defers to: the POSIX plugin "ghost" plus the per-arch
+// native-Windows entries "ghost-windows-amd64" and "ghost-windows-arm64",
+// each of which bundles one .exe. The set must agree with
+// .claude-plugin/marketplace.json and with the manifests the assemble
+// scripts emit — TestPluginNameCoupling enforces that equality.
+var managedPluginNames = []string{"ghost", "ghost-windows-amd64", "ghost-windows-arm64"}
 
 // PluginInstalled reports whether a Ghost plugin is installed for Claude Code
 // at all — detected by running-as-plugin OR by an entry in Claude Code's
@@ -80,16 +131,14 @@ func PluginInstalled() bool {
 		return false
 	}
 	for key := range doc.Plugins {
-		// Keys are "<plugin>@<marketplace>". The POSIX plugin is "ghost";
-		// native Windows is served by the per-arch entries
-		// "ghost-windows-amd64" and "ghost-windows-arm64", each bundling one
-		// .exe. Match that exact set (case-insensitively) so a standalone
-		// `ghost mcp init` defers to any Ghost-managed install without
-		// claiming unrelated plugins whose names merely start with "ghost-".
+		// Keys are "<plugin>@<marketplace>". Match the exact Ghost-managed
+		// set case-insensitively without claiming unrelated plugins whose
+		// names merely start with "ghost-".
 		name, _, _ := strings.Cut(key, "@")
-		switch strings.ToLower(name) {
-		case "ghost", "ghost-windows-amd64", "ghost-windows-arm64":
-			return true
+		for _, n := range managedPluginNames {
+			if strings.EqualFold(name, n) {
+				return true
+			}
 		}
 	}
 	return false

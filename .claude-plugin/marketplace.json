@@ -10,7 +10,7 @@
     {
       "name": "ghost",
       "displayName": "Ghost Memory (macOS & Linux)",
-      "description": "MCP memory server for Claude Code on macOS and Linux (including WSL): project context injection, memory save/search, and automatic consolidation. Bundles every macOS and Linux binary behind one zero-config launcher. On native Windows install ghost-windows-amd64 or ghost-windows-arm64 instead.",
+      "description": "MCP memory server for Claude Code on macOS and Linux (including WSL): project context injection, memory save/search, and on-demand consolidation. Bundles every macOS and Linux binary behind one zero-config launcher. On native Windows install ghost-windows-amd64 or ghost-windows-arm64 instead. First-run setup is automatic and persistent: it disables Claude Code's built-in file memory, imports memories from projects Ghost already knows (others import on first use), and writes MEMORY.md redirects in known projects — these changes remain if you uninstall the plugin. The stop-hook save reminder is on by default; the LLM consolidation passes (`reflect`/`resolve`/`supersede`) are opt-in and off by default.",
       "author": {
         "name": "Wayne Cataldo",
         "email": "waynecataldo@gmail.com"
@@ -24,7 +24,7 @@
     {
       "name": "ghost-windows-amd64",
       "displayName": "Ghost Memory (Windows x64)",
-      "description": "MCP memory server for Claude Code on 64-bit native Windows (x64/amd64) — the architecture of most Windows PCs. Bundles a native ghost.exe for the MCP server and both lifecycle hooks; zero configuration.",
+      "description": "MCP memory server for Claude Code on 64-bit native Windows (x64/amd64) — the architecture of most Windows PCs. Bundles a native ghost.exe for the MCP server and both lifecycle hooks; zero configuration. First-run setup is automatic and persistent: it disables Claude Code's built-in file memory, imports memories from projects Ghost already knows (others import on first use), and writes MEMORY.md redirects in known projects — these changes remain if you uninstall the plugin. The stop-hook save reminder is on by default; the LLM consolidation passes (`reflect`/`resolve`/`supersede`) are opt-in and off by default.",
       "author": {
         "name": "Wayne Cataldo",
         "email": "waynecataldo@gmail.com"
@@ -38,7 +38,7 @@
     {
       "name": "ghost-windows-arm64",
       "displayName": "Ghost Memory (Windows ARM64)",
-      "description": "MCP memory server for Claude Code on Windows on ARM (ARM64) — Snapdragon X / Surface-class PCs. Bundles a native ghost.exe for the MCP server and both lifecycle hooks; zero configuration.",
+      "description": "MCP memory server for Claude Code on Windows on ARM (ARM64) — Snapdragon X / Surface-class PCs. Bundles a native ghost.exe for the MCP server and both lifecycle hooks; zero configuration. First-run setup is automatic and persistent: it disables Claude Code's built-in file memory, imports memories from projects Ghost already knows (others import on first use), and writes MEMORY.md redirects in known projects — these changes remain if you uninstall the plugin. The stop-hook save reminder is on by default; the LLM consolidation passes (`reflect`/`resolve`/`supersede`) are opt-in and off by default.",
       "author": {
         "name": "Wayne Cataldo",
         "email": "waynecataldo@gmail.com"
