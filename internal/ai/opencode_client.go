@@ -25,9 +25,17 @@ type OpenCodeClient struct {
 	// model pins the model via -m. Constructor-set, it wins over the
 	// GHOST_OPENCODE_MODEL env var: a long-lived MCP server must apply its
 	// configured pin per-tool without mutating the process environment (which
-	// would leak across tools and concurrent calls). Empty falls back to env.
+	// would leak across tools and concurrent calls). Empty falls back to env,
+	// then to Ghost's explicit default below.
 	model string
 }
+
+// DefaultOpenCodeModel is used when neither a constructor pin nor
+// GHOST_OPENCODE_MODEL is set. The child runs with a scrubbed config directory,
+// so relying on the user's OpenCode default would make behavior depend on a
+// config Ghost intentionally does not load. Big Pickle is the validated
+// low-cost classifier model and keeps unpinned calls reproducible.
+const DefaultOpenCodeModel = "opencode/big-pickle"
 
 // NewOpenCodeClient creates an OpenCodeClient that invokes `opencode` on PATH.
 func NewOpenCodeClient() *OpenCodeClient {
@@ -69,16 +77,15 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 		defer cancel()
 	}
 	// --format json emits a JSON-lines stream; --pure skips plugins. The prompt
-	// is the last argument. GHOST_OPENCODE_MODEL, when set, pins the model via
-	// `-m` — the child's config dir is scrubbed below, so without it opencode
-	// would always run its built-in default model. subprocessEnv (below)
-	// confines the child to a Ghost-owned scratch dir, which doubles as the
-	// neutral working directory (so the subprocess does not load the repo's
-	// CLAUDE.md/AGENTS.md, project opencode.json, or git context — the reflect
-	// prompt is self-contained) and as a fresh empty XDG_CONFIG_HOME (so the
-	// child does not load the user's global opencode config, which would start
-	// Ghost's own MCP server against this process's SQLite DB), and strips
-	// ANTHROPIC_API_KEY.
+	// is the last argument. A configured model is passed with `-m`; when none is
+	// configured, Ghost passes its explicit Big Pickle default because the
+	// child's config dir is scrubbed below. subprocessEnv (below) confines the
+	// child to a Ghost-owned scratch dir, which doubles as the neutral working
+	// directory (so the subprocess does not load the repo's CLAUDE.md/AGENTS.md,
+	// project opencode.json, or git context — the reflect prompt is
+	// self-contained) and as a fresh empty XDG_CONFIG_HOME (so the child does not
+	// load the user's global opencode config, which would start Ghost's own MCP
+	// server against this process's SQLite DB), and strips ANTHROPIC_API_KEY.
 	//
 	// opencode V2 dropped --pure (it rejects the flag outright) and, without
 	// --standalone, attaches `run` to the user's shared background service —
@@ -93,9 +100,10 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	if model == "" {
 		model = os.Getenv("GHOST_OPENCODE_MODEL")
 	}
-	if model != "" {
-		args = append(args, "-m", model)
+	if model == "" {
+		model = DefaultOpenCodeModel
 	}
+	args = append(args, "-m", model)
 	args = append(args, prompt)
 	cmd, cleanup, err := c.subprocessEnv(ctx, args)
 	if err != nil {
@@ -176,9 +184,9 @@ func OpencodeMajorVersion(out string) int {
 // then scrubs config state: XDG_CONFIG_HOME is pointed at that same fresh
 // empty dir so the child loads no global opencode config — no Ghost MCP
 // server, no user plugins — and stripLLMKeys removes ANTHROPIC_API_KEY,
-// mirroring CLIClient's stripAPIKey. The child consequently runs on opencode's
-// built-in default model rather than the user's configured `model` key, which
-// is an acceptable, documented trade for not re-opening this process's DB.
+// mirroring CLIClient's stripAPIKey. The child therefore does not inherit the
+// user's configured model; OpenCodeClient supplies its explicit default (or a
+// constructor/environment override) before the scrubbed child starts.
 //
 // Pinning the temp-dir variables matters beyond tidiness: opencode writes a
 // hidden JIT-cache shared object (~4.7 MiB) into its temp dir on every

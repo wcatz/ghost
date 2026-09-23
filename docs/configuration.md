@@ -167,7 +167,7 @@ cli:
   opencode_binary: "/home/you/.opencode/bin/opencode"
 ```
 
-The three `model_*` settings apply only to the opencode backend. Other harnesses do not receive a model flag. An empty value uses the harness default or an inherited `GHOST_OPENCODE_MODEL` value; a configured phase pin overrides the inherited value for that phase.
+The three `model_*` settings apply only to the opencode backend. Other harnesses do not receive a model flag. An empty value uses an inherited `GHOST_OPENCODE_MODEL` value, or Ghost's explicit `opencode/big-pickle` default when no environment pin is set. A configured phase pin overrides the inherited value for that phase.
 
 Ghost does not contain a direct Anthropic HTTP client. The selected CLI handles its own authentication and subscription billing.
 
@@ -224,7 +224,7 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 
 Other useful variables:
 
-- `GHOST_OPENCODE_MODEL` — inherited model pin for opencode-backed operations.
+- `GHOST_OPENCODE_MODEL` — inherited model pin for opencode-backed operations. If unset, Ghost passes `opencode/big-pickle` explicitly because the isolated child does not load the user's global OpenCode config.
 - `GHOST_DEBUG` — enable debug logging.
 - `GHOST_LOG_FILE` — redirect MCP logs to a file; useful when a client surfaces stderr as protocol noise.
 

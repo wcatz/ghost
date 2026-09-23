@@ -360,13 +360,13 @@ func TestLoad_CLIPhaseModelsEmptyByDefault(t *testing.T) {
 	}
 
 	if cfg.CLI.ModelReflect != "" {
-		t.Errorf("cli.model_reflect default = %q, want empty (harness default)", cfg.CLI.ModelReflect)
+		t.Errorf("cli.model_reflect default = %q, want empty (client default)", cfg.CLI.ModelReflect)
 	}
 	if cfg.CLI.ModelResolve != "" {
-		t.Errorf("cli.model_resolve default = %q, want empty (harness default)", cfg.CLI.ModelResolve)
+		t.Errorf("cli.model_resolve default = %q, want empty (client default)", cfg.CLI.ModelResolve)
 	}
 	if cfg.CLI.ModelSupersede != "" {
-		t.Errorf("cli.model_supersede default = %q, want empty (harness default)", cfg.CLI.ModelSupersede)
+		t.Errorf("cli.model_supersede default = %q, want empty (client default)", cfg.CLI.ModelSupersede)
 	}
 }
 

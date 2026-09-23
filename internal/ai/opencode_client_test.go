@@ -155,9 +155,9 @@ func TestOpenCodeClient_ModelFlagFromEnv(t *testing.T) {
 	}
 }
 
-// TestOpenCodeClient_NoEnvNoModelFlag: with GHOST_OPENCODE_MODEL unset or
-// empty, no -m flag may appear (opencode keeps its default model selection).
-func TestOpenCodeClient_NoEnvNoModelFlag(t *testing.T) {
+// TestOpenCodeClient_DefaultModelFlag: with GHOST_OPENCODE_MODEL unset or
+// empty, the scrubbed child still receives Ghost's explicit Big Pickle default.
+func TestOpenCodeClient_DefaultModelFlag(t *testing.T) {
 	bin := fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`)
 	t.Setenv("GHOST_OPENCODE_MODEL", "")
 	c := &OpenCodeClient{binary: bin}
@@ -165,8 +165,8 @@ func TestOpenCodeClient_NoEnvNoModelFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reflect: %v", err)
 	}
-	if strings.Contains(text, " -m ") || strings.HasSuffix(strings.TrimSpace(text), "-m") {
-		t.Fatalf("unexpected -m flag: %q", text)
+	if !strings.Contains(text, "-m opencode/big-pickle") {
+		t.Fatalf("default model flag missing: %q", text)
 	}
 }
 
