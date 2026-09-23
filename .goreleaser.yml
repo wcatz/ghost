@@ -30,6 +30,9 @@ checksum:
 
 release:
   draft: true
+  # A workflow re-run must adopt the existing draft, not create a second
+  # (goreleaser v2 defaults this to false → duplicate-draft chaos).
+  use_existing_draft: true
   extra_files:
     - glob: install.ps1
 

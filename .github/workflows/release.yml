@@ -221,7 +221,13 @@ jobs:
         run: |
           PATH_IN_REPO=".claude-plugin/marketplace.json"
           gh api "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}?ref=main" > /tmp/main-contents.json
-          jq -r '.content' /tmp/main-contents.json | base64 -d > /tmp/main-marketplace.json
+          # Split into two simple commands, not a pipe (and not `&&`): under
+          # Actions' default `bash -e {0}` (no pipefail) a jq failure piped
+          # into base64 is masked by base64's success, and a failing left
+          # side of `&&` does not trigger errexit either. As separate lines
+          # each command is errexit-visible; -e makes jq fail on null/empty.
+          jq -er '.content' /tmp/main-contents.json > /tmp/main-marketplace.b64
+          base64 -d /tmp/main-marketplace.b64 > /tmp/main-marketplace.json
           if cmp -s /tmp/main-marketplace.json "$PATH_IN_REPO"; then
             echo "main already pins ${GITHUB_REF_NAME}; skipping catalog commit"
             exit 0
@@ -270,7 +276,11 @@ jobs:
           attempt=1
           while [ "$attempt" -le 3 ]; do
             if gh api "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}?ref=main" > /tmp/verify-contents.json; then
-              jq -r '.content' /tmp/verify-contents.json | base64 -d > /tmp/verify-marketplace.json
+              # Two simple commands, not a pipe (nor `&&`): `bash -e {0}` has
+              # no pipefail, so a jq failure piped into base64 would be
+              # masked — and `&&` doesn't trip errexit on its left side.
+              jq -er '.content' /tmp/verify-contents.json > /tmp/verify-marketplace.b64
+              base64 -d /tmp/verify-marketplace.b64 > /tmp/verify-marketplace.json
               if cmp -s /tmp/verify-marketplace.json .claude-plugin/marketplace.json; then
                 echo "main catalog verified against the pinned copy"
                 exit 0
