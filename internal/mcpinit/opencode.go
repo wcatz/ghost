@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -142,6 +143,14 @@ func verifyOpencodeRegistration(w io.Writer) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// opencode V2 has no `mcp ls`; its `mcp list` shows only config-file
+	// servers (never the plugin's mcp.transform registration) and, without
+	// --standalone, starts the background service as a side effect. Nothing
+	// V2 offers can verify the plugin registration, so skip it there.
+	if ver, err := exec.CommandContext(ctx, ocBin, "--version").Output(); err == nil && opencodeMajorVersion(string(ver)) >= 2 {
+		_, _ = fmt.Fprintln(w, "  ✓ opencode V2 detected — the plugin registers ghost at startup (V2's `opencode mcp list` shows only config-file servers, so registration isn't checked here)")
+		return
+	}
 	out, err := exec.CommandContext(ctx, ocBin, "mcp", "ls").CombinedOutput()
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "  ! could not verify registration (`opencode mcp ls` failed): %s\n", strings.TrimSpace(string(out)))
@@ -152,6 +161,23 @@ func verifyOpencodeRegistration(w io.Writer) {
 	} else {
 		_, _ = fmt.Fprintln(w, "  ! `opencode mcp ls` succeeded but ghost is not listed — restart opencode, or re-run `ghost mcp init --client opencode`")
 	}
+}
+
+// opencodeMajorVersion extracts the major version from `opencode --version`
+// output ("1.18.32" on V1, "opencode v2.0.14" on V2). Unparseable output
+// returns 0, which keeps the V1 behavior.
+func opencodeMajorVersion(out string) int {
+	for _, field := range strings.Fields(out) {
+		field = strings.TrimPrefix(field, "v")
+		major, _, ok := strings.Cut(field, ".")
+		if !ok {
+			continue
+		}
+		if n, err := strconv.Atoi(major); err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 // opencodeConfigDir returns $XDG_CONFIG_HOME when set, else ~/.config.

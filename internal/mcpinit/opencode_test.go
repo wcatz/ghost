@@ -301,3 +301,59 @@ func TestCheckPrereqs_ClaudeMissing(t *testing.T) {
 		t.Errorf("opencode target should require only ghost: %v", err)
 	}
 }
+
+// writeOpencodeStub installs a fake opencode that answers --version with
+// version and records every other invocation's argv in a marker file, so a
+// test can assert which subcommands the installer ran.
+func writeOpencodeStub(t *testing.T, binDir, version, mcpOutput string) (calls string) {
+	t.Helper()
+	calls = filepath.Join(t.TempDir(), "calls")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"--version\" ]; then echo '" + version + "'; exit 0; fi\n" +
+		"echo \"$*\" >> '" + calls + "'\n" +
+		"echo '" + mcpOutput + "'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "opencode"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return calls
+}
+
+// TestVerifyOpencodeRegistration_V1 keeps the V1 check: `opencode mcp ls`
+// lists plugin-registered servers there, so a ghost entry verifies.
+func TestVerifyOpencodeRegistration_V1(t *testing.T) {
+	home, _ := setupOpencodeTestEnv(t)
+	calls := writeOpencodeStub(t, filepath.Join(home, "bin"), "1.18.32", "ghost connected")
+
+	var out bytes.Buffer
+	verifyOpencodeRegistration(&out)
+
+	if !strings.Contains(out.String(), "verified: ghost listed by `opencode mcp ls`") {
+		t.Errorf("V1 should verify via mcp ls, got:\n%s", out.String())
+	}
+	if data, _ := os.ReadFile(calls); !strings.Contains(string(data), "mcp ls") {
+		t.Errorf("V1 must run `opencode mcp ls`, calls: %q", data)
+	}
+}
+
+// TestVerifyOpencodeRegistration_V2SkipsMcpList pins the V2 behavior: V2 has
+// no `mcp ls`, its `mcp list` shows only config-file servers (never the
+// plugin's mcp.transform registration), and without --standalone it starts
+// the background service as a side effect. The installer must not shell out
+// to `opencode mcp` at all on V2.
+func TestVerifyOpencodeRegistration_V2SkipsMcpList(t *testing.T) {
+	home, _ := setupOpencodeTestEnv(t)
+	calls := writeOpencodeStub(t, filepath.Join(home, "bin"), "opencode v2.0.14", "No MCP servers configured")
+
+	var out bytes.Buffer
+	verifyOpencodeRegistration(&out)
+
+	if data, err := os.ReadFile(calls); err == nil {
+		t.Errorf("V2 must not run any opencode subcommand besides --version, calls: %q", data)
+	}
+	if !strings.Contains(out.String(), "opencode V2") {
+		t.Errorf("V2 should explain why registration isn't verified, got:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "could not verify") || strings.Contains(out.String(), "not listed") {
+		t.Errorf("V2 must not report a false registration failure, got:\n%s", out.String())
+	}
+}
