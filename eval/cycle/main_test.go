@@ -12,10 +12,18 @@ func TestScratchEnvIsolates(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", "/leak/data")
 	t.Setenv("XDG_CONFIG_HOME", "/leak/config")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-leak")
+	t.Setenv("anthropic_api_key", "sk-leak-lower")
 	env := scratchEnv("/scratch")
 	joined := strings.Join(env, "\n")
-	if strings.Contains(joined, "/leak/") || strings.Contains(joined, "ANTHROPIC_API_KEY=") {
-		t.Fatalf("leaked env: %s", joined)
+	var leakedKeys []string
+	for _, kv := range env {
+		key, _, _ := strings.Cut(kv, "=")
+		if strings.EqualFold(key, "ANTHROPIC_API_KEY") {
+			leakedKeys = append(leakedKeys, key)
+		}
+	}
+	if strings.Contains(joined, "/leak/") || len(leakedKeys) > 0 {
+		t.Fatalf("leaked environment keys: %v", leakedKeys)
 	}
 	if !strings.Contains(joined, "XDG_DATA_HOME=/scratch/data") ||
 		!strings.Contains(joined, "XDG_CONFIG_HOME=/scratch/config") {
