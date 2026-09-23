@@ -200,10 +200,13 @@ func checkPrereqs(w io.Writer, client string) (ghostBin, claudeBin string, err e
 // Tests override this to stay isolated from host binaries.
 var systemBinDirs = []string{"/opt/homebrew/bin", "/usr/local/bin"}
 
-// windowsBinExts are the extensions that count as executable in findBinary's
-// common-dir fallback on Windows: the native binary plus script wrappers —
-// the PATHEXT set PATH lookups resolve through (.com omitted: nothing we
-// probe ships as .com).
+// windowsBinExts is the deliberately pinned extension set findBinary's
+// common-dir fallback probes on Windows: .exe first, then .cmd, then .bat —
+// fixed order and fixed content on every machine. It is not PATHEXT: the
+// machine's PATHEXT env var is user-customizable and covers more types
+// (.com, .ps1, ...), so reading it would make the fallback's probe order
+// and coverage vary per host. Accepted asymmetry: a bare name.ps1 in a
+// probed dir would not be found by the fallback — deliberate.
 var windowsBinExts = []string{".exe", ".cmd", ".bat"}
 
 // commonBinCandidates returns the file names findBinary probes inside a common
@@ -249,6 +252,10 @@ func commonDirExecutable(p string, st os.FileInfo) bool {
 // effective HOME; the systemBinDirs list is absolute, so tests that must stay
 // isolated from host binaries override it. On Windows the fallback also
 // probes name.exe/.cmd/.bat, since executability there is by extension.
+// Probing the pinned candidates directly instead of calling
+// exec.LookPath(filepath.Join(dir, name)) is deliberate: LookPath would
+// defer to the machine's PATHEXT order and content (env-dependent), while
+// the pinned list keeps probe behavior deterministic across machines.
 func findBinary(name string) string {
 	if p, err := exec.LookPath(name); err == nil {
 		return p
