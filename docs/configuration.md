@@ -18,7 +18,8 @@ The user config file is normally:
 
 | Platform | Path |
 |---|---|
-| Linux/macOS | `$XDG_CONFIG_HOME/ghost/config.yaml`, or `~/.config/ghost/config.yaml` |
+| Linux | `$XDG_CONFIG_HOME/ghost/config.yaml`, or `~/.config/ghost/config.yaml` when `XDG_CONFIG_HOME` is unset |
+| macOS | `$XDG_CONFIG_HOME/ghost/config.yaml`, or `~/Library/Application Support/ghost/config.yaml` when `XDG_CONFIG_HOME` is unset |
 | Windows | `%AppData%\ghost\config.yaml` when `XDG_CONFIG_HOME` is unset |
 
 The data directory is separate from the config directory:
