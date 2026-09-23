@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"strings"
 )
 
 // Transcript formats known to the contract. The scanner registry is keyed by
@@ -65,11 +66,37 @@ type claudeJSONLLine struct {
 	} `json:"message"`
 }
 
-// ghostSaveTools are the tool names whose presence in a transcript proves the
-// session saved knowledge to Ghost.
-var ghostSaveTools = map[string]bool{
-	"mcp__ghost__ghost_memory_save": true,
-	"mcp__ghost__ghost_save_global": true,
+// ghostSaveToolNames are Ghost's save tools as the MCP server names them.
+// Their presence in a transcript proves the session saved knowledge to Ghost.
+var ghostSaveToolNames = map[string]bool{
+	"ghost_memory_save": true,
+	"ghost_save_global": true,
+}
+
+// ghostServerQualifiers are the ways MCP hosts qualify a tool with its server
+// (here, "ghost"), in the order they must be tried — "mcp__ghost__" before
+// codex's separator-less "mcp__ghost":
+//   - Claude Code: mcp__<server>__<tool>
+//   - opencode (V1, and V2 with codemode off): <server>_<tool>
+//   - opencode V2 Code Mode: <server>.<tool>
+//   - codex: namespace "mcp__<server>" concatenated with the name
+var ghostServerQualifiers = []string{"mcp__ghost__", "ghost_", "ghost.", "mcp__ghost"}
+
+// isGhostSaveTool reports whether a transcript's tool name is one of Ghost's
+// save tools, however the host spells it: bare, or qualified with the ghost
+// server under any host's convention. Matching is harness-agnostic (#505) but
+// server-aware — the same tool name under another server never counts, or a
+// stop would skip the nudge when nothing was saved to Ghost.
+func isGhostSaveTool(name string) bool {
+	if ghostSaveToolNames[name] {
+		return true
+	}
+	for _, q := range ghostServerQualifiers {
+		if rest, ok := strings.CutPrefix(name, q); ok && ghostSaveToolNames[rest] {
+			return true
+		}
+	}
+	return false
 }
 
 // streamJSONL visits each line of a newline-delimited JSON transcript and
@@ -102,7 +129,7 @@ func ScanClaudeJSONL(r io.Reader) (ScanResult, error) {
 		for _, c := range l.Message.Content {
 			if c.Type == "tool_use" {
 				res.ToolCalls++
-				if ghostSaveTools[c.Name] {
+				if isGhostSaveTool(c.Name) {
 					res.GhostSaves++
 				}
 			}
@@ -124,27 +151,10 @@ type codexRolloutLine struct {
 	} `json:"payload"`
 }
 
-// codexGhostSaveIdentities are the flattened tool identities (namespace+name;
-// codex's concatenation has no separator) that count as Ghost saves:
-//   - legacy/flat: bare "ghost_memory_save" / "ghost_save_global" with no
-//     namespace
-//   - namespaced: MCP server "ghost" (namespace "mcp__ghost") exposing those
-//     same tool names
-//
-// Exact-match only — a different server shipping an identically-named tool
-// (e.g. namespace "mcp__other", name "ghost_memory_save") must not read as a
-// Ghost save, or codex stops would skip the nudge when nothing was saved.
-var codexGhostSaveIdentities = map[string]bool{
-	"ghost_memory_save":           true,
-	"ghost_save_global":           true,
-	"mcp__ghostghost_memory_save": true,
-	"mcp__ghostghost_save_global": true,
-}
-
 // ScanCodexRollout streams a codex rollout transcript and counts tool calls
 // (function_call items plus local_shell_call items — codex's shell is not a
 // function call), plus how many were Ghost save tools per
-// codexGhostSaveIdentities. Unparseable lines are skipped; errors mid-file are
+// isGhostSaveTool (namespace and name are concatenated, as codex flattens them). Unparseable lines are skipped; errors mid-file are
 // returned with partial counts, same fail-open posture as the other scanners.
 func ScanCodexRollout(r io.Reader) (ScanResult, error) {
 	var res ScanResult
@@ -164,7 +174,7 @@ func ScanCodexRollout(r io.Reader) (ScanResult, error) {
 				flat = *l.Payload.Namespace
 			}
 			flat += l.Payload.Name
-			if codexGhostSaveIdentities[flat] {
+			if isGhostSaveTool(flat) {
 				res.GhostSaves++
 			}
 		case "local_shell_call":
@@ -188,15 +198,6 @@ type opencodeMessagesLine struct {
 	} `json:"parts"`
 }
 
-// ghostSaveToolsOpencode mirrors ghostSaveTools under opencode's MCP naming
-// convention: tools register as `<server>_<tool>` with non-alphanumeric
-// characters folded to '_' (opencode docs, "Names and permissions") — not
-// Claude Code's `mcp__<server>__<tool>`.
-var ghostSaveToolsOpencode = map[string]bool{
-	"ghost_ghost_memory_save": true,
-	"ghost_save_global":       true,
-}
-
 // ScanOpencodeMessages streams an opencode-messages transcript and counts
 // assistant tool-call parts, plus how many were Ghost save tools. Only parts
 // typed "tool" count — prose mentions never do — and only assistant messages
@@ -215,7 +216,7 @@ func ScanOpencodeMessages(r io.Reader) (ScanResult, error) {
 		for _, p := range l.Parts {
 			if p.Type == "tool" {
 				res.ToolCalls++
-				if ghostSaveToolsOpencode[p.Tool] {
+				if isGhostSaveTool(p.Tool) {
 					res.GhostSaves++
 				}
 			}
@@ -243,17 +244,6 @@ type opencodeV2MessageLine struct {
 	} `json:"content"`
 }
 
-// ghostSaveToolsOpencodeV2 covers both ways V2 exposes an MCP tool. Code
-// Mode (the default) routes calls through the `execute` tool and records each
-// inner call's path as `<server>.<tool>`; with codemode disabled the tool
-// stays native as `<server>_<tool>`, the same normalization V1 used.
-var ghostSaveToolsOpencodeV2 = map[string]bool{
-	"ghost.ghost_memory_save": true,
-	"ghost.ghost_save_global": true,
-	"ghost_ghost_memory_save": true,
-	"ghost_save_global":       true,
-}
-
 // ScanOpencodeV2Messages streams an opencode-v2-messages transcript and counts
 // assistant tool entries, plus how many were Ghost saves. A Code Mode
 // `execute` entry counts once as a tool call; its saves come only from the
@@ -275,12 +265,12 @@ func ScanOpencodeV2Messages(r io.Reader) (ScanResult, error) {
 				continue
 			}
 			res.ToolCalls++
-			if ghostSaveToolsOpencodeV2[c.Name] {
+			if isGhostSaveTool(c.Name) {
 				res.GhostSaves++
 				continue
 			}
 			for _, inner := range c.State.Metadata.ToolCalls {
-				if ghostSaveToolsOpencodeV2[inner.Tool] {
+				if isGhostSaveTool(inner.Tool) {
 					res.GhostSaves++
 				}
 			}

@@ -194,7 +194,7 @@ func TestScanOpencodeMessages(t *testing.T) {
 		{"save suppresses nudge", []string{ocLineBash, ocLineSave}, 2, 1},
 		{"global save counts", []string{ocLineBash, ocLineGlobal}, 2, 1},
 		{"prose mention is not a save", []string{ocLineBash, ocLineText}, 1, 0},
-		{"claude-code style name is not a save here", []string{ocLineBash, ocLineClaudeStyle}, 2, 0},
+		{"claude-code style name counts too (harness-agnostic, #505)", []string{ocLineBash, ocLineClaudeStyle}, 2, 1},
 		{"pure conversation", []string{ocLineUser, ocLineText}, 0, 0},
 		{"garbage lines skipped", []string{"garbage not json", ocLineBash, "{{{{", ocLineSave}, 2, 1},
 	}
@@ -304,5 +304,56 @@ func TestScanOpencodeV2Messages_GoldenFixture(t *testing.T) {
 	}
 	if got.ToolCalls != 2 || got.GhostSaves != 1 {
 		t.Errorf("golden fixture = %+v, want toolCalls=2 saves=1", got)
+	}
+}
+
+// TestIsGhostSaveTool pins harness-agnostic save matching (#505): a ghost
+// save tool counts however an MCP host spells it, as long as the qualifier
+// names the ghost server. The same tool name under another server never
+// counts.
+func TestIsGhostSaveTool(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"ghost_memory_save", true},
+		{"ghost_save_global", true},
+		{"mcp__ghost__ghost_memory_save", true}, // Claude Code
+		{"mcp__ghost__ghost_save_global", true},
+		{"ghost_ghost_memory_save", true}, // opencode native <server>_<tool>
+		{"ghost_ghost_save_global", true},
+		{"ghost.ghost_memory_save", true}, // opencode V2 Code Mode path
+		{"ghost.ghost_save_global", true},
+		{"mcp__ghostghost_memory_save", true}, // codex namespace+name
+		{"mcp__ghostghost_save_global", true},
+		{"mcp__other__ghost_memory_save", false},
+		{"other_ghost_memory_save", false},
+		{"other.ghost_memory_save", false},
+		{"mcp__otherghost_memory_save", false},
+		{"mcp__ghostly__ghost_memory_save", false},
+		{"ghost_memory_search", false},
+		{"ghost_memory_save_draft", false},
+		{"Bash", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isGhostSaveTool(tc.name); got != tc.want {
+			t.Errorf("isGhostSaveTool(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestScanners_CountGlobalSaveUnderOpencodeNaming: opencode names MCP tools
+// <server>_<tool>, so ghost_save_global arrives as ghost_ghost_save_global.
+// The per-host map only listed the bare name, so these saves never counted.
+func TestScanners_CountGlobalSaveUnderOpencodeNaming(t *testing.T) {
+	v1 := `{"info":{"id":"m1","role":"assistant","sessionID":"s"},"parts":[` +
+		`{"id":"p1","sessionID":"s","messageID":"m1","type":"tool","callID":"c1","tool":"ghost_ghost_save_global","state":{"status":"completed"}}]}`
+	if got, err := ScanOpencodeMessages(strings.NewReader(v1 + "\n")); err != nil || got.GhostSaves != 1 {
+		t.Errorf("V1 opencode global save = %+v, %v; want 1 save", got, err)
+	}
+	v2 := `{"id":"m1","type":"assistant","content":[{"type":"tool","id":"c1","name":"ghost_ghost_save_global","state":{"status":"completed"}}]}`
+	if got, err := ScanOpencodeV2Messages(strings.NewReader(v2 + "\n")); err != nil || got.GhostSaves != 1 {
+		t.Errorf("V2 opencode native global save = %+v, %v; want 1 save", got, err)
 	}
 }
