@@ -55,6 +55,9 @@ if command -v jq >/dev/null 2>&1; then
 else
   # Anchor to top-level indentation like assemble-plugin-windows.sh does:
   # an unanchored pattern would rewrite every "version" key, not just this one.
+  # CI/release always carry jq, so this sed path is a hand-verified emergency
+  # fallback (not CI-covered), anchored to the manifest's two-space top-level
+  # indentation: a reformat silently no-ops and the jq branch stays authoritative.
   sed -i.bak -E 's/^  "version": "[^"]*"/  "version": "'"$VERSION"'"/' "$MANIFEST"
   rm -f "$MANIFEST.bak"
 fi

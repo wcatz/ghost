@@ -49,6 +49,9 @@ jobs:
       - name: JSON-validate every manifest, hook file, MCP config, and the marketplace
         # jq -e fails on invalid JSON and on non-false top-level output;
         # each file is printed so a skip can never be silent.
+        # hooks/.mcp.json are checked at source, but `cp -R` makes the assembled
+        # copies byte-identical and the strict-validate step below parses them
+        # (assembled trees + marketplace), so source checks cover what ships.
         run: |
           set -euo pipefail
           for f in \
@@ -71,7 +74,9 @@ jobs:
         # local schema check and needs no login — verified with an empty
         # HOME. Pinned, not @latest, so a CLI release cannot turn every
         # open PR red without a change here; bump deliberately. npm ships
-        # preinstalled on ubuntu runners, so no setup-node is needed.
+        # preinstalled on ubuntu runners, so no setup-node is needed. Check for
+        # newer with `npm view @anthropic-ai/claude-code version` when touching
+        # this file.
         run: |
           npm install -g @anthropic-ai/claude-code@2.1.280
           claude --version

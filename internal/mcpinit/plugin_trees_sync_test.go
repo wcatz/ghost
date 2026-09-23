@@ -113,12 +113,12 @@ func diffNormalized(posixRel, windowsRel string, posix, windows any) string {
 		if posixLine == windowsLine {
 			continue
 		}
-		fmt.Fprintf(&b, "  line %d:\n    %s: %s\n    %s: %s\n",
+		fmt.Fprintf(&b, "  normalized line %d:\n    %s: %s\n    %s: %s\n",
 			i+1, posixRel, posixLine, windowsRel, windowsLine)
 		shown++
 	}
 	if len(posixLines) != len(windowsLines) {
-		fmt.Fprintf(&b, "  line counts differ: %s has %d lines, %s has %d\n",
+		fmt.Fprintf(&b, "  normalized line counts differ: %s has %d lines, %s has %d\n",
 			posixRel, len(posixLines), windowsRel, len(windowsLines))
 	}
 	return strings.TrimRight(b.String(), "\n")
