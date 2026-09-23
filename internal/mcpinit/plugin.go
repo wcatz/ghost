@@ -56,6 +56,14 @@ func isUnderPluginCache(p string) bool {
 	return strings.Contains(s, pluginCacheDir)
 }
 
+// managedPluginNames is the exact set of Ghost-managed plugin names that
+// PluginInstalled defers to: the POSIX plugin "ghost" plus the per-arch
+// native-Windows entries "ghost-windows-amd64" and "ghost-windows-arm64",
+// each of which bundles one .exe. The set must agree with
+// .claude-plugin/marketplace.json and with the manifests the assemble
+// scripts emit — TestPluginNameCoupling enforces that equality.
+var managedPluginNames = []string{"ghost", "ghost-windows-amd64", "ghost-windows-arm64"}
+
 // PluginInstalled reports whether a Ghost plugin is installed for Claude Code
 // at all — detected by running-as-plugin OR by an entry in Claude Code's
 // installed-plugins registry. `ghost mcp init` uses this to defer rather than
@@ -80,16 +88,14 @@ func PluginInstalled() bool {
 		return false
 	}
 	for key := range doc.Plugins {
-		// Keys are "<plugin>@<marketplace>". The POSIX plugin is "ghost";
-		// native Windows is served by the per-arch entries
-		// "ghost-windows-amd64" and "ghost-windows-arm64", each bundling one
-		// .exe. Match that exact set (case-insensitively) so a standalone
-		// `ghost mcp init` defers to any Ghost-managed install without
-		// claiming unrelated plugins whose names merely start with "ghost-".
+		// Keys are "<plugin>@<marketplace>". Match the exact Ghost-managed
+		// set case-insensitively without claiming unrelated plugins whose
+		// names merely start with "ghost-".
 		name, _, _ := strings.Cut(key, "@")
-		switch strings.ToLower(name) {
-		case "ghost", "ghost-windows-amd64", "ghost-windows-arm64":
-			return true
+		for _, n := range managedPluginNames {
+			if strings.EqualFold(name, n) {
+				return true
+			}
 		}
 	}
 	return false
