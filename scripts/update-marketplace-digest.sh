@@ -77,9 +77,22 @@ fi
 jq -e '.plugins | type == "array"' "$FILE" >/dev/null 2>&1 \
   || { echo "error: $FILE is not valid marketplace JSON (no plugins array)" >&2; exit 1; }
 
-mapfile -t ENTRIES < <(jq -r '.plugins[].name' "$FILE")
-if [ "${#ENTRIES[@]}" -ne 3 ]; then
-  echo "error: expected exactly 3 marketplace entries, found ${#ENTRIES[@]}: ${ENTRIES[*]:-none}" >&2
+# Read entry names with a bash-3.2-compatible while-read loop (stock macOS
+# bash has no `mapfile`) fed by process substitution, so the loop runs in
+# this shell and keeps ENTRIES visible; the jq -e gate above already proved
+# the file parses, so the substitution source cannot fail silently.
+ENTRIES=()
+while IFS= read -r entry; do
+  ENTRIES+=("$entry")
+done < <(jq -r '.plugins[].name' "$FILE")
+
+# Exact entry SET, not just a count: length==3 would accept
+# ["ghost","ghost","ghost"] and pin every entry to one archive. Compare the
+# sorted names against the expected set (dupes/unknowns change the string).
+EXPECTED_SORTED="$(printf '%s\n' ghost ghost-windows-amd64 ghost-windows-arm64 | LC_ALL=C sort)"
+FOUND="$(printf '%s\n' ${ENTRIES[@]+"${ENTRIES[@]}"} | LC_ALL=C sort)"
+if [ "$FOUND" != "$EXPECTED_SORTED" ]; then
+  echo "error: marketplace entries must be exactly {ghost, ghost-windows-amd64, ghost-windows-arm64}; found: ${ENTRIES[*]:-none}" >&2
   exit 1
 fi
 
