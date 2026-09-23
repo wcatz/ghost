@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/wcatz/ghost/internal/ai"
 )
 
 // ReportData is everything the Markdown scorecard renders.
@@ -40,7 +42,7 @@ func writeReport(dir string, d ReportData) (string, error) {
 	fmt.Fprintf(&b, "- Scratch: `%s`\n", d.ScratchDir)
 	model := os.Getenv("GHOST_OPENCODE_MODEL")
 	if model == "" {
-		model = "(opencode default)"
+		model = ai.DefaultOpenCodeModel
 	}
 	fmt.Fprintf(&b, "- LLM backend: claude-or-opencode CLI path; opencode model: %s\n\n", model)
 

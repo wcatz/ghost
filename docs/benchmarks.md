@@ -1,8 +1,23 @@
-# Benchmark plan
+# Benchmarks and methodology
 
-This document is the methodology for publishing retrieval-quality numbers honestly. The guiding rule: **a score only exists if anyone can re-run the harness with one command** — fixed seeds, published judge prompts (where a judge is used at all), and per-question logs.
+Ghost publishes benchmark results together with the harness, inputs, and limitations needed to reproduce them. The guiding rule is simple: **a score is useful only when someone can re-run the evaluation and understand what it measures**.
 
-**Status:** Phase 1 (LongMemEval-S retrieval), Phase 2 (`ghost bench`), and Phase 4 (end-to-end retrieve→generate→judge with DeepSeek v4 Pro) have shipped with published numbers below. Phase 3 (staleness suite) ships report-only in CI. The official GPT-4o leaderboard-comparable run has not been executed yet.
+## At a glance
+
+| Evaluation | What it measures | Headline result |
+|---|---|---|
+| LongMemEval-S retrieval | Judge-free retrieval against official evidence labels | Hybrid Recall@5 **93.0%**, Recall@10 **97.3%** on 470 answerable questions |
+| `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.817** on 219 queries and 547 memories |
+| LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions |
+| Staleness suite | Fresh-fact ranking without breaking older-but-correct facts | Fresh-wins **1.000** while the recency-trap case stays **0.929** |
+
+These rows are not one leaderboard. Retrieval metrics, end-to-end answer accuracy, and a staleness fixture answer different questions. Competitor scores also use different generators and judges, so cross-system comparisons are directional unless the evaluation protocol is identical.
+
+**Status:** LongMemEval-S retrieval, `ghost bench`, and the documented end-to-end run have shipped. The staleness suite is report-only in CI. The official GPT-4o leaderboard-comparable run has not been executed.
+
+> Sections explicitly labeled **Historical record** document past experiments and their original implementation details. They are retained for reproducibility context, not as a description of current production routing. For current behavior, start with the [documentation index](README.md).
+
+For the product overview, see [`../README.md`](../README.md). For the implementation that produces these results, see [`architecture.md`](architecture.md). For the built-in command, see [`cli.md`](cli.md#context-and-benchmarks).
 
 ## Why these benchmarks and not others
 
