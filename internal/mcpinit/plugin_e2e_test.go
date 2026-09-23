@@ -299,8 +299,10 @@ func TestPluginE2E(t *testing.T) {
 		// hook's re-eval of payload cwd) from a read-only DB open failure
 		// inside the hook — neither is visible in the stdout string alone.
 		// family (A) = path-form divergence between seed and hook; (B) =
-		// read-only open/query failure. Invoked only from the marker failure
-		// branches below; green runs stay silent.
+		// read-only open/query failure; a database that is simply absent is
+		// reported as such and gets no write probe, because the hook bails on
+		// the same stat failure before ever opening. Invoked only from the
+		// marker failure branches below; green runs stay silent.
 		diag := func(reason string) {
 			t.Helper()
 			t.Logf("diag: %s", reason)
@@ -314,7 +316,10 @@ func TestPluginE2E(t *testing.T) {
 
 			// Read-only probe on exactly the DSN the hook uses: an open or
 			// query error here proves family (B); surviving rows with paths
-			// that differ from eval(cwd) point at family (A).
+			// that differ from eval(cwd) point at family (A). mode=ro never
+			// creates the file, and its query error on a missing database is
+			// read together with the stat line above (stat_ok=false), not as
+			// family (B) on its own.
 			db, err := sql.Open("sqlite", roDSN(dbPath))
 			t.Logf("diag: ro open err=%v", err)
 			if err == nil {
@@ -341,6 +346,14 @@ func TestPluginE2E(t *testing.T) {
 			// Direct resolve on the known-good read-write DSN: if RW resolves
 			// while the roDSN probe errored, family (B) is proven; if RW also
 			// misses and the stored path differs from eval(cwd), family (A).
+			// OpenDB creates the database when the file is missing, so probing
+			// past a failed stat would fabricate an empty database and then
+			// report a clean RW open with no resolved project — the hook bails
+			// on the same stat failure, so there is nothing to probe.
+			if statErr != nil {
+				t.Logf("diag: rw probe skipped: database missing (hook bails the same way — stat failure, not a resolution miss)")
+				return
+			}
 			rwdb, err := memory.OpenDB(dbPath)
 			if err != nil {
 				t.Logf("diag: rw open err=%v", err)
