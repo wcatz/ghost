@@ -237,21 +237,24 @@ jobs:
       - name: Verify the catalog on main matches the pinned copy
         # Runs strictly AFTER the commit step: on a normal release main still
         # pins the previous release until that commit lands, so a pre-commit
-        # byte-compare could only ever fail. The raw file on main must be
+        # byte-compare could only ever fail. The file on main must be
         # byte-identical to what this job just verified locally (or, under the
         # downgrade guard, intentionally pin a newer release than this tag).
-        # No curl -f here: -f would exit non-zero on an HTTP error and
-        # bash -e would kill the step before the retry loop could absorb raw
-        # CDN propagation — fetch first, then branch on the captured HTTP
-        # code instead.
+        # Route: contents API, not raw.githubusercontent.com — the same
+        # interface that performed the commit. The raw branch CDN caches for
+        # minutes, so right after a successful PUT it can still serve the
+        # pre-commit file and spuriously fail a release whose catalog commit
+        # already landed; the API is read-your-writes consistent, and its
+        # bytes are the authoritative input to the downgrade guard below.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/.claude-plugin/marketplace.json"
+          PATH_IN_REPO=".claude-plugin/marketplace.json"
           VERSION="${GITHUB_REF_NAME#v}"
           attempt=1
-          code=000
           while [ "$attempt" -le 3 ]; do
-            code="$(curl -sSL --retry 3 --retry-connrefused -o /tmp/verify-marketplace.json -w '%{http_code}' "$URL" || true)"
-            if [ "$code" = "200" ]; then
+            if gh api "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}?ref=main" > /tmp/verify-contents.json; then
+              jq -r '.content' /tmp/verify-contents.json | base64 -d > /tmp/verify-marketplace.json
               if cmp -s /tmp/verify-marketplace.json .claude-plugin/marketplace.json; then
                 echo "main catalog verified against the pinned copy"
                 exit 0
@@ -260,8 +263,8 @@ jobs:
               # than this tag, so "differs from the local copy" is the correct
               # state. Accept it only when the version extracted from
               # source.url (jq, so no other JSON text can poison it) is
-              # strictly newer; anything older is a stale post-commit CDN copy
-              # and keeps retrying until it fails below.
+              # strictly newer; anything older is a stale/divergent state and
+              # keeps retrying until it fails below.
               MAIN_VERSION="$(jq -r '[.plugins[]?.source.url? | strings | select(test("releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/")) | capture("releases/download/v(?<v>[0-9]+\\.[0-9]+\\.[0-9]+)/").v] | .[0] // empty' /tmp/verify-marketplace.json || true)"
               NEWEST="$(printf '%s\n%s\n' "$MAIN_VERSION" "$VERSION" | sort -V | tail -n 1)"
               if [ -n "$MAIN_VERSION" ] && [ "$MAIN_VERSION" != "$VERSION" ] && [ "$NEWEST" = "$MAIN_VERSION" ]; then
@@ -270,11 +273,15 @@ jobs:
               fi
             fi
             if [ "$attempt" -lt 3 ]; then
-              echo "attempt ${attempt}: main catalog not in sync (HTTP ${code}, CDN propagation); retrying in 10s"
+              echo "attempt ${attempt}: main catalog not in sync; retrying in 10s"
               sleep 10
             fi
             attempt=$((attempt + 1))
           done
-          echo "::error::marketplace.json on main differs from the pinned local copy (last fetch HTTP ${code})"
+          if [ ! -f /tmp/verify-marketplace.json ]; then
+            echo "::error::could not fetch marketplace.json from main via the contents API"
+            exit 1
+          fi
+          echo "::error::marketplace.json on main differs from the pinned local copy"
           diff -u .claude-plugin/marketplace.json /tmp/verify-marketplace.json || true
           exit 1
