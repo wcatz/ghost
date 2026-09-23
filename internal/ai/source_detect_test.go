@@ -329,3 +329,25 @@ func TestDetectSourceFromProc(t *testing.T) {
 		}
 	})
 }
+
+// TestSourceFromProcessName_ExeSuffix: opencode V2's npm package ships its
+// native binary as `opencode.exe` on every platform (bin/opencode.exe), so the
+// harness process's comm is "opencode.exe". Without folding the suffix, an MCP
+// server spawned by an npm-installed V2 — which reports clientInfo "cli", not
+// "opencode" — can't be attributed to opencode at all.
+func TestSourceFromProcessName_ExeSuffix(t *testing.T) {
+	cases := map[string]string{
+		"opencode":     "opencode",
+		"opencode.exe": "opencode",
+		"codex.exe":    "codex",
+		"claude.exe":   "claude-code",
+		"goose.exe":    "goose",
+		"notepad.exe":  "",
+		"ghost":        "",
+	}
+	for name, want := range cases {
+		if got := sourceFromProcessName(name); got != want {
+			t.Errorf("sourceFromProcessName(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
