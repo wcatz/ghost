@@ -132,7 +132,7 @@ windows-plugin:
     - uses: actions/checkout@v7.0.1
     - uses: actions/setup-go@v7
       with: { go-version-file: go.mod }
-    - run: go test -count=1 -run 'TestPlugin(NameCoupling|E2E)$' ./internal/mcpinit/
+    - run: go test -count=1 ./internal/mcpinit/
 ```
 
 Scope: the legs run the whole package — test isolation sets `USERPROFILE` alongside `HOME` everywhere `os.UserHomeDir` is the production source of truth (Windows reads `USERPROFILE`), so every suite reads its hermetic profile instead of the runner's real profile, and the chmod-based inaccessible-database test skips on Windows, where the mechanism cannot revoke access.
