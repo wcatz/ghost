@@ -111,6 +111,15 @@ jobs:
   #                        on the first, releases/latest — which keeps
   #                        serving the previous release until we publish).
   #                        Re-run safe.
+  #   catalog commit step: MEASURED BLOCKED at v0.30.18 (run 35928382388):
+  #                        GH013 ruleset violations reject BOTH write routes
+  #                        for GITHUB_TOKEN — contents-API PUT (HTTP 409)
+  #                        and git push (probe run 35929704681, same rules)
+  #                        — so the job ends red at that step until an
+  #                        authorization route is chosen. Users are
+  #                        unaffected: main's catalog stays stale-but-valid.
+  #                        Recovery = the manual admin runbook in the commit
+  #                        step's comment below.
   #   after catalog push:  main's catalog pins this release's exact bytes;
   #                        the digest script is byte-idempotent and the
   #                        commit step skips when main already matches, so a
@@ -204,22 +213,38 @@ jobs:
           [ "$fail" -eq 0 ]
 
       - name: Commit the pinned catalog to main
-        # Authorized by the repo ruleset `main-branch-protection`, whose
-        # bypass actor for non-PR pushes is github-actions[bot] (User id
-        # 41898282, bypass_mode always) — the identity this GITHUB_TOKEN
-        # authenticates as — migrated from classic branch protection
-        # 2026-09-23 with owner approval. (Not the GitHub Actions app id
-        # 15368: GitHub rejects the built-in app as a bypass actor — "must
-        # be part of the ruleset source or owner organization".) The same
-        # ruleset still enforces required checks + PR-before-merge for humans.
-        # Route: contents API, not git ref juggling. This checkout sits at
-        # the tag, so pushing to main with git would need a stash/checkout
-        # dance on the tag tree; the API does one atomic PUT carrying main's
-        # current blob sha, so a concurrent change to main makes the PUT fail
-        # instead of clobbering. Idempotency guard: byte-compare main's copy
-        # against the freshly pinned local file and skip when they match —
-        # the digest script is byte-idempotent, but a naive re-run would
-        # create an identical-content commit.
+        # MEASURED BLOCKED (v0.30.18, run 35928382388): this step's
+        # contents-API PUT with GITHUB_TOKEN failed HTTP 409 GH013 —
+        # "Repository rule violations found for refs/heads/main ... 3 of 3
+        # required status checks are expected. Changes must be made through a
+        # pull request." The earlier wrong-sha probe (409 sha-mismatch, no
+        # protection text) was misleading: sha validation runs BEFORE rules
+        # evaluation, so it never reached the rules check.
+        # Follow-up probe c2 (run 35929704681) drove the alternative git
+        # route under the identical workflow context — github-actions[bot]
+        # identity, DCO trailer, checkout-persisted GITHUB_TOKEN — and its
+        # push was rejected with the SAME violations ("push declined due to
+        # repository rule violations"). Both write routes are blocked for
+        # GITHUB_TOKEN: the ruleset `main-branch-protection` bypass actor
+        # User 41898282 (github-actions[bot]) does NOT apply, because the
+        # effective principal of a workflow's GITHUB_TOKEN is the GitHub
+        # Actions app integration (id 15368), which cannot be a bypass actor
+        # on a personal repo (API 422 during setup). Local admin pushes DO
+        # bypass — each prints "Bypassed rule violations for refs/heads/main".
+        # The step body below is kept ready for when an authorization route
+        # is chosen (PAT secret / per-release owner-merged PR / accept the
+        # manual admin pin): the atomic PUT carries main's current blob sha,
+        # so a concurrent change to main fails instead of clobbering;
+        # idempotency guard — byte-compare main's copy against the freshly
+        # pinned local file and skip when they match (the digest script is
+        # byte-idempotent, but a naive re-run would create an
+        # identical-content commit); cross-release downgrade guard.
+        # Until then this step fails at every release (users unaffected — the
+        # catalog is stale-but-valid) and the MANUAL RECOVERY RUNBOOK is the
+        # documented path: an admin runs
+        # scripts/update-marketplace-digest.sh against the published assets
+        # and pushes the pinned .claude-plugin/marketplace.json to main
+        # (admin pushes bypass the ruleset).
         # NOTE: writes made with GITHUB_TOKEN do NOT trigger follow-on
         # workflow runs, so this digest commit lands without a main CI run;
         # acceptable because the digest script's assertions + jq validity and
