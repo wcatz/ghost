@@ -19,6 +19,12 @@
 #
 # PLATFORMS may be overridden for a fast local check, e.g.
 #   PLATFORMS="linux-amd64" scripts/assemble-plugin.sh 0.0.0 /tmp/ghost-plugin
+#
+# The checked-in plugin manifests carry version 0.0.0 so a source-checkout
+# install (`claude --plugin-dir plugin`) is honest about having no release
+# version; this script stamps the real release version into the assembled
+# copy (assemble-plugin-windows.sh stamps the version and the arch-qualified
+# name into its manifest).
 
 set -euo pipefail
 

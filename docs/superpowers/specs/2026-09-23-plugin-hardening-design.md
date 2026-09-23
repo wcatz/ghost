@@ -74,7 +74,7 @@ func isUnderPluginCache(p string) bool {
 
 Disclosure-only. The following text is appended to all three `.claude-plugin/marketplace.json` entry descriptions, both `plugin.json` descriptions (`plugin/` and `plugin-windows/`), and — as the same two sentences in prose — to the README plugin paragraph after line 42:
 
-> First-run setup is automatic and persistent: it disables Claude Code's built-in file memory, imports existing Claude memories, and writes MEMORY.md redirects in known projects — these changes remain if you uninstall the plugin. Memory save on session stop is on by default; the LLM consolidation passes (reflect/resolve/supersede) are opt-in and off by default.
+> First-run setup is automatic and persistent: it disables Claude Code's built-in file memory, imports memories from projects Ghost already knows (others import on first use), and writes MEMORY.md redirects in known projects — these changes remain if you uninstall the plugin. The stop-hook save reminder is on by default; the LLM consolidation passes (`reflect`/`resolve`/`supersede`) are opt-in and off by default.
 
 (The consolidation defaults are verified against `config.go`: `reflection.auto_reflect` and siblings default `false`; `stophook.go` only spawns the lifecycle when a phase is enabled.)
 

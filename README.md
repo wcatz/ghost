@@ -39,7 +39,7 @@ Then start a session. Ghost injects your project's context automatically and sta
 /plugin install ghost-windows-arm64@ghost     # native Windows on ARM
 ```
 
-The plugin declares the MCP server and both hooks itself, then finalizes on your first session (disables Claude's built-in file memory, imports existing memories, writes project redirects). Updates flow through `/plugin update`. `ghost mcp init` remains the path for opencode, codex, goose, and manual MCP setups.
+The plugin declares the MCP server and both hooks itself, then finalizes on your first session (disables Claude's built-in file memory, imports existing memories, writes project redirects) — these first-run changes persist if you uninstall the plugin. The stop-hook save reminder is on by default; the LLM consolidation passes (`reflect`/`resolve`/`supersede`) are opt-in and off by default. Updates flow through `/plugin update`. `ghost mcp init` remains the path for opencode, codex, goose, and manual MCP setups.
 
 **Using opencode (with Ollama)?** Skip the Claude Code init entirely — register Ghost as an MCP server:
 
