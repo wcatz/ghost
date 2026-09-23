@@ -375,3 +375,83 @@ func envValue(env []string, key string) string {
 	}
 	return ""
 }
+
+// versionedOpenCodeBinary is a fake opencode that answers `--version` with
+// version and echoes every other invocation's argv back as a text event.
+func versionedOpenCodeBinary(t *testing.T, version string) string {
+	t.Helper()
+	return fakeOpenCodeBinary(t, `if [ "$1" = "--version" ]; then echo '`+version+`'; exit 0; fi
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`)
+}
+
+// TestOpenCodeClient_V1Flags: opencode V1 keeps `--pure` (skip plugins) and
+// never gets V2's `--standalone`.
+func TestOpenCodeClient_V1Flags(t *testing.T) {
+	c := &OpenCodeClient{binary: versionedOpenCodeBinary(t, "1.18.32")}
+	text, _, err := c.Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if !strings.Contains(text, "--pure") || strings.Contains(text, "--standalone") {
+		t.Fatalf("V1 args = %q, want --pure and no --standalone", text)
+	}
+}
+
+// TestOpenCodeClient_V2Flags: opencode V2 rejects `--pure` ("Unrecognized
+// flag"), and without `--standalone` its `run` attaches to the user's shared
+// background service — which loads the user's real config, including Ghost's
+// own plugin and MCP server. V2 must get --standalone and never --pure.
+func TestOpenCodeClient_V2Flags(t *testing.T) {
+	c := &OpenCodeClient{binary: versionedOpenCodeBinary(t, "opencode v2.0.15")}
+	text, _, err := c.Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if strings.Contains(text, "--pure") || !strings.Contains(text, "--standalone") {
+		t.Fatalf("V2 args = %q, want --standalone and no --pure", text)
+	}
+	for _, want := range []string{"run", "--format json", "--title [ghost]", "prompt"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("V2 args = %q, missing %q", text, want)
+		}
+	}
+}
+
+func TestOpencodeMajorVersion(t *testing.T) {
+	cases := map[string]int{
+		"1.18.32\n":          1,
+		"opencode v2.0.15\n": 2,
+		"v3.1.0":             3,
+		"":                   0,
+		`{"type":"text"}`:    0,
+	}
+	for in, want := range cases {
+		if got := OpencodeMajorVersion(in); got != want {
+			t.Errorf("OpencodeMajorVersion(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+// TestOpenCodeClient_VersionCacheFollowsBinaryUpgrade: a long-lived Ghost
+// process (the MCP server) must notice an opencode upgrade in place. The
+// version cache is keyed by the resolved binary's identity, so replacing the
+// file (V1 -> V2 here) re-probes instead of reusing stale flags.
+func TestOpenCodeClient_VersionCacheFollowsBinaryUpgrade(t *testing.T) {
+	bin := versionedOpenCodeBinary(t, "1.18.32")
+	c := &OpenCodeClient{binary: bin}
+	text, _, err := c.Reflect(context.Background(), "prompt")
+	if err != nil || !strings.Contains(text, "--pure") {
+		t.Fatalf("before upgrade: args=%q err=%v, want V1 --pure", text, err)
+	}
+
+	upgraded := `#!/bin/sh
+if [ "$1" = "--version" ]; then echo 'opencode v2.0.15'; exit 0; fi
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`
+	if err := os.WriteFile(bin, []byte(upgraded), 0o755); err != nil {
+		t.Fatalf("upgrade fake binary: %v", err)
+	}
+	text, _, err = c.Reflect(context.Background(), "prompt")
+	if err != nil || !strings.Contains(text, "--standalone") || strings.Contains(text, "--pure") {
+		t.Fatalf("after upgrade: args=%q err=%v, want V2 --standalone", text, err)
+	}
+}

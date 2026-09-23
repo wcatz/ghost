@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // OpenCodeClient drives the `opencode` CLI as a subprocess LLM, the way
@@ -76,7 +79,16 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	// child does not load the user's global opencode config, which would start
 	// Ghost's own MCP server against this process's SQLite DB), and strips
 	// ANTHROPIC_API_KEY.
+	//
+	// opencode V2 dropped --pure (it rejects the flag outright) and, without
+	// --standalone, attaches `run` to the user's shared background service —
+	// which loads the user's real config, Ghost's plugin and MCP server
+	// included, defeating the scrub above. V2 therefore gets --standalone,
+	// so the child runs a private server on the scrubbed config instead.
 	args := []string{"run", "--format", "json", "--pure", "--title", "[ghost]"}
+	if c.majorVersion(ctx) >= 2 {
+		args = []string{"run", "--format", "json", "--standalone", "--title", "[ghost]"}
+	}
 	model := c.model
 	if model == "" {
 		model = os.Getenv("GHOST_OPENCODE_MODEL")
@@ -97,6 +109,65 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 		return "", fmt.Errorf("opencode run: %w: %s", err, stderr.String())
 	}
 	return parseOpenCodeOutput(stdout.String())
+}
+
+// opencodeMajors caches each opencode binary's major version: Ghost spawns one
+// harness process per consolidation, resolve candidate, and supersede pair, so
+// probing `--version` every time would double the process count. Entries are
+// keyed by the resolved binary's identity (path, size, mtime), so a
+// long-lived Ghost process — the MCP server — re-probes after opencode is
+// upgraded in place instead of reusing a stale flag set.
+var opencodeMajors sync.Map // opencodeBinaryID -> int
+
+type opencodeBinaryID struct {
+	path    string
+	size    int64
+	modTime time.Time
+}
+
+// majorVersion returns the major version of c.binary via `--version`, cached
+// per binary identity. An unresolvable binary or failed probe is not cached
+// and reports 0, which keeps the V1 invocation — the behavior Ghost had before
+// V2 existed.
+func (c *OpenCodeClient) majorVersion(ctx context.Context) int {
+	path, err := exec.LookPath(c.binary)
+	if err != nil {
+		return 0
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	id := opencodeBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}
+	if v, ok := opencodeMajors.Load(id); ok {
+		return v.(int)
+	}
+	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(pctx, path, "--version").Output()
+	if err != nil {
+		return 0
+	}
+	major := OpencodeMajorVersion(string(out))
+	opencodeMajors.Store(id, major)
+	return major
+}
+
+// OpencodeMajorVersion extracts the major version from `opencode --version`
+// output ("1.18.32" on V1, "opencode v2.0.14" on V2). Unparseable output
+// returns 0, which callers treat as V1.
+func OpencodeMajorVersion(out string) int {
+	for _, field := range strings.Fields(out) {
+		field = strings.TrimPrefix(field, "v")
+		major, _, ok := strings.Cut(field, ".")
+		if !ok {
+			continue
+		}
+		if n, err := strconv.Atoi(major); err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 // subprocessEnv builds the opencode child command and environment. It routes
