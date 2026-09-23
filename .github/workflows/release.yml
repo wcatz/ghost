@@ -100,9 +100,16 @@ jobs:
   # Failure ordering — every stage is safe to re-run:
   #   before publish:      release is an unpublished draft; releases/latest
   #                        still serves the previous release. Re-run safe.
+  #                        Deterministic pre-publish failure: a prerelease
+  #                        tag (e.g. v0.31.0-rc1) passes the v* trigger but
+  #                        is rejected by the digest script's bare-semver
+  #                        gate → the draft can never be pinned; recovery is
+  #                        delete the draft, fix/retag.
   #   after publish,
-  #   before catalog push: main's catalog still pins the previous release's
-  #                        version-pinned assets, which remain valid.
+  #   before catalog push: main's catalog still points at valid assets
+  #                        (version-pinned from the second release onward;
+  #                        on the first, releases/latest — which keeps
+  #                        serving the previous release until we publish).
   #                        Re-run safe.
   #   after catalog push:  main's catalog pins this release's exact bytes;
   #                        the digest script is byte-idempotent and the
@@ -129,11 +136,20 @@ jobs:
           scripts/assemble-plugin.sh "$VERSION" dist/ghost-plugin
           # Contents at the archive root, so Claude Code finds
           # .claude-plugin/plugin.json without a wrapper directory.
-          (cd dist/ghost-plugin && zip -qr ../ghost-plugin.zip .)
+          # Deterministic archives so a workflow re-run reproduces
+          # byte-identical zips → stable digests → the re-run-safety
+          # claims below hold: normalize mtimes to the DOS epoch
+          # 1980-01-01 (zip's minimum timestamp), then zip a sorted entry
+          # list with -X so no per-file extra fields (UT/UID/GID) leak in.
+          find dist/ghost-plugin -exec touch -t 198001010000 {} +
+          rm -f dist/ghost-plugin.zip
+          (cd dist/ghost-plugin && find . -print | LC_ALL=C sort | zip -X -q ../ghost-plugin.zip -@)
           unzip -l dist/ghost-plugin.zip | head -20
           for arch in amd64 arm64; do
             scripts/assemble-plugin-windows.sh "$arch" "$VERSION" "dist/ghost-plugin-windows-$arch"
-            (cd "dist/ghost-plugin-windows-$arch" && zip -qr "../ghost-plugin-windows-$arch.zip" .)
+            find "dist/ghost-plugin-windows-$arch" -exec touch -t 198001010000 {} +
+            rm -f "dist/ghost-plugin-windows-$arch.zip"
+            (cd "dist/ghost-plugin-windows-$arch" && find . -print | LC_ALL=C sort | zip -X -q "../ghost-plugin-windows-$arch.zip" -@)
             unzip -l "dist/ghost-plugin-windows-$arch.zip" | head -20
           done
 
