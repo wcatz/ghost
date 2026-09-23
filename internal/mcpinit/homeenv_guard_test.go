@@ -1,8 +1,11 @@
 package mcpinit
 
 import (
-	"bufio"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -11,57 +14,61 @@ import (
 // self-enforcing: production resolves home via os.UserHomeDir, which reads
 // HOME on Unix but USERPROFILE on Windows, so a sibling test that sets only
 // one of them directly reads the runner's real profile on the other OS —
-// exactly what the whole-package Windows legs must never do. Every
-// *_test.go in this package must go through setHome (homeenv_test.go) for
-// both variables, and this test fails the file:line of any direct
-// t.Setenv("HOME"/"USERPROFILE") reintroduction.
+// exactly what the whole-package Windows legs must never do.
+// homeenv_test.go is the sanctioned exclusion: it defines homeVars/setHome,
+// the only sanctioned way to set these variables, so every other *_test.go
+// in this package must go through setHome. The guard parses each sibling
+// with go/ast and fails the file:line of any Setenv call (any receiver:
+// t.Setenv or os.Setenv) whose first argument is the string literal "HOME"
+// or "USERPROFILE" — an exact comparison, so near-miss names such as
+// HOMEWORK cannot match, and comment or string-literal text cannot trigger
+// a call that the AST does not contain. Names built dynamically (kv[0] in
+// setHome's own loop) are intentionally out of scope: the invariant targets
+// the literal-call smell this check catches.
 func TestHomeEnvIsolationGuard(t *testing.T) {
 	const helperFile = "homeenv_test.go" // where homeVars/setHome live
-	const guardFile = "homeenv_guard_test.go"
-	needles := []string{`t.Setenv("HOME"`, `t.Setenv("USERPROFILE"`}
 
+	fset := token.NewFileSet()
 	entries, err := os.ReadDir(".")
 	if err != nil {
 		t.Fatalf("read package directory: %v", err)
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, "_test.go") {
+		if e.IsDir() || !strings.HasSuffix(name, "_test.go") || name == helperFile {
 			continue
 		}
-		if name == helperFile || name == guardFile {
-			// The helper is where setHome applies t.Setenv itself; this
-			// file quotes the forbidden call shapes as needle literals.
-			continue
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
 		}
-		scanForBareHomeSetenv(t, name, needles)
-	}
-}
-
-// scanForBareHomeSetenv fails with file:line for every non-comment line of
-// path that sets HOME or USERPROFILE directly instead of via setHome.
-func scanForBareHomeSetenv(t *testing.T, path string, needles []string) {
-	t.Helper()
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatalf("open %s: %v", path, err)
-	}
-	defer f.Close()
-
-	sc := bufio.NewScanner(f)
-	for line := 1; sc.Scan(); line++ {
-		trimmed := strings.TrimSpace(sc.Text())
-		if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") {
-			continue
+		// A sibling test file that does not parse is itself a problem.
+		file, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
 		}
-		for _, needle := range needles {
-			if strings.Contains(trimmed, needle) {
-				t.Errorf("%s:%d sets HOME/USERPROFILE directly; use setHome(t, dir) so both variables stay in sync", path, line)
-				break
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
 			}
-		}
-	}
-	if err := sc.Err(); err != nil {
-		t.Fatalf("scan %s: %v", path, err)
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Setenv" || len(call.Args) == 0 {
+				return true
+			}
+			lit, ok := call.Args[0].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			key, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				return true
+			}
+			if key == "HOME" || key == "USERPROFILE" {
+				pos := fset.Position(lit.Pos())
+				t.Errorf("%s:%d sets %s directly; use setHome(t, dir) so HOME and USERPROFILE move together", pos.Filename, pos.Line, key)
+			}
+			return true
+		})
 	}
 }
