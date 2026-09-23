@@ -97,7 +97,7 @@ func isUnderPluginCache(p string) bool {
 
 - Only `$HOME/.claude/plugins/**` counts; a `.claude/plugins/` segment anywhere else (the audit's false-positive `ghost upgrade` refusal) no longer matches.
 - The fallback preserves today's exact behavior when `UserHomeDir` fails, so the gate never silently returns `false` in that case.
-- Tests: existing cases rebuilt from a set test home (`HOME` and `USERPROFILE`; the windows legs run only the two plugin suites — `-run` in §4 — so the Windows-only case-fold subtest currently runs on no CI leg; it is restored by the whole-package Windows follow-up); new false case for another root; new fallback case with both env vars emptied.
+- Tests: existing cases rebuilt from a set test home (`HOME` and `USERPROFILE`; the windows legs run the whole package — §4 — so the Windows-only case-fold subtest runs on windows-latest and windows-11-arm); new false case for another root; new fallback case with both env vars emptied.
 
 ### 3. Disclosure and `0.0.0` (`A5E6A856a/b/d`)
 
@@ -135,7 +135,7 @@ windows-plugin:
     - run: go test -count=1 -run 'TestPlugin(NameCoupling|E2E)$' ./internal/mcpinit/
 ```
 
-Scope: `-run` selects the two plugin suites — the package's remaining tests isolate `HOME` but not `USERPROFILE`, while production resolves `os.UserHomeDir()` (Windows reads `USERPROFILE`); whole-package Windows runs follow up once test isolation sets both variables. Compilation still covers every test file before `-run` filters.
+Scope: the legs run the whole package — test isolation sets `USERPROFILE` alongside `HOME` everywhere `os.UserHomeDir` is the production source of truth (Windows reads `USERPROFILE`), so every suite reads its hermetic profile instead of the runner's real profile, and the chmod-based inaccessible-database test skips on Windows, where the mechanism cannot revoke access.
 
 Grounding (runner-images Windows Server 2025 manifest, verified 2026-09-23): Bash 5.3, jq 1.8.1, Python 3.12 are preinstalled; `windows-11-arm` is GA (free for public repos), which closes the task's ARM64-native remainder alongside x64. `fail-fast: false` keeps one architecture's result visible while the other runs.
 
