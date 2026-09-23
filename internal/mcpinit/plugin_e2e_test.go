@@ -83,7 +83,7 @@ func writeRootZip(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck
 	zw := zip.NewWriter(f)
 	walkErr := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -115,7 +115,7 @@ func writeRootZip(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		defer srcf.Close()
+		defer srcf.Close() //nolint:errcheck
 		_, err = io.Copy(w, srcf)
 		return err
 	})
@@ -133,7 +133,7 @@ func extractRootZip(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer r.Close()
+	defer r.Close() //nolint:errcheck
 	for _, h := range r.File {
 		p := filepath.Join(dst, filepath.FromSlash(h.Name))
 		if h.FileInfo().IsDir() || strings.HasSuffix(h.Name, "/") {
