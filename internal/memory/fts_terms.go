@@ -65,8 +65,11 @@ const (
 // the fill rule, so a broader function-word tier is low-risk here.
 //
 // Deliberately excluded: number words ("port 8" vs "port 9" must differ —
-// numerics are signal; TestSanitizeFTS also pins "one".."twelve" as content)
-// and negators ("not"/"no" change query meaning).
+// numerics are signal; spelled number words such as "one" stay CONTENT
+// words, pinned as their tier by TestSanitizeFTSN_StopwordSelectionRules/
+// number_words_kept_as_content — TestSanitizeFTS's "limits to 10 words"
+// case pins emission of "one".."twelve" as terms, not their tier) and
+// negators ("not"/"no" change query meaning).
 //
 // Matching lowercases the term; the emitted term always keeps its original
 // text (selection changes which terms are emitted, never how they are

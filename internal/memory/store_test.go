@@ -1219,6 +1219,23 @@ func TestSanitizeFTSN_StopwordSelectionRules(t *testing.T) {
 			t.Errorf("emitted %d terms, want exactly %d", n, ftsSearchWordLimit)
 		}
 	})
+
+	t.Run("number words kept as content words", func(t *testing.T) {
+		// "one" must score as CONTENT, not stopword: the query is 12 terms
+		// (>= cap) whose other 11 are content words, so a stopword-tier "one"
+		// would be evicted from the top 10 — changing both the first emitted
+		// term (alpha, not one) and the last (juliet, not india). This is the
+		// tier pin the ftsStopwords provenance comment cites;
+		// TestSanitizeFTS's "limits to 10 words" case pins only emission,
+		// since an all-tie stable selection collapses to the same first-10
+		// output.
+		query := "one alpha bravo charlie delta echo foxtrot golf hotel india juliet november"
+		got := sanitizeFTS(query)
+		want := `"one" OR "alpha" OR "bravo" OR "charlie" OR "delta" OR "echo" OR "foxtrot" OR "golf" OR "hotel" OR "india"`
+		if got != want {
+			t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", query, got, want)
+		}
+	})
 }
 
 // TestSanitizeFTSKeepsLongQueryTails pins selection on three real >10-word
@@ -1259,6 +1276,44 @@ func TestSanitizeFTSKeepsLongQueryTails(t *testing.T) {
 			assertOriginalOrder(t, tc.query, terms)
 		})
 	}
+}
+
+// TestSanitizeFTSN_PromotesIdentifierOverContentTail pins the identifier
+// tier itself: with more non-stopword terms than the cap, an
+// identifier-shaped TAIL term must outrank ordinary content words and take a
+// slot. The query is 12 non-stop terms — 11 plain content words plus the
+// tail identifier at position 11 — so exactly 10 are kept: the identifier
+// plus the first 9 content words. Displaced are panic (the 10th content
+// word) and recover. If identifiers scored as plain content, all 12 would
+// tie and stable selection would emit the positional first 10 (ending
+// `... "defer" OR "panic"`), which the identifier/present and
+// panic/absent assertions below reject.
+func TestSanitizeFTSN_PromotesIdentifierOverContentTail(t *testing.T) {
+	query := "deploy rollback shard replica cache buffer goroutine channel defer panic recover ghost_windows_arm64"
+	got := sanitizeFTS(query)
+	terms := splitFTSTERMs(t, got)
+	t.Logf("sanitizeFTS(%q) = %s", query, got)
+
+	if len(terms) != ftsSearchWordLimit {
+		t.Errorf("emitted %d terms, want exactly %d", len(terms), ftsSearchWordLimit)
+	}
+	identifierPresent := false
+	panicPresent := false
+	for _, term := range terms {
+		switch term {
+		case "ghost_windows_arm64":
+			identifierPresent = true
+		case "panic":
+			panicPresent = true
+		}
+	}
+	if !identifierPresent {
+		t.Errorf("identifier tail term ghost_windows_arm64 missing from emitted terms %v — the identifier tier did not outrank content words", terms)
+	}
+	if panicPresent {
+		t.Errorf("content word panic emitted in %v — the identifier should have displaced the 10th content word", terms)
+	}
+	assertOriginalOrder(t, query, terms)
 }
 
 func TestStoreTouch(t *testing.T) {
