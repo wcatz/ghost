@@ -99,7 +99,7 @@ Memories are concise, durable notes with one of eight categories:
 - `preference` — a user preference
 - `fact` — general project knowledge
 
-The agent saves memories through MCP tools. Near-duplicates are detected within the same project: same-category saves fold at the standard similarity bar, and cross-category re-saves of the same rule fold too when their token overlap is near-identical (Jaccard >= 0.7), with dead records (resolved/superseded) never treated as fold targets. Ghost preserves the new text as a linked row, strengthens the existing row, and records the relationship without overwriting the original — the existing memory keeps its category. Memories can also be pinned, updated, promoted, searched, or deleted.
+The agent saves memories through MCP tools. Near-duplicates are detected within the same project: same-category saves fold at the standard similarity bar, and cross-category re-saves of the same rule fold too when their token overlap is near-identical (Jaccard >= 0.7) — and those cross-category folds never target dead records (resolved/superseded). Ghost preserves the new text as a linked row, strengthens the existing row, and records the relationship without overwriting the original — the existing memory keeps its category. Memories can also be pinned, updated, promoted, searched, or deleted.
 
 ### Projects and global knowledge
 
