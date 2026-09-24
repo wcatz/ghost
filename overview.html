@@ -559,7 +559,7 @@
       </div>
       <div class="comp-card">
         <h3><span class="dot"></span>Auditable, enumerable egress</h3>
-        <p>GhostMem's normal local memory path makes <b>zero GhostMem-owned network calls</b>. The explicit runtime
+        <p>The normal local memory path results in <b>zero network calls made by GhostMem</b>. The explicit runtime
         integrations are localhost Ollama for embeddings, the selected CLI harness for memory maintenance,
         and the GitHub API for self-upgrade. The harness may use a provider's API or subscription according
         to its own configuration; GhostMem does not add a direct Anthropic client.</p>
@@ -639,9 +639,9 @@
         <h3>The ownership model</h3>
         <div class="sub2">GhostMem — memory on infrastructure you already control</div>
         <ul>
-          <li><span class="who us">Nothing to verify</span><b>No GhostMem-side vendor access</b>There is no GhostMem-side account,
-          token, or endpoint that could reach your memories. An explicitly selected LLM harness is a separate,
-          user-configured egress path and is not a GhostMem memory vendor.</li>
+          <li><span class="who us">Nothing to verify</span><b>No vendor access to GhostMem</b>There is no account, token, or endpoint for
+          GhostMem that could reach your memories. An explicitly selected LLM harness is a separate, user-configured
+          egress path; the harness does not act as a memory vendor with access to GhostMem.</li>
           <li><span class="who us">You hold it</span><b>Data custody</b>One SQLite file on company-managed hardware.
           Residency equals wherever IT put it — office, laptop fleet, or private VPC.</li>
           <li><span class="who us">Your chain only</span><b>Explicit external paths</b>GhostMem has no remote memory
@@ -652,7 +652,7 @@
           <li><span class="who us">Yours alone</span><b>Breach scope</b>A compromised laptop exposes that laptop's data —
           same as any other local file. There is no multi-tenant blast radius.</li>
           <li><span class="who us">One-time</span><b>Cost of trust</b>Security review reads one small Go codebase with an
-          embedded schema. There is no GhostMem-side DPA; any separately selected LLM provider remains subject to its own terms.</li>
+          embedded schema. There is no DPA involving GhostMem; any separately selected LLM provider remains subject to its own terms.</li>
         </ul>
       </div>
     </div>
@@ -782,8 +782,7 @@
     <div class="lic-strip">
       <b>The license in one breath:</b> Apache-2.0 grants commercial use, modification, redistribution, sublicensing,
       and a patent grant — closed-source derivatives are fine. Keep the LICENSE text and attribution notices, mark
-      modified files. One thing it does not grant: the trademark. Vertical products need their own name;
-      the name is intentionally distinct from a well-known publishing platform.
+      modified files. One thing it does not grant: the trademark. GhostMem is a developer memory server, not a blogging platform.
     </div>
   </div>
 </section>
@@ -801,7 +800,7 @@
       <details open>
         <summary>Where does my data actually go?</summary>
         <div class="a">One SQLite file under <code>~/.local/share/ghost</code> (or <code>$XDG_DATA_HOME/ghost</code>) — same path on
-        every OS. GhostMem's local memory path makes <b>zero GhostMem-owned network calls</b>. The explicit runtime integrations are
+        every OS. The normal local memory path results in <b>zero network calls made by GhostMem</b>. The explicit runtime integrations are
         localhost Ollama for embeddings, the selected CLI harness for memory maintenance, and the GitHub API for self-upgrade;
         a harness may use its own API or subscription authentication.</div>
       </details>
