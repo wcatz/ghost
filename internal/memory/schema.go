@@ -66,7 +66,14 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT,
-    resolve_kept_hash TEXT NOT NULL DEFAULT ''
+    resolve_kept_hash TEXT NOT NULL DEFAULT '',
+    valid_from    TEXT,
+    valid_until   TEXT,
+    verified_at   TEXT,
+    agent         TEXT,
+    session_id    TEXT,
+    source_ref    TEXT,
+    confidence    REAL
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
