@@ -488,6 +488,7 @@ func (s *Server) registerTools() {
 		Query     string `json:"query" jsonschema:"Search query — natural language or FTS5 (e.g. 'helm deploy', 'sqlite*'; trailing * is a prefix match, terms are OR'd)"`
 		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
+		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list: per-memory FTS rank, vector rank and cosine, fused RRF score, decay factor, supersede and near-duplicate penalties, plus the reason each excluded candidate was left out. Use when a result looks wrong and you need to know which signal is responsible."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -527,6 +528,26 @@ func (s *Server) registerTools() {
 			if searchLimit > 100 {
 				searchLimit = 100
 			}
+		}
+		// explain runs the same pipeline and returns the diagnosis instead of
+		// the formatted list. Membership is identical to the non-explain path
+		// because both come from SearchHybrid over the same window, so the
+		// breakdown can only describe a result this tool would really return.
+		if args.Explain {
+			ex, xErr := s.store.ExplainSearch(ctx, args.ProjectID, args.Query, queryVec, searchLimit)
+			if xErr != nil {
+				return nil, nil, fmt.Errorf("explain failed: %w", xErr)
+			}
+			if args.Category != "" {
+				ex.Notes = append(ex.Notes, "a category filter is applied after the search by this tool; rows below are pre-filter")
+			}
+			payload, mErr := json.MarshalIndent(ex, "", "  ")
+			if mErr != nil {
+				return nil, nil, fmt.Errorf("encode explanation: %w", mErr)
+			}
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: string(payload)}},
+			}, nil, nil
 		}
 		memories, err := s.store.SearchHybrid(ctx, args.ProjectID, args.Query, queryVec, searchLimit)
 		if err != nil {
