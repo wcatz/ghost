@@ -586,8 +586,12 @@ func runLifecycle() {
 // a dash — or is literally "--source" — cannot be misread as a flag: without
 // that, the hook's argv realigned and the write phases ran against a different
 // project than the one whose pid file was claimed. A lone positional is still
-// accepted for manual use. Anything unexpected is an error rather than being
-// ignored, because a silently misparsed project is a wrong-project write.
+// accepted for manual use, but a bare dash-leading positional is an unknown
+// flag (it is indistinguishable from one; use --project for such names). The
+// phase subcommands take the same verbatim --project form, so a dash-prefixed
+// name round-trips through the whole chain. Anything unexpected is an error
+// rather than being ignored, because a silently misparsed project is a
+// wrong-project write.
 func parseLifecycleArgs(args []string) (project, source string, err error) {
 	projectSet, sourceSet := false, false
 	for i := 0; i < len(args); i++ {
@@ -622,13 +626,6 @@ func parseLifecycleArgs(args []string) (project, source string, err error) {
 	}
 	if !projectSet || project == "" {
 		return "", "", fmt.Errorf("--project is required (usage: ghost lifecycle --project <name> [--source <src>])")
-	}
-	// The phases are run as `ghost reflect|resolve|supersede <project> ...`, and
-	// those parsers read a dash-leading element as a flag, so a dash-prefixed
-	// name cannot be run by them. Reject it here with a clear message rather
-	// than spawning a chain that is guaranteed to fail phase by phase.
-	if strings.HasPrefix(project, "-") {
-		return "", "", fmt.Errorf("project %q begins with %q, which the reflect/resolve/supersede subcommands would read as a flag; rename the project to use auto-consolidation", project, "-")
 	}
 	return project, source, nil
 }
@@ -675,17 +672,22 @@ type lifecyclePhase struct {
 // was killed by hand. The bound is long enough that a legitimately slow pass
 // (resolve classifies up to 8 candidates per CLI-harness call, several seconds
 // each) completes; set the value to 0 to remove the bound entirely.
+//
+// The project is passed to every phase with the explicit --project form (not
+// positionally) so a dash-prefixed project name is parsed as a name by the
+// phase subcommands rather than as a flag — one uniform emission for all
+// projects, dash-leading or not.
 func lifecyclePhases(cfg *config.Config, projectName string, llmOK bool) []lifecyclePhase {
 	timeout := time.Duration(cfg.Reflection.LifecycleTimeoutMinutes) * time.Minute
 	var phases []lifecyclePhase
 	if cfg.Reflection.AutoReflect && llmOK {
-		phases = append(phases, lifecyclePhase{"reflect", []string{"reflect", projectName, "--apply", "--require-llm", "--skip-unchanged"}, timeout})
+		phases = append(phases, lifecyclePhase{"reflect", []string{"reflect", "--project", projectName, "--apply", "--require-llm", "--skip-unchanged"}, timeout})
 	}
 	if cfg.Reflection.AutoResolve {
-		phases = append(phases, lifecyclePhase{"resolve", []string{"resolve", projectName, "--apply"}, timeout})
+		phases = append(phases, lifecyclePhase{"resolve", []string{"resolve", "--project", projectName, "--apply"}, timeout})
 	}
 	if cfg.Reflection.AutoSupersede {
-		phases = append(phases, lifecyclePhase{"supersede", []string{"supersede", projectName, "--apply"}, timeout})
+		phases = append(phases, lifecyclePhase{"supersede", []string{"supersede", "--project", projectName, "--apply"}, timeout})
 	}
 	return phases
 }
@@ -728,39 +730,85 @@ func reflectSkipDecision(skipUnchanged, apply bool, stored, current string) bool
 	return skipUnchanged && apply && stored != "" && stored == current
 }
 
+// reflectArgs is one parsed `ghost reflect` invocation.
+type reflectArgs struct {
+	project       string
+	tier          string
+	source        string
+	apply         bool
+	restore       bool
+	requireLLM    bool
+	allowDrops    bool
+	skipUnchanged bool
+}
+
+// parseReflectArgs parses `ghost reflect`'s arguments (everything after the
+// subcommand word). Hand-rolled, matching the historical loop exactly: value
+// flags accept both "--flag value" and "--flag=value", positionals set the
+// project (last one wins), and unknown flags are silently ignored — the caller
+// prints the usage block when the project comes out empty. The project may
+// also come from --project, which takes the NEXT argument verbatim — a
+// dash-leading name such as -x or --odd is a name, not a flag — so the
+// lifecycle coordinator can emit one uniform form for every project; the
+// positional form is unchanged for manual use. A valueless --project (no
+// argument, or an empty --project=) is an error rather than a silent fall
+// back to another interpretation. Extracted from runReflect so the argv
+// contract is unit-testable without spawning.
+func parseReflectArgs(args []string) (reflectArgs, error) {
+	p := reflectArgs{tier: "auto"}
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--project":
+			if i+1 >= len(args) {
+				return p, errors.New("--project requires a value")
+			}
+			p.project = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--project="):
+			p.project = strings.TrimPrefix(args[i], "--project=")
+			if p.project == "" {
+				return p, errors.New("--project requires a value")
+			}
+		case args[i] == "--tier" && i+1 < len(args):
+			p.tier = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--tier="):
+			p.tier = strings.TrimPrefix(args[i], "--tier=")
+		case args[i] == "--apply":
+			p.apply = true
+		case args[i] == "--restore":
+			p.restore = true
+		case args[i] == "--require-llm":
+			p.requireLLM = true
+		case args[i] == "--allow-drops":
+			p.allowDrops = true
+		case args[i] == "--skip-unchanged":
+			p.skipUnchanged = true
+		case args[i] == "--source" && i+1 < len(args):
+			p.source = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--source="):
+			p.source = strings.TrimPrefix(args[i], "--source=")
+		case !strings.HasPrefix(args[i], "-"):
+			p.project = args[i]
+		}
+	}
+	return p, nil
+}
+
 // runReflect manually triggers memory consolidation for a project.
 // Defaults to dry-run (preview only). Use --apply to save results.
 // Use --restore to undo the last consolidation from snapshot.
 func runReflect() {
-	var projectName, tierValue, source string
-	var apply, restore, requireLLM, allowDrops, skipUnchanged bool
-	tierValue = "auto"
-	for i := 2; i < len(os.Args); i++ {
-		switch {
-		case os.Args[i] == "--tier" && i+1 < len(os.Args):
-			tierValue = os.Args[i+1]
-			i++
-		case strings.HasPrefix(os.Args[i], "--tier="):
-			tierValue = strings.TrimPrefix(os.Args[i], "--tier=")
-		case os.Args[i] == "--apply":
-			apply = true
-		case os.Args[i] == "--restore":
-			restore = true
-		case os.Args[i] == "--require-llm":
-			requireLLM = true
-		case os.Args[i] == "--allow-drops":
-			allowDrops = true
-		case os.Args[i] == "--skip-unchanged":
-			skipUnchanged = true
-		case os.Args[i] == "--source" && i+1 < len(os.Args):
-			source = os.Args[i+1]
-			i++
-		case strings.HasPrefix(os.Args[i], "--source="):
-			source = strings.TrimPrefix(os.Args[i], "--source=")
-		case !strings.HasPrefix(os.Args[i], "-"):
-			projectName = os.Args[i]
-		}
+	parsed, parseErr := parseReflectArgs(os.Args[2:])
+	if parseErr != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
+		os.Exit(1)
 	}
+	projectName := parsed.project
+	tierValue := parsed.tier
+	source := parsed.source
+	apply, restore, requireLLM, allowDrops, skipUnchanged := parsed.apply, parsed.restore, parsed.requireLLM, parsed.allowDrops, parsed.skipUnchanged
 	if projectName == "" {
 		fmt.Fprintln(os.Stderr, `Usage: ghost reflect <project> [flags]
 
@@ -775,7 +823,9 @@ Flags:
   --source string CLI harness for the auto tier: claude-code, opencode, codex,
                    or goose. Defaults to the calling harness (detected from
                    the environment and process ancestry); an undetectable
-                   caller is an error. Ignored by explicit --tier cli/opencode/sqlite.`)
+                   caller is an error. Ignored by explicit --tier cli/opencode/sqlite.
+  --project string Project name; an alternative to the positional form that
+                   takes the next argument verbatim, so dash-prefixed names work.`)
 		os.Exit(1)
 	}
 
@@ -1262,6 +1312,57 @@ func buildClassifyProviderForSource(cfg *config.Config, source string) (ai.Provi
 	return sp, nil
 }
 
+// parseSupersedeArgs parses `ghost supersede`'s arguments (everything after
+// the subcommand word). Hand-rolled, matching the historical loop exactly:
+// value flags accept both "--flag value" and "--flag=value", positionals set
+// the project (last one wins — --project assigns the same way), a
+// non-numeric --threshold keeps the default, and any other flag is an
+// unknown-flag error (which the caller prints and exits on). The project may
+// come from --project, which takes the NEXT argument verbatim — a
+// dash-leading name such as -x or --odd is a name, not a flag — so the
+// lifecycle coordinator can emit one uniform form for every project; a
+// valueless --project is an error. Extracted from runSupersede so the argv
+// contract is unit-testable without os.Exit.
+func parseSupersedeArgs(args []string) (project, source string, apply bool, threshold float32, err error) {
+	threshold = 0.80 // supersession candidates are the SAME fact — tighter than the 0.70 'related' floor
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--apply":
+			apply = true
+		case args[i] == "--project":
+			if i+1 >= len(args) {
+				return "", "", false, 0, errors.New("--project requires a value")
+			}
+			project = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--project="):
+			project = strings.TrimPrefix(args[i], "--project=")
+			if project == "" {
+				return "", "", false, 0, errors.New("--project requires a value")
+			}
+		case args[i] == "--threshold" && i+1 < len(args):
+			if v, verr := strconv.ParseFloat(args[i+1], 32); verr == nil {
+				threshold = float32(v)
+			}
+			i++
+		case strings.HasPrefix(args[i], "--threshold="):
+			if v, verr := strconv.ParseFloat(strings.TrimPrefix(args[i], "--threshold="), 32); verr == nil {
+				threshold = float32(v)
+			}
+		case args[i] == "--source" && i+1 < len(args):
+			source = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--source="):
+			source = strings.TrimPrefix(args[i], "--source=")
+		case !strings.HasPrefix(args[i], "-"):
+			project = args[i]
+		default:
+			return "", "", false, 0, fmt.Errorf("unknown flag %q", args[i])
+		}
+	}
+	return project, source, apply, threshold, nil
+}
+
 // runSupersede implements `ghost supersede <project> [--apply]` — the creation
 // half of staleness-aware ranking. It proposes newer→older 'supersedes' links
 // over the project's live memories (cosine-similar candidates, CLI-harness
@@ -1269,34 +1370,10 @@ func buildClassifyProviderForSource(cfg *config.Config, source string) (ai.Provi
 // it self-heals after `ghost reflect` cascade-deletes links. Consumed by
 // search only when SupersedeDemote is set. See docs/benchmarks.md Phase 3.
 func runSupersede() {
-	var projectName string
-	var source string
-	apply := false
-	threshold := float32(0.80) // supersession candidates are the SAME fact — tighter than the 0.70 'related' floor
-	for i := 2; i < len(os.Args); i++ {
-		switch {
-		case os.Args[i] == "--apply":
-			apply = true
-		case os.Args[i] == "--threshold" && i+1 < len(os.Args):
-			if v, err := strconv.ParseFloat(os.Args[i+1], 32); err == nil {
-				threshold = float32(v)
-			}
-			i++
-		case strings.HasPrefix(os.Args[i], "--threshold="):
-			if v, err := strconv.ParseFloat(strings.TrimPrefix(os.Args[i], "--threshold="), 32); err == nil {
-				threshold = float32(v)
-			}
-		case os.Args[i] == "--source" && i+1 < len(os.Args):
-			source = os.Args[i+1]
-			i++
-		case strings.HasPrefix(os.Args[i], "--source="):
-			source = strings.TrimPrefix(os.Args[i], "--source=")
-		case !strings.HasPrefix(os.Args[i], "-"):
-			projectName = os.Args[i]
-		default:
-			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", os.Args[i])
-			os.Exit(1)
-		}
+	projectName, source, apply, threshold, parseErr := parseSupersedeArgs(os.Args[2:])
+	if parseErr != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
+		os.Exit(1)
 	}
 	if projectName == "" {
 		fmt.Fprintln(os.Stderr, `Usage: ghost supersede <project> [flags]
@@ -1308,6 +1385,8 @@ Flags:
                       codex, or goose. Defaults to the calling harness
                       (detected from the environment and process ancestry); an
                       undetectable caller is an error.
+  --project string    Project name; an alternative to the positional form that
+                      takes the next argument verbatim, so dash-prefixed names work.
 
 Classifies each candidate as supersedes, causes, or neither. Runs through the
 configured CLI harness of the calling session (--source overrides; otherwise
@@ -1370,6 +1449,55 @@ authentication and billing.`)
 	}
 }
 
+// parseResolveArgs parses `ghost resolve`'s arguments (everything after the
+// subcommand word). Hand-rolled, matching the historical loop exactly: exactly
+// one project — positionally (unchanged back-compat) or from --project, which
+// takes the NEXT argument verbatim so a dash-leading name such as -x or --odd
+// is a name, not a flag (a second project in any mixture keeps the historical
+// "expected exactly one project" error); value flags in both "--flag value"
+// and "--flag=value" forms; any other flag an unknown-flag error — which the
+// caller prints and exits on. A valueless --project is an error. Extracted
+// from runResolve so the argv contract is unit-testable without os.Exit.
+func parseResolveArgs(args []string) (project, source string, apply bool, err error) {
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--apply":
+			apply = true
+		case args[i] == "--project":
+			if i+1 >= len(args) {
+				return "", "", false, errors.New("--project requires a value")
+			}
+			if project != "" {
+				return "", "", false, errors.New("expected exactly one project")
+			}
+			project = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--project="):
+			v := strings.TrimPrefix(args[i], "--project=")
+			if v == "" {
+				return "", "", false, errors.New("--project requires a value")
+			}
+			if project != "" {
+				return "", "", false, errors.New("expected exactly one project")
+			}
+			project = v
+		case args[i] == "--source" && i+1 < len(args):
+			source = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--source="):
+			source = strings.TrimPrefix(args[i], "--source=")
+		case !strings.HasPrefix(args[i], "-"):
+			if project != "" {
+				return "", "", false, errors.New("expected exactly one project")
+			}
+			project = args[i]
+		default:
+			return "", "", false, fmt.Errorf("unknown flag %q", args[i])
+		}
+	}
+	return project, source, apply, nil
+}
+
 // runResolve is the CLI entry for `ghost resolve`. It marks resolved-evidence
 // memories (concluded work: findings, changelog notes, PR locators) so they
 // drop out of session-start injection while staying searchable. Cheap local
@@ -1381,28 +1509,10 @@ authentication and billing.`)
 // its resolved_at. The stop hook spawns `ghost lifecycle` detached
 // (internal/mcpinit/stophook.go); its resolve phase runs this with --apply.
 func runResolve() {
-	var projectName string
-	var source string
-	apply := false
-	for i := 2; i < len(os.Args); i++ {
-		switch {
-		case os.Args[i] == "--apply":
-			apply = true
-		case os.Args[i] == "--source" && i+1 < len(os.Args):
-			source = os.Args[i+1]
-			i++
-		case strings.HasPrefix(os.Args[i], "--source="):
-			source = strings.TrimPrefix(os.Args[i], "--source=")
-		case !strings.HasPrefix(os.Args[i], "-"):
-			if projectName != "" {
-				fmt.Fprintln(os.Stderr, "error: expected exactly one project")
-				os.Exit(1)
-			}
-			projectName = os.Args[i]
-		default:
-			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", os.Args[i])
-			os.Exit(1)
-		}
+	projectName, source, apply, parseErr := parseResolveArgs(os.Args[2:])
+	if parseErr != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
+		os.Exit(1)
 	}
 	if projectName == "" {
 		fmt.Fprintln(os.Stderr, `Usage: ghost resolve <project> [flags]
@@ -1413,6 +1523,8 @@ Flags:
                   codex, or goose. Defaults to the calling harness (detected
                   from the environment and process ancestry); an undetectable
                   caller is an error.
+  --project string Project name; an alternative to the positional form that
+                  takes the next argument verbatim, so dash-prefixed names work.
 
 Marks resolved-evidence memories so they drop from session-start injection
 (still searchable). Runs through the configured CLI harness of the calling
