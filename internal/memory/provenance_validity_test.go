@@ -6,24 +6,6 @@ import (
 	"testing"
 )
 
-// phase1aColumns are the additive provenance and temporal-validity columns
-// added in schema v10. All are nullable: Ghost does not know the provenance
-// of memories written before these columns existed, and inventing a value for
-// them would be worse than recording nothing — an empty agent field means
-// "unknown", a guessed one means "wrong".
-var phase1aColumns = []struct {
-	name string
-	ddl  string
-}{
-	{"valid_from", "TEXT"},
-	{"valid_until", "TEXT"},
-	{"verified_at", "TEXT"},
-	{"agent", "TEXT"},
-	{"session_id", "TEXT"},
-	{"source_ref", "TEXT"},
-	{"confidence", "REAL"},
-}
-
 func columnNames(t *testing.T, db *sql.DB, table string) map[string]bool {
 	t.Helper()
 	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
@@ -105,7 +87,7 @@ func TestMigrateV10AddsProvenanceAndValidity(t *testing.T) {
 	}
 
 	cols := columnNames(t, db, "memories")
-	for _, c := range phase1aColumns {
+	for _, c := range phase1aProvenanceColumns {
 		if !cols[c.name] {
 			t.Errorf("memories.%s missing after migrateV10", c.name)
 		}
@@ -159,7 +141,7 @@ func TestMigrateFreshDBHasProvenanceAndValidity(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	cols := columnNames(t, db, "memories")
-	for _, c := range phase1aColumns {
+	for _, c := range phase1aProvenanceColumns {
 		if !cols[c.name] {
 			t.Errorf("memories.%s missing on a fresh database (initSQL)", c.name)
 		}
