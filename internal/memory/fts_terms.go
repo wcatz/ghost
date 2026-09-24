@@ -59,7 +59,7 @@ const (
 // internal/reflection's `stopwords` map (tier_sqlite.go), which cannot be
 // imported here because reflection imports internal/memory — the dependency
 // runs the other way — so the set is embedded and kept aligned by this
-// comment. It is intentionally larger than reflection's 22-word list:
+// comment. It is intentionally larger than reflection's 21-word list:
 // reflection filters tokens inside a similarity score where every dropped
 // word shifts Jaccard, while selection only DEMOTES a term and never below
 // the fill rule, so a broader function-word tier is low-risk here.
