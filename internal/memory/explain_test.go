@@ -134,3 +134,103 @@ func TestExplainSearchExcludedRowsCarryAReason(t *testing.T) {
 		}
 	}
 }
+
+// TestExplainFTSOnlyScoreMatchesTheRanking: with no vector matches
+// SearchHybrid passes a nil score map to decayRank, which synthesizes an
+// unweighted base of 1/(RRFK+rank+1). Reporting the weighted form instead
+// would advertise a number 0.3x the one that actually ranked the results —
+// an agent comparing the breakdown to the ordering would find them
+// irreconcilable, which is the exact confusion explain exists to remove.
+func TestExplainFTSOnlyScoreMatchesTheRanking(t *testing.T) {
+	db, err := OpenDB(filepath.Join(t.TempDir(), "explain-fts-only.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	s := NewStore(db, nil)
+	if err := s.EnsureProject(ctx, testProject, "/tmp/ftsonly", testProject); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, _, _, err := s.Upsert(ctx, testProject, "fact",
+			fmt.Sprintf("traefik routing rule number %d", i), "manual", 0.5, nil); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	ex, err := s.ExplainSearch(ctx, testProject, "traefik routing", nil, 3)
+	if err != nil {
+		t.Fatalf("ExplainSearch: %v", err)
+	}
+	if ex.VectorAvailable {
+		t.Fatal("VectorAvailable true for a nil query vector")
+	}
+
+	p := DefaultSearchParams()
+	for _, r := range ex.Rows {
+		if r.FTSRank < 0 {
+			continue
+		}
+		want := 1.0 / float64(p.RRFK+r.FTSRank+1)
+		if r.RRFScore != want {
+			t.Errorf("row %s FTSRank=%d RRFScore=%v, want %v — the unweighted base decayRank actually used",
+				r.ID, r.FTSRank, r.RRFScore, want)
+		}
+	}
+}
+
+// TestExplainNearDuplicatePenaltyIsDeterministic: DemotionPenalties decides
+// which member of a near-duplicate pair loses from its position in the ids
+// slice (rank[b] > rank[a]). Collecting those ids by ranging over maps lets
+// Go randomize the order, so the penalty would land on a different member
+// every run — an explanation that disagrees with itself is worse than none.
+func TestExplainNearDuplicatePenaltyIsDeterministic(t *testing.T) {
+	db, err := OpenDB(filepath.Join(t.TempDir(), "explain-det.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	s := NewStore(db, nil)
+	if err := s.EnsureProject(ctx, testProject, "/tmp/det", testProject); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	// A near-duplicate pair plus an unrelated row, all matching the query,
+	// so both pair members land in the returned window.
+	pair := "vaultwarden runs behind cloudflare tunnel"
+	if _, _, _, err := s.Upsert(ctx, testProject, "fact", pair, "manual", 0.6, nil); err != nil {
+		t.Fatalf("seed pair: %v", err)
+	}
+	if _, _, _, err := s.Upsert(ctx, testProject, "fact", pair, "manual", 0.6, nil); err != nil {
+		t.Fatalf("seed duplicate: %v", err)
+	}
+	if _, _, _, err := s.Upsert(ctx, testProject, "fact", "unrelated row about vaultwarden", "manual", 0.5, nil); err != nil {
+		t.Fatalf("seed unrelated: %v", err)
+	}
+
+	var baseline map[string]int
+	for run := 0; run < 8; run++ {
+		ex, err := s.ExplainSearch(ctx, testProject, "vaultwarden cloudflare tunnel", nil, 3)
+		if err != nil {
+			t.Fatalf("ExplainSearch run %d: %v", run, err)
+		}
+		got := map[string]int{}
+		for _, r := range ex.Rows {
+			got[r.ID] = r.NearDuplicatePenalty
+		}
+		if baseline == nil {
+			baseline = got
+			continue
+		}
+		for id, want := range baseline {
+			if got[id] != want {
+				t.Fatalf("run %d assigned near_duplicate_penalty %d to %s, run 0 assigned %d — the assignment depends on map iteration order",
+					run, got[id], id, want)
+			}
+		}
+	}
+}

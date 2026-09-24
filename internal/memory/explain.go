@@ -22,11 +22,11 @@ type ExplainRow struct {
 	FTSRank              int     `json:"fts_rank"`               // -1 when the FTS leg had no match
 	VectorRank           int     `json:"vector_rank"`            // -1 when the vector leg had no match
 	VectorScore          float64 `json:"vector_score"`           // cosine; -1 when absent
-	RRFScore             float64 `json:"rrf_score"`              // fused base score before decay
+	RRFScore             float64 `json:"rrf_score"`              // base before decay: 1/(K+rank+1) when no vector leg fused, the weighted sum otherwise
 	DecayFactor          float64 `json:"decay_factor"`           // category/age multiplier applied to the base
 	AgeDays              float64 `json:"age_days"`               //
-	SupersedePenalty     int     `json:"supersede_penalty"`      // co-present memories superseding this one
-	NearDuplicatePenalty int     `json:"near_duplicate_penalty"` // higher-ranked near-duplicate partners
+	SupersedePenalty     int     `json:"supersede_penalty"`      // window-scoped as demoteResults applies it; 0 for rows outside the window
+	NearDuplicatePenalty int     `json:"near_duplicate_penalty"` // window-scoped and order-sensitive, exactly as DemotionPenalties assigns it
 	Reason               string  `json:"reason,omitempty"`       // why it is absent from the results
 }
 
@@ -142,17 +142,35 @@ func (s *Store) ExplainSearch(ctx context.Context, projectID, query string, quer
 		pinned[m.ID] = m.Pinned
 	}
 
-	// Penalty lookups follow the same locking contract as demoteResults:
-	// Store's RLock is held while the helpers read s.db directly.
+	// Penalties are window-scoped and order-sensitive, exactly as the search
+	// applies them. demoteResults runs over the returned window in returned
+	// order, and DemotionPenalties decides which member of a near-duplicate
+	// pair loses from its position in that slice (rank[b] > rank[a]) — so
+	// passing anything else both widens the set and changes the verdict.
+	// Collecting ids by ranging over maps would additionally randomize the
+	// order Go uses, assigning the penalty to a different member on each run.
+	finalIDs := make([]string, len(final))
+	for i, m := range final {
+		finalIDs[i] = m.ID
+	}
 	s.mu.RLock()
-	supersede, supErr := SupersedePenalties(ctx, s.db, ids)
-	nearDup, nearErr := DemotionPenalties(ctx, s.db, ids, pinned, s.demotionThreshold)
+	supersede, supErr := SupersedePenalties(ctx, s.db, finalIDs)
+	nearDup, nearErr := DemotionPenalties(ctx, s.db, finalIDs, pinned, s.demotionThreshold)
 	s.mu.RUnlock()
 	if supErr != nil {
 		supersede = nil
 	}
 	if nearErr != nil {
 		nearDup = nil
+	}
+
+	// SearchHybrid reports an unweighted base when the vector leg contributes
+	// nothing: it passes a nil score map to decayRank, which synthesises
+	// 1/(K+rank+1). Reporting the weighted form there would show a number
+	// 0.3x the one that actually ranked the results.
+	ftsOnly := len(vec) == 0
+	if ftsOnly {
+		ex.Notes = append(ex.Notes, "no vector matches survived — ranking used the unweighted FTS base score, so rrf_score reports that base rather than a weighted sum")
 	}
 
 	now := time.Now().UTC()
@@ -174,7 +192,14 @@ func (s *Store) ExplainSearch(ctx context.Context, projectID, query string, quer
 
 		if r, hit := ftsRank[id]; hit {
 			row.FTSRank = r
-			row.RRFScore += p.FTSWeight / float64(p.RRFK+r+1)
+			if ftsOnly {
+				// Matches decayRank's synthesized base: SearchHybrid passes a
+				// nil score map on this path, so ranking used 1/(K+rank+1)
+				// with no leg weight applied.
+				row.RRFScore += 1.0 / float64(p.RRFK+r+1)
+			} else {
+				row.RRFScore += p.FTSWeight / float64(p.RRFK+r+1)
+			}
 		}
 		if r, hit := vecRank[id]; hit {
 			row.VectorRank = r
