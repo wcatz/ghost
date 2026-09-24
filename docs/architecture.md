@@ -6,7 +6,7 @@ This document is for contributors and maintainers. For installation and everyday
 
 Ghost is intentionally:
 
-- **Single-writer and local-first:** one SQLite database, normally accessed by one process at a time.
+- **Multi-process and local-first:** one SQLite database that any number of Ghost processes may open concurrently; SQLite is the synchronization layer. See [Concurrency contract](#concurrency-contract).
 - **Pull-based during normal MCP use:** the server exposes tools and resources; it does not inject an LLM call into ordinary memory reads.
 - **CGO-free:** `modernc.org/sqlite` supplies SQLite and FTS5 without a C toolchain.
 - **Host-aware:** lifecycle events are normalized into a small contract shared by Claude Code, opencode, Codex, and Goose.
@@ -168,6 +168,34 @@ Without Ollama, the same API remains available with FTS5-only results. Search me
 ### Memory lifecycle
 
 `reflect` replaces non-manual memories through a tiered consolidator. It snapshots before replacement, rejects empty results, preserves manual memories, and can restore the latest snapshot. `resolve` stamps resolved evidence so it leaves injection but remains searchable. `supersede` creates directed replacement links after source-matched classification.
+
+## Concurrency contract
+
+**Multiple Ghost processes may open the same database concurrently, and SQLite is the synchronization layer.** This is a supported mode, not an accident: a CLI command, a live MCP server, a hook-spawned lifecycle subprocess, and a maintenance run routinely overlap.
+
+Ghost does not run a single owning daemon that other commands route through. Each process opens its own handle and relies on the database for isolation.
+
+The guarantees rest on four settings:
+
+| Setting | Where | Why |
+|---|---|---|
+| `journal_mode(WAL)` | `memory.OpenDB` | Readers never block on a writer for their snapshot, so a hook read cannot be stalled by a reflection write. WAL is persisted in the database file, so it applies to every connection to that file. |
+| `busy_timeout(5000)` | `memory.OpenDB`, `mcpinit.rwDSN` | A write arriving mid-contention waits out the other writer instead of failing. Without it, concurrent writes return `SQLITE_BUSY` and the memory is silently lost. |
+| `busy_timeout(1000)` | `mcpinit.roDSN`, CLI read paths | Read-only connections are not exposed to write-lock contention under WAL, so a short timeout is enough to catch real problems without hanging a hook. |
+| `SetMaxOpenConns(1)` | `memory.OpenDB` | Pins each handle to one connection so `PRAGMA data_version` polls compare against a stable baseline. `obsidian sync` uses that counter to detect commits from other processes; an unpinned pool would compare connection-local counters instead of points in database history. |
+
+A read-only connection deliberately sets no `journal_mode`: setting it writes the database header, which a read-only connection cannot do.
+
+### Boundaries
+
+- **Writers are serialized by SQLite, not by Ghost.** There is no application-level writer lock for ordinary memory operations. The per-project lifecycle PID file (`AcquireLifecycleLock`) prevents two *maintenance runs* from overlapping; it does not govern memory reads or writes.
+- **A handle is one connection.** Process-level concurrency is the number of open handles, not the number of goroutines. Goroutines within one process contend with each other for that single connection.
+- **Holding a pinned connection blocks the pool.** Code that pins `db.Conn(ctx)` must not then issue a `db.*` call on the same handle: with `MaxOpenConns(1)` that call waits for a connection only the pinning code can release, and blocks forever.
+- **This contract is solo mode.** It bounds one machine and one database file. A networked multi-writer backend is a separate deployment mode, not a relaxation of these settings; see `ROADMAP.md`.
+
+### Tests
+
+`TestConcurrentProcessesMixedReadWrite` opens several handles against one file, runs concurrent writers and FTS readers, and asserts no `SQLITE_BUSY` failures and no dropped writes. `TestOpenDBPinsPoolToSingleConnection` pins the pool setting directly. Both are contract guards: they pass while the contract holds and fail if a setting that provides it is removed.
 
 ## Configuration and filesystem layout
 
