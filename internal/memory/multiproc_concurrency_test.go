@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -36,6 +37,12 @@ func TestConcurrentProcessesMixedReadWrite(t *testing.T) {
 		writesEach = 25
 	)
 
+	// searchQuery is what the readers ask for; searchTerms is its
+	// whitespace-split form, used to check that a returned row's content
+	// actually is the text the FTS index claims it is.
+	searchQuery := "sqlite wal checkpointing concurrent"
+	searchTerms := strings.Fields(searchQuery)
+
 	// Seed through the first handle so every later writer has a project to
 	// write against; a missing project would surface as FOREIGN KEY rather
 	// than contention and mask the behavior under test.
@@ -64,6 +71,7 @@ func TestConcurrentProcessesMixedReadWrite(t *testing.T) {
 		wg          sync.WaitGroup
 		mu          sync.Mutex
 		written     int
+		ids         []string
 		writeErrs   []string
 		readErrs    []string
 		tornContent []string
@@ -76,7 +84,7 @@ func TestConcurrentProcessesMixedReadWrite(t *testing.T) {
 			go func(h, w int) {
 				defer wg.Done()
 				content := fmt.Sprintf("concurrent fact h=%d w=%d about sqlite wal checkpointing", h, w)
-				_, _, _, err := store.Upsert(ctx, testProject, "fact", content, "manual", 0.5, []string{"concurrency"})
+				id, _, _, err := store.Upsert(ctx, testProject, "fact", content, "manual", 0.5, []string{"concurrency"})
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
@@ -84,6 +92,7 @@ func TestConcurrentProcessesMixedReadWrite(t *testing.T) {
 					return
 				}
 				written++
+				ids = append(ids, id)
 			}(h, w)
 		}
 
@@ -94,7 +103,7 @@ func TestConcurrentProcessesMixedReadWrite(t *testing.T) {
 			for i := 0; i < writesEach; i++ {
 				// SearchFTS rather than SearchHybrid: the FTS side needs no
 				// Ollama, so the contract holds in a hermetic CI run.
-				rows, err := store.SearchFTS(ctx, testProject, "sqlite wal checkpointing concurrent", 10)
+				rows, err := store.SearchFTS(ctx, testProject, searchQuery, 10)
 				if err != nil {
 					mu.Lock()
 					readErrs = append(readErrs, err.Error())
@@ -102,13 +111,67 @@ func TestConcurrentProcessesMixedReadWrite(t *testing.T) {
 					continue
 				}
 				for _, r := range rows {
-					// A torn row would pair content with a missing or
-					// mismatched FTS entry: the search returned it by content,
-					// so the stored content must actually contain the query
-					// terms rather than a stale or empty string.
-					if r.Content == "" {
+					// The FTS row matched searchQuery, so the base-table
+					// content it claims to mirror must contain the same terms.
+					// Checking only for an empty string would let a stale FTS
+					// entry match while joined content held unrelated text —
+					// exactly the torn state this test exists to catch. Terms
+					// are matched loosely (any one of them, case-insensitive)
+					// because FTS5 stems and this assertion is about identity,
+					// not about the tokenizer's ranking.
+					if !containsAnyTerm(r.Content, searchTerms) {
 						mu.Lock()
-						tornContent = append(tornContent, fmt.Sprintf("id=%s returned empty content", r.ID))
+						tornContent = append(tornContent, fmt.Sprintf("id=%s matched %q but content is %q", r.ID, searchQuery, r.Content))
+						mu.Unlock()
+					}
+				}
+			}
+		}(store)
+	}
+	wg.Wait()
+
+	// Phase 2: rewrite content while readers keep searching.
+	//
+	// Inserts alone cannot expose a torn row: memories_au, the trigger that
+	// keeps the FTS index in step with `memories.content`, fires only
+	// WHEN old.content != new.content. A test that only appends never runs
+	// that path, so its torn-row assertion would be dead code. Rewriting each
+	// row to text that deliberately omits searchQuery makes the failure mode
+	// observable: if the index is left stale, SearchFTS still returns the row
+	// while its content no longer contains the terms, and the reader loop
+	// above reports it.
+	for h, store := range stores {
+		wg.Add(1)
+		go func(h int, store *Store) {
+			defer wg.Done()
+			for i, id := range ids {
+				if i%handles != h {
+					continue // partition rows so handles do not fight over one row
+				}
+				updated := fmt.Sprintf("rewritten h=%d i=%d revision about kubernetes namespaces", h, i)
+				if err := store.UpdateMemory(ctx, testProject, id, &updated, nil, nil, nil); err != nil {
+					mu.Lock()
+					writeErrs = append(writeErrs, fmt.Sprintf("update h=%d i=%d: %v", h, i, err))
+					mu.Unlock()
+				}
+			}
+		}(h, store)
+
+		wg.Add(1)
+		go func(store *Store) {
+			defer wg.Done()
+			for i := 0; i < writesEach; i++ {
+				rows, err := store.SearchFTS(ctx, testProject, searchQuery, 10)
+				if err != nil {
+					mu.Lock()
+					readErrs = append(readErrs, err.Error())
+					mu.Unlock()
+					continue
+				}
+				for _, r := range rows {
+					if !containsAnyTerm(r.Content, searchTerms) {
+						mu.Lock()
+						tornContent = append(tornContent, fmt.Sprintf("id=%s matched %q but content is %q", r.ID, searchQuery, r.Content))
 						mu.Unlock()
 					}
 				}
@@ -145,6 +208,20 @@ func TestConcurrentProcessesMixedReadWrite(t *testing.T) {
 	if total != written {
 		t.Errorf("database holds %d memories, but %d writes reported success — contention silently dropped %d", total, written, written-total)
 	}
+}
+
+// containsAnyTerm reports whether content holds at least one of the given
+// terms, case-insensitively. Any one match is enough: the FTS index matched
+// the query as a whole, and this only has to distinguish "the same fact"
+// from "unrelated text that a stale index entry still points at".
+func containsAnyTerm(content string, terms []string) bool {
+	lower := strings.ToLower(content)
+	for _, t := range terms {
+		if strings.Contains(lower, strings.ToLower(t)) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestOpenDBPinsPoolToSingleConnection pins the second half of the contract:

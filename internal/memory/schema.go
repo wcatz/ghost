@@ -242,7 +242,21 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		u := url.URL{Scheme: "file", Opaque: (&url.URL{Path: dbPath}).EscapedPath()}
 		dsn = u.String()
 	}
-	db, err := sql.Open("sqlite", dsn+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
+	// _txlock=immediate makes BeginTx issue BEGIN IMMEDIATE, taking the write
+	// lock when the transaction starts rather than on its first write
+	// statement. The default (deferred) is only safe when the first statement
+	// is already a write: a transaction that reads first holds a WAL read
+	// snapshot, and if another process commits before that transaction's
+	// first write, the read-to-write upgrade fails with SQLITE_BUSY_SNAPSHOT
+	// (517) — which busy_timeout does NOT retry, because it is a snapshot
+	// conflict rather than a lock conflict. UpdateMemory is the case that
+	// exposed this: reads the row, then UPDATEs it, and under concurrent
+	// handles every one of those updates failed in well under a millisecond,
+	// far faster than any timeout could have been reached.
+	//
+	// Every other BeginTx here is write-first, so immediate changes nothing
+	// for them — they acquire the same lock on their first statement anyway.
+	db, err := sql.Open("sqlite", dsn+"?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
