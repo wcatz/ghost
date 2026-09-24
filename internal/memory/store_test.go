@@ -433,6 +433,329 @@ func TestStoreUpsertImportanceCap(t *testing.T) {
 	}
 }
 
+// canonicalMemoryCount counts memories that are not themselves the SOURCE of
+// an active 'duplicate' link — i.e. fold targets, not linked copies. A fold
+// preserves both texts as rows (the non-destructive design TestStoreUpsert
+// pins: 2 rows after a same-category fold), so the raw row count cannot tell
+// "one rule plus its linked copy" from "two competing duplicates"; this count
+// can. Cross-category folding must yield exactly one canonical memory.
+func canonicalMemoryCount(t *testing.T, s *Store, projectID string) int {
+	t.Helper()
+	var count int
+	err := s.db.QueryRowContext(context.Background(), `
+		SELECT COUNT(*) FROM memories m
+		WHERE m.project_id = ?
+		  AND NOT EXISTS (
+		    SELECT 1 FROM memory_links l
+		    WHERE l.source_id = m.id
+		      AND l.relation = 'duplicate'
+		      AND l.invalidated_at IS NULL
+		  )
+	`, projectID).Scan(&count)
+	if err != nil {
+		t.Fatalf("canonical memory count: %v", err)
+	}
+	return count
+}
+
+// TestUpsert_FoldsCrossCategoryDuplicate pins the regression this branch
+// fixes: the same rule saved as preference and then as gotcha must FOLD into
+// the first memory instead of landing as a second, competing canonical copy.
+// Before the cross-category probe existed, the gotcha save missed entirely
+// (the probe only looked within its own category) and inserted an unlinked
+// duplicate — how one production-safety rule accumulated as 12 copies split
+// across preference/gotcha.
+func TestUpsert_FoldsCrossCategoryDuplicate(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const rule = "SQLite busy timeout must be set on the read-only hook connection"
+
+	firstID, dupOf, _, err := s.Upsert(ctx, testProject, "preference", rule, "reflection", 0.6, nil)
+	if err != nil {
+		t.Fatalf("Upsert (first, preference): %v", err)
+	}
+	if dupOf != "" {
+		t.Fatalf("first save should not report a duplicate, got %q", dupOf)
+	}
+
+	secondID, dupOf, score, err := s.Upsert(ctx, testProject, "gotcha", rule, "reflection", 0.6, nil)
+	if err != nil {
+		t.Fatalf("Upsert (second, gotcha): %v", err)
+	}
+	if dupOf != firstID {
+		t.Errorf("cross-category re-save of the same rule must fold into the existing memory: duplicateOf = %q, want %q", dupOf, firstID)
+	}
+	if score < 0.7 {
+		t.Errorf("fold score = %v, want >= 0.7 (identical text)", score)
+	}
+	if secondID == firstID {
+		t.Error("fold must still insert the new text as its own linked row (non-destructive), not reuse the target's ID")
+	}
+
+	// ONE canonical memory — the fold target plus at most a linked copy of
+	// the incoming save. Before the fix this counted 2 (two unlinked,
+	// competing copies of one rule).
+	if got := canonicalMemoryCount(t, s, testProject); got != 1 {
+		t.Errorf("canonical memory count = %d, want 1 (fold target + linked copy)", got)
+	}
+
+	// Raw rows mirror the SAME-CATEGORY fold exactly: the non-destructive
+	// fold keeps both texts (TestStoreUpsert asserts 2 rows after a
+	// same-category fold and forbids content overwrites), so cross-category
+	// must not invent a suppress-insert or content-overwrite path.
+	if got, err := s.CountMemories(ctx, testProject); err != nil {
+		t.Fatalf("CountMemories: %v", err)
+	} else if got != 2 {
+		t.Errorf("raw row count = %d, want 2 (fold keeps both texts, mirroring same-category semantics)", got)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	byID := map[string]Memory{}
+	for _, m := range all {
+		byID[m.ID] = m
+	}
+
+	// Surviving-category rule: the EXISTING memory keeps its category — a
+	// save never silently recategorizes the (possibly pinned/canonical) row
+	// it folds into — and its content is untouched. The linked copy carries
+	// the incoming category so nothing the caller saved is lost.
+	if byID[firstID].Category != "preference" {
+		t.Errorf("fold target category = %q, want preference (existing memory keeps its category)", byID[firstID].Category)
+	}
+	if byID[firstID].Content != rule {
+		t.Errorf("fold target content was overwritten: %q", byID[firstID].Content)
+	}
+	if byID[secondID].Category != "gotcha" {
+		t.Errorf("linked copy category = %q, want gotcha (incoming category preserved)", byID[secondID].Category)
+	}
+
+	// The 'duplicate' link connects copy -> target, same direction the
+	// same-category fold writes.
+	links, err := s.GetLinks(ctx, firstID)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	found := false
+	for _, l := range links {
+		if l.Relation == "duplicate" && l.SourceID == secondID && l.TargetID == firstID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected duplicate link source=%s target=%s, links: %+v", secondID, firstID, links)
+	}
+}
+
+// TestUpsert_CrossCategoryDissimilarSavesStaySeparate guards the other side
+// of the cross-category probe: different categories legitimately hold
+// different facts with overlapping vocabulary, so a save whose token overlap
+// sits below the 0.7 bar must stay its own memory even though the FTS probe
+// recalls the other-category candidate.
+func TestUpsert_CrossCategoryDissimilarSavesStaySeparate(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a := "SQLite busy timeout must be set on the read-only hook connection"
+	b := "SQLite FTS5 rank ordering is unstable across identical RRF scores in hybrid search"
+
+	_, dupOf, _, err := s.Upsert(ctx, testProject, "preference", a, "reflection", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (first): %v", err)
+	}
+	if dupOf != "" {
+		t.Fatalf("first save should not report a duplicate, got %q", dupOf)
+	}
+
+	_, dupOf, _, err = s.Upsert(ctx, testProject, "gotcha", b, "reflection", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (second): %v", err)
+	}
+	j := jaccard(tokenizeContent(a), tokenizeContent(b))
+	t.Logf("cross-category Jaccard = %.4f (shared vocabulary: sqlite; bar 0.7)", j)
+	if j >= 0.7 {
+		t.Fatalf("test setup: pair must sit below the bar, got %.4f", j)
+	}
+	if dupOf != "" {
+		t.Errorf("dissimilar cross-category saves must not fold: duplicateOf = %q", dupOf)
+	}
+	if got := canonicalMemoryCount(t, s, testProject); got != 2 {
+		t.Errorf("canonical memory count = %d, want 2 (distinct facts stay distinct)", got)
+	}
+	if got, err := s.CountMemories(ctx, testProject); err != nil {
+		t.Fatalf("CountMemories: %v", err)
+	} else if got != 2 {
+		t.Errorf("raw row count = %d, want 2", got)
+	}
+}
+
+// TestUpsert_CrossCategoryBarPinsPointSeven pins the exact cross-category
+// bar: token Jaccard >= 0.7 folds, just under does not. Both pairs are
+// subset-shaped so the Jaccard is hand-computable from token counts:
+//
+//	over:  |A|=12, B = A + 5 extra tokens -> 12 / (12+5) = 12/17 = 0.705882...
+//	under: |A|=11, B = A + 5 extra tokens -> 11 / (11+5) = 11/16 = 0.687500
+func TestUpsert_CrossCategoryBarPinsPointSeven(t *testing.T) {
+	t.Run("just over 0.7 (12/17 = 0.705882) folds", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+
+		shared := "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima" // 12 tokens
+		a := shared                                                                          // 12 tokens
+		b := shared + " mike november oscar papa quebec"                                     // 17 tokens, superset of a
+
+		firstID, _, _, err := s.Upsert(ctx, testProject, "preference", a, "reflection", 0.6, nil)
+		if err != nil {
+			t.Fatalf("Upsert (first): %v", err)
+		}
+		_, dupOf, _, err := s.Upsert(ctx, testProject, "gotcha", b, "reflection", 0.6, nil)
+		if err != nil {
+			t.Fatalf("Upsert (second): %v", err)
+		}
+		j := jaccard(tokenizeContent(a), tokenizeContent(b))
+		t.Logf("over-bar pair Jaccard = %.6f (12/17), bar 0.7", j)
+		if j < 0.7 {
+			t.Fatalf("test setup: pair must clear the bar, got %.6f", j)
+		}
+		if dupOf != firstID {
+			t.Errorf("pair at Jaccard %.6f >= 0.7 must fold: duplicateOf = %q, want %q", j, dupOf, firstID)
+		}
+		if got := canonicalMemoryCount(t, s, testProject); got != 1 {
+			t.Errorf("canonical memory count = %d, want 1", got)
+		}
+	})
+
+	t.Run("just under 0.7 (11/16 = 0.6875) stays separate", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+
+		shared := "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo" // 11 tokens
+		a := shared                                                                     // 11 tokens
+		b := shared + " romeo sierra tango uniform victor"                              // 16 tokens, superset of a
+
+		_, _, _, err := s.Upsert(ctx, testProject, "preference", a, "reflection", 0.6, nil)
+		if err != nil {
+			t.Fatalf("Upsert (first): %v", err)
+		}
+		_, dupOf, _, err := s.Upsert(ctx, testProject, "gotcha", b, "reflection", 0.6, nil)
+		if err != nil {
+			t.Fatalf("Upsert (second): %v", err)
+		}
+		j := jaccard(tokenizeContent(a), tokenizeContent(b))
+		t.Logf("under-bar pair Jaccard = %.6f (11/16), bar 0.7", j)
+		if j >= 0.7 {
+			t.Fatalf("test setup: pair must sit under the bar, got %.6f", j)
+		}
+		if dupOf != "" {
+			t.Errorf("pair at Jaccard %.6f < 0.7 must not fold: duplicateOf = %q", j, dupOf)
+		}
+		if got := canonicalMemoryCount(t, s, testProject); got != 2 {
+			t.Errorf("canonical memory count = %d, want 2", got)
+		}
+		if got, err := s.CountMemories(ctx, testProject); err != nil {
+			t.Fatalf("CountMemories: %v", err)
+		} else if got != 2 {
+			t.Errorf("raw row count = %d, want 2", got)
+		}
+	})
+}
+
+// TestUpsert_CrossCategoryNeverFoldsDeadRecords: a fold must never strengthen
+// or link into a record the read paths already treat as dead — a resolved
+// (resolve-verdict) memory or the target of an active 'supersedes' edge. The
+// same-category probe predates those exclusions and is left untouched; the
+// NEW cross-category probe must exclude them so a re-save cannot vanish into
+// a dead record.
+func TestUpsert_CrossCategoryNeverFoldsDeadRecords(t *testing.T) {
+	const rule = "SQLite busy timeout must be set on the read-only hook connection"
+
+	t.Run("resolved candidate is never a fold target", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+
+		deadID, err := s.Create(ctx, testProject, Memory{
+			Category:   "fact",
+			Content:    rule,
+			Source:     "reflection",
+			Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		n, err := s.SetResolved(ctx, []string{deadID})
+		if err != nil {
+			t.Fatalf("SetResolved: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("SetResolved stamped %d, want 1 (candidate must actually be dead)", n)
+		}
+
+		_, dupOf, _, err := s.Upsert(ctx, testProject, "preference", rule, "reflection", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		if dupOf != "" {
+			t.Errorf("must not fold into a resolved (dead) record: duplicateOf = %q (%s)", dupOf, deadID)
+		}
+		// The new save was inserted as its own memory — it did not vanish.
+		if got, err := s.CountMemories(ctx, testProject); err != nil {
+			t.Fatalf("CountMemories: %v", err)
+		} else if got != 2 {
+			t.Errorf("raw row count = %d, want 2 (dead candidate + new save)", got)
+		}
+		if got := canonicalMemoryCount(t, s, testProject); got != 2 {
+			t.Errorf("canonical memory count = %d, want 2", got)
+		}
+	})
+
+	t.Run("superseded candidate is never a fold target", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+
+		staleID, err := s.Create(ctx, testProject, Memory{
+			Category:   "fact",
+			Content:    rule,
+			Source:     "reflection",
+			Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("Create (stale): %v", err)
+		}
+		freshID, err := s.Create(ctx, testProject, Memory{
+			Category:   "fact",
+			Content:    "SQLite WAL checkpointing blocks concurrent writers on the hook",
+			Source:     "reflection",
+			Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("Create (fresh): %v", err)
+		}
+		if err := s.CreateLink(ctx, freshID, staleID, "supersedes", 0.9, "llm"); err != nil {
+			t.Fatalf("CreateLink supersedes: %v", err)
+		}
+
+		// Cross-category candidates: the superseded stale row (identical
+		// text — would fold at Jaccard 1.0 if the exclusion were missing)
+		// and the live fresh row (shares vocabulary but sits far below the
+		// bar). Neither may become the fold target.
+		_, dupOf, _, err := s.Upsert(ctx, testProject, "preference", rule, "reflection", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		if dupOf != "" {
+			t.Errorf("must not fold into a superseded record: duplicateOf = %q (stale=%s fresh=%s)", dupOf, staleID, freshID)
+		}
+		if got, err := s.CountMemories(ctx, testProject); err != nil {
+			t.Fatalf("CountMemories: %v", err)
+		} else if got != 3 {
+			t.Errorf("raw row count = %d, want 3 (stale + fresh + new save)", got)
+		}
+	})
+}
+
 func TestStoreDelete(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -1092,6 +1415,228 @@ func TestSanitizeFTSDefaultCap(t *testing.T) {
 	if n := strings.Count(got, " OR ") + 1; n != ftsSearchWordLimit {
 		t.Errorf("sanitizeFTS returned %d terms, want %d", n, ftsSearchWordLimit)
 	}
+}
+
+// splitFTSTERMs splits a sanitizer result into its emitted terms, unescaped
+// and with any prefix star stripped. Test inputs never embed a literal " OR "
+// inside a term, so splitting on it is safe.
+func splitFTSTERMs(t *testing.T, got string) []string {
+	t.Helper()
+	if got == `""` {
+		return nil
+	}
+	parts := strings.Split(got, " OR ")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if len(p) < 2 || !strings.HasPrefix(p, `"`) {
+			t.Fatalf("malformed term %q in %q", p, got)
+		}
+		p = strings.TrimSuffix(p, "*")
+		p = strings.Trim(p, `"`)
+		out = append(out, strings.ReplaceAll(p, `""`, `"`))
+	}
+	return out
+}
+
+// assertOriginalOrder checks that every emitted term occurs in the query and
+// that the emitted terms appear in original query order.
+func assertOriginalOrder(t *testing.T, query string, terms []string) {
+	t.Helper()
+	fields := strings.Fields(query)
+	idx := make(map[string]int, len(fields))
+	for i, w := range fields {
+		if _, ok := idx[w]; !ok {
+			idx[w] = i
+		}
+	}
+	last := -1
+	for _, term := range terms {
+		i, ok := idx[term]
+		if !ok {
+			t.Fatalf("emitted term %q is not part of query %q", term, query)
+		}
+		if i <= last {
+			t.Errorf("term %q emitted out of original order (position %d after %d) in %v", term, i, last, terms)
+		}
+		last = i
+	}
+}
+
+// TestSanitizeFTSN_SelectsTailTerms is the core term-selection regression:
+// a natural-language query's tail carries its most specific terms, and
+// positional truncation used to discard them before they ever reached FTS.
+// The query below is 13 words; the old first-10 truncation dropped
+// "ghost_windows_arm64 sha256 digest" entirely. Selection must keep the tail,
+// emit exactly ftsSearchWordLimit terms, and preserve original query order.
+func TestSanitizeFTSN_SelectsTailTerms(t *testing.T) {
+	const query = "please can you tell me exactly how to pin the ghost_windows_arm64 sha256 digest"
+	got := sanitizeFTS(query)
+	terms := splitFTSTERMs(t, got)
+	t.Logf("sanitizeFTS(%q) = %s", query, got)
+
+	if len(terms) != ftsSearchWordLimit {
+		t.Errorf("emitted %d terms, want exactly %d", len(terms), ftsSearchWordLimit)
+	}
+	for _, tail := range []string{"ghost_windows_arm64", "sha256", "digest"} {
+		found := false
+		for _, term := range terms {
+			if term == tail {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("tail term %q missing from emitted terms %v — positional truncation discarded the query tail", tail, terms)
+		}
+	}
+	assertOriginalOrder(t, query, terms)
+}
+
+// TestSanitizeFTSN_CountPinUnderSelection pins the emitted count at exactly
+// ftsSearchWordLimit when the query has more non-stopword terms than the cap:
+// selection changes WHICH terms are emitted, never how many. All terms here
+// score equally (plain lowercase content words), so ties fall back to
+// original position — the output is the first maxWords terms.
+func TestSanitizeFTSN_CountPinUnderSelection(t *testing.T) {
+	query := "deploy rollback shard replica cache buffer goroutine channel defer panic recover closure ticker mutex"
+	got := sanitizeFTS(query)
+	want := `"deploy" OR "rollback" OR "shard" OR "replica" OR "cache" OR "buffer" OR "goroutine" OR "channel" OR "defer" OR "panic"`
+	if got != want {
+		t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", query, got, want)
+	}
+	if n := len(splitFTSTERMs(t, got)); n != ftsSearchWordLimit {
+		t.Errorf("emitted %d terms, want exactly %d", n, ftsSearchWordLimit)
+	}
+}
+
+// TestSanitizeFTSN_StopwordSelectionRules pins both directions of the
+// stopword rule:
+//
+//  1. Stops are dropped when >= maxWords higher-value terms exist (they never
+//     crowd content words out of the cap).
+//  2. Stops are kept as filler otherwise — selection never emits fewer than
+//     min(len(terms), maxWords) terms.
+func TestSanitizeFTSN_StopwordSelectionRules(t *testing.T) {
+	t.Run("stops dropped when content words fill the cap", func(t *testing.T) {
+		query := "alpha bravo the charlie delta echo the foxtrot golf hotel the india juliet kilo lima mike november oscar"
+		got := sanitizeFTS(query)
+		want := `"alpha" OR "bravo" OR "charlie" OR "delta" OR "echo" OR "foxtrot" OR "golf" OR "hotel" OR "india" OR "juliet"`
+		if got != want {
+			t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", query, got, want)
+		}
+		if n := len(splitFTSTERMs(t, got)); n != ftsSearchWordLimit {
+			t.Errorf("emitted %d terms, want exactly %d", n, ftsSearchWordLimit)
+		}
+	})
+
+	t.Run("stops fill the cap when content words are scarce", func(t *testing.T) {
+		// 13 terms, only 8 of them content words: all 8 content words plus
+		// the two earliest stopwords must reach FTS (never fewer than
+		// min(len(terms), maxWords) = 10 terms).
+		query := "rotate the kes signing keys and the artifact digest of the release notes"
+		got := sanitizeFTS(query)
+		want := `"rotate" OR "the" OR "kes" OR "signing" OR "keys" OR "and" OR "artifact" OR "digest" OR "release" OR "notes"`
+		if got != want {
+			t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", query, got, want)
+		}
+		if n := len(splitFTSTERMs(t, got)); n != ftsSearchWordLimit {
+			t.Errorf("emitted %d terms, want exactly %d", n, ftsSearchWordLimit)
+		}
+	})
+
+	t.Run("number words kept as content words", func(t *testing.T) {
+		// "one" must score as CONTENT, not stopword: the query is 12 terms
+		// (>= cap) whose other 11 are content words, so a stopword-tier "one"
+		// would be evicted from the top 10 — changing both the first emitted
+		// term (alpha, not one) and the last (juliet, not india). This is the
+		// tier pin the ftsStopwords provenance comment cites;
+		// TestSanitizeFTS's "limits to 10 words" case pins only emission,
+		// since an all-tie stable selection collapses to the same first-10
+		// output.
+		query := "one alpha bravo charlie delta echo foxtrot golf hotel india juliet november"
+		got := sanitizeFTS(query)
+		want := `"one" OR "alpha" OR "bravo" OR "charlie" OR "delta" OR "echo" OR "foxtrot" OR "golf" OR "hotel" OR "india"`
+		if got != want {
+			t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", query, got, want)
+		}
+	})
+}
+
+// TestSanitizeFTSKeepsLongQueryTails pins selection on three real >10-word
+// queries from internal/bench/testdata/queries.jsonl. Positional truncation
+// dropped each query's most specific tail terms ("is a prefix match",
+// "signing keys", "decrypt") before they could reach the FTS leg. The t.Logf
+// line is the query-level before/after evidence for the selection change.
+func TestSanitizeFTSKeepsLongQueryTails(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		tail  []string
+	}{
+		{"q_oauth_open_redirect", "what makes the OAuth redirect validator dangerous if it is a prefix match", []string{"prefix", "match"}},
+		{"q_kes", "how often do I need to rotate the block producer signing keys", []string{"signing", "keys"}},
+		{"q_sops_key", "how are secrets encrypted in the infra repo and who can decrypt", []string{"decrypt"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeFTS(tc.query)
+			terms := splitFTSTERMs(t, got)
+			t.Logf("sanitizeFTS(%q) = %s", tc.query, got)
+
+			if len(terms) > ftsSearchWordLimit {
+				t.Errorf("emitted %d terms, cap is %d", len(terms), ftsSearchWordLimit)
+			}
+			for _, tail := range tc.tail {
+				found := false
+				for _, term := range terms {
+					if term == tail {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("tail term %q missing from emitted terms %v — positional truncation discarded the query tail", tail, terms)
+				}
+			}
+			assertOriginalOrder(t, tc.query, terms)
+		})
+	}
+}
+
+// TestSanitizeFTSN_PromotesIdentifierOverContentTail pins the identifier
+// tier itself: with more non-stopword terms than the cap, an
+// identifier-shaped TAIL term must outrank ordinary content words and take a
+// slot. The query is 12 non-stop terms — 11 plain content words plus the
+// tail identifier at position 11 — so exactly 10 are kept: the identifier
+// plus the first 9 content words. Displaced are panic (the 10th content
+// word) and recover. If identifiers scored as plain content, all 12 would
+// tie and stable selection would emit the positional first 10 (ending
+// `... "defer" OR "panic"`), which the identifier/present and
+// panic/absent assertions below reject.
+func TestSanitizeFTSN_PromotesIdentifierOverContentTail(t *testing.T) {
+	query := "deploy rollback shard replica cache buffer goroutine channel defer panic recover ghost_windows_arm64"
+	got := sanitizeFTS(query)
+	terms := splitFTSTERMs(t, got)
+	t.Logf("sanitizeFTS(%q) = %s", query, got)
+
+	if len(terms) != ftsSearchWordLimit {
+		t.Errorf("emitted %d terms, want exactly %d", len(terms), ftsSearchWordLimit)
+	}
+	identifierPresent := false
+	panicPresent := false
+	for _, term := range terms {
+		switch term {
+		case "ghost_windows_arm64":
+			identifierPresent = true
+		case "panic":
+			panicPresent = true
+		}
+	}
+	if !identifierPresent {
+		t.Errorf("identifier tail term ghost_windows_arm64 missing from emitted terms %v — the identifier tier did not outrank content words", terms)
+	}
+	if panicPresent {
+		t.Errorf("content word panic emitted in %v — the identifier should have displaced the 10th content word", terms)
+	}
+	assertOriginalOrder(t, query, terms)
 }
 
 func TestStoreTouch(t *testing.T) {
@@ -1853,7 +2398,7 @@ func TestStoreDecisions(t *testing.T) {
 	ctx := context.Background()
 
 	// Record a decision.
-	id, memID, err := s.RecordDecision(ctx, testProject,
+	id, memID, _, err := s.RecordDecision(ctx, testProject,
 		"Use SQLite for storage",
 		"SQLite provides embedded persistence with FTS5",
 		"Simple, no external dependencies",
@@ -1940,13 +2485,13 @@ func TestSupersedeDecision(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	oldID, _, err := s.RecordDecision(ctx, testProject,
+	oldID, _, _, err := s.RecordDecision(ctx, testProject,
 		"Use Redis for the job queue", "Redis lists as the queue backend",
 		"Already deployed for caching", nil, nil)
 	if err != nil {
 		t.Fatalf("RecordDecision (old): %v", err)
 	}
-	newID, _, err := s.RecordDecision(ctx, testProject,
+	newID, _, _, err := s.RecordDecision(ctx, testProject,
 		"Reverse: use Postgres for the job queue", "SKIP LOCKED on Postgres",
 		"Redis lost jobs on failover", nil, nil)
 	if err != nil {
@@ -2009,7 +2554,7 @@ func TestListDecisionsLimitPicksNewestNotLiveOnly(t *testing.T) {
 	// Oldest recorded first, so the last one recorded is the newest.
 	var ids []string
 	for i := range 4 {
-		id, _, err := s.RecordDecision(ctx, testProject,
+		id, _, _, err := s.RecordDecision(ctx, testProject,
 			fmt.Sprintf("Decision %d", i), fmt.Sprintf("do thing %d", i), "because", nil, nil)
 		if err != nil {
 			t.Fatalf("RecordDecision %d: %v", i, err)
@@ -2050,7 +2595,7 @@ func TestSupersedeDecisionRejectsBadInput(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	id, _, err := s.RecordDecision(ctx, testProject, "T", "D", "R", nil, nil)
+	id, _, _, err := s.RecordDecision(ctx, testProject, "T", "D", "R", nil, nil)
 	if err != nil {
 		t.Fatalf("RecordDecision: %v", err)
 	}
@@ -2079,7 +2624,7 @@ func TestRecordDecisionPersistsMemoryRow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	id, memID, err := s.RecordDecision(ctx, testProject,
+	id, memID, _, err := s.RecordDecision(ctx, testProject,
 		"Use SQLite", "SQLite for persistence", "Simple and embedded",
 		[]string{"postgres"}, []string{"db"})
 	if err != nil {
@@ -2424,7 +2969,7 @@ func seedFullProject(t *testing.T, s *Store, ctx context.Context, projectID stri
 	if _, err := s.CreateTask(ctx, projectID, "seed task two", "desc", 1); err != nil {
 		t.Fatalf("seed task two: %v", err)
 	}
-	if _, _, err := s.RecordDecision(ctx, projectID, "seed decision", "did the thing", "because", nil, nil); err != nil {
+	if _, _, _, err := s.RecordDecision(ctx, projectID, "seed decision", "did the thing", "because", nil, nil); err != nil {
 		t.Fatalf("seed decision: %v", err)
 	}
 	for i := 0; i < 6; i++ {

@@ -418,6 +418,34 @@ func TestConfigFilePath_DoesNotCreateFile(t *testing.T) {
 	}
 }
 
+// TestDataDirPath_NoCreate pins the split the failure marker relies on:
+// DataDirPath returns the same location DataDir creates, but without ever
+// creating it — so the stop hook's no-LLM skip can check for an existing
+// store and leave no phantom directory when there is none.
+func TestDataDirPath_NoCreate(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmpDir)
+
+	path, err := DataDirPath()
+	if err != nil {
+		t.Fatalf("DataDirPath() error: %v", err)
+	}
+	expected := filepath.Join(tmpDir, "ghost")
+	if path != expected {
+		t.Errorf("expected %q, got %q", expected, path)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("DataDirPath must not create the directory, stat err = %v", err)
+	}
+	// DataDir creates the same path it returned.
+	if _, err := DataDir(); err != nil {
+		t.Fatalf("DataDir() error: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("DataDir must create the DataDirPath path: %v", err)
+	}
+}
+
 func TestDataDir_DefaultFallback(t *testing.T) {
 	// Unset XDG_DATA_HOME to test the fallback to ~/.local/share.
 	t.Setenv("XDG_DATA_HOME", "")

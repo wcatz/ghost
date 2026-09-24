@@ -640,12 +640,20 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 	return id, nil
 }
 
-// Upsert checks for an existing similar memory (same category, FTS overlap).
-// If found, it strengthens the existing memory's importance/access_count and
-// links the new content to it as a 'duplicate' — it never overwrites the
-// existing row's content, so a genuinely different follow-up save under a
-// manual-sourced target (or any target) is never silently discarded. If no
-// candidate scores above threshold, it creates a new, unlinked row.
+// Upsert checks for an existing similar memory, probing in two stages:
+// same-category first (existing bar: mergeScore — Jaccard >= 0.5 or the
+// gated overlap leg), then — only when the same-category probe misses —
+// cross-category candidates at a deliberately higher bar: token Jaccard >=
+// upsertCrossCategoryThreshold (0.7), dead records excluded. On a hit from
+// either probe it strengthens the existing memory's importance/access_count
+// and links the new content to it as a 'duplicate' — it never overwrites the
+// existing row's content or its category (the fold target keeps whatever
+// category it already has, so a save never silently recategorizes a
+// pinned/canonical memory; the linked copy carries the incoming category so
+// nothing the caller saved is lost), so a genuinely different follow-up save
+// under a manual-sourced target (or any target) is never silently discarded.
+// If no candidate scores above the applicable bar, it creates a new,
+// unlinked row.
 func (s *Store) Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (id string, duplicateOf string, score float64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -695,13 +703,78 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 		score = bestSim
 	}
 
+	// Cross-category probe — runs ONLY when the same-category probe above
+	// missed (existingID == ""), so a save that folds within its own category
+	// pays nothing extra. One FTS query with category != surfaces
+	// other-category candidates; precision then requires token Jaccard >=
+	// upsertCrossCategoryThreshold (0.7) — stricter than the same-category
+	// mergeScore gate, because cross-category vocabulary overlap is common
+	// and near-identical wording is the only reliable duplicate signal. The
+	// fold target's category is never touched (see the fold path below): the
+	// existing memory — possibly pinned/canonical — keeps its category, and
+	// the linked copy inserted by the fold carries the incoming category.
+	// Resolved records and the targets of active 'supersedes' edges are
+	// excluded here so a re-save can never fold into a dead memory; the
+	// same-category probe predates those exclusions and keeps its behavior.
+	if existingID == "" {
+		crossRows, crossErr := s.db.QueryContext(ctx, `
+			SELECT m.id, m.importance, m.content
+			FROM memories m
+			JOIN memories_fts f ON f.rowid = m.rowid
+			WHERE m.project_id = ?
+			  AND m.category != ?
+			  AND m.resolved_at IS NULL
+			  AND NOT EXISTS (
+			      SELECT 1 FROM memory_links l
+			      WHERE l.target_id = m.id
+			        AND l.relation = 'supersedes'
+			        AND l.invalidated_at IS NULL
+			  )
+			  AND memories_fts MATCH ?
+			ORDER BY rank, m.importance DESC
+			LIMIT 15
+		`, projectID, category, ftsQuery)
+		if crossErr == nil {
+			// Same empty-token guard as the same-category probe: token-free
+			// content can still FTS-match, and jaccard(∅,∅) scores 1.0.
+			newTokens := tokenizeContent(content)
+			var bestJaccard float64
+			for len(newTokens) > 0 && crossRows.Next() {
+				var candID, candContent string
+				var candImportance float32
+				if scanErr := crossRows.Scan(&candID, &candImportance, &candContent); scanErr != nil {
+					continue
+				}
+				j := jaccard(newTokens, tokenizeContent(candContent))
+				if j >= upsertCrossCategoryThreshold && j > bestJaccard {
+					bestJaccard = j
+					existingID = candID
+					existingImportance = candImportance
+				}
+			}
+			if rowsErr := crossRows.Err(); rowsErr != nil {
+				existingID = "" // treat a broken candidate scan as no match
+			}
+			_ = crossRows.Close()
+			if existingID != "" {
+				score = bestJaccard
+			}
+		}
+		// A failed cross probe falls through to the no-match insert below —
+		// same failure semantics as the same-category probe (a broken probe
+		// must never block a save).
+	}
+
 	tagsJSON, _ := json.Marshal(tags)
 
 	if existingID != "" {
-		// Found a match — strengthen the existing row, then insert the new
-		// content as its own row and link it back as a 'duplicate'. Never
-		// overwrite existingContent: that silently discarded content for
-		// source='manual' targets while still reporting a merge.
+		// Found a match (same-category or cross-category probe) — strengthen
+		// the existing row, then insert the new content as its own row and
+		// link it back as a 'duplicate'. Never overwrite existingContent or
+		// the existing row's category: that silently discarded content for
+		// source='manual' targets while still reporting a merge, and would
+		// recategorize a pinned/canonical fold target. The inserted copy
+		// carries the incoming category unchanged.
 		newImportance := existingImportance + (importance * 0.2)
 		if newImportance > 1.0 {
 			newImportance = 1.0
@@ -1771,6 +1844,26 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 // behind it. The divergence is intentional, not drift.
 const upsertMergeThreshold = 0.5
 
+// upsertCrossCategoryThreshold is the bar a candidate from ANOTHER category
+// must clear before Upsert folds a save into it: token Jaccard >= 0.7 on the
+// full content token sets, with no overlap-coefficient leg. The deliberately
+// higher bar (same-category keeps its existing mergeScore gate untouched)
+// exists because different categories legitimately hold different facts with
+// overlapping vocabulary — "deploy staging" vs "deploy production" may both
+// read like gotchas without being one rule. What it must catch is the shape
+// that produced the 12-copy production-safety incident: the REFLECT
+// consolidator re-emitting one rule as paraphrases split across
+// preference/gotcha, which then walked past the same-category-only probe on
+// every later re-save. Dead records are never candidates regardless of score
+// (resolved_at IS NULL, no active 'supersedes' edge): a fold must not
+// strengthen a record injection already dropped.
+//
+// Cost: one extra FTS query, issued only when the same-category probe misses
+// (genuinely new facts pay it; a save that folds within its own category does
+// not), bounded by the same LIMIT 15 candidate window the same-category probe
+// uses.
+const upsertCrossCategoryThreshold = 0.7
+
 // The overlap leg's gates. The overlap coefficient's one known failure mode is
 // subset-of-a-much-larger-text: a short save whose few tokens all happen to
 // appear in a long unrelated memory scores 1.0. The min-token and min-ratio
@@ -1892,12 +1985,18 @@ func mergeScore(a, b map[string]bool) float64 {
 	return 0
 }
 
-// ftsSearchWordLimit caps how many query terms reach the FTS leg. It is
-// deliberately 10 for the current v2 benchmark. A larger cap broadens the OR
-// query and changes the measured retrieval trade-off; any future change must
-// be re-run against the current graded dataset rather than relying on older
-// experiment numbers. Recovering a natural-language query's tail terms needs
-// term *selection* (stopword/identifier ranking), not a bigger cap.
+// ftsSearchWordLimit caps how many query terms reach the FTS leg, and it is
+// deliberately 10. WHICH terms fill that budget is decided by term
+// selection — see selectFTSTERMs/ftsTermValue in fts_terms.go for the
+// scoring (identifier-shaped tokens outrank content words, stopwords last,
+// ties by original position), which is how a natural-language query's tail
+// terms reach FTS without the budget itself growing.
+//
+// The cap itself must not grow: raising it to 15/20/25/30 broadened the OR
+// query enough that FTS-only NDCG@10 rose above the fused hybrid and
+// inverted TestBenchRegressionFloors (fusion must beat either single leg),
+// measured on the v2 benchmark. Any future change must be re-run against the
+// current graded dataset rather than relying on older experiment numbers.
 const ftsSearchWordLimit = 10
 
 // sanitizeFTS sanitizes text into an FTS5 OR-query. Used on the search path
@@ -1906,14 +2005,19 @@ func sanitizeFTS(text string) string {
 	return sanitizeFTSN(text, ftsSearchWordLimit)
 }
 
-// sanitizeFTSN sanitizes text into an FTS5 OR-query, capped at maxWords.
-// Upsert's duplicate-recall probe uses a wider cap than plain search
-// (see sanitizeFTS) because a broader OR-probe over more of the content
-// improves candidate recall for the precision pass (mergeScore) that follows;
-// widening the cap globally would instead perturb ranked search results.
+// sanitizeFTSN sanitizes text into an FTS5 OR-query, capped at maxWords
+// terms SELECTED by value (ftsTermValue in fts_terms.go) and emitted in
+// original query order — a natural-language query's specific tail terms must
+// reach FTS, not just its first maxWords words. The cap itself exists to
+// keep the OR query narrow (see ftsSearchWordLimit); selection only decides
+// which terms fill it. Upsert's duplicate-recall probe uses a wider cap than
+// plain search (see sanitizeFTS) because a broader OR-probe over more of the
+// content improves candidate recall for the precision pass (mergeScore) that
+// follows; widening the cap globally would instead perturb ranked search
+// results.
 func sanitizeFTSN(text string, maxWords int) string {
 	// Remove FTS5 operators and punctuation, keep only words.
-	var words []string
+	var terms []ftsTerm
 	for _, word := range strings.Fields(text) {
 		// A trailing '*' is an FTS5 prefix operator. Capture it before the edge
 		// trim (which would strip it) and re-attach it outside the quotes as
@@ -1936,18 +2040,27 @@ func sanitizeFTSN(text string, maxWords int) string {
 			if prefix {
 				term += "*"
 			}
-			words = append(words, term)
+			terms = append(terms, ftsTerm{
+				text:  term,
+				value: ftsTermValue(clean),
+				pos:   len(terms),
+			})
 		}
 	}
-	if len(words) == 0 {
+	if len(terms) == 0 {
 		return `""`
 	}
-	// Limit to first maxWords words to keep the query reasonable.
-	if len(words) > maxWords {
+	// Select the maxWords highest-value terms (stopwords only fill the cap
+	// when content words can't) instead of truncating the tail positionally.
+	if len(terms) > maxWords {
 		slog.Warn("fts query truncated",
-			"original_terms", len(words),
+			"original_terms", len(terms),
 			"limit", maxWords)
-		words = words[:maxWords]
+		terms = selectFTSTERMs(terms, maxWords)
+	}
+	words := make([]string, len(terms))
+	for i, t := range terms {
+		words[i] = t.text
 	}
 	return strings.Join(words, " OR ")
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/reflection"
 )
 
 // testDeleteStore returns a real in-memory Store with one project ("proj",
@@ -843,13 +844,13 @@ func TestLifecyclePhasesOrder(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("phase order = %v, want %v", got, want)
 	}
-	if !reflect.DeepEqual(phases[0].args, []string{"reflect", "proj", "--apply", "--require-llm", "--skip-unchanged"}) {
+	if !reflect.DeepEqual(phases[0].args, []string{"reflect", "--project", "proj", "--apply", "--require-llm", "--skip-unchanged"}) {
 		t.Errorf("reflect args = %v", phases[0].args)
 	}
-	if !reflect.DeepEqual(phases[1].args, []string{"resolve", "proj", "--apply"}) {
+	if !reflect.DeepEqual(phases[1].args, []string{"resolve", "--project", "proj", "--apply"}) {
 		t.Errorf("resolve args = %v", phases[1].args)
 	}
-	if !reflect.DeepEqual(phases[2].args, []string{"supersede", "proj", "--apply"}) {
+	if !reflect.DeepEqual(phases[2].args, []string{"supersede", "--project", "proj", "--apply"}) {
 		t.Errorf("supersede args = %v", phases[2].args)
 	}
 }
@@ -945,9 +946,11 @@ func TestLifecyclePhasesTimeoutFromConfig(t *testing.T) {
 // running its write phases against the wrong project. The misroute this guards
 // is concrete: the hook used to pass the project positionally, so a project
 // literally named "--source" realigned the argv and lifecycle ran for whatever
-// followed, while the pid file was claimed for the real project. Dash-prefixed
-// names are now rejected outright, because the phase subcommands' parsers would
-// read them as flags and fail one phase at a time.
+// followed, while the pid file was claimed for the real project. --project
+// therefore takes the NEXT argument verbatim — a dash-prefixed name given that
+// way is a name, and the phase subcommands accept the same form — while a BARE
+// dash-prefixed positional stays an unknown-flag error, because it is
+// indistinguishable from one.
 func TestParseLifecycleArgs(t *testing.T) {
 	ok := []struct {
 		args    []string
@@ -958,6 +961,9 @@ func TestParseLifecycleArgs(t *testing.T) {
 		{[]string{"--project", "my project", "--source", "opencode"}, "my project", "opencode"},
 		{[]string{"ghost"}, "ghost", ""}, // positional still works for manual use
 		{[]string{"ghost", "--source", "cli"}, "ghost", "cli"},
+		{[]string{"--project", "-dashy"}, "-dashy", ""}, // dash-prefixed names round-trip through the phases now
+		{[]string{"--project", "--odd"}, "--odd", ""},
+		{[]string{"--project", "--source"}, "--source", ""}, // value is verbatim, not re-aligned
 	}
 	for _, tc := range ok {
 		project, source, err := parseLifecycleArgs(tc.args)
@@ -980,13 +986,261 @@ func TestParseLifecycleArgs(t *testing.T) {
 		{"--project", "a", "b"},              // extra positional after flag
 		{"--project", "a", "--project", "b"}, // duplicate flag must not last-win
 		{"--project", "a", "--source", "s", "--source", "t"}, // duplicate --source
-		{"--project", "--source"},                            // dash-prefixed project is rejected, not misrouted
-		{"--project", "-dashy"},                              // dash-prefixed project
-		{"-dashy"},                                           // dash-prefixed positional
+		{"-dashy"}, // bare dash-prefixed positional: indistinguishable from a flag; use --project -dashy
 	}
 	for _, args := range bad {
 		if _, _, err := parseLifecycleArgs(args); err == nil {
 			t.Errorf("parseLifecycleArgs(%v) = nil error, want an error", args)
+		}
+	}
+}
+
+// TestParseReflectArgs pins `ghost reflect` argv parsing: the historical
+// positional form (with any accepted flag combination) parses unchanged, and
+// --project takes the NEXT argument verbatim — including dash-leading names
+// such as -x or --odd — so they read as project names, not flags.
+// --project=VALUE matches the parser's other equals-form flags, a valueless
+// --project is a clear error, and unknown flags stay silently ignored
+// (reflect's historical behavior; resolve/supersede error on them).
+func TestParseReflectArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want reflectArgs
+	}{
+		{"positional", []string{"myproj"}, reflectArgs{project: "myproj", tier: "auto"}},
+		{"positional with apply", []string{"myproj", "--apply"}, reflectArgs{project: "myproj", tier: "auto", apply: true}},
+		{"positional with lifecycle flags", []string{"myproj", "--apply", "--require-llm", "--skip-unchanged", "--source", "claude"},
+			reflectArgs{project: "myproj", tier: "auto", apply: true, requireLLM: true, skipUnchanged: true, source: "claude"}},
+		{"tier separate value", []string{"myproj", "--tier", "cli"}, reflectArgs{project: "myproj", tier: "cli"}},
+		{"tier equals value", []string{"myproj", "--tier=cli"}, reflectArgs{project: "myproj", tier: "cli"}},
+		{"restore allow-drops source-equals", []string{"myproj", "--restore", "--allow-drops", "--source=codex"},
+			reflectArgs{project: "myproj", tier: "auto", restore: true, allowDrops: true, source: "codex"}},
+		{"last positional wins", []string{"a", "b"}, reflectArgs{project: "b", tier: "auto"}},
+		{"unknown flag ignored", []string{"myproj", "--wat"}, reflectArgs{project: "myproj", tier: "auto"}},
+		{"project flag dash value", []string{"--project", "-x", "--apply"}, reflectArgs{project: "-x", tier: "auto", apply: true}},
+		{"project flag double-dash value", []string{"--project", "--odd"}, reflectArgs{project: "--odd", tier: "auto"}},
+		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--require-llm", "--skip-unchanged", "--source", "claude"},
+			reflectArgs{project: "-myproj", tier: "auto", apply: true, requireLLM: true, skipUnchanged: true, source: "claude"}},
+		{"project equals form", []string{"--project=-eq"}, reflectArgs{project: "-eq", tier: "auto"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseReflectArgs(tc.args)
+			if err != nil {
+				t.Fatalf("parseReflectArgs(%v): %v", tc.args, err)
+			}
+			if got != tc.want {
+				t.Errorf("parseReflectArgs(%v) = %+v, want %+v", tc.args, got, tc.want)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"project missing value", []string{"--apply", "--project"}},
+		{"project empty equals value", []string{"--project="}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseReflectArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parseReflectArgs(%v) must reject a valueless --project", tc.args)
+			}
+			if !strings.Contains(err.Error(), "--project requires a value") {
+				t.Errorf("error %q must name the missing --project value", err)
+			}
+		})
+	}
+}
+
+// TestParseResolveArgs pins `ghost resolve` argv parsing: exactly one project,
+// positionally (unchanged back-compat) or via --project, which takes the NEXT
+// argument verbatim so dash-leading names parse as names; a second project in
+// any mixture stays the "expected exactly one project" error; valueless
+// --project and unknown flags stay clear errors.
+func TestParseResolveArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		project string
+		source  string
+		apply   bool
+	}{
+		{"positional", []string{"myproj"}, "myproj", "", false},
+		{"positional with apply", []string{"myproj", "--apply"}, "myproj", "", true},
+		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false},
+		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false},
+		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true},
+		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false},
+		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true},
+		{"project equals form", []string{"--project=-eq"}, "-eq", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			project, source, apply, err := parseResolveArgs(tc.args)
+			if err != nil {
+				t.Fatalf("parseResolveArgs(%v): %v", tc.args, err)
+			}
+			if project != tc.project || source != tc.source || apply != tc.apply {
+				t.Errorf("parseResolveArgs(%v) = (%q, %q, %v), want (%q, %q, %v)",
+					tc.args, project, source, apply, tc.project, tc.source, tc.apply)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"two positionals", []string{"a", "b"}, "expected exactly one project"},
+		{"positional then project flag", []string{"a", "--project", "b"}, "expected exactly one project"},
+		{"project flag then positional", []string{"--project", "a", "b"}, "expected exactly one project"},
+		{"duplicate project flag", []string{"--project", "a", "--project", "b"}, "expected exactly one project"},
+		{"project missing value", []string{"--apply", "--project"}, "--project requires a value"},
+		{"project empty equals value", []string{"--project="}, "--project requires a value"},
+		{"unknown flag", []string{"myproj", "--bogus"}, `unknown flag "--bogus"`},
+		{"source missing value", []string{"myproj", "--source"}, `unknown flag "--source"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, err := parseResolveArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parseResolveArgs(%v) must fail", tc.args)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q must contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseSupersedeArgs pins `ghost supersede` argv parsing: same shapes as
+// resolve except the project is last-wins across positionals (historical
+// behavior) and --threshold exists in both value forms, defaulting to 0.80
+// when the value does not parse.
+func TestParseSupersedeArgs(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		project   string
+		source    string
+		apply     bool
+		threshold float32
+	}{
+		{"positional", []string{"myproj"}, "myproj", "", false, 0.80},
+		{"positional with apply", []string{"myproj", "--apply"}, "myproj", "", true, 0.80},
+		{"threshold separate value", []string{"myproj", "--threshold", "0.5"}, "myproj", "", false, 0.5},
+		{"threshold equals value", []string{"myproj", "--threshold=0.25"}, "myproj", "", false, 0.25},
+		{"threshold bad value keeps default", []string{"myproj", "--threshold", "abc"}, "myproj", "", false, 0.80},
+		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, 0.80},
+		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, 0.80},
+		{"last positional wins", []string{"a", "b"}, "b", "", false, 0.80},
+		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, 0.80},
+		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false, 0.80},
+		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true, 0.80},
+		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, 0.80},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			project, source, apply, threshold, err := parseSupersedeArgs(tc.args)
+			if err != nil {
+				t.Fatalf("parseSupersedeArgs(%v): %v", tc.args, err)
+			}
+			if project != tc.project || source != tc.source || apply != tc.apply || threshold != tc.threshold {
+				t.Errorf("parseSupersedeArgs(%v) = (%q, %q, %v, %v), want (%q, %q, %v, %v)",
+					tc.args, project, source, apply, threshold, tc.project, tc.source, tc.apply, tc.threshold)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"project missing value", []string{"--apply", "--project"}, "--project requires a value"},
+		{"project empty equals value", []string{"--project="}, "--project requires a value"},
+		{"unknown flag", []string{"myproj", "--bogus"}, `unknown flag "--bogus"`},
+		{"threshold missing value", []string{"myproj", "--threshold"}, `unknown flag "--threshold"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, _, _, err := parseSupersedeArgs(tc.args)
+			if err == nil {
+				t.Fatalf("parseSupersedeArgs(%v) must fail", tc.args)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q must contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestDashProjectLifecycleRoundTrip proves a dash-prefixed project name is
+// auto-consolidatable end to end: the coordinator's --project entry parse
+// accepts it (no fail-fast guard), every phase argv lifecyclePhases emits
+// parses back to exactly that name — not a flag — with its flags intact, and
+// the name resolves in the store the way each phase's resolveProjectOrExit
+// resolves it.
+func TestDashProjectLifecycleRoundTrip(t *testing.T) {
+	proj, _, err := parseLifecycleArgs([]string{"--project", "-dashy"})
+	if err != nil {
+		t.Fatalf("parseLifecycleArgs --project -dashy: %v", err)
+	}
+	cfg := &config.Config{}
+	cfg.Reflection.AutoReflect = true
+	cfg.Reflection.AutoResolve = true
+	cfg.Reflection.AutoSupersede = true
+	phases := lifecyclePhases(cfg, proj, true)
+	if len(phases) != 3 {
+		t.Fatalf("expected 3 phases, got %d", len(phases))
+	}
+
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	store := memory.NewStore(db, logger)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "dash-id", "/tmp/-dashy", "-dashy"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	for _, ph := range phases {
+		args := ph.args[1:] // drop the subcommand word
+		var got string
+		var apply bool
+		switch ph.name {
+		case "reflect":
+			p, perr := parseReflectArgs(args)
+			if perr != nil {
+				t.Fatalf("parseReflectArgs(%v): %v", ph.args, perr)
+			}
+			got, apply = p.project, p.apply
+			if !p.requireLLM || !p.skipUnchanged {
+				t.Errorf("reflect phase flags lost: %+v", p)
+			}
+		case "resolve":
+			project, _, a, perr := parseResolveArgs(args)
+			if perr != nil {
+				t.Fatalf("parseResolveArgs(%v): %v", ph.args, perr)
+			}
+			got, apply = project, a
+		case "supersede":
+			project, _, a, _, perr := parseSupersedeArgs(args)
+			if perr != nil {
+				t.Fatalf("parseSupersedeArgs(%v): %v", ph.args, perr)
+			}
+			got, apply = project, a
+		default:
+			t.Fatalf("unexpected phase %q", ph.name)
+		}
+		if got != "-dashy" {
+			t.Errorf("%s phase parsed project %q, want -dashy (argv %v)", ph.name, got, ph.args)
+		}
+		if !apply {
+			t.Errorf("%s phase lost --apply: %v", ph.name, ph.args)
+		}
+		id, _, rerr := store.ResolveProject(ctx, got)
+		if rerr != nil || id != "dash-id" {
+			t.Errorf("%s project %q did not resolve: id=%q err=%v", ph.name, got, id, rerr)
 		}
 	}
 }
@@ -1020,4 +1274,34 @@ func mustCtx(t *testing.T, minutes int) context.Context {
 	ctx, cancel := consolidationContext(context.Background(), minutes)
 	t.Cleanup(cancel)
 	return ctx
+}
+
+// TestClampReflectMemories pins the shared content cap on consolidation
+// output: reflection proposals obey the same memory.MaxContentLen as MCP
+// saves, content at the cap is untouched, and a cut is explicit — the
+// stored text ends with the marker naming the limit instead of stopping
+// mid-sentence with no signal.
+func TestClampReflectMemories(t *testing.T) {
+	const markerLiteral = " …[truncated at 8000 bytes]"
+
+	mems := []reflection.ReflectMemory{
+		{Category: "fact", Content: "short and complete"},
+		{Category: "gotcha", Content: strings.Repeat("b", memory.MaxContentLen)},
+		{Category: "gotcha", Content: strings.Repeat("a", memory.MaxContentLen+1)},
+	}
+
+	if cut := clampReflectMemories(mems); cut != 1 {
+		t.Errorf("cut = %d, want 1 (only the over-cap content is cut)", cut)
+	}
+	if mems[0].Content != "short and complete" {
+		t.Errorf("sub-cap content rewritten: %q", mems[0].Content)
+	}
+	if mems[1].Content != strings.Repeat("b", memory.MaxContentLen) {
+		t.Errorf("exactly-at-cap content rewritten: len=%d, want %d", len(mems[1].Content), memory.MaxContentLen)
+	}
+	want := strings.Repeat("a", memory.MaxContentLen) + markerLiteral
+	if mems[2].Content != want {
+		t.Errorf("over-cap content = len %d ending %q, want len %d ending %q",
+			len(mems[2].Content), mems[2].Content[len(mems[2].Content)-len(markerLiteral):], len(want), markerLiteral)
+	}
 }

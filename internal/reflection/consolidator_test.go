@@ -106,7 +106,13 @@ func TestSQLiteConsolidator_MergesDuplicates(t *testing.T) {
 	}
 }
 
-func TestSQLiteConsolidator_DifferentCategoriesNotMerged(t *testing.T) {
+// TestSQLiteConsolidator_MergesDifferentCategoryDuplicates pins the shipped
+// behavior change: identical content in two categories used to survive a
+// consolidation pass as two competing copies (the pairing was gated on
+// category equality), which is how the REFLECT consolidator re-emitted one
+// rule split across categories. The pairing now runs across categories
+// through the same gate, and the FIRST-seen memory's category survives.
+func TestSQLiteConsolidator_MergesDifferentCategoryDuplicates(t *testing.T) {
 	sc := NewSQLiteConsolidator()
 
 	input := ReflectionInput{
@@ -121,9 +127,60 @@ func TestSQLiteConsolidator_DifferentCategoriesNotMerged(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Same content but different categories — should NOT be merged.
-	if len(result.Memories) != 2 {
-		t.Fatalf("expected 2 memories (different categories), got %d", len(result.Memories))
+	// Same content, different categories — now merged into ONE proposal.
+	if len(result.Memories) != 1 {
+		t.Fatalf("expected 1 memory after cross-category merge, got %d", len(result.Memories))
+	}
+	// First-seen category survives (fact), importance takes the max.
+	if result.Memories[0].Category != "fact" {
+		t.Errorf("surviving category = %q, want fact (first-seen keeps its category)", result.Memories[0].Category)
+	}
+	if result.Memories[0].Importance != 0.8 {
+		t.Errorf("merged memory importance = %v, want 0.8 (max)", result.Memories[0].Importance)
+	}
+}
+
+// TestSQLiteConsolidator_MergesCrossCategoryParaphrases pins the task's
+// reflection scenario: two near-identical paraphrases of one rule proposed in
+// DIFFERENT categories (preference + gotcha) within one consolidator pass must
+// come out as ONE merged proposal. Before cross-category pairing this pass
+// emitted 2 — successive passes could keep re-entering the store as a
+// paraphrase split across categories.
+func TestSQLiteConsolidator_MergesCrossCategoryParaphrases(t *testing.T) {
+	sc := NewSQLiteConsolidator()
+
+	pref := "Never fold a saved rule into a dead memory record"
+	gotcha := "Never fold a saved rule into a dead invalidated memory"
+	input := ReflectionInput{
+		ExistingMemories: []memory.Memory{
+			{Category: "preference", Content: pref, Importance: 0.7, Tags: []string{"dedup"}},
+			{Category: "gotcha", Content: gotcha, Importance: 0.8, Tags: []string{"safety"}},
+		},
+	}
+
+	result, err := sc.Consolidate(context.Background(), input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	t.Logf("pair Jaccard = %.3f (reflection tokenize, stopword-filtered)",
+		jaccard(tokenize(pref), tokenize(gotcha)))
+
+	// ONE merged proposal out (2 before cross-category pairing).
+	if len(result.Memories) != 1 {
+		t.Fatalf("expected 1 merged proposal, got %d", len(result.Memories))
+	}
+	m := result.Memories[0]
+	// First-seen category survives — merging must not silently recategorize
+	// the earlier memory; importance takes the max and content the longest,
+	// exactly how the same-category merge has always behaved.
+	if m.Category != "preference" {
+		t.Errorf("surviving category = %q, want preference (first-seen keeps its category)", m.Category)
+	}
+	if m.Importance != 0.8 {
+		t.Errorf("merged importance = %v, want 0.8 (max)", m.Importance)
+	}
+	if m.Content != gotcha {
+		t.Errorf("merged content = %q, want the longer paraphrase %q", m.Content, gotcha)
 	}
 }
 

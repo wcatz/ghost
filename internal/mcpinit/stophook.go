@@ -226,6 +226,12 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 			sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
 			if !sp.Available() {
 				slog.Warn("lifecycle: skipping — no CLI binary available", "source", source)
+				// This guard is exactly the historical silent death of
+				// auto-reflect (no process ever starts, so lifecycle.log
+				// never even appears). Record a failure marker when a store
+				// exists to attribute it to, so the next session-start can
+				// say so instead of the loss surfacing weeks later.
+				recordReflectSkipMarker(cwd)
 				return
 			}
 		}
@@ -276,11 +282,13 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 	exe, err := os.Executable()
 	if err != nil {
 		slog.Warn("lifecycle spawn: cannot locate the ghost binary", "error", err)
+		recordSpawnFailure(projectID, cfg, err)
 		return
 	}
 	logFile, err := os.OpenFile(filepath.Join(dataDir, "lifecycle.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		slog.Warn("lifecycle spawn: cannot open log", "error", err)
+		recordSpawnFailure(projectID, cfg, err)
 		return
 	}
 	defer logFile.Close() //nolint:errcheck
@@ -298,9 +306,70 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 	detachProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		slog.Warn("lifecycle spawn: starting the detached process failed", "error", err)
+		recordSpawnFailure(projectID, cfg, err)
 		return
 	}
 	_ = cmd.Process.Release()
+}
+
+// Lock scope for the two hook-side marker writes below: the per-project pid
+// lock (AcquireLifecycleLock) serializes only the CHILD's end-of-run
+// write/clear — these hook-side writes fire while no child holds it,
+// recordReflectSkipMarker before the isAlive(pidPath) fast path and
+// recordSpawnFailure when the child never started. A hook-side marker can
+// therefore be written and then cleared by a child that subsequently starts
+// and succeeds (or the reverse ordering). The benign worst case is at most
+// ONE missed alert cycle for that project — never a false alert, and
+// temp+rename keeps the marker file itself intact throughout.
+//
+// recordReflectSkipMarker writes the failure marker for the reflect-only
+// no-LLM guard above, where no lifecycle process ever starts. It runs only
+// when a store ALREADY exists (DataDirPath never creates, and a store-less
+// setup has nothing to consolidate — TestSpawnLifecycleIfConfigured_NoOpWithoutLLM
+// pins that no phantom data dir appears), and only when cwd resolves to a
+// project: an unattributable skip cannot be matched to a session later, so
+// recording it would only produce a stray alert. Best-effort throughout.
+func recordReflectSkipMarker(cwd string) {
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		return
+	}
+	dbPath := filepath.Join(dataDir, "ghost.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return
+	}
+	db, err := sql.Open("sqlite", roDSN(dbPath))
+	if err != nil {
+		return
+	}
+	defer db.Close() //nolint:errcheck
+	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	projectID, _ := resolveSessionProject(context.Background(), store, cwd)
+	if projectID == "" {
+		return
+	}
+	_ = WriteLifecycleFailure(projectID, []string{"reflect"}, NoLLMBackendError)
+}
+
+// recordSpawnFailure writes the failure marker for a chain that FAILED TO
+// START after the project was resolved (binary not locatable, log not
+// openable, process not spawnable): no phase will run, so every enabled
+// phase is recorded as failed. Best-effort — a hook must never fail a stop.
+func recordSpawnFailure(projectID string, cfg *config.Config, cause error) {
+	var phases []string
+	if cfg.Reflection.AutoReflect {
+		phases = append(phases, "reflect")
+	}
+	if cfg.Reflection.AutoResolve {
+		phases = append(phases, "resolve")
+	}
+	if cfg.Reflection.AutoSupersede {
+		phases = append(phases, "supersede")
+	}
+	if len(phases) == 0 {
+		return
+	}
+	_ = WriteLifecycleFailure(projectID, phases, cause.Error())
 }
 
 // atomicWritePID writes pid (and, when haveToken is true, its creation-time
