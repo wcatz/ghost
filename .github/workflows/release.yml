@@ -5,13 +5,15 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-  packages: write
-
 jobs:
   release:
     runs-on: ubuntu-latest
+    # GoReleaser builds archives and checksums and creates the draft release,
+    # so it needs contents: write. It publishes no container image because
+    # .goreleaser.yml has no dockers or image_templates; the docker job pushes
+    # the image.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -54,6 +56,12 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    # contents: read covers actions/checkout; packages: write is what lets
+    # GITHUB_TOKEN authenticate to ghcr.io in the login step and publish the
+    # multi-arch image in the build step.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -130,8 +138,13 @@ jobs:
   plugin:
     needs: release
     runs-on: ubuntu-latest
+    # contents: write uploads the three plugin archives as release assets and
+    # writes the pinned catalog. pull-requests: write opens the catalog PR. No
+    # packages: write — this job attaches archives to an existing release, it
+    # does not publish an image.
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -212,47 +225,39 @@ jobs:
           done
           [ "$fail" -eq 0 ]
 
-      - name: Commit the pinned catalog to main
-        # MEASURED BLOCKED (v0.30.18, run 35928382388): this step's
-        # contents-API PUT with GITHUB_TOKEN failed HTTP 409 GH013 —
-        # "Repository rule violations found for refs/heads/main ... 3 of 3
-        # required status checks are expected. Changes must be made through a
-        # pull request." The earlier wrong-sha probe (409 sha-mismatch, no
-        # protection text) was misleading: sha validation runs BEFORE rules
-        # evaluation, so it never reached the rules check.
-        # Follow-up probe c2 (run 35929704681) drove the alternative git
-        # route under the identical workflow context — github-actions[bot]
-        # identity, DCO trailer, checkout-persisted GITHUB_TOKEN — and its
-        # push was rejected with the SAME violations ("push declined due to
-        # repository rule violations"). Both write routes are blocked for
-        # GITHUB_TOKEN: the ruleset `main-branch-protection` bypass actor
-        # User 41898282 (github-actions[bot]) does NOT apply, because the
-        # effective principal of a workflow's GITHUB_TOKEN is the GitHub
-        # Actions app integration (id 15368), which cannot be a bypass actor
-        # on a personal repo (API 422 during setup). Local admin pushes DO
-        # bypass — each prints "Bypassed rule violations for refs/heads/main".
-        # The step body below is kept ready for when an authorization route
-        # is chosen (PAT secret / per-release owner-merged PR / accept the
-        # manual admin pin): the atomic PUT carries main's current blob sha,
-        # so a concurrent change to main fails instead of clobbering;
-        # idempotency guard — byte-compare main's copy against the freshly
-        # pinned local file and skip when they match (the digest script is
-        # byte-idempotent, but a naive re-run would create an
-        # identical-content commit); cross-release downgrade guard.
-        # Until then this step fails at every release (users unaffected — the
-        # catalog is stale-but-valid) and the MANUAL RECOVERY RUNBOOK is the
-        # documented path: an admin runs
-        # scripts/update-marketplace-digest.sh against the published assets
-        # and pushes the pinned .claude-plugin/marketplace.json to main
-        # (admin pushes bypass the ruleset).
-        # NOTE: writes made with GITHUB_TOKEN do NOT trigger follow-on
-        # workflow runs, so this digest commit lands without a main CI run;
-        # acceptable because the digest script's assertions + jq validity and
-        # the cmp verify step below are the gate.
+      - name: Propose the pinned catalog as a pull request
+        id: pin
+        # The catalog is pinned to version-pinned release URLs plus each
+        # archive's sha256. It must reach main, and main requires a pull
+        # request plus three status checks (measured at v0.30.18, run
+        # 35928382388: the contents-API PUT with GITHUB_TOKEN returned HTTP 409
+        # GH013, and the git-push route under the same context, run
+        # 35929704681, was rejected with the same violations).
+        #
+        # A workflow's GITHUB_TOKEN cannot be a bypass actor on a personal
+        # repository, so this writes the catalog to a unique unprotected branch
+        # and opens a PR instead. That is GitHub's documented behaviour for
+        # automation-created PRs: the pull_request event DOES create workflow
+        # runs, held in an approval-required state, released from the merge box
+        # with "Approve workflows to run". A GitHub App or PAT token would skip
+        # that click, but a human was always going to merge the PR, so it is not
+        # worth a long-lived credential.
+        #
+        # The branch is unique per release and is deleted at merge by the
+        # repository's "Automatically delete head branches" setting, so there
+        # is no delete logic here to fail.
+        #
+        # MANUAL STEP after this job succeeds: open the PR below, click
+        # "Approve workflows to run", then merge it. Until the pin is merged,
+        # the catalog keeps pointing at the previous release — which is safe,
+        # because those URLs remain valid.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           PATH_IN_REPO=".claude-plugin/marketplace.json"
+          VERSION="${GITHUB_REF_NAME#v}"
+          BRANCH="automation/marketplace-pin-v${VERSION}"
           gh api "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}?ref=main" > /tmp/main-contents.json
           # Split into two simple commands, not a pipe (and not `&&`): under
           # Actions' default `bash -e {0}` (no pipefail) a jq failure piped
@@ -262,85 +267,160 @@ jobs:
           jq -er '.content' /tmp/main-contents.json > /tmp/main-marketplace.b64
           base64 -d /tmp/main-marketplace.b64 > /tmp/main-marketplace.json
           if cmp -s /tmp/main-marketplace.json "$PATH_IN_REPO"; then
-            echo "main already pins ${GITHUB_REF_NAME}; skipping catalog commit"
+            echo "main already pins ${GITHUB_REF_NAME}; skipping catalog pin"
+            echo "SKIPPED=1" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Cross-release guard (sweeper finding): a re-run of an OLD release
-          # after a newer release already repinned main must never downgrade
-          # the catalog. Extract the version main pins now via jq — scoped to
-          # source.url so no description/homepage text can poison it (empty
-          # while main still carries releases/latest URLs) — and skip when it
-          # is newer than this tag. Same version with different bytes falls
-          # through: that is a legitimate re-pin (e.g. --clobber replaced the
-          # assets, so the catalog must follow the new digests).
-          VERSION="${GITHUB_REF_NAME#v}"
-          MAIN_VERSION="$(jq -r '[.plugins[]?.source.url? | strings | select(test("releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/")) | capture("releases/download/v(?<v>[0-9]+\\.[0-9]+\\.[0-9]+)/").v] | .[0] // empty' /tmp/main-marketplace.json || true)"
+          # Cross-release guard (carried over unchanged): a re-run of an OLD
+          # release after a newer release already repinned main must never
+          # downgrade the catalog. Extract the version main pins now via jq —
+          # scoped to source.url so no description/homepage text can poison it
+          # (empty while main still carries releases/latest URLs) — and skip
+          # when it is newer than this tag. Same version with different bytes
+          # falls through: that is a legitimate re-pin (e.g. --clobber
+          # replaced the assets, so the catalog must follow the new digests).
+          MAIN_VERSION="$(jq -r '[.plugins[]?.source.url? | strings | select(test("releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/")) | capture("releases/download/v(?<v>[0-9]+\\.[0-9]+\\.[0-9]+)/").v] | .[0] // empty' /tmp/main-marketplace.json)"
           NEWEST="$(printf '%s\n%s\n' "$MAIN_VERSION" "$VERSION" | sort -V | tail -n 1)"
           if [ -n "$MAIN_VERSION" ] && [ "$MAIN_VERSION" != "$VERSION" ] && [ "$NEWEST" = "$MAIN_VERSION" ]; then
-            echo "main pins newer release v${MAIN_VERSION}; not downgrading to v${VERSION} — skipping catalog commit"
+            echo "main pins newer release v${MAIN_VERSION}; not downgrading to v${VERSION} — skipping catalog pin"
+            echo "SKIPPED=1" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          BLOB_SHA="$(jq -r '.sha' /tmp/main-contents.json)"
+          # Resolve the blob SHA the PUT must carry. The contents API takes "the
+          # blob SHA of the file being replaced" ON THE TARGET BRANCH, so main's
+          # SHA is only right when the branch does not exist yet.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" >/dev/null 2>&1; then
+            # Re-run of a tag whose branch already carries a catalog commit but
+            # whose PR was never merged. main still holds the older catalog, so
+            # main's SHA would be stale and the PUT would 409.
+            gh api "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}?ref=${BRANCH}" > /tmp/branch-contents.json
+            BLOB_SHA="$(jq -r '.sha' /tmp/branch-contents.json)"
+            echo "pin branch ${BRANCH} already exists; updating it"
+          else
+            # First run. The contents API's branch parameter is not documented to
+            # create a missing ref, so create it explicitly rather than depend on
+            # undocumented auto-creation. A branch cut from main's HEAD carries
+            # main's marketplace.json blob, so main's SHA is the correct one.
+            MAIN_HEAD_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/heads/${BRANCH}" -f sha="$MAIN_HEAD_SHA" >/dev/null
+            BLOB_SHA="$(jq -r '.sha' /tmp/main-contents.json)"
+            echo "created pin branch ${BRANCH} from main@${MAIN_HEAD_SHA:0:7}"
+          fi
           CONTENT_B64="$(base64 <"$PATH_IN_REPO" | tr -d '\n')"
           gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}" \
             -f message="chore(release): pin plugin archives for ${GITHUB_REF_NAME}"$'\n\n'"Signed-off-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>" \
             -f content="$CONTENT_B64" \
             -f sha="$BLOB_SHA" \
-            -f branch="main" >/dev/null
-          echo "committed pinned catalog to main for ${GITHUB_REF_NAME}"
+            -f branch="$BRANCH" >/dev/null
+          echo "wrote pinned catalog to ${BRANCH}"
+          echo "BRANCH=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "SKIPPED=0" >> "$GITHUB_OUTPUT"
 
-      - name: Verify the catalog on main matches the pinned copy
-        # Runs strictly AFTER the commit step: on a normal release main still
-        # pins the previous release until that commit lands, so a pre-commit
-        # byte-compare could only ever fail. The file on main must be
-        # byte-identical to what this job just verified locally (or, under the
-        # downgrade guard, intentionally pin a newer release than this tag).
-        # Route: contents API, not raw.githubusercontent.com — the same
-        # interface that performed the commit. The raw branch CDN caches for
-        # minutes, so right after a successful PUT it can still serve the
-        # pre-commit file and spuriously fail a release whose catalog commit
-        # already landed; the API is read-your-writes consistent, and its
-        # bytes are the authoritative input to the downgrade guard below.
+      - name: Open or update the catalog pull request
+        # GITHUB_TOKEN-created PRs do produce workflow runs, but held pending
+        # approval (see the step above), so the merge box shows a banner. The
+        # summary below says so explicitly: without it a successful release
+        # looks stalled, because the PR is open and its checks are queued with
+        # nothing explaining why.
+        if: steps.pin.outputs.SKIPPED == '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+          BRANCH="${{ steps.pin.outputs.BRANCH }}"
+          {
+            echo "Pins \`.claude-plugin/marketplace.json\` to the"
+            echo "\`releases/download/${GITHUB_REF_NAME}\` archives attached by this release,"
+            echo "with each archive's sha256."
+            echo
+            jq -r '.plugins[] | "- `\(.name)`: \(.source.url) (`\(.source.sha256)`)"' \
+              .claude-plugin/marketplace.json
+            echo
+            echo "Written by the release workflow for ${GITHUB_REF_NAME}."
+          } > /tmp/pr-body.md
+          EXISTING="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$EXISTING" ]; then
+            gh pr edit "$EXISTING" --body-file /tmp/pr-body.md
+            echo "updated existing catalog PR #${EXISTING}"
+            PR_URL="$(gh pr view "$EXISTING" --json url --jq .url)"
+          else
+            gh pr create --base main --head "$BRANCH" \
+              --title "chore(release): pin plugin archives for ${GITHUB_REF_NAME}" \
+              --body-file /tmp/pr-body.md
+            PR_URL="$(gh pr view "$BRANCH" --json url --jq .url)"
+          fi
+          # Assign first, then write. A command substitution that fails inside a
+          # double-quoted echo argument does not fail the echo, so the previous
+          # form wrote an empty PR_URL and the summary silently lost the link
+          # the manual merge needs. As its own statement the assignment is
+          # errexit-visible.
+          if [ -z "$PR_URL" ]; then
+            echo "::error::could not resolve the catalog PR URL"
+            exit 1
+          fi
+          printf 'PR_URL=%s\n' "$PR_URL" >> "$GITHUB_OUTPUT"
+        id: open-pr
+
+      - name: Report the manual merge step
+        if: steps.pin.outputs.SKIPPED == '0'
+        run: |
+          {
+            echo "### Catalog pin needs a manual merge"
+            echo
+            echo "1. Open ${{ steps.open-pr.outputs.PR_URL }}"
+            echo "2. Click **Approve workflows to run** in the merge box — the checks"
+            echo "   are held pending because the PR was created by the workflow"
+            echo "3. Merge once the three required checks pass"
+            echo
+            echo "Until then the catalog keeps pointing at the previous release."
+            echo "Those URLs stay valid, so installs are not broken."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the catalog on the pin branch matches the pinned copy
+        if: steps.pin.outputs.SKIPPED == '0'
+        # Reads the pin branch, not main: at this point in the job the PR is open
+        # but not merged, so main still carries the previous release and a
+        # comparison against it could only fail. Route: contents API, not
+        # raw.githubusercontent.com — the raw branch CDN caches for minutes, so
+        # immediately after a successful write it can still serve pre-write
+        # bytes and spuriously fail a write that already landed. The API is
+        # read-your-writes consistent.
+        #
+        # Skipped when a guard caused the pin step to exit early, because then no
+        # branch write happened and there is nothing new to verify; running it
+        # anyway would compare a stale branch against the local copy and fail a
+        # correctly-skipped release. The main catalog is verified by the PR's own
+        # required checks, which the branch rule will not let a merge bypass.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
           PATH_IN_REPO=".claude-plugin/marketplace.json"
-          VERSION="${GITHUB_REF_NAME#v}"
+          BRANCH="${{ steps.pin.outputs.BRANCH }}"
           attempt=1
           while [ "$attempt" -le 3 ]; do
-            if gh api "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}?ref=main" > /tmp/verify-contents.json; then
+            if gh api "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}?ref=${BRANCH}" > /tmp/verify-contents.json; then
               # Two simple commands, not a pipe (nor `&&`): `bash -e {0}` has
               # no pipefail, so a jq failure piped into base64 would be
               # masked — and `&&` doesn't trip errexit on its left side.
               jq -er '.content' /tmp/verify-contents.json > /tmp/verify-marketplace.b64
               base64 -d /tmp/verify-marketplace.b64 > /tmp/verify-marketplace.json
-              if cmp -s /tmp/verify-marketplace.json .claude-plugin/marketplace.json; then
-                echo "main catalog verified against the pinned copy"
-                exit 0
-              fi
-              # Downgrade-guard skip: main intentionally pins a newer release
-              # than this tag, so "differs from the local copy" is the correct
-              # state. Accept it only when the version extracted from
-              # source.url (jq, so no other JSON text can poison it) is
-              # strictly newer; anything older is a stale/divergent state and
-              # keeps retrying until it fails below.
-              MAIN_VERSION="$(jq -r '[.plugins[]?.source.url? | strings | select(test("releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/")) | capture("releases/download/v(?<v>[0-9]+\\.[0-9]+\\.[0-9]+)/").v] | .[0] // empty' /tmp/verify-marketplace.json || true)"
-              NEWEST="$(printf '%s\n%s\n' "$MAIN_VERSION" "$VERSION" | sort -V | tail -n 1)"
-              if [ -n "$MAIN_VERSION" ] && [ "$MAIN_VERSION" != "$VERSION" ] && [ "$NEWEST" = "$MAIN_VERSION" ]; then
-                echo "main intentionally pins newer release v${MAIN_VERSION}; catalog commit was skipped by the downgrade guard"
+              if cmp -s /tmp/verify-marketplace.json "$PATH_IN_REPO"; then
+                echo "pin branch ${BRANCH} verified against the pinned copy"
                 exit 0
               fi
             fi
             if [ "$attempt" -lt 3 ]; then
-              echo "attempt ${attempt}: main catalog not in sync; retrying in 10s"
+              echo "attempt ${attempt}: ${BRANCH} not in sync; retrying in 10s"
               sleep 10
             fi
             attempt=$((attempt + 1))
           done
           if [ ! -f /tmp/verify-marketplace.json ]; then
-            echo "::error::could not fetch marketplace.json from main via the contents API"
+            echo "::error::could not fetch marketplace.json from ${BRANCH} via the contents API"
             exit 1
           fi
-          echo "::error::marketplace.json on main differs from the pinned local copy"
+          echo "::error::${BRANCH} differs from the pinned local copy"
           diff -u .claude-plugin/marketplace.json /tmp/verify-marketplace.json || true
           exit 1
