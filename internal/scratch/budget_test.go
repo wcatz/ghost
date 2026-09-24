@@ -3,6 +3,7 @@ package scratch
 import (
 	"bytes"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -261,6 +262,57 @@ func TestEnforceBudget_ReapIntoBudgetRecordsWithoutWarning(t *testing.T) {
 	}
 	if !res.Recorded || res.ReapedCount != 1 {
 		t.Errorf("recorded=%v reaped=%d, want recorded with 1 reaped entry", res.Recorded, res.ReapedCount)
+	}
+}
+
+// TestRecordBudgetRun_ReapFailureNotRecordedAsWithinBudget: EnforceBudget warns
+// and proceeds when Reap fails — correctly, hygiene must never block a spawn.
+// But recordBudgetRun must not then write "within budget after reaping stale
+// entries", which asserts a successful reap that did not happen. The recorded
+// row is an audit trail; it has to name the failure.
+func TestRecordBudgetRun_ReapFailureNotRecordedAsWithinBudget(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dataHome, "ghost", "ghost.db")
+	seed, err := openTestDB(dbPath)
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The failure shape: the root measured back within budget (OverBudget
+	// false) but the reap itself returned an error.
+	res := BudgetResult{
+		Root:       "/root/scratch",
+		MaxBytes:   4096,
+		BytesAfter: 0,
+		ReapErr:    errors.New("scratch root unreadable"),
+	}
+	if !recordBudgetRun(res) {
+		t.Fatalf("recordBudgetRun = false, want a recorded row")
+	}
+
+	db, err := openTestDB(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var note string
+	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
+		t.Fatalf("select note: %v", err)
+	}
+	if strings.Contains(note, "within budget after reaping stale entries") {
+		t.Errorf("note = %q, must not claim a successful reap when Reap returned an error", note)
+	}
+	if !strings.Contains(note, "reap") || !strings.Contains(note, "failed") {
+		t.Errorf("note = %q, want it to name the reap failure", note)
 	}
 }
 

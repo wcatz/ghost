@@ -159,9 +159,19 @@ func runMaintenanceCleanScratch(args []string) {
 		os.Exit(1)
 	}
 	if !apply {
-		fmt.Fprintln(os.Stdout, "nothing removed — pass --apply to remove the strict-signature files listed above")
+		if _, err := fmt.Fprintln(os.Stdout, "nothing removed — pass --apply to remove the strict-signature files listed above"); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
-	removed, removedBytes, skipped := scratch.CleanLegacy(os.Stdout, report)
-	fmt.Fprintf(os.Stdout, "done: removed %d file(s), %d bytes (%d skipped)\n", removed, removedBytes, skipped)
+	removed, removedBytes, skipped, err := scratch.CleanLegacy(os.Stdout, report)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := fmt.Fprintf(os.Stdout, "done: removed %d file(s), %d bytes (%d skipped)\n", removed, removedBytes, skipped); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 }

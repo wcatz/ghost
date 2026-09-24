@@ -31,6 +31,10 @@ type BudgetResult struct {
 	OverBudget  bool // still over budget after reaping
 	Fired       bool // initial measure exceeded the budget (reap path ran)
 	Recorded    bool // a maintenance_runs row was written
+	// ReapErr is the error the reap returned, if any. It is carried on the
+	// result so the recorded maintenance_runs row can say the reap failed
+	// instead of claiming stale entries were reaped.
+	ReapErr error
 }
 
 // Size walks dir and returns the total bytes and count of regular files.
@@ -122,6 +126,7 @@ func EnforceBudget() BudgetResult {
 	// Over budget: reap stale entries FIRST, then re-measure.
 	res.Fired = true
 	removed, reapErr := Reap(staleAge)
+	res.ReapErr = reapErr
 	if reapErr != nil {
 		slog.Warn("scratch budget: reap of stale entries failed",
 			"root", root, "error", reapErr)
@@ -182,7 +187,12 @@ func recordBudgetRun(res BudgetResult) bool {
 	defer db.Close() //nolint:errcheck
 
 	note := "within budget after reaping stale entries"
-	if res.OverBudget {
+	switch {
+	case res.ReapErr != nil:
+		// The row is an audit trail. A failed reap must not read as a
+		// successful one, whatever the post-reap measure happened to show.
+		note = fmt.Sprintf("reap of stale entries failed: %v", res.ReapErr)
+	case res.OverBudget:
 		note = fmt.Sprintf("over budget by %d bytes; proceeding", res.BytesAfter-res.MaxBytes)
 	}
 	run := memory.MaintenanceRun{

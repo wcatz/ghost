@@ -184,7 +184,10 @@ func (p probe) inUse(path string) (inUse, ok bool) {
 }
 
 // CleanLegacy removes the report's candidates under --apply. It returns the
-// count of files removed, bytes removed, and candidates skipped.
+// count of files removed, bytes removed, candidates skipped, and the first
+// write error encountered while narrating (reporting is best-effort per line,
+// but a failed write is returned rather than dropped, matching
+// WriteLegacyReport).
 //
 // Safety rails, in order per candidate:
 //  1. no open-file probe on PATH (Windows CI, minimal containers) → remove
@@ -197,48 +200,58 @@ func (p probe) inUse(path string) (inUse, ok bool) {
 //
 // What it never touches: non-strict names, directories (even ones named like
 // droppings), symlinks, and nested files the top-level scan never saw.
-func CleanLegacy(w io.Writer, r LegacyReport) (removed int, removedBytes int64, skipped int) {
+func CleanLegacy(w io.Writer, r LegacyReport) (removed int, removedBytes int64, skipped int, err error) {
+	// A failed write must not abort the removal loop: the removals are the
+	// point, and a broken stdout should not leave debris behind. The first
+	// error is returned after every candidate has been considered.
+	note := func(format string, args ...any) {
+		if err != nil {
+			return
+		}
+		_, err = fmt.Fprintf(w, format, args...)
+	}
+
 	candidates := make([]LegacyFile, 0, len(r.CacheFiles)+len(r.TempFiles))
 	candidates = append(candidates, r.CacheFiles...)
 	candidates = append(candidates, r.TempFiles...)
 	if len(candidates) == 0 {
-		return 0, 0, 0
+		return 0, 0, 0, nil
 	}
 
 	p, found := detectOpenProbe()
 	if !found {
-		fmt.Fprintf(w, "cannot verify that files are closed: neither lsof nor fuser is available; skipping removal of %d file(s)\n", len(candidates))
-		return 0, 0, len(candidates)
+		note("cannot verify that files are closed: neither lsof nor fuser is available; skipping removal of %d file(s)\n", len(candidates))
+		return 0, 0, len(candidates), err
 	}
 
 	for _, c := range candidates {
 		name := filepath.Base(c.Path)
 		// Re-verify immediately before removal: the scan's verdict could be
 		// stale if the path was swapped between report and apply.
-		info, err := os.Lstat(c.Path)
-		if err != nil || !info.Mode().IsRegular() || !legacyDropping.MatchString(name) {
-			fmt.Fprintf(w, "skipping %s: no longer a strict-signature regular file\n", c.Path)
+		info, statErr := os.Lstat(c.Path)
+		if statErr != nil || !info.Mode().IsRegular() || !legacyDropping.MatchString(name) {
+			note("skipping %s: no longer a strict-signature regular file\n", c.Path)
 			skipped++
 			continue
 		}
 		if inUse, ok := p.inUse(c.Path); !ok {
-			fmt.Fprintf(w, "cannot verify %s is closed (%s errored); skipping\n", c.Path, p.tool)
+			note("cannot verify %s is closed (%s errored); skipping\n", c.Path, p.tool)
 			skipped++
 			continue
 		} else if inUse {
-			fmt.Fprintf(w, "skipping open file: %s\n", c.Path)
+			note("skipping open file: %s\n", c.Path)
 			skipped++
 			continue
 		}
-		if err := os.Remove(c.Path); err != nil {
-			fmt.Fprintf(w, "skipping %s: %v\n", c.Path, err)
+		if rmErr := os.Remove(c.Path); rmErr != nil {
+			note("skipping %s: %v\n", c.Path, rmErr)
 			skipped++
 			continue
 		}
-		fmt.Fprintf(w, "removed %s (%d bytes)\n", c.Path, c.Size)
+		note("removed %s (%d bytes)\n", c.Path, c.Size)
 		removed++
 		removedBytes += c.Size
 	}
-	fmt.Fprintf(w, "removed %d file(s), %d bytes; skipped %d\n", removed, removedBytes, skipped)
-	return removed, removedBytes, skipped
+	note("removed %d file(s), %d bytes; skipped %d\n", removed, removedBytes, skipped)
+	return removed, removedBytes, skipped, err
 }

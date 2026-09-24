@@ -96,6 +96,30 @@ func TestPrintMaintenanceStatus_EmptyAndDisabledBudget(t *testing.T) {
 	}
 }
 
+// TestPrintMaintenanceStatus_NegativeBudgetPrintsDisabled: EnforceBudget treats
+// any non-positive budget as disabled (`maxBytes <= 0`), and ScratchConfig
+// documents a negative value as behaving as 0. The status line must agree, or a
+// `max_bytes: -1` prints as an active budget while enforcement is actually off.
+func TestPrintMaintenanceStatus_NegativeBudgetPrintsDisabled(t *testing.T) {
+	view := maintenanceStatusView{
+		Root:      "/root/scratch",
+		RootBytes: 4096,
+		RootFiles: 2,
+		Budget:    -1, // negative: documented as behaving as 0
+	}
+	var buf bytes.Buffer
+	if err := printMaintenanceStatus(&buf, view); err != nil {
+		t.Fatalf("printMaintenanceStatus: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "disabled") {
+		t.Errorf("negative budget must print as disabled, matching EnforceBudget:\n%s", out)
+	}
+	if strings.Contains(out, "budget -1 bytes") {
+		t.Errorf("negative budget printed as an active budget:\n%s", out)
+	}
+}
+
 // TestPrintMaintenanceStatus_NoDatabase: a machine that has never run ghost's
 // server has no DB — the status command reports that instead of failing.
 func TestPrintMaintenanceStatus_NoDatabase(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -126,7 +127,9 @@ func TestScanLegacyAndReport_ListStrictFilesOnlyRemovingNothing(t *testing.T) {
 
 	report := ScanLegacy(cacheDir, tmpDir)
 	var buf bytes.Buffer
-	WriteLegacyReport(&buf, report)
+	if err := WriteLegacyReport(&buf, report); err != nil {
+		t.Fatalf("WriteLegacyReport: %v", err)
+	}
 	out := buf.String()
 
 	// Counts + bytes per category.
@@ -195,6 +198,62 @@ func fakeTool(t *testing.T, name string, exitCode int) {
 	t.Setenv("PATH", dir)
 }
 
+// TestProbe_inUse_RealToolContract pins probe.inUse against the REAL lsof and
+// fuser binaries, because the rest of the suite fakes them (fakeTool above) and
+// therefore cannot notice if the exit-code contract those fakes assume is not
+// what the shipped tools actually do.
+//
+// The contract inUse depends on, and which both tools satisfy: exit 0 means a
+// process holds the file, exit 1 means nobody holds it, any other exit means
+// the probe errored. Note in particular that lsof exits 1 — not 0 — when it
+// finds no holder, so a probe that read lsof's exit as "always success" would
+// report every candidate as in use and clean-scratch would remove nothing.
+func TestProbe_inUse_RealToolContract(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("neither lsof nor fuser exists on Windows; CleanLegacy degrades by construction")
+	}
+	for _, tool := range []string{"lsof", "fuser"} {
+		t.Run(tool, func(t *testing.T) {
+			path, err := exec.LookPath(tool)
+			if err != nil {
+				t.Skipf("%s not installed", tool)
+			}
+			p := probe{tool: tool, path: path}
+
+			dir := t.TempDir()
+			candidate := filepath.Join(dir, ".0123456789abcdef-00000000.so")
+			if err := os.WriteFile(candidate, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			// Unheld: the file exists but nothing has it open. This is the
+			// case that decides whether apply-mode removes anything at all.
+			inUse, ok := p.inUse(candidate)
+			if !ok {
+				t.Errorf("%s: unheld file reported cannot-verify; CleanLegacy would refuse to remove anything", tool)
+			}
+			if inUse {
+				t.Errorf("%s: unheld file reported in use (exit 0); CleanLegacy would skip every removal", tool)
+			}
+
+			// Held: a real open descriptor must be detected, or apply-mode
+			// would delete a file another process is still using.
+			f, err := os.Open(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close() //nolint:errcheck
+			inUse, ok = p.inUse(candidate)
+			if !ok {
+				t.Errorf("%s: held file reported cannot-verify", tool)
+			}
+			if !inUse {
+				t.Errorf("%s: held file reported not in use; CleanLegacy would delete an in-use file", tool)
+			}
+		})
+	}
+}
+
 // TestCleanLegacy_ApplyRemovesStrictRegularFilesOnly: with a tool present that
 // reports every file as closed, --apply removes exactly the strict-signature
 // regular files; the non-strict files, the strict-named directory (with its
@@ -206,7 +265,10 @@ func TestCleanLegacy_ApplyRemovesStrictRegularFilesOnly(t *testing.T) {
 	fakeTool(t, "lsof", 1) // not in use → removable
 
 	var buf bytes.Buffer
-	removed, removedBytes, skipped := CleanLegacy(&buf, report)
+	removed, removedBytes, skipped, err := CleanLegacy(&buf, report)
+	if err != nil {
+		t.Fatalf("CleanLegacy: %v", err)
+	}
 
 	if removed != 2 || removedBytes != 300 || skipped != 0 {
 		t.Errorf("CleanLegacy = (%d files, %d bytes, %d skipped), want (2, 300, 0): output:\n%s",
@@ -247,7 +309,10 @@ func TestCleanLegacy_SkipsOpenFiles(t *testing.T) {
 	fakeTool(t, "lsof", 0) // in use → must skip
 
 	var buf bytes.Buffer
-	removed, _, skipped := CleanLegacy(&buf, report)
+	removed, _, skipped, err := CleanLegacy(&buf, report)
+	if err != nil {
+		t.Fatalf("CleanLegacy: %v", err)
+	}
 	out := buf.String()
 
 	if removed != 0 || skipped != 2 {
@@ -272,7 +337,10 @@ func TestCleanLegacy_ToolErrorSkips(t *testing.T) {
 	fakeTool(t, "lsof", 2) // error → cannot verify
 
 	var buf bytes.Buffer
-	removed, _, skipped := CleanLegacy(&buf, report)
+	removed, _, skipped, err := CleanLegacy(&buf, report)
+	if err != nil {
+		t.Fatalf("CleanLegacy: %v", err)
+	}
 	if removed != 0 || skipped != 2 {
 		t.Errorf("CleanLegacy = (removed %d, skipped %d), want (0, 2): output:\n%s", removed, skipped, buf.String())
 	}
@@ -289,7 +357,10 @@ func TestCleanLegacy_FuserFallback(t *testing.T) {
 	fakeTool(t, "fuser", 1) // only fuser on PATH; reports closed
 
 	var buf bytes.Buffer
-	removed, _, skipped := CleanLegacy(&buf, report)
+	removed, _, skipped, err := CleanLegacy(&buf, report)
+	if err != nil {
+		t.Fatalf("CleanLegacy: %v", err)
+	}
 	if removed != 2 || skipped != 0 {
 		t.Errorf("CleanLegacy = (removed %d, skipped %d), want (2, 0): output:\n%s", removed, skipped, buf.String())
 	}
@@ -306,7 +377,10 @@ func TestCleanLegacy_ToolUnavailableSkipsRemoval(t *testing.T) {
 	t.Setenv("PATH", "") // no lsof, no fuser anywhere
 
 	var buf bytes.Buffer
-	removed, _, skipped := CleanLegacy(&buf, report)
+	removed, _, skipped, err := CleanLegacy(&buf, report)
+	if err != nil {
+		t.Fatalf("CleanLegacy: %v", err)
+	}
 	out := buf.String()
 
 	if removed != 0 {
