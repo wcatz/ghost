@@ -67,7 +67,7 @@ func TestIsUnderPluginCache(t *testing.T) {
 		if runtime.GOOS != "windows" {
 			t.Skip("case-folding branch only runs on Windows; asserted there and pinned as case-sensitive on POSIX above")
 		}
-		t.Setenv("USERPROFILE", `C:\Users\u`)
+		setHome(t, `C:\Users\u`)
 		if !isUnderPluginCache(`C:/USERS/U/.CLAUDE/PLUGINS/ghost/1.0.0/bin/ghost.exe`) {
 			t.Error("want true for a differently-cased executable path on Windows")
 		}

@@ -161,13 +161,14 @@ jobs:
       - name: Build
         run: go build -o /dev/null ./cmd/ghost
 
-  # Real-Windows verification for the Claude Code plugin: this package owns
-  # the coupling test (runs the assemble scripts) and the plugin e2e suite
-  # (zip round-trip, MCP stdio handshake, both hooks, init deferral), and
-  # the legs run the whole package — test isolation sets USERPROFILE
-  # alongside HOME, so every test reads its hermetic profile here. Two
-  # architectures because a native .exe cannot serve both — matching the
-  # two per-arch marketplace entries.
+  # Real-Windows verification of the whole internal/mcpinit suite:
+  # cross-platform correctness of every test in this package on native
+  # Windows, both arches — the coupling test (runs the assemble scripts),
+  # the plugin e2e suite (zip round-trip, MCP stdio handshake, both hooks,
+  # init deferral), the hook tree-sync test, and the rest. Test isolation
+  # sets USERPROFILE alongside HOME, so every test reads its hermetic
+  # profile here. Two architectures because a native .exe cannot serve
+  # both — matching the two per-arch marketplace entries.
   #
   # No -race: these are OS/ARCH legs — linux's build-and-test owns race.
   # If windows-11-arm cannot queue for this repo, trim the matrix to
