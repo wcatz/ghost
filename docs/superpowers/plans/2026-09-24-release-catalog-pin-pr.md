@@ -326,18 +326,38 @@ implementation.
           # when it is newer than this tag. Same version with different bytes
           # falls through: that is a legitimate re-pin (e.g. --clobber
           # replaced the assets, so the catalog must follow the new digests).
-          MAIN_VERSION="$(jq -r '[.plugins[]?.source.url? | strings | select(test("releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/")) | capture("releases/download/v(?<v>[0-9]+\\.[0-9]+\\.[0-9]+)/").v] | .[0] // empty' /tmp/main-marketplace.json || true)"
+          # No `|| true`: a catalog whose only URLs are releases/latest
+          # legitimately yields empty with jq exit 0, so a failure here means
+          # malformed input and must fail the stage rather than silently
+          # reading as "main pins nothing".
+          MAIN_VERSION="$(jq -r '[.plugins[]?.source.url? | strings | select(test("releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/")) | capture("releases/download/v(?<v>[0-9]+\\.[0-9]+\\.[0-9]+)/").v] | .[0] // empty' /tmp/main-marketplace.json)"
           NEWEST="$(printf '%s\n%s\n' "$MAIN_VERSION" "$VERSION" | sort -V | tail -n 1)"
           if [ -n "$MAIN_VERSION" ] && [ "$MAIN_VERSION" != "$VERSION" ] && [ "$NEWEST" = "$MAIN_VERSION" ]; then
             echo "main pins newer release v${MAIN_VERSION}; not downgrading to v${VERSION} — skipping catalog pin"
             echo "SKIPPED=1" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Commit the pinned bytes to the pin branch. The contents API creates
-          # the branch on first use and adds a commit on later releases; it is
-          # an ordinary commit, not a force-push, so a half-applied write cannot
-          # strand the branch.
-          BLOB_SHA="$(jq -r '.sha' /tmp/main-contents.json)"
+          # Resolve the blob SHA the PUT must carry. The contents API takes "the
+          # blob SHA of the file being replaced" ON THE TARGET BRANCH, so main's
+          # SHA is only right when the branch does not exist yet.
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" >/dev/null 2>&1; then
+            # Re-run of a tag whose branch already carries a catalog commit but
+            # whose PR was never merged. main still holds the older catalog, so
+            # main's SHA would be stale and the PUT would 409.
+            gh api "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}?ref=${BRANCH}" > /tmp/branch-contents.json
+            BLOB_SHA="$(jq -r '.sha' /tmp/branch-contents.json)"
+            echo "pin branch ${BRANCH} already exists; updating it"
+          else
+            # First run. The contents API's branch parameter is not documented to
+            # create a missing ref, so create it explicitly rather than depend on
+            # undocumented auto-creation. A branch cut from main's HEAD carries
+            # main's marketplace.json blob, so main's SHA is the correct one.
+            MAIN_HEAD_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/heads/${BRANCH}" -f sha="$MAIN_HEAD_SHA" >/dev/null
+            BLOB_SHA="$(jq -r '.sha' /tmp/main-contents.json)"
+            echo "created pin branch ${BRANCH} from main@${MAIN_HEAD_SHA:0:7}"
+          fi
           CONTENT_B64="$(base64 <"$PATH_IN_REPO" | tr -d '\n')"
           gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/${PATH_IN_REPO}" \
             -f message="chore(release): pin plugin archives for ${GITHUB_REF_NAME}"$'\n\n'"Signed-off-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>" \
@@ -398,13 +418,23 @@ Insert immediately after the `Propose the pinned catalog as a pull request` stag
           if [ -n "$EXISTING" ]; then
             gh pr edit "$EXISTING" --body-file /tmp/pr-body.md
             echo "updated existing catalog PR #${EXISTING}"
-            echo "PR_URL=$(gh pr view "$EXISTING" --json url --jq .url)" >> "$GITHUB_OUTPUT"
+            PR_URL="$(gh pr view "$EXISTING" --json url --jq .url)"
           else
             gh pr create --base main --head "$BRANCH" \
               --title "chore(release): pin plugin archives for ${GITHUB_REF_NAME}" \
               --body-file /tmp/pr-body.md
-            echo "PR_URL=$(gh pr view "$BRANCH" --json url --jq .url)" >> "$GITHUB_OUTPUT"
+            PR_URL="$(gh pr view "$BRANCH" --json url --jq .url)"
           fi
+          # Assign first, then write. A command substitution that fails inside a
+          # double-quoted echo argument does not fail the echo, so the previous
+          # form wrote an empty PR_URL and the summary silently lost the link
+          # the manual merge needs. As its own statement the assignment is
+          # errexit-visible.
+          if [ -z "$PR_URL" ]; then
+            echo "::error::could not resolve the catalog PR URL"
+            exit 1
+          fi
+          printf 'PR_URL=%s\n' "$PR_URL" >> "$GITHUB_OUTPUT"
         id: open-pr
 ```
 
