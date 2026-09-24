@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 9
+const schemaVersion = 10
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -29,6 +29,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV7,
 	migrateV8,
 	migrateV9,
+	migrateV10,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -432,6 +433,60 @@ func migrateV9(tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+// migrateV10 adds temporal-validity and provenance columns to memories.
+//
+// Temporal validity answers "was this true then / is it true now", which
+// decay alone cannot: decay only lowers a stale memory's rank, it never says
+// the memory stopped being applicable. Provenance answers "why believe it" —
+// a fact read out of a Helmfile is not the same evidence as an agent's
+// inference, and `source` already distinguishes how a memory arrived but not
+// who or what produced its content, in which session, against which
+// reference, or how much it was trusted.
+//
+// All seven columns are nullable and deliberately get NO default. Ghost has
+// no record of the agent, session, or reference behind memories written
+// before v10, and a fabricated value would be an assertion about provenance
+// that nobody made: NULL reads as "unknown", which is true. confidence in
+// particular stays NULL rather than 0.5 — a stored number implies a
+// measured belief, and an invented midpoint would launder into evidence the
+// moment anything ranked by it.
+//
+// Purely additive: no existing column, constraint, trigger, or FTS index
+// changes, so there is no table rebuild and no writer or reader needs to
+// change for the migration to be correct.
+func migrateV10(tx *sql.Tx) error {
+	for _, c := range phase1aProvenanceColumns {
+		exists, err := columnExists(tx, "memories", c.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue // hand-migrated DB already carries this column
+		}
+		q := fmt.Sprintf("ALTER TABLE memories ADD COLUMN %s %s", c.name, c.typ)
+		if _, err := tx.Exec(q); err != nil {
+			return fmt.Errorf("add memories.%s: %w", c.name, err)
+		}
+	}
+	return nil
+}
+
+// phase1aProvenanceColumns is the v10 column set, shared by migrateV10 and
+// the tests that assert it, so a column added to one and forgotten in the
+// other cannot pass.
+var phase1aProvenanceColumns = []struct {
+	name string
+	typ  string
+}{
+	{"valid_from", "TEXT"},
+	{"valid_until", "TEXT"},
+	{"verified_at", "TEXT"},
+	{"agent", "TEXT"},
+	{"session_id", "TEXT"},
+	{"source_ref", "TEXT"},
+	{"confidence", "REAL"},
 }
 
 // columnExists reports whether table has a column named column, matching
