@@ -328,7 +328,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
           BRANCH="${{ steps.pin.outputs.BRANCH }}"
           {
             echo "Pins \`.claude-plugin/marketplace.json\` to the"

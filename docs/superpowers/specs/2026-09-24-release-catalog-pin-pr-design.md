@@ -66,16 +66,26 @@ proposes; a human disposes. That is the property the branch rule exists to keep.
 ### Permissions
 
 The workflow currently declares `contents: write` and `packages: write` at the
-top level, so both jobs receive both. This change splits them per job, which is
-the least privilege the two jobs actually need:
+top level, so all three jobs receive both. This change splits them per job, which
+is the least privilege each job actually needs:
 
-- `release` — `contents: write`, `packages: write` (unchanged set).
+- `release` — `contents: write`. It runs GoReleaser, which builds archives,
+  checksums, and the draft release. `.goreleaser.yml` has no `dockers` or
+  `image_templates`, so it publishes no container image and does not need
+  `packages: write`.
+- `docker` — `contents: read`, `packages: write`. It logs into GHCR and pushes
+  the multi-arch image. Stating it explicitly is what keeps that push working
+  once the workflow-level block is gone.
 - `plugin` — `contents: write`, `pull-requests: write`. It does not publish
-  packages, and it gains only what opening a PR requires.
+  packages, and it gains only what writing the pin branch and opening the PR
+  requires.
 
 `contents: write` on the `plugin` job is what creates and updates the pin
 branch; the ruleset restricts `main`, not other refs. Nothing is written to
 `main`.
+
+`pull-requests: write` is granted in the same commit that adds the PR-opening
+code, so no commit in this work holds a permission nothing consumes.
 
 ### Branch and commit
 
