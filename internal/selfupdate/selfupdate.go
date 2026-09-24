@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -196,13 +197,59 @@ func Replace(targetPath string, newBinary []byte) error {
 	return nil
 }
 
+// maxSymlinkHops bounds chain resolution so a self-referential or
+// mutually-referential symlink pair cannot spin forever.
+const maxSymlinkHops = 32
+
+// resolveSymlinks returns the real filesystem path behind path.
+//
+// os.Readlink alone is not sufficient here: it returns a *relative* target
+// verbatim, and a relative target is only meaningful relative to the
+// directory holding the symlink. Self-update runs from wherever the user
+// invoked `ghost upgrade`, so resolving against the process working directory
+// would point at a file that has nothing to do with the install. A single
+// readlink also stops at the first hop of a chain and reports a symlink
+// rather than the binary, and a broken link resolves "successfully" only to
+// fail later with an error naming a path the user never typed.
+//
+// Every path returned is absolute, so the caller's working directory can
+// never change where the update lands.
 func resolveSymlinks(path string) (string, error) {
-	resolved, err := os.Readlink(path)
+	// Anchor once, against the path the caller actually gave us. Everything
+	// after this is derived from that anchor rather than from cwd.
+	current, err := filepath.Abs(path)
 	if err != nil {
-		// Not a symlink.
-		return path, nil
+		return "", fmt.Errorf("make %s absolute: %w", path, err)
 	}
-	return resolved, nil
+
+	for hops := 0; ; hops++ {
+		if hops >= maxSymlinkHops {
+			return "", fmt.Errorf("resolve symlinks: %q exceeds %d hops — the chain may contain a loop", path, maxSymlinkHops)
+		}
+
+		info, err := os.Lstat(current)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return "", fmt.Errorf("resolve symlinks: %q does not exist (missing file or broken symlink target): %w", current, err)
+			}
+			return "", fmt.Errorf("resolve symlinks: %w", err)
+		}
+
+		if info.Mode()&os.ModeSymlink == 0 {
+			// A regular file or directory: this is the real target.
+			return current, nil
+		}
+
+		target, err := os.Readlink(current)
+		if err != nil {
+			return "", fmt.Errorf("readlink %s: %w", current, err)
+		}
+		if !filepath.IsAbs(target) {
+			// Relative to the directory holding the link, never to cwd.
+			target = filepath.Join(dirOf(current), target)
+		}
+		current = target
+	}
 }
 
 func dirOf(path string) string {
