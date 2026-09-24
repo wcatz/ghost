@@ -575,7 +575,11 @@ Replace the whole stage with:
           fi
           echo "::error::${BRANCH} differs from the pinned local copy"
           diff -u .claude-plugin/marketplace.json /tmp/verify-marketplace.json || true
+          exit 1
 ```
+
+The trailing `exit 1` is load-bearing: the `|| true` on the diff keeps `set -e` from firing so
+the unified diff prints, which would otherwise make a divergent branch exit 0 and pass.
 
 Note the removed lines: the `MAIN_VERSION` extraction and the downgrade-guard acceptance
 branch. They are dead once the comparison target is the branch this job just wrote — the
