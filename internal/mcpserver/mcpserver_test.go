@@ -335,7 +335,7 @@ func TestBuildProjectContext_IncludesDecisionID(t *testing.T) {
 	srv := New(store, logger, "test")
 
 	ctx := context.Background()
-	decisionID, _, err := store.RecordDecision(ctx, "abc123", "Use SQLite", "Embedded DB for simplicity", "No CGO dependency", []string{"PostgreSQL", "MySQL"}, []string{"database"})
+	decisionID, _, _, err := store.RecordDecision(ctx, "abc123", "Use SQLite", "Embedded DB for simplicity", "No CGO dependency", []string{"PostgreSQL", "MySQL"}, []string{"database"})
 	if err != nil {
 		t.Fatalf("RecordDecision: %v", err)
 	}
@@ -677,7 +677,7 @@ func TestDecisionRecord_EndToEnd(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
 
-	id, memID, err := store.RecordDecision(ctx, "abc123", "Use SQLite", "Embedded DB for simplicity", "No CGO dependency", []string{"PostgreSQL", "MySQL"}, []string{"database"})
+	id, memID, _, err := store.RecordDecision(ctx, "abc123", "Use SQLite", "Embedded DB for simplicity", "No CGO dependency", []string{"PostgreSQL", "MySQL"}, []string{"database"})
 	if err != nil {
 		t.Fatalf("RecordDecision: %v", err)
 	}
@@ -2042,7 +2042,7 @@ func TestGhostProjectDelete_DryRunByDefault(t *testing.T) {
 			t.Fatalf("CreateTask %d: %v", i, err)
 		}
 	}
-	if _, _, err := store.RecordDecision(ctx, "abc123", "seed decision", "did the thing", "because", nil, nil); err != nil {
+	if _, _, _, err := store.RecordDecision(ctx, "abc123", "seed decision", "did the thing", "because", nil, nil); err != nil {
 		t.Fatalf("RecordDecision: %v", err)
 	}
 

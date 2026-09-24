@@ -2398,7 +2398,7 @@ func TestStoreDecisions(t *testing.T) {
 	ctx := context.Background()
 
 	// Record a decision.
-	id, memID, err := s.RecordDecision(ctx, testProject,
+	id, memID, _, err := s.RecordDecision(ctx, testProject,
 		"Use SQLite for storage",
 		"SQLite provides embedded persistence with FTS5",
 		"Simple, no external dependencies",
@@ -2485,13 +2485,13 @@ func TestSupersedeDecision(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	oldID, _, err := s.RecordDecision(ctx, testProject,
+	oldID, _, _, err := s.RecordDecision(ctx, testProject,
 		"Use Redis for the job queue", "Redis lists as the queue backend",
 		"Already deployed for caching", nil, nil)
 	if err != nil {
 		t.Fatalf("RecordDecision (old): %v", err)
 	}
-	newID, _, err := s.RecordDecision(ctx, testProject,
+	newID, _, _, err := s.RecordDecision(ctx, testProject,
 		"Reverse: use Postgres for the job queue", "SKIP LOCKED on Postgres",
 		"Redis lost jobs on failover", nil, nil)
 	if err != nil {
@@ -2554,7 +2554,7 @@ func TestListDecisionsLimitPicksNewestNotLiveOnly(t *testing.T) {
 	// Oldest recorded first, so the last one recorded is the newest.
 	var ids []string
 	for i := range 4 {
-		id, _, err := s.RecordDecision(ctx, testProject,
+		id, _, _, err := s.RecordDecision(ctx, testProject,
 			fmt.Sprintf("Decision %d", i), fmt.Sprintf("do thing %d", i), "because", nil, nil)
 		if err != nil {
 			t.Fatalf("RecordDecision %d: %v", i, err)
@@ -2595,7 +2595,7 @@ func TestSupersedeDecisionRejectsBadInput(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	id, _, err := s.RecordDecision(ctx, testProject, "T", "D", "R", nil, nil)
+	id, _, _, err := s.RecordDecision(ctx, testProject, "T", "D", "R", nil, nil)
 	if err != nil {
 		t.Fatalf("RecordDecision: %v", err)
 	}
@@ -2624,7 +2624,7 @@ func TestRecordDecisionPersistsMemoryRow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	id, memID, err := s.RecordDecision(ctx, testProject,
+	id, memID, _, err := s.RecordDecision(ctx, testProject,
 		"Use SQLite", "SQLite for persistence", "Simple and embedded",
 		[]string{"postgres"}, []string{"db"})
 	if err != nil {
@@ -2969,7 +2969,7 @@ func seedFullProject(t *testing.T, s *Store, ctx context.Context, projectID stri
 	if _, err := s.CreateTask(ctx, projectID, "seed task two", "desc", 1); err != nil {
 		t.Fatalf("seed task two: %v", err)
 	}
-	if _, _, err := s.RecordDecision(ctx, projectID, "seed decision", "did the thing", "because", nil, nil); err != nil {
+	if _, _, _, err := s.RecordDecision(ctx, projectID, "seed decision", "did the thing", "because", nil, nil); err != nil {
 		t.Fatalf("seed decision: %v", err)
 	}
 	for i := 0; i < 6; i++ {

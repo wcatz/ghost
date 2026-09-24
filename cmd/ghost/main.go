@@ -690,6 +690,22 @@ func lifecyclePhases(cfg *config.Config, projectName string, llmOK bool) []lifec
 	return phases
 }
 
+// clampReflectMemories applies the shared content cap (memory.MaxContentLen)
+// to consolidation output before it reaches the store, so reflection
+// proposals obey the same single-cap contract as MCP saves: content over the
+// cap is cut at a rune boundary with the explicit truncation marker appended
+// instead of being stored silently. Returns how many contents were cut.
+func clampReflectMemories(mems []reflection.ReflectMemory) int {
+	cut := 0
+	for i := range mems {
+		if clamped, wasCut := memory.ClampContent(mems[i].Content); wasCut {
+			mems[i].Content = clamped
+			cut++
+		}
+	}
+	return cut
+}
+
 // consolidatable returns the memories reflection may rewrite: non-resolved,
 // unpinned, non-manual rows. ReplaceNonManual preserves exactly the excluded
 // set, so this is the input the consolidator sees — and therefore the set the
@@ -1091,6 +1107,14 @@ Flags:
 		}
 	}
 
+	// One cap for every writer: consolidation output obeys the same
+	// memory.MaxContentLen as MCP saves, cut with the same explicit marker,
+	// so a reflection proposal can never store content the save path would
+	// have refused to store silently.
+	if cuts := clampReflectMemories(projectMems) + clampReflectMemories(globalMems); cuts > 0 {
+		fmt.Fprintf(os.Stderr, "warning: %d consolidation memory content(s) exceeded the %d-byte cap and were truncated with an explicit marker\n", cuts, memory.MaxContentLen)
+	}
+
 	var existingNonManual int
 	for _, m := range live {
 		if m.Source != "manual" {
@@ -1149,8 +1173,15 @@ Flags:
 		fmt.Printf("Applied: %s\n", summary)
 		fmt.Println("(use --restore to undo)")
 
-		if result.LearnedContext != "" {
-			if err := store.UpdateLearnedContext(ctx, projectID, result.LearnedContext, summary); err != nil {
+		// One cap for every writer, learned-context summary included: the
+		// consolidator's own output is clamped with the same marker as its
+		// memories so the "any Ghost writer" claim on memory.MaxContentLen
+		// holds for every field this command writes.
+		if learned, learnedCut := memory.ClampContent(result.LearnedContext); learned != "" {
+			if learnedCut {
+				fmt.Fprintf(os.Stderr, "warning: learned context exceeded the %d-byte content cap and was truncated with an explicit marker\n", memory.MaxContentLen)
+			}
+			if err := store.UpdateLearnedContext(ctx, projectID, learned, summary); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: update learned context: %v\n", err)
 			}
 		}

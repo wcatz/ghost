@@ -12,11 +12,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 )
 
 const (
-	maxContentLen = 4000
 	minContentLen = 20
 	source        = "onboarding"
 )
@@ -136,10 +136,10 @@ func ParseMemoryFile(path string) (content, category string, importance float32,
 		return "", "", 0, true, nil
 	}
 
-	// Truncate if too long.
-	if len(content) > maxContentLen {
-		content = content[:maxContentLen]
-	}
+	// One cap for every writer: imports share memory.MaxContentLen with the
+	// MCP save path, cut on a rune boundary with the explicit marker
+	// appended — not a silent byte slice that could split a rune.
+	content, _ = memory.ClampContent(content)
 
 	// Map type to category.
 	category = mapCategory(fmType)
