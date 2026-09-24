@@ -6,7 +6,6 @@ import (
 	"testing"
 )
 
-func strPtr(s string) *string   { return &s }
 func f64Ptr(f float64) *float64 { return &f }
 
 // TestUpsertWithProvenanceRecordsAgentAndConfidence pins that provenance
@@ -105,13 +104,6 @@ func TestUpsertWithoutProvenanceLeavesColumnsNull(t *testing.T) {
 		return
 	}
 	t.Fatalf("saved memory %s not returned", id)
-}
-
-func deref(p *string) any {
-	if p == nil {
-		return nil
-	}
-	return *p
 }
 
 func derefF(p *float64) any {
