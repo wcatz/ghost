@@ -278,15 +278,20 @@ func TestNegativeRetrievalRejectReasonsExist(t *testing.T) {
 		if len(f.want) == 0 {
 			t.Errorf("%s: no positive expectation — a fixture that only forbids things cannot tell a correct empty result from a broken search", f.name)
 		}
-		for key := range f.afterKey {
-			found := false
-			for _, w := range f.want {
-				if w == key {
-					found = true
+		// Both endpoints matter: the position check returns early if either
+		// side is absent, so a fixture that leaves the anchor out of want
+		// would pass without ever comparing ranks.
+		for key, anchor := range f.afterKey {
+			for _, endpoint := range []string{key, anchor} {
+				found := false
+				for _, w := range f.want {
+					if w == endpoint {
+						found = true
+					}
 				}
-			}
-			if !found {
-				t.Errorf("%s: afterKey target %q is not in want — the position check is skipped when a row is absent, so evicting it entirely would pass unnoticed", f.name, key)
+				if !found {
+					t.Errorf("%s: afterKey endpoint %q is not in want — the position check is skipped when either side is absent, so evicting it would pass unnoticed", f.name, endpoint)
+				}
 			}
 		}
 		if len(f.reject) == 0 && len(f.afterKey) == 0 {
