@@ -222,3 +222,60 @@ func TestMigrateFreshDBHasRepoRemote(t *testing.T) {
 		t.Error("projects.repo_remote missing on a fresh database (initSQL)")
 	}
 }
+
+// TestEnsureProjectDoesNotClearRecordedRemote guards the identity a path-based
+// save established against a later save that has no path to inspect.
+//
+// This was a real defect: the ON CONFLICT clause used COALESCE(excluded,
+// existing), and in SQLite an empty string is not NULL — so COALESCE(”, X)
+// returns ”. Every ordinary named save therefore erased the remote, and the
+// next save from a different checkout no longer matched, quietly creating the
+// duplicate project this feature exists to prevent.
+func TestEnsureProjectDoesNotClearRecordedRemote(t *testing.T) {
+	db, err := OpenDB(filepath.Join(t.TempDir(), "keep-remote.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	s := NewStore(db, nil)
+
+	const remote = "git@github.com:wcatz/ghost.git"
+	if err := s.EnsureProjectWithRepo(ctx, "proj", "/home/u/src/ghost", "ghost", remote); err != nil {
+		t.Fatalf("ensure with remote: %v", err)
+	}
+
+	// The common case afterwards: a caller that names the project and has no
+	// filesystem path to inspect.
+	if err := s.EnsureProject(ctx, "proj", "", "ghost"); err != nil {
+		t.Fatalf("ensure without remote: %v", err)
+	}
+
+	var got sql.NullString
+	if err := db.QueryRow(`SELECT repo_remote FROM projects WHERE id = 'proj'`).Scan(&got); err != nil {
+		t.Fatalf("read repo_remote: %v", err)
+	}
+	if !got.Valid || got.String == "" {
+		t.Errorf("repo_remote = %v after a named save, want %q preserved — an empty update must not erase identity", got.String, remote)
+	}
+}
+
+// TestNormalizeRepoRemoteTrailingSlash: git permits trailing slashes in remote
+// URLs, and two spellings of one repository that normalize differently are two
+// projects again.
+func TestNormalizeRepoRemoteTrailingSlash(t *testing.T) {
+	want := "github.com/wcatz/ghost"
+	for _, in := range []string{
+		"https://github.com/wcatz/ghost.git",
+		"https://github.com/wcatz/ghost.git/",
+		"https://github.com/wcatz/ghost/",
+		"https://github.com/wcatz/ghost",
+		"git@github.com:wcatz/ghost.git/",
+		"github.com/wcatz/ghost/",
+	} {
+		if got := NormalizeRepoRemote(in); got != want {
+			t.Errorf("NormalizeRepoRemote(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

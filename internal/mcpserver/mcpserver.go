@@ -74,7 +74,11 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	}
 
 	if remote != "" {
-		if id, _, err := s.store.ResolveProject(ctx, remote); err == nil && id != "" {
+		id, _, err := s.store.ResolveProject(ctx, remote)
+		if err != nil {
+			return "", fmt.Errorf("resolve project by repository: %w", err)
+		}
+		if id != "" {
 			return id, nil
 		}
 	}
@@ -86,7 +90,11 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 	// Ensure may have folded an existing duplicate row into its canonical
 	// project, so ask again before handing the id back.
 	if remote != "" {
-		if id, _, err := s.store.ResolveProject(ctx, remote); err == nil && id != "" {
+		id, _, err := s.store.ResolveProject(ctx, remote)
+		if err != nil {
+			return "", fmt.Errorf("resolve project after ensure: %w", err)
+		}
+		if id != "" {
 			return id, nil
 		}
 	}

@@ -326,7 +326,7 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 		INSERT INTO projects (id, path, name, repo_remote) VALUES (?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			path = CASE WHEN excluded.path = excluded.id THEN projects.path ELSE excluded.path END,
-			repo_remote = COALESCE(excluded.repo_remote, projects.repo_remote),
+			repo_remote = CASE WHEN excluded.repo_remote = '' THEN projects.repo_remote ELSE excluded.repo_remote END,
 			updated_at = datetime('now')
 	`, id, path, name, repoRemote)
 	if err != nil {

@@ -84,6 +84,10 @@ func canonicalRemote(s string) string {
 		return ""
 	}
 
+	// Trailing slashes are legal in remote URLs and must not survive into the
+	// canonical form: ".../repo.git/" and ".../repo" are one repository, and
+	// a difference here would silently split it back into two projects.
+	rest = strings.TrimRight(rest, "/")
 	rest = strings.TrimSuffix(rest, ".git")
 	if rest == "" {
 		return ""
