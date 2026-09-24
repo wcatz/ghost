@@ -6,9 +6,10 @@ import (
 )
 
 // MaxContentLen is the byte cap on content written by any Ghost writer —
-// the MCP save/update/global tools, consolidation (reflection) proposals,
-// and file imports all share this one constant. It is deliberately a
-// constant rather than configuration: FTS rows, embeddings, search output,
+// the MCP save/update/global tools, consolidation (reflection) proposals
+// (memories and learned context), and file imports all share this one
+// constant. It is deliberately a constant rather than configuration: FTS
+// rows, embeddings, search output,
 // and session injection all stay bounded by it, and a knob would let one
 // deployment silently reintroduce the loss this cap exists to prevent.
 //
@@ -21,8 +22,10 @@ const MaxContentLen = 8000
 // TruncationMarker returns the marker ClampContent appends to content it
 // cut: it names the exact limit so the stored value itself shows how much
 // was lost, even to a reader with no access to the original save response.
+// The limit is byte-based (MaxContentLen is a byte cap), so the marker says
+// bytes, not chars.
 func TruncationMarker() string {
-	return fmt.Sprintf(" …[truncated at %d chars]", MaxContentLen)
+	return fmt.Sprintf(" …[truncated at %d bytes]", MaxContentLen)
 }
 
 // ClampContent applies MaxContentLen to s. Content that fits is returned

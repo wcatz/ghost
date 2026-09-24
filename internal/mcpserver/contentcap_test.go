@@ -16,12 +16,12 @@ import (
 // stored content that was cut at the cap. Kept as a literal (not derived
 // from memory.MaxContentLen) so a cap or marker change that alters stored
 // bytes fails here instead of silently redefining "correct".
-const truncationMarkerLiteral = " …[truncated at 8000 chars]"
+const truncationMarkerLiteral = " …[truncated at 8000 bytes]"
 
 // truncationWarningLiteral pins the caller-facing warning that must appear
 // in the save/update response when content was cut, so the saving agent
 // learns the full text did NOT land.
-const truncationWarningLiteral = "WARNING: content was truncated at 8000 chars"
+const truncationWarningLiteral = "WARNING: content was truncated at 8000 bytes"
 
 // newCapSession wires a fully-registered server (tools, schema and all) to
 // an in-memory client session, returning both the session and the store so
@@ -90,7 +90,7 @@ func TestSave_TruncationIsExplicitAtCap(t *testing.T) {
 
 	want := strings.Repeat("z", 8000) + truncationMarkerLiteral
 	if stored != want {
-		t.Errorf("stored content = len %d ending %q, want exactly 8000 chars + %q (len %d)",
+		t.Errorf("stored content = len %d ending %q, want exactly 8000 bytes + %q (len %d)",
 			len(stored), tail(stored, 60), truncationMarkerLiteral, len(want))
 	}
 	if !strings.HasSuffix(stored, truncationMarkerLiteral) {
@@ -239,4 +239,74 @@ func tail(s string, n int) string {
 		return s
 	}
 	return s[len(s)-n:]
+}
+
+// TestTruncationWarnings_NameTheirKind pins the warning text emitted by
+// each call-site kind: memory tools advise splitting into memories, task
+// tools into tasks, and the decision tool into decision-appropriate
+// recovery — one shared "split it into focused memories" line reused for a
+// task or a decision is the sweeper finding this guards against. Every
+// case also asserts the OTHER kinds' advice is absent, so swapping two
+// call sites' kinds (or reverting to the shared wording) fails a test.
+func TestTruncationWarnings_NameTheirKind(t *testing.T) {
+	cases := []struct {
+		name    string
+		call    func(t *testing.T, srv *Server, session *mcp.ClientSession) string
+		want    string
+		notWant []string
+	}{
+		{
+			name: "memory save advises memories",
+			call: func(t *testing.T, srv *Server, session *mcp.ClientSession) string {
+				resp, _ := saveAndFetchContent(t, srv, session, strings.Repeat("z", 9000))
+				return resp
+			},
+			want:    "WARNING: content was truncated at 8000 bytes; the stored text is incomplete — split it into focused memories or shorten it deliberately.",
+			notWant: []string{"focused tasks", "rationale context"},
+		},
+		{
+			name: "task create advises tasks",
+			call: func(t *testing.T, srv *Server, session *mcp.ClientSession) string {
+				res := callTool(t, session, "ghost_task_create", map[string]any{
+					"project_id":  "test-project",
+					"title":       "cap test task",
+					"description": strings.Repeat("t", 9000),
+				})
+				return resultText(res)
+			},
+			want:    "WARNING: task description was truncated at 8000 bytes; the stored text is incomplete — split it into focused tasks or shorten it deliberately.",
+			notWant: []string{"focused memories", "rationale context"},
+		},
+		{
+			name: "decision record advises decision recovery",
+			call: func(t *testing.T, srv *Server, session *mcp.ClientSession) string {
+				res := callTool(t, session, "ghost_decision_record", map[string]any{
+					"project_id": "test-project",
+					"title":      "cap test decision",
+					"decision":   strings.Repeat("d", 9000),
+					"rationale":  "short rationale",
+				})
+				return resultText(res)
+			},
+			want:    "WARNING: decision text was truncated at 8000 bytes; the stored text is incomplete — shorten it, or move detail into the decision's rationale context.",
+			notWant: []string{"focused memories", "focused tasks"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, session := newCapSession(t)
+			resp := tc.call(t, srv, session)
+			t.Logf("captured response: %s", resp)
+
+			if !strings.Contains(resp, tc.want) {
+				t.Errorf("response must carry the kind-correct warning\n  want substring: %q\n  got: %q", tc.want, resp)
+			}
+			for _, bad := range tc.notWant {
+				if strings.Contains(resp, bad) {
+					t.Errorf("response carries another writer's advice %q: %q", bad, resp)
+				}
+			}
+		})
+	}
 }

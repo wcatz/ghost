@@ -10,7 +10,7 @@ import (
 // (not derived from MaxContentLen) so any change to the marker wording or
 // the cap fails here and forces a deliberate update of every consumer that
 // matches on it.
-const truncationMarkerLiteral = " …[truncated at 8000 chars]"
+const truncationMarkerLiteral = " …[truncated at 8000 bytes]"
 
 func TestTruncationMarker_MatchesPinnedLiteral(t *testing.T) {
 	if got := TruncationMarker(); got != truncationMarkerLiteral {
@@ -51,12 +51,14 @@ func TestClampContent_OverCapCutsAndMarks(t *testing.T) {
 }
 
 func TestClampContent_MultibyteCutsOnRuneBoundary(t *testing.T) {
-	// 5000 * 2 bytes = 10000 bytes: the cut must land on a rune boundary
-	// and the result must stay valid UTF-8.
-	in := strings.Repeat("é", 5000)
+	// 3-byte runes: at the 8000-byte cap byte 8000 falls INSIDE a rune
+	// (8000 = 3*2666+2), so the rune-boundary backup loop must actually run.
+	// A 2-byte rune (é) would land exactly on a boundary and never exercise
+	// it — see review nit on the original version of this test.
+	in := strings.Repeat("€", 5000) // 15000 bytes
 	out, cut := ClampContent(in)
 	if !cut {
-		t.Fatal("cut=false for 10000-byte input, want true")
+		t.Fatal("cut=false for 15000-byte input, want true")
 	}
 	if !utf8.ValidString(out) {
 		t.Error("clamped content is not valid UTF-8 — the cut split a rune")
@@ -67,6 +69,9 @@ func TestClampContent_MultibyteCutsOnRuneBoundary(t *testing.T) {
 	body := strings.TrimSuffix(out, truncationMarkerLiteral)
 	if len(body) > MaxContentLen {
 		t.Errorf("cut body is %d bytes, exceeds the %d cap", len(body), MaxContentLen)
+	}
+	if len(body) == MaxContentLen {
+		t.Errorf("cut body is exactly %d bytes — with 3-byte runes the backup loop cannot have run", MaxContentLen)
 	}
 }
 

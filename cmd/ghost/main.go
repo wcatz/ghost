@@ -1173,8 +1173,15 @@ Flags:
 		fmt.Printf("Applied: %s\n", summary)
 		fmt.Println("(use --restore to undo)")
 
-		if result.LearnedContext != "" {
-			if err := store.UpdateLearnedContext(ctx, projectID, result.LearnedContext, summary); err != nil {
+		// One cap for every writer, learned-context summary included: the
+		// consolidator's own output is clamped with the same marker as its
+		// memories so the "any Ghost writer" claim on memory.MaxContentLen
+		// holds for every field this command writes.
+		if learned, learnedCut := memory.ClampContent(result.LearnedContext); learned != "" {
+			if learnedCut {
+				fmt.Fprintf(os.Stderr, "warning: learned context exceeded the %d-byte content cap and was truncated with an explicit marker\n", memory.MaxContentLen)
+			}
+			if err := store.UpdateLearnedContext(ctx, projectID, learned, summary); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: update learned context: %v\n", err)
 			}
 		}

@@ -1029,7 +1029,7 @@ func mustCtx(t *testing.T, minutes int) context.Context {
 // stored text ends with the marker naming the limit instead of stopping
 // mid-sentence with no signal.
 func TestClampReflectMemories(t *testing.T) {
-	const markerLiteral = " …[truncated at 8000 chars]"
+	const markerLiteral = " …[truncated at 8000 bytes]"
 
 	mems := []reflection.ReflectMemory{
 		{Category: "fact", Content: "short and complete"},

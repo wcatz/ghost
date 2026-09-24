@@ -144,12 +144,23 @@ const (
 // truncationWarning is the caller-facing half of the explicit-truncation
 // contract: whenever memory.ClampContent cut content at the cap, the
 // save/update response appends this line so the saving agent learns the
-// full text did NOT land and can split the memory or shorten it
-// deliberately. The stored half is the marker memory.ClampContent appends
-// to the content itself — truncation is visible on both sides.
-func truncationWarning() string {
-	return fmt.Sprintf(" — WARNING: content was truncated at %d chars; the stored text is incomplete — split it into focused memories or shorten it deliberately.", memory.MaxContentLen)
+// full text did NOT land and can act instead of believing it all stored.
+// what names the field that was cut and advice names the recovery step
+// for THAT writer — a task description must not be told to split into
+// memories, and a decision must not be told to split into tasks. The
+// stored half is the marker memory.ClampContent appends to the content
+// itself — truncation is visible on both sides.
+func truncationWarning(what, advice string) string {
+	return fmt.Sprintf(" — WARNING: %s was truncated at %d bytes; the stored text is incomplete — %s", what, memory.MaxContentLen, advice)
 }
+
+// Recovery advice per writer kind, kept as named constants so each call
+// site passes its own and the per-kind warning tests can pin them.
+const (
+	memoryTruncationAdvice   = "split it into focused memories or shorten it deliberately."
+	taskTruncationAdvice     = "split it into focused tasks or shorten it deliberately."
+	decisionTruncationAdvice = "shorten it, or move detail into the decision's rationale context."
+)
 
 const mcpInstructions = `Ghost is your persistent memory system. It remembers project knowledge across sessions — use it proactively.
 
@@ -400,7 +411,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, args updateArgs) (string
 
 	msg := fmt.Sprintf("Memory updated (id: %s): %s", args.MemoryID, strings.Join(changed, ", "))
 	if truncated {
-		msg += truncationWarning()
+		msg += truncationWarning("content", memoryTruncationAdvice)
 	}
 	return msg, nil
 }
@@ -610,7 +621,7 @@ func (s *Server) registerTools() {
 			msg = fmt.Sprintf("Memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
 		}
 		if truncated {
-			msg += truncationWarning()
+			msg += truncationWarning("content", memoryTruncationAdvice)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
@@ -967,7 +978,7 @@ func (s *Server) registerTools() {
 			msg = fmt.Sprintf("Global memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
 		}
 		if globalTruncated {
-			msg += truncationWarning()
+			msg += truncationWarning("content", memoryTruncationAdvice)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
@@ -1025,7 +1036,7 @@ func (s *Server) registerTools() {
 		s.notifyProjectResource(ctx, args.ProjectID, "tasks")
 		msg := fmt.Sprintf("Task created (id: %s)", id)
 		if descTruncated {
-			msg += truncationWarning()
+			msg += truncationWarning("task description", taskTruncationAdvice)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
@@ -1287,7 +1298,14 @@ func (s *Server) registerTools() {
 			"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
 			decisionID, memoryID, supersedeNote)
 		if decisionTruncated || rationaleTruncated {
-			msg += truncationWarning()
+			what := "decision text"
+			switch {
+			case decisionTruncated && rationaleTruncated:
+				what = "decision and rationale text"
+			case rationaleTruncated:
+				what = "rationale text"
+			}
+			msg += truncationWarning(what, decisionTruncationAdvice)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
@@ -1557,7 +1575,7 @@ func (s *Server) registerTools() {
 		s.notifyProjectResource(ctx, updated.ProjectID, "tasks")
 		msg := "Task updated."
 		if truncated {
-			msg += truncationWarning()
+			msg += truncationWarning("task description", taskTruncationAdvice)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
