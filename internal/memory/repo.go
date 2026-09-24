@@ -90,23 +90,3 @@ func canonicalRemote(s string) string {
 	}
 	return head + "/" + rest
 }
-
-// RepoRemoteOwnerName splits a normalized remote into owner and repository
-// name.
-//
-// Derived rather than stored: a project's remote can be rewritten (repository
-// moved, mirror swapped, host renamed), and columns copied from it would drift
-// out of step the first time that happened. The remote is the single fact;
-// everything else is a function of it.
-//
-// Returns ("", "") unless the remote splits into a host plus at least one
-// more segment, so a malformed value cannot produce a plausible-looking owner.
-func RepoRemoteOwnerName(normalized string) (owner, repo string) {
-	parts := strings.Split(strings.Trim(normalized, "/"), "/")
-	if len(parts) < 3 {
-		return "", ""
-	}
-	owner = parts[len(parts)-2]
-	repo = parts[len(parts)-1]
-	return owner, repo
-}
