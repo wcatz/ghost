@@ -68,7 +68,12 @@ type lifecycleFailureMarker struct {
 // Best-effort by contract: callers ignore the error — failing to record a
 // failure must never itself fail a run.
 func WriteLifecycleFailure(project string, phasesFailed []string, firstErr string) error {
-	dataDir, err := config.DataDir()
+	// DataDirPath, not DataDir: recording a failure is best-effort bookkeeping
+	// and must not MkdirAll a ghost/ directory that no store ever created —
+	// same reason as recordReflectSkipMarker and ClearLifecycleFailure. With no
+	// store the project cannot resolve and this returns an error the callers
+	// already ignore.
+	dataDir, err := config.DataDirPath()
 	if err != nil {
 		return fmt.Errorf("locate data dir: %w", err)
 	}

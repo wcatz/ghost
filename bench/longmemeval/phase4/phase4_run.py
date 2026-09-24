@@ -252,7 +252,16 @@ def chat_opencode(model, prompt, max_tokens=None):
                 if ev.get("type") == "text" and ev.get("part", {}).get("type") == "text":
                     parts.append(ev["part"].get("text", ""))
             return "".join(parts)
-        except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
+        except FileNotFoundError:
+            # The binary is missing or not executable. No amount of waiting
+            # installs it, so fail now instead of burning the retry budget;
+            # other OSErrors (transient resource/IO conditions) still retry.
+            raise RuntimeError(
+                "opencode binary not found or not executable — install it or put it on PATH"
+            ) from None
+        except PermissionError as e:
+            raise RuntimeError(f"opencode binary is not executable: {e}") from None
+        except (RuntimeError, subprocess.TimeoutExpired) as e:
             last_err = e
             wait = min(2 ** attempt, 30)
             sys.stderr.write(f"  opencode error ({e}), retry in {wait}s "

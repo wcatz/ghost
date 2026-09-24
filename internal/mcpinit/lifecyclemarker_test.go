@@ -141,6 +141,31 @@ func TestWriteLifecycleFailure_SchemaAtomicity(t *testing.T) {
 	}
 }
 
+// TestWriteLifecycleFailure_DoesNotCreateDataDir: recording a failure is
+// best-effort bookkeeping, and its siblings (recordReflectSkipMarker,
+// ClearLifecycleFailure) locate the data dir with config.DataDirPath() for
+// exactly this reason. WriteLifecycleFailure must not create a ghost/ directory
+// that no store ever made: on a machine with no store, a hook that fails has to
+// leave the filesystem untouched rather than leave a phantom data dir behind.
+func TestWriteLifecycleFailure_DoesNotCreateDataDir(t *testing.T) {
+	dataHome := isolatedHome(t)
+	ghostDir := filepath.Join(dataHome, "ghost")
+
+	// No store is seeded, so nothing below dataHome exists yet.
+	if _, err := os.Stat(ghostDir); !os.IsNotExist(err) {
+		t.Fatalf("fixture precondition: %s already exists (stat err %v)", ghostDir, err)
+	}
+
+	// The call is expected to fail (it cannot resolve a project without a
+	// store); the assertion is on the side effect, not the error.
+	_ = WriteLifecycleFailure("p1", []string{"reflect"}, "boom")
+
+	if _, err := os.Stat(ghostDir); !os.IsNotExist(err) {
+		t.Errorf("WriteLifecycleFailure created %s with no store present (stat err %v); "+
+			"a failed marker write must not materialize a data dir", ghostDir, err)
+	}
+}
+
 // TestWriteLifecycleFailure_ConcurrentWritersStayAtomic races writers for
 // different phases: rename atomicity means the final file is always ONE
 // writer's complete record (never a torn or interleaved mix) and no temp
