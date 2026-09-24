@@ -152,7 +152,7 @@ func runSessionStart(data []byte, stdout io.Writer) {
 	// session-start stdout stays byte-identical to what it was without this
 	// feature.
 	if alert := lifecycleFailureAlert(projectID, project); alert != "" {
-		fmt.Fprintln(stdout, alert)
+		_, _ = fmt.Fprintln(stdout, alert)
 	}
 
 	// Count this session. Context loading above is strictly read-only; the
