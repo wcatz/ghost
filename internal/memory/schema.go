@@ -80,7 +80,13 @@ CREATE TABLE IF NOT EXISTS memories (
     agent         TEXT,
     session_id    TEXT,
     source_ref    TEXT,
-    confidence    REAL
+    confidence    REAL,
+    -- Machine-readable scope: a JSON object such as
+    -- {"environment":"production","component":"api"}, or NULL when the memory
+    -- applies everywhere. NULL and absent are deliberately the same thing —
+    -- "no scope stated" must not read as a scope of "", and a fabricated
+    -- scope would claim where knowledge applies that nobody asserted.
+    scope         TEXT
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(

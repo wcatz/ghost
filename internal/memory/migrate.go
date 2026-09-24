@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 11
+const schemaVersion = 12
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -31,6 +31,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV9,
 	migrateV10,
 	migrateV11,
+	migrateV12,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -497,6 +498,35 @@ func migrateV11(tx *sql.Tx) error {
 	}
 	if _, err := tx.Exec(`ALTER TABLE projects ADD COLUMN repo_remote TEXT`); err != nil {
 		return fmt.Errorf("add projects.repo_remote: %w", err)
+	}
+	return nil
+}
+
+// migrateV12 adds memories.scope, a JSON object naming where a memory
+// applies — {"environment":"production","component":"api"} — or NULL when it
+// applies everywhere.
+//
+// Before this, scope was only ever implied by wording: "the database for
+// development is SQLite" and "the database for production is PostgreSQL"
+// differed because the sentence said so, so retrieval could only hope
+// semantic similarity separated them. A machine-readable scope lets a query
+// for production exclude a development row by construction rather than by
+// resemblance.
+//
+// Additive and NULL by default. Existing memories were written without any
+// notion of scope, so stamping them one would assert where knowledge applies
+// that nobody asserted — NULL reads as "unspecified", which is true, and
+// ScopeMatches treats it as eligible everywhere.
+func migrateV12(tx *sql.Tx) error {
+	exists, err := columnExists(tx, "memories", "scope")
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil // hand-migrated DB already has the column
+	}
+	if _, err := tx.Exec(`ALTER TABLE memories ADD COLUMN scope TEXT`); err != nil {
+		return fmt.Errorf("add memories.scope: %w", err)
 	}
 	return nil
 }

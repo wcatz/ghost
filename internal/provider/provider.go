@@ -27,6 +27,8 @@ type MemoryStore interface {
 	// reference, and how much it was trusted. A zero Provenance records
 	// NULL across all four columns.
 	UpsertWithProvenance(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, prov memory.Provenance) (string, string, float64, error)
+	// UpsertWithOptions is Upsert plus optional provenance and scope.
+	UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts memory.UpsertOptions) (string, string, float64, error)
 	Delete(ctx context.Context, id string) error
 	UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error
 	PromoteToGlobal(ctx context.Context, projectID, id string) error

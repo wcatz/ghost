@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -544,6 +545,7 @@ func (s *Server) registerTools() {
 		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'platform-ops', 'web-app')"`
 		Query     string `json:"query" jsonschema:"Search query — natural language or FTS5 (e.g. 'helm deploy', 'sqlite*'; trailing * is a prefix match, terms are OR'd)"`
 		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
+		Scope     any    `json:"scope,omitempty" jsonschema:"Only return memories that do not contradict this scope, as an object of string values — e.g. {\"environment\": \"production\"}. A memory that says nothing about a key still matches, so unscoped knowledge remains available; one that names a different value is excluded."`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
 		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list: per-memory FTS rank, vector rank and cosine, fused RRF score, decay factor, supersede and near-duplicate penalties, plus the reason each excluded candidate was left out. Use when a result looks wrong and you need to know which signal is responsible."`
 	}
@@ -632,6 +634,34 @@ func (s *Server) registerTools() {
 			maybeIncomplete = rawCount == searchLimit && len(memories) < args.Limit
 		}
 
+		// Post-filter by scope. A row that names a differing scope is a
+		// different claim about where knowledge applies, not a weaker match —
+		// semantic similarity cannot reliably separate "development uses
+		// SQLite" from "production uses PostgreSQL", but a scope value can.
+		// Rows that say nothing about a requested key stay eligible: general
+		// knowledge applies everywhere, and hiding it would make missing scope
+		// a reason to drop the most reusable facts in the store.
+		scopeFilter, err := optScope(args.Scope, "scope")
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(scopeFilter) > 0 {
+			rawScopeCount := len(memories)
+			filtered := memories[:0]
+			for _, m := range memories {
+				if memory.ScopeMatches(m.Scope, scopeFilter) {
+					filtered = append(filtered, m)
+				}
+			}
+			if len(filtered) > args.Limit {
+				filtered = filtered[:args.Limit]
+			}
+			memories = filtered
+			if rawScopeCount == searchLimit && len(memories) < args.Limit {
+				maybeIncomplete = true
+			}
+		}
+
 		if len(memories) == 0 {
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: "No matching memories found."}},
@@ -656,6 +686,7 @@ func (s *Server) registerTools() {
 		// values survive schema validation and are normalized in-handler.
 		Importance any `json:"importance,omitempty" jsonschema:"Importance score, a number 0.0-1.0 (e.g. 0.7). Default 0.7"`
 		Tags       any `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
+		Scope      any `json:"scope,omitempty" jsonschema:"Where this memory applies, as an object of string values — e.g. {\"environment\": \"production\", \"component\": \"api\"}. Omit for knowledge that applies everywhere. Retrieval can then exclude a memory scoped elsewhere instead of guessing from its wording."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -714,7 +745,11 @@ func (s *Server) registerTools() {
 		}
 		args.ProjectID = canonical
 
-		id, duplicateOf, score, err := s.store.UpsertWithProvenance(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, provenanceFor(req))
+		scope, err := optScope(args.Scope, "scope")
+		if err != nil {
+			return nil, nil, err
+		}
+		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, memory.UpsertOptions{Provenance: provenanceFor(req), Scope: scope})
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -2110,7 +2145,7 @@ func formatMemories(memories []memory.Memory) string {
 		if m.ResolvedAt != nil {
 			resolved = " [resolved]"
 		}
-		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, quoteData(m.Content))
+		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, scopeLabel(m.Scope), quoteData(m.Content))
 	}
 	return sb.String()
 }
@@ -2118,6 +2153,35 @@ func formatMemories(memories []memory.Memory) string {
 // quoteData wraps untrusted stored text in «...» data delimiters, first
 // rewriting any literal « or » inside it so embedded delimiters can't
 // terminate the data block early and smuggle text back out as instructions.
+// scopeLabel renders a memory's scope for the listing, or "" when unscoped.
+//
+// Keys are sorted: map iteration order is random in Go, so an unsorted
+// rendering would show the same scope in a different order on each read and
+// look like the scope itself was changing.
+func scopeLabel(scope map[string]string) string {
+	if len(scope) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(scope))
+	for k := range scope {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	b.WriteString(" scope{")
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(k)
+		b.WriteString("=")
+		b.WriteString(scope[k])
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
 func quoteData(s string) string {
 	return "«" + strings.NewReplacer("«", "<<", "»", ">>").Replace(s) + "»"
 }

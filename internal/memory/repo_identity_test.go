@@ -154,6 +154,32 @@ func TestMigrateV11AddsRepoRemote(t *testing.T) {
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 )`,
+		// A real schema-v10 database always has memories; seeding only
+		// projects made this fixture unrealistically minimal, and the later
+		// migrateV12 step then failed on a missing table.
+		`CREATE TABLE memories (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL DEFAULT 'fact',
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL DEFAULT 0.5,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT,
+    source        TEXT NOT NULL DEFAULT 'reflection',
+    tags          TEXT DEFAULT '[]',
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at   TEXT,
+    resolve_kept_hash TEXT NOT NULL DEFAULT '',
+    valid_from    TEXT,
+    valid_until   TEXT,
+    verified_at   TEXT,
+    agent         TEXT,
+    session_id    TEXT,
+    source_ref    TEXT,
+    confidence    REAL
+)`,
 		`CREATE TABLE ghost_state (
     project_id          TEXT PRIMARY KEY,
     interaction_count   INTEGER NOT NULL DEFAULT 0,
