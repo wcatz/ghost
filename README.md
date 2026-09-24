@@ -1,22 +1,22 @@
-# Ghost
+# GhostMem
 
-<img src="assets/ghost.png" alt="Ghost" width="120" align="right" />
+<img src="assets/ghost.png" alt="GhostMem" width="120" align="right" />
 
 **A local-first MCP memory server for Claude Code, opencode, Cursor, and any MCP client. One memory across clients, in one SQLite file you own.**
 
-Ghost remembers project knowledge between agent sessions. It stores memories, tasks, and decisions locally, searches them with SQLite FTS5 and optional local embeddings, and works with the MCP clients you already use.
+GhostMem remembers project knowledge between agent sessions. It stores memories, tasks, and decisions locally, searches them with SQLite FTS5 and optional local embeddings, and works with the MCP clients you already use.
 
 - **Local by default:** one SQLite database; no account, cloud service, or required vector database.
 - **Cross-client:** Claude Code, opencode, Codex, Goose, Cursor, and other MCP clients can share the same memory.
-- **Graceful degradation:** Ollama is optional. Without it, Ghost still provides full-text search.
+- **Graceful degradation:** Ollama is optional. Without it, GhostMem still provides full-text search.
 - **Transparent lifecycle:** consolidation, resolution, and supersession are dry-run by default and can be undone or disabled.
 
 ## Contents
 
-- [Why Ghost?](#why-ghost)
+- [Why GhostMem?](#why-ghostmem)
 - [Quick start](#quick-start)
 - [Choose your client](#choose-your-client)
-- [What Ghost remembers](#what-ghost-remembers)
+- [What GhostMem remembers](#what-ghostmem-remembers)
 - [How it works](#how-it-works)
 - [Privacy, control, and cost](#privacy-control-and-cost)
 - [Optional integrations](#optional-integrations)
@@ -26,11 +26,11 @@ Ghost remembers project knowledge between agent sessions. It stores memories, ta
 - [Project status](#project-status)
 - [Contributing](#contributing)
 
-## Why Ghost?
+## Why GhostMem?
 
-Most agent memory is trapped inside one product. Ghost provides one portable memory layer:
+Most agent memory is trapped inside one product. GhostMem provides one portable memory layer:
 
-| | Typical built-in memory | Ghost |
+| | Typical built-in memory | GhostMem |
 |---|---|---|
 | Reach | One assistant or client | Any MCP client |
 | Storage | Product-specific files or services | One local SQLite file |
@@ -38,7 +38,7 @@ Most agent memory is trapped inside one product. Ghost provides one portable mem
 | Maintenance | Memories accumulate unchanged | Categories, dedup, linking, and lifecycle tools |
 | Ownership | Depends on the provider | You own and can inspect the database |
 
-Native memory features are useful inside their own products. Ghost is for the gap between them: a project convention learned in one client can inform the next client you use.
+Native memory features are useful inside their own products. GhostMem is for the gap between them: a project convention learned in one client can inform the next client you use.
 
 ## Quick start
 
@@ -46,7 +46,7 @@ Native memory features are useful inside their own products. Ghost is for the ga
 
 - **Go 1.26+** for a source installation.
 - A supported MCP client for integration setup.
-- **Optional:** [Ollama](https://ollama.com/) with `nomic-embed-text:v1.5` for vector embeddings. Ghost works without it using FTS5 only.
+- **Optional:** [Ollama](https://ollama.com/) with `nomic-embed-text:v1.5` for vector embeddings. GhostMem works without it using FTS5 only.
 
 ### Install and initialize
 
@@ -55,7 +55,7 @@ go install github.com/wcatz/ghost/cmd/ghost@latest
 ghost mcp init
 ```
 
-`ghost mcp init` detects supported clients on `PATH`, configures the integrations it finds, and creates the local Ghost store. It is idempotent and non-destructive. Preview its changes first with:
+`ghost mcp init` detects supported clients on `PATH`, configures the integrations it finds, and creates the local GhostMem store. It is idempotent and non-destructive. Preview its changes first with:
 
 ```bash
 ghost mcp init --dry-run
@@ -68,7 +68,7 @@ ghost version
 ghost mcp status --client claude   # use opencode, codex, or goose for those integrations
 ```
 
-After initialization, start a session in your project. Ghost injects the project context automatically and exposes its tools to the client.
+After initialization, start a session in your project. GhostMem injects the project context automatically and exposes its tools to the client.
 
 Prefer a prebuilt binary or a client-specific setup? See the [installation guide](docs/installation.md).
 
@@ -84,7 +84,7 @@ Prefer a prebuilt binary or a client-specific setup? See the [installation guide
 
 The full setup matrix, Windows instructions, Docker usage, and uninstall steps live in [`docs/installation.md`](docs/installation.md).
 
-## What Ghost remembers
+## What GhostMem remembers
 
 ### Memories
 
@@ -99,15 +99,15 @@ Memories are concise, durable notes with one of eight categories:
 - `preference` — a user preference
 - `fact` — general project knowledge
 
-The agent saves memories through MCP tools. Near-duplicates are detected within the same project and category: Ghost preserves the new text as a linked row, strengthens the existing row, and records the relationship without overwriting the original. Memories can also be pinned, updated, promoted, searched, or deleted.
+The agent saves memories through MCP tools. Near-duplicates are detected within the same project and category: GhostMem preserves the new text as a linked row, strengthens the existing row, and records the relationship without overwriting the original. Memories can also be pinned, updated, promoted, searched, or deleted.
 
 ### Projects and global knowledge
 
-Ghost resolves a project by longest path prefix, with a basename fallback. Project knowledge stays scoped to that project; the special `_global` project holds preferences and facts that apply everywhere. Use cross-project search when the relevant context may live under another repository.
+GhostMem resolves a project by longest path prefix, with a basename fallback. Project knowledge stays scoped to that project; the special `_global` project holds preferences and facts that apply everywhere. Use cross-project search when the relevant context may live under another repository.
 
 ### Tasks and decisions
 
-Alongside memories, Ghost stores:
+Alongside memories, GhostMem stores:
 
 - **Tasks** with `pending`, `active`, `done`, and `blocked` states.
 - **Decision records** with the chosen direction, rationale, alternatives, and status.
@@ -129,7 +129,7 @@ Save → Embed → Link → Search → Consolidate → Decay
 5. **Consolidate:** `ghost reflect` can merge duplicates and prune noise, with snapshots and dry-run protection.
 6. **Decay:** category-aware scoring keeps stable conventions and preferences from fading while fresh operational facts can outrank stale ones.
 
-Core memory reads, writes, and search do not need an LLM. Reflection, resolution, and supersession use the calling session's CLI harness (`claude`, `opencode`, `codex`, or `goose`) when invoked; Ghost does not silently switch to a different harness.
+Core memory reads, writes, and search do not need an LLM. Reflection, resolution, and supersession use the calling session's CLI harness (`claude`, `opencode`, `codex`, or `goose`) when invoked; GhostMem does not silently switch to a different harness.
 
 For implementation details, see [`docs/architecture.md`](docs/architecture.md).
 
@@ -145,17 +145,17 @@ $XDG_DATA_HOME/ghost/ghost.db
 ~/.local/share/ghost/ghost.db
 ```
 
-It is a plain SQLite file. You can inspect, back up, move, or delete it without a Ghost-specific export format.
+It is a plain SQLite file. You can inspect, back up, move, or delete it without a GhostMem-specific export format.
 
 ### What can leave the machine
 
-In normal operation Ghost does not make network calls. The exceptions are explicit:
+In normal operation GhostMem does not make network calls. The exceptions are explicit:
 
 - **Local Ollama** for optional embeddings.
 - The **calling AI CLI harness** when you run or enable reflection, resolution, or supersession.
 - The **GitHub API** when you run `ghost upgrade`.
 
-Ghost does not require a separate Anthropic API key. The selected CLI harness handles its own authentication and billing.
+GhostMem does not require a separate Anthropic API key. The selected CLI harness handles its own authentication and billing.
 
 ### Turning things off
 
@@ -177,11 +177,11 @@ ghost obsidian export --out ~/Documents/GhostVault
 ghost obsidian sync --interval 30s
 ```
 
-The mirror is read-only from Ghost's perspective. Edits in the vault are not synced back, and a running sync can overwrite hand edits on the next database change. See [the usage guide](docs/usage.md#obsidian-vault-mirror).
+The mirror is read-only from GhostMem's perspective. Edits in the vault are not synced back, and a running sync can overwrite hand edits on the next database change. See [the usage guide](docs/usage.md#obsidian-vault-mirror).
 
 ### Agent workflows
 
-Ghost works well with structured agent workflows such as [Superpowers](https://github.com/obra/superpowers): recall context before planning, search memory before changing unfamiliar code, record decisions when alternatives matter, and save durable findings when a phase completes.
+GhostMem works well with structured agent workflows such as [Superpowers](https://github.com/obra/superpowers): recall context before planning, search memory before changing unfamiliar code, record decisions when alternatives matter, and save durable findings when a phase completes.
 
 ## Commands
 
@@ -203,7 +203,7 @@ See [`docs/cli.md`](docs/cli.md) for flags, dry-run behavior, lifecycle details,
 
 ## Configuration
 
-Ghost works with zero configuration. A minimal optional setup is:
+GhostMem works with zero configuration. A minimal optional setup is:
 
 ```yaml
 embedding:
@@ -220,7 +220,7 @@ Configuration is loaded from compiled defaults, system YAML, user YAML, and `GHO
 
 ## Benchmarks
 
-Ghost publishes reproducible retrieval and end-to-end results with the harnesses that produced them. The headline results are:
+GhostMem publishes reproducible retrieval and end-to-end results with the harnesses that produced them. The headline results are:
 
 - **LongMemEval-S retrieval:** hybrid Recall@5 **93.0%** and Recall@10 **97.3%** on the 470 answerable questions.
 - **End-to-end LongMemEval-S:** **96.2%** blended accuracy across 500 questions with the documented DeepSeek v4 Pro generator and judge.
@@ -230,7 +230,7 @@ Different generators and judges make cross-system scores directional rather than
 
 ## Project status
 
-Ghost is a solo project used for real infrastructure work. The project intentionally favors a small, readable system:
+GhostMem is a solo project used for real infrastructure work. The project intentionally favors a small, readable system:
 
 - Pure Go with `CGO_ENABLED=0` and eight direct Go dependencies.
 - SQLite + FTS5 persistence with optional local Ollama embeddings.
