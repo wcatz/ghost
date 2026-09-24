@@ -43,6 +43,13 @@ CREATE TABLE IF NOT EXISTS projects (
     id          TEXT PRIMARY KEY,
     path        TEXT NOT NULL UNIQUE,
     name        TEXT NOT NULL,
+    -- Normalized remote URL of the repository the project's path points at.
+    -- Nullable: a project may have no repository, and a caller may have no
+    -- path to inspect. This is what makes ~/src/ghost and ~/work/ghost one
+    -- project rather than two — path identity cannot say they are the same.
+    -- Only the remote is stored; provider/owner/name are derived from it, so
+    -- they can never drift out of step when a remote is rewritten.
+    repo_remote TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );

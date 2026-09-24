@@ -80,6 +80,11 @@ type MemoryStore interface {
 	// Project management
 	ListProjects(ctx context.Context) ([]memory.Project, error)
 	EnsureProject(ctx context.Context, id, path, name string) error
+	// EnsureProjectWithRepo is EnsureProject plus the normalized remote of the
+	// repository at path, so two checkouts of one repository collapse into a
+	// single project. Empty means "no repository known" and never clears a
+	// remote already recorded.
+	EnsureProjectWithRepo(ctx context.Context, id, path, name, repoRemote string) error
 	ResolveProject(ctx context.Context, input string) (id, name string, err error)
 	ListProjectNames(ctx context.Context) ([]string, error)
 	MergeProject(ctx context.Context, oldID, newID string) error

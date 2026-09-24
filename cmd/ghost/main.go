@@ -3,11 +3,22 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/repo"
 )
 
 var version = "dev"
 
 func main() {
+	// Repository identity needs git, which internal/memory deliberately never
+	// invokes — the capability is injected so the store stays a pure storage
+	// layer, tests can pin it, and a store built without one resolves exactly
+	// as it did before. Wired once here because main dispatches the MCP
+	// server, the lifecycle hooks and every CLI subcommand, so a single line
+	// covers the whole binary.
+	memory.SetDetectRemote(repo.DetectRemote)
+
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "-v", "--version", "version":

@@ -245,7 +245,31 @@ func (s *Store) GetProjectPath(ctx context.Context, id string) (string, error) {
 // EnsureProject creates a project record if it doesn't exist.
 // When called with an absolute path, it auto-merges any same-name project
 // that was created with a non-absolute path (e.g., by MCP using name-as-ID).
+// EnsureProject creates or refreshes a project with no repository identity.
+// Callers that know the filesystem path should prefer EnsureProjectWithRepo,
+// which lets two checkouts of one repository collapse into a single project.
 func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error {
+	return s.ensureProjectLocked(ctx, id, path, name, "")
+}
+
+// EnsureProjectWithRepo is EnsureProject plus the normalized remote URL of the
+// repository at path.
+//
+// When another project already claims that remote, this merges into it instead
+// of creating a second project — mirroring the path-based self-heal below.
+// That is the case repository identity exists for: ~/src/ghost and
+// ~/work/ghost are different paths, and an agent that changes working
+// directory would otherwise start a second project and lose everything the
+// first one knew.
+//
+// repoRemote may be empty. An empty value never clears a remote already on
+// record, so callers that cannot inspect a path (MCP tools pass path="") do
+// not erase identity that a caller which could inspect it had established.
+func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoRemote string) error {
+	return s.ensureProjectLocked(ctx, id, path, name, repoRemote)
+}
+
+func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRemote string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -255,6 +279,26 @@ func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error 
 	// preserves the invariant already on disk for name-as-ID projects.
 	if path == "" {
 		path = id
+	}
+
+	// Repository identity: one remote means one project, whatever the local
+	// checkout path happens to be. _global is excluded on both sides for the
+	// same reason MergeProject refuses it — merging it would move or dump the
+	// bucket that global injection reads from.
+	repoRemote = NormalizeRepoRemote(repoRemote)
+	if repoRemote != "" && id != "_global" {
+		var existingID string
+		scanErr := s.db.QueryRowContext(ctx,
+			`SELECT id FROM projects WHERE repo_remote = ? AND id != ? LIMIT 1`,
+			repoRemote, id).Scan(&existingID)
+		if scanErr == nil && existingID != "" && existingID != "_global" {
+			// mergeProjectLocked does not lock internally (only the public
+			// MergeProject wrapper does), and we already hold s.mu.
+			if err := s.mergeProjectLocked(ctx, id, existingID); err != nil {
+				return fmt.Errorf("auto-merge repository duplicate: %w", err)
+			}
+			return nil
+		}
 	}
 
 	// Check if another project already owns this path. If so, merge
@@ -279,11 +323,12 @@ func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error 
 	}
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO projects (id, path, name) VALUES (?, ?, ?)
+		INSERT INTO projects (id, path, name, repo_remote) VALUES (?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			path = CASE WHEN excluded.path = excluded.id THEN projects.path ELSE excluded.path END,
+			repo_remote = CASE WHEN excluded.repo_remote = '' THEN projects.repo_remote ELSE excluded.repo_remote END,
 			updated_at = datetime('now')
-	`, id, path, name)
+	`, id, path, name, repoRemote)
 	if err != nil {
 		return fmt.Errorf("ensure project: %w", err)
 	}
@@ -561,6 +606,26 @@ func deleteProjectRowTx(ctx context.Context, tx *sql.Tx, id string) error {
 // filesystem path — to that project's (id, name). Returns ("", "", nil)
 // on no match; a non-nil error only indicates a real DB failure.
 //
+// detectRemoteForPath maps a filesystem path to its repository remote.
+//
+// It is a package variable rather than a call to git because internal/memory
+// is deliberately a pure storage layer that never spawns a process. The
+// capability is injected instead: the application wires it in once, tests can
+// pin it, and a store built without one resolves exactly as it did before
+// repository identity existed. The zero value (the default) disables the
+// feature rather than half-enabling it.
+var detectRemoteForPath = func(string) string { return "" }
+
+// SetDetectRemote wires the repository detector used when resolving a project
+// by filesystem path. Passing nil restores the default no-op.
+func SetDetectRemote(fn func(dir string) string) {
+	if fn == nil {
+		detectRemoteForPath = func(string) string { return "" }
+		return
+	}
+	detectRemoteForPath = fn
+}
+
 // Lookup order, first hit wins:
 //  1. exact id = input
 //  2. exact name = input
@@ -618,6 +683,32 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 		}
 		if err != sql.ErrNoRows {
 			return "", "", fmt.Errorf("resolve project by path: %w", err)
+		}
+	}
+
+	// Repository identity, ahead of the basename fallback: a remote is more
+	// specific than a bare directory name, and a caller naming a repository
+	// (git@host:owner/repo.git, https://host/owner/repo) is asking for that
+	// repository, not for whichever project happens to sit in a folder called
+	// "repo". Normalization makes every spelling of one remote compare equal.
+	//
+	// The input may also be a filesystem path — the second checkout of a
+	// repository whose first checkout already created a project. A path
+	// carries no identity of its own, so it is resolved through the injected
+	// detector; without that, saving from ~/work/ghost and then reading from
+	// it would disagree about which project it is. Detection runs only for
+	// absolute inputs, so resolving by id or name never spawns a process.
+	remote := NormalizeRepoRemote(input)
+	if remote == "" && filepath.IsAbs(input) {
+		remote = NormalizeRepoRemote(detectRemoteForPath(input))
+	}
+	if remote != "" {
+		err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE repo_remote = ? LIMIT 1`, remote).Scan(&id, &name)
+		if err == nil {
+			return id, name, nil
+		}
+		if err != sql.ErrNoRows {
+			return "", "", fmt.Errorf("resolve project by repository: %w", err)
 		}
 	}
 

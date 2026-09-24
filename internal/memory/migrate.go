@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 10
+const schemaVersion = 11
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -30,6 +30,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV8,
 	migrateV9,
 	migrateV10,
+	migrateV11,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -469,6 +470,33 @@ func migrateV10(tx *sql.Tx) error {
 		if _, err := tx.Exec(q); err != nil {
 			return fmt.Errorf("add memories.%s: %w", c.name, err)
 		}
+	}
+	return nil
+}
+
+// migrateV11 adds projects.repo_remote, the normalized remote URL of the
+// repository a project's path points at.
+//
+// Path identity cannot recognise that two checkouts are one project:
+// ~/src/ghost and ~/work/ghost are different strings, so an agent that changes
+// working directory silently starts a second project and loses everything the
+// first one knew. The remote is the only thing the two paths share that says
+// they are the same repository.
+//
+// Additive and nullable: a project may have no repository, and existing rows
+// have nothing to detect from here — git is consulted by the caller that owns
+// the path, never by this package. No default is applied, because inventing a
+// remote for a project that has none would merge unrelated work.
+func migrateV11(tx *sql.Tx) error {
+	exists, err := columnExists(tx, "projects", "repo_remote")
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil // hand-migrated DB already has the column
+	}
+	if _, err := tx.Exec(`ALTER TABLE projects ADD COLUMN repo_remote TEXT`); err != nil {
+		return fmt.Errorf("add projects.repo_remote: %w", err)
 	}
 	return nil
 }

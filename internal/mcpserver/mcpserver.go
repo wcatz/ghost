@@ -19,6 +19,7 @@ import (
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
+	"github.com/wcatz/ghost/internal/repo"
 	"github.com/wcatz/ghost/internal/resolve"
 )
 
@@ -43,6 +44,62 @@ func boolPtr(b bool) *bool { return &b }
 // contain a harness (running `go test` from an opencode session), which would
 // otherwise make that case environment-dependent.
 var detectCallingSource = ai.DetectSource
+
+// ensureProjectFor creates the project for a save and returns the id the
+// caller must write to, adding repository identity when the caller identified
+// it by a filesystem path.
+//
+// MCP callers normally pass a project *name*, which says nothing about a
+// repository — but project_id is sometimes an absolute path, and that is
+// exactly the shape that produced duplicate projects when a session changed
+// working directory. Only git can say whether two such paths are one
+// repository, so detection is confined to that case: an ordinary named save
+// never spawns a process.
+//
+// The returned id is not always the argument. When the path belongs to a
+// repository Ghost already knows, this resolves to the project that owns it
+// instead of opening a second one. Resolution cannot live in
+// Store.ResolveProject: a path carries no repository identity of its own, so
+// asking the store "which project is this path?" would need the store to run
+// git — which it deliberately never does.
+//
+// The caller must use the returned id rather than the argument. Ensuring can
+// fold an already-duplicate row into its canonical project, and writing to
+// the folded-away id afterwards fails on a foreign key against a project that
+// was deliberately not created.
+func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string, error) {
+	remote := ""
+	if filepath.IsAbs(projectID) {
+		remote = repo.DetectRemote(projectID)
+	}
+
+	if remote != "" {
+		id, _, err := s.store.ResolveProject(ctx, remote)
+		if err != nil {
+			return "", fmt.Errorf("resolve project by repository: %w", err)
+		}
+		if id != "" {
+			return id, nil
+		}
+	}
+
+	if err := s.store.EnsureProjectWithRepo(ctx, projectID, "", projectID, remote); err != nil {
+		return "", err
+	}
+
+	// Ensure may have folded an existing duplicate row into its canonical
+	// project, so ask again before handing the id back.
+	if remote != "" {
+		id, _, err := s.store.ResolveProject(ctx, remote)
+		if err != nil {
+			return "", fmt.Errorf("resolve project after ensure: %w", err)
+		}
+		if id != "" {
+			return id, nil
+		}
+	}
+	return projectID, nil
+}
 
 // provenanceFor derives write-time provenance for a save made through this
 // request.
@@ -646,10 +703,16 @@ func (s *Server) registerTools() {
 		var truncated bool
 		args.Content, truncated = memory.ClampContent(args.Content)
 
-		// Pass "" for path — MCP callers don't have filesystem paths.
-		if err := s.store.EnsureProject(ctx, args.ProjectID, "", args.ProjectID); err != nil {
+		// Pass "" for path: MCP callers name projects rather than describing
+		// them. ensureProjectFor still derives repository identity when
+		// project_id happens to be an absolute path, which is how two
+		// checkouts of one repository stay one project — and it returns the
+		// id to write to, since that checkout may already be represented.
+		canonical, err := s.ensureProjectFor(ctx, args.ProjectID)
+		if err != nil {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
+		args.ProjectID = canonical
 
 		id, duplicateOf, score, err := s.store.UpsertWithProvenance(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, provenanceFor(req))
 		if err != nil {
@@ -1320,14 +1383,18 @@ func (s *Server) registerTools() {
 			tags = []string{}
 		}
 		tags = validateTags(tags)
-		// Pass "" for path — MCP callers don't have filesystem paths. Mirrors
-		// ghost_memory_save: without this, a decision recorded for a project
-		// that has never saved a memory yet fails with a raw FK-constraint
-		// error instead of succeeding, since decisions.project_id references
-		// projects.id.
-		if err := s.store.EnsureProject(ctx, args.ProjectID, "", args.ProjectID); err != nil {
+		// Pass "" for path: MCP callers name projects rather than describing
+		// them, though ensureProjectFor still derives repository identity when
+		// project_id is an absolute path and returns the id to write to.
+		// Mirrors ghost_memory_save: without this, a decision recorded for a
+		// project that has never saved a memory yet fails with a raw
+		// FK-constraint error instead of succeeding, since
+		// decisions.project_id references projects.id.
+		canonical, err := s.ensureProjectFor(ctx, args.ProjectID)
+		if err != nil {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
+		args.ProjectID = canonical
 		decisionID, memoryID, companionClamped, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
