@@ -1,0 +1,216 @@
+package memory
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+// ExplainRow is one candidate's contribution to a search, with every signal
+// that moved it stated separately.
+//
+// Ranks are 0-based within their leg (the same convention RRF uses) so the
+// arithmetic shown matches the arithmetic performed. A leg that did not match
+// reports -1 rather than 0, because rank 0 is a real first place — an absent
+// leg and a top-ranked one must not look alike.
+type ExplainRow struct {
+	ID                   string  `json:"memory_id"`
+	Category             string  `json:"category"`
+	Content              string  `json:"content"`
+	Included             bool    `json:"included"`
+	Rank                 int     `json:"rank"`                   // 1-based; 0 when excluded
+	FTSRank              int     `json:"fts_rank"`               // -1 when the FTS leg had no match
+	VectorRank           int     `json:"vector_rank"`            // -1 when the vector leg had no match
+	VectorScore          float64 `json:"vector_score"`           // cosine; -1 when absent
+	RRFScore             float64 `json:"rrf_score"`              // fused base score before decay
+	DecayFactor          float64 `json:"decay_factor"`           // category/age multiplier applied to the base
+	AgeDays              float64 `json:"age_days"`               //
+	SupersedePenalty     int     `json:"supersede_penalty"`      // co-present memories superseding this one
+	NearDuplicatePenalty int     `json:"near_duplicate_penalty"` // higher-ranked near-duplicate partners
+	Reason               string  `json:"reason,omitempty"`       // why it is absent from the results
+}
+
+// SearchExplain is the diagnosis for one search: which legs ran, what each
+// candidate scored, and why anything was left out.
+//
+// Membership is never re-derived here. Rows are marked included by asking
+// SearchHybrid for the real answer, so an explanation can only ever describe
+// a ranking Ghost actually produced — recomputing it locally would let the
+// explanation drift from the behavior it is supposed to explain.
+type SearchExplain struct {
+	ProjectID       string       `json:"project_id"`
+	Query           string       `json:"query"`
+	Limit           int          `json:"limit"`
+	VectorAvailable bool         `json:"vector_available"`
+	Notes           []string     `json:"notes,omitempty"`
+	Rows            []ExplainRow `json:"rows"`
+}
+
+// ExplainSearch runs the production search and reports how each candidate
+// got its score. It is a read-only diagnostic: it performs the same queries
+// SearchHybrid does and adds no writes.
+func (s *Store) ExplainSearch(ctx context.Context, projectID, query string, queryVec []float32, limit int) (SearchExplain, error) {
+	p := DefaultSearchParams()
+	p.MinSimilarity = s.vectorMinSimilarityFloor()
+
+	ex := SearchExplain{
+		ProjectID:       projectID,
+		Query:           query,
+		Limit:           limit,
+		VectorAvailable: queryVec != nil,
+	}
+	if queryVec == nil {
+		ex.Notes = append(ex.Notes, "no query embedding available — FTS-only search, so vector scores are absent rather than zero")
+	}
+
+	// Membership comes from the real search.
+	final, err := s.SearchHybrid(ctx, projectID, query, queryVec, limit)
+	if err != nil {
+		return ex, fmt.Errorf("search: %w", err)
+	}
+
+	fts, err := s.SearchFTS(ctx, projectID, query, limit*2)
+	if err != nil {
+		fts = nil // SearchHybrid treats a failing leg as non-fatal; do the same
+	}
+
+	// Both the raw and floor-filtered vector legs are needed: a candidate
+	// dropped by the floor is a distinct, diagnosable outcome ("your query
+	// matched nothing strongly enough"), and it is invisible if only the
+	// filtered leg is kept.
+	var rawVec, vec []ScoredMemory
+	if queryVec != nil {
+		if v, vErr := s.SearchVector(ctx, projectID, queryVec, limit*2); vErr == nil {
+			rawVec = v
+			vec = filterVectorFloor(v, p.MinSimilarity)
+		}
+	}
+
+	ftsRank := make(map[string]int, len(fts))
+	for i, m := range fts {
+		if _, seen := ftsRank[m.ID]; !seen {
+			ftsRank[m.ID] = i
+		}
+	}
+	vecRank := make(map[string]int, len(vec))
+	vecScore := make(map[string]float64, len(vec))
+	for i, v := range vec {
+		vecRank[v.MemoryID] = i
+		vecScore[v.MemoryID] = float64(v.Score)
+	}
+	rawRank := make(map[string]int, len(rawVec))
+	rawScore := make(map[string]float64, len(rawVec))
+	for i, v := range rawVec {
+		rawRank[v.MemoryID] = i
+		rawScore[v.MemoryID] = float64(v.Score)
+	}
+	finalRank := make(map[string]int, len(final))
+	for i, m := range final {
+		finalRank[m.ID] = i + 1
+	}
+
+	// Candidate union: everything any leg surfaced, plus everything returned.
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(ftsRank)+len(rawRank)+len(finalRank))
+	add := func(id string) {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	for id := range ftsRank {
+		add(id)
+	}
+	for id := range rawRank {
+		add(id)
+	}
+	for id := range finalRank {
+		add(id)
+	}
+	if len(ids) == 0 {
+		return ex, nil
+	}
+
+	candidates, err := s.GetByIDs(ctx, ids)
+	if err != nil {
+		return ex, fmt.Errorf("hydrate candidates: %w", err)
+	}
+	byID := make(map[string]Memory, len(candidates))
+	pinned := make(map[string]bool, len(candidates))
+	for _, m := range candidates {
+		byID[m.ID] = m
+		pinned[m.ID] = m.Pinned
+	}
+
+	// Penalty lookups follow the same locking contract as demoteResults:
+	// Store's RLock is held while the helpers read s.db directly.
+	s.mu.RLock()
+	supersede, supErr := SupersedePenalties(ctx, s.db, ids)
+	nearDup, nearErr := DemotionPenalties(ctx, s.db, ids, pinned, s.demotionThreshold)
+	s.mu.RUnlock()
+	if supErr != nil {
+		supersede = nil
+	}
+	if nearErr != nil {
+		nearDup = nil
+	}
+
+	now := time.Now().UTC()
+	for _, id := range ids {
+		m, ok := byID[id]
+		if !ok {
+			continue // raced with a delete; not diagnosable, skip
+		}
+		row := ExplainRow{
+			ID:       id,
+			Category: m.Category,
+			Content:  explainSnippet(m.Content, 120),
+			FTSRank:  -1, VectorRank: -1, VectorScore: -1,
+			SupersedePenalty:     supersede[id],
+			NearDuplicatePenalty: nearDup[id],
+			AgeDays:              ageDays(m.CreatedAt, now),
+		}
+		row.DecayFactor = DecayFactor(m.Category, m.Pinned, row.AgeDays)
+
+		if r, hit := ftsRank[id]; hit {
+			row.FTSRank = r
+			row.RRFScore += p.FTSWeight / float64(p.RRFK+r+1)
+		}
+		if r, hit := vecRank[id]; hit {
+			row.VectorRank = r
+			row.VectorScore = vecScore[id]
+			row.RRFScore += p.VecWeight / float64(p.RRFK+r+1)
+		}
+
+		if rank, isFinal := finalRank[id]; isFinal {
+			row.Included = true
+			row.Rank = rank
+			ex.Rows = append(ex.Rows, row)
+			continue
+		}
+
+		// Excluded. Demotions in this system are membership-preserving, so
+		// absence is either the similarity floor or the result window.
+		_, onFloor := rawRank[id]
+		_, survived := vecRank[id]
+		if onFloor && !survived {
+			row.Reason = fmt.Sprintf("dropped by the vector similarity floor: cosine %.4f is below the minimum %.4f",
+				rawScore[id], float64(p.MinSimilarity))
+		} else {
+			row.Reason = fmt.Sprintf("outside the result window: only the top %d are returned", limit)
+		}
+		ex.Rows = append(ex.Rows, row)
+	}
+	return ex, nil
+}
+
+// explainSnippet shortens content for a diagnostic listing. Explanations are
+// read by a human or an agent debugging a query, so the identifying opening
+// words matter more than the full text.
+func explainSnippet(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}

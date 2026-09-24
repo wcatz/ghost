@@ -31,6 +31,9 @@ type MemoryStore interface {
 	SearchFTS(ctx context.Context, projectID, query string, limit int) ([]memory.Memory, error)
 	SearchFTSAll(ctx context.Context, query string, limit int) ([]memory.Memory, error)
 	SearchHybrid(ctx context.Context, projectID, query string, queryVec []float32, limit int) ([]memory.Memory, error)
+	// ExplainSearch reports how each candidate was scored by the same
+	// pipeline SearchHybrid uses, including why anything was excluded.
+	ExplainSearch(ctx context.Context, projectID, query string, queryVec []float32, limit int) (memory.SearchExplain, error)
 	SearchHybridAll(ctx context.Context, query string, queryVec []float32, limit int) ([]memory.Memory, error)
 	SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]memory.ScoredMemory, error)
 	GetByCategory(ctx context.Context, projectID, category string, limit int) ([]memory.Memory, error)
