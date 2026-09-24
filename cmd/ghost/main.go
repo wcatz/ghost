@@ -439,10 +439,12 @@ func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName 
 // Each phase is a separate `ghost` child process, so a failure in one phase
 // cannot corrupt the next, and a failing phase does not abort the remaining
 // ones — the stop hook spawns this detached and never reads its exit status,
-// so this log is the only record. Running them sequentially here is the whole
-// point: spawned as three independent processes they raced, and reflect's
-// rewrite could replace rows while supersede was classifying them (foreign-key
-// aborts and lost resolved_at stamps).
+// so this log (stderr below) plus the lifecycle-last-failure marker recorded
+// at the end of the run — which the next session-start surfaces as an alert —
+// are the record. Running them sequentially here is the whole point: spawned
+// as three independent processes they raced, and reflect's rewrite could
+// replace rows while supersede was classifying them (foreign-key aborts and
+// lost resolved_at stamps).
 //
 // Internal subcommand: not listed in help.
 func runLifecycle() {
@@ -486,7 +488,8 @@ func runLifecycle() {
 	llmOK := ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary).Available() ||
 		ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary).Available()
 
-	if cfg.Reflection.AutoReflect && !llmOK {
+	reflectSkipped := cfg.Reflection.AutoReflect && !llmOK
+	if reflectSkipped {
 		fmt.Fprintln(os.Stderr, "lifecycle: skipping reflect — no CLI binary available")
 	}
 
@@ -498,6 +501,23 @@ func runLifecycle() {
 		fmt.Fprintf(os.Stderr, "lifecycle: warning: scratch reap failed: %v\n", reapErr)
 	} else {
 		fmt.Fprintf(os.Stderr, "lifecycle: scratch reap removed=%d\n", removed)
+	}
+
+	// Outcome tracking for the end-of-run marker: a phase that could not run
+	// (skipped for want of an LLM backend — the original silent incident) or
+	// exited non-zero counts as failed; success counts only phases that
+	// actually ran.
+	phasesRan := 0
+	var failedPhases []string
+	var firstPhaseErr string
+	recordFailure := func(phase, msg string) {
+		failedPhases = append(failedPhases, phase)
+		if firstPhaseErr == "" {
+			firstPhaseErr = msg
+		}
+	}
+	if reflectSkipped {
+		recordFailure("reflect", mcpinit.NoLLMBackendError)
 	}
 
 	for _, ph := range lifecyclePhases(cfg, projectName, llmOK) {
@@ -543,9 +563,21 @@ func runLifecycle() {
 		cancel()
 		if runErr != nil {
 			fmt.Fprintf(os.Stderr, "lifecycle: %s failed after %s (continuing): %v\n", ph.name, time.Since(start).Round(time.Second), runErr)
+			recordFailure(ph.name, runErr.Error())
 			continue
 		}
+		phasesRan++
 		fmt.Fprintf(os.Stderr, "lifecycle: %s completed in %s\n", ph.name, time.Since(start).Round(time.Second))
+	}
+
+	// Record the outcome durably: any failed phase leaves an atomic
+	// lifecycle-last-failure.json marker that the next session-start turns
+	// into a visible alert (detached runs otherwise speak only to
+	// lifecycle.log); a run where every phase that ran succeeded clears an
+	// earlier marker. The per-phase stderr lines above are unchanged — for a
+	// foreground run they are already the terminal's visible record.
+	if err := mcpinit.FinishLifecycleRun(projectName, phasesRan, failedPhases, firstPhaseErr); err != nil {
+		fmt.Fprintf(os.Stderr, "lifecycle: warning: could not record run outcome: %v\n", err)
 	}
 }
 

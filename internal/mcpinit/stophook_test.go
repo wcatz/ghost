@@ -411,6 +411,56 @@ func TestSpawnLifecycleIfConfigured_ProceedsWhenResolveEnabledWithoutLLM(t *test
 	}
 }
 
+// TestSpawnLifecycle_ReflectOnlyNoLLMWritesMarker pins the hook-guard write:
+// with reflect-only config and no LLM CLI reachable, the stop hook's no-LLM
+// guard skips the spawn entirely — the original mr-slave incident (auto-
+// reflect silently dead for weeks; no lifecycle process, not even
+// lifecycle.log, ever appears) — so the guard itself must leave the failure
+// marker when a store exists to attribute it to. When no store exists it
+// must still create nothing (see TestSpawnLifecycleIfConfigured_NoOpWithoutLLM).
+func TestSpawnLifecycle_ReflectOnlyNoLLMWritesMarker(t *testing.T) {
+	dataHome := isolatedHome(t)
+	writeGhostConfigFile(t, "reflection:\n  auto_reflect: true\n")
+	t.Setenv("PATH", t.TempDir()) // no claude, no opencode
+
+	projDir := filepath.Join(t.TempDir(), "myproj")
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir proj: %v", err)
+	}
+	canonical, err := filepath.EvalSymlinks(projDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	seedProject(t, dataHome, "p1", canonical, "myproj")
+
+	spawnLifecycleIfConfigured(canonical, "")
+
+	b, err := os.ReadFile(filepath.Join(dataHome, "ghost", "lifecycle-last-failure.json"))
+	if err != nil {
+		t.Fatalf("expected a failure marker for the skipped reflect spawn: %v", err)
+	}
+	var m struct {
+		Project      string   `json:"project"`
+		PhasesFailed []string `json:"phases_failed"`
+		Error        string   `json:"error"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal marker %q: %v", b, err)
+	}
+	if m.Project != "p1" {
+		t.Errorf("marker project = %q, want p1", m.Project)
+	}
+	if len(m.PhasesFailed) != 1 || m.PhasesFailed[0] != "reflect" {
+		t.Errorf("marker phases_failed = %v, want [reflect]", m.PhasesFailed)
+	}
+	if !strings.Contains(m.Error, "no CLI LLM backend") {
+		t.Errorf("marker error = %q, want the no-CLI-backend explanation", m.Error)
+	}
+	if _, err := os.Stat(filepath.Join(dataHome, "ghost", "lifecycle.log")); !os.IsNotExist(err) {
+		t.Errorf("no lifecycle process may spawn from the skipped guard, lifecycle.log stat err = %v", err)
+	}
+}
+
 // TestClaimPidFile_ConcurrentCallersOnlyOneWins races many goroutines against
 // an empty pidPath, simulating near-simultaneous stop hooks for the same
 // project when no resolve has ever run. Exactly one must win the claim.

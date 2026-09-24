@@ -144,10 +144,24 @@ func runSessionStart(data []byte, stdout io.Writer) {
 
 	projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown := loadSessionContext(cwd)
 
-	// Count this session. Context loading above is strictly read-only; the
-	// counter bump is the one deliberate write, scoped to its own short-lived
-	// connection and best-effort — on any failure (busy store, permissions)
-	// the stale stored count is shown instead. Never creates a database.
+	// Surface a failed auto-consolidation chain from an earlier session as
+	// ONE labeled line ahead of the context block (after plugin finalize in
+	// RunHostEvent, on the full-injection path only — resume/compact/
+	// subagent fires return above and stay silent). The marker is read
+	// best-effort; with no (fresh, matching) marker this writes nothing, so
+	// session-start stdout stays byte-identical to what it was without this
+	// feature.
+	if alert := lifecycleFailureAlert(projectID, project); alert != "" {
+		_, _ = fmt.Fprintln(stdout, alert)
+	}
+
+	// Count this session. Context loading above is read-only; this handler's
+	// deliberate writes are the counter bump below — scoped to its own
+	// short-lived connection and best-effort, so on any failure (busy store,
+	// permissions) the stale stored count is shown instead and a database is
+	// never created — plus the alert block above, whose only state effect is
+	// deleting a lifecycle-last-failure.json marker that aged past the
+	// 30-day self-clean horizon (its marker read otherwise touches nothing).
 	// Only a genuine new session should count — resume/clear/compact fire
 	// SessionStart too, but a user perceives those as continuing the same
 	// session, not starting a new one. Bumping on every fire inflated the
