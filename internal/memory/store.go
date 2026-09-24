@@ -684,9 +684,16 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 // auto-filled value would be fabricated provenance, which is the exact thing
 // these columns exist to avoid.
 type Provenance struct {
-	// Agent names the harness that produced the memory (claude, opencode,
-	// codex, goose) — distinct from Source, which records *how* it arrived
-	// (mcp, reflection, manual).
+	// Agent names the harness that produced the memory. The values are the
+	// source tokens ai.NewSourceProviderForSource understands — claude-code,
+	// opencode, codex, goose — not the binary names. Claude is "claude-code"
+	// everywhere it appears as a source (SourceForClientName maps it, and
+	// detectSourceFromEnv normalizes CLAUDECODE to it), so storing anything
+	// else would split the vocabulary and make a filter on agent miss rows
+	// that ghost_resolve and the CLI already treat as claude-code.
+	//
+	// Distinct from Source, which records *how* the memory arrived (mcp,
+	// reflection, manual).
 	Agent string
 	// SessionID identifies the caller session, when one is known.
 	SessionID string
