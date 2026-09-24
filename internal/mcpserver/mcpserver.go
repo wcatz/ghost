@@ -125,11 +125,13 @@ type Server struct {
 	resolveCLI config.CLIConfig
 }
 
-// Content length caps enforced on free-text tool arguments. Memory content was
-// already capped; task and decision fields had no cap at all, letting a
-// misbehaving client grow the SQLite file without bound through those paths.
+// Content length caps enforced on free-text tool arguments. The memory
+// content cap itself lives in memory.MaxContentLen — one named constant
+// shared by every writer (MCP tools, reflection proposals, imports) — and
+// memory.ClampContent both enforces it and appends the explicit truncation
+// marker. These remain MCP-local: titles and list items have their own,
+// smaller display-oriented budgets.
 const (
-	maxContentLen   = 2000
 	maxTitleLen     = 300
 	maxAlternatives = 20
 
@@ -138,6 +140,16 @@ const (
 	// fetched count cannot drift apart.
 	globalMemoriesLimit = 15
 )
+
+// truncationWarning is the caller-facing half of the explicit-truncation
+// contract: whenever memory.ClampContent cut content at the cap, the
+// save/update response appends this line so the saving agent learns the
+// full text did NOT land and can split the memory or shorten it
+// deliberately. The stored half is the marker memory.ClampContent appends
+// to the content itself — truncation is visible on both sides.
+func truncationWarning() string {
+	return fmt.Sprintf(" — WARNING: content was truncated at %d chars; the stored text is incomplete — split it into focused memories or shorten it deliberately.", memory.MaxContentLen)
+}
 
 const mcpInstructions = `Ghost is your persistent memory system. It remembers project knowledge across sessions — use it proactively.
 
@@ -349,10 +361,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, args updateArgs) (string
 	var content, category *string
 	truncated := false
 	if args.Content != "" {
-		if len(args.Content) > maxContentLen {
-			args.Content = truncateUTF8(args.Content, maxContentLen)
-			truncated = true
-		}
+		args.Content, truncated = memory.ClampContent(args.Content)
 		content = &args.Content
 		changed = append(changed, "content")
 	}
@@ -391,7 +400,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, args updateArgs) (string
 
 	msg := fmt.Sprintf("Memory updated (id: %s): %s", args.MemoryID, strings.Join(changed, ", "))
 	if truncated {
-		msg += fmt.Sprintf(" (content truncated to %d chars)", maxContentLen)
+		msg += truncationWarning()
 	}
 	return msg, nil
 }
@@ -574,11 +583,8 @@ func (s *Server) registerTools() {
 			args.ProjectID = resolved
 		}
 
-		truncated := false
-		if len(args.Content) > maxContentLen {
-			args.Content = truncateUTF8(args.Content, maxContentLen)
-			truncated = true
-		}
+		var truncated bool
+		args.Content, truncated = memory.ClampContent(args.Content)
 
 		// Pass "" for path — MCP callers don't have filesystem paths.
 		if err := s.store.EnsureProject(ctx, args.ProjectID, "", args.ProjectID); err != nil {
@@ -604,7 +610,7 @@ func (s *Server) registerTools() {
 			msg = fmt.Sprintf("Memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
 		}
 		if truncated {
-			msg += fmt.Sprintf(" (content truncated to %d chars)", maxContentLen)
+			msg += truncationWarning()
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
@@ -937,10 +943,7 @@ func (s *Server) registerTools() {
 		tags = validateTags(tags)
 
 		globalTruncated := false
-		if len(args.Content) > maxContentLen {
-			args.Content = truncateUTF8(args.Content, maxContentLen)
-			globalTruncated = true
-		}
+		args.Content, globalTruncated = memory.ClampContent(args.Content)
 
 		if err := s.store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
 			return nil, nil, fmt.Errorf("ensure global project: %w", err)
@@ -964,7 +967,7 @@ func (s *Server) registerTools() {
 			msg = fmt.Sprintf("Global memory saved (id: %s), linked as a likely duplicate of %s (score %.2f)", id, duplicateOf, score)
 		}
 		if globalTruncated {
-			msg += fmt.Sprintf(" (content truncated to %d chars)", maxContentLen)
+			msg += truncationWarning()
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
@@ -994,7 +997,8 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("project_id and title are required")
 		}
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
-		args.Description = truncateUTF8(args.Description, maxContentLen)
+		var descTruncated bool
+		args.Description, descTruncated = memory.ClampContent(args.Description)
 		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve project: %w", err)
@@ -1019,8 +1023,12 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("create task: %w", err)
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "tasks")
+		msg := fmt.Sprintf("Task created (id: %s)", id)
+		if descTruncated {
+			msg += truncationWarning()
+		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Task created (id: %s)", id)}},
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 		}, nil, nil
 	})
 
@@ -1220,8 +1228,9 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("project_id, title, decision, and rationale are required")
 		}
 		args.Title = truncateUTF8(args.Title, maxTitleLen)
-		args.Decision = truncateUTF8(args.Decision, maxContentLen)
-		args.Rationale = truncateUTF8(args.Rationale, maxContentLen)
+		var decisionTruncated, rationaleTruncated bool
+		args.Decision, decisionTruncated = memory.ClampContent(args.Decision)
+		args.Rationale, rationaleTruncated = memory.ClampContent(args.Rationale)
 		alternatives, err := optStringSlice(args.Alternatives, "alternatives")
 		if err != nil {
 			return nil, nil, err
@@ -1274,10 +1283,14 @@ func (s *Server) registerTools() {
 			}
 		}
 		s.notifyProjectResource(ctx, args.ProjectID, "decisions")
+		msg := fmt.Sprintf(
+			"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
+			decisionID, memoryID, supersedeNote)
+		if decisionTruncated || rationaleTruncated {
+			msg += truncationWarning()
+		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
-				"Decision recorded (decision_id: %s). A companion memory was also saved (memory_id: %s) — use memory_id, not decision_id, with ghost_memory_pin or ghost_memory_update.%s",
-				decisionID, memoryID, supersedeNote)}},
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 		}, nil, nil
 	})
 
@@ -1525,9 +1538,13 @@ func (s *Server) registerTools() {
 			normalized := 2
 			priority = &normalized
 		}
+		truncated := false
 		if args.Description != nil {
-			truncated := truncateUTF8(*args.Description, maxContentLen)
-			args.Description = &truncated
+			clamped, cut := memory.ClampContent(*args.Description)
+			args.Description = &clamped
+			if cut {
+				truncated = true
+			}
 		}
 
 		// UpdateTask does its own read-merge-write under one lock, so a
@@ -1538,8 +1555,12 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("update task: %w", err)
 		}
 		s.notifyProjectResource(ctx, updated.ProjectID, "tasks")
+		msg := "Task updated."
+		if truncated {
+			msg += truncationWarning()
+		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Task updated."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 		}, nil, nil
 	})
 

@@ -20,6 +20,7 @@ import (
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/reflection"
 )
 
 // testDeleteStore returns a real in-memory Store with one project ("proj",
@@ -1020,4 +1021,34 @@ func mustCtx(t *testing.T, minutes int) context.Context {
 	ctx, cancel := consolidationContext(context.Background(), minutes)
 	t.Cleanup(cancel)
 	return ctx
+}
+
+// TestClampReflectMemories pins the shared content cap on consolidation
+// output: reflection proposals obey the same memory.MaxContentLen as MCP
+// saves, content at the cap is untouched, and a cut is explicit — the
+// stored text ends with the marker naming the limit instead of stopping
+// mid-sentence with no signal.
+func TestClampReflectMemories(t *testing.T) {
+	const markerLiteral = " …[truncated at 8000 chars]"
+
+	mems := []reflection.ReflectMemory{
+		{Category: "fact", Content: "short and complete"},
+		{Category: "gotcha", Content: strings.Repeat("b", memory.MaxContentLen)},
+		{Category: "gotcha", Content: strings.Repeat("a", memory.MaxContentLen+1)},
+	}
+
+	if cut := clampReflectMemories(mems); cut != 1 {
+		t.Errorf("cut = %d, want 1 (only the over-cap content is cut)", cut)
+	}
+	if mems[0].Content != "short and complete" {
+		t.Errorf("sub-cap content rewritten: %q", mems[0].Content)
+	}
+	if mems[1].Content != strings.Repeat("b", memory.MaxContentLen) {
+		t.Errorf("exactly-at-cap content rewritten: len=%d, want %d", len(mems[1].Content), memory.MaxContentLen)
+	}
+	want := strings.Repeat("a", memory.MaxContentLen) + markerLiteral
+	if mems[2].Content != want {
+		t.Errorf("over-cap content = len %d ending %q, want len %d ending %q",
+			len(mems[2].Content), mems[2].Content[len(mems[2].Content)-len(markerLiteral):], len(want), markerLiteral)
+	}
 }
