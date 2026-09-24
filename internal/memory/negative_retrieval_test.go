@@ -155,7 +155,7 @@ var negativeRetrievalCases = []negFixture{
 		links: []negLink{{"helmfile_canonical", "helmfile_duplicate", "duplicate"}},
 		query: "helmfile environments",
 		limit: 3,
-		want:  []string{"helmfile_canonical", "helmfile_timeline"},
+		want:  []string{"helmfile_canonical", "helmfile_duplicate", "helmfile_timeline"},
 		afterKey: map[string]string{
 			"helmfile_duplicate": "helmfile_timeline",
 		},
@@ -192,7 +192,7 @@ var negativeRetrievalCases = []negFixture{
 		// restatement of db_postgres sinks below it.
 		query: "what database does production use",
 		limit: 3,
-		want:  []string{"db_postgres", "db_mysql"},
+		want:  []string{"db_postgres", "db_mysql", "db_postgres_dup"},
 		afterKey: map[string]string{
 			"db_postgres_dup": "db_mysql",
 		},
@@ -209,7 +209,7 @@ var negativeRetrievalCases = []negFixture{
 		// suppressed, while the restatement still sinks.
 		query: "what is the project database",
 		limit: 3,
-		want:  []string{"dev_sqlite", "prod_postgres"},
+		want:  []string{"dev_sqlite", "prod_postgres", "dev_sqlite_dup"},
 		afterKey: map[string]string{
 			"dev_sqlite_dup": "prod_postgres",
 		},
@@ -277,6 +277,17 @@ func TestNegativeRetrievalRejectReasonsExist(t *testing.T) {
 		}
 		if len(f.want) == 0 {
 			t.Errorf("%s: no positive expectation — a fixture that only forbids things cannot tell a correct empty result from a broken search", f.name)
+		}
+		for key := range f.afterKey {
+			found := false
+			for _, w := range f.want {
+				if w == key {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("%s: afterKey target %q is not in want — the position check is skipped when a row is absent, so evicting it entirely would pass unnoticed", f.name, key)
+			}
 		}
 		if len(f.reject) == 0 && len(f.afterKey) == 0 {
 			t.Errorf("%s: asserts nothing negative; it belongs in the positive suite instead", f.name)
