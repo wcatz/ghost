@@ -35,6 +35,27 @@ type Config struct {
 	Search     SearchConfig     `koanf:"search"`
 	Obsidian   ObsidianConfig   `koanf:"obsidian"`
 	Routing    RoutingConfig    `koanf:"routing"`
+	Scratch    ScratchConfig    `koanf:"scratch"`
+}
+
+// DefaultScratchMaxBytes is the compiled per-root scratch budget: 512 MiB.
+// It is the value scratch.max_bytes takes when the key is unset, and the
+// fallback when config loading itself fails.
+const DefaultScratchMaxBytes int64 = 512 * 1024 * 1024
+
+// ScratchConfig bounds the scratch root every harness spawn is confined to
+// (internal/scratch: $GHOST_SCRATCH_DIR or <dataDir>/scratch).
+type ScratchConfig struct {
+	// MaxBytes is the per-root size budget enforced before each harness
+	// spawn: over budget → stale entries are reaped first; still over budget
+	// after the reap → a loud warning naming the root and the bytes-over, and
+	// the spawn proceeds anyway (hygiene never blocks maintenance, but is
+	// never quiet).
+	//
+	// 0 disables enforcement entirely — the explicit opt-out, distinct from
+	// leaving the key unset, which keeps the 512 MiB default. A negative
+	// value behaves as 0 (the check treats any non-positive budget as off).
+	MaxBytes int64 `koanf:"max_bytes"`
 }
 
 // SearchConfig controls hybrid-search ranking behavior.
@@ -179,6 +200,7 @@ var defaults = map[string]interface{}{
 	"obsidian.interval":                        "30s",
 	"obsidian.auto_sync":                       false,
 	"routing.default_project":                  "",
+	"scratch.max_bytes":                        DefaultScratchMaxBytes,
 }
 
 // Load reads configuration with layered precedence.
@@ -231,6 +253,9 @@ func Load() (*Config, error) {
 		"GHOST_OLLAMA_URL":                               "embedding.ollama_url",
 		"GHOST_ROUTING_DEFAULT_PROJECT":                  "routing.default_project",
 		"GHOST_SEARCH_MIN_SIMILARITY":                    "search.min_similarity",
+		// GHOST_SCRATCH_MAX_BYTES: the generic _→. transformer would produce
+		// scratch.max.bytes, missing the max_bytes key entirely.
+		"GHOST_SCRATCH_MAX_BYTES": "scratch.max_bytes",
 	}
 	for envKey, koanfKey := range envOverrides {
 		if val := os.Getenv(envKey); val != "" {

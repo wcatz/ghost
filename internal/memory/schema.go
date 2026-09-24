@@ -217,6 +217,17 @@ CREATE TABLE IF NOT EXISTS link_scans (
     memory_id  TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
     scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS maintenance_runs (
+    id                   TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    kind                 TEXT NOT NULL,
+    recorded_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    scratch_bytes        INTEGER NOT NULL DEFAULT 0,
+    scratch_reaped_bytes INTEGER NOT NULL DEFAULT 0,
+    scratch_reaped_count INTEGER NOT NULL DEFAULT 0,
+    note                 TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_maintenance_runs_at ON maintenance_runs(recorded_at DESC);
 `
 
 // OpenDB opens or creates the SQLite database and runs migrations.

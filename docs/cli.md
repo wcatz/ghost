@@ -204,6 +204,40 @@ ghost bench --sweep
 
 `--sweep` grid-searches the fusion parameters. See [Benchmarks and methodology](benchmarks.md).
 
+## Scratch hygiene
+
+### `ghost maintenance status`
+
+Shows the live scratch root usage (bytes, file count) against the configured
+`scratch.max_bytes` budget, followed by the most recent hygiene events — one
+line per run with its timestamp, scratch bytes, and reaped counts:
+
+```bash
+ghost maintenance status
+```
+
+Budget checks that fired before a harness spawn (root was over budget, so
+stale entries were reaped and possibly a loud warning emitted) are recorded to
+the database; quiet under-budget spawns add no rows. `0` budget prints as
+disabled.
+
+### `ghost maintenance clean-scratch`
+
+Reports pre-scratch-root debris — `~/.cache/ghost-tmp` and the shared system
+temp dir's hidden `.<hex>-00000000.so` JIT-cache droppings — with counts,
+bytes, and exact paths. Report-only by default:
+
+```bash
+ghost maintenance clean-scratch            # report: counts, bytes, paths
+ghost maintenance clean-scratch --apply    # remove strict-signature matches
+```
+
+`--apply` removes only regular files matching the strict droppings signature
+(never directories, even ones named like droppings), skips anything an
+`lsof`/`fuser` probe reports as open or mmap'd, and — when neither probe tool
+is available (Windows, minimal containers) — refuses to remove anything and
+says so rather than risk deleting an open file.
+
 ## Maintenance and installation
 
 ### `ghost upgrade`

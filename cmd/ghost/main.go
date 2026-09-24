@@ -98,6 +98,20 @@ func main() {
 		case "context":
 			runContext()
 			return
+		case "maintenance":
+			if len(os.Args) > 2 {
+				switch os.Args[2] {
+				case "status":
+					runMaintenanceStatus()
+					return
+				case "clean-scratch":
+					runMaintenanceCleanScratch(os.Args[3:])
+					return
+				}
+			}
+			fmt.Fprintln(os.Stderr, "Usage: ghost maintenance status")
+			fmt.Fprintln(os.Stderr, "       ghost maintenance clean-scratch [--apply]")
+			os.Exit(1)
 		}
 	}
 	printUsage()
@@ -2063,6 +2077,9 @@ Commands:
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
   obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
   context [--cwd <dir>]       Print the passive session-start context block (for opencode)
+  maintenance status          Show live scratch usage and recent hygiene runs
+  maintenance clean-scratch   Report pre-scratch-root legacy debris
+                              (dry-run by default, --apply to remove strict matches)
   bench [--sweep]             Run the retrieval-quality benchmark (built-in dataset);
                               --sweep grid-searches the fusion parameters
   upgrade                     Update ghost to the latest release

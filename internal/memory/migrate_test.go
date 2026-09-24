@@ -1215,3 +1215,89 @@ func TestMigrateV4NarrowsUpdateTrigger(t *testing.T) {
 		t.Errorf("memories_au trigger missing content-change guard, got: %s", auSQL)
 	}
 }
+
+// TestMigrateV9AddsMaintenanceRuns exercises the one-shot upgrade every existing
+// v8 database takes: migrateV9 must create maintenance_runs (schemaVersion 9),
+// stamp the version, and leave existing rows untouched. The fixture drops the
+// table initSQL would create and stamps user_version=8 to simulate a real
+// pre-migration database, and migrate() is called directly — bypassing
+// OpenDB's unconditional initSQL run — so the step's own DDL is what the test
+// proves.
+func TestMigrateV9AddsMaintenanceRuns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open v8 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(initSQL); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if _, err := db.Exec(`DROP TABLE maintenance_runs`); err != nil {
+		t.Fatalf("drop maintenance_runs to simulate a v8 database: %v", err)
+	}
+	seed := []string{
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v9-p1', 'p1')`,
+		`PRAGMA user_version = 8`,
+	}
+	for _, s := range seed {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed v8 db (%s): %v", s, err)
+		}
+	}
+
+	if err := migrate(db, 8); err != nil {
+		t.Fatalf("migrate v8->v9: %v", err)
+	}
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	// The migrated table is usable and stores a budget-check event.
+	if _, err := db.Exec(
+		`INSERT INTO maintenance_runs (kind, scratch_bytes, scratch_reaped_bytes, scratch_reaped_count, note)
+		 VALUES ('scratch-budget', 123456, 8192, 2, 'probe')`,
+	); err != nil {
+		t.Fatalf("insert after migrateV9: %v", err)
+	}
+	var gotBytes, gotReaped int
+	var gotNote string
+	if err := db.QueryRow(
+		`SELECT scratch_bytes, scratch_reaped_count, note FROM maintenance_runs WHERE kind='scratch-budget'`,
+	).Scan(&gotBytes, &gotReaped, &gotNote); err != nil {
+		t.Fatalf("select from maintenance_runs: %v", err)
+	}
+	if gotBytes != 123456 || gotReaped != 2 || gotNote != "probe" {
+		t.Errorf("row = (%d, %d, %q), want (123456, 2, probe)", gotBytes, gotReaped, gotNote)
+	}
+
+	// Pre-migration rows survived the additive step.
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM projects`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("projects after migration: n=%d err=%v, want 1", n, err)
+	}
+}
+
+// TestMigrateFreshDBHasMaintenanceRuns: a brand-new database (initSQL path, no
+// migration involved) must have maintenance_runs and its recency index from the
+// start — guards against the table silently dropping out of initSQL while
+// migrateV9 still exists to paper over it on upgraded databases.
+func TestMigrateFreshDBHasMaintenanceRuns(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(`SELECT scratch_bytes, scratch_reaped_bytes, scratch_reaped_count FROM maintenance_runs LIMIT 0`); err != nil {
+		t.Fatalf("maintenance_runs columns missing on fresh db: %v", err)
+	}
+	var idx string
+	if err := db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_maintenance_runs_at'`,
+	).Scan(&idx); err != nil {
+		t.Fatalf("idx_maintenance_runs_at index missing on fresh db: %v", err)
+	}
+}
