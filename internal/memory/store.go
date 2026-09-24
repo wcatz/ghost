@@ -1892,12 +1892,18 @@ func mergeScore(a, b map[string]bool) float64 {
 	return 0
 }
 
-// ftsSearchWordLimit caps how many query terms reach the FTS leg. It is
-// deliberately 10 for the current v2 benchmark. A larger cap broadens the OR
-// query and changes the measured retrieval trade-off; any future change must
-// be re-run against the current graded dataset rather than relying on older
-// experiment numbers. Recovering a natural-language query's tail terms needs
-// term *selection* (stopword/identifier ranking), not a bigger cap.
+// ftsSearchWordLimit caps how many query terms reach the FTS leg, and it is
+// deliberately 10. WHICH terms fill that budget is decided by term
+// selection — see selectFTSTERMs/ftsTermValue in fts_terms.go for the
+// scoring (identifier-shaped tokens outrank content words, stopwords last,
+// ties by original position), which is how a natural-language query's tail
+// terms reach FTS without the budget itself growing.
+//
+// The cap itself must not grow: raising it to 15/20/25/30 broadened the OR
+// query enough that FTS-only NDCG@10 rose above the fused hybrid and
+// inverted TestBenchRegressionFloors (fusion must beat either single leg),
+// measured on the v2 benchmark. Any future change must be re-run against the
+// current graded dataset rather than relying on older experiment numbers.
 const ftsSearchWordLimit = 10
 
 // sanitizeFTS sanitizes text into an FTS5 OR-query. Used on the search path
@@ -1906,14 +1912,19 @@ func sanitizeFTS(text string) string {
 	return sanitizeFTSN(text, ftsSearchWordLimit)
 }
 
-// sanitizeFTSN sanitizes text into an FTS5 OR-query, capped at maxWords.
-// Upsert's duplicate-recall probe uses a wider cap than plain search
-// (see sanitizeFTS) because a broader OR-probe over more of the content
-// improves candidate recall for the precision pass (mergeScore) that follows;
-// widening the cap globally would instead perturb ranked search results.
+// sanitizeFTSN sanitizes text into an FTS5 OR-query, capped at maxWords
+// terms SELECTED by value (ftsTermValue in fts_terms.go) and emitted in
+// original query order — a natural-language query's specific tail terms must
+// reach FTS, not just its first maxWords words. The cap itself exists to
+// keep the OR query narrow (see ftsSearchWordLimit); selection only decides
+// which terms fill it. Upsert's duplicate-recall probe uses a wider cap than
+// plain search (see sanitizeFTS) because a broader OR-probe over more of the
+// content improves candidate recall for the precision pass (mergeScore) that
+// follows; widening the cap globally would instead perturb ranked search
+// results.
 func sanitizeFTSN(text string, maxWords int) string {
 	// Remove FTS5 operators and punctuation, keep only words.
-	var words []string
+	var terms []ftsTerm
 	for _, word := range strings.Fields(text) {
 		// A trailing '*' is an FTS5 prefix operator. Capture it before the edge
 		// trim (which would strip it) and re-attach it outside the quotes as
@@ -1936,18 +1947,27 @@ func sanitizeFTSN(text string, maxWords int) string {
 			if prefix {
 				term += "*"
 			}
-			words = append(words, term)
+			terms = append(terms, ftsTerm{
+				text:  term,
+				value: ftsTermValue(clean),
+				pos:   len(terms),
+			})
 		}
 	}
-	if len(words) == 0 {
+	if len(terms) == 0 {
 		return `""`
 	}
-	// Limit to first maxWords words to keep the query reasonable.
-	if len(words) > maxWords {
+	// Select the maxWords highest-value terms (stopwords only fill the cap
+	// when content words can't) instead of truncating the tail positionally.
+	if len(terms) > maxWords {
 		slog.Warn("fts query truncated",
-			"original_terms", len(words),
+			"original_terms", len(terms),
 			"limit", maxWords)
-		words = words[:maxWords]
+		terms = selectFTSTERMs(terms, maxWords)
+	}
+	words := make([]string, len(terms))
+	for i, t := range terms {
+		words[i] = t.text
 	}
 	return strings.Join(words, " OR ")
 }
