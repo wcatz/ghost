@@ -247,8 +247,10 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// DataDir returns the ghost data directory, creating it if needed.
-func DataDir() (string, error) {
+// DataDirPath returns the ghost data directory path WITHOUT creating it, so
+// callers that must not leave a phantom directory behind (the stop hook's
+// no-LLM skip, marker reads) can still locate the store.
+func DataDirPath() (string, error) {
 	dataHome := os.Getenv("XDG_DATA_HOME")
 	if dataHome == "" {
 		home, err := os.UserHomeDir()
@@ -257,7 +259,15 @@ func DataDir() (string, error) {
 		}
 		dataHome = filepath.Join(home, ".local", "share")
 	}
-	dir := filepath.Join(dataHome, "ghost")
+	return filepath.Join(dataHome, "ghost"), nil
+}
+
+// DataDir returns the ghost data directory, creating it if needed.
+func DataDir() (string, error) {
+	dir, err := DataDirPath()
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
