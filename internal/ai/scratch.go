@@ -24,6 +24,15 @@ import (
 // returned release is always safe to call, repeatedly and after the directory
 // has already been removed; it is a no-op when ok is false.
 func harnessCommand(ctx context.Context, binary string, args, env []string, harness string) (*exec.Cmd, func(), bool) {
+	// Pre-spawn scratch budget check: measure → if over budget reap stale
+	// entries → if still over budget warn loudly → record fired checks to
+	// maintenance_runs. It never fails and never blocks: every failure path
+	// inside EnforceBudget warns and returns, so hygiene cannot stop a spawn —
+	// it must just never be quiet. It runs before Open so this invocation's
+	// own fresh directory is not counted against the budget it is about to
+	// consume.
+	scratch.EnforceBudget()
+
 	cmd := exec.CommandContext(ctx, binary, args...)
 	dir, err := scratch.Open()
 	if err != nil {

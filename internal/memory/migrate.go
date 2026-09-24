@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 8
+const schemaVersion = 9
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -28,6 +28,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV6,
 	migrateV7,
 	migrateV8,
+	migrateV9,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -395,6 +396,35 @@ func migrateV8(tx *sql.Tx) error {
     PRIMARY KEY (newer_id, older_id)
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_supersede_checked_project ON supersede_checked(project_id)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("%q: %w", s[:min(40, len(s))], err)
+		}
+	}
+	return nil
+}
+
+// migrateV9 adds the maintenance_runs table: scratch-hygiene events (a budget
+// check that fired before a harness spawn — over budget, reaped, maybe warned)
+// recorded so `ghost maintenance status` can show scratch bytes and reaped
+// counts. Like migrateV8, the DDL is copied here rather than shared with
+// initSQL (steps are frozen in time) and the CREATE IF NOT EXISTS guards make
+// the step safe to re-run against a hand-migrated database. The table is
+// deliberately project-less — hygiene events belong to the whole instance, not
+// one project — so it carries no foreign keys and needs no orphan handling.
+func migrateV9(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS maintenance_runs (
+    id                   TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    kind                 TEXT NOT NULL,
+    recorded_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    scratch_bytes        INTEGER NOT NULL DEFAULT 0,
+    scratch_reaped_bytes INTEGER NOT NULL DEFAULT 0,
+    scratch_reaped_count INTEGER NOT NULL DEFAULT 0,
+    note                 TEXT NOT NULL DEFAULT ''
+)`,
+		`CREATE INDEX IF NOT EXISTS idx_maintenance_runs_at ON maintenance_runs(recorded_at DESC)`,
 	}
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {

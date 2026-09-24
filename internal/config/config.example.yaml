@@ -91,6 +91,17 @@
 #   interval: "30s"                  # sync poll cadence (Go duration, e.g. "1m")
 #   auto_sync: false                 # true = auto-start sync from session-start
 
+# --- Scratch root budget ---
+# Every harness spawn is confined to a scratch root (dataDir/scratch or
+# $GHOST_SCRATCH_DIR). Before each spawn the root is checked against this
+# budget: stale entries are reaped first, and a root still over budget after
+# reaping warns loudly (bytes over + root path) and proceeds anyway —
+# hygiene must not block maintenance, but must never be quiet. Events are
+# recorded to maintenance_runs; see `ghost maintenance status`.
+# 0 disables the check entirely (explicit opt-out).
+# scratch:
+#   max_bytes: 536870912        # 512 MiB (default)
+
 # --- Session Injection ---
 # How the SessionStart hook picks which project memories to inject. The hook
 # injects a condensed selection (default 15) so the token budget is spent on

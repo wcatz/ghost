@@ -551,3 +551,85 @@ func TestInjectionConfigDefaults(t *testing.T) {
 		t.Errorf("category_caps[gotcha] = %d, want 4", cfg.Injection.CategoryCaps["gotcha"])
 	}
 }
+
+func TestScratchDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	unsetEnvVars(t, []string{"GHOST_SCRATCH_MAX_BYTES"})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Scratch.MaxBytes != 512*1024*1024 {
+		t.Errorf("scratch.max_bytes = %d, want 536870912 (512 MiB default)", cfg.Scratch.MaxBytes)
+	}
+}
+
+func TestScratchMaxBytesFromYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	unsetEnvVars(t, []string{"GHOST_SCRATCH_MAX_BYTES"})
+
+	cfgDir := filepath.Join(tmpDir, "ghost")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte("scratch:\n  max_bytes: 1024\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Scratch.MaxBytes != 1024 {
+		t.Errorf("scratch.max_bytes = %d, want 1024 (yaml)", cfg.Scratch.MaxBytes)
+	}
+}
+
+// TestScratchMaxBytesZeroDisables pins the 0-semantics: an explicit 0 in the
+// config file must override the compiled 512 MiB default (opt-out), distinct
+// from "unset" which keeps the default.
+func TestScratchMaxBytesZeroDisables(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	unsetEnvVars(t, []string{"GHOST_SCRATCH_MAX_BYTES"})
+
+	cfgDir := filepath.Join(tmpDir, "ghost")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte("scratch:\n  max_bytes: 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Scratch.MaxBytes != 0 {
+		t.Errorf("scratch.max_bytes = %d, want 0 (explicit opt-out must beat the default)", cfg.Scratch.MaxBytes)
+	}
+}
+
+// TestScratchMaxBytesEnvOverride: GHOST_SCRATCH_MAX_BYTES must map to
+// scratch.max_bytes — the generic GHOST_* _→. transformer would produce
+// scratch.max.bytes and miss, so the explicit envOverrides entry is required.
+func TestScratchMaxBytesEnvOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "2048")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Scratch.MaxBytes != 2048 {
+		t.Errorf("scratch.max_bytes = %d, want 2048 (env override)", cfg.Scratch.MaxBytes)
+	}
+}
