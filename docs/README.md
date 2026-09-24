@@ -1,16 +1,16 @@
-# Ghost documentation
+# GhostMem documentation
 
-Ghost's documentation is split by audience. Start with the page that matches what you need:
+GhostMem's documentation is split by audience. Start with the page that matches what you need:
 
-## Using Ghost
+## Using GhostMem
 
 - [Installation and client setup](installation.md) — source installs, Claude Code, opencode, Codex, Goose, Cursor, Windows, Docker, verification, and cleanup.
-- [Using Ghost](usage.md) — the memory model, categories, search, projects, tasks, decisions, lifecycle operations, and Obsidian.
+- [Using GhostMem](usage.md) — the memory model, categories, search, projects, tasks, decisions, lifecycle operations, and Obsidian.
 - [Configuration](configuration.md) — config paths, precedence, environment variables, embeddings, lifecycle, injection, and routing.
 - [CLI reference](cli.md) — every public command, flag, dry-run default, and lifecycle operation.
 - [MCP surface](mcp.md) — the 20 tools, 4 resources, 2 prompts, and agent guidance.
 
-## Understanding Ghost
+## Understanding GhostMem
 
 - [Architecture](architecture.md) — runtime modes, package boundaries, data flow, schema, search, and release build details for contributors.
 - [Benchmarks and methodology](benchmarks.md) — reproducible retrieval, end-to-end, staleness, and parameter-sweep results.
