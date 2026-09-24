@@ -312,6 +312,16 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 	_ = cmd.Process.Release()
 }
 
+// Lock scope for the two hook-side marker writes below: the per-project pid
+// lock (AcquireLifecycleLock) serializes only the CHILD's end-of-run
+// write/clear — these hook-side writes fire while no child holds it,
+// recordReflectSkipMarker before the isAlive(pidPath) fast path and
+// recordSpawnFailure when the child never started. A hook-side marker can
+// therefore be written and then cleared by a child that subsequently starts
+// and succeeds (or the reverse ordering). The benign worst case is at most
+// ONE missed alert cycle for that project — never a false alert, and
+// temp+rename keeps the marker file itself intact throughout.
+//
 // recordReflectSkipMarker writes the failure marker for the reflect-only
 // no-LLM guard above, where no lifecycle process ever starts. It runs only
 // when a store ALREADY exists (DataDirPath never creates, and a store-less

@@ -322,6 +322,30 @@ func TestSessionStart_StaleMarkerSilentButKept(t *testing.T) {
 	}
 }
 
+// TestSessionStart_ThirteenDayOldMarkerStillPrints pins the alert freshness
+// threshold from BELOW. It brackets lifecycleAlertMaxAge together with
+// TestSessionStart_StaleMarkerSilentButKept (15d silent): this test fails if
+// the constant drops below 13 days (e.g. the 14d→2d mutation), and that one
+// fails if it rises above 15 days — so only a threshold between 13d and 15d
+// (i.e. the intended 14d) keeps the pair green.
+func TestSessionStart_ThirteenDayOldMarkerStillPrints(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	projDir := seedSessionProject(t, xdgHome, "p1", "myproj")
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	at := time.Now().UTC().Add(-13 * 24 * time.Hour).Format(time.RFC3339)
+	writeMarkerFile(t, xdgHome, testMarker{
+		Project: "p1", PhasesFailed: []string{"reflect"}, Error: "boom", At: at, Version: 1,
+	})
+
+	firstLine, _ := alertFirstLine(t, projDir)
+
+	if !strings.HasPrefix(firstLine, "**Ghost maintenance alert:**") {
+		t.Errorf("13-day-old marker must still print (alert threshold is 14d), got: %s", firstLine)
+	}
+}
+
 // TestSessionStart_MarkerOlderThan30DaysSelfCleans: a marker older than 30
 // days prints nothing AND is deleted, so dead markers cannot accumulate
 // forever.
@@ -343,6 +367,34 @@ func TestSessionStart_MarkerOlderThan30DaysSelfCleans(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("31-day-old marker must be deleted (30-day self-clean), stat err = %v", err)
+	}
+}
+
+// TestSessionStart_TwentyNineDayOldMarkerKept pins the self-clean horizon
+// from BELOW. It brackets lifecycleMarkerMaxAge together with
+// TestSessionStart_MarkerOlderThan30DaysSelfCleans (31d deleted): this test
+// fails if the constant drops below 29 days (e.g. the 30d→16d mutation — a
+// 29d marker would be deleted here) and that one fails if it rises above 31
+// days — so only a horizon between 29d and 31d (i.e. the intended 30d) keeps
+// the pair green. Between 14d and the horizon the marker also stays silent.
+func TestSessionStart_TwentyNineDayOldMarkerKept(t *testing.T) {
+	isolatedHome(t)
+	xdgHome := t.TempDir()
+	projDir := seedSessionProject(t, xdgHome, "p1", "myproj")
+	t.Setenv("XDG_DATA_HOME", xdgHome)
+
+	at := time.Now().UTC().Add(-29 * 24 * time.Hour).Format(time.RFC3339)
+	path := writeMarkerFile(t, xdgHome, testMarker{
+		Project: "p1", PhasesFailed: []string{"reflect"}, Error: "boom", At: at, Version: 1,
+	})
+
+	_, out := alertFirstLine(t, projDir)
+
+	if strings.Contains(out, "Ghost maintenance alert") {
+		t.Errorf("29-day-old marker must stay silent (past the 14d alert window), got:\n%s", out)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("29-day-old marker must be kept (only >30d self-cleans): %v", err)
 	}
 }
 

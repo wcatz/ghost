@@ -411,14 +411,13 @@ func TestSpawnLifecycleIfConfigured_ProceedsWhenResolveEnabledWithoutLLM(t *test
 	}
 }
 
-// TestClaimPidFile_ConcurrentCallersOnlyOneWins races many goroutines against
-// an empty pidPath, simulating near-simultaneous stop hooks for the same
-// project when no resolve has ever run. Exactly one must win the claim.
-// TestSpawnLifecycle_ReflectOnlyNoLLMWritesMarker: the stop hook's reflect-
-// only no-LLM guard skips the spawn entirely — the original mr-slave incident
-// (auto-reflect silently dead for weeks). When a store exists to attribute it
-// to, the skip must leave a failure marker; when no store exists it must
-// still create nothing (see TestSpawnLifecycleIfConfigured_NoOpWithoutLLM).
+// TestSpawnLifecycle_ReflectOnlyNoLLMWritesMarker pins the hook-guard write:
+// with reflect-only config and no LLM CLI reachable, the stop hook's no-LLM
+// guard skips the spawn entirely — the original mr-slave incident (auto-
+// reflect silently dead for weeks; no lifecycle process, not even
+// lifecycle.log, ever appears) — so the guard itself must leave the failure
+// marker when a store exists to attribute it to. When no store exists it
+// must still create nothing (see TestSpawnLifecycleIfConfigured_NoOpWithoutLLM).
 func TestSpawnLifecycle_ReflectOnlyNoLLMWritesMarker(t *testing.T) {
 	dataHome := isolatedHome(t)
 	writeGhostConfigFile(t, "reflection:\n  auto_reflect: true\n")
@@ -462,6 +461,9 @@ func TestSpawnLifecycle_ReflectOnlyNoLLMWritesMarker(t *testing.T) {
 	}
 }
 
+// TestClaimPidFile_ConcurrentCallersOnlyOneWins races many goroutines against
+// an empty pidPath, simulating near-simultaneous stop hooks for the same
+// project when no resolve has ever run. Exactly one must win the claim.
 func TestClaimPidFile_ConcurrentCallersOnlyOneWins(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "resolve-test.pid")
