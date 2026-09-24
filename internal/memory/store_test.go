@@ -433,6 +433,329 @@ func TestStoreUpsertImportanceCap(t *testing.T) {
 	}
 }
 
+// canonicalMemoryCount counts memories that are not themselves the SOURCE of
+// an active 'duplicate' link — i.e. fold targets, not linked copies. A fold
+// preserves both texts as rows (the non-destructive design TestStoreUpsert
+// pins: 2 rows after a same-category fold), so the raw row count cannot tell
+// "one rule plus its linked copy" from "two competing duplicates"; this count
+// can. Cross-category folding must yield exactly one canonical memory.
+func canonicalMemoryCount(t *testing.T, s *Store, projectID string) int {
+	t.Helper()
+	var count int
+	err := s.db.QueryRowContext(context.Background(), `
+		SELECT COUNT(*) FROM memories m
+		WHERE m.project_id = ?
+		  AND NOT EXISTS (
+		    SELECT 1 FROM memory_links l
+		    WHERE l.source_id = m.id
+		      AND l.relation = 'duplicate'
+		      AND l.invalidated_at IS NULL
+		  )
+	`, projectID).Scan(&count)
+	if err != nil {
+		t.Fatalf("canonical memory count: %v", err)
+	}
+	return count
+}
+
+// TestUpsert_FoldsCrossCategoryDuplicate pins the regression this branch
+// fixes: the same rule saved as preference and then as gotcha must FOLD into
+// the first memory instead of landing as a second, competing canonical copy.
+// Before the cross-category probe existed, the gotcha save missed entirely
+// (the probe only looked within its own category) and inserted an unlinked
+// duplicate — how one production-safety rule accumulated as 12 copies split
+// across preference/gotcha.
+func TestUpsert_FoldsCrossCategoryDuplicate(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const rule = "SQLite busy timeout must be set on the read-only hook connection"
+
+	firstID, dupOf, _, err := s.Upsert(ctx, testProject, "preference", rule, "reflection", 0.6, nil)
+	if err != nil {
+		t.Fatalf("Upsert (first, preference): %v", err)
+	}
+	if dupOf != "" {
+		t.Fatalf("first save should not report a duplicate, got %q", dupOf)
+	}
+
+	secondID, dupOf, score, err := s.Upsert(ctx, testProject, "gotcha", rule, "reflection", 0.6, nil)
+	if err != nil {
+		t.Fatalf("Upsert (second, gotcha): %v", err)
+	}
+	if dupOf != firstID {
+		t.Errorf("cross-category re-save of the same rule must fold into the existing memory: duplicateOf = %q, want %q", dupOf, firstID)
+	}
+	if score < 0.7 {
+		t.Errorf("fold score = %v, want >= 0.7 (identical text)", score)
+	}
+	if secondID == firstID {
+		t.Error("fold must still insert the new text as its own linked row (non-destructive), not reuse the target's ID")
+	}
+
+	// ONE canonical memory — the fold target plus at most a linked copy of
+	// the incoming save. Before the fix this counted 2 (two unlinked,
+	// competing copies of one rule).
+	if got := canonicalMemoryCount(t, s, testProject); got != 1 {
+		t.Errorf("canonical memory count = %d, want 1 (fold target + linked copy)", got)
+	}
+
+	// Raw rows mirror the SAME-CATEGORY fold exactly: the non-destructive
+	// fold keeps both texts (TestStoreUpsert asserts 2 rows after a
+	// same-category fold and forbids content overwrites), so cross-category
+	// must not invent a suppress-insert or content-overwrite path.
+	if got, err := s.CountMemories(ctx, testProject); err != nil {
+		t.Fatalf("CountMemories: %v", err)
+	} else if got != 2 {
+		t.Errorf("raw row count = %d, want 2 (fold keeps both texts, mirroring same-category semantics)", got)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	byID := map[string]Memory{}
+	for _, m := range all {
+		byID[m.ID] = m
+	}
+
+	// Surviving-category rule: the EXISTING memory keeps its category — a
+	// save never silently recategorizes the (possibly pinned/canonical) row
+	// it folds into — and its content is untouched. The linked copy carries
+	// the incoming category so nothing the caller saved is lost.
+	if byID[firstID].Category != "preference" {
+		t.Errorf("fold target category = %q, want preference (existing memory keeps its category)", byID[firstID].Category)
+	}
+	if byID[firstID].Content != rule {
+		t.Errorf("fold target content was overwritten: %q", byID[firstID].Content)
+	}
+	if byID[secondID].Category != "gotcha" {
+		t.Errorf("linked copy category = %q, want gotcha (incoming category preserved)", byID[secondID].Category)
+	}
+
+	// The 'duplicate' link connects copy -> target, same direction the
+	// same-category fold writes.
+	links, err := s.GetLinks(ctx, firstID)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	found := false
+	for _, l := range links {
+		if l.Relation == "duplicate" && l.SourceID == secondID && l.TargetID == firstID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected duplicate link source=%s target=%s, links: %+v", secondID, firstID, links)
+	}
+}
+
+// TestUpsert_CrossCategoryDissimilarSavesStaySeparate guards the other side
+// of the cross-category probe: different categories legitimately hold
+// different facts with overlapping vocabulary, so a save whose token overlap
+// sits below the 0.7 bar must stay its own memory even though the FTS probe
+// recalls the other-category candidate.
+func TestUpsert_CrossCategoryDissimilarSavesStaySeparate(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a := "SQLite busy timeout must be set on the read-only hook connection"
+	b := "SQLite FTS5 rank ordering is unstable across identical RRF scores in hybrid search"
+
+	_, dupOf, _, err := s.Upsert(ctx, testProject, "preference", a, "reflection", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (first): %v", err)
+	}
+	if dupOf != "" {
+		t.Fatalf("first save should not report a duplicate, got %q", dupOf)
+	}
+
+	_, dupOf, _, err = s.Upsert(ctx, testProject, "gotcha", b, "reflection", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (second): %v", err)
+	}
+	j := jaccard(tokenizeContent(a), tokenizeContent(b))
+	t.Logf("cross-category Jaccard = %.4f (shared vocabulary: sqlite; bar 0.7)", j)
+	if j >= 0.7 {
+		t.Fatalf("test setup: pair must sit below the bar, got %.4f", j)
+	}
+	if dupOf != "" {
+		t.Errorf("dissimilar cross-category saves must not fold: duplicateOf = %q", dupOf)
+	}
+	if got := canonicalMemoryCount(t, s, testProject); got != 2 {
+		t.Errorf("canonical memory count = %d, want 2 (distinct facts stay distinct)", got)
+	}
+	if got, err := s.CountMemories(ctx, testProject); err != nil {
+		t.Fatalf("CountMemories: %v", err)
+	} else if got != 2 {
+		t.Errorf("raw row count = %d, want 2", got)
+	}
+}
+
+// TestUpsert_CrossCategoryBarPinsPointSeven pins the exact cross-category
+// bar: token Jaccard >= 0.7 folds, just under does not. Both pairs are
+// subset-shaped so the Jaccard is hand-computable from token counts:
+//
+//	over:  |A|=12, B = A + 5 extra tokens -> 12 / (12+5) = 12/17 = 0.705882...
+//	under: |A|=11, B = A + 5 extra tokens -> 11 / (11+5) = 11/16 = 0.687500
+func TestUpsert_CrossCategoryBarPinsPointSeven(t *testing.T) {
+	t.Run("just over 0.7 (12/17 = 0.705882) folds", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+
+		shared := "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima" // 12 tokens
+		a := shared                                                                          // 12 tokens
+		b := shared + " mike november oscar papa quebec"                                     // 17 tokens, superset of a
+
+		firstID, _, _, err := s.Upsert(ctx, testProject, "preference", a, "reflection", 0.6, nil)
+		if err != nil {
+			t.Fatalf("Upsert (first): %v", err)
+		}
+		_, dupOf, _, err := s.Upsert(ctx, testProject, "gotcha", b, "reflection", 0.6, nil)
+		if err != nil {
+			t.Fatalf("Upsert (second): %v", err)
+		}
+		j := jaccard(tokenizeContent(a), tokenizeContent(b))
+		t.Logf("over-bar pair Jaccard = %.6f (12/17), bar 0.7", j)
+		if j < 0.7 {
+			t.Fatalf("test setup: pair must clear the bar, got %.6f", j)
+		}
+		if dupOf != firstID {
+			t.Errorf("pair at Jaccard %.6f >= 0.7 must fold: duplicateOf = %q, want %q", j, dupOf, firstID)
+		}
+		if got := canonicalMemoryCount(t, s, testProject); got != 1 {
+			t.Errorf("canonical memory count = %d, want 1", got)
+		}
+	})
+
+	t.Run("just under 0.7 (11/16 = 0.6875) stays separate", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+
+		shared := "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo" // 11 tokens
+		a := shared                                                                     // 11 tokens
+		b := shared + " romeo sierra tango uniform victor"                              // 16 tokens, superset of a
+
+		_, _, _, err := s.Upsert(ctx, testProject, "preference", a, "reflection", 0.6, nil)
+		if err != nil {
+			t.Fatalf("Upsert (first): %v", err)
+		}
+		_, dupOf, _, err := s.Upsert(ctx, testProject, "gotcha", b, "reflection", 0.6, nil)
+		if err != nil {
+			t.Fatalf("Upsert (second): %v", err)
+		}
+		j := jaccard(tokenizeContent(a), tokenizeContent(b))
+		t.Logf("under-bar pair Jaccard = %.6f (11/16), bar 0.7", j)
+		if j >= 0.7 {
+			t.Fatalf("test setup: pair must sit under the bar, got %.6f", j)
+		}
+		if dupOf != "" {
+			t.Errorf("pair at Jaccard %.6f < 0.7 must not fold: duplicateOf = %q", j, dupOf)
+		}
+		if got := canonicalMemoryCount(t, s, testProject); got != 2 {
+			t.Errorf("canonical memory count = %d, want 2", got)
+		}
+		if got, err := s.CountMemories(ctx, testProject); err != nil {
+			t.Fatalf("CountMemories: %v", err)
+		} else if got != 2 {
+			t.Errorf("raw row count = %d, want 2", got)
+		}
+	})
+}
+
+// TestUpsert_CrossCategoryNeverFoldsDeadRecords: a fold must never strengthen
+// or link into a record the read paths already treat as dead — a resolved
+// (resolve-verdict) memory or the target of an active 'supersedes' edge. The
+// same-category probe predates those exclusions and is left untouched; the
+// NEW cross-category probe must exclude them so a re-save cannot vanish into
+// a dead record.
+func TestUpsert_CrossCategoryNeverFoldsDeadRecords(t *testing.T) {
+	const rule = "SQLite busy timeout must be set on the read-only hook connection"
+
+	t.Run("resolved candidate is never a fold target", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+
+		deadID, err := s.Create(ctx, testProject, Memory{
+			Category:   "fact",
+			Content:    rule,
+			Source:     "reflection",
+			Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		n, err := s.SetResolved(ctx, []string{deadID})
+		if err != nil {
+			t.Fatalf("SetResolved: %v", err)
+		}
+		if n != 1 {
+			t.Fatalf("SetResolved stamped %d, want 1 (candidate must actually be dead)", n)
+		}
+
+		_, dupOf, _, err := s.Upsert(ctx, testProject, "preference", rule, "reflection", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		if dupOf != "" {
+			t.Errorf("must not fold into a resolved (dead) record: duplicateOf = %q (%s)", dupOf, deadID)
+		}
+		// The new save was inserted as its own memory — it did not vanish.
+		if got, err := s.CountMemories(ctx, testProject); err != nil {
+			t.Fatalf("CountMemories: %v", err)
+		} else if got != 2 {
+			t.Errorf("raw row count = %d, want 2 (dead candidate + new save)", got)
+		}
+		if got := canonicalMemoryCount(t, s, testProject); got != 2 {
+			t.Errorf("canonical memory count = %d, want 2", got)
+		}
+	})
+
+	t.Run("superseded candidate is never a fold target", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+
+		staleID, err := s.Create(ctx, testProject, Memory{
+			Category:   "fact",
+			Content:    rule,
+			Source:     "reflection",
+			Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("Create (stale): %v", err)
+		}
+		freshID, err := s.Create(ctx, testProject, Memory{
+			Category:   "fact",
+			Content:    "SQLite WAL checkpointing blocks concurrent writers on the hook",
+			Source:     "reflection",
+			Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("Create (fresh): %v", err)
+		}
+		if err := s.CreateLink(ctx, freshID, staleID, "supersedes", 0.9, "llm"); err != nil {
+			t.Fatalf("CreateLink supersedes: %v", err)
+		}
+
+		// Cross-category candidates: the superseded stale row (identical
+		// text — would fold at Jaccard 1.0 if the exclusion were missing)
+		// and the live fresh row (shares vocabulary but sits far below the
+		// bar). Neither may become the fold target.
+		_, dupOf, _, err := s.Upsert(ctx, testProject, "preference", rule, "reflection", 0.7, nil)
+		if err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+		if dupOf != "" {
+			t.Errorf("must not fold into a superseded record: duplicateOf = %q (stale=%s fresh=%s)", dupOf, staleID, freshID)
+		}
+		if got, err := s.CountMemories(ctx, testProject); err != nil {
+			t.Fatalf("CountMemories: %v", err)
+		} else if got != 3 {
+			t.Errorf("raw row count = %d, want 3 (stale + fresh + new save)", got)
+		}
+	})
+}
+
 func TestStoreDelete(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
