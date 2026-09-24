@@ -38,7 +38,17 @@ func (s *SQLiteConsolidator) Consolidate(_ context.Context, input ReflectionInpu
 		items[i] = tokenized{tokens: tokenize(m.Content)}
 	}
 
-	// Find and merge duplicates (Jaccard >= 0.5, same category only).
+	// Find and merge duplicates (Jaccard >= 0.5 / full containment, ANY
+	// category — the pairing used to be gated on category equality, which
+	// let this consolidator re-emit one rule as paraphrases split across
+	// preference/gotcha on successive passes; the gate itself is unchanged
+	// and still blocks numeric conflicts). The EARLIER memory survives with
+	// its category (first in input order — merging must not silently
+	// recategorize it), taking max importance, the longest content, and the
+	// union of tags, exactly how same-category merges have always behaved;
+	// ReplaceNonManual's exact-content reuse at apply time handles the
+	// surviving row's embedding/links the same way it already does for
+	// same-category merges.
 	absorbed := make([]bool, len(items))
 	var result []ReflectMemory
 
@@ -50,9 +60,6 @@ func (s *SQLiteConsolidator) Consolidate(_ context.Context, input ReflectionInpu
 		best := mems[i]
 		for j := i + 1; j < len(items); j++ {
 			if absorbed[j] {
-				continue
-			}
-			if mems[i].Category != mems[j].Category {
 				continue
 			}
 

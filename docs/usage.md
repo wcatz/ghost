@@ -15,7 +15,7 @@ Every memory has:
 - Creation and update timestamps
 - Optional pinned state
 
-Ghost detects near-duplicates on save within the same project and category. It preserves the new text as a linked row, strengthens the existing row, and records the relationship without overwriting the original. A pinned memory is exempt from pruning and time-decay penalties.
+Ghost detects near-duplicates on save within the same project — same-category saves fold at the standard similarity bar, and a cross-category re-save of the same rule folds too at token Jaccard >= 0.7 (resolved/superseded records are never fold targets). It preserves the new text as a linked row, strengthens the existing row, and records the relationship without overwriting the original; the existing memory keeps its category. A pinned memory is exempt from pruning and time-decay penalties.
 
 ## Choose a category
 
