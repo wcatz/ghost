@@ -34,6 +34,23 @@ type Memory struct {
 	ResolvedAt   *string  `json:"resolved_at,omitempty"`
 	CreatedAt    string   `json:"created_at"`
 	UpdatedAt    string   `json:"updated_at"`
+
+	// Provenance: which harness wrote this, in which session, against which
+	// reference, and how much it was trusted.
+	//
+	// The three strings treat "" as unknown and carry omitempty, since there
+	// is no meaningful difference between "no agent recorded" and "an agent
+	// whose name is empty". Confidence is a pointer instead: 0.0 is a valid
+	// rating, so nil — not zero — has to mean "no belief was recorded".
+	//
+	// The database column is NULL for every memory written before schema v10
+	// and for every write that passes no Provenance. That is deliberate —
+	// Ghost never learned those values, and inventing one would be a claim
+	// nobody made.
+	Agent      string   `json:"agent,omitempty"`
+	SessionID  string   `json:"session_id,omitempty"`
+	SourceRef  string   `json:"source_ref,omitempty"`
+	Confidence *float64 `json:"confidence,omitempty"`
 }
 
 // Project represents a registered project.
@@ -640,10 +657,13 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 
 	var id string
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO memories (project_id, category, content, source, importance, tags)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO memories (project_id, category, content, source, importance, tags,
+		                      agent, session_id, source_ref, confidence)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
-	`, projectID, m.Category, m.Content, m.Source, m.Importance, string(tags)).Scan(&id)
+	`, projectID, m.Category, m.Content, m.Source, m.Importance, string(tags),
+		nullIfEmpty(m.Agent), nullIfEmpty(m.SessionID),
+		nullIfEmpty(m.SourceRef), m.Confidence).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create memory: %w", err)
 	}
@@ -667,7 +687,55 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 // under a manual-sourced target (or any target) is never silently discarded.
 // If no candidate scores above the applicable bar, it creates a new,
 // unlinked row.
+// Provenance is the optional write-time context attached to a single save.
+// Every field is optional and its zero value means "not known": passing no
+// Provenance at all records NULL across the board rather than a guess.
+//
+// SessionID is deliberately not auto-populated. Ghost has no session identity
+// available on the MCP path — no column, no handshake field, no env marker —
+// so it stays empty until a caller that genuinely knows supplies it. An
+// auto-filled value would be fabricated provenance, which is the exact thing
+// these columns exist to avoid.
+type Provenance struct {
+	// Agent names the harness that produced the memory. The values are the
+	// source tokens ai.NewSourceProviderForSource understands — claude-code,
+	// opencode, codex, goose — not the binary names. Claude is "claude-code"
+	// everywhere it appears as a source (SourceForClientName maps it, and
+	// detectSourceFromEnv normalizes CLAUDECODE to it), so storing anything
+	// else would split the vocabulary and make a filter on agent miss rows
+	// that ghost_resolve and the CLI already treat as claude-code.
+	//
+	// Distinct from Source, which records *how* the memory arrived (mcp,
+	// reflection, manual).
+	Agent string
+	// SessionID identifies the caller session, when one is known.
+	SessionID string
+	// SourceRef points at what the memory was read from — a file, path,
+	// commit, or URL.
+	SourceRef string
+	// Confidence is a belief rating in [0,1]. Pointer so that nil means
+	// "no belief recorded" while 0.0 remains a real rating.
+	Confidence *float64
+}
+
+// nullIfEmpty maps an empty provenance string to SQL NULL rather than the
+// empty string. The distinction is real: NULL records that Ghost never
+// learned an agent or reference, while ” would claim a value that happens
+// to be empty. Queries that count recorded provenance rely on IS NOT NULL.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// Upsert stores a memory with no provenance, exactly as before.
 func (s *Store) Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (id string, duplicateOf string, score float64, err error) {
+	return s.UpsertWithProvenance(ctx, projectID, category, content, source, importance, tags, Provenance{})
+}
+
+// UpsertWithProvenance is Upsert plus optional write-time provenance.
+func (s *Store) UpsertWithProvenance(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, prov Provenance) (id string, duplicateOf string, score float64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -812,10 +880,13 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 		}
 
 		if err = tx.QueryRowContext(ctx, `
-			INSERT INTO memories (project_id, category, content, source, importance, tags)
-			VALUES (?, ?, ?, ?, ?, ?)
+			INSERT INTO memories (project_id, category, content, source, importance, tags,
+			                      agent, session_id, source_ref, confidence)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id
-		`, projectID, category, content, source, importance, string(tagsJSON)).Scan(&id); err != nil {
+		`, projectID, category, content, source, importance, string(tagsJSON),
+			nullIfEmpty(prov.Agent), nullIfEmpty(prov.SessionID),
+			nullIfEmpty(prov.SourceRef), prov.Confidence).Scan(&id); err != nil {
 			return "", "", 0, fmt.Errorf("create memory: %w", err)
 		}
 
@@ -845,10 +916,13 @@ func (s *Store) Upsert(ctx context.Context, projectID, category, content, source
 
 	// No match — create new.
 	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO memories (project_id, category, content, source, importance, tags)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO memories (project_id, category, content, source, importance, tags,
+		                      agent, session_id, source_ref, confidence)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
-	`, projectID, category, content, source, importance, string(tagsJSON)).Scan(&id)
+	`, projectID, category, content, source, importance, string(tagsJSON),
+		nullIfEmpty(prov.Agent), nullIfEmpty(prov.SessionID),
+		nullIfEmpty(prov.SourceRef), prov.Confidence).Scan(&id)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
@@ -894,7 +968,8 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
-		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at
+		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
+		       agent, session_id, source_ref, confidence
 		FROM memories
 		WHERE (project_id = ? OR project_id = '_global')
 		  AND resolved_at IS NULL
@@ -951,7 +1026,8 @@ func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit in
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, m.project_id, m.category, m.content, m.importance, m.access_count,
-		       m.last_accessed, m.source, m.tags, m.pinned, m.resolved_at, m.created_at, m.updated_at
+		       m.last_accessed, m.source, m.tags, m.pinned, m.resolved_at, m.created_at, m.updated_at,
+		       m.agent, m.session_id, m.source_ref, m.confidence
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE (m.project_id = ? OR m.project_id = '_global')
@@ -973,7 +1049,8 @@ func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Me
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, m.project_id, m.category, m.content, m.importance, m.access_count,
-		       m.last_accessed, m.source, m.tags, m.pinned, m.resolved_at, m.created_at, m.updated_at
+		       m.last_accessed, m.source, m.tags, m.pinned, m.resolved_at, m.created_at, m.updated_at,
+		       m.agent, m.session_id, m.source_ref, m.confidence
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE memories_fts MATCH ?
@@ -994,7 +1071,8 @@ func (s *Store) GetByCategory(ctx context.Context, projectID, category string, l
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
-		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at
+		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
+		       agent, session_id, source_ref, confidence
 		FROM memories
 		WHERE (project_id = ? OR project_id = '_global') AND category = ?
 		ORDER BY importance DESC, created_at DESC
@@ -1014,7 +1092,8 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
-		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at
+		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
+		       agent, session_id, source_ref, confidence
 		FROM memories
 		WHERE project_id = ?
 		ORDER BY importance DESC, created_at DESC
@@ -1065,7 +1144,8 @@ func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memo
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
-		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at
+		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
+		       agent, session_id, source_ref, confidence
 		FROM memories
 		WHERE project_id = ?
 		  AND resolved_at IS NULL
@@ -1812,11 +1892,14 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 		var resolvedAt sql.NullString
 		var tagsJSON string
 		var pinned int
+		var agent, sessionID, sourceRef sql.NullString
+		var confidence sql.NullFloat64
 
 		if err := rows.Scan(
 			&m.ID, &m.ProjectID, &m.Category, &m.Content, &m.Importance,
 			&m.AccessCount, &lastAccessed, &m.Source, &tagsJSON,
 			&pinned, &resolvedAt, &m.CreatedAt, &m.UpdatedAt,
+			&agent, &sessionID, &sourceRef, &confidence,
 		); err != nil {
 			return nil, fmt.Errorf("scan memory: %w", err)
 		}
@@ -1828,6 +1911,24 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 			m.ResolvedAt = &resolvedAt.String
 		}
 		m.Pinned = pinned == 1
+
+		// NULL provenance reads back as the empty string. There is no
+		// meaningful empty value for an agent, session or reference, so
+		// collapsing NULL to "" costs nothing — while Confidence stays a
+		// pointer, because nil ("no belief recorded") and 0.0 ("rated
+		// worthless") are different claims.
+		if agent.Valid {
+			m.Agent = agent.String
+		}
+		if sessionID.Valid {
+			m.SessionID = sessionID.String
+		}
+		if sourceRef.Valid {
+			m.SourceRef = sourceRef.String
+		}
+		if confidence.Valid {
+			m.Confidence = &confidence.Float64
+		}
 
 		if err := json.Unmarshal([]byte(tagsJSON), &m.Tags); err != nil {
 			m.Tags = []string{}

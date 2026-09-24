@@ -44,6 +44,34 @@ func boolPtr(b bool) *bool { return &b }
 // otherwise make that case environment-dependent.
 var detectCallingSource = ai.DetectSource
 
+// provenanceFor derives write-time provenance for a save made through this
+// request.
+//
+// The MCP client's reported name is authoritative when it maps to a known
+// harness, since the client knows what it is better than process ancestry
+// can guess. Otherwise the process ancestry is consulted — but unlike
+// ghost_resolve, a save never fails when nothing is identifiable: it records
+// NULL and proceeds. Refusing to store a memory because its author could not
+// be determined would trade the memory itself for the provenance, and an
+// unknown author is a truthful value.
+//
+// SessionID and SourceRef are deliberately left empty here. Ghost has no
+// session identity on the MCP path, and the save arguments carry no source
+// reference, so both stay NULL until a caller that genuinely knows supplies
+// them. Fabricating either would make the whole column untrustworthy.
+func provenanceFor(req *mcp.CallToolRequest) memory.Provenance {
+	clientName := ""
+	if req != nil && req.Session != nil {
+		if p := req.Session.InitializeParams(); p != nil && p.ClientInfo != nil {
+			clientName = p.ClientInfo.Name
+		}
+	}
+	if agent := ai.SourceForClientName(clientName); agent != "" {
+		return memory.Provenance{Agent: agent}
+	}
+	return memory.Provenance{Agent: detectCallingSource()}
+}
+
 // resolveCapableStore narrows provider.MemoryStore's concrete backing store to
 // the methods ghost_resolve needs (ResolveCandidates, SetResolved, the
 // supersedes-link read for deterministic demotion, and the KEEP-verdict cache).
@@ -602,7 +630,7 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
 
-		id, duplicateOf, score, err := s.store.Upsert(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags)
+		id, duplicateOf, score, err := s.store.UpsertWithProvenance(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, provenanceFor(req))
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -959,7 +987,7 @@ func (s *Server) registerTools() {
 		if err := s.store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
 			return nil, nil, fmt.Errorf("ensure global project: %w", err)
 		}
-		id, duplicateOf, score, err := s.store.Upsert(ctx, "_global", args.Category, args.Content, "mcp", importance, tags)
+		id, duplicateOf, score, err := s.store.UpsertWithProvenance(ctx, "_global", args.Category, args.Content, "mcp", importance, tags, provenanceFor(req))
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
