@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -203,7 +204,19 @@ func TestSchemas_NeverRejectContentUpToCap(t *testing.T) {
 		byName[tool.Name] = tool
 	}
 
-	for _, name := range []string{"ghost_memory_save", "ghost_memory_update", "ghost_save_global"} {
+	// Every field this PR clamps must also be free of a schema maxLength
+	// below the cap: the SDK validates against the schema before the
+	// handler runs, so a sub-cap maxLength there would hard-reject instead
+	// of letting the server cut explicitly.
+	guards := map[string][]string{
+		"ghost_memory_save":     {"content"},
+		"ghost_memory_update":   {"content"},
+		"ghost_save_global":     {"content"},
+		"ghost_task_create":     {"description"},
+		"ghost_task_update":     {"description"},
+		"ghost_decision_record": {"decision", "rationale"},
+	}
+	for name, props := range guards {
 		tool, ok := byName[name]
 		if !ok {
 			t.Fatalf("tool %s missing from tools/list", name)
@@ -220,14 +233,16 @@ func TestSchemas_NeverRejectContentUpToCap(t *testing.T) {
 		if err := json.Unmarshal(raw, &schema); err != nil {
 			t.Fatalf("unmarshal %s input schema: %v", name, err)
 		}
-		content, ok := schema.Properties["content"]
-		if !ok {
-			t.Fatalf("%s input schema has no content property: %s", name, raw)
-		}
-		if content.MaxLength != nil && *content.MaxLength < memory.MaxContentLen {
-			t.Errorf("%s input schema declares maxLength=%d, below the %d-char server cap — "+
-				"validating clients and the SDK would reject content the server would accept",
-				name, *content.MaxLength, memory.MaxContentLen)
+		for _, prop := range props {
+			field, ok := schema.Properties[prop]
+			if !ok {
+				t.Fatalf("%s input schema has no %s property: %s", name, prop, raw)
+			}
+			if field.MaxLength != nil && *field.MaxLength < memory.MaxContentLen {
+				t.Errorf("%s input schema property %q declares maxLength=%d, below the %d-byte server cap — "+
+					"validating clients and the SDK would reject content the server would accept",
+					name, prop, *field.MaxLength, memory.MaxContentLen)
+			}
 		}
 	}
 }
@@ -306,6 +321,91 @@ func TestTruncationWarnings_NameTheirKind(t *testing.T) {
 				if strings.Contains(resp, bad) {
 					t.Errorf("response carries another writer's advice %q: %q", bad, resp)
 				}
+			}
+		})
+	}
+}
+
+// memoryIDFromDecisionResp pulls the companion memory id out of a
+// ghost_decision_record response ("… (memory_id: ABC…)").
+func memoryIDFromDecisionResp(t *testing.T, resp string) string {
+	t.Helper()
+	const marker = "(memory_id: "
+	i := strings.Index(resp, marker)
+	if i < 0 {
+		t.Fatalf("response carries no memory id: %q", resp)
+	}
+	rest := resp[i+len(marker):]
+	j := strings.IndexByte(rest, ')')
+	if j < 0 {
+		t.Fatalf("unterminated memory id in response: %q", resp)
+	}
+	return rest[:j]
+}
+
+// TestDecisionCompanionMemoryCapped guards the composition path:
+// RecordDecision builds the companion memory as "title: decision.
+// Rationale: rationale", so two INDIVIDUALLY sub-cap fields can sum over
+// the cap — 7000B decision + 2000B rationale passes both field clamps with
+// no warning, yet the composed row lands at ~9034 bytes > 8000. The
+// composition must be clamped at the canonical site inside RecordDecision,
+// and the handler must warn the caller even though no field was cut.
+func TestDecisionCompanionMemoryCapped(t *testing.T) {
+	const title = "CapGuard"
+	markerLen := len(truncationMarkerLiteral)
+	companionWarning := "WARNING: decision companion memory was truncated at 8000 bytes"
+
+	cases := []struct {
+		name      string
+		decision  string
+		rationale string
+		wantCut   bool
+	}{
+		{"sub-cap fields summing over the cap", strings.Repeat("d", 7000), strings.Repeat("r", 2000), true},
+		{"both fields at the cap", strings.Repeat("e", 8000), strings.Repeat("f", 8000), true},
+		{"sub-cap sum stays byte-identical", "Use SQLite", "No external deps", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, session := newCapSession(t)
+			res := callTool(t, session, "ghost_decision_record", map[string]any{
+				"project_id": "test-project",
+				"title":      title,
+				"decision":   tc.decision,
+				"rationale":  tc.rationale,
+			})
+			resp := resultText(res)
+			t.Logf("captured response: %s", resp)
+			memID := memoryIDFromDecisionResp(t, resp)
+
+			mems, err := srv.store.GetByIDs(context.Background(), []string{memID})
+			if err != nil || len(mems) != 1 {
+				t.Fatalf("GetByIDs(%q): err=%v n=%d", memID, err, len(mems))
+			}
+			stored := mems[0].Content
+
+			if !tc.wantCut {
+				want := fmt.Sprintf("%s: %s. Rationale: %s", title, tc.decision, tc.rationale)
+				if stored != want {
+					t.Errorf("companion memory rewritten despite sub-cap inputs: len %d, want byte-identical len %d", len(stored), len(want))
+				}
+				if strings.Contains(stored, truncationMarkerLiteral) || strings.Contains(resp, "WARNING") {
+					t.Errorf("sub-cap composition must carry no marker or warning; stored tail %q, resp %q", tail(stored, 40), resp)
+				}
+				return
+			}
+
+			// Cut: exactly the cap's worth of composed text plus the pinned
+			// marker (ASCII inputs → rune boundary is the byte boundary).
+			if !strings.HasSuffix(stored, truncationMarkerLiteral) {
+				t.Errorf("companion memory must end with the truncation marker; len=%d tail %q", len(stored), tail(stored, 60))
+			}
+			if len(stored) > memory.MaxContentLen+markerLen {
+				t.Errorf("companion memory stored at %d bytes > cap+marker (%d) — composition bypassed the cap", len(stored), memory.MaxContentLen+markerLen)
+			}
+			if !strings.Contains(resp, companionWarning) {
+				t.Errorf("response must warn that the companion composition was cut even though no field was; got %q", resp)
 			}
 		})
 	}

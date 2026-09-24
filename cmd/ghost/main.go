@@ -1112,7 +1112,7 @@ Flags:
 	// so a reflection proposal can never store content the save path would
 	// have refused to store silently.
 	if cuts := clampReflectMemories(projectMems) + clampReflectMemories(globalMems); cuts > 0 {
-		fmt.Fprintf(os.Stderr, "warning: %d consolidation memory content(s) exceeded the %d-char cap and were truncated with an explicit marker\n", cuts, memory.MaxContentLen)
+		fmt.Fprintf(os.Stderr, "warning: %d consolidation memory content(s) exceeded the %d-byte cap and were truncated with an explicit marker\n", cuts, memory.MaxContentLen)
 	}
 
 	var existingNonManual int

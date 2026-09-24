@@ -5,13 +5,17 @@ import (
 	"unicode/utf8"
 )
 
-// MaxContentLen is the byte cap on content written by any Ghost writer —
-// the MCP save/update/global tools, consolidation (reflection) proposals
-// (memories and learned context), and file imports all share this one
-// constant. It is deliberately a constant rather than configuration: FTS
-// rows, embeddings, search output,
-// and session injection all stay bounded by it, and a knob would let one
-// deployment silently reintroduce the loss this cap exists to prevent.
+// MaxContentLen is the byte cap on content written by any production Ghost
+// writer — the MCP save/update/global tools, consolidation (reflection)
+// proposals (memories and learned context), decision companion memories,
+// and file imports all share this one constant. Bench/eval seeders and
+// snapshot restore write synthetic or byte-exact data into throwaway or
+// restored stores and are deliberately outside this contract.
+//
+// It is deliberately a constant rather than configuration: FTS rows,
+// embeddings, search output, and session injection all stay bounded by
+// it, and a knob would let one deployment silently reintroduce the loss
+// this cap exists to prevent.
 //
 // 8000 (raised from 2000) gives incident and delegation-discipline records
 // room for the second half that the old cap silently dropped, while keeping

@@ -27,7 +27,13 @@ type Decision struct {
 // memory row's ID (needed for ghost_memory_pin/ghost_memory_update, which
 // operate on memories, not decisions) — the two are different rows and
 // different IDs.
-func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, err error) {
+//
+// The companion content is the composition "title: decision. Rationale:
+// rationale", so it is clamped through ClampContent right before the INSERT:
+// two individually sub-cap fields can concatenate over the cap. The returned
+// companionClamped reports that composition cut, letting the MCP handler
+// warn the caller even when neither field itself was truncated.
+func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, companionClamped bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -36,7 +42,7 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", "", fmt.Errorf("record decision: begin tx: %w", err)
+		return "", "", false, fmt.Errorf("record decision: begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // intentional no-op after Commit
 
@@ -46,28 +52,31 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 		RETURNING id
 	`, projectID, title, decision, string(altJSON), rationale, string(tagJSON)).Scan(&decisionID)
 	if err != nil {
-		return "", "", fmt.Errorf("record decision: %w", err)
+		return "", "", false, fmt.Errorf("record decision: %w", err)
 	}
 
-	content := fmt.Sprintf("%s: %s. Rationale: %s", title, decision, rationale)
+	// Clamp the COMPOSITION at the canonical site: the field-level clamps in
+	// the MCP handler cannot see glue text pushing two sub-cap fields over
+	// the cap, and this is the last writer-side stop before the INSERT.
+	content, cut := ClampContent(fmt.Sprintf("%s: %s. Rationale: %s", title, decision, rationale))
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags)
 		VALUES (?, 'decision', ?, 'decision_log', 0.9, ?)
 		RETURNING id
 	`, projectID, content, string(tagJSON)).Scan(&memoryID)
 	if err != nil {
-		return "", "", fmt.Errorf("record decision memory: %w", err)
+		return "", "", false, fmt.Errorf("record decision memory: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return "", "", fmt.Errorf("record decision: commit: %w", err)
+		return "", "", false, fmt.Errorf("record decision: commit: %w", err)
 	}
 
 	if s.onSave != nil {
 		s.onSave(projectID)
 	}
 
-	return decisionID, memoryID, nil
+	return decisionID, memoryID, cut, nil
 }
 
 // SupersedeDecision marks oldID as superseded by newID within one project.

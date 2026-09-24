@@ -1279,7 +1279,7 @@ func (s *Server) registerTools() {
 		if err := s.store.EnsureProject(ctx, args.ProjectID, "", args.ProjectID); err != nil {
 			return nil, nil, fmt.Errorf("ensure project: %w", err)
 		}
-		decisionID, memoryID, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags)
+		decisionID, memoryID, companionClamped, err := s.store.RecordDecision(ctx, args.ProjectID, args.Title, args.Decision, args.Rationale, alternatives, tags)
 		if err != nil {
 			return nil, nil, fmt.Errorf("record decision: %w", err)
 		}
@@ -1306,6 +1306,13 @@ func (s *Server) registerTools() {
 				what = "rationale text"
 			}
 			msg += truncationWarning(what, decisionTruncationAdvice)
+		} else if companionClamped {
+			// Both fields fit individually but their composition did not —
+			// the cut happened in the companion memory row, so name it and
+			// give memory advice. When a field WAS cut the warning above
+			// already tells the caller to shorten, and the marker still
+			// names the composition cut in the stored row.
+			msg += truncationWarning("decision companion memory", memoryTruncationAdvice)
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: msg}},

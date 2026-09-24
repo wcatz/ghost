@@ -63,8 +63,9 @@ type MemoryStore interface {
 	CompleteTask(ctx context.Context, taskID, notes string) error
 	UpdateTask(ctx context.Context, taskID string, status *string, priority *int, description *string) (memory.Task, error)
 
-	// Decisions
-	RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, err error)
+	// Decisions. companionClamped reports that the composed companion-memory
+	// content was cut at memory.MaxContentLen even when no field was.
+	RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, companionClamped bool, err error)
 	ListDecisions(ctx context.Context, projectID, status string, limit int) ([]memory.Decision, error)
 	SupersedeDecision(ctx context.Context, projectID, oldID, newID string) error
 
