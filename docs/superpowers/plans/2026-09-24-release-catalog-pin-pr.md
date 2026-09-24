@@ -701,10 +701,10 @@ pin_branch_catalog() {
 if [ "${1:-}" = "api" ]; then
   case "$*" in
     *"/contents/.claude-plugin/marketplace.json?ref=main"*)
-      main_catalog | jq '{content: (. | @base64), sha: "deadbeef"}'
+      main_catalog | jq '{content: (. | @base64), sha: "'"$MAIN_BLOB"'"}'
       ;;
     *"/contents/.claude-plugin/marketplace.json?ref=automation/marketplace-pin-"*)
-      pin_branch_catalog | jq '{content: (. | @base64), sha: "deadbeef"}'
+      pin_branch_catalog | jq '{content: (. | @base64), sha: "'"$BRANCH_BLOB"'"}'
       ;;
     *" -X PUT "*) echo '{"commit":{"sha":"abc123"}}' ;;
     *) echo '{}' ;;
@@ -745,12 +745,23 @@ old = "https://github.com/wcatz/ghost/releases/download/v0.30.17/ghost-plugin.zi
 new = "https://github.com/wcatz/ghost/releases/download/v0.30.19/ghost-plugin.zip"
 pinned = "https://github.com/wcatz/ghost/releases/download/v0.30.18/ghost-plugin.zip"
 
-pathlib.Path("main-old.json").write_text(json.dumps(catalog(old, "a" * 64), indent=2) + "\n")
-pathlib.Path("main-newer.json").write_text(json.dumps(catalog(new, "b" * 64), indent=2) + "\n")
+# Compact, no trailing newline. The shim serves each fixture through
+# `jq '{content: (. | @base64), ...}'`, and jq RE-SERIALIZES on the way out, so
+# pretty-printed bytes would not survive the round trip and the byte comparison
+# would fail for the wrong reason.
+def dump(name, doc):
+    pathlib.Path(name).write_text(json.dumps(doc, separators=(",", ":")))
+
+dump("main-old.json", catalog(old, "a" * 64))
+dump("main-newer.json", catalog(new, "b" * 64))
+dump("pinned.json", catalog(pinned, "c" * 64))
 # The idempotent case must be byte-identical to the local pinned copy.
-pathlib.Path("main-pinned.json").write_text(json.dumps(catalog(pinned, "c" * 64), indent=2) + "\n")
-pathlib.Path("pinned.json").write_text(json.dumps(catalog(pinned, "c" * 64), indent=2) + "\n")
-print("ok: 4 fixtures written")
+pathlib.Path("main-pinned.json").write_text(pathlib.Path("pinned.json").read_text())
+# The stage compares against this local copy, so it must match too.
+pathlib.Path(".claude-plugin").mkdir(exist_ok=True)
+pathlib.Path(".claude-plugin/marketplace.json").write_text(
+    pathlib.Path("pinned.json").read_text())
+print("ok: 4 fixtures + local pinned copy written")
 PY
 ```
 
@@ -859,6 +870,10 @@ Run:
 cd /tmp/opencode/pin-shim
 export GHOST_SHIM_DIR=/tmp/opencode/pin-shim
 export GITHUB_REPOSITORY=wcatz/ghost
+# Distinct per source, so a PUT carrying the wrong blob SHA is visible in the log.
+export MAIN_BLOB=1111111111111111111111111111111111111111
+export BRANCH_BLOB=2222222222222222222222222222222222222222
+export MAIN_HEAD=3333333333333333333333333333333333333333
 sed 's|\${{ steps.pin.outputs.BRANCH }}|automation/marketplace-pin-v0.30.18|' verify.sh > verify.run.sh
 
 export GHOST_SHIM_LOG=/tmp/opencode/pin-shim/log-verify
