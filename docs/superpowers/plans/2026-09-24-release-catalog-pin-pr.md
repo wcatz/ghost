@@ -43,9 +43,21 @@
 **Files:**
 - Modify: `.github/workflows/release.yml:8-10`
 
-The block is currently workflow-level, so both jobs receive `packages: write` even though
-only `release` publishes images. Splitting it is what lets the `plugin` job hold exactly
-what it needs.
+The block is currently workflow-level, so all three jobs receive both permissions. The
+workflow has three jobs and each needs something different:
+
+- `release` runs GoReleaser, which builds archives, checksums, and the draft release. It
+  publishes no container image, so it needs `contents: write` only.
+- `docker` logs into GHCR and pushes the multi-arch image with `push: true`. It needs
+  `packages: write`, and only reads the repository.
+- `plugin` attaches archives to the release and writes the pinned catalog. Today it
+  needs `contents: write` for both. Task 2 adds the catalog PR and grants
+  `pull-requests: write` in the same commit, so no commit in this plan ever holds a
+  permission nothing consumes.
+
+Dropping the workflow-level block without giving `docker` its own block would silently
+revoke the image push, because the repository's default token permissions are not assumed
+to grant `packages: write`.
 
 - [ ] **Step 1: Record the current block so the change is provably scoped**
 
@@ -53,9 +65,10 @@ Run:
 
 ```bash
 sed -n '8,11p' .github/workflows/release.yml
+grep -n -E '^  [a-z][a-z-]*:' .github/workflows/release.yml
 ```
 
-Expected, byte for byte:
+Expected first command, byte for byte:
 
 ```yaml
 permissions:
@@ -63,38 +76,64 @@ permissions:
   packages: write
 ```
 
-- [ ] **Step 2: Give `release` its existing permissions as a job-level block**
+Expected second command, listing every job that must end up with its own block:
 
-Insert immediately after the `release` job's `runs-on: ubuntu-latest` line (currently line
-15), so the block sits with the job that uses it:
+```text
+9:  release:
+57:  docker:
+132:  plugin:
+```
+
+If a fourth job appears, stop: this plan's permission table is incomplete and every job
+must be classified before continuing.
+
+- [ ] **Step 2: Give `release` the permissions GoReleaser actually uses**
+
+Insert immediately after the `release` job's `runs-on: ubuntu-latest` line:
 
 ```yaml
   release:
     runs-on: ubuntu-latest
-    # Unchanged from the workflow-level block: this job builds and pushes the
-    # OCI image, so it needs both. Split out per job so the plugin job does not
-    # inherit packages: write, which it never uses.
+    # GoReleaser builds archives, checksums, and the draft release, so it needs
+    # contents: write. It publishes no container image — .goreleaser.yml has no
+    # dockers or image_templates — so it does not need packages: write. The
+    # image is pushed by the docker job below.
     permissions:
       contents: write
+```
+
+- [ ] **Step 3: Give `docker` the permission its GHCR push needs**
+
+Insert immediately after the `docker` job's `runs-on: ubuntu-latest` line:
+
+```yaml
+  docker:
+    runs-on: ubuntu-latest
+    # contents: read covers actions/checkout; packages: write is what lets
+    # GITHUB_TOKEN authenticate to ghcr.io in the login step and publish the
+    # multi-arch image in the build step.
+    permissions:
+      contents: read
       packages: write
 ```
 
-- [ ] **Step 3: Give `plugin` the write it actually needs**
+- [ ] **Step 4: Give `plugin` the write it actually needs**
 
 Insert immediately after the `plugin` job's `runs-on: ubuntu-latest` line:
 
 ```yaml
   plugin:
     runs-on: ubuntu-latest
-    # contents: write creates and updates the pin branch. pull-requests: write
-    # opens the catalog PR. No packages: write — this job attaches archives to
-    # an existing release, it does not publish an image.
+    # contents: write uploads the three plugin archives as release assets and
+    # writes the pinned catalog. No packages: write — this job attaches
+    # archives to an existing release, it does not publish an image.
+    # Task 2 adds pull-requests: write here in the same commit that adds the
+    # catalog PR, so no commit holds a permission nothing consumes.
     permissions:
       contents: write
-      pull-requests: write
 ```
 
-- [ ] **Step 4: Delete the workflow-level block**
+- [ ] **Step 5: Delete the workflow-level block**
 
 Remove exactly:
 
@@ -107,7 +146,7 @@ permissions:
 
 The `jobs:` key must now follow the `on:` block directly.
 
-- [ ] **Step 5: Prove each job has the permissions it needs and no more**
+- [ ] **Step 6: Prove every job has the permissions it needs and no more**
 
 Run:
 
@@ -115,15 +154,24 @@ Run:
 python3 - <<'PY'
 import re, sys, pathlib
 text = pathlib.Path('.github/workflows/release.yml').read_text()
-# A workflow-level permissions block would silently re-grant both jobs everything.
+# A workflow-level permissions block would silently re-grant every job both.
 top = re.search(r'^permissions:\n(?:  .*\n)+', text, re.M)
 if top:
     sys.exit(f'FAIL: workflow-level permissions block still present:\n{top.group(0)}')
-for job, required in (('release', {'contents: write', 'packages: write'}),
-                      ('plugin', {'contents: write', 'pull-requests: write'})):
-    body = re.search(rf'^  {job}:\n(.*?)(?=^  [a-z-]+:\n|\Z)', text, re.M | re.S)
-    if not body:
-        sys.exit(f'FAIL: job {job} not found')
+expected = {
+    'release': {'contents: write'},
+    'docker':  {'contents: read', 'packages: write'},
+    'plugin':  {'contents: write'},
+}
+# Scope the job scan to the jobs: block. An unscoped `^  (\w+):` also matches the
+# `push:` trigger under on:, which reports a phantom extra job named push.
+found = set(re.findall(r'^  ([a-z][a-z-]*):\n', text[text.index('\njobs:\n'):], re.M))
+missing = set(expected) - found
+extra = found - set(expected)
+if missing or extra:
+    sys.exit(f'FAIL: job set mismatch; missing={sorted(missing)} unexpected={sorted(extra)}')
+for job, required in expected.items():
+    body = re.search(rf'^  {job}:\n(.*?)(?=^  [a-z][a-z-]*:\n|\Z)', text[text.index('\njobs:\n'):], re.M | re.S)
     block = re.search(r'^    permissions:\n((?:      .*\n)+)', body.group(1), re.M)
     if not block:
         sys.exit(f'FAIL: job {job} has no permissions block')
@@ -138,12 +186,13 @@ PY
 Expected:
 
 ```text
-ok: release -> ['contents: write', 'packages: write']
-ok: plugin -> ['contents: write', 'pull-requests: write']
+ok: release -> ['contents: write']
+ok: docker -> ['contents: read', 'packages: write']
+ok: plugin -> ['contents: write']
 permissions split verified
 ```
 
-- [ ] **Step 6: Lint the workflow**
+- [ ] **Step 7: Lint the workflow**
 
 Run:
 
@@ -154,7 +203,7 @@ Run:
 Expected: no output, exit 0. `actionlint` flags a job that references a permission its block
 does not grant, so this is the check that catches an under-grant here.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add .github/workflows/release.yml
@@ -166,12 +215,47 @@ git commit -s -m "ci(release): scope workflow permissions per job"
 ### Task 2: Replace the commit stage with a branch-and-PR stage
 
 **Files:**
-- Modify: `.github/workflows/release.yml:215-290` (the stage named
-  `Commit the pinned catalog to main`)
+- Modify: `.github/workflows/release.yml` — the `plugin` job's permissions block, and the
+  stage named `Commit the pinned catalog to main`
 
 The guards are copied over verbatim. Only the write target and the follow-up action change.
 
-- [ ] **Step 1: Record the exact stage being replaced**
+- [ ] **Step 1: Grant `pull-requests: write` to the `plugin` job**
+
+This is deliberately in the same commit as the PR-opening stage, so no commit in this plan
+holds a permission nothing consumes. Add the line to the job's existing block:
+
+```yaml
+  plugin:
+    runs-on: ubuntu-latest
+    # contents: write uploads the three plugin archives as release assets and
+    # writes the pinned catalog. pull-requests: write opens the catalog PR. No
+    # packages: write — this job attaches archives to an existing release, it
+    # does not publish an image.
+    permissions:
+      contents: write
+      pull-requests: write
+```
+
+Verify:
+
+```bash
+python3 - <<'PY'
+import re, sys, pathlib
+text = pathlib.Path('.github/workflows/release.yml').read_text()
+body = re.search(r'^  plugin:\n(.*?)(?=^  [a-z][a-z-]*:\n|\Z)', text[text.index('\njobs:\n'):], re.M | re.S)
+block = re.search(r'^    permissions:\n((?:      .*\n)+)', body.group(1), re.M)
+got = {l.strip() for l in block.group(1).splitlines() if l.strip()}
+want = {'contents: write', 'pull-requests: write'}
+if got != want:
+    sys.exit(f'FAIL: plugin permissions = {sorted(got)}, want {sorted(want)}')
+print(f'ok: plugin -> {sorted(got)}')
+PY
+```
+
+Expected: `ok: plugin -> ['contents: write', 'pull-requests: write']`
+
+- [ ] **Step 2: Record the exact stage being replaced**
 
 Run:
 
@@ -182,7 +266,7 @@ awk '/^      - name: Commit the pinned catalog to main$/,/^      - name: Verify 
 Expected first line: `      - name: Commit the pinned catalog to main`. Record the line number of
 the following `- name:` — the whole stage is replaced.
 
-- [ ] **Step 2: Write the replacement stage**
+- [ ] **Step 3: Write the replacement stage**
 
 Replace the entire `Commit the pinned catalog to main` stage with the following. The comment
 block explains why the write moved off `main`; the two guards are unchanged from the current
@@ -265,7 +349,7 @@ implementation.
           echo "SKIPPED=0" >> "$GITHUB_OUTPUT"
 ```
 
-- [ ] **Step 3: Declare the step outputs the verify stage depends on**
+- [ ] **Step 4: Declare the step outputs the verify stage depends on**
 
 Replace the stage's name line and add an `id`, so the next task can condition on it:
 
@@ -282,7 +366,7 @@ The full opening of the stage therefore reads:
         # The catalog is pinned to version-pinned release URLs plus each
 ```
 
-- [ ] **Step 4: Add the stage that opens or updates the PR**
+- [ ] **Step 5: Add the stage that opens or updates the PR**
 
 Insert immediately after the `Propose the pinned catalog as a pull request` stage:
 
@@ -324,7 +408,7 @@ Insert immediately after the `Propose the pinned catalog as a pull request` stag
         id: open-pr
 ```
 
-- [ ] **Step 5: Add the summary that names the manual step**
+- [ ] **Step 6: Add the summary that names the manual step**
 
 Insert immediately after the `Open or update the catalog pull request` stage:
 
@@ -345,7 +429,7 @@ Insert immediately after the `Open or update the catalog pull request` stage:
           } >> "$GITHUB_STEP_SUMMARY"
 ```
 
-- [ ] **Step 6: Prove no write still targets `main`**
+- [ ] **Step 7: Prove no write still targets `main`**
 
 Run:
 
@@ -361,7 +445,7 @@ ok: no contents write targets main
 1
 ```
 
-- [ ] **Step 7: Prove the guards survived verbatim**
+- [ ] **Step 8: Prove the guards survived verbatim**
 
 Run:
 
@@ -384,7 +468,7 @@ done
 Expected: five `ok:` lines. Any `FAIL:` means a guard was dropped or reworded and must be
 restored from the pre-change stage.
 
-- [ ] **Step 8: Lint and commit**
+- [ ] **Step 9: Lint and commit**
 
 Run:
 
