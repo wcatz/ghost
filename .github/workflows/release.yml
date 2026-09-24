@@ -5,13 +5,15 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-  packages: write
-
 jobs:
   release:
     runs-on: ubuntu-latest
+    # GoReleaser builds archives and checksums and creates the draft release,
+    # so it needs contents: write. It publishes no container image because
+    # .goreleaser.yml has no dockers or image_templates; the docker job pushes
+    # the image.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -54,6 +56,12 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    # contents: read covers actions/checkout; packages: write is what lets
+    # GITHUB_TOKEN authenticate to ghcr.io in the login step and publish the
+    # multi-arch image in the build step.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -130,6 +138,9 @@ jobs:
   plugin:
     needs: release
     runs-on: ubuntu-latest
+    # contents: write uploads the three plugin archives as release assets and
+    # writes the pinned catalog. No packages: write — this job attaches
+    # archives to an existing release, it does not publish an image.
     permissions:
       contents: write
     steps:
