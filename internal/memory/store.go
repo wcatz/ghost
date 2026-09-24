@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -97,7 +98,19 @@ func (s *Store) vectorMinSimilarityFloor() float32 {
 }
 
 // NewStore creates a new memory store from an open database.
+//
+// A nil logger means "log nothing" and is honoured as such: Store has over a
+// dozen unguarded s.logger.X call sites, and Go's log/slog panics on a nil
+// *Logger receiver (Info, Warn and Debug all dereference l.Handler), so a nil
+// passed straight through would turn any logging call into a crash. Call
+// sites such as mcpinit's lifecycle lock and marker paths pass nil
+// deliberately — they build a Store only to resolve a project identifier and
+// have no logger yet — and a discarded handler preserves that silence rather
+// than forcing every caller to construct one.
 func NewStore(db *sql.DB, logger *slog.Logger) *Store {
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	return &Store{db: db, logger: logger, demotionThreshold: DefaultDemotionThreshold}
 }
 
