@@ -181,12 +181,20 @@ type Item struct {
     Bucket                string    // project id or "_global" — bench's diversity unit
     ProjectID             string
     Scope                 map[string]string
-    ResolvedAt, ValidFrom, ValidUntil, VerifiedAt *time.Time
+    ResolvedAt, ValidFrom, ValidUntil, VerifiedAt *time.Time // parsed by stage 2
     Confidence            *float64
     Agent                 string
     Score                 float64   // final, after every scoring stage
 }
 ```
+
+The four timestamps on `Item` are `*time.Time` even though `memory.Memory` will
+carry the validity three as `*string`, because `Item` is the assembler's *output*
+type rather than a storage type: it holds the parsed form the renderer and the
+metrics need. A value that failed to parse is nil on `Item` **and** recorded in
+the trace as `validity_unparseable`, so nil unambiguously means "no validity claim
+we can read" — which is why the contamination predicate in §5 needs its own nil
+check rather than trusting a bare comparison.
 
 ### The hook's read-only constraint is load-bearing — but not for the reason I first gave
 
@@ -236,8 +244,7 @@ type CandidateSet struct {
 }
 
 type Candidate struct {
-    memory.Memory                    // the hydrated row — see the caveat below
-    ValidFrom, ValidUntil, VerifiedAt *time.Time // NOT on memory.Memory yet
+    memory.Memory                    // the hydrated row, carrying validity once extended
     FTSRank, VectorRank   int        // -1 when that leg did not retrieve it
     VectorScore           float64    // cosine; -1 when absent
     Base, Decay, Score    float64    // fused base, DecayFactor, base×decay
@@ -247,15 +254,40 @@ type LinkEdge struct{ From, To, Relation string; Strength float64 }
 type LegStatus struct{ Attempted, Available bool; Err string; Truncated bool }
 ```
 
-**`memory.Memory` cannot carry stage 2 today.** It has `ResolvedAt` and
-`Confidence` but **no** `ValidFrom`, `ValidUntil` or `VerifiedAt`, and
-`scanMemories` does not bind those three columns at all — so the columns exist in
-the DDL, are copied between `memories` and `memory_snapshots`, and are unreachable
-from Go (#575). The `Candidate` fields above are therefore part of PR 1's scope,
-not an assumption: PR 1 adds the three fields to `Memory`, binds them in
-`scanMemories`, and adds them to the `SELECT` lists in `store.go` and
-`vector.go:481-487`. Until that lands, stage 2 has nothing to read and stage 4's
-`Confidence` comes from the one field `Memory` does carry.
+**`memory.Memory` cannot carry stage 2 today, and PR 1 extends it.** `Memory` has
+`ResolvedAt *string` and `Confidence *float64` but **no** `ValidFrom`,
+`ValidUntil` or `VerifiedAt`, and `scanMemories` does not bind those three columns
+at all — the columns exist in the DDL, are copied between `memories` and
+`memory_snapshots`, and are unreachable from Go (#575). PR 1 adds the three fields
+to `Memory`, binds them in `scanMemories`, and adds them to the `SELECT` lists in
+`store.go` and `vector.go:481-487`. They are declared **only** on `Memory`, not
+also on `Candidate`: a duplicate declaration on the outer struct would shadow the
+promoted embedded field and leave `Candidate.ValidUntil` and
+`Candidate.Memory.ValidUntil` as two independent values, of which stage 2 would
+read the wrong one.
+
+**They are `*string`, not `*time.Time`, and stage 2 owns the parsing.** Three
+reasons, all from the existing code rather than preference:
+
+- `Memory.ResolvedAt` is already `*string` (`store.go:34`) — the established
+  pattern for a nullable SQLite `TEXT` timestamp in this struct, and validity
+  should not be the odd one out.
+- The columns are unconstrained `TEXT` with **no** format enforcement, and the
+  values already in the tree are not all the same shape: SQLite's own
+  `datetime('now')` writes `2026-01-02 03:04:05`, while
+  `provenance_validity_test.go:174` inserts a bare date, `'2026-09-24'`.
+- `database/sql` will not scan a `TEXT` driver value into `*time.Time`; the
+  driver would have to be taught, and hand-rolling that is worse than parsing.
+
+So `scanMemories` scans `sql.NullString` and the fields stay `*string`, and stage
+2 parses them against a documented, closed layout set — `"2006-01-02 15:04:05"`
+(the SQLite writer's shape) and `"2006-01-02"` — in that order. **A value matching
+neither layout is treated as unset, not as an error**, and the row is recorded in
+the trace with `Reason: "validity_unparseable"`. The reasoning: a malformed
+timestamp must not be able to fail a whole retrieval, and must not silently read
+as "valid" either — surfacing it is the only honest third option. The regression
+test seeds both accepted shapes plus a malformed one and asserts none of them
+errors the query.
 
 Returning `Edges` from the same call keeps `Retriever` a one-method interface —
 nothing in `internal/context` can reach a `*sql.DB` — at the cost of one batched
@@ -682,21 +714,29 @@ while the stage saw the whole candidate set.
 Bench calls the same `Assemble` with `Source: SourceBench, Explain: true` and
 `Condition` set per ablation.
 
-**One honest limit on "zero bench-side retrieval code":** `internal/bench.Run`
-(`runner.go:45-62`) scores three conditions, and the third is **vector-only**,
-which `Request` could not express — a nil `QueryVec` means FTS-only, and zeroing
-`FTSWeight` is not a substitute, because fused FTS candidates still enter the
-candidate union with a zero base score and would occupy window slots. That is why
-`Condition` is in the contract. With it, all three ablations go through
-`Assemble`; **without** it, the honest statement is that bench keeps its own
-`store.SearchFTS` / `store.SearchVector` calls for the two single-leg ablations and
-uses `Assemble` for hybrid and for the context mode. The claim as originally
-written was too strong.
+**One honest limit on "zero bench-side retrieval code":** it applies to the
+**context mode only**, and the existing ablation tables keep their direct store
+calls. `internal/bench.Run` (`runner.go:45-62`) scores `fts-only`, `vector-only`
+and `hybrid` by calling `store.SearchFTS` / `store.SearchVector` /
+`store.SearchHybrid` directly, which means those conditions deliberately bypass
+validity, conflicts and dedup. Routing them through `Assemble` would apply those
+stages and change the returned IDs, the ordering, and therefore the metrics — and
+`regression_test.go`'s floors (`ndcg10`, `recall10`) are measured against exactly
+those numbers, so silently changing their definition would invalidate the whole
+regression baseline rather than test it. The three ablations therefore stay as
+they are, and #582's context metrics are reported as an additional condition.
+
+`Condition` is in the contract anyway, for the reason it is needed *at all*:
+vector-only is not expressible otherwise. A nil `QueryVec` means FTS-only, and
+zeroing `FTSWeight` is not a substitute, because fused FTS candidates still enter
+the candidate union with a zero base score and would occupy window slots — the
+ablation would not be measuring vector-only retrieval. With `Condition` available,
+a later PR can unify the ablations on purpose, as its own bench-gated change.
 
 | Metric | Computed from | Note |
 |---|---|---|
 | **Context precision** | `Σ relevance(Item.ID) / len(Items)` | bench's existing `Query.Rel` grades. The denominator is the *assembled* block, not a ranked list — that is the whole difference from NDCG. |
-| **Contamination rate** | items whose own `Item` fields are contaminating *at assembly time* | `Item.ResolvedAt != nil`, `Item.ValidUntil < Request.Now`, `Item.Scope` contradicts the request, or `Item.Bucket` is **neither the requested project nor `_global`**. `_global` is *never* contamination: both retrieval legs and `GetTopMemories` include it deliberately (`store.go:1106`, `1165`), so a global preference in the block is the product working, and scoring it as contamination would report correct behaviour as a regression. **Classified from the production exclusion codes in `Decision.Reason`**, not a bench-only re-implementation — #582's second AC. |
+| **Contamination rate** | items whose own `Item` fields are contaminating *at assembly time* | `Item.ResolvedAt != nil`, or `Item.ValidUntil != nil && Item.ValidUntil.Before(Request.Now)`, or `Item.Scope` contradicts the request, or `Item.Bucket` is **neither the requested project nor `_global`**. The nil check is explicit because the field is a pointer — a bare `<` against `Request.Now` does not compile, and a bare dereference can panic. This mirrors stage 2's own predicate rather than restating it, which is the point of classifying from production codes. `_global` is *never* contamination: both retrieval legs and `GetTopMemories` include it deliberately (`store.go:1106`, `1165`), so a global preference in the block is the product working, and scoring it as contamination would report correct behaviour as a regression. **Classified from the production exclusion codes in `Decision.Reason`**, not a bench-only re-implementation — #582's second AC. |
 | **Budget adherence** | `Result.Bytes` vs. the matching `Slice.MaxBytes`; dropped IDs from the stage-8 `StageTrace.DroppedIDs` | `DroppedIDs` is what lets bench intersect the trim with `Query.Rel` and measure *relevant rows the trim discarded* — the "low-relevance memory crowding out a relevant one" regression, otherwise invisible. |
 | **Diversity** | `max_b count(Item.Bucket) / len(Items)` | One histogram over `Item.Bucket`, with `_global` as its own bucket. |
 | **Token cost** | `Σ Item.Bytes` per answered question, reported next to accuracy | Bytes, not a tokenizer: the injection budget is already in bytes and `MaxContentLen` is 8,000 bytes. A tokenizer would be a second, disagreeing notion of size. |
@@ -724,7 +764,7 @@ widened window it returns does not exist on `main`.
 | 4 | `feat(context): abstention is an outcome, not an empty list` | **#580** | **Neutral by construction** — `weak` annotates, so no row is withheld. Arm A is a rank ≤ 3 gate that applies *only* when the vector leg ran; passive sources get `answerable`/`not_applicable` and never `weak`. Arm B ships disabled. Regression tests: a rank-≥4 FTS hit with `QueryVec == nil` is `answerable`/`no_vector_leg`; a rank-0 FTS hit is `answerable` with no abstention line. |
 | 5 | `feat(memory): explain reports the assembler's own decisions, and `ghost context --explain` exists` | **#583** (and the class in #571) | Not applicable — explain is a read-only diagnostic and never fed a scored result. The mutation check is on the invariant test: restore the local re-derivation in `explain.go` and `explain_rrf_equals_ordering_score` must fail. Also adds the `--explain` flag to `runContext` (`cmd/ghost/session.go:18`), which today parses only `--cwd` and silently ignores everything else. |
 | 6 | `feat(context): conflict, dedup, diversity and budget stages` | **#581** (remaining ACs) | **The gated one.** The only membership changes are the diversity quota (default off, so a no-op until #582 sets a number) and `Slice.DropDemotedLosers` for `_global`, which must *preserve* today's removal behaviour rather than converge it to reorder — so the gate is a before/after of the rendered session-start block, not a metric movement. `contradicts` is non-removing in v1, so it contributes nothing here. Paste both tables and the rendered-block diff. |
-| 7 | `feat(bench): context-quality metrics` | **#582** | Not applicable — measurement only, reported not gating. This is the PR that sets `context.abstain_cosine` from the abstention subset, with the before/after in the body. It also wires `Condition` so all three ablations go through `Assemble` instead of bench calling the store directly. |
+| 7 | `feat(bench): context-quality metrics` | **#582** | **Measurement only, and PR 7 keeps it that way by *not* rerouting the existing ablations.** `bench.Run` (`runner.go:45-62`) calls `store.SearchFTS` and `store.SearchVector` directly today, so its single-leg conditions bypass validity, conflicts and dedup entirely. Routing them through `Assemble` would apply those stages and change the IDs, ordering and metrics — which would silently redefine the baseline that `regression_test.go`'s floors (`ndcg10`, `recall10`) have been measured against for the life of the suite. So the historical ablation tables **keep their direct store calls**, and #582's context mode is added as a **new** condition alongside them, with `Condition` available if a later PR wants to unify. §5's claim is scoped to the context mode alone. |
 
 **Why this order.** #575 (3) lands the validity *writers* together with the
 retrieval change they enable, because a stage that reads columns nothing writes is
@@ -779,7 +819,10 @@ an LLM reranker, a two-pass retrieve — edits one slice.
   not bound in `scanMemories`, so stage 2 has nothing to read until they are
   added, along with the `SELECT` lists in `store.go` and `vector.go:481-487`.
   That touches the two hot files plus a 17-destination scan, so it belongs in PR 1
-  with its own mutation-checked test rather than arriving piecemeal in PR 3.
+  with its own mutation-checked test rather than arriving piecemeal in PR 3. The
+  parsing rules above matter as much as the fields: the columns are unconstrained
+  `TEXT` and already hold two different shapes, so a bare `*time.Time` scan would
+  fail at runtime rather than at compile time.
 - **Converging the renderer cuts both ways.** `formatMemories` gains nothing
   (it already prints scope) but must not *lose* importance or tags, and
   session-start gains a `scope{…}` suffix on every scoped row — a visible product
