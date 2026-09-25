@@ -68,3 +68,35 @@ func TestWriteFileAtomicAppliesUmaskOnCreate(t *testing.T) {
 	syscall.Umask(permissive)
 	assertFileMode(t, other, 0644)
 }
+
+// TestSettingsFile_SaveNeverWidensMode pins that a file able to hold
+// credentials cannot end up more permissive than 0600, even when the user's
+// copy was group- or world-readable. Before the atomic-write refactor every
+// save chmod'd the file to 0600, so keeping a 0644 settings.json readable by
+// others was a regression. Unix only: the 0600 ceiling is a permission-bit
+// contract, and on Windows os.Chmod(0400) sets FILE_ATTRIBUTE_READONLY, which
+// then blocks the rename that replaces the file at all.
+func TestSettingsFile_SaveNeverWidensMode(t *testing.T) {
+	cases := map[string]os.FileMode{
+		"world-readable copy": 0644,
+		"group-readable copy": 0640,
+		"already private":     0600,
+		"narrower than 0600":  0400,
+	}
+	for name, mode := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := tempSettings(t, `{"effortLevel":"high"}`)
+			if err := os.Chmod(path, mode); err != nil {
+				t.Fatal(err)
+			}
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatalf("loadSettings: %v", err)
+			}
+			if err := sf.save(); err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			assertFileMode(t, path, mode&0600)
+		})
+	}
+}
