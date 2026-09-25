@@ -203,9 +203,9 @@ func TestExplainSearchExcludedRowsCarryAReason(t *testing.T) {
 	}
 }
 
-// TestExplainFTSOnlyScoreMatchesTheRanking: with no vector matches
-// SearchHybrid passes a nil score map to decayRank, which synthesizes an
-// unweighted base of 1/(RRFK+rank+1). Reporting the weighted form instead
+// TestExplainFTSOnlyScoreMatchesTheRanking: with no vector matches the search
+// ranks on the unweighted keyword base — keywordOnlyParams sets FTSWeight=1 —
+// so the fused score is 1/(RRFK+rank+1). Reporting the weighted form instead
 // would advertise a number 0.3x the one that actually ranked the results —
 // an agent comparing the breakdown to the ordering would find them
 // irreconcilable, which is the exact confusion explain exists to remove.

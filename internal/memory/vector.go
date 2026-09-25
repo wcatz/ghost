@@ -362,6 +362,11 @@ func decayRank(results []Memory, scores map[string]float64, p SearchParams, limi
 	for i, m := range results {
 		base := scores[m.ID]
 		if scores == nil {
+			// No production caller reaches this: every path into decayRank comes
+			// from fuseAndRank, which always supplies a score map (the keyword-only
+			// path's is the unweighted 1/(K+rank+1) base, not a missing map). Kept
+			// so a caller that has no fused scores at all still ranks on rank
+			// order rather than on a map miss reading as 0.
 			base = 1.0 / float64(p.RRFK+i+1)
 		}
 		scored[i] = struct {
@@ -435,7 +440,6 @@ func (s *Store) fuseAndRank(ctx context.Context, ftsResults []Memory, vecResults
 	// Hydrate the full candidate pool before ranking — decayRank needs
 	// category/pinned/created_at to reorder the window, and hydration via
 	// GetByIDs does not preserve order, so the final sort lives there too.
-	beforeHybridHydrate(window.IDs)
 	poolIDs := make([]string, len(pool))
 	if window.Scores == nil {
 		window.Scores = make(map[string]float64, len(pool))
@@ -449,11 +453,32 @@ func (s *Store) fuseAndRank(ctx context.Context, ftsResults []Memory, vecResults
 	if len(poolIDs) == 0 {
 		poolIDs = window.IDs
 	}
-	memories, err := s.GetByIDs(ctx, poolIDs)
-	if err != nil {
-		return nil, err
+
+	// Hydrate before ranking — decayRank needs category/pinned/created_at to
+	// reorder the window, and hydration via GetByIDs does not preserve order, so
+	// the final sort lives there too.
+	//
+	// The keyword-only path is exempt. With no vector leg its narrowed pool is a
+	// subset of ftsResults, and those arrive fully hydrated because SearchFTS
+	// selects every column — so re-reading them by id would spend a
+	// WHERE id IN (...) round trip rebuilding the slice already in hand. That is
+	// the degraded path, taken whenever there is no embedder or the vector floor
+	// empties the leg, so it is the one that can least afford the extra query.
+	//
+	// The hybrid path still re-reads the whole pool. There a row deleted between
+	// the leg queries and hydration is exactly what the backfill below exists to
+	// replace, and reusing the leg's copy would hide the delete.
+	beforeHybridHydrate(window.IDs)
+	var memories []Memory
+	if len(vecResults) == 0 {
+		memories = selectHydratedWindow(ftsResults, window, poolIDs)
+	} else {
+		hydrated, err := s.GetByIDs(ctx, poolIDs)
+		if err != nil {
+			return nil, err
+		}
+		memories = selectHydratedWindow(hydrated, window, poolIDs)
 	}
-	memories = selectHydratedWindow(memories, window, poolIDs)
 	memories = decayRank(memories, window.Scores, p, limit, time.Now().UTC())
 	return s.demoteResults(ctx, memories, p), nil
 }
