@@ -68,7 +68,7 @@ func (c *CLIClient) run(ctx context.Context, prompt string, extraArgs ...string)
 	}
 	args := append([]string{"-p", "--setting-sources", "project,local"}, extraArgs...)
 	args = append(args, prompt)
-	cmd, release, _ := harnessCommand(ctx, c.binary, args, stripLLMKeys(os.Environ()), "claude")
+	cmd, release, _ := harnessCommand(ctx, c.binary, args, harnessEnv(os.Environ()), "claude")
 	defer release()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

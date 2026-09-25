@@ -37,7 +37,7 @@ func (c *GooseClient) run(ctx context.Context, prompt string) (string, error) {
 	}
 	args := []string{"run", "-q"}
 	args = append(args, prompt)
-	cmd, release, _ := harnessCommand(ctx, c.binary, args, stripLLMKeys(os.Environ()), "goose")
+	cmd, release, _ := harnessCommand(ctx, c.binary, args, harnessEnv(os.Environ()), "goose")
 	defer release()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

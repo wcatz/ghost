@@ -205,7 +205,7 @@ func OpencodeMajorVersion(out string) int {
 // run. The returned cleanup is safe to call more than once in both paths.
 func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string) (*exec.Cmd, func(), error) {
 	base := make([]string, 0, len(os.Environ())+1)
-	for _, kv := range os.Environ() {
+	for _, kv := range harnessEnv(os.Environ()) {
 		if strings.HasPrefix(kv, "XDG_CONFIG_HOME=") {
 			continue // replaced by the scrub dir below
 		}
