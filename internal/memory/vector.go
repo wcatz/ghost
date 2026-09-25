@@ -94,6 +94,25 @@ type vecEntry struct {
 // SearchVector performs brute-force cosine similarity search against stored embeddings.
 // Returns memory IDs sorted by descending similarity.
 func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]ScoredMemory, error) {
+	return s.searchVector(ctx, projectID, queryVec, limit, nil)
+}
+
+// SearchVectorScoped is SearchVector with a scope constraint applied *before*
+// the limit. SearchVector truncates to its top `limit` candidates, so a caller
+// that filters scope afterwards can be handed only rows it may not use, and a
+// compatible row ranked just below the cut is never seen at all. Filtering first
+// is the whole point: the limit then counts eligible candidates.
+//
+// Scope is not folded into the SQL. The predicate is ScopeMatches — a row that
+// does not mention a requested key stays eligible — which is a per-key
+// comparison over decoded JSON, and re-expressing it in SQL would duplicate the
+// rule the linker and fusion already share. The scan is brute force over the
+// project's embeddings either way, so filtering after it costs nothing.
+func (s *Store) SearchVectorScoped(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]ScoredMemory, error) {
+	return s.searchVector(ctx, projectID, queryVec, limit, scope)
+}
+
+func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]ScoredMemory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -153,6 +172,18 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].Score > scored[j].Score
 	})
+
+	// Narrow before the cut, so `limit` counts candidates the caller may
+	// actually use rather than rows a post-filter would discard.
+	if len(scope) > 0 {
+		eligible := scored[:0]
+		for _, sm := range scored {
+			if ScopeMatches(sm.Scope, scope) {
+				eligible = append(eligible, sm)
+			}
+		}
+		scored = eligible
+	}
 
 	if len(scored) > limit {
 		scored = scored[:limit]
