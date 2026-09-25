@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -84,21 +85,28 @@ func TestEnsureProjectWithRepoKeepsDifferentRepositoriesApart(t *testing.T) {
 
 	ctx := context.Background()
 	s := NewStore(db, nil)
-
-	if err := s.EnsureProjectWithRepo(ctx, "a", "/home/u/src/ghost", "ghost", "git@github.com:wcatz/ghost.git"); err != nil {
+	root := t.TempDir()
+	pathA := filepath.Join(root, "src", "ghost")
+	pathB := filepath.Join(root, "src", "other-ghost")
+	for _, path := range []string{pathA, pathB} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", path, err)
+		}
+	}
+	if err := s.EnsureProjectWithRepo(ctx, "a", pathA, "ghost", "git@github.com:wcatz/ghost.git"); err != nil {
 		t.Fatalf("ensure a: %v", err)
 	}
-	if err := s.EnsureProjectWithRepo(ctx, "b", "/home/u/src/other-ghost", "other-ghost", "git@github.com:someone/other-ghost.git"); err != nil {
+	if err := s.EnsureProjectWithRepo(ctx, "b", pathB, "other-ghost", "git@github.com:someone/other-ghost.git"); err != nil {
 		t.Fatalf("ensure b: %v", err)
 	}
 
-	for _, in := range []string{"/home/u/src/ghost", "/home/u/src/other-ghost"} {
+	for _, in := range []string{pathA, pathB} {
 		id, _, err := s.ResolveProject(ctx, in)
 		if err != nil {
 			t.Fatalf("resolve %q: %v", in, err)
 		}
 		want := "a"
-		if in == "/home/u/src/other-ghost" {
+		if in == pathB {
 			want = "b"
 		}
 		if id != want {

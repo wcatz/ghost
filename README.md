@@ -103,7 +103,7 @@ The agent saves memories through MCP tools. Near-duplicates are detected within 
 
 ### Projects and global knowledge
 
-GhostMem resolves a project by longest path prefix, then by repository remote, then by basename. A basename match is accepted only when the name is unique, the recorded path contains the session's directory, and no remote contradicts it, so a project with no recorded location is reached by name only. Project knowledge stays scoped to that project; the special `_global` project holds preferences and facts that apply everywhere. Use cross-project search when the relevant context may live under another repository.
+GhostMem resolves a project by longest canonical path prefix, then by repository remote, then by basename. A basename match is accepted only when exactly one candidate survives the recorded-path and remote checks; an ambiguous name is rejected rather than guessed. A project with no recorded location is reached by name only. Project knowledge stays scoped to that project; the special `_global` project holds preferences and facts that apply everywhere. Use cross-project search when the relevant context may live under another repository.
 
 ### Tasks and decisions
 

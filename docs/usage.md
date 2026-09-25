@@ -34,7 +34,7 @@ If a choice was made after considering alternatives, record a decision rather th
 
 ## Projects and global memory
 
-A project is normally identified by the directory where the agent is working. Ghost resolves projects by longest path prefix first, then by repository remote, then by basename. A basename match is accepted only when the name is unique, the recorded path contains the session's directory, and no repository remote contradicts it. This keeps worktrees and moved checkouts associated with the intended project.
+A project is normally identified by the directory where the agent is working. Ghost resolves projects by longest canonical path prefix first, then by repository remote, then by basename. A basename match is accepted only when exactly one candidate survives the recorded-path and repository-remote checks; an ambiguous name is rejected rather than guessed. This keeps worktrees and moved checkouts associated with the intended project.
 
 For compatibility with clients that supply a path-shaped `project_id` on a save, Ghost also detects the checkout's normalized Git remote, so worktrees and moved checkouts remain one project. If the project was first created under its plain name and has no recorded remote yet, that path binds the remote only when the repository name identifies exactly one unclaimed project; ambiguous or conflicting names are never guessed.
 

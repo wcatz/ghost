@@ -92,6 +92,10 @@ type MemoryStore interface {
 	// resolved id/path; repoName is derived from the remote, not a directory.
 	ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, error)
 	ResolveProject(ctx context.Context, input string) (id, name string, err error)
+	// ResolveExactProjectID reports whether input is literally a project's id,
+	// with no path, remote or basename fallback. The write side needs it to
+	// avoid re-deriving an id the caller already supplied.
+	ResolveExactProjectID(ctx context.Context, id string) (string, bool, error)
 	ListProjectNames(ctx context.Context) ([]string, error)
 	MergeProject(ctx context.Context, oldID, newID string) error
 	DeleteProject(ctx context.Context, input string, apply bool) (memory.DeleteProjectSummary, error)

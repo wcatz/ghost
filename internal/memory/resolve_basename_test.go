@@ -2,6 +2,9 @@ package memory
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -45,12 +48,19 @@ func TestResolveBasenameRefusesUnrelatedDirectory(t *testing.T) {
 func TestResolveBasenameStillMatchesOwnDirectory(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
+	projectPath := filepath.Join(t.TempDir(), "infra")
+	subdir := filepath.Join(projectPath, "sub")
+	for _, dir := range []string{projectPath, subdir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
 
-	if err := s.EnsureProject(ctx, "infra-id", "/x/infra", "infra"); err != nil {
+	if err := s.EnsureProject(ctx, "infra-id", projectPath, "infra"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
-	id, name, err := s.ResolveProject(ctx, "/x/infra")
+	id, name, err := s.ResolveProject(ctx, projectPath)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -58,16 +68,12 @@ func TestResolveBasenameStillMatchesOwnDirectory(t *testing.T) {
 		t.Errorf("session inside its own project did not resolve: id=%q name=%q, want infra-id/infra", id, name)
 	}
 
-	// And nothing more: a session in a SUBdirectory of a short-path project
-	// does not resolve either, because the prefix step's LENGTH(path) > 10
-	// guard skips it and this input's basename is the subdirectory's name,
-	// which names no project. That is a separate, pre-existing gap and not
-	// what this test is about — widening prefix matching to cover it is a
-	// different change.
-	if id, name, err := s.ResolveProject(ctx, "/x/infra/sub"); err != nil {
+	id, name, err = s.ResolveProject(ctx, subdir)
+	if err != nil {
 		t.Fatalf("ResolveProject subdir: %v", err)
-	} else if id != "" || name != "" {
-		t.Errorf("subdirectory of a short-path project resolved to %q (%q), want no match", id, name)
+	}
+	if id != "infra-id" || name != "infra" {
+		t.Errorf("session in a project subdirectory resolved to %q (%q), want infra-id/infra", id, name)
 	}
 }
 
@@ -80,27 +86,27 @@ func TestResolveBasenameStillMatchesOwnDirectory(t *testing.T) {
 func TestResolveBasenameIgnoresCandidatesThatDisagree(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
+	root := t.TempDir()
+	realPath := filepath.Join(root, "real", "infra")
+	aliasPath := filepath.Join(root, "alias", "infra")
+	if err := os.MkdirAll(realPath, 0o755); err != nil {
+		t.Fatalf("mkdir real path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(aliasPath), 0o755); err != nil {
+		t.Fatalf("mkdir alias parent: %v", err)
+	}
+	if err := os.Symlink(realPath, aliasPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
 
-	// Created first, and with a path this short so the SQL path step cannot
-	// answer (LENGTH(path) > 10) and the basename fallback is what answers.
-	if err := s.EnsureProject(ctx, "real-id", "/x/infra", "infra"); err != nil {
+	if err := s.EnsureProject(ctx, "real-id", aliasPath, "infra"); err != nil {
 		t.Fatalf("EnsureProject real: %v", err)
 	}
-	// The duplicate is created second on purpose: an absolute-path
-	// EnsureProject auto-merges a same-name project with a non-absolute path
-	// (store.go), which would delete the row this test needs to exist.
 	if err := s.EnsureProject(ctx, "dup-id", "", "infra"); err != nil {
 		t.Fatalf("EnsureProject duplicate: %v", err)
 	}
-	var dupPath string
-	if err := s.db.QueryRowContext(ctx, `SELECT path FROM projects WHERE id = 'dup-id'`).Scan(&dupPath); err != nil {
-		t.Fatalf("read duplicate path: %v", err)
-	}
-	if dupPath != "dup-id" {
-		t.Fatalf("precondition: duplicate path = %q, want the id sentinel", dupPath)
-	}
 
-	id, name, err := s.ResolveProject(ctx, "/x/infra")
+	id, name, err := s.ResolveProject(ctx, realPath)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -109,13 +115,10 @@ func TestResolveBasenameIgnoresCandidatesThatDisagree(t *testing.T) {
 	}
 }
 
-// TestResolveProjectByAmbiguousBareNameReturnsNoMatch: rule 1 has to hold
-// where MCP project_id actually enters. Every MCP tool passes a NAME, and the
-// exact-name step took LIMIT 1, so a duplicated name handed the caller one
-// arbitrary row — and every save it made landed there. Naming a project is
-// not a location report, so the evidence rules have nothing to filter on:
-// two rows means there is no answer.
-func TestResolveProjectByAmbiguousBareNameReturnsNoMatch(t *testing.T) {
+// TestResolveProjectByAmbiguousBareNameReturnsError prevents the save path
+// from treating multiple exact-name matches as a miss and auto-creating a
+// third project.
+func TestResolveProjectByAmbiguousBareNameReturnsError(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
@@ -125,63 +128,43 @@ func TestResolveProjectByAmbiguousBareNameReturnsNoMatch(t *testing.T) {
 	if err := s.EnsureProject(ctx, "b", "", "infra"); err != nil {
 		t.Fatalf("EnsureProject b: %v", err)
 	}
-	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE name = 'infra'`).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("precondition: %d projects named infra, want 2", n)
-	}
 
-	id, name, err := s.ResolveProject(ctx, "infra")
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "" || name != "" {
-		t.Errorf("ambiguous name resolved to %q (%q) — with two candidates the caller cannot know which project it got", id, name)
+	_, _, err := s.ResolveProject(ctx, "infra")
+	if !errors.Is(err, ErrAmbiguousProject) {
+		t.Fatalf("ResolveProject(infra) error = %v, want ErrAmbiguousProject", err)
 	}
 }
 
-// TestResolveBasenameRequiresUniqueName: projects.name carries no uniqueness
-// constraint, and the fallback used to take LIMIT 1 — an arbitrary pick
-// whenever two projects shared a name, with no way for the caller to know
-// which one it got.
-//
-// The fixture is built so the uniqueness rule is the ONLY thing that can
-// decide it. Two earlier fixtures could not: with two sentinel candidates
-// the path rules reject both (0 survivors), and with one sentinel plus one
-// matching candidate the sentinel is rejected too (1 survivor), so deleting
-// the uniqueness check left both tests green.
-//
-// Two distinct recorded paths that both agree with the session is the only
-// state that isolates it, and pathsAgree is deliberately spelling-tolerant,
-// so two spellings of one directory qualify: "/a/in" and "/a/in/" both hold
-// this session. Both paths are short, so the SQL path step cannot answer
-// (LENGTH(path) > 10) and the basename fallback is what runs.
+// TestResolveBasenameRequiresUniqueName uses two recorded aliases of one real
+// directory so the path and remote rules cannot choose a winner.
 func TestResolveBasenameRequiresUniqueName(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-
-	if err := s.EnsureProject(ctx, "one", "/a/in", "in"); err != nil {
+	root := t.TempDir()
+	realPath := filepath.Join(root, "real", "in")
+	if err := os.MkdirAll(realPath, 0o755); err != nil {
+		t.Fatalf("mkdir real path: %v", err)
+	}
+	aliasOne := filepath.Join(root, "alias-one", "in")
+	aliasTwo := filepath.Join(root, "alias-two", "in")
+	for _, alias := range []string{aliasOne, aliasTwo} {
+		if err := os.MkdirAll(filepath.Dir(alias), 0o755); err != nil {
+			t.Fatalf("mkdir alias parent: %v", err)
+		}
+		if err := os.Symlink(realPath, alias); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+	}
+	if err := s.EnsureProject(ctx, "one", aliasOne, "in"); err != nil {
 		t.Fatalf("EnsureProject one: %v", err)
 	}
-	if err := s.EnsureProject(ctx, "two", "/a/in/", "in"); err != nil {
+	if err := s.EnsureProject(ctx, "two", aliasTwo, "in"); err != nil {
 		t.Fatalf("EnsureProject two: %v", err)
 	}
-	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE name = 'in'`).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("precondition: %d projects named in, want 2", n)
-	}
 
-	id, name, err := s.ResolveProject(ctx, "/a/in")
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "" || name != "" {
-		t.Errorf("two consistent candidates resolved to %q (%q) — with two survivors there is no correct answer, only a guess", id, name)
+	_, _, err := s.ResolveProject(ctx, realPath)
+	if !errors.Is(err, ErrAmbiguousProject) {
+		t.Fatalf("two consistent candidates error = %v, want ErrAmbiguousProject", err)
 	}
 }
 
@@ -194,10 +177,11 @@ func TestResolveBasenameRequiresUniqueName(t *testing.T) {
 func TestResolveBasenameRefusesRelativePathInput(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-
-	// Short path, so the SQL path step cannot answer and the basename
-	// fallback is the only thing that can.
-	if err := s.EnsureProject(ctx, "infra-id", "/x/infra", "infra"); err != nil {
+	stored := filepath.Join(t.TempDir(), "infra")
+	if err := os.MkdirAll(stored, 0o755); err != nil {
+		t.Fatalf("mkdir stored path: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "infra-id", stored, "infra"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
@@ -206,7 +190,7 @@ func TestResolveBasenameRefusesRelativePathInput(t *testing.T) {
 		t.Fatalf("ResolveProject: %v", err)
 	}
 	if id != "" || name != "" {
-		t.Errorf("a relative path claimed project %q (%q): IsAbs is false for this shape, so an IsAbs-gated guard would be off", id, name)
+		t.Errorf("a relative path claimed project %q (%q): it did not prove agreement with the recorded location", id, name)
 	}
 }
 
@@ -239,19 +223,25 @@ func TestResolveBasenameRefusesRootPathProject(t *testing.T) {
 func TestResolveBasenameRefusesProvenRemoteConflict(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-
-	// Short path, and the session stands exactly on it: the prefix step
-	// cannot answer (LENGTH > 10) and the path guard agrees, so the remote
-	// rule is the only thing left that can refuse. An earlier revision of
-	// this test used a long path with the session elsewhere, and disabling
-	// the remote guard still passed — the path guard was answering for it.
-	if err := s.EnsureProjectWithRepo(ctx, "infra-id", "/x/infra", "infra", "github.com/me/infra"); err != nil {
+	root := t.TempDir()
+	realPath := filepath.Join(root, "real", "infra")
+	aliasPath := filepath.Join(root, "alias", "infra")
+	if err := os.MkdirAll(realPath, 0o755); err != nil {
+		t.Fatalf("mkdir real path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(aliasPath), 0o755); err != nil {
+		t.Fatalf("mkdir alias parent: %v", err)
+	}
+	if err := os.Symlink(realPath, aliasPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := s.EnsureProjectWithRepo(ctx, "infra-id", aliasPath, "infra", "github.com/me/infra"); err != nil {
 		t.Fatalf("EnsureProjectWithRepo: %v", err)
 	}
-	SetDetectRemote(func(dir string) string { return "github.com/someone-else/infra" })
+	SetDetectRemote(func(string) string { return "github.com/someone-else/infra" })
 	t.Cleanup(func() { SetDetectRemote(nil) })
 
-	id, name, err := s.ResolveProject(ctx, "/x/infra")
+	id, name, err := s.ResolveProject(ctx, realPath)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -268,18 +258,25 @@ func TestResolveBasenameRefusesProvenRemoteConflict(t *testing.T) {
 func TestResolveBasenameAllowsUnprovenRemote(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-
-	if err := s.EnsureProject(ctx, "infra-id", "/x/infra", "infra"); err != nil {
+	root := t.TempDir()
+	realPath := filepath.Join(root, "real", "infra")
+	aliasPath := filepath.Join(root, "alias", "infra")
+	if err := os.MkdirAll(realPath, 0o755); err != nil {
+		t.Fatalf("mkdir real path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(aliasPath), 0o755); err != nil {
+		t.Fatalf("mkdir alias parent: %v", err)
+	}
+	if err := os.Symlink(realPath, aliasPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "infra-id", aliasPath, "infra"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
-	SetDetectRemote(func(dir string) string { return "github.com/me/infra" })
+	SetDetectRemote(func(string) string { return "github.com/me/infra" })
 	t.Cleanup(func() { SetDetectRemote(nil) })
 
-	// Stand in the project's own directory — short, so the prefix step skips
-	// it and the basename fallback is what answers. Only the remote rule is
-	// under test here; putting the session somewhere else would let the path
-	// rule reject it first and prove nothing about remotes.
-	id, name, err := s.ResolveProject(ctx, "/x/infra")
+	id, name, err := s.ResolveProject(ctx, realPath)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -468,33 +465,29 @@ func TestIsPathShaped(t *testing.T) {
 	}
 }
 
-// TestPathsAgreeIsSeparatorAgnostic pins the exact defect review caught on
-// #565: the guard compared with strings.HasPrefix(input, path+"/"), which can
-// never match a native Windows path. Windows stores backslashes, and — worse —
-// filepath.IsAbs reports false for a drive-relative path such as
-// \some\unrelated\ghost, so the whole guard silently switched itself off on
-// the platform where an unrelated directory is most likely to share a basename.
-//
-// These are unit-level because filepath.Base does not split on backslashes
-// when the tests run on Linux, so the integration fixtures above cannot reach
-// this comparison with a Windows-shaped path. The normalization being tested
-// here is what makes the guard correct on Windows.
+// TestPathsAgreeIsSeparatorAgnostic exercises real paths so canonicalization
+// is tested on both POSIX and Windows without accepting a nonexistent path.
 func TestPathsAgreeIsSeparatorAgnostic(t *testing.T) {
+	root := t.TempDir()
+	stored := filepath.Join(root, "infra")
+	child := filepath.Join(stored, "sub")
+	other := filepath.Join(root, "other", "infra")
+	for _, dir := range []string{stored, child, other} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	storedSlash := strings.ReplaceAll(stored, string(filepath.Separator), "/")
+	childSlash := strings.ReplaceAll(child, string(filepath.Separator), "/")
 	cases := []struct {
-		name   string
-		input  string
-		stored string
-		want   bool
+		name, input, stored string
+		want                bool
 	}{
-		{"session inside the project, backslash input", `C:\x\infra\sub`, `C:\x\infra`, true},
-		{"session inside the project, mixed separators", `C:\x\infra\sub`, `C:/x/infra`, true},
-		{"stored backslash, input forward slash", `C:/x/infra/sub`, `C:\x\infra`, true},
-		{"exact match either way", `C:\x\infra`, `C:/x/infra`, true},
-		{"a different tree with the same basename", `C:\y\infra`, `C:\x\infra`, false},
-		{"forward slash equivalent of the attack", `/some/unrelated/path/infra`, `/x/infra`, false},
-		{"segment boundary is respected", `/x/infra-other`, `/x/infra`, false},
-		{"segment boundary respected from either side", `/x/infra`, `/x/infra-other`, false},
-		{"a path that does not exist resolves to nothing", `/definitely/not/here/a`, `/definitely/not/here/b`, false},
+		{"child matches stored", child, stored, true},
+		{"slash spelling matches", childSlash, storedSlash, true},
+		{"different tree", other, stored, false},
+		{"segment boundary", filepath.Join(stored+"-other", "sub"), stored, false},
+		{"unresolvable", filepath.Join(root, "missing"), stored, false},
 	}
 	for _, c := range cases {
 		if got := pathsAgree(c.input, c.stored); got != c.want {

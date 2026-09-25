@@ -23,6 +23,12 @@ func NormalizeRepoRemote(raw string) string {
 	if s == "" {
 		return ""
 	}
+	// A relative path with dot segments is not a repository URL. Without this
+	// guard, ../../tmp/checkout becomes a canonical "remote" and suppresses
+	// filesystem detection, so a second checkout silently fails to resolve.
+	if isFilesystemPath(s) {
+		return ""
+	}
 
 	// scheme://[user@]host/path — the most explicit form.
 	if i := strings.Index(s, "://"); i >= 0 {
@@ -93,4 +99,23 @@ func canonicalRemote(s string) string {
 		return ""
 	}
 	return head + "/" + rest
+}
+
+func isFilesystemPath(s string) bool {
+	norm := strings.ReplaceAll(s, `\`, "/")
+	if norm == "" {
+		return false
+	}
+	if norm[0] == '/' || norm[0] == '~' {
+		return true
+	}
+	if len(norm) >= 2 && norm[1] == ':' {
+		return true // Windows drive-relative and drive-absolute paths
+	}
+	for _, part := range strings.Split(norm, "/") {
+		if part == "." || part == ".." {
+			return true
+		}
+	}
+	return false
 }

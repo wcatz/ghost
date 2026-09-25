@@ -77,6 +77,17 @@ var detectRemoteForSave = repo.DetectRemote
 // the folded-away id afterwards fails on a foreign key against a project that
 // was deliberately not created.
 func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string, error) {
+	// An id the caller already knows is not re-derived. This is the exact-id
+	// lookup only, not ResolveProject: a path prefix, a remote or a basename
+	// fallback could each answer with a DIFFERENT project than the caller
+	// named, and reclassifying a save that way moves the memory out from under
+	// the address the client used.
+	if resolvedID, ok, err := s.store.ResolveExactProjectID(ctx, projectID); err != nil {
+		return "", err
+	} else if ok {
+		return resolvedID, nil
+	}
+
 	pathShaped := strings.ContainsAny(projectID, `/\`)
 	remote := ""
 	if pathShaped {

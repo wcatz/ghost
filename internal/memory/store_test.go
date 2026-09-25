@@ -2085,11 +2085,16 @@ func TestStoreResolveProject_ByName(t *testing.T) {
 func TestStoreResolveProject_PathPrefix(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	if err := s.EnsureProject(ctx, "ghostid", "/home/wayne/git/ghost", "ghost"); err != nil {
+	projectPath := filepath.Join(t.TempDir(), "ghost")
+	child := filepath.Join(projectPath, "internal", "memory")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatalf("mkdir child: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "ghostid", projectPath, "ghost"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
-	id, name, err := s.ResolveProject(ctx, "/home/wayne/git/ghost/internal/memory")
+	id, name, err := s.ResolveProject(ctx, child)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -2101,13 +2106,17 @@ func TestStoreResolveProject_PathPrefix(t *testing.T) {
 func TestStoreResolveProject_PathWithWildcardChars(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	// A stored path containing literal '%'/'_' must not act as a SQL LIKE
-	// wildcard against an unrelated input path.
-	if err := s.EnsureProject(ctx, "wildid", "/home/wayne/git/foo_bar", "foobar"); err != nil {
+	root := t.TempDir()
+	stored := filepath.Join(root, "foo_bar")
+	exactChild := filepath.Join(stored, "sub")
+	if err := os.MkdirAll(exactChild, 0o755); err != nil {
+		t.Fatalf("mkdir exact child: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "wildid", stored, "foobar"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
-	id, name, err := s.ResolveProject(ctx, "/home/wayne/git/fooXbar/sub")
+	id, name, err := s.ResolveProject(ctx, filepath.Join(root, "fooXbar", "sub"))
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -2115,7 +2124,7 @@ func TestStoreResolveProject_PathWithWildcardChars(t *testing.T) {
 		t.Errorf("'_' in stored path must not wildcard-match, got id=%q name=%q", id, name)
 	}
 
-	id, name, err = s.ResolveProject(ctx, "/home/wayne/git/foo_bar/sub")
+	id, name, err = s.ResolveProject(ctx, exactChild)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -2127,14 +2136,21 @@ func TestStoreResolveProject_PathWithWildcardChars(t *testing.T) {
 func TestStoreResolveProject_LongestPathWins(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	if err := s.EnsureProject(ctx, "parent", "/home/wayne/git", "parent"); err != nil {
+	root := t.TempDir()
+	parentPath := filepath.Join(root, "repo")
+	childPath := filepath.Join(parentPath, "ghost")
+	input := filepath.Join(childPath, "cmd")
+	if err := os.MkdirAll(input, 0o755); err != nil {
+		t.Fatalf("mkdir input: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "parent", parentPath, "parent"); err != nil {
 		t.Fatalf("EnsureProject parent: %v", err)
 	}
-	if err := s.EnsureProject(ctx, "child", "/home/wayne/git/ghost", "ghost"); err != nil {
+	if err := s.EnsureProject(ctx, "child", childPath, "ghost"); err != nil {
 		t.Fatalf("EnsureProject child: %v", err)
 	}
 
-	id, _, err := s.ResolveProject(ctx, "/home/wayne/git/ghost/cmd")
+	id, _, err := s.ResolveProject(ctx, input)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -2146,11 +2162,16 @@ func TestStoreResolveProject_LongestPathWins(t *testing.T) {
 func TestStoreResolveProject_NoPrefixFalseMatch(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	if err := s.EnsureProject(ctx, "ghostid", "/home/wayne/git/ghost", "ghost"); err != nil {
+	root := t.TempDir()
+	projectPath := filepath.Join(root, "ghost")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "ghostid", projectPath, "ghost"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
-	id, name, err := s.ResolveProject(ctx, "/home/wayne/git/ghost-extra")
+	id, name, err := s.ResolveProject(ctx, filepath.Join(root, "ghost-extra"))
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -2162,13 +2183,23 @@ func TestStoreResolveProject_NoPrefixFalseMatch(t *testing.T) {
 func TestStoreResolveProject_BasenameFallback(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	// Path shorter than the LENGTH(path) > 10 guard, so prefix matching can't fire —
-	// isolates the basename-of-input fallback (case 4).
-	if err := s.EnsureProject(ctx, "ghostid", "/x/ghost", "ghost"); err != nil {
+	root := t.TempDir()
+	realPath := filepath.Join(root, "real", "ghost")
+	storedAlias := filepath.Join(root, "alias", "ghost")
+	if err := os.MkdirAll(realPath, 0o755); err != nil {
+		t.Fatalf("mkdir real path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(storedAlias), 0o755); err != nil {
+		t.Fatalf("mkdir alias parent: %v", err)
+	}
+	if err := os.Symlink(realPath, storedAlias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "ghostid", storedAlias, "ghost"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
-	id, name, err := s.ResolveProject(ctx, "/x/ghost")
+	id, name, err := s.ResolveProject(ctx, realPath)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -2176,12 +2207,7 @@ func TestStoreResolveProject_BasenameFallback(t *testing.T) {
 		t.Errorf("basename fallback: got id=%q name=%q, want id=%q name=%q", id, name, "ghostid", "ghost")
 	}
 
-	// The input has to be the project's own directory. It used to accept any
-	// path ending in the same basename — that is issue #546: an unrelated
-	// clone at ~/Downloads/ghost received this project's memories as trusted
-	// context. Refusing it is what makes the fallback safe to keep at all;
-	// see resolve_basename_test.go.
-	id, name, err = s.ResolveProject(ctx, "/some/unrelated/path/ghost")
+	id, name, err = s.ResolveProject(ctx, filepath.Join(root, "unrelated", "ghost"))
 	if err != nil {
 		t.Fatalf("ResolveProject unrelated: %v", err)
 	}
@@ -2211,13 +2237,26 @@ func TestStoreResolveProject_NoMatch(t *testing.T) {
 func TestStoreResolveProject_WindowsBackslashPath(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
+	root := t.TempDir()
+	exact := filepath.Join(root, "exact")
+	repo := filepath.Join(root, "repo")
+	child := filepath.Join(repo, "sub", "deeper")
+	for _, dir := range []string{exact, child} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	toBackslashes := func(path string) string {
+		return strings.ReplaceAll(path, string(filepath.Separator), `\`)
+	}
+	exactWin := toBackslashes(exact)
+	repoWin := toBackslashes(repo)
+	childWin := toBackslashes(child)
 
-	// Exact path: stored and input both use backslashes.
-	// `C:\work\exact` is 13 bytes — clears the LENGTH(path) > 10 guard.
-	if err := s.EnsureProject(ctx, "win1", `C:\work\exact`, "win-exact"); err != nil {
+	if err := s.EnsureProject(ctx, "win1", exactWin, "win-exact"); err != nil {
 		t.Fatalf("EnsureProject win1: %v", err)
 	}
-	id, name, err := s.ResolveProject(ctx, `C:\work\exact`)
+	id, name, err := s.ResolveProject(ctx, exactWin)
 	if err != nil {
 		t.Fatalf("ResolveProject exact: %v", err)
 	}
@@ -2225,12 +2264,10 @@ func TestStoreResolveProject_WindowsBackslashPath(t *testing.T) {
 		t.Errorf("exact backslash path: got id=%q name=%q, want id=%q name=%q", id, name, "win1", "win-exact")
 	}
 
-	// Prefix: parent stored with backslashes, input descends below it.
-	// `C:\work\repo` is 12 bytes — clears the LENGTH(path) > 10 guard.
-	if err := s.EnsureProject(ctx, "win2", `C:\work\repo`, "win-prefix"); err != nil {
+	if err := s.EnsureProject(ctx, "win2", repoWin, "win-prefix"); err != nil {
 		t.Fatalf("EnsureProject win2: %v", err)
 	}
-	id, name, err = s.ResolveProject(ctx, `C:\work\repo\sub\deeper`)
+	id, name, err = s.ResolveProject(ctx, childWin)
 	if err != nil {
 		t.Fatalf("ResolveProject prefix: %v", err)
 	}
@@ -2238,8 +2275,7 @@ func TestStoreResolveProject_WindowsBackslashPath(t *testing.T) {
 		t.Errorf("backslash prefix: got id=%q name=%q, want id=%q name=%q", id, name, "win2", "win-prefix")
 	}
 
-	// No match: an unmatched backslash path resolves to empty, not an error.
-	id, name, err = s.ResolveProject(ctx, `C:\nowhere\else`)
+	id, name, err = s.ResolveProject(ctx, toBackslashes(filepath.Join(root, "nowhere", "else")))
 	if err != nil {
 		t.Fatalf("ResolveProject no match: %v", err)
 	}

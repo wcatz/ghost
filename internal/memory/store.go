@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1017,29 +1018,34 @@ func SetDetectRemote(fn func(dir string) string) {
 	detectRemoteForPath = fn
 }
 
-// Lookup order, first hit wins:
-//  1. exact id = input
-//  2. exact name = input, but only if exactly one project carries that name.
-//     projects.name has no uniqueness constraint, so LIMIT 1 here would pick
-//     one arbitrarily and hand the caller a project it never named, with
-//     every save it made landing there. Two rows is no answer.
-//  3. if the input is path-shaped (contains '/' or '\'): input = path OR
-//     input has literal prefix path + "/" (ordered by LENGTH(path) DESC —
-//     longest/most-specific match wins; LENGTH(path) > 10 guards against a
-//     short project path matching too broadly, matching the hook's original
-//     lookupProject behavior; the prefix check is a literal substr comparison,
-//     not LIKE, so '%'/'_' in a stored path can't act as SQL wildcards
-//     against input; input and stored path are compared both raw and
-//     slash-normalized so native-Windows backslash paths resolve too)
-//  4. repository identity: an input that normalizes to a remote URL matches
-//     projects.repo_remote exactly; a path-shaped input that is not a remote
-//     is resolved through the injected detector, so a second checkout of a
-//     known repository joins it instead of opening a new project
-//  5. name = basename(input), with every candidate filtered by the evidence
-//     rules below and required to leave exactly one survivor
-//
-// Both refusal steps return ("", "", nil) rather than an error: no
-// single right answer is not a database failure.
+// ErrAmbiguousProject means an identifier matched more than one project and
+// choosing one would silently send a caller's data to an arbitrary project.
+// Callers that create projects must propagate this error instead of treating
+// it as a miss.
+var ErrAmbiguousProject = errors.New("project identifier is ambiguous")
+
+// ResolveProject resolves an exact ID/name, a canonical path prefix, an exact
+// repository remote, or one evidence-backed basename candidate. A genuine miss
+// returns ("", "", nil); multiple surviving candidates return ErrAmbiguousProject.
+// ResolveExactProjectID reports whether input is literally a project's id. It
+// is deliberately narrower than ResolveProject: that function also accepts a
+// path prefix, a repository remote and a basename fallback, and the write side
+// must not use those — reclassifying a save that named an existing project by
+// the repository the session happens to be standing in would move the memory to
+// a different project than the caller addressed. Only the id is a claim the
+// caller can make without evidence.
+func (s *Store) ResolveExactProjectID(ctx context.Context, id string) (string, bool, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE id = ? LIMIT 1`, id).Scan(&id, &name)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("resolve project by exact id: %w", err)
+	}
+	return id, true, nil
+}
+
 func (s *Store) ResolveProject(ctx context.Context, input string) (id, name string, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1052,13 +1058,12 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 		return "", "", fmt.Errorf("resolve project by id: %w", err)
 	}
 
-	// Rule 1 — exactly one project, or no answer — applies here too. Every MCP
-	// tool passes a name, and projects.name carries no uniqueness constraint,
-	// so LIMIT 1 here would hand the caller a project it never named and put
-	// every save it made there. A name is not a report of where the caller
-	// stands, so there is no evidence to filter these rows on: one row is the
-	// answer, two is none.
-	nameMatches, qErr := s.basenameCandidates(ctx, input)
+	hasRepoRemote, schemaErr := s.hasRepoRemoteColumn(ctx)
+	if schemaErr != nil {
+		return "", "", fmt.Errorf("inspect project schema: %w", schemaErr)
+	}
+
+	nameMatches, qErr := s.basenameCandidates(ctx, input, hasRepoRemote)
 	if qErr != nil {
 		return "", "", fmt.Errorf("resolve project by name: %w", qErr)
 	}
@@ -1066,35 +1071,27 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 		return nameMatches[0].id, nameMatches[0].name, nil
 	}
 	if len(nameMatches) > 1 {
-		return "", "", nil // ambiguous — no single right answer exists
+		return "", "", fmt.Errorf("%w: %q matches multiple projects", ErrAmbiguousProject, input)
 	}
 
+	remote := ""
 	if IsPathShaped(input) {
-		// Literal prefix comparison, not LIKE: a stored path containing '%' or
-		// '_' must not be treated as a SQL wildcard against input.
-		// The gate works by detecting '\' as well as '/'; REPLACE below
-		// normalizes the STORED path so the SQL comparisons match slash or
-		// backslash inputs on native Windows. SQLite string literals don't
-		// process backslash escapes, so '\' in SQL is one literal backslash.
-		// Normalization is done with strings.ReplaceAll, not filepath.ToSlash:
-		// ToSlash is a no-op for backslashes off-Windows (it only swaps
-		// filepath.Separator), so it can't be exercised or relied on in Linux
-		// tests.
-		norm := strings.ReplaceAll(input, `\`, "/")
-		err = s.db.QueryRowContext(ctx, `
-			SELECT id, name FROM projects
-			WHERE (path = ?
-			    OR REPLACE(path, '\', '/') = ?
-			    OR substr(?, 1, LENGTH(REPLACE(path, '\', '/')) + 1) = REPLACE(path, '\', '/') || '/')
-			  AND LENGTH(path) > 10
-			ORDER BY LENGTH(path) DESC LIMIT 1
-		`, input, norm, norm).Scan(&id, &name)
-		if err == nil {
-			return id, name, nil
+		pathMatches, qErr := s.pathCandidates(ctx, input, hasRepoRemote)
+		if qErr != nil {
+			return "", "", fmt.Errorf("resolve project by path: %w", qErr)
 		}
-		if err != sql.ErrNoRows {
-			return "", "", fmt.Errorf("resolve project by path: %w", err)
+		remote = s.inputRemote(input)
+		survivors := make([]basenameCandidate, 0, len(pathMatches))
+		for _, candidate := range pathMatches {
+			if candidate.agreesWithSession(input, remote) {
+				survivors = append(survivors, candidate)
+			}
 		}
+		if len(survivors) > 0 {
+			return survivors[0].id, survivors[0].name, nil
+		}
+	} else {
+		remote = NormalizeRepoRemote(input)
 	}
 
 	// Repository identity, ahead of the basename fallback: a remote is more
@@ -1121,65 +1118,49 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	// never does either unless it carries a separator, which this function
 	// cannot tell apart from a path. A separator-shaped miss costs one
 	// `git config` call, which returns nothing for anything that is not a
-	// directory.
-	remote := NormalizeRepoRemote(input)
-	if remote == "" && strings.ContainsAny(input, `/\`) {
-		remote = NormalizeRepoRemote(detectRemoteForPath(input))
-	}
-	if remote == "" {
-		remote = NormalizeRepoRemote(input)
-	}
-	if remote != "" {
-		err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE repo_remote = ? AND id != '_global' LIMIT 1`, remote).Scan(&id, &name)
-		if err == nil {
-			return id, name, nil
+	// directory. inputRemote is that policy, shared with the write side.
+	remote = s.inputRemote(input)
+	if remote != "" && hasRepoRemote {
+		// Every match is fetched, not LIMIT 1: two projects claiming one
+		// normalized remote is a corrupt identity, and picking the row SQLite
+		// surfaced first would send a save to an arbitrary one of them.
+		var remoteIDs []string
+		var rows *sql.Rows
+		rows, qErr = s.db.QueryContext(ctx,
+			`SELECT id FROM projects WHERE repo_remote = ? ORDER BY id`, remote)
+		if qErr != nil {
+			return "", "", fmt.Errorf("check repository identity: %w", qErr)
 		}
-		if err != sql.ErrNoRows {
-			return "", "", fmt.Errorf("resolve project by repository: %w", err)
+		for rows.Next() {
+			var rid string
+			if scanErr := rows.Scan(&rid); scanErr != nil {
+				_ = rows.Close()
+				return "", "", fmt.Errorf("check repository identity: %w", scanErr)
+			}
+			remoteIDs = append(remoteIDs, rid)
+		}
+		rowsErr := rows.Err()
+		_ = rows.Close()
+		if rowsErr != nil {
+			return "", "", fmt.Errorf("check repository identity: %w", rowsErr)
+		}
+		if len(remoteIDs) > 1 {
+			return "", "", fmt.Errorf("%w: repository %q matches multiple projects", ErrAmbiguousProject, remote)
+		}
+		if len(remoteIDs) == 1 {
+			if err = s.db.QueryRowContext(ctx,
+				`SELECT id, name FROM projects WHERE id = ?`, remoteIDs[0]).Scan(&id, &name); err == nil {
+				return id, name, nil
+			} else if err != sql.ErrNoRows {
+				return "", "", fmt.Errorf("resolve project by repository: %w", err)
+			}
 		}
 	}
 
-	// The basename fallback is the weakest signal in this function, and it
-	// decides what a session has injected into it: projects.name carries no
-	// uniqueness constraint, so an unrelated clone parked at ~/Downloads/infra
-	// used to be enough to receive the real infra project's memories — hosts,
-	// IPs, topology — as trusted context, with its own saves landing in that
-	// project too (issue #546).
-	//
-	// A directory is evidence about where a session is standing, so three
-	// things are checked before a bare name is trusted:
-	//
-	//  1. Exactly one candidate agrees with the evidence. Ambiguity is judged
-	//     on the survivors, not on the raw candidate set: a duplicate name
-	//     that the same rules reject is not a competing answer, and refusing
-	//     because it exists would strand a session standing in the project it
-	//     names. Two survivors is still no match — LIMIT 1 used to pick one
-	//     arbitrarily and the caller had no way to know which, so a save
-	//     landed in whichever row the index surfaced first.
-	//
-	//  2. The candidate's recorded path agrees. A project that has recorded a
-	//     real location only accepts a session actually inside that tree.
-	//     One that has never said where it lives — path = id, the sentinel
-	//     ensureProjectLocked normalizes an empty path to — has no location
-	//     for any directory to agree with, so a path-shaped input is refused
-	//     there too: a folder that merely shares its basename is the #546
-	//     claim, and there is nothing recorded to check it against. Naming
-	//     the project outright still resolves it — see below. A relative
-	//     recorded path is refused for the same reason plus one more
-	//     (resolving it on disk would answer from the process's working
-	//     directory, not from where the session is), and so is a bare root,
-	//     which contains every absolute path on the machine.
-	//
-	//  3. No proven remote conflict. When both sides assert an identity and
-	//     they disagree, that is a contradiction to act on. A candidate with
-	//     no recorded remote has asserted nothing, so a session arriving
-	//     with one does not disprove it — only a demonstrably different
-	//     repository does.
-	//
-	// A bare name skips the path rules: a caller naming "infra" is saying
-	// which project it means, not reporting where it is standing.
+	// A basename is accepted only after the same canonical-path and remote
+	// checks as the path-prefix step; ambiguity is an error, not a miss.
 	base := filepath.Base(input)
-	candidates, qErr := s.basenameCandidates(ctx, base)
+	candidates, qErr := s.basenameCandidates(ctx, base, hasRepoRemote)
 	if qErr != nil {
 		return "", "", fmt.Errorf("resolve project by basename: %w", qErr)
 	}
@@ -1190,8 +1171,11 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 			survivors = append(survivors, cand)
 		}
 	}
-	if len(survivors) != 1 {
-		return "", "", nil // none agreed, or two did — no single right answer exists
+	if len(survivors) == 0 {
+		return "", "", nil
+	}
+	if len(survivors) > 1 {
+		return "", "", fmt.Errorf("%w: %q matches multiple projects", ErrAmbiguousProject, input)
 	}
 	return survivors[0].id, survivors[0].name, nil
 }
@@ -1199,30 +1183,77 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 // basenameCandidate is one projects row that answers to a name.
 type basenameCandidate struct{ id, name, path, remote string }
 
-// basenameCandidates returns every project carrying this name, with the
-// columns the evidence rules need. There is deliberately no LIMIT: the rules
-// reject candidates, so "two rows came back" does not mean two rows compete —
-// only the survivors count, and truncating the set could hide a second
-// candidate that agrees.
-func (s *Store) basenameCandidates(ctx context.Context, name string) ([]basenameCandidate, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, path, COALESCE(repo_remote, '') FROM projects WHERE name = ?`, name)
-	if err != nil {
-		return nil, err
+// hasRepoRemoteColumn reports whether the projects table has the optional
+// repository-identity column. Read-only lifecycle consumers can legitimately
+// open a pre-v11 database, so resolution must not require that column.
+func (s *Store) hasRepoRemoteColumn(ctx context.Context) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM pragma_table_info('projects') WHERE name = 'repo_remote'
+	`).Scan(&exists)
+	return exists > 0, err
+}
+
+func (s *Store) inputRemote(input string) string {
+	remote := NormalizeRepoRemote(input)
+	if remote == "" && IsPathShaped(input) {
+		remote = NormalizeRepoRemote(detectRemoteForPath(input))
 	}
+	return remote
+}
+
+func scanProjectCandidates(rows *sql.Rows) ([]basenameCandidate, error) {
 	defer rows.Close() //nolint:errcheck
 	var candidates []basenameCandidate
 	for rows.Next() {
-		var c basenameCandidate
-		if err := rows.Scan(&c.id, &c.name, &c.path, &c.remote); err != nil {
+		var candidate basenameCandidate
+		if err := rows.Scan(&candidate.id, &candidate.name, &candidate.path, &candidate.remote); err != nil {
 			return nil, fmt.Errorf("scan candidate: %w", err)
 		}
-		candidates = append(candidates, c)
+		candidates = append(candidates, candidate)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate candidates: %w", err)
 	}
 	return candidates, nil
+}
+
+// basenameCandidates returns every project carrying this name. There is
+// deliberately no LIMIT: evidence can reject a candidate, and truncating the
+// set could hide a second candidate that agrees.
+func (s *Store) basenameCandidates(ctx context.Context, name string, hasRepoRemote bool) ([]basenameCandidate, error) {
+	remoteColumn := "''"
+	if hasRepoRemote {
+		remoteColumn = "COALESCE(repo_remote, '')"
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, path, `+remoteColumn+` FROM projects WHERE name = ?`, name)
+	if err != nil {
+		return nil, err
+	}
+	return scanProjectCandidates(rows)
+}
+
+// pathCandidates returns rows whose recorded path text could contain input.
+// The caller still applies storedPathIsUsable, pathsAgree, and remote checks;
+// this query is only a narrowing step, never proof of a project match.
+func (s *Store) pathCandidates(ctx context.Context, input string, hasRepoRemote bool) ([]basenameCandidate, error) {
+	remoteColumn := "''"
+	if hasRepoRemote {
+		remoteColumn = "COALESCE(repo_remote, '')"
+	}
+	norm := strings.ReplaceAll(input, `\`, "/")
+	query := `SELECT id, name, path, ` + remoteColumn + ` FROM projects
+		WHERE (path = ?
+		   OR REPLACE(path, '\', '/') = ?
+		   OR substr(?, 1, LENGTH(REPLACE(path, '\', '/')) + 1) = REPLACE(path, '\', '/') || '/')
+		  AND LENGTH(path) > 10
+		ORDER BY LENGTH(path) DESC`
+	rows, err := s.db.QueryContext(ctx, query, input, norm, norm)
+	if err != nil {
+		return nil, err
+	}
+	return scanProjectCandidates(rows)
 }
 
 // agreesWithSession applies the three rules in ResolveProject to one
@@ -1303,22 +1334,28 @@ func storedPathIsUsable(stored string) bool {
 // the long form, a symlink in the middle). A path that does not exist or
 // cannot be resolved stays unresolved and fails, so an unreadable directory
 // never becomes evidence that it is the project it claims to be.
-func pathsAgree(input, stored string) bool {
-	norm := func(p string) string { return strings.ReplaceAll(p, `\`, "/") }
-	a, b := norm(input), norm(stored)
-	// Textual agreement is nearly unreachable: an input textually inside a
-	// stored path already matched in the SQL path step, which only skips
-	// stored paths of 10 bytes or fewer — so the EvalSymlinks fallback, not
-	// this, is what answers in practice; keep both.
-	if samePath(a, b) {
-		return true
+func canonicalPath(p string) (string, error) {
+	normalized := strings.ReplaceAll(p, `\`, "/")
+	resolved, err := filepath.EvalSymlinks(filepath.FromSlash(normalized))
+	if err != nil {
+		return "", err
 	}
-	ra, errA := filepath.EvalSymlinks(input)
-	rb, errB := filepath.EvalSymlinks(stored)
-	if errA != nil || errB != nil {
+	return strings.ReplaceAll(filepath.ToSlash(resolved), `\`, "/"), nil
+}
+
+// pathsAgree reports whether input and stored resolve to the same directory or
+// to a directory inside it. Both paths are resolved before comparison so dot
+// segments and symlink escapes cannot pass a textual prefix check.
+func pathsAgree(input, stored string) bool {
+	resolvedInput, err := canonicalPath(input)
+	if err != nil {
 		return false
 	}
-	return samePath(norm(ra), norm(rb))
+	resolvedStored, err := canonicalPath(stored)
+	if err != nil {
+		return false
+	}
+	return samePath(resolvedInput, resolvedStored)
 }
 
 // samePath is exact equality or a directory-prefix match on a segment
