@@ -1199,9 +1199,10 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 			}
 			return survivors[0].id, survivors[0].name, nil
 		}
-	} else {
-		remote = NormalizeRepoRemote(input)
 	}
+	// A name-shaped input that found no candidate carries no location, so
+	// remote stays empty and the repository step below is a no-op. Re-deriving
+	// it from the input here would only ever re-parse a name.
 
 	// Repository identity, ahead of the basename fallback: a remote is more
 	// specific than a bare directory name, and a caller naming a repository
