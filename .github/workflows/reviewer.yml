@@ -331,32 +331,38 @@ jobs:
               | capture("<!-- ghost-review:(?<sha>[0-9a-f]{7,40}) -->")?.sha]
               | last // empty' 2>/dev/null | tail -n 1 || true)"
 
-          if [ -n "$LAST_SHA" ] && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
+          # Limit an incremental diff to the files this PR changes. A branch
+          # that merged its base since LAST_SHA would otherwise carry the
+          # base's changes into pr.diff: the model reviews code that is not
+          # in the PR, and GitHub rejects every comment on those paths ("Path
+          # could not be resolved"), failing the post. The PR's files are
+          # derived locally, the way GitHub derives a PR diff (merge-base of
+          # the base tip and HEAD), as a NUL-delimited list — lossless for any
+          # filename, and with no API file-count ceiling. The list lives under
+          # RUNNER_TEMP, not the PR-controlled checkout, and is read as
+          # literal pathspecs so '*.go' or ':(exclude)x' cannot widen or empty
+          # the diff. If the merge-base is not available, review in full.
+          BASE_OID="$(gh pr view "$PR_NUMBER" --json baseRefOid --jq .baseRefOid)"
+          MERGE_BASE=""
+          if git cat-file -e "${BASE_OID}^{commit}" 2>/dev/null; then
+            MERGE_BASE="$(git merge-base "$BASE_OID" HEAD 2>/dev/null || true)"
+          fi
+          if [ -n "$LAST_SHA" ] && [ -n "$MERGE_BASE" ] \
+            && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
             echo "incremental review: ${LAST_SHA}..HEAD"
-            # Limit the incremental diff to the files this PR changes. A
-            # branch that merged its base since LAST_SHA would otherwise
-            # carry the base's changes into pr.diff: the model reviews code
-            # that is not in the PR, and GitHub rejects every comment on
-            # those paths ("Path could not be resolved"), failing the post.
-            # The list lives under RUNNER_TEMP, not the PR-controlled
-            # checkout, and the paths are literal pathspecs so a filename
-            # such as '*.go' or ':(exclude)x' cannot widen or empty the diff.
-            # Names come from the PR files API, JSON-decoded, so they are raw
-            # paths: a diff-text source would C-quote non-ASCII names and
-            # the literal pathspec would then match nothing. The one name
-            # this cannot carry is one containing a newline.
             pr_files_list="$(mktemp "${RUNNER_TEMP}/pr-files.XXXXXX")"
-            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
-              --paginate --jq '.[].filename' > "$pr_files_list"
+            git diff -z --name-only "$MERGE_BASE" HEAD > "$pr_files_list"
             if [ -s "$pr_files_list" ]; then
-              mapfile -t pr_files < "$pr_files_list"
+              # git diff has no --pathspec-from-file; a NUL-split array is
+              # equally lossless.
+              mapfile -d '' -t pr_files < "$pr_files_list"
               git --literal-pathspecs diff "${LAST_SHA}" HEAD -- "${pr_files[@]}" > pr.diff
             else
               : > pr.diff
             fi
             rm -f "$pr_files_list"
           else
-            echo "full review (no usable prior marker)"
+            echo "full review (no usable prior marker or merge-base)"
             gh pr diff "$PR_NUMBER" > pr.diff
           fi
 
