@@ -11,13 +11,18 @@ import (
 // candidate that cannot be written to _global is inserted into the project in
 // that transaction; if that recovery write also fails, the whole transaction
 // rolls back rather than leaving the snapshot's candidates in neither place.
-func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []Memory, consolidatedSince string, promoteGlobals bool) (preserved []string, promoted, keptProject int, err error) {
+// The returned keptMems are the cross-project candidates that could not be
+// promoted and were written back into the project instead. The caller needs
+// them, not just a count: a summary that reports how many rows the project now
+// holds cannot be built from an integer when it also has to say which rows those
+// are.
+func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []Memory, consolidatedSince string, promoteGlobals bool) (preserved []string, promoted int, keptMems []Memory, err error) {
 	if !promoteGlobals && len(globalMems) > 0 {
 		projectMems = append(append([]Memory(nil), projectMems...), globalMems...)
 		globalMems = nil
 	}
 	if len(projectMems) == 0 && len(globalMems) == 0 {
-		return nil, 0, 0, nil
+		return nil, 0, nil, nil
 	}
 
 	s.mu.Lock()
@@ -25,7 +30,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("begin reflection apply tx: %w", err)
+		return nil, 0, nil, fmt.Errorf("begin reflection apply tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -33,7 +38,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 	if len(projectMems) > 0 {
 		preserved, err = s.ReplaceNonManual(txCtx, projectID, projectMems, consolidatedSince)
 		if err != nil {
-			return nil, 0, 0, fmt.Errorf("replace project memories: %w", err)
+			return nil, 0, nil, fmt.Errorf("replace project memories: %w", err)
 		}
 	}
 
@@ -43,37 +48,37 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 			// still be healthy. Keep each candidate project-scoped instead of
 			// turning an infrastructure error into data loss.
 			var recoveryErr error
-			keptProject, recoveryErr = s.upsertMemoriesTx(ctx, tx, projectID, globalMems)
+			keptMems, recoveryErr = s.upsertMemoriesTx(ctx, tx, projectID, globalMems)
 			if recoveryErr != nil {
-				return nil, 0, 0, fmt.Errorf("ensure _global: %v; return candidates to project: %w", ensureErr, recoveryErr)
+				return nil, 0, nil, fmt.Errorf("ensure _global: %v; return candidates to project: %w", ensureErr, recoveryErr)
 			}
 		} else {
 			for _, m := range globalMems {
 				promotedOK, kept, candidateErr := s.promoteReflectionCandidate(ctx, tx, projectID, m)
 				if candidateErr != nil {
-					return nil, 0, 0, candidateErr
+					return nil, 0, nil, candidateErr
 				}
 				if promotedOK {
 					promoted++
 				} else if kept {
-					keptProject++
+					keptMems = append(keptMems, m)
 				}
 			}
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, 0, 0, fmt.Errorf("commit reflection apply tx: %w", err)
+		return nil, 0, nil, fmt.Errorf("commit reflection apply tx: %w", err)
 	}
 	if s.onSave != nil {
-		if len(projectMems) > 0 || keptProject > 0 {
+		if len(projectMems) > 0 || len(keptMems) > 0 {
 			s.onSave(projectID)
 		}
 		if promoted > 0 {
 			s.onSave("_global")
 		}
 	}
-	return preserved, promoted, keptProject, nil
+	return preserved, promoted, keptMems, nil
 }
 
 // ensureGlobalProjectTx creates the bucket without taking Store.mu or opening
@@ -152,8 +157,8 @@ func provenanceFromMemory(m Memory) Provenance {
 	}
 }
 
-func (s *Store) upsertMemoriesTx(ctx context.Context, tx *sql.Tx, projectID string, memories []Memory) (int, error) {
-	upserted := 0
+func (s *Store) upsertMemoriesTx(ctx context.Context, tx *sql.Tx, projectID string, memories []Memory) ([]Memory, error) {
+	written := make([]Memory, 0, len(memories))
 	for _, m := range memories {
 		category := m.Category
 		if !IsValidCategory(category) {
@@ -167,9 +172,9 @@ func (s *Store) upsertMemoriesTx(ctx context.Context, tx *sql.Tx, projectID stri
 			Provenance: provenanceFromMemory(m),
 			Scope:      m.Scope,
 		}); err != nil {
-			return upserted, err
+			return written, err
 		}
-		upserted++
+		written = append(written, m)
 	}
-	return upserted, nil
+	return written, nil
 }

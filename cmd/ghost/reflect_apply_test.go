@@ -20,11 +20,11 @@ type fakeReflectionApplier struct {
 	consolidated    string
 	resultPreserved []string
 	resultPromoted  int
-	resultKept      int
+	resultKept      []memory.Memory
 	err             error
 }
 
-func (f *fakeReflectionApplier) ApplyReflection(_ context.Context, _ string, projectMems, globalMems []memory.Memory, consolidatedSince string, promote bool) (preserved []string, promoted, keptProject int, err error) {
+func (f *fakeReflectionApplier) ApplyReflection(_ context.Context, _ string, projectMems, globalMems []memory.Memory, consolidatedSince string, promote bool) (preserved []string, promoted int, keptMems []memory.Memory, err error) {
 	f.calls++
 	f.projectMems = append([]memory.Memory(nil), projectMems...)
 	f.globalMems = append([]memory.Memory(nil), globalMems...)
@@ -70,8 +70,8 @@ func TestApplyReflectionAlwaysReachesPromotionWithoutProjectMemories(t *testing.
 	if !f.promote {
 		t.Fatal("applier did not receive the explicit promotion request")
 	}
-	if promoted != 1 || kept != 0 || preserved != nil {
-		t.Errorf("result = (%v, %d, %d), want (nil, 1, 0)", preserved, promoted, kept)
+	if promoted != 1 || len(kept) != 0 || preserved != nil {
+		t.Errorf("result = (%v, %d, %d), want (nil, 1, 0)", preserved, promoted, len(kept))
 	}
 }
 
@@ -223,8 +223,8 @@ func TestApplyReflectionKeepsCrossProjectCandidatesWhenPromotionOff(t *testing.T
 	if promoted != 0 {
 		t.Errorf("promoted = %d, want 0 — promotion was not requested", promoted)
 	}
-	if kept != 0 {
-		t.Errorf("kept = %d, want 0 — a kept candidate means the global write was attempted at all", kept)
+	if len(kept) != 0 {
+		t.Errorf("kept = %d, want 0 — a kept candidate means the global write was attempted at all", len(kept))
 	}
 
 	all, err := store.GetAll(ctx, "proj", 100)

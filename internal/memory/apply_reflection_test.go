@@ -24,8 +24,8 @@ func TestApplyReflectionPromotesGlobalsAndReplacesProjectTogether(t *testing.T) 
 	if err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
 	}
-	if len(preserved) != 0 || promoted != 1 || kept != 0 {
-		t.Fatalf("result = (%v, %d, %d), want no preserved rows, 1 promoted, 0 kept", preserved, promoted, kept)
+	if len(preserved) != 0 || promoted != 1 || len(kept) != 0 {
+		t.Fatalf("result = (%v, %d, %d), want no preserved rows, 1 promoted, 0 kept", preserved, promoted, len(kept))
 	}
 
 	project, err := s.GetAll(ctx, testProject, -1)
@@ -57,8 +57,8 @@ func TestApplyReflectionPreservesScopeAndProvenanceOnPromotion(t *testing.T) {
 
 	if _, promoted, kept, err := s.ApplyReflection(ctx, testProject, nil, []Memory{candidate}, "", true); err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
-	} else if promoted != 1 || kept != 0 {
-		t.Fatalf("result promoted=%d kept=%d, want 1/0", promoted, kept)
+	} else if promoted != 1 || len(kept) != 0 {
+		t.Fatalf("result promoted=%d kept=%d, want 1/0", promoted, len(kept))
 	}
 
 	global, err := s.GetAll(ctx, "_global", -1)
@@ -94,8 +94,8 @@ func TestApplyReflectionPreservesScopeAndProvenanceOnRecovery(t *testing.T) {
 
 	if _, promoted, kept, err := s.ApplyReflection(ctx, testProject, nil, []Memory{candidate}, "", true); err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
-	} else if promoted != 0 || kept != 1 {
-		t.Fatalf("result promoted=%d kept=%d, want 0/1", promoted, kept)
+	} else if promoted != 0 || len(kept) != 1 {
+		t.Fatalf("result promoted=%d kept=%d, want 0/1", promoted, len(kept))
 	}
 	project, err := s.GetAll(ctx, testProject, -1)
 	if err != nil {
@@ -156,8 +156,8 @@ func TestApplyReflectionDoesNotFoldAcrossScopes(t *testing.T) {
 	development.Scope = map[string]string{"environment": "development"}
 	if _, promoted, kept, err := s.ApplyReflection(ctx, testProject, nil, []Memory{development}, "", true); err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
-	} else if promoted != 1 || kept != 0 {
-		t.Fatalf("result promoted=%d kept=%d, want 1/0", promoted, kept)
+	} else if promoted != 1 || len(kept) != 0 {
+		t.Fatalf("result promoted=%d kept=%d, want 1/0", promoted, len(kept))
 	}
 
 	global, err := s.GetAll(ctx, "_global", -1)
@@ -199,8 +199,8 @@ func TestApplyReflectionReturnsFailedGlobalToProject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
 	}
-	if promoted != 0 || kept != 1 {
-		t.Fatalf("result promoted=%d kept=%d, want 0/1", promoted, kept)
+	if promoted != 0 || len(kept) != 1 {
+		t.Fatalf("result promoted=%d kept=%d, want 0/1", promoted, len(kept))
 	}
 
 	project, err := s.GetAll(ctx, testProject, -1)
@@ -240,8 +240,8 @@ func TestApplyReflectionRollsBackWhenFailedGlobalCannotBeReturned(t *testing.T) 
 	if err == nil {
 		t.Fatal("ApplyReflection succeeded despite both promotion and recovery failing")
 	}
-	if promoted != 0 || kept != 0 {
-		t.Errorf("result promoted=%d kept=%d, want zero on rollback", promoted, kept)
+	if promoted != 0 || len(kept) != 0 {
+		t.Errorf("result promoted=%d kept=%d, want zero on rollback", promoted, len(kept))
 	}
 	project, err := s.GetAll(ctx, testProject, -1)
 	if err != nil {
@@ -268,8 +268,8 @@ func TestApplyReflectionKeepsGlobalsProjectScopedByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
 	}
-	if promoted != 0 || kept != 0 {
-		t.Fatalf("result promoted=%d kept=%d, want 0/0", promoted, kept)
+	if promoted != 0 || len(kept) != 0 {
+		t.Fatalf("result promoted=%d kept=%d, want 0/0", promoted, len(kept))
 	}
 	project, err := s.GetAll(ctx, testProject, -1)
 	if err != nil {
@@ -303,8 +303,8 @@ func TestApplyReflectionKeepsCandidatesWhenGlobalProjectCannotBeEnsured(t *testi
 	if err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
 	}
-	if promoted != 0 || kept != 1 {
-		t.Fatalf("result promoted=%d kept=%d, want 0/1", promoted, kept)
+	if promoted != 0 || len(kept) != 1 {
+		t.Fatalf("result promoted=%d kept=%d, want 0/1", promoted, len(kept))
 	}
 	project, err := s.GetAll(ctx, testProject, -1)
 	if err != nil {
@@ -324,8 +324,8 @@ func TestApplyReflectionPromotesOnlyGlobals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyReflection: %v", err)
 	}
-	if promoted != 1 || kept != 0 {
-		t.Fatalf("result promoted=%d kept=%d, want 1/0", promoted, kept)
+	if promoted != 1 || len(kept) != 0 {
+		t.Fatalf("result promoted=%d kept=%d, want 1/0", promoted, len(kept))
 	}
 	globals, err := s.GetAll(ctx, "_global", -1)
 	if err != nil {

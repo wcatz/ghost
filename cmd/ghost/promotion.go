@@ -15,14 +15,14 @@ import (
 // recovery behind one call makes their ordering testable and lets the store
 // commit them atomically.
 type reflectionApplier interface {
-	ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []memory.Memory, consolidatedSince string, promoteGlobals bool) (preserved []string, promoted, keptProject int, err error)
+	ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []memory.Memory, consolidatedSince string, promoteGlobals bool) (preserved []string, promoted int, keptMems []memory.Memory, err error)
 }
 
 // applyReflection converts reflection proposals to store rows and always
 // invokes the store apply boundary. Promotion is not nested under a
 // project-memory guard: a result containing only cross-project candidates is
 // precisely the case where an explicit promotion request must still run.
-func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool) (preserved []string, promoted, keptProject int, err error) {
+func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool) (preserved []string, promoted int, keptMems []memory.Memory, err error) {
 	if !promoteGlobals && len(globalMems) > 0 {
 		projectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 		globalMems = nil
@@ -30,7 +30,7 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 	projectRows := reflectMemoriesToMemory(projectID, projectMems)
 	globalRows := reflectMemoriesToMemory("_global", globalMems)
 	if len(projectRows) == 0 && len(globalRows) == 0 {
-		return nil, 0, 0, nil
+		return nil, 0, nil, nil
 	}
 	return store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals)
 }
