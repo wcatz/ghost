@@ -174,6 +174,33 @@ type Slice struct {
     DropDemotedLosers bool // true for _global today; false elsewhere — see §2
 }
 type Budget []Slice // first matching Bucket wins; "*" is the fallback
+```
+
+**A per-slice `MaxItems` cannot express the search tool's single total limit.**
+`ghost_memory_search` takes one `limit` and applies it to the **combined** result
+(`args.Limit`, `mcpserver.go:671`), across both the project bucket and `_global`.
+`Budget` is a list of per-bucket `Slice`s, so "at most 10 items" expressed as
+`MaxItems: 10` on each of two slices permits 20 — and a caller cannot express the
+difference between "10 per bucket" and "10 total" at all. Injection is the
+opposite shape: two independent caps, 15 project and 8 globals, which is exactly
+what per-slice is right for.
+
+So `Budget` needs a total alongside the per-slice caps:
+
+```go
+type Budget struct {
+    MaxItems int      // 0 = unbounded TOTAL across all slices; the search tool's `limit`
+    MaxBytes int      // 0 = unbounded total
+    Slices   []Slice  // per-bucket caps, applied within the total
+}
+```
+
+Stage 8 applies the per-slice caps first (preserving the 15/8 injection split) and
+then the total, so today's search behaviour — one combined `limit` — is expressed
+as `MaxItems: limit` with per-slice `MaxItems: 0`, and today's injection behaviour
+is expressed with the total unset. Without the total field the seam cannot
+reproduce `ghost_memory_search` and would quietly double its result size, which is
+exactly the kind of default-path change PR 1 is gated against.
 
 // Condition is which retrieval legs run. bench needs all three; zeroing
 // FTSWeight is NOT the vector-only case, because fused FTS candidates still
@@ -275,10 +302,22 @@ retrieval path, both of which defeat the point of the seam. So:
 - For `SourceAllProjects` it keeps its current meaning (no project filter at
   all), so the two are distinguished by `Source`, not by the emptiness of the
   field.
-- The invariant that *is* kept: `ProjectID == ""` with a non-empty `Query` is
-  rejected, because a query against no project has no meaning the legs can
-  express. `Run` returns an error rather than silently degrading to a global-only
-  keyword search that the caller did not ask for.
+- The invariant that *is* kept, narrowly: `ProjectID == ""` is **rejected** only
+  for `SourceSearch`, where the caller named a project context and the empty value
+  can only be a bug. `ghost_memory_search` today always passes a project
+  (`mcpserver.go:627-671`), so this guards a caller error rather than describing
+  a supported mode, and `Run` returns an error rather than silently degrading to
+  a global-only keyword search nobody asked for.
+- For `SourceAllProjects` an empty `ProjectID` is the **whole point** — it is the
+  no-project-filter search — so it is explicitly *not* an error there, with or
+  without a query.
+
+I first wrote this as "`ProjectID == ""` with a non-empty `Query` is rejected",
+which would have broken `ghost_search_all`: that tool (`mcpserver.go:1077`,
+`SearchHybridAll`) searches **all** projects *with* a query and no project id, and
+it is the one case the empty value exists for. The rejection is scoped to
+`SourceSearch` because that is the only source where an empty project id is
+meaningless rather than deliberate.
 
 The regression test is the rendered block for a projectless session: project
 bucket absent, `_global` bucket present and capped by the existing `globalsCap`,
@@ -318,6 +357,28 @@ type Retriever interface {
 
 func Run(ctx context.Context, r Retriever, req Request) (Result, error)
 ```
+
+**`internal/mcpserver` cannot hand `s.store` to `Run` today, and the spec should
+say how that is bridged rather than assume `*memory.Store`.** `Server.store` is
+declared as the `provider.MemoryStore` **interface** (`mcpserver.go:199`), and
+the concrete `*memory.Store` is reached by type assertion where a capability is
+needed — `resolveCapableStore` (`mcpserver.go:133-136`) exists precisely because
+`Candidates` and the other non-interface methods are not part of
+`provider.MemoryStore`. A type assertion that returns `(T, bool)` fails closed at
+runtime, so the migration cannot be a bare `assemble.Run(ctx, s.store, req)`.
+
+Two options, and this design takes the second:
+
+- **Widen `provider.MemoryStore`** to include `Candidates`. Rejected: it makes
+  every provider implementation — including any test fake and the Obsidian sync
+  path — carry a method that only the SQLite store can implement, widening a
+  deliberately narrow interface for one caller.
+- **Assert once at the call site**, mirroring `resolveCapableStore`: a small
+  helper that type-asserts `s.store` to `assemble.Retriever` and returns a
+  structured error naming the missing method when the assertion fails. This keeps
+  `provider.MemoryStore` narrow, makes the failure legible instead of a silent
+  no-op, and gives the Obsidian/in-memory providers an explicit "not supported by
+  this backend" path rather than a panic.
 
 **Where the DTOs live: `internal/memory`, not `internal/assemble`.** My first
 draft declared `CandidateRequest`, `CandidateSet`, `Candidate` and `LinkEdge` in
@@ -415,14 +476,15 @@ in PR 1, not a refinement of a later one.
 
 Two consequences that follow from `SetMaxOpenConns(1)` and are not optional:
 
-- The transaction must be **read-only for its whole life**. It is `BEGIN DEFERRED`
-  and never writes, so no read→write upgrade is ever attempted. That also disposes
-  of the caveat I first wrote here: `SQLITE_BUSY_SNAPSHOT` is a *read-to-write
-  upgrade* failure — it is returned when a deferred transaction that has already
-  read tries to become a writer after another connection committed — so a
-  read-only transaction cannot produce it. The real contention risk is plain
-  `SQLITE_BUSY` from a concurrent writer, which `busy_timeout=5000` already
-  covers and which must stay a non-fatal leg error, never a panic.
+- The transaction must be **read-only for its whole life**. It takes no write
+  lock, so no read→write upgrade is ever attempted. That is also why the
+  `SQLITE_BUSY_SNAPSHOT` caveat I first wrote here does not apply: per `OpenDB`'s
+  own comment (`schema.go:291-301`), that error is a read-to-write **upgrade**
+  failure — a transaction that reads first holds a WAL read snapshot and fails if
+  another process commits before its first write. A transaction that never writes
+  cannot produce it. The real contention risk is plain `SQLITE_BUSY` from a
+  concurrent writer, which `busy_timeout=5000` covers and which must stay a
+  non-fatal leg error, never a panic.
 - Holding the single connection **serialises every other database user** for the
   duration of the call — including `ghost_memory_save` on another goroutine. That
   is already true of any single query on this handle, but a four-leg transaction
@@ -430,6 +492,33 @@ Two consequences that follow from `SetMaxOpenConns(1)` and are not optional:
   therefore stay as short as possible: no LLM calls, no embedding generation, and
   no rendering inside it. Embeddings are fetched by `SearchVector` rather than
   computed, which keeps the embed call outside the transaction by construction.
+
+**`BeginTx` on the production DSN cannot give a deferred read transaction, and
+this is what makes the plan above unimplementable as written.** `OpenDB` opens
+with `?_txlock=immediate` (`schema.go:305`), which makes the driver issue
+**`BEGIN IMMEDIATE`** for every `BeginTx` on that handle — taking the *write*
+lock at BEGIN rather than on first write. The DSN comment is explicit that this
+was chosen to make `UpdateMemory`'s read-then-`UPDATE` pattern safe from
+`SQLITE_BUSY_SNAPSHOT` (`schema.go:291-304`), which is the right trade for write
+paths and the wrong trade here: a retrieval transaction that took the write lock
+would block every concurrent `ghost_memory_save` for its whole duration, and a
+read path that can fail with `SQLITE_BUSY` is a **new** failure mode that does
+not exist today.
+
+So the retrieval snapshot needs a handle whose DSN does **not** set
+`_txlock=immediate`. That is not a new idea in this codebase — it is exactly the
+split the session hook already has, opening its own handle through a read-only
+DSN (`roDSN`, `hook.go:417`). The design therefore adds a `memory.OpenReadDB`
+returning a read-only handle with `journal_mode(WAL)`, `foreign_keys(ON)`,
+`busy_timeout(5000)` and **no** `_txlock`, and `Candidates` is served from that
+handle for the whole transaction. Two consequences the spec should not leave
+implicit:
+
+- The production `*memory.Store` (immediate, read-write) keeps serving writes and
+  single-statement reads. Only the multi-leg snapshot path uses the read handle.
+- The hook's `roDSN` and this new constructor must be **one** function, not two
+  near-identical DSN strings, or the read-only invariant the hook relies on
+  drifts between the two call sites. `roDSN` becomes a call into it.
 
 **Edge failures are non-fatal, and visibly so.** The edge load introduces a
 failure path that `CandidateSet` must model rather than hide, because the trace
@@ -1088,22 +1177,34 @@ real.
 | 2 validity | No change today (the columns are inert); becomes a membership change the day #575 writes them. |
 | 3 predicates | No change on the bench fixture, which is unscoped and uncategorised. The ordering fix — predicates ahead of window closure — is real but a no-op when no predicate is set. |
 | 4 provenance | No change; the multiplier is pinned to 1.0. |
-| 5 conflicts | **No change.** `demoteSuperseded` already runs. The only addition is the `contradicts` pair rule, which is non-removing and reorders nothing in v1. |
-| 6 dedup | **No change for project rows** — `demoteNearDuplicates` already runs. The addition is `Slice.DropDemotedLosers`, which is `true` for `_global` only, so it changes membership only for `_global` rows in the block. |
+| 5 conflicts | **Changes membership, not just order.** `demoteSuperseded` already runs, but over a *wider* row set than today: it reorders the whole `CandidateSet.Rows`, and stage 8 then trims to the window. A row that sits mid-window today can be pushed below the cut by a superseder that is itself below the cut, so the demotion decides membership *through* the trim. This is the correction to my earlier claim that stage 5 is a no-op for hybrid — it is order-preserving within a fixed set, not membership-preserving once a later stage truncates. |
+| 6 dedup | **Same shape as stage 5, and the same correction.** `demoteNearDuplicates` reorders, and the reorder can evict a row from the trimmed window. The addition on top is `Slice.DropDemotedLosers`, `true` for `_global` only, which changes membership outright for global rows. |
 | 7 diversity | No change; default off. |
 | 8 budget | No change, provided bench sets `MaxItems`/`MaxBytes` to the current limit — and unset is equally a no-op. |
 | 9 render | No change to the metrics; bench scores IDs, not rendered text. |
 | outcome | No change; `weak` annotates and withholds no row. |
 
-So the risk is real but **narrower** than "three new stages land on every
-condition". Rerouting `hybrid` would not newly apply conflicts and dedup; it
-would widen the candidate pool and pick up the `_global` drop policy. The
-baseline argument still stands — `regression_test.go`'s floors (`ndcg10`,
-`recall10`) are measured against exactly these numbers, so silently redefining
-them would invalidate the regression baseline rather than test it — but it is a
-*widening* risk, not a wholesale redefinition. The three ablations therefore
-stay as they are, and #582's context metrics are reported as an additional
-condition.
+So the risk is real, and **my first correction to it was itself wrong.** I wrote
+that rerouting `hybrid` "would not newly apply conflicts and dedup" because both
+demotions already run inside `SearchHybridParams`. That reasoning holds only
+within a fixed row set. `demoteSuperseded` and `demoteNearDuplicates` are
+**order-preserving, not membership-preserving**, and stage 1 widens the candidate
+pool while stage 8 trims it to a window — so once a reorder happens *before* a
+truncation, the demotion decides which rows survive it. A superseder sitting below
+the cut can push a healthy row out of the window entirely. Conflating "reorders
+rather than removes" with "cannot change membership" was the error, and it is the
+same mistake the outcome-reason round caught from the other direction, where
+`all_dedup_dropped` is reachable precisely because `DropDemotedLosers` exists.
+
+So the accurate statement is: rerouting `hybrid` would apply conflicts and dedup
+over a **wider** set, which turns their existing reorder into a membership change,
+plus stage 1's widened pool and stage 6's `_global`-only drop policy. The
+conclusion is unchanged — the baseline argument stands, and the three ablations
+stay as they are — but it rests on demotion-across-a-trim rather than on demotion
+being inert. `regression_test.go`'s floors (`ndcg10`, `recall10`) are measured
+against exactly these numbers, so silently redefining them would invalidate the
+regression baseline rather than test it. #582's context metrics are reported as
+an additional condition.
 
 `Condition` is in the contract anyway, for the reason it is needed *at all*:
 vector-only is not expressible otherwise. A nil `QueryVec` means FTS-only, and
@@ -1262,8 +1363,8 @@ widened window it returns does not exist on `main`.
 | # | Branch / title | Closes | Bench expectation |
 |---|---|---|---|
 | 1 | `feat(assemble): internal/assemble seam; scope and category filter before window closure` | **#573** (and category's half) | **Neutral by construction.** The seam delegates to the same legs; both post-filters move ahead of the truncation and the window widens for either. The scored path is byte-identical for unscoped, uncategorised queries (the fixture's queries are both), so both tables must be *equal*, not merely within 0.005. Stage 2 reads validity columns that are always NULL today, which is what keeps it a no-op. Carries four named regression tests: the configured floor with a non-zero `search.min_similarity`, `Request.Now` bounding `AgeDays`/`DecayFactor`, `Candidates` returning strictly more rows than the current path, and `TestNegativeRetrieval` still green (the contradicts contract is unchanged). |
-| 2 | `feat(mcpinit): render and apply scope on the session-start surface` | **#577** | Not applicable — injection is not scored by `ghost bench`. Gate is behavioural: the new `injection.session_scope` key defaults to unset, so the default is a no-op and the change is rendering plus one opt-in predicate. |
-| 3 | `feat(memory): write validity, confidence and provenance from the tools` | **#575** | **Not neutral, and I had this wrong.** PR 1 installs stage 2, which *reads* `valid_from`/`valid_until`; the moment this PR starts writing them, that stage changes membership. So the writers and the consumption are split honestly: this PR ships the writers **and** the retrieval change together, and is bench-gated on the new validity fixtures. It is not "writers only" and the PR body must not claim to be. Stage 4's multiplier stays 1.0, so `confidence` remains unread for ranking. |
+| 2 | `feat(mcpinit): render and apply scope on the session-start surface` | **#577** | Not applicable — injection is not scored by `ghost bench`. The gate is the rendered block, and it is **not** a pure no-op: `Item.Line()` now emits the scope label unconditionally, so a memory that carries a scope gains a label it did not have before. That is a *rendering* change on existing data, which is what #577 asked for, so it is expected rather than a regression — but "the default is a no-op" is too strong and the gate has to say so. Correct statement: with `injection.session_scope` unset, the *selection* is byte-identical (no predicate is applied, so no row is withheld), and the only difference is the scope label appearing on rows that carry a scope. Gate on that diff explicitly, and on the `_global` slice and the 15/8 caps being unchanged. |
+| 3 | `feat(memory): write validity, confidence and provenance from the tools` | **#575** | **Not neutral, and I had this wrong twice.** PR 1 installs stage 2, which *reads* `valid_from`/`valid_until`; the moment this PR starts writing them, that stage changes membership, so the writers and the consumption ship together and the PR is bench-gated on the new validity fixtures. Separately, the title claims a **confidence** writer and there is not one: `confidence` is writable through `Store.Create` and `UpsertWithOptions` today, but no product tool sets it, and this PR's scope is validity plus provenance. Either the title drops "confidence" or the PR adds the tool that sets it; claiming a writer that does not exist makes the PR look like it unblocks stage 4 when stage 4's multiplier stays pinned at 1.0 regardless. Stage 4 remains inert until a real writer lands. |
 | 4 | `feat(assemble): abstention is an outcome, not an empty list` | **#580** | **Neutral by construction** — `weak` annotates, so no row is withheld. Arm A is a rank ≤ 3 gate that applies *only* when the vector leg ran; passive sources get `answerable`/`not_applicable` and never `weak`. Arm B ships disabled. Regression tests: a rank-≥4 FTS hit with `QueryVec == nil` is `answerable`/`no_vector_leg`; a rank-0 FTS hit is `answerable` with no abstention line. |
 | 5 | `feat(memory): explain reports the assembler's own decisions, and `ghost context --explain` exists` | **#583** (and the class in #571) | Not applicable — explain is a read-only diagnostic and never fed a scored result. The mutation check is on the invariant test: restore the local re-derivation in `explain.go` and `explain_rrf_equals_ordering_score` must fail. Also adds the `--explain` flag to `runContext` (`cmd/ghost/session.go:18`), which today parses only `--cwd` and silently ignores everything else. |
 | 6 | `feat(assemble): conflict, dedup, diversity and budget stages` | **#581** (remaining ACs) | **The gated one.** The only membership changes are the diversity quota (default off, so a no-op until #582 sets a number) and `Slice.DropDemotedLosers` for `_global`, which must *preserve* today's removal behaviour rather than converge it to reorder — so the gate is a before/after of the rendered session-start block, not a metric movement. `contradicts` is non-removing in v1, so it contributes nothing here. Paste both tables and the rendered-block diff. |
