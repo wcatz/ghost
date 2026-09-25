@@ -7,8 +7,11 @@ import (
 
 // retainedMemory is exactly what the drop-guard hands back to the replace:
 // reflection.RetainGuardedDrops re-emits the input memory field-for-field, and
-// cmd/ghost converts a reflection.ReflectMemory to a memory.Memory carrying only
-// category, content, importance and tags — no Source, no Scope, no Provenance.
+// cmd/ghost's reflectMemoriesToMemory then adds ProjectID and a hardcoded
+// Source of 'reflection' — never a Scope or any Provenance. Source is left off
+// here because ReplaceNonManual does not read it: both the insert and the
+// rewrite path hardcode 'reflection', so the stored source survives only
+// because the unchanged path no longer assigns it.
 func retainedMemory(category, content string, importance float32, tags []string) Memory {
 	return Memory{Category: category, Content: content, Importance: importance, Tags: tags}
 }

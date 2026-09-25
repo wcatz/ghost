@@ -2740,6 +2740,14 @@ type replaceCandidate struct {
 // folding it would have — its 30/45-day decay restarted on every applied
 // reflect, so an architecture/decision/pattern memory the model kept dropping
 // never aged out, and its original mcp provenance was overwritten.
+//
+// Note that emitted.Source plays no part: the one caller does set it
+// (cmd/ghost's reflectMemoriesToMemory hardcodes 'reflection'), but this
+// function never reads it, and neither does the insert or the rewrite path
+// below — both hardcode 'reflection' in SQL. The stored source therefore
+// survives an unchanged re-emission only because that branch stopped assigning
+// it, which is also why a future reader of Memory.Source must not assume it
+// decides this.
 func reusePreservesAge(stored replaceCandidate, emitted Memory) bool {
 	return stored.content == emitted.Content && stored.category == emitted.Category
 }

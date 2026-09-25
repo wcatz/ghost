@@ -12,14 +12,20 @@ import (
 // TestRunReflectApplyKeepsAgeOfUnchangedMemory is issue #623 at the layer the
 // issue was filed against: the real `ghost reflect --apply` path.
 //
-// cmd/ghost converts each reflection.ReflectMemory to a memory.Memory carrying
-// no Source and no Provenance, and hands it to ReplaceNonManual. A memory the
-// consolidator left out comes back through that same path via the #549 drop
-// guard (RetainGuardedDrops), byte-identically, so it takes the exact-content
-// reuse UPDATE — which used to stamp created_at = datetime('now') and
-// source = 'reflection' onto it. An omitted stale memory was therefore written
-// back looking brand new on every applied reflect: its decay restarted and its
-// mcp provenance was gone.
+// A memory the consolidator left out comes back through the #549 drop guard
+// (RetainGuardedDrops), byte-identically, so it takes the exact-content reuse
+// UPDATE in ReplaceNonManual — which used to stamp created_at = datetime('now')
+// and source = 'reflection' onto it. An omitted stale memory was therefore
+// written back looking brand new on every applied reflect: its decay restarted
+// and its mcp provenance was gone.
+//
+// The caller does supply a Source (reflectMemoriesToMemory sets 'reflection',
+// along with ProjectID, on every row) but no Provenance. It makes no
+// difference here: ReplaceNonManual never reads Memory.Source — both the insert
+// and the rewrite path hardcode 'reflection' — so the stored source survives
+// only because the unchanged path no longer assigns it. That the caller
+// stamping a Source does not decide the stored source is the property worth
+// keeping in mind, and the reason this test runs the real conversion.
 //
 // This drives the sqlite consolidation tier against a real database through
 // runReflect itself, so the conversion in cmd/ghost/lifecycle.go is part of
