@@ -185,7 +185,7 @@ clock, and non-zero budget before calling `Candidates`.
 A projectless session start is a supported rendered state: global memories are
 loaded on a separate path and are still shown when no project matches. The
 empty project ID therefore means `GlobalOnly` for session start and unresolved
-search, while `AllProjects` applies to the all-projects source. Search's
+search, while `AllProjects` applies to the all-projects sources. Search's
 unknown-project fallback is preserved rather than converted to an error; the
 test suite covers that behavior. The inconsistency with update and delete
 remains outside this seam.
@@ -369,7 +369,7 @@ Request
 | 2 validity | columns are not exposed by `Memory` | parse and drop `valid_until < Now` or `valid_from > Now`; `verified_at` is a flag only |
 | 3 predicates | category and scope post-filter the closed window | apply category and scope before closure; project membership remains in SQL and is recorded as a per-row verdict, not a second filter |
 | 4 provenance | no consumer | ship the stage with multiplier `1.0`; define NULL and non-NULL confidence semantics before any multiplier changes |
-| 5 conflicts | supersede and demotion helpers exist | supersede reorders; `contradicts` pairs are recorded and not acted on in v1; `elaborates` is non-removing |
+| 5 conflicts | supersede and demotion helpers exist | supersede reorders; `contradicts` pairs are recorded and not acted on in v1; `elaborates` groups without removing |
 | 6 dedup | demotion helpers exist | duplicate and near-duplicate edges reorder; session-start global slices retain their explicit drop policy |
 | 7 diversity | none | per-bucket quota, off by default until measured |
 | 8 budget | separate search and hook trims | UTF-8 item clamp plus whole-item byte/count trim, with total and slice caps |
@@ -582,9 +582,10 @@ instead of this absence sentence. The note suppresses an absence claim.
 error-free, and untruncated, with `CoverageComplete` true. `Expected`,
 `Indexed`, `Unembedded`, and `DimMismatch` account for the rows a leg could
 see; a vector leg that skips dimension-mismatched or unembedded rows is not
-complete coverage. A non-applicable leg is not a failure. Partial failure is
-reported in notes and the machine payload rather than converted into a
-relevance verdict.
+complete coverage. `Candidates` sets `CoverageComplete` after reconciling
+those counts; `Run` never infers coverage. A non-applicable leg is not a
+failure. Partial failure is reported in notes and the machine payload rather
+than converted into a relevance verdict.
 
 The existing `maybeIncomplete` caveat is rendered from this same result path:
 empty bounded results use the absence-safe note, while non-empty results keep
