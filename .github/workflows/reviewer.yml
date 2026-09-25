@@ -366,9 +366,13 @@ jobs:
             # The list lives under RUNNER_TEMP, not the PR-controlled
             # checkout, and the paths are literal pathspecs so a filename
             # such as '*.go' or ':(exclude)x' cannot widen or empty the diff.
-            # (Names containing a newline are not supported by --name-only.)
+            # Names come from the PR files API, JSON-decoded, so they are raw
+            # paths: a diff-text source would C-quote non-ASCII names and
+            # the literal pathspec would then match nothing. The one name
+            # this cannot carry is one containing a newline.
             pr_files_list="$(mktemp "${RUNNER_TEMP}/pr-files.XXXXXX")"
-            gh pr diff "$PR_NUMBER" --name-only > "$pr_files_list"
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+              --paginate --jq '.[].filename' > "$pr_files_list"
             if [ -s "$pr_files_list" ]; then
               mapfile -t pr_files < "$pr_files_list"
               git --literal-pathspecs diff "${LAST_SHA}" HEAD -- "${pr_files[@]}" > pr.diff
