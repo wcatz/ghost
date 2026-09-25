@@ -617,27 +617,6 @@ func TestWriteFileAtomic(t *testing.T) {
 	}
 }
 
-// TestWriteFileAtomicReplacesReadOnlyFile pins that a config the user made
-// read-only is still repaired, and keeps its mode: the replacement is written
-// through a writable temp file (0600) and only then given the target's exact
-// permissions, the same shape as the pre-existing settings.json write.
-func TestWriteFileAtomicReplacesReadOnlyFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(path, []byte("a = 1\n"), 0400); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(path, 0400); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := writeFileAtomic(path, []byte("b = 2\n"), 0644); err != nil {
-		t.Fatalf("writeFileAtomic over a read-only file: %v", err)
-	}
-	assertFileContent(t, path, "b = 2\n")
-	assertFileMode(t, path, 0400)
-}
-
 // TestWriteFileAtomicKeepsSymlink covers a config.toml that is a symlink into a
 // dotfiles repo: the rename must land on the link's target, not replace the
 // link with a regular file (which is what a bare temp+rename does).

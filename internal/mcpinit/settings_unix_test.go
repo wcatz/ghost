@@ -9,6 +9,29 @@ import (
 	"testing"
 )
 
+// TestWriteFileAtomicReplacesReadOnlyFile pins that a config the user made
+// read-only is still repaired, and keeps its mode: the replacement is written
+// through a writable temp file (0600) and only then given the target's exact
+// permissions, the same shape the settings.json write has always had. Windows
+// is excluded because there a read-only file cannot be replaced at all, by
+// rename or by os.WriteFile, so there is no contract to pin.
+func TestWriteFileAtomicReplacesReadOnlyFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("a = 1\n"), 0400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0400); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeFileAtomic(path, []byte("b = 2\n"), 0644); err != nil {
+		t.Fatalf("writeFileAtomic over a read-only file: %v", err)
+	}
+	assertFileContent(t, path, "b = 2\n")
+	assertFileMode(t, path, 0400)
+}
+
 // TestWriteFileAtomicAppliesUmaskOnCreate pins that a newly created user config
 // is created with perm subject to the process umask, exactly as os.WriteFile
 // does. A temp file created at a fixed mode and then chmod-ed would bypass the
