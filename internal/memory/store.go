@@ -1019,16 +1019,27 @@ func SetDetectRemote(fn func(dir string) string) {
 
 // Lookup order, first hit wins:
 //  1. exact id = input
-//  2. exact name = input
-//  3. if input contains '/' or '\': input = path OR input has literal prefix
-//     path + "/" (ordered by LENGTH(path) DESC — longest/most-specific match
-//     wins; LENGTH(path) > 10 guards against a short project path matching too
-//     broadly, matching the hook's original lookupProject behavior; the
-//     prefix check is a literal substr comparison, not LIKE, so '%'/'_' in a
-//     stored path can't act as SQL wildcards against input; input and stored
-//     path are compared both raw and slash-normalized so native-Windows
-//     backslash paths resolve too)
-//  4. name = basename(input)
+//  2. exact name = input, but only if exactly one project carries that name.
+//     projects.name has no uniqueness constraint, so LIMIT 1 here would pick
+//     one arbitrarily and hand the caller a project it never named, with
+//     every save it made landing there. Two rows is no answer.
+//  3. if the input is path-shaped (contains '/' or '\'): input = path OR
+//     input has literal prefix path + "/" (ordered by LENGTH(path) DESC —
+//     longest/most-specific match wins; LENGTH(path) > 10 guards against a
+//     short project path matching too broadly, matching the hook's original
+//     lookupProject behavior; the prefix check is a literal substr comparison,
+//     not LIKE, so '%'/'_' in a stored path can't act as SQL wildcards
+//     against input; input and stored path are compared both raw and
+//     slash-normalized so native-Windows backslash paths resolve too)
+//  4. repository identity: an input that normalizes to a remote URL matches
+//     projects.repo_remote exactly; a path-shaped input that is not a remote
+//     is resolved through the injected detector, so a second checkout of a
+//     known repository joins it instead of opening a new project
+//  5. name = basename(input), with every candidate filtered by the evidence
+//     rules below and required to leave exactly one survivor
+//
+// Both refusal steps return ("", "", nil) rather than an error: no
+// single right answer is not a database failure.
 func (s *Store) ResolveProject(ctx context.Context, input string) (id, name string, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1041,15 +1052,24 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 		return "", "", fmt.Errorf("resolve project by id: %w", err)
 	}
 
-	err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE name = ? LIMIT 1`, input).Scan(&id, &name)
-	if err == nil {
-		return id, name, nil
+	// Rule 1 — exactly one project, or no answer — applies here too. Every MCP
+	// tool passes a name, and projects.name carries no uniqueness constraint,
+	// so LIMIT 1 here would hand the caller a project it never named and put
+	// every save it made there. A name is not a report of where the caller
+	// stands, so there is no evidence to filter these rows on: one row is the
+	// answer, two is none.
+	nameMatches, qErr := s.basenameCandidates(ctx, input)
+	if qErr != nil {
+		return "", "", fmt.Errorf("resolve project by name: %w", qErr)
 	}
-	if err != sql.ErrNoRows {
-		return "", "", fmt.Errorf("resolve project by name: %w", err)
+	if len(nameMatches) == 1 {
+		return nameMatches[0].id, nameMatches[0].name, nil
+	}
+	if len(nameMatches) > 1 {
+		return "", "", nil // ambiguous — no single right answer exists
 	}
 
-	if strings.ContainsAny(input, `/\`) {
+	if IsPathShaped(input) {
 		// Literal prefix comparison, not LIKE: a stored path containing '%' or
 		// '_' must not be treated as a SQL wildcard against input.
 		// The gate works by detecting '\' as well as '/'; REPLACE below
@@ -1087,14 +1107,28 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	// repository whose first checkout already created a project. A path
 	// carries no identity of its own, so it is resolved through the injected
 	// detector; without that, saving from ~/work/ghost and then reading from
+<<<<<<< HEAD
 	// it would disagree about which project it is. Detection runs only for
 	// path-shaped inputs, so resolving by id or name never spawns a process. A
 	// path is tested after the raw input has been normalised as a remote,
 	// because a relative path such as ../checkout can otherwise be mistaken for
 	// a host/path remote. Non-directory remote strings fail the detector's
 	// os.Stat before it starts Git, then normalize normally.
+=======
+	// it would disagree about which project it is.
+	//
+	// Detection is gated on the input being path-shaped rather than on
+	// filepath.IsAbs, because IsAbs is false for a drive-relative Windows
+	// path such as \work\ghost — skipping detection for exactly the shape a
+	// second checkout arrives in is how one repository became two projects.
+	// The cost of that choice is bounded and stated here rather than implied:
+	// an id never spawns a process, and a name never does either unless it
+	// carries a separator, which this function cannot tell apart from a
+	// path. A separator-shaped miss costs one `git config` call, which
+	// returns nothing for anything that is not a directory.
+>>>>>>> 04b91bc (fix(memory): decide basename ambiguity on the candidates that agree)
 	remote := NormalizeRepoRemote(input)
-	if remote == "" && IsPathShaped(input) {
+	if remote == "" && strings.ContainsAny(input, `/\`) {
 		remote = NormalizeRepoRemote(detectRemoteForPath(input))
 	}
 	if remote == "" {
@@ -1120,10 +1154,13 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	// A directory is evidence about where a session is standing, so three
 	// things are checked before a bare name is trusted:
 	//
-	//  1. Exactly one project answers to it. Two candidates is not a weaker
-	//     match but no match: LIMIT 1 picked one arbitrarily and the caller
-	//     had no way to know which, so a save landed in whichever row the
-	//     index happened to surface first.
+	//  1. Exactly one candidate agrees with the evidence. Ambiguity is judged
+	//     on the survivors, not on the raw candidate set: a duplicate name
+	//     that the same rules reject is not a competing answer, and refusing
+	//     because it exists would strand a session standing in the project it
+	//     names. Two survivors is still no match — LIMIT 1 used to pick one
+	//     arbitrarily and the caller had no way to know which, so a save
+	//     landed in whichever row the index surfaced first.
 	//
 	//  2. The candidate's recorded path agrees. A project that has recorded a
 	//     real location only accepts a session actually inside that tree.
@@ -1132,7 +1169,11 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	//     for any directory to agree with, so a path-shaped input is refused
 	//     there too: a folder that merely shares its basename is the #546
 	//     claim, and there is nothing recorded to check it against. Naming
-	//     the project outright still resolves it — see below.
+	//     the project outright still resolves it — see below. A relative
+	//     recorded path is refused for the same reason plus one more
+	//     (resolving it on disk would answer from the process's working
+	//     directory, not from where the session is), and so is a bare root,
+	//     which contains every absolute path on the machine.
 	//
 	//  3. No proven remote conflict. When both sides assert an identity and
 	//     they disagree, that is a contradiction to act on. A candidate with
@@ -1140,68 +1181,120 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	//     with one does not disprove it — only a demonstrably different
 	//     repository does.
 	//
-	// A bare name skips all three: a caller naming "infra" is saying which
-	// project it means, not reporting where it is standing.
+	// A bare name skips the path rules: a caller naming "infra" is saying
+	// which project it means, not reporting where it is standing.
 	base := filepath.Base(input)
-	candRows, qErr := s.db.QueryContext(ctx,
-		`SELECT id, name, path, COALESCE(repo_remote, '') FROM projects WHERE name = ?`, base)
+	candidates, qErr := s.basenameCandidates(ctx, base)
 	if qErr != nil {
 		return "", "", fmt.Errorf("resolve project by basename: %w", qErr)
 	}
-	type basenameCandidate struct{ id, name, path, remote string }
+
+	survivors := make([]basenameCandidate, 0, 1)
+	for _, cand := range candidates {
+		if cand.agreesWithSession(input, remote) {
+			survivors = append(survivors, cand)
+		}
+	}
+	if len(survivors) != 1 {
+		return "", "", nil // none agreed, or two did — no single right answer exists
+	}
+	return survivors[0].id, survivors[0].name, nil
+}
+
+// basenameCandidate is one projects row that answers to a name.
+type basenameCandidate struct{ id, name, path, remote string }
+
+// basenameCandidates returns every project carrying this name, with the
+// columns the evidence rules need. There is deliberately no LIMIT: the rules
+// reject candidates, so "two rows came back" does not mean two rows compete —
+// only the survivors count, and truncating the set could hide a second
+// candidate that agrees.
+func (s *Store) basenameCandidates(ctx context.Context, name string) ([]basenameCandidate, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, path, COALESCE(repo_remote, '') FROM projects WHERE name = ?`, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
 	var candidates []basenameCandidate
-	for candRows.Next() {
+	for rows.Next() {
 		var c basenameCandidate
-		if scanErr := candRows.Scan(&c.id, &c.name, &c.path, &c.remote); scanErr != nil {
-			candRows.Close() //nolint:errcheck
-			return "", "", fmt.Errorf("scan basename candidate: %w", scanErr)
+		if err := rows.Scan(&c.id, &c.name, &c.path, &c.remote); err != nil {
+			return nil, fmt.Errorf("scan candidate: %w", err)
 		}
 		candidates = append(candidates, c)
 	}
-	if scanErr := candRows.Err(); scanErr != nil {
-		candRows.Close() //nolint:errcheck
-		return "", "", fmt.Errorf("iterate basename candidates: %w", scanErr)
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate candidates: %w", err)
 	}
-	candRows.Close() //nolint:errcheck
+	return candidates, nil
+}
 
-	if len(candidates) != 1 {
-		return "", "", nil // none, or ambiguous — no single right answer exists
-	}
-	c := candidates[0]
-
-	// Path agreement. Gate on the input LOOKING like a path rather than on
-	// filepath.IsAbs: a drive-relative Windows path such as
-	// \some\unrelated\ghost is not absolute, so IsAbs silently disabled this
-	// guard on Windows — where the fixture that failed was running. The gate
-	// is the same one the path-prefix step above uses.
-	//
-	// Both sides are compared with separators normalized, matching that step
-	// again: stored paths use the platform's native form, so a raw
-	// strings.HasPrefix(input, c.path+"/") can never match a backslash path.
-	// Where spelling alone cannot settle it — Windows short (8.3) names
-	// against the long form EvalSymlinks returns, or a symlinked path — both
-	// are resolved on disk and compared again, because two spellings of one
-	// directory are one directory. A path that does not resolve gets no
-	// benefit of the doubt: refusing is the safe answer.
-	//
-	// A sentinel path (no separator — ensureProjectLocked normalized an empty
-	// path to the id) has nothing to compare against, so rule 2 above refuses
-	// a path-shaped input instead of falling back to the name alone.
-	if strings.ContainsAny(input, `/\`) {
-		if !strings.ContainsAny(c.path, `/\`) {
-			return "", "", nil // sentinel project: no recorded location to agree with
-		}
-		if !pathsAgree(input, c.path) {
-			return "", "", nil // session is not inside where the project says it lives
-		}
-	}
-	// remote != c.remote is redundant here — an exact repo_remote match
-	// returned above, so equality is impossible once both sides are non-empty
-	// — but it is spelled out because it states the rule being enforced.
+// agreesWithSession applies the three rules in ResolveProject to one
+// candidate. They are independent, so the order they run in carries no
+// meaning; each is a reason to refuse. That is also why this is a predicate
+// over candidates rather than a sequence of guards over one: ambiguity is
+// decided on whoever survives, so a duplicate that the same evidence rejects
+// cannot strand a session standing in the project it names.
+func (c basenameCandidate) agreesWithSession(input, remote string) bool {
+	// Rule 3. remote != c.remote is redundant — an exact repo_remote match
+	// returned earlier — but it states the rule being enforced.
 	if remote != "" && c.remote != "" && remote != c.remote {
-		return "", "", nil // both asserted an identity, and they disagree
+		return false // both asserted an identity, and they disagree
 	}
-	return c.id, c.name, nil
+	if !IsPathShaped(input) {
+		return true // a bare name reports no location to disagree with
+	}
+	// Rule 2. A stored path that is not an absolute location with something
+	// below the root is not something a directory can be compared against:
+	// the id sentinel recorded no location at all, a relative one would be
+	// resolved against the process's working directory, and "/" contains
+	// every absolute path. Refusing here also spares the two failed
+	// EvalSymlinks calls pathsAgree would otherwise make.
+	if !storedPathIsUsable(c.path) {
+		return false
+	}
+	return pathsAgree(input, c.path)
+}
+
+// IsPathShaped reports whether s looks like a filesystem path rather than a
+// project name or a repository remote: it contains a path separator.
+//
+// This is the one definition of "the caller is reporting a location", shared
+// by store resolution (the path steps and the basename evidence rules) and
+// by mcpserver's repository detection, so a drive-relative Windows path
+// cannot be treated as a name on one side of a boundary and as a path on the
+// other.
+//
+// filepath.IsAbs is deliberately not this test: it is false for a
+// drive-relative Windows path such as \work\ghost, which is exactly the
+// shape a second checkout of a repository arrives in.
+func IsPathShaped(s string) bool {
+	return strings.ContainsAny(s, `/\`)
+}
+
+// storedPathIsUsable reports whether a recorded path is a location a session
+// directory can be compared against: absolute, in either separator spelling,
+// with at least one segment below the root.
+//
+// Three shapes are refused, each for its own reason:
+//   - the id sentinel (path == id) and any relative path: nothing was
+//     recorded that a directory could contradict, and EvalSymlinks would
+//     resolve a relative path against the PROCESS working directory, so
+//     agreement would depend on where the caller happens to run rather than
+//     where the session is standing;
+//   - a bare root ("/" or "C:/"): it contains every absolute path on the
+//     machine, so a project recorded there would claim any session whose
+//     directory shares its name.
+func storedPathIsUsable(stored string) bool {
+	norm := strings.ReplaceAll(stored, `\`, "/")
+	// Drop a Windows drive prefix so the root test is the same one on both
+	// platforms: "C:/x" and "/x" are the same shape.
+	if len(norm) >= 3 && norm[1] == ':' && norm[2] == '/' &&
+		((norm[0] >= 'a' && norm[0] <= 'z') || (norm[0] >= 'A' && norm[0] <= 'Z')) {
+		norm = norm[2:]
+	}
+	return strings.HasPrefix(norm, "/") && strings.Trim(norm, "/") != ""
 }
 
 // pathsAgree reports whether a session's reported directory and a project's

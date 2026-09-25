@@ -60,23 +60,65 @@ func TestResolveBasenameStillMatchesOwnDirectory(t *testing.T) {
 
 	// And nothing more: a session in a SUBdirectory of a short-path project
 	// does not resolve either, because the prefix step's LENGTH(path) > 10
-	// guard skips it and this input's basename is the subdirectory's name.
-	// That is a separate, pre-existing gap and not what this test is about —
-	// widening prefix matching to cover it is a different change.
+	// guard skips it and this input's basename is the subdirectory's name,
+	// which names no project. That is a separate, pre-existing gap and not
+	// what this test is about — widening prefix matching to cover it is a
+	// different change.
+	if id, name, err := s.ResolveProject(ctx, "/x/infra/sub"); err != nil {
+		t.Fatalf("ResolveProject subdir: %v", err)
+	} else if id != "" || name != "" {
+		t.Errorf("subdirectory of a short-path project resolved to %q (%q), want no match", id, name)
+	}
 }
 
-// TestResolveBasenameRequiresUniqueName: projects.name carries no uniqueness
-// constraint, and the fallback used to take LIMIT 1 — an arbitrary pick
-// whenever two projects shared a name, with no way for the caller to know
-// which one it got.
-func TestResolveBasenameRequiresUniqueName(t *testing.T) {
+// TestResolveBasenameIgnoresCandidatesThatDisagree: ambiguity is decided on
+// the candidates that AGREE with the evidence, not on the raw candidate set.
+// Deciding it before the filters strands a session that is standing in the
+// right directory because an unrelated duplicate of the name happens to
+// exist — the caller loses its project for the sake of a row that the same
+// evidence rules reject.
+func TestResolveBasenameIgnoresCandidatesThatDisagree(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	// Both created over MCP, so path = id: a non-absolute value. That
-	// matters for what this test proves — with an absolute path on either
-	// candidate the path guard would refuse the session first and the
-	// uniqueness rule would never run, leaving it untested.
+	// Created first, and with a path this short so the SQL path step cannot
+	// answer (LENGTH(path) > 10) and the basename fallback is what answers.
+	if err := s.EnsureProject(ctx, "real-id", "/x/infra", "infra"); err != nil {
+		t.Fatalf("EnsureProject real: %v", err)
+	}
+	// The duplicate is created second on purpose: an absolute-path
+	// EnsureProject auto-merges a same-name project with a non-absolute path
+	// (store.go), which would delete the row this test needs to exist.
+	if err := s.EnsureProject(ctx, "dup-id", "", "infra"); err != nil {
+		t.Fatalf("EnsureProject duplicate: %v", err)
+	}
+	var dupPath string
+	if err := s.db.QueryRowContext(ctx, `SELECT path FROM projects WHERE id = 'dup-id'`).Scan(&dupPath); err != nil {
+		t.Fatalf("read duplicate path: %v", err)
+	}
+	if dupPath != "dup-id" {
+		t.Fatalf("precondition: duplicate path = %q, want the id sentinel", dupPath)
+	}
+
+	id, name, err := s.ResolveProject(ctx, "/x/infra")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "real-id" || name != "infra" {
+		t.Errorf("session inside its own project got id=%q name=%q, want real-id/infra — a duplicate that disagrees with the evidence is not a competing answer", id, name)
+	}
+}
+
+// TestResolveProjectByAmbiguousBareNameReturnsNoMatch: rule 1 has to hold
+// where MCP project_id actually enters. Every MCP tool passes a NAME, and the
+// exact-name step took LIMIT 1, so a duplicated name handed the caller one
+// arbitrary row — and every save it made landed there. Naming a project is
+// not a location report, so the evidence rules have nothing to filter on:
+// two rows means there is no answer.
+func TestResolveProjectByAmbiguousBareNameReturnsNoMatch(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
 	if err := s.EnsureProject(ctx, "a", "", "infra"); err != nil {
 		t.Fatalf("EnsureProject a: %v", err)
 	}
@@ -91,12 +133,102 @@ func TestResolveBasenameRequiresUniqueName(t *testing.T) {
 		t.Fatalf("precondition: %d projects named infra, want 2", n)
 	}
 
-	id, name, err := s.ResolveProject(ctx, "/cc/infra")
+	id, name, err := s.ResolveProject(ctx, "infra")
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
 	if id != "" || name != "" {
-		t.Errorf("ambiguous name resolved to %q (%q) — with two candidates there is no correct answer, only a guess", id, name)
+		t.Errorf("ambiguous name resolved to %q (%q) — with two candidates the caller cannot know which project it got", id, name)
+	}
+}
+
+// TestResolveBasenameRequiresUniqueName: projects.name carries no uniqueness
+// constraint, and the fallback used to take LIMIT 1 — an arbitrary pick
+// whenever two projects shared a name, with no way for the caller to know
+// which one it got.
+//
+// The fixture is built so the uniqueness rule is the ONLY thing that can
+// decide it. Two earlier fixtures could not: with two sentinel candidates
+// the path rules reject both (0 survivors), and with one sentinel plus one
+// matching candidate the sentinel is rejected too (1 survivor), so deleting
+// the uniqueness check left both tests green.
+//
+// Two distinct recorded paths that both agree with the session is the only
+// state that isolates it, and pathsAgree is deliberately spelling-tolerant,
+// so two spellings of one directory qualify: "/a/in" and "/a/in/" both hold
+// this session. Both paths are short, so the SQL path step cannot answer
+// (LENGTH(path) > 10) and the basename fallback is what runs.
+func TestResolveBasenameRequiresUniqueName(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if err := s.EnsureProject(ctx, "one", "/a/in", "in"); err != nil {
+		t.Fatalf("EnsureProject one: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "two", "/a/in/", "in"); err != nil {
+		t.Fatalf("EnsureProject two: %v", err)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE name = 'in'`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("precondition: %d projects named in, want 2", n)
+	}
+
+	id, name, err := s.ResolveProject(ctx, "/a/in")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("two consistent candidates resolved to %q (%q) — with two survivors there is no correct answer, only a guess", id, name)
+	}
+}
+
+// TestResolveBasenameRefusesRelativePathInput replaces a test that could not
+// fail: the old gate test used "/x/infra", which filepath.IsAbs reports as
+// absolute on Linux, so reverting the gate to IsAbs left it green and it
+// duplicated TestResolveBasenameStillMatchesOwnDirectory. A RELATIVE
+// path-shaped input is the shape that separates the two gates, and
+// filepath.Base splits it on Linux and Windows alike.
+func TestResolveBasenameRefusesRelativePathInput(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Short path, so the SQL path step cannot answer and the basename
+	// fallback is the only thing that can.
+	if err := s.EnsureProject(ctx, "infra-id", "/x/infra", "infra"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	id, name, err := s.ResolveProject(ctx, "some/relative/place/infra")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("a relative path claimed project %q (%q): IsAbs is false for this shape, so an IsAbs-gated guard would be off", id, name)
+	}
+}
+
+// TestResolveBasenameRefusesRootPathProject: samePath trims the trailing
+// slash off a stored "/" and is left comparing against "", so HasPrefix(a,
+// "/") accepts EVERY absolute path on the machine. A project recorded at the
+// filesystem root would claim any session whose directory shares its name —
+// the #546 shape, with a wildcard instead of a basename.
+func TestResolveBasenameRefusesRootPathProject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if err := s.EnsureProject(ctx, "root-id", "/", "infra"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	id, name, err := s.ResolveProject(ctx, "/x/infra")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("a project recorded at the filesystem root claimed %q (%q) — / contains every absolute path", id, name)
 	}
 }
 
@@ -276,6 +408,66 @@ func TestResolveRemoteDetectionDoesNotDependOnIsAbs(t *testing.T) {
 	}
 }
 
+// TestStoredPathIsUsable pins the shapes a recorded path must have before a
+// session directory can be compared against it, on both platforms' spellings.
+// It is unit-level because the relative case cannot be reached from a test on
+// Linux: pathsAgree would resolve a relative stored path against the test
+// binary's own working directory, so the integration fixture cannot tell a
+// cwd-dependent answer from a correct one.
+func TestStoredPathIsUsable(t *testing.T) {
+	cases := []struct {
+		name   string
+		stored string
+		want   bool
+	}{
+		{"absolute posix path", "/home/u/git/infra", true},
+		{"absolute posix path, trailing slash", "/home/u/git/infra/", true},
+		{"single segment below the root", "/x", true},
+		{"absolute windows path", `C:\x\infra`, true},
+		{"windows path spelled with slashes", "C:/x/infra", true},
+		{"windows root only", `C:\`, false},
+		{"posix root only", "/", false},
+		{"the id sentinel", "infra-id", false},
+		{"a bare project name", "infra", false},
+		{"relative path with a separator", "sub/infra", false},
+		{"relative windows path with a separator", `sub\infra`, false},
+		{"drive-relative windows path", `C:infra`, false},
+		{"empty", "", false},
+	}
+	for _, c := range cases {
+		if got := storedPathIsUsable(c.stored); got != c.want {
+			t.Errorf("%s: storedPathIsUsable(%q) = %v, want %v", c.name, c.stored, got, c.want)
+		}
+	}
+}
+
+// TestIsPathShaped pins the single definition of "the caller is reporting a
+// location", shared by the store's path steps, the basename evidence rules
+// and mcpserver's repository detection. filepath.IsAbs is the wrong test —
+// false for a drive-relative Windows path — and that is what both the Windows
+// fixtures in this file and the mcpserver gate depend on.
+func TestIsPathShaped(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"bare project name", "infra", false},
+		{"project id", "a7293a04b38a", false},
+		{"posix absolute path", "/home/u/git/infra", true},
+		{"relative path", "sub/dir", true},
+		{"drive-relative windows path", `\work\ghost`, true},
+		{"windows absolute path", `C:\work\ghost`, true},
+		{"repository url", "github.com/wcatz/ghost", true},
+		{"empty", "", false},
+	}
+	for _, c := range cases {
+		if got := IsPathShaped(c.input); got != c.want {
+			t.Errorf("%s: IsPathShaped(%q) = %v, want %v", c.name, c.input, got, c.want)
+		}
+	}
+}
+
 // TestPathsAgreeIsSeparatorAgnostic pins the exact defect review caught on
 // #565: the guard compared with strings.HasPrefix(input, path+"/"), which can
 // never match a native Windows path. Windows stores backslashes, and — worse —
@@ -308,29 +500,5 @@ func TestPathsAgreeIsSeparatorAgnostic(t *testing.T) {
 		if got := pathsAgree(c.input, c.stored); got != c.want {
 			t.Errorf("%s: pathsAgree(%q, %q) = %v, want %v", c.name, c.input, c.stored, got, c.want)
 		}
-	}
-}
-
-// TestResolveBasenameGuardDoesNotDependOnIsAbs guards the other half of the
-// same defect: the guard is gated on the input merely LOOKING like a path,
-// the same test the path-prefix step uses, because filepath.IsAbs is false
-// for drive-relative Windows paths and would have disabled it entirely.
-func TestResolveBasenameGuardDoesNotDependOnIsAbs(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	// Stored with a separator, so the guard applies.
-	if err := s.EnsureProject(ctx, "infra-id", "/x/infra", "infra"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-
-	// On Linux filepath.IsAbs("/x/infra") is true, so this asserts the
-	// positive path holds with the gate in place rather than being skipped.
-	id, _, err := s.ResolveProject(ctx, "/x/infra")
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "infra-id" {
-		t.Errorf("own directory stopped resolving: id=%q, want infra-id", id)
 	}
 }
