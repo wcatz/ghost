@@ -304,6 +304,8 @@ A read-only connection deliberately sets no `journal_mode`: setting it writes th
 
 `internal/config` loads compiled defaults, `/etc/ghost/config.yaml`, the user config file, and `GHOST_*` environment variables. Commands apply supported flag overrides after loading. The data directory is resolved from `XDG_DATA_HOME` or the user's home directory and contains `ghost.db`.
 
+`memory.OpenDB` is the only read-write open, and it is therefore the only place that can guarantee the on-disk modes: it calls `tightenPermissions` (`internal/memory/perms_unix.go`, a no-op on Windows) to strip the group and other bits from the configured data directory and from `ghost.db`, `ghost.db-wal` and `ghost.db-shm`. The pass is subtractive by construction and cannot widen a mode, it `Lstat`s each path and chmods only regular files so a symlink is skipped rather than followed, and it is scoped to the configured data directory so a database opened in a scratch or eval tree does not have its parent chmod'ed. A chmod that fails logs a warning and does not fail the open. The contract guards are in `internal/memory/perms_test.go`; see [`configuration.md`](configuration.md#data-directory-permissions) for the user-facing description.
+
 See [`configuration.md`](configuration.md) for the user-facing contract and [`internal/config/config.example.yaml`](../internal/config/config.example.yaml) for the annotated template.
 
 ## Build and release

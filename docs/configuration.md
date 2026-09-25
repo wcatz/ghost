@@ -66,6 +66,24 @@ The data directory is separate from the config directory:
 
 The data path is intentionally consistent across operating systems. A Windows installation therefore commonly uses `%USERPROFILE%\.local\share\ghost\ghost.db` for the database, while the config file follows the platform convention above.
 
+### Data directory permissions
+
+Ghost treats the database as private to your account. On every read-write open it strips the group and other permission bits from:
+
+- the data directory itself (`ghost/`, which becomes `0700`), and
+- `ghost.db`, `ghost.db-wal` and `ghost.db-shm` (which become `0600`).
+
+`MkdirAll` only applies its mode when it creates a directory, so an existing one keeps whatever mode it had, and SQLite names no mode for the files it creates. An install made under a group-shared umask therefore ended up with a `0750` directory and a `0640` database, readable by everyone in your group. The pass above runs on the open path, so it also repairs a mode that drifts later.
+
+Two things it deliberately does not do:
+
+- **It never widens a mode.** Only group and other bits are cleared, so a database you locked down yourself — `chmod 0400 ghost.db` — is left alone rather than handed back `0600`.
+- **It touches nothing else.** A pre-migration backup beside the database (`ghost.db.pre-migrate-*`) and every other file in the directory keep the mode they have. A symlink planted as `ghost.db` is skipped rather than followed, so whatever it points at is not chmod'ed. And a database Ghost opens outside the data directory — an `eval` or bench scratch tree, a directory you pointed an environment variable at — has its three files tightened but not the directory holding it.
+
+A mode that cannot be tightened (a read-only or foreign-owned mount) is logged as a warning and the open continues. Refusing to start over a mode bit would be the worse outcome.
+
+On Windows the pass is skipped entirely: access there is carried by an ACL inherited from the parent directory, not by the mode bits `chmod` maps onto read-only, so tightening a number would not change who can read the database.
+
 ## Minimal example
 
 ```yaml

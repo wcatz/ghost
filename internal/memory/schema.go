@@ -387,6 +387,13 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("inspect schema: %w", err)
 	}
 
+	// The database file and the -wal and -shm files SQLite maintains beside it
+	// all exist now, so their modes are the ones that will be on disk from
+	// here on. This is the one place any ghost opens the database read-write,
+	// so it is the one place that can guarantee the modes. It cannot fail the
+	// open, and it does not need the schema to be current to be correct.
+	tightenPermissions(dbPath)
+
 	if _, err := db.Exec(initSQL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
