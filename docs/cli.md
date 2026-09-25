@@ -47,7 +47,7 @@ ghost mcp status --client goose
 
 Without `--client`, status targets Claude Code. The checks include client registration, lifecycle wiring, the database, Ollama reachability, and embedding/link coverage where applicable. A generic MCP client has no Ghost-specific status integration.
 
-Status also lists any project that records no usable checkout and no repository remote, with the `ghost project bind` command that repairs it. Those projects are not a health failure — every check above can pass while sessions in such a checkout silently get no injected context — and the section is omitted entirely when there is nothing to fix. The listing reads the database without opening it for writing, so a status run never creates the store it is reporting on. The section also names the follow-up step for the standalone, init-managed Claude integration: after binding, `ghost mcp init` writes the per-checkout memory redirect that a newly absolute path makes the redirect check expect.
+Status also lists any project that records no usable checkout and no repository remote, with the `ghost project bind` command that repairs it. Those projects are not a health failure — every check above can pass while sessions in such a checkout silently get no injected context — and the section is omitted entirely when there is nothing to fix. The listing reads the database without opening it for writing, so a status run never creates the store it is reporting on. The section also names the follow-up step for the standalone, init-managed Claude integration: after binding, `ghost mcp init` writes the per-checkout memory redirect that a newly absolute path makes the redirect check expect — unless that checkout already has its own `MEMORY.md`, which init leaves alone.
 
 ## Hooks
 
@@ -183,7 +183,9 @@ The command refuses, writing nothing, when:
 
 Binding the same project to the same directory again succeeds and changes nothing, so the command printed by `ghost mcp status` is safe to re-run.
 
-A successful bind that gives a project its first absolute path is followed by one more step **on the standalone, init-managed Claude Code integration**: run `ghost mcp init` to write that checkout's memory redirect. The installer skips projects with no absolute path, and `ghost mcp status` counts every project that has one, so until init runs again the redirect check reports the repair as incomplete. This applies to neither of the other setups: the ghost Claude Code plugin manages its own wiring (its `mcp init` returns early writing nothing, and `mcp status` returns before the redirect check), and the opencode, codex and goose installers have no redirect at all. The bind output names the installation the step belongs to.
+A successful bind that gives a project its first absolute path is followed by one more step **on the standalone, init-managed Claude Code integration**: run `ghost mcp init` to write that checkout's memory redirect. The installer skips projects with no absolute path, and `ghost mcp status` counts every project that has one, so until init runs again the redirect check reports the repair as incomplete. This applies to neither of the other setups: the ghost Claude Code plugin manages its own wiring (its `mcp init` returns early writing nothing, and `mcp status` returns before the redirect check), and the opencode, codex and goose installers have no redirect at all.
+
+One case needs action before init will write anything: init never overwrites a `MEMORY.md` that Ghost did not write, so a checkout that already has its own must have it merged or removed first. `mcp status` counts such a project as not redirected and prints the same line as any other failure, so the bind output names this case rather than promising a redirect that will not appear. The bind output names the installation the step belongs to as well.
 
 ## Obsidian
 

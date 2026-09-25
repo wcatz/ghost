@@ -415,6 +415,13 @@ func TestBindingPrintsTheMCPInitFollowUp(t *testing.T) {
 		if !strings.Contains(out.String(), "not the ghost plugin") {
 			t.Errorf("the follow-up should name the installation it applies to, got:\n%s", out.String())
 		}
+		// And it must not promise more than init delivers: init skips a
+		// checkout that already has its own MEMORY.md, and status counts that
+		// as not redirected while printing the same line either way, so
+		// without this clause the advice ends in a red check with no action.
+		if !strings.Contains(out.String(), "MEMORY.md") {
+			t.Errorf("the follow-up should say when init will not write the redirect, got:\n%s", out.String())
+		}
 	})
 
 	t.Run("a project that already had a checkout does not", func(t *testing.T) {
@@ -500,5 +507,8 @@ func TestUnboundProjectNotice(t *testing.T) {
 	// have no redirect, and this notice prints for all of them.
 	if !strings.Contains(after, "ghost mcp init") || !strings.Contains(after, "not the ghost plugin") {
 		t.Errorf("the notice should name the installation whose init step finishes the repair, got:\n%s", after)
+	}
+	if !strings.Contains(after, "MEMORY.md") {
+		t.Errorf("the notice should say when init will not write the redirect, got:\n%s", after)
 	}
 }
