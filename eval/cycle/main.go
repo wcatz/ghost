@@ -190,8 +190,8 @@ func run(cfg config) error {
 			return fmt.Errorf("pre-reflect state: %w", ferr)
 		}
 		refCtx, refCancel := context.WithTimeout(ctx, 15*time.Minute)
-		// --allow-drops: in the scratch DB, guarded-category deletions are
-		// data the reflect grader measures, not production harm.
+		// --allow-drops: in the scratch DB, deletions of unreferenced memories
+		// are data the reflect grader measures, not production harm.
 		refOut, refErrOut, rerr := runGhost(refCtx, env, ghostBin, "reflect", cfg.project, "--tier", "opencode", "--apply", "--allow-drops")
 		refCancel()
 		if rerr != nil && strings.Contains(rerr.Error(), "SQLITE_BUSY") {

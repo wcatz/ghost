@@ -897,10 +897,26 @@ func TestReflectSkipDecision(t *testing.T) {
 }
 
 func TestReflectMaySkipDoesNotSkipExplicitPromotion(t *testing.T) {
-	if reflectMaySkip(true, true, true, "same", "same") {
+	if reflectMaySkip(true, true, true, false, "same", "same") {
 		t.Fatal("explicit --promote-globals was skipped as unchanged")
 	}
-	if !reflectMaySkip(true, true, false, "same", "same") {
+	if !reflectMaySkip(true, true, false, false, "same", "same") {
+		t.Fatal("ordinary unchanged apply should still skip")
+	}
+}
+
+// TestReflectMaySkipDoesNotSkipExplicitAllowDrops: --allow-drops is the same
+// class of flag as --promote-globals. The fingerprint describes the corpus, not
+// what the apply was asked to do with it, so an operator who runs a
+// --skip-unchanged apply with --allow-drops right after a default one would
+// otherwise inherit the earlier verdict, print "unchanged — skipping" and prune
+// nothing: the explicit request to delete is discarded, and since #549 widened
+// the guard, that prune is now the only way to drop any category.
+func TestReflectMaySkipDoesNotSkipExplicitAllowDrops(t *testing.T) {
+	if reflectMaySkip(true, true, false, true, "same", "same") {
+		t.Fatal("explicit --allow-drops was skipped as unchanged, so the prune silently no-ops")
+	}
+	if !reflectMaySkip(true, true, false, false, "same", "same") {
 		t.Fatal("ordinary unchanged apply should still skip")
 	}
 }

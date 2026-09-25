@@ -330,12 +330,14 @@ func reflectSkipDecision(skipUnchanged, apply bool, stored, current string) bool
 	return skipUnchanged && apply && stored != "" && stored == current
 }
 
-// reflectMaySkip additionally honors the explicit promotion request. The
-// input signature describes the project corpus, not whether cross-project
-// candidates were already moved to _global, so promotion must never inherit a
-// prior default apply's unchanged verdict.
-func reflectMaySkip(skipUnchanged, apply, promoteGlobals bool, stored, current string) bool {
-	return !promoteGlobals && reflectSkipDecision(skipUnchanged, apply, stored, current)
+// reflectMaySkip additionally honors the two flags that change what an apply
+// DOES rather than what it reads. The input signature describes the project
+// corpus, not what was done to it, so neither may inherit a prior default
+// apply's unchanged verdict: --promote-globals moves cross-project candidates
+// into _global, and --allow-drops deletes the inputs no output referenced
+// instead of re-adding them verbatim.
+func reflectMaySkip(skipUnchanged, apply, promoteGlobals, allowDrops bool, stored, current string) bool {
+	return !promoteGlobals && !allowDrops && reflectSkipDecision(skipUnchanged, apply, stored, current)
 }
 
 // reflectArgs is one parsed `ghost reflect` invocation.
@@ -428,7 +430,7 @@ Flags:
   --apply         Save results (default is dry-run/preview only)
   --restore       Undo the last consolidation from snapshot
   --require-llm   Fail instead of falling back to the Jaccard-only sqlite tier
-  --allow-drops   Apply even when guarded-category memories would be deleted without a merge
+  --allow-drops   Apply even when memories would be deleted without a merge
   --promote-globals Write cross-project candidates to _global (default: keep them project-scoped)
   --skip-unchanged Skip when the consolidatable set is unchanged since the last
                    applied consolidation (used by the auto lifecycle)
@@ -623,7 +625,7 @@ Flags:
 		storedSig, err := store.GetReflectInputSignature(ctx, projectID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: read reflect signature: %v\n", err)
-		} else if reflectMaySkip(skipUnchanged, apply, parsed.promoteGlobals, storedSig, currentSig) {
+		} else if reflectMaySkip(skipUnchanged, apply, parsed.promoteGlobals, parsed.allowDrops, storedSig, currentSig) {
 			fmt.Printf("reflect: consolidatable set unchanged since the last applied consolidation — skipping (%d memories, no LLM call)\n", len(live))
 			return
 		}
@@ -674,6 +676,10 @@ Flags:
 		ProjectLanguage:   projectLanguage,
 		ProjectName:       projectName,
 		OtherProjectNames: filteredNames,
+		// The prompt tells the model what omitting an input costs, and that is
+		// the other side of this run's --allow-drops: without it an unreferenced
+		// memory is re-added verbatim, with it the memory is deleted.
+		AllowDrops: allowDrops,
 	}
 
 	consolidateCtx, cancel := consolidationContext(ctx, cfg.Reflection.ConsolidationTimeoutMinutes)
@@ -730,8 +736,12 @@ Flags:
 		return
 	}
 
-	// Guarded-drop audit (#337): gotcha/dependency/preference/convention
-	// memories must be merged, never deleted outright. Refusing the whole
+	// Drop audit (#337, covering every category since #549): no input memory
+	// may be deleted without a merge target. The autonomous phase spawned by
+	// lifecyclePhases (`reflect --apply --require-llm`) runs unattended, which
+	// is exactly where an unreferenced architecture or decision memory
+	// disappears, and the `manual` source excluded below covers none of it:
+	// seeds are 'builtin' and agent saves are 'mcp'. Refusing the whole
 	// consolidation preserved fidelity but meant a rich project was never
 	// consolidated at all (measured: 1 success in 13 attempts on a 220-memory
 	// project), so the dropped memories are now retained VERBATIM instead: the
@@ -741,7 +751,7 @@ Flags:
 	// (#452). --allow-drops keeps its meaning: accept the deletions.
 	guardedDrops := reflection.AuditGuardedDrops(input, result)
 	if len(guardedDrops) > 0 {
-		fmt.Fprintf(os.Stderr, "WARNING: %d guarded-category memory(ies) had no surviving merge target:\n", len(guardedDrops))
+		fmt.Fprintf(os.Stderr, "WARNING: %d memory(ies) had no surviving merge target:\n", len(guardedDrops))
 		for _, d := range guardedDrops {
 			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, truncateForDisplay(d.Content, 100))
 		}

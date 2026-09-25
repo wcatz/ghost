@@ -158,7 +158,7 @@ func TestVerifyLiveCopy(t *testing.T) {
 	requireNoWAL(t, afterPath)
 
 	drops := AuditGuardedDrops(ReflectionInput{ExistingMemories: before}, result)
-	t.Logf("before(live)=%d  survivors(project+_global)=%d  uncovered guarded=%d",
+	t.Logf("before(live)=%d  survivors(project+_global)=%d  uncovered=%d",
 		len(before), len(result.Memories), len(drops))
 	for _, d := range drops {
 		t.Errorf("UNCOVERED [%s] %.90s", d.Category, d.Content)

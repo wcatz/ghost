@@ -123,6 +123,93 @@ func TestBuildReflectionPrompt_ForbidsFabrication(t *testing.T) {
 	}
 }
 
+// TestBuildReflectionPrompt_ProtectsEveryCategory pins the prompt half of the
+// drop guard. AuditGuardedDrops retained every category from #549, so a prompt
+// still naming only gotcha/dependency/preference/convention would leave the
+// model compressing away memories the apply then re-adds verbatim beside its own
+// rewrites. It also has to say that omitting is not deletion, or "drop stale
+// ones" reads as permission to lose them.
+func TestBuildReflectionPrompt_ProtectsEveryCategory(t *testing.T) {
+	prompt := BuildReflectionPrompt(ReflectionInput{
+		ProjectName:      "ghost",
+		ExistingMemories: []memory.Memory{{Category: "decision", Content: "chose X"}},
+	})
+	for _, want := range []string{
+		"EVERY category is protected",
+		"architecture, decision, pattern",
+		"Dropping is not deletion",
+		"kept verbatim",
+		"restate the specifics",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+	// The old rule's own wording is what narrows the guard to four categories; if
+	// it came back, the assertions above could still pass on the same sentence.
+	if strings.Contains(prompt, "whose category is gotcha") {
+		t.Error("prompt still protects only four categories by name")
+	}
+}
+
+// TestBuildReflectionPrompt_AllowDropsInvertsTheContract: the guarantee is
+// two-sided, and stating the wrong side is worse than saying nothing. Under
+// --allow-drops an unreferenced input is DELETED, so the retention sentences
+// would tell the model omission is free exactly where it costs a memory — and
+// eval/cycle runs every reflect with that flag, so the eval harness would
+// measure a lazier consolidator than production uses. Each branch also asserts
+// the OTHER branch's sentence is absent, since a prompt containing both
+// contradicts itself.
+func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
+	memories := []memory.Memory{{Category: "gotcha", Content: "port 2222 not 22"}}
+
+	retained := BuildReflectionPrompt(ReflectionInput{ProjectName: "ghost", ExistingMemories: memories})
+	dropping := BuildReflectionPrompt(ReflectionInput{ProjectName: "ghost", ExistingMemories: memories, AllowDrops: true})
+
+	for _, want := range []string{
+		"Dropping is not deletion",
+		"kept verbatim",
+		"does not remove it",
+		"undone by the verbatim re-add",
+	} {
+		if !strings.Contains(retained, want) {
+			t.Errorf("retention prompt missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{
+		"DELETES any input",
+		"omitting one deletes it",
+		"a real deletion",
+		"There is no protected category",
+	} {
+		if strings.Contains(retained, unwanted) {
+			t.Errorf("retention prompt leaks the --allow-drops wording %q", unwanted)
+		}
+	}
+
+	for _, want := range []string{
+		"DELETES any input",
+		"There is no protected category",
+		"omitting one deletes it",
+		"a real deletion",
+		"the input is deleted even though you mentioned it",
+	} {
+		if !strings.Contains(dropping, want) {
+			t.Errorf("--allow-drops prompt missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{
+		"Dropping is not deletion",
+		"EVERY category is protected",
+		"kept verbatim",
+		"undone by the verbatim re-add",
+	} {
+		if strings.Contains(dropping, unwanted) {
+			t.Errorf("--allow-drops prompt still promises retention: %q", unwanted)
+		}
+	}
+}
+
 // TestDropFabricatedMemories_LogsDrop pins the surfacing fix: a dropped memory
 // used to vanish with no trace, making a fabricated-output run look identical
 // to a clean one. It passes an explicit logger, so it also pins that drops go
