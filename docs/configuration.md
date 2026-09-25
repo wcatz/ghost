@@ -90,9 +90,11 @@ The pass runs on the two functions that open the database read-write, so which c
 What decides it is the *open*, not the command. A read-write open tightens wherever it is called; a read-only one never does.
 
 - **Read-only opens change nothing.** The stop hook's own database reads, the lifecycle marker, the lifecycle lock and `ghost obsidian sync` all connect read-only. A diagnostic has to be able to report on a database it cannot modify, and a read-only connection cannot create one either.
-- **Read-write opens tighten**, including commands whose job is only to read. `ghost mcp status` and `ghost maintenance status` open the database read-write to check store health and report recent runs, and `ghost project bind` opens it to write the binding. Most other commands reach it through the same shared startup that already ran migrations on their behalf.
+- **Read-write opens tighten**, including commands whose job is only to read. `ghost mcp status` and `ghost maintenance status` open the database read-write to check store health and report recent runs, `ghost project bind` opens it to write the binding, and the opencode plugin's `ghost context` opens it to render a session's context. Most other commands reach it through the same shared startup that already ran migrations on their behalf.
 
-Two session events can tighten as a side effect. A genuine session *start* — a new session in a directory that resolves to a project, not a resume, a clear, a compaction or a subagent — bumps the project's session counter, which is a write. A session *stop* spawns `ghost lifecycle` for a reflection pass when that is configured, and that runs in its own process with its own open.
+A session *start* can tighten as a side effect too, but the conditions differ by host. Claude Code, Codex and Goose go through `ghost hook`: a genuine new session in a directory that resolves to a project bumps the project's session counter, which is a write, while a resume, a clear, a compaction and a subagent fire do not. opencode has no hook event of its own and instead spawns `ghost context` at start, which has no such exclusions. Separately, the first session start after a Claude Code *plugin* install imports your memory files, which is a read-write open whatever the session's shape.
+
+A session *stop* can tighten indirectly: when lifecycle reflection is configured, the stop hook spawns `ghost lifecycle`, which runs in its own process with its own open.
 
 On Windows the pass is skipped entirely: access there is carried by an ACL inherited from the parent directory, not by the mode bits `chmod` maps onto read-only, so tightening a number would not change who can read the database.
 
