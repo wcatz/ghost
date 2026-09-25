@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -277,17 +276,23 @@ func runMCPStatus() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	// Printed before the unhealthy exit, and on its own store: a project with
-	// no usable path and no repository remote is not a health failure — every
-	// check above can pass while sessions in that checkout silently get no
-	// context — so it is advice, and advice must survive a non-zero exit. A
-	// failure to read the projects is warned about rather than fatal for the
-	// same reason: the integration checks already ran and reported.
-	_, _, store := bootstrap(os.Stderr, slog.LevelWarn)
-	if err := writeUnboundProjectNotice(context.Background(), os.Stdout, store); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	// Printed before the unhealthy exit, and on a store this command opened
+	// read-only: a project with no usable path and no repository remote is not
+	// a health failure — every check above can pass while sessions in that
+	// checkout silently get no context — so it is advice, and advice must
+	// survive a non-zero exit. It also must not be a bootstrap() call, because
+	// bootstrap creates the database, stamps its schema version and seeds the
+	// builtin rows: a status check that made those writes would turn the next
+	// run's "no Ghost database (run ghost first)" into a healthy line, so the
+	// diagnostic would invalidate its own result. A failure to read the
+	// projects is warned about rather than fatal for the same reason the
+	// notice is printed before the exit: the checks above already reported.
+	if store := openDiagnosticStore(); store != nil {
+		if err := writeUnboundProjectNotice(context.Background(), os.Stdout, store); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		}
+		store.Close() //nolint:errcheck
 	}
-	store.Close() //nolint:errcheck
 	if !healthy {
 		os.Exit(1)
 	}

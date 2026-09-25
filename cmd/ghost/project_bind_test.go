@@ -211,6 +211,54 @@ func TestRunProjectBindCoreMakesPathAbsolute(t *testing.T) {
 	}
 }
 
+// TestOpenDiagnosticStoreDoesNotCreateTheDatabase — `ghost mcp status` reports
+// on the store, so it must not be the command that brings one into being. A
+// bootstrap() here would create ghost.db, stamp its schema version and seed the
+// builtin rows, and the next status run would report a healthy database where
+// it should report none — the check invalidating its own result.
+func TestOpenDiagnosticStoreDoesNotCreateTheDatabase(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	dbPath := filepath.Join(dataHome, "ghost", "ghost.db")
+
+	if store := openDiagnosticStore(); store != nil {
+		store.Close() //nolint:errcheck
+		t.Fatal("a diagnostic read opened a store that did not exist")
+	}
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Fatalf("the diagnostic read created %s", dbPath)
+	}
+
+	// With a real database present it does read, and it reports the projects.
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	rw, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if err := memory.NewStore(rw, nil).EnsureProject(t.Context(), "infra", "", "infrastructure"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	store := openDiagnosticStore()
+	if store == nil {
+		t.Fatal("a diagnostic read refused an existing database")
+	}
+	defer store.Close() //nolint:errcheck
+
+	var out bytes.Buffer
+	if err := writeUnboundProjectNotice(t.Context(), &out, store); err != nil {
+		t.Fatalf("writeUnboundProjectNotice: %v", err)
+	}
+	if !strings.Contains(out.String(), "ghost project bind infra /path/to/checkout") {
+		t.Errorf("notice should list the unbound project, got:\n%s", out.String())
+	}
+}
+
 // TestUnboundProjectNotice covers the `ghost mcp status` line: it must name
 // every project a session directory cannot resolve, print the exact fix
 // command, and stay silent when there is nothing to fix.
@@ -262,5 +310,11 @@ func TestUnboundProjectNotice(t *testing.T) {
 	}
 	if !strings.Contains(after, "ghost project bind ledger") {
 		t.Errorf("the still-unbound project must remain, got:\n%s", after)
+	}
+	// The limit of the check is stated, not implied: a project bound to a
+	// checkout that has since moved is not detectable from a stored path, and a
+	// user who hits that needs to know the status line will not mention it.
+	if !strings.Contains(after, "no longer exists") {
+		t.Errorf("the notice should state what it cannot detect, got:\n%s", after)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/repo"
 )
@@ -321,6 +322,27 @@ func projectLabel(name, id string) string {
 	return fmt.Sprintf("%s (%s)", name, id)
 }
 
+// openDiagnosticStore opens the Ghost database for a command that only
+// reports on it, or returns nil when there is nothing to report. It never
+// creates the file: a diagnostic that bootstraps the store it is diagnosing
+// makes its own "no database" line untrue on the next run. Every failure — a
+// missing database, an unreadable one, a data dir that cannot be resolved —
+// is nil rather than an error, because the caller has nothing to add to a
+// report another check already produced.
+func openDiagnosticStore() *memory.Store {
+	dataDir, err := config.DataDir()
+	if err != nil {
+		return nil
+	}
+	db, err := memory.OpenDBReadOnly(filepath.Join(dataDir, "ghost.db"))
+	if err != nil {
+		return nil
+	}
+	// A nil logger is honoured as silence; this store never writes, so it has
+	// nothing to report about itself.
+	return memory.NewStore(db, nil)
+}
+
 // writeUnboundProjectNotice reports the projects a session directory can never
 // resolve, each with the command that fixes it. It is called by `ghost mcp
 // status` and prints nothing when there is nothing to fix, so a healthy install
@@ -342,6 +364,13 @@ func writeUnboundProjectNotice(ctx context.Context, out io.Writer, store *memory
 			return err
 		}
 	}
+	// The limit is stated rather than papered over. This notice tests the
+	// recorded path's SHAPE, so a project bound to a checkout that has since
+	// been moved or deleted is not listed — it needs the same command with the
+	// new path, and detecting it would mean a stat whose transient failure
+	// (an unmounted volume, a permission error) would invite an overwrite of a
+	// path that was correct a moment ago.
+	_, _ = fmt.Fprintln(out, "  A recorded path that no longer exists is not detected here — re-bind it with the new path.")
 	return nil
 }
 
@@ -359,11 +388,12 @@ func runProjectBind() {
 	if len(positional) != 2 {
 		fmt.Fprintln(os.Stderr, "Usage: ghost project bind <project-id> <checkout-directory>")
 		fmt.Fprintln(os.Stderr, `Gives a project a recorded checkout, so a session in that directory
-resolves it. Projects created over MCP — and every project upgraded from a
-v9 database — record only a name, so no directory resolves them and they get
-no session-start context or lifecycle work. Refuses _global, a path another
-project already claims, and a repository another project already claims. Safe
-to re-run.`)
+resolves it. A project created over MCP records only a name, and a project
+upgraded from a v9 database recorded its name as its path, so until something
+records a real path or a repository remote no directory resolves them and they
+get no session-start context or lifecycle work. Refuses _global, a path
+another project already claims, and a repository another project already
+claims. Safe to re-run.`)
 		os.Exit(1)
 	}
 
