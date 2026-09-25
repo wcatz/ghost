@@ -1,6 +1,6 @@
 # Runtime Free-Model Selection for the CI Reviewer
 
-**Issue:** #597  
+**Issue:** #597
 **Status:** Implemented design for the reviewer workflow
 
 ## Problem

@@ -62,7 +62,9 @@ func ensureObsidianSyncRunning() {
 	}
 	logPath := filepath.Join(dataDir, "obsidian-sync.log")
 	lockCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-	logLock, acquired, err := fileguard.TryAcquireLockContext(lockCtx, logPath+".lock")
+	// TryAcquireLockContext returns either an acquired lock or an error, so a
+	// deadline means only "rotation is busy right now" — never a failure.
+	logLock, _, err := fileguard.TryAcquireLockContext(lockCtx, logPath+".lock")
 	cancel()
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -72,9 +74,6 @@ func ensureObsidianSyncRunning() {
 			slog.Warn("obsidian sync spawn: cannot lock log", "error", err)
 			return
 		}
-	} else if !acquired {
-		slog.Debug("obsidian sync spawn: log rotation busy; opening without lock")
-		logLock = nil
 	}
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if logLock != nil {

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -158,37 +157,38 @@ func QuarantineDir(path string) (string, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return "", err
 	}
-	if !quarantineOwned(dir) {
-		adoptable, err := quarantineDirAdoptable(dir)
-		if err != nil {
-			return "", err
-		}
-		if !adoptable {
-			return "", fmt.Errorf("refusing unowned quarantine directory: %s", dir)
-		}
-		if err := os.WriteFile(filepath.Join(dir, quarantineOwnerName), []byte(quarantineOwnerMarker), 0o600); err != nil {
-			return "", err
-		}
-		if !quarantineOwned(dir) {
-			return "", fmt.Errorf("cannot mark quarantine directory: %s", dir)
-		}
+	if err := ensureQuarantineOwned(dir); err != nil {
+		return "", err
 	}
 	return dir, nil
 }
 
-func quarantineDirAdoptable(dir string) (bool, error) {
+// ErrUnownedQuarantine marks a same-named directory that Ghost cannot prove it
+// created. Callers must defer it rather than delete anything inside it.
+var ErrUnownedQuarantine = errors.New("refusing unowned quarantine directory")
+
+// ensureQuarantineOwned marks an empty quarantine directory as Ghost-owned and
+// verifies the marker. A pre-existing directory that still holds any entry is
+// never adopted: names alone are not proof of ownership, and a user directory
+// inside a managed vault must keep its contents.
+func ensureQuarantineOwned(dir string) error {
+	if quarantineOwned(dir) {
+		return nil
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return false, err
+		return err
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if name == quarantineOwnerName || strings.HasPrefix(name, "tombstone-") || strings.HasPrefix(name, "stage-") {
-			continue
-		}
-		return false, nil
+	if len(entries) > 0 {
+		return fmt.Errorf("%w: %s", ErrUnownedQuarantine, dir)
 	}
-	return true, nil
+	if err := os.WriteFile(filepath.Join(dir, quarantineOwnerName), []byte(quarantineOwnerMarker), 0o600); err != nil {
+		return err
+	}
+	if !quarantineOwned(dir) {
+		return fmt.Errorf("cannot mark quarantine directory: %s", dir)
+	}
+	return nil
 }
 
 func quarantineOwned(dir string) bool {
@@ -196,8 +196,9 @@ func quarantineOwned(dir string) bool {
 	return err == nil && string(data) == quarantineOwnerMarker
 }
 
-// IsQuarantineDir reports whether path is a Ghost-owned private quarantine
-// directory. A user directory with the same basename is not adopted.
+// IsQuarantineDir reports whether path carries Ghost's ownership marker. It is
+// a pure predicate: a same-named directory without the marker is never adopted
+// here, so callers leave its contents alone.
 func IsQuarantineDir(path string) bool {
 	return filepath.Base(path) == quarantineDirName && quarantineOwned(path)
 }
@@ -346,8 +347,14 @@ func ReapQuarantineDirWithProbe(dir string, probe OpenFileProbe) (int, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return 0, fmt.Errorf("quarantine path is not a directory: %s", dir)
 	}
-	if !quarantineOwned(dir) {
-		return 0, fmt.Errorf("refusing unowned quarantine directory: %s", dir)
+	// Share the write path's ownership rule: an empty unmarked directory is
+	// re-marked, a directory holding anything else is deferred silently rather
+	// than reaped or reported as a retention failure on every database open.
+	if err := ensureQuarantineOwned(dir); err != nil {
+		if errors.Is(err, ErrUnownedQuarantine) {
+			return 0, nil
+		}
+		return 0, err
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {

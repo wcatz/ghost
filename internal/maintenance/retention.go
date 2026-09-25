@@ -311,10 +311,22 @@ func readLogTail(path string, maxBytes int64) ([]byte, error) {
 	}
 	start := info.Size() - maxBytes
 	tail := make([]byte, maxBytes)
-	if _, err := file.ReadAt(tail, start); err != nil && !errors.Is(err, io.EOF) {
+	n, err := readLogTailAt(file, tail, start)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
+	// A truncation landing between Stat and ReadAt leaves the tail partly
+	// zero-filled. Treat that as a shrink so the caller restores the tombstone
+	// instead of publishing a corrupt replacement.
+	if int64(n) < maxBytes {
+		return nil, errLogShrank
+	}
 	return tail, nil
+}
+
+// readLogTailAt is a narrow test seam over (*os.File).ReadAt.
+var readLogTailAt = func(file *os.File, tail []byte, start int64) (int, error) {
+	return file.ReadAt(tail, start)
 }
 
 // ReapStaleProcessFiles removes only the retired per-phase claim names. The

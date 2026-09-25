@@ -71,14 +71,87 @@ func TestUnownedQuarantineDirIsNeverReaped(t *testing.T) {
 	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReapStaleQuarantineWithProbe(root, func(string) (bool, error) { return false, nil }); err == nil {
-		t.Fatal("reaper adopted an unowned quarantine directory")
+	// The reaper defers silently: a foreign directory is not Ghost's to clean,
+	// and reporting an error would warn on every database open forever.
+	removed, err := ReapStaleQuarantineWithProbe(root, func(string) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatalf("reaper reported an unowned directory as a failure: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("reaper removed %d files from an unowned directory", removed)
 	}
 	if _, err := os.Stat(old); err != nil {
 		t.Fatalf("unowned file removed: %v", err)
 	}
 	if _, err := QuarantineDir(filepath.Join(root, "candidate")); err == nil {
 		t.Fatal("quarantine adopted an unowned directory")
+	}
+}
+
+// Ghost-shaped filenames are not proof of ownership: a user directory whose
+// entries merely look like tombstones must keep them, both on the write and the
+// reap path. Only an empty unmarked directory is re-marked.
+func TestUnmarkedQuarantineWithGhostShapedEntriesIsNotAdopted(t *testing.T) {
+	for _, extra := range []string{"", "user-file"} {
+		name := extra
+		if name == "" {
+			name = "tombstone-user-file-1234"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, quarantineDirName)
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			debris := filepath.Join(dir, name)
+			if err := os.WriteFile(debris, []byte("debris"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if extra != "" {
+				ghostShaped := filepath.Join(dir, "stage-abc123")
+				if err := os.WriteFile(ghostShaped, []byte("stage"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			old := time.Now().Add(-24 * time.Hour)
+			if err := os.Chtimes(debris, old, old); err != nil {
+				t.Fatal(err)
+			}
+			removed, err := ReapStaleQuarantineWithProbe(root, func(string) (bool, error) { return false, nil })
+			if err != nil {
+				t.Fatalf("reaper reported unmarked directory as failure: %v", err)
+			}
+			if removed != 0 {
+				t.Fatalf("removed %d files from an unmarked directory", removed)
+			}
+			if _, err := os.Stat(debris); err != nil {
+				t.Fatalf("debris removed from unmarked directory: %v", err)
+			}
+			if _, err := QuarantineDir(filepath.Join(root, "candidate")); err == nil {
+				t.Fatal("QuarantineDir adopted a non-empty unmarked directory")
+			}
+		})
+	}
+}
+
+func TestReaperSelfHealsEmptyUnmarkedQuarantine(t *testing.T) {
+	root := t.TempDir()
+	dir, err := QuarantineDir(filepath.Join(root, "candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, quarantineOwnerName)); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := ReapStaleQuarantineWithProbe(root, func(string) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatalf("reaper could not self-heal an empty unmarked directory: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("removed=%d want 0", removed)
+	}
+	if !quarantineOwned(dir) {
+		t.Fatal("reaper did not restore the ownership marker")
 	}
 }
 

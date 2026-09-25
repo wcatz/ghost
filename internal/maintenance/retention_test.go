@@ -2,6 +2,7 @@ package maintenance
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -136,6 +137,33 @@ func TestRotateLogRestoresLogThatShrankDuringRotation(t *testing.T) {
 	}
 	if data, err := os.ReadFile(logPath); err != nil || string(data) != "01" {
 		t.Fatalf("shrunken log = %q err=%v, want restored %q", data, err, "01")
+	}
+}
+
+// A truncation that lands between the size check and the read leaves the tail
+// partly zero-filled. That must restore the tombstone, not publish a corrupt
+// log and discard the original.
+func TestRotateLogRestoresLogTruncatedBetweenStatAndRead(t *testing.T) {
+	noOpenProbe(t)
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "lifecycle.log")
+	writeRetentionFile(t, logPath, "0123456789")
+	oldRead := readLogTailAt
+	readLogTailAt = func(_ *os.File, tail []byte, _ int64) (int, error) {
+		copy(tail, "AB")
+		return 2, io.EOF
+	}
+	t.Cleanup(func() { readLogTailAt = oldRead })
+
+	rotated, err := RotateLogs(dir, 4)
+	if err != nil {
+		t.Fatalf("RotateLogs: %v", err)
+	}
+	if rotated != 0 {
+		t.Fatalf("rotated=%d want 0", rotated)
+	}
+	if data, err := os.ReadFile(logPath); err != nil || string(data) != "0123456789" {
+		t.Fatalf("log after short read = %q err=%v, want intact original", data, err)
 	}
 }
 
@@ -313,6 +341,9 @@ func TestRunUsesRetentionDefaultsWhenConfigLoadFails(t *testing.T) {
 	}
 }
 
+// Rotation must not create a sidecar for a log it will not touch. Log openers
+// in mcpinit intentionally do create lifecycle.log.lock/obsidian-sync.log.lock
+// (a lock has to exist to be contended); that is documented, not asserted here.
 func TestRotateLogsDoesNotCreateLocksForMissingOrSmallLogs(t *testing.T) {
 	noOpenProbe(t)
 	dir := t.TempDir()
