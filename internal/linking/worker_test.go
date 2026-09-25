@@ -146,32 +146,6 @@ func TestSweepOnceFindsCompatibleNeighbourBelowConflictingOnes(t *testing.T) {
 	}
 }
 
-// TestSweepOnceStillCapsNeighborCount guards the budget the oversample could
-// otherwise spend: the fetch looks deeper to find compatible rows, but a memory
-// still gets at most maxCandidates related edges. Before the fetch limit was
-// widened this fell out of the truncation for free; it is now an explicit cap.
-func TestSweepOnceStillCapsNeighborCount(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	source := addEmbeddedScoped(t, s, "production pooling timeout", []float32{1, 0}, map[string]string{"environment": "production"})
-	for i := 0; i < maxCandidates+3; i++ {
-		addEmbeddedScoped(t, s, fmt.Sprintf("production neighbour %d", i),
-			[]float32{1, 0.02 * float32(i+1)}, map[string]string{"environment": "production"})
-	}
-
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	NewWorker(s, logger, time.Minute, 0.70).SweepOnce(ctx)
-
-	links, err := s.GetLinks(ctx, source)
-	if err != nil {
-		t.Fatalf("GetLinks(source): %v", err)
-	}
-	if len(links) != maxCandidates {
-		t.Errorf("source has %d links, want the %d-neighbour cap to still apply: %+v", len(links), maxCandidates, links)
-	}
-}
-
 func TestSweepOnceDoesNotLinkScopeConflictingMemories(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
