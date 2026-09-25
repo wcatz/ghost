@@ -229,7 +229,12 @@ CREATE TABLE IF NOT EXISTS memory_snapshots (
     confidence    REAL,
     valid_from    TEXT,
     valid_until   TEXT,
-    verified_at   TEXT
+    verified_at   TEXT,
+    -- The scoped value of the memory itself, in memories.scope's JSON form.
+    -- Without it a restore could not put scope back, which made the replace's
+    -- dropped scope unrecoverable: the snapshot is the only undo history for
+    -- a reflection replace (issue #572).
+    scope         TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_project ON memory_snapshots(project_id, snapshot_id);
 

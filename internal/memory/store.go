@@ -1694,11 +1694,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags,
 		                              created_at, memory_id, access_count, last_accessed,
 		                              agent, session_id, source_ref, confidence,
-		                              valid_from, valid_until, verified_at)
+		                              valid_from, valid_until, verified_at, scope)
 		SELECT ?, project_id, category, content, importance, source, tags,
 		       created_at, id, access_count, last_accessed,
 		       agent, session_id, source_ref, confidence,
-		       valid_from, valid_until, verified_at
+		       valid_from, valid_until, verified_at, scope
 		FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL
 	`, snapshotID, projectID)
 	if err != nil {
@@ -1824,18 +1824,19 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE memories
 				SET category = ?, content = ?, importance = ?, source = 'reflection', tags = ?,
+				    scope = ?,
 				    created_at = datetime('now'), updated_at = datetime('now')
 				WHERE id = ?
-			`, m.Category, m.Content, m.Importance, string(tags), id); err != nil {
+			`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
 				return nil, fmt.Errorf("update reused memory: %w", err)
 			}
 			reused++
 			continue
 		}
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO memories (project_id, category, content, source, importance, tags)
-			VALUES (?, ?, ?, 'reflection', ?, ?)
-		`, projectID, m.Category, m.Content, m.Importance, string(tags))
+			INSERT INTO memories (project_id, category, content, source, importance, tags, scope)
+			VALUES (?, ?, ?, 'reflection', ?, ?, ?)
+		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope))
 		if err != nil {
 			return nil, fmt.Errorf("insert memory: %w", err)
 		}
@@ -1957,7 +1958,8 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		    access_count = s.access_count, last_accessed = s.last_accessed,
 		    agent = s.agent, session_id = s.session_id, source_ref = s.source_ref,
 		    confidence = s.confidence, valid_from = s.valid_from,
-		    valid_until = s.valid_until, verified_at = s.verified_at
+		    valid_until = s.valid_until, verified_at = s.verified_at,
+		    scope = s.scope
 		FROM memory_snapshots s
 		WHERE s.snapshot_id = ? AND s.memory_id = memories.id
 		  AND memories.pinned = 0 AND memories.resolved_at IS NULL
@@ -1978,11 +1980,11 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		INSERT INTO memories (id, project_id, category, content, source, importance, tags,
 		                      created_at, updated_at, access_count, last_accessed,
 		                      agent, session_id, source_ref, confidence,
-		                      valid_from, valid_until, verified_at)
+		                      valid_from, valid_until, verified_at, scope)
 		SELECT COALESCE(memory_id, hex(randomblob(16))), project_id, category, content,
 		       source, importance, tags, created_at, created_at, access_count, last_accessed,
 		       agent, session_id, source_ref, confidence,
-		       valid_from, valid_until, verified_at
+		       valid_from, valid_until, verified_at, scope
 		FROM memory_snapshots
 		WHERE snapshot_id = ?
 		  AND ((memory_id IS NOT NULL AND memory_id NOT IN (SELECT id FROM memories))
