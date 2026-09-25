@@ -24,8 +24,9 @@ func liveTestSource() string {
 
 // liveResolveCases is the labeled resolve set both live classifier tests score
 // against. One table means the single-note and batched paths are held to the
-// same accuracy bar. `want` is true when the note is RESOLVED evidence (should
-// be dropped from ranked injection) and false when it must be KEPT.
+// same accuracy bar. `want` is VerdictResolved when the note is RESOLVED
+// evidence (should be dropped from ranked injection) and VerdictKeep when it
+// must remain injectable.
 //
 // The set deliberately pairs each RESOLVED example with a KEEP case that
 // resembles it on the surface: a decision record containing the word "RESOLVED"
@@ -35,23 +36,23 @@ func liveTestSource() string {
 // memory — and they are the ones this measurement exists to watch.
 var liveResolveCases = []struct {
 	content string
-	want    bool
+	want    Verdict
 }{
 	// RESOLVED: intermediate findings, changelogs, cost estimates, and
 	// experiment results for work that has concluded (rubric examples).
-	{"Kill experiment found 7.3% cross-session links, so we removed the ranking bonus.", true},
-	{"Cost estimate from May: $148/mo projected; actuals have since replaced it.", true},
-	{"Postmortem (concluded): deploy failure was a stale hash; mitigated. No open actions.", true},
-	{"Changelog: connection leak fixed in v0.9.3 (PR #398). Concluded work.", true},
-	{"Draft decision: pin resolve to big-pickle; superseded by the KEEP-bias measurement before shipping.", true},
+	{"Kill experiment found 7.3% cross-session links, so we removed the ranking bonus.", VerdictResolved},
+	{"Cost estimate from May: $148/mo projected; actuals have since replaced it.", VerdictResolved},
+	{"Postmortem (concluded): deploy failure was a stale hash; mitigated. No open actions.", VerdictResolved},
+	{"Changelog: connection leak fixed in v0.9.3 (PR #398). Concluded work.", VerdictResolved},
+	{"Draft decision: pin resolve to big-pickle; superseded by the KEEP-bias measurement before shipping.", VerdictResolved},
 
 	// KEEP: terminal conclusions, standing rules, active decisions, and
 	// reusable knowledge — even when phrased with conclusions or history.
-	{"Graph-expansion RESOLVED NO-GO (2026-07-20): decision record — ranking stays off.", false},
-	{"The repository default branch is main; the master rename landed in v0.9.0.", false},
-	{"Split resolve classification into batches of 8 notes per harness call with a KEEP-biased rubric.", false},
-	{"Always run go vet ./... before committing.", false},
-	{"Open task: measure resolve KEEP bias against a labeled set before validating the resolve model pin.", false},
+	{"Graph-expansion RESOLVED NO-GO (2026-07-20): decision record — ranking stays off.", VerdictKeep},
+	{"The repository default branch is main; the master rename landed in v0.9.0.", VerdictKeep},
+	{"Split resolve classification into batches of 8 notes per harness call with a KEEP-biased rubric.", VerdictKeep},
+	{"Always run go vet ./... before committing.", VerdictKeep},
+	{"Open task: measure resolve KEEP bias against a labeled set before validating the resolve model pin.", VerdictKeep},
 }
 
 // TestResolutionClassifierLive validates the actual prompt against the labeled
@@ -85,13 +86,13 @@ func TestResolutionClassifierLive(t *testing.T) {
 		} else {
 			correct++
 		}
-		if !c.want {
+		if c.want == VerdictKeep {
 			keepLabeled++
-			if got {
+			if got == VerdictResolved {
 				keepFalsePos++
 			}
 		}
-		t.Logf("[%s] want=RESOLVED?%v got=%v  note=%q", verdict, c.want, got, c.content)
+		t.Logf("[%s] want=%v got=%v  note=%q", verdict, c.want, got, c.content)
 	}
 	acc := float64(correct) / float64(len(liveResolveCases))
 	kfac := float64(keepFalsePos) / float64(keepLabeled)
@@ -151,13 +152,13 @@ func TestResolutionClassifierLiveBatch(t *testing.T) {
 		} else {
 			correct++
 		}
-		if !c.want {
+		if c.want == VerdictKeep {
 			keepLabeled++
-			if got[i] {
+			if got[i] == VerdictResolved {
 				keepFalsePos++
 			}
 		}
-		t.Logf("[%s] want=RESOLVED?%v got=%v  note=%q", verdict, c.want, got[i], c.content)
+		t.Logf("[%s] want=%v got=%v  note=%q", verdict, c.want, got[i], c.content)
 	}
 	acc := float64(correct) / float64(len(liveResolveCases))
 	kfac := float64(keepFalsePos) / float64(keepLabeled)

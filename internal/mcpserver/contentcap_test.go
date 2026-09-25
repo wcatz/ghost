@@ -247,7 +247,34 @@ func TestSchemas_NeverRejectContentUpToCap(t *testing.T) {
 	}
 }
 
-// tail returns the last n bytes of s for failure messages (bounded so a
+func TestGlobalToolDescriptionsMatchProvenanceContract(t *testing.T) {
+	_, session := newCapSession(t)
+	tools, err := session.ListTools(context.Background(), &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	byName := make(map[string]string, len(tools.Tools))
+	for _, tool := range tools.Tools {
+		byName[tool.Name] = tool.Description
+	}
+
+	for _, name := range []string{"ghost_memory_promote", "ghost_save_global"} {
+		description, ok := byName[name]
+		if !ok {
+			t.Fatalf("tool %q missing from tools/list", name)
+		}
+		if strings.Contains(description, "replayed as trusted context") {
+			t.Errorf("%s description still promises trusted replay: %q", name, description)
+		}
+		if !strings.Contains(description, "source") || !strings.Contains(description, "verify") {
+			t.Errorf("%s description does not explain the source label and verification boundary: %q", name, description)
+		}
+	}
+	if !strings.Contains(byName["ghost_save_global"], "source=mcp") {
+		t.Errorf("ghost_save_global description does not identify its source=mcp provenance: %q", byName["ghost_save_global"])
+	}
+}
+
 // pathological input can't flood the log).
 func tail(s string, n int) string {
 	if len(s) <= n {

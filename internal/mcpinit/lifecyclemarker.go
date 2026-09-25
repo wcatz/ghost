@@ -22,8 +22,19 @@ import (
 // whenever a run fails, read (and printed as one labeled alert) by the next
 // session-start.
 const (
-	// lifecycleMarkerFile is the marker's fixed name inside config.DataDir().
-	lifecycleMarkerFile = "lifecycle-last-failure.json"
+	// lifecycleMarkerPrefix is the stem shared by every failure marker file in
+	// config.DataDir(). Each project gets its own file named after it (see
+	// projectMarkerFile), because one shared file failed two ways at once:
+	// any project's successful run deleted it wholesale, erasing another
+	// project's still-active failure, and two projects failing at the same
+	// moment overwrote each other — so at most one project's problem was ever
+	// recorded, frequently not the one being read (issue #540).
+	lifecycleMarkerPrefix = "lifecycle-last-failure"
+	// legacyMarkerFile is the pre-per-project name. Never written now; still
+	// read as a last resort so a marker left by an older build keeps alerting
+	// instead of becoming an orphan that only the 30-day self-clean ever
+	// notices.
+	legacyMarkerFile = lifecycleMarkerPrefix + ".json"
 	// lifecycleMarkerVersion is the marker schema version as written; readers
 	// ignore it (unknown fields and versions parse into the same shape).
 	lifecycleMarkerVersion = 1
@@ -37,9 +48,15 @@ const (
 	// marker (its project deleted, its config changed by hand) can never
 	// nag — or linger on disk — forever.
 	lifecycleMarkerMaxAge = 30 * 24 * time.Hour
-	// lifecycleMarkerErrorMaxBytes caps the recorded error line (first line
-	// only) so the alert stays one short block of context.
+	// lifecycleMarkerErrorMaxBytes caps what the ALERT renders, so the block
+	// printed at session start stays short enough to read.
 	lifecycleMarkerErrorMaxBytes = 300
+	// lifecycleMarkerDetailMaxBytes caps what the FILE stores. Larger than
+	// the alert cap deliberately: the marker now carries the captured stderr
+	// tail, and truncating it at write time to one line would discard exactly
+	// the detail that captures exist to preserve. The alert still shows one
+	// line; the file keeps enough to diagnose from.
+	lifecycleMarkerDetailMaxBytes = 1500
 )
 
 // NoLLMBackendError is the marker error text for the specific failure this
@@ -84,14 +101,19 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 	if resolved == "" {
 		return fmt.Errorf("cannot record lifecycle failure without a project")
 	}
-	text := strings.SplitN(firstErr, "\n", 2)[0]
-	if strings.TrimSpace(text) == "" {
+	// Keep the whole bounded cause, not just its first line. The first line
+	// used to be all that survived, which threw away the captured stderr tail
+	// the moment it was recorded. The alert still renders one line
+	// (lifecycleFailureAlert splits), so a multi-line marker costs the reader
+	// nothing and gives anyone opening the file the actual evidence.
+	text := strings.TrimSpace(firstErr)
+	if text == "" {
 		text = "phase failed"
 	}
 	m := lifecycleFailureMarker{
 		Project:      resolved,
 		PhasesFailed: append([]string(nil), phasesFailed...),
-		Error:        truncateUTF8(text, lifecycleMarkerErrorMaxBytes),
+		Error:        truncateUTF8(text, lifecycleMarkerDetailMaxBytes),
 		At:           time.Now().UTC().Format(time.RFC3339),
 		Version:      lifecycleMarkerVersion,
 	}
@@ -102,7 +124,8 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 	// Write-temp-then-rename, with a UNIQUE temp name (os.CreateTemp), so a
 	// reader — or a second writer for another project — can never observe a
 	// torn file: the rename is the only mutation of the marker path.
-	tmp, err := os.CreateTemp(dataDir, lifecycleMarkerFile+".tmp*")
+	markerName := projectMarkerFile(resolved)
+	tmp, err := os.CreateTemp(dataDir, markerName+".tmp*")
 	if err != nil {
 		return err
 	}
@@ -116,24 +139,89 @@ func WriteLifecycleFailure(project string, phasesFailed []string, firstErr strin
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	if err := os.Rename(tmpPath, filepath.Join(dataDir, lifecycleMarkerFile)); err != nil {
+	if err := os.Rename(tmpPath, filepath.Join(dataDir, markerName)); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}
 	return nil
 }
 
-// ClearLifecycleFailure removes the marker. A missing marker is success, not
-// an error; the data dir is never created just to delete nothing.
-func ClearLifecycleFailure() error {
+// ClearLifecycleFailure removes THIS project's marker. A missing marker is
+// success, not an error; the data dir is never created just to delete nothing.
+//
+// Scoped deliberately. The old implementation removed the one shared file, so
+// project A succeeding after project B failed erased B's failure — the marker
+// recorded B's problem, and A's next clean run made it invisible (issue #540).
+// Success heals its own project and nothing else.
+//
+// The legacy single-file marker is also removed when it names this project, so
+// an older build's record does not keep alerting after the project recovers;
+// one belonging to a different project is left alone.
+func ClearLifecycleFailure(project string) error {
 	dataDir, err := config.DataDirPath()
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(filepath.Join(dataDir, lifecycleMarkerFile)); err != nil && !os.IsNotExist(err) {
-		return err
+	// Resolve exactly as WriteLifecycleFailure does when it keys the file.
+	// Clearing by the raw name a caller passed would never find a marker the
+	// writer stored under the resolved id — "success heals" would silently
+	// heal nothing.
+	if project != "" {
+		if resolved := resolveMarkerProject(dataDir, project); resolved != "" {
+			project = resolved
+		}
+	}
+	if project != "" {
+		if err := os.Remove(filepath.Join(dataDir, projectMarkerFile(project))); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	legacy := filepath.Join(dataDir, legacyMarkerFile)
+	// Compared with no emptiness guard: an unattributed legacy marker
+	// (Project == "") must still self-clean when told to clear "".
+	if m := readMarkerAtPath(legacy); m != nil && m.Project == project {
+		if err := os.Remove(legacy); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	return nil
+}
+
+// projectMarkerFile is the marker file name for one project inside
+// config.DataDir(). Sanitized because the project may be an unresolved name,
+// which the filesystem will not accept as-is; resolved ids are already safe.
+func projectMarkerFile(project string) string {
+	return lifecycleMarkerPrefix + "-" + sanitizeMarkerProject(project) + ".json"
+}
+
+// sanitizeMarkerProject maps a project id or name onto a file-name-safe stem.
+// Anything outside the common set becomes "_" rather than being dropped, so
+// two names differing only in punctuation cannot collapse onto each other and
+// silently share a marker. Capped only against absurd lengths.
+func sanitizeMarkerProject(project string) string {
+	var b strings.Builder
+	for _, r := range project {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		// Not a placeholder word like "unattributed": a real project could be
+		// named that, and the two would then share a marker — one project's
+		// failure recorded under the other's name, which is the coupling this
+		// change exists to remove. The empty project IS the legacy shared
+		// file's meaning, so it maps there.
+		return strings.TrimSuffix(legacyMarkerFile, ".json")
+	}
+	if len(out) > 80 {
+		return out[:80]
+	}
+	return out
 }
 
 // FinishLifecycleRun is the lifecycle coordinator's single end-of-run outcome
@@ -161,7 +249,10 @@ func FinishLifecycleRun(project string, phasesRan int, failedPhases []string, fi
 	if phasesRan == 0 {
 		return nil
 	}
-	return ClearLifecycleFailure()
+	// Scoped to THIS project. Success used to delete the one shared file, so
+	// a clean run in project A erased project B's failure — the marker said B
+	// had failed and A's next success made it disappear (issue #540).
+	return ClearLifecycleFailure(project)
 }
 
 // resolveMarkerProject best-effort resolves project (name/id/path) to the
@@ -186,12 +277,11 @@ func resolveMarkerProject(dataDir, project string) string {
 // when it is unparseable, or when its timestamp cannot be interpreted (a
 // marker that cannot be aged safely is never printed and never deleted —
 // fail silent, keep the file for manual inspection).
-func readLifecycleFailure() *lifecycleFailureMarker {
-	dataDir, err := config.DataDirPath()
-	if err != nil {
-		return nil
-	}
-	b, err := os.ReadFile(filepath.Join(dataDir, lifecycleMarkerFile))
+// readMarkerAtPath loads and validates a single marker file. A missing,
+// unparseable or undated file reads as no marker rather than an error: this is
+// a best-effort alert, and every failure mode of it must degrade to silence.
+func readMarkerAtPath(path string) *lifecycleFailureMarker {
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
@@ -203,6 +293,78 @@ func readLifecycleFailure() *lifecycleFailureMarker {
 		return nil
 	}
 	return &m
+}
+
+// readLifecycleFailure finds the marker relevant to a session: this project's
+// own file first, then the name it may have been written under if the id was
+// unknown at write time, and finally the legacy shared file so a record made
+// by an older build still alerts instead of silently rotting on disk.
+func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker {
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		return nil
+	}
+	if projectID == "" && projectName == "" {
+		// A session that resolves to no project cannot say which marker is
+		// its own. The single shared file used to be shown in exactly this
+		// case, because some news beats none when there is nothing to filter
+		// by — so keep it, and surface the most recent failure rather than
+		// whatever sorts first.
+		return newestMarker(filepath.Join(dataDir, lifecycleMarkerPrefix+"-*.json"),
+			filepath.Join(dataDir, legacyMarkerFile))
+	}
+	for _, name := range markerCandidates(projectID, projectName) {
+		if m := readMarkerAtPath(filepath.Join(dataDir, name)); m != nil {
+			return m
+		}
+	}
+	return nil
+}
+
+// newestMarker reads every path it can and returns the one recorded last.
+func newestMarker(patterns ...string) *lifecycleFailureMarker {
+	var newest *lifecycleFailureMarker
+	newestAt := time.Time{}
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			continue
+		}
+		for _, path := range matches {
+			m := readMarkerAtPath(path)
+			if m == nil {
+				continue
+			}
+			at, err := time.Parse(time.RFC3339, m.At)
+			if err != nil {
+				continue
+			}
+			if newest == nil || at.After(newestAt) {
+				newest, newestAt = m, at
+			}
+		}
+	}
+	return newest
+}
+
+// markerCandidates is the lookup order: the resolved id, the display name (a
+// marker written when the id could not be resolved keys on the name), then the
+// legacy shared file. Duplicates collapse so a session whose id and name match
+// reads the same file twice.
+func markerCandidates(ids ...string) []string {
+	out := make([]string, 0, len(ids)+1)
+	seen := make(map[string]bool, len(ids)+1)
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		f := projectMarkerFile(id)
+		if !seen[f] {
+			seen[f] = true
+			out = append(out, f)
+		}
+	}
+	return append(out, legacyMarkerFile)
 }
 
 // lifecycleFailureAlert renders the one-line session-start alert for the
@@ -226,7 +388,7 @@ func readLifecycleFailure() *lifecycleFailureMarker {
 // alert never includes paths — only the project identifier and the first
 // (≤300-byte) line of the recorded error.
 func lifecycleFailureAlert(projectID, projectName string) string {
-	m := readLifecycleFailure()
+	m := readLifecycleFailure(projectID, projectName)
 	if m == nil {
 		return ""
 	}
@@ -236,7 +398,9 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 	}
 	age := time.Since(at)
 	if age > lifecycleMarkerMaxAge {
-		_ = ClearLifecycleFailure()
+		// Clear the marker that was actually read, keyed by its own recorded
+		// project — never a blanket removal that could touch another's.
+		_ = ClearLifecycleFailure(m.Project)
 		return ""
 	}
 	if age > lifecycleAlertMaxAge {

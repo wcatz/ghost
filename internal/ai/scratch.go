@@ -18,12 +18,18 @@ import (
 // CLAUDE.md/AGENTS.md, project opencode.json, or git context, and the scratch
 // directory serves that purpose while staying inside the owned root.
 //
+// The environment is filtered here rather than at each call site. This is the
+// single spawn funnel for normal calls and probes, so a future backend cannot
+// accidentally pass os.Environ() straight to exec.CommandContext.
+//
 // ok is false when the scratch root cannot be created. That is a WARN, not an
-// error: the child then inherits env and CWD — the pre-scratch behavior — so a
-// broken data dir degrades loudly rather than taking down reflection. The
-// returned release is always safe to call, repeatedly and after the directory
-// has already been removed; it is a no-op when ok is false.
-func harnessCommand(ctx context.Context, binary string, args, env []string, harness string) (*exec.Cmd, func(), bool) {
+// error: the child then keeps the allowlisted environment and the inherited
+// working directory, so a broken data dir degrades loudly rather than taking
+// down reflection. The returned release is always safe to call, repeatedly and
+// after the directory has already been removed; it is a no-op when ok is false.
+func harnessCommand(ctx context.Context, binary string, args, baseEnv []string, kind harnessKind) (*exec.Cmd, func(), bool) {
+	env := harnessEnv(baseEnv, kind)
+
 	// Pre-spawn scratch budget check: measure → if over budget reap stale
 	// entries → if still over budget warn loudly → record fired checks to
 	// maintenance_runs. It never fails and never blocks: every failure path
@@ -36,8 +42,8 @@ func harnessCommand(ctx context.Context, binary string, args, env []string, harn
 	cmd := exec.CommandContext(ctx, binary, args...)
 	dir, err := scratch.Open()
 	if err != nil {
-		slog.Warn("harness scratch dir unavailable; child keeps the inherited temp dir and working directory",
-			"harness", harness, "error", err)
+		slog.Warn("harness scratch dir unavailable; child keeps the allowlisted environment and inherited working directory",
+			"harness", kind, "error", err)
 		cmd.Env = env
 		return cmd, func() {}, false
 	}

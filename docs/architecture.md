@@ -82,7 +82,7 @@ The database schema is an embedded Go string constant in `internal/memory/schema
 
 All hook paths converge on `internal/hostevent`, which parses the versioned event envelope and dispatches normalized events. The `scratch` and `procstat` packages keep harness scratch and detached-process liveness handling separate from host adapters.
 
-If a host reports an unknown source, `internal/ai` does not cascade to a default harness. The caller must provide a source or the operation fails with an actionable error. This prevents an opencode or Claude session from silently using the wrong harness or billing path. OpenCode children receive an explicit `opencode/big-pickle` model unless a per-phase pin or `GHOST_OPENCODE_MODEL` override is supplied; the child config is intentionally scrubbed, so the user's global OpenCode model is not inherited.
+If a host reports an unknown source, `internal/ai` does not cascade to a default harness. The caller must provide a source or the operation fails with an actionable error. This prevents an opencode or Claude session from silently using the wrong harness or billing path. OpenCode children receive an explicit `opencode/big-pickle` model unless a per-phase pin or `GHOST_OPENCODE_MODEL` override is supplied; the child home/config tree is invocation-owned, only a configured `auth.json` is carried into its data root, and its tool/MCP policy is deny-all, so the user's global OpenCode model, plugins, and MCP servers are not inherited.
 
 ## Data flow
 
@@ -195,7 +195,7 @@ The main schema tables are:
 | `tasks` | Cross-session work items |
 | `decisions` | Decisions, rationale, alternatives, and status |
 | `ghost_state` | Per-project learned context and interaction state |
-| `memory_snapshots` | Reflection rollback snapshots |
+| `memory_snapshots` | Reflection rollback snapshots, including `scope` and its `scope_captured` marker (schema v14) so a restore can put scope back — and leave a live scope alone when the snapshot predates scope |
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
 
@@ -213,7 +213,7 @@ Without Ollama, the same API remains available with FTS5-only results. Search me
 
 ### Memory lifecycle
 
-`reflect` replaces non-manual memories through a tiered consolidator. It snapshots before replacement, rejects empty results, preserves manual memories, and can restore the latest snapshot. `resolve` stamps resolved evidence so it leaves injection but remains searchable. `supersede` creates directed replacement links after source-matched classification.
+`reflect` replaces non-manual/non-builtin memories through a tiered consolidator. It snapshots before replacement, rejects empty results, preserves manual and Ghost-shipped builtin memories, and can restore the latest snapshot. Cross-project candidates stay in the project by default; `--promote-globals` opts into `_global`, and the project replacement plus any global writes commit in one store transaction. `resolve` stamps resolved evidence so it leaves injection but remains searchable. `supersede` creates directed replacement links after source-matched classification.
 
 ## Memory axes
 

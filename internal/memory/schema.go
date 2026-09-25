@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS memories (
     access_count  INTEGER NOT NULL DEFAULT 0,
     last_accessed TEXT,
     source        TEXT NOT NULL DEFAULT 'reflection'
-                  CHECK (source IN ('reflection', 'chat', 'manual', 'tool', 'mcp', 'onboarding', 'decision_log')),
+                  CHECK (source IN ('reflection', 'chat', 'manual', 'tool', 'mcp', 'onboarding', 'decision_log', 'builtin')),
     tags          TEXT DEFAULT '[]',
     pinned        INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
@@ -229,7 +229,22 @@ CREATE TABLE IF NOT EXISTS memory_snapshots (
     confidence    REAL,
     valid_from    TEXT,
     valid_until   TEXT,
-    verified_at   TEXT
+    verified_at   TEXT,
+    -- The scoped value of the memory itself, in memories.scope's JSON form.
+    -- Without it a restore could not put scope back, which made the replace's
+    -- dropped scope unrecoverable: the snapshot is the only undo history for
+    -- a reflection replace (issue #572).
+    scope         TEXT,
+    -- Whether scope above is the memory's scope or merely the absence of
+    -- one this build could record. migrateV14 adds both columns to a table
+    -- whose earlier rows predate scope entirely, and for those rows scope IS
+    -- NULL — the same value a genuinely unscoped v14 snapshot stores. Restore
+    -- reads this flag instead of guessing from NULL: 1 means "trust the value,
+    -- NULL included", 0 means "this snapshot cannot speak about scope" and the
+    -- live row's own scope is left alone. Defaults to 0 so any row that did not
+    -- state it — a legacy row, or an unverified hand backfill — is treated as
+    -- unknown rather than as a claim that the memory had no scope.
+    scope_captured INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_project ON memory_snapshots(project_id, snapshot_id);
 

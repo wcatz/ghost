@@ -93,6 +93,10 @@ type MemoryStore interface {
 	// single project. Empty means "no repository known" and never clears a
 	// remote already recorded.
 	EnsureProjectWithRepo(ctx context.Context, id, path, name, repoRemote string) error
+	// ResolveOrCreateRepoProject resolves repository identity and creates the
+	// fallback project in one write transaction. projectRef is the ordinary
+	// resolved id/path; repoName is derived from the remote, not a directory.
+	ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, error)
 	ResolveProject(ctx context.Context, input string) (id, name string, err error)
 	ListProjectNames(ctx context.Context) ([]string, error)
 	MergeProject(ctx context.Context, oldID, newID string) error

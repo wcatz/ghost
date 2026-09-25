@@ -96,32 +96,52 @@ func parseReflectionResponse(text string) (ReflectionResult, error) {
 	if err := json.Unmarshal([]byte(text), &result); err != nil {
 		snippet := text
 		if len(snippet) > 120 {
-			snippet = snippet[:120] + "..."
+			snippet = memory.TruncateUTF8(snippet, 120) + "..."
 		}
 		return ReflectionResult{}, fmt.Errorf("reflection output is not valid JSON: %w (starts: %q)", err, snippet)
 	}
 
-	// Validate importance ranges, scope, and category. An invalid category
-	// would fail the schema CHECK inside ReplaceNonManual and sink the whole
-	// apply transaction — normalize to the schema default ('fact') the same
-	// way invalid scope collapses to 'project'.
-	for i := range result.Memories {
-		if result.Memories[i].Importance < 0 {
-			result.Memories[i].Importance = 0
-		}
-		if result.Memories[i].Importance > 1 {
-			result.Memories[i].Importance = 1
-		}
-		if result.Memories[i].Tags == nil {
-			result.Memories[i].Tags = []string{}
-		}
-		if result.Memories[i].Scope != "global" {
-			result.Memories[i].Scope = "project"
-		}
-		if !memory.IsValidCategory(result.Memories[i].Category) {
-			result.Memories[i].Category = "fact"
-		}
-	}
+	normalizeReflectMemories(&result)
 
 	return result, nil
+}
+
+// normalizeReflectMemories enforces what an LLM emission is allowed to claim
+// about itself. It runs after unmarshalling and is deliberately a separate
+// function: these rules are the difference between a bad suggestion and a
+// permanent, machine-made decision, and they deserve to be tested directly
+// rather than only through a harness call.
+//
+// The scope rule is the one that matters. The SQLite tier refuses to promote
+// anything secret-looking, and justified it by saying the LLM tier's prompt
+// excludes secrets — but a prompt is a request, not a guarantee, so the check
+// has to be on the value the model actually returned. A global memory is
+// replayed into every future session in every project: promoting a credential
+// does not contain a leak, it takes one confined to a single project and
+// widens it to all of them.
+func normalizeReflectMemories(result *ReflectionResult) {
+	for i := range result.Memories {
+		m := &result.Memories[i]
+		if m.Importance < 0 {
+			m.Importance = 0
+		}
+		if m.Importance > 1 {
+			m.Importance = 1
+		}
+		if m.Tags == nil {
+			m.Tags = []string{}
+		}
+		if m.Scope != "global" {
+			m.Scope = "project"
+		}
+		// An invalid category would fail the schema CHECK inside
+		// ReplaceNonManual and sink the whole apply transaction — fall back
+		// to the schema default, the same way invalid scope collapses.
+		if !memory.IsValidCategory(m.Category) {
+			m.Category = "fact"
+		}
+		if m.Scope == "global" && looksLikeSecret(strings.ToLower(m.Content)) {
+			m.Scope = "project"
+		}
+	}
 }

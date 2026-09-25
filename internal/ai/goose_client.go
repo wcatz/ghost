@@ -35,15 +35,17 @@ func (c *GooseClient) run(ctx context.Context, prompt string) (string, error) {
 		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
 		defer cancel()
 	}
-	args := []string{"run", "-q"}
+	// --no-profile prevents the configured developer/MCP extensions from
+	// loading; --no-session keeps the untrusted prompt out of Goose's state.
+	args := []string{"run", "-q", "--no-profile", "--no-session"}
 	args = append(args, prompt)
-	cmd, release, _ := harnessCommand(ctx, c.binary, args, stripLLMKeys(os.Environ()), "goose")
+	cmd, release, _ := harnessCommand(ctx, c.binary, args, os.Environ(), harnessGoose)
 	defer release()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("goose run: %w: %s", err, stderr.String())
+		return "", fmt.Errorf("goose run: %w: %s", err, harnessFailureOutput(stdout.String(), stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }

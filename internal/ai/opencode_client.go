@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,7 +116,10 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("opencode run: %w: %s", err, stderr.String())
+		// stderr alone was empty for every one of the 357 failures in
+		// lifecycle.log: opencode reports errors on its JSON stream, not the
+		// console (issue #540).
+		return "", fmt.Errorf("opencode run: %w: %s", err, harnessFailureOutput(stdout.String(), stderr.String()))
 	}
 	return parseOpenCodeOutput(stdout.String())
 }
@@ -153,7 +157,9 @@ func (c *OpenCodeClient) majorVersion(ctx context.Context) int {
 	}
 	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(pctx, path, "--version").Output()
+	probe, release, _ := harnessCommand(pctx, path, []string{"--version"}, os.Environ(), harnessOpencode)
+	defer release()
+	out, err := probe.Output()
 	if err != nil {
 		return 0
 	}
@@ -179,15 +185,44 @@ func OpencodeMajorVersion(out string) int {
 	return 0
 }
 
+// openCodeNoToolsConfig is written into an invocation-owned config tree. The
+// wildcard permission denies every tool, while the explicit tool map keeps
+// older OpenCode versions from exposing a built-in tool that predates the
+// wildcard rule. An empty MCP map and an empty plugin list make the isolation
+// intent visible in the child config as well as in the command line.
+const openCodeNoToolsConfig = `{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "*": "deny",
+    "mcp_*": "deny"
+  },
+  "tools": {
+    "bash": false,
+    "edit": false,
+    "write": false,
+    "read": false,
+    "grep": false,
+    "glob": false,
+    "list": false,
+    "patch": false,
+    "webfetch": false,
+    "task": false,
+    "todowrite": false,
+    "todoread": false
+  },
+  "mcp": {},
+  "plugin": []
+}`
+
 // subprocessEnv builds the opencode child command and environment. It routes
-// through harnessCommand, so the child's working directory and temp-dir
-// variables point at a fresh Ghost-owned scratch dir (see harnessCommand), and
-// then scrubs config state: XDG_CONFIG_HOME is pointed at that same fresh
-// empty dir so the child loads no global opencode config — no Ghost MCP
-// server, no user plugins — and stripLLMKeys removes ANTHROPIC_API_KEY,
-// mirroring CLIClient's stripAPIKey. The child therefore does not inherit the
-// user's configured model; OpenCodeClient supplies its explicit default (or a
-// constructor/environment override) before the scrubbed child starts.
+// through harnessCommand, so the child's working directory, temp-dir
+// variables, and backend-specific environment all follow the same policy as
+// the other three clients. It then replaces the user's home/config roots with
+// an invocation-owned tree and writes a no-tools/no-MCP config. This is
+// deliberately stronger than changing XDG_CONFIG_HOME alone: OpenCode versions
+// differ in which home/config variable they consult, and a user-level MCP
+// server must not be able to start merely because one version ignores the
+// XDG override.
 //
 // Pinning the temp-dir variables matters beyond tidiness: opencode writes a
 // hidden JIT-cache shared object (~4.7 MiB) into its temp dir on every
@@ -199,22 +234,15 @@ func OpencodeMajorVersion(out string) int {
 // dir is removed by the returned cleanup, so the cache dies with it.
 //
 // When the scratch root is unusable, harnessCommand has already logged a WARN;
-// this falls back to the pre-scratch arrangement — a MkdirTemp dir under the
-// inherited temp dir as both config home and temp dir, with cmd.Dir set to
-// os.TempDir() — so a broken data dir degrades visibly instead of failing the
-// run. The returned cleanup is safe to call more than once in both paths.
+// this falls back to a private MkdirTemp tree under the inherited temp dir,
+// while retaining the same allowlisted environment and no-tools config.
 func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string) (*exec.Cmd, func(), error) {
-	base := make([]string, 0, len(os.Environ())+1)
-	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "XDG_CONFIG_HOME=") {
-			continue // replaced by the scrub dir below
-		}
-		base = append(base, kv)
-	}
-
-	cmd, release, ok := harnessCommand(ctx, c.binary, args, base, "opencode")
+	cmd, release, ok := harnessCommand(ctx, c.binary, args, os.Environ(), harnessOpencode)
 	if ok {
-		cmd.Env = stripLLMKeys(append(cmd.Env, "XDG_CONFIG_HOME="+cmd.Dir))
+		if err := configureOpenCodeIsolation(cmd); err != nil {
+			release()
+			return nil, nil, err
+		}
 		return cmd, release, nil
 	}
 
@@ -223,20 +251,158 @@ func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string) (*exe
 		release()
 		return nil, nil, err
 	}
-	cmd.Dir = os.TempDir()
-	env := make([]string, 0, len(base)+len(tempDirKeys)+1)
-	for _, kv := range base {
+	cmd.Dir = dir
+	env := make([]string, 0, len(cmd.Env)+len(tempDirKeys))
+	for _, kv := range cmd.Env {
 		if isTempDirKey(kv) {
-			continue // replaced below so the child's cache lives in the MkdirTemp dir
+			continue // replaced below so the child's cache lives in the private dir
 		}
 		env = append(env, kv)
 	}
-	env = append(env, "XDG_CONFIG_HOME="+dir)
 	for _, key := range tempDirKeys {
 		env = append(env, key+"="+dir)
 	}
-	cmd.Env = stripLLMKeys(env)
+	cmd.Env = env
+	if err := configureOpenCodeIsolation(cmd); err != nil {
+		_ = os.RemoveAll(dir)
+		release()
+		return nil, nil, err
+	}
 	return cmd, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// configureOpenCodeIsolation gives the child a private home and config tree,
+// writes the no-tools policy into it, and replaces inherited duplicates with
+// the exact values the child should see. It copies only an existing OpenCode
+// auth.json (never the user's config, plugins, or MCP definitions) when no
+// OPENCODE_API_KEY is supplied; the credential file is then reachable under the
+// invocation-owned data root without reopening the global config tree.
+func configureOpenCodeIsolation(cmd *exec.Cmd) error {
+	if cmd.Dir == "" {
+		return fmt.Errorf("opencode scratch directory is empty")
+	}
+	home := filepath.Join(cmd.Dir, "home")
+	configDir := filepath.Join(cmd.Dir, "opencode-config")
+	dataDir := filepath.Join(cmd.Dir, "opencode-data")
+	cacheDir := filepath.Join(cmd.Dir, "opencode-cache")
+	stateDir := filepath.Join(cmd.Dir, "opencode-state")
+	runtimeDir := filepath.Join(cmd.Dir, "opencode-runtime")
+	for _, dir := range []string{home, configDir, dataDir, cacheDir, stateDir, runtimeDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("opencode isolated dir %s: %w", dir, err)
+		}
+	}
+	configPath := filepath.Join(configDir, "opencode.json")
+	if err := os.WriteFile(configPath, []byte(openCodeNoToolsConfig), 0o600); err != nil {
+		return fmt.Errorf("opencode isolated config: %w", err)
+	}
+	if err := copyOpenCodeAuth(cmd.Env, dataDir); err != nil {
+		return err
+	}
+
+	env := cmd.Env
+	for key, value := range map[string]string{
+		"HOME":                            home,
+		"USERPROFILE":                     home,
+		"XDG_CONFIG_HOME":                 configDir,
+		"XDG_DATA_HOME":                   dataDir,
+		"XDG_CACHE_HOME":                  cacheDir,
+		"XDG_STATE_HOME":                  stateDir,
+		"XDG_RUNTIME_DIR":                 runtimeDir,
+		"OPENCODE_CONFIG_DIR":             configDir,
+		"OPENCODE_CONFIG":                 configPath,
+		"OPENCODE_CONFIG_CONTENT":         openCodeNoToolsConfig,
+		"OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+	} {
+		env = setHarnessEnvValue(env, key, value)
+	}
+	cmd.Env = env
+	return nil
+}
+
+// copyOpenCodeAuth carries forward only the credential file that OpenCode
+// needs to authenticate. The source is discovered before HOME/XDG_DATA_HOME
+// are replaced, so both a normal login and the evaluation harness's seeded
+// auth.json continue to work without exposing the user's config or MCP tree.
+func copyOpenCodeAuth(env []string, dataDir string) error {
+	if harnessEnvValue(env, "OPENCODE_API_KEY") != "" {
+		return nil
+	}
+	source := openCodeAuthSource(env)
+	if source == "" {
+		return nil
+	}
+	contents, err := os.ReadFile(source)
+	if err != nil {
+		return fmt.Errorf("read opencode auth file: %w", err)
+	}
+	authDir := filepath.Join(dataDir, "opencode")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		return fmt.Errorf("create opencode auth directory: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "auth.json"), contents, 0o600); err != nil {
+		return fmt.Errorf("copy opencode auth file: %w", err)
+	}
+	return nil
+}
+
+func openCodeAuthSource(env []string) string {
+	var candidates []string
+	seen := make(map[string]bool)
+	add := func(parts ...string) {
+		if len(parts) == 0 || parts[0] == "" {
+			return
+		}
+		path := filepath.Join(parts...)
+		if !seen[path] {
+			seen[path] = true
+			candidates = append(candidates, path)
+		}
+	}
+
+	if dataHome := harnessEnvValue(env, "XDG_DATA_HOME"); dataHome != "" {
+		add(dataHome, "opencode", "auth.json")
+	}
+	for _, homeKey := range []string{"HOME", "USERPROFILE"} {
+		if home := harnessEnvValue(env, homeKey); home != "" {
+			add(home, ".local", "share", "opencode", "auth.json")
+			add(home, ".config", "opencode", "auth.json")
+			add(home, "Library", "Application Support", "opencode", "auth.json")
+		}
+	}
+	for _, dataKey := range []string{"LOCALAPPDATA", "APPDATA"} {
+		if dataHome := harnessEnvValue(env, dataKey); dataHome != "" {
+			add(dataHome, "opencode", "auth.json")
+		}
+	}
+	for _, path := range candidates {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return path
+		}
+	}
+	return ""
+}
+
+func harnessEnvValue(env []string, key string) string {
+	for _, kv := range env {
+		name, value, ok := strings.Cut(kv, "=")
+		if ok && strings.EqualFold(name, key) {
+			return value
+		}
+	}
+	return ""
+}
+
+func setHarnessEnvValue(env []string, key, value string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok && strings.EqualFold(name, key) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, key+"="+value)
 }
 
 // tempDirKeys are the variables that steer a child's temporary files — and so
