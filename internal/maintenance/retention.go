@@ -1,10 +1,12 @@
-// Package maintenance owns bounded, best-effort cleanup of Ghost-owned files
-// in the data directory. It deliberately operates on an explicit directory
-// and database path: retention must never create a data directory as a side
-// effect of a status, hook, or failed cleanup pass.
+// Package maintenance owns bounded, best-effort cleanup of Ghost-owned data-dir
+// files and the shared race-safe primitive used to reclaim orphaned export
+// temporaries. Data-dir retention operates on an explicit directory and
+// database path: it must never create a data directory as a side effect of a
+// status, hook, or failed cleanup pass.
 package maintenance
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,15 +16,23 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/procstat"
 )
 
+const openProbeTimeout = 2 * time.Second
+
 var (
-	// openFileProbe is a narrow seam for tests and for the production lsof/
-	// fuser probe. A probe error is fail-closed: the candidate is left alone.
+	// openFileProbe is a narrow seam for tests and for the production native
+	// probe plus lsof/fuser fallback. A probe error is fail-closed: the
+	// candidate is left alone.
 	openFileProbe = detectOpenFile
+
+	runOpenProbeTool = func(ctx context.Context, tool, path string) error {
+		return exec.CommandContext(ctx, tool, path).Run()
+	}
 
 	knownLogNames = []string{
 		"lifecycle.log",
@@ -76,9 +86,9 @@ func RunWithConfig(dataDir, dbPath string, backupCount int, logMaxBytes int64) (
 	return result, errors.Join(errs...)
 }
 
-// backupCandidate is a regular, timestamped pre-migrate copy. The timestamp
-// parsed from the filename breaks ties, while mtime reflects when a copy was
-// actually created if the wall clock moved between migrations.
+// backupCandidate is a regular, timestamped pre-migrate copy. The numeric
+// suffix is the migration timestamp and is authoritative; mtime only breaks a
+// timestamp tie.
 type backupCandidate struct {
 	path  string
 	name  string
@@ -104,7 +114,7 @@ func PrunePreMigrateBackups(dbPath string, keep int) (int, error) {
 	}
 
 	var liveInfo os.FileInfo
-	if info, statErr := os.Lstat(dbPath); statErr == nil {
+	if info, statErr := os.Stat(dbPath); statErr == nil {
 		liveInfo = info
 	}
 	prefix := filepath.Base(dbPath) + ".pre-migrate-"
@@ -115,7 +125,7 @@ func PrunePreMigrateBackups(dbPath string, keep int) (int, error) {
 		}
 		stamp, parseErr := strconv.ParseInt(strings.TrimPrefix(entry.Name(), prefix), 10, 64)
 		if parseErr != nil {
-			return 0, fmt.Errorf("unrecognized pre-migrate backup name %s", entry.Name())
+			continue // prefix debris is not a retention candidate
 		}
 		path := filepath.Join(dir, entry.Name())
 		info, statErr := os.Lstat(path)
@@ -133,11 +143,11 @@ func PrunePreMigrateBackups(dbPath string, keep int) (int, error) {
 		})
 	}
 	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].mtime != candidates[j].mtime {
-			return candidates[i].mtime > candidates[j].mtime
-		}
 		if candidates[i].stamp != candidates[j].stamp {
 			return candidates[i].stamp > candidates[j].stamp
+		}
+		if candidates[i].mtime != candidates[j].mtime {
+			return candidates[i].mtime > candidates[j].mtime
 		}
 		return candidates[i].name > candidates[j].name
 	})
@@ -148,30 +158,22 @@ func PrunePreMigrateBackups(dbPath string, keep int) (int, error) {
 	removed := 0
 	var errs []error
 	for _, candidate := range candidates[keep:] {
-		inUse, probeErr := openFileProbe(candidate.path)
-		if probeErr != nil {
-			// Cannot verify means cannot delete. Leave the file for a later pass.
-			errs = append(errs, fmt.Errorf("probe %s: %w", candidate.path, probeErr))
+		ok, err := removeUnheldFile(candidate.path)
+		if err != nil {
+			errs = append(errs, err)
 			continue
 		}
-		if inUse {
-			continue
+		if ok {
+			removed++
 		}
-		if err := os.Remove(candidate.path); err != nil {
-			if !os.IsNotExist(err) {
-				errs = append(errs, fmt.Errorf("remove %s: %w", candidate.path, err))
-			}
-			continue
-		}
-		removed++
 	}
 	return removed, errors.Join(errs...)
 }
 
 // RotateLogs bounds the known Ghost-owned data-dir logs without deleting an
-// open file. Each oversized regular file is rewritten in place with its newest
-// maxBytes tail, so a process holding the original descriptor is never handed
-// a deleted path. Held files are deferred to a later pass.
+// open file. An oversized file is atomically quarantined first, so a writer
+// that races the probe either follows the new path or is detected on the
+// quarantined inode before it is removed.
 func RotateLogs(dataDir string, maxBytes int64) (int, error) {
 	if maxBytes <= 0 || dataDir == "" {
 		return 0, nil
@@ -179,73 +181,94 @@ func RotateLogs(dataDir string, maxBytes int64) (int, error) {
 	rotated := 0
 	var errs []error
 	for _, name := range knownLogNames {
-		path := filepath.Join(dataDir, name)
-		info, err := os.Lstat(path)
+		ok, err := rotateLog(filepath.Join(dataDir, name), maxBytes)
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			errs = append(errs, fmt.Errorf("stat %s: %w", path, err))
+			errs = append(errs, fmt.Errorf("rotate %s: %w", name, err))
 			continue
 		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			continue
+		if ok {
+			rotated++
 		}
-		if info.Size() <= maxBytes {
-			continue
-		}
-		inUse, probeErr := openFileProbe(path)
-		if probeErr != nil {
-			errs = append(errs, fmt.Errorf("probe %s: %w", path, probeErr))
-			continue
-		}
-		if inUse {
-			continue
-		}
-		if err := rotateLog(path, maxBytes); err != nil {
-			errs = append(errs, fmt.Errorf("rotate %s: %w", path, err))
-			continue
-		}
-		rotated++
 	}
 	return rotated, errors.Join(errs...)
 }
 
-func rotateLog(path string, maxBytes int64) error {
-	file, err := os.OpenFile(path, os.O_RDWR, 0)
+func rotateLog(path string, maxBytes int64) (bool, error) {
+	info, err := os.Lstat(path)
 	if err != nil {
-		return err
-	}
-	defer file.Close() //nolint:errcheck
-	current, err := file.Stat()
-	if err != nil {
-		return err
-	}
-	if current.Size() <= maxBytes {
-		return nil
-	}
-	start := current.Size() - maxBytes
-	tail := make([]byte, maxBytes)
-	if _, err := file.ReadAt(tail, start); err != nil && !errors.Is(err, io.EOF) {
-		return err
-	}
-	if err := file.Truncate(0); err != nil {
-		return err
-	}
-	if len(tail) > 0 {
-		if _, err := file.WriteAt(tail, 0); err != nil {
-			return err
+		if os.IsNotExist(err) {
+			return false, nil
 		}
+		return false, err
 	}
-	return file.Sync()
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= maxBytes {
+		return false, nil
+	}
+	tombstone, err := quarantinePath(path)
+	if err != nil {
+		return false, err
+	}
+	inUse, probeErr := openFileProbe(tombstone)
+	if probeErr != nil {
+		return false, errorsJoinRestore(path, tombstone, probeErr)
+	}
+	if inUse {
+		return false, errorsJoinRestore(path, tombstone, nil)
+	}
+	tail, err := readLogTail(tombstone, maxBytes)
+	if err != nil {
+		return false, errorsJoinRestore(path, tombstone, err)
+	}
+	out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		return false, errorsJoinRestore(path, tombstone, err)
+	}
+	if _, err := out.Write(tail); err != nil {
+		_ = out.Close()
+		_ = os.Remove(path)
+		return false, errorsJoinRestore(path, tombstone, err)
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		_ = os.Remove(path)
+		return false, errorsJoinRestore(path, tombstone, err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(path)
+		return false, errorsJoinRestore(path, tombstone, err)
+	}
+	if err := removeQuarantine(tombstone); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-// ReapStaleProcessFiles removes dead Ghost process claims and orphan lock
-// siblings from the retired per-phase naming scheme. Current lifecycle and
-// Obsidian claim locks are persistent by design, so their lock sidecars are
-// left in place. Liveness is checked before taking a legacy claim lock; a live
-// PID is never removed, and a lock held by another process is left for its
-// owner.
+func readLogTail(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close() //nolint:errcheck
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() <= maxBytes {
+		return nil, nil
+	}
+	start := info.Size() - maxBytes
+	tail := make([]byte, maxBytes)
+	if _, err := file.ReadAt(tail, start); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return tail, nil
+}
+
+// ReapStaleProcessFiles removes only the retired per-phase claim names. The
+// current lifecycle and Obsidian protocols are deliberately outside this
+// reaper: their lock inodes are persistent, their PID files are updated after
+// process start, and a killed lifecycle coordinator can still have phase
+// children running.
 func ReapStaleProcessFiles(dataDir string) (int, error) {
 	if dataDir == "" {
 		return 0, nil
@@ -266,19 +289,16 @@ func ReapStaleProcessFiles(dataDir string) (int, error) {
 		}
 		name := entry.Name()
 		switch {
-		case isGhostPIDName(name):
+		case isLegacyPIDName(name):
 			n, err := removeStaleClaim(filepath.Join(dataDir, name))
 			removed += n
 			if err != nil {
 				errs = append(errs, err)
 			}
-		case isGhostPIDLockName(name):
+		case isLegacyPIDLockName(name):
 			pidName := strings.TrimSuffix(name, ".lock")
-			if !isLegacyPIDName(pidName) {
-				continue // current claim locks are intentionally persistent
-			}
 			if _, statErr := os.Stat(filepath.Join(dataDir, pidName)); statErr == nil {
-				continue // the PID pass owns the paired lock
+				continue // the paired PID pass owns it
 			} else if !os.IsNotExist(statErr) {
 				errs = append(errs, fmt.Errorf("stat %s: %w", pidName, statErr))
 				continue
@@ -288,19 +308,22 @@ func ReapStaleProcessFiles(dataDir string) (int, error) {
 			if err != nil {
 				errs = append(errs, err)
 			}
+		case isLegacyPIDTempName(name):
+			pidName := strings.TrimSuffix(name, ".tmp")
+			if _, statErr := os.Stat(filepath.Join(dataDir, pidName)); statErr == nil {
+				continue // the paired PID pass owns it
+			} else if !os.IsNotExist(statErr) {
+				errs = append(errs, fmt.Errorf("stat %s: %w", pidName, statErr))
+				continue
+			}
+			n, err := removeOrphanTemp(filepath.Join(dataDir, name))
+			removed += n
+			if err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return removed, errors.Join(errs...)
-}
-
-func isGhostPIDName(name string) bool {
-	if name == "obsidian-sync.pid" {
-		return true
-	}
-	if strings.HasPrefix(name, "lifecycle-") && strings.HasSuffix(name, ".pid") && len(name) > len("lifecycle-.pid") {
-		return true
-	}
-	return isLegacyPIDName(name)
 }
 
 func isLegacyPIDName(name string) bool {
@@ -312,24 +335,21 @@ func isLegacyPIDName(name string) bool {
 	return false
 }
 
-func isGhostPIDLockName(name string) bool {
-	return strings.HasSuffix(name, ".pid.lock") && isGhostPIDName(strings.TrimSuffix(name, ".lock"))
+func isLegacyPIDLockName(name string) bool {
+	return strings.HasSuffix(name, ".pid.lock") && isLegacyPIDName(strings.TrimSuffix(name, ".lock"))
+}
+
+func isLegacyPIDTempName(name string) bool {
+	return strings.HasSuffix(name, ".pid.tmp") && isLegacyPIDName(strings.TrimSuffix(name, ".tmp"))
 }
 
 func removeStaleClaim(pidPath string) (int, error) {
-	alive, known, err := claimIsAlive(pidPath)
+	state, known, err := claimState(pidPath)
 	if err != nil {
 		return 0, err
 	}
-	if known && alive {
+	if !known || state != procstat.StateDead {
 		return 0, nil
-	}
-	if !known {
-		if _, statErr := os.Lstat(pidPath); os.IsNotExist(statErr) {
-			return 0, nil
-		} else if statErr != nil {
-			return 0, fmt.Errorf("stat %s: %w", pidPath, statErr)
-		}
 	}
 
 	lockPath := pidPath + ".lock"
@@ -337,74 +357,93 @@ func removeStaleClaim(pidPath string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer lock.Close() //nolint:errcheck
+	lockHeld, lockOpen := true, true
+	defer func() {
+		if lockHeld {
+			_ = unlockProcessLock(lock)
+		}
+		if lockOpen {
+			_ = lock.Close()
+		}
+	}()
 	locked, err := tryLockExclusive(lock)
 	if err != nil {
 		return 0, fmt.Errorf("lock %s: %w", lockPath, err)
 	}
 	if !locked {
-		return 0, nil // another Ghost process owns the claim
+		return 0, nil
 	}
-	defer unlockProcessLock(lock) //nolint:errcheck
 
-	// Re-check under the lock: a claimant may have replaced the file between
-	// the initial liveness read and lock acquisition.
-	alive, known, err = claimIsAlive(pidPath)
+	state, known, err = claimState(pidPath)
 	if err != nil {
 		return 0, err
 	}
-	if known && alive {
+	if !known || state != procstat.StateDead {
 		return 0, nil
 	}
-	inUse, probeErr := openFileProbe(pidPath)
-	if probeErr != nil {
-		return 0, fmt.Errorf("probe PID file %s: %w", pidPath, probeErr)
+	removedPID, err := removeUnheldFile(pidPath)
+	if err != nil {
+		return 0, err
 	}
-	if inUse {
+	if !removedPID {
 		return 0, nil
 	}
-	removed := 0
-	pidExisted := !fileIsMissing(pidPath)
-	if err := removeRegularFile(pidPath); err != nil {
+	removed := 1
+	if removedTemp, err := removeUnheldFile(pidPath + ".tmp"); err != nil {
 		return removed, err
-	}
-	if pidExisted {
+	} else if removedTemp {
 		removed++
 	}
-	_ = removeRegularFile(pidPath + ".tmp")
-	if isLegacyPIDName(filepath.Base(pidPath)) {
-		if err := removeOwnedLock(lockPath, lock); err != nil {
-			return removed, err
-		}
+
+	// Only retired names reach this path. Close the legacy lock before
+	// quarantining its inode; current protocol locks are never candidates.
+	_ = unlockProcessLock(lock)
+	lockHeld = false
+	_ = lock.Close()
+	lockOpen = false
+	if removedLock, err := removeUnheldFile(lockPath); err != nil {
+		return removed, err
+	} else if removedLock {
+		removed++
 	}
 	return removed, nil
 }
 
 func removeOrphanLock(lockPath string) (int, error) {
-	inUse, probeErr := openFileProbe(lockPath)
-	if probeErr != nil {
-		return 0, fmt.Errorf("probe orphan lock %s: %w", lockPath, probeErr)
-	}
-	if inUse {
-		return 0, nil
-	}
 	lock, err := openProcessLock(lockPath)
 	if err != nil {
 		return 0, err
 	}
-	defer lock.Close() //nolint:errcheck
 	locked, err := tryLockExclusive(lock)
 	if err != nil {
+		_ = lock.Close()
 		return 0, fmt.Errorf("lock %s: %w", lockPath, err)
 	}
 	if !locked {
+		_ = lock.Close()
 		return 0, nil
 	}
-	defer unlockProcessLock(lock) //nolint:errcheck
-	if err := removeOwnedLock(lockPath, lock); err != nil {
+	_ = unlockProcessLock(lock)
+	_ = lock.Close()
+	removed, err := removeUnheldFile(lockPath)
+	if err != nil {
 		return 0, err
 	}
-	return 1, nil
+	if removed {
+		return 1, nil
+	}
+	return 0, nil
+}
+
+func removeOrphanTemp(path string) (int, error) {
+	removed, err := removeUnheldFile(path)
+	if err != nil {
+		return 0, err
+	}
+	if removed {
+		return 1, nil
+	}
+	return 0, nil
 }
 
 func openProcessLock(path string) (*os.File, error) {
@@ -422,59 +461,63 @@ func openProcessLock(path string) (*os.File, error) {
 	return file, nil
 }
 
-func claimIsAlive(path string) (alive, known bool, err error) {
+func claimState(path string) (procstat.State, bool, error) {
 	data, readErr := os.ReadFile(path)
 	if readErr != nil {
 		if os.IsNotExist(readErr) {
-			return false, false, nil
+			return procstat.StateDead, false, nil
 		}
-		return false, false, fmt.Errorf("read PID file %s: %w", path, readErr)
+		return procstat.StateUnknown, false, fmt.Errorf("read PID file %s: %w", path, readErr)
 	}
 	pidText, token, haveToken := strings.Cut(strings.TrimSpace(string(data)), ":")
 	pid, parseErr := strconv.Atoi(pidText)
 	if parseErr != nil || pid <= 0 {
-		return false, false, nil
+		return procstat.StateDead, true, nil
 	}
-	return procstat.IsAlive(pid, token, haveToken), true, nil
+	return procstat.Check(pid, token, haveToken), true, nil
 }
 
-func removeRegularFile(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("stat %s: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("refusing to remove non-regular file %s", path)
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove %s: %w", path, err)
-	}
-	return nil
-}
-
-func fileIsMissing(path string) bool {
-	_, err := os.Lstat(path)
-	return os.IsNotExist(err)
+// RemoveFileIfUnheld removes a regular file only after atomically moving it
+// to a private quarantine name and proving that no process holds that inode.
+// It is exported for the Obsidian orphan-temp reaper so it shares the same
+// race-safe deletion boundary as data-dir retention.
+func RemoveFileIfUnheld(path string) (bool, error) {
+	return removeUnheldFile(path)
 }
 
 func detectOpenFile(path string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), openProbeTimeout)
+	defer cancel()
+
 	tool, err := exec.LookPath("lsof")
 	if err != nil {
 		tool, err = exec.LookPath("fuser")
 	}
-	if err != nil {
-		return false, errors.New("neither lsof nor fuser is available")
+	var toolErr error
+	if err == nil {
+		inUse, known, probeErr := probeOpenFileWithTool(ctx, tool, path)
+		if known {
+			return inUse, probeErr
+		}
+		toolErr = probeErr
 	}
-	runErr := exec.Command(tool, path).Run()
+	if inUse, known, nativeErr := nativeOpenProbe(path); known {
+		return inUse, nativeErr
+	}
+	if err != nil {
+		return false, errors.New("neither a native open-file probe nor lsof/fuser is available")
+	}
+	return false, toolErr
+}
+
+func probeOpenFileWithTool(ctx context.Context, tool, path string) (inUse, known bool, err error) {
+	runErr := runOpenProbeTool(ctx, tool, path)
 	if runErr == nil {
-		return true, nil
+		return true, true, nil
 	}
 	var exitErr *exec.ExitError
 	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 {
-		return false, nil
+		return false, true, nil
 	}
-	return false, fmt.Errorf("%s: %w", filepath.Base(tool), runErr)
+	return false, false, fmt.Errorf("%s: %w", filepath.Base(tool), runErr)
 }

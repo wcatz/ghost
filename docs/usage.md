@@ -121,7 +121,7 @@ reflect → resolve → supersede
 
 The phases are disabled by default. When enabled, each phase has a timeout and failures are logged without blocking the hook. The lifecycle log is stored in Ghost's data directory. Keep automatic lifecycle work off until you understand the maintenance model and have a backup strategy.
 
-Ghost's database-open and detached-lifecycle maintenance passes keep the newest three pre-migration database copies by default, bound the known lifecycle/Obsidian logs, and remove only dead process claims and unlocked retired lock sidecars. Configure the limits with `retention.backup_count` and `retention.log_max_bytes`; see the [configuration reference](configuration.md#data-dir-retention).
+Ghost's database-open and detached-lifecycle maintenance passes keep the newest three pre-migration database copies by default, bound the known lifecycle/Obsidian logs, and remove only dead retired per-phase PID/temp/lock claims. Current lifecycle/Obsidian claims are not reaped. Configure the limits with `retention.backup_count` and `retention.log_max_bytes`; see the [configuration reference](configuration.md#data-dir-retention).
 
 ## Obsidian vault mirror
 
@@ -138,6 +138,7 @@ Use `--project myproject` to mirror one project plus global records. The mirror 
 - Vault edits are not imported back into Ghost.
 - A running sync may overwrite hand-edited notes after a database change.
 - A marker directory protects unrelated files from cleanup.
+- Crashed-export temporaries are reclaimed only after a one-hour grace period, an exact generated-name match, and an open-handle check.
 
 Set `obsidian.auto_sync: true` only if you want the SessionStart hook to launch a background sync process.
 

@@ -206,7 +206,7 @@ ghost bench --sweep
 
 ## Data-dir retention
 
-Ghost runs a best-effort retention pass after database opens/migrations and at the start of a detached lifecycle. The detached lifecycle and Obsidian-sync launch paths rotate their logs file-only before opening them, without synchronous database maintenance. The pass keeps the newest configured number of pre-migration database copies, trims the newest tail of known lifecycle/Obsidian logs, and removes only dead Ghost PID claims plus retired per-phase lock sidecars that are not held. The live database, newest backup, and files belonging to a running Ghost process are never removed. `ghost maintenance status` remains a read-only report.
+Ghost runs a best-effort retention pass after database opens/migrations and at the start of a detached lifecycle. The detached lifecycle and Obsidian-sync launch paths rotate their logs file-only before opening them, without synchronous database maintenance. The pass keeps the newest configured number of pre-migration database copies, trims the newest tail of known lifecycle/Obsidian logs, and removes only dead retired per-phase PID/temp/lock claims. Current lifecycle/Obsidian claims and files belonging to a running Ghost process are never removed. Linux and Windows use native handle probes, with `lsof`/`fuser` as a fallback; an unverifiable file is deferred. `ghost maintenance status` uses a no-retention database-open path and remains read-only.
 
 ```yaml
 retention:
@@ -220,7 +220,8 @@ Set either value to `0` (or a negative value) to disable that cleanup. The equiv
 
 Shows the live scratch root usage (bytes, file count) against the configured
 `scratch.max_bytes` budget, followed by the most recent hygiene events — one
-line per run with its timestamp, scratch bytes, and reaped counts:
+line per run with its timestamp, scratch bytes, and reaped counts. The command
+opens the database read-only and does not create the scratch root:
 
 ```bash
 ghost maintenance status

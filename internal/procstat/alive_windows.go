@@ -3,45 +3,49 @@
 package procstat
 
 import (
+	"errors"
+
 	"golang.org/x/sys/windows"
 )
 
-// IsAlive reports whether pid names a running process. Unlike POSIX, Windows
-// aggressively recycles PIDs, so a PID that opens successfully but has already
-// exited (GetExitCodeProcess returns anything but STILL_ACTIVE) is treated as
-// not alive — otherwise a reused PID belonging to an unrelated process would
-// be mistaken for the one that owned the PID file. If haveToken is true, a
-// live PID is additionally required to still carry wantToken as its
-// creation-time token — a mismatch means the OS recycled pid to an unrelated
-// process after the original one exited, which STILL_ACTIVE alone can't
-// distinguish from the original still running. A transient failure to read
-// the fresh token fails open to "alive" rather than flapping a live process
-// to "dead".
-func IsAlive(pid int, wantToken string, haveToken bool) bool {
+// Check reports the strongest process-identity conclusion the platform can
+// prove. Access failures are Unknown, never Dead.
+func Check(pid int, wantToken string, haveToken bool) State {
 	if pid <= 0 || int64(pid) > 0xFFFFFFFF {
-		return false
+		return StateDead
 	}
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
-		return false
+		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+			return StateDead
+		}
+		return StateUnknown
 	}
 	defer windows.CloseHandle(h) //nolint:errcheck
 
 	const stillActive = 259 // STILL_ACTIVE, per the Win32 GetExitCodeProcess docs
-
 	var exitCode uint32
 	if err := windows.GetExitCodeProcess(h, &exitCode); err != nil {
-		return false
+		return StateUnknown
 	}
 	if exitCode != stillActive {
-		return false
+		return StateDead
 	}
 	if !haveToken {
-		return true
+		return StateAlive
 	}
 	token, ok := StartTime(pid)
 	if !ok {
-		return true
+		return StateUnknown
 	}
-	return token == wantToken
+	if token != wantToken {
+		return StateDead
+	}
+	return StateAlive
+}
+
+// IsAlive preserves the historical boolean API while treating an indeterminate
+// probe as alive. Destructive callers should use Check directly.
+func IsAlive(pid int, wantToken string, haveToken bool) bool {
+	return Check(pid, wantToken, haveToken) != StateDead
 }

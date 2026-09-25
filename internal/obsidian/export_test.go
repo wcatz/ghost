@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -257,6 +258,10 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 	// Simulate a crashed write: orphaned tmp inside a managed subtree.
 	stray := filepath.Join(vault, "ghost", "Memories", "foo.md.ghost-tmp-7f3c2a")
 	if err := os.WriteFile(stray, []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * ghostTempMinAge)
+	if err := os.Chtimes(stray, old, old); err != nil {
 		t.Fatal(err)
 	}
 	// A tmp file outside managed subtrees is none of our business.

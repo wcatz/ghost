@@ -3,32 +3,42 @@
 package procstat
 
 import (
+	"errors"
 	"os"
 	"syscall"
 )
 
-// IsAlive reports whether pid names a running process, by sending it signal
-// 0 — this checks existence and permission without actually signaling the
-// process. If haveToken is true, a live PID is additionally required to still
-// carry wantToken as its creation-time token — a mismatch means the OS
-// recycled pid to an unrelated process after the original one exited, which
-// plain signal-0 can't distinguish from the original still running. A
-// transient failure to read the fresh token fails open to "alive" rather than
-// flapping a live process to "dead".
-func IsAlive(pid int, wantToken string, haveToken bool) bool {
+// Check reports the strongest process-identity conclusion the platform can
+// prove. Permission and unsupported-platform errors are Unknown, never Dead.
+func Check(pid int, wantToken string, haveToken bool) State {
+	if pid <= 0 {
+		return StateDead
+	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return false
+		return StateUnknown
 	}
-	if proc.Signal(syscall.Signal(0)) != nil {
-		return false
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
+		if errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrProcessDone) {
+			return StateDead
+		}
+		return StateUnknown
 	}
 	if !haveToken {
-		return true
+		return StateAlive
 	}
 	token, ok := StartTime(pid)
 	if !ok {
-		return true
+		return StateUnknown
 	}
-	return token == wantToken
+	if token != wantToken {
+		return StateDead
+	}
+	return StateAlive
+}
+
+// IsAlive preserves the historical boolean API while treating an indeterminate
+// probe as alive. Destructive callers should use Check directly.
+func IsAlive(pid int, wantToken string, haveToken bool) bool {
+	return Check(pid, wantToken, haveToken) != StateDead
 }

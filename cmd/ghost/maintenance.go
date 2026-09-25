@@ -86,18 +86,23 @@ func runMaintenanceStatus() {
 		view.NoDatabase = true
 		view.Root = "(not created yet)"
 	} else {
-		// The database existing means the data dir exists, so Root() creates
-		// no phantom directory — only the scratch subdir any spawn would make.
-		if root, rErr := scratch.Root(); rErr == nil {
+		// Status must not create the scratch root merely to inspect it.
+		if root, rErr := scratch.RootPath(); rErr == nil {
 			view.Root = root
-			if b, f, sErr := scratch.Size(root); sErr == nil {
+			if _, statErr := os.Stat(root); os.IsNotExist(statErr) {
+				view.Root = "(not created yet)"
+			} else if statErr != nil {
+				view.Root = fmt.Sprintf("(unavailable: %v)", statErr)
+			} else if b, f, sErr := scratch.Size(root); sErr == nil {
 				view.RootBytes, view.RootFiles = b, f
 			}
 		} else {
 			view.Root = fmt.Sprintf("(unavailable: %v)", rErr)
 		}
 
-		db, err := memory.OpenDB(dbPath)
+		// Status is explicitly read-only: schema inspection must not trigger
+		// migrations, retention, or any other database write.
+		db, err := memory.OpenDBReadOnly(dbPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: database: %v\n", err)
 			os.Exit(1)

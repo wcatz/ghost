@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // mustWrite / mustMkdirAll fail the test on setup errors instead of
@@ -106,6 +107,56 @@ consistent:
 	leftovers, _ := filepath.Glob(filepath.Join(dir, "*.ghost-tmp*"))
 	if len(leftovers) != 0 {
 		t.Fatalf("temp files left behind: %v", leftovers)
+	}
+}
+
+func TestPruneLeavesOpenOldGhostTemp(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
+	sub := filepath.Join(root, "proj", "Memories")
+	mustMkdirAll(t, sub)
+	path := filepath.Join(sub, "active.md.ghost-tmp-abc123")
+	mustWrite(t, path, "active")
+	old := time.Now().Add(-2 * ghostTempMinAge)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close() //nolint:errcheck
+
+	if err := prune(root, []string{"proj"}, map[string]string{}, nil); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("open old temp was removed: %v", err)
+	}
+}
+
+func TestPruneLeavesRecentAndNearMissTemps(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
+	sub := filepath.Join(root, "proj", "Memories")
+	mustMkdirAll(t, sub)
+	recent := filepath.Join(sub, "recent.md.ghost-tmp-abc123")
+	nearMiss := filepath.Join(sub, "note.ghost-tmp-draft.md")
+	mustWrite(t, recent, "active")
+	mustWrite(t, nearMiss, "user")
+	old := time.Now().Add(-2 * ghostTempMinAge)
+	if err := os.Chtimes(nearMiss, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := prune(root, []string{"proj"}, map[string]string{}, nil); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Errorf("recent active temp was removed: %v", err)
+	}
+	if _, err := os.Stat(nearMiss); err != nil {
+		t.Errorf("near-miss user filename was removed: %v", err)
 	}
 }
 

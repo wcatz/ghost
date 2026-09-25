@@ -124,9 +124,11 @@ func TestBackupBeforeMigrate(t *testing.T) {
 func TestOpenDBRunsRetentionAfterSuccessfulMigration(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
 	t.Setenv("GHOST_RETENTION_BACKUP_COUNT", "1")
 
-	dbPath := newLegacyDB(t)
+	dbPath := newLegacyDBAt(t, filepath.Join(dataHome, "ghost", "ghost.db"))
 	old := dbPath + ".pre-migrate-1"
 	if err := os.WriteFile(old, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
@@ -143,5 +145,93 @@ func TestOpenDBRunsRetentionAfterSuccessfulMigration(t *testing.T) {
 	matches, _ := filepath.Glob(dbPath + ".pre-migrate-*")
 	if len(matches) != 1 {
 		t.Fatalf("retention kept %d backups, want 1: %v", len(matches), matches)
+	}
+}
+
+func TestOpenDBReadOnlyLeavesArtifactsUntouched(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("GHOST_RETENTION_LOG_MAX_BYTES", "4")
+	t.Setenv("GHOST_RETENTION_BACKUP_COUNT", "1")
+	dataDir := filepath.Join(dataHome, "ghost")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dataDir, "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	logPath := filepath.Join(dataDir, "lifecycle.log")
+	backupPath := dbPath + ".pre-migrate-1"
+	newerBackupPath := dbPath + ".pre-migrate-2"
+	if err := os.WriteFile(logPath, []byte("0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backupPath, []byte("backup"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newerBackupPath, []byte("newer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	statusDB, err := OpenDBReadOnly(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDBWithoutRetention: %v", err)
+	}
+	_ = statusDB.Close()
+	if data, err := os.ReadFile(logPath); err != nil || string(data) != "0123456789" {
+		t.Fatalf("no-maintenance open changed log: data=%q err=%v", data, err)
+	}
+	if _, err := os.Stat(backupPath); err != nil {
+		t.Fatalf("no-maintenance open changed backup: %v", err)
+	}
+	if _, err := os.Stat(newerBackupPath); err != nil {
+		t.Fatalf("no-maintenance open changed newest backup: %v", err)
+	}
+}
+
+func TestOpenDBReadOnlyDoesNotMigrateLegacyDatabase(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	dbPath := newLegacyDBAt(t, filepath.Join(dataHome, "ghost", "ghost.db"))
+
+	db, err := OpenDBReadOnly(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDBReadOnly: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='notifications'`).Scan(&count); err != nil {
+		t.Fatalf("query legacy table: %v", err)
+	}
+	if count != 1 {
+		t.Fatal("read-only open migrated the legacy database")
+	}
+}
+
+func TestOpenDBDoesNotMaintainArbitraryDatabaseParent(t *testing.T) {
+	configuredHome := t.TempDir()
+	otherDir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", configuredHome)
+	stale := filepath.Join(otherDir, "reflect-old.pid")
+	if err := os.WriteFile(stale, []byte("999999999"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	otherDB := filepath.Join(otherDir, "ghost.db")
+	db, err := OpenDB(otherDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("arbitrary database parent was maintained: %v", err)
 	}
 }

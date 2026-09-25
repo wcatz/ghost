@@ -8,8 +8,21 @@
 //
 // The token is opaque: it is never interpreted as wall-clock time or compared
 // across platforms or machines, only for exact equality against a token
-// obtained the same way on the same machine. Both functions fail open to
-// PID-only semantics when the platform cannot supply a token (unsupported OS,
-// unreadable proc entry, permission denied): a transient token-read failure
-// never reports a live process as dead.
+// obtained the same way on the same machine. Check distinguishes unknown
+// access from a proven exit; IsAlive retains the historical fail-open boolean
+// contract for callers that do not need tri-state safety.
 package procstat
+
+// State is the result of a process-identity probe. Unknown is intentionally
+// distinct from Dead: callers that remove files must not treat an inaccessible
+// or unsupported probe as proof that a process exited.
+type State uint8
+
+const (
+	// StateUnknown means the platform could not prove liveness or death.
+	StateUnknown State = iota
+	// StateAlive means the PID and optional creation token identify a live process.
+	StateAlive
+	// StateDead means the PID is proven absent or its creation token is stale.
+	StateDead
+)

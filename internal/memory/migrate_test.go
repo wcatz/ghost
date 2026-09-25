@@ -81,7 +81,14 @@ CREATE TABLE scheduled_jobs (id INTEGER PRIMARY KEY, body TEXT);
 // newLegacyDB writes a legacy-schema database with sample rows and returns its path.
 func newLegacyDB(t *testing.T) string {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	return newLegacyDBAt(t, filepath.Join(t.TempDir(), "ghost.db"))
+}
+
+func newLegacyDBAt(t *testing.T, dbPath string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open legacy db: %v", err)

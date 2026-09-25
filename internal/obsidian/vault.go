@@ -4,11 +4,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
+	"time"
+
+	"github.com/wcatz/ghost/internal/maintenance"
 )
 
-const markerName = ".ghost-vault"
+const (
+	markerName      = ".ghost-vault"
+	ghostTempMinAge = time.Hour
+)
+
+var ghostTempNamePattern = regexp.MustCompile(`^.+\.md\.ghost-tmp-[A-Za-z0-9]+$`)
 
 // readDirFn is swappable so tests can force ensureVault's ReadDir call to
 // fail deterministically — os.Chmod-based fault injection is unreliable
@@ -78,11 +87,17 @@ func writeIfChanged(path, content string) (bool, error) {
 	return true, os.Rename(tmp, path)
 }
 
-// isGhostTempFile recognizes both the original fixed temp suffix and the
-// unique suffix produced by writeIfChanged's os.CreateTemp call.
+// isGhostTempFile recognizes the original fixed temp suffix and the exact
+// generated form used by writeIfChanged's os.CreateTemp call. A broad
+// substring match would delete user files such as note.ghost-tmp-draft.md.
 func isGhostTempFile(path string) bool {
 	name := filepath.Base(path)
-	return strings.HasSuffix(name, ".ghost-tmp") || strings.Contains(name, ".ghost-tmp-")
+	return strings.HasSuffix(name, ".ghost-tmp") || ghostTempNamePattern.MatchString(name)
+}
+
+func ghostTempIsOld(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && time.Since(info.ModTime()) >= ghostTempMinAge
 }
 
 // hasGhostID reports whether a file's frontmatter carries a ghost_id key —
@@ -132,9 +147,10 @@ func hasGhostContent(dir string) bool {
 // ghost_id is not in keep, or whose basename is not the canonical one for
 // that ghost_id (a content edit renamed the slug — the old-slug file is
 // stale even though its ID is still live). All three guards from the spec
-// are enforced. Orphaned *.ghost-tmp files (left by a crashed writeIfChanged)
-// are also reclaimed — but only inside the managed subtrees, behind the
-// marker guard.
+// are enforced. Old, orphaned *.ghost-tmp files (left by a crashed
+// writeIfChanged) are also reclaimed — only inside the managed subtrees,
+// behind the marker guard, and after a grace period that protects an active
+// concurrent writer.
 func prune(root string, subtrees []string, keep map[string]string, knownFolders []string) error {
 	if _, err := os.Stat(filepath.Join(root, markerName)); err != nil {
 		return fmt.Errorf("refusing to prune: %s marker not found in %s", markerName, root)
@@ -155,7 +171,11 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 				return nil
 			}
 			if isGhostTempFile(path) {
-				return os.Remove(path) // orphan from a crashed write
+				if !ghostTempIsOld(path) {
+					return nil // concurrent writer or recently crashed write
+				}
+				_, err := maintenance.RemoveFileIfUnheld(path)
+				return err
 			}
 			if !strings.HasSuffix(path, ".md") {
 				return nil

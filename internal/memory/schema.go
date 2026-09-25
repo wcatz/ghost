@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/maintenance"
 	_ "modernc.org/sqlite"
 )
@@ -294,8 +295,32 @@ CREATE TABLE IF NOT EXISTS maintenance_runs (
 CREATE INDEX IF NOT EXISTS idx_maintenance_runs_at ON maintenance_runs(recorded_at DESC);
 `
 
-// OpenDB opens or creates the SQLite database and runs migrations.
+// OpenDB opens or creates the SQLite database, runs migrations, and performs
+// the best-effort Ghost data-dir retention pass after a successful open.
 func OpenDB(dbPath string) (*sql.DB, error) {
+	return openDB(dbPath)
+}
+
+// OpenDBReadOnly opens an existing Ghost database for inspection without
+// running initSQL, migrations, retention, or any other database write.
+func OpenDBReadOnly(dbPath string) (*sql.DB, error) {
+	if dbPath == ":memory:" {
+		return nil, fmt.Errorf("read-only database open requires a file path")
+	}
+	u := url.URL{Scheme: "file", Opaque: (&url.URL{Path: dbPath}).EscapedPath()}
+	db, err := sql.Open("sqlite", u.String()+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, fmt.Errorf("open read-only database: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping read-only database: %w", err)
+	}
+	return db, nil
+}
+
+func openDB(dbPath string) (*sql.DB, error) {
 	// File paths go through the file: URI form with the path percent-encoded —
 	// a '?' or '#' in the data-dir path (legal in $XDG_DATA_HOME/$HOME) would
 	// otherwise be parsed as the query/fragment separator, silently opening a
@@ -406,12 +431,17 @@ func backupBeforeMigrate(db *sql.DB, dbPath string) error {
 
 // runDataDirRetention is deliberately best-effort. It runs after OpenDB has
 // reached a usable state, never while a migration is still destructive, and
-// never turns cleanup trouble into a failed database open.
+// never turns cleanup trouble into a failed database open. Only the configured
+// Ghost data-dir database is a candidate; generic OpenDB callers are untouched.
 func runDataDirRetention(dbPath string) {
-	if dbPath == ":memory:" {
+	if dbPath == ":memory:" || filepath.Base(dbPath) != "ghost.db" {
 		return
 	}
-	if _, err := maintenance.Run(filepath.Dir(dbPath), dbPath); err != nil {
+	dataDir, err := config.DataDirPath()
+	if err != nil || filepath.Clean(filepath.Dir(dbPath)) != filepath.Clean(dataDir) {
+		return
+	}
+	if _, err := maintenance.Run(dataDir, dbPath); err != nil {
 		slog.Warn("data-dir maintenance failed", "error", err)
 	}
 }

@@ -28,6 +28,22 @@ func writeOwnerDir(t *testing.T, root, name, marker string) string {
 	return dir
 }
 
+func TestRootPathDoesNotCreate(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "scratch")
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+
+	got, err := RootPath()
+	if err != nil {
+		t.Fatalf("RootPath: %v", err)
+	}
+	if got != root {
+		t.Errorf("RootPath = %q, want %q", got, root)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("RootPath created %s: %v", root, err)
+	}
+}
+
 func TestRoot_UsesEnvOverride(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "scratch")
 	t.Setenv("GHOST_SCRATCH_DIR", root)

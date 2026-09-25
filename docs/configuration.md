@@ -112,9 +112,9 @@ retention:
   log_max_bytes: 10485760
 ```
 
-`backup_count` keeps that many newest `ghost.db.pre-migrate-*` copies; the live database and the newest copy are never removed. `log_max_bytes` retains the newest tail of each known data-dir log when it exceeds the cap. A value of `0` (or a negative value) disables that cleanup. Ghost also reaps only dead Ghost process claims and unlocked retired per-phase lock sidecars; a live PID or held lock is left for its owner.
+`backup_count` keeps that many newest `ghost.db.pre-migrate-*` copies; the live database and the newest copy are never removed. `log_max_bytes` retains the newest tail of each known data-dir log when it exceeds the cap. A value of `0` (or a negative value) disables that cleanup. Ghost reaps only dead retired per-phase PID, temporary, and lock claims; current lifecycle/Obsidian claim protocols are left untouched. Linux and Windows use native handle probes, with `lsof`/`fuser` as a fallback; a file whose holder cannot be verified is deferred.
 
-The retention pass runs after a database opens or migrates and at the start of a detached lifecycle. The detached lifecycle and Obsidian-sync launch paths also rotate their logs file-only immediately before opening them; neither path performs synchronous database maintenance. It is best-effort and never creates the data directory just to clean it; `ghost maintenance status` remains a read-only report.
+The retention pass runs after a database opens or migrates and at the start of a detached lifecycle. The detached lifecycle and Obsidian-sync launch paths also rotate their logs file-only immediately before opening them; neither path performs synchronous database maintenance. It is best-effort and never creates the data directory just to clean it. `ghost maintenance status` uses the no-retention database-open path and remains a read-only report.
 
 ## Session injection
 

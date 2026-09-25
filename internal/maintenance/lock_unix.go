@@ -22,9 +22,3 @@ func tryLockExclusive(file *os.File) (bool, error) {
 func unlockProcessLock(file *os.File) error {
 	return syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 }
-
-func removeOwnedLock(path string, _ *os.File) error {
-	// Unlinking while the descriptor is locked is safe on Unix: no other
-	// process can acquire this inode once the stale owner has released it.
-	return os.Remove(path)
-}

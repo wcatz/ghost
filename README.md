@@ -147,7 +147,7 @@ $XDG_DATA_HOME/ghost/ghost.db
 
 It is a plain SQLite file. You can inspect, back up, move, or delete it without a GhostMem-specific export format.
 
-Ghost also keeps the data directory bounded: it retains the newest three pre-migration database copies by default, trims oversized lifecycle/Obsidian logs, and removes only dead Ghost process claims and unlocked retired lock sidecars. Tune `retention.backup_count` and `retention.log_max_bytes` (or their `GHOST_RETENTION_*` environment overrides) in the [configuration reference](docs/configuration.md).
+Ghost also keeps the data directory bounded: it retains the newest three pre-migration database copies by default, trims oversized lifecycle/Obsidian logs, and removes only dead retired per-phase PID/temp/lock claims. Current lifecycle/Obsidian claims and files whose open state cannot be verified are left untouched. Tune `retention.backup_count` and `retention.log_max_bytes` (or their `GHOST_RETENTION_*` environment overrides) in the [configuration reference](docs/configuration.md).
 
 ### What can leave the machine
 

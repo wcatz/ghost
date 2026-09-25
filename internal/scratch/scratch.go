@@ -61,18 +61,28 @@ const ownerFile = ".owner"
 // exactly the shield Open's callers rely on.
 const startNone = "none"
 
+// RootPath returns the configured scratch root without creating it. The
+// permissions are tightened only by Root, after the directory exists.
+func RootPath() (string, error) {
+	root := os.Getenv(envDir)
+	if root == "" {
+		dataDir, err := config.DataDirPath()
+		if err != nil {
+			return "", fmt.Errorf("scratch root: %w", err)
+		}
+		root = filepath.Join(dataDir, "scratch")
+	}
+	return root, nil
+}
+
 // Root returns the scratch root, creating it (0700) if needed. The root is
 // $GHOST_SCRATCH_DIR when set and non-empty, otherwise <dataDir>/scratch. The
 // permissions are tightened explicitly because MkdirAll leaves an existing
 // directory's mode alone and the override may name a pre-existing shared dir.
 func Root() (string, error) {
-	root := os.Getenv(envDir)
-	if root == "" {
-		dataDir, err := config.DataDir()
-		if err != nil {
-			return "", fmt.Errorf("scratch root: %w", err)
-		}
-		root = filepath.Join(dataDir, "scratch")
+	root, err := RootPath()
+	if err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return "", fmt.Errorf("scratch root %s: %w", root, err)

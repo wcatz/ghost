@@ -312,7 +312,7 @@ audit it, and context metrics only make sense once stages 2–8 are one pipeline
 | Issue | Why it is P3 |
 |---|---|
 | [#558](https://github.com/wcatz/ghost/issues/558) | Release signing: checksums are published but never signed, so `ghost upgrade` cannot verify provenance; gated on the upgrade path being worth a signature format |
-| [#542](https://github.com/wcatz/ghost/issues/542) | Data-dir growth (pre-migrate backups, unrotated logs, stale lock files) — becomes tractable once #586 gives backups a retention policy |
+| [#542](https://github.com/wcatz/ghost/issues/542) | Data-dir growth (pre-migrate backups, unrotated logs, stale retired per-phase lock files) — bounded retention implemented; #586 remains separate backup/export work |
 | [#552](https://github.com/wcatz/ghost/issues/552) / [#545](https://github.com/wcatz/ghost/issues/545) / [#546](https://github.com/wcatz/ghost/issues/546) | Harness env allowlist and the two reflection/resolution privilege findings; the adversarial fixtures in #585 are the regression net |
 
 Team mode (Part 4) and compliance controls (Part 5) remain gated on real demand
