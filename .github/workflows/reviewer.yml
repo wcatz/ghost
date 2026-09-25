@@ -312,7 +312,11 @@ jobs:
           git config --local --remove-section 'http.https://github.com/' 2>/dev/null || true
 
           gh pr view "$PR_NUMBER" --json title --jq .title > pr.title
-          gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid > pr.head
+          # Record the commit actually checked out, not a second API read: a
+          # push between checkout and that read would otherwise label a
+          # review of H1 as H2, and the later head-freshness checks (which
+          # compare pr.head to the live head) would pass for the wrong commit.
+          git rev-parse HEAD > pr.head
           # Review only what changed since the last review. The marker is
           # written into the review body by build_review(); reading it back
           # keeps this independent of the summary comment (phase 4).
@@ -331,11 +335,30 @@ jobs:
               | capture("<!-- ghost-review:(?<sha>[0-9a-f]{7,40}) -->")?.sha]
               | last // empty' 2>/dev/null | tail -n 1 || true)"
 
-          if [ -n "$LAST_SHA" ] && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
+          # Decide incremental vs full from the local snapshot. An incremental
+          # diff (LAST_SHA..HEAD) is only the PR's own work when the base has
+          # not moved since LAST_SHA, i.e. the merge-base is an ancestor of
+          # LAST_SHA. After a base merge that range carries base changes the
+          # PR never made: the model reviews them and GitHub rejects comments
+          # on them ("Path could not be resolved"). So a moved base, or a
+          # merge-base that cannot be computed, means a full review. The full
+          # diff is taken locally too (merge-base..HEAD, as GitHub diffs a PR)
+          # so it covers exactly the checked-out head recorded in pr.head.
+          BASE_OID="$(gh pr view "$PR_NUMBER" --json baseRefOid --jq .baseRefOid)"
+          MERGE_BASE=""
+          if git cat-file -e "${BASE_OID}^{commit}" 2>/dev/null; then
+            MERGE_BASE="$(git merge-base "$BASE_OID" HEAD 2>/dev/null || true)"
+          fi
+          if [ -n "$LAST_SHA" ] && [ -n "$MERGE_BASE" ] \
+            && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null \
+            && git merge-base --is-ancestor "$MERGE_BASE" "$LAST_SHA"; then
             echo "incremental review: ${LAST_SHA}..HEAD"
             git diff "${LAST_SHA}" HEAD > pr.diff
+          elif [ -n "$MERGE_BASE" ]; then
+            echo "full review (no usable prior marker, or the base moved since it)"
+            git diff "$MERGE_BASE" HEAD > pr.diff
           else
-            echo "full review (no usable prior marker)"
+            echo "full review (merge-base unavailable; using the API diff)"
             gh pr diff "$PR_NUMBER" > pr.diff
           fi
 
