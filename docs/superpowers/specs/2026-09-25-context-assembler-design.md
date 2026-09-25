@@ -130,14 +130,14 @@ type Request struct {
     ProjectID string               // "" only with SourceAllProjects
     Query     string               // "" = passive mode, see §2 stage 1
     Scope     map[string]string    // nil = no scope predicate
-    Category  string               // "" = any
+    Category  string               // "" = any; stage 3 membership, never post-closure
     Source    Source
     Budget    Budget
     QueryVec  []float32            // nil → FTS-only; the caller embeds
     Explain   bool
     Params    *memory.SearchParams // nil → DefaultSearchParams() with the store's
                                    // configured MinSimilarity re-applied on top
-    Now       time.Time            // required; never time.Now() inside
+    Now       time.Time            // required, and honoured end to end — see below
 }
 
 type Result struct {
@@ -230,7 +230,7 @@ resembles this".
 `memory.Store` gets a `Candidates` method wrapping the existing
 `SearchFTS`/`SearchVector`/`filterVectorFloor`/`FuseAndSelectWindow`/`decayRank`
 calls and returning the window **plus** the discarded tail; the hook gets a
-read-only variant over its own handle. Three consequences:
+read-only variant over its own handle. Four consequences:
 
 - **Scoring stays inside `memory`.** `decayRank` (`vector.go:332`) is
   unexported and stays that way; `internal/context` never calls it. Stage 1's
@@ -248,19 +248,35 @@ read-only variant over its own handle. Three consequences:
   bare defaults, which would silently disable every non-zero user setting. The
   regression test sets a non-zero `search.min_similarity` and asserts rows below
   it are still dropped.
-
+- **`Request.Now` is honoured everywhere, and that costs a small storage change.**
+  A required clock is meaningless if the primitives below call `time.Now()`
+  themselves, and they do — five times in `vector.go` (lines 425, 448, 460, 567,
+  577) — while `DecayRankingSQL` hard-codes `julianday('now')` (`store.go:1089`,
+  `1091`). A `Candidates` that delegates to them would rank against the wall
+  clock and then stamp the trace with `Request.Now`, and the two would disagree.
+  So `Candidates` passes `Request.Now` down: `decayRank` already takes a `now`
+  parameter, so the Go path is already bound-able; `DecayRankingSQL` needs its two
+  `julianday('now')` calls replaced by a bound `?` parameter, which changes that
+  exported constant's signature. The hook shows the pattern it wants —
+  `hook.go:470-473` captures `now` once and re-scores in Go *specifically* to
+  avoid clock drift between the SQL rank and the Go rank. `Candidates` makes that
+  unconditional, and the regression test is that two `Assemble` calls with
+  different `Now` values and identical data produce different `AgeDays` and
+  `DecayFactor` and identical `Base` scores.
 
 ## Decision 2 — The nine stages
 
 Order is fixed and load-bearing: **every filter precedes window closure**, which
-is the invariant #573 and #581 are really about.
+is the invariant #573 and #581 are really about. That applies to `category` just
+as much as to `scope` — today's category post-filter has the same defect #573
+found in the scope one, and the pipeline must not import it.
 
 ```text
   Request
     │
     ├─1 retrieve      Candidates() → widened, untrimmed set
     ├─2 validity      drop expired / not-yet-valid            ── membership
-    ├─3 scope         ScopeMatches + project bucket           ── membership
+    ├─3 predicates    project membership, category, scope     ── membership
     ├─4 provenance    bounded multiplier                      ── score
     ├─5 conflicts     sink superseded; split contradicts      ── membership+order
     ├─6 dedup         collapse duplicate/near-dup             ── order
@@ -272,10 +288,10 @@ is the invariant #573 and #581 are really about.
 
 | # | Stage | Exists today | Where | Action |
 |---|---|---|---|---|
-| 1 | retrieve | yes, but query-only | `SearchHybridParams` `vector.go:439`; `fuseAndRank:400`; `decayRank:332`; `FuseAndSelectWindow` (#591); passive rank path `GetTopMemories` `store.go:1097` + `DecayRankingSQL:1083` | **Keep all of it in `memory`.** New `Candidates` returns the widened set *with* scoring already applied (see the three consequences above). **Two modes**: `Request.Query != ""` is the hybrid path; `Request.Query == ""` is the passive path, which is what session-start and project-context need and what no current unified function serves. |
+| 1 | retrieve | yes, but query-only and clock-unbound | `SearchHybridParams` `vector.go:439`; `fuseAndRank:400`; `decayRank:332`; `FuseAndSelectWindow` (#591); passive rank path `GetTopMemories` `store.go:1097` + `DecayRankingSQL:1083` | **Keep all of it in `memory`.** New `Candidates` returns the widened set *with* scoring already applied and `Request.Now` honoured (see the four consequences above). **Two modes**: `Request.Query != ""` is the hybrid path; `Request.Query == ""` is the passive path, which is what session-start and project-context need and what no current unified function serves. |
 | 2 | validity | **no** | columns `valid_from`/`valid_until`/`verified_at` are inert (#575) | **New.** `valid_until < now` → drop; `valid_from > now` → drop; both NULL → valid. `verified_at` NULL sets an `unverified` *flag only*, no penalty in v1 (see the last decision below). |
-| 3 | scope | half | `memory.ScopeMatches` is already an exported pure predicate; the *loop* is `mcpserver.go:652-663` | **Move the loop** into stage 3, over the widened set. Project membership stays in SQL (both legs already do `project_id = ? OR '_global'`); the stage records the verdict per row. |
-| 4 | provenance | **no** | `confidence` can never be non-NULL (#575); `agent` written, never read | **New stage, identity by default.** Ship the stage and the bounded multiplier with the multiplier pinned to 1.0 until #575 has writers. |
+| 3 | predicates (project, category, scope) | half | `memory.ScopeMatches` is already an exported pure predicate; the *loops* are `mcpserver.go:627-639` (category) and `652-663` (scope) | **Move both loops** into stage 3, over the widened set, and **carry `Request.Category` into `CandidateRequest`** so the SQL legs can over-fetch on it. Neither `SearchFTS` nor `SearchVector` accepts a category today, so a `Candidates` that ignored it would either drop `ghost_memory_search`'s category filter or reintroduce the post-closure defect #573 found in the scope one. Project membership stays in SQL (both legs already do `project_id = ? OR '_global'`); the stage records all three verdicts per row. |
+| 4 | provenance | **no consumer** | the column *is* writable — `Store.Create` persists `Memory.Confidence` (`store.go:767`) and `UpsertWithOptions` persists `Provenance.Confidence` (`store.go:1019`, `1056`), and a test stores 0.9 — but no **product tool** sets it (#575), and `agent` is written by `ghost_memory_save` and read by nothing | **New stage, identity by default.** Ship the stage and the bounded multiplier with the multiplier pinned to 1.0 until #575 has writers. Note the column is not *empty* on every store: rows written by import, by a direct `Store.Create` caller, or by a test can already carry a value, so stage 4 must define what a non-NULL `confidence` means **before** it is allowed to move any score — the test for that is a seeded row with `confidence = 0.1` that must rank identically to `NULL` while the multiplier is 1.0. |
 | 5 | conflicts | partially | `demoteSuperseded` `vector.go:262` + `SupersedePenalties` `demotion.go:106`; `contradicts` appears **only** in the schema CHECK (`schema.go:240`, `migrate.go:273`) — no code writes or reads it | **Move the reorder** into stage 5, fed from `CandidateSet.Edges`. **Add** the contradicts-pair rule, gated on a fixture that actually contains such edges (see below). |
 | 6 | dedup | yes | `demoteNearDuplicates` `demotion.go:163` + `DemotionPenalties:34` + `StableDemote:90` | **Move** into stage 6, fed from `CandidateSet.Edges`. Reorder stays membership-preserving; the trace records the collapse set. |
 | 7 | diversity | **no** | — | **New**, default no-op (§ below). |
@@ -356,8 +372,8 @@ when there *was* a question. Passive sources have no `Query` and no `QueryVec`
 (§2 stage 1), a relevance floor has nothing to measure, and applying the query
 table to them would mark every successful session start `weak`, which is worse
 than useless. `not_applicable` is the honest value: no relevance claim was made,
-so none is qualified. The floor arms are defined only for query mode, and
-`explain` states which mode ran so a reader is never guessing.
+so none is qualified. `Trace.Mode` records which rule ran, so a reader of an
+explain payload is never guessing.
 
 ### Thresholds, and their inputs
 
@@ -379,8 +395,28 @@ default `0.0`, i.e. disabled. It cannot default on: `search.min_similarity` is
 cosine floor, so there is no measured value to inherit, and inventing one would
 be exactly the unevidenced number #561 exists to eliminate. PR 4 ships the key;
 PR 7 sets it from the LongMemEval abstention subset, before/after in the body.
-Arm A alone already makes the outcome machine-readable, which is #580's actual
-requirement.
+
+**Arm A is a floor only when a vector leg actually ran.** This closes a hole the
+first draft of this section contradicted itself on. With `QueryVec == nil` — no
+embedder, or an embedding failure — arm B has nothing to measure, so an FTS hit
+at rank 4 would fall through both arms and be labelled `weak` with reason
+`below_floor`. That is precisely what #580 forbids: "when the vector backend is
+unavailable, FTS-only hits remain `answerable` and the reason never claims below
+floor." So:
+
+```text
+vector leg attempted and produced results  → both arms apply; below_floor is reachable
+vector leg did not run (QueryVec nil, or  → arm A is a relevance NOTE, not a gate.
+  embedder unavailable/failed)              Any admitted row is answerable, with
+                                           reason no_vector_leg. Never below_floor.
+```
+
+`LegStatus.Attempted` distinguishes "the backend was never there" from "the
+backend answered and found nothing", and the second case *does* leave `below_floor`
+reachable — an FTS rank-4 hit plus a vector leg that returned nothing is a
+genuinely weak result and saying so is the product working. The regression test is
+a strong FTS hit at rank ≥ 4 with `QueryVec == nil`, which must come back
+`answerable` / `no_vector_leg`.
 
 **`weak` annotates; it does not withhold.** A `weak` result returns its items
 *and* the abstention line. Withholding would be a ranking change, and
@@ -423,8 +459,15 @@ items — #580's last AC. **Session-start prints neither**, for the same reason 
 passive rule has no `weak`: passive rows make no relevance claim to qualify, and
 a "this might be wrong" banner on every session start trains the agent to ignore
 it. The hook's empty block stays *absent*, not apologetic; the outcome lives in
-`Trace` and in `ghost context --explain`, and the block's existing "N of M shown"
-line is where a partial block announces itself.
+`Trace`, and the block's existing "N of M shown" line is where a partial block
+announces itself.
+
+The trace is inspected via a `ghost context --explain` flag that **does not exist
+today**: `runContext` (`cmd/ghost/session.go:18-30`) parses only `--cwd` and
+silently ignores anything else, so the diagnostic this section promises would
+otherwise be a documentation of a command that quietly does nothing. Adding the
+flag is part of migration PR 5, alongside the `Trace` → payload projection. Until
+it lands, `explain:true` on `ghost_memory_search` is the only trace surface.
 
 ### Honest absence (#573)
 
@@ -561,11 +604,11 @@ widened window it returns does not exist on `main`.
 
 | # | Branch / title | Closes | Bench expectation |
 |---|---|---|---|
-| 1 | `feat(context): internal/context seam; scope filters before window closure` | **#573** | **Neutral by construction.** The seam delegates to the same legs; scope moves ahead of the truncation and the window widens for `scope` as it already does for `category`. The scored path is byte-identical for unscoped queries (the fixture's queries are unscoped), so both tables must be *equal*, not merely within 0.005. Also carries the configured-floor regression test from §1. |
+| 1 | `feat(context): internal/context seam; scope and category filter before window closure` | **#573** (and category's half) | **Neutral by construction.** The seam delegates to the same legs; both post-filters move ahead of the truncation and the window widens for either. The scored path is byte-identical for unscoped, uncategorised queries (the fixture's queries are both), so both tables must be *equal*, not merely within 0.005. Carries three named regression tests: the configured floor with a non-zero `search.min_similarity`, `Request.Now` bounding `AgeDays`/`DecayFactor`, and `Candidates` returning strictly more rows than the current path. |
 | 2 | `feat(mcpinit): render and apply scope on the session-start surface` | **#577** | Not applicable — injection is not scored by `ghost bench`. Gate is behavioural: the new `injection.session_scope` key defaults to unset, so the default is a no-op and the change is rendering plus one opt-in predicate. |
 | 3 | `feat(memory): write validity, confidence and provenance from the tools` | **#575** | **Neutral.** Writers only. Nothing reads `confidence` for ranking until PR 6's stage 4 is enabled, which it is not. Includes `Item`/`formatMemories` gaining the fields so they are *visible* before they are *weighted*. |
-| 4 | `feat(context): abstention is an outcome, not an empty list` | **#580** | **Neutral by construction** — `weak` annotates, so no row is withheld. Arm A is a rank ≤ 3 gate on a leg that already exists; passive sources get `answerable`/`not_applicable` and never `weak`. Arm B ships disabled. |
-| 5 | `feat(memory): explain reports the assembler's own decisions` | **#583** (and the class in #571) | Not applicable — explain is a read-only diagnostic and never fed a scored result. The mutation check is on the invariant test: restore the local re-derivation in `explain.go` and `explain_rrf_equals_ordering_score` must fail. |
+| 4 | `feat(context): abstention is an outcome, not an empty list` | **#580** | **Neutral by construction** — `weak` annotates, so no row is withheld. Arm A is a rank ≤ 3 gate that applies *only* when the vector leg ran; passive sources get `answerable`/`not_applicable` and never `weak`. Arm B ships disabled. Regression tests: a rank-≥4 FTS hit with `QueryVec == nil` is `answerable`/`no_vector_leg`; a rank-0 FTS hit is `answerable` with no abstention line. |
+| 5 | `feat(memory): explain reports the assembler's own decisions, and `ghost context --explain` exists` | **#583** (and the class in #571) | Not applicable — explain is a read-only diagnostic and never fed a scored result. The mutation check is on the invariant test: restore the local re-derivation in `explain.go` and `explain_rrf_equals_ordering_score` must fail. Also adds the `--explain` flag to `runContext` (`cmd/ghost/session.go:18`), which today parses only `--cwd` and silently ignores everything else. |
 | 6 | `feat(context): conflict, dedup, diversity and budget stages` | **#581** (remaining ACs) | **At risk — the gated one, and partly unmeasurable.** The `contradicts` rule is the only membership change, and no corpus Ghost can score today contains such an edge (§2). So PR 6 must **first add a contradicts fixture** to the built-in dataset, show the rule firing on it, and only then claim neutrality on the rest. The diversity quota defaults to off. Paste both tables and the fixture diff. |
 | 7 | `feat(bench): context-quality metrics` | **#582** | Not applicable — measurement only, reported not gating. This is the PR that sets `context.abstain_cosine` from the abstention subset, with the before/after in the body. It cannot validate the contradicts rule either: LongMemEval and LoCoMo ingest via `Store.Create` and create no links, so PR 6's fixture is the only contradicts evidence that will exist. |
 
@@ -621,6 +664,19 @@ an LLM reranker, a two-pass retrieve — edits one slice.
   re-creates #573 inside the new package. The test is that `Candidates` returns
   strictly more rows than the current path for the same inputs, and PR 1's body
   shows the counts.
+- **Bounding the clock changes an exported constant.** `DecayRankingSQL` is
+  exported and shared with the hook's `ORDER BY`, so replacing its two
+  `julianday('now')` calls with a bound parameter is a signature change to a
+  shared primitive mid-migration. That is deliberate — an unbounded clock means
+  the trace and the ranking can disagree, which is the failure this whole design
+  exists to prevent — but it is a hot-file edit and it must land in PR 1, not
+  drift into a later one.
+- **Moving `category` into the pipeline is a behaviour change users can see.**
+  Today the category filter is lossy over an unwidened window (#573's mechanism,
+  applied to a different argument) and its zero result drops the incompleteness
+  caveat. Fixing it means a previously-empty scoped-category search can start
+  returning rows. That is the correct direction and still a visible change, so
+  PR 1's body should show one before/after.
 - **Abstention thresholds without comparability.** #580 records that the
   LongMemEval abstention subset is only comparable after #322/#561, so arm B
   ships off. If arm A alone proves insufficient, the honest response is a
