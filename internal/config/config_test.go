@@ -876,6 +876,62 @@ func TestFallbackConfig_BadEnvValueDegrades(t *testing.T) {
 	}
 }
 
+// TestFallbackConfig_UndecodableGenericEnvValue pins that a GHOST_* value the
+// generic provider cannot weakly convert yields the compiled defaults, never a
+// near-zero Config. These four keys have no envOverrides entry, so loadEnvLayer
+// does not see the failure — it surfaces at the decode, and returning the
+// partial Config would start the server with embeddings and linking off, a zero
+// demotion threshold, and reflection.lifecycle_timeout_minutes=0: the unbounded
+// lifecycle the defaults deliberately avoid.
+func TestFallbackConfig_UndecodableGenericEnvValue(t *testing.T) {
+	// Only the generic-mapped keys belong here. A key with an envOverrides entry
+	// (GHOST_REFLECTION_LIFECYCLE_TIMEOUT_MINUTES, say) is caught earlier, by
+	// loadEnvLayer's own parser, and is reported by variable name instead.
+	cases := []struct {
+		envKey, value, wantKey string
+	}{
+		{"GHOST_LINKING_THRESHOLD", "high", "linking.threshold"},
+		{"GHOST_EMBEDDING_DIMENSIONS", "abc", "embedding.dimensions"},
+		{"GHOST_EMBEDDING_ENABLED", "yes", "embedding.enabled"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.envKey, func(t *testing.T) {
+			isolateConfig(t)
+			t.Setenv(tc.envKey, tc.value)
+			writeUserConfig(t, malformedYAML)
+			warnings := captureConfigWarnings(t)
+
+			cfg := LoadForHook()
+			if cfg == nil {
+				t.Fatal("LoadForHook() = nil")
+			}
+			// Every value below is one the compiled defaults set. A near-zero
+			// Config would fail each of them.
+			if !cfg.Embedding.Enabled || cfg.Embedding.Dimensions != 768 {
+				t.Errorf("embedding = %+v, want the compiled default (768 dimensions, enabled)", cfg.Embedding)
+			}
+			if !cfg.Linking.Enabled || cfg.Linking.Threshold != 0.70 || cfg.Linking.DemotionThreshold != 0.90 {
+				t.Errorf("linking = %+v, want the compiled defaults", cfg.Linking)
+			}
+			// The one that matters most: 0 disables the bound entirely.
+			if cfg.Reflection.LifecycleTimeoutMinutes != 60 {
+				t.Errorf("reflection.lifecycle_timeout_minutes = %d, want the compiled default 60 (0 means unbounded)",
+					cfg.Reflection.LifecycleTimeoutMinutes)
+			}
+			if cfg.Scratch.MaxBytes != 512*1024*1024 {
+				t.Errorf("scratch.max_bytes = %d, want the compiled default 512 MiB", cfg.Scratch.MaxBytes)
+			}
+			// The bad value must be reported, not swallowed. koanf's decode error
+			// names the config key, not the variable — mapping a variable back to
+			// a key needs the allowlist docs/configuration.md explains we do not
+			// have, so the key is what the user is given.
+			if !strings.Contains(warnings.String(), tc.wantKey) {
+				t.Errorf("warning %q must name the unreadable key %s", warnings.String(), tc.wantKey)
+			}
+		})
+	}
+}
+
 // TestIsolateConfig_ClearsConfigEnvVars makes the helper's claim testable: a
 // host GHOST_* variable must not reach an assertion that a compiled default
 // holds. The names are derived from the two env layers, so a variable added

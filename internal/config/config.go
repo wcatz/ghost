@@ -326,22 +326,48 @@ func LoadForHook() *Config {
 // A GHOST_* value that cannot be read is reported and skipped rather than
 // returned as an error, because this path has no way to fail; the variables
 // applied before it are kept.
+//
+// It never returns a near-zero Config. Merging the environment in makes the
+// unmarshal step reachable for a reason the defaults-only version did not have:
+// koanf's generic env provider stores every value as a string, so one that
+// cannot be weakly converted to its field's type (GHOST_EMBEDDING_DIMENSIONS=abc)
+// fails the whole decode. Returning that partial Config would start the server
+// with embeddings and linking off, a zero demotion threshold, and — worst —
+// reflection.lifecycle_timeout_minutes=0, the unbounded lifecycle the compiled
+// defaults exist to avoid. So a decode failure drops the environment and keeps
+// the defaults, loudly.
 func FallbackConfig() *Config {
-	cfg := &Config{}
-	k := koanf.New(".")
-	if err := k.Load(confmap.Provider(defaults, "."), nil); err == nil {
-		if err := loadEnvLayer(k); err != nil {
-			warnf("%v — using the rest of the environment", err)
-		}
-		if err := k.Unmarshal("", cfg); err == nil {
-			return cfg
-		}
+	if cfg, ok := decodeFallback(loadEnvLayer); ok {
+		return cfg
 	}
-	// Unreachable for the literal defaults map above; still fill in the two
-	// values the fallback paths read rather than returning a zero Config.
+	// The defaults map is a literal that always decodes, so this cannot fail
+	// either; the two fills are belt and braces for a nil deref, not a path
+	// anyone should reach.
+	cfg, _ := decodeFallback(func(*koanf.Koanf) error { return nil })
 	cfg.Injection = DefaultInjectionConfig()
 	cfg.Scratch.MaxBytes = DefaultScratchMaxBytes
 	return cfg
+}
+
+// decodeFallback builds the Config from the compiled defaults with env applied
+// through applyEnv, reporting whether the result decoded. applyEnv is a
+// parameter so the env-free retry does not have to undo anything koanf already
+// merged.
+func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
+	k := koanf.New(".")
+	if err := k.Load(confmap.Provider(defaults, "."), nil); err != nil {
+		warnf("compiled defaults are unusable: %v", err)
+		return nil, false
+	}
+	if err := applyEnv(k); err != nil {
+		warnf("%v — using the rest of the environment", err)
+	}
+	cfg := &Config{}
+	if err := k.Unmarshal("", cfg); err != nil {
+		warnf("%v — using the built-in defaults", err)
+		return nil, false
+	}
+	return cfg, true
 }
 
 // warnSink is where configuration warnings go. It is atomic because the sink is
