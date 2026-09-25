@@ -28,7 +28,7 @@
 - Memory categories: architecture, decision, pattern, convention, gotcha, dependency, preference, fact
 - Time-decay scoring: convention/preference/fact never decay; architecture/pattern 45-day; decision/gotcha/dependency 30-day
 - Empty-set guard: never replace all memories with empty reflection output
-- Project lookup: path-prefix match (longest wins) OR basename name fallback; path-shaped MCP saves prefer the observed Git remote and may bind it to one uniquely named, unclaimed project
+- Project lookup: path-prefix match (longest wins) OR exact repository remote OR basename name fallback — a basename match needs a unique name, a recorded path containing the session's directory, and no remote conflict; a name-shaped input skips those checks, and a project with no recorded location is reached by name only. A path-shaped MCP save detects the checkout's Git remote and may bind it to one uniquely named, unclaimed project
 - Global memories: `_global` project, included in every project's context
 - Source provenance: `manual` marks direct user material; `builtin` marks Ghost-shipped pinned rules and is never presented as user-authored
 - Reflection promotion: cross-project candidates stay project-scoped by default; `ghost reflect --promote-globals` opts into `_global`, and the project replacement plus global writes share one transaction

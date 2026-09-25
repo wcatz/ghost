@@ -34,7 +34,11 @@ If a choice was made after considering alternatives, record a decision rather th
 
 ## Projects and global memory
 
-Agents should identify projects by the name reported for the current session. Ghost resolves a checkout through its longest recorded path prefix. For compatibility with clients that supply a path-shaped `project_id` on a save, Ghost also detects the checkout's normalized Git remote so worktrees and moved checkouts remain one project. If the project was first created under its plain name and has no recorded remote yet, the compatibility path binds the remote only when the repository name identifies exactly one unclaimed project; ambiguous or conflicting names are never guessed.
+A project is normally identified by the directory where the agent is working. Ghost resolves projects by longest path prefix first, then by repository remote, then by basename. A basename match is accepted only when the name is unique, the recorded path contains the session's directory, and no repository remote contradicts it. This keeps worktrees and moved checkouts associated with the intended project.
+
+For compatibility with clients that supply a path-shaped `project_id` on a save, Ghost also detects the checkout's normalized Git remote, so worktrees and moved checkouts remain one project. If the project was first created under its plain name and has no recorded remote yet, that path binds the remote only when the repository name identifies exactly one unclaimed project; ambiguous or conflicting names are never guessed.
+
+A project created over MCP has no recorded location — a name was all it was given — and a session directory deliberately does not resolve it. Adopting whichever directory happened to start a session would let an unrelated clone claim the project and read its memories, which is the failure this rules out. Name the project instead (every MCP tool takes a name), or give it a location once by saving from the real checkout: the recorded path or repository remote is what the path rules can then agree with. Until a project has one, a session in its directory reports no match, and the Stop hook's lifecycle work — reflection, consolidation, resolve — does not run for it either, because it resolves the same way.
 
 Project-specific knowledge belongs in that project. Use the special `_global` project for preferences and facts that should apply everywhere, such as a preferred validation workflow or a personal communication preference. Use `ghost_search_all` when the relevant knowledge might be stored under another project.
 

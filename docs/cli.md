@@ -149,7 +149,7 @@ Moves all records from the old project into the surviving project while preservi
 ghost project merge old-name new-name
 ```
 
-Both arguments accept a project name, ID, path-prefix match, or basename match. The command refuses to merge a project into itself.
+Both arguments accept a project name, ID, path-prefix match, or basename match. A name carried by two projects resolves to neither, and a basename match is accepted only when the recorded path contains the given directory. The command refuses to merge a project into itself.
 
 ## Obsidian
 
