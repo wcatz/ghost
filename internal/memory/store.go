@@ -1168,9 +1168,24 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	}
 	c := candidates[0]
 
-	if filepath.IsAbs(input) && filepath.IsAbs(c.path) &&
-		input != c.path && !strings.HasPrefix(input, c.path+"/") {
-		return "", "", nil // session is not inside where the project says it lives
+	// Path agreement. Gate on the input LOOKING like a path rather than on
+	// filepath.IsAbs: a drive-relative Windows path such as
+	// \some\unrelated\ghost is not absolute, so IsAbs silently disabled this
+	// guard on Windows — where the fixture that failed was running. The gate
+	// is the same one the path-prefix step above uses.
+	//
+	// Both sides are compared with separators normalized, matching that step
+	// again: stored paths use the platform's native form, so a raw
+	// strings.HasPrefix(input, c.path+"/") can never match a backslash path.
+	// Where spelling alone cannot settle it — Windows short (8.3) names
+	// against the long form EvalSymlinks returns, or a symlinked path — both
+	// are resolved on disk and compared again, because two spellings of one
+	// directory are one directory. A path that does not resolve gets no
+	// benefit of the doubt: refusing is the safe answer.
+	if strings.ContainsAny(input, `/\`) && strings.ContainsAny(c.path, `/\`) {
+		if !pathsAgree(input, c.path) {
+			return "", "", nil // session is not inside where the project says it lives
+		}
 	}
 	if remote != "" && c.remote != "" && remote != c.remote {
 		return "", "", nil // both asserted an identity, and they disagree
@@ -1181,6 +1196,38 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 // ListProjectNames returns all known project names, ordered the same way as
 // ListProjects (name ASC) — used to format an actionable CLI error listing
 // known projects on a resolution miss.
+// pathsAgree reports whether a session's reported directory and a project's
+// recorded path are the same place.
+//
+// Comparison is separator-agnostic — Windows stores backslashes and the path
+// step above already normalizes them, so a literal prefix test using "/" can
+// never match a native Windows path. Textual equality is tried first because
+// it costs nothing; only when it fails are both paths resolved on disk, which
+// reconciles two spellings of one directory (Windows 8.3 short names against
+// the long form, a symlink in the middle). A path that does not exist or
+// cannot be resolved stays unresolved and fails, so an unreadable directory
+// never becomes evidence that it is the project it claims to be.
+func pathsAgree(input, stored string) bool {
+	norm := func(p string) string { return strings.ReplaceAll(p, `\`, "/") }
+	a, b := norm(input), norm(stored)
+	if samePath(a, b) {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(input)
+	rb, errB := filepath.EvalSymlinks(stored)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return samePath(norm(ra), norm(rb))
+}
+
+// samePath is exact equality or a directory-prefix match on a segment
+// boundary, so /x/infra does not accept /x/infra-other.
+func samePath(a, b string) bool {
+	b = strings.TrimSuffix(b, "/")
+	return a == b || strings.HasPrefix(a, b+"/")
+}
+
 func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 	projects, err := s.ListProjects(ctx)
 	if err != nil {

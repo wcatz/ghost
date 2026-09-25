@@ -204,3 +204,62 @@ func TestResolveBasenameProjectWithoutRealPath(t *testing.T) {
 		t.Errorf("project that recorded no path refused a session: id=%q name=%q — there was nothing to contradict", id, name)
 	}
 }
+
+// TestPathsAgreeIsSeparatorAgnostic pins the exact defect review caught on
+// #565: the guard compared with strings.HasPrefix(input, path+"/"), which can
+// never match a native Windows path. Windows stores backslashes, and — worse —
+// filepath.IsAbs reports false for a drive-relative path such as
+// \some\unrelated\ghost, so the whole guard silently switched itself off on
+// the platform where an unrelated directory is most likely to share a basename.
+//
+// These are unit-level because filepath.Base does not split on backslashes
+// when the tests run on Linux, so the integration fixtures above cannot reach
+// this comparison with a Windows-shaped path. The normalization being tested
+// here is what makes the guard correct on Windows.
+func TestPathsAgreeIsSeparatorAgnostic(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		stored string
+		want   bool
+	}{
+		{"session inside the project, backslash input", `C:\x\infra\sub`, `C:\x\infra`, true},
+		{"session inside the project, mixed separators", `C:\x\infra\sub`, `C:/x/infra`, true},
+		{"stored backslash, input forward slash", `C:/x/infra/sub`, `C:\x\infra`, true},
+		{"exact match either way", `C:\x\infra`, `C:/x/infra`, true},
+		{"a different tree with the same basename", `C:\y\infra`, `C:\x\infra`, false},
+		{"forward slash equivalent of the attack", `/some/unrelated/path/infra`, `/x/infra`, false},
+		{"segment boundary is respected", `/x/infra-other`, `/x/infra`, false},
+		{"segment boundary respected from either side", `/x/infra`, `/x/infra-other`, false},
+		{"a path that does not exist resolves to nothing", `/definitely/not/here/a`, `/definitely/not/here/b`, false},
+	}
+	for _, c := range cases {
+		if got := pathsAgree(c.input, c.stored); got != c.want {
+			t.Errorf("%s: pathsAgree(%q, %q) = %v, want %v", c.name, c.input, c.stored, got, c.want)
+		}
+	}
+}
+
+// TestResolveBasenameGuardDoesNotDependOnIsAbs guards the other half of the
+// same defect: the guard is gated on the input merely LOOKING like a path,
+// the same test the path-prefix step uses, because filepath.IsAbs is false
+// for drive-relative Windows paths and would have disabled it entirely.
+func TestResolveBasenameGuardDoesNotDependOnIsAbs(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Stored with a separator, so the guard applies.
+	if err := s.EnsureProject(ctx, "infra-id", "/x/infra", "infra"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	// On Linux filepath.IsAbs("/x/infra") is true, so this asserts the
+	// positive path holds with the gate in place rather than being skipped.
+	id, _, err := s.ResolveProject(ctx, "/x/infra")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "infra-id" {
+		t.Errorf("own directory stopped resolving: id=%q, want infra-id", id)
+	}
+}
