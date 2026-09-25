@@ -330,12 +330,14 @@ func reflectSkipDecision(skipUnchanged, apply bool, stored, current string) bool
 	return skipUnchanged && apply && stored != "" && stored == current
 }
 
-// reflectMaySkip additionally honors the explicit promotion request. The
-// input signature describes the project corpus, not whether cross-project
-// candidates were already moved to _global, so promotion must never inherit a
-// prior default apply's unchanged verdict.
-func reflectMaySkip(skipUnchanged, apply, promoteGlobals bool, stored, current string) bool {
-	return !promoteGlobals && reflectSkipDecision(skipUnchanged, apply, stored, current)
+// reflectMaySkip additionally honors the two flags that change what an apply
+// DOES rather than what it reads. The input signature describes the project
+// corpus, not what was done to it, so neither may inherit a prior default
+// apply's unchanged verdict: --promote-globals moves cross-project candidates
+// into _global, and --allow-drops deletes the inputs no output referenced
+// instead of re-adding them verbatim.
+func reflectMaySkip(skipUnchanged, apply, promoteGlobals, allowDrops bool, stored, current string) bool {
+	return !promoteGlobals && !allowDrops && reflectSkipDecision(skipUnchanged, apply, stored, current)
 }
 
 // reflectArgs is one parsed `ghost reflect` invocation.
@@ -623,7 +625,7 @@ Flags:
 		storedSig, err := store.GetReflectInputSignature(ctx, projectID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: read reflect signature: %v\n", err)
-		} else if reflectMaySkip(skipUnchanged, apply, parsed.promoteGlobals, storedSig, currentSig) {
+		} else if reflectMaySkip(skipUnchanged, apply, parsed.promoteGlobals, parsed.allowDrops, storedSig, currentSig) {
 			fmt.Printf("reflect: consolidatable set unchanged since the last applied consolidation — skipping (%d memories, no LLM call)\n", len(live))
 			return
 		}
