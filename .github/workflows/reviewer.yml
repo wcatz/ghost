@@ -212,10 +212,9 @@ jobs:
           # opencode invocation. Leaving it out of this agent file prevents
           # a stale or accidentally paid MODELS entry from becoming agent
           # metadata; V2 otherwise has no model to infer from this file.
-          # No API key: the review runs on the anonymous free tier, so it
-          # never spends account credits. The selection step accepts only
-          # opencode/*-free and opencode/big-pickle and never falls back to
-          # the paid opencode-go provider.
+          # The free path has no API key. If all free probes/reviews fail,
+          # the later fallback scopes the repository's inference credential
+          # to one paid child invocation; the agent itself remains unchanged.
           mkdir -p "$HOME/.config/opencode/agent"
           AGENT=$HOME/.config/opencode/agent/ghost-reviewer.md
           # The frontmatter is static. It stays in a QUOTED heredoc so a
