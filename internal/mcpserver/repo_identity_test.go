@@ -282,7 +282,14 @@ func TestPathSaveJoinsExistingNamedProjectAcrossCheckoutNames(t *testing.T) {
 // must use the same boundary or those saves silently create path projects.
 func TestRelativeCheckoutSaveBindsExistingNamedProject(t *testing.T) {
 	// main() wires this for the real binary; tests build stores directly.
-	memory.SetDetectRemote(repo.DetectRemote)
+	var detectedRelative string
+	memory.SetDetectRemote(func(path string) string {
+		remote := repo.DetectRemote(path)
+		if !filepath.IsAbs(path) && strings.ContainsAny(path, `/\`) {
+			detectedRelative = remote
+		}
+		return remote
+	})
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
 
 	const origin = "https://github.com/wcatz/ghost.git"
@@ -299,6 +306,7 @@ func TestRelativeCheckoutSaveBindsExistingNamedProject(t *testing.T) {
 		t.Fatalf("precondition: relative checkout %q is not a path-shaped non-absolute input", relative)
 	}
 	srv, session := newCapSession(t)
+	ctx := context.Background()
 
 	for i, save := range []struct {
 		projectID string
@@ -324,14 +332,23 @@ func TestRelativeCheckoutSaveBindsExistingNamedProject(t *testing.T) {
 	if len(projects) != 2 {
 		t.Fatalf("relative checkout created a path project: got %d projects, want test-project and ghost", len(projects))
 	}
-	out := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
-		"project_id": checkout,
-		"query":      "saved",
-		"limit":      10,
-	}))
-	for _, want := range []string{"saved before the relative checkout", "saved from the relative checkout"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("absolute checkout cannot see %q after the relative save:\n%s", want, out)
+	resolved, _, err := srv.store.ResolveProject(ctx, relative)
+	if err != nil {
+		t.Fatalf("ResolveProject relative: %v", err)
+	}
+	if resolved != "ghost" {
+		t.Fatalf("relative path resolved to %q (detector returned %q), want ghost", resolved, detectedRelative)
+	}
+	for _, projectID := range []string{checkout, relative} {
+		out := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
+			"project_id": projectID,
+			"query":      "saved",
+			"limit":      10,
+		}))
+		for _, want := range []string{"saved before the relative checkout", "saved from the relative checkout"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("checkout %q cannot see %q after the relative save:\n%s", projectID, want, out)
+			}
 		}
 	}
 }

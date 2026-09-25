@@ -1088,10 +1088,17 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	// carries no identity of its own, so it is resolved through the injected
 	// detector; without that, saving from ~/work/ghost and then reading from
 	// it would disagree about which project it is. Detection runs only for
-	// absolute inputs, so resolving by id or name never spawns a process.
-	remote := NormalizeRepoRemote(input)
-	if remote == "" && filepath.IsAbs(input) {
+	// path-shaped inputs (containing '/' or '\'), so resolving by id or name
+	// never spawns a process. A path is tested before the raw input is treated
+	// as a remote because a relative path such as ../checkout can otherwise be
+	// mistaken for a host/path remote. Non-directory remote strings fail the
+	// detector's os.Stat before it starts Git, then normalize normally.
+	remote := ""
+	if strings.ContainsAny(input, `/\`) {
 		remote = NormalizeRepoRemote(detectRemoteForPath(input))
+	}
+	if remote == "" {
+		remote = NormalizeRepoRemote(input)
 	}
 	if remote != "" {
 		err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE repo_remote = ? AND id != '_global' LIMIT 1`, remote).Scan(&id, &name)
