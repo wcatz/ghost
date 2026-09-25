@@ -13,17 +13,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// protectPath restricts a path to its owner by writing a protected DACL.
-// Windows has no POSIX mode: os.Chmod there only toggles the read-only bit
-// and never removes inherited ACL access, so the numeric 0700/0600 this
-// package has always passed left the vault readable by every account on
-// the machine. The DACL is written on every tighten pass rather than
-// compared: deciding "already tight" costs a security-descriptor read per
-// file, i.e. one syscall more than writing one.
-func protectPath(path string, _ os.FileInfo, _ os.FileMode) error {
-	return setPrivateDACL(path)
-}
-
 // protectFile secures the temp file before it is renamed into place. Set by
 // name: the temp name is unique inside the vault directory and has not been
 // published yet, and Windows has no fchmod equivalent.
@@ -132,19 +121,6 @@ func isDirNotEmpty(err error) bool {
 // guard is on the file type).
 func makeFIFO(path string) error {
 	return errors.New("named pipes are not a filesystem concept on Windows")
-}
-
-// isTransientRenameErr reports whether a failed rename may succeed on a
-// retry. MoveFileEx's replace step fails with a sharing violation whenever
-// another process holds the destination open without FILE_SHARE_DELETE —
-// Obsidian, Search Indexer, or Defender reading the vault is routine, not
-// exceptional — and the same race between two concurrent syncs surfaces as
-// ERROR_ACCESS_DENIED. A genuinely denied rename (read-only attribute, real
-// DACL denial) just spends the same bounded backoff and then reports.
-func isTransientRenameErr(err error) bool {
-	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
-		errors.Is(err, windows.ERROR_LOCK_VIOLATION) ||
-		errors.Is(err, windows.ERROR_ACCESS_DENIED)
 }
 
 // renameNoReplace moves oldPath to newPath only if newPath does not exist.

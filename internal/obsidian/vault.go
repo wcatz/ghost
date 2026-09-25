@@ -2,6 +2,7 @@ package obsidian
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,34 +33,6 @@ var removeDirFn atomic.Value // func(string) error
 // replacement without relying on scheduler timing.
 var pruneBeforeRemoveFn atomic.Value // func(string)
 
-// beforeDirCleanupFn is a test seam between the orphan walk and its directory
-// cleanup climb, for the same reason: a replacement in that window cannot be
-// produced by scheduler timing alone.
-var beforeDirCleanupFn atomic.Value // func()
-
-func beforeDirCleanup() {
-	fn, _ := beforeDirCleanupFn.Load().(func())
-	if fn == nil {
-		return
-	}
-	fn()
-}
-
-// beforeClassifyFn is a test seam between the permission walk's lstat and the
-// frontmatter read. It is the only way to reach the "was a regular file a
-// moment ago, is not readable now" case deterministically: a file that is
-// already a special file is skipped by the walk before classification, and
-// permission-based unreadability is unreliable across CI privilege levels.
-var beforeClassifyFn atomic.Value // func(string)
-
-func beforeClassify(path string) {
-	fn, _ := beforeClassifyFn.Load().(func(string))
-	if fn == nil {
-		return
-	}
-	fn(path)
-}
-
 // renameFn is swappable so tests can force the publish step to fail with a
 // platform-specific transient error (see renameWithRetry).
 var renameFn atomic.Value // func(string, string) error
@@ -75,9 +48,22 @@ func removeFile(path string) error {
 	return fn(path)
 }
 
+// ErrNotRegularFile reports a note path that exists but is not a regular file.
+// It is a distinct error so a caller can skip that note and keep going, rather
+// than treating it as a write failure and abandoning the whole export.
+var ErrNotRegularFile = errors.New("destination is not a regular file")
+
 // crashTempMarker is the infix writeIfChanged gives os.CreateTemp, so a
 // crashed write leaves a name like "My Note.md.ghost-tmp-4821".
 const crashTempMarker = ".ghost-tmp-"
+
+// pruneQuarantineMarker is the prefix removeGhostFile uses to move a note aside
+// before deleting it. A crash between the rename and the delete leaves the note
+// under that name, and nothing else ever looks for it again — the mirror is
+// silently missing a note it still owns. The reclaim sweep therefore covers it
+// on the same terms as a crashed publish: same grace period, so a note that is
+// mid-delete right now is never taken out from under itself.
+const pruneQuarantineMarker = ".ghost-prune-"
 
 // crashTempGrace is how long a temp file must have existed before the reclaim
 // sweep will remove it.
@@ -107,14 +93,26 @@ func isCrashTemp(path string, now time.Time) bool {
 	name := filepath.Base(path)
 	idx := strings.LastIndex(name, crashTempMarker)
 	if idx < 0 {
+		// A note stranded under the prune quarantine for the same reason: the
+		// process died between moving it aside and deleting it.
+		if q := strings.LastIndex(name, pruneQuarantineMarker); q >= 0 && len(name) > q+len(pruneQuarantineMarker) {
+			return olderThanGrace(path, now)
+		}
 		return false
 	}
 	if len(name) <= idx+len(crashTempMarker) {
 		return false
 	}
+	return olderThanGrace(path, now)
+}
+
+// olderThanGrace reports whether path has not been touched for longer than the
+// reclaim grace period. A stat failure is false: "cannot prove it is
+// abandoned" is the answer that must not delete.
+func olderThanGrace(path string, now time.Time) bool {
 	info, err := os.Stat(path)
 	if err != nil {
-		return false // cannot prove it is abandoned
+		return false
 	}
 	return now.Sub(info.ModTime()) > crashTempGrace
 }
@@ -123,8 +121,6 @@ func init() {
 	readDirFn.Store(os.ReadDir)
 	removeDirFn.Store(os.Remove)
 	pruneBeforeRemoveFn.Store(func(string) {})
-	beforeDirCleanupFn.Store(func() {})
-	beforeClassifyFn.Store(func(string) {})
 	renameFn.Store(os.Rename)
 	removeFileFn.Store(os.Remove)
 }
@@ -236,27 +232,6 @@ func removeGhostFile(path string) (bool, error) {
 	return true, nil
 }
 
-// renameWithRetry publishes the temp file over the destination, retrying a
-// transient failure. On Windows the replace can lose a race with any reader
-// that holds the destination open (Obsidian, Search Indexer, Defender), or
-// with a concurrent sync — on a vault that exists to be read, that is
-// routine, so a bounded backoff beats failing the export. The predicate is
-// per-platform: POSIX rename has no such transient state.
-func renameWithRetry(oldPath, newPath string) error {
-	const attempts = 4
-	var err error
-	for i := 0; i < attempts; i++ {
-		if i > 0 {
-			time.Sleep(time.Duration(i) * 20 * time.Millisecond)
-		}
-		fn, _ := renameFn.Load().(func(string, string) error)
-		if err = fn(oldPath, newPath); err == nil || !isTransientRenameErr(err) {
-			return err
-		}
-	}
-	return err
-}
-
 // ensureVault prepares dir as a Ghost-managed mirror target. Fresh or empty
 // dirs are initialized with the marker; a non-empty dir without the marker is
 // refused — Ghost never adopts a folder it didn't create. An existing vault
@@ -281,103 +256,32 @@ func ensureVault(dir string) error {
 			return err
 		}
 	}
-	return tightenVault(dir)
-}
-
-// tightenVault walks an adopted vault and brings its permission bits to the
-// current standard: directories 0700, Ghost-managed files 0600. It runs on
-// every ensureVault, but only ever chmods a mismatch — on an already-tight
-// vault that costs one walk of stats, a fraction of the export that follows,
-// which re-reads every note in full anyway. Files Ghost did not write keep
-// their mode: tightening is scoped to what the mirror owns.
-func tightenVault(dir string) error {
-	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			// A concurrent disappearance is not a permission problem: the entry
-			// is gone, so there is nothing left to tighten. Anything else means
-			// the entry could not be inspected, and saying so is the point —
-			// swallowing it let a legacy 0644 note or a 0755 subtree keep its
-			// permissive bits while Export reported the vault tight.
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return fmt.Errorf("inspect %s for tightening: %w", path, err)
-		}
-		// lstat, so a symlink is neither of the two kinds below and Ghost
-		// never chmods through one to a target outside the vault.
-		info, err := d.Info()
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return fmt.Errorf("stat %s for tightening: %w", path, err)
-		}
-		switch {
-		case info.IsDir():
-			return tightenIfLoose(path, info, 0o700)
-		case !info.Mode().IsRegular():
-			return nil
-		default:
-			beforeClassify(path)
-			managed, err := ghostManagedFile(path)
-			if err != nil {
-				// An unreadable .md must not end the whole pass. The only
-				// question tightenVault answers is whether to chmod something
-				// Ghost owns, and an entry it cannot classify is not something
-				// it should chmod on a guess — so it is skipped and reported.
-				// Failing the export instead turned one locked or vanished
-				// note into "no vault at all", which is a far worse outcome
-				// than one file keeping its old permissions for a run. The
-				// warning is deliberate: the file is left loose until it can
-				// be read, and the operator needs to know that.
-				fmt.Fprintf(os.Stderr, "warning: could not read %s, leaving its permissions unchanged: %v\n", path, err)
-				return nil
-			}
-			if !managed {
-				return nil // a user note or attachment keeps its own mode
-			}
-			return tightenIfLoose(path, info, 0o600)
-		}
-	})
-}
-
-// tightenIfLoose hands path to the platform's protection only when its mode
-// already differs (POSIX) — the walk's stat, no extra syscall on a tight
-// vault. On Windows the mode is meaningless and the DACL write decides.
-func tightenIfLoose(path string, info os.FileInfo, mode os.FileMode) error {
-	return protectPath(path, info, mode)
-}
-
-// ghostManagedFile reports whether a file is Ghost's own — the vault marker or a
-// note whose frontmatter carries a ghost_id — for a caller that must be able to
-// tell "not Ghost's" from "could not be read".
-//
-// The permission pass uses it rather than ghostManaged because a note whose
-// frontmatter could not be read is not the same as a user's note, and
-// collapsing the two is how a legacy world-readable note keeps its mode while
-// the export reports success. A concurrent disappearance is not a failure — the
-// entry is gone — but any other open or read error is returned.
-func ghostManagedFile(path string) (bool, error) {
-	if filepath.Base(path) == markerName {
-		return true, nil
-	}
-	if !strings.HasSuffix(path, ".md") {
-		return false, nil
-	}
-	f, err := openRegular(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read %s: %w", path, err)
-	}
-	defer f.Close() //nolint:errcheck // read-only: close errors are meaningless here
-	_, ok := frontmatterHasGhostID(f)
-	return ok, nil
+	// No retroactive permission pass. An earlier revision walked the whole
+	// vault on every ensureVault and chmod'd every directory it found to 0700 —
+	// including the user's own folders and the .obsidian/ directory Ghost never
+	// created — and on Windows it rewrote a protected DACL on each of them, on
+	// every pass. That is outside what a mirror is for: it changes permissions
+	// on files Ghost does not own, for a vault it merely reads. Permissions are
+	// now set only where Ghost writes, in writeIfChanged, via protectFile.
+	return nil
 }
 
 // writeIfChanged writes content atomically (temp+rename), skipping the write
 // when the file already has identical content — no mtime churn.
+// writeIfChangedSkipSpecial is writeIfChanged for the export loop: a note path
+// that is not a regular file is skipped with a warning rather than ending the
+// export. A symlink or a named pipe at a note path belongs to the user or to
+// another tool, and Ghost will not replace it — but refusing every note because
+// one path is occupied is a worse failure than syncing the rest.
+func writeIfChangedSkipSpecial(path, content string) (bool, error) {
+	written, err := writeIfChanged(path, content)
+	if errors.Is(err, ErrNotRegularFile) {
+		fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", path, err)
+		return false, nil
+	}
+	return written, err
+}
+
 func writeIfChanged(path, content string) (bool, error) {
 	// Decide the destination's type before reading it, not after. os.ReadFile
 	// on a FIFO blocks until a writer appears, so a FIFO sitting at a
@@ -395,7 +299,13 @@ func writeIfChanged(path, content string) (bool, error) {
 	case err != nil && !os.IsNotExist(err):
 		return false, err
 	case err == nil && !info.Mode().IsRegular():
-		return false, fmt.Errorf("refusing to publish over %s: not a regular file", path)
+		// Skip the note, do not fail the export. A named pipe or a symlink at a
+		// note path is something a user or another tool put there, and Ghost
+		// will not replace it — but one such path is not a reason to abandon
+		// every other note in the export. The caller decides whether a skipped
+		// note is a problem; the default is that a mirror that syncs 400 notes
+		// and refuses to sync any of them is worse than one that syncs 399.
+		return false, ErrNotRegularFile
 	case err == nil:
 		// Regular file: the unchanged-content check still applies, so an
 		// already-correct note costs no write and no mtime churn.
@@ -432,7 +342,7 @@ func writeIfChanged(path, content string) (bool, error) {
 	if err := f.Close(); err != nil {
 		return false, err
 	}
-	return true, renameWithRetry(tmp, path)
+	return true, os.Rename(tmp, path)
 }
 
 // maxFrontmatterLine bounds a single frontmatter line for hasGhostID's
@@ -592,7 +502,6 @@ func pruneOrphanFolder(dir string) error {
 	// other failure (permissions, a Windows sharing violation, I/O) is
 	// returned, because swallowing it made prune report success while an
 	// empty stale directory sat there for every later export to retry.
-	beforeDirCleanup()
 	for _, site := range deletedDirs {
 	climb:
 		for sub := site; ; sub = filepath.Dir(sub) {

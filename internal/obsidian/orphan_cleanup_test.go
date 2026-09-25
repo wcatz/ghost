@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -127,60 +126,6 @@ func TestManagedPruneDoesNotDeleteConcurrentReplacement(t *testing.T) {
 	}
 	if string(got) != userNote {
 		t.Fatalf("replacement content = %q, want user note preserved", got)
-	}
-}
-
-// TestOrphanCleanupKeepsReplacementDirectory covers the gap the per-file
-// replacement guard leaves: the directory cleanup runs after the walk, so a
-// directory replaced in that window shares its path with the one the walk
-// emptied while being a different object entirely. os.Remove answers on the
-// name, so the replacement goes — with anything the user put in it.
-//
-// The seam fires once, between the walk finishing and the climb starting, which
-// is the only window where this is expressible without racing the scheduler.
-func TestOrphanCleanupKeepsReplacementDirectory(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "vault")
-	if err := ensureVault(root); err != nil {
-		t.Fatalf("ensureVault: %v", err)
-	}
-	orphan := filepath.Join(root, "oldproject")
-	nested := filepath.Join(orphan, "Memories")
-	mustMkdirAll(t, nested)
-	mustWrite(t, filepath.Join(nested, "Managed Note.md"), ghostNote)
-
-	var replaced string
-	beforeDirCleanupFn.Store(func() {
-		replaced = nested
-		// Swap the emptied directory for a fresh one. It has to be empty:
-		// a replacement holding a file would make os.Remove answer ENOTEMPTY
-		// and the guard would appear to work for the wrong reason. An empty
-		// replacement is exactly the case where an identity-blind os.Remove
-		// succeeds on a directory the walk never saw.
-		staging := nested + ".staging"
-		mustMkdirAll(t, staging)
-		if err := os.Rename(nested, nested+".original"); err != nil {
-			t.Fatalf("move original aside: %v", err)
-		}
-		if err := os.Rename(staging, nested); err != nil {
-			t.Fatalf("put replacement in place: %v", err)
-		}
-	})
-	t.Cleanup(func() { beforeDirCleanupFn.Store(func() {}) })
-
-	if err := prune(root, nil, map[string]string{}, []string{"liveproject"}); err != nil {
-		t.Fatalf("prune: %v", err)
-	}
-	if replaced == "" {
-		t.Fatal("the seam never fired, so the replacement was never modelled")
-	}
-	if _, err := os.Stat(replaced); err != nil {
-		t.Errorf("replacement directory was removed: %v", err)
-	}
-	// The original directory is still recorded, so its own emptiness check can
-	// be told apart from the replacement's: the guard must stop the climb at
-	// the replacement rather than skipping past it and closing an ancestor.
-	if _, err := os.Stat(nested + ".original"); err != nil {
-		t.Errorf("the walk's own emptied directory was removed: %v", err)
 	}
 }
 
@@ -535,93 +480,6 @@ func TestWriteIfChangedRefusesSpecialDestination(t *testing.T) {
 	}
 }
 
-// TestGhostManagedFileDistinguishesUnreadableFromUnowned backs the permission
-// pass. The old classifier returned a bool, so a note whose frontmatter could
-// not be read looked exactly like a user's note and kept its 0644 mode while
-// the export reported the vault tight. An unreadable entry has to be an error.
-func TestGhostManagedFileDistinguishesUnreadableFromUnowned(t *testing.T) {
-	dir := t.TempDir()
-
-	user := filepath.Join(dir, "Mine.md")
-	mustWrite(t, user, userNote)
-	if managed, err := ghostManagedFile(user); err != nil || managed {
-		t.Errorf("ghostManagedFile(user note) = (%v, %v), want (false, nil)", managed, err)
-	}
-
-	ghost := filepath.Join(dir, "Theirs.md")
-	mustWrite(t, ghost, ghostNote)
-	if managed, err := ghostManagedFile(ghost); err != nil || !managed {
-		t.Errorf("ghostManagedFile(Ghost note) = (%v, %v), want (true, nil)", managed, err)
-	}
-
-	pipe := filepath.Join(dir, "Pipe.md")
-	if err := makeFIFO(pipe); err != nil {
-		t.Skipf("named pipe unavailable: %v", err)
-	}
-	if _, err := ghostManagedFile(pipe); err == nil {
-		t.Error("ghostManagedFile on a named pipe returned no error, want the unreadable entry reported")
-	}
-}
-
-// TestProtectPathRefusesSymlinkTarget covers the POSIX chmod. The caller's
-// lstat had already established the entry was not a symlink, but os.Chmod
-// takes a pathname: replacing the entry with a symlink in between made chmod
-// follow it and change a target outside the vault — widening access to exactly
-// the thing the lstat exists to keep out of reach.
-func TestProtectPathRefusesSymlinkTarget(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// Windows has no mode bits: protectPath writes a DACL, and os.Chmod
-		// there toggles only the read-only attribute. Neither the 0600/0644
-		// assertions nor the chmod-follows-a-symlink mechanism this pins are
-		// observable on that platform, so asserting them there tests nothing.
-		// The Windows path is covered by TestProtectPathRefusesSymlinkTargetWindows.
-		t.Skip("POSIX mode semantics; see TestProtectPathRefusesSymlinkTargetWindows")
-	}
-	dir := t.TempDir()
-	outside := filepath.Join(dir, "outside.md")
-	mustWrite(t, outside, "not Ghost's\n")
-	if err := os.Chmod(outside, 0o644); err != nil {
-		t.Fatalf("chmod target: %v", err)
-	}
-	link := filepath.Join(dir, "Inside.md")
-	if err := os.Symlink(outside, link); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-
-	// The info the walk would have handed over for a loose regular file.
-	probe := filepath.Join(dir, "probe.md")
-	mustWrite(t, probe, "probe\n")
-	probeInfo, err := os.Lstat(probe)
-	if err != nil {
-		t.Fatalf("lstat probe: %v", err)
-	}
-
-	if err := protectPath(link, probeInfo, 0o600); err == nil {
-		t.Error("protectPath tightened a symlink, want it refused")
-	}
-	fi, err := os.Lstat(outside)
-	if err != nil {
-		t.Fatalf("lstat target: %v", err)
-	}
-	if fi.Mode().Perm() != 0o644 {
-		t.Errorf("symlink target mode = %o, want 0644 — protection followed a link outside the vault", fi.Mode().Perm())
-	}
-
-	// The control: a real loose file is still tightened through its handle.
-	loose := filepath.Join(dir, "loose.md")
-	mustWrite(t, loose, "loose\n")
-	looseInfo, err := os.Lstat(loose)
-	if err != nil {
-		t.Fatalf("lstat loose: %v", err)
-	}
-	if err := protectPath(loose, looseInfo, 0o600); err != nil {
-		t.Fatalf("protectPath on a regular file: %v", err)
-	}
-	if fi, err := os.Lstat(loose); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Errorf("loose mode = %v (err=%v), want 0600", fi.Mode().Perm(), err)
-	}
-}
-
 // TestRemoveGhostFileRestoresAfterFailedRemoval covers a note stranded under a
 // name prune can never see. By the time the final os.Remove runs, the note has
 // already been moved aside, so a failed deletion returned without putting it
@@ -770,32 +628,6 @@ func TestSyncRetriesFailedInitialExport(t *testing.T) {
 	}
 }
 
-// TestProtectPathRefusesSymlinkTargetWindows is the Windows counterpart. The
-// mode bits are meaningless there, so the observable contract is different: the
-// target outside the vault must not gain a private DACL, and an ambiguous path
-// must be refused rather than secured quietly.
-func TestProtectPathRefusesSymlinkTargetWindows(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Windows DACL semantics")
-	}
-	dir := t.TempDir()
-	outside := filepath.Join(dir, "outside.md")
-	mustWrite(t, outside, "not Ghost's\n")
-	link := filepath.Join(dir, "Inside.md")
-	if err := os.Symlink(outside, link); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-	probe := filepath.Join(dir, "probe.md")
-	mustWrite(t, probe, "probe\n")
-	probeInfo, err := os.Lstat(probe)
-	if err != nil {
-		t.Fatalf("lstat probe: %v", err)
-	}
-	if err := protectPath(link, probeInfo, 0o600); err == nil {
-		t.Error("protectPath secured a symlink, want it refused")
-	}
-}
-
 // TestPruneKeepsCrashTempYoungerThanGrace is the concurrency half of the crash
 // reclaim. writeIfChanged publishes through a temp file in the same directory
 // and renames it into place, so between CreateTemp and that rename the file is a
@@ -834,56 +666,87 @@ func TestPruneKeepsCrashTempYoungerThanGrace(t *testing.T) {
 	}
 }
 
-// TestTightenVaultSkipsUnreadableNote: one unreadable .md must not end the
-// export. tightenVault only answers "should this be chmod'ed", and a file it
-// cannot classify is not one it should chmod on a guess — but returning an error
-// aborted the whole pass, turning a single locked note into no vault at all.
-//
-// The unreadable entry is produced by swapping a regular file for a FIFO in the
-// seam between the walk's lstat and the frontmatter read. A file that is
-// ALREADY special is skipped by the walk before classification, and
-// permission-based unreadability is unreliable across CI privilege levels, so
-// this is the only shape that reaches the branch deterministically. It is also
-// the real one: that is exactly the window in which the type can change.
-func TestTightenVaultSkipsUnreadableNote(t *testing.T) {
+// TestExportSkipsNonRegularNotePath covers the write side. A symlink or a named
+// pipe sitting at a note path belongs to the user or to another tool, and Ghost
+// will not replace it — but one occupied path must not end the export. The
+// mirror is there to sync the other notes.
+func TestExportSkipsNonRegularNotePath(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	if _, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "first fact", Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "second fact", Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("first Export: %v", err)
+	}
+
+	// Something that is not a regular file where a note goes.
+	memories := filepath.Join(vault, "ghost", "Memories")
+	entries, err := os.ReadDir(memories)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no notes were written to occupy the path")
+	}
+	occupied := filepath.Join(memories, entries[0].Name())
+	if err := os.Remove(occupied); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := makeFIFO(occupied); err != nil {
+		t.Skipf("named pipe unavailable: %v", err)
+	}
+
+	// A second export must still succeed, and must still write the other note.
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("Export aborted on a non-regular note path: %v", err)
+	}
+	if fi, err := os.Lstat(occupied); err != nil {
+		t.Errorf("the special file was removed: %v", err)
+	} else if fi.Mode()&os.ModeNamedPipe == 0 {
+		t.Errorf("occupied path is no longer a FIFO (mode %v)", fi.Mode())
+	}
+}
+
+// TestPruneReclaimsStrandedQuarantinedNote covers the crash window in
+// removeGhostFile. It renames a note to .ghost-prune-* and only then deletes it;
+// a process that dies between the two leaves the note under a name nothing else
+// searches, so the mirror silently loses a note it still owns. The reclaim sweep
+// now covers the quarantine on the same terms as a crashed publish — including
+// the grace period, so a note mid-delete is never taken out from under itself.
+func TestPruneReclaimsStrandedQuarantinedNote(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
 	if err := ensureVault(root); err != nil {
 		t.Fatalf("ensureVault: %v", err)
 	}
-	dir := filepath.Join(root, "live")
+	dir := filepath.Join(root, "live", "Memories")
 	mustMkdirAll(t, dir)
+	mustWrite(t, filepath.Join(dir, "Managed Note.md"), ghostNote)
 
-	// The note that will become unreadable, and the readable one the walk must
-	// still reach afterwards.
-	doomed := filepath.Join(dir, "Swapped.md")
-	mustWrite(t, doomed, ghostNote)
-	loose := filepath.Join(dir, "Managed Note.md")
-	mustWrite(t, loose, ghostNote)
-	if err := os.Chmod(loose, 0o644); err != nil {
-		t.Fatalf("chmod: %v", err)
+	// A note abandoned mid-prune, long ago.
+	stranded := filepath.Join(dir, ".ghost-prune-4821")
+	mustWrite(t, stranded, ghostNote)
+	old := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(stranded, old, old); err != nil {
+		t.Fatalf("age the stranded note: %v", err)
 	}
+	// One still inside the grace period: a prune in flight.
+	inFlight := filepath.Join(dir, ".ghost-prune-9137")
+	mustWrite(t, inFlight, ghostNote)
 
-	beforeClassifyFn.Store(func(path string) {
-		if path != doomed {
-			return
-		}
-		if err := os.Remove(path); err != nil {
-			t.Errorf("remove doomed: %v", err)
-		}
-		if err := makeFIFO(path); err != nil {
-			t.Skipf("named pipe unavailable: %v", err)
-		}
-	})
-	t.Cleanup(func() { beforeClassifyFn.Store(func(string) {}) })
-
-	if err := tightenVault(root); err != nil {
-		t.Fatalf("tightenVault aborted on an unreadable note: %v", err)
+	if err := prune(root, []string{"live"}, map[string]string{}, []string{"live"}); err != nil {
+		t.Fatalf("prune: %v", err)
 	}
-	info, err := os.Lstat(loose)
-	if err != nil {
-		t.Fatalf("lstat: %v", err)
+	if _, err := os.Stat(stranded); !os.IsNotExist(err) {
+		t.Errorf("a note stranded under the prune quarantine was not reclaimed (err=%v)", err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("the walk stopped before the readable note: mode = %o, want 0600", info.Mode().Perm())
+	if _, err := os.Stat(inFlight); err != nil {
+		t.Errorf("a note inside the grace period was reclaimed while a prune could still be using it: %v", err)
 	}
 }

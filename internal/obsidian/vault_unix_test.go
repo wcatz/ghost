@@ -47,66 +47,71 @@ func TestVaultIsNotWorldReadable(t *testing.T) {
 	}
 }
 
-// TestEnsureVaultTightensLegacyPermissions: 0700/0600 only reaches files
-// Ghost writes after the fact — writeIfChanged skips unchanged content and
-// MkdirAll never retightens an existing directory — so a vault created
-// before the permission fix stays 0755/0644 forever. ensureVault is the
-// one place that sees the whole vault on startup; when the marker says the
-// vault is Ghost's, it must tighten what Ghost owns and leave user files'
-// modes alone.
-func TestEnsureVaultTightensLegacyPermissions(t *testing.T) {
+// TestEnsureVaultLeavesUserPermissionsAlone is the architect's ruling, on
+// disk. An earlier revision walked the whole vault on every ensureVault and
+// chmod'd every directory to 0700 — including the user's own folders and
+// .obsidian/, which Ghost never created — and on Windows rewrote a protected
+// DACL on each of them on every pass. A mirror reads those paths; it does not
+// own them, and changing their permissions is not its business.
+//
+// Ghost still sets 0700/0600 on everything it creates and writes, in
+// writeIfChanged, via protectFile. This asserts only the other half: a user's
+// folder keeps the mode they gave it.
+func TestEnsureVaultLeavesUserPermissionsAlone(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
-	proj := filepath.Join(root, "proj")
-	memories := filepath.Join(proj, "Memories")
-	mustMkdirAll(t, memories)
-	marker := filepath.Join(root, markerName)
-	mustWrite(t, marker, `{"schema_version":1}`+"\n")
-	note := filepath.Join(memories, "n.md")
-	mustWrite(t, note, ghostNote)
-	own := filepath.Join(proj, "own.md") // no frontmatter — the user's file
-	mustWrite(t, own, userNote)
-
-	// Chmod the legacy modes outright: relying on umask would let the
-	// environment hand us 0700/0600 for free and the assertions would pass
-	// without the fix.
-	for _, d := range []string{root, proj, memories} {
-		if err := os.Chmod(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, f := range []string{marker, note, own} {
-		if err := os.Chmod(f, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-
 	if err := ensureVault(root); err != nil {
 		t.Fatalf("ensureVault: %v", err)
 	}
-
-	for _, tc := range []struct {
-		path string
-		want os.FileMode
-	}{
-		{root, 0o700},
-		{proj, 0o700},
-		{memories, 0o700},
-		{marker, 0o600},
-		{note, 0o600},
-	} {
-		st, err := os.Stat(tc.path)
-		if err != nil {
-			t.Fatalf("stat %s: %v", tc.path, err)
+	// The user's own directories, including the ones Obsidian itself makes.
+	userDirs := []string{
+		filepath.Join(root, "my notes"),
+		filepath.Join(root, ".obsidian"),
+		filepath.Join(root, ".obsidian", "workspace"),
+	}
+	for _, d := range userDirs {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
 		}
-		if st.Mode().Perm() != tc.want {
-			t.Errorf("%s mode = %04o, want %04o", tc.path, st.Mode().Perm(), tc.want)
+		if err := os.Chmod(d, 0o755); err != nil {
+			t.Fatalf("chmod %s: %v", d, err)
 		}
 	}
-	// Tightening is scoped to what the mirror owns; the user's own file keeps
-	// the mode it had.
-	if st, err := os.Stat(own); err != nil {
+	userFile := filepath.Join(root, "my notes", "shopping list.md")
+	if err := os.WriteFile(userFile, []byte("# mine\n"), 0o644); err != nil {
+		t.Fatalf("write user file: %v", err)
+	}
+	// WriteFile applies the umask, so the mode is set explicitly.
+	if err := os.Chmod(userFile, 0o644); err != nil {
+		t.Fatalf("chmod user file: %v", err)
+	}
+
+	if err := ensureVault(root); err != nil {
+		t.Fatalf("ensureVault on a vault with user content: %v", err)
+	}
+
+	for _, d := range userDirs {
+		st, err := os.Stat(d)
+		if err != nil {
+			t.Fatalf("stat %s: %v", d, err)
+		}
+		if st.Mode().Perm() != 0o755 {
+			t.Errorf("%s mode = %04o, want 0755 — a mirror must not change the permissions of a folder it did not create", d, st.Mode().Perm())
+		}
+	}
+	if st, err := os.Stat(userFile); err != nil {
 		t.Fatalf("stat user file: %v", err)
 	} else if st.Mode().Perm() != 0o644 {
-		t.Errorf("user file mode = %04o, want it left at 0644", st.Mode().Perm())
+		t.Errorf("user file mode = %04o, want 0644", st.Mode().Perm())
+	}
+
+	// The other half of the contract: what Ghost writes is still tight.
+	note := filepath.Join(root, "proj", "Memories", "n.md")
+	if _, err := writeIfChanged(note, ghostNote); err != nil {
+		t.Fatalf("writeIfChanged: %v", err)
+	}
+	if st, err := os.Stat(note); err != nil {
+		t.Fatalf("stat written note: %v", err)
+	} else if st.Mode().Perm() != 0o600 {
+		t.Errorf("written note mode = %04o, want 0600", st.Mode().Perm())
 	}
 }

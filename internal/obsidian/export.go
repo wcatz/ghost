@@ -104,7 +104,7 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 				return fmt.Errorf("links for %s: %w", m.ID, err)
 			}
 			keep[m.ID] = fileFor[m.ID]
-			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Memories", fileFor[m.ID]), renderMemory(m, links, fileFor))
+			w, err := writeIfChangedSkipSpecial(filepath.Join(vaultDir, d.folder, "Memories", fileFor[m.ID]), renderMemory(m, links, fileFor))
 			if err != nil {
 				return err
 			}
@@ -121,7 +121,7 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		for _, dec := range decisions {
 			name := fileNameFor(dec.Title, dec.ID)
 			keep[dec.ID] = name
-			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Decisions", name), renderDecision(dec))
+			w, err := writeIfChangedSkipSpecial(filepath.Join(vaultDir, d.folder, "Decisions", name), renderDecision(dec))
 			if err != nil {
 				return err
 			}
@@ -138,7 +138,7 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		for _, tk := range tasks {
 			name := fileNameFor(tk.Title, tk.ID)
 			keep[tk.ID] = name
-			w, err := writeIfChanged(filepath.Join(vaultDir, d.folder, "Tasks", name), renderTask(tk))
+			w, err := writeIfChangedSkipSpecial(filepath.Join(vaultDir, d.folder, "Tasks", name), renderTask(tk))
 			if err != nil {
 				return err
 			}
