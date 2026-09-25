@@ -1001,6 +1001,49 @@ func TestRunCodex_TOMLRepairSurvivesMalformedValue(t *testing.T) {
 	}
 }
 
+// TestRunCodex_TOMLValueLineMentioningGhostIsNotAHeader pins that a bracketed
+// line which is value content, not a broken table header, does not make the
+// initializer refuse a perfectly valid config. The refusal exists to stop a
+// duplicate [mcp_servers.ghost] table, not to object to the word appearing in a
+// value.
+func TestRunCodex_TOMLValueLineMentioningGhostIsNotAHeader(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+	seed := codexMCPServerComment + "\n" +
+		"[mcp_servers.ghost]\n" +
+		"command = " + codexTOMLString(ghostBin) + "\n" +
+		"args = [\"mcp\"]\n" +
+		"labels = [\n" +
+		"  [\"ghost\"],\n" +
+		"  [\"mcp_servers.ghost\", \"alias\"],\n" +
+		"]\n"
+	if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	if strings.Contains(out.String(), "left unchanged") {
+		t.Errorf("value content naming ghost must not be refused, got:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "✓ ghost MCP server already registered") {
+		t.Errorf("the current registration should be left alone, got:\n%s", out.String())
+	}
+	got, err := os.ReadFile(codexConfigToml(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != seed {
+		t.Errorf("config.toml must be untouched, got:\n%s", got)
+	}
+}
+
 // mustCodexGhostSpan returns the ghost table's own lines in a config.toml body.
 func mustCodexGhostSpan(t *testing.T, content string) []string {
 	t.Helper()

@@ -413,10 +413,11 @@ const (
 // header, so the distinction comes from the content: every dot-separated part
 // must look like a key (a bare key or one quoted string) before the line is
 // treated as a header at all, and a single part only counts when nothing else
-// fits. Two readings stay ambiguous, and both are resolved toward value content
-// because that is the reading that cannot lose a neighbouring table's keys: a
-// single-element array of a bare value ([true], [1]) and a [[...]] line. A table
-// codex declared with exactly those shapes would be swept up by the repair.
+// fits. One reading stays ambiguous: a single-element array of a bare value,
+// [true] or [1], which is resolved toward value content because that is the
+// reading that cannot lose a neighbouring table's keys, at the cost of a table
+// codex declared with exactly that name being swept up by the repair. A
+// [[...]] line is resolved the other way, as a table.
 func codexBracketedKind(line string) codexBracketed {
 	if !codexIsTableHeader(line) {
 		return codexNotAKey
@@ -609,18 +610,35 @@ func findCodexAmbiguousGhostHeader(lines []string, key string) (at int, text str
 		if _, named := normaliseCodexTableName(line); named {
 			continue // a parseable header: the repair path matches or ignores it
 		}
-		// A line a malformed value swallowed is deliberately not skipped: it
-		// cannot be one of our own headers, because a multi-part key path always
-		// reads as a table and so is never tracked as value content. What is left
-		// that names ghost is a form the repair cannot manage, and refusing is
-		// the one outcome that cannot duplicate the server. The cost is a
-		// refusal on a bracketed line that only happens to contain the word, such
-		// as a nested array element holding "mcp_servers.ghost" as a string.
+		// A line a malformed value swallowed is not skipped outright, or a
+		// broken header hidden behind the typo would be appended to. It has to
+		// look like the start of a header first, so an array element that merely
+		// contains the word stays value content.
+		if !codexIsTableHeader(line) && !codexHeaderCandidate(line) {
+			continue
+		}
 		if codexHeaderNamesPart(line, leaf) {
 			return i + 1, trimmed, true
 		}
 	}
 	return 0, "", false
+}
+
+// codexHeaderCandidate reports whether a bracketed line that does not parse as a
+// header is at least shaped like the start of one, which is how a header broken
+// by a typo is told apart from an array element that happens to hold the same
+// word: [mcp_servers.ghost.] and ["mcp_servers".ghost are candidates, while
+// ["ghost"], is an element.
+func codexHeaderCandidate(line string) bool {
+	t := strings.TrimSpace(strings.TrimPrefix(codexStripComment(strings.TrimSpace(line)), "[["))
+	if !strings.HasPrefix(t, "[") {
+		return false
+	}
+	first := codexDottedParts(strings.TrimLeft(t, "["))
+	if len(first) == 0 {
+		return false
+	}
+	return isCodexBareKey(first[0]) || isCodexQuotedToken(first[0])
 }
 
 // codexHeaderNamesPart reports whether an unparseable table header still names
