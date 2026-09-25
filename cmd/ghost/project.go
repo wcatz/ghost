@@ -331,7 +331,15 @@ func printBinding(out io.Writer, binding memory.ProjectBinding) error {
 	// this clause the advice would leave the check red with nothing to act on.
 	// The wording is the code's own test rather than a claim about provenance,
 	// which the installer has no way to know.
-	if binding.PathChanged && !filepath.IsAbs(binding.PreviousPath) {
+	// Any newly recorded directory has no redirect yet — writeRedirects only
+	// runs over absolute paths, and it skips a file that is not its own stale
+	// redirect. Status counts the redirect under the path NOW recorded, so a
+	// re-point to a moved checkout goes red exactly like a first bind: the one
+	// on disk is under the old directory and EncodeProjectPath is a pure string
+	// transform of the current path. That is why the guard is PathChanged
+	// rather than "had no absolute path": both cases leave status reporting a
+	// finished repair as broken.
+	if binding.PathChanged {
 		if _, err := fmt.Fprintln(out, "  next: on the standalone Claude Code integration (not the ghost plugin), run\n"+
 			"        `ghost mcp init` to write this checkout's memory redirect\n"+
 			"        (init overwrites only a MEMORY.md it recognises as its own\n"+

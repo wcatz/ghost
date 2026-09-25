@@ -17,8 +17,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	pathpkg "path"
-	"strings"
 )
 
 // Reasons a bind can be refused. They are sentinels rather than formatted
@@ -205,14 +203,20 @@ func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote st
 		}
 	}
 
-	// Compared as text against the PHYSICAL path, so a project recorded under a
-	// symlink's own spelling is rewritten to the directory a session's working
-	// directory actually has — the spelling resolution can match, since the
-	// candidate query narrows on text and an alias shares no prefix with its
-	// target. Two spellings of one location that differ only in trailing
-	// separators or dot segments are already equal after cleaning, and a re-run
-	// must look like a re-run rather than rewrite updated_at.
-	pathChanged := !sameRecordedPath(storedPath, physical)
+	// Compared as EXACT text against the physical path, and that strictness is
+	// the point: the candidate query matches on stored text, so a row holding
+	// "/x/checkout/" is returned by no clause of it — not equal to the session's
+	// "/x/checkout", and not a prefix of it followed by "/" — and a project
+	// stored that way resolves from nowhere. Treating two spellings of one
+	// location as "already bound" would leave exactly that state unrepairable:
+	// the refusal rolls back, the row keeps the spelling, and re-running fails
+	// identically forever. It is also not in the unbound notice, whose shape
+	// test passes, so nothing else would ever suggest the bind.
+	//
+	// The cost is that a row another writer spelled with backslashes is rewritten
+	// once to the physical spelling, which the query does match. That is a
+	// normalization, stable after the first bind.
+	pathChanged := storedPath != physical
 	newPath := storedPath
 	if pathChanged {
 		newPath = physical
@@ -361,10 +365,17 @@ func checkPathResolvable(ctx context.Context, tx *sql.Tx, id, physical, remote s
 		}
 	}
 	if survivors == 0 {
+		// Stated as what was observed, with the rule offered as the likely
+		// reason rather than asserted as the cause: this project's own row
+		// always survives agreesWithSession once it has been written with the
+		// physical path, so the candidate query is what dropped it — and
+		// blaming a rule the path may well pass is how the previous version of
+		// this message came to deny the length limit to a 21-character path.
+		//
 		// pathRankLength, not len: the filter is SQLite's LENGTH() on TEXT,
-		// which counts characters, so a byte count here would report a
-		// multi-byte path as longer than the limit that actually dropped it.
-		return fmt.Errorf("%w: %q is %d characters, and path resolution only considers recorded paths longer than 10",
+		// which counts characters, so a byte count would report a multi-byte
+		// path as longer than the limit that dropped it.
+		return fmt.Errorf("%w: %q is %d characters — path resolution's candidate query returned no row for it, and that query only considers recorded paths longer than 10 characters",
 			ErrBindPathUnmatchable, physical, pathRankLength(physical))
 	}
 	if tied {
@@ -408,24 +419,12 @@ func scanBindCandidates(rows *sql.Rows) ([]basenameCandidate, error) {
 	return candidates, nil
 }
 
-// sameRecordedPath compares two recorded paths as locations rather than as
-// text: separators normalized and dot segments cleaned on both sides, so
-// "/x/checkout/" and "\x\checkout" are one directory. Deliberately not
-// filepath.Clean, which would resolve a relative path against this process's
-// working directory and make the answer depend on where the caller runs.
-//
-// This is the whole "is this already the recorded path" test, and it stays
-// textual on purpose. The resolver narrows its candidate query on the stored
-// TEXT, so a path recorded under a symlink's spelling and its physical target
-// do not match each other either; calling them the same binding would leave
-// the project unresolvable from the directory the user just named.
-func sameRecordedPath(a, b string) bool {
-	return cleanRecordedPath(a) == cleanRecordedPath(b)
-}
-
-func cleanRecordedPath(p string) string {
-	return pathpkg.Clean(strings.ReplaceAll(p, `\`, "/"))
-}
+// sameRecordedPath compared two recorded paths as locations rather than as text:
+// separators normalized and dot segments cleaned on both sides. It is gone
+// because resolution does not compare them that way. The candidate query matches
+// the stored TEXT, so "/x/checkout/" and "/x/checkout" are not interchangeable
+// there, and bind must write the spelling the query can return — see the
+// pathChanged comparison in BindProjectPath.
 
 // ListUnboundProjects returns the projects a session directory can never
 // resolve: no usable recorded path and no repository remote, in name order.

@@ -427,20 +427,37 @@ func TestBindingPrintsTheMCPInitFollowUp(t *testing.T) {
 		}
 	})
 
-	t.Run("a project that already had a checkout does not", func(t *testing.T) {
+	t.Run("a re-point also needs the redirect", func(t *testing.T) {
 		store := bindStore(t)
 		dir := t.TempDir()
 		if err := store.EnsureProject(ctx, "infra", dir, "infrastructure"); err != nil {
 			t.Fatalf("EnsureProject: %v", err)
 		}
-		// Re-point it: the redirect for the previous checkout already exists, and
-		// the one being replaced is the user's business, not a follow-up step.
+		// Re-point it, the repair docs/cli.md documents for a moved checkout.
+		// The redirect check looks under the path NOW recorded, so the one on
+		// disk for the old directory does not count and status goes red the
+		// same way it does for a first bind.
 		var out bytes.Buffer
 		if err := runProjectBindCore(ctx, store, &out, "infra", t.TempDir(), noRemote); err != nil {
 			t.Fatalf("runProjectBindCore: %v", err)
 		}
+		if !strings.Contains(out.String(), "ghost mcp init") {
+			t.Errorf("a re-pointed checkout also has no redirect, got:\n%s", out.String())
+		}
+	})
+
+	t.Run("a re-run that changes nothing needs no step", func(t *testing.T) {
+		store := bindStore(t)
+		dir := t.TempDir()
+		if err := store.EnsureProject(ctx, "infra", dir, "infrastructure"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		var out bytes.Buffer
+		if err := runProjectBindCore(ctx, store, &out, "infra", dir, noRemote); err != nil {
+			t.Fatalf("runProjectBindCore: %v", err)
+		}
 		if strings.Contains(out.String(), "ghost mcp init") {
-			t.Errorf("re-pointing an already-bound project needs no init step, got:\n%s", out.String())
+			t.Errorf("binding the same directory again changes nothing to follow up, got:\n%s", out.String())
 		}
 	})
 }

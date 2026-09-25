@@ -360,6 +360,37 @@ func TestBindPathOnlyParentClaimsItsSubtree(t *testing.T) {
 	}
 }
 
+// TestBindProjectPathRepairsAnUnmatchableSpelling — a row some earlier writer
+// left with a trailing separator is invisible to the candidate query: its
+// three clauses all compare against the stored TEXT, and "/x/checkout/" is
+// neither equal to the session's "/x/checkout" nor a prefix of it followed by
+// "/". Such a project is not in the unbound notice either — the shape test
+// passes — so bind is the only thing that can repair it, and it must: it has to
+// write the spelling the query can return rather than decide the two are the
+// same location and change nothing.
+func TestBindProjectPathRepairsAnUnmatchableSpelling(t *testing.T) {
+	ctx := context.Background()
+	s := bindStore(t)
+	dir := t.TempDir()
+	if err := s.EnsureProject(ctx, "infra", dir+string(filepath.Separator), "infrastructure"); err != nil {
+		t.Fatalf("EnsureProject with a trailing separator: %v", err)
+	}
+
+	got, err := s.BindProjectPath(ctx, "infra", dir, "")
+	if err != nil {
+		t.Fatalf("bind must repair an unmatchable spelling, got %v", err)
+	}
+	if !got.PathChanged {
+		t.Errorf("writing the matchable spelling is a change: %+v", got)
+	}
+	if recorded := projectPath(t, s, "infra"); recorded != physical(t, dir) {
+		t.Errorf("stored path = %q, want the spelling resolution can match (%q)", recorded, physical(t, dir))
+	}
+	if id, _, err := s.ResolveProject(ctx, dir); err != nil || id != "infra" {
+		t.Errorf("ResolveProject(%q) = (%q, %v), want the repaired project", dir, id, err)
+	}
+}
+
 // TestBindProjectPathRefusesUnmatchablePath — the resolver's candidate query
 // skips recorded paths of ten characters or fewer, so binding one records a
 // project that no session directory can ever find. The command exists to make
@@ -408,6 +439,14 @@ func TestBindProjectPathRefusesUnmatchablePath(t *testing.T) {
 			// counted on the resolved path rather than the typed one.
 			if !strings.Contains(err.Error(), fmt.Sprintf("is %d characters", wantLength)) {
 				t.Errorf("error should count the %d characters the filter counted, got %q", wantLength, err)
+			}
+			// And the message must report what was observed rather than assert
+			// the length rule as the cause: a previous version blamed that rule
+			// for a 21-character path it plainly passed, which is how a real
+			// bug (a trailing separator the candidate query cannot match) hid
+			// behind a confident explanation.
+			if !strings.Contains(err.Error(), "candidate query returned no row") {
+				t.Errorf("error should report what the candidate query did, got %q", err)
 			}
 			if got := projectPath(t, s, "infra"); got != "infra" {
 				t.Errorf("the refused bind wrote path %q", got)
