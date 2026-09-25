@@ -613,25 +613,29 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("search failed: %w", err)
 		}
 
+		// Whether SearchHybrid filled the fetch window, captured BEFORE any
+		// post-filter. Every later filter narrows the same pool, so measuring
+		// "was the window full" after one of them has already run would lose
+		// the signal: a category that shrank the pool first would make a
+		// subsequent scope filter look like it never had more matches to
+		// exclude, and the caller would be told its truncated result was
+		// exhaustive.
+		fullWindow := len(memories) == searchLimit
+
 		// Post-filter by category if specified.
 		maybeIncomplete := false
 		if args.Category != "" {
-			rawCount := len(memories)
 			filtered := memories[:0]
 			for _, m := range memories {
 				if m.Category == args.Category {
 					filtered = append(filtered, m)
 				}
 			}
-			if len(filtered) > args.Limit {
-				filtered = filtered[:args.Limit]
-			}
 			memories = filtered
-			// rawCount == searchLimit means SearchHybrid may have had more
-			// matches beyond what we fetched — the category filter narrowed
-			// an unknown-sized pool, so under-limit results aren't provably
+			// A full window means SearchHybrid may have had more matches
+			// beyond what we fetched, so a narrowed result is not provably
 			// exhaustive.
-			maybeIncomplete = rawCount == searchLimit && len(memories) < args.Limit
+			maybeIncomplete = fullWindow && len(memories) < args.Limit
 		}
 
 		// Post-filter by scope. A row that names a differing scope is a
@@ -646,20 +650,29 @@ func (s *Server) registerTools() {
 			return nil, nil, err
 		}
 		if len(scopeFilter) > 0 {
-			rawScopeCount := len(memories)
 			filtered := memories[:0]
 			for _, m := range memories {
 				if memory.ScopeMatches(m.Scope, scopeFilter) {
 					filtered = append(filtered, m)
 				}
 			}
-			if len(filtered) > args.Limit {
-				filtered = filtered[:args.Limit]
-			}
 			memories = filtered
-			if rawScopeCount == searchLimit && len(memories) < args.Limit {
+			if fullWindow && len(memories) < args.Limit {
 				maybeIncomplete = true
 			}
+		}
+
+		// Apply the limit once, after every post-filter. Truncating inside
+		// each filter lets an earlier one drop rows a later filter would have
+		// kept: with category first, a limit of 2 trimmed the pool to two
+		// before scope ran, and the production row was gone before scope ever
+		// saw it — the filter that was asked for did the opposite of what it
+		// was asked.
+		if len(memories) > args.Limit {
+			memories = memories[:args.Limit]
+		}
+		if fullWindow && len(memories) < args.Limit {
+			maybeIncomplete = true
 		}
 
 		if len(memories) == 0 {
@@ -670,7 +683,23 @@ func (s *Server) registerTools() {
 
 		text := formatMemories(memories)
 		if maybeIncomplete {
-			text += "\n\n(Note: category filter may have missed further matches beyond the search window — use ghost_memories_list for exhaustive category browsing.)"
+			// Name whichever filter actually narrowed the window. Saying
+			// "category filter" when scope did the narrowing sends the reader
+			// looking for a filter that was never applied.
+			var narrowed []string
+			if args.Category != "" {
+				narrowed = append(narrowed, "category")
+			}
+			if len(scopeFilter) > 0 {
+				narrowed = append(narrowed, "scope")
+			}
+			which := "a post-filter"
+			if len(narrowed) == 1 {
+				which = "the " + narrowed[0] + " filter"
+			} else if len(narrowed) > 1 {
+				which = "the " + strings.Join(narrowed, " and ") + " filters"
+			}
+			text += "\n\n(Note: " + which + " may have missed further matches beyond the search window — use ghost_memories_list for exhaustive category browsing.)"
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: text}},

@@ -150,3 +150,75 @@ func TestScopeRejectsNonStringValues(t *testing.T) {
 		t.Fatalf("non-string scope value was accepted; it can never match a string filter:\n%s", resultText(res))
 	}
 }
+
+// TestScopeNarrowingIsReported: when the scope filter drops rows from a full
+// window, the caller must be told the result may be short rather than
+// presented with a truncated list as everything that matched.
+//
+// The flag is computed once, before any post-filter runs, and this test
+// deliberately runs BOTH filters to catch the case that was reported: with
+// category applied first, a scope filter that measures "was the window full"
+// against the already-shrunk pool sees a count below the fetch limit and
+// concludes nothing was ever withheld.
+func TestScopeNarrowingIsReported(t *testing.T) {
+	_, session := newCapSession(t)
+
+	// Six rows, so a limit of 2 fetches 2*3 = 6 with a category filter set —
+	// a full window. Three are category fact, three gotcha; one of the fact
+	// rows is production.
+	//
+	// Contents differ in vocabulary on purpose: near restatements would fold
+	// at save time, the window would never fill, and the assertion would pass
+	// for the wrong reason.
+	rows := []struct{ content, category, env string }{
+		{"The development database is SQLite.", "fact", "development"},
+		{"Backups of the analytics database run nightly.", "fact", "development"},
+		{"The production database is PostgreSQL.", "fact", "production"},
+		{"Retention on the warehouse database is thirty days.", "gotcha", "development"},
+		{"A read replica of the reporting database lives elsewhere.", "gotcha", "development"},
+		{"Slow queries on the metrics database need an index.", "gotcha", "development"},
+	}
+	for _, r := range rows {
+		args := map[string]any{
+			"project_id": "test-project",
+			"content":    r.content,
+			"category":   r.category,
+			"scope":      map[string]any{"environment": r.env},
+		}
+		if res := callTool(t, session, "ghost_memory_save", args); res.IsError {
+			t.Fatalf("save %q failed: %s", r.content, resultText(res))
+		}
+	}
+
+	res := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "database",
+		"category":   "fact",
+		"limit":      2,
+		"scope":      map[string]any{"environment": "production"},
+	})
+	if res.IsError {
+		t.Fatalf("search failed: %s", resultText(res))
+	}
+	out := resultText(res)
+
+	if strings.Contains(out, "for development") {
+		t.Errorf("development row survived a production-scoped search:\n%s", out)
+	}
+	// Assert the note exists AND names scope, rather than matching one
+	// phrasing: with both filters applied it reads "category and scope
+	// filters", and pinning that exact string would make a harmless wording
+	// change look like a regression.
+	idx := strings.Index(out, "may have missed")
+	if idx < 0 {
+		t.Errorf("scope narrowing was not reported — a truncated result presented as complete:\n%s", out)
+	} else {
+		start := idx - 80
+		if start < 0 {
+			start = 0
+		}
+		if !strings.Contains(out[start:idx], "scope") {
+			t.Errorf("the incompleteness note does not name the scope filter:\n%s", out)
+		}
+	}
+}
