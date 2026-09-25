@@ -1395,14 +1395,23 @@ func TestResolveOrCreateRepoProjectBindsRemoteFromSubdirectoryOfSameRepository(t
 // whether a save may identify a project, because the write side is otherwise
 // the one place that never spawns git: the remote at the saving directory was
 // detected by the caller that passed it in, so the only question left is the one
-// at the project's recorded path, and a save made at that root settles without
-// asking anything.
+// at the project's recorded path.
+//
+// The third case is the one that matters in production, since it is every save
+// after the first: once the project records its repository, the transaction
+// returns before the guard is reached, so the answer is provably unused and must
+// cost nothing. "Provably" is the part under test — the pre-lock read has the
+// row, so it can see that the remote is already recorded and skip the spawn
+// rather than computing an answer nobody will read.
 func TestResolveOrCreateRepoProjectDetectsRemoteOnce(t *testing.T) {
 	const own = "https://github.com/wcatz/infra.git"
 	for _, c := range []struct {
-		name   string
-		saving func(parent string) string
-		want   int
+		name string
+		// bindFirst saves from the project root first, which is what puts the
+		// project in the state every later save meets.
+		bindFirst bool
+		saving    func(parent string) string
+		want      int
 	}{
 		{
 			name:   "a save at the project root",
@@ -1413,6 +1422,12 @@ func TestResolveOrCreateRepoProjectDetectsRemoteOnce(t *testing.T) {
 			name:   "a save from a subdirectory",
 			saving: func(parent string) string { return filepath.Join(parent, "src") },
 			want:   1,
+		},
+		{
+			name:      "a save from a subdirectory of a project that records its remote",
+			bindFirst: true,
+			saving:    func(parent string) string { return filepath.Join(parent, "src") },
+			want:      0,
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -1429,6 +1444,13 @@ func TestResolveOrCreateRepoProjectDetectsRemoteOnce(t *testing.T) {
 			}
 			if err := s.EnsureProject(ctx, parent, parent, "infra"); err != nil {
 				t.Fatalf("EnsureProject parent: %v", err)
+			}
+			if c.bindFirst {
+				if _, err := s.ResolveOrCreateRepoProject(
+					ctx, parent, "infra", parent, parent, parent, own,
+				); err != nil {
+					t.Fatalf("bind the project from its root: %v", err)
+				}
 			}
 
 			detections := 0
@@ -1474,9 +1496,15 @@ func TestResolveOrCreateRepoProjectDetectsBeforeTakingTheStoreLock(t *testing.T)
 		t.Fatalf("EnsureProject parent: %v", err)
 	}
 
-	detected := make(chan struct{})
+	// Buffered, and a non-blocking send: a second detection is a regression this
+	// test is here to catch, and closing an already-closed channel would panic
+	// the whole package binary instead of failing this test.
+	detected := make(chan struct{}, 1)
 	SetDetectRemote(func(string) string {
-		close(detected)
+		select {
+		case detected <- struct{}{}:
+		default:
+		}
 		return own
 	})
 	t.Cleanup(func() { SetDetectRemote(nil) })

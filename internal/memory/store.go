@@ -481,7 +481,14 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 	// different fixes — a different repository found, or no repository readable
 	// at the recorded path — and a message naming only the first sends an
 	// operator with the second looking for a nested checkout they do not have.
-	if prefixMatch && !saving.speaksForProject {
+	//
+	// The projectID comparison is the guard's own evidence check: the answer
+	// above describes one project, read before the lock, and it is consulted
+	// only when the transaction matched that same project. Every other case —
+	// no answer, or an answer about a different row — is no evidence, and no
+	// evidence refuses, because this guard exists to stop a wrong remote being
+	// written and a missing reading is not permission to write one.
+	if prefixMatch && (saving.projectID != id || !saving.speaksForProject) {
 		s.logger.Warn("refused to bind a repository to a project whose checkout contains this save: could not establish that the saving directory belongs to that project's own repository",
 			"project", id,
 			"recorded_path", matchedPath, "recorded_path_remote", saving.recordedRemote,
@@ -507,25 +514,31 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 
 // savingRepository is the answer to "does the saving directory belong to the
 // repository the enclosing project is a checkout of", which is the only thing
-// that lets a save identify the project it was routed to. It is decided before
-// the store's write lock is taken, because deciding it can cost a `git config`
-// and everything inside that lock holds the single write connection too.
+// that lets a save identify the project it was routed to.
 //
-// The value is a hint about evidence, not the evidence itself: the transaction
-// re-runs its own lookup and only consults this on the path-prefix branch. A
-// project created between the two reads therefore falls back to the
-// pre-existing behaviour rather than being refused on evidence that was never
-// collected, which is the safe direction to be wrong in — this guard exists to
-// stop a wrong remote being written, not to enforce a policy.
+// It is decided before the store's write lock is taken, because deciding it can
+// cost a `git config` and everything inside that lock holds the single write
+// connection too.
+//
+// It carries the row it was read from rather than a bare yes, because the
+// transaction has to be able to tell an answer about the project it matched from
+// no answer at all. The transaction is the authority: it consults this only when
+// projectID is the project it just matched, and a winner it did not confirm — a
+// project created or re-pointed between the two reads, or a read that failed —
+// leaves the guard with no evidence, which refuses. A guard that treated a
+// missing answer as permission would be no guard at all on exactly the paths
+// where its input could not be collected.
 type savingRepository struct {
-	// speaksForProject reports whether the saving directory is inside the
-	// repository the enclosing project is a checkout of.
-	speaksForProject bool
-	// recordedRemote is the repository detected at that project's recorded
-	// path, which is what tells a nested checkout (a different remote) from a
-	// recorded path git cannot read (none). It is empty when the saving
-	// directory was the recorded root, because that answer spent no detection.
+	// projectID is the project this answer describes, "" when there is none.
+	projectID string
+	// recordedRemote is what that project records for itself. A project that
+	// records one is never decided by this answer — the transaction returns
+	// before the guard — so it is read to skip the detection rather than to
+	// decide anything, which is what keeps every save after the first free.
 	recordedRemote string
+	// speaksForProject reports whether the saving directory belongs to the
+	// repository that project is a checkout of.
+	speaksForProject bool
 }
 
 // savingRepository answers savingRepository for a save from projectRef, whose
@@ -550,38 +563,47 @@ type savingRepository struct {
 // repository's identity to another is the failure this exists to stop.
 //
 // The candidate is read on the pool rather than inside the transaction for the
-// reason above. That read mirrors the transaction's own prefix query — the same
+// reason above, and the read mirrors the transaction's own prefix query — the same
 // three path clauses, the same length filter, the same longest-path winner, and
-// the same exclusion of _global — so the two name the same project. Where they
-// cannot disagree usefully is the case that matters: a read that fails or finds
-// nothing answers "speaks", because a project the transaction then matches has
-// no evidence against it here.
+// the same exclusion of _global — so the two name the same project. Two reads
+// that both fail leave the guard without evidence, which is the safe direction to
+// be wrong in: a project this save could have identified stays unclaimed and is
+// identified by the next save, rather than being handed a repository that
+// belongs to a checkout inside it.
 func (s *Store) savingRepository(ctx context.Context, projectRef, repoRemote string) savingRepository {
 	norm := absoluteSessionPath(projectRef)
-	candidates, err := s.pathCandidates(ctx, norm, false)
+	hasRepoRemote, err := s.hasRepoRemoteColumn(ctx)
 	if err != nil {
-		return savingRepository{speaksForProject: true}
+		return savingRepository{}
 	}
-	recorded, length := "", -1
+	candidates, err := s.pathCandidates(ctx, norm, hasRepoRemote)
+	if err != nil {
+		return savingRepository{}
+	}
+	var winner basenameCandidate
+	length := -1
 	for _, candidate := range candidates {
 		if candidate.id == "_global" {
 			continue // not a checkout, and never a prefix match for one
 		}
 		if l := pathRankLength(candidate.path); l > length {
-			recorded, length = candidate.path, l
+			winner, length = candidate, l
 		}
 	}
-	if recorded == "" {
-		return savingRepository{speaksForProject: true}
+	if winner.id == "" {
+		return savingRepository{}
 	}
-	if savingPathIsProjectRoot(recorded, norm) {
-		return savingRepository{speaksForProject: true}
+	saving := savingRepository{projectID: winner.id, recordedRemote: winner.remote, speaksForProject: true}
+	// The project already says which repository it is, and the transaction
+	// returns on that before the guard: this answer cannot change what happens,
+	// so it costs nothing to leave it at "speaks" and spend no detection.
+	if winner.remote != "" || savingPathIsProjectRoot(winner.path, norm) {
+		return saving
 	}
-	recordedRemote := s.inputRemote(recorded)
-	return savingRepository{
-		speaksForProject: recordedRemote != "" && recordedRemote == repoRemote,
-		recordedRemote:   recordedRemote,
-	}
+	recordedRemote := s.inputRemote(winner.path)
+	saving.recordedRemote = recordedRemote
+	saving.speaksForProject = recordedRemote != "" && recordedRemote == repoRemote
+	return saving
 }
 
 // savingPathIsProjectRoot reports whether the directory a save came from is the
