@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestEnsureProjectWithRepoMergesSameRepositoryAcrossPaths is the whole point
@@ -1443,6 +1444,60 @@ func TestResolveOrCreateRepoProjectDetectsRemoteOnce(t *testing.T) {
 				t.Errorf("a repository-aware save spawned %d detections, want %d", detections, c.want)
 			}
 		})
+	}
+}
+
+// TestResolveOrCreateRepoProjectDetectsBeforeTakingTheStoreLock pins where that
+// detection happens, because the cost is not only a process spawn: the resolve
+// holds the store-wide mutex and the single write connection for its whole
+// duration, so a git that hangs there stalls every other reader and writer on
+// this Store to answer one save.
+//
+// Holding the mutex and watching for the detection is the only way to say which
+// side of it the work falls on. If the detection moved back inside the lock, the
+// channel below would never close and this fails rather than hangs, because the
+// test releases the mutex on the timeout path.
+func TestResolveOrCreateRepoProjectDetectsBeforeTakingTheStoreLock(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const own = "https://github.com/wcatz/infra.git"
+	root := t.TempDir()
+	parent := filepath.Join(root, "git", "infra")
+	subdir := filepath.Join(parent, "src", "api")
+	for _, dir := range []string{parent, subdir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+	if err := s.EnsureProject(ctx, parent, parent, "infra"); err != nil {
+		t.Fatalf("EnsureProject parent: %v", err)
+	}
+
+	detected := make(chan struct{})
+	SetDetectRemote(func(string) string {
+		close(detected)
+		return own
+	})
+	t.Cleanup(func() { SetDetectRemote(nil) })
+
+	s.mu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ResolveOrCreateRepoProject(ctx, subdir, "infra", subdir, subdir, subdir, own)
+		done <- err
+	}()
+
+	select {
+	case <-detected:
+	case <-time.After(5 * time.Second):
+		s.mu.Unlock()
+		t.Fatal("the repository detection ran behind the store mutex")
+	}
+	s.mu.Unlock()
+
+	if err := <-done; err != nil {
+		t.Fatalf("ResolveOrCreateRepoProject: %v", err)
 	}
 }
 

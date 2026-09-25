@@ -330,6 +330,13 @@ func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repo
 		path = id
 	}
 
+	// Before the store lock, and this is the only reason the answer is computed
+	// here rather than inside the transaction: deciding it can cost a
+	// `git config`, and everything below holds both the store-wide mutex and the
+	// single write connection. A hung git there would stall every other reader
+	// and writer on this Store to answer one save.
+	saving := s.savingRepository(ctx, projectRef, repoRemote)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -342,7 +349,7 @@ func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repo
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	canonical, err := s.resolveRepoProjectTx(ctx, tx, projectRef, path, repoName, repoRemote)
+	canonical, err := s.resolveRepoProjectTx(ctx, tx, projectRef, path, repoName, repoRemote, saving)
 	if err != nil {
 		return "", err
 	}
@@ -358,8 +365,8 @@ func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repo
 	return canonical, nil
 }
 
-func (s *Store) resolveRepoProjectTx(ctx context.Context, tx *sql.Tx, projectRef, savingPath, repoName, repoRemote string) (string, error) {
-	if id, found, err := s.resolveExplicitProjectRepoTx(ctx, tx, projectRef, repoRemote); found || err != nil {
+func (s *Store) resolveRepoProjectTx(ctx context.Context, tx *sql.Tx, projectRef, savingPath, repoName, repoRemote string, saving savingRepository) (string, error) {
+	if id, found, err := s.resolveExplicitProjectRepoTx(ctx, tx, projectRef, repoRemote, saving); found || err != nil {
 		return id, err
 	}
 	if id, err := s.findProjectByRepoRemoteTx(ctx, tx, repoRemote, ""); err != nil {
@@ -373,7 +380,7 @@ func (s *Store) resolveRepoProjectTx(ctx context.Context, tx *sql.Tx, projectRef
 	return s.bindUniqueProjectNameRepoTx(ctx, tx, repoName, savingPath, repoRemote)
 }
 
-func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, projectRef, repoRemote string) (id string, found bool, err error) {
+func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, projectRef, repoRemote string, saving savingRepository) (id string, found bool, err error) {
 	if projectRef == "" {
 		return "", false, nil
 	}
@@ -474,15 +481,12 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 	// different fixes — a different repository found, or no repository readable
 	// at the recorded path — and a message naming only the first sends an
 	// operator with the second looking for a nested checkout they do not have.
-	if prefixMatch {
-		sameRepository, recordedRemote := s.savingDirectorySpeaksForProject(matchedPath, norm, repoRemote)
-		if !sameRepository {
-			s.logger.Warn("refused to bind a repository to a project whose checkout contains this save: could not establish that the saving directory belongs to that project's own repository",
-				"project", id,
-				"recorded_path", matchedPath, "recorded_path_remote", recordedRemote,
-				"saving_path", projectRef, "saving_path_remote", repoRemote)
-			return id, true, nil
-		}
+	if prefixMatch && !saving.speaksForProject {
+		s.logger.Warn("refused to bind a repository to a project whose checkout contains this save: could not establish that the saving directory belongs to that project's own repository",
+			"project", id,
+			"recorded_path", matchedPath, "recorded_path_remote", saving.recordedRemote,
+			"saving_path", projectRef, "saving_path_remote", repoRemote)
+		return id, true, nil
 	}
 
 	ownerID, err := s.findProjectByRepoRemoteTx(ctx, tx, repoRemote, id)
@@ -501,43 +505,83 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 	return id, true, nil
 }
 
-// savingDirectorySpeaksForProject reports whether the repository detected at a
-// saving directory is the one the matched project is a checkout of, which is
-// the only thing that lets a save identify the project it was routed to. Two
-// things establish it, and the first is the cheap one.
+// savingRepository is the answer to "does the saving directory belong to the
+// repository the enclosing project is a checkout of", which is the only thing
+// that lets a save identify the project it was routed to. It is decided before
+// the store's write lock is taken, because deciding it can cost a `git config`
+// and everything inside that lock holds the single write connection too.
 //
-// The saving directory IS the project's recorded root: one directory, so there
-// is no second repository to have meant, and no detection is spent.
+// The value is a hint about evidence, not the evidence itself: the transaction
+// re-runs its own lookup and only consults this on the path-prefix branch. A
+// project created between the two reads therefore falls back to the
+// pre-existing behaviour rather than being refused on evidence that was never
+// collected, which is the safe direction to be wrong in — this guard exists to
+// stop a wrong remote being written, not to enforce a policy.
+type savingRepository struct {
+	// speaksForProject reports whether the saving directory is inside the
+	// repository the enclosing project is a checkout of.
+	speaksForProject bool
+	// recordedRemote is the repository detected at that project's recorded
+	// path, which is what tells a nested checkout (a different remote) from a
+	// recorded path git cannot read (none). It is empty when the saving
+	// directory was the recorded root, because that answer spent no detection.
+	recordedRemote string
+}
+
+// savingRepository answers savingRepository for a save from projectRef, whose
+// repository the caller has already detected as repoRemote.
 //
-// Failing that, the two directories report the same remote. That is what an
-// ordinary subdirectory of the checkout looks like — sessions start in
-// src/api more often than at the root, and `git config` walks up. The remote at
-// the saving directory is the one the caller already detected and passed in, so
-// this costs at most one additional `git config` (bounded by
-// repo.detectTimeout), and only on the prefix branch with a non-root saving
-// directory.
+// Two things establish the answer, and the first is the cheap one. The saving
+// directory IS the project's recorded root: one directory, so there is no second
+// repository to have meant, and no detection is spent. Failing that, the two
+// directories report the same remote, which is what an ordinary subdirectory of
+// the checkout looks like — sessions start in src/api more often than at the
+// root, and `git config` walks up. The remote at the saving directory is the one
+// the caller already detected and passed in, so the only detection here is the
+// one at the recorded path: at most one additional `git config`, bounded by
+// repo.detectTimeout.
 //
-// Anything else is a nested checkout, and a remote that cannot be detected at
-// the recorded path proves nothing at all. Both refusals take the same
-// direction: the enclosing project is not identified, and the save still lands
-// in it. internal/memory never spawns git itself, so a store built without a
-// detector — the default, and what every test but the ones that pin one gets —
-// cannot tell a subdirectory from a submodule here, and guessing towards
-// handing one repository's identity to another is the failure this exists to
-// stop.
+// Anything else is a nested checkout, and a remote that cannot be detected at the
+// recorded path proves nothing at all. Both refusals take the same direction: the
+// enclosing project is not identified, and the save still lands in it.
+// internal/memory never spawns git itself, so a store built without a detector —
+// the default, and what every test but the ones that pin one gets — cannot tell a
+// subdirectory from a submodule here, and guessing towards handing one
+// repository's identity to another is the failure this exists to stop.
 //
-// The remote detected at the recorded path is returned so that a caller refusing
-// on this answer can report it: "" there is what separates a nested checkout
-// from a recorded path git cannot read — moved, deleted, owned by someone else,
-// or a store with no detector wired. "" is also what the root fast path returns,
-// because it spent no detection, so a caller must read the boolean first: this
-// value says something only on a false answer.
-func (s *Store) savingDirectorySpeaksForProject(recorded, saving, savingRemote string) (bool, string) {
-	if savingPathIsProjectRoot(recorded, saving) {
-		return true, ""
+// The candidate is read on the pool rather than inside the transaction for the
+// reason above. That read mirrors the transaction's own prefix query — the same
+// three path clauses, the same length filter, the same longest-path winner, and
+// the same exclusion of _global — so the two name the same project. Where they
+// cannot disagree usefully is the case that matters: a read that fails or finds
+// nothing answers "speaks", because a project the transaction then matches has
+// no evidence against it here.
+func (s *Store) savingRepository(ctx context.Context, projectRef, repoRemote string) savingRepository {
+	norm := absoluteSessionPath(projectRef)
+	candidates, err := s.pathCandidates(ctx, norm, false)
+	if err != nil {
+		return savingRepository{speaksForProject: true}
+	}
+	recorded, length := "", -1
+	for _, candidate := range candidates {
+		if candidate.id == "_global" {
+			continue // not a checkout, and never a prefix match for one
+		}
+		if l := pathRankLength(candidate.path); l > length {
+			recorded, length = candidate.path, l
+		}
+	}
+	if recorded == "" {
+		return savingRepository{speaksForProject: true}
+	}
+	if savingPathIsProjectRoot(recorded, norm) {
+		return savingRepository{speaksForProject: true}
 	}
 	recordedRemote := s.inputRemote(recorded)
-	return recordedRemote != "" && recordedRemote == savingRemote, recordedRemote
+	return savingRepository{
+		speaksForProject: recordedRemote != "" && recordedRemote == repoRemote,
+		recordedRemote:   recordedRemote,
+	}
 }
 
 // savingPathIsProjectRoot reports whether the directory a save came from is the
