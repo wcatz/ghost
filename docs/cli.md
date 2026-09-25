@@ -290,6 +290,8 @@ ghost upgrade
 
 A plugin-managed binary refuses this path because the plugin manager owns it; use `/plugin update` in Claude Code instead.
 
+The release tag and the running version are compared as semantic versions, so a release older than the one already installed is refused rather than installed. A version that cannot be ordered — a `dev` build, a tag that is not a semver — keeps upgrading, and the checksum still has to agree before anything is replaced. Requests carry a deadline (30s for the release lookup, 10 minutes for the archive) and every response is size-capped, so a stalled or oversized download fails instead of hanging or filling memory.
+
 ### `ghost version`
 
 Prints the binary version:

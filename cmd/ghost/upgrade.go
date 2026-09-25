@@ -3,13 +3,57 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/selfupdate"
 )
+
+// upgradeOutcome is what `ghost upgrade` decided to do, from the running
+// version and the latest release tag alone — before anything is downloaded.
+type upgradeOutcome int
+
+const (
+	upgradeProceed upgradeOutcome = iota
+	upgradeCurrent
+	upgradeRefuseDowngrade
+)
+
+// decideUpgrade compares the running version against the latest release tag.
+//
+// Ordering matters: the release has to be newer than what is already
+// installed. A tag that is merely *different* is not an upgrade, and installing
+// it moves the user backwards — the "upgrade" that unpicks a yanked release
+// whose tag no longer points at the newest build, or that reads "0.9.0" as
+// newer than "0.10.0" because it compared the strings.
+//
+// A version that cannot be ordered — a "dev" build, a tag like
+// "vscode-pre-rewrite" — keeps the pre-guard behaviour of going ahead, because
+// the alternative is refusing to update every developer build, and the archive
+// checksum still has to agree before anything is installed.
+func decideUpgrade(running, latest string) upgradeOutcome {
+	cmp, err := selfupdate.CompareVersions(latest, running)
+	switch {
+	case err != nil:
+		return upgradeProceed
+	case cmp < 0:
+		return upgradeRefuseDowngrade
+	case cmp == 0:
+		return upgradeCurrent
+	default:
+		return upgradeProceed
+	}
+}
+
+// downgradeMessage names both versions, so the refusal explains which release
+// the guard saw and which one is installed, and what to do when the installed
+// build is the one that was withdrawn.
+func downgradeMessage(running, latest string) string {
+	return fmt.Sprintf(
+		"refusing to downgrade: the latest release is %s but this binary is %s. If %s was withdrawn, install the release archive you want from https://github.com/wcatz/ghost/releases",
+		latest, running, running)
+}
 
 // runUpgrade downloads and installs the latest ghost release.
 func runUpgrade() {
@@ -37,9 +81,13 @@ func runUpgrade() {
 	}
 
 	latest := strings.TrimPrefix(rel.TagName, "v")
-	if latest == version {
+	switch decideUpgrade(version, latest) {
+	case upgradeCurrent:
 		fmt.Printf("Already up to date (%s).\n", version)
 		return
+	case upgradeRefuseDowngrade:
+		fmt.Fprintf(os.Stderr, "error: %s\n", downgradeMessage(version, latest))
+		os.Exit(1)
 	}
 
 	asset, err := selfupdate.FindAsset(rel)
@@ -62,10 +110,12 @@ func runUpgrade() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	checksumBytes, err := io.ReadAll(checksumBody)
+	// Capped: a manifest is a few hundred bytes, so a response larger than the
+	// cap is not one, and reading it whole would just move the problem.
+	checksumBytes, err := selfupdate.ReadChecksums(checksumBody)
 	_ = checksumBody.Close()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: reading checksums.txt: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -75,7 +125,9 @@ func runUpgrade() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	archiveBytes, err := io.ReadAll(body)
+	// Capped, and over the cap is an error: a truncated archive would either
+	// fail to extract or extract a short binary, and neither is an answer.
+	archiveBytes, err := selfupdate.ReadArchive(body)
 	_ = body.Close()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: downloading %s: %v\n", asset.Name, err)
