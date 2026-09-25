@@ -3,6 +3,7 @@
 package memory
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -139,17 +140,26 @@ func TestOpenDBLeavesAlreadyTightModesAlone(t *testing.T) {
 	}
 }
 
-// TestOpenDBLeavesFilesItDoesNotOwnAlone: only the three database files are
-// Ghost's to chmod. A pre-migration backup sits in the same directory and must
-// keep the mode its creator gave it — silently rewriting a backup changes a
-// file a user may be relying on.
+// TestOpenDBLeavesFilesItDoesNotOwnAlone: an unrelated file sitting in the data
+// directory is not Ghost's to chmod. Only the paths Ghost itself creates — the
+// database, its two sidecars, and the pre-migration backup — are in scope, and
+// rewriting anything else would change a file a user put there.
 func TestOpenDBLeavesFilesItDoesNotOwnAlone(t *testing.T) {
 	dir := fakeDataDir(t)
+	// A pre-migration backup from an EARLIER ghost, already on disk. The one
+	// OpenDB writes during a migration is tightened as it is created (see
+	// TestMigrationBackupIsTightened); a backup nobody is rewriting keeps the
+	// mode it was given.
 	backup := filepath.Join(dir, "ghost.db.pre-migrate-1700000000")
 	if err := os.WriteFile(backup, nil, 0o644); err != nil {
 		t.Fatalf("seed backup: %v", err)
 	}
 	setPerm(t, backup, 0o644)
+	notes := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(notes, nil, 0o644); err != nil {
+		t.Fatalf("seed notes: %v", err)
+	}
+	setPerm(t, notes, 0o644)
 
 	db, err := OpenDB(filepath.Join(dir, "ghost.db"))
 	if err != nil {
@@ -158,7 +168,67 @@ func TestOpenDBLeavesFilesItDoesNotOwnAlone(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	if got := permOf(t, backup); got != 0o644 {
-		t.Errorf("pre-migration backup mode = %#o, want 0644 — a file Ghost did not create was chmod'ed", got)
+		t.Errorf("pre-existing pre-migration backup mode = %#o, want 0644 — a file this open did not write was chmod'ed", got)
+	}
+	if got := permOf(t, notes); got != 0o644 {
+		t.Errorf("unrelated file mode = %#o, want 0644", got)
+	}
+}
+
+// TestMigrationBackupIsTightened: the pre-migration backup is a full copy of the
+// memory database, written by this same open, and VACUUM INTO names no mode for
+// the file it creates — so without an explicit chmod the copy lands at the same
+// width this PR exists to remove. The 0700 data directory usually shields it, but
+// a database opened outside that directory has no such shield, so the backup
+// itself has to be tight.
+//
+// The database is opened outside the DataDir on purpose, for the same reason: it
+// is the case where nothing else would have covered the copy.
+func TestMigrationBackupIsTightened(t *testing.T) {
+	fakeDataDir(t) // XDG_DATA_HOME names a tree this database is deliberately not in
+	dir := filepath.Join(t.TempDir(), "scratch", "data", "ghost")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	setPerm(t, dir, 0o755)
+	dbPath := filepath.Join(dir, "ghost.db")
+
+	// Build a real store, then stamp it back to a version that needs migrating
+	// so OpenDB takes the backup branch. A synthetic user_version is enough:
+	// migrate() is what this is exercising the backup for, not its steps.
+	rw, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := rw.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion-1)); err != nil {
+		t.Fatalf("stamp user_version: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	setPerm(t, dir, 0o755)
+	setPerm(t, dbPath, 0o640)
+
+	migrated, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB (migrating): %v", err)
+	}
+	defer func() { _ = migrated.Close() }()
+
+	backups, err := filepath.Glob(dbPath + ".pre-migrate-*")
+	if err != nil {
+		t.Fatalf("glob backups: %v", err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("found %d pre-migration backups, want 1: %v", len(backups), backups)
+	}
+	if got := permOf(t, backups[0]); got != 0o600 {
+		t.Errorf("pre-migration backup mode = %#o, want 0600 — a full copy of the database left at the umask's width", got)
+	}
+	// And the directory it landed in is deliberately not tightened, which is
+	// the reason the backup needs its own mode.
+	if got := permOf(t, dir); got != 0o755 {
+		t.Errorf("foreign dir mode = %#o, want 0755", got)
 	}
 }
 

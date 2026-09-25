@@ -466,5 +466,14 @@ func backupBeforeMigrate(db *sql.DB, dbPath string) error {
 	if _, err := db.Exec(`VACUUM INTO ?`, backup); err != nil {
 		return fmt.Errorf("vacuum into %s: %w", backup, err)
 	}
+	// VACUUM INTO names no mode for the file it creates, so the copy lands at
+	// whatever SQLite's default is minus the umask — a full copy of the memory
+	// database, at the same width this open is in the middle of removing. It is
+	// only shielded by the 0700 data directory, and a database opened outside
+	// that directory (eval, bench) has no such shield, so tighten the copy here
+	// rather than leave it to a pass that walks only the three live files. A
+	// chmod failure is reported, not fatal: the migration's safety net exists
+	// either way.
+	TightenPermissions(backup)
 	return nil
 }

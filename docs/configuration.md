@@ -73,19 +73,22 @@ Ghost treats the database as private to your account. Whenever it writes to the 
 - the data directory itself (`ghost/`, which becomes `0700`), and
 - `ghost.db`, `ghost.db-wal` and `ghost.db-shm` (which become `0600`).
 
-`MkdirAll` only applies its mode when it creates a directory, so an existing one keeps whatever mode it had, and SQLite names no mode for the files it creates. An install made under a group-shared umask therefore ended up with a `0750` directory and a `0640` database, readable by everyone in your group. The pass above runs on the open path, so it also repairs a mode that drifts later.
+Why the modes needed enforcing at all: `MkdirAll` only applies its mode when it creates a directory, so a directory that already existed keeps whatever mode it had, and SQLite names no mode for the files it creates, so a new database takes your umask. A data directory that something outside Ghost created first — a packaging script, a pre-existing `XDG_DATA_HOME`, a `mkdir` you ran by hand — was therefore typically `0750` or `0755` instead of `0700`, and a `0644` or `0640` `ghost.db` beside it: the whole memory store readable by everyone in your group. The pass above runs on the open path, so it also repairs a mode that drifts later.
 
-Two things it deliberately does not do:
+Three things it deliberately does not do:
 
-- **It never widens a mode.** Only group and other bits are cleared, so a database you locked down yourself — `chmod 0400 ghost.db` — is left alone rather than handed back `0600`.
-- **It touches nothing else.** A pre-migration backup beside the database (`ghost.db.pre-migrate-*`) and every other file in the directory keep the mode they have. A symlink planted as `ghost.db` is skipped rather than followed, so whatever it points at is not chmod'ed. And a database Ghost opens outside the data directory — an `eval` or bench scratch tree, a directory you pointed an environment variable at — has its three files tightened but not the directory holding it.
+- **It never widens a mode.** Only group and other bits are cleared, so a database you locked down yourself — `chmod 0400 ghost.db` — is left alone rather than handed back `0600`. The setuid, setgid and sticky bits are not preserved either: a data directory that was group-shared with `setgid` (`2775`) loses it, which is the intended direction — the directory is no longer shared.
+- **It touches nothing else.** Every other file in the directory keeps the mode it has. A pre-migration backup Ghost writes during a schema upgrade (`ghost.db.pre-migrate-<timestamp>`) is tightened to `0600` as it is created, since it is a full copy of the database; backups from earlier versions keep the modes they were given.
+- **It does not follow a symlinked `ghost.db`.** If your `ghost.db` is a symlink — a synced data directory, a dotfiles checkout — the pass skips it, because chmod'ing through the link would change the mode of whatever it points at, which may not be yours to change. It logs a warning naming the path, since a symlinked database means the real one keeps whatever mode it has. Point Ghost at the database directly if you want it protected.
+
+A database Ghost opens outside the data directory — an `eval` or bench scratch tree, a directory you pointed an environment variable at — has its three files tightened but not the directory holding it.
 
 A mode that cannot be tightened (a read-only or foreign-owned mount) is logged as a warning and the command continues. Refusing to run over a mode bit would be the worse outcome.
 
 The pass runs on the two functions that open the database read-write, so which commands tighten a mode follows from which of them they use:
 
 - Anything reaching the database through a read-only open changes nothing. That covers the stop hook's reads, the lifecycle marker and lock, `ghost obsidian sync` and `ghost project bind`. A diagnostic has to be able to report on a database it cannot modify, and a read-only connection cannot create one either.
-- `ghost mcp status` and `ghost maintenance status` **do** tighten, because both check store health through a read-write open even though they only read. That is a pre-existing choice, not one this pass introduces: they already ran migrations and stamped `user_version` before printing a health line.
+- `ghost mcp status` and `ghost maintenance status` **do** tighten, because both reach the database through a read-write open even though they only read. That is a pre-existing choice, not one this pass introduces: they already ran migrations and stamped `user_version` before printing a health line.
 
 On Windows the pass is skipped entirely: access there is carried by an ACL inherited from the parent directory, not by the mode bits `chmod` maps onto read-only, so tightening a number would not change who can read the database.
 
