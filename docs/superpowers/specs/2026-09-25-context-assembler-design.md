@@ -82,7 +82,9 @@ type Slice struct {
 type Budget struct {
     MaxItems       int     // 0 = unbounded total
     MaxBytes       int     // complete response bytes; 0 = unbounded total
-    ResponseReserve int     // reserved framing/outcome/notes bytes
+    ResponseReserve int     // provisional framing/outcome/notes allowance
+    MaxNoteBytes   int     // per-note maximum; 0 = use the documented default
+    MaxNotesBytes  int     // total notes maximum; 0 = use the documented default
     Slices         []Slice
 }
 
@@ -116,22 +118,26 @@ type Result struct {
     Trace   *Trace
     Bytes   int // complete rendered response, including framing and outcome
 }
+
+var ErrResponseBudgetExceeded = errors.New("response budget exceeded")
 ```
 
-`Slice` is a per-bucket membership budget; `Slice.MaxBytes` bounds item
-content and never includes response framing. `Budget` also has a total because
-search applies one limit across project and `_global`, while injection has
-independent project and global caps. A zero budget is rejected rather than
-treated as an implicit unbounded request. Stage 8 applies slice item caps first,
-uses `ResponseReserve` as a provisional allowance, renders the actual framing,
-outcome, and notes, measures those bytes, and then drops items until the
-complete response fits `Budget.MaxBytes`. If the non-item bytes alone exceed
-the cap, notes and error text are bounded to their documented maximum; if they
-still exceed it, `Run` returns `response_budget_exceeded`. Callers that have a
-response-level byte contract set both fields; there is no implicit default.
-`MaxItems: 0` is unbounded only within the scope named by the field. `Result.Bytes`
-counts the complete response, including framing, outcome, and notes;
-`Item.Bytes` counts only content.
+`Slice` is a per-bucket membership budget; `Slice.MaxBytes` bounds item content
+and never includes response framing. `Budget` also has a total because search
+applies one limit across project and `_global`, while injection has independent
+project and global caps. A zero budget is rejected. Stage 8 selects items; after
+stage 9 derives the outcome, a fit pass re-renders and drops the lowest-ranked
+item until `Result.Bytes <= Budget.MaxBytes` and the outcome is stable; when
+`Budget.MaxBytes == 0`, that pass is skipped. `ResponseReserve` is provisional,
+not a guarantee. Notes are bounded by `MaxNoteBytes` and `MaxNotesBytes` (default
+512 and 2048 bytes); diagnostic notes are dropped before the machine or reason
+line, and note dropping never changes `Outcome` or `Reason`.
+If the required envelope still exceeds the cap, `Run` returns the
+`ErrResponseBudgetExceeded` sentinel rather than an outcome; `mcpserver` renders
+it as an ordinary tool error with copy `response budget exceeded; no memories
+were returned`. `Result.Bytes` is measured after the fit pass; `Item.Bytes` is
+content only. Callers with a response-level cap set the budget fields; there is
+no implicit default.
 
 `Item` is the shared output type for rendering, explanation, and bench metrics.
 It carries the fields needed to reproduce both existing renderers and to
@@ -380,7 +386,7 @@ Request
   ├─7 diversity    per-bucket quota
   ├─8 budget       final order and hard trim
   ├─9 render       shared item rendering
-  └─ outcome       answerable | weak | empty
+  └─ outcome       answerable | weak | empty → response-fit loop
 ```
 
 | Stage | Existing behavior | Assembler behavior |
@@ -480,9 +486,7 @@ enabled, remains off by default, and receives its own bench comparison.
 
 `Slice.ClampBytes` is a presentation clamp that preserves UTF-8 boundaries.
 `Slice.MaxBytes` and `MaxItems` are hard item-membership trims. Stage 8 applies
-those slice caps, renders and measures the actual non-item bytes, and then
-applies the complete response cap. Stage 9 shares the item line's scope label,
-validity state,
+those slice caps. Stage 9 shares the item line's scope label, validity state,
 confidence, agent when present, and quote escaping, while preserving the
 distinct search and session-start framing and field order. Both surfaces render
 scope, validity state, confidence, and agent when present from the same `Item`
@@ -577,9 +581,9 @@ error with zero vector survivors yielding `empty`/`retrieval_failed`.
 `weak` annotates the returned items and abstention line. It withholds no row,
 which keeps the outcome decision orthogonal to ranking and bench results. The
 response-budget test covers the complete response, including the human and
-machine lines, at the limit, one byte over, and well under it. The abstention
-subset score is recorded before and after any Arm B threshold change with the
-exact benchmark command and base commit.
+machine lines, at the limit, one byte over, and well under it after the fit
+pass. The abstention subset score is recorded before and after any Arm B
+threshold change with the exact benchmark command and base commit.
 
 ### Output and absence
 
