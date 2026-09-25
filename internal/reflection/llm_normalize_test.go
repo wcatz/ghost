@@ -70,9 +70,8 @@ func TestNormalizeReflectMemoriesScopeRules(t *testing.T) {
 	}
 }
 
-// TestNormalizeReflectMemoriesFieldRules covers the rest of the normalization:
-// these guard the apply transaction (an out-of-range importance or unknown
-// category fails a schema CHECK mid-transaction and sinks the whole round).
+// TestParseReflectionResponseErrorSnippetIsRuneSafe keeps malformed model
+// output from exposing a split UTF-8 rune in a diagnostic preview.
 func TestParseReflectionResponseErrorSnippetIsRuneSafe(t *testing.T) {
 	bad := "x" + strings.Repeat("🙂", 40) + "not-json"
 	_, err := parseReflectionResponse(bad)
@@ -87,6 +86,9 @@ func TestParseReflectionResponseErrorSnippetIsRuneSafe(t *testing.T) {
 	}
 }
 
+// TestNormalizeReflectMemoriesFieldRules covers the rest of the normalization:
+// these guard the apply transaction (an out-of-range importance or unknown
+// category fails a schema CHECK mid-transaction and sinks the whole round).
 func TestNormalizeReflectMemoriesFieldRules(t *testing.T) {
 	result := ReflectionResult{Memories: []ReflectMemory{
 		{Category: "not-a-real-category", Content: "a", Importance: 1.7},

@@ -3,7 +3,6 @@ package memory
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 )
 
@@ -44,7 +43,7 @@ func (s *Store) ApplyReflection(ctx context.Context, projectID string, projectMe
 			// still be healthy. Keep each candidate project-scoped instead of
 			// turning an infrastructure error into data loss.
 			var recoveryErr error
-			keptProject, recoveryErr = insertMemoriesTx(ctx, tx, projectID, globalMems)
+			keptProject, recoveryErr = s.upsertMemoriesTx(ctx, tx, projectID, globalMems)
 			if recoveryErr != nil {
 				return nil, 0, 0, fmt.Errorf("ensure _global: %v; return candidates to project: %w", ensureErr, recoveryErr)
 			}
@@ -107,7 +106,10 @@ func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, proj
 	if source == "" {
 		source = "reflection"
 	}
-	_, _, _, upsertErr := s.Upsert(withStoreTx(ctx, tx), "_global", m.Category, m.Content, source, m.Importance, m.Tags)
+	_, _, _, upsertErr := s.UpsertWithOptions(withStoreTx(ctx, tx), "_global", m.Category, m.Content, source, m.Importance, m.Tags, UpsertOptions{
+		Provenance: provenanceFromMemory(m),
+		Scope:      m.Scope,
+	})
 	if upsertErr == nil {
 		if _, err := tx.ExecContext(ctx, `RELEASE `+savepoint); err != nil {
 			return false, false, fmt.Errorf("release global promotion: %w", err)
@@ -121,24 +123,27 @@ func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, proj
 		return false, false, fmt.Errorf("global promotion failed: %v; release savepoint: %w", upsertErr, releaseErr)
 	}
 
-	tags, _ := json.Marshal(m.Tags)
-	category := m.Category
-	if !IsValidCategory(category) {
-		category = "fact"
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO memories (project_id, category, content, source, importance, tags)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, projectID, category, m.Content, source, m.Importance, string(tags)); err != nil {
+	if _, err := s.upsertMemoriesTx(ctx, tx, projectID, []Memory{m}); err != nil {
 		return false, false, fmt.Errorf("global promotion failed: %v; return candidate to project: %w", upsertErr, err)
 	}
 	return false, true, nil
 }
 
-func insertMemoriesTx(ctx context.Context, tx *sql.Tx, projectID string, memories []Memory) (int, error) {
-	inserted := 0
+// upsertMemoriesTx uses the same duplicate probing, scope-conflict checks,
+// metadata writes, and duplicate links as a normal project save while keeping
+// the call inside ApplyReflection's transaction.
+func provenanceFromMemory(m Memory) Provenance {
+	return Provenance{
+		Agent:      m.Agent,
+		SessionID:  m.SessionID,
+		SourceRef:  m.SourceRef,
+		Confidence: m.Confidence,
+	}
+}
+
+func (s *Store) upsertMemoriesTx(ctx context.Context, tx *sql.Tx, projectID string, memories []Memory) (int, error) {
+	upserted := 0
 	for _, m := range memories {
-		tags, _ := json.Marshal(m.Tags)
 		category := m.Category
 		if !IsValidCategory(category) {
 			category = "fact"
@@ -147,13 +152,13 @@ func insertMemoriesTx(ctx context.Context, tx *sql.Tx, projectID string, memorie
 		if source == "" {
 			source = "reflection"
 		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO memories (project_id, category, content, source, importance, tags)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, projectID, category, m.Content, source, m.Importance, string(tags)); err != nil {
-			return inserted, err
+		if _, _, _, err := s.UpsertWithOptions(withStoreTx(ctx, tx), projectID, category, m.Content, source, m.Importance, m.Tags, UpsertOptions{
+			Provenance: provenanceFromMemory(m),
+			Scope:      m.Scope,
+		}); err != nil {
+			return upserted, err
 		}
-		inserted++
+		upserted++
 	}
-	return inserted, nil
+	return upserted, nil
 }

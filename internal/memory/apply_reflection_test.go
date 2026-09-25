@@ -43,6 +43,140 @@ func TestApplyReflectionPromotesGlobalsAndReplacesProjectTogether(t *testing.T) 
 	}
 }
 
+func TestApplyReflectionPreservesScopeAndProvenanceOnPromotion(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	confidence := 0.73
+	candidate := reflectionMemory("preference", "scoped global")
+	candidate.Scope = map[string]string{"environment": "development"}
+	candidate.Agent = "opencode"
+	candidate.SessionID = "session-1"
+	candidate.SourceRef = "PR-567"
+	candidate.Confidence = &confidence
+
+	if _, promoted, kept, err := s.ApplyReflection(ctx, testProject, nil, []Memory{candidate}, "", true); err != nil {
+		t.Fatalf("ApplyReflection: %v", err)
+	} else if promoted != 1 || kept != 0 {
+		t.Fatalf("result promoted=%d kept=%d, want 1/0", promoted, kept)
+	}
+
+	global, err := s.GetAll(ctx, "_global", -1)
+	if err != nil {
+		t.Fatalf("GetAll global: %v", err)
+	}
+	if len(global) != 1 {
+		t.Fatalf("global memories = %+v, want one row", global)
+	}
+	got := global[0]
+	if got.Scope["environment"] != "development" || got.Agent != "opencode" || got.SessionID != "session-1" || got.SourceRef != "PR-567" || got.Confidence == nil || *got.Confidence != confidence {
+		t.Errorf("promoted metadata = %+v, want scope and provenance preserved", got)
+	}
+}
+
+func TestApplyReflectionPreservesScopeAndProvenanceOnRecovery(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	confidence := 0.61
+	candidate := reflectionMemory("preference", "recovered global")
+	candidate.Scope = map[string]string{"environment": "staging"}
+	candidate.Agent = "claude-code"
+	candidate.SessionID = "session-2"
+	candidate.SourceRef = "PR-567"
+	candidate.Confidence = &confidence
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE TRIGGER fail_global_metadata BEFORE INSERT ON memories
+		WHEN NEW.project_id = '_global'
+		BEGIN SELECT RAISE(ABORT, 'injected global failure'); END
+	`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+
+	if _, promoted, kept, err := s.ApplyReflection(ctx, testProject, nil, []Memory{candidate}, "", true); err != nil {
+		t.Fatalf("ApplyReflection: %v", err)
+	} else if promoted != 0 || kept != 1 {
+		t.Fatalf("result promoted=%d kept=%d, want 0/1", promoted, kept)
+	}
+	project, err := s.GetAll(ctx, testProject, -1)
+	if err != nil {
+		t.Fatalf("GetAll project: %v", err)
+	}
+	if len(project) != 1 {
+		t.Fatalf("project memories = %+v, want one recovered row", project)
+	}
+	got := project[0]
+	if got.Scope["environment"] != "staging" || got.Agent != "claude-code" || got.SessionID != "session-2" || got.SourceRef != "PR-567" || got.Confidence == nil || *got.Confidence != confidence {
+		t.Errorf("recovered metadata = %+v, want scope and provenance preserved", got)
+	}
+}
+
+func TestApplyReflectionRecoveryUsesProjectDedupSemantics(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if _, err := s.Create(ctx, testProject, reflectionMemory("preference", "duplicate candidate")); err != nil {
+		t.Fatalf("seed project memory: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		CREATE TRIGGER fail_global_dedup BEFORE INSERT ON memories
+		WHEN NEW.project_id = '_global'
+		BEGIN SELECT RAISE(ABORT, 'injected global failure'); END
+	`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+
+	if _, _, _, err := s.ApplyReflection(ctx, testProject, nil,
+		[]Memory{reflectionMemory("preference", "duplicate candidate")}, "", true); err != nil {
+		t.Fatalf("ApplyReflection: %v", err)
+	}
+	var links int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM memory_links
+		WHERE relation = 'duplicate' AND source_id != target_id
+	`).Scan(&links); err != nil {
+		t.Fatalf("count duplicate links: %v", err)
+	}
+	if links == 0 {
+		t.Fatal("recovery wrote a duplicate without the normal duplicate link")
+	}
+}
+
+func TestApplyReflectionDoesNotFoldAcrossScopes(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject global: %v", err)
+	}
+	production := reflectionMemory("preference", "scoped duplicate")
+	production.Scope = map[string]string{"environment": "production"}
+	if _, err := s.Create(ctx, "_global", production); err != nil {
+		t.Fatalf("seed production memory: %v", err)
+	}
+
+	development := production
+	development.Scope = map[string]string{"environment": "development"}
+	if _, promoted, kept, err := s.ApplyReflection(ctx, testProject, nil, []Memory{development}, "", true); err != nil {
+		t.Fatalf("ApplyReflection: %v", err)
+	} else if promoted != 1 || kept != 0 {
+		t.Fatalf("result promoted=%d kept=%d, want 1/0", promoted, kept)
+	}
+
+	global, err := s.GetAll(ctx, "_global", -1)
+	if err != nil {
+		t.Fatalf("GetAll global: %v", err)
+	}
+	if len(global) != 2 {
+		t.Fatalf("global memories = %+v, want separate production/development rows", global)
+	}
+	foundDevelopment := false
+	for _, row := range global {
+		if row.Scope["environment"] == "development" {
+			foundDevelopment = true
+		}
+	}
+	if !foundDevelopment {
+		t.Errorf("development candidate was folded into the production-scoped row: %+v", global)
+	}
+}
+
 func TestApplyReflectionReturnsFailedGlobalToProject(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

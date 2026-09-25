@@ -409,6 +409,7 @@ Flags:
   --restore       Undo the last consolidation from snapshot
   --require-llm   Fail instead of falling back to the Jaccard-only sqlite tier
   --allow-drops   Apply even when guarded-category memories would be deleted without a merge
+  --promote-globals Write cross-project candidates to _global (default: keep them project-scoped)
   --skip-unchanged Skip when the consolidatable set is unchanged since the last
                    applied consolidation (used by the auto lifecycle)
   --source string CLI harness for the auto tier: claude-code, opencode, codex,
@@ -672,15 +673,7 @@ Flags:
 	}
 	result.Memories = validMemories
 
-	catCounts := make(map[string]int)
-	for _, m := range result.Memories {
-		catCounts[m.Category]++
-	}
-	var parts []string
-	for cat, n := range catCounts {
-		parts = append(parts, fmt.Sprintf("%d %s", n, cat))
-	}
-	fmt.Printf("Result:       %d memories (%s)\n", len(result.Memories), strings.Join(parts, ", "))
+	fmt.Printf("Result:       %d memories (%s)\n", len(result.Memories), reflectCategoryParts(result.Memories))
 	fmt.Println()
 
 	var projectMems, globalMems []reflection.ReflectMemory
@@ -730,11 +723,7 @@ Flags:
 	if len(guardedDrops) > 0 {
 		fmt.Fprintf(os.Stderr, "WARNING: %d guarded-category memory(ies) had no surviving merge target:\n", len(guardedDrops))
 		for _, d := range guardedDrops {
-			truncated := d.Content
-			if len(truncated) > 100 {
-				truncated = truncated[:100] + "..."
-			}
-			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, truncated)
+			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, truncateForDisplay(d.Content, 100))
 		}
 		if allowDrops {
 			fmt.Fprintf(os.Stderr, "  --allow-drops set: these %d memories will be DELETED\n", len(guardedDrops))
@@ -775,87 +764,51 @@ Flags:
 
 	// Cross-project candidates are NOT promoted to _global unless asked.
 	//
-	// _global is injected into every future session in every project, and
-	// session start describes it as authoritative. Letting a reflection pass
-	// write there unattended moved content — potentially summarised from an
-	// untrusted repository — straight into every project's trusted context
-	// with no human in the loop (issue #545). Keeping them project-scoped is
+	// _global is injected into every future session in every project. Even the
+	// cautious session-start wording does not make reflection output
+	// user-confirmed, so letting a reflection pass write there unattended
+	// moved content — potentially summarised from an untrusted repository —
+	// straight into every project's shared context with no human in the loop
+	// (issue #545). Keeping them project-scoped is
 	// still useful and fully reversible, so promotion is now an explicit
 	// decision: `ghost reflect --apply --promote-globals`.
-	if len(globalMems) > 0 && !parsed.promoteGlobals {
-		projectMems = append(projectMems, globalMems...)
+	projectForSummary := projectMems
+	if !parsed.promoteGlobals && len(globalMems) > 0 {
+		projectForSummary = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 	}
 
-	var preserved []string
-	consolidated := 0
-	if len(projectMems) > 0 {
-		dbMemories := make([]memory.Memory, len(projectMems))
-		for i, m := range projectMems {
-			dbMemories[i] = memory.Memory{
-				ProjectID:  projectID,
-				Category:   m.Category,
-				Content:    m.Content,
-				Importance: m.Importance,
-				Source:     "reflection",
-				Tags:       m.Tags,
-			}
-		}
-		consolidated = len(dbMemories)
-
-		preserved, err = store.ReplaceNonManual(ctx, projectID, dbMemories, consolidatedSince)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
-			os.Exit(1)
-		}
+	preserved, promoted, keptProject, err := applyReflection(ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
+		os.Exit(1)
 	}
-
-	// Promotion runs here, unconditionally, after the project apply. It must
-	// not sit inside the project guard: a round can yield only cross-project
-	// memories, and --promote-globals is an explicit request, so nesting it
-	// made the opt-in do nothing at exactly the moment there was nothing else
-	// to write. Running it after the apply keeps the ordering this exists for
-	// — a failed apply never leaves globals injected.
-	promoted, lost := applyPromotion(ctx, store, globalMems, parsed.promoteGlobals)
 	if promoted > 0 {
 		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
 	}
-
-	// A candidate that failed to promote has already been deleted from the
-	// project: with promotion on, global candidates are deliberately kept out
-	// of projectMems, so ReplaceNonManual removed them. Leaving a failure
-	// there would lose the memory outright. Put it back — the worst case has
-	// to be "not promoted", never "gone".
-	if len(lost) > 0 {
-		kept := 0
-		for _, m := range lost {
-			if _, _, _, err := store.Upsert(ctx, projectID, m.Category, m.Content, "reflection", m.Importance, m.Tags); err != nil {
-				fmt.Fprintf(os.Stderr, "error: unpromoted global also failed to return to the project: %v\n", err)
-				continue
-			}
-			kept++
+	if parsed.promoteGlobals {
+		failed := len(globalMems) - promoted
+		if failed > 0 {
+			fmt.Fprintln(os.Stderr, recoveryWarning(keptProject, failed))
 		}
-		fmt.Fprintf(os.Stderr, "warning: %d of %d global memories could not be promoted and were kept in the project\n", kept, len(lost))
 	}
 
-	if consolidated > 0 {
-		summary := fmt.Sprintf("%d memories consolidated (%s)", consolidated, strings.Join(parts, ", "))
-		if len(globalMems) > 0 {
-			if parsed.promoteGlobals {
-				summary += fmt.Sprintf(", %d promoted to global", len(globalMems))
-			} else {
-				summary += fmt.Sprintf(", %d cross-project candidates kept project-scoped", len(globalMems))
-			}
-		}
+	if len(projectForSummary) > 0 || len(globalMems) > 0 {
+		summary := appliedSummary(projectForSummary, globalMems, promoted, parsed.promoteGlobals)
 		fmt.Printf("Applied: %s\n", summary)
 		if len(globalMems) > 0 && !parsed.promoteGlobals {
 			fmt.Println("(re-run with --promote-globals to inject them into every project)")
 		}
-		fmt.Println("(use --restore to undo)")
+		if len(projectForSummary) > 0 {
+			fmt.Println(restoreHint(promoted))
+		} else if promoted > 0 {
+			fmt.Println("(promoted globals must be removed from _global by hand; no project snapshot was created)")
+		}
 
 		// One cap for every writer, learned-context summary included: the
 		// consolidator's own output is clamped with the same marker as its
 		// memories so the "any Ghost writer" claim on memory.MaxContentLen
-		// holds for every field this command writes.
+		// holds for every field this command writes. This stays outside the
+		// project-count guard so an only-global round still records context.
 		if learned, learnedCut := memory.ClampContent(result.LearnedContext); learned != "" {
 			if learnedCut {
 				fmt.Fprintf(os.Stderr, "warning: learned context exceeded the %d-byte content cap and was truncated with an explicit marker\n", memory.MaxContentLen)
@@ -1213,67 +1166,4 @@ different harness). The harness owns its authentication and billing.`)
 	if !apply && res.Confirmed+res.Superseded+res.Corrected > 0 {
 		fmt.Println("\nRe-run with --apply to mark these resolved.")
 	}
-}
-
-// truncateForDisplay shortens s to at most n BYTES without splitting a
-// multi-byte character. The dry-run listing used to slice s[:120] directly,
-// which can cut a rune in half and print an invalid byte — harmless to a
-// terminal, but it makes the preview lie about what will be stored.
-func truncateForDisplay(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	cut := n
-	// Walk back off any continuation byte (0b10xxxxxx) so the slice ends on a
-	// rune boundary. A leading byte starts a rune; stopping there keeps the
-	// final rune whole.
-	for cut > 0 && s[cut]&0xC0 == 0x80 {
-		cut--
-	}
-	return s[:cut] + "..."
-}
-
-// globalPromoter is the slice of `ghost reflect` that writes into _global.
-// Kept as a value rather than inlined so the ordering it depends on stays
-// visible at the call site: promotion must happen AFTER the project apply.
-type globalPromoter interface {
-	EnsureProject(ctx context.Context, id, path, name string) error
-	Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (string, string, float64, error)
-}
-
-// applyPromotion writes cross-project candidates into _global when the caller
-// explicitly asked for it, and returns the ones it could not write.
-//
-// Called unconditionally after the project apply rather than inside it. Two
-// reasons, both found in review:
-//
-//   - Inside `len(projectMems) > 0` it was unreachable when a round produced
-//     only cross-project memories — the one case where asking for promotion
-//     clearly meant it.
-//   - Its failures used to be logged and dropped. Global candidates are kept
-//     out of projectMems when promotion is on, so ReplaceNonManual has already
-//     deleted them from the project; a failed Upsert then left the memory in
-//     neither place. Returning them is what lets the caller put them back, so
-//     the worst case is "not promoted" rather than "lost".
-//
-// promote=false returns immediately and writes nothing: candidates are then
-// part of projectMems and were applied with them.
-func applyPromotion(ctx context.Context, store globalPromoter, globalMems []reflection.ReflectMemory, promote bool) (promoted int, failed []reflection.ReflectMemory) {
-	if !promote || len(globalMems) == 0 {
-		return 0, nil
-	}
-	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: ensure _global project: %v\n", err)
-		// Nothing could be written, so every candidate is unaccounted for.
-		return 0, globalMems
-	}
-	for _, m := range globalMems {
-		if _, _, _, err := store.Upsert(ctx, "_global", m.Category, m.Content, "reflection", m.Importance, m.Tags); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: upsert global memory: %v\n", err)
-			failed = append(failed, m)
-			continue
-		}
-		promoted++
-	}
-	return promoted, failed
 }
