@@ -24,8 +24,16 @@ type testMarker struct {
 
 // markerPath returns the marker file location inside an isolated
 // XDG_DATA_HOME (config.DataDir() = <XDG_DATA_HOME>/ghost).
-func markerPath(xdgHome string) string {
-	return filepath.Join(xdgHome, "ghost", "lifecycle-last-failure.json")
+// markerPath is where a marker for this project lives. An empty project means
+// the legacy shared file, which is where an unattributable marker still is —
+// production cannot write one (WriteLifecycleFailure refuses an empty project),
+// so "" only ever comes from a record made by an older build.
+func markerPath(xdgHome, project string) string {
+	name := legacyMarkerFile
+	if project != "" {
+		name = projectMarkerFile(project)
+	}
+	return filepath.Join(xdgHome, "ghost", name)
 }
 
 // writeMarkerFile seeds a failure marker directly as JSON.
@@ -38,7 +46,7 @@ func writeMarkerFile(t *testing.T, xdgHome string, m testMarker) string {
 	if err != nil {
 		t.Fatalf("marshal marker: %v", err)
 	}
-	path := markerPath(xdgHome)
+	path := markerPath(xdgHome, m.Project)
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatalf("write marker: %v", err)
 	}
@@ -95,8 +103,9 @@ func mustJSONString(s string) string {
 }
 
 // TestWriteLifecycleFailure_SchemaAtomicity pins the marker contract: name
-// input is resolved to the project ID, only the FIRST line of the error is
-// kept and it is truncated at ~300 bytes, `at` is RFC3339, `version` is 1,
+// input is resolved to the project ID and written to THAT project's file, the
+// full bounded cause is kept (the alert truncates, not the writer),
+// `at` is RFC3339, `version` is 1,
 // the write is temp+rename (no .tmp remnants), and nothing else in the data
 // dir is touched.
 func TestWriteLifecycleFailure_SchemaAtomicity(t *testing.T) {
@@ -108,15 +117,20 @@ func TestWriteLifecycleFailure_SchemaAtomicity(t *testing.T) {
 		"line one\nline two must not survive\n"); err != nil {
 		t.Fatalf("WriteLifecycleFailure: %v", err)
 	}
-	m := readMarkerFile(t, filepath.Join(ghostDir, lifecycleMarkerFile))
+	m := readMarkerFile(t, filepath.Join(ghostDir, projectMarkerFile("p1")))
 	if m.Project != "p1" {
 		t.Errorf("project = %q, want the resolved id p1", m.Project)
 	}
 	if len(m.PhasesFailed) != 2 || m.PhasesFailed[0] != "reflect" || m.PhasesFailed[1] != "resolve" {
 		t.Errorf("phases_failed = %v, want [reflect resolve]", m.PhasesFailed)
 	}
-	if m.Error != "line one" {
-		t.Errorf("error = %q, want only the first line", m.Error)
+	// The whole cause is stored now, not just line one: truncating at write
+	// time discarded exactly the captured stderr tail that captures exist to
+	// preserve. The alert still renders one line (lifecycleFailureAlert).
+	// Trimmed: a trailing newline is formatting, not evidence, and the marker
+	// renders a single line regardless.
+	if m.Error != "line one\nline two must not survive" {
+		t.Errorf("error = %q, want the full bounded cause", m.Error)
 	}
 	if _, err := time.Parse(time.RFC3339, m.At); err != nil {
 		t.Errorf("at = %q, want RFC3339: %v", m.At, err)
@@ -124,17 +138,19 @@ func TestWriteLifecycleFailure_SchemaAtomicity(t *testing.T) {
 	if m.Version != lifecycleMarkerVersion {
 		t.Errorf("version = %d, want %d", m.Version, lifecycleMarkerVersion)
 	}
-	if rem, _ := filepath.Glob(filepath.Join(ghostDir, lifecycleMarkerFile+".tmp*")); len(rem) != 0 {
+	if rem, _ := filepath.Glob(filepath.Join(ghostDir, projectMarkerFile("p1")+".tmp*")); len(rem) != 0 {
 		t.Errorf("atomic write left temp files behind: %v", rem)
 	}
 
-	// A single over-long error line is truncated at ~300 bytes.
-	if err := WriteLifecycleFailure("p1", []string{"reflect"}, strings.Repeat("y", 400)); err != nil {
+	// An over-long cause is truncated at the DETAIL cap, which is larger than
+	// the alert's own cap: the file keeps the captured stderr tail so it can be
+	// diagnosed from, while the alert still renders one short line.
+	if err := WriteLifecycleFailure("p1", []string{"reflect"}, strings.Repeat("y", lifecycleMarkerDetailMaxBytes+200)); err != nil {
 		t.Fatalf("WriteLifecycleFailure (long): %v", err)
 	}
-	m = readMarkerFile(t, filepath.Join(ghostDir, lifecycleMarkerFile))
-	if len(m.Error) > lifecycleMarkerErrorMaxBytes+len("…") {
-		t.Errorf("error length = %d bytes, want <= %d", len(m.Error), lifecycleMarkerErrorMaxBytes+len("…"))
+	m = readMarkerFile(t, filepath.Join(ghostDir, projectMarkerFile("p1")))
+	if len(m.Error) > lifecycleMarkerDetailMaxBytes+len("…") {
+		t.Errorf("error length = %d bytes, want <= %d", len(m.Error), lifecycleMarkerDetailMaxBytes+len("…"))
 	}
 	if !strings.HasSuffix(m.Error, "…") {
 		t.Errorf("truncated error must be ellipsis-terminated, got %q...", m.Error[:20])
@@ -186,14 +202,14 @@ func TestWriteLifecycleFailure_ConcurrentWritersStayAtomic(t *testing.T) {
 	}
 	wg.Wait()
 
-	m := readMarkerFile(t, filepath.Join(ghostDir, lifecycleMarkerFile))
+	m := readMarkerFile(t, filepath.Join(ghostDir, projectMarkerFile("p1")))
 	if len(m.PhasesFailed) != 1 || !strings.HasPrefix(m.PhasesFailed[0], "phase-") {
 		t.Errorf("marker must be exactly one writer's complete record, got phases %v", m.PhasesFailed)
 	}
 	if !strings.HasPrefix(m.Error, "error-") {
 		t.Errorf("marker error = %q, want a complete writer record", m.Error)
 	}
-	if rem, _ := filepath.Glob(filepath.Join(ghostDir, lifecycleMarkerFile+".tmp*")); len(rem) != 0 {
+	if rem, _ := filepath.Glob(filepath.Join(ghostDir, projectMarkerFile("p1")+".tmp*")); len(rem) != 0 {
 		t.Errorf("concurrent writes left temp files behind: %v", rem)
 	}
 }
@@ -210,7 +226,7 @@ func TestFinishLifecycleRun(t *testing.T) {
 		if err := FinishLifecycleRun("My Project", 1, []string{"resolve"}, "exit status 1"); err != nil {
 			t.Fatalf("FinishLifecycleRun: %v", err)
 		}
-		m := readMarkerFile(t, filepath.Join(dataHome, "ghost", lifecycleMarkerFile))
+		m := readMarkerFile(t, filepath.Join(dataHome, "ghost", projectMarkerFile("p1")))
 		if len(m.PhasesFailed) != 1 || m.PhasesFailed[0] != "resolve" {
 			t.Errorf("phases_failed = %v, want [resolve]", m.PhasesFailed)
 		}
@@ -222,7 +238,7 @@ func TestFinishLifecycleRun(t *testing.T) {
 	t.Run("fully successful run clears the marker", func(t *testing.T) {
 		dataHome := isolatedHome(t)
 		seedProject(t, dataHome, "p1", "/tmp/my-project", "My Project")
-		path := filepath.Join(dataHome, "ghost", lifecycleMarkerFile)
+		path := markerPath(dataHome, "p1")
 		writeMarkerFile(t, dataHome, testMarker{
 			Project: "p1", PhasesFailed: []string{"reflect"}, Error: "old", At: time.Now().UTC().Format(time.RFC3339), Version: 1,
 		})
@@ -252,7 +268,7 @@ func TestFinishLifecycleRun(t *testing.T) {
 
 	t.Run("clear without a marker is not an error", func(t *testing.T) {
 		isolatedHome(t)
-		if err := ClearLifecycleFailure(); err != nil {
+		if err := ClearLifecycleFailure("p1"); err != nil {
 			t.Errorf("ClearLifecycleFailure on a missing marker: %v", err)
 		}
 		if err := FinishLifecycleRun("p1", 2, nil, ""); err != nil {
