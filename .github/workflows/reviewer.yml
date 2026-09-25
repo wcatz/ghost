@@ -355,16 +355,26 @@ jobs:
           # every incrementally changed path still being one of the PR's own
           # paths; otherwise fall through to the full review. Both lists are
           # NUL-delimited and compared byte-exactly.
+          # Any failure returns non-zero, so the safe full review is taken.
+          # --no-renames keeps both lists to literal paths; LC_ALL=C gives
+          # sort and comm one byte order; the result is tested by byte count,
+          # so a path that begins with a newline cannot read as "no extras".
           incremental_paths_ok() {
-            local inc pr
-            inc="$(mktemp "${RUNNER_TEMP}/inc-paths.XXXXXX")"
-            pr="$(mktemp "${RUNNER_TEMP}/pr-paths.XXXXXX")"
-            git diff -z --name-only "${LAST_SHA}" HEAD | sort -z > "$inc"
-            git diff -z --name-only "$MERGE_BASE" HEAD | sort -z > "$pr"
-            local extra
-            extra="$(comm -z -23 "$inc" "$pr" | tr '\0' '\n' | head -n 1)"
-            rm -f "$inc" "$pr"
-            [ -z "$extra" ]
+            local inc pr extra rc
+            inc="$(mktemp "${RUNNER_TEMP}/inc-paths.XXXXXX")" || return 1
+            pr="$(mktemp "${RUNNER_TEMP}/pr-paths.XXXXXX")" || { rm -f "$inc"; return 1; }
+            extra="$(mktemp "${RUNNER_TEMP}/extra-paths.XXXXXX")" || { rm -f "$inc" "$pr"; return 1; }
+            rc=1
+            if git diff -z --no-renames --name-only "${LAST_SHA}" HEAD > "$inc.raw" \
+              && git diff -z --no-renames --name-only "$MERGE_BASE" HEAD > "$pr.raw" \
+              && LC_ALL=C sort -z "$inc.raw" > "$inc" \
+              && LC_ALL=C sort -z "$pr.raw" > "$pr" \
+              && LC_ALL=C comm -z -23 "$inc" "$pr" > "$extra" \
+              && [ ! -s "$extra" ]; then
+              rc=0
+            fi
+            rm -f "$inc" "$pr" "$extra" "$inc.raw" "$pr.raw"
+            return "$rc"
           }
           if [ -n "$LAST_SHA" ] && [ -n "$MERGE_BASE" ] \
             && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null \
@@ -373,7 +383,7 @@ jobs:
             echo "incremental review: ${LAST_SHA}..HEAD"
             git diff "${LAST_SHA}" HEAD > pr.diff
           elif [ -n "$MERGE_BASE" ]; then
-            echo "full review (no usable prior marker, or the base moved since it)"
+            echo "full review (no usable prior marker, the base moved, or a path left the PR since it)"
             git diff "$MERGE_BASE" HEAD > pr.diff
           else
             echo "full review (merge-base unavailable; using the API diff)"
