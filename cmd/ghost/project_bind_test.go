@@ -415,13 +415,14 @@ func TestBindingPrintsTheMCPInitFollowUp(t *testing.T) {
 		if !strings.Contains(out.String(), "not the ghost plugin") {
 			t.Errorf("the follow-up should name the installation it applies to, got:\n%s", out.String())
 		}
-		// And it must not promise more than init delivers. Asserted on the
-		// whole qualified phrase, not the bare filename: init leaves alone a
-		// MEMORY.md Ghost did not write, but it DOES rewrite a redirect of its
-		// own that still carries the stale ghost_list_projects marker, so a
-		// blanket "never overwrites an existing MEMORY.md" would be wrong in the
-		// other direction.
-		if !strings.Contains(out.String(), "never overwrites a MEMORY.md Ghost did not write") {
+		// And it must not promise more than init delivers, in the terms the
+		// installer decides by. writeRedirects branches on CONTENT: it skips a
+		// file without "stored in Ghost" and rewrites one that has it but still
+		// carries the stale ghost_list_projects marker — whoever wrote it. So
+		// both a blanket "never overwrites an existing MEMORY.md" and a claim
+		// about provenance ("Ghost did not write") would be wrong; the test pins
+		// the content-based wording that matches the branch.
+		if !strings.Contains(out.String(), "overwrites only a MEMORY.md it recognises as its own") {
 			t.Errorf("the follow-up should qualify which MEMORY.md init leaves alone, got:\n%s", out.String())
 		}
 	})
@@ -510,7 +511,7 @@ func TestUnboundProjectNotice(t *testing.T) {
 	if !strings.Contains(after, "ghost mcp init") || !strings.Contains(after, "not the ghost plugin") {
 		t.Errorf("the notice should name the installation whose init step finishes the repair, got:\n%s", after)
 	}
-	if !strings.Contains(after, "never overwrites a MEMORY.md Ghost did not write") {
+	if !strings.Contains(after, "overwrites only a MEMORY.md it recognises as its own") {
 		t.Errorf("the notice should qualify which MEMORY.md init leaves alone, got:\n%s", after)
 	}
 }
