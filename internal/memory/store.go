@@ -864,7 +864,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// which silently swallowed unrelated saves.
 	ftsQuery := sanitizeFTSN(content, 30)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT m.id, m.importance, m.content
+		SELECT m.id, m.importance, m.content, m.scope
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE m.project_id = ?
@@ -882,7 +882,15 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		for len(newTokens) > 0 && rows.Next() {
 			var candID, candContent string
 			var candImportance float32
-			if scanErr := rows.Scan(&candID, &candImportance, &candContent); scanErr != nil {
+			var candScope sql.NullString
+			if scanErr := rows.Scan(&candID, &candImportance, &candContent, &candScope); scanErr != nil {
+				continue
+			}
+			// A candidate that names a shared key differently is a different
+			// fact about a different place, not a second wording of this one.
+			// Skipping rather than stopping keeps looking for a compatible
+			// candidate among the remaining matches.
+			if ScopesConflict(opts.Scope, parseScope(candScope)) {
 				continue
 			}
 			sim := mergeScore(newTokens, tokenizeContent(candContent))
@@ -914,7 +922,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// same-category probe predates those exclusions and keeps its behavior.
 	if existingID == "" {
 		crossRows, crossErr := s.db.QueryContext(ctx, `
-			SELECT m.id, m.importance, m.content
+			SELECT m.id, m.importance, m.content, m.scope
 			FROM memories m
 			JOIN memories_fts f ON f.rowid = m.rowid
 			WHERE m.project_id = ?
@@ -938,7 +946,14 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			for len(newTokens) > 0 && crossRows.Next() {
 				var candID, candContent string
 				var candImportance float32
-				if scanErr := crossRows.Scan(&candID, &candImportance, &candContent); scanErr != nil {
+				var candScope sql.NullString
+				if scanErr := crossRows.Scan(&candID, &candImportance, &candContent, &candScope); scanErr != nil {
+					continue
+				}
+				// The stricter Jaccard gate does not help here: near-identical
+				// wording across environments scores high regardless of
+				// category, so scope is what separates them.
+				if ScopesConflict(opts.Scope, parseScope(candScope)) {
 					continue
 				}
 				j := jaccard(newTokens, tokenizeContent(candContent))
