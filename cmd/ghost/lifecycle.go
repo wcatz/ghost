@@ -731,10 +731,12 @@ Flags:
 	}
 
 	// Drop audit (#337, covering every category since #549): no input memory
-	// may be deleted without a merge target. An unattended --apply nobody
-	// watches is exactly where an unreferenced architecture or decision memory
-	// disappears, and `manual` source never covers an agent save. Refusing the
-	// whole consolidation preserved fidelity but meant a rich project was never
+	// may be deleted without a merge target. The autonomous phase spawned by
+	// lifecyclePhases (`reflect --apply --require-llm`) runs unattended, which
+	// is exactly where an unreferenced architecture or decision memory
+	// disappears, and the `manual` source excluded below covers none of it:
+	// seeds are 'builtin' and agent saves are 'mcp'. Refusing the whole
+	// consolidation preserved fidelity but meant a rich project was never
 	// consolidated at all (measured: 1 success in 13 attempts on a 220-memory
 	// project), so the dropped memories are now retained VERBATIM instead: the
 	// zero-loss invariant still holds and the rest of the consolidation

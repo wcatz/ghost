@@ -27,9 +27,10 @@ const dropContainmentThreshold = 0.45
 // knowledge — gotchas, dependency pins, workflow conventions and user
 // preferences (issue #337, eval-cycle finding F3) — but an architecture or
 // decision memory dropped by an unattended consolidation is just as
-// unrecoverable, and nothing else covers it (agent saves carry source='mcp', so
-// `manual` is only ever written for pinned seeds). Deleting an unreferenced
-// input therefore takes an explicit --allow-drops.
+// unrecoverable, and the `manual` source that reflection preserves covers none
+// of it: seeds are written 'builtin' and agent saves 'mcp', so nothing an
+// agent writes is ever excluded by it. Deleting an unreferenced input
+// therefore takes an explicit --allow-drops.
 //
 // Uses the package's tokenize (numeric-retaining, stopword-filtered) so merged
 // rewrites that preserve substance — including ports and versions — are
