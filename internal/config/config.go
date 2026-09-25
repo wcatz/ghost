@@ -533,19 +533,6 @@ var knownKeys = collectKeys(reflect.TypeFor[Config]())
 // the decode of the whole config.
 var boundKeyTypes = collectKeyTypes(reflect.TypeFor[Config]())
 
-// withAncestors adds every parent of every key, so a section header is
-// recognised as the parent of the keys it holds.
-func withAncestors(keys map[string]struct{}) map[string]struct{} {
-	out := make(map[string]struct{}, len(keys)*2)
-	for key := range keys {
-		out[key] = struct{}{}
-		for i := strings.LastIndex(key, "."); i >= 0; i = strings.LastIndex(key[:i], ".") {
-			out[key[:i]] = struct{}{}
-		}
-	}
-	return out
-}
-
 // collectKeyTypes is collectKeys keeping the field type, for the leaves.
 func collectKeyTypes(t reflect.Type) map[string]reflect.Type {
 	out := make(map[string]reflect.Type)
