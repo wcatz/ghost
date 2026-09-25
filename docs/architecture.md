@@ -314,9 +314,9 @@ Every other open is read-only and deliberately stays that way: a diagnostic must
 
 - `mcpinit.importMemories`, reached by `finalizePlugin` before any of the session-start gates when a Claude Code plugin install is finalizing for the first time. It opens read-write to import memory files, so that one fire tightens regardless of source or whether it is a subagent.
 - `runSessionStart`, which returns early for a subagent, a `resume` and a `compact`, and gates the bump on `projectID != ""` and on the source being empty or `startup` — so a `clear` does not bump either.
-- `RenderSessionContext`, which opencode's plugin reaches by spawning `ghost context` at start instead of a hook event, because opencode has no injection surface of its own. It has no source or subagent gate at all, and is gated only on `projectID != ""`.
+- `RenderSessionContext`, which opencode's plugin reaches by spawning `ghost context` at start, because opencode has no context-injection surface of its own — it returns before `runSessionStart` on the `InjectContext` gate, and its plugin spawns the context render instead. It has no source or subagent gate at all, and is gated only on `projectID != ""`.
 
-So a genuine new session in a directory that resolves to a project tightens; on the `ghost hook` path a resumed, cleared or compacted one does not, while on the opencode path any start does. That is the same gate that keeps the session counter honest. A session stop can reach a read-write open indirectly when the stop hook spawns `ghost lifecycle` for a reflection pass.
+So a genuine new session in a directory that resolves to a project tightens; on the `ghost hook` path a resumed, cleared or compacted one does not, while on the opencode path any start does. That is the same gate that keeps the session counter honest. Goose's session start tightens nothing at all, for the same `InjectContext` reason. A session stop can reach a read-write open indirectly when the stop hook spawns `ghost lifecycle` for a reflection pass.
 
 That is why the pass is a named exported function rather than a line inside `OpenDB`: a read-only path is not a place to add a side effect to, but a read-write one is, and there are two of them.
 
