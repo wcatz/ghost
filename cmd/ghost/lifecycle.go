@@ -674,6 +674,10 @@ Flags:
 		ProjectLanguage:   projectLanguage,
 		ProjectName:       projectName,
 		OtherProjectNames: filteredNames,
+		// The prompt tells the model what omitting an input costs, and that is
+		// the other side of this run's --allow-drops: without it an unreferenced
+		// memory is re-added verbatim, with it the memory is deleted.
+		AllowDrops: allowDrops,
 	}
 
 	consolidateCtx, cancel := consolidationContext(ctx, cfg.Reflection.ConsolidationTimeoutMinutes)
