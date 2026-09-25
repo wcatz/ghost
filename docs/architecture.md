@@ -173,7 +173,10 @@ The window's width is `limit`, or twice that under `DecayReselect`, where decay
 still has to narrow the set afterwards. Scope constraints are narrowed from the
 combined candidate pool before this cut, including when one leg is unavailable,
 so an out-of-scope row cannot consume a result slot and force the tool to report
-absence for an eligible row that was retrieved but not selected. Category is a
+absence for an eligible row that was retrieved but not selected. The hydration
+backfill after the cut draws from that same narrowed pool, so a row that
+disappears between the leg queries and hydration is replaced by the next
+strongest *in-scope* candidate rather than shortening the result. Category is a
 separate tool-level post-filter and therefore uses a wider store fetch. Ordering
 is deterministic (ties broken by ID), because the demotion penalties applied
 downstream depend on order.
