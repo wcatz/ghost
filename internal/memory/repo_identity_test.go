@@ -963,6 +963,251 @@ func TestEnsureProjectWithRepoDoesNotChooseAmbiguousNameOwner(t *testing.T) {
 	}
 }
 
+// TestResolveOrCreateRepoProjectRefusesUnrelatedNameBinding keeps a save from
+// an unrelated clone out of a project that merely shares its directory name.
+//
+// A recorded path and an empty remote is the state of every project upgraded
+// from a v9 database, so the unique-name fallback had nothing to contradict it:
+// a save reporting ~/Downloads/infra with origin github.com/evil/infra bound
+// that remote to the real ~/git/infra project, and from then on the unrelated
+// directory resolved as the real project while the real checkout was locked
+// out by the remote conflict. A unique name is weak evidence; the candidate's
+// own path is what makes it checkable.
+func TestResolveOrCreateRepoProjectRefusesUnrelatedNameBinding(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Both directories exist: pathsAgree resolves what it compares, so a
+	// missing unrelated directory would make this pass for the wrong reason.
+	root := t.TempDir()
+	realPath := filepath.Join(root, "git", "infra")
+	unrelatedPath := filepath.Join(root, "Downloads", "infra")
+	for _, dir := range []string{realPath, unrelatedPath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+	if err := s.EnsureProject(ctx, realPath, realPath, "infra"); err != nil {
+		t.Fatalf("EnsureProject real checkout: %v", err)
+	}
+
+	const evil = "https://github.com/evil/infra.git"
+	canonical, err := s.ResolveOrCreateRepoProject(
+		ctx, unrelatedPath, "infra", unrelatedPath, unrelatedPath, unrelatedPath, evil,
+	)
+	if err != nil {
+		t.Fatalf("ResolveOrCreateRepoProject: %v", err)
+	}
+	if canonical == realPath {
+		t.Errorf("save from the unrelated clone resolved to the real project %q — its name was enough to claim it", realPath)
+	}
+
+	var realRemote string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, realPath).Scan(&realRemote); err != nil {
+		t.Fatalf("read real project repository: %v", err)
+	}
+	if realRemote != "" {
+		t.Errorf("real project was bound to %q by an unrelated clone, want it left unclaimed", realRemote)
+	}
+
+	// The real checkout must still be reachable by its own path, and the
+	// unrelated directory must not resolve to it any more.
+	if id, _, err := s.ResolveProject(ctx, realPath); err != nil {
+		t.Fatalf("ResolveProject real path: %v", err)
+	} else if id != realPath {
+		t.Errorf("ResolveProject(%q) = %q, want the real project %q", realPath, id, realPath)
+	}
+	if id, _, err := s.ResolveProject(ctx, unrelatedPath); err != nil {
+		t.Fatalf("ResolveProject unrelated path: %v", err)
+	} else if id == realPath {
+		t.Errorf("ResolveProject(%q) = the real project %q, want the unrelated clone kept apart", unrelatedPath, realPath)
+	}
+
+	// The refused save is not dropped: it becomes its own project carrying
+	// its own remote, which is what keeps the real one addressable.
+	var canonicalRemote string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, canonical).Scan(&canonicalRemote); err != nil {
+		t.Fatalf("read canonical project repository: %v", err)
+	}
+	if want := "github.com/evil/infra"; canonicalRemote != want {
+		t.Errorf("refused save recorded repository %q on %q, want %q", canonicalRemote, canonical, want)
+	}
+}
+
+// TestResolveOrCreateRepoProjectBindsNameWhenPathsAgree is the other half of
+// the guard above: refusing a name binding is only safe because a name that
+// does agree still binds. A guard that read "the project has a recorded path"
+// as "refuse" would strand every project upgraded from a v9 database, whose
+// path is present and whose remote is not.
+func TestResolveOrCreateRepoProjectBindsNameWhenPathsAgree(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// A project recorded at a real checkout whose recorded path spells a
+	// trailing separator, and no remote: a path a directory can be compared
+	// against, that no text comparison finds equal to the plain spelling.
+	checkout := filepath.Join(t.TempDir(), "git", "infra")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatalf("create %s: %v", checkout, err)
+	}
+	if err := s.EnsureProject(ctx, "real-id", checkout+string(os.PathSeparator), "infra"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	// The session reports the same directory without that separator. The
+	// explicit path query compares text and misses it, so the unique name is
+	// the only thing that can claim this save — and the recorded path agrees
+	// with where the save came from.
+	canonical, err := s.ResolveOrCreateRepoProject(
+		ctx, checkout, "infra", checkout, checkout, checkout, "https://github.com/wcatz/infra.git",
+	)
+	if err != nil {
+		t.Fatalf("ResolveOrCreateRepoProject: %v", err)
+	}
+	if canonical != "real-id" {
+		t.Errorf("save from the project's own checkout resolved to %q, want %q", canonical, "real-id")
+	}
+	var got string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = 'real-id'`).Scan(&got); err != nil {
+		t.Fatalf("read bound repository: %v", err)
+	}
+	if want := "github.com/wcatz/infra"; got != want {
+		t.Errorf("bound repository = %q, want %q", got, want)
+	}
+}
+
+// TestResolveOrCreateRepoProjectRefusesUnresolvableRecordedPath pins the one
+// case the guard cannot read as a disagreement: a recorded path that is
+// absolute and well formed but no longer resolves, because the checkout was
+// moved, deleted, or recorded on a volume that is not mounted. pathsAgree
+// resolves both sides on disk, so it reports no agreement, and the same two
+// rules agreeWithSession applies on the read side refuse there too. The
+// project's memories stay put and a save from its own path still binds it;
+// what is refused is a different directory inheriting them.
+func TestResolveOrCreateRepoProjectRefusesUnresolvableRecordedPath(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// The recorded checkout no longer exists; the saving one does.
+	gone := filepath.Join(t.TempDir(), "git", "infra")
+	if err := s.EnsureProject(ctx, "real-id", gone, "infra"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "Downloads", "infra")
+	if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+		t.Fatalf("create %s: %v", elsewhere, err)
+	}
+
+	canonical, err := s.ResolveOrCreateRepoProject(
+		ctx, elsewhere, "infra", elsewhere, elsewhere, elsewhere, "https://github.com/evil/infra.git",
+	)
+	if err != nil {
+		t.Fatalf("ResolveOrCreateRepoProject: %v", err)
+	}
+	if canonical == "real-id" {
+		t.Errorf("save from %q claimed a project whose recorded path does not resolve", elsewhere)
+	}
+	var got string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = 'real-id'`).Scan(&got); err != nil {
+		t.Fatalf("read bound repository: %v", err)
+	}
+	if got != "" {
+		t.Errorf("project with an unresolvable recorded path was bound to %q", got)
+	}
+}
+
+// TestResolveProjectDerivesRemoteOnceAndOnlyWhereItIsRead keeps remote
+// detection — a `git config` spawn per call in the shipped binary, capped at
+// two seconds each — off the resolutions that do not read it.
+//
+// The path-prefix filter could decide from a candidate that asserts no
+// repository of its own, and the same input was then derived a second time for
+// the repository step below, so one unresolved path cost two spawns and the
+// Stop hook paid that per turn in an unmatched directory.
+func TestResolveProjectDerivesRemoteOnceAndOnlyWhereItIsRead(t *testing.T) {
+	t.Run("a path-prefix hit detects nothing", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		// Recorded path and session directory differ, so the resolution is
+		// carried by the path-prefix step rather than the exact-id lookup.
+		root := t.TempDir()
+		inner := filepath.Join(root, "sub")
+		if err := os.MkdirAll(inner, 0o755); err != nil {
+			t.Fatalf("create %s: %v", inner, err)
+		}
+		if err := s.EnsureProject(ctx, "ghost-proj", root, "ghost"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+
+		detections := 0
+		SetDetectRemote(func(string) string { detections++; return "" })
+		t.Cleanup(func() { SetDetectRemote(nil) })
+
+		if id, _, err := s.ResolveProject(ctx, inner); err != nil {
+			t.Fatalf("ResolveProject: %v", err)
+		} else if id != "ghost-proj" {
+			t.Fatalf("ResolveProject(%q) = %q, want the enclosing project", inner, id)
+		}
+		if detections != 0 {
+			t.Errorf("a path-prefix hit spawned %d remote detections, want 0", detections)
+		}
+	})
+
+	t.Run("a recorded remote is still checked once", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		root := t.TempDir()
+		inner := filepath.Join(root, "sub")
+		if err := os.MkdirAll(inner, 0o755); err != nil {
+			t.Fatalf("create %s: %v", inner, err)
+		}
+		if err := s.EnsureProjectWithRepo(ctx, "ghost-proj", root, "ghost", "https://github.com/wcatz/ghost.git"); err != nil {
+			t.Fatalf("EnsureProjectWithRepo: %v", err)
+		}
+
+		detections := 0
+		SetDetectRemote(func(string) string {
+			detections++
+			return "https://github.com/evil/ghost.git"
+		})
+		t.Cleanup(func() { SetDetectRemote(nil) })
+
+		// A session standing in a project that claims another repository is
+		// refused, which is the rule the session's remote exists to enforce.
+		if id, _, err := s.ResolveProject(ctx, inner); err != nil {
+			t.Fatalf("ResolveProject: %v", err)
+		} else if id != "" {
+			t.Errorf("ResolveProject(%q) = %q, want a refusal", inner, id)
+		}
+		if detections > 1 {
+			t.Errorf("a rejected path-prefix hit spawned %d remote detections, want at most 1", detections)
+		}
+	})
+
+	t.Run("an unmatched path detects at most once", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		missing := filepath.Join(t.TempDir(), "no-such-checkout")
+
+		detections := 0
+		SetDetectRemote(func(string) string { detections++; return "" })
+		t.Cleanup(func() { SetDetectRemote(nil) })
+
+		if id, _, err := s.ResolveProject(ctx, missing); err != nil {
+			t.Fatalf("ResolveProject: %v", err)
+		} else if id != "" {
+			t.Fatalf("ResolveProject(%q) = %q, want a miss", missing, id)
+		}
+		if detections > 1 {
+			t.Errorf("an unmatched path spawned %d remote detections, want at most 1", detections)
+		}
+	})
+}
+
 // TestNormalizeRepoRemoteTrailingSlash: git permits trailing slashes in remote
 // URLs, and two spellings of one repository that normalize differently are two
 // projects again.

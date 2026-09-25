@@ -308,6 +308,13 @@ func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoR
 // final component of the normalized remote, never a directory basename. An
 // explicit project already bound to another repository is an error rather than
 // a reason to route the save to that remote's existing owner.
+//
+// path is the session's directory on this filesystem, not a synthetic id. The
+// unique-name fallback claims a project of the same name only when its
+// recorded path is unusable or contains path, so a caller that cannot report a
+// real directory loses that fallback: the save opens its own project instead —
+// one extra project per distinct id rather than one per save, since the
+// fallback row is then found by id.
 func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, error) {
 	repoRemote = NormalizeRepoRemote(repoRemote)
 	if repoRemote == "" {
@@ -335,7 +342,7 @@ func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repo
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	canonical, err := s.resolveRepoProjectTx(ctx, tx, projectRef, repoName, repoRemote)
+	canonical, err := s.resolveRepoProjectTx(ctx, tx, projectRef, path, repoName, repoRemote)
 	if err != nil {
 		return "", err
 	}
@@ -351,7 +358,7 @@ func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repo
 	return canonical, nil
 }
 
-func (s *Store) resolveRepoProjectTx(ctx context.Context, tx *sql.Tx, projectRef, repoName, repoRemote string) (string, error) {
+func (s *Store) resolveRepoProjectTx(ctx context.Context, tx *sql.Tx, projectRef, savingPath, repoName, repoRemote string) (string, error) {
 	if id, found, err := s.resolveExplicitProjectRepoTx(ctx, tx, projectRef, repoRemote); found || err != nil {
 		return id, err
 	}
@@ -363,7 +370,7 @@ func (s *Store) resolveRepoProjectTx(ctx context.Context, tx *sql.Tx, projectRef
 	if repoName == "" {
 		return "", nil
 	}
-	return s.bindUniqueProjectNameRepoTx(ctx, tx, repoName, repoRemote)
+	return s.bindUniqueProjectNameRepoTx(ctx, tx, repoName, savingPath, repoRemote)
 }
 
 func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, projectRef, repoRemote string) (id string, found bool, err error) {
@@ -436,7 +443,12 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 	return id, true, nil
 }
 
-func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, name, repoRemote string) (string, error) {
+// bindUniqueProjectNameRepoTx is the last resort of write-side resolution: a
+// repository whose name matches exactly one project that has claimed no
+// remote of its own may take that project as its own — unless that project
+// says it lives somewhere the save did not come from, which is the guard
+// below and the reason savingPath is a parameter.
+func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, name, savingPath, repoRemote string) (string, error) {
 	var count int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM projects
@@ -448,12 +460,12 @@ func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, nam
 		return "", nil
 	}
 
-	var id, existingRemote string
+	var id, existingRemote, storedPath string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT id, COALESCE(repo_remote, '')
+		SELECT id, COALESCE(repo_remote, ''), path
 		FROM projects
 		WHERE name = ? AND id != '_global'
-	`, name).Scan(&id, &existingRemote); err != nil {
+	`, name).Scan(&id, &existingRemote, &storedPath); err != nil {
 		if err == sql.ErrNoRows {
 			return "", nil
 		}
@@ -463,6 +475,33 @@ func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, nam
 		if existingRemote == repoRemote {
 			return id, nil
 		}
+		return "", nil
+	}
+	// A name does not outweigh where a project says it lives. An unrelated
+	// clone whose directory is called "infra" would otherwise claim the
+	// project at ~/git/infra: it would take over that project's remote, route
+	// this save into memories that are not its own, and lock the real
+	// checkout out behind a remote conflict. So a usable recorded path must
+	// agree with the directory the save came from; only a path that cannot be
+	// compared — the id sentinel a name-as-id project records, or a relative
+	// one — leaves the name to decide alone.
+	//
+	// A recorded path that no longer resolves counts as a disagreement, which
+	// is what agreesWithSession already does on the read side: the same two
+	// rules decide both directions, so a moved or deleted checkout keeps its
+	// memories and stays addressable by a save from its own path instead of
+	// being inherited by whatever directory took its name. The price is that a
+	// second checkout of a project with no recorded remote keeps its own
+	// project rather than inheriting the first one's memories — the trade
+	// #610 asked for, and the reason the refusal is logged rather than silent.
+	if storedPathIsUsable(storedPath) && !pathsAgree(absoluteSessionPath(savingPath), storedPath) {
+		// pathsAgree fails for a path that no longer resolves as well as for
+		// one that resolves somewhere else, and the two need different fixes,
+		// so the log says which it was.
+		_, resolveErr := canonicalPath(storedPath)
+		s.logger.Warn("refused to bind a repository to a project of the same name: its recorded path does not contain the saving directory",
+			"project", name, "recorded_path", storedPath, "recorded_path_resolves", resolveErr == nil,
+			"saving_path", savingPath, "remote", repoRemote)
 		return "", nil
 	}
 	if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, id, repoRemote); err != nil {
@@ -1194,15 +1233,34 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 		return "", "", fmt.Errorf("%w: %q matches multiple projects", ErrAmbiguousProject, input)
 	}
 
+	// inputRemote can spawn git, so the session's remote is derived at most
+	// once per resolve and only by the steps that read it. remoteOnce
+	// memoizes the cost; it does not cache it across calls, because the
+	// detector observes a directory that a save may have re-pointed since.
 	remote := ""
+	remoteDerived := false
+	remoteOnce := func() string {
+		if !remoteDerived {
+			remote = s.inputRemote(input)
+			remoteDerived = true
+		}
+		return remote
+	}
+
 	if IsPathShaped(input) {
 		pathMatches, qErr := s.pathCandidates(ctx, input, hasRepoRemote)
 		if qErr != nil {
 			return "", "", fmt.Errorf("resolve project by path: %w", qErr)
 		}
-		remote = s.inputRemote(input)
 		survivors := make([]basenameCandidate, 0, len(pathMatches))
 		for _, candidate := range pathMatches {
+			// The session's remote is read for one reason only: to reject a
+			// candidate that asserts a different one. A candidate that
+			// asserts none can neither agree nor disagree, so a prefix hit
+			// against unclaimed projects settles without detection.
+			if candidate.remote != "" {
+				remote = remoteOnce()
+			}
 			if candidate.agreesWithSession(input, remote) {
 				survivors = append(survivors, candidate)
 			}
@@ -1217,9 +1275,10 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 			return survivors[0].id, survivors[0].name, nil
 		}
 	}
-	// A name-shaped input that found no candidate carries no location, so
-	// remote stays empty and the repository step below is a no-op. Re-deriving
-	// it from the input here would only ever re-parse a name.
+	// A name-shaped input spawns no process here, because inputRemote gates
+	// detection on IsPathShaped. It is not a no-op, though: an input that
+	// parses as a remote without carrying a separator ("github.com:owner")
+	// normalizes to one, and the repository step below is reached for it.
 
 	// Repository identity, ahead of the basename fallback: a remote is more
 	// specific than a bare directory name, and a caller naming a repository
@@ -1245,8 +1304,9 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	// never does either unless it carries a separator, which this function
 	// cannot tell apart from a path. A separator-shaped miss costs one
 	// `git config` call, which returns nothing for anything that is not a
-	// directory. inputRemote is that policy, shared with the write side.
-	remote = s.inputRemote(input)
+	// directory — once per resolve, whether or not the path step above already
+	// spent it. inputRemote is that policy, shared with the write side.
+	remote = remoteOnce()
 	if remote != "" && hasRepoRemote {
 		rows, queryErr := s.db.QueryContext(ctx, `
 			SELECT id, name FROM projects
@@ -1499,17 +1559,10 @@ func storedPathIsUsable(stored string) bool {
 	return strings.HasPrefix(norm, "/") && strings.Trim(norm, "/") != ""
 }
 
-// pathsAgree reports whether a session's reported directory and a project's
-// recorded path are the same place.
-//
-// Comparison is separator-agnostic — Windows stores backslashes and the path
-// step above already normalizes them, so a literal prefix test using "/" can
-// never match a native Windows path. Textual equality is tried first because
-// it costs nothing; only when it fails are both paths resolved on disk, which
-// reconciles two spellings of one directory (Windows 8.3 short names against
-// the long form, a symlink in the middle). A path that does not exist or
-// cannot be resolved stays unresolved and fails, so an unreadable directory
-// never becomes evidence that it is the project it claims to be.
+// canonicalPath resolves one path to its canonical, forward-slash form, or
+// reports why it cannot: a path that does not exist, or cannot be resolved,
+// stays unresolved. Callers treat that as a failure to agree rather than as a
+// match.
 func canonicalPath(p string) (string, error) {
 	normalized := strings.ReplaceAll(p, `\`, "/")
 	resolved, err := filepath.EvalSymlinks(filepath.FromSlash(normalized))
@@ -1519,9 +1572,16 @@ func canonicalPath(p string) (string, error) {
 	return strings.ReplaceAll(filepath.ToSlash(resolved), `\`, "/"), nil
 }
 
-// pathsAgree reports whether input and stored resolve to the same directory or
-// to a directory inside it. Both paths are resolved before comparison so dot
-// segments and symlink escapes cannot pass a textual prefix check.
+// pathsAgree reports whether input and stored are the same place: input
+// resolves to stored, or to a directory inside it. Both paths are resolved
+// before comparison, so dot segments and symlink escapes cannot pass a textual
+// prefix check and two spellings of one directory (Windows 8.3 short names
+// against the long form, a symlink in the middle, a trailing separator) do
+// agree. Comparison is separator-agnostic — Windows stores backslashes and the
+// path step above already normalizes them, so a literal prefix test using "/"
+// can never match a native Windows path. A path that does not exist or cannot
+// be resolved stays unresolved and fails, so an unreadable directory never
+// becomes evidence that it is the project it claims to be.
 func pathsAgree(input, stored string) bool {
 	resolvedInput, err := canonicalPath(input)
 	if err != nil {
