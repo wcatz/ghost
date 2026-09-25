@@ -126,20 +126,20 @@ and never includes response framing. `Budget` also has a total because search
 applies one limit across project and `_global`, while injection has independent
 project and global caps. An all-zero budget is rejected. Stage 8 applies slice
 caps. After stage 9 and outcome derivation, a separate `Run` response-fit
-post-pass renders, measures, drops the lowest-ranked row, recomputes the outcome,
-and records a `response_fit` trace entry until the bytes fit or no rows remain.
-No rows means `empty`/`all_over_budget`; `Budget.MaxBytes == 0` skips the pass.
-Notes are bounded by `MaxNoteBytes` and `MaxNotesBytes` (default 512 and 2048
-bytes); diagnostic notes drop before the machine or reason line and never change
-the outcome or reason. If the envelope still exceeds the cap, `Run` returns
-`ErrResponseBudgetExceeded` rather than an outcome, and `mcpserver` renders it
-as a tool error with copy `response budget exceeded`. `Result.Bytes` is measured
-after the pass; `Item.Bytes` is content only. Callers with a response-level cap
-set the budget fields; there is no implicit default.
+post-pass drops the lowest-ranked row, recomputes the outcome, re-renders, and
+measures the final response; it repeats until that render fits or no rows remain.
+Each iteration records a `response_fit` trace entry, and `Result.Bytes` is the
+last render's count. No rows means `empty`/`all_over_budget`;
+`Budget.MaxBytes == 0` skips the pass. Notes are bounded by `MaxNoteBytes` and
+`MaxNotesBytes` (default 512 and 2048 bytes); diagnostic notes drop before the
+machine or reason line and never change the outcome or reason. If the final
+envelope still exceeds the cap, `Run` returns `ErrResponseBudgetExceeded` rather
+than an outcome, and `mcpserver` renders it as a tool error with copy
+"response budget exceeded". `Item.Bytes` is content only; callers set the budget
+fields, with no implicit default.
 
-`Item` is the shared output type for rendering, explanation, and bench metrics.
-It carries the fields needed to reproduce both existing renderers and to
-measure the axes named in Decision 5.
+`Item` is the shared output type for rendering, explanation, and bench metrics;
+it carries the fields needed to reproduce both renderers and measure Decision 5.
 
 ```go
 type Item struct {
@@ -501,13 +501,13 @@ query. `Candidates` errors are returned as errors. Otherwise the rules are:
 ```text
 QUERY MODE
   stage 1 produced no candidates                         -> empty
-  candidates existed but stage 8 admitted none            -> empty
+  candidates existed but stage 8 or response_fit admitted none -> empty
   at least one admitted row satisfies a floor arm          -> answerable
   admitted rows satisfy no floor arm                       -> weak
 
 PASSIVE MODE
   stage 1 produced no rows                                -> empty/no_memories
-  rows existed but stage 8 admitted none                  -> empty/stage reason
+  rows existed but stage 8 or response_fit admitted none  -> empty/stage reason
   at least one row admitted                               -> answerable/not_applicable
 ```
 
@@ -518,6 +518,7 @@ claim and never receive `weak`.
 ### Reasons
 
 The empty reason set is closed. The first matching stage supplies the reason;
+the `response_fit` post-pass supplies `all_over_budget` after the stage loop.
 `window_exhausted` is a note modifier rather than a peer reason.
 
 | Reason | Stage | Meaning |
@@ -531,7 +532,7 @@ The empty reason set is closed. The first matching stage supplies the reason;
 | `all_out_of_scope` | 3 | every row failed scope |
 | `all_dedup_dropped` | 6 | every row was removed by a source policy |
 | `all_diversity_capped` | 7 | every row was cut by a diversity quota |
-| `all_over_budget` | 8 | every row was cut by the item or response-fit budget |
+| `all_over_budget` | fit | every row was cut by the item or response-fit budget |
 
 There is no `all_out_of_project` reason: project membership is enforced in
 SQL. There is no `all_resolved` reason: query mode deliberately admits resolved
@@ -698,9 +699,8 @@ age, and rank values, and carries the scope, validity, confidence, and
 provenance facts. `StageTrace` supplies per-stage counts and dropped IDs;
 the response-fit post-pass writes its own `response_fit` entry and per-row
 `Decision`s, separate from stage 8's slice trims. `Floors` records the exact
-threshold values. The `SearchExplain` adapter carries the existing project,
-query, limit,
-vector-availability, and note metadata from `Trace` and adds the scope keys,
+threshold values. The `SearchExplain` adapter carries the existing project, query,
+limit, vector-availability, and note metadata from `Trace` and adds the scope keys,
 validity state and penalty, confidence and provenance contributions, and the
 `AgainstID` for conflict or diversity effects.
 
@@ -827,17 +827,17 @@ existing provenance path. The shared renderer exposes those fields, while
 stage 4's multiplier remains `1.0` until measured. Session-start sets
 `Slice.MaxItems` and `Slice.ClampBytes` from its existing 15/8 and 200/300
 policies and leaves `Budget.MaxBytes` and note limits at 0/default; it introduces
-no new total cap. PR 4 sets the search response cap before the byte-boundary
-test.
+no new total cap. PR 4 implements the `response_fit` post-pass and search cap;
+PR 6 verifies it against both surfaces.
 
 | # | Branch / title | Closes | Bench expectation |
 |---:|---|---|---|
 | 1 | `feat(assemble): internal/assemble seam; scope and category filter before window closure` | #573 | Run origin/main and branch; stay within 0.005 on NDCG@10 and R@5, explaining any diff. Cover the configured vector floor, bound `Now`, widened rows, and existing negative retrieval. |
 | 2 | `feat(mcpinit): render and apply scope on the session-start surface` | #577 | Add and document `injection.session_scope`; compare the rendered block, with selection and 15/8 caps unchanged when the key is unset. |
 | 3 | `feat(memory): write validity and provenance from the tools` | #575 | Add the writer fields, run the delta gate on new validity fixtures, and show the before/after `ghost_memory_search` payload. |
-| 4 | `feat(assemble): abstention is an outcome, not an empty list` | #580 | Record the abstention-subset score before and after threshold changes; unit-test the `response_fit` post-pass at the search byte limit. Arm B starts disabled. |
+| 4 | `feat(assemble): abstention is an outcome, not an empty list` | #580 | Implement and unit-test the `Run` response-fit post-pass and search cap; record the abstention-subset score before and after threshold changes. Arm B starts disabled. |
 | 5 | `feat(memory): explain reports the assembler's decisions and `ghost context --explain` exists` | #583 | No scored-result change; mutation-test the no-recomputation invariant and add the CLI flag. |
-| 6 | `feat(assemble): conflict, dedup, diversity and budget stages` | Related #581 | Run the delta gate; wire and verify `response_fit`, the global drop policy, and before/after payloads for both surfaces. |
+| 6 | `feat(assemble): conflict, dedup, diversity and budget stages` | Related #581 | Run the delta gate; verify PR 4's `response_fit` against both surfaces, the global drop policy, and before/after payloads. |
 | 7 | `feat(bench): context-quality metrics` | #582 | Add context mode beside direct-call ablations; record the exact baseline SHA and command, and report metrics without gating them. |
 
 PR 6 deliberately does not claim to close #581's contradiction-separation or
