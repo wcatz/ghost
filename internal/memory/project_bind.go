@@ -54,11 +54,17 @@ var (
 	ErrBindPathContainsOther = errors.New("the path contains another project's checkout")
 
 	// ErrBindPathInsideOther means another project records a path this one is
-	// inside, and that project records no repository remote. It then claims
-	// every directory below itself by prefix, so a project bound inside its
-	// subtree could never be returned by resolution. A project identified by a
-	// remote is not in this state: it resolves from any checkout of its
-	// repository, and a nested checkout is legitimately a different project.
+	// inside, and that project records no repository remote. Resolution WOULD
+	// return the nested project — the longest surviving path wins — so this is a
+	// policy about overlapping claims, not a claim about a broken lookup. A
+	// project identified only by its directory answers for every directory
+	// beneath it, clones of unrelated repositories included, because nothing
+	// contradicts it; nesting a second project inside that subtree entrenches
+	// the overlap without giving the enclosing project the identity that would
+	// make it safe. A remote is that identity, and a project with one is not in
+	// this state: a session in a different repository then contradicts it, so a
+	// nested checkout — a submodule, a vendored repository — is legitimately its
+	// own project and binds.
 	ErrBindPathInsideOther = errors.New("the path is inside another project's checkout")
 
 	// ErrBindPathUnmatchable means the path is one path resolution cannot
@@ -288,11 +294,10 @@ func checkBindPathConflicts(ctx context.Context, tx *sql.Tx, id, physical string
 				ErrBindPathContainsOther, otherID, otherPath)
 		case samePath(physical, otherPhysical) && otherRemote == "":
 			// The path being bound is inside the other project's location, and
-			// that project has no remote, so it claims this directory by prefix
-			// and the project being bound could never be resolved. A project
-			// identified by a repository is not in that state, and a nested
-			// checkout of another repository is legitimately its own project.
-			return fmt.Errorf("%w: %q records %q and has no repository remote, so it claims every directory beneath it — bind the outer project instead, or give it a remote",
+			// that project has no remote, so its directory claims the whole
+			// subtree — a session in any clone under it resolves to it. The
+			// remedy is the identity that ends the claim.
+			return fmt.Errorf("%w: %q records %q and has no repository remote, so that directory answers for everything beneath it — bind the outer project instead, or give it a remote",
 				ErrBindPathInsideOther, otherID, otherPath)
 		}
 	}
@@ -356,8 +361,11 @@ func checkPathResolvable(ctx context.Context, tx *sql.Tx, id, physical, remote s
 		}
 	}
 	if survivors == 0 {
+		// pathRankLength, not len: the filter is SQLite's LENGTH() on TEXT,
+		// which counts characters, so a byte count here would report a
+		// multi-byte path as longer than the limit that actually dropped it.
 		return fmt.Errorf("%w: %q is %d characters, and path resolution only considers recorded paths longer than 10",
-			ErrBindPathUnmatchable, physical, len(physical))
+			ErrBindPathUnmatchable, physical, pathRankLength(physical))
 	}
 	if tied {
 		return fmt.Errorf("%w: %q ties with another project's path for the longest match, which resolution refuses to choose between",

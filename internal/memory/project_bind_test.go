@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -310,6 +311,55 @@ func TestBindProjectPathRewritesAnAliasedPath(t *testing.T) {
 	}
 }
 
+// TestBindPathOnlyParentClaimsItsSubtree pins the reason the nested-bind
+// refusal exists, and it is a resolution fact rather than a bind fact: a
+// project identified only by its directory claims every directory beneath it,
+// including an unrelated clone, because agreesWithSession accepts an enclosing
+// candidate as a prefix and nothing contradicts it. Give that same project a
+// repository remote and the claim disappears, because a session in a different
+// repository now contradicts the recorded remote. That is why the refusal's
+// remedy is "give the enclosing project a remote", and why the same bind is
+// allowed when the enclosing project has one.
+func TestBindPathOnlyParentClaimsItsSubtree(t *testing.T) {
+	ctx := context.Background()
+
+	newParent := func(t *testing.T, remote string) (*Store, string) {
+		t.Helper()
+		s := bindStore(t)
+		sentinelProject(t, s, "parent", "parent")
+		parent := t.TempDir()
+		if _, err := s.BindProjectPath(ctx, "parent", parent, remote); err != nil {
+			t.Fatalf("binding the parent: %v", err)
+		}
+		// A sibling that belongs to no project: a clone of something else.
+		sibling := filepath.Join(parent, "unrelated-clone")
+		if err := os.Mkdir(sibling, 0o700); err != nil {
+			t.Fatalf("Mkdir: %v", err)
+		}
+		return s, sibling
+	}
+
+	// The path-only parent answers for a directory it has never heard of.
+	s, sibling := newParent(t, "")
+	if id, _, err := s.ResolveProject(ctx, sibling); err != nil || id != "parent" {
+		t.Errorf("a path-only parent should claim the directory beneath it, got (%q, %v)", id, err)
+	}
+
+	// With a remote, a session in a different repository contradicts it and the
+	// claim is gone.
+	s, sibling = newParent(t, "github.com/owner/parent")
+	SetDetectRemote(func(dir string) string {
+		if dir == sibling {
+			return "github.com/owner/something-else"
+		}
+		return ""
+	})
+	t.Cleanup(func() { SetDetectRemote(nil) })
+	if id, _, err := s.ResolveProject(ctx, sibling); err != nil || id == "parent" {
+		t.Errorf("a repository-identified parent must not claim another repository's checkout, got (%q, %v)", id, err)
+	}
+}
+
 // TestBindProjectPathRefusesUnmatchablePath — the resolver's candidate query
 // skips recorded paths of ten characters or fewer, so binding one records a
 // project that no session directory can ever find. The command exists to make
@@ -317,26 +367,49 @@ func TestBindProjectPathRewritesAnAliasedPath(t *testing.T) {
 // not a success.
 func TestBindProjectPathRefusesUnmatchablePath(t *testing.T) {
 	ctx := context.Background()
-	s := bindStore(t)
-	sentinelProject(t, s, "infra", "infrastructure")
 
-	// The filter is on the stored path's length, so the test needs a real
-	// directory whose PHYSICAL path is short. A deep temp root cannot provide
-	// one, which is why this skips rather than silently passing.
+	// Two shapes of the same refusal. The filter is SQLite's LENGTH(path) > 10,
+	// which counts CHARACTERS on TEXT, so a short path made of multi-byte
+	// characters is dropped by the query while its byte length is over the
+	// limit — and an error that counted bytes would then claim the path passed
+	// the very rule it failed.
 	short := filepath.Join(os.TempDir(), "gb1")
-	if resolved, err := filepath.EvalSymlinks(short); err == nil && len(resolved) > 10 {
-		t.Skipf("no short physical path available under %s (temp root is %d chars)", os.TempDir(), len(resolved))
+	multibyte := filepath.Join(os.TempDir(), "日本")
+	cases := []struct {
+		name       string
+		dir        string
+		wantLength int
+	}{
+		{name: "ascii", dir: short, wantLength: len(short)},
+		{name: "multibyte", dir: multibyte, wantLength: len([]rune(multibyte))},
 	}
-	if err := os.Mkdir(short, 0o700); err != nil {
-		t.Skipf("cannot create %s: %v", short, err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(short) })
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resolved, err := filepath.EvalSymlinks(tc.dir)
+			if err == nil {
+				if n := len([]rune(resolved)); n > 10 {
+					t.Skipf("no path of %d characters available under %s (temp root is %d)", tc.wantLength, os.TempDir(), n)
+				}
+			}
+			if err := os.Mkdir(tc.dir, 0o700); err != nil {
+				t.Skipf("cannot create %s: %v", tc.dir, err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(tc.dir) })
 
-	if _, err := s.BindProjectPath(ctx, "infra", short, ""); !errors.Is(err, ErrBindPathUnmatchable) {
-		t.Fatalf("err = %v, want ErrBindPathUnmatchable for a path the resolver skips", err)
-	}
-	if got := projectPath(t, s, "infra"); got != "infra" {
-		t.Errorf("the refused bind wrote path %q", got)
+			s := bindStore(t)
+			sentinelProject(t, s, "infra", "infrastructure")
+			_, err = s.BindProjectPath(ctx, "infra", tc.dir, "")
+			if !errors.Is(err, ErrBindPathUnmatchable) {
+				t.Fatalf("err = %v, want ErrBindPathUnmatchable for a path the resolver skips", err)
+			}
+			// The number in the message must be the number the filter used.
+			if !strings.Contains(err.Error(), fmt.Sprintf("is %d characters", tc.wantLength)) {
+				t.Errorf("error should count the %d characters the filter counted, got %q", tc.wantLength, err)
+			}
+			if got := projectPath(t, s, "infra"); got != "infra" {
+				t.Errorf("the refused bind wrote path %q", got)
+			}
+		})
 	}
 }
 

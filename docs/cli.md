@@ -47,7 +47,7 @@ ghost mcp status --client goose
 
 Without `--client`, status targets Claude Code. The checks include client registration, lifecycle wiring, the database, Ollama reachability, and embedding/link coverage where applicable. A generic MCP client has no Ghost-specific status integration.
 
-Status also lists any project that records no usable checkout and no repository remote, with the `ghost project bind` command that repairs it. Those projects are not a health failure — every check above can pass while sessions in such a checkout silently get no injected context — and the section is omitted entirely when there is nothing to fix. The listing reads the database without opening it for writing, so a status run never creates the store it is reporting on.
+Status also lists any project that records no usable checkout and no repository remote, with the `ghost project bind` command that repairs it. Those projects are not a health failure — every check above can pass while sessions in such a checkout silently get no injected context — and the section is omitted entirely when there is nothing to fix. The listing reads the database without opening it for writing, so a status run never creates the store it is reporting on. The section also names the follow-up step: after binding, `ghost mcp init` writes the per-checkout memory redirect that a newly absolute path makes the redirect check expect.
 
 ## Hooks
 
@@ -176,12 +176,14 @@ The command refuses, writing nothing, when:
 | the path is missing, is not a directory, or is the filesystem root | a path that cannot be compared against a session directory would never resolve |
 | another project already records that directory | two projects on one checkout leave a session there resolving to whichever row ranked higher; the same directory reached through a symlink counts as already recorded |
 | the path contains another project's checkout | a recorded path matches by prefix, so binding `~/git` while a project records `~/git/infra` would hand that project every unregistered clone beneath it |
-| the path is inside another project's checkout, and that project has no remote | such a project claims every directory below itself, so a project bound inside its subtree could never be resolved; a project with a remote is identified by repository instead, and a nested checkout is legitimately a separate project |
+| the path is inside another project's checkout, and that project has no remote | that project answers for every directory beneath it, clones of unrelated repositories included, so nesting a second project there entrenches an overlap only a repository identity resolves. Give the enclosing project a remote and the same bind succeeds: a session in a different repository then contradicts it, so a nested checkout — a submodule, a vendored repository — is legitimately its own project |
 | path resolution could never match the path | resolution only considers recorded paths longer than ten characters, and refuses a tie for the longest match, so binding one would record a project no session can find |
 | another project already records the detected remote | one repository is one project (git-ssh and https spellings normalize to the same remote) |
 | the project already belongs to a different remote | merging is the repair; rebinding is not |
 
 Binding the same project to the same directory again succeeds and changes nothing, so the command printed by `ghost mcp status` is safe to re-run.
+
+A successful bind that gives a project its first absolute path is followed by one more step: run `ghost mcp init` to write that checkout's Claude memory redirect. The installer skips projects with no absolute path, and `ghost mcp status` counts every project that has one, so until init runs again the redirect check reports the repair as incomplete. The bind output says so when it applies.
 
 ## Obsidian
 

@@ -310,6 +310,16 @@ func printBinding(out io.Writer, binding memory.ProjectBinding) error {
 			return err
 		}
 	}
+	// A project that had no absolute path is one `ghost mcp init` skipped: the
+	// installer writes a Claude memory redirect per absolute checkout, and skips
+	// the rest. Recording one makes `ghost mcp status` count it, so status goes
+	// red on the redirect check until init runs again. Saying so here is the
+	// difference between a finished repair and one that looks broken.
+	if binding.PathChanged && !filepath.IsAbs(binding.PreviousPath) {
+		if _, err := fmt.Fprintln(out, "  next: run `ghost mcp init` to write the memory redirect for this checkout (ghost mcp status checks it)"); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -373,7 +383,14 @@ func writeUnboundProjectNotice(ctx context.Context, out io.Writer, store *memory
 	// new path, and detecting it would mean a stat whose transient failure
 	// (an unmounted volume, a permission error) would invite an overwrite of a
 	// path that was correct a moment ago.
-	_, err = fmt.Fprintln(out, "  A recorded path that no longer exists is not detected here — re-bind it with the new path.")
+	if _, err := fmt.Fprintln(out, "  A recorded path that no longer exists is not detected here — re-bind it with the new path."); err != nil {
+		return err
+	}
+	// The repair is two commands, and only the first is the bind. `mcp init`
+	// writes the per-checkout memory redirect that a newly absolute path makes
+	// `mcp status` check for, and it skips projects with no absolute path — this
+	// exact set — so without it status reports the repair as half-done.
+	_, err = fmt.Fprintln(out, "  After binding, re-run `ghost mcp init` to write the memory redirect each new checkout needs.")
 	return err
 }
 

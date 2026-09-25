@@ -322,8 +322,9 @@ func TestWriteUnboundProjectNoticeReportsWriteFailure(t *testing.T) {
 		}
 	}
 
-	// One write per line: the header, one per project, then the caveat.
-	for failOn := 1; failOn <= 4; failOn++ {
+	// One write per line: the header, one per project, then the two closing
+	// lines (the limit of the check, and the follow-up command).
+	for failOn := 1; failOn <= 5; failOn++ {
 		out := &failingWriter{failOn: failOn}
 		if err := writeUnboundProjectNotice(ctx, out, store); err == nil {
 			t.Errorf("write %d failed but writeUnboundProjectNotice returned nil", failOn)
@@ -385,6 +386,47 @@ func TestOpenDiagnosticStoreDoesNotCreateTheDatabase(t *testing.T) {
 	}
 }
 
+// TestBindingPrintsTheMCPInitFollowUp — `ghost mcp status` counts a project
+// whose recorded path is absolute as needing a Claude memory redirect, and
+// `ghost mcp init` writes that redirect while skipping every project whose path
+// is not absolute — which is exactly the set bind repairs. So a successful bind
+// turns a status check red until init is re-run, and a success message that does
+// not say so makes a finished repair look broken.
+func TestBindingPrintsTheMCPInitFollowUp(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a newly bound project needs the redirect", func(t *testing.T) {
+		store := bindStore(t)
+		if err := store.EnsureProject(ctx, "infra", "", "infrastructure"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		var out bytes.Buffer
+		if err := runProjectBindCore(ctx, store, &out, "infra", t.TempDir(), noRemote); err != nil {
+			t.Fatalf("runProjectBindCore: %v", err)
+		}
+		if !strings.Contains(out.String(), "ghost mcp init") {
+			t.Errorf("output should say how to finish the repair, got:\n%s", out.String())
+		}
+	})
+
+	t.Run("a project that already had a checkout does not", func(t *testing.T) {
+		store := bindStore(t)
+		dir := t.TempDir()
+		if err := store.EnsureProject(ctx, "infra", dir, "infrastructure"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		// Re-point it: the redirect for the previous checkout already exists, and
+		// the one being replaced is the user's business, not a follow-up step.
+		var out bytes.Buffer
+		if err := runProjectBindCore(ctx, store, &out, "infra", t.TempDir(), noRemote); err != nil {
+			t.Fatalf("runProjectBindCore: %v", err)
+		}
+		if strings.Contains(out.String(), "ghost mcp init") {
+			t.Errorf("re-pointing an already-bound project needs no init step, got:\n%s", out.String())
+		}
+	})
+}
+
 // TestUnboundProjectNotice covers the `ghost mcp status` line: it must name
 // every project a session directory cannot resolve, print the exact fix
 // command, and stay silent when there is nothing to fix.
@@ -442,5 +484,10 @@ func TestUnboundProjectNotice(t *testing.T) {
 	// user who hits that needs to know the status line will not mention it.
 	if !strings.Contains(after, "no longer exists") {
 		t.Errorf("the notice should state what it cannot detect, got:\n%s", after)
+	}
+	// The plan the notice hands out is two commands, and only the first is the
+	// bind: init is what writes the redirect the bind makes status check for.
+	if !strings.Contains(after, "ghost mcp init") {
+		t.Errorf("the notice should name the step that finishes the repair, got:\n%s", after)
 	}
 }
