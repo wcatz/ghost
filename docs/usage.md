@@ -34,7 +34,7 @@ If a choice was made after considering alternatives, record a decision rather th
 
 ## Projects and global memory
 
-A project is normally identified by the directory where the agent is working. Ghost resolves projects by longest path prefix first, then by basename. This keeps worktrees and moved checkouts associated with the intended project.
+Agents should identify projects by the name reported for the current session. Ghost resolves a checkout through its longest recorded path prefix. For compatibility with clients that supply a path-shaped `project_id` on a save, Ghost also detects the checkout's normalized Git remote so worktrees and moved checkouts remain one project. If the project was first created under its plain name and has no recorded remote yet, the compatibility path binds the remote only when the repository name identifies exactly one unclaimed project; ambiguous or conflicting names are never guessed.
 
 Project-specific knowledge belongs in that project. Use the special `_global` project for preferences and facts that should apply everywhere, such as a preferred validation workflow or a personal communication preference. Use `ghost_search_all` when the relevant knowledge might be stored under another project.
 
