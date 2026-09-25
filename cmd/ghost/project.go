@@ -433,7 +433,10 @@ func runProjectBind() {
 		os.Exit(1)
 	}
 
-	_, _, store := bootstrap(os.Stderr, cliLogLevel())
+	// failOnConfig, like every other CLI subcommand: the user asked for this
+	// command by name, and running it against half the intended configuration is
+	// worse than an error that names the file.
+	_, _, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
 
 	// repo.DetectRemote is the same detector main injects into the store, so
