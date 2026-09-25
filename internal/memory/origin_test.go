@@ -19,6 +19,7 @@ func TestOriginClassCoversEverySchemaSource(t *testing.T) {
 		{source: "mcp", wantOwn: false, wantLabel: "mcp"},
 		{source: "onboarding", wantOwn: false, wantLabel: "onboarding"},
 		{source: "decision_log", wantOwn: false, wantLabel: "decision_log"},
+		{source: "builtin", wantOwn: false, wantLabel: "builtin"},
 	}
 
 	for _, tc := range cases {

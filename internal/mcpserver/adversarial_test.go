@@ -235,6 +235,7 @@ func TestSourceLabelUsesSharedOriginClassification(t *testing.T) {
 		{source: "mcp", want: " source=mcp"},
 		{source: "onboarding", want: " source=onboarding"},
 		{source: "decision_log", want: " source=decision_log"},
+		{source: "builtin", want: " source=builtin"},
 	} {
 		if got := sourceLabel(tc.source); got != tc.want {
 			t.Errorf("sourceLabel(%q) = %q, want %q", tc.source, got, tc.want)

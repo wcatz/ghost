@@ -142,8 +142,8 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 }
 
 // seedGlobalMemory defines a memory that Ghost ships with out of the box.
-// These are inserted as source='manual', pinned=1, so consolidation never
-// touches them.
+// These are inserted as source='builtin', pinned=1, so consolidation never
+// touches them and provenance surfaces can distinguish them from user writes.
 type seedGlobalMemory struct {
 	Category   string
 	Content    string
@@ -162,9 +162,9 @@ var defaultSeedMemories = []seedGlobalMemory{
 }
 
 // SeedGlobalMemories ensures the _global project exists and inserts any
-// missing seed memories. Seeds are pinned and source='manual' so they
-// survive consolidation. Idempotent — skips memories whose content already
-// exists.
+// missing seed memories. Seeds are pinned and source='builtin' so they
+// survive consolidation without being presented as user-authored. Idempotent —
+// skips memories whose content already exists.
 func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -194,7 +194,7 @@ func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 		tags, _ := json.Marshal(seed.Tags)
 		_, err = s.db.ExecContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags, pinned)
-			VALUES ('_global', ?, ?, 'manual', ?, ?, 1)
+			VALUES ('_global', ?, ?, 'builtin', ?, ?, 1)
 		`, seed.Category, seed.Content, seed.Importance, string(tags))
 		if err != nil {
 			s.logger.Warn("seed memory insert failed", "content", seed.Content, "error", err)
@@ -2109,14 +2109,15 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		defer tx.Rollback() //nolint:errcheck
 	}
 
-	// Snapshot existing non-manual memories before deleting. Pinned memories
-	// and resolved memories are excluded throughout this function — like
-	// source='manual', a pin is an explicit user override and a resolved_at
-	// stamp is a resolve pass's verdict, both of which reflection must never
-	// delete, rewrite, or silently drop (it has no way to know a consolidated
-	// memory it emits corresponds to a pinned/resolved one it never saw as
-	// such, so preservation has to mean "don't touch it" rather than "carry the
-	// flag through"). See issue #318.
+	// Snapshot existing non-manual/non-builtin memories before deleting.
+	// Pinned memories and resolved memories are excluded throughout this
+	// function — manual and builtin sources are explicit preservation classes,
+	// while a pin is an explicit user override and a resolved_at stamp is a
+	// resolve pass's verdict. Reflection must never delete, rewrite, or
+	// silently drop any of them (it has no way to know a consolidated memory
+	// it emits corresponds to a pinned/resolved one it never saw as such, so
+	// preservation has to mean "don't touch it" rather than "carry the flag
+	// through"). See issue #318.
 	snapshotID := fmt.Sprintf("%s-%d", projectID, time.Now().UnixNano())
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags,
@@ -2127,7 +2128,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		       created_at, id, access_count, last_accessed,
 		       agent, session_id, source_ref, confidence,
 		       valid_from, valid_until, verified_at, scope, 1
-		FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL
+		FROM memories WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
 	`, snapshotID, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot memories: %w", err)
@@ -2142,7 +2143,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// the consolidation round trip are kept in place for the same reason.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, content FROM memories
-		WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL
+		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
 	`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list replaceable memories: %w", err)
@@ -2175,7 +2176,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	if consolidatedSince != "" {
 		crows, err := tx.QueryContext(ctx, `
 			SELECT id FROM memories
-			WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
+			WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
 		`, projectID, consolidatedSince)
 		if err != nil {
 			return nil, fmt.Errorf("find concurrent memories: %w", err)

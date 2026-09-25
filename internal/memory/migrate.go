@@ -578,7 +578,119 @@ func migrateV13(tx *sql.Tx) error {
 	return nil
 }
 
-// phase1aProvenanceColumns is the v10 column set, shared by migrateV10 and
+// migrateV14 adds the builtin source and relabels Ghost's shipped global
+// seeds. A pinned manual row is still protected from reflection, but its
+// source must not make SessionStart call a Ghost-authored rule the user's own
+// preference.
+func migrateV14(tx *sql.Tx) error {
+	stale, err := tableDDLLacks(tx, "memories", "'builtin'")
+	if err != nil {
+		return err
+	}
+	if stale {
+		if err := rebuildMemoriesV14(tx); err != nil {
+			return fmt.Errorf("rebuild memories for builtin source: %w", err)
+		}
+	}
+
+	// Keep this data migration separate from the CHECK rebuild so databases
+	// that were hand-migrated to the new CHECK still receive the provenance
+	// correction. The content literal is frozen with this migration; changing
+	// today's seed list must not rewrite historical migration behavior.
+	if _, err := tx.Exec(`
+		UPDATE memories
+		SET source = 'builtin'
+		WHERE project_id = '_global'
+		  AND source = 'manual'
+		  AND pinned = 1
+		  AND content = 'NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.'
+	`); err != nil {
+		return fmt.Errorf("relabel builtin seed: %w", err)
+	}
+	return nil
+}
+
+func rebuildMemoriesV14(tx *sql.Tx) error {
+	stmts := []string{
+		`DROP TRIGGER IF EXISTS memories_ai`,
+		`DROP TRIGGER IF EXISTS memories_ad`,
+		`DROP TRIGGER IF EXISTS memories_au`,
+		`DROP TABLE IF EXISTS memories_fts`,
+		`CREATE TABLE memories_v14_new (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL DEFAULT 'fact'
+                  CHECK (category IN (
+                      'architecture', 'decision', 'pattern', 'convention',
+                      'gotcha', 'dependency', 'preference', 'fact'
+                  )),
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL DEFAULT 0.5,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT,
+    source        TEXT NOT NULL DEFAULT 'reflection'
+                  CHECK (source IN ('reflection', 'chat', 'manual', 'tool', 'mcp', 'onboarding', 'decision_log', 'builtin')),
+    tags          TEXT DEFAULT '[]',
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at   TEXT,
+    resolve_kept_hash TEXT NOT NULL DEFAULT '',
+    valid_from    TEXT,
+    valid_until   TEXT,
+    verified_at   TEXT,
+    agent         TEXT,
+    session_id    TEXT,
+    source_ref    TEXT,
+    confidence    REAL,
+    scope         TEXT
+)`,
+		`INSERT INTO memories_v14_new (
+    rowid, id, project_id, category, content, importance, access_count,
+    last_accessed, source, tags, pinned, created_at, updated_at, resolved_at,
+    resolve_kept_hash, valid_from, valid_until, verified_at, agent, session_id,
+    source_ref, confidence, scope
+)
+SELECT rowid, id, project_id, category, content, importance, access_count,
+       last_accessed,
+       CASE WHEN project_id = '_global' AND source = 'manual' AND pinned = 1
+                 AND content = 'NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.'
+            THEN 'builtin' ELSE source END,
+       tags, pinned, created_at, updated_at, resolved_at, resolve_kept_hash,
+       valid_from, valid_until, verified_at, agent, session_id, source_ref,
+       confidence, scope
+FROM memories`,
+		`DROP TABLE memories`,
+		`ALTER TABLE memories_v14_new RENAME TO memories`,
+		`CREATE VIRTUAL TABLE memories_fts USING fts5(
+    content,
+    content=memories,
+    content_rowid=rowid,
+    tokenize='porter unicode61'
+)`,
+		`CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END`,
+		`CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+END`,
+		`CREATE TRIGGER memories_au AFTER UPDATE ON memories WHEN old.content != new.content BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
+END`,
+		`INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_cat ON memories(project_id, category)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_memories_project_source ON memories(project_id, source)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("%q: %w", stmt[:min(40, len(stmt))], err)
+		}
+	}
+	return nil
+}
+
 // the tests that assert it, so a column added to one and forgotten in the
 // other cannot pass.
 var phase1aProvenanceColumns = []struct {

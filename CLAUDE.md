@@ -30,6 +30,7 @@
 - Empty-set guard: never replace all memories with empty reflection output
 - Project lookup: path-prefix match (longest wins) OR basename name fallback; path-shaped MCP saves prefer the observed Git remote and may bind it to one uniquely named, unclaimed project
 - Global memories: `_global` project, included in every project's context
+- Source provenance: `manual` marks direct user material; `builtin` marks Ghost-shipped pinned rules and is never presented as user-authored
 - Reflection promotion: cross-project candidates stay project-scoped by default; `ghost reflect --promote-globals` opts into `_global`, and the project replacement plus global writes share one transaction
 - Hybrid search: 70% vector (cosine, Ollama) + 30% FTS5, RRF fusion — falls back to FTS5-only
 - Memory links: `memory_links` edge table auto-populated by cosine similarity (internal/linking worker); links cascade-delete with memories and self-heal after reflection. A graph-expansion ranking bonus was evaluated and removed — dominated by a deeper vector-k (links and the vector leg are both cosine); the link graph is retained for Obsidian export and supersedes ranking (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`).

@@ -33,8 +33,12 @@ func TestNormalizeReflectMemoriesScopeRules(t *testing.T) {
 				{Category: "fact", Content: "The api key for this service is sk-live-123.", Scope: "global"},
 				{Category: "fact", Content: "Rotate the deployment password every quarter.", Scope: "global"},
 				{Category: "fact", Content: "The CI access_token lives in the runner env.", Scope: "global"},
+				{Category: "fact", Content: "GITHUB_TOKEN=ghp_example", Scope: "global"},
+				{Category: "fact", Content: "CLIENT_SECRET: rotate this value", Scope: "global"},
+				{Category: "fact", Content: "PRIVATE_KEY=-----BEGIN PRIVATE KEY-----", Scope: "global"},
+				{Category: "fact", Content: "api-key: example-secret", Scope: "global"},
 			},
-			wantScope: []string{"project", "project", "project"},
+			wantScope: []string{"project", "project", "project", "project", "project", "project", "project"},
 		},
 		{
 			name: "ordinary cross-repo knowledge is still promoted",

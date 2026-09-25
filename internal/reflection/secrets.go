@@ -17,5 +17,17 @@ func looksLikeSecret(lower string) bool {
 			return true
 		}
 	}
+
+	// Assignment syntax is common in operational notes and is easy to miss
+	// when the key and separator are joined without a prose word ("TOKEN=...",
+	// "CLIENT_SECRET:...", "api-key:..."). Normalize separators first, then
+	// require a key boundary so ordinary words such as "tokenizer" do not
+	// become global blockers.
+	normalized := strings.NewReplacer("-", "_", " ", "_", "=", "_", ":", "_").Replace(lower)
+	for _, key := range []string{"api_key", "apikey", "credential", "password", "secret", "token", "private_key", "bearer"} {
+		if strings.Contains(normalized, key+"_") || strings.Contains(normalized, "_"+key+"_") || strings.HasSuffix(normalized, "_"+key) {
+			return true
+		}
+	}
 	return false
 }

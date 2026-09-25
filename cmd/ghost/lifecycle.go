@@ -297,13 +297,13 @@ func clampReflectMemories(mems []reflection.ReflectMemory) int {
 }
 
 // consolidatable returns the memories reflection may rewrite: non-resolved,
-// unpinned, non-manual rows. ReplaceNonManual preserves exactly the excluded
-// set, so this is the input the consolidator sees — and therefore the set the
-// skip-unchanged fingerprint must cover.
+// unpinned, non-manual/non-builtin rows. ReplaceNonManual preserves exactly
+// the excluded set, so this is the input the consolidator sees — and
+// therefore the set the skip-unchanged fingerprint must cover.
 func consolidatable(mems []memory.Memory) []memory.Memory {
 	out := make([]memory.Memory, 0, len(mems))
 	for _, m := range mems {
-		if m.ResolvedAt != nil || m.Pinned || m.Source == "manual" {
+		if m.ResolvedAt != nil || m.Pinned || m.Source == "manual" || m.Source == "builtin" {
 			continue
 		}
 		out = append(out, m)

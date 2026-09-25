@@ -110,7 +110,7 @@ func TestSessionContextTagsEveryNonManualGlobal(t *testing.T) {
 // legal source values without context. In particular, onboarding and
 // decision_log are not interchangeable with an agent write.
 func TestSessionContextGuidanceNamesTheOriginsActuallyPresent(t *testing.T) {
-	sources := []string{"reflection", "chat", "tool", "mcp", "onboarding", "decision_log"}
+	sources := []string{"reflection", "chat", "tool", "mcp", "onboarding", "decision_log", "builtin"}
 	globals := make([]sessionMemory, 0, len(sources)+1)
 	for i, source := range sources {
 		globals = append(globals, sessionMemory{
