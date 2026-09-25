@@ -3,6 +3,7 @@ package mcpinit
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -196,8 +197,10 @@ func TestTouchLifecycleStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected the stamp for the resolved id: %v", err)
 	}
-	if perm := st.Mode().Perm(); perm != 0o600 {
-		t.Errorf("stamp mode = %o, want 0600", perm)
+	if want, ok := wantStampMode(); ok {
+		if perm := st.Mode().Perm(); perm != want {
+			t.Errorf("stamp mode = %o, want %o", perm, want)
+		}
 	}
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
@@ -227,13 +230,31 @@ func TestTouchLifecycleStart(t *testing.T) {
 	}
 }
 
-// TestTouchLifecycleStart_ReplacesTheStamp pins the two properties a
-// write-in-place would lose. A stamp already on disk at a wider mode (or with
-// stale content) must come back 0600 and empty, which only a temp-file rename
-// guarantees: os.WriteFile's O_TRUNC on an existing path keeps that path's mode,
-// so a world-readable file would sit in the data dir forever. The mtime must
-// also MOVE, or a long-lived project would be pinned inside the window by a stamp
-// nobody refreshed.
+// wantStampMode is the mode the stamp must carry, and whether the platform has
+// Unix mode bits to assert it with. Windows reports 0666 for a writable file
+// whatever perm was passed to open — there are no POSIX modes on NTFS — so
+// asserting 0600 there would be asserting something untrue about the platform
+// rather than about this code. The 0600 request still stands, and is asserted
+// everywhere that has modes to assert it with (see also os.SameFile below, which
+// pins the atomic replace on every platform).
+func wantStampMode() (os.FileMode, bool) {
+	if runtime.GOOS == "windows" {
+		return 0, false
+	}
+	return 0o600, true
+}
+
+// TestTouchLifecycleStart_ReplacesTheStamp pins the properties a write-in-place
+// would lose, in two independent ways so neither is a Unix-only assertion:
+//
+//   - the stamp must be a DIFFERENT file afterwards (os.SameFile compares the
+//     Windows file index and the Unix inode alike), which is what temp+rename
+//     gives and an in-place truncate cannot;
+//   - and on a platform with mode bits it must come back 0600, where an in-place
+//     write would keep the old path's wider mode.
+//
+// The stale content must be gone and the mtime must MOVE, or a long-lived
+// project would be pinned inside the window by a stamp nobody refreshed.
 func TestTouchLifecycleStart_ReplacesTheStamp(t *testing.T) {
 	dataHome := isolatedHome(t)
 	seedProject(t, dataHome, "p1", "/tmp/p1", "p1")
@@ -253,6 +274,10 @@ func TestTouchLifecycleStart_ReplacesTheStamp(t *testing.T) {
 		t.Fatal("precondition: a 6h-old stamp is outside a 30m window")
 	}
 
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := TouchLifecycleStart("p1"); err != nil {
 		t.Fatalf("TouchLifecycleStart: %v", err)
 	}
@@ -261,8 +286,13 @@ func TestTouchLifecycleStart_ReplacesTheStamp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := st.Mode().Perm(); perm != 0o600 {
-		t.Errorf("stamp mode = %o, want 0600 (an in-place write would keep the old mode)", perm)
+	if os.SameFile(before, st) {
+		t.Error("the stamp is still the same file: it was written in place, not replaced by a rename")
+	}
+	if want, ok := wantStampMode(); ok {
+		if perm := st.Mode().Perm(); perm != want {
+			t.Errorf("stamp mode = %o, want %o (an in-place write would keep the old mode)", perm, want)
+		}
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
