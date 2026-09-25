@@ -9,14 +9,17 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Memory represents a single discrete memory.
@@ -571,7 +574,12 @@ func (s *Store) createRepoProjectTx(ctx context.Context, tx *sql.Tx, id, path, n
 	return id, nil
 }
 
-func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemote string) error {
+// reconcileMergeRepoTx binds repoRemote to a merge target that does not record
+// one yet. excluded names the other participants of the merge, which may
+// legitimately hold the remote already inside this transaction — the incoming
+// row is written before the merge runs and is deleted by it, so treating its own
+// temporary claim as a conflicting holder would make every merge fail.
+func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemote string, excluded ...string) error {
 	if repoRemote == "" {
 		return nil
 	}
@@ -588,6 +596,25 @@ func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemot
 			return fmt.Errorf("project %q belongs to a different repository", existingID)
 		}
 		return nil
+	}
+	// Binding a remote the target does not have can collide with a project that
+	// already records it. v15 makes repo_remote unique, so that write is refused
+	// by the index — and a raw constraint failure names neither the project
+	// already holding the identity nor the fact that two rows claim to be the
+	// same repository. Name both, and point at the migration that merges them.
+	args := []any{repoRemote, existingID}
+	clause := ""
+	for _, id := range excluded {
+		clause += " AND id != ?"
+		args = append(args, id)
+	}
+	var holder string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id FROM projects WHERE repo_remote = ? AND id != ?`+clause+` ORDER BY id`, args...).Scan(&holder); err == nil {
+		return fmt.Errorf("%w: repository %q is already recorded on project %q, so it cannot also be bound to %q",
+			ErrAmbiguousProject, repoRemote, holder, existingID)
+	} else if err != sql.ErrNoRows {
+		return fmt.Errorf("check repository identity before binding: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE projects
@@ -756,6 +783,54 @@ func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
 	return s.mergeProjectLocked(ctx, oldID, newID)
 }
 
+var projectMergeStatements = []string{
+	`UPDATE memories SET project_id = ? WHERE project_id = ?`,
+	`UPDATE tasks SET project_id = ? WHERE project_id = ?`,
+	`UPDATE decisions SET project_id = ? WHERE project_id = ?`,
+	`UPDATE token_usage SET project_id = ? WHERE project_id = ?`,
+	`UPDATE audit_log SET project_id = ? WHERE project_id = ?`,
+	`UPDATE memory_snapshots SET project_id = ? WHERE project_id = ?`,
+	`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
+}
+
+// mergeProjectTx folds oldID's rows into newID and deletes oldID.
+//
+// The _global refusal lives here, not in MergeProject, because this primitive
+// has three callers and only one of them is the public wrapper. migrateV14
+// discovers duplicate repository identities and picks an order for them, and
+// ensureProjectLocked's unique-constraint recovery merges whichever row already
+// holds the remote — and a v13 database can legitimately hold that remote on
+// _global, because EnsureProjectWithRepo has always written the supplied remote
+// for that ID. A guard only the wrapper applies would leave both of those paths
+// able to move a project's entire corpus into the global bucket, or delete
+// _global outright. The bucket global injection reads from is not a project, so
+// every merge involving it is refused; callers that discover such a group return
+// this error rather than choosing an order that happens to spare it.
+func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
+	if oldID == newID {
+		return nil
+	}
+	// _global is the bucket global injection reads from, not a project: merging
+	// into it would move a corpus into every session, and merging out of it
+	// would delete it. The guard lives in the shared primitive so every caller
+	// inherits it — the public wrapper, this merge, and migrateV15.
+	if oldID == "_global" || newID == "_global" {
+		return fmt.Errorf("%w: refusing to merge the _global project (old=%q new=%q)", ErrAmbiguousProject, oldID, newID)
+	}
+	for _, stmt := range projectMergeStatements {
+		if _, err := tx.ExecContext(ctx, stmt, newID, oldID); err != nil {
+			return fmt.Errorf("merge reassign: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, oldID); err != nil {
+		return fmt.Errorf("merge delete ghost_state: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, oldID); err != nil {
+		return fmt.Errorf("merge delete project: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) error {
 	return s.mergeProjectWithRepoLocked(ctx, oldID, newID, "")
 }
@@ -784,13 +859,42 @@ func (s *Store) mergeProjectWithRepoTx(ctx context.Context, tx *sql.Tx, oldID, n
 	if oldID == "_global" || newID == "_global" {
 		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
 	}
-	if err := reconcileMergeRepoTx(ctx, tx, oldID, repoRemote); err != nil {
+	// Validate the outgoing row's recorded identity first: it must not claim a
+	// DIFFERENT repository, or the merge would silently move that project's
+	// memories under an identity they were never verified against. Read-only —
+	// the row is about to be deleted, so binding anything to it is wasted work.
+	if err := validateMergeRepoTx(ctx, tx, oldID, repoRemote); err != nil {
 		return err
 	}
-	if err := reconcileMergeRepoTx(ctx, tx, newID, repoRemote); err != nil {
+	// Then delete oldID, and only then bind the remote to the survivor. The
+	// order matters: v15 makes repo_remote unique, and the incoming row is
+	// written before the merge runs, so it already holds the identity this
+	// function may have to give the survivor. Binding first would collide with
+	// a row that is about to be deleted and fail the whole merge.
+	if err := mergeProjectTx(ctx, tx, oldID, newID); err != nil {
 		return err
 	}
-	return s.mergeProjectTx(ctx, tx, oldID, newID)
+	return reconcileMergeRepoTx(ctx, tx, newID, repoRemote, oldID)
+}
+
+// validateMergeRepoTx refuses a merge whose outgoing project records a
+// different repository from the one the merge is being performed under.
+func validateMergeRepoTx(ctx context.Context, tx *sql.Tx, oldID, repoRemote string) error {
+	if repoRemote == "" {
+		return nil
+	}
+	var existingRemote string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, oldID).Scan(&existingRemote); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return fmt.Errorf("read merge source repository: %w", err)
+	}
+	if existingRemote != "" && existingRemote != repoRemote {
+		return fmt.Errorf("project %q belongs to a different repository", oldID)
+	}
+	return nil
 }
 
 func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
@@ -1034,18 +1138,34 @@ func SetDetectRemote(fn func(dir string) string) {
 	detectRemoteForPath = fn
 }
 
-// Lookup order, first hit wins:
-//  1. exact id = input
-//  2. exact name = input
-//  3. if input contains '/' or '\': input = path OR input has literal prefix
-//     path + "/" (ordered by LENGTH(path) DESC — longest/most-specific match
-//     wins; LENGTH(path) > 10 guards against a short project path matching too
-//     broadly, matching the hook's original lookupProject behavior; the
-//     prefix check is a literal substr comparison, not LIKE, so '%'/'_' in a
-//     stored path can't act as SQL wildcards against input; input and stored
-//     path are compared both raw and slash-normalized so native-Windows
-//     backslash paths resolve too)
-//  4. name = basename(input)
+// ErrAmbiguousProject means an identifier matched more than one project and
+// choosing one would silently send a caller's data to an arbitrary project.
+// Callers that create projects must propagate this error instead of treating
+// it as a miss.
+var ErrAmbiguousProject = errors.New("project identifier is ambiguous")
+
+// ResolveProject resolves an exact ID/name, a canonical path prefix, an exact
+// repository remote, or one evidence-backed basename candidate. A genuine miss
+// returns ("", "", nil); multiple surviving candidates return ErrAmbiguousProject.
+// ResolveExactProjectID reports whether input is literally a project's id. It
+// is deliberately narrower than ResolveProject: that function also accepts a
+// path prefix, a repository remote and a basename fallback, and the write side
+// must not use those — reclassifying a save that named an existing project by
+// the repository the session happens to be standing in would move the memory to
+// a different project than the caller addressed. Only the id is a claim the
+// caller can make without evidence.
+func (s *Store) ResolveExactProjectID(ctx context.Context, id string) (string, bool, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE id = ? LIMIT 1`, id).Scan(&id, &name)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("resolve project by exact id: %w", err)
+	}
+	return id, true, nil
+}
+
 func (s *Store) ResolveProject(ctx context.Context, input string) (id, name string, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1058,41 +1178,48 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 		return "", "", fmt.Errorf("resolve project by id: %w", err)
 	}
 
-	err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE name = ? LIMIT 1`, input).Scan(&id, &name)
-	if err == nil {
-		return id, name, nil
-	}
-	if err != sql.ErrNoRows {
-		return "", "", fmt.Errorf("resolve project by name: %w", err)
+	hasRepoRemote, schemaErr := s.hasRepoRemoteColumn(ctx)
+	if schemaErr != nil {
+		return "", "", fmt.Errorf("inspect project schema: %w", schemaErr)
 	}
 
-	if strings.ContainsAny(input, `/\`) {
-		// Literal prefix comparison, not LIKE: a stored path containing '%' or
-		// '_' must not be treated as a SQL wildcard against input.
-		// The gate works by detecting '\' as well as '/'; REPLACE below
-		// normalizes the STORED path so the SQL comparisons match slash or
-		// backslash inputs on native Windows. SQLite string literals don't
-		// process backslash escapes, so '\' in SQL is one literal backslash.
-		// Normalization is done with strings.ReplaceAll, not filepath.ToSlash:
-		// ToSlash is a no-op for backslashes off-Windows (it only swaps
-		// filepath.Separator), so it can't be exercised or relied on in Linux
-		// tests.
-		norm := strings.ReplaceAll(input, `\`, "/")
-		err = s.db.QueryRowContext(ctx, `
-			SELECT id, name FROM projects
-			WHERE (path = ?
-			    OR REPLACE(path, '\', '/') = ?
-			    OR substr(?, 1, LENGTH(REPLACE(path, '\', '/')) + 1) = REPLACE(path, '\', '/') || '/')
-			  AND LENGTH(path) > 10
-			ORDER BY LENGTH(path) DESC LIMIT 1
-		`, input, norm, norm).Scan(&id, &name)
-		if err == nil {
-			return id, name, nil
+	nameMatches, qErr := s.basenameCandidates(ctx, input, hasRepoRemote)
+	if qErr != nil {
+		return "", "", fmt.Errorf("resolve project by name: %w", qErr)
+	}
+	if len(nameMatches) == 1 {
+		return nameMatches[0].id, nameMatches[0].name, nil
+	}
+	if len(nameMatches) > 1 {
+		return "", "", fmt.Errorf("%w: %q matches multiple projects", ErrAmbiguousProject, input)
+	}
+
+	remote := ""
+	if IsPathShaped(input) {
+		pathMatches, qErr := s.pathCandidates(ctx, input, hasRepoRemote)
+		if qErr != nil {
+			return "", "", fmt.Errorf("resolve project by path: %w", qErr)
 		}
-		if err != sql.ErrNoRows {
-			return "", "", fmt.Errorf("resolve project by path: %w", err)
+		remote = s.inputRemote(input)
+		survivors := make([]basenameCandidate, 0, len(pathMatches))
+		for _, candidate := range pathMatches {
+			if candidate.agreesWithSession(input, remote) {
+				survivors = append(survivors, candidate)
+			}
+		}
+		if len(survivors) > 0 {
+			bestLength := pathRankLength(survivors[0].path)
+			for _, candidate := range survivors[1:] {
+				if pathRankLength(candidate.path) == bestLength {
+					return "", "", fmt.Errorf("%w: %q has tied path-prefix matches", ErrAmbiguousProject, input)
+				}
+			}
+			return survivors[0].id, survivors[0].name, nil
 		}
 	}
+	// A name-shaped input that found no candidate carries no location, so
+	// remote stays empty and the repository step below is a no-op. Re-deriving
+	// it from the input here would only ever re-parse a name.
 
 	// Repository identity, ahead of the basename fallback: a remote is more
 	// specific than a bare directory name, and a caller naming a repository
@@ -1104,39 +1231,318 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	// repository whose first checkout already created a project. A path
 	// carries no identity of its own, so it is resolved through the injected
 	// detector; without that, saving from ~/work/ghost and then reading from
-	// it would disagree about which project it is. Detection runs only for
-	// path-shaped inputs (containing '/' or '\'), so resolving by id or name
-	// never spawns a process. A path is tested before the raw input is treated
-	// as a remote because a relative path such as ../checkout can otherwise be
-	// mistaken for a host/path remote. Non-directory remote strings fail the
-	// detector's os.Stat before it starts Git, then normalize normally.
-	remote := ""
-	if strings.ContainsAny(input, `/\`) {
+	// it would disagree about which project it is.
+	//
+	// Detection is gated on the input being path-shaped rather than on
+	// filepath.IsAbs, because IsAbs is false for a drive-relative Windows
+	// path such as \work\ghost — skipping detection for exactly the shape a
+	// second checkout arrives in is how one repository became two projects.
+	// The raw input is normalised as a remote first, because a relative path
+	// such as ../checkout would otherwise be mistaken for a host/path remote;
+	// non-directory remote strings then fail the detector's os.Stat before it
+	// starts Git, and normalise normally. The cost of the gate is bounded and
+	// stated here rather than implied: an id never spawns a process, and a name
+	// never does either unless it carries a separator, which this function
+	// cannot tell apart from a path. A separator-shaped miss costs one
+	// `git config` call, which returns nothing for anything that is not a
+	// directory. inputRemote is that policy, shared with the write side.
+	remote = s.inputRemote(input)
+	if remote != "" && hasRepoRemote {
+		rows, queryErr := s.db.QueryContext(ctx, `
+			SELECT id, name FROM projects
+			WHERE repo_remote = ? AND id != '_global'
+			ORDER BY id
+		`, remote)
+		if queryErr != nil {
+			return "", "", fmt.Errorf("resolve project by repository: %w", queryErr)
+		}
+		var matches []struct{ id, name string }
+		for rows.Next() {
+			var match struct{ id, name string }
+			if scanErr := rows.Scan(&match.id, &match.name); scanErr != nil {
+				_ = rows.Close()
+				return "", "", fmt.Errorf("resolve project by repository: scan: %w", scanErr)
+			}
+			matches = append(matches, match)
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			_ = rows.Close()
+			return "", "", fmt.Errorf("resolve project by repository: %w", rowsErr)
+		}
+		_ = rows.Close()
+		if len(matches) > 1 {
+			return "", "", fmt.Errorf("%w: repository %q matches multiple projects", ErrAmbiguousProject, remote)
+		}
+		if len(matches) == 1 {
+			return matches[0].id, matches[0].name, nil
+		}
+	}
+
+	// A basename is accepted only after the same canonical-path and remote
+	// checks as the path-prefix step; ambiguity is an error, not a miss.
+	base := filepath.Base(input)
+	candidates, qErr := s.basenameCandidates(ctx, base, hasRepoRemote)
+	if qErr != nil {
+		return "", "", fmt.Errorf("resolve project by basename: %w", qErr)
+	}
+
+	survivors := make([]basenameCandidate, 0, 1)
+	for _, cand := range candidates {
+		if cand.agreesWithSession(input, remote) {
+			survivors = append(survivors, cand)
+		}
+	}
+	if len(survivors) == 0 {
+		return "", "", nil
+	}
+	if len(survivors) > 1 {
+		return "", "", fmt.Errorf("%w: %q matches multiple projects", ErrAmbiguousProject, input)
+	}
+	return survivors[0].id, survivors[0].name, nil
+}
+
+// basenameCandidate is one projects row that answers to a name.
+type basenameCandidate struct{ id, name, path, remote string }
+
+// hasRepoRemoteColumn reports whether the projects table has the optional
+// repository-identity column. Read-only lifecycle consumers can legitimately
+// open a pre-v11 database, so resolution must not require that column.
+func (s *Store) hasRepoRemoteColumn(ctx context.Context) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM pragma_table_info('projects') WHERE name = 'repo_remote'
+	`).Scan(&exists)
+	return exists > 0, err
+}
+
+func (s *Store) inputRemote(input string) string {
+	remote := NormalizeRepoRemote(input)
+	if remote == "" && IsPathShaped(input) {
 		remote = NormalizeRepoRemote(detectRemoteForPath(input))
 	}
-	if remote == "" {
-		remote = NormalizeRepoRemote(input)
-	}
-	if remote != "" {
-		err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE repo_remote = ? AND id != '_global' LIMIT 1`, remote).Scan(&id, &name)
-		if err == nil {
-			return id, name, nil
-		}
-		if err != sql.ErrNoRows {
-			return "", "", fmt.Errorf("resolve project by repository: %w", err)
-		}
-	}
+	return remote
+}
 
-	base := filepath.Base(input)
-	err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE name = ? LIMIT 1`, base).Scan(&id, &name)
-	if err == nil {
-		return id, name, nil
+func scanProjectCandidates(rows *sql.Rows) ([]basenameCandidate, error) {
+	defer rows.Close() //nolint:errcheck
+	var candidates []basenameCandidate
+	for rows.Next() {
+		var candidate basenameCandidate
+		if err := rows.Scan(&candidate.id, &candidate.name, &candidate.path, &candidate.remote); err != nil {
+			return nil, fmt.Errorf("scan candidate: %w", err)
+		}
+		candidates = append(candidates, candidate)
 	}
-	if err != sql.ErrNoRows {
-		return "", "", fmt.Errorf("resolve project by basename: %w", err)
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate candidates: %w", err)
 	}
+	return candidates, nil
+}
 
-	return "", "", nil
+// basenameCandidates returns every project carrying this name. There is
+// deliberately no LIMIT: evidence can reject a candidate, and truncating the
+// set could hide a second candidate that agrees.
+func (s *Store) basenameCandidates(ctx context.Context, name string, hasRepoRemote bool) ([]basenameCandidate, error) {
+	remoteColumn := "''"
+	if hasRepoRemote {
+		remoteColumn = "COALESCE(repo_remote, '')"
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, name, path, `+remoteColumn+` FROM projects WHERE name = ?`, name)
+	if err != nil {
+		return nil, err
+	}
+	return scanProjectCandidates(rows)
+}
+
+// pathCandidates returns rows whose recorded path text could contain input.
+// The caller still applies storedPathIsUsable, pathsAgree, and remote checks;
+// this query is only a narrowing step, never proof of a project match.
+func (s *Store) pathCandidates(ctx context.Context, input string, hasRepoRemote bool) ([]basenameCandidate, error) {
+	remoteColumn := "''"
+	if hasRepoRemote {
+		remoteColumn = "COALESCE(repo_remote, '')"
+	}
+	norm := absoluteSessionPath(input)
+	query := `SELECT id, name, path, ` + remoteColumn + ` FROM projects
+		WHERE (path = ?
+		   OR REPLACE(path, '\', '/') = ?
+		   OR substr(?, 1, LENGTH(REPLACE(path, '\', '/')) + 1) = REPLACE(path, '\', '/') || '/')
+		  AND LENGTH(path) > 10
+		ORDER BY LENGTH(path) DESC`
+	rows, err := s.db.QueryContext(ctx, query, norm, norm, norm)
+	if err != nil {
+		return nil, err
+	}
+	return scanProjectCandidates(rows)
+}
+
+// agreesWithSession applies the three rules in ResolveProject to one
+// candidate. They are independent, so the order they run in carries no
+// meaning; each is a reason to refuse. That is also why this is a predicate
+// over candidates rather than a sequence of guards over one: ambiguity is
+// decided on whoever survives, so a duplicate that the same evidence rejects
+// cannot strand a session standing in the project it names.
+func (c basenameCandidate) agreesWithSession(input, remote string) bool {
+	// Rule 3. remote != c.remote is redundant — an exact repo_remote match
+	// returned earlier — but it states the rule being enforced.
+	if remote != "" && c.remote != "" && remote != c.remote {
+		return false // both asserted an identity, and they disagree
+	}
+	if !IsPathShaped(input) {
+		return true // a bare name reports no location to disagree with
+	}
+	// Rule 2. A stored path that is not an absolute location with something
+	// below the root is not something a directory can be compared against:
+	// the id sentinel recorded no location at all, a relative one would be
+	// resolved against the process's working directory, and "/" contains
+	// every absolute path. Refusing here also spares the two failed
+	// EvalSymlinks calls pathsAgree would otherwise make.
+	if !storedPathIsUsable(c.path) {
+		return false
+	}
+	// Compare the absolute form, for the same reason the SQL prefilter above
+	// uses it: a relative input otherwise never matches, because EvalSymlinks
+	// leaves a relative path relative and every usable stored path is absolute.
+	return pathsAgree(absoluteSessionPath(input), c.path)
+}
+
+// absoluteSessionPath normalizes a caller-reported session directory to the
+// absolute, forward-slash form the rest of resolution compares in.
+//
+// A relative path is resolved against the process's working directory, which is
+// where a caller reporting a relative directory is standing. Paths that are
+// already absolute in either spelling are only separator-normalized: a Windows
+// path arriving on a POSIX host is absolute, and prefixing the process's
+// working directory onto it would both corrupt the string and hide a project
+// that the prefilter had already matched. So the "is it absolute" test is
+// deliberately spelling-agnostic rather than filepath.IsAbs, which is false for
+// a backslash path on Linux and for a drive-relative path on Windows.
+func absoluteSessionPath(input string) string {
+	norm := strings.ReplaceAll(input, `\`, "/")
+	if strings.HasPrefix(norm, "/") || isWindowsDrivePath(norm) || isDriveRelative(norm) {
+		return norm
+	}
+	abs, err := filepath.Abs(norm)
+	if err != nil {
+		return norm
+	}
+	return strings.ReplaceAll(abs, `\`, "/")
+}
+
+// isWindowsDrivePath reports whether p begins with a drive specifier and a
+// separator, e.g. "C:/repo" — the absolute Windows form.
+func isWindowsDrivePath(p string) bool {
+	return len(p) >= 3 && p[1] == ':' && p[2] == '/' && isASCIILetter(p[0])
+}
+
+// isDriveRelative reports whether p begins with a bare drive specifier, e.g.
+// "C:repo". It is relative to that drive's current directory, which the process
+// cannot know, so it is left in its own spelling rather than resolved against
+// this host's working directory — resolving it would claim a location the
+// caller never reported.
+func isDriveRelative(p string) bool {
+	return len(p) >= 2 && p[1] == ':' && isASCIILetter(p[0])
+}
+
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// IsPathShaped reports whether s looks like a filesystem path rather than a
+// project name or a repository remote: it contains a path separator, or it
+// begins with a drive-relative Windows prefix such as C:repo.
+//
+// This is the one definition of "the caller is reporting a location", shared
+// by store resolution (the path steps and the basename evidence rules) and
+// by mcpserver's repository detection, so a drive-relative Windows path
+// cannot be treated as a name on one side of a boundary and as a path on the
+// other.
+//
+// filepath.IsAbs is deliberately not this test: it is false for a
+// drive-relative Windows path such as \work\ghost, which is exactly the
+// shape a second checkout of a repository arrives in. The separator check alone
+// was not enough either, because C:repo carries no separator at all — a
+// single ASCII letter, a colon, and then text — so it read as a project name
+// and both the resolver's path steps and the server's repository detection
+// skipped it. A one-letter prefix is what makes this unambiguous: it is the
+// whole of a Windows drive specifier, and a project name that begins with a
+// single letter and a colon is not a shape anything else produces.
+func IsPathShaped(s string) bool {
+	if strings.ContainsAny(s, `/\`) {
+		return true
+	}
+	return isDriveRelative(s)
+}
+
+// storedPathIsUsable reports whether a recorded path is a location a session
+// directory can be compared against: absolute, in either separator spelling,
+// with at least one segment below the root.
+//
+// Three shapes are refused, each for its own reason:
+//   - the id sentinel (path == id) and any relative path: nothing was
+//     recorded that a directory could contradict, and EvalSymlinks would
+//     resolve a relative path against the PROCESS working directory, so
+//     agreement would depend on where the caller happens to run rather than
+//     where the session is standing;
+//   - a bare root ("/" or "C:/"): it contains every absolute path on the
+//     machine, so a project recorded there would claim any session whose
+//     directory shares its name.
+func storedPathIsUsable(stored string) bool {
+	norm := strings.ReplaceAll(stored, `\`, "/")
+	// Drop a Windows drive prefix so the root test is the same one on both
+	// platforms: "C:/x" and "/x" are the same shape.
+	if isWindowsDrivePath(norm) {
+		norm = norm[2:]
+	}
+	norm = pathpkg.Clean(norm)
+	return strings.HasPrefix(norm, "/") && strings.Trim(norm, "/") != ""
+}
+
+// pathsAgree reports whether a session's reported directory and a project's
+// recorded path are the same place.
+//
+// Comparison is separator-agnostic — Windows stores backslashes and the path
+// step above already normalizes them, so a literal prefix test using "/" can
+// never match a native Windows path. Textual equality is tried first because
+// it costs nothing; only when it fails are both paths resolved on disk, which
+// reconciles two spellings of one directory (Windows 8.3 short names against
+// the long form, a symlink in the middle). A path that does not exist or
+// cannot be resolved stays unresolved and fails, so an unreadable directory
+// never becomes evidence that it is the project it claims to be.
+func canonicalPath(p string) (string, error) {
+	normalized := strings.ReplaceAll(p, `\`, "/")
+	resolved, err := filepath.EvalSymlinks(filepath.FromSlash(normalized))
+	if err != nil {
+		return "", err
+	}
+	return strings.ReplaceAll(filepath.ToSlash(resolved), `\`, "/"), nil
+}
+
+// pathsAgree reports whether input and stored resolve to the same directory or
+// to a directory inside it. Both paths are resolved before comparison so dot
+// segments and symlink escapes cannot pass a textual prefix check.
+func pathsAgree(input, stored string) bool {
+	resolvedInput, err := canonicalPath(input)
+	if err != nil {
+		return false
+	}
+	resolvedStored, err := canonicalPath(stored)
+	if err != nil {
+		return false
+	}
+	return samePath(resolvedInput, resolvedStored)
+}
+
+func pathRankLength(p string) int {
+	return utf8.RuneCountInString(strings.ReplaceAll(p, `\`, "/"))
+}
+
+// samePath is exact equality or a directory-prefix match on a segment
+// boundary, so /x/infra does not accept /x/infra-other.
+func samePath(a, b string) bool {
+	b = strings.TrimSuffix(b, "/")
+	return a == b || strings.HasPrefix(a, b+"/")
 }
 
 // ListProjectNames returns all known project names, ordered the same way as

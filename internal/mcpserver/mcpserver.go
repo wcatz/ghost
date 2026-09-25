@@ -55,11 +55,15 @@ var detectRemoteForSave = repo.DetectRemote
 // identified it by a filesystem path.
 //
 // MCP callers normally pass a project *name*, which says nothing about a
-// repository — but project_id is sometimes an absolute path, and that is
+// repository — but project_id is sometimes a filesystem path, and that is
 // exactly the shape that produced duplicate projects when a session changed
 // working directory. Only git can say whether two such paths are one
 // repository, so detection is confined to that case: an ordinary named save
-// never spawns a process.
+// never spawns a process. The test is memory.IsPathShaped rather than
+// filepath.IsAbs, the same predicate Store.ResolveProject applies, so a
+// drive-relative Windows path — which IsAbs reports as relative — cannot be
+// treated as a name by the writer and as a path by the reader, which is how a
+// second checkout of a known repository would open a second project.
 //
 // For a path-shaped input with a detected remote, the transactional store
 // operation repeats exact/longest-prefix path resolution and rechecks the
@@ -73,6 +77,17 @@ var detectRemoteForSave = repo.DetectRemote
 // the folded-away id afterwards fails on a foreign key against a project that
 // was deliberately not created.
 func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string, error) {
+	// An id the caller already knows is not re-derived. This is the exact-id
+	// lookup only, not ResolveProject: a path prefix, a remote or a basename
+	// fallback could each answer with a DIFFERENT project than the caller
+	// named, and reclassifying a save that way moves the memory out from under
+	// the address the client used.
+	if resolvedID, ok, err := s.store.ResolveExactProjectID(ctx, projectID); err != nil {
+		return "", err
+	} else if ok {
+		return resolvedID, nil
+	}
+
 	pathShaped := strings.ContainsAny(projectID, `/\`)
 	remote := ""
 	if pathShaped {
