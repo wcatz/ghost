@@ -278,8 +278,6 @@ The four axes are named in [`architecture.md`](architecture.md#memory-axes). Val
 | Issue | Why it is P0 |
 |---|---|
 | [#575](https://github.com/wcatz/ghost/issues/575) | Validity is preserved by snapshot replacement/restore but is not exposed or consulted by normal retrieval; confidence is written but not read by ranking |
-| [#574](https://github.com/wcatz/ghost/issues/574) | The linker's `related` edges bypass the scope exemption added in #563 |
-| [#571](https://github.com/wcatz/ghost/issues/571) | Explain mode reports rows the tool would exclude |
 | [#577](https://github.com/wcatz/ghost/issues/577) | Session-start injection neither renders nor filters scope — the surface that most needs it |
 | [#579](https://github.com/wcatz/ghost/issues/579) | Define the four axes and their invariants; the documentation half can land first and this section already starts it |
 | [#580](https://github.com/wcatz/ghost/issues/580) | Retrieval never abstains: weak matches are returned as if authoritative |

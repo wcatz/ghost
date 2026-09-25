@@ -93,7 +93,6 @@ type vecEntry struct {
 
 // SearchVector performs brute-force cosine similarity search against stored embeddings.
 // Returns memory IDs sorted by descending similarity.
-// SearchVector performs brute-force cosine similarity search against stored embeddings.
 func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]ScoredMemory, error) {
 	return s.searchVector(ctx, projectID, queryVec, limit, nil)
 }
