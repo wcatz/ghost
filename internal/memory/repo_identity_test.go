@@ -178,7 +178,16 @@ func TestResolveExplicitProjectRepoTxRefusesEvidenceAboutAnotherCheckout(t *test
 	// evidence read and before the transaction, so both sides of every
 	// comparison here see the normalized spelling rather than the detected URL.
 	canon := NormalizeRepoRemote(own)
-	root := t.TempDir()
+	// The root is canonicalised once, because BindProjectPath records the
+	// physical directory and this test compares what it wrote. t.TempDir() is
+	// spelled /var/folders/... on macOS, which is a symlink to
+	// /private/var/folders/..., so the raw spelling would not match on every
+	// host — and the failure would read as a bind that recorded the wrong
+	// directory, which is the opposite of what this test is about.
+	root, err := canonicalPath(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp root: %v", err)
+	}
 	checkout := filepath.Join(root, "git", "infra")
 	saving := filepath.Join(checkout, "src", "api")
 	repointed := filepath.Join(checkout, "src")
