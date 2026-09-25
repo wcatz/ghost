@@ -1160,6 +1160,13 @@ func TestSetWarningWriter_ConcurrentWithWarnings(t *testing.T) {
 		defer wg.Done()
 		<-start
 		for range 200 {
+			// warnf prints each distinct message once per process, so 200 loads
+			// of one file would reach the sink once and leave the other 199
+			// returning before the atomic load — which is what made this test
+			// vacuous, and would let a plain io.Writer variable pass it. Clearing
+			// the dedup set per iteration puts every iteration back on the path
+			// that reads the sink.
+			resetWarned()
 			if _, err := Load(); err != nil {
 				t.Errorf("Load(): %v", err)
 				return
