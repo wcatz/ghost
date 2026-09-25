@@ -469,11 +469,20 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 	//
 	// Logged for the same reason the unique-name refusal is: the save landed
 	// somewhere and the project that answered for it is deliberately left
-	// unclaimed, which is a fact a user with a nested checkout will want.
-	if prefixMatch && !s.savingDirectorySpeaksForProject(matchedPath, norm, repoRemote) {
-		s.logger.Warn("refused to bind a repository to an enclosing project: the save came from a directory inside a different repository",
-			"project", id, "recorded_path", matchedPath, "saving_path", projectRef, "remote", repoRemote)
-		return id, true, nil
+	// unclaimed, which is a fact a user with a nested checkout will want. Both
+	// remotes are in the line because the refusal has two causes that need
+	// different fixes — a different repository found, or no repository readable
+	// at the recorded path — and a message naming only the first sends an
+	// operator with the second looking for a nested checkout they do not have.
+	if prefixMatch {
+		sameRepository, recordedRemote := s.savingDirectorySpeaksForProject(matchedPath, norm, repoRemote)
+		if !sameRepository {
+			s.logger.Warn("refused to bind a repository to a project whose checkout contains this save: could not establish that the saving directory belongs to that project's own repository",
+				"project", id,
+				"recorded_path", matchedPath, "recorded_path_remote", recordedRemote,
+				"saving_path", projectRef, "saving_path_remote", repoRemote)
+			return id, true, nil
+		}
 	}
 
 	ownerID, err := s.findProjectByRepoRemoteTx(ctx, tx, repoRemote, id)
@@ -502,12 +511,11 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 //
 // Failing that, the two directories report the same remote. That is what an
 // ordinary subdirectory of the checkout looks like — sessions start in
-// src/api more often than at the root, and `git config` walks up — and it is
-// also what a worktree of the same repository looks like, which is the case
-// repository identity exists for. The remote at the saving directory is the one
-// the caller already detected and passed in, so this costs at most one
-// additional `git config` (bounded by repo.detectTimeout), and only on the
-// prefix branch with a non-root saving directory.
+// src/api more often than at the root, and `git config` walks up. The remote at
+// the saving directory is the one the caller already detected and passed in, so
+// this costs at most one additional `git config` (bounded by
+// repo.detectTimeout), and only on the prefix branch with a non-root saving
+// directory.
 //
 // Anything else is a nested checkout, and a remote that cannot be detected at
 // the recorded path proves nothing at all. Both refusals take the same
@@ -517,12 +525,17 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 // cannot tell a subdirectory from a submodule here, and guessing towards
 // handing one repository's identity to another is the failure this exists to
 // stop.
-func (s *Store) savingDirectorySpeaksForProject(recorded, saving, savingRemote string) bool {
+//
+// The remote detected at the recorded path is returned so that a caller refusing
+// on this answer can report it: "" there is what separates a nested checkout
+// from a recorded path git cannot read — moved, deleted, owned by someone else,
+// or a store with no detector wired.
+func (s *Store) savingDirectorySpeaksForProject(recorded, saving, savingRemote string) (bool, string) {
 	if savingPathIsProjectRoot(recorded, saving) {
-		return true
+		return true, ""
 	}
 	recordedRemote := s.inputRemote(recorded)
-	return recordedRemote != "" && recordedRemote == savingRemote
+	return recordedRemote != "" && recordedRemote == savingRemote, recordedRemote
 }
 
 // savingPathIsProjectRoot reports whether the directory a save came from is the
