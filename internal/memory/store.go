@@ -1193,9 +1193,6 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	return c.id, c.name, nil
 }
 
-// ListProjectNames returns all known project names, ordered the same way as
-// ListProjects (name ASC) — used to format an actionable CLI error listing
-// known projects on a resolution miss.
 // pathsAgree reports whether a session's reported directory and a project's
 // recorded path are the same place.
 //
@@ -1228,6 +1225,9 @@ func samePath(a, b string) bool {
 	return a == b || strings.HasPrefix(a, b+"/")
 }
 
+// ListProjectNames returns all known project names, ordered the same way as
+// ListProjects (name ASC) — used to format an actionable CLI error listing
+// known projects on a resolution miss.
 func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 	projects, err := s.ListProjects(ctx)
 	if err != nil {
