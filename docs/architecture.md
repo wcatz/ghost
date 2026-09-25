@@ -131,11 +131,47 @@ The lifecycle is opt-in. A phase failure is logged and does not prevent later ph
 - Project and memory CRUD
 - FTS5 indexing and query sanitization
 - Optional vector storage and cosine similarity
-- Reciprocal Rank Fusion for hybrid results
+- Reciprocal Rank Fusion for hybrid results, with the result window chosen by
+  `FuseAndSelectWindow` (see [Hybrid fusion and window selection](#hybrid-fusion-and-window-selection))
 - Category-aware time-decay ordering
 - Pinned and near-duplicate handling
 - Directed memory links
 - Snapshots, audit history, tasks, decisions, and usage data
+
+### Hybrid fusion and window selection
+
+`FuseAndSelectWindow` (`internal/memory/vector.go`) owns both halves of hybrid
+retrieval: it fuses the FTS5 and vector legs into one ranking, and it decides
+which memories form the result window. They live in one function because
+window selection is not separable from fusion — the rule that keeps a keyword
+hit has to be stated in terms of the scores fusion produced.
+
+Fusion is Reciprocal Rank Fusion, weighted 0.3 FTS / 0.7 vector with k=60.
+A memory retrieved by both legs accumulates both contributions, so a two-leg
+match always outranks a single-leg one.
+
+Window selection reserves real estate for the keyword leg. A plain cut on the
+fused score could not admit a keyword-only hit at all: the keyword leg's rank-1
+row scores 0.3/61 ≈ 0.0049, while the vector leg's 20th row — still well
+inside the fetched window — scores 0.7/80 ≈ 0.0088. A full vector leg
+therefore outranked the best keyword match every time, and an exact identifier
+match could never reach the results, which is the case FTS exists for.
+
+So the best `limit/5` keyword hits the vector leg did **not** retrieve are
+guaranteed a place in the window, evicting the weakest admitted rows for them.
+Position is left to the fused score: admission is the defect, and the stronger
+interventions were built and measured against the built-in dataset first.
+Reordering the selected slice does nothing beyond admission, because
+`decayRank` re-sorts by score on the way out. Flooring a reserved hit's score
+does work, but the floor cannot be made safe — at the top of the window it
+costs hybrid R@1 0.507 → 0.366 and NDCG@10 0.812 → 0.738, and at the median it
+sits close enough to the row below that decay, which multiplies scores by a
+category- and age-dependent factor, reorders it and breaks the invariant that
+uniform timestamps leave the graded ranking untouched.
+
+The window's width is `limit`, or twice that under `DecayReselect`, where decay
+still has to narrow the set afterwards. Ordering is deterministic (ties broken
+by ID), because the demotion penalties applied downstream depend on order.
 
 The main schema tables are:
 
@@ -149,7 +185,7 @@ The main schema tables are:
 | `tasks` | Cross-session work items |
 | `decisions` | Decisions, rationale, alternatives, and status |
 | `ghost_state` | Per-project learned context and interaction state |
-| `memory_snapshots` | Reflection rollback snapshots |
+| `memory_snapshots` | Reflection rollback snapshots, including `scope` and its `scope_captured` marker (schema v14) so a restore can put scope back — and leave a live scope alone when the snapshot predates scope |
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
 
@@ -168,6 +204,54 @@ Without Ollama, the same API remains available with FTS5-only results. Search me
 ### Memory lifecycle
 
 `reflect` replaces non-manual memories through a tiered consolidator. It snapshots before replacement, rejects empty results, preserves manual memories, and can restore the latest snapshot. `resolve` stamps resolved evidence so it leaves injection but remains searchable. `supersede` creates directed replacement links after source-matched classification.
+
+## Memory axes
+
+A memory is described along four independent axes. The axes are orthogonal: a row can be live, in-date, contradicted, and low-confidence at the same time, and each of those facts is stored and judged separately. This section is the normative definition of the axes; the gaps listed against each one are tracked as issues and are the plan in [`ROADMAP.md`](ROADMAP.md#part-9--architecture-direction-memory-axes-and-context-assembly-p0p3).
+
+| Axis | Question it answers | Storage today | Status |
+|---|---|---|---|
+| **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `audit_log` | Partial — no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
+| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Partial — snapshot replacement and restore preserve these fields, but normal reads and ranking do not expose or consult them ([#575](https://github.com/wcatz/ghost/issues/575)); wiring them into retrieval is part of the assembler ([#581](https://github.com/wcatz/ghost/issues/581)) |
+| **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Partial — the linker's `related` edges bypass the scope exemption ([#574](https://github.com/wcatz/ghost/issues/574)) |
+| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref` | Inert — written on some paths, never read by ranking ([#575](https://github.com/wcatz/ghost/issues/575)); history is missing entirely ([#578](https://github.com/wcatz/ghost/issues/578)) |
+
+Axis interaction rules:
+
+- **Supersede wins over time.** A memory that has a live replacement is demoted regardless of a later `verified_at` or higher confidence on the old row.
+- **Resolved leaves injection, not the database.** `resolved_at` removes a row from ranked session injection ([#559](https://github.com/wcatz/ghost/issues/559)) but keeps it searchable and auditable.
+- **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled block; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)).
+- **Scope and project membership are not axes.** They are access predicates applied before scoring ([#577](https://github.com/wcatz/ghost/issues/577)); a memory that fails them is out of scope regardless of its other axes.
+- **Provenance is history, not a weight.** `agent`/`session_id`/`source_ref` describe who wrote a row; append-only history of those changes is [#578](https://github.com/wcatz/ghost/issues/578).
+
+## Context assembly (target design)
+
+> **Target design, not current behavior.** Today there is no assembler: `ghost_memory_search` (`internal/mcpserver`) and the session-start injector (`internal/mcpinit`) each run their own ad-hoc retrieve → filter → rank → trim sequence, which is why the two surfaces disagree about scope ([#577](https://github.com/wcatz/ghost/issues/577)) and why filters run after the result window closes ([#573](https://github.com/wcatz/ghost/issues/573)). The plan to converge them is [#581](https://github.com/wcatz/ghost/issues/581).
+
+Both consumers should call one assembler with an explicit budget, so every surface applies the same predicates in the same order and every stage is testable in isolation:
+
+```text
+query
+  1. retrieve       hybrid FTS + vector candidates, widened window (0.3 FTS / 0.7 vector RRF)
+  2. validity       drop or bound rows outside valid_from/valid_until, flag unverified
+  3. scope          machine-readable memories.scope match, project membership
+  4. provenance     bounded penalty for unattributed or low-confidence rows
+  5. conflicts      suppress superseded rows; never emit a contradicts pair together
+  6. dedup          collapse duplicate/near-duplicate links to one representative
+  7. diversity      cap per-source share so one project cannot crowd out the rest
+  8. budget         final ordering, then a hard byte/token trim
+  9. render         one renderer shared by search output and injected context
+       → Trace      per-stage row counts and per-row exclusion reasons
+```
+
+Rules the pipeline must hold:
+
+- **Filters precede window closure.** Stages 2-4 run over the widened candidate set from stage 1, never over an already-truncated list.
+- **One renderer, one field set.** Scope, validity state, and confidence appear identically in `ghost_memory_search` output and in the injected session-start block.
+- **The trace is the explain payload.** `explain:true` ([#583](https://github.com/wcatz/ghost/issues/583)) reports the stages above, so explain and ranking cannot disagree.
+- **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through ([#580](https://github.com/wcatz/ghost/issues/580)).
+- **The budget is a hard boundary.** Stage 8 trims deterministically and is tested at, just under, and just over the limit; injection and search use different budgets but the same code.
+- **The pipeline is measurable.** Bench gains context precision, contamination rate, budget adherence, diversity, and token cost ([#582](https://github.com/wcatz/ghost/issues/582)), and contamination classification reuses the production exclusion reasons so the two cannot drift.
 
 ## Concurrency contract
 

@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 13
+const schemaVersion = 14
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -33,6 +33,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV11,
 	migrateV12,
 	migrateV13,
+	migrateV14,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -742,6 +743,38 @@ FROM memory_snapshots`,
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("%q: %w", s[:min(40, len(s))], err)
+		}
+	}
+	return nil
+}
+
+// migrateV14 adds memory_snapshots.scope and its scope_captured marker. v13
+// gave the snapshot table the identity and provenance columns; scope arrived
+// with the memories table in v12 and was simply never carried across, so a
+// reflection replace could drop a memory's scope and the restore that should
+// have undone it had nowhere to read it from (issue #572).
+//
+// The two columns are added separately on purpose. A database whose scope
+// column an operator added by hand has rows that were never verified against a
+// real snapshot, so scope_captured stays 0 for them: restore preserves the live
+// scope rather than trusting a backfill, which is the recoverable direction.
+func migrateV14(tx *sql.Tx) error {
+	hasScope, err := columnExists(tx, "memory_snapshots", "scope")
+	if err != nil {
+		return err
+	}
+	if !hasScope {
+		if _, err := tx.Exec(`ALTER TABLE memory_snapshots ADD COLUMN scope TEXT`); err != nil {
+			return fmt.Errorf("add memory_snapshots.scope: %w", err)
+		}
+	}
+	hasCaptured, err := columnExists(tx, "memory_snapshots", "scope_captured")
+	if err != nil {
+		return err
+	}
+	if !hasCaptured {
+		if _, err := tx.Exec(`ALTER TABLE memory_snapshots ADD COLUMN scope_captured INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add memory_snapshots.scope_captured: %w", err)
 		}
 	}
 	return nil
