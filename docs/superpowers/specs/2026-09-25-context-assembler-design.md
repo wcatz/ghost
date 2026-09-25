@@ -186,7 +186,8 @@ const (
 )
 
 type Request struct {
-    ProjectID string               // "" only with SourceAllProjects
+    ProjectID string               // "" for SourceAllProjects AND for a projectless
+                                  // session_start — see "Projectless session start"
     Query     string               // "" = passive mode, see §2 stage 1
     Scope     map[string]string    // nil = no scope predicate
     Category  string               // "" = any; stage 3 membership, never post-closure
@@ -244,6 +245,46 @@ the trace as `validity_unparseable`, so nil unambiguously means "no validity cla
 we can read" — which is why the contamination predicate in §5 needs its own nil
 check rather than trusting a bare comparison.
 
+### Projectless session start is a real, rendered state
+
+My first draft wrote `ProjectID string // "" only with SourceAllProjects`, which
+is false about the product. Session-start **already renders a globals-only block
+for an unmatched project**, and it does so through a path that bypasses project
+retrieval entirely:
+
+- `loadSessionContext` resolves the project, and on no match returns immediately
+  with an empty `projectID` (`hook.go:428-430`) — so no project memories, and no
+  `ghost_state` lookups either.
+- Globals are loaded on a **separate** path (`loadGlobals`, `hook.go:177`/`:301`)
+  that never consults `projectID`.
+- The render guard is `if projectID == "" && len(globals) == 0` (`hook.go:303`) —
+  projectless **with** globals falls through and calls `formatSessionContext`
+  (`hook.go:306`) with an empty project id and a populated global list.
+
+So the existing behaviour is "no project match → still inject your global
+preferences", and it is deliberate enough to have its own guard clause rather
+than an accident of ordering. Forcing it through a contract that forbids an
+empty `ProjectID` would mean either breaking that rendering or keeping a second
+retrieval path, both of which defeat the point of the seam. So:
+
+- `ProjectID == ""` is legal for `SourceSessionStart` **and** `SourceAllProjects`.
+- For `SourceSessionStart` it selects a **globals-only passive mode**: stage 1
+  fetches the `_global` bucket and nothing else, and stages 2–8 run over that
+  block normally. `Item.Bucket` is `"_global"` for every row, which is already
+  what the diversity metric buckets on (§5).
+- For `SourceAllProjects` it keeps its current meaning (no project filter at
+  all), so the two are distinguished by `Source`, not by the emptiness of the
+  field.
+- The invariant that *is* kept: `ProjectID == ""` with a non-empty `Query` is
+  rejected, because a query against no project has no meaning the legs can
+  express. `Run` returns an error rather than silently degrading to a global-only
+  keyword search that the caller did not ask for.
+
+The regression test is the rendered block for a projectless session: project
+bucket absent, `_global` bucket present and capped by the existing `globalsCap`,
+and no `all_out_of_project` reason — which is what the next subsection needs to
+make reachable at all.
+
 ### The hook's read-only constraint is load-bearing — but not for the reason I first gave
 
 `internal/mcpinit/hook.go:400-406` says the memory query "deliberately queries its
@@ -268,12 +309,42 @@ that is not a prerequisite for this design and is not claimed as one.
 ```go
 // Retriever is what the assembler needs from storage. memory.Store satisfies it;
 // memory.NewReadOnly(ro *sql.DB) satisfies it for the hook.
+//
+// The parameter and result types are memory's, NOT assemble's — see "Where the
+// DTOs live" below, which is load-bearing rather than cosmetic.
 type Retriever interface {
-    Candidates(ctx context.Context, q CandidateRequest) (*CandidateSet, error)
+    Candidates(ctx context.Context, q memory.CandidateRequest) (*memory.CandidateSet, error)
 }
 
 func Run(ctx context.Context, r Retriever, req Request) (Result, error)
 ```
+
+**Where the DTOs live: `internal/memory`, not `internal/assemble`.** My first
+draft declared `CandidateRequest`, `CandidateSet`, `Candidate` and `LinkEdge` in
+`assemble` and had `*memory.Store` implement the interface. **That cannot
+compile.** `assemble` imports `internal/memory` (for `SearchParams`, `Memory`,
+`ScopeMatches`, `DecayFactor`), so for `*memory.Store` to implement a method whose
+signature mentions an `assemble` type, `internal/memory` would have to import
+`internal/assemble` — an import cycle, and a direct violation of the one-way
+layering this decision exists to establish. The giveaway is `Candidate` embedding
+`memory.Memory`: a `memory` type that embeds another `memory` type is coherent; an
+`assemble` type that embeds `memory.Memory` forces `memory` to name `assemble`.
+
+Declaring the four DTOs in `internal/memory` resolves it with no new package:
+
+- `memory` gains no dependency — it only names its own types.
+- `assemble` keeps importing `memory` one-way, so the layering holds.
+- `Candidate` embeds `Memory` **directly** (not `memory.Memory`), which also
+  dissolves the duplicate-field problem the "Candidate validity fields will be
+  duplicated" round raised: there is now exactly one home for the validity
+  fields, and no shadowing outer copy.
+- A third option — a leaf `internal/candidatetype` package importing neither —
+  was rejected as a package that exists only to dodge a cycle, adding an import
+  to every reader of the DTOs for no behaviour.
+
+The cost is that `memory` exposes a few retrieval-shaped types. That is the
+correct home for them: they describe a *read* of the store, and the store is
+what produces them.
 
 `CandidateSet` is the widened set stages 2 onward filter over, and it carries
 more than rows. Stages 5–6 read link edges while `SupersedePenalties` and
@@ -284,23 +355,66 @@ was never configured" are currently indistinguishable, which is the distinction
 #580 asks for:
 
 ```go
+// package memory
 type CandidateSet struct {
     Rows    []Candidate          // hydrated, fused, decay-ordered, untrimmed
     Edges   []LinkEdge           // active edges whose BOTH endpoints are in Rows
+    EdgesStatus EdgeStatus       // ok | unavailable | err — see "Edge failures"
     Legs    map[string]LegStatus // "fts","vector": attempted/available/err/truncated
     Widened bool                 // the fetch window was full — see §3
 }
 
 type Candidate struct {
-    memory.Memory                    // the hydrated row, carrying validity once extended
-    FTSRank, VectorRank   int        // -1 when that leg did not retrieve it
-    VectorScore           float64    // cosine; -1 when absent
-    Base, Decay, Score    float64    // fused base, DecayFactor, base×decay
+    Memory                        // the hydrated row, carrying validity once extended
+    FTSRank, VectorRank   int     // -1 when that leg did not retrieve it
+    VectorScore           float64 // cosine; -1 when absent
+    Base, Decay, Score    float64 // fused base, DecayFactor, base×decay
     AgeDays               float64
 }
 type LinkEdge struct{ From, To, Relation string; Strength float64 }
 type LegStatus struct{ Attempted, Available bool; Err string; Truncated bool }
+type EdgeStatus struct{ Status string; Err string } // "ok" | "unavailable" | "err"
 ```
+
+**One snapshot per `Candidates` call.** The legs, the hydration and the edge
+load must run inside a **single read transaction**, not as today's separate
+autocommit queries. `SearchFTS` (`store.go:1159`), `SearchVector` (`vector.go:83`),
+`GetByIDs` (`store.go:482`) and the penalty/edge lookups each open their own
+implicit transaction today, so a concurrent write landing between them can
+produce an FTS rank computed over old content, a body hydrated *after* the write,
+and an edge set that lost a cascade-deleted link — three views of one store that
+disagree. That is not a theoretical hazard here: the session hook and the MCP
+server write through `ghost_memory_save` while a search is in flight. It also
+corrupts the trace, which is presented as the *authoritative* record of why a
+result looks as it does (#583).
+
+So `Candidates` takes a `queryer` and every leg runs through it inside one
+`BEGIN DEFERRED`. Under WAL this is a consistent snapshot for the whole call.
+One caveat carried forward from the store's existing transaction notes: a
+deferred read transaction can still surface `SQLITE_BUSY_SNAPSHOT` if a writer
+commits between the snapshot and a read, which bypasses `busy_timeout`; the
+assembler must treat that as the same non-fatal leg error it already handles, not
+as a panic and not as a silent partial result.
+
+**Edge failures are non-fatal, and visibly so.** The edge load introduces a
+failure path that `CandidateSet` must model rather than hide, because the trace
+must never claim stages 5 and 6 ran when they did not. The precedent is
+`demoteResults`: on a failed penalty lookup it logs at debug and returns the
+results unchanged (`demotion.go:176-178`). `Candidates` follows that, with one
+addition the current code cannot make — it is a one-way door, so it has to say
+so:
+
+- `EdgesStatus.Status == "ok"` — edges loaded; stages 5 and 6 are authoritative.
+- `"err"` — the lookup failed. `Edges` is empty, stages 5 and 6 are recorded in
+  the trace as **skipped** with `Decision.Reason = "edges_unavailable"`, and
+  `Result.Notes` carries the error. Ranking degrades to the pre-demotion order,
+  which is the same output today's failure path produces.
+- `"unavailable"` — the query succeeded but returned no edges (a store with no
+  `memory_links` rows, e.g. a fresh import). Not an error, not a note.
+
+The alternative — failing the whole search — is rejected: conflict and dedup are
+*reorder* stages, and today's code treats a failure there as non-fatal. Making
+them fatal would be a behaviour regression in the error direction.
 
 **`memory.Memory` cannot carry stage 2 today, and PR 1 extends it.** `Memory` has
 `ResolvedAt *string` and `Confidence *float64` but **no** `ValidFrom`,
@@ -312,7 +426,10 @@ to `Memory`, binds them in `scanMemories`, and adds them to the `SELECT` lists i
 also on `Candidate`: a duplicate declaration on the outer struct would shadow the
 promoted embedded field and leave `Candidate.ValidUntil` and
 `Candidate.Memory.ValidUntil` as two independent values, of which stage 2 would
-read the wrong one.
+read the wrong one. Moving the DTOs into `memory` (§ "Where the DTOs live") makes
+that shadowing structurally impossible rather than merely discouraged: `Candidate`
+lives in the same package as `Memory`, embeds it directly, and the compiler
+rejects a redeclaration of a promoted field at the same depth.
 
 **They are `*string`, not `*time.Time`, and stage 2 owns the parsing.** Three
 reasons, all from the existing code rather than preference:
@@ -380,6 +497,53 @@ read-only variant over its own handle. Four consequences:
   different `Now` values and identical data produce different `AgeDays` and
   `DecayFactor` and identical `Base` scores.
 
+### Passive mode is three policies, not one function
+
+My first draft equated passive mode with `GetTopMemories` (`store.go:1097`) plus
+`DecayRankingSQL`. **That is wrong about session-start**, and getting it wrong
+would have quietly broken PR 2's no-op gate. `GetTopMemories` exists and shares
+the ranking SQL, but the hook does not call it — `loadSessionContext` issues its
+own query against its read-only handle (`hook.go:459-464`), reusing
+`memory.DecayRankingSQL` for the `ORDER BY` precisely so the two cannot drift
+apart, and then applies selection logic that exists nowhere in `memory`. Three
+distinct policies are in play:
+
+| Policy | Project bucket | `_global` bucket |
+|---|---|---|
+| Fetch | own SQL, `resolved_at IS NULL`, over-fetch `sessionMemoriesCap*3` (45) — `hook.go:459-464` | own SQL, `resolved_at IS NULL`, over-fetch `globalsCap*2` (16) — `hook.go:339-344` |
+| Order | `DecayRankingSQL` DESC, then `importance`, `created_at`, `id` | `pinned DESC, importance DESC, updated_at DESC` (`hook.go:342`) — **not** decay-ranked at all |
+| Selection | **two-pass**: pass 1 reserves up to `injection.behavior_floor` slots for behavioural categories scored by `importance × DecayFactor × category_weight` under per-category caps; pass 2 fills the rest by plain decay score (`hook.go:507-571`) | no two-pass, no weights — a flat `globalsCap` = 8 cut |
+| Cap | `sessionMemoriesCap` = 15 (`:323`) | `globalsCap` = 8 (`:311`) |
+| Near-dup | demoted before the cap, at the `injection` override or `DefaultDemotionThreshold` 0.90 (`hook.go:604`) | `globalsDemotionThreshold` = 0.85 (`:317`), lower on purpose — a live global pair linked at 0.8857 |
+
+Three consequences the pipeline has to respect:
+
+1. **Pass 1 is a selection stage, not a ranking stage.** It reorders *then cuts*,
+   and it cuts by category. That is not stage 1 (retrieve), not stage 4
+   (provenance multiplier) and not stage 8 (byte/count trim) — it is a
+   *membership* decision driven by category semantics. It becomes an explicit
+   **passive selection policy** on `Slice` (or a `PassivePolicy` beside it), and
+   it is the one place where `injection.behavior_floor`, `category_weights` and
+   `category_caps` must keep their exact current meaning.
+2. **`_global` is not decay-ranked.** Stage 1's `DecayFactor` is correct for
+   project memories and wrong for globals; applying it uniformly would reorder
+   every global by age, which today it is not. The bucket therefore selects the
+   scoring function, exactly as it already selects the cap and the demotion
+   threshold. This is the single most load-bearing row in the table above.
+3. **The demotion threshold is per-bucket** (0.90 vs 0.85), so it belongs on
+   `Slice` next to `DropDemotedLosers` rather than in a global config default.
+
+**How this stays a no-op for PR 2.** PR 2 only changes the *rendering* and adds
+one opt-in scope predicate. The passive policy table is therefore a
+**specification of existing behaviour that `Candidates` must reproduce**, not a
+redesign: the three policies are ported as-is, and PR 2's gate is a
+before/after of the rendered block byte-for-byte. Any divergence found while
+porting — a different `ORDER BY` tiebreak, a floor applied one slot early — is a
+bug in the port, fixed to match the hook, not a new preference. The
+configuration keys (`injection.behavior_floor`, `category_weights`,
+`category_caps`) are read by `Candidates`, not re-implemented in `assemble`, so
+there is exactly one place that knows their meaning.
+
 ## Decision 2 — The nine stages
 
 Order is fixed and load-bearing: **every filter precedes window closure**, which
@@ -404,7 +568,7 @@ found in the scope one, and the pipeline must not import it.
 
 | # | Stage | Exists today | Where | Action |
 |---|---|---|---|---|
-| 1 | retrieve | yes, but query-only and clock-unbound | `SearchHybridParams` `vector.go:439`; `fuseAndRank:400`; `decayRank:332`; `FuseAndSelectWindow` (#591); passive rank path `GetTopMemories` `store.go:1097` + `DecayRankingSQL:1083` | **Keep all of it in `memory`.** New `Candidates` returns the widened set *with* scoring already applied and `Request.Now` honoured (see the four consequences above). **Two modes**: `Request.Query != ""` is the hybrid path; `Request.Query == ""` is the passive path, which is what session-start and project-context need and what no current unified function serves. |
+| 1 | retrieve | yes, but query-only and clock-unbound | `SearchHybridParams` `vector.go:439`; `fuseAndRank:400`; `decayRank:332`; `FuseAndSelectWindow` (#591). **Passive mode is *not* `GetTopMemories`** — see "Passive mode is three policies", below. | **Keep all of it in `memory`.** New `Candidates` returns the widened set *with* scoring already applied and `Request.Now` honoured (see the four consequences above). **Two modes**: `Request.Query != ""` is the hybrid path; `Request.Query == ""` is the passive path, which is what session-start and project-context need and what no current unified function serves. |
 | 2 | validity | **no** | columns `valid_from`/`valid_until`/`verified_at` are inert (#575) | **New.** `valid_until < now` → drop; `valid_from > now` → drop; both NULL → valid. `verified_at` NULL sets an `unverified` *flag only*, no penalty in v1 (see the last decision below). |
 | 3 | predicates (project, category, scope) | half | `memory.ScopeMatches` is already an exported pure predicate; the *loops* are `mcpserver.go:627-639` (category) and `652-663` (scope) | **Move both loops** into stage 3, over the widened set, and **carry `Request.Category` into `CandidateRequest`** so the SQL legs can over-fetch on it. Neither `SearchFTS` nor `SearchVector` accepts a category today, so a `Candidates` that ignored it would either drop `ghost_memory_search`'s category filter or reintroduce the post-closure defect #573 found in the scope one. Project membership stays in SQL (both legs already do `project_id = ? OR '_global'`); the stage records all three verdicts per row. |
 | 4 | provenance | **no consumer** | the column *is* writable — `Store.Create` persists `Memory.Confidence` (`store.go:767`) and `UpsertWithOptions` persists `Provenance.Confidence` (`store.go:1019`, `1056`), and a test stores 0.9 — but no **product tool** sets it (#575), and `agent` is written by `ghost_memory_save` and read by nothing | **New stage, identity by default.** Ship the stage and the bounded multiplier with the multiplier pinned to 1.0 until #575 has writers. Note the column is not *empty* on every store: rows written by import, by a direct `Store.Create` caller, or by a test can already carry a value, so stage 4 must define what a non-NULL `confidence` means **before** it is allowed to move any score — the test for that is a seeded row with `confidence = 0.1` that must rank identically to `NULL` while the multiplier is 1.0. |
@@ -508,37 +672,61 @@ PASSIVE MODE (Request.Query == "" — session_start, project_context)
    ≥1 row admitted                                         → answerable, reason: not_applicable
 ```
 
-### The `empty` reason set is closed, with a precedence
+### The `empty` reason set is closed, in actual stage order
 
 An open-ended reason list cannot be a machine-readable contract, so the codes are
-exhaustive and the first match wins. The order is *earliest stage first*, because
-the earliest stage to empty the set is the one that actually explains it — and
-because later stages are membership-preserving by design and so cannot be the
-cause unless nothing earlier did it.
+exhaustive and the first match wins. The order is **the stage number**, because
+the earliest stage to empty the set is the one that actually explains it — later
+stages are membership-preserving by design and so cannot be the cause unless
+nothing earlier did it. My first draft listed these by habit rather than by stage
+and got the order wrong in one place: validity is **stage 2** and was listed after
+the stage-3 category reason, which contradicts the precedence the same paragraph
+claims.
 
-| # | Reason | Fires when |
-|---|---|---|
-| 1 | `no_candidates` | stage 1 produced zero rows, with every leg reporting `Attempted && !Err` |
-| 2 | `retrieval_failed` | at least one leg errored and the survivors yielded nothing (partial leg failure) |
-| 3 | `vector_backend_unavailable` | no embedder, or the embedding call failed, so only FTS ran and matched nothing |
-| 4 | `all_out_of_project` | every candidate failed project membership |
-| 5 | `all_out_of_category` | every candidate failed the category predicate |
-| 6 | `all_expired` | every candidate failed validity (expired or not yet valid) |
-| 7 | `all_out_of_scope` | every candidate failed `ScopeMatches` |
-| 8 | `all_diversity_capped` | every candidate was cut by a per-bucket quota |
-| 9 | `all_over_budget` | every candidate was cut by the byte/count trim |
-| 10 | `all_resolved` | every candidate had `resolved_at` set |
-| 11 | `window_exhausted` | `CandidateSet.Widened` and one of 4–10 did it — the answer is *bounded*, not absent |
+| # | Reason | Stage | Fires when |
+|---|---|---|---|
+| 1 | `no_candidates` | 1 | retrieval returned zero rows, every leg `Attempted && !Err` (query mode) |
+| 2 | `retrieval_failed` | 1 | ≥1 leg errored and the survivors yielded nothing (partial leg failure) |
+| 3 | `vector_backend_unavailable` | 1 | no embedder, or the embed call failed, so only FTS ran and matched nothing |
+| 4 | `no_memories` | 1 | retrieval returned zero rows (passive mode) — the passive counterpart of 1 |
+| 5 | `all_invalid` | 2 | every candidate failed validity — expired, **or** not yet valid |
+| 6 | `all_out_of_category` | 3 | every candidate failed the category predicate |
+| 7 | `all_out_of_scope` | 3 | every candidate failed `ScopeMatches` |
+| 8 | `all_dedup_dropped` | 6 | every candidate was removed by `Slice.DropDemotedLosers` (reachable only for the `_global` slice today) |
+| 9 | `all_diversity_capped` | 7 | every candidate was cut by a per-bucket quota |
+| 10 | `all_over_budget` | 8 | every candidate was cut by the byte/count trim |
 
-Two corrections to my first draft this makes explicit. **`all_demoted` is not in
-the set and cannot be**: supersede and dedup are membership-preserving in v1 (and
-for the default slices), so they reorder rather than empty. It is reachable only
-via reason 9's sibling `Slice.DropDemotedLosers`, and is reported as
-`all_dedup_dropped` when every candidate was removed that way. And reason 11 is a
-*modifier*, not a peer: the specific cause (4–10) is what `Reason` carries, and
-`Result.Notes` says the window was also exhausted — the same way today's
-`maybeIncomplete` caveat works, so a caller can tell "nothing matches" from
-"nothing matched in what I looked at".
+Stages 4 and 5 contribute **no** reasons, and that is a statement about them
+rather than an omission: stage 4's multiplier is 1.0 so nothing is dropped, and
+stage 5 is membership-preserving in v1 because `contradicts` is non-removing and
+`supersede` only reorders.
+
+Three codes from my first draft are **removed because they are unobservable**, not
+because they are inconvenient:
+
+- **`all_out_of_project`** — project filtering stays in both SQL legs
+  (`store.go:1165`, `vector.go:87`), so a row from another project never becomes a
+  `Candidate` and stage 3 has nothing to reject. The one place an empty project
+  *is* reachable is projectless session start, and that is a deliberate
+  globals-only mode with its own outcome, not a filtering accident.
+- **`all_resolved`** — there is no dropping stage for `resolved_at`. In query mode
+  resolved memories stay searchable by design, and in passive mode
+  `resolved_at IS NULL` is in the fetch SQL (`hook.go:461`, `:335`), so a resolved
+  row never reaches the pipeline. Note the asymmetry that matters for §5: a
+  resolved row *can* still be admitted in query mode, so the contamination
+  metric's `Item.ResolvedAt != nil` arm stays; it is only the *empty* reason that
+  is unreachable.
+- **`all_demoted`** — supersede and dedup reorder rather than empty, except via
+  `DropDemotedLosers`, which is reason 8 and now carries that name in the table
+  rather than being invented in prose.
+
+`window_exhausted` is deliberately **not** in the table. It is a modifier, not a
+peer: `CandidateSet.Widened` is set, the specific cause (5–10) is what `Reason`
+carries, and `Result.Notes` records that the window was also exhausted — the same
+way today's `maybeIncomplete` caveat works, so a caller can tell "nothing matches"
+from "nothing matched in what I looked at". Listing it as reason 11 would let a
+reader conclude the answer is absent when it is merely bounded, which is the exact
+error §4's empty-message copy also has to avoid.
 
 The passive branch is not a special case bolted on. `weak` means "these rows
 resemble the question less than I would like" — a claim that only means anything
@@ -632,18 +820,43 @@ for `empty`:
 ```text
 Ghost memory: the best match here is weak. Treat the items below as leads, not
 established facts, and verify before acting on them.
-Ghost memory: no sufficiently relevant memory for this question. Do not rely on
-prior context for it; save what you learn with ghost_memory_save.
 ```
 
-The `empty` sentence **replaces** the bare `No matching memories found.`
-(`mcpserver.go:678`) and is byte-bounded by the same `Slice.MaxBytes` as the
-items — #580's last AC. **Session-start prints neither**, for the same reason the
-passive rule has no `weak`: passive rows make no relevance claim to qualify, and
-a "this might be wrong" banner on every session start trains the agent to ignore
-it. The hook's empty block stays *absent*, not apologetic; the outcome lives in
-`Trace`, and the block's existing "N of M shown" line is where a partial block
-announces itself.
+**The `empty` sentence is reason-specific, and only one reason may claim
+absence.** My first draft used a single sentence — "no sufficiently relevant
+memory for this question" — for every `empty`. That is wrong for most of the
+reason set, and wrong in the one direction that matters: it tells an agent that
+prior context is *absent* when the truth is often that retrieval was
+*incomplete*. A bounded window or a failed leg is not evidence of absence, and an
+agent that reads "nothing relevant exists" will stop looking and save something
+that was already known.
+
+So the copy is a function of `Reason`, with the *absence* claim reserved for the
+one case that actually establishes it:
+
+| Reason | Copy |
+|---|---|
+| `no_candidates`, `no_memories` | "no stored memory matches this question" — **absence**, because retrieval completed successfully over the whole store and found nothing |
+| `all_invalid` | "everything I found for this is out of date; it is not being suggested" — the rows exist, they were correctly withheld |
+| `all_dedup_dropped`, `all_diversity_capped`, `all_over_budget` | "found N, all withheld by the <dedup / diversity / budget> limit; raise the limit to see more" — a knob, not a claim |
+| `retrieval_failed` | "search could not complete (<leg> failed); this is not evidence that nothing exists" — explicitly **not** absence |
+| `vector_backend_unavailable` | "keyword-only search, no vector index available; this may be less complete than usual" |
+| `all_out_of_category`, `all_out_of_scope` | "nothing matches the <category / scope> filter you set" — and, when `window_exhausted` is set, append "in what I searched" |
+| any reason **with** `window_exhausted` | every row above gains a "in what I searched" suffix, and the absence claim is suppressed entirely |
+
+The rule that makes this checkable: **the word "none" / "no … exists" may appear
+only when `Legs` shows every leg completed with no error and `Widened` is false.**
+That is a one-line assertion in the renderer and a one-line test — set
+`Widened = true` and assert the absence sentence does not appear.
+
+Each sentence is byte-bounded by the same `Slice.MaxBytes` as the items — #580's
+last AC — and each includes the `Result.Notes` for its reason, so a truncated
+render still says *why* rather than just stopping mid-sentence. **Session-start
+prints none of them**, for the same reason the passive rule has no `weak`: passive
+rows make no relevance claim to qualify, and a "this might be wrong" banner on
+every session start trains the agent to ignore it. The hook's empty block stays
+*absent*, not apologetic; the outcome lives in `Trace`, and the block's existing
+"N of M shown" line is where a partial block announces itself.
 
 The trace is inspected via a `ghost context --explain` flag that **does not exist
 today**: `runContext` (`cmd/ghost/session.go:18-30`) parses only `--cwd` and
@@ -655,17 +868,19 @@ it lands, `explain:true` on `ghost_memory_search` is the only trace surface.
 ### Honest absence (#573)
 
 `empty` and a *bounded* search are different claims. When stage 1's widened set
-was itself truncated (`CandidateSet.Widened == true`) and stages 2–3 then emptied
-it, absence is not provable: the reason becomes `window_exhausted`, rendered as
-*"no match within the searched window — widen limit or drop the scope filter"*
-rather than *"no memory exists"*. `LegStatus.Truncated` distinguishes "the
-backend answered" from "the backend was cut off", and a failing leg is reported
-as a `Note` rather than silently narrowing the set — the current
-`SearchHybridParams` (`vector.go:442/454`) discards a leg error, which is how
-#580's "FTS-only hits must not be reported as below-floor" requirement currently
-has nowhere to be expressed. The existing `maybeIncomplete` caveat
-(`mcpserver.go:674-676`, 685+) moves into `Notes` and is rendered from one place,
-so #573's zero-result half and its non-empty half can no longer disagree.
+was itself truncated (`CandidateSet.Widened == true`) and a later stage then
+emptied it, absence is not provable. Consistent with the reason table, the
+**specific stage reason stays in `Reason`** and the boundedness is a `Note` — the
+message becomes *"no match within the searched window — widen limit or drop the
+scope filter"* rather than *"no memory exists"*, and the absence claim is
+suppressed. `LegStatus.Truncated` distinguishes "the backend answered" from "the
+backend was cut off", and a failing leg is reported as a `Note` rather than
+silently narrowing the set — the current `SearchHybridParams` (`vector.go:442/454`)
+discards a leg error, which is how #580's "FTS-only hits must not be reported as
+below-floor" requirement currently has nowhere to be expressed. The existing
+`maybeIncomplete` caveat (`mcpserver.go:674-676`, 685+) moves into `Notes` and is
+rendered from one place, so #573's zero-result half and its non-empty half can no
+longer disagree.
 
 ## Decision 4 — Explainability: the trace *is* the explain payload
 
@@ -758,7 +973,9 @@ while the stage saw the whole candidate set.
 
 ## Decision 5 — The metrics hook for #582
 
-`#582` needs five numbers, and all five are computable from `Result` + `Trace`.
+`#582` needs six numbers, and all six are computable from `Result` + `Trace` — the
+sixth, result rate, exists because the other five can all be gamed by abstaining
+(§ "Empty blocks").
 Bench calls the same `assemble.Run` with `Source: SourceBench, Explain: true` and
 `Condition` set per ablation.
 
@@ -814,8 +1031,63 @@ a later PR can unify the ablations on purpose, as its own bench-gated change.
 
 | Metric | Computed from | Note |
 |---|---|---|
-| **Context precision** | `Σ relevance(Item.ID) / len(Items)` | bench's existing `Query.Rel` grades. The denominator is the *assembled* block, not a ranked list — that is the whole difference from NDCG. |
-| **Contamination rate** | items whose own `Item` fields are contaminating *at assembly time* | `Item.ResolvedAt != nil`, **or** `Item.ValidUntil != nil && Item.ValidUntil.Before(Request.Now)` (expired), **or** `Item.ValidFrom != nil && Item.ValidFrom.After(Request.Now)` (not yet valid), **or** `Item.Scope` contradicts the request, **or** `Item.Bucket` is neither the requested project nor `_global`. The nil checks are explicit because the fields are pointers — a bare `<`/`>` against `Request.Now` does not compile, and a bare dereference can panic. **Both validity arms are required**: stage 2 drops on `valid_until < now` *and* on `valid_from > now` (Decision 2, stage 2), and an earlier draft of this metric checked only the first. A half-mirrored predicate is worse than a re-implementation, because it reports 0% contamination for a not-yet-valid row that stage 2 would have dropped, which reads as "the filter works" when the metric simply never looked. Hence the fixture below. `_global` is *never* contamination: both retrieval legs and `GetTopMemories` include it deliberately (`store.go:1106`, `1165`), so a global preference in the block is the product working, and scoring it as contamination would report correct behaviour as a regression. **Classified from the production exclusion codes in `Decision.Reason`**, not a bench-only re-implementation — #582's second AC. |
+| **Context precision** | `Σ relevance(Item.ID) / len(Items)` | bench's existing `Query.Rel` grades. The denominator is the *assembled* block, not a ranked list — that is the whole difference from NDCG. Empty blocks are **excluded** from the ratio and counted separately — see "Empty blocks" below. |
+| **Contamination rate** | admitted `Item`s whose own fields are contaminating *at assembly time*, from `assemble.Contaminating(item, req)` | `Item.ResolvedAt != nil`, **or** `Item.ValidUntil != nil && Item.ValidUntil.Before(req.Now)` (expired), **or** `Item.ValidFrom != nil && Item.ValidFrom.After(req.Now)` (not yet valid), **or** `Item.Scope` contradicts the request, **or** `Item.Bucket` is neither the requested project nor `_global`. The nil checks are explicit because the fields are pointers — a bare `<`/`>` against `req.Now` does not compile, and a bare dereference can panic. **Both validity arms are required**: stage 2 drops on `valid_until < now` *and* on `valid_from > now` (Decision 2, stage 2), and an earlier draft checked only the first. A half-mirrored predicate is worse than a re-implementation, because it reports 0% contamination for a not-yet-valid row stage 2 would have dropped, reading as "the filter works" when the metric never looked. Hence the fixture below. `_global` is *never* contamination: both retrieval legs and `GetTopMemories` include it deliberately (`store.go:1106`, `1165`), so a global preference is the product working. Classified from fields, **not** from `Decision.Reason` — see the next paragraph. |
+| **Budget adherence** | `Result.Bytes` vs. the matching `Slice.MaxBytes`; dropped IDs from the stage-8 `StageTrace.DroppedIDs` | `DroppedIDs` is what lets bench intersect the trim with `Query.Rel` and measure *relevant rows the trim discarded* — the "low-relevance memory crowding out a relevant one" regression, otherwise invisible. |
+| **Diversity** | `max_b count(Item.Bucket) / len(Items)` | One histogram over `Item.Bucket`, with `_global` as its own bucket. Empty blocks excluded, as above. |
+| **Result rate** | `count(Outcome != empty) / count(queries)` | Reported **separately** and never folded into a ratio. An assembler that returns nothing scores 0% precision and 0% contamination, so without this number the other metrics can be gamed by abstention. |
+| **Token cost** | `Σ Item.Bytes` per answered question, reported next to accuracy | Bytes, not a tokenizer: the injection budget is already in bytes and `MaxContentLen` is 8,000 bytes. A tokenizer would be a second, disagreeing notion of size. |
+
+**Empty blocks are excluded from every ratio, and never aggregated as zero.**
+Context precision and diversity both divide by `len(Items)`, and the design
+deliberately admits empty results — that is what `OutcomeEmpty` and `weak` are
+for. An undefined policy here is not a style gap: `0/0` is `NaN` in Go, and
+`NaN` propagates silently through a mean, so a single empty block poisons the
+aggregate with no visible error. Worse, *skipping* and *counting as zero* are
+opposite incentives — counting as zero makes an assembler that abstains on
+everything score perfectly on contamination and diversity.
+
+So the policy is fixed and stated in the metric table:
+
+- A query with `Outcome == empty` contributes to **result rate** and to **nothing
+  else**. It is not a 0, and it is not a 1.
+- Each ratio reports `(numerator, denominator)` as well as the value, so a reader
+  can see the scored set shrank. A ratio over 0 queries is reported as `n/a`, and
+  `n/a` is never averaged.
+- Precision, diversity and contamination are computed **only** over blocks with
+  ≥1 admitted item, and the count of excluded queries is printed next to them.
+- The one place a zero *is* meaningful is a per-query numerator: a non-empty block
+  with no relevant item is genuinely 0.0 precision, and that must drag the mean.
+
+The regression test is arithmetic, not behavioural: one query with an empty
+`Result`, one with a single relevant item, and one with a single irrelevant item
+assert the reported triple is `(result rate 2/3, precision 1/2, n/a never
+averaged)`. A change that counts empty blocks as 0.0 fails it on precision; a
+change that averages `NaN` fails it on the report.
+
+**Corroborated by the trace, classified from the fields.** #582's AC says the
+metric must be derived from production code rather than re-implemented in bench.
+There are two ways to honour that, and my first draft picked the one that cannot
+work: it claimed the classifier reads the production **exclusion** codes in
+`Decision.Reason`. It cannot. `Decision.Reason` describes rows a stage
+*excluded*, and contamination is measured over rows that were **admitted** — so
+every correctly filtered contaminant is invisible to the metric by construction,
+and a row that leaks through is recorded as `Kept: true`, carrying no exclusion
+code to classify. The two populations are disjoint. A metric built that way would
+report 0% contamination on a store where every filter is broken.
+
+What actually honours the AC: the classifier is a **pure function over the
+fields the production stages read** — `assemble.Contaminating(item, req)`,
+sitting in `internal/assemble` beside the stage predicates rather than in
+`internal/bench`, and called *by* those stages. It is the same code path in the
+sense that matters — one definition, changed once, and the production stages and
+the metric cannot drift by construction rather than by discipline.
+`Decision.Reason` is then used for what it actually supports, as
+**corroboration**: bench cross-checks that a row the classifier flags as
+contaminated was *not* excluded, which is exactly the leak case the exclusion
+codes can express. `Decision` therefore needs no change — a `Kept: true` row is
+enough to detect the leak — and the trace gains a real use rather than a
+ceremonial one.
 | **Budget adherence** | `Result.Bytes` vs. the matching `Slice.MaxBytes`; dropped IDs from the stage-8 `StageTrace.DroppedIDs` | `DroppedIDs` is what lets bench intersect the trim with `Query.Rel` and measure *relevant rows the trim discarded* — the "low-relevance memory crowding out a relevant one" regression, otherwise invisible. |
 | **Diversity** | `max_b count(Item.Bucket) / len(Items)` | One histogram over `Item.Bucket`, with `_global` as its own bucket. |
 | **Token cost** | `Σ Item.Bytes` per answered question, reported next to accuracy | Bytes, not a tokenizer: the injection budget is already in bytes and `MaxContentLen` is 8,000 bytes. A tokenizer would be a second, disagreeing notion of size. |
