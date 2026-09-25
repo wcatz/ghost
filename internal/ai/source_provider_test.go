@@ -2,28 +2,21 @@ package ai
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 )
 
+func sourceProviderTestBinary(t *testing.T) string {
+	t.Helper()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test executable: %v", err)
+	}
+	return binary
+}
+
 func TestSourceProviderForSource(t *testing.T) {
-	dir := t.TempDir()
-	claude := filepath.Join(dir, "claude")
-	opencode := filepath.Join(dir, "opencode")
-	codex := filepath.Join(dir, "codex")
-	goose := filepath.Join(dir, "goose")
-	if err := os.WriteFile(claude, []byte("#!/bin/sh\nexit 0"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(opencode, []byte("#!/bin/sh\nexit 0"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(codex, []byte("#!/bin/sh\nexit 0"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(goose, []byte("#!/bin/sh\nexit 0"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	binary := sourceProviderTestBinary(t)
+	claude, opencode, codex, goose := binary, binary, binary, binary
 
 	tests := []struct {
 		source string
@@ -79,11 +72,7 @@ func TestSourceProviderClassify(t *testing.T) {
 }
 
 func TestSourceProviderCodexRoutesToRealBackend(t *testing.T) {
-	dir := t.TempDir()
-	codex := filepath.Join(dir, "codex")
-	if err := os.WriteFile(codex, []byte("#!/bin/sh\nexit 0"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	codex := sourceProviderTestBinary(t)
 	p := NewSourceProviderForSource("codex", "", "", codex, "")
 	if p.Name() != "codex" {
 		t.Errorf("Name() = %q, want %q", p.Name(), "codex")
@@ -94,11 +83,7 @@ func TestSourceProviderCodexRoutesToRealBackend(t *testing.T) {
 }
 
 func TestSourceProviderGooseRoutesToRealBackend(t *testing.T) {
-	dir := t.TempDir()
-	goose := filepath.Join(dir, "goose")
-	if err := os.WriteFile(goose, []byte("#!/bin/sh\nexit 0"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	goose := sourceProviderTestBinary(t)
 	p := NewSourceProviderForSource("goose", "", "", "", goose)
 	if p.Name() != "goose" {
 		t.Errorf("Name() = %q, want %q", p.Name(), "goose")
@@ -135,15 +120,8 @@ func TestSourceForClientName(t *testing.T) {
 // as before. This is the MCP server's path for applying cli.model_resolve
 // without mutating process env.
 func TestNewSourceProviderForSourceWithModel_ThreadsModel(t *testing.T) {
-	dir := t.TempDir()
-	claude := filepath.Join(dir, "claude")
-	opencode := filepath.Join(dir, "opencode")
-	if err := os.WriteFile(claude, []byte("#!/bin/sh\nexit 0"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(opencode, []byte("#!/bin/sh\nexit 0"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	binary := sourceProviderTestBinary(t)
+	claude, opencode := binary, binary
 
 	// opencode backend: constructor model must be non-empty.
 	p := NewSourceProviderForSourceWithModel("opencode", "opencode/big-pickle", claude, opencode, "", "")
