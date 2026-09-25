@@ -358,7 +358,18 @@ jobs:
 
           if [ -n "$LAST_SHA" ] && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null; then
             echo "incremental review: ${LAST_SHA}..HEAD"
-            git diff "${LAST_SHA}" HEAD > pr.diff
+            # Limit the incremental diff to the files this PR changes. A
+            # branch that merged its base since LAST_SHA would otherwise
+            # carry the base's changes into pr.diff: the model reviews code
+            # that is not in the PR, and GitHub rejects every comment on
+            # those paths ("Path could not be resolved"), failing the post.
+            gh pr diff "$PR_NUMBER" --name-only > pr.files
+            if [ -s pr.files ]; then
+              mapfile -t pr_files < pr.files
+              git diff "${LAST_SHA}" HEAD -- "${pr_files[@]}" > pr.diff
+            else
+              : > pr.diff
+            fi
           else
             echo "full review (no usable prior marker)"
             gh pr diff "$PR_NUMBER" > pr.diff
