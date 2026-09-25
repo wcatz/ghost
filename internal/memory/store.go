@@ -555,9 +555,12 @@ type savingRepository struct {
 // repository the caller has already detected as repoRemote.
 //
 // Three answers, and the first two are permissions that cost nothing. The
-// project already records a remote, so the transaction returns before the guard
-// is ever reached and nothing here can change what happens. The saving directory
-// IS the project's recorded root: one directory, so there is no second
+// project already records a remote, so when the transaction matches that same
+// row — the ordinary case — it returns before the guard is ever reached, and
+// nothing here can change what happens. (When the pre-lock read named a
+// different row, that row typically records no remote, the guard is reached, and
+// the refusal is decided by the projectID comparison alone.) The saving
+// directory IS the project's recorded root: one directory, so there is no second
 // repository to have meant, and still no detection spent.
 //
 // Only the third is a decision, and it is the one that costs: the saving
