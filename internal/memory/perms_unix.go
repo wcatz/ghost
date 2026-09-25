@@ -23,16 +23,21 @@ import (
 // the same width.
 const permsGroupOther os.FileMode = 0o077
 
-// tightenPermissions removes group and other access from the configured data
-// directory and from the database's own three files. It is called from the one
-// read-write open path, so every ghost that touches the database read-write
-// tightens it, and a mode that drifts again later is caught on the next open.
+// TightenPermissions removes group and other access from the configured data
+// directory and from the database's own three files. It never fails: a
+// permission that cannot be tightened (a read-only or foreign-owned mount, an
+// exotic filesystem) is logged and left alone, because refusing to go on over a
+// mode bit would be the worse outcome and the caller has no way to recover.
 //
-// Nothing here can fail an open. A permission that cannot be tightened (a
-// read-only or foreign-owned mount, an exotic filesystem) is logged and left
-// alone: refusing to start over a mode bit would be a worse outcome than the
-// mode bit, and the caller has no way to recover.
-func tightenPermissions(dbPath string) {
+// Exported because the tree has more than one read-write open. OpenDB is the
+// only one that creates the database or migrates it, and calls this itself;
+// mcpinit's bumpSessionCount is the session hook's one deliberate write, over
+// its own short-lived rwDSN connection, and calls it too. Every other open in
+// the tree is read-only and must stay that way — a diagnostic has to be able to
+// report on a database it must not modify, and a read-only connection cannot
+// create one. A mode that drifts is therefore repaired the first time Ghost
+// writes, whichever of the two paths that is.
+func TightenPermissions(dbPath string) {
 	// An in-memory database has no directory and no files.
 	if dbPath == ":memory:" {
 		return

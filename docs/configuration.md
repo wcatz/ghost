@@ -68,7 +68,7 @@ The data path is intentionally consistent across operating systems. A Windows in
 
 ### Data directory permissions
 
-Ghost treats the database as private to your account. On every read-write open it strips the group and other permission bits from:
+Ghost treats the database as private to your account. Whenever it writes to the database — starting the MCP server, running a command, or a Claude Code session starting — it strips the group and other permission bits from:
 
 - the data directory itself (`ghost/`, which becomes `0700`), and
 - `ghost.db`, `ghost.db-wal` and `ghost.db-shm` (which become `0600`).
@@ -80,7 +80,9 @@ Two things it deliberately does not do:
 - **It never widens a mode.** Only group and other bits are cleared, so a database you locked down yourself — `chmod 0400 ghost.db` — is left alone rather than handed back `0600`.
 - **It touches nothing else.** A pre-migration backup beside the database (`ghost.db.pre-migrate-*`) and every other file in the directory keep the mode they have. A symlink planted as `ghost.db` is skipped rather than followed, so whatever it points at is not chmod'ed. And a database Ghost opens outside the data directory — an `eval` or bench scratch tree, a directory you pointed an environment variable at — has its three files tightened but not the directory holding it.
 
-A mode that cannot be tightened (a read-only or foreign-owned mount) is logged as a warning and the open continues. Refusing to start over a mode bit would be the worse outcome.
+A mode that cannot be tightened (a read-only or foreign-owned mount) is logged as a warning and the command continues. Refusing to run over a mode bit would be the worse outcome.
+
+Read-only commands — `ghost mcp status`, `ghost doctor` and the rest — do not change any mode. They must be able to report on a database they cannot modify, so the pass runs on the write paths only.
 
 On Windows the pass is skipped entirely: access there is carried by an ACL inherited from the parent directory, not by the mode bits `chmod` maps onto read-only, so tightening a number would not change who can read the database.
 

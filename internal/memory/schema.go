@@ -392,7 +392,7 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	// here on. This is the one place any ghost opens the database read-write,
 	// so it is the one place that can guarantee the modes. It cannot fail the
 	// open, and it does not need the schema to be current to be correct.
-	tightenPermissions(dbPath)
+	TightenPermissions(dbPath)
 
 	if _, err := db.Exec(initSQL); err != nil {
 		_ = db.Close()
