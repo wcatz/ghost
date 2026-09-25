@@ -969,7 +969,7 @@ jobs:
           set -euo pipefail
           cd "${GITHUB_WORKSPACE}"
           expected="$(cat pr.head)"
-          current="$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)"
+          current="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
           if [ "$current" != "$expected" ]; then
             echo "::notice::PR head changed from ${expected} to ${current}; skipping stale review"
             echo "current=false" >> "$GITHUB_OUTPUT"
@@ -1013,7 +1013,7 @@ jobs:
         run: |
           cd "${GITHUB_WORKSPACE}"
           expected="$(cat pr.head)"
-          current="$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)"
+          current="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
           if [ "$current" != "$expected" ]; then
             echo "::notice::PR head changed from ${expected} to ${current}; skipping stale review"
             exit 0
