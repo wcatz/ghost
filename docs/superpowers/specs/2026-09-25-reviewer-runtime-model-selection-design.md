@@ -39,14 +39,19 @@ read-only agent and an explicit `-m`. Probes use `--standalone` and execute from
 or other probe error skips the candidate. `Agent not found` is fatal and is never converted
 into a fallback to OpenCode's default, write-capable agent.
 
-The probe phase records every free candidate that accepts the agent. The review tries those
-free models in order, using the first one initially and continuing to the next only when a
-free review fails for a non-agent reason. If every free candidate fails at either stage,
-the same review step invokes the single job-level `PAID_MODEL`. The paid route is deliberately
-`opencode-go/muse-spark-1.3-contributor`: it is the cheapest suitable current Go coding
-model and is not Kimi. The `OPENCODE_GO_API_KEY` secret is mapped to `OPENCODE_API_KEY` only
-on the paid child process, so neither the free probes nor the free review receives it. A
-percent-escaped warning names the paid model and the free failure reason.
+The probe phase records every free candidate that accepts the agent, capped at eight so
+selection and retry budgets remain finite. The free review step tries those models in
+order, using the first one initially and continuing to the next only when a free review
+fails for a non-agent reason. Every candidate reply is passed through the trusted base
+`extract_findings_from_reply` and `validate` functions before it is accepted; malformed,
+tool-only, or off-contract replies are treated as candidate failures. If every free
+candidate fails at either stage, a separate paid step invokes the single job-level
+`PAID_MODEL`. The paid route is deliberately `opencode-go/muse-spark-1.3-contributor`: it is
+the cheapest suitable current Go coding model and is not Kimi. The `OPENCODE_GO_API_KEY`
+secret is mapped to `OPENCODE_API_KEY` only in the paid step's environment, never in the
+free step or a free child. A percent-escaped warning names the paid model and the free
+failure reason. A bounded selection timeout is handed to the paid step; an explicit
+`Agent not found` marker remains fatal.
 
 The workflow logs the selected free or paid model and logs every considered free candidate
 that was skipped. Provider/model text is normalized and percent-escaped before it is placed
@@ -56,8 +61,11 @@ are unchanged.
 ## Safety invariants
 
 - The free catalog, probe, and review paths are credential-free.
-- The paid secret exists only in the fallback child invocation environment, never in a
-  free-model process or a later GitHub step.
+- The paid secret is supplied only through the separate fallback step environment, never
+  materialized in a run script, a free-model process, or a later GitHub step.
+- A reply is accepted only after trusted extraction and schema validation; invalid free
+  replies continue to the next free candidate and invalid paid replies fail the review.
+- The free candidate list and retry deadlines are capped so the paid step retains time.
 - The agent file remains in `$HOME/.config/opencode/agent` and keeps explicit read-only
   tool permissions.
 - Every free catalog/probe command runs from `$RUNNER_TEMP`, not the PR workspace.
@@ -68,6 +76,7 @@ are unchanged.
 
 The workflow is checked with `actionlint` and the review job on the implementation PR is
 the end-to-end proof. The PR body records the selection and skip log lines from that run.
-Focused behavior harnesses exercise catalog ordering, free fallback, probe skips, fatal
-agent errors, workflow-command escaping, and the paid child-only secret boundary. Their
-mutants are checked by temporarily reverting the corresponding behavior.
+Focused behavior harnesses exercise catalog ordering, free exhaustion, invalid-reply
+validation, probe skips, fatal agent errors, workflow-command escaping, and the paid
+step-only secret boundary. Their mutants are checked by temporarily reverting the
+corresponding behavior.
