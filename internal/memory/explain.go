@@ -33,39 +33,50 @@ type ExplainRow struct {
 // SearchExplain is the diagnosis for one search: which legs ran, what each
 // candidate scored, and why anything was left out.
 //
-// Membership is never re-derived here. Rows are marked included by asking
-// SearchHybrid for the unscoped answer, so an explanation describes the ranking
-// Ghost actually produced for that query. A scoped caller must disclose when
-// scope is not applied by this compatibility path; recomputing membership
-// locally would let the explanation drift from the behavior it explains.
+// Membership is never re-derived here. Rows are marked included by asking the
+// same scoped or unscoped production search the formatted path uses, so an
+// explanation describes the ranking Ghost actually produced for that query.
 type SearchExplain struct {
-	ProjectID       string       `json:"project_id"`
-	Query           string       `json:"query"`
-	Limit           int          `json:"limit"`
-	VectorAvailable bool         `json:"vector_available"`
-	Notes           []string     `json:"notes,omitempty"`
-	Rows            []ExplainRow `json:"rows"`
+	ProjectID       string            `json:"project_id"`
+	Query           string            `json:"query"`
+	Limit           int               `json:"limit"`
+	VectorAvailable bool              `json:"vector_available"`
+	Scope           map[string]string `json:"scope,omitempty"` // requested scope applied to membership
+	Notes           []string          `json:"notes,omitempty"`
+	Rows            []ExplainRow      `json:"rows"`
 }
 
-// ExplainSearch runs the production search and reports how each candidate
-// got its score. It is a read-only diagnostic: it performs the same queries
-// SearchHybrid does and adds no writes.
+// ExplainSearch runs the production unscoped search and reports how each
+// candidate got its score. It is kept as the compatibility entry point for
+// callers that do not have a scope constraint.
 func (s *Store) ExplainSearch(ctx context.Context, projectID, query string, queryVec []float32, limit int) (SearchExplain, error) {
+	return s.ExplainSearchScoped(ctx, projectID, query, queryVec, limit, nil)
+}
+
+// ExplainSearchScoped is the production explain entry point. It uses the same
+// scoped search and window selection as formatted retrieval, then explains the
+// resulting membership without re-deriving it locally.
+func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string, queryVec []float32, limit int, scope map[string]string) (SearchExplain, error) {
 	p := DefaultSearchParams()
 	p.MinSimilarity = s.vectorMinSimilarityFloor()
+	p.Scope = scope
 
 	ex := SearchExplain{
 		ProjectID:       projectID,
 		Query:           query,
 		Limit:           limit,
 		VectorAvailable: queryVec != nil,
+		Scope:           scope,
 	}
 	if queryVec == nil {
 		ex.Notes = append(ex.Notes, "no query embedding available — FTS-only search, so vector scores are absent rather than zero")
 	}
+	if len(scope) > 0 {
+		ex.Notes = append(ex.Notes, "scope is applied inside hybrid window selection; included membership below matches the scoped search")
+	}
 
-	// Membership comes from the real search.
-	final, err := s.SearchHybrid(ctx, projectID, query, queryVec, limit)
+	// Membership comes from the same production search the formatted path uses.
+	final, err := s.SearchHybridScoped(ctx, projectID, query, queryVec, limit, scope)
 	if err != nil {
 		return ex, fmt.Errorf("search: %w", err)
 	}
@@ -208,7 +219,7 @@ func (s *Store) ExplainSearch(ctx context.Context, projectID, query string, quer
 			row.RRFScore += p.VecWeight / float64(p.RRFK+r+1)
 		}
 
-		if rank, isFinal := finalRank[id]; isFinal {
+		if rank, isFinal := finalRank[id]; isFinal && (len(scope) == 0 || ScopeMatches(m.Scope, scope)) {
 			row.Included = true
 			row.Rank = rank
 			ex.Rows = append(ex.Rows, row)
@@ -216,13 +227,17 @@ func (s *Store) ExplainSearch(ctx context.Context, projectID, query string, quer
 		}
 
 		// Excluded. Demotions in this system are membership-preserving, so
-		// absence is either the similarity floor or the result window.
+		// absence is the vector floor, the scope constraint, or the result
+		// window, in the same order the production search applies them.
 		_, onFloor := rawRank[id]
 		_, survived := vecRank[id]
-		if onFloor && !survived {
+		switch {
+		case onFloor && !survived:
 			row.Reason = fmt.Sprintf("dropped by the vector similarity floor: cosine %.4f is below the minimum %.4f",
 				rawScore[id], float64(p.MinSimilarity))
-		} else {
+		case len(scope) > 0 && !ScopeMatches(m.Scope, scope):
+			row.Reason = "excluded by scope: memory scope conflicts with the requested scope"
+		default:
 			row.Reason = fmt.Sprintf("outside the result window: only the top %d are returned", limit)
 		}
 		ex.Rows = append(ex.Rows, row)

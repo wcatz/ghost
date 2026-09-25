@@ -8,13 +8,14 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// TestSearchExplainLabelsUnappliedScope keeps the explain rendering honest
-// while scoped plain search filters inside window selection. The compatibility
-// note must disclose that the rows are still unscoped.
-func TestSearchExplainLabelsUnappliedScope(t *testing.T) {
+// TestSearchExplainAppliesScope makes explain describe the same membership the
+// formatted scoped search returns. An out-of-scope candidate may remain in the
+// diagnostic union, but it must be marked excluded and carry the scope reason.
+func TestSearchExplainAppliesScope(t *testing.T) {
 	_, session := newCapSession(t)
 	saveScoped(t, session, "development database uses SQLite", "development")
 	saveScoped(t, session, "production database uses PostgreSQL", "production")
+	saveScoped(t, session, "unscoped database uses the shared service", "")
 
 	res := callTool(t, session, "ghost_memory_search", map[string]any{
 		"project_id": "test-project",
@@ -30,12 +31,44 @@ func TestSearchExplainLabelsUnappliedScope(t *testing.T) {
 	if err := json.Unmarshal([]byte(resultText(res)), &ex); err != nil {
 		t.Fatalf("response is not a JSON explanation: %v", err)
 	}
+	if ex.Scope["environment"] != "production" {
+		t.Fatalf("explanation scope = %v, want the requested production scope", ex.Scope)
+	}
+
+	rows := make(map[string]memory.ExplainRow)
+	for _, row := range ex.Rows {
+		rows[row.Content] = row
+	}
+	dev, ok := rows["development database uses SQLite"]
+	if !ok {
+		t.Fatalf("development candidate missing from explanation rows: %+v", ex.Rows)
+	}
+	prod, ok := rows["production database uses PostgreSQL"]
+	if !ok {
+		t.Fatalf("production candidate missing from explanation rows: %+v", ex.Rows)
+	}
+	unscoped, ok := rows["unscoped database uses the shared service"]
+	if !ok {
+		t.Fatalf("unscoped candidate missing from explanation rows: %+v", ex.Rows)
+	}
+	if dev.Included || dev.Rank != 0 || !strings.Contains(dev.Reason, "scope") {
+		t.Errorf("out-of-scope row = %+v, want excluded at rank 0 with a scope reason", dev)
+	}
+	if !prod.Included || prod.Rank != 1 || !unscoped.Included {
+		t.Errorf("eligible rows were not included: production=%+v unscoped=%+v", prod, unscoped)
+	}
+	sawScopeNote := false
 	for _, note := range ex.Notes {
-		if strings.Contains(note, "scope is not applied in this explanation") {
-			return
+		if strings.Contains(note, "scope is not applied") {
+			t.Errorf("stale unscoped explain note remains: %q", note)
+		}
+		if strings.Contains(note, "scope is applied inside hybrid window selection") {
+			sawScopeNote = true
 		}
 	}
-	t.Fatalf("scoped explanation did not disclose that its rows are unscoped: %v", ex.Notes)
+	if !sawScopeNote {
+		t.Errorf("scoped explanation did not identify the selection seam: %v", ex.Notes)
+	}
 }
 
 // TestSearchExplainReturnsDiagnosisThroughTheTool: an agent debugging a bad

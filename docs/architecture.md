@@ -174,9 +174,11 @@ still has to narrow the set afterwards. Scope constraints are narrowed from the
 combined candidate pool before this cut, including when one leg is unavailable,
 so an out-of-scope row cannot consume a result slot and force the tool to report
 absence for an eligible row that was retrieved but not selected. Category is a
-separate tool-level post-filter and therefore uses a wider store fetch. Ordering
-is deterministic (ties broken by ID), because the demotion penalties applied
-downstream depend on order.
+separate tool-level post-filter and therefore uses a wider store fetch. Explain
+mode calls the same scoped selection entry point, so its included rows and
+scope-exclusion reasons describe the store result rather than an unscoped
+ranking. Ordering is deterministic (ties broken by ID), because the demotion
+penalties applied downstream depend on order.
 
 The main schema tables are:
 
