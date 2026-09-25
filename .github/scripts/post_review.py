@@ -133,11 +133,30 @@ def main(argv):
 
     payload["body"] = body + "\n\n" + marker
 
-    proc = subprocess.run(
-        ["gh", "api", f"repos/{repo}/pulls/{number}/reviews",
-         "--method", "POST", "--input", "-"],
-        input=json.dumps(payload), text=True, capture_output=True, check=False,
-    )
+    proc = _post(repo, number, payload)
+    file_level = []
+    if proc.returncode != 0 and payload["comments"] and _is_422(proc):
+        # GitHub rejects the WHOLE review (422) when one inline anchor is
+        # refused ("line must be part of the diff"). Retry once without line
+        # anchors, then post each finding as a FILE-level review comment:
+        # those are still review threads, so sweeper's thread count (the
+        # merge gate) sees them. Only a 422 is retried — auth, rate-limit or
+        # transport errors are not fixed by dropping anchors, and retrying
+        # them could post a duplicate review.
+        print("::warning::inline review rejected "
+              f"({_log_safe(_api_error(proc), limit=300)}); "
+              "retrying with file-level comments")
+        file_level, payload = payload["comments"], dict(payload, comments=[])
+        # Threads first, marker-bearing review last: the marker tells the
+        # next run this commit was reviewed, so it must never be posted
+        # while any finding still lacks a thread.
+        for c in file_level:
+            fp = _post_file_comment(repo, number, payload["commit_id"], c)
+            if fp.returncode != 0:
+                print(f"::error::posting a file-level finding failed: "
+                      f"{_log_safe(_api_error(fp), limit=500)}", file=sys.stderr)
+                return 1
+        proc = _post(repo, number, payload)
     if proc.returncode != 0:
         # GitHub's Reviews API can return a 422 whose body echoes back
         # field-level validation errors, and every field in our payload is
@@ -148,13 +167,45 @@ def main(argv):
         # rather than dropped, and bounded so a pathological response
         # can't flood the log.
         print(f"::error::posting the review failed: "
-              f"{_log_safe(proc.stderr.strip(), limit=2000)}",
+              f"{_log_safe(_api_error(proc), limit=2000)}",
               file=sys.stderr)
         return 1
 
     print(f"posted review: {len(payload['comments'])} inline finding(s), "
+          f"{len(file_level)} file-level, "
           f"{len(dropped)} unanchored")
     return 0
+
+
+def _post(repo, number, payload):
+    return subprocess.run(
+        ["gh", "api", f"repos/{repo}/pulls/{number}/reviews",
+         "--method", "POST", "--input", "-"],
+        input=json.dumps(payload), text=True, capture_output=True, check=False,
+    )
+
+
+def _api_error(proc):
+    """The real failure reason. `gh api` prints only "gh: Unprocessable
+    Entity (HTTP 422)" on stderr; GitHub's validation errors (which field
+    was refused, and why) are the JSON body it prints on stdout."""
+    parts = (getattr(proc, "stderr", ""), getattr(proc, "stdout", ""))
+    return " ".join(x.strip() for x in parts if isinstance(x, str) and x.strip())
+
+
+def _is_422(proc):
+    return "422" in _api_error(proc)
+
+
+def _post_file_comment(repo, number, commit_id, c):
+    body = f"**Line {c.get('line')}:** {c.get('body', '')}"
+    return subprocess.run(
+        ["gh", "api", f"repos/{repo}/pulls/{number}/comments",
+         "--method", "POST", "--input", "-"],
+        input=json.dumps({"body": body, "commit_id": commit_id,
+                          "path": c["path"], "subject_type": "file"}),
+        text=True, capture_output=True, check=False,
+    )
 
 
 if __name__ == "__main__":
