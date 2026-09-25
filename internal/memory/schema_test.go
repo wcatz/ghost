@@ -3,13 +3,14 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/wcatz/ghost/internal/fileguard"
+	"github.com/wcatz/ghost/internal/maintenance"
 )
 
 // TestOpenDBHostilePath: OpenDB must open the database at exactly the path it
@@ -124,7 +125,7 @@ func TestBackupBeforeMigrate(t *testing.T) {
 }
 
 func TestOpenDBRunsRetentionAfterSuccessfulMigration(t *testing.T) {
-	restore := fileguard.SetProbeForTest(func(string) (bool, error) { return false, nil })
+	restore := maintenance.SetProbeForTest(func(string) (bool, error) { return false, nil })
 	defer restore()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -149,6 +150,29 @@ func TestOpenDBRunsRetentionAfterSuccessfulMigration(t *testing.T) {
 	matches, _ := filepath.Glob(dbPath + ".pre-migrate-*")
 	if len(matches) != 1 {
 		t.Fatalf("retention kept %d backups, want 1: %v", len(matches), matches)
+	}
+}
+
+func TestOpenDBDefersRetentionWhenProbeFails(t *testing.T) {
+	restore := maintenance.SetProbeForTest(func(string) (bool, error) { return false, errors.New("probe failed") })
+	defer restore()
+	dataHome := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("GHOST_RETENTION_BACKUP_COUNT", "1")
+	dbPath := newLegacyDBAt(t, filepath.Join(dataHome, "ghost", "ghost.db"))
+	old := dbPath + ".pre-migrate-1"
+	if err := os.WriteFile(old, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	if _, err := os.Stat(old); err != nil {
+		t.Fatalf("unverifiable retention removed backup: %v", err)
 	}
 }
 

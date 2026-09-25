@@ -16,14 +16,19 @@ const (
 	// ProbeTimeout bounds the complete external+native probe sequence.
 	ProbeTimeout = 2 * time.Second
 	// QuarantineGrace is how long an unheld tombstone must age before reaping.
-	QuarantineGrace   = time.Hour
-	quarantineDirName = ".ghost-quarantine"
+	QuarantineGrace       = time.Hour
+	quarantineDirName     = ".ghost-quarantine"
+	quarantineOwnerName   = ".owner"
+	quarantineOwnerMarker = "ghost-fileguard-v1\n"
 )
 
 // OpenFileProbe reports whether a path is held by a process.
 type OpenFileProbe func(string) (bool, error)
 
-var activeProbe OpenFileProbe = DetectOpenFile
+var (
+	activeProbe OpenFileProbe = DetectOpenFile
+	chtimesFile               = os.Chtimes
+)
 
 // SetProbeForTest installs a deterministic process-wide probe and returns a
 // restore function. It is a test seam inside an internal package.
@@ -75,6 +80,23 @@ func TryAcquireLock(lockPath string) (*Lock, bool, error) {
 	return &Lock{file: file}, true, nil
 }
 
+// TryAcquireLockContext polls for lockPath until ctx is done.
+func TryAcquireLockContext(ctx context.Context, lockPath string) (*Lock, bool, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		lock, acquired, err := TryAcquireLock(lockPath)
+		if err != nil || acquired {
+			return lock, acquired, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 // AcquireLock takes lockPath, blocking until it is available. Callers must keep
 // the critical section to filesystem-only work.
 func AcquireLock(lockPath string) (*Lock, error) {
@@ -89,12 +111,45 @@ func AcquireLock(lockPath string) (*Lock, error) {
 	return &Lock{file: file}, nil
 }
 
+var (
+	// ErrNotRegular marks a path that is not a bounded regular file.
+	ErrNotRegular = errors.New("not a regular file")
+	// ErrTooLarge marks a regular file above the caller's byte cap.
+	ErrTooLarge = errors.New("file exceeds size limit")
+)
+
+// ReadSmallRegularFile reads a bounded regular file without following a final
+// symlink. PID-shaped paths use this so FIFOs and devices cannot block a caller.
+func ReadSmallRegularFile(path string, maxBytes int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s", ErrNotRegular, path)
+	}
+	if info.Size() > maxBytes {
+		return nil, fmt.Errorf("%w: %s", ErrTooLarge, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%w: %s", ErrTooLarge, path)
+	}
+	return data, nil
+}
+
 // QuarantineDir returns the private quarantine directory for path's parent.
 func QuarantineDir(path string) (string, error) {
 	dir := filepath.Join(filepath.Dir(path), quarantineDirName)
 	if info, err := os.Lstat(dir); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return "", fmt.Errorf("quarantine path is not a directory: %s", dir)
+		}
+		if !quarantineOwned(dir) {
+			return "", fmt.Errorf("refusing unowned quarantine directory: %s", dir)
 		}
 	} else if !os.IsNotExist(err) {
 		return "", err
@@ -105,12 +160,24 @@ func QuarantineDir(path string) (string, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return "", err
 	}
+	owner := filepath.Join(dir, quarantineOwnerName)
+	if _, err := os.Lstat(owner); os.IsNotExist(err) {
+		if err := os.WriteFile(owner, []byte(quarantineOwnerMarker), 0o600); err != nil {
+			return "", err
+		}
+	}
 	return dir, nil
 }
 
-// IsQuarantineDir reports whether path is a private quarantine directory.
+func quarantineOwned(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, quarantineOwnerName))
+	return err == nil && string(data) == quarantineOwnerMarker
+}
+
+// IsQuarantineDir reports whether path is a Ghost-owned private quarantine
+// directory. A user directory with the same basename is not adopted.
 func IsQuarantineDir(path string) bool {
-	return filepath.Base(path) == quarantineDirName
+	return filepath.Base(path) == quarantineDirName && quarantineOwned(path)
 }
 
 // Quarantine probes path, atomically renames it into the private quarantine
@@ -159,9 +226,13 @@ func Quarantine(path string, probe OpenFileProbe) (string, error) {
 		}
 		return "", err
 	}
-	// Rename preserves source mtime; quarantine age must start now.
+	// Rename preserves source mtime; quarantine age must start now. If the
+	// timestamp cannot be recorded, restore and abort rather than letting an
+	// old source mtime bypass the grace period on the next pass.
 	now := time.Now()
-	_ = os.Chtimes(tombstone, now, now)
+	if err := chtimesFile(tombstone, now, now); err != nil {
+		return tombstone, errors.Join(fmt.Errorf("stamp quarantine time: %w", err), Restore(path, tombstone))
+	}
 	inUse, err = probe(tombstone)
 	if err != nil {
 		return tombstone, errors.Join(err, Restore(path, tombstone))
@@ -253,6 +324,9 @@ func ReapQuarantineDirWithProbe(dir string, probe OpenFileProbe) (int, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return 0, fmt.Errorf("quarantine path is not a directory: %s", dir)
 	}
+	if !quarantineOwned(dir) {
+		return 0, fmt.Errorf("refusing unowned quarantine directory: %s", dir)
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -298,23 +372,19 @@ func StageFile(path string) (*os.File, error) {
 	return os.CreateTemp(dir, "stage-*")
 }
 
+var linkFile = os.Link
+
 // PublishNoReplace atomically exposes a fully written staging file at path
 // without replacing a file a non-cooperating writer created in the meantime.
 func PublishNoReplace(stage, path string) error {
-	if err := os.Link(stage, path); err == nil {
+	if err := linkFile(stage, path); err == nil {
 		return os.Remove(stage)
 	} else if os.IsExist(err) {
 		return ErrPublishExists
 	}
-	// Some filesystems do not support hard links. With the shared log lock held,
-	// a missing target is safe to publish by rename.
-	if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
-		if statErr != nil {
-			return statErr
-		}
-		return ErrPublishExists
-	}
-	return os.Rename(stage, path)
+	// Hard links are unavailable on some filesystems. Use the platform's atomic
+	// no-replace rename; never fall back to replacing rename.
+	return publishNoReplace(stage, path)
 }
 
 // ErrPublishExists means a writer recreated the visible path during rotation.

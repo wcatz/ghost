@@ -3,6 +3,7 @@
 package fileguard
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -82,22 +83,48 @@ func nativeOpenProbe(ctx context.Context, path string) (inUse, known bool, err e
 			unverifiable = true
 		}
 
-		maps, mapsErr := os.ReadFile(filepath.Join(procDir, "maps"))
+		matches, mapsErr := procMapsContain(ctx, filepath.Join(procDir, "maps"), dev, ino)
 		if mapsErr != nil {
+			if os.IsNotExist(mapsErr) {
+				continue
+			}
 			if errors.Is(mapsErr, os.ErrPermission) {
 				unverifiable = true
+				continue
 			}
-			continue
+			return false, false, mapsErr
 		}
-		for _, line := range strings.Split(string(maps), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) >= 5 && fields[3] == dev && fields[4] == ino {
-				return true, true, nil
-			}
+		if matches {
+			return true, true, nil
 		}
 	}
 	if unverifiable {
 		return false, false, nil
 	}
 	return false, true, nil
+}
+
+func procMapsContain(ctx context.Context, path, dev, ino string) (bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close() //nolint:errcheck
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	for lineNo := 0; scanner.Scan(); lineNo++ {
+		if lineNo%256 == 0 {
+			if err := ctx.Err(); err != nil {
+				return false, err
+			}
+		}
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 5 && fields[3] == dev && fields[4] == ino {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+	return false, ctx.Err()
 }

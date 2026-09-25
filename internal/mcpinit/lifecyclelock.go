@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/fileguard"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -17,7 +18,7 @@ import (
 // or malformed. Only the pid is read; the creation-time token that
 // isProcessAlive uses is irrelevant for the ownership check in release.
 func pidInFile(pidPath string) int {
-	data, err := os.ReadFile(pidPath)
+	data, err := fileguard.ReadSmallRegularFile(pidPath, 4096)
 	if err != nil {
 		return 0
 	}

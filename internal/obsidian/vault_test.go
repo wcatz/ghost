@@ -185,7 +185,7 @@ func TestPruneLeavesOpenOldGhostTemp(t *testing.T) {
 	}
 	defer file.Close() //nolint:errcheck
 	restore := fileguard.SetProbeForTest(func(probed string) (bool, error) {
-		return probed == path || strings.HasPrefix(filepath.Base(probed), ".active.md.ghost-tmp-abc123.retention-"), nil
+		return probed == path || strings.HasPrefix(filepath.Base(probed), "tombstone-active.md.ghost-tmp-abc123-"), nil
 	})
 	defer restore()
 

@@ -1,8 +1,8 @@
-// Package maintenance owns bounded, best-effort cleanup of Ghost-owned data-dir
-// files and the shared race-safe primitive used to reclaim orphaned export
-// temporaries. Data-dir retention operates on an explicit directory and
-// database path: it must never create a data directory as a side effect of a
-// status, hook, or failed cleanup pass.
+// Package maintenance owns bounded, best-effort policy for Ghost-owned data-dir
+// backups, logs, and retired process claims. Low-level probe, quarantine, and
+// publication guards live in internal/fileguard. Data-dir retention operates
+// on an explicit directory and database path: it must never create a data
+// directory as a side effect of a status, hook, or failed cleanup pass.
 package maintenance
 
 import (
@@ -20,8 +20,6 @@ import (
 	"github.com/wcatz/ghost/internal/procstat"
 )
 
-const quarantineGrace = fileguard.QuarantineGrace
-
 var (
 	// openFileProbe is a narrow test seam. Production uses fileguard's bounded
 	// lsof/fuser probe with native fallback.
@@ -37,6 +35,19 @@ var (
 
 	beforePublishLog = func(string) {}
 )
+
+// SetProbeForTest pins the policy package's explicit probe and returns a
+// restore function. Cross-package tests use this instead of inheriting the
+// host's real lsof/procfs state.
+func SetProbeForTest(probe fileguard.OpenFileProbe) func() {
+	old := openFileProbe
+	if probe == nil {
+		openFileProbe = fileguard.DetectOpenFile
+	} else {
+		openFileProbe = probe
+	}
+	return func() { openFileProbe = old }
+}
 
 // Result is the count of files changed by one retention pass.
 type Result struct {
@@ -206,6 +217,16 @@ func RotateLogs(dataDir string, maxBytes int64) (int, error) {
 }
 
 func rotateLog(path string, maxBytes int64) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= maxBytes {
+		return false, nil
+	}
 	lock, acquired, err := fileguard.TryAcquireLock(path + ".lock")
 	if err != nil {
 		return false, err
@@ -215,7 +236,8 @@ func rotateLog(path string, maxBytes int64) (bool, error) {
 	}
 	defer lock.Close() //nolint:errcheck
 
-	info, err := os.Lstat(path)
+	// Re-stat under the lock: another rotator may have published a fresh tail.
+	info, err = os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
@@ -231,6 +253,13 @@ func rotateLog(path string, maxBytes int64) (bool, error) {
 	}
 	if err != nil {
 		return false, err
+	}
+	quarantined, err := os.Stat(tombstone)
+	if err != nil {
+		return false, errors.Join(err, fileguard.Restore(path, tombstone))
+	}
+	if quarantined.Size() <= maxBytes {
+		return false, fileguard.Restore(path, tombstone)
 	}
 	tail, err := readLogTail(tombstone, maxBytes)
 	if err != nil {
@@ -452,20 +481,13 @@ func removeOrphanTemp(path string) (int, error) {
 }
 
 func claimState(path string) (procstat.State, bool, error) {
-	info, statErr := os.Lstat(path)
-	if statErr != nil {
-		if os.IsNotExist(statErr) {
-			return procstat.StateDead, false, nil
-		}
-		return procstat.StateUnknown, false, fmt.Errorf("stat PID file %s: %w", path, statErr)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > 4096 {
-		return procstat.StateUnknown, false, nil
-	}
-	data, readErr := os.ReadFile(path)
+	data, readErr := fileguard.ReadSmallRegularFile(path, 4096)
 	if readErr != nil {
 		if os.IsNotExist(readErr) {
 			return procstat.StateDead, false, nil
+		}
+		if errors.Is(readErr, fileguard.ErrNotRegular) || errors.Is(readErr, fileguard.ErrTooLarge) {
+			return procstat.StateUnknown, false, nil
 		}
 		return procstat.StateUnknown, false, fmt.Errorf("read PID file %s: %w", path, readErr)
 	}

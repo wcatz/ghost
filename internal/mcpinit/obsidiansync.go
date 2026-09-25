@@ -1,6 +1,7 @@
 package mcpinit
 
 import (
+	"context"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/fileguard"
@@ -45,13 +47,8 @@ func ensureObsidianSyncRunning() {
 		return
 	}
 	// isAlive false is only a fast path: two hooks firing close together would
-	// both pass it and both spawn a vault-writing process. claimPidFile
-	// re-checks under an OS-level lock so exactly one wins, matching the
-	// resolve/supersede/reflect lifecycle spawns.
-	if !claimPidFile(pidPath) {
-		return
-	}
-
+	// both pass it and both reach the claim below. claimPidFile re-checks under
+	// an OS-level lock so exactly one wins, matching the lifecycle spawns.
 	exe, err := os.Executable()
 	if err != nil {
 		slog.Warn("obsidian sync spawn: cannot locate the ghost binary", "error", err)
@@ -63,9 +60,11 @@ func ensureObsidianSyncRunning() {
 		slog.Warn("obsidian sync spawn: log rotation failed", "error", err)
 	}
 	logPath := filepath.Join(dataDir, "obsidian-sync.log")
-	logLock, err := fileguard.AcquireLock(logPath + ".lock")
-	if err != nil {
-		slog.Warn("obsidian sync spawn: cannot lock log", "error", err)
+	lockCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	logLock, acquired, err := fileguard.TryAcquireLockContext(lockCtx, logPath+".lock")
+	cancel()
+	if err != nil || !acquired {
+		slog.Warn("obsidian sync spawn: log lock busy", "error", err)
 		return
 	}
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
@@ -75,6 +74,9 @@ func ensureObsidianSyncRunning() {
 		return
 	}
 	defer logFile.Close() //nolint:errcheck
+	if !claimPidFile(pidPath) {
+		return
+	}
 
 	cmd := exec.Command(exe, "obsidian", "sync")
 	cmd.Stdout = logFile
@@ -99,7 +101,7 @@ func ensureObsidianSyncRunning() {
 // carry that token to be reported alive — see isProcessAlive in
 // obsidiansync_unix.go / obsidiansync_windows.go.
 func isAlive(pidPath string) bool {
-	data, err := os.ReadFile(pidPath)
+	data, err := fileguard.ReadSmallRegularFile(pidPath, 4096)
 	if err != nil {
 		return false
 	}

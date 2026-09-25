@@ -114,6 +114,31 @@ func TestRotateLogProbesOriginalBeforeRename(t *testing.T) {
 	}
 }
 
+func TestRotateLogRestoresLogThatShrankDuringRotation(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "lifecycle.log")
+	writeRetentionFile(t, logPath, "0123456789")
+	stubOpenProbe(t, func(probed string) (bool, error) {
+		if probed != logPath && isQuarantineOf(probed, logPath) {
+			if err := os.Truncate(probed, 2); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return false, nil
+	})
+
+	rotated, err := RotateLogs(dir, 4)
+	if err != nil {
+		t.Fatalf("RotateLogs: %v", err)
+	}
+	if rotated != 0 {
+		t.Fatalf("rotated=%d want 0", rotated)
+	}
+	if data, err := os.ReadFile(logPath); err != nil || string(data) != "01" {
+		t.Fatalf("shrunken log = %q err=%v, want restored %q", data, err, "01")
+	}
+}
+
 func TestRotateLogPublishesCompleteFileBeforeOpener(t *testing.T) {
 	noOpenProbe(t)
 	dir := t.TempDir()
@@ -288,6 +313,20 @@ func TestRunUsesRetentionDefaultsWhenConfigLoadFails(t *testing.T) {
 	}
 }
 
+func TestRotateLogsDoesNotCreateLocksForMissingOrSmallLogs(t *testing.T) {
+	noOpenProbe(t)
+	dir := t.TempDir()
+	writeRetentionFile(t, filepath.Join(dir, "lifecycle.log"), "ok")
+	if _, err := RotateLogs(dir, 4); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range knownLogNames {
+		if _, err := os.Stat(filepath.Join(dir, name+".lock")); !os.IsNotExist(err) {
+			t.Errorf("rotation created lock for unrotated %s: %v", name, err)
+		}
+	}
+}
+
 func TestRotateLogsBoundsKnownLogs(t *testing.T) {
 	noOpenProbe(t)
 	dir := t.TempDir()
@@ -377,7 +416,7 @@ func TestReapStaleQuarantineFilesOnlyOldUnheld(t *testing.T) {
 	recent := filepath.Join(quarantineDir, "tombstone-newabc123")
 	writeRetentionFile(t, old, "old")
 	writeRetentionFile(t, recent, "recent")
-	oldTime := time.Now().Add(-2 * quarantineGrace)
+	oldTime := time.Now().Add(-2 * fileguard.QuarantineGrace)
 	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
 		t.Fatal(err)
 	}

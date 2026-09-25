@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
@@ -294,9 +295,14 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 		slog.Warn("lifecycle spawn: log rotation failed", "error", err)
 	}
 	logPath := filepath.Join(dataDir, "lifecycle.log")
-	logLock, err := fileguard.AcquireLock(logPath + ".lock")
-	if err != nil {
-		slog.Warn("lifecycle spawn: cannot lock log", "error", err)
+	lockCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	logLock, acquired, err := fileguard.TryAcquireLockContext(lockCtx, logPath+".lock")
+	cancel()
+	if err != nil || !acquired {
+		if err == nil {
+			err = context.DeadlineExceeded
+		}
+		slog.Warn("lifecycle spawn: log lock busy", "error", err)
 		recordSpawnFailure(projectID, cfg, err)
 		return
 	}
