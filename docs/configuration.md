@@ -87,8 +87,12 @@ A mode that cannot be tightened (a read-only or foreign-owned mount) is logged a
 
 The pass runs on the two functions that open the database read-write, so which commands tighten a mode follows from which of them they use:
 
-- Anything reaching the database through a read-only open changes nothing. That covers the stop hook's reads, the lifecycle marker and lock, `ghost obsidian sync` and `ghost project bind`. A diagnostic has to be able to report on a database it cannot modify, and a read-only connection cannot create one either.
-- `ghost mcp status` and `ghost maintenance status` **do** tighten, because both reach the database through a read-write open even though they only read. That is a pre-existing choice, not one this pass introduces: they already ran migrations and stamped `user_version` before printing a health line.
+What decides it is the *open*, not the command. Both of the tree's read-write opens bootstrap through `ghost`'s shared startup, which runs migrations and stamps `user_version` before any command-specific work, so most commands tighten simply by starting up:
+
+- **Read-only opens change nothing.** This covers the stop hook's own database reads, the lifecycle marker, the lifecycle lock, `ghost obsidian sync` and the lifecycle reads the reflection coordinator does. A diagnostic has to be able to report on a database it cannot modify, and a read-only connection cannot create one either.
+- **Everything reached through a read-write open tightens**, including commands that only read: `ghost mcp status` and `ghost maintenance status` both check store health that way, and `ghost project bind` bootstraps then writes its binding.
+
+A session *stop* can tighten too, indirectly: if lifecycle reflection is configured, the stop hook spawns `ghost lifecycle`, which bootstraps read-write in its own process. That was already true of the migrations it ran; the modes follow the same path.
 
 On Windows the pass is skipped entirely: access there is carried by an ACL inherited from the parent directory, not by the mode bits `chmod` maps onto read-only, so tightening a number would not change who can read the database.
 
