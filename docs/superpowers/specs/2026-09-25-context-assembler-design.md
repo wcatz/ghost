@@ -189,11 +189,16 @@ type Budget struct {
 // Condition is which retrieval legs run. bench needs all three; zeroing
 // FTSWeight is NOT the vector-only case, because fused FTS candidates still
 // enter the union with a zero base score (runner.go:46-60).
-type Condition string
+//
+// The enum is CANONICAL in internal/memory, because CandidateRequest carries it
+// and naming memory.Condition from assemble is the only direction that does not
+// recreate the import cycle. This is a type ALIAS, so callers here keep writing
+// Condition and CondFTSOnly and nothing downstream has to change.
+type Condition = memory.Condition
 const (
-    CondHybrid   Condition = "hybrid"
-    CondFTSOnly  Condition = "fts_only"  // the default: nil QueryVec
-    CondVectorOnly Condition = "vector_only" // bench's second ablation
+    CondHybrid     = memory.CondHybrid
+    CondFTSOnly    = memory.CondFTSOnly
+    CondVectorOnly = memory.CondVectorOnly
 )
 
 type Request struct {
@@ -485,63 +490,120 @@ was asked for.
 
 ```go
 // package memory
+// Condition is CANONICAL here, not in assemble: CandidateRequest carries it,
+// and naming assemble.Condition from memory would recreate the import cycle
+// this DTO move exists to break. assemble.Condition is a type alias.
+type Condition string
+const (
+    CondHybrid     Condition = "hybrid"
+    CondFTSOnly    Condition = "fts_only"
+    CondVectorOnly Condition = "vector_only"
+)
+
+// ProjectMode replaces the overloaded "" in ProjectID. A single empty string
+// had to mean "_global only" for a projectless session start AND "no project
+// filter" for ghost_search_all, which are different SQL. The mode is explicit
+// so the boundary cannot lose the distinction.
+type ProjectMode string
+const (
+    ProjectScoped ProjectMode = "scoped"       // project_id = ? OR '_global'
+    GlobalOnly    ProjectMode = "global_only"  // project_id = '_global'
+    AllProjects   ProjectMode = "all_projects" // no project predicate at all
+)
+
 type CandidateRequest struct {
-    ProjectID   string            // "" = _global only (see the validation matrix)
-    Query       string            // "" = passive mode
-    QueryVec    []float32
-    Scope       map[string]string // nil = no scope predicate
-    Category    string            // "" = any; over-fetch, then stage 3 confirms
-    Condition   Condition         // hybrid | fts_only | vector_only
-    Params      SearchParams      // resolved, never nil: the store's configured
-                                  // MinSimilarity is already folded in by Run
-    Now         time.Time         // required; AgeDays/DecayFactor derive from it
-    Fetch       Fetch             // how wide each leg over-fetches
-    Passive     []SlicePolicy     // per-bucket passive behaviour, see §2
-    Demotion    map[string]float64 // bucket -> near-dup threshold
-    StorePath   string            // "" when the store is in-memory; see the
-                                  // read-handle note above
+    ProjectID string        // required when Mode == ProjectScoped; else ignored
+    Mode      ProjectMode   // see above; the caller sets it, never memory
+    Query     string        // "" = passive mode
+    QueryVec  []float32
+    Scope     map[string]string // nil = no scope predicate
+    Category  string            // "" = any; over-fetch, then stage 3 confirms
+    Condition Condition
+    // Params is the caller's UNRESOLVED params and may be nil. Candidates
+    // merges the store's configured vector floor into it immediately before
+    // vector filtering -- see "the floor is the store's to apply".
+    Params SearchParams
+    Now    time.Time  // required; AgeDays/DecayFactor derive from it
+    Fetch  Fetch      // query-mode widths; per-bucket widths live on SlicePolicy
+    Passive []SlicePolicy // populated only when Query == ""
 }
 
 type Fetch struct {
-    FTSTopK, VectorTopK int    // per-leg over-fetch, both > limit today (limit*2)
-    Limit               int    // the ranked window; Candidates returns MORE than this
+    FTSTopK, VectorTopK int // per-leg over-fetch (limit*2 today)
+    Limit               int // the ranked window; Candidates returns MORE than this
 }
 
 type SlicePolicy struct {
-    Bucket             string
-    Order              string  // "decay" | "pinned_importance_updated"
-    TwoPass            bool    // behavioural floor + category weights (project only)
-    BehaviorFloor      int
-    CategoryWeights    map[string]float64
-    CategoryCaps       map[string]int
-    DropDemotedLosers  bool    // honoured only for SourceSessionStart
+    Bucket              string
+    Order               string   // "decay" | "pinned_importance_updated"
+    TwoPass             bool     // behavioural floor + category weights
+    BehaviorFloor       int
+    BehaviorCategories  []string // injection.behavior_categories; default
+                                    // gotcha/convention/preference/decision.
+                                    // Cannot be inferred from CategoryWeights --
+                                    // that map is nil by default (config.go:196).
+    CategoryWeights     map[string]float64
+    CategoryCaps        map[string]int
+    OverFetch           int      // per-bucket: project 45, globals 16 (hook.go:459,339)
+    DropDemotedLosers   bool     // honoured only for SourceSessionStart
 }
 ```
+
+**The vector floor is the store's to apply, not the assembler's.** My previous
+revision had `Run` re-apply the configured `search.min_similarity` on top of the
+request's params, exactly as `SearchHybrid` does. **That cannot be done from
+`Run`.** The floor is private `Store` state reached through
+`vectorMinSimilarityFloor()` (`vector.go:643`, `:767`), `Retriever` exposes only
+`Candidates`, and `Request` carries no store configuration — so `Run` would either
+retain the default `0` or need an undocumented type assertion, and either way a
+non-zero `search.min_similarity` gets bypassed on exactly the path that was
+supposed to preserve it.
+
+So `CandidateRequest.Params` is the caller's **unresolved** params (nil allowed)
+and `Candidates` applies the merge itself, immediately before vector filtering,
+using the same helper `SearchHybrid` uses. One place owns the floor, the store
+cannot be bypassed from outside, and the "configured floor with a non-zero
+`search.min_similarity`" regression test is testable at the `Candidates` boundary.
+
+**`StorePath` is gone, and handle selection moves into the store.** I had
+`Run` populate a `StorePath` to choose between `readDB` and `db`, which
+contradicted "the handle is injected, not discovered": `Run` has a `Request` and a
+one-method `Retriever`, neither of which exposes a path, so populating it needed
+exactly the concrete-type assertion the design was avoiding. `Store.Candidates`
+now selects `readDB` when present and `db` otherwise, and `Store` learns its own
+kind at construction:
+
+- `NewStoreWithRead` → read-backed, uses `readDB` for the snapshot.
+- `NewStore(db, …)` with no read handle → uses `db`. For a **file-backed** store
+  that is a degradation, not a correctness bug: the transaction is `BEGIN
+  IMMEDIATE` and takes the write lock. So `NewStore` on a file path **logs a
+  warning** that the deferred-read guarantee is unavailable, and
+  `memory.NewReadDB` returns an error for `:memory:` so a private in-memory store
+  can never be handed a read handle that cannot see it.
 
 **The `Run` → `Candidates` mapping**, since the interesting part is what `Run`
 resolves *before* the call:
 
-- `Params`: `Run` resolves the `*memory.SearchParams` **and re-applies the
-  store's configured `search.min_similarity` floor** on top, exactly as
-  `SearchHybrid` does (`vector.go:433`). A nil reaching `Candidates` is a bug,
-  so the field is a value, not a pointer.
-- `Now`: passed through unchanged. The four-consequence list above ("scoring stays
-  inside `memory`") depends on `Candidates` never calling `time.Now()`.
+- `Mode`: `SourceSessionStart` with `ProjectID == ""` → `GlobalOnly`;
+  `SourceAllProjects` → `AllProjects`; everything else → `ProjectScoped`. This
+  is the mapping that makes `ghost_search_all` expressible, and `AllProjects`
+  means the legs use the `SearchHybridAll` shape (no project predicate) rather
+  than the `_global` predicate.
+- `Now`: passed through unchanged. The four-consequence list depends on
+  `Candidates` never calling `time.Now()`.
 - `Condition` → the legs: `CondVectorOnly` runs the vector leg alone, which is why
-  the type has to cross the boundary rather than being a nil-`QueryVec` trick.
+  the enum has to cross the boundary rather than being a nil-`QueryVec` trick.
 - `Fetch.Limit` is the caller's limit; `Candidates` returns strictly more. The
   "returns strictly more rows" regression test is a statement about this field.
-- `Passive` is only populated for `Request.Query == ""`, and it is what carries
-  the three passive policies. In query mode it is empty and those fields are
-  never read.
-- `StorePath` is empty for in-memory stores, which is how `Candidates` knows to
-  use the injected handle rather than trying to open one.
+- `Passive` is populated only for `Request.Query == ""`, and each entry carries
+  its own `OverFetch`, because the project bucket fetches 45 and `_global` 16.
+  In query mode it is empty and those fields are never read.
 
-`Run` validates before calling: `Now` non-zero, `Params` resolvable,
-`Condition`/`Query`/`QueryVec` consistent, `Budget` non-zero (§ Input/output), and
-the `ProjectID`/`Query` matrix. A validation failure returns an error and never
-becomes a `CandidateSet`, so a malformed request cannot reach a leg as a
-silently-degraded one.
+`Run` validates before calling: `Now` non-zero, `Mode`/`ProjectID` consistent
+with the source matrix, `Condition`/`Query`/`QueryVec` consistent, and `Budget`
+non-zero (§ Input/output). A validation failure returns an error and never becomes
+a `CandidateSet`, so a malformed request cannot reach a leg as a silently
+degraded one.
 
 **One snapshot per `Candidates` call — which means refactoring the legs, not
 just wrapping them.** The legs, the hydration and the edge load must run inside a
@@ -1163,11 +1225,62 @@ the stage reason, and it **suppresses the absence claim** — so it is only ever
 combined with a non-absence reason, since the absence case requires
 `Widened == false` by definition.
 
-The rule that makes all of this checkable: **the absence claim is permitted only
-when every leg reports `Attempted && Err == ""` and `Widened` is false.** That is
-a one-line assertion in the renderer and three tests — set `Widened = true`, set
-`Legs["fts"].Err`, and set `Source: SourceSessionStart`, and assert the absence
-sentence does not appear in any of them.
+**The absence claim: over the *applicable* legs, and only when coverage is
+complete.** My first formulation was "every leg reports `Attempted && Err == ""`
+and `Widened` is false". That is wrong three separate ways, and each one produces
+a claim the retrieval never made.
+
+- **It is not exhaustive, because the vector leg only sees indexed rows.**
+  `SearchVector` reads `memory_embeddings` and **silently skips**
+  dimension-mismatched rows (`vector.go:99-108`); memories saved while the
+  embedding worker is behind stay unembedded; and a configured `MinSimilarity`
+  drops candidates with no `Err` at all. An unembedded memory is invisible to the
+  vector leg and produces no error, so "the leg succeeded" does not mean "the leg
+  saw everything". Claiming absence from that is exactly the failure mode the
+  reason-specific copy exists to prevent.
+- **It cannot hold for an intentionally-skipped leg.** For `CondFTSOnly` the
+  vector leg is *not attempted* by design, so a predicate requiring every leg to
+  be attempted is unsatisfiable, and an empty FTS-only request falls through to
+  `vector_backend_unavailable` — blaming a backend the caller never asked for.
+- **It ignores partial failure.** If FTS errors but vector returns candidates,
+  `retrieval_failed` does not fire (survivors yielded something) and the
+  default-disabled vector arm leaves those rows with no floor arm, so the stable
+  outcome becomes `weak/below_floor` — reporting a *keyword relevance* judgement
+  when keyword retrieval never ran.
+
+So `LegStatus` carries the coverage the claim actually needs, and the rule is
+replaced:
+
+```go
+type LegStatus struct {
+    Attempted, Available bool
+    Err            string
+    Truncated      bool
+    Applicable     bool   // was this leg in scope for this Condition?
+    Indexed        int    // rows the leg COULD see (embeddings for vector)
+    Eligible       int    // rows surviving the floor/drop filter
+    DimMismatch    int    // vector only: rows skipped as dimension-mismatched
+}
+```
+
+- Absence is claimed **only** when every *applicable* leg has
+  `Applicable && Available && Err == ""`, `Truncated == false`, **and** the vector
+  leg's `Indexed` accounts for the memories that exist (`Indexed == DimMismatch`-
+  free coverage, asserted against the store's memory count for the mode) — or,
+  more honestly, when `SourceAllProjects`/`ProjectScoped` and the vector leg is
+  either fully indexed or the query was FTS-only with no index dependency.
+- `vector_backend_unavailable` is reserved for a leg that was **applicable and
+  could not run**. A non-applicable leg never produces it.
+- A **partial** failure where survivors exist adds `Result.Notes` carrying the
+  failed legs **and** suppresses `below_floor`: no floor verdict is rendered from
+  a retrieval path that did not run. The outcome becomes `answerable` with a
+  `retrieval_partial` note, because rows were retrieved — the claim is about
+  *completeness*, not about *relevance*.
+
+Two regression tests: an empty explicit `CondFTSOnly` request yields
+`no_candidates` (not `vector_backend_unavailable`), and a store with one
+unembedded memory plus an FTS miss yields the partial note and never
+`below_floor`.
 
 Each sentence is byte-bounded by the same `Slice.MaxBytes` as the items — #580's
 last AC — and each includes the `Result.Notes` for its reason, so a truncated
@@ -1367,7 +1480,7 @@ a later PR can unify the ablations on purpose, as its own bench-gated change.
 | Metric | Computed from | Note |
 |---|---|---|
 | **Context precision** | `Σ relevance(Item.ID) / len(Items)` | bench's existing `Query.Rel` grades. The denominator is the *assembled* block, not a ranked list — that is the whole difference from NDCG. Empty blocks are **excluded** from the ratio and counted separately — see "Empty blocks" below. |
-| **Contamination rate** | admitted `Item`s for which `ExpiredAt‖NotYetValidAt‖ScopeContradicts‖BucketUnexpected` all hold, composed by the metric from the shared leaf predicates | `Item.ResolvedAt != nil` (no stage drops resolved rows in query mode, so this arm is metric-only), **or** `Item.ValidUntil != nil && Item.ValidUntil.Before(req.Now)` (expired), **or** `Item.ValidFrom != nil && Item.ValidFrom.After(req.Now)` (not yet valid), **or** `Item.Scope` contradicts the request, **or** `Item.Bucket` is neither the requested project nor `_global`. The nil checks are explicit because the fields are pointers — a bare `<`/`>` against `req.Now` does not compile, and a bare dereference can panic. **Both validity arms are required**: stage 2 drops on `valid_until < now` *and* on `valid_from > now` (Decision 2, stage 2), and an earlier draft checked only the first. A half-mirrored predicate is worse than a re-implementation, because it reports 0% contamination for a not-yet-valid row stage 2 would have dropped, reading as "the filter works" when the metric never looked. Hence the fixture below. `_global` is *never* contamination: both retrieval legs and `GetTopMemories` include it deliberately (`store.go:1106`, `1165`), so a global preference is the product working. The metric composes the leaf predicates itself rather than calling a shared drop function — see the next paragraph for why that distinction is what keeps the metric non-vacuous. |
+| **Contamination rate** | admitted `Item`s for which **any** of the five arms holds, composed by the metric from the shared leaf predicates | `Item.ResolvedAt != nil`, **or** `ExpiredAt(Item.ValidUntil, req.Now)`, **or** `NotYetValidAt(Item.ValidFrom, req.Now)`, **or** `ScopeContradicts(Item.Scope, req.Scope)`, **or** `BucketUnexpected(Item.Bucket, req.ProjectID)` — a **disjunction**, not a conjunction. An earlier revision said "all four predicates must hold" while the fixtures and the note below define it as "any", which is self-contradictory and would have made `future_scheduled` (a single failing arm) score as clean while the test demanded it be flagged. The nil checks are explicit because the fields are pointers — a bare `<`/`>` against `req.Now` does not compile, and a bare dereference can panic. **Both validity arms are required**: stage 2 drops on `valid_until < now` *and* on `valid_from > now` (Decision 2, stage 2), and an earlier draft checked only the first, reporting 0% contamination for a row stage 2 would have dropped. `_global` is *never* contamination: both legs and `GetTopMemories` include it deliberately (`store.go:1106`, `1165`). The metric composes the leaf predicates itself rather than calling a shared drop function — see below for why that is what keeps it non-vacuous. |
 | **Budget adherence** | `Result.Bytes` vs. the matching `Slice.MaxBytes`; dropped IDs from the stage-8 `StageTrace.DroppedIDs` | `DroppedIDs` is what lets bench intersect the trim with `Query.Rel` and measure *relevant rows the trim discarded* — the "low-relevance memory crowding out a relevant one" regression, otherwise invisible. |
 | **Diversity** | `max_b count(Item.Bucket) / len(Items)` | One histogram over `Item.Bucket`, with `_global` as its own bucket. Empty blocks excluded, as above. |
 | **Result rate** | `count(Outcome != empty) / count(queries)` | Reported **separately**, and it is the metric that makes the others readable. Because empty blocks are excluded from precision and contamination, an assembler that returns nothing has *no* precision sample rather than a bad one — so on its own it would post a clean scoreboard. Result rate is the number that makes that visible. |
@@ -1437,8 +1550,8 @@ func BucketUnexpected(bucket, projectID string) bool
 
 // stage 2 drops when ExpiredAt(..) || NotYetValidAt(..)
 // stage 3 drops when ScopeContradicts(..) || BucketUnexpected(..)
-// the metric flags when all four hold — its own composition, not a call
-// into a shared drop function
+// the metric flags when ResolvedAt != nil OR any of the four above — a
+// DISJUNCTION, matching the table above and the future_scheduled fixture
 ```
 
 So a stage that forgets to call `NotYetValidAt` is caught by the metric, and a
@@ -1507,9 +1620,17 @@ not compile, which is the intended coupling between the metric and the type.
 
 Seven PRs, each shippable alone, each naming its issue and its bench
 expectation. The bench delta gate (origin/main vs. branch, NDCG@10 and R@5
-within 0.005) applies to PRs 1, 4 and 6; PRs 2, 3, 5 and 7 cannot move ranking
+within 0.005) applies to PRs 1, 3, 4 and 6; PRs 2, 5 and 7 cannot move ranking
 and say so with the reason. **PR 1 is additionally blocked on #591**, since the
 widened window it returns does not exist on `main`.
+
+**PR 3 is in that gate, not exempt from it.** My earlier text exempted it as
+"cannot move ranking", which is precisely the claim PR 3's own row contradicts:
+its validity writers activate stage 2 and drop rows, and dropping rows changes
+result IDs, ordering and every retrieval metric. It is gated on the **new
+validity fixtures** rather than the existing corpus, because the existing corpus
+has no non-NULL validity columns and so cannot exercise stage 2 at all. A
+ranking-affecting change must not ship without its comparison.
 
 | # | Branch / title | Closes | Bench expectation |
 |---|---|---|---|
