@@ -17,6 +17,7 @@ type linkStore interface {
 	ListProjects(ctx context.Context) ([]memory.Project, error)
 	UnscannedEmbeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error)
 	GetEmbedding(ctx context.Context, memoryID string) ([]float32, error)
+	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 	SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]memory.ScoredMemory, error)
 	CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error
 	MarkLinkScanned(ctx context.Context, memoryID string) error
@@ -108,6 +109,16 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			w.logger.Debug("linking: get embedding", "error", err, "memory_id", id)
 			continue
 		}
+		sourceMemories, err := w.store.GetByIDs(ctx, []string{id})
+		if err != nil {
+			w.logger.Debug("linking: get source scope", "error", err, "memory_id", id)
+			continue
+		}
+		if len(sourceMemories) != 1 {
+			w.logger.Debug("linking: source memory disappeared", "memory_id", id)
+			continue
+		}
+		sourceScope := sourceMemories[0].Scope
 		// +1 because the memory itself is its own nearest neighbor.
 		candidates, err := w.store.SearchVector(ctx, projectID, vec, maxCandidates+1)
 		if err != nil {
@@ -117,6 +128,9 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 		failed := false
 		for _, cand := range candidates {
 			if cand.MemoryID == id || cand.Score < w.threshold {
+				continue
+			}
+			if memory.ScopesConflict(sourceScope, cand.Scope) {
 				continue
 			}
 			if err := w.store.CreateLink(ctx, id, cand.MemoryID, "related", cand.Score, "auto"); err != nil {

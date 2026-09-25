@@ -196,6 +196,11 @@ The main schema tables are:
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
 
+The linking worker skips cosine `related` edges whose endpoint scopes conflict,
+and `DemotionPenalties` ignores scope-conflicting `related` and `duplicate` edges
+even when a legacy or manual edge already exists. Unscoped or one-sided scopes
+remain compatible under `ScopesConflict`.
+
 ### Retrieval
 
 When embeddings are available, search combines:

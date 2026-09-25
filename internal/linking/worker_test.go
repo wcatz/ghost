@@ -30,9 +30,14 @@ func testStore(t *testing.T) *memory.Store {
 
 func addEmbedded(t *testing.T, s *memory.Store, content string, vec []float32) string {
 	t.Helper()
+	return addEmbeddedScoped(t, s, content, vec, nil)
+}
+
+func addEmbeddedScoped(t *testing.T, s *memory.Store, content string, vec []float32, scope map[string]string) string {
+	t.Helper()
 	ctx := context.Background()
 	id, err := s.Create(ctx, testProject, memory.Memory{
-		Category: "fact", Content: content, Source: "manual", Importance: 0.7,
+		Category: "fact", Content: content, Source: "manual", Importance: 0.7, Scope: scope,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -86,6 +91,26 @@ func TestSweepOnceLinksSimilarMemories(t *testing.T) {
 	}
 	if len(ids) != 0 {
 		t.Fatalf("got %d unscanned after sweep, want 0", len(ids))
+	}
+}
+
+func TestSweepOnceDoesNotLinkScopeConflictingMemories(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	dev := addEmbeddedScoped(t, s, "development database uses SQLite", []float32{1, 0, 0.1}, map[string]string{"environment": "development"})
+	prod := addEmbeddedScoped(t, s, "production database uses SQLite", []float32{1, 0.1, 0}, map[string]string{"environment": "production"})
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	NewWorker(s, logger, time.Minute, 0.70).SweepOnce(ctx)
+
+	for _, id := range []string{dev, prod} {
+		links, err := s.GetLinks(ctx, id)
+		if err != nil {
+			t.Fatalf("GetLinks(%s): %v", id, err)
+		}
+		if len(links) != 0 {
+			t.Errorf("scope-conflicting memory %s received related links: %+v", id, links)
+		}
 	}
 }
 
