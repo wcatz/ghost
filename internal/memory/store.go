@@ -13,11 +13,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Memory represents a single discrete memory.
@@ -555,7 +557,12 @@ func (s *Store) createRepoProjectTx(ctx context.Context, tx *sql.Tx, id, path, n
 	return id, nil
 }
 
-func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemote string) error {
+// reconcileMergeRepoTx binds repoRemote to a merge target that does not record
+// one yet. excluded names the other participants of the merge, which may
+// legitimately hold the remote already inside this transaction — the incoming
+// row is written before the merge runs and is deleted by it, so treating its own
+// temporary claim as a conflicting holder would make every merge fail.
+func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemote string, excluded ...string) error {
 	if repoRemote == "" {
 		return nil
 	}
@@ -572,6 +579,25 @@ func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemot
 			return fmt.Errorf("project %q belongs to a different repository", existingID)
 		}
 		return nil
+	}
+	// Binding a remote the target does not have can collide with a project that
+	// already records it. v15 makes repo_remote unique, so that write is refused
+	// by the index — and a raw constraint failure names neither the project
+	// already holding the identity nor the fact that two rows claim to be the
+	// same repository. Name both, and point at the migration that merges them.
+	args := []any{repoRemote, existingID}
+	clause := ""
+	for _, id := range excluded {
+		clause += " AND id != ?"
+		args = append(args, id)
+	}
+	var holder string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id FROM projects WHERE repo_remote = ? AND id != ?`+clause+` ORDER BY id`, args...).Scan(&holder); err == nil {
+		return fmt.Errorf("%w: repository %q is already recorded on project %q, so it cannot also be bound to %q",
+			ErrAmbiguousProject, repoRemote, holder, existingID)
+	} else if err != sql.ErrNoRows {
+		return fmt.Errorf("check repository identity before binding: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE projects
@@ -740,6 +766,41 @@ func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
 	return s.mergeProjectLocked(ctx, oldID, newID)
 }
 
+var projectMergeStatements = []string{
+	`UPDATE memories SET project_id = ? WHERE project_id = ?`,
+	`UPDATE tasks SET project_id = ? WHERE project_id = ?`,
+	`UPDATE decisions SET project_id = ? WHERE project_id = ?`,
+	`UPDATE token_usage SET project_id = ? WHERE project_id = ?`,
+	`UPDATE audit_log SET project_id = ? WHERE project_id = ?`,
+	`UPDATE memory_snapshots SET project_id = ? WHERE project_id = ?`,
+	`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
+}
+
+func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
+	if oldID == newID {
+		return nil
+	}
+	// _global is the bucket global injection reads from, not a project: merging
+	// into it would move a corpus into every session, and merging out of it
+	// would delete it. The guard lives in the shared primitive so every caller
+	// inherits it — the public wrapper, this merge, and migrateV15.
+	if oldID == "_global" || newID == "_global" {
+		return fmt.Errorf("%w: refusing to merge the _global project (old=%q new=%q)", ErrAmbiguousProject, oldID, newID)
+	}
+	for _, stmt := range projectMergeStatements {
+		if _, err := tx.ExecContext(ctx, stmt, newID, oldID); err != nil {
+			return fmt.Errorf("merge reassign: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, oldID); err != nil {
+		return fmt.Errorf("merge delete ghost_state: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, oldID); err != nil {
+		return fmt.Errorf("merge delete project: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) error {
 	return s.mergeProjectWithRepoLocked(ctx, oldID, newID, "")
 }
@@ -768,13 +829,42 @@ func (s *Store) mergeProjectWithRepoTx(ctx context.Context, tx *sql.Tx, oldID, n
 	if oldID == "_global" || newID == "_global" {
 		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
 	}
-	if err := reconcileMergeRepoTx(ctx, tx, oldID, repoRemote); err != nil {
+	// Validate the outgoing row's recorded identity first: it must not claim a
+	// DIFFERENT repository, or the merge would silently move that project's
+	// memories under an identity they were never verified against. Read-only —
+	// the row is about to be deleted, so binding anything to it is wasted work.
+	if err := validateMergeRepoTx(ctx, tx, oldID, repoRemote); err != nil {
 		return err
 	}
-	if err := reconcileMergeRepoTx(ctx, tx, newID, repoRemote); err != nil {
+	// Then delete oldID, and only then bind the remote to the survivor. The
+	// order matters: v15 makes repo_remote unique, and the incoming row is
+	// written before the merge runs, so it already holds the identity this
+	// function may have to give the survivor. Binding first would collide with
+	// a row that is about to be deleted and fail the whole merge.
+	if err := mergeProjectTx(ctx, tx, oldID, newID); err != nil {
 		return err
 	}
-	return s.mergeProjectTx(ctx, tx, oldID, newID)
+	return reconcileMergeRepoTx(ctx, tx, newID, repoRemote, oldID)
+}
+
+// validateMergeRepoTx refuses a merge whose outgoing project records a
+// different repository from the one the merge is being performed under.
+func validateMergeRepoTx(ctx context.Context, tx *sql.Tx, oldID, repoRemote string) error {
+	if repoRemote == "" {
+		return nil
+	}
+	var existingRemote string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, oldID).Scan(&existingRemote); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return fmt.Errorf("read merge source repository: %w", err)
+	}
+	if existingRemote != "" && existingRemote != repoRemote {
+		return fmt.Errorf("project %q belongs to a different repository", oldID)
+	}
+	return nil
 }
 
 func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
@@ -1088,6 +1178,12 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 			}
 		}
 		if len(survivors) > 0 {
+			bestLength := pathRankLength(survivors[0].path)
+			for _, candidate := range survivors[1:] {
+				if pathRankLength(candidate.path) == bestLength {
+					return "", "", fmt.Errorf("%w: %q has tied path-prefix matches", ErrAmbiguousProject, input)
+				}
+			}
 			return survivors[0].id, survivors[0].name, nil
 		}
 	} else {
@@ -1121,39 +1217,31 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	// directory. inputRemote is that policy, shared with the write side.
 	remote = s.inputRemote(input)
 	if remote != "" && hasRepoRemote {
-		// Every match is fetched, not LIMIT 1: two projects claiming one
-		// normalized remote is a corrupt identity, and picking the row SQLite
-		// surfaced first would send a save to an arbitrary one of them.
-		var remoteIDs []string
-		var rows *sql.Rows
-		rows, qErr = s.db.QueryContext(ctx,
-			`SELECT id FROM projects WHERE repo_remote = ? ORDER BY id`, remote)
-		if qErr != nil {
-			return "", "", fmt.Errorf("check repository identity: %w", qErr)
+		rows, queryErr := s.db.QueryContext(ctx, `
+			SELECT id, name FROM projects WHERE repo_remote = ? ORDER BY id
+		`, remote)
+		if queryErr != nil {
+			return "", "", fmt.Errorf("resolve project by repository: %w", queryErr)
 		}
+		var matches []struct{ id, name string }
 		for rows.Next() {
-			var rid string
-			if scanErr := rows.Scan(&rid); scanErr != nil {
+			var match struct{ id, name string }
+			if scanErr := rows.Scan(&match.id, &match.name); scanErr != nil {
 				_ = rows.Close()
-				return "", "", fmt.Errorf("check repository identity: %w", scanErr)
+				return "", "", fmt.Errorf("resolve project by repository: scan: %w", scanErr)
 			}
-			remoteIDs = append(remoteIDs, rid)
+			matches = append(matches, match)
 		}
-		rowsErr := rows.Err()
+		if rowsErr := rows.Err(); rowsErr != nil {
+			_ = rows.Close()
+			return "", "", fmt.Errorf("resolve project by repository: %w", rowsErr)
+		}
 		_ = rows.Close()
-		if rowsErr != nil {
-			return "", "", fmt.Errorf("check repository identity: %w", rowsErr)
-		}
-		if len(remoteIDs) > 1 {
+		if len(matches) > 1 {
 			return "", "", fmt.Errorf("%w: repository %q matches multiple projects", ErrAmbiguousProject, remote)
 		}
-		if len(remoteIDs) == 1 {
-			if err = s.db.QueryRowContext(ctx,
-				`SELECT id, name FROM projects WHERE id = ?`, remoteIDs[0]).Scan(&id, &name); err == nil {
-				return id, name, nil
-			} else if err != sql.ErrNoRows {
-				return "", "", fmt.Errorf("resolve project by repository: %w", err)
-			}
+		if len(matches) == 1 {
+			return matches[0].id, matches[0].name, nil
 		}
 	}
 
@@ -1320,6 +1408,7 @@ func storedPathIsUsable(stored string) bool {
 		((norm[0] >= 'a' && norm[0] <= 'z') || (norm[0] >= 'A' && norm[0] <= 'Z')) {
 		norm = norm[2:]
 	}
+	norm = pathpkg.Clean(norm)
 	return strings.HasPrefix(norm, "/") && strings.Trim(norm, "/") != ""
 }
 
@@ -1356,6 +1445,10 @@ func pathsAgree(input, stored string) bool {
 		return false
 	}
 	return samePath(resolvedInput, resolvedStored)
+}
+
+func pathRankLength(p string) int {
+	return utf8.RuneCountInString(strings.ReplaceAll(p, `\`, "/"))
 }
 
 // samePath is exact equality or a directory-prefix match on a segment

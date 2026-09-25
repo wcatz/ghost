@@ -3,9 +3,11 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -433,6 +435,127 @@ func TestMigrateFreshDBHasRepoRemote(t *testing.T) {
 	}
 	if hasColumn != 1 {
 		t.Error("projects.repo_remote missing on a fresh database (initSQL)")
+	}
+}
+
+func TestMigrateV14MergesDuplicateRepositoryIdentities(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "duplicate-remote.sqlite")
+	db, err := OpenDB(path)
+	if err != nil {
+		t.Fatalf("OpenDB seed: %v", err)
+	}
+	if _, err := db.Exec(`DROP INDEX idx_projects_repo_remote`); err != nil {
+		_ = db.Close()
+		t.Fatalf("drop seed index: %v", err)
+	}
+	const remote = "github.com/me/infra"
+	if _, err := db.Exec(`
+		INSERT INTO projects (id, path, name, repo_remote) VALUES
+		('remote-a', '/remote/a', 'a', ?),
+		('remote-b', '/remote/b', 'b', ?)
+	`, remote, remote); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert duplicate projects: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO memories (id, project_id, category, content, source)
+		VALUES ('remote-memory', 'remote-b', 'fact', 'preserve me', 'manual')
+	`); err != nil {
+		_ = db.Close()
+		t.Fatalf("insert duplicate project memory: %v", err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 13`); err != nil {
+		_ = db.Close()
+		t.Fatalf("stamp pre-v14 schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close seed database: %v", err)
+	}
+
+	migrated, err := OpenDB(path)
+	if err != nil {
+		t.Fatalf("OpenDB migrated: %v", err)
+	}
+	defer migrated.Close() //nolint:errcheck
+	var projects, memories int
+	if err := migrated.QueryRow(`SELECT count(*) FROM projects WHERE repo_remote = ?`, remote).Scan(&projects); err != nil {
+		t.Fatalf("count migrated projects: %v", err)
+	}
+	if projects != 1 {
+		t.Fatalf("migrated remote project count = %d, want 1", projects)
+	}
+	if err := migrated.QueryRow(`SELECT count(*) FROM memories WHERE id = 'remote-memory' AND project_id = 'remote-a'`).Scan(&memories); err != nil {
+		t.Fatalf("read migrated memory: %v", err)
+	}
+	if memories != 1 {
+		t.Fatal("migration did not preserve the duplicate project's memory")
+	}
+	var indexName string
+	if err := migrated.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_projects_repo_remote'`).Scan(&indexName); err != nil {
+		t.Fatalf("repository identity index missing after migration: %v", err)
+	}
+}
+
+func TestEnsureProjectWithRepoConcurrentStoresConverge(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "concurrent.sqlite")
+	seed, err := OpenDB(path)
+	if err != nil {
+		t.Fatalf("OpenDB seed: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed: %v", err)
+	}
+
+	const workers = 4
+	stores := make([]*Store, workers)
+	dbs := make([]*sql.DB, workers)
+	for i := range stores {
+		dbs[i], err = OpenDB(path)
+		if err != nil {
+			t.Fatalf("OpenDB worker %d: %v", i, err)
+		}
+		stores[i] = NewStore(dbs[i], nil)
+	}
+	t.Cleanup(func() {
+		for _, db := range dbs {
+			_ = db.Close()
+		}
+	})
+
+	paths := make([]string, workers)
+	for i := range paths {
+		paths[i] = filepath.Join(t.TempDir(), "checkout")
+	}
+	start := make(chan struct{})
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i, store := range stores {
+		wg.Add(1)
+		go func(i int, store *Store) {
+			defer wg.Done()
+			<-start
+			errs <- store.EnsureProjectWithRepo(context.Background(),
+				fmt.Sprintf("concurrent-%d", i),
+				paths[i],
+				fmt.Sprintf("checkout-%d", i),
+				"github.com/me/infra")
+		}(i, store)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent EnsureProjectWithRepo: %v", err)
+		}
+	}
+
+	var count int
+	if err := dbs[0].QueryRow(`SELECT count(*) FROM projects WHERE repo_remote = 'github.com/me/infra'`).Scan(&count); err != nil {
+		t.Fatalf("count remote projects: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("concurrent creation left %d projects for one remote, want 1", count)
 	}
 }
 

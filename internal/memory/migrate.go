@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 15
+const schemaVersion = 16
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -35,6 +35,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV13,
 	migrateV14,
 	migrateV15,
+	migrateV16,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -579,37 +580,6 @@ func migrateV13(tx *sql.Tx) error {
 	return nil
 }
 
-// migrateV15 adds the builtin source and relabels Ghost's shipped global
-// seeds. A pinned manual row is still protected from reflection, but its
-// source must not make SessionStart call a Ghost-authored rule the user's own
-// preference.
-func migrateV15(tx *sql.Tx) error {
-	stale, err := tableDDLLacks(tx, "memories", "'builtin'")
-	if err != nil {
-		return err
-	}
-	if stale {
-		if err := rebuildMemoriesV15(tx); err != nil {
-			return fmt.Errorf("rebuild memories for builtin source: %w", err)
-		}
-	}
-
-	// Keep this data migration separate from the CHECK rebuild so databases
-	// that were hand-migrated to the new CHECK still receive the provenance
-	// correction. The content literal is frozen with this migration; changing
-	// today's seed list must not rewrite historical migration behavior.
-	if _, err := tx.Exec(`
-		UPDATE memories
-		SET source = 'builtin'
-		WHERE project_id = '_global'
-		  AND source = 'manual'
-		  AND content = 'NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.'
-	`); err != nil {
-		return fmt.Errorf("relabel builtin seed: %w", err)
-	}
-	return nil
-}
-
 func rebuildMemoriesV15(tx *sql.Tx) error {
 	stmts := []string{
 		`DROP TRIGGER IF EXISTS memories_ai`,
@@ -691,6 +661,108 @@ END`,
 	return nil
 }
 
+// migrateV15 adds the builtin source and relabels Ghost's shipped global
+// seeds. A pinned manual row is still protected from reflection, but its
+// source must not make SessionStart call a Ghost-authored rule the user's own
+// preference.
+func migrateV15(tx *sql.Tx) error {
+	stale, err := tableDDLLacks(tx, "memories", "'builtin'")
+	if err != nil {
+		return err
+	}
+	if stale {
+		if err := rebuildMemoriesV15(tx); err != nil {
+			return fmt.Errorf("rebuild memories for builtin source: %w", err)
+		}
+	}
+
+	// Keep this data migration separate from the CHECK rebuild so databases
+	// that were hand-migrated to the new CHECK still receive the provenance
+	// correction. The content literal is frozen with this migration; changing
+	// today's seed list must not rewrite historical migration behavior.
+	if _, err := tx.Exec(`
+		UPDATE memories
+		SET source = 'builtin'
+		WHERE project_id = '_global'
+		  AND source = 'manual'
+		  AND content = 'NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.'
+	`); err != nil {
+		return fmt.Errorf("relabel builtin seed: %w", err)
+	}
+	return nil
+}
+
+// migrateV16 makes normalized repository identity unique. Older databases may
+// already contain duplicate remotes; merge those rows before creating the
+// partial unique index so the invariant is established without losing project
+// data.
+func migrateV16(tx *sql.Tx) error {
+	exists, err := columnExists(tx, "projects", "repo_remote")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	rows, err := tx.Query(`
+		SELECT repo_remote FROM projects
+		WHERE repo_remote IS NOT NULL AND repo_remote <> ''
+		GROUP BY repo_remote HAVING count(*) > 1
+		ORDER BY repo_remote
+	`)
+	if err != nil {
+		return fmt.Errorf("find duplicate repository identities: %w", err)
+	}
+	var remotes []string
+	for rows.Next() {
+		var remote string
+		if err := rows.Scan(&remote); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan duplicate repository identity: %w", err)
+		}
+		remotes = append(remotes, remote)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate duplicate repository identities: %w", err)
+	}
+	_ = rows.Close()
+
+	for _, remote := range remotes {
+		rows, err := tx.Query(`SELECT id FROM projects WHERE repo_remote = ? ORDER BY id`, remote)
+		if err != nil {
+			return fmt.Errorf("list duplicate repository identity %q: %w", remote, err)
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan duplicate repository project: %w", err)
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("iterate duplicate repository projects: %w", err)
+		}
+		_ = rows.Close()
+		for _, oldID := range ids[1:] {
+			if err := mergeProjectTx(context.Background(), tx, oldID, ids[0]); err != nil {
+				return fmt.Errorf("merge duplicate repository identity %q: %w", remote, err)
+			}
+		}
+	}
+	if _, err := tx.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_repo_remote
+		ON projects(repo_remote) WHERE repo_remote IS NOT NULL AND repo_remote <> ''
+	`); err != nil {
+		return fmt.Errorf("create unique repository identity index: %w", err)
+	}
+	return nil
+}
+
+// phase1aProvenanceColumns is the v10 column set, shared by migrateV10 and
 // the tests that assert it, so a column added to one and forgotten in the
 // other cannot pass.
 var phase1aProvenanceColumns = []struct {
