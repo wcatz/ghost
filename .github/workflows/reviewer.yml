@@ -249,18 +249,17 @@ jobs:
           AGENT_EOF
           # A silently unregistered agent would fall back to the default
           # tool set, which is the bug this step exists to prevent.
-          # V2 has no `agent list`; `debug agents` prints every resolved
-          # agent as JSON, including the permissions the tools map became.
-          # Require the agent AND a bash deny, so a V2 change that silently
-          # drops the tools map cannot hand the model a shell.
-          opencode debug agents > agents.json 2>/dev/null || true
-          jq -e '.[] | select(.id == "ghost-reviewer")
-                 | .permissions | any(.action == "bash" and .effect == "deny")' \
-            agents.json >/dev/null || {
-            echo "::error::ghost-reviewer agent did not register with bash denied — refusing to review with the default (write-capable) tool set"
-            jq '[.[] | {id, permissions}]' agents.json || cat agents.json || true
-            exit 1
-          }
+          # V2 has no `agent list`, and `debug agents` prints an empty list
+          # on a fresh runner (it reads a background service CI never
+          # starts), so it cannot guard anything. V2 itself is the guard:
+          # `run --agent <name>` for an unregistered agent exits 1 with
+          # 'Agent not found' instead of falling back to the default,
+          # write-capable agent (verified on 2.0.15), and the Review step
+          # treats that error as fatal rather than trying the next model.
+          # Verified the same day that this agent refuses a prompt telling
+          # it to run a shell command ("I can't run shell commands in this
+          # environment"), with no tool call emitted.
+          [ -s "$AGENT" ] || { echo "::error::reviewer agent file was not written"; exit 1; }
 
           # Model ids are provider-scoped (opencode/..., not a bare
           # codename). The run is keyless, so the catalog is the anonymous
@@ -533,6 +532,11 @@ jobs:
             fi
             reason=$( { jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.try 2>/dev/null; cat model-stderr.txt; } \
                       | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ')
+            case "$reason" in
+              *"Agent not found"*)
+                echo "::error::ghost-reviewer agent did not register — refusing to review with the default (write-capable) tool set"
+                exit 1 ;;
+            esac
             echo "::warning::review model ${m} failed: ${reason:-no output}"
           done
           rm -f model-reply.try
