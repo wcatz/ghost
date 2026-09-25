@@ -349,9 +349,27 @@ jobs:
           if git cat-file -e "${BASE_OID}^{commit}" 2>/dev/null; then
             MERGE_BASE="$(git merge-base "$BASE_OID" HEAD 2>/dev/null || true)"
           fi
+          # A path the PR changed and then reverted (net-zero against the
+          # base) is in LAST_SHA..HEAD but not in the PR diff, and GitHub
+          # refuses any comment on it. Incremental is therefore also gated on
+          # every incrementally changed path still being one of the PR's own
+          # paths; otherwise fall through to the full review. Both lists are
+          # NUL-delimited and compared byte-exactly.
+          incremental_paths_ok() {
+            local inc pr
+            inc="$(mktemp "${RUNNER_TEMP}/inc-paths.XXXXXX")"
+            pr="$(mktemp "${RUNNER_TEMP}/pr-paths.XXXXXX")"
+            git diff -z --name-only "${LAST_SHA}" HEAD | sort -z > "$inc"
+            git diff -z --name-only "$MERGE_BASE" HEAD | sort -z > "$pr"
+            local extra
+            extra="$(comm -z -23 "$inc" "$pr" | tr '\0' '\n' | head -n 1)"
+            rm -f "$inc" "$pr"
+            [ -z "$extra" ]
+          }
           if [ -n "$LAST_SHA" ] && [ -n "$MERGE_BASE" ] \
             && git cat-file -e "${LAST_SHA}^{commit}" 2>/dev/null \
-            && git merge-base --is-ancestor "$MERGE_BASE" "$LAST_SHA"; then
+            && git merge-base --is-ancestor "$MERGE_BASE" "$LAST_SHA" \
+            && incremental_paths_ok; then
             echo "incremental review: ${LAST_SHA}..HEAD"
             git diff "${LAST_SHA}" HEAD > pr.diff
           elif [ -n "$MERGE_BASE" ]; then
