@@ -20,16 +20,24 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
-    # The ONE place the review models are listed: an ordered list of free
-    # models, tried in turn by the Review step (the first is also written
-    # into the agent file and checked by the catalog preflight). Job
-    # scope, because shell variables do not survive between steps.
+    # The ONE place maintainers list review-model preferences. The selection
+    # step uses this order first, then appends free models discovered at run
+    # time; if every free candidate fails, the review uses the single paid
+    # fallback below. Only anonymous opencode/*-free ids and
+    # opencode/big-pickle are eligible for the free path.
+    #
+    # PAID_MODEL is deliberately one low-cost Go coding model, not a list and
+    # not Kimi: Muse Spark 1.3 Contributor is the cheapest suitable current
+    # opencode-go route. The secret is injected only around its invocation.
+    # Job scope, because shell variables do not survive between steps.
     env:
       MODELS: opencode/space-bunny-free opencode/big-pickle opencode/mimo-v2.6-flash-free
-    # Must stay above the model step's own timeout plus the ~3 min of
-    # checkout/install/prepare ahead of it, or the job ceiling kills the
-    # run first and the step timeout never fires.
-    timeout-minutes: 35
+      PAID_MODEL: opencode-go/muse-spark-1.3-contributor
+    # Must stay above the bounded model-selection phase (15 min), the free
+    # review phase (70 min), the paid fallback phase (15 min), and the
+    # ~3 min of checkout/install/prepare ahead of them, or the job ceiling
+    # kills the run before the fallback can execute.
+    timeout-minutes: 110
     # Fork PRs get a read-only token and no repo secrets by GitHub's design,
     # so the App mint below would fail and the whole pipeline would run
     # anyway, wasting an LLM invocation to reach a guaranteed failure at
@@ -142,8 +150,8 @@ jobs:
           # FreeTierError ("OpenCode's free tier can only be used from
           # within OpenCode") while 1.18.31 succeeded at cost 0 — but only
           # for a default agent; custom agents with a tools map or a
-          # permission override were still rejected (the reason V1 used the paid go
-          # tier below).
+          # permission override were still rejected (the reason V1 used a paid go
+          # tier at the time).
           # If a future bump fails fast with that error again, bump
           # OC_VERSION and OC_SHA256 here (and the cache key above) before
           # anything else.
@@ -199,39 +207,25 @@ jobs:
         # id the pinned binary knows is then listed explicitly, because
         # the wildcard's semantics are not documented.
         run: |
-          # THE model pin. Verified: frontmatter `model:` is honoured with
-          # no -m flag. Keeping it here rather than on the run command
-          # puts it next to the tool restrictions, so rotating the model
-          # is a one-line edit in one place.
-          #
-          # MODELS (job env above) is an ordered list of FREE models, tried
-          # in turn by the Review step; the first is also written into the
-          # agent file.
-          # No API key: the review runs on the anonymous free tier, so it
-          # never spends account credits. Verified 2026-09-25 on 2.0.15:
-          # opencode/space-bunny-free accepts this read-only agent (tools
-          # map) anonymously, while opencode/big-pickle and
-          # opencode/mimo-v2.6-flash-free reject it with 403 FreeTierError
-          # ("OpenCode's free tier can only be used from within OpenCode")
-          # even when authenticated. They stay in the list so the review
-          # picks them up automatically if the free tier relaxes. Free
-          # models rotate: when the first one disappears from the catalog,
-          # the preflight below warns, and the job-level MODELS is the only
-          # place to change. V2 ignores the agent file's model: line, so the Review
-          # step passes -m explicitly.
-          MODEL=${MODELS%% *}
+          # The model is selected at run time by the step after Prepare
+          # review context, then supplied explicitly with -m to every
+          # opencode invocation. Leaving it out of this agent file prevents
+          # a stale or accidentally paid MODELS entry from becoming agent
+          # metadata; V2 otherwise has no model to infer from this file.
+          # The free path has no API key. If all free probes/reviews fail,
+          # the later fallback scopes the repository's inference credential
+          # to one paid child invocation; the agent itself remains unchanged.
           mkdir -p "$HOME/.config/opencode/agent"
           AGENT=$HOME/.config/opencode/agent/ghost-reviewer.md
-          # Only the model line interpolates. The rest stays in a QUOTED
-          # heredoc so that a future edit to the system prompt cannot be
-          # expanded by the shell: a stray backtick or $ in prose would
-          # otherwise become command substitution in a step that runs
-          # before the untrusted tree is even checked out.
+          # The frontmatter is static. It stays in a QUOTED heredoc so a
+          # future edit to the system prompt cannot be expanded by the
+          # shell: a stray backtick or $ in prose would otherwise become
+          # command substitution in a step that runs before the untrusted
+          # tree is even checked out.
           printf '%s\n' \
             '---' \
             'description: Read-only PR reviewer for the ghost codebase' \
-            'mode: primary' \
-            "model: ${MODEL}" > "$AGENT"
+            'mode: primary' > "$AGENT"
           cat >> "$AGENT" <<'AGENT_EOF'
           tools:
             "*": false
@@ -262,38 +256,19 @@ jobs:
           # starts), so it cannot guard anything. V2 itself is the guard:
           # `run --agent <name>` for an unregistered agent exits 1 with
           # 'Agent not found' instead of falling back to the default,
-          # write-capable agent (verified on 2.0.15), and the Review step
-          # treats that error as fatal rather than trying the next model.
+          # write-capable agent (verified on 2.0.15), and the selection
+          # step treats that error as fatal rather than trying the next model.
           # Verified the same day that this agent refuses a prompt telling
           # it to run a shell command ("I can't run shell commands in this
           # environment"), with no tool call emitted.
           [ -s "$AGENT" ] || { echo "::error::reviewer agent file was not written"; exit 1; }
 
-          # Model ids are provider-scoped (opencode/..., not a bare
-          # codename). The run is keyless, so the catalog is the anonymous
-          # tier's — the same one the free models in MODELS come from — and
-          # a miss here really does mean the first model was rotated out.
-          # The Review step still tries the rest of MODELS in order.
-          #
-          # This check only improves that message. It never decides
-          # whether the review runs: `opencode models` at 1.18.30 prints
-          # one provider-qualified id per bare line, but that is an
-          # observed format, not a contract, and a version bump could
-          # change it. Hard-failing on an unmatched id would then block
-          # every review on the repo to guard against a rotation that
-          # already fails loudly on its own. So: warn, and let the run
-          # produce the real verdict.
-          # From a scratch dir, never the workspace: V2 loads project config
-          # and plugins (.opencode/, opencode.json) from the working
-          # directory, and at this point the workspace is still the
-          # untrusted PR checkout, so a PR could otherwise run code here or
-          # replace the read-only agent before the review.
-          if catalog=$(cd "$RUNNER_TEMP" && opencode models 2>/dev/null) && [ -n "$catalog" ]; then
-            printf '%s\n' "$catalog" | grep -qxF "$MODEL" \
-              || echo "::warning::${MODEL} (first of MODELS) is not in the opencode model catalog. Either it was rotated or retired — if the review step now fails with an opaque gateway error, that is why, and MODEL in this step is the only place to change it — or 'opencode models' no longer prints one provider-qualified id per line, in which case this preflight is stale and the review below is unaffected."
-          else
-            echo "::warning::could not read the opencode model catalog — skipping the ${MODEL} preflight"
-          fi
+          # Model discovery is deliberately deferred until after Prepare
+          # review context. The selection step then runs `opencode models`
+          # and its probes from RUNNER_TEMP, where V2 cannot load project
+          # config or plugins from the untrusted PR tree. It writes the
+          # selected id to the next step's output; this agent has no model
+          # pin to drift out of sync with it.
 
       - name: Prepare review context
         id: context
@@ -474,103 +449,560 @@ jobs:
           find . -path ./.review-context -prune -o -type l -exec rm -f {} + 2>/dev/null || true
           rm -rf .git
 
-      - name: Review with opencode
+      - name: Prepare reviewer helpers
         if: steps.context.outputs.skip != 'true'
-        # 15 was cutting it fine: run 34892821126 took 12m51s. The
-        # read-only agent reads more than the write-capable one did (21
-        # tool calls against 9 on a comparable diff) because it has no
-        # shortcut, so a larger diff would have tripped it.
-        timeout-minutes: 25
-        # Keyless on purpose: every model in MODELS is a free-tier model,
-        # so there is no credential in this step at all and a review can
-        # never spend account credits. (Until 2026-09-25 this step ran a
-        # paid go-endpoint model via OPENCODE_API_KEY; when that balance ran
-        # out every review failed with an opaque gateway error.)
         run: |
-          cd "${GITHUB_WORKSPACE}"
-          # Hard-fail rather than hand a credential to a model fed
-          # untrusted input. A set-but-EMPTY var is harmless, so the test
-          # is on the value.
-          for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN \
-                   ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE; do
-            if [ -n "${!v}" ]; then
-              echo "::error::credential \$$v present in the model step — refusing to run"
-              exit 1
-            fi
-          done
-
-          # Capture stdout to a file; the model writes NOTHING to disk
-          # (--agent ghost-reviewer registers read-only tools only).
-          # post_review.py recovers the JSON from the reply via
-          # extract_findings().
-          #
-          # --format json emits raw JSON events rather than a single blob,
-          # so the reply text is spread across events; extract_findings
-          # scans the whole stream for balanced objects, which is why it
-          # tolerates that shape where #421's parts[-1] did not.
-          REVIEW_PROMPT="You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO).
+          cat > "${RUNNER_TEMP}/reviewer-prompt.txt" <<'REVIEW_PROMPT_EOF'
+          You are a senior Go code reviewer for the ghost codebase (Go 1.26+, modernc.org/sqlite, no CGO).
 
           Read ./pr.title, ./pr.diff, and ./.review-context/conventions.md. The diff is authoritative for changed lines; do NOT re-derive it. Read the changed files in this checkout to verify each finding.
 
-          This checkout is NOT the repository. Before you were started, these paths were deleted from it so that a pull request cannot steer its own review: AGENTS.md, CLAUDE.md, .mcp.json, opencode.json, opencode.jsonc, .opencode, every symlink, and .git. Their absence here is NOT evidence that they are absent from the repository, and a reference to any of them is NOT a dead reference. The content of CLAUDE.md is in ./.review-context/conventions.md, copied from the base ref under a different name for the same reason. Do NOT run commands and do NOT narrate your process. Also read ./.review-context/prior-threads.json — findings you already raised on this PR. Entries with \"resolved\": false are STILL OPEN: do not raise them again. Entries with \"resolved\": true were dismissed: do not raise them again unless the code changed in a way that makes the original concern newly valid.
+          This checkout is NOT the repository. Before you were started, these paths were deleted from it so that a pull request cannot steer its own review: AGENTS.md, CLAUDE.md, .mcp.json, opencode.json, opencode.jsonc, .opencode, every symlink, and .git. Their absence here is NOT evidence that they are absent from the repository, and a reference to any of them is NOT a dead reference. The content of CLAUDE.md is in ./.review-context/conventions.md, copied from the base ref under a different name for the same reason. Do NOT run commands and do NOT narrate your process. Also read ./.review-context/prior-threads.json — findings you already raised on this PR. Entries with "resolved": false are STILL OPEN: do not raise them again. Entries with "resolved": true were dismissed: do not raise them again unless the code changed in a way that makes the original concern newly valid.
 
           Cover: correctness bugs, race conditions, error-handling gaps, and breaking changes to MCP tool contracts or the SQLite schema. Do NOT report style preferences — golangci-lint handles those.
 
           Reply with ONLY a JSON document matching exactly this schema — no preamble, no explanation, no markdown fence. Your FINAL message must be the JSON itself, printed as text. Do NOT put the answer in a tool call, and do NOT attempt to write it to a file — you have no tool that can write. Print the JSON and nothing else:
 
-          {\"verdict\": \"blocker|should-fix|nit|clean\",
-           \"summary\": \"one paragraph, plain English, what this PR does\",
-           \"findings\": [{\"file\": \"repo/relative/path.go\", \"line\": 42, \"end_line\": 44, \"severity\": \"blocker|should-fix|nit\", \"title\": \"short label\", \"body\": \"what is wrong, why it matters, the concrete fix\"}]}
+          {"verdict": "blocker|should-fix|nit|clean",
+           "summary": "one paragraph, plain English, what this PR does",
+           "findings": [{"file": "repo/relative/path.go", "line": 42, "end_line": 44, "severity": "blocker|should-fix|nit", "title": "short label", "body": "what is wrong, why it matters, the concrete fix"}]}
 
           For a change to Markdown or other prose, review it as documentation, not as Go: flag claims the code in this checkout contradicts, references to files, symbols or commands that no longer exist, and statements that contradict another part of the same document. Prose style, wording and formatting are 'nit' at most, and say nothing at all if the only issue is taste.
 
           Rules: 'line' must be a line that appears in ./pr.diff as added or context — never a line outside it. 'end_line' is optional and must be >= 'line'. Use severity 'nit' for anything that does not affect correctness. If you find nothing, emit verdict 'clean' with an empty findings array. Verify each finding against the code before asserting it; omit anything you cannot verify."
+          REVIEW_PROMPT_EOF
 
-          # Try each free model in turn. A model that errors (rate limit,
-          # free-tier refusal, rotated out of the catalog) must not fail the
-          # review opaquely: its error text becomes a ::warning:: and the
-          # next model is tried; only when every model fails is it an error.
-          : > model-reply.txt
-          for m in $MODELS; do
-            echo "reviewing with ${m}"
-            if opencode run --standalone --agent ghost-reviewer -m "$m" --format json \
-                 "$REVIEW_PROMPT" > model-reply.try 2> model-stderr.txt \
-               && [ -s model-reply.try ] \
-               && jq -s -e 'length > 0 and all(.[]; .type != "error")' model-reply.try >/dev/null 2>&1; then
-              mv model-reply.try model-reply.txt
-              echo "review produced by ${m}"
-              break
+      - name: Select review model
+        id: select_model
+        if: steps.context.outputs.skip != 'true'
+        # Selection is deliberately bounded: each probe has its own timeout,
+        # and a broken/rate-limited free model must not consume the whole job.
+        timeout-minutes: 15
+        # A bounded selection failure is handed to the paid step below; the
+        # explicit Agent-not-found marker remains fatal and is not handed off.
+        continue-on-error: true
+        # This step has no token or secret. It runs every opencode command
+        # from RUNNER_TEMP, never from the untrusted PR checkout.
+        run: |
+          set -euo pipefail
+
+          workflow_escape() {
+            local value="${1-}"
+            # Escape '%' first so an existing %0A cannot be decoded by
+            # Actions, then encode real line breaks introduced by providers.
+            value=${value//%/%25}
+            value=${value//$'\r'/%0D}
+            value=${value//$'\n'/%0A}
+            printf '%s' "$value"
+          }
+
+          notice() {
+            printf '::notice::%s\n' "$(workflow_escape "$1")"
+          }
+
+          fail() {
+            printf '::error::%s\n' "$(workflow_escape "$1")"
+            exit 1
+          }
+
+          is_free_model() {
+            [[ "$1" == "opencode/big-pickle" \
+              || "$1" =~ ^opencode/[A-Za-z0-9][A-Za-z0-9._-]*-free$ ]]
+          }
+
+          declare -a candidates=()
+          declare -A seen=()
+          add_candidate() {
+            local candidate="$1"
+            if is_free_model "$candidate" && [[ -z "${seen[$candidate]+present}" ]]; then
+              candidates+=("$candidate")
+              seen["$candidate"]=1
             fi
-            reason=$( { jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.try 2>/dev/null; cat model-stderr.txt; } \
-                      | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ')
-            case "$reason" in
-              *"Agent not found"*)
-                echo "::error::ghost-reviewer agent did not register — refusing to review with the default (write-capable) tool set"
-                exit 1 ;;
-            esac
-            # reason is provider/model-derived: percent-escape it (as
-            # base_ref_safe does) so a %0A in an error body cannot open a new
-            # workflow command such as ::stop-commands::.
-            reason=${reason//%/%25}
-            echo "::warning::review model ${m} failed: ${reason:-no output}"
-          done
-          rm -f model-reply.try
+          }
 
-          [ -s model-reply.txt ] || { echo "::error::model produced no output at all"; exit 1; }
-          echo "model reply: $(wc -c < model-reply.txt) bytes"
-          # Event-type inventory. --format json emits JSONL, and the
-          # answer lives in a message part, not at the top level; this
-          # line names which part type carries it so a failed extraction
-          # is diagnosable without another round trip. The tool name is
-          # in there too: run 34878398658 failed with the answer inside a
-          # tool part, and the log did not say which tool, which cost a
-          # round trip. Indented, so a crafted type string cannot start
-          # a '::' workflow command.
-          jq -r '"\(.type)|\(.part.type // "-")|\(.part.tool // "-")"' model-reply.txt 2>/dev/null \
-            | sort | uniq -c | sed 's/^/  /' || true
+          catalog_file="$RUNNER_TEMP/reviewer-model-catalog.txt"
+          catalog_err="$RUNNER_TEMP/reviewer-model-catalog.err"
+          free_catalog="$RUNNER_TEMP/reviewer-model-free.txt"
+          free_models_file="$RUNNER_TEMP/reviewer-free-models.txt"
+          catalog_ok=0
+          : > "$free_models_file"
+          : > "$catalog_file"
+          : > "$catalog_err"
+          # Do not add --standalone here: V2's private server has no
+          # provider catalog when the runner is keyless. The normal models
+          # command can query the anonymous catalog when one is available,
+          # while the cwd below still keeps project config and plugins out
+          # of the PR tree.
+          if (cd "$RUNNER_TEMP" && env -u OPENCODE_API_KEY -u OPENCODE_GO_API_KEY \
+                timeout --foreground 60s opencode models \
+                > "$catalog_file" 2> "$catalog_err"); then
+            catalog_ok=1
+          fi
+
+          if [ "$catalog_ok" -eq 1 ]; then
+            # opencode models is observed as one provider-qualified id per
+            # line. Keep only the anonymous opencode provider: an
+            # opencode-go/* id is paid even when its model name says -free.
+            if ! awk '
+              { sub(/\r$/, "") }
+              $0 == "opencode/big-pickle" || $0 ~ /^opencode\/[A-Za-z0-9][A-Za-z0-9._-]*-free$/ { print }
+            ' "$catalog_file" | awk '!seen[$0]++' > "$free_catalog"; then
+              : > "$free_catalog"
+              catalog_ok=0
+              notice "model catalog output could not be parsed; using filtered MODELS fallback"
+            fi
+          else
+            : > "$free_catalog"
+            catalog_reason=$(tr '\r\n' '  ' < "$catalog_err" | head -c 400 || true)
+            notice "model catalog discovery failed: ${catalog_reason:-no output}; using filtered MODELS fallback"
+          fi
+          if [ "$catalog_ok" -eq 1 ]; then
+            notice "catalog filter: only anonymous opencode/*-free and opencode/big-pickle are eligible; paid and non-free provider ids were excluded"
+          fi
+
+          declare -a preferred_models=()
+          if [ -n "${MODELS:-}" ]; then
+            read -r -a preferred_models <<< "$MODELS"
+          fi
+          for model in "${preferred_models[@]}"; do
+            if ! is_free_model "$model"; then
+              notice "preferred review model ${model} skipped: not an anonymous opencode free-tier id; paid/non-free providers are never used"
+            elif [ "$catalog_ok" -eq 1 ] && [ -s "$free_catalog" ] \
+                 && ! grep -Fxq -- "$model" "$free_catalog"; then
+              notice "preferred review model ${model} was not present in the current opencode catalog; retaining it as a fallback after discovered models"
+            fi
+          done
+
+          if [ "$catalog_ok" -eq 1 ] && [ -s "$free_catalog" ]; then
+            # MODELS is the preferred order when its entries are present;
+            # append all other current free ids in catalog order.
+            for model in "${preferred_models[@]}"; do
+              if is_free_model "$model" && grep -Fxq -- "$model" "$free_catalog"; then
+                add_candidate "$model"
+              fi
+            done
+            while IFS= read -r model; do
+              [ -n "$model" ] && add_candidate "$model"
+            done < "$free_catalog"
+            # A stale catalog must not erase the maintainers' last-resort
+            # choices: try safe MODELS entries that were not discovered only
+            # after the current catalog candidates have had their probes.
+            for model in "${preferred_models[@]}"; do
+              if is_free_model "$model" && ! grep -Fxq -- "$model" "$free_catalog"; then
+                add_candidate "$model"
+              fi
+            done
+          else
+            if [ "$catalog_ok" -eq 1 ]; then
+              notice "no free models found in the current opencode catalog; using filtered MODELS fallback"
+            fi
+            for model in "${preferred_models[@]}"; do
+              add_candidate "$model"
+            done
+          fi
+
+          # Keep the retry budget finite even if the catalog grows: eight
+          # probes fit inside the selection timeout with room for discovery.
+          MAX_CANDIDATES=8
+          if [ "${#candidates[@]}" -gt "$MAX_CANDIDATES" ]; then
+            capped_candidates=()
+            for ((i = 0; i < MAX_CANDIDATES; i++)); do
+              capped_candidates+=("${candidates[$i]}")
+            done
+            candidates=("${capped_candidates[@]}")
+            notice "free candidate list capped at ${MAX_CANDIDATES} models to reserve retry and paid-fallback time"
+          fi
+          notice "review model candidates: ${#candidates[@]} (catalog free ids: $(wc -l < "$free_catalog"))"
+          selected_model=
+          probe_dir="$RUNNER_TEMP/reviewer-model-probe"
+          probe_out="$RUNNER_TEMP/reviewer-model-probe.jsonl"
+          probe_err="$RUNNER_TEMP/reviewer-model-probe.err"
+          for model in "${candidates[@]}"; do
+            notice "probing review model ${model} with ghost-reviewer from RUNNER_TEMP"
+            rm -rf "$probe_dir"
+            mkdir -p "$probe_dir"
+            : > "$probe_out"
+            : > "$probe_err"
+            probe_status=0
+            (cd "$probe_dir" && env -u OPENCODE_API_KEY -u OPENCODE_GO_API_KEY \
+              timeout --foreground 60s opencode run \
+              --standalone --agent ghost-reviewer -m "$model" --format json \
+              'Reply with exactly OK.' > "$probe_out" 2> "$probe_err") || probe_status=$?
+
+            if [ "$probe_status" -eq 0 ] && [ -s "$probe_out" ] \
+               && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
+                  "$probe_out" >/dev/null 2>&1; then
+              printf '%s\n' "$model" >> "$free_models_file"
+              if [ -z "$selected_model" ]; then
+                selected_model=$model
+                notice "selected review model: ${model} (probe passed)"
+              else
+                notice "review model ${model} passed the read-only probe; queued behind ${selected_model}"
+              fi
+              continue
+            fi
+
+            reason=$(
+              {
+                jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' "$probe_out" 2>/dev/null || true
+                cat "$probe_err"
+              } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
+            )
+            if printf '%s' "$reason" | grep -Fqi 'agent not found'; then
+              printf 'agent_fatal=true\n' >> "$GITHUB_OUTPUT"
+              fail "ghost-reviewer agent did not register; refusing to select a model with the default (write-capable) tool set"
+            fi
+            [ -n "$reason" ] || reason="probe exited ${probe_status} without a valid JSON event stream"
+            notice "review model ${model} skipped: ${reason}"
+          done
+
+          if [ -z "$selected_model" ]; then
+            notice "all free candidates failed their read-only probes; the paid fallback will be considered"
+            printf 'free_status=failed\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          printf 'free_status=success\nselected_model=%s\n' "$selected_model" >> "$GITHUB_OUTPUT"
+
+      - name: Review with opencode (free)
+        id: free_review
+        if: >-
+          !cancelled() &&
+          always() &&
+          steps.context.outputs.skip != 'true' &&
+          steps.select_model.outcome == 'success' &&
+          steps.select_model.outputs.selected_model != ''
+        continue-on-error: true
+        timeout-minutes: 70
+        env:
+          SELECTED_MODEL: ${{ steps.select_model.outputs.selected_model }}
+        run: |
+          set +e
+          cd "${GITHUB_WORKSPACE}" || {
+            printf 'review_status=fatal\n' >> "$GITHUB_OUTPUT"
+            echo "::error::could not enter the review workspace"
+            exit 0
+          }
+          # Hard-fail rather than hand a credential to a model fed
+          # untrusted input. A set-but-EMPTY var is harmless, so the test
+          # is on the value. The paid step below deliberately has its
+          # inference-scoped OPENCODE_API_KEY, which this guard allows.
+          for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN \
+                   ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE; do
+            if [ -n "${!v}" ]; then
+              printf 'review_status=fatal\n' >> "$GITHUB_OUTPUT"
+              echo "::error::credential \$$v present in the free model step — refusing to run"
+              exit 0
+            fi
+          done
+
+          workflow_escape() {
+            local value="${1-}"
+            value=${value//%/%25}
+            value=${value//$'\r'/%0D}
+            value=${value//$'\n'/%0A}
+            printf '%s' "$value"
+          }
+
+          # This is deliberately the same trusted extraction and schema gate
+          # used by post_review.py; a non-empty event stream alone is not a
+          # successful review.
+          validate_reply() {
+            python3 - "$RUNNER_TEMP/base-scripts" "$1" <<'PY'
+          import sys
+
+          sys.path.insert(0, sys.argv[1])
+          from review_findings import extract_findings_from_reply, validate
+
+          try:
+              with open(sys.argv[2], encoding="utf-8") as reply:
+                  validate(extract_findings_from_reply(reply.read()))
+          except Exception as exc:
+              print(f"reply validation failed: {exc}", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+          }
+
+          if [ ! -s "${RUNNER_TEMP}/reviewer-prompt.txt" ] \
+             || [ ! -f "${RUNNER_TEMP}/base-scripts/review_findings.py" ]; then
+            printf 'review_status=fatal\n' >> "$GITHUB_OUTPUT"
+            echo "::error::trusted reviewer prompt or validation inputs are missing"
+            exit 0
+          fi
+          REVIEW_PROMPT="$(cat "${RUNNER_TEMP}/reviewer-prompt.txt")"
+
+          if [[ "${SELECTED_MODEL}" != "opencode/big-pickle" \
+                && ! "${SELECTED_MODEL}" =~ ^opencode/[A-Za-z0-9][A-Za-z0-9._-]*-free$ ]]; then
+            printf 'review_status=fatal\n' >> "$GITHUB_OUTPUT"
+            echo "::error::selected review model is not an anonymous opencode free-tier id — refusing the real review"
+            exit 0
+          fi
+
+          free_models_file="${RUNNER_TEMP}/reviewer-free-models.txt"
+          failure_file="${RUNNER_TEMP}/free-review-failure.txt"
+          : > "$failure_file"
+          free_review_success=0
+          free_attempt=0
+          if [ -s "$free_models_file" ]; then
+            while IFS= read -r model; do
+              [ -n "$model" ] || continue
+              if [[ "$model" != "opencode/big-pickle" \
+                    && ! "$model" =~ ^opencode/[A-Za-z0-9][A-Za-z0-9._-]*-free$ ]]; then
+                printf 'review_status=fatal\n' >> "$GITHUB_OUTPUT"
+                echo "::error::free review model is not an anonymous opencode free-tier id — refusing the real review"
+                exit 0
+              fi
+              if [ "$model" = "${SELECTED_MODEL}" ]; then
+                echo "selected review model: ${model}"
+              else
+                echo "trying free review model: ${model}"
+              fi
+
+              : > model-reply.txt
+              : > model-stderr.txt
+              : > model-validation.err
+              free_status=0
+              free_attempt=$((free_attempt + 1))
+              if [ "$free_attempt" -eq 1 ]; then
+                # Give the preferred model the same generous window as the
+                # old single-model review; later retries stay bounded so
+                # exhausting the capped free list leaves time for paid.
+                free_timeout=1200
+              else
+                free_timeout=300
+              fi
+              env -u OPENCODE_API_KEY -u OPENCODE_GO_API_KEY \
+                timeout --foreground "${free_timeout}s" opencode run --standalone \
+                --agent ghost-reviewer -m "$model" --format json \
+                "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || free_status=$?
+
+              valid_reply=0
+              if [ "$free_status" -eq 0 ] && [ -s model-reply.txt ] \
+                 && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
+                    model-reply.txt >/dev/null 2>&1; then
+                if validate_reply model-reply.txt 2> model-validation.err; then
+                  valid_reply=1
+                fi
+              fi
+              if [ "$valid_reply" -eq 1 ]; then
+                free_review_success=1
+                echo "review produced by ${model}"
+                break
+              fi
+
+              free_failure_reason=$(
+                {
+                  jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
+                  cat model-stderr.txt 2>/dev/null || true
+                  cat model-validation.err 2>/dev/null || true
+                } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
+              )
+              if printf '%s' "$free_failure_reason" | grep -Fqi 'agent not found'; then
+                printf 'review_status=agent_fatal\nagent_fatal=true\n' >> "$GITHUB_OUTPUT"
+                echo "::error::ghost-reviewer agent did not register — refusing to review with the default (write-capable) tool set"
+                exit 0
+              fi
+              [ -n "$free_failure_reason" ] || free_failure_reason="free review exited ${free_status} without a valid findings document"
+              printf '%s: %s\n' "$model" "$free_failure_reason" >> "$failure_file"
+              echo "::warning::free review model ${model} failed: $(workflow_escape "$free_failure_reason"); trying remaining free candidates"
+            done < "$free_models_file"
+          fi
+
+          if [ "$free_review_success" -eq 1 ]; then
+            printf 'review_status=success\n' >> "$GITHUB_OUTPUT"
+            echo "model reply: $(wc -c < model-reply.txt) bytes"
+            jq -r '"\(.type)|\(.part.type // "-")|\(.part.tool // "-")"' model-reply.txt 2>/dev/null \
+              | sort | uniq -c | sed 's/^/  /' || true
+            exit 0
+          fi
+          printf 'review_status=failed\n' >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Review with opencode (paid fallback)
+        id: paid_review
+        if: >-
+          !cancelled() &&
+          always() &&
+          steps.context.outputs.skip != 'true' &&
+          steps.select_model.outputs.agent_fatal != 'true' &&
+          steps.free_review.outputs.agent_fatal != 'true' &&
+          (steps.select_model.outcome == 'failure' ||
+           steps.select_model.outputs.free_status == 'failed' ||
+           steps.free_review.outcome == 'failure' ||
+           (steps.free_review.outcome == 'success' &&
+            steps.free_review.outputs.review_status == 'failed'))
+        continue-on-error: true
+        timeout-minutes: 15
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+          SELECT_MODEL_OUTCOME: ${{ steps.select_model.outcome }}
+        run: |
+          set +e
+          cd "${GITHUB_WORKSPACE}" || {
+            printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
+            echo "::error::could not enter the paid review workspace"
+            exit 0
+          }
+          for v in GITHUB_TOKEN GH_TOKEN ACTIONS_RUNTIME_TOKEN \
+                   ACTIONS_ID_TOKEN_REQUEST_TOKEN AWS_WEB_IDENTITY_TOKEN_FILE; do
+            if [ -n "${!v}" ]; then
+              printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
+              echo "::error::credential \$$v present in the paid model step — refusing to run"
+              exit 0
+            fi
+          done
+
+          workflow_escape() {
+            local value="${1-}"
+            value=${value//%/%25}
+            value=${value//$'\r'/%0D}
+            value=${value//$'\n'/%0A}
+            printf '%s' "$value"
+          }
+
+          # This is deliberately the same trusted extraction and schema gate
+          # used by post_review.py; a non-empty event stream alone is not a
+          # successful review.
+          validate_reply() {
+            python3 - "$RUNNER_TEMP/base-scripts" "$1" <<'PY'
+          import sys
+
+          sys.path.insert(0, sys.argv[1])
+          from review_findings import extract_findings_from_reply, validate
+
+          try:
+              with open(sys.argv[2], encoding="utf-8") as reply:
+                  validate(extract_findings_from_reply(reply.read()))
+          except Exception as exc:
+              print(f"reply validation failed: {exc}", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+          }
+
+          if [ ! -s "${RUNNER_TEMP}/reviewer-prompt.txt" ] \
+             || [ ! -f "${RUNNER_TEMP}/base-scripts/review_findings.py" ]; then
+            printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
+            echo "::error::trusted reviewer prompt or validation inputs are missing"
+            exit 0
+          fi
+          REVIEW_PROMPT="$(cat "${RUNNER_TEMP}/reviewer-prompt.txt")"
+          if [[ "${PAID_MODEL:-}" != opencode-go/* || "${PAID_MODEL:-}" == *kimi* ]]; then
+            printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
+            echo "::error::paid fallback must be a non-Kimi opencode-go model — refusing the fallback"
+            exit 0
+          fi
+
+          failure_file="${RUNNER_TEMP}/free-review-failure.txt"
+          if [ -s "$failure_file" ]; then
+            free_failure_reason=$(head -c 400 "$failure_file" | tr '\n' ' ' || true)
+          elif [ "${SELECT_MODEL_OUTCOME}" = failure ]; then
+            free_failure_reason="free model selection did not complete"
+          else
+            free_failure_reason="no free candidate produced a valid findings document"
+          fi
+          echo "::warning::free review path failed: $(workflow_escape "$free_failure_reason"); using paid fallback ${PAID_MODEL}"
+
+          : > model-reply.txt
+          : > model-stderr.txt
+          : > model-validation.err
+          paid_status=0
+          timeout --foreground 600s opencode run --standalone \
+            --agent ghost-reviewer -m "$PAID_MODEL" --format json \
+            "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || paid_status=$?
+
+          valid_reply=0
+          if [ "$paid_status" -eq 0 ] && [ -s model-reply.txt ] \
+             && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
+                model-reply.txt >/dev/null 2>&1; then
+            if validate_reply model-reply.txt 2> model-validation.err; then
+              valid_reply=1
+            fi
+          fi
+          if [ "$valid_reply" -eq 1 ]; then
+            printf 'paid_status=success\n' >> "$GITHUB_OUTPUT"
+            echo "review produced by paid fallback ${PAID_MODEL}"
+            echo "model reply: $(wc -c < model-reply.txt) bytes"
+            jq -r '"\(.type)|\(.part.type // "-")|\(.part.tool // "-")"' model-reply.txt 2>/dev/null \
+              | sort | uniq -c | sed 's/^/  /' || true
+            exit 0
+          fi
+
+          reason=$(
+            {
+              jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
+              cat model-stderr.txt 2>/dev/null || true
+              cat model-validation.err 2>/dev/null || true
+            } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
+          )
+          if printf '%s' "$reason" | grep -Fqi 'agent not found'; then
+            printf 'paid_status=agent_fatal\npaid_agent_fatal=true\n' >> "$GITHUB_OUTPUT"
+            echo "::error::ghost-reviewer agent did not register — refusing to review with the default (write-capable) tool set"
+            exit 0
+          fi
+          printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
+          echo "::error::paid fallback ${PAID_MODEL} failed: $(workflow_escape "${reason:-no valid findings document}")"
+          exit 0
+
+      - name: Require a valid review result
+        if: >-
+          !cancelled() &&
+          always() &&
+          steps.context.outputs.skip != 'true'
+        env:
+          SELECT_MODEL_OUTCOME: ${{ steps.select_model.outcome }}
+          SELECT_AGENT_FATAL: ${{ steps.select_model.outputs.agent_fatal }}
+          FREE_OUTCOME: ${{ steps.free_review.outcome }}
+          FREE_STATUS: ${{ steps.free_review.outputs.review_status }}
+          FREE_AGENT_FATAL: ${{ steps.free_review.outputs.agent_fatal }}
+          PAID_STATUS: ${{ steps.paid_review.outputs.paid_status }}
+          PAID_AGENT_FATAL: ${{ steps.paid_review.outputs.paid_agent_fatal }}
+        run: |
+          if [ "${SELECT_AGENT_FATAL}" = true ] || [ "${FREE_AGENT_FATAL}" = true ] \
+             || [ "${PAID_AGENT_FATAL}" = true ]; then
+            echo "::error::review agent was not registered; refusing to use the default tool set"
+            exit 1
+          fi
+          if [ "${SELECT_MODEL_OUTCOME}" = success ] && [ "${FREE_STATUS}" = success ]; then
+            echo "review result accepted from the free path"
+            exit 0
+          fi
+          if [ "${PAID_STATUS}" = success ]; then
+            echo "review result accepted from the paid fallback"
+            exit 0
+          fi
+          echo "::error::no valid free or paid review result was produced"
+          exit 1
+
+      - name: Verify current PR head
+        id: head_check
+        if: >-
+          !cancelled() &&
+          always() &&
+          steps.context.outputs.skip != 'true' &&
+          (steps.free_review.outputs.review_status == 'success' ||
+           steps.paid_review.outputs.paid_status == 'success')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+          expected="$(cat pr.head)"
+          current="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+          if [ "$current" != "$expected" ]; then
+            echo "::notice::PR head changed from ${expected} to ${current}; refusing stale review"
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "current=true" >> "$GITHUB_OUTPUT"
 
       - name: Mint bot identity token
-        if: steps.context.outputs.skip != 'true'
+        if: >-
+          !cancelled() &&
+          always() &&
+          steps.context.outputs.skip != 'true' &&
+          steps.head_check.outputs.current == 'true' &&
+          (steps.free_review.outputs.review_status == 'success' ||
+           steps.paid_review.outputs.paid_status == 'success')
         id: apptoken
         # Minted here, immediately before it's needed, rather than at job
         # start: this keeps the App token off disk for the entire time the
@@ -586,12 +1018,24 @@ jobs:
         run: echo "::warning::App token unavailable — reviews will post as github-actions"
 
       - name: Post review
-        if: steps.context.outputs.skip != 'true'
+        if: >-
+          !cancelled() &&
+          always() &&
+          steps.context.outputs.skip != 'true' &&
+          steps.head_check.outputs.current == 'true' &&
+          (steps.free_review.outputs.review_status == 'success' ||
+           steps.paid_review.outputs.paid_status == 'success')
         env:
           GH_TOKEN: ${{ steps.apptoken.outputs.token || github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           cd "${GITHUB_WORKSPACE}"
+          expected="$(cat pr.head)"
+          current="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
+          if [ "$current" != "$expected" ]; then
+            echo "::notice::PR head changed from ${expected} to ${current}; refusing stale review"
+            exit 1
+          fi
           python3 "${RUNNER_TEMP}/base-scripts/post_review.py" \
             "${GITHUB_REPOSITORY}" "${PR_NUMBER}" "$(cat pr.head)" \
             model-reply.txt pr.diff
