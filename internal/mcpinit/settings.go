@@ -4,6 +4,7 @@ package mcpinit
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -90,10 +91,10 @@ func (s *settingsFile) save() error {
 		return fmt.Errorf("create dir %s: %w", dir, err)
 	}
 
-	// Backup existing file.
+	// Backup the pre-merge file, once.
 	if data, err := os.ReadFile(s.path); err == nil {
-		if err := os.WriteFile(s.path+".bak", data, 0600); err != nil {
-			return fmt.Errorf("backup %s: %w", s.path+".bak", err)
+		if err := writeBackupOnce(s.path+".bak", data); err != nil {
+			return err
 		}
 	}
 
@@ -103,14 +104,56 @@ func (s *settingsFile) save() error {
 	}
 	out = append(out, '\n')
 
-	// Atomic write: temp file + rename.
-	tmp, err := os.CreateTemp(dir, ".settings-*.json")
+	return writeFileAtomic(s.path, out, 0600)
+}
+
+// writeBackupOnce captures data at path only when nothing is there yet. The
+// .bak is meant to hold the user's pre-ghost file, so rolling it forward on
+// every save would leave the only pristine copy overwritten by ghost's own
+// previous output: a second init would then destroy the original. O_EXCL
+// makes the check and the create a single step, so two concurrent saves cannot
+// both believe they were first.
+func writeBackupOnce(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return fmt.Errorf("backup %s: %w", path, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("backup %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("backup %s: %w", path, err)
+	}
+	return nil
+}
+
+// writeFileAtomic writes data to path through a temp file in the same
+// directory followed by a rename, so a failed or interrupted write can never
+// leave a half-written user config behind. Every write to a file the user owns
+// (settings.json, codex config.toml) goes through here rather than a bare
+// os.WriteFile. A symlinked config (a dotfiles checkout, say) is resolved
+// first: renaming over the link itself would replace it with a regular file
+// and strand the real config. An existing file keeps its own permissions, so
+// rewriting a 0600 config.toml cannot silently widen it; perm applies on create.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	dir := filepath.Dir(path)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
 
-	if _, err := tmp.Write(out); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write temp file: %w", err)
@@ -119,11 +162,11 @@ func (s *settingsFile) save() error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
-	if err := os.Chmod(tmpPath, 0600); err != nil {
+	if err := os.Chmod(tmpPath, perm); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("chmod temp file: %w", err)
 	}
-	if err := os.Rename(tmpPath, s.path); err != nil {
+	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename temp file: %w", err)
 	}

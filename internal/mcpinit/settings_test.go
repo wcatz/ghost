@@ -528,3 +528,142 @@ func TestSave_RoundTrip(t *testing.T) {
 		t.Error("backup file not created")
 	}
 }
+
+// TestSettingsFile_SaveBacksUpOnlyOnce pins that the .bak is the user's
+// pre-ghost file, not ghost's previous output. Rolling the backup forward on
+// every save means a second init destroys the only pristine copy, so a bad
+// merge can no longer be undone.
+func TestSettingsFile_SaveBacksUpOnlyOnce(t *testing.T) {
+	path := tempSettings(t, `{"effortLevel":"high"}`)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+	if err := sf.save(); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("first save should back up the original: %v", err)
+	}
+	if string(bak) != string(original) {
+		t.Errorf("first backup = %q, want the original %q", bak, original)
+	}
+
+	// The user edits the file, then a second init merges into it again.
+	edited := `{"autoMemoryEnabled":false,"effortLevel":"low"}`
+	if err := os.WriteFile(path, []byte(edited), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sf2, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings (second): %v", err)
+	}
+	if err := sf2.save(); err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+	bak2, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("read backup after second save: %v", err)
+	}
+	if string(bak2) != string(original) {
+		t.Errorf("second save clobbered the original backup: got %q, want %q", bak2, original)
+	}
+	if string(bak2) == edited {
+		t.Error("backup must not be ghost's own previous output")
+	}
+}
+
+// TestWriteFileAtomic covers the contract the user-owned config writes share:
+// a temp file in the same directory renamed over the target, no leftovers, and
+// an existing file's permissions preserved (a 0600 config.toml must not become
+// world-readable just because ghost rewrote it).
+func TestWriteFileAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	if err := writeFileAtomic(path, []byte("a = 1\n"), 0644); err != nil {
+		t.Fatalf("writeFileAtomic (create): %v", err)
+	}
+	assertFileContent(t, path, "a = 1\n")
+	assertFileMode(t, path, 0644)
+
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(path, []byte("b = 2\n"), 0644); err != nil {
+		t.Fatalf("writeFileAtomic (replace): %v", err)
+	}
+	assertFileContent(t, path, "b = 2\n")
+	assertFileMode(t, path, 0600)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "config.toml" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("atomic write left temp files behind: %v", names)
+	}
+}
+
+// TestWriteFileAtomicKeepsSymlink covers a config.toml that is a symlink into a
+// dotfiles repo: the rename must land on the link's target, not replace the
+// link with a regular file (which is what a bare temp+rename does).
+func TestWriteFileAtomicKeepsSymlink(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "dotfiles", "config.toml")
+	link := filepath.Join(root, "config.toml")
+	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(real, []byte("a = 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if err := writeFileAtomic(link, []byte("b = 2\n"), 0644); err != nil {
+		t.Fatalf("writeFileAtomic through a symlink: %v", err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink was replaced by a regular file; the user lost their dotfiles link")
+	}
+	assertFileContent(t, real, "b = 2\n")
+	assertFileContent(t, link, "b = 2\n")
+}
+
+func assertFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("%s = %q, want %q", filepath.Base(path), got, want)
+	}
+}
+
+func assertFileMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Errorf("%s mode = %v, want %v", filepath.Base(path), got, want)
+	}
+}

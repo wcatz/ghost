@@ -85,6 +85,8 @@ The database schema is an embedded Go string constant in `internal/memory/schema
 
 All hook paths converge on `internal/hostevent`, which parses the versioned event envelope and dispatches normalized events. The `scratch` and `procstat` packages keep harness scratch and detached-process liveness handling separate from host adapters.
 
+Every file the user owns is written through one atomic path (temp file in the same directory, then rename), so an interrupted write cannot leave a half-written host config, and a symlinked config is written through to its target rather than replaced by it. The Claude `settings.json.bak` backup is captured once, by the first save that finds a file to back up, so repeated `init` runs never overwrite the pristine original with ghost's own output.
+
 If a host reports an unknown source, `internal/ai` does not cascade to a default harness. The caller must provide a source or the operation fails with an actionable error. This prevents an opencode or Claude session from silently using the wrong harness or billing path. OpenCode children receive an explicit `opencode/big-pickle` model unless a per-phase pin or `GHOST_OPENCODE_MODEL` override is supplied; the child home/config tree is invocation-owned, only a configured `auth.json` is carried into its data root, and its tool/MCP policy is deny-all, so the user's global OpenCode model, plugins, and MCP servers are not inherited.
 
 ## Data flow
