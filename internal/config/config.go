@@ -335,23 +335,50 @@ func LoadForHook() *Config {
 // with embeddings and linking off, a zero demotion threshold, and — worst —
 // reflection.lifecycle_timeout_minutes=0, the unbounded lifecycle the compiled
 // defaults exist to avoid. So a decode failure drops the environment and keeps
-// the defaults, loudly.
+// the defaults, loudly, down to the last resort: even if the defaults layer
+// itself cannot be decoded, the result is defaultConfig() — the same values,
+// written out — never a struct of Go zero values.
 func FallbackConfig() *Config {
 	if cfg, ok := decodeFallback(loadEnvLayer); ok {
 		return cfg
 	}
 	// The defaults map is a literal that always decodes, so this retry cannot
 	// fail in practice. It is still checked: decodeFallback reports failure with
-	// a nil *Config*, and the two fills below would dereference it — and a panic
-	// in the one function that exists to absorb a broken config is precisely the
-	// failure mode that must not be reachable.
+	// a nil *Config*, and a panic in the one function that exists to absorb a
+	// broken config is precisely the failure mode that must not be reachable.
 	cfg, ok := decodeFallback(func(*koanf.Koanf) error { return nil })
 	if !ok || cfg == nil {
-		cfg = &Config{}
+		return defaultConfig()
 	}
-	cfg.Injection = DefaultInjectionConfig()
-	cfg.Scratch.MaxBytes = DefaultScratchMaxBytes
 	return cfg
+}
+
+// defaultConfig is the last resort: the compiled defaults written out, for the
+// case where even the defaults layer will not decode. It mirrors the defaults
+// map the way DefaultInjectionConfig mirrors its injection.* entries, and
+// TestDefaultConfig_MatchesTheDefaultsMap fails if the two drift, so adding a
+// key to one without the other cannot reach a machine that needs this.
+func defaultConfig() *Config {
+	return &Config{
+		Embedding: EmbeddingConfig{
+			Enabled:    true,
+			OllamaURL:  "http://localhost:11434",
+			Model:      "nomic-embed-text:v1.5",
+			Dimensions: 768,
+		},
+		Reflection: ReflectionConfig{
+			ConsolidationTimeoutMinutes: 10,
+			LifecycleTimeoutMinutes:     60,
+		},
+		Linking: LinkingConfig{
+			Enabled:           true,
+			Threshold:         0.70,
+			DemotionThreshold: 0.90,
+		},
+		Injection: DefaultInjectionConfig(),
+		Obsidian:  ObsidianConfig{Interval: "30s"},
+		Scratch:   ScratchConfig{MaxBytes: DefaultScratchMaxBytes},
+	}
 }
 
 // decodeFallback builds the Config from the compiled defaults with env applied

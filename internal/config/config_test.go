@@ -5,12 +5,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/knadh/koanf/parsers/yaml"
+	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
 )
 
@@ -876,17 +878,37 @@ func TestFallbackConfig_BadEnvValueDegrades(t *testing.T) {
 	}
 }
 
+// TestDefaultConfig_MatchesTheDefaultsMap pins the hand-written last-resort
+// Config against the compiled defaults map. The literal exists for the case
+// where even the defaults layer will not decode, which no ordinary run can
+// reach — so without this, a key added to the map and forgotten here would only
+// ever be discovered on a machine that needed the fallback.
+func TestDefaultConfig_MatchesTheDefaultsMap(t *testing.T) {
+	k := koanf.New(".")
+	if err := k.Load(confmap.Provider(defaults, "."), nil); err != nil {
+		t.Fatalf("load defaults: %v", err)
+	}
+	want := &Config{}
+	if err := k.Unmarshal("", want); err != nil {
+		t.Fatalf("unmarshal defaults: %v", err)
+	}
+	if got := defaultConfig(); !reflect.DeepEqual(got, want) {
+		t.Errorf("defaultConfig() has drifted from the defaults map:\n got %+v\nwant %+v", got, want)
+	}
+}
+
 // TestFallbackConfig_NeverPanicsOnDecodeFailure pins that FallbackConfig
-// returns a usable Config on the paths where decodeFallback reports failure, and
-// in particular does not dereference the nil it returns. It is the function that
-// exists to absorb a broken config, so a panic here is the one outcome it must
-// not have. The defaults map is a literal that always decodes, so the real
-// fallback is reached by breaking that assumption: an unbindable defaults entry
-// makes every decode fail, both the real one and the env-free retry.
+// returns the compiled defaults — not a struct of Go zero values — on the paths
+// where decodeFallback reports failure. It is the function that exists to absorb
+// a broken config, so a panic here, or a server booting with embeddings and
+// linking off and an unbounded lifecycle, is the outcome it must not have. The
+// defaults map is a literal that normally always decodes, so the last resort is
+// reached by breaking that assumption: an unbindable entry makes every decode
+// fail, both the real one and the env-free retry.
 func TestFallbackConfig_NeverPanicsOnDecodeFailure(t *testing.T) {
 	isolateConfig(t)
 	writeUserConfig(t, malformedYAML)
-	// A map value koanf cannot flatten into its key space: every decode of the
+	// A value koanf cannot flatten into its key space: every decode of the
 	// defaults layer now fails, not just the one carrying the environment.
 	defaults["injection.category_caps"] = func() {}
 	t.Cleanup(func() {
@@ -898,12 +920,24 @@ func TestFallbackConfig_NeverPanicsOnDecodeFailure(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("FallbackConfig() = nil")
 	}
+	// The full default set, not just the two fields a partial fill would set.
+	// These are the fields cmd/ghost's own bootstrap test pins for this
+	// fallback, because they are what decide whether the server comes up with
+	// embeddings and linking on.
+	if !cfg.Embedding.Enabled || cfg.Embedding.Dimensions != 768 {
+		t.Errorf("embedding = %+v, want the compiled defaults (768 dimensions, enabled)", cfg.Embedding)
+	}
+	if !cfg.Linking.Enabled || cfg.Linking.Threshold != 0.70 || cfg.Linking.DemotionThreshold != 0.90 {
+		t.Errorf("linking = %+v, want the compiled defaults", cfg.Linking)
+	}
+	if cfg.Reflection.LifecycleTimeoutMinutes != 60 || cfg.Reflection.ConsolidationTimeoutMinutes != 10 {
+		t.Errorf("reflection = %+v, want the compiled defaults (60 and 10 minute bounds)", cfg.Reflection)
+	}
+	if cfg.Obsidian.Interval != "30s" {
+		t.Errorf("obsidian.interval = %q, want the compiled default 30s", cfg.Obsidian.Interval)
+	}
 	if cfg.Scratch.MaxBytes != DefaultScratchMaxBytes {
 		t.Errorf("scratch.max_bytes = %d, want %d", cfg.Scratch.MaxBytes, DefaultScratchMaxBytes)
-	}
-	if cfg.Injection.BehaviorFloor != DefaultInjectionConfig().BehaviorFloor {
-		t.Errorf("injection.behavior_floor = %d, want the filled-in default %d",
-			cfg.Injection.BehaviorFloor, DefaultInjectionConfig().BehaviorFloor)
 	}
 	if !strings.Contains(warnings.String(), "built-in defaults") {
 		t.Errorf("warning %q must say the built-in defaults are in use", warnings.String())
