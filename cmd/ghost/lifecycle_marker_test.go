@@ -60,7 +60,7 @@ func isolatedLifecycleEnv(t *testing.T) string {
 // TestRunLifecycle_ReflectSkippedWithoutLLMWritesMarker: with auto_reflect
 // enabled and no LLM CLI reachable, runLifecycle skips reflect entirely
 // today — silently, for the detached stop hook, forever. The run must leave
-// a lifecycle-last-failure.json marker recording the skipped phase so the
+// a per-project lifecycle-last-failure marker recording the skipped phase so the
 // next session-start can surface it.
 func TestRunLifecycle_ReflectSkippedWithoutLLMWritesMarker(t *testing.T) {
 	dataHome := isolatedLifecycleEnv(t)
@@ -72,7 +72,9 @@ func TestRunLifecycle_ReflectSkippedWithoutLLMWritesMarker(t *testing.T) {
 
 	runLifecycle()
 
-	markerFile := filepath.Join(dataHome, "ghost", "lifecycle-last-failure.json")
+	// Per-project marker: runLifecycle resolves the session directory to
+	// projx, and the writer keys the file on that resolved id.
+	markerFile := filepath.Join(dataHome, "ghost", "lifecycle-last-failure-projx.json")
 	b, err := os.ReadFile(markerFile)
 	if err != nil {
 		t.Fatalf("expected a failure marker after reflect was skipped for no LLM backend: %v", err)

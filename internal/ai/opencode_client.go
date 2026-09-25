@@ -116,7 +116,10 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("opencode run: %w: %s", err, stderr.String())
+		// stderr alone was empty for every one of the 357 failures in
+		// lifecycle.log: opencode reports errors on its JSON stream, not the
+		// console (issue #540).
+		return "", fmt.Errorf("opencode run: %w: %s", err, harnessFailureOutput(stdout.String(), stderr.String()))
 	}
 	return parseOpenCodeOutput(stdout.String())
 }

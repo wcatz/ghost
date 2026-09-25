@@ -162,7 +162,7 @@ func (c *CLIClient) run(ctx context.Context, prompt string, extraArgs ...string)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("claude -p: %w: %s", err, stderr.String())
+		return "", fmt.Errorf("claude -p: %w: %s", err, harnessFailureOutput(stdout.String(), stderr.String()))
 	}
 	return stdout.String(), nil
 }

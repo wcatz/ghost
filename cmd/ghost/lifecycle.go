@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -132,8 +133,14 @@ func runLifecycle() {
 		// the watchdog below, because WaitDelay would kill only the direct child
 		// and leave a harness grandchild that ignored SIGTERM orphaned.
 		cmd.WaitDelay = phaseGracePeriod + 5*time.Second
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
+		// Tee into a bounded tail. The child's output still reaches the
+		// terminal (and lifecycle.log for a detached run) unchanged — but
+		// runErr.Error() alone is "exit status 1", and that is all the marker
+		// ever recorded. When a phase dies without saying why, the tail is the
+		// only record of what it printed last.
+		tail := newPhaseTail(phaseFailureTailMax)
+		cmd.Stdout = io.MultiWriter(os.Stdout, tail)
+		cmd.Stderr = io.MultiWriter(os.Stderr, tail)
 
 		phaseDone := make(chan struct{})
 		go func() {
@@ -150,8 +157,13 @@ func runLifecycle() {
 		close(phaseDone)
 		cancel()
 		if runErr != nil {
+			// The cause, not the exit status: with no output this becomes
+			// "exit 1; argv: ghost reflect --project x --apply; ghost dev"
+			// instead of the bare "exit status 1" that made 357 log entries
+			// indistinguishable.
+			cause := phaseFailureCause(phaseArgs, runErr, tail.String())
 			fmt.Fprintf(os.Stderr, "lifecycle: %s failed after %s (continuing): %v\n", ph.name, time.Since(start).Round(time.Second), runErr)
-			recordFailure(ph.name, runErr.Error())
+			recordFailure(ph.name, cause)
 			continue
 		}
 		phasesRan++
