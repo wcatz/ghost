@@ -8,8 +8,23 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+// beforeHybridHydrateFn is a test seam between candidate selection and
+// hydration. Production leaves it as a no-op; tests use it to model a delete
+// landing after the leg queries release their read locks.
+var beforeHybridHydrateFn atomic.Value // func([]string)
+
+func init() {
+	beforeHybridHydrateFn.Store(func([]string) {})
+}
+
+func beforeHybridHydrate(ids []string) {
+	fn, _ := beforeHybridHydrateFn.Load().(func([]string))
+	fn(ids)
+}
 
 // StoreEmbedding saves an embedding vector for a memory.
 // The vector is stored as raw little-endian float32 bytes.
@@ -406,37 +421,72 @@ func ageDays(createdAt string, now time.Time) float64 {
 }
 
 // fuseAndRank runs the shared selection pipeline for hybrid and FTS-only
-// searches. FuseAndSelectWindow owns scope narrowing and membership; this
-// function only materializes that window, ranks it, and applies final demotion.
+// searches. Window selection — fusion, scope narrowing and membership — lives in
+// FuseAndSelectWindow and the unexported selectWindow it delegates to; this
+// function materializes that window, hydrates it, ranks it, and applies final
+// demotion.
 func (s *Store) fuseAndRank(ctx context.Context, ftsResults []Memory, vecResults []ScoredMemory, limit int, p SearchParams) ([]Memory, error) {
-	window := FuseAndSelectWindow(ftsResults, vecResults, limit, p)
+	// Fuse once, narrow scope, then cut the window. The same narrowed pool feeds
+	// the hydration backfill below, which is why narrowing happens here rather
+	// than inside the selection seam alone.
+	pool := scopeEligiblePool(fuseCandidatePool(ftsResults, vecResults, p), p)
+	window := selectWindow(pool, limit, p)
 
-	// FTS results are already hydrated. Reuse them and query only vector-only
-	// selections, keeping the FTS-only fallback on the same selection seam
-	// without adding a redundant database round trip.
-	byID := make(map[string]Memory, len(ftsResults))
-	for _, m := range ftsResults {
-		byID[m.ID] = m
+	// Hydrate the full candidate pool before ranking — decayRank needs
+	// category/pinned/created_at to reorder the window, and hydration via
+	// GetByIDs does not preserve order, so the final sort lives there too.
+	beforeHybridHydrate(window.IDs)
+	poolIDs := make([]string, len(pool))
+	if window.Scores == nil {
+		window.Scores = make(map[string]float64, len(pool))
+	}
+	for i, candidate := range pool {
+		poolIDs[i] = candidate.id
+		if _, ok := window.Scores[candidate.id]; !ok {
+			window.Scores[candidate.id] = candidate.score
+		}
+	}
+	if len(poolIDs) == 0 {
+		poolIDs = window.IDs
+	}
+	memories, err := s.GetByIDs(ctx, poolIDs)
+	if err != nil {
+		return nil, err
+	}
+	memories = selectHydratedWindow(memories, window, poolIDs)
+	memories = decayRank(memories, window.Scores, p, limit, time.Now().UTC())
+	return s.demoteResults(ctx, memories, p), nil
+}
+
+func selectHydratedWindow(hydrated []Memory, window HybridWindow, poolIDs []string) []Memory {
+	byID := make(map[string]Memory, len(hydrated))
+	for _, memory := range hydrated {
+		byID[memory.ID] = memory
 	}
 	selected := make([]Memory, 0, len(window.IDs))
-	missing := make([]string, 0, len(window.IDs))
+	seen := make(map[string]bool, len(window.IDs))
 	for _, id := range window.IDs {
-		if m, ok := byID[id]; ok {
-			selected = append(selected, m)
-		} else {
-			missing = append(missing, id)
+		if memory, ok := byID[id]; ok {
+			selected = append(selected, memory)
+			seen[id] = true
 		}
 	}
-	if len(missing) > 0 {
-		hydrated, err := s.GetByIDs(ctx, missing)
-		if err != nil {
-			return nil, err
-		}
-		selected = append(selected, hydrated...)
+	if len(selected) == len(window.IDs) {
+		return selected
 	}
-
-	selected = decayRank(selected, window.Scores, p, limit, time.Now().UTC())
-	return s.demoteResults(ctx, selected, p), nil
+	for _, id := range poolIDs {
+		if len(selected) == len(window.IDs) {
+			break
+		}
+		if seen[id] {
+			continue
+		}
+		if memory, ok := byID[id]; ok {
+			selected = append(selected, memory)
+			seen[id] = true
+		}
+	}
+	return selected
 }
 
 // HybridWindow is the result of hybrid fusion and window selection: the memory
@@ -445,6 +495,69 @@ func (s *Store) fuseAndRank(ctx context.Context, ftsResults []Memory, vecResults
 type HybridWindow struct {
 	IDs    []string
 	Scores map[string]float64
+}
+
+func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchParams) []*hybridCandidate {
+	byID := make(map[string]*hybridCandidate, len(ftsResults)+len(vecResults))
+	get := func(id string) *hybridCandidate {
+		c, ok := byID[id]
+		if !ok {
+			c = &hybridCandidate{id: id}
+			byID[id] = c
+		}
+		return c
+	}
+	for rank, memory := range ftsResults {
+		candidate := get(memory.ID)
+		candidate.fts = rank + 1
+		candidate.scope = memory.Scope
+		candidate.score += p.FTSWeight / float64(p.RRFK+rank+1)
+	}
+	for rank, scored := range vecResults {
+		candidate := get(scored.MemoryID)
+		candidate.vec = rank + 1
+		// Only fill in scope from the vector leg when the keyword leg did not
+		// supply it: both describe the same row, so they agree, and a nil map
+		// from either leg is a row that genuinely has no scope.
+		if candidate.scope == nil {
+			candidate.scope = scored.Scope
+		}
+		candidate.score += p.VecWeight / float64(p.RRFK+rank+1)
+	}
+
+	pool := make([]*hybridCandidate, 0, len(byID))
+	for _, candidate := range byID {
+		pool = append(pool, candidate)
+	}
+	// Deterministic order: map iteration is randomized, and an unstable sort
+	// over tied scores made result order — and the demotion penalties that
+	// depend on it — vary between runs of the same query.
+	sort.Slice(pool, func(i, j int) bool {
+		if pool[i].score != pool[j].score {
+			return pool[i].score > pool[j].score
+		}
+		return pool[i].id < pool[j].id
+	})
+	return pool
+}
+
+// scopeEligiblePool drops the candidates the requested scope excludes. It runs
+// before the cut so an eligible candidate can backfill a row scope removed, and
+// both the window and fuseAndRank's hydration backfill read its result, so an
+// out-of-scope row can neither take a result slot nor stand in for a selected
+// row that vanished. ScopeMatches keeps rows that do not mention a requested
+// key eligible; silence is not disagreement.
+func scopeEligiblePool(pool []*hybridCandidate, p SearchParams) []*hybridCandidate {
+	if len(p.Scope) == 0 {
+		return pool
+	}
+	eligible := pool[:0]
+	for _, c := range pool {
+		if ScopeMatches(c.scope, p.Scope) {
+			eligible = append(eligible, c)
+		}
+	}
+	return eligible
 }
 
 // FuseAndSelectWindow owns both halves of hybrid retrieval — fusing the
@@ -473,63 +586,17 @@ type HybridWindow struct {
 // always been given. Either way this is the eligible set, and decayRank orders
 // and trims within it.
 func FuseAndSelectWindow(ftsResults []Memory, vecResults []ScoredMemory, limit int, p SearchParams) HybridWindow {
-	// Fusion: reciprocal rank fusion over both legs. A memory found by both
-	// accumulates both contributions, which is the only thing that makes a
-	// high FTS rank outrank a high vector rank.
-	byID := make(map[string]*hybridCandidate, len(ftsResults)+len(vecResults))
-	get := func(id string) *hybridCandidate {
-		c, ok := byID[id]
-		if !ok {
-			c = &hybridCandidate{id: id}
-			byID[id] = c
-		}
-		return c
-	}
-	for rank, m := range ftsResults {
-		c := get(m.ID)
-		c.fts = rank + 1
-		c.scope = m.Scope
-		c.score += p.FTSWeight / float64(p.RRFK+rank+1)
-	}
-	for rank, sm := range vecResults {
-		c := get(sm.MemoryID)
-		c.vec = rank + 1
-		// Only fill in scope from the vector leg when the keyword leg did not
-		// supply it: both describe the same row, so they agree, and a nil map
-		// from either leg is a row that genuinely has no scope.
-		if c.scope == nil {
-			c.scope = sm.Scope
-		}
-		c.score += p.VecWeight / float64(p.RRFK+rank+1)
-	}
+	return selectWindow(scopeEligiblePool(fuseCandidatePool(ftsResults, vecResults, p), p), limit, p)
+}
 
-	pool := make([]*hybridCandidate, 0, len(byID))
-	for _, c := range byID {
-		pool = append(pool, c)
-	}
-	// Narrow the combined pool before the cut so an eligible candidate can
-	// backfill a row excluded by scope. ScopeMatches keeps rows that do not
-	// mention a requested key eligible; silence is not disagreement.
-	if len(p.Scope) > 0 {
-		eligible := pool[:0]
-		for _, c := range pool {
-			if ScopeMatches(c.scope, p.Scope) {
-				eligible = append(eligible, c)
-			}
-		}
-		pool = eligible
-	}
-
-	// Deterministic order: map iteration is randomized, and an unstable sort
-	// over tied scores made result order — and the demotion penalties that
-	// depend on it — vary between runs of the same query.
-	sort.Slice(pool, func(i, j int) bool {
-		if pool[i].score != pool[j].score {
-			return pool[i].score > pool[j].score
-		}
-		return pool[i].id < pool[j].id
-	})
-
+// selectWindow cuts an already-fused, already-narrowed candidate pool down to
+// the result window. It is the same seam fuseAndRank uses once it holds that
+// pool, so a candidate excluded by scope cannot re-enter through the backfill.
+//
+// It reorders the slice it is handed — the reservation promotes keyword hits in
+// place — so it cuts a copy, leaving the caller's pool in fused-score order for
+// use as a hydration backfill source.
+func selectWindow(pool []*hybridCandidate, limit int, p SearchParams) HybridWindow {
 	width := limit
 	if p.DecayReselect && p.DecayEnabled {
 		width = limit * 2
@@ -537,7 +604,7 @@ func FuseAndSelectWindow(ftsResults []Memory, vecResults []ScoredMemory, limit i
 	if width <= 0 {
 		return HybridWindow{}
 	}
-
+	pool = append([]*hybridCandidate(nil), pool...)
 	// Reserve slots for the top keyword hits: the best `limit/5` of them are
 	// guaranteed a place in the window even when the vector leg would have
 	// filled every row. A fifth of the window, and only when that is at least
@@ -561,7 +628,7 @@ func FuseAndSelectWindow(ftsResults []Memory, vecResults []ScoredMemory, limit i
 	//     enough to survive that spread exceeds the catastrophic top floor.
 	//
 	// What the issue describes is admission, and admission is what this does.
-	if slots := limit / 5; slots > 0 && len(pool) > width {
+	if slots := limit / 5; p.FTSWeight > 0 && slots > 0 && len(pool) > width {
 		isReserved := func(c *hybridCandidate) bool {
 			return c.vec == 0 && c.fts > 0 && c.fts <= slots
 		}
@@ -601,12 +668,11 @@ func FuseAndSelectWindow(ftsResults []Memory, vecResults []ScoredMemory, limit i
 	return hybridWindowOf(pool)
 }
 
-//
-
 // hybridCandidate is one memory's fused standing: the rank each leg gave it
 // and the score those ranks produced. fts or vec is 0 when that leg did not
 // retrieve it, which is what distinguishes a two-leg hit from a keyword-only
-// one.
+// one. scope is the row's own scope, carried by whichever leg retrieved it, so
+// selection can narrow the pool without a second lookup.
 type hybridCandidate struct {
 	id    string
 	fts   int

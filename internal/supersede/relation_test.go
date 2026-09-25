@@ -375,8 +375,8 @@ var liveRelationCases = []struct {
 }
 
 // liveTestSource prefers GHOST_TEST_SOURCE and otherwise detects the calling
-// harness, so the live labeled-set tests keep running from a session shell
-// instead of silently skipping.
+// harness to decide WHICH harness to call. It no longer decides WHETHER to
+// call one: that is GHOST_LIVE_TESTS=1 alone (issue #548).
 func liveTestSource() string {
 	if s := os.Getenv("GHOST_TEST_SOURCE"); s != "" {
 		return s
@@ -394,6 +394,9 @@ func liveTestSource() string {
 // a missed link merely leaves the staleness bug unfixed for that pair, which is
 // cheaper to recover from.
 func TestRelationClassifierLive(t *testing.T) {
+	if !ai.LiveTestsEnabled() {
+		t.Skip("live LLM test makes billable harness calls; set GHOST_LIVE_TESTS=1 to run")
+	}
 	// Session-scoped, mirroring production's buildClassifyProviderForSource:
 	// it routes through the SAME NewSourceProviderForSource seam, so setting
 	// GHOST_TEST_SOURCE=opencode (or claude-code/codex/goose) compels that
@@ -401,6 +404,9 @@ func TestRelationClassifierLive(t *testing.T) {
 	// source var it detects the calling harness (ai.DetectSource), and skips
 	// only if neither is available. New harnesses are added in one place (the
 	// source switch) and are honored here automatically.
+	//
+	// None of that decides whether to run at all: GHOST_LIVE_TESTS=1 does
+	// (issue #548), checked first above.
 	ctx := context.Background()
 	cli := ai.NewSourceProviderForSource(liveTestSource(), "", "", "", "")
 	if !cli.Available() {
@@ -431,9 +437,12 @@ func TestRelationClassifierLive(t *testing.T) {
 
 // TestRelationClassifierLiveBatch runs the same labeled set through the
 // batched path (chunks of 3), validating the numbered-line prompt and parser
-// against a real harness. Skipped when no harness is detected; set
-// GHOST_TEST_SOURCE=opencode to compel one.
+// against a real harness. Off by default: set GHOST_LIVE_TESTS=1, plus
+// GHOST_TEST_SOURCE=opencode to compel a particular harness.
 func TestRelationClassifierLiveBatch(t *testing.T) {
+	if !ai.LiveTestsEnabled() {
+		t.Skip("live LLM test makes billable harness calls; set GHOST_LIVE_TESTS=1 to run")
+	}
 	ctx := context.Background()
 	cli := ai.NewSourceProviderForSource(liveTestSource(), "", "", "", "")
 	if !cli.Available() {
