@@ -68,6 +68,20 @@ func TestMigrateV10AddsProvenanceAndValidity(t *testing.T) {
     resolved_at   TEXT,
     resolve_kept_hash TEXT NOT NULL DEFAULT ''
 )`,
+		// migrate() now continues to v13, which ALTERs memory_snapshots; a real
+		// database of this vintage always has the table (it predates v6 — see the
+		// pre-v6 schema in this file), just not the identity columns v13 adds.
+		`CREATE TABLE memory_snapshots (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    snapshot_id   TEXT NOT NULL,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL,
+    source        TEXT NOT NULL,
+    tags          TEXT DEFAULT '[]',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
 		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v10-p1', 'p1')`,
 		`INSERT INTO memories (id, project_id, content, resolved_at)
 		  VALUES ('m1', 'p1', 'a note written before provenance existed', '2026-01-02 03:04:05')`,

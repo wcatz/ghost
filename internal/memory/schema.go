@@ -203,7 +203,33 @@ CREATE TABLE IF NOT EXISTS memory_snapshots (
     importance    REAL NOT NULL,
     source        TEXT NOT NULL,
     tags          TEXT DEFAULT '[]',
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    -- The ORIGINAL memory's timestamp, not the moment the snapshot was
+    -- taken. A restore that reset created_at made an old memory look freshly
+    -- written, and created_at feeds decay, so restoring "the same memory"
+    -- silently aged it backwards.
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Identity and history, so a restore returns the same memory rather than
+    -- a lookalike. memory_embeddings and memory_links both reference
+    -- memories(id) ON DELETE CASCADE, so a delete-then-reinsert destroys the
+    -- embedding and the row's whole link graph even though the text comes
+    -- back looking identical. NULL only on snapshots written before schema
+    -- v13, which never recorded an id — those restore by content match
+    -- instead.
+    --
+    -- pinned and resolved_at are deliberately not stored: the snapshot
+    -- predicate is source != 'manual' AND pinned = 0 AND resolved_at IS
+    -- NULL, so both are constant by construction. Restore re-checks them on
+    -- the live row instead, which is the value that can actually change.
+    memory_id     TEXT,
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    last_accessed TEXT,
+    agent         TEXT,
+    session_id    TEXT,
+    source_ref    TEXT,
+    confidence    REAL,
+    valid_from    TEXT,
+    valid_until   TEXT,
+    verified_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_project ON memory_snapshots(project_id, snapshot_id);
 

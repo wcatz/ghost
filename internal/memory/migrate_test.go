@@ -386,6 +386,20 @@ func TestMigrateRepairsPreExistingCacheOrphans(t *testing.T) {
     reflection_summary  TEXT DEFAULT '',
     updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 )`,
+		// migrate() now continues to v13, which ALTERs memory_snapshots; a real
+		// database of this vintage always has the table (it predates v6 — see the
+		// pre-v6 schema in this file), just not the identity columns v13 adds.
+		`CREATE TABLE memory_snapshots (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    snapshot_id   TEXT NOT NULL,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL,
+    source        TEXT NOT NULL,
+    tags          TEXT DEFAULT '[]',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
 		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v5c-p1', 'p1')`,
 		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'survivor memory')`,
 		`INSERT INTO link_scans (memory_id, scanned_at) VALUES ('deleted-mem', datetime('now'))`,
@@ -713,6 +727,20 @@ func TestMigrateV6AddsReflectInputSig(t *testing.T) {
     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT
 )`,
+		// migrate() now continues to v13, which ALTERs memory_snapshots; a real
+		// database of this vintage always has the table (it predates v6 — see the
+		// pre-v6 schema in this file), just not the identity columns v13 adds.
+		`CREATE TABLE memory_snapshots (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    snapshot_id   TEXT NOT NULL,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL,
+    source        TEXT NOT NULL,
+    tags          TEXT DEFAULT '[]',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
 		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v5-p1', 'p1')`,
 		`INSERT INTO ghost_state (project_id, learned_context) VALUES ('p1', 'pre-migration context')`,
 		`PRAGMA user_version = 5`,
@@ -794,6 +822,20 @@ func TestMigrateV7AddsResolveKeptHash(t *testing.T) {
     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT
 )`,
+		// migrate() now continues to v13, which ALTERs memory_snapshots; a real
+		// database of this vintage always has the table (it predates v6 — see the
+		// pre-v6 schema in this file), just not the identity columns v13 adds.
+		`CREATE TABLE memory_snapshots (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    snapshot_id   TEXT NOT NULL,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL,
+    source        TEXT NOT NULL,
+    tags          TEXT DEFAULT '[]',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
 		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v6-p1', 'p1')`,
 		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'pre-migration note')`,
 		`PRAGMA user_version = 6`,
@@ -874,6 +916,20 @@ func TestMigrateV8AddsSupersedeChecked(t *testing.T) {
     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT,
     resolve_kept_hash TEXT NOT NULL DEFAULT ''
+)`,
+		// migrate() now continues to v13, which ALTERs memory_snapshots; a real
+		// database of this vintage always has the table (it predates v6 — see the
+		// pre-v6 schema in this file), just not the identity columns v13 adds.
+		`CREATE TABLE memory_snapshots (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    snapshot_id   TEXT NOT NULL,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL,
+    source        TEXT NOT NULL,
+    tags          TEXT DEFAULT '[]',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 )`,
 		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v7-p1', 'p1')`,
 		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'newer note')`,

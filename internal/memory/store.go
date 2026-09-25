@@ -1691,8 +1691,14 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// flag through"). See issue #318.
 	snapshotID := fmt.Sprintf("%s-%d", projectID, time.Now().UnixNano())
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags)
-		SELECT ?, project_id, category, content, importance, source, tags
+		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags,
+		                              created_at, memory_id, access_count, last_accessed,
+		                              agent, session_id, source_ref, confidence,
+		                              valid_from, valid_until, verified_at)
+		SELECT ?, project_id, category, content, importance, source, tags,
+		       created_at, id, access_count, last_accessed,
+		       agent, session_id, source_ref, confidence,
+		       valid_from, valid_until, verified_at
 		FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL
 	`, snapshotID, projectID)
 	if err != nil {
@@ -1840,17 +1846,21 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			"project_id", projectID, "reused", reused, "concurrent_kept", len(concurrent))
 	}
 
-	// Prune old snapshots — keep only the 3 most recent per project. Order by
+	// Prune old snapshots — keep only the 10 most recent per project. Order by
 	// snapshot_id, not created_at: snapshot_id embeds UnixNano, while
 	// created_at is only second-precision, so same-second snapshots would
 	// otherwise prune in arbitrary order.
+	//
+	// Widened from 3: with a restore no longer consuming the snapshot it
+	// read, three was a handful of reflections of history — one bad round
+	// and there was nothing left to roll back to.
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM memory_snapshots
 		WHERE project_id = ? AND snapshot_id NOT IN (
 			SELECT DISTINCT snapshot_id FROM memory_snapshots
 			WHERE project_id = ?
 			ORDER BY snapshot_id DESC
-			LIMIT 3
+			LIMIT 10
 		)
 	`, projectID, projectID)
 	if err != nil {
@@ -1895,37 +1905,110 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Delete current non-manual memories. Pinned and resolved memories are
-	// excluded, same as ReplaceNonManual: reflection never touched them, so
-	// restore must not delete them either — they aren't in the snapshot to
-	// bring back. See issue #318.
-	_, err = tx.ExecContext(ctx, `DELETE FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL`, projectID)
+	// Remove what the replace created — and only that.
+	//
+	// "Rows created after the snapshot" cannot be the rule, tempting as it
+	// sounds: the replacements the revert exists to undo ARE created after
+	// the snapshot, in the same transaction that takes it. Deleting them by
+	// age would leave the reflection's output sitting next to the state it
+	// replaced, so a restore added rows back without ever undoing anything.
+	//
+	// Identity gives a cleaner cut. ReplaceNonManual hardcodes
+	// source='reflection' for everything it emits, and every reflection row
+	// that existed before the snapshot is in the snapshot by id — so a
+	// reflection row NOT in this snapshot can only be output of this replace
+	// (or a later one, which is equally superseded). A save made afterwards
+	// through the MCP server carries source='mcp' and is never touched, which
+	// is the data-loss half of this bug: it was never in the snapshot, so
+	// deleting it had no way back.
+	//
+	// Pinned and resolved rows stay excluded throughout (issue #318).
+	del, err := tx.ExecContext(ctx, `
+		DELETE FROM memories
+		WHERE project_id = ? AND source = 'reflection' AND pinned = 0 AND resolved_at IS NULL
+		  AND NOT EXISTS (
+		      SELECT 1 FROM memory_snapshots s
+		      WHERE s.snapshot_id = ?
+		        AND ((s.memory_id IS NOT NULL AND s.memory_id = memories.id)
+		             OR (s.memory_id IS NULL
+		                 AND s.content = memories.content AND s.source = memories.source))
+		  )
+	`, projectID, snapshotID)
 	if err != nil {
-		return 0, fmt.Errorf("delete current: %w", err)
+		return 0, fmt.Errorf("remove replace output: %w", err)
 	}
+	removedN, _ := del.RowsAffected()
 
-	// Restore from snapshot.
+	// Restore in place instead of delete-then-reinsert.
+	//
+	// The old shape deleted EVERY non-manual row and re-inserted the
+	// snapshot. Because memory_embeddings and memory_links both reference
+	// memories(id) ON DELETE CASCADE, re-inserting under a fresh id destroyed
+	// the embedding and the link graph of every row the restore "brought
+	// back", while the text looked perfectly fine — and the reset
+	// created_at/access_count made decay treat an old memory as new.
+	//
+	// Updating the row that still exists keeps its identity, its embeddings
+	// and its links; the FTS triggers refresh the index on content change.
+	updated, err := tx.ExecContext(ctx, `
+		UPDATE memories SET
+		    category = s.category, content = s.content, importance = s.importance,
+		    source = s.source, tags = s.tags, created_at = s.created_at,
+		    access_count = s.access_count, last_accessed = s.last_accessed,
+		    agent = s.agent, session_id = s.session_id, source_ref = s.source_ref,
+		    confidence = s.confidence, valid_from = s.valid_from,
+		    valid_until = s.valid_until, verified_at = s.verified_at
+		FROM memory_snapshots s
+		WHERE s.snapshot_id = ? AND s.memory_id = memories.id
+		  AND memories.pinned = 0 AND memories.resolved_at IS NULL
+	`, snapshotID)
+	if err != nil {
+		return 0, fmt.Errorf("restore existing rows: %w", err)
+	}
+	updatedN, _ := updated.RowsAffected()
+
+	// Bring back rows that are genuinely gone, under the id they had, so
+	// anything still pointing at them resolves again.
+	//
+	// memory_id is NULL only for snapshots written before schema v13, whose
+	// ids were never recorded. Those match on content instead: that can only
+	// add a row that is missing and never overwrites a live one, so a repeated
+	// restore stays a no-op rather than duplicating what it just wrote.
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO memories (project_id, category, content, source, importance, tags)
-		SELECT project_id, category, content, source, importance, tags
-		FROM memory_snapshots WHERE snapshot_id = ?
+		INSERT INTO memories (id, project_id, category, content, source, importance, tags,
+		                      created_at, updated_at, access_count, last_accessed,
+		                      agent, session_id, source_ref, confidence,
+		                      valid_from, valid_until, verified_at)
+		SELECT COALESCE(memory_id, hex(randomblob(16))), project_id, category, content,
+		       source, importance, tags, created_at, created_at, access_count, last_accessed,
+		       agent, session_id, source_ref, confidence,
+		       valid_from, valid_until, verified_at
+		FROM memory_snapshots
+		WHERE snapshot_id = ?
+		  AND ((memory_id IS NOT NULL AND memory_id NOT IN (SELECT id FROM memories))
+		       OR (memory_id IS NULL
+		           AND NOT EXISTS (SELECT 1 FROM memories m
+		                           WHERE m.project_id = memory_snapshots.project_id
+		                             AND m.content = memory_snapshots.content
+		                             AND m.source = memory_snapshots.source)))
 	`, snapshotID)
 	if err != nil {
 		return 0, fmt.Errorf("restore snapshot: %w", err)
 	}
+	insertedN, _ := res.RowsAffected()
 
-	// Clean up the used snapshot.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_snapshots WHERE snapshot_id = ?`, snapshotID); err != nil {
-		s.logger.Warn("failed to delete used snapshot", "snapshot_id", snapshotID, "error", err)
-	}
+	// The snapshot is deliberately kept. Restore is idempotent — re-running
+	// it produces the same state — so deleting it only meant a second attempt
+	// failed with "no snapshots found" while burning one of the few retained.
 
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit: %w", err)
 	}
 
-	n, _ := res.RowsAffected()
-	s.logger.Info("memories restored from snapshot", "project_id", projectID, "snapshot_id", snapshotID, "count", n)
-	return int(n), nil
+	n := int(removedN + updatedN + insertedN)
+	s.logger.Info("memories restored from snapshot", "project_id", projectID, "snapshot_id", snapshotID,
+		"removed", removedN, "updated", updatedN, "reinserted", insertedN, "count", n)
+	return n, nil
 }
 
 // CountMemories returns the total number of memories for a project.
