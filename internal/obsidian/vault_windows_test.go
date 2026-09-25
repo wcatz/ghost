@@ -62,8 +62,11 @@ func TestWriteIfChangedRetriesTransientRenameFailure(t *testing.T) {
 		t.Errorf("rename attempts = %d, want 3 (two transient failures, then success)", attempts)
 	}
 	// A non-transient failure is reported immediately, not retried away.
-	renameFn.Store(func(string, string) error { return windows.ERROR_FILE_NOT_FOUND })
 	attempts = 0
+	renameFn.Store(func(string, string) error {
+		attempts++
+		return windows.ERROR_FILE_NOT_FOUND
+	})
 	if _, err := writeIfChanged(p, "changed"); err == nil {
 		t.Error("a permanent rename failure must still fail the write")
 	}

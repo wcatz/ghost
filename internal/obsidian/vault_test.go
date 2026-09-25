@@ -3,6 +3,8 @@ package obsidian
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -87,45 +89,102 @@ func TestWriteIfChanged(t *testing.T) {
 // partially written or interleaved note (and a rename could hit a missing
 // file). Payloads are large enough that interleaving corrupts the result
 // rather than coincidentally matching.
+//
+// Two dimensions. Both race many DISTINCT payloads per destination and accept
+// any payload written for that destination, so a shared temp name is caught
+// wherever foreign bytes land: each writer's rename can publish another
+// writer's bytes. The second dimension adds the shared-target case — all
+// writers replacing one path, which must end as exactly one of the payloads —
+// and is POSIX-only by construction: Go opens files for reading without
+// FILE_SHARE_DELETE, so on Windows a rename replacing a destination that any
+// goroutine holds for a read is refused outright. That is a property of this
+// test's own concurrent readers, not of Ghost, whose publishes go through
+// renameWithRetry for exactly that transient.
 func TestWriteIfChangedConcurrentTempIsolation(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "a.md")
-	payloads := []string{
-		strings.Repeat("A", 4096) + "one",
-		strings.Repeat("B", 4096) + "two",
-		strings.Repeat("C", 4096) + "three",
-	}
+	const writersPerTarget = 30
 
-	var wg sync.WaitGroup
-	errs := make(chan error, len(payloads)*50)
-	for i := 0; i < 50; i++ {
-		for _, pl := range payloads {
-			wg.Add(1)
-			go func(pl string) {
-				defer wg.Done()
-				if _, err := writeIfChanged(p, pl); err != nil {
-					errs <- err
+	t.Run("distinct targets", func(t *testing.T) {
+		dir := t.TempDir()
+		payloadFor := func(target string, i int) string {
+			return target + "-" + strconv.Itoa(i) + " " + strings.Repeat(target, 4096+i)
+		}
+		var wg sync.WaitGroup
+		errs := make(chan error, 3*writersPerTarget)
+		for i := 0; i < writersPerTarget; i++ {
+			for _, target := range []string{"one", "two", "three"} {
+				wg.Add(1)
+				go func(target string, i int) {
+					defer wg.Done()
+					p := filepath.Join(dir, target+".md")
+					if _, err := writeIfChanged(p, payloadFor(target, i)); err != nil {
+						errs <- err
+					}
+				}(target, i)
+			}
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Fatalf("concurrent write failed: %v", err)
+		}
+		for _, target := range []string{"one", "two", "three"} {
+			got, err := os.ReadFile(filepath.Join(dir, target+".md"))
+			if err != nil {
+				t.Fatalf("read %s.md: %v", target, err)
+			}
+			for i := 0; i < writersPerTarget; i++ {
+				if string(got) == payloadFor(target, i) {
+					goto consistent
 				}
-			}(pl)
+			}
+			t.Errorf("%s.md holds no payload written for it (interleaved write), len=%d", target, len(got))
+		consistent:
 		}
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		t.Fatalf("concurrent write failed: %v", err)
-	}
+		assertNoTempLeftovers(t, dir)
+	})
 
-	got, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatalf("read final: %v", err)
-	}
-	for _, pl := range payloads {
-		if string(got) == pl {
-			goto consistent
+	t.Run("shared target", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows refuses a replace while another goroutine holds the destination open for reading")
 		}
-	}
-	t.Fatalf("final content is not exactly one payload (interleaved write), len=%d", len(got))
-consistent:
+		dir := t.TempDir()
+		p := filepath.Join(dir, "a.md")
+		payloads := []string{
+			strings.Repeat("A", 4096) + "one",
+			strings.Repeat("B", 4096) + "two",
+			strings.Repeat("C", 4096) + "three",
+		}
+		var wg sync.WaitGroup
+		errs := make(chan error, len(payloads)*50)
+		for i := 0; i < 50; i++ {
+			for _, pl := range payloads {
+				wg.Add(1)
+				go func(pl string) {
+					defer wg.Done()
+					if _, err := writeIfChanged(p, pl); err != nil {
+						errs <- err
+					}
+				}(pl)
+			}
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Fatalf("concurrent write failed: %v", err)
+		}
+		got, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read final: %v", err)
+		}
+		if string(got) != payloads[0] && string(got) != payloads[1] && string(got) != payloads[2] {
+			t.Fatalf("final content is not exactly one payload (interleaved write), len=%d", len(got))
+		}
+		assertNoTempLeftovers(t, dir)
+	})
+}
+
+func assertNoTempLeftovers(t *testing.T, dir string) {
+	t.Helper()
 	leftovers, _ := filepath.Glob(filepath.Join(dir, "*.ghost-tmp*"))
 	if len(leftovers) != 0 {
 		t.Fatalf("temp files left behind: %v", leftovers)
