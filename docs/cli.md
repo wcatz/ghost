@@ -83,11 +83,15 @@ ghost reflect myproject --apply
 | `--restore` | Restore the most recent consolidation snapshot. |
 | `--require-llm` | Fail instead of falling back to the offline SQLite/Jaccard tier. |
 | `--allow-drops` | Apply even when guarded-category memories would be removed without a merge. |
+| `--promote-globals` | Promote cross-project candidates into `_global`; without this flag they remain project-scoped. |
 | `--skip-unchanged` | Skip the LLM call when the consolidatable set is unchanged since the last applied pass. |
 | `--source <host>` | Explicit harness: `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
 The `auto` tier uses the explicit source when provided, otherwise detects the calling harness. It does not silently switch to a different harness or billing path. When a source is known but its CLI binary is unavailable, auto can fall back to SQLite; the offline tier is also available for an explicit local run.
+
+CLI-backed maintenance runs each harness with an allowlisted environment, isolated configuration, and tools/MCP disabled; see [Harness subprocess environment](configuration.md#harness-subprocess-environment).
+
 
 ### `ghost resolve <project>`
 
@@ -104,7 +108,7 @@ ghost resolve myproject --apply
 | `--source <host>` | Classify through `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
-The classifier uses a local keyword prefilter and batched KEEP-biased calls. It fails when no source-specific harness can be selected; it never silently falls back to another harness.
+The classifier uses a local keyword prefilter and batched KEEP-biased calls. Only explicit KEEP verdicts enter the content-hash cache; missing or garbled verdicts are counted as UNKNOWN and retried on a later pass. It fails when no source-specific harness can be selected; it never silently falls back to another harness.
 
 ### `ghost supersede <project>`
 

@@ -87,7 +87,7 @@ ghost reflect myproject
 ghost reflect myproject --apply
 ```
 
-`reflect` can merge duplicates, prune noise, and promote useful cross-project knowledge. It takes a snapshot before replacing memories, refuses to replace the store with an empty result, and preserves manually saved memories. Use `--restore` to restore the most recent snapshot.
+`reflect` can merge duplicates, prune noise, and promote useful cross-project knowledge. Cross-project candidates remain project-scoped unless you pass `--promote-globals`; that explicit opt-in writes them to `_global`, where they are injected into every project. It takes a snapshot before replacing project memories, refuses to replace the store with an empty result, and preserves manually saved memories. Use `--restore` to restore the most recent project snapshot; promoted globals are not covered by that restore and must be removed from `_global` separately.
 
 The default `auto` tier routes through the calling session's CLI harness. When a source is known but its CLI binary is unavailable, it falls back to the offline SQLite/Jaccard tier; if the calling source cannot be detected, it fails rather than guessing. `--require-llm` disables the fallback and fails if the selected harness is unavailable.
 
@@ -98,7 +98,7 @@ ghost resolve myproject
 ghost resolve myproject --apply
 ```
 
-`resolve` finds intermediate findings, changelog notes, and other resolved evidence. Applying the result stamps `resolved_at`, which removes the note from ranked session injection while keeping it searchable. KEEP decisions are cached by content hash, so converged projects avoid repeated classifier calls.
+`resolve` finds intermediate findings, changelog notes, and other resolved evidence. Applying the result stamps `resolved_at`, which removes the note from ranked session injection while keeping it searchable. Only explicit KEEP decisions are cached by content hash; garbled or otherwise unknown verdicts are reported as UNKNOWN, remain uncached, and are offered again on a later pass, so converged projects avoid repeated calls only after a real KEEP verdict.
 
 ### Link superseding memories
 
