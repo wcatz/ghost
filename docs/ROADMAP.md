@@ -277,6 +277,7 @@ The four axes are named in [`architecture.md`](architecture.md#memory-axes). Val
 
 | Issue | Why it is P0 |
 |---|---|
+| [#574](https://github.com/wcatz/ghost/issues/574) | Partly delivered: the linker's `related` edges and near-duplicate demotion now ignore scope conflicts, but `internal/supersede` still selects candidates with the unscoped `SearchVector` and writes `supersedes`/`causes` edges across a scope conflict, which `SupersedePenalties` then applies |
 | [#575](https://github.com/wcatz/ghost/issues/575) | Validity is preserved by snapshot replacement/restore but is not exposed or consulted by normal retrieval; confidence is written but not read by ranking |
 | [#577](https://github.com/wcatz/ghost/issues/577) | Session-start injection neither renders nor filters scope — the surface that most needs it |
 | [#579](https://github.com/wcatz/ghost/issues/579) | Define the four axes and their invariants; the documentation half can land first and this section already starts it |
