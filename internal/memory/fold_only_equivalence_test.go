@@ -96,10 +96,14 @@ func TestTokenizeContentKeepsContractionsAsNegation(t *testing.T) {
 			t.Errorf("tokenizeContent(%q) has no negation, want one in any spelling", s)
 		}
 	}
-	// A positive sentence must not acquire one.
+	// A positive sentence must not acquire one. "can" and "won" are in this
+	// list deliberately: they are the fragments a split contraction leaves, and
+	// both are ordinary English words, so a bare-fragment match would turn
+	// "you can deploy" into a negation indistinguishable from "you cannot".
 	for _, s := range []string{
 		"run the linter before pushing", "the user is wayne", "commit directly to the main branch ever",
 		"you should run live tests", "deploy on a tuesday", "the linter runs before pushing",
+		"you can deploy on tuesday", "you can ship a release on friday", "we can run live tests",
 	} {
 		if containsNegation(tokenizeContent(s)) {
 			t.Errorf("tokenizeContent(%q) invented a negation", s)

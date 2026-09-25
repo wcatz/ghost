@@ -841,15 +841,16 @@ Flags:
 		// project, and reports the REAL promoted count rather than the number
 		// of candidates — a partial promotion must not print "3 promoted to
 		// global" one line after "Promoted 1/3".
-		// Everything the project ends up holding, which is projectMems plus,
-		// when promotion is off, the candidates folded back into it — and, when
-		// promotion is on, any candidate that failed to promote and was kept.
-		// appliedSummary counts rows, so leaving these out would understate it.
-		appliedProjectMems := append([]reflection.ReflectMemory(nil), projectMems...)
+		// Everything the project ends up holding. With promotion OFF, every
+		// candidate is folded back into the project, so all of them belong in
+		// the count. With promotion ON, only some may have been kept, and
+		// ApplyReflection returns counts rather than identities — so the exact
+		// kept subset is not knowable here, and adding all of globalMems would
+		// count promoted rows as project memories too. The summary is therefore
+		// not inflated, and the recoveryWarning below carries the kept count.
+		appliedProjectMems := projectMems
 		if !parsed.promoteGlobals {
-			appliedProjectMems = append(appliedProjectMems, globalMems...)
-		} else if keptProject > 0 {
-			appliedProjectMems = append(appliedProjectMems, globalMems...)
+			appliedProjectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 		}
 		summary := appliedSummary(appliedProjectMems, globalMems, promoted, parsed.promoteGlobals)
 		fmt.Printf("Applied: %s\n", summary)

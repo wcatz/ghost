@@ -3269,12 +3269,37 @@ const (
 // tokenizeContent lowercases s and splits it into a set of alphanumeric
 // tokens longer than one rune. Mirrors reflection's tokenize so both dedup
 // layers score similarity identically.
-// contractionNegations maps the fragment left behind when an apostrophe is
-// treated as a separator. The order matters: these are checked before the bare
-// "not", so "doesn't" contributes "doesnt" — which is a negation — rather than a
-// positive "does".
-var contractionNegations = []string{"don", "doesn", "didn", "isn", "aren", "wasn", "weren", "won", "can", "couldn", "shouldn", "wouldn", "ain", "hasn", "haven", "hadn", "mustn"}
+// contractionNegations are the stems whose apostrophe-free spelling ends in a
+// single "t": dont, isnt, wasnt, arent, werent, doesnt, didnt, wouldnt, couldnt,
+// shouldnt, hasnt, havent, hadnt, aint, wont, cant.
+var contractionNegations = []string{
+	"don", "isn", "aren", "wasn", "weren", "doesn", "didn", "wouldn", "couldn",
+	"shouldn", "hasn", "haven", "hadn", "ain", "won", "can",
+}
 
+// tokenizeContent lowercases, removes apostrophes, and splits on every
+// non-alphanumeric character.
+//
+// Removing the apostrophe FIRST is what makes the negation legible. Splitting on
+// it turns "don't" into "don" plus a dropped "t", and "can't" into "can" — an
+// ordinary English word, so a negation check keyed on the fragment would call
+// "you can deploy on tuesday" a negation and make it tokenize identically to
+// "you cannot deploy on tuesday". With the apostrophe removed the whole family
+// is unambiguous: every n't-contraction and "cannot" become one token ending in
+// a distinctive "t" or the whole word "cannot", and the bare words can, won and
+// don are never consulted on their own.
+//
+// This matters because FoldOnly drops the incoming text: a negated instruction
+// and its positive form have to be distinguishable, or the fold strengthens one
+// and silently loses the other.
+// tokenizeContent lowercases and splits on every non-alphanumeric character.
+//
+// Splitting on the apostrophe is what makes the contraction handling necessary
+// rather than incidental: without it a negated instruction tokenized almost
+// identically to its positive form wherever the following words were shared.
+// Contractions therefore fold onto one canonical negation token, so "don't",
+// "doesn't", "isn't", "shouldn't", "won't" and "can't" all compare equal to a
+// plain "not". The apostrophe is not the information; the negation is.
 // tokenizeContent lowercases and splits on every non-alphanumeric character.
 //
 // Splitting on the apostrophe is what makes the contraction handling necessary
@@ -3286,8 +3311,10 @@ var contractionNegations = []string{"don", "doesn", "didn", "isn", "aren", "wasn
 // "won't" and "can't" all land on the same word and compare equal to a plain
 // "not". The apostrophe itself is not information; the negation is.
 func tokenizeContent(s string) map[string]bool {
+	// Apostrophes go before the split, never after: see the note above.
+	lower := strings.ReplaceAll(strings.ToLower(s), "'", "")
 	tokens := make(map[string]bool)
-	for _, word := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+	for _, word := range strings.FieldsFunc(lower, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	}) {
 		if len(word) <= 1 {
@@ -3303,15 +3330,17 @@ func tokenizeContent(s string) map[string]bool {
 }
 
 func isContractionNegation(word string) bool {
-	// "don't" splits into "don" + "t"; "dont" stays whole. Both spellings, and
-	// the same for every other contraction, have to land on the negation token
-	// or the apostrophe-free spelling would read as a positive claim.
+	if word == "cannot" {
+		return true
+	}
+	// Only the suffixed spellings. The bare stem is never matched: "can" and
+	// "won" are English words, and a sentence containing one is not a negation.
 	for _, stem := range contractionNegations {
-		if word == stem || word == stem+"t" || word == stem+"nt" {
+		if word == stem+"t" {
 			return true
 		}
 	}
-	return word == "cannot"
+	return false
 }
 
 // containsNegation reports whether a token set states a negation, in any of the
