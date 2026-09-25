@@ -28,8 +28,18 @@ func Sync(ctx context.Context, ex *Exporter, db *sql.DB, vaultDir, projectFilter
 	// transient startup blip (vault volume not yet mounted, busy disk), and
 	// silently — the tick loop is what logs. last was captured before the
 	// attempt, so the very next tick retries without needing another commit.
+	// Whether the previous export attempt succeeded. A failed export must not
+	// be gated on data_version: nothing about the database changed when the
+	// export broke, so v == last holds forever and the "will retry next tick"
+	// this logs was never true for the startup path — the loop skipped every
+	// subsequent tick and the vault stayed empty until an unrelated commit
+	// moved the counter. The tick path already retained its baseline for the
+	// same reason; this carries that intent to the first export too.
+	exportedOK := false
 	if err := ex.Export(ctx, vaultDir, projectFilter); err != nil {
 		ex.Logger.Warn("obsidian sync: initial export failed, will retry next tick", "error", err)
+	} else {
+		exportedOK = true
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -43,16 +53,21 @@ func Sync(ctx context.Context, ex *Exporter, db *sql.DB, vaultDir, projectFilter
 				ex.Logger.Warn("obsidian sync: data_version poll failed", "error", err)
 				continue
 			}
-			if v == last {
+			// Gated on success rather than on data_version alone: after a
+			// failed attempt the baseline already equals the live counter,
+			// so this comparison would skip the retry this block promises.
+			if exportedOK && v == last {
 				continue
 			}
 			if err := ex.Export(ctx, vaultDir, projectFilter); err != nil {
 				// Baseline stays put: the version delta persists, so the
 				// next tick retries without needing another commit.
 				ex.Logger.Warn("obsidian sync: export failed, will retry next tick", "error", err)
+				exportedOK = false
 				continue
 			}
 			last = v
+			exportedOK = true
 		}
 	}
 }

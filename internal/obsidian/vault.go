@@ -29,7 +29,7 @@ func readDir(dir string) ([]os.DirEntry, error) {
 func ensureVault(dir string) error {
 	entries, err := readDir(dir)
 	if os.IsNotExist(err) {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create vault dir: %w", err)
 		}
 		entries = nil
@@ -42,7 +42,7 @@ func ensureVault(dir string) error {
 	if len(entries) > 0 {
 		return fmt.Errorf("%s exists, is not empty, and has no %s marker — refusing to manage it (use a fresh directory)", dir, markerName)
 	}
-	return os.WriteFile(filepath.Join(dir, markerName), []byte(`{"schema_version":1}`+"\n"), 0o644)
+	return os.WriteFile(filepath.Join(dir, markerName), []byte(`{"schema_version":1}`+"\n"), 0o600)
 }
 
 // writeIfChanged writes content atomically (temp+rename), skipping the write
@@ -51,7 +51,7 @@ func writeIfChanged(path, content string) (bool, error) {
 	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
 		return false, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false, err
 	}
 	// A fixed temp name collides when two syncs write the same note at once
@@ -64,7 +64,7 @@ func writeIfChanged(path, content string) (bool, error) {
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp) //nolint:errcheck // no-op once the rename succeeds
-	if err := f.Chmod(0o644); err != nil {
+	if err := f.Chmod(0o600); err != nil {
 		f.Close() //nolint:errcheck
 		return false, err
 	}
@@ -99,6 +99,63 @@ func hasGhostID(path string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// pruneOrphanFolder removes Ghost's own notes from a folder the current
+// project set no longer claims, then removes any directory left empty.
+//
+// It never removes a file that is not Ghost's. The sweep used os.RemoveAll on
+// the whole folder whenever it held at least one ghost_id note, so a user's
+// note or attachment sitting beside that file went with it — with no undo, and
+// against a design spec that states user-created files are never touched
+// (2026-07-10 obsidian-vault-mirror-design.md). Triggers are ordinary: a
+// project rename or merge changes the folder set, and any user folder holding
+// a copied Ghost note looked exactly like an orphaned project.
+//
+// Deleting Ghost-managed files one at a time and offering directories for
+// removal only when empty leaves user content exactly where it was. os.Remove
+// answering ENOTEMPTY is not an error here but the proof the guard worked: a
+// directory that will not close is a directory that still holds something
+// Ghost does not own.
+func pruneOrphanFolder(dir string) error {
+	if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // unreadable entry: leave it and everything under it alone
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".md") {
+			return nil // an attachment — not Ghost's to delete
+		}
+		if _, ok := hasGhostID(path); !ok {
+			return nil // a note the user wrote — never touched
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("remove ghost-managed files: %w", err)
+	}
+
+	// Deepest first. WalkDir is pre-order, so a directory always appears
+	// before anything under it; walking that list backwards therefore offers
+	// every child before its parent, which is what makes a nested tree
+	// collapsible one empty level at a time.
+	var dirs []string
+	if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			dirs = append(dirs, path)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("list orphan directories: %w", err)
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		_ = os.Remove(dirs[i]) // ENOTEMPTY means user content remains: leave it
+	}
+	return nil
 }
 
 // hasGhostContent reports whether dir contains any .md file with a ghost_id
@@ -189,8 +246,8 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 			}
 			dir := filepath.Join(root, e.Name())
 			if hasGhostContent(dir) {
-				if err := os.RemoveAll(dir); err != nil {
-					return fmt.Errorf("remove orphan folder %s: %w", e.Name(), err)
+				if err := pruneOrphanFolder(dir); err != nil {
+					return fmt.Errorf("prune orphan folder %s: %w", e.Name(), err)
 				}
 			}
 		}
