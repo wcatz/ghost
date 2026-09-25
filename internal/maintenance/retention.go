@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,12 +23,15 @@ import (
 	"github.com/wcatz/ghost/internal/procstat"
 )
 
-const openProbeTimeout = 2 * time.Second
+const (
+	openProbeTimeout = 2 * time.Second
+	quarantineGrace  = time.Hour
+)
 
 var (
-	// openFileProbe is a narrow seam for tests and for the production native
-	// probe plus lsof/fuser fallback. A probe error is fail-closed: the
-	// candidate is left alone.
+	// openFileProbe is a narrow seam for tests and for the production
+	// lsof/fuser probe with a native fallback. A probe error is fail-closed:
+	// the candidate is left alone.
 	openFileProbe = detectOpenFile
 
 	runOpenProbeTool = func(ctx context.Context, tool, path string) error {
@@ -41,7 +45,26 @@ var (
 		"resolve.log",
 		"supersede.log",
 	}
+
+	quarantineNamePattern = regexp.MustCompile(`^\..+\.retention-[A-Za-z0-9]+$`)
 )
+
+// OpenFileProbe reports whether a path is held by a process. It is exported so
+// tests in dependent packages can pin the probe instead of inheriting whatever
+// lsof, fuser, or procfs state the host happens to have.
+type OpenFileProbe func(string) (bool, error)
+
+// SetOpenFileProbeForTest installs a deterministic probe and returns a restore
+// function. It is a test seam inside an internal package, not a runtime option.
+func SetOpenFileProbeForTest(probe OpenFileProbe) func() {
+	old := openFileProbe
+	if probe == nil {
+		openFileProbe = detectOpenFile
+	} else {
+		openFileProbe = probe
+	}
+	return func() { openFileProbe = old }
+}
 
 // Result is the count of files changed by one retention pass.
 type Result struct {
@@ -68,6 +91,11 @@ func RunWithConfig(dataDir, dbPath string, backupCount int, logMaxBytes int64) (
 	var result Result
 	var errs []error
 
+	quarantineRemoved, err := ReapStaleQuarantineFiles(dataDir)
+	result.StaleFilesRemoved += quarantineRemoved
+	if err != nil {
+		errs = append(errs, fmt.Errorf("reap stale quarantine files: %w", err))
+	}
 	removed, err := PrunePreMigrateBackups(dbPath, backupCount)
 	result.BackupsRemoved = removed
 	if err != nil {
@@ -79,7 +107,7 @@ func RunWithConfig(dataDir, dbPath string, backupCount int, logMaxBytes int64) (
 		errs = append(errs, fmt.Errorf("rotate data-dir logs: %w", err))
 	}
 	stale, err := ReapStaleProcessFiles(dataDir)
-	result.StaleFilesRemoved = stale
+	result.StaleFilesRemoved += stale
 	if err != nil {
 		errs = append(errs, fmt.Errorf("reap stale process files: %w", err))
 	}
@@ -170,6 +198,45 @@ func PrunePreMigrateBackups(dbPath string, keep int) (int, error) {
 	return removed, errors.Join(errs...)
 }
 
+// ReapStaleQuarantineFiles removes provably unheld quarantine tombstones left
+// by an interrupted or racing rotation once they are older than a grace period.
+func ReapStaleQuarantineFiles(dataDir string) (int, error) {
+	if dataDir == "" {
+		return 0, nil
+	}
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read data dir %s: %w", dataDir, err)
+	}
+	removed := 0
+	var errs []error
+	for _, entry := range entries {
+		if entry.IsDir() || !quarantineNamePattern.MatchString(entry.Name()) {
+			continue
+		}
+		path := filepath.Join(dataDir, entry.Name())
+		info, statErr := os.Lstat(path)
+		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
+		if time.Since(info.ModTime()) < quarantineGrace {
+			continue
+		}
+		ok, removeErr := removeUnheldFile(path)
+		if removeErr != nil {
+			errs = append(errs, removeErr)
+			continue
+		}
+		if ok {
+			removed++
+		}
+	}
+	return removed, errors.Join(errs...)
+}
+
 // RotateLogs bounds the known Ghost-owned data-dir logs without deleting an
 // open file. An oversized file is atomically quarantined first, so a writer
 // that races the probe either follows the new path or is detected on the
@@ -204,11 +271,21 @@ func rotateLog(path string, maxBytes int64) (bool, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= maxBytes {
 		return false, nil
 	}
+	inUse, probeErr := openFileProbe(path)
+	if probeErr != nil {
+		return false, probeErr
+	}
+	if inUse {
+		return false, nil
+	}
 	tombstone, err := quarantinePath(path)
 	if err != nil {
+		if renameMeansHeld(err) {
+			return false, nil
+		}
 		return false, err
 	}
-	inUse, probeErr := openFileProbe(tombstone)
+	inUse, probeErr = openFileProbe(tombstone)
 	if probeErr != nil {
 		return false, errorsJoinRestore(path, tombstone, probeErr)
 	}
@@ -220,6 +297,15 @@ func rotateLog(path string, maxBytes int64) (bool, error) {
 		return false, errorsJoinRestore(path, tombstone, err)
 	}
 	out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+	if errors.Is(err, os.ErrExist) {
+		// A writer recreated the visible path after quarantine. Preserve that
+		// writer's file, bound the old inode in place, and let the grace-period
+		// tombstone reaper remove the hidden copy later.
+		if rewriteErr := rewriteQuarantine(tombstone, tail); rewriteErr != nil {
+			return false, rewriteErr
+		}
+		return false, nil
+	}
 	if err != nil {
 		return false, errorsJoinRestore(path, tombstone, err)
 	}
@@ -241,6 +327,22 @@ func rotateLog(path string, maxBytes int64) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func rewriteQuarantine(path string, tail []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(tail); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 func readLogTail(path string, maxBytes int64) ([]byte, error) {

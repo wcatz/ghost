@@ -5,6 +5,25 @@ import (
 	"testing"
 )
 
+func TestRecentMaintenanceRunsTreatsMissingTableAsEmpty(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.Exec(`DROP TABLE maintenance_runs`); err != nil {
+		t.Fatal(err)
+	}
+
+	runs, err := RecentMaintenanceRuns(context.Background(), db, 10)
+	if err != nil {
+		t.Fatalf("RecentMaintenanceRuns on pre-v9 schema: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("missing table returned %d runs", len(runs))
+	}
+}
+
 // TestRecordAndRecentMaintenanceRuns: RecordMaintenanceRun inserts a row with
 // a generated id and server-side timestamp; RecentMaintenanceRuns returns them
 // newest-first with every field the status printer shows (scratch bytes,

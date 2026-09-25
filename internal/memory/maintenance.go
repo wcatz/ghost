@@ -49,6 +49,15 @@ func RecentMaintenanceRuns(ctx context.Context, db *sql.DB, limit int) ([]Mainte
 	if limit <= 0 {
 		limit = 20
 	}
+	var tableExists int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='maintenance_runs'`,
+	).Scan(&tableExists); err != nil {
+		return nil, fmt.Errorf("inspect maintenance runs table: %w", err)
+	}
+	if tableExists == 0 {
+		return []MaintenanceRun{}, nil
+	}
 	rows, err := db.QueryContext(ctx,
 		`SELECT id, kind, recorded_at, scratch_bytes, scratch_reaped_bytes, scratch_reaped_count, note
 		 FROM maintenance_runs

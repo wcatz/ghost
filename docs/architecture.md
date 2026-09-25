@@ -125,7 +125,7 @@ host Stop
 
 The lifecycle is opt-in. A phase failure is logged and does not prevent later phases from running. The reflect phase can use a source-matched CLI harness or an explicitly selected offline tier; the autonomous path requires a real harness when it is configured to rewrite memories.
 
-Data-dir hygiene is deliberately separate from memory semantics. `internal/maintenance` bounds the known Ghost-owned backup/log classes, reaps only retired per-phase PID/temp/lock claims, runs after configured Ghost database opens/migrations and at the start of a detached lifecycle, and fails closed when a candidate's live owner or open-file state cannot be proven safe. Destructive operations first move a candidate to a private quarantine name, so a writer that raced the probe is detected on the moved inode before removal. It never treats the live database or newest pre-migration copy as disposable cleanup.
+Data-dir hygiene is deliberately separate from memory semantics. `internal/maintenance` bounds the known Ghost-owned backup/log classes, reaps only retired per-phase PID/temp/lock claims, runs after configured Ghost database opens/migrations and at the start of a detached lifecycle, and fails closed when a candidate's live owner or open-file state cannot be proven safe. Destructive operations probe the original path, move the candidate to a private quarantine name, then probe the moved inode, so a writer that raced the probe is detected before removal and Windows-held files defer without an error. Old unheld tombstones are themselves reaped after a grace period. It never treats the live database or newest pre-migration copy as disposable cleanup.
 
 ## Persistence and search
 

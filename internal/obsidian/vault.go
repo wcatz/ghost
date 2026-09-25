@@ -175,7 +175,10 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 					return nil // concurrent writer or recently crashed write
 				}
 				_, err := maintenance.RemoveFileIfUnheld(path)
-				return err
+				if err != nil {
+					return nil // unverifiable or transiently busy: defer the temp
+				}
+				return nil
 			}
 			if !strings.HasSuffix(path, ".md") {
 				return nil

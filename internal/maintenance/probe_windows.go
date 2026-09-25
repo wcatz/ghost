@@ -8,6 +8,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func renameMeansHeld(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
+}
+
 // nativeOpenProbe attempts an exclusive open. Existing holders that do not
 // share access report a sharing/access violation, which is treated as held.
 func nativeOpenProbe(path string) (inUse, known bool, err error) {

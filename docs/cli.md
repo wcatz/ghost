@@ -206,7 +206,7 @@ ghost bench --sweep
 
 ## Data-dir retention
 
-Ghost runs a best-effort retention pass after database opens/migrations and at the start of a detached lifecycle. The detached lifecycle and Obsidian-sync launch paths rotate their logs file-only before opening them, without synchronous database maintenance. The pass keeps the newest configured number of pre-migration database copies, trims the newest tail of known lifecycle/Obsidian logs, and removes only dead retired per-phase PID/temp/lock claims. Current lifecycle/Obsidian claims and files belonging to a running Ghost process are never removed. Linux and Windows use native handle probes, with `lsof`/`fuser` as a fallback; an unverifiable file is deferred. `ghost maintenance status` uses a no-retention database-open path and remains read-only.
+Ghost runs a best-effort retention pass after database opens/migrations and at the start of a detached lifecycle. The detached lifecycle and Obsidian-sync launch paths rotate their logs file-only before opening them, without synchronous database maintenance. The pass keeps the newest configured number of pre-migration database copies, trims the newest tail of known lifecycle/Obsidian logs, and removes only dead retired per-phase PID/temp/lock claims. Current lifecycle/Obsidian claims and files belonging to a running Ghost process are never removed. The probe uses `lsof`/`fuser` when present and otherwise falls back to a native Linux procfs or Windows handle probe; an unverifiable file is deferred. `ghost maintenance status` uses a no-retention database-open path and remains read-only.
 
 ```yaml
 retention:

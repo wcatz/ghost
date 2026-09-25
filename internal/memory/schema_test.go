@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/wcatz/ghost/internal/maintenance"
 )
 
 // TestOpenDBHostilePath: OpenDB must open the database at exactly the path it
@@ -122,6 +124,8 @@ func TestBackupBeforeMigrate(t *testing.T) {
 }
 
 func TestOpenDBRunsRetentionAfterSuccessfulMigration(t *testing.T) {
+	restore := maintenance.SetOpenFileProbeForTest(func(string) (bool, error) { return false, nil })
+	defer restore()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dataHome := t.TempDir()

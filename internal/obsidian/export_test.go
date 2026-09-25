@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wcatz/ghost/internal/maintenance"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -243,6 +244,8 @@ func TestExportFilterInvariantFolders(t *testing.T) {
 }
 
 func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
+	restore := maintenance.SetOpenFileProbeForTest(func(string) (bool, error) { return false, nil })
+	defer restore()
 	store := seedStore(t)
 	ctx := context.Background()
 	if _, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "Some fact", Importance: 0.8, Source: "mcp"}); err != nil {

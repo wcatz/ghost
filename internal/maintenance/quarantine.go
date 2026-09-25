@@ -74,11 +74,21 @@ func removeUnheldFile(path string) (bool, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return false, nil
 	}
+	inUse, probeErr := openFileProbe(path)
+	if probeErr != nil {
+		return false, probeErr
+	}
+	if inUse {
+		return false, nil
+	}
 	tombstone, err := quarantinePath(path)
 	if err != nil {
+		if renameMeansHeld(err) {
+			return false, nil
+		}
 		return false, err
 	}
-	inUse, probeErr := openFileProbe(tombstone)
+	inUse, probeErr = openFileProbe(tombstone)
 	if probeErr != nil {
 		return false, errorsJoinRestore(path, tombstone, probeErr)
 	}

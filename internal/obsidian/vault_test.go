@@ -1,12 +1,15 @@
 package obsidian
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/wcatz/ghost/internal/maintenance"
 )
 
 // mustWrite / mustMkdirAll fail the test on setup errors instead of
@@ -110,6 +113,30 @@ consistent:
 	}
 }
 
+func TestPruneDefersUnverifiableGhostTemp(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
+	sub := filepath.Join(root, "proj", "Memories")
+	mustMkdirAll(t, sub)
+	path := filepath.Join(sub, "unknown.md.ghost-tmp-abc123")
+	mustWrite(t, path, "unknown")
+	old := time.Now().Add(-2 * ghostTempMinAge)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	restore := maintenance.SetOpenFileProbeForTest(func(string) (bool, error) {
+		return false, errors.New("probe unavailable")
+	})
+	defer restore()
+
+	if err := prune(root, []string{"proj"}, map[string]string{}, nil); err != nil {
+		t.Fatalf("prune must defer an unverifiable temp: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("unverifiable temp was removed: %v", err)
+	}
+}
+
 func TestPruneLeavesOpenOldGhostTemp(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
@@ -126,6 +153,10 @@ func TestPruneLeavesOpenOldGhostTemp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close() //nolint:errcheck
+	restore := maintenance.SetOpenFileProbeForTest(func(probed string) (bool, error) {
+		return probed == path || strings.HasPrefix(filepath.Base(probed), ".active.md.ghost-tmp-abc123.retention-"), nil
+	})
+	defer restore()
 
 	if err := prune(root, []string{"proj"}, map[string]string{}, nil); err != nil {
 		t.Fatalf("prune: %v", err)
