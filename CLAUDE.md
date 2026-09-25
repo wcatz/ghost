@@ -39,5 +39,5 @@
 - Always `go vet ./...` before committing
 - Tests use `go test ./...`
 - Never commit to main directly — feature branches + PRs
-- SQLite schema is embedded as a Go string constant in `internal/memory/schema.go`
+- SQLite schema is embedded as a Go string constant in `internal/memory/schema.go` (currently v14; `migrate.go` carries one frozen step per version)
 - `ghost mcp init` is idempotent and non-destructive — safe to re-run

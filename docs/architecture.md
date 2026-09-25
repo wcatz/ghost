@@ -185,7 +185,7 @@ The main schema tables are:
 | `tasks` | Cross-session work items |
 | `decisions` | Decisions, rationale, alternatives, and status |
 | `ghost_state` | Per-project learned context and interaction state |
-| `memory_snapshots` | Reflection rollback snapshots |
+| `memory_snapshots` | Reflection rollback snapshots, including `scope` and its `scope_captured` marker (schema v14) so a restore can put scope back — and leave a live scope alone when the snapshot predates scope |
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
 

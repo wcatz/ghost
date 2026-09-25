@@ -1694,11 +1694,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags,
 		                              created_at, memory_id, access_count, last_accessed,
 		                              agent, session_id, source_ref, confidence,
-		                              valid_from, valid_until, verified_at)
+		                              valid_from, valid_until, verified_at, scope, scope_captured)
 		SELECT ?, project_id, category, content, importance, source, tags,
 		       created_at, id, access_count, last_accessed,
 		       agent, session_id, source_ref, confidence,
-		       valid_from, valid_until, verified_at
+		       valid_from, valid_until, verified_at, scope, 1
 		FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL
 	`, snapshotID, projectID)
 	if err != nil {
@@ -1821,21 +1821,34 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// created_at is reset deliberately: consolidated knowledge counts
 			// as refreshed (issue #279). The row identity — and with it its
 			// embeddings, links, and access stats — survives.
+			// A replacement that states no scope must not erase the scope the
+			// live row already carries. `ghost reflect --apply` is the only
+			// caller and reflection.ReflectMemory has no machine-readable
+			// scope, so every emitted memory arrives here with Scope nil: with
+			// a plain `scope = ?` the reuse path NULLed out a real scope on
+			// every reflection that re-emitted a scoped fact verbatim, and
+			// nothing else about the row moved to make it visible. COALESCE
+			// keeps "not stated" reading as "leave it alone" and still lets a
+			// replacement that does state a scope rewrite it. There is no
+			// clear-the-scope operation anywhere in the API, so nothing can
+			// express "deliberately unscoped" and the ambiguity is not
+			// hiding a real case.
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE memories
 				SET category = ?, content = ?, importance = ?, source = 'reflection', tags = ?,
+				    scope = COALESCE(?, scope),
 				    created_at = datetime('now'), updated_at = datetime('now')
 				WHERE id = ?
-			`, m.Category, m.Content, m.Importance, string(tags), id); err != nil {
+			`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
 				return nil, fmt.Errorf("update reused memory: %w", err)
 			}
 			reused++
 			continue
 		}
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO memories (project_id, category, content, source, importance, tags)
-			VALUES (?, ?, ?, 'reflection', ?, ?)
-		`, projectID, m.Category, m.Content, m.Importance, string(tags))
+			INSERT INTO memories (project_id, category, content, source, importance, tags, scope)
+			VALUES (?, ?, ?, 'reflection', ?, ?, ?)
+		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope))
 		if err != nil {
 			return nil, fmt.Errorf("insert memory: %w", err)
 		}
@@ -1957,7 +1970,18 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		    access_count = s.access_count, last_accessed = s.last_accessed,
 		    agent = s.agent, session_id = s.session_id, source_ref = s.source_ref,
 		    confidence = s.confidence, valid_from = s.valid_from,
-		    valid_until = s.valid_until, verified_at = s.verified_at
+		    valid_until = s.valid_until, verified_at = s.verified_at,
+		    -- scope_captured distinguishes a snapshot that recorded the
+		    -- memory's scope from a pre-v14 one whose scope column is NULL
+		    -- because that build had no column to write. For the former the
+		    -- recorded value wins, NULL included (the memory was unscoped
+		    -- then, and the restore is a revert, not an upgrade). For the
+		    -- latter the snapshot says nothing about scope, so the live row
+		    -- keeps its own — otherwise rolling back to an old snapshot
+		    -- silently unscoped a fact a later reflection had scoped
+		    -- correctly, making the corpus less specific than it was before
+		    -- the replace being undone.
+		    scope = CASE WHEN s.scope_captured = 1 THEN s.scope ELSE memories.scope END
 		FROM memory_snapshots s
 		WHERE s.snapshot_id = ? AND s.memory_id = memories.id
 		  AND memories.pinned = 0 AND memories.resolved_at IS NULL
@@ -1978,11 +2002,20 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		INSERT INTO memories (id, project_id, category, content, source, importance, tags,
 		                      created_at, updated_at, access_count, last_accessed,
 		                      agent, session_id, source_ref, confidence,
-		                      valid_from, valid_until, verified_at)
+		                      valid_from, valid_until, verified_at, scope)
 		SELECT COALESCE(memory_id, hex(randomblob(16))), project_id, category, content,
 		       source, importance, tags, created_at, created_at, access_count, last_accessed,
 		       agent, session_id, source_ref, confidence,
-		       valid_from, valid_until, verified_at
+		       valid_from, valid_until, verified_at,
+		       -- The same marker the UPDATE above honours. A snapshot whose
+		       -- scope_captured is 0 either predates the column or was
+		       -- backfilled by hand, and migrateV14 deliberately calls such a
+		       -- value unverified — so a row restored from one comes back
+		       -- unscoped rather than carrying a scope nobody recorded. The
+		       -- alternative is restoring a scope that was never true of that
+		       -- memory, which is worse than restoring none: there is no
+		       -- provenance to tell the two apart afterwards.
+		       CASE WHEN scope_captured = 1 THEN scope ELSE NULL END
 		FROM memory_snapshots
 		WHERE snapshot_id = ?
 		  AND ((memory_id IS NOT NULL AND memory_id NOT IN (SELECT id FROM memories))
