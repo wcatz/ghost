@@ -1,6 +1,7 @@
 package obsidian
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,7 +26,10 @@ func readDir(dir string) ([]os.DirEntry, error) {
 
 // ensureVault prepares dir as a Ghost-managed mirror target. Fresh or empty
 // dirs are initialized with the marker; a non-empty dir without the marker is
-// refused — Ghost never adopts a folder it didn't create.
+// refused — Ghost never adopts a folder it didn't create. An existing vault
+// also gets one tighten pass: writeIfChanged skips unchanged content and
+// MkdirAll never retightens a directory, so a vault created under the old
+// 0755/0644 defaults would stay world-readable forever otherwise.
 func ensureVault(dir string) error {
 	entries, err := readDir(dir)
 	if os.IsNotExist(err) {
@@ -36,13 +40,67 @@ func ensureVault(dir string) error {
 	} else if err != nil {
 		return fmt.Errorf("read vault dir: %w", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, markerName)); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, markerName)); err != nil {
+		if len(entries) > 0 {
+			return fmt.Errorf("%s exists, is not empty, and has no %s marker — refusing to manage it (use a fresh directory)", dir, markerName)
+		}
+		if err := os.WriteFile(filepath.Join(dir, markerName), []byte(`{"schema_version":1}`+"\n"), 0o600); err != nil {
+			return err
+		}
+	}
+	return tightenVault(dir)
+}
+
+// tightenVault walks an adopted vault and brings its permission bits to the
+// current standard: directories 0700, Ghost-managed files 0600. It runs on
+// every ensureVault, but only ever chmods a mismatch — on an already-tight
+// vault that costs one walk of stats, a fraction of the export that follows,
+// which re-reads every note in full anyway. Files Ghost did not write keep
+// their mode: tightening is scoped to what the mirror owns.
+func tightenVault(dir string) error {
+	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // unreadable entry: leave it; writes surface real problems
+		}
+		// lstat, so a symlink is neither of the two kinds below and Ghost
+		// never chmods through one to a target outside the vault.
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		switch {
+		case info.IsDir():
+			return tightenIfLoose(path, info, 0o700)
+		case !info.Mode().IsRegular():
+			return nil
+		case !ghostManaged(path):
+			return nil // a user note or attachment keeps its own mode
+		default:
+			return tightenIfLoose(path, info, 0o600)
+		}
+	})
+}
+
+// tightenIfLoose chmods path to mode only when its bits already differ, so
+// repeat walks are stats only.
+func tightenIfLoose(path string, info os.FileInfo, mode os.FileMode) error {
+	if info.Mode().Perm() == mode {
 		return nil
 	}
-	if len(entries) > 0 {
-		return fmt.Errorf("%s exists, is not empty, and has no %s marker — refusing to manage it (use a fresh directory)", dir, markerName)
+	return os.Chmod(path, mode)
+}
+
+// ghostManaged reports whether a file is Ghost's own: the vault marker or a
+// note whose frontmatter carries a ghost_id.
+func ghostManaged(path string) bool {
+	if filepath.Base(path) == markerName {
+		return true
 	}
-	return os.WriteFile(filepath.Join(dir, markerName), []byte(`{"schema_version":1}`+"\n"), 0o600)
+	if !strings.HasSuffix(path, ".md") {
+		return false
+	}
+	_, ok := hasGhostID(path)
+	return ok
 }
 
 // writeIfChanged writes content atomically (temp+rename), skipping the write
@@ -80,17 +138,22 @@ func writeIfChanged(path, content string) (bool, error) {
 
 // hasGhostID reports whether a file's frontmatter carries a ghost_id key —
 // the only files prune may touch. Only the frontmatter block (between the
-// opening and closing --- lines) is scanned, never the note body.
+// opening and closing --- lines) is scanned, never the note body, so the
+// stream stops at the closing --- instead of reading the whole file: prune
+// and the permission tighten both ask this of every .md in the vault, and
+// whole-file reads made the orphan sweep read each note twice.
 func hasGhostID(path string) (string, bool) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return "", false
 	}
-	lines := strings.Split(string(data), "\n")
-	if len(lines) == 0 || lines[0] != "---" {
+	defer f.Close() //nolint:errcheck // read-only: close errors are meaningless here
+	s := bufio.NewScanner(f)
+	if !s.Scan() || s.Text() != "---" {
 		return "", false
 	}
-	for _, line := range lines[1:] {
+	for s.Scan() {
+		line := s.Text()
 		if line == "---" { // end of frontmatter — stop before the body
 			break
 		}
@@ -98,11 +161,12 @@ func hasGhostID(path string) (string, bool) {
 			return strings.TrimSpace(id), true
 		}
 	}
-	return "", false
+	return "", false // no ghost_id (or an unscannable line): not Ghost's file
 }
 
 // pruneOrphanFolder removes Ghost's own notes from a folder the current
-// project set no longer claims, then removes any directory left empty.
+// project set no longer claims, then removes directories left empty by
+// those deletions.
 //
 // It never removes a file that is not Ghost's. The sweep used os.RemoveAll on
 // the whole folder whenever it held at least one ghost_id note, so a user's
@@ -113,11 +177,21 @@ func hasGhostID(path string) (string, bool) {
 // a copied Ghost note looked exactly like an orphaned project.
 //
 // Deleting Ghost-managed files one at a time and offering directories for
-// removal only when empty leaves user content exactly where it was. os.Remove
-// answering ENOTEMPTY is not an error here but the proof the guard worked: a
+// removal only when they held a deleted Ghost file leaves user content
+// exactly where it was — including an empty folder the user created, which
+// a sweep keyed on emptiness alone would vacuum up. os.Remove answering
+// ENOTEMPTY is not an error here but the proof the guard worked: a
 // directory that will not close is a directory that still holds something
 // Ghost does not own.
+//
+// One walk does all three jobs — find Ghost notes, delete them, remember
+// where — instead of the earlier probe walk, delete walk, and directory
+// walk, each re-reading every note. A folder with no Ghost notes deletes
+// nothing and therefore offers nothing upward, which is the same guarantee
+// the old hasGhostContent probe gave, for free.
 func pruneOrphanFolder(dir string) error {
+	var deletedDirs []string
+	found := false
 	if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // unreadable entry: leave it and everything under it alone
@@ -134,48 +208,33 @@ func pruneOrphanFolder(dir string) error {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+		found = true
+		deletedDirs = append(deletedDirs, filepath.Dir(path))
 		return nil
 	}); err != nil {
 		return fmt.Errorf("remove ghost-managed files: %w", err)
 	}
-
-	// Deepest first. WalkDir is pre-order, so a directory always appears
-	// before anything under it; walking that list backwards therefore offers
-	// every child before its parent, which is what makes a nested tree
-	// collapsible one empty level at a time.
-	var dirs []string
-	if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err == nil && d.IsDir() {
-			dirs = append(dirs, path)
-		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("list orphan directories: %w", err)
+	if !found {
+		return nil // no Ghost content here: the folder is the user's, untouched
 	}
-	for i := len(dirs) - 1; i >= 0; i-- {
-		_ = os.Remove(dirs[i]) // ENOTEMPTY means user content remains: leave it
+
+	// Climb from each deletion site toward the orphan root, offering a
+	// directory only while it is empty. Every ancestor of a deleted Ghost
+	// note gets its chance (a later climb cleans up what an earlier one
+	// found still populated), while a user's empty folder sits under no
+	// deletion site and is never offered at all. The climb stops at dir —
+	// the orphan folder itself may close, its parent may not.
+	for _, site := range deletedDirs {
+		for sub := site; ; sub = filepath.Dir(sub) {
+			if err := os.Remove(sub); err != nil {
+				break // not empty (something Ghost doesn't own remains) or gone
+			}
+			if sub == dir {
+				break
+			}
+		}
 	}
 	return nil
-}
-
-// hasGhostContent reports whether dir contains any .md file with a ghost_id
-// in its frontmatter — the signature of a Ghost-managed note.
-func hasGhostContent(dir string) bool {
-	var found bool
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".md") {
-			return nil
-		}
-		if _, ok := hasGhostID(path); ok {
-			found = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	if err != nil {
-		return false // can't scan — preserve the folder
-	}
-	return found
 }
 
 // prune deletes Ghost-managed .md files under the given vault subtrees whose
@@ -245,10 +304,11 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 				return fmt.Errorf("refusing to prune: orphan dir %q escapes vault root", e.Name())
 			}
 			dir := filepath.Join(root, e.Name())
-			if hasGhostContent(dir) {
-				if err := pruneOrphanFolder(dir); err != nil {
-					return fmt.Errorf("prune orphan folder %s: %w", e.Name(), err)
-				}
+			// probe-as-it-goes: with nothing Ghost-owned to delete,
+			// pruneOrphanFolder returns without touching a file, a
+			// directory, or the folder itself.
+			if err := pruneOrphanFolder(dir); err != nil {
+				return fmt.Errorf("prune orphan folder %s: %w", e.Name(), err)
 			}
 		}
 	}

@@ -80,6 +80,37 @@ func TestOrphanCleanupRemovesFullyGhostFolder(t *testing.T) {
 	}
 }
 
+// TestOrphanCleanupKeepsUserEmptySubdir: emptiness alone is not permission
+// to delete. An empty folder the user created beside a Ghost note is
+// indistinguishable from a stale Ghost folder by emptiness, so the sweep
+// only offers directories that actually held a deleted Ghost file — and the
+// folders above them only while they close up.
+func TestOrphanCleanupKeepsUserEmptySubdir(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "vault")
+	if err := ensureVault(root); err != nil {
+		t.Fatalf("ensureVault: %v", err)
+	}
+
+	orphan := filepath.Join(root, "oldproject")
+	mustMkdirAll(t, orphan)
+	mustWrite(t, filepath.Join(orphan, "Managed Note.md"), ghostNote)
+	scratch := filepath.Join(orphan, "Scratch") // user-created and empty
+	mustMkdirAll(t, scratch)
+
+	if err := prune(root, nil, map[string]string{}, []string{"liveproject"}); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(orphan, "Managed Note.md")); !os.IsNotExist(err) {
+		t.Errorf("Ghost-managed note survived the orphan sweep (err=%v)", err)
+	}
+	if _, err := os.Stat(scratch); err != nil {
+		t.Errorf("user-created empty dir was deleted by the orphan sweep: %v", err)
+	}
+	if _, err := os.Stat(orphan); err != nil {
+		t.Errorf("orphan folder was removed while it still holds the user's empty dir: %v", err)
+	}
+}
+
 // TestOrphanCleanupIgnoresUserOnlyFolder: a folder with no Ghost content is
 // not this sweep's business at all, whatever it is called.
 func TestOrphanCleanupIgnoresUserOnlyFolder(t *testing.T) {
