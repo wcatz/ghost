@@ -2763,18 +2763,27 @@ func reusePreservesAge(stored replaceCandidate, emitted Memory) bool {
 // keeps the retention case a retention.
 //
 // Falls back to the first candidate when no category matches, so a genuine
-// recategorization still finds its row rather than inserting a duplicate —
-// which is what the content-only match did before. In that case the caller
-// takes the rewrite branch, exactly as it did previously. Callers pass
-// candidates already ordered oldest first (see the candidate query), so the
-// fallback keeps the oldest age and stays deterministic.
-func takeReusableRow(matches []replaceCandidate, emitted Memory) (replaceCandidate, []replaceCandidate) {
+// recategorization still updates its row in place — the behaviour the
+// content-only match had, and the one the rewrite branch's "must still be
+// applied in place" case depends on. Without the fallback a recategorized
+// emission would find no same-category candidate and insert a duplicate beside
+// the row it was recategorizing. In that case the caller takes the rewrite
+// branch, exactly as it did previously.
+//
+// Returns false for an empty bucket, so a future caller cannot index an empty
+// slice here. Callers pass candidates already ordered oldest first (see the
+// candidate query), so the fallback keeps the oldest age and stays
+// deterministic.
+func takeReusableRow(matches []replaceCandidate, emitted Memory) (replaceCandidate, []replaceCandidate, bool) {
+	if len(matches) == 0 {
+		return replaceCandidate{}, nil, false
+	}
 	for i, c := range matches {
 		if c.category == emitted.Category {
-			return c, append(matches[:i:i], matches[i+1:]...)
+			return c, append(matches[:i:i], matches[i+1:]...), true
 		}
 	}
-	return matches[0], matches[1:]
+	return matches[0], matches[1:], true
 }
 
 // ReplaceNonManual atomically replaces all non-manual memories for a project.
@@ -2930,8 +2939,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// to what the consolidator emitted. A whitespace-only difference takes
 		// the insert path instead, which leaves the memory to be re-embedded
 		// rather than keeping a vector that no longer describes its content.
-		if matches := reusable[m.Content]; len(matches) > 0 {
-			chosen, rest := takeReusableRow(matches, m)
+		if chosen, rest, ok := takeReusableRow(reusable[m.Content], m); ok {
 			reuseFor[i] = chosen
 			reusable[m.Content] = rest
 		}
