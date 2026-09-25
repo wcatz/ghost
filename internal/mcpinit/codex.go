@@ -411,17 +411,23 @@ const (
 // codexBracketedKind classifies a bracketed line that could be a table header.
 // A nested array element inside a multi-line value is bracketed exactly like a
 // header, so the distinction has to come from the content: every dot-separated
-// part must look like a key (a bare key or one quoted token) before the line is
+// part must look like a key (a bare key or one quoted string) before the line is
 // treated as a header at all, and a single part only counts when nothing else
-// fits. What stays ambiguous is a single-element array of a bare value,
-// [true] or [1], which is read as value content; a table codex declared with
-// exactly that name would then be swept up by the repair.
+// fits. What stays ambiguous is a single-element array of a bare value, [true]
+// or [1], which is read as value content; a table codex declared with exactly
+// that name would then be swept up by the repair.
 func codexBracketedKind(line string) codexBracketed {
 	if !codexIsTableHeader(line) {
 		return codexNotAKey
 	}
 	t := codexStripComment(strings.TrimSpace(line))
-	inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(t, "["), "]"))
+	inner := strings.TrimSpace(strings.TrimPrefix(t, "[["))
+	inner = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(inner, "["), "]"))
+	if strings.HasPrefix(strings.TrimSpace(t), "[[") {
+		// An array-of-tables header can never be an array element, so it always
+		// reads as a table even when the value above it never closed.
+		return codexTableKey
+	}
 	parts := codexDottedParts(inner)
 	quoted := 0
 	for _, part := range parts {
@@ -479,9 +485,15 @@ func isCodexBareKey(s string) bool {
 	return true
 }
 
-// isCodexQuotedToken reports whether s is one quoted string, quotes included.
+// isCodexQuotedToken reports whether s is exactly one quoted string, quotes
+// included. The closing quote has to be the last byte, which is what separates a
+// key part such as "b.c" from an array element holding several values, ["a",
+// "b.c"], whose first quote closes early.
 func isCodexQuotedToken(s string) bool {
-	return len(s) >= 2 && (s[0] == '\'' || s[0] == '"') && s[len(s)-1] == s[0]
+	if len(s) < 2 || (s[0] != '\'' && s[0] != '"') {
+		return false
+	}
+	return codexStringEnd(s, 0) == len(s)-1
 }
 
 // isCodexBareValue reports whether a bare token is a TOML value, which is what
@@ -512,16 +524,20 @@ func isCodexBareValue(s string) bool {
 }
 
 // codexAssignmentKeyPath returns the key path a `key = value` assignment
-// declares, and whether it is a path at all. A single quoted token is one
-// literal key, so "mcp_servers.ghost" does not name the mcp_servers.ghost path
-// and must not be read as it. Any dotted spelling is a path, including one whose
-// part is a literal name: "mcp_servers".ghost, mcp_servers . ghost, and
-// ghost."a.b" all reach the server, so the guard that stops init appending a
-// duplicate table has to see them.
+// declares, and whether it is a path at all. One quoted part is that part's
+// content, so "ghost" under [mcp_servers] reaches the server the same way a bare
+// ghost does. The exception is a quoted name holding a dot: "mcp_servers.ghost"
+// is one literal key, not the mcp_servers.ghost path, so it must not be read as
+// it. Any dotted spelling is a path, including one with a literal part, since
+// "mcp_servers".ghost, mcp_servers . ghost and ghost."a.b" all reach the server
+// and the guard that stops init appending a duplicate table has to see them.
 func codexAssignmentKeyPath(assigned string) (path string, isPath bool) {
 	parts := codexDottedParts(assigned)
 	if len(parts) == 1 && isCodexQuotedToken(parts[0]) {
-		return "", false
+		if strings.ContainsRune(parts[0][1:len(parts[0])-1], '.') {
+			return "", false
+		}
+		return parts[0][1 : len(parts[0])-1], true
 	}
 	names := make([]string, 0, len(parts))
 	for _, part := range parts {
@@ -587,11 +603,16 @@ func findCodexAmbiguousGhostHeader(lines []string, key string) (at int, text str
 	continuation := codexValueContinuationLines(lines)
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if continuation[i] || !strings.HasPrefix(trimmed, "[") {
+		if !strings.HasPrefix(trimmed, "[") {
 			continue
 		}
-		if _, named := normaliseCodexTableName(line); named {
-			continue // a parseable header: the normal path matches or ignores it
+		if name, named := normaliseCodexTableName(line); named {
+			if name != key || !continuation[i] {
+				continue // another table, or one the normal path repairs
+			}
+			// Our own header, hidden inside a value that never closed: the
+			// repair cannot see it either, so appending is the one outcome
+			// that must not happen.
 		}
 		if codexHeaderNamesPart(line, leaf) {
 			return i + 1, trimmed, true

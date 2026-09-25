@@ -599,6 +599,22 @@ func TestRunCodex_TOMLRepairValueEndings(t *testing.T) {
 				"command = {BIN}\n" +
 				"args = [\"mcp\"]\n",
 		},
+		"nested array element with a dotted string": {
+			// ["A", "b.c"] starts and ends with a quote but holds two values,
+			// so it must not pass for one quoted key part.
+			seed: "[mcp_servers.ghost]\n" +
+				"env_keep = [\n" +
+				"  [\"A\", \"b.c\"]\n" +
+				"]\n" +
+				"command = '/old/install/ghost'\n" +
+				"args = [\"mcp\"]\n",
+			want: "[mcp_servers.ghost]\n" +
+				"env_keep = [\n" +
+				"  [\"A\", \"b.c\"]\n" +
+				"]\n" +
+				"command = {BIN}\n" +
+				"args = [\"mcp\"]\n",
+		},
 		"nested array element holding a bare value": {
 			// [true] is a plausible table header too, so only the fact that a
 			// bare true is a value and not a key keeps it in the array above.
@@ -723,6 +739,8 @@ func TestRunCodex_TOMLHeaderSpellings(t *testing.T) {
 // a duplicate table, and rewriting inside a table whose shape we do not
 // understand risks eating the user's keys.
 func TestRunCodex_TOMLAmbiguousGhostHeaderLeftAlone(t *testing.T) {
+	// A malformed value above the header must not hide it: an array-of-tables
+	// header can never be an array element, so the value does not swallow it.
 	for _, header := range []string{
 		"[mcp_servers.ghost.]",    // trailing dot: no such key path
 		"[mcp_servers..ghost]",    // empty key part
@@ -735,6 +753,7 @@ func TestRunCodex_TOMLAmbiguousGhostHeaderLeftAlone(t *testing.T) {
 
 			seed := "# my model settings\n" +
 				"model = \"gpt-5.6\"\n" +
+				"unterminated = [1, 2\n" +
 				"\n" +
 				header + "\n" +
 				"command = \"/bin/ghost\"\n" +
@@ -850,7 +869,8 @@ func TestRunCodex_TOMLRepairKeepsNestedArray(t *testing.T) {
 // rest of config.toml, delete a different MCP server's keys, or hide the ghost
 // table so init appends a second copy of it.
 func TestRunCodex_TOMLRepairSurvivesMalformedValue(t *testing.T) {
-	cases := map[string]struct{ seed, want string }{
+	// keep is a line below the ghost table that must survive the repair.
+	cases := map[string]struct{ seed, want, keep string }{
 		"unterminated value inside the ghost table": {
 			// The unterminated extra swallows [mcp_servers.other] when a header
 			// is not treated as closing an open value.
@@ -862,6 +882,7 @@ func TestRunCodex_TOMLRepairSurvivesMalformedValue(t *testing.T) {
 				"[mcp_servers.other]\n" +
 				"command = \"/usr/bin/other\"\n" +
 				"args = [\"serve\"]\n",
+			keep: `command = "/usr/bin/other"`,
 			want: codexMCPServerComment + "\n" +
 				"[mcp_servers.ghost]\n" +
 				"command = {BIN}\n" +
@@ -872,7 +893,29 @@ func TestRunCodex_TOMLRepairSurvivesMalformedValue(t *testing.T) {
 				"command = \"/usr/bin/other\"\n" +
 				"args = [\"serve\"]\n",
 		},
+		"array-of-tables header below a malformed value": {
+			keep: `args = ["serve"]`,
+			// [[...]] can never be an array element, so it ends the malformed
+			// value. Swallowed as value content, the list entry's own args line
+			// lands inside the ghost span and is dropped as a duplicate key.
+			seed: "[mcp_servers.ghost]\n" +
+				"command = '/old/ghost'\n" +
+				"args = [\"mcp\"]\n" +
+				"extra = [1, 2\n" +
+				"\n" +
+				"[[mcp_servers.list]]\n" +
+				"args = [\"serve\"]\n",
+			want: codexMCPServerComment + "\n" +
+				"[mcp_servers.ghost]\n" +
+				"command = {BIN}\n" +
+				"args = [\"mcp\"]\n" +
+				"extra = [1, 2\n" +
+				"\n" +
+				"[[mcp_servers.list]]\n" +
+				"args = [\"serve\"]\n",
+		},
 		"quoted foreign header below a malformed value": {
+			keep: `command = "/usr/bin/other"`,
 			// ["mcp_servers.other"] is a literal table name, so it ends the
 			// malformed value. Read as value content it would leave the other
 			// server's command and args inside the ghost span, where the
@@ -896,6 +939,7 @@ func TestRunCodex_TOMLRepairSurvivesMalformedValue(t *testing.T) {
 				"args = [\"serve\"]\n",
 		},
 		"unterminated value above the ghost table": {
+			keep: `command = "/usr/bin/other"`,
 			// The ghost table is still found and repaired in place, so init
 			// does not append a duplicate definition of a table already there.
 			seed: "[profiles.dev]\n" +
@@ -950,8 +994,8 @@ func TestRunCodex_TOMLRepairSurvivesMalformedValue(t *testing.T) {
 			if n := countCodexGhostHeaders(string(got)); n != 1 {
 				t.Errorf("the ghost table must appear exactly once, got %d:\n%s", n, got)
 			}
-			if !strings.Contains(string(got), `command = "/usr/bin/other"`) {
-				t.Errorf("the other MCP server lost its command:\n%s", got)
+			if tc.keep != "" && !strings.Contains(string(got), tc.keep) {
+				t.Errorf("a line below the ghost table was lost (%s):\n%s", tc.keep, got)
 			}
 		})
 	}
@@ -983,6 +1027,8 @@ func TestRunCodex_TOMLDottedGhostEntryLeftAlone(t *testing.T) {
 		"spaced dot separator":       `mcp_servers . ghost = { command = "/bin/ghost", args = ["mcp"] }`,
 		"quoted parts and spaces":    ` "mcp_servers" . ghost = { command = "/bin/ghost" }`,
 		"inline mcp_servers table":   `mcp_servers = { ghost = { command = "/bin/ghost", args = ["mcp"] } }`,
+		"quoted part under mcp_servers": "[mcp_servers]\n" +
+			"\"ghost\" = { command = \"/bin/ghost\", args = [\"mcp\"] }",
 		"dotted key with a literal part": "[mcp_servers]\n" +
 			"ghost.\"a.b\" = 1",
 		"dotted key with a literal part at the top level": `"mcp_servers".ghost."a.b" = 1`,
