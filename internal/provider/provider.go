@@ -38,6 +38,10 @@ type MemoryStore interface {
 	SearchFTS(ctx context.Context, projectID, query string, limit int) ([]memory.Memory, error)
 	SearchFTSAll(ctx context.Context, query string, limit int) ([]memory.Memory, error)
 	SearchHybrid(ctx context.Context, projectID, query string, queryVec []float32, limit int) ([]memory.Memory, error)
+	// SearchHybridScoped is SearchHybrid with a scope constraint applied
+	// inside fusion and window selection. The store owns production search
+	// parameters so scoped MCP searches retain the configured vector floor.
+	SearchHybridScoped(ctx context.Context, projectID, query string, queryVec []float32, limit int, scope map[string]string) ([]memory.Memory, error)
 	// ExplainSearch reports how each candidate was scored by the same
 	// pipeline SearchHybrid uses, including why anything was excluded.
 	ExplainSearch(ctx context.Context, projectID, query string, queryVec []float32, limit int) (memory.SearchExplain, error)

@@ -170,8 +170,13 @@ category- and age-dependent factor, reorders it and breaks the invariant that
 uniform timestamps leave the graded ranking untouched.
 
 The window's width is `limit`, or twice that under `DecayReselect`, where decay
-still has to narrow the set afterwards. Ordering is deterministic (ties broken
-by ID), because the demotion penalties applied downstream depend on order.
+still has to narrow the set afterwards. Scope constraints are narrowed from the
+combined candidate pool before this cut, including when one leg is unavailable,
+so an out-of-scope row cannot consume a result slot and force the tool to report
+absence for an eligible row that was retrieved but not selected. Category is a
+separate tool-level post-filter and therefore uses a wider store fetch. Ordering
+is deterministic (ties broken by ID), because the demotion penalties applied
+downstream depend on order.
 
 The main schema tables are:
 

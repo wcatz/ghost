@@ -8,6 +8,36 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
+// TestSearchExplainLabelsUnappliedScope keeps the explain rendering honest
+// while scoped plain search filters inside window selection. The compatibility
+// note must disclose that the rows are still unscoped.
+func TestSearchExplainLabelsUnappliedScope(t *testing.T) {
+	_, session := newCapSession(t)
+	saveScoped(t, session, "development database uses SQLite", "development")
+	saveScoped(t, session, "production database uses PostgreSQL", "production")
+
+	res := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "database",
+		"limit":      3,
+		"explain":    true,
+		"scope":      map[string]any{"environment": "production"},
+	})
+	if res.IsError {
+		t.Fatalf("explain search errored: %s", resultText(res))
+	}
+	var ex memory.SearchExplain
+	if err := json.Unmarshal([]byte(resultText(res)), &ex); err != nil {
+		t.Fatalf("response is not a JSON explanation: %v", err)
+	}
+	for _, note := range ex.Notes {
+		if strings.Contains(note, "scope is not applied in this explanation") {
+			return
+		}
+	}
+	t.Fatalf("scoped explanation did not disclose that its rows are unscoped: %v", ex.Notes)
+}
+
 // TestSearchExplainReturnsDiagnosisThroughTheTool: an agent debugging a bad
 // result must be able to ask for the breakdown through the tool it already
 // calls, not reach into a package. This asserts the argument is accepted, the

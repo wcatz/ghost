@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -27,8 +28,7 @@ func SweepGrid() []memory.SearchParams {
 		p := memory.DefaultSearchParams()
 		p.VecWeight = vw
 		// Round the complement so e.g. 1-0.7 is exactly 0.3 and the grid
-		// contains a point == DefaultSearchParams (float identity matters
-		// for the "current default" marker).
+		// contains a point equal to DefaultSearchParams.
 		p.FTSWeight = math.Round((1-vw)*100) / 100
 		grid = append(grid, p)
 	}
@@ -71,7 +71,10 @@ func FormatSweep(points []SweepPoint) string {
 	fmt.Fprintf(&b, "%-22s %7s %7s %8s %8s\n", "params", "R@1", "R@10", "MRR@10", "NDCG@10")
 	for _, pt := range points {
 		mark := ""
-		if pt.Params == def {
+		// DeepEqual, not ==: SearchParams carries a Scope map, which makes the
+		// struct non-comparable. The sweep never sets Scope, so this only has
+		// to stay correct for the default-versus-default case.
+		if reflect.DeepEqual(pt.Params, def) {
 			mark = "  <- current default"
 		}
 		fmt.Fprintf(&b, "%-22s %7.3f %7.3f %8.3f %8.3f%s\n",

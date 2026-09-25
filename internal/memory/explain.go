@@ -34,9 +34,10 @@ type ExplainRow struct {
 // candidate scored, and why anything was left out.
 //
 // Membership is never re-derived here. Rows are marked included by asking
-// SearchHybrid for the real answer, so an explanation can only ever describe
-// a ranking Ghost actually produced — recomputing it locally would let the
-// explanation drift from the behavior it is supposed to explain.
+// SearchHybrid for the unscoped answer, so an explanation describes the ranking
+// Ghost actually produced for that query. A scoped caller must disclose when
+// scope is not applied by this compatibility path; recomputing membership
+// locally would let the explanation drift from the behavior it explains.
 type SearchExplain struct {
 	ProjectID       string       `json:"project_id"`
 	Query           string       `json:"query"`
