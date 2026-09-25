@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,11 +20,11 @@ type fakeReflectionApplier struct {
 	consolidated    string
 	resultPreserved []string
 	resultPromoted  int
-	resultKept      int
+	resultKept      []memory.Memory
 	err             error
 }
 
-func (f *fakeReflectionApplier) ApplyReflection(_ context.Context, _ string, projectMems, globalMems []memory.Memory, consolidatedSince string, promote bool) (preserved []string, promoted, keptProject int, err error) {
+func (f *fakeReflectionApplier) ApplyReflection(_ context.Context, _ string, projectMems, globalMems []memory.Memory, consolidatedSince string, promote bool) (preserved []string, promoted int, keptMems []memory.Memory, err error) {
 	f.calls++
 	f.projectMems = append([]memory.Memory(nil), projectMems...)
 	f.globalMems = append([]memory.Memory(nil), globalMems...)
@@ -69,8 +70,8 @@ func TestApplyReflectionAlwaysReachesPromotionWithoutProjectMemories(t *testing.
 	if !f.promote {
 		t.Fatal("applier did not receive the explicit promotion request")
 	}
-	if promoted != 1 || kept != 0 || preserved != nil {
-		t.Errorf("result = (%v, %d, %d), want (nil, 1, 0)", preserved, promoted, kept)
+	if promoted != 1 || len(kept) != 0 || preserved != nil {
+		t.Errorf("result = (%v, %d, %d), want (nil, 1, 0)", preserved, promoted, len(kept))
 	}
 }
 
@@ -180,4 +181,67 @@ func containsAll(s string, want ...string) bool {
 		}
 	}
 	return true
+}
+
+// TestApplyReflectionKeepsCrossProjectCandidatesWhenPromotionOff is the
+// data-loss guard. With --promote-globals off, applyPromotion returns without
+// writing anything, so a cross-project candidate has exactly one destination
+// left: the project it came from. The replace is built from the project-scoped
+// slice alone, which excludes cross-project candidates by construction — so
+// folding them in here is what stops ReplaceNonManual from deleting a memory
+// that nothing then re-creates.
+//
+// The end state is asserted against a real store rather than a fake, because the
+// failure mode is "deleted from the project and absent everywhere else", which
+// only a database can show.
+func TestApplyReflectionKeepsCrossProjectCandidatesWhenPromotionOff(t *testing.T) {
+	db, err := memory.OpenDB(filepath.Join(t.TempDir(), "reflect.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	store := memory.NewStore(db, nil)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "proj", "/tmp/proj", "proj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	// A pre-existing non-manual memory, so ReplaceNonManual has something to
+	// replace rather than treating this as the first write.
+	if _, err := store.Create(ctx, "proj", memory.Memory{
+		Category: "fact", Content: "an older project fact", Source: "reflection",
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, promoted, kept, err := applyReflection(ctx, store, "proj",
+		projectMemories("a consolidated project fact"),
+		globals("prefer running the linter before pushing"),
+		"", false)
+	if err != nil {
+		t.Fatalf("applyReflection: %v", err)
+	}
+	if promoted != 0 {
+		t.Errorf("promoted = %d, want 0 — promotion was not requested", promoted)
+	}
+	if len(kept) != 0 {
+		t.Errorf("kept = %d, want 0 — a kept candidate means the global write was attempted at all", len(kept))
+	}
+
+	all, err := store.GetAll(ctx, "proj", 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	var found bool
+	for _, m := range all {
+		if m.Content == "prefer running the linter before pushing" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the cross-project candidate was deleted from the project and stored nowhere: %+v", all)
+	}
+	// It must not have leaked into _global either — promotion was off.
+	if g, err := store.GetAll(ctx, "_global", 10); err == nil && len(g) > 0 {
+		t.Errorf("_global holds %d rows with promotion off: %+v", len(g), g)
+	}
 }

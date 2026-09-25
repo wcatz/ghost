@@ -797,7 +797,18 @@ Flags:
 		projectForSummary = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 	}
 
-	preserved, promoted, keptProject, err := applyReflection(ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals)
+	// One call, one transaction. applyReflection is the store's apply
+	// boundary: the project replace, every _global write, and the recovery of
+	// any candidate that could not be promoted either commit together or roll
+	// back together. Doing the parts here instead — as an earlier revision of
+	// this PR did — put two failure windows between them. A crash or a signal
+	// after the replace and before promotion left a candidate in neither place,
+	// and with promotion OFF every cross-project candidate was deleted from the
+	// project by the replace and then written nowhere at all, because promotion
+	// returns early and the recovery list was empty. applyReflection folds
+	// those candidates back into the project itself when promotion is off.
+	preserved, promoted, keptMems, err := applyReflection(
+		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 		os.Exit(1)
@@ -805,15 +816,50 @@ Flags:
 	if promoted > 0 {
 		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
 	}
-	if parsed.promoteGlobals {
-		failed := len(globalMems) - promoted
-		if failed > 0 {
-			fmt.Fprintln(os.Stderr, recoveryWarning(keptProject, failed))
+	if len(globalMems) > 0 && parsed.promoteGlobals {
+		// A partial promotion is reported, never counted as a clean success:
+		// the candidate is back in the project, so the count of "kept" is the
+		// part that still needs a decision from the operator.
+		if len(keptMems) > 0 {
+			fmt.Fprintln(os.Stderr, recoveryWarning(len(keptMems), len(globalMems)))
 		}
 	}
 
-	if len(projectForSummary) > 0 || len(globalMems) > 0 {
-		summary := appliedSummary(projectForSummary, globalMems, promoted, parsed.promoteGlobals)
+	// A round that wrote something counts as applied, and that includes a
+	// candidate that could not be promoted and was written back into the
+	// project: it is a row the project now holds, so it belongs in the count
+	// and in the category breakdown, or the summary would report fewer
+	// memories than the project actually has.
+	//
+	// Keying this on the project-memory count alone dropped both the summary
+	// and the learned context for a promotion-only round — exactly the round
+	// the flag was added for.
+	if promoted > 0 || len(keptMems) > 0 || len(projectMems) > 0 || len(globalMems) > 0 {
+		// Everything the project ends up holding, which is projectMems plus the
+		// candidates that landed back in it: all of them when promotion is off,
+		// and the kept subset when it is on. appliedSummary counts rows, so
+		// leaving these out understates what was written.
+		appliedProjectMems := append([]reflection.ReflectMemory(nil), projectMems...)
+		if !parsed.promoteGlobals {
+			appliedProjectMems = append(appliedProjectMems, globalMems...)
+		} else {
+			// Only the candidates that actually failed promotion. Adding all of
+			// globalMems here would count the promoted rows as project memories
+			// too, which is the over-count this replaced.
+			keptText := make(map[string]bool, len(keptMems))
+			for _, m := range keptMems {
+				keptText[m.Content] = true
+			}
+			for _, m := range globalMems {
+				if keptText[m.Content] {
+					appliedProjectMems = append(appliedProjectMems, m)
+				}
+			}
+		}
+		// appliedSummary reports the REAL promoted count rather than the number
+		// of candidates, so a partial promotion does not print "3 promoted to
+		// global" one line after "Promoted 1/3".
+		summary := appliedSummary(appliedProjectMems, globalMems, promoted, parsed.promoteGlobals)
 		fmt.Printf("Applied: %s\n", summary)
 		if len(globalMems) > 0 && !parsed.promoteGlobals {
 			fmt.Println("(re-run with --promote-globals to inject them into every project)")
