@@ -46,20 +46,49 @@ func TestAuditGuardedDrops_MergedRewriteIsNotADrop(t *testing.T) {
 	}
 }
 
-// TestAuditGuardedDrops_IgnoresUnguardedCategories: fact/architecture memories
-// are free to be consolidated away — only gotcha/dependency/preference/
-// convention are guarded.
-func TestAuditGuardedDrops_IgnoresUnguardedCategories(t *testing.T) {
+// TestAuditGuardedDrops_RetainsEveryCategory: the guard is not a category
+// allowlist (#549). Under the old map only gotcha/dependency/preference/
+// convention were audited, so an architecture or decision memory the
+// consolidator simply omitted was deleted from the corpus unreported — the one
+// loss an unattended --apply pass cannot be watched for. Every category is
+// audited now, and a merged rewrite that preserves the input's substance still
+// counts as a survivor, so retention does not duplicate it.
+func TestAuditGuardedDrops_RetainsEveryCategory(t *testing.T) {
+	const pattern = "Redis Streams consumer groups with explicit XACK"
 	input := ReflectionInput{ExistingMemories: []memory.Memory{
-		mem("fact", "The queue once used Redis lists with manual requeues"),
-		mem("preference", "Wayne prefers PRs under 400 changed lines"),
+		mem("architecture", "Orchestrator splits into ingest and billing services"),
+		mem("decision", "Chose Postgres over DynamoDB because the ledger is append-only"),
+		mem("pattern", pattern),
 	}}
+	// The consolidator kept one memory, folding the pattern into it, and
+	// dropped the other two outright.
 	result := ReflectionResult{Memories: []ReflectMemory{
-		{Category: "fact", Content: "The job queue uses Redis Streams"},
+		{Category: "pattern", Content: "Job consumption uses Redis Streams consumer groups with explicit XACK after handling"},
 	}}
+
 	drops := AuditGuardedDrops(input, result)
-	if len(drops) != 1 || drops[0].Category != "preference" {
-		t.Fatalf("want only the preference flagged, got %+v", drops)
+	if len(drops) != 2 {
+		t.Fatalf("want 2 drops (architecture, decision), got %d: %+v", len(drops), drops)
+	}
+	flagged := map[string]bool{}
+	for _, d := range drops {
+		flagged[d.Category] = true
+	}
+	if !flagged["architecture"] || !flagged["decision"] {
+		t.Fatalf("want the architecture and decision flagged, got %+v", drops)
+	}
+	if flagged["pattern"] {
+		t.Fatalf("merged rewrite flagged as a drop: %+v", drops)
+	}
+
+	result.Memories = append(result.Memories, RetainGuardedDrops(drops)...)
+	if remaining := AuditGuardedDrops(input, result); len(remaining) != 0 {
+		t.Fatalf("retention left %d memories uncovered: %+v", len(remaining), remaining)
+	}
+	for _, m := range result.Memories {
+		if m.Category == "pattern" && m.Content == pattern {
+			t.Fatalf("surviving pattern re-added verbatim, so it is duplicated: %+v", m)
+		}
 	}
 }
 

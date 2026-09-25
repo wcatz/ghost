@@ -428,7 +428,7 @@ Flags:
   --apply         Save results (default is dry-run/preview only)
   --restore       Undo the last consolidation from snapshot
   --require-llm   Fail instead of falling back to the Jaccard-only sqlite tier
-  --allow-drops   Apply even when guarded-category memories would be deleted without a merge
+  --allow-drops   Apply even when memories would be deleted without a merge
   --promote-globals Write cross-project candidates to _global (default: keep them project-scoped)
   --skip-unchanged Skip when the consolidatable set is unchanged since the last
                    applied consolidation (used by the auto lifecycle)
@@ -730,9 +730,11 @@ Flags:
 		return
 	}
 
-	// Guarded-drop audit (#337): gotcha/dependency/preference/convention
-	// memories must be merged, never deleted outright. Refusing the whole
-	// consolidation preserved fidelity but meant a rich project was never
+	// Drop audit (#337, covering every category since #549): no input memory
+	// may be deleted without a merge target. An unattended --apply nobody
+	// watches is exactly where an unreferenced architecture or decision memory
+	// disappears, and `manual` source never covers an agent save. Refusing the
+	// whole consolidation preserved fidelity but meant a rich project was never
 	// consolidated at all (measured: 1 success in 13 attempts on a 220-memory
 	// project), so the dropped memories are now retained VERBATIM instead: the
 	// zero-loss invariant still holds and the rest of the consolidation
@@ -741,7 +743,7 @@ Flags:
 	// (#452). --allow-drops keeps its meaning: accept the deletions.
 	guardedDrops := reflection.AuditGuardedDrops(input, result)
 	if len(guardedDrops) > 0 {
-		fmt.Fprintf(os.Stderr, "WARNING: %d guarded-category memory(ies) had no surviving merge target:\n", len(guardedDrops))
+		fmt.Fprintf(os.Stderr, "WARNING: %d memory(ies) had no surviving merge target:\n", len(guardedDrops))
 		for _, d := range guardedDrops {
 			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, truncateForDisplay(d.Content, 100))
 		}

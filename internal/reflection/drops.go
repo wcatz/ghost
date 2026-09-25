@@ -1,17 +1,6 @@
 package reflection
 
-// guardedCategories are memory kinds whose loss is never acceptable without a
-// merge target: operational pitfalls, version pins, workflow rules, and user
-// preferences. Deleting them outright silently erases knowledge that still
-// guides future work (issue #337, eval-cycle finding F3).
-var guardedCategories = map[string]bool{
-	"gotcha":     true,
-	"dependency": true,
-	"preference": true,
-	"convention": true,
-}
-
-// DroppedGuarded is an input memory in a guarded category that has no close
+// DroppedGuarded is an input memory, in any category, that has no close
 // survivor in the consolidation output. Importance and Tags are carried so the
 // memory can be re-inserted verbatim by RetainGuardedDrops without losing its
 // weight or labels.
@@ -26,16 +15,25 @@ type DroppedGuarded struct {
 // fraction of its tokens appears in some single output memory. Containment
 // (input→output), not Jaccard: the question is whether the input's substance
 // survives anywhere, not whether the rewrite is fully explained by one source.
-// Deliberately lenient — this audit can BLOCK an apply, so false positives
-// (flagging a healthy merge) are the expensive failure mode. Outright
-// deletions land far below it (an unrelated survivor shares only a stray
+// Deliberately lenient — a false positive costs a healthy merge whose input is
+// then also re-added verbatim (a duplicate row), while an outright deletion
+// lands far below the threshold (an unrelated survivor shares only a stray
 // token or two).
 const dropContainmentThreshold = 0.45
 
-// AuditGuardedDrops returns input memories in guarded categories that have no
-// token-overlap survivor among the result memories. Uses the package's
-// tokenize (numeric-retaining, stopword-filtered) so merged rewrites that
-// preserve substance — including ports and versions — are recognized.
+// AuditGuardedDrops returns every input memory that has no token-overlap
+// survivor among the result memories, whatever its category. Every category is
+// under the drop guard (#549): it began as an allowlist of operational
+// knowledge — gotchas, dependency pins, workflow conventions and user
+// preferences (issue #337, eval-cycle finding F3) — but an architecture or
+// decision memory dropped by an unattended consolidation is just as
+// unrecoverable, and nothing else covers it (agent saves carry source='mcp', so
+// `manual` is only ever written for pinned seeds). Deleting an unreferenced
+// input therefore takes an explicit --allow-drops.
+//
+// Uses the package's tokenize (numeric-retaining, stopword-filtered) so merged
+// rewrites that preserve substance — including ports and versions — are
+// recognized as survivors and are not re-added alongside the merge.
 func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []DroppedGuarded {
 	outTokens := make([]map[string]bool, 0, len(result.Memories))
 	for _, m := range result.Memories {
@@ -44,9 +42,6 @@ func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []Dropped
 
 	var drops []DroppedGuarded
 	for _, in := range input.ExistingMemories {
-		if !guardedCategories[in.Category] {
-			continue
-		}
 		inTokens := tokenize(in.Content)
 		if len(inTokens) == 0 {
 			continue
@@ -82,10 +77,10 @@ func hasCloseSurvivor(inTokens map[string]bool, outTokens []map[string]bool) boo
 	return false
 }
 
-// RetainGuardedDrops turns dropped guarded memories back into result memories
-// so they can be carried forward verbatim. Refusing to apply (the pre-#458
-// behaviour) preserved fidelity but meant a project whose consolidator drops
-// guarded memories was never consolidated at all — measured 1 success in 13
+// RetainGuardedDrops turns every flagged drop back into a result memory so it
+// can be carried forward verbatim. Refusing to apply (the pre-#458
+// behaviour) preserved fidelity but meant a project whose consolidator dropped
+// memories was never consolidated at all — measured 1 success in 13
 // attempts on a 220-memory project. Re-inserting the dropped memories keeps
 // the zero-loss invariant AND lets the rest of the consolidation apply. Because
 // the content is byte-identical to the stored memory, ReplaceNonManual's
