@@ -167,3 +167,47 @@ func TestHarnessEnvSurvivesAnEmptyParent(t *testing.T) {
 		t.Errorf("PATH = %q, want /bin", got["PATH"])
 	}
 }
+
+// lookupFold finds a variable the way Windows treats them — by name, not by
+// the exact spelling the parent happened to use.
+func lookupFold(env []string, want string) (string, bool) {
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && strings.EqualFold(k, want) {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// TestHarnessEnvAcceptsWindowsVariableSpelling: Windows spells these Path and
+// Home, and os.Environ() hands back exactly that case. A case-sensitive map
+// lookup dropped them, so a harness child on Windows started without a PATH
+// and could not find its own binaries — the allowlist failing in the one
+// place deny-by-default is hardest to diagnose.
+//
+// isTempDirKey already normalizes with EqualFold for the same reason.
+func TestHarnessEnvAcceptsWindowsVariableSpelling(t *testing.T) {
+	got := harnessEnv([]string{
+		"Path=C:\\Windows\\system32", // Windows' own spelling of PATH
+		"Home=C:\\Users\\u",
+		"Lang=en_US.UTF-8",
+		"Ghost_OpenCode_Model=opencode/big-pickle", // prefix check too
+		"AWS_SECRET_ACCESS_KEY=AKIAsecret",         // still must not pass
+	})
+
+	for name, want := range map[string]string{
+		"Path":                 "C:\\Windows\\system32",
+		"Home":                 "C:\\Users\\u",
+		"Lang":                 "en_US.UTF-8",
+		"Ghost_OpenCode_Model": "opencode/big-pickle",
+	} {
+		if v, ok := lookupFold(got, name); !ok {
+			t.Errorf("%s was dropped — a Windows child would be missing it", name)
+		} else if v != want {
+			t.Errorf("%s = %q, want %q", name, v, want)
+		}
+	}
+	if _, ok := lookupFold(got, "AWS_SECRET_ACCESS_KEY"); ok {
+		t.Error("AWS_SECRET_ACCESS_KEY passed despite the case-insensitive lookup")
+	}
+}

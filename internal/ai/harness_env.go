@@ -70,10 +70,12 @@ func harnessEnv(base []string) []string {
 		"OPENAI_ORG_ID": true, "OPENAI_ORGANIZATION": true,
 	}
 
-	// Explicit opt-outs for a setup this list cannot anticipate.
+	// Explicit opt-outs for a setup this list cannot anticipate. Stored
+	// uppercased for the same reason as the lookup below: a user writing
+	// "MyVar" against a parent that spells it "myvar" is still opting it in.
 	for _, name := range strings.Split(os.Getenv("GHOST_PASSTHROUGH_ENV"), ",") {
 		if n := strings.TrimSpace(name); n != "" {
-			keep[n] = true
+			keep[strings.ToUpper(n)] = true
 		}
 	}
 
@@ -83,7 +85,14 @@ func harnessEnv(base []string) []string {
 		if !ok {
 			continue // malformed entry; dropping it cannot lose information
 		}
-		if keep[name] || strings.HasPrefix(name, "GHOST_") {
+		// Case-insensitive: Windows spells these Path and Home, and
+		// os.Environ() returns exactly that. A case-sensitive lookup dropped
+		// PATH there, leaving the child without a way to find its own
+		// binaries. isTempDirKey normalizes with EqualFold for the same
+		// reason; ToUpper is used here so one normalized value serves both
+		// the map lookup and the prefix test.
+		upper := strings.ToUpper(name)
+		if keep[upper] || strings.HasPrefix(upper, "GHOST_") {
 			out = append(out, kv)
 		}
 	}
