@@ -301,16 +301,23 @@ func normaliseCodexTableName(line string) (name string, ok bool) {
 	if inner == "" {
 		return "", false
 	}
-	name, isPath := codexDottedKeyPath(inner)
-	if !isPath {
-		// ["mcp_servers.ghost"] declares one literal key holding a dot, which
-		// is a different table from the mcp_servers.ghost path.
-		return "", false
+	parts := codexDottedParts(inner)
+	names := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if isCodexQuotedToken(part) {
+			// ["mcp_servers.ghost"] declares one literal key holding a dot,
+			// which is a different table from the mcp_servers.ghost path.
+			if strings.ContainsRune(part[1:len(part)-1], '.') {
+				return "", false
+			}
+			part = part[1 : len(part)-1]
+		}
+		if part == "" || strings.ContainsAny(part, "[]") {
+			return "", false
+		}
+		names = append(names, part)
 	}
-	if strings.ContainsAny(name, "[]") {
-		return "", false
-	}
-	return name, true
+	return strings.Join(names, "."), true
 }
 
 // codexIsTableHeader reports whether line opens a TOML table. The '=' guard
@@ -375,27 +382,76 @@ func codexValueContinuationLines(lines []string) map[int]bool {
 }
 
 // codexHeaderClosesValue reports whether a line is a table header that must end a
-// value still open above it. A bare-key header ([mcp_servers.other]) always
-// does. A header with any quoted key part does not, because a nested array
-// element such as ["b"] is indistinguishable from it and is far more common
-// inside a value than a quoted table header is; the residual risk is a quoted
-// table header directly below a malformed value, which stays part of the value.
+// value still open above it, which decides whether a malformed value can hide
+// every table below it. The test is content-based, not punctuation-based,
+// because a nested array element is bracketed exactly like a header; see
+// codexBracketedKind.
 func codexHeaderClosesValue(line string) bool {
-	if !codexIsTableHeader(line) {
-		return false
-	}
-	return !strings.ContainsAny(codexStripComment(strings.TrimSpace(line)), `'"`)
+	return codexBracketedKind(line) == codexTableKey
 }
 
-// codexDottedKeyPath returns the dotted key path a `key = value` assignment
-// declares, and whether the text really is a path. A quoted token is one literal
-// key part, so "mcp_servers".ghost is the path mcp_servers.ghost and
-// mcp_servers . ghost is the same path with spacing, while "mcp_servers.ghost"
-// is a single key whose name happens to contain a dot, which is a different key
-// and must not be read as the ghost server.
-func codexDottedKeyPath(text string) (path string, isPath bool) {
-	// Split on the dots that separate key parts, not on a dot inside a quoted
-	// token: in "mcp_servers.ghost" the dot belongs to the key's name.
+// codexBracketed says how a bracketed line should be read while recovering from
+// a malformed value.
+type codexBracketed int
+
+const (
+	// codexNotAKey is not a key path at all: an array element such as [1, 2]
+	// or ["a", "b"], which belongs to the value above it.
+	codexNotAKey codexBracketed = iota
+	// codexArrayElement could be either, and a value is the more likely
+	// reading: a single quoted token like ["b"], or a single bare token that
+	// is a TOML value like [true] or [1].
+	codexArrayElement
+	// codexTableKey only reads as a table: a multi-part key path, a bare token
+	// that is not a value like [b], or a quoted name holding a dot, which is a
+	// literal table name such as ["mcp_servers.other"].
+	codexTableKey
+)
+
+// codexBracketedKind classifies a bracketed line that could be a table header.
+// A nested array element inside a multi-line value is bracketed exactly like a
+// header, so the distinction has to come from the content: every dot-separated
+// part must look like a key (a bare key or one quoted token) before the line is
+// treated as a header at all, and a single part only counts when nothing else
+// fits. What stays ambiguous is a single-element array of a bare value,
+// [true] or [1], which is read as value content; a table codex declared with
+// exactly that name would then be swept up by the repair.
+func codexBracketedKind(line string) codexBracketed {
+	if !codexIsTableHeader(line) {
+		return codexNotAKey
+	}
+	t := codexStripComment(strings.TrimSpace(line))
+	inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(t, "["), "]"))
+	parts := codexDottedParts(inner)
+	quoted := 0
+	for _, part := range parts {
+		switch {
+		case isCodexBareKey(part):
+		case isCodexQuotedToken(part):
+			quoted++
+			if strings.ContainsRune(part[1:len(part)-1], '.') {
+				return codexTableKey // a literal name like "mcp_servers.other"
+			}
+		default:
+			return codexNotAKey
+		}
+	}
+	switch {
+	case len(parts) > 1:
+		return codexTableKey
+	case quoted > 0:
+		return codexArrayElement // ["b"] reads as an element before a table
+	case isCodexBareValue(parts[0]):
+		return codexArrayElement // [true], [1], [1.5]
+	default:
+		return codexTableKey // [b]: a bare word is not a TOML value
+	}
+}
+
+// codexDottedParts splits text on the dots that separate key parts, trimming the
+// space around each one. A dot inside a quoted token belongs to the key's name,
+// so it does not split.
+func codexDottedParts(text string) []string {
 	var parts []string
 	start := 0
 	for i := 0; i < len(text); i++ {
@@ -403,19 +459,73 @@ func codexDottedKeyPath(text string) (path string, isPath bool) {
 		case '\'', '"':
 			i = codexStringEnd(text, i)
 		case '.':
-			parts = append(parts, text[start:i])
+			parts = append(parts, strings.TrimSpace(text[start:i]))
 			start = i + 1
 		}
 	}
-	parts = append(parts, text[start:])
+	return append(parts, strings.TrimSpace(text[start:]))
+}
 
+// isCodexBareKey reports whether s is a bare TOML key.
+func isCodexBareKey(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isCodexIdentByte(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isCodexQuotedToken reports whether s is one quoted string, quotes included.
+func isCodexQuotedToken(s string) bool {
+	return len(s) >= 2 && (s[0] == '\'' || s[0] == '"') && s[len(s)-1] == s[0]
+}
+
+// isCodexBareValue reports whether a bare token is a TOML value, which is what
+// makes a single-token bracket read as an array element rather than a table.
+func isCodexBareValue(s string) bool {
+	switch s {
+	case "true", "false":
+		return true
+	}
+	if s == "" {
+		return false
+	}
+	// A number, allowing a sign, decimal point and exponent. A date-time holds
+	// colons and dashes and lands here too, which is the right answer for the
+	// bracket test either way.
+	digits := false
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9':
+			digits = true
+		case c == '+' || c == '-' || c == '.' || c == ':' || c == 'T' || c == 'Z' ||
+			c == 'e' || c == 'E' || c == '_':
+		default:
+			return false
+		}
+	}
+	return digits
+}
+
+// codexAssignmentKeyPath returns the key path a `key = value` assignment
+// declares, and whether it is a path at all. A single quoted token is one
+// literal key, so "mcp_servers.ghost" does not name the mcp_servers.ghost path
+// and must not be read as it. Any dotted spelling is a path, including one whose
+// part is a literal name: "mcp_servers".ghost, mcp_servers . ghost, and
+// ghost."a.b" all reach the server, so the guard that stops init appending a
+// duplicate table has to see them.
+func codexAssignmentKeyPath(assigned string) (path string, isPath bool) {
+	parts := codexDottedParts(assigned)
+	if len(parts) == 1 && isCodexQuotedToken(parts[0]) {
+		return "", false
+	}
 	names := make([]string, 0, len(parts))
 	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if len(part) >= 2 && (part[0] == '\'' || part[0] == '"') && part[len(part)-1] == part[0] {
-			if strings.ContainsRune(part[1:len(part)-1], '.') {
-				return "", false
-			}
+		if isCodexQuotedToken(part) {
 			part = part[1 : len(part)-1]
 		}
 		if part == "" {
@@ -516,13 +626,12 @@ func codexHeaderNamesPart(line, part string) bool {
 	return false
 }
 
-// splitCodexAssignment splits a `key = value` line into its two halves, with
-// the key normalized to its bare spelling: TOML treats "command" and command as
-// the same key, so a quoted owned key has to be recognized as ours rather than
-// left in the file to collide with the bare one we write. ok is false for a
-// line that carries no assignment (a blank, a comment, an orphaned fragment of
-// a multi-line value). The first `=` separates them, which is safe because a
-// TOML key can never contain one.
+// splitCodexAssignment splits a `key = value` line into its two halves. ok is
+// false for a line that carries no assignment (a blank, a comment, an orphaned
+// fragment of a multi-line value). The first `=` separates them, which is safe
+// because a TOML key can never contain one. The key comes back as written: what a
+// quoted key means differs by caller, so codexOwnedKeyName unquotes it for the
+// owned keys while codexAssignmentKeyPath reads it as a path.
 func splitCodexAssignment(line string) (key, value string, ok bool) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -532,11 +641,19 @@ func splitCodexAssignment(line string) (key, value string, ok bool) {
 	if eq < 0 {
 		return "", "", false
 	}
-	key = strings.TrimSpace(trimmed[:eq])
-	if len(key) >= 2 && (key[0] == '\'' || key[0] == '"') && key[len(key)-1] == key[0] {
-		key = key[1 : len(key)-1]
+	return strings.TrimSpace(trimmed[:eq]), strings.TrimSpace(trimmed[eq+1:]), true
+}
+
+// codexOwnedKeyName maps a key to the name ghost owns, so a quoted spelling of an
+// owned key is recognized as ours instead of being left in the file to collide
+// with the bare one we write. Only a key that is one quoted token is unquoted:
+// "command" is the command key, while "mcp_servers".ghost is a path and never
+// collides with an owned name.
+func codexOwnedKeyName(key string) string {
+	if len(key) > 0 && (key[0] == 0x27 || key[0] == 0x22) && codexStringEnd(key, 0) == len(key)-1 {
+		return key[1 : len(key)-1]
 	}
-	return key, strings.TrimSpace(trimmed[eq+1:]), true
+	return key
 }
 
 // codexValueLastLine returns the index of the line completing an unterminated
@@ -582,7 +699,7 @@ func findCodexDottedGhost(lines []string, key string) (at int, text string, ok b
 		if !isAssign {
 			continue
 		}
-		assignedPath, isPath := codexDottedKeyPath(assigned)
+		assignedPath, isPath := codexAssignmentKeyPath(assigned)
 		if !isPath {
 			continue // a single literal key, not a path
 		}
@@ -666,7 +783,7 @@ func parseCodexMCPServerBlock(lines []string) codexMCPServerValues {
 		if !ok {
 			continue
 		}
-		switch key {
+		switch codexOwnedKeyName(key) {
 		case "command":
 			vals.Command = decodeCodexTOMLString(value)
 		case "args":
@@ -750,7 +867,7 @@ func repairCodexMCPServerTable(lines []string, start, end int, ghostBin string) 
 			insertAt = i
 		}
 		if key, _, ok := splitCodexAssignment(lines[i]); ok {
-			defined[key] = true
+			defined[codexOwnedKeyName(key)] = true
 		}
 	}
 	if insertAt < 0 {
@@ -776,6 +893,7 @@ func repairCodexMCPServerTable(lines []string, start, end int, ghostBin string) 
 			inserted = true
 		}
 		key, value, ok := splitCodexAssignment(lines[i])
+		key = codexOwnedKeyName(key)
 		line := ownedLine(key)
 		if !ok || line == "" {
 			out = append(out, lines[i])

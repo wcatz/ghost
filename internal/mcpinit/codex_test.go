@@ -582,6 +582,39 @@ func TestRunCodex_TOMLRepairValueEndings(t *testing.T) {
 				"[profiles.ci]\n" +
 				"model = \"gpt-5-mini\"\n",
 		},
+		"unquoted nested array element": {
+			// [1, 2] is bracketed like a header but is not one: treating it as
+			// a table header ends the span early, which drops env_keep's opening
+			// bracket and leaves a duplicate command/args below.
+			seed: "[mcp_servers.ghost]\n" +
+				"env_keep = [\n" +
+				"  [1, 2]\n" +
+				"]\n" +
+				"command = '/old/install/ghost'\n" +
+				"args = [\"mcp\"]\n",
+			want: "[mcp_servers.ghost]\n" +
+				"env_keep = [\n" +
+				"  [1, 2]\n" +
+				"]\n" +
+				"command = {BIN}\n" +
+				"args = [\"mcp\"]\n",
+		},
+		"nested array element holding a bare value": {
+			// [true] is a plausible table header too, so only the fact that a
+			// bare true is a value and not a key keeps it in the array above.
+			seed: "[mcp_servers.ghost]\n" +
+				"env_keep = [\n" +
+				"  [true]\n" +
+				"]\n" +
+				"command = '/old/install/ghost'\n" +
+				"args = [\"mcp\"]\n",
+			want: "[mcp_servers.ghost]\n" +
+				"env_keep = [\n" +
+				"  [true]\n" +
+				"]\n" +
+				"command = {BIN}\n" +
+				"args = [\"mcp\"]\n",
+		},
 		"escaped quote inside a basic string": {
 			// args = ["a\"["] holds one element, a"[ , so it ends on that line.
 			seed: "[mcp_servers.ghost]\n" +
@@ -839,6 +872,29 @@ func TestRunCodex_TOMLRepairSurvivesMalformedValue(t *testing.T) {
 				"command = \"/usr/bin/other\"\n" +
 				"args = [\"serve\"]\n",
 		},
+		"quoted foreign header below a malformed value": {
+			// ["mcp_servers.other"] is a literal table name, so it ends the
+			// malformed value. Read as value content it would leave the other
+			// server's command and args inside the ghost span, where the
+			// repair drops them as duplicate keys.
+			seed: "[mcp_servers.ghost]\n" +
+				"command = '/old/ghost'\n" +
+				"args = [\"mcp\"]\n" +
+				"extra = [1, 2\n" +
+				"\n" +
+				"[\"mcp_servers.other\"]\n" +
+				"command = \"/usr/bin/other\"\n" +
+				"args = [\"serve\"]\n",
+			want: codexMCPServerComment + "\n" +
+				"[mcp_servers.ghost]\n" +
+				"command = {BIN}\n" +
+				"args = [\"mcp\"]\n" +
+				"extra = [1, 2\n" +
+				"\n" +
+				"[\"mcp_servers.other\"]\n" +
+				"command = \"/usr/bin/other\"\n" +
+				"args = [\"serve\"]\n",
+		},
 		"unterminated value above the ghost table": {
 			// The ghost table is still found and repaired in place, so init
 			// does not append a duplicate definition of a table already there.
@@ -927,6 +983,9 @@ func TestRunCodex_TOMLDottedGhostEntryLeftAlone(t *testing.T) {
 		"spaced dot separator":       `mcp_servers . ghost = { command = "/bin/ghost", args = ["mcp"] }`,
 		"quoted parts and spaces":    ` "mcp_servers" . ghost = { command = "/bin/ghost" }`,
 		"inline mcp_servers table":   `mcp_servers = { ghost = { command = "/bin/ghost", args = ["mcp"] } }`,
+		"dotted key with a literal part": "[mcp_servers]\n" +
+			"ghost.\"a.b\" = 1",
+		"dotted key with a literal part at the top level": `"mcp_servers".ghost."a.b" = 1`,
 		"multi-line inline mcp_servers table": "mcp_servers = {\n" +
 			"  ghost = { command = \"/bin/ghost\", args = [\"mcp\"] },\n" +
 			"}",
