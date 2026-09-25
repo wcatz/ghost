@@ -1226,6 +1226,20 @@ func nullIfEmpty(s string) any {
 type UpsertOptions struct {
 	Provenance Provenance
 	Scope      map[string]string
+
+	// FoldOnly changes what happens when a near-duplicate is found: the
+	// existing row is strengthened and returned, and the incoming text is
+	// NOT inserted as a new row.
+	//
+	// The default fold keeps the new wording, and that is right for a save —
+	// the caller explicitly asked for that text to be stored. It is wrong for
+	// promotion into _global, where the same fact arrives as a fresh
+	// paraphrase from every project's reflection: _global accumulated 68
+	// redundant rows in 19 clusters this way, one of them nine paraphrases of
+	// a single gouroboros fact, while every project scope had none (issue
+	// #544). Those rows cost window slots and resolve and supersede work,
+	// and 93 active duplicate links were needed just to sink them again.
+	FoldOnly bool
 }
 
 func (s *Store) Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (id string, duplicateOf string, score float64, err error) {
@@ -1426,6 +1440,18 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			WHERE id = ? AND project_id = ?
 		`, newImportance, existingID, projectID); err != nil {
 			return "", "", 0, fmt.Errorf("strengthen memory: %w", err)
+		}
+
+		if opts.FoldOnly {
+			// The caller does not want the incoming wording stored — a
+			// promotion whose fact _global already knows. The strengthen above
+			// is still the right outcome: the duplicate is evidence the fact
+			// keeps recurring, and throwing that away would make promotion
+			// lose the signal. Commit just the UPDATE.
+			if err = tx.Commit(); err != nil {
+				return "", "", 0, fmt.Errorf("commit upsert tx: %w", err)
+			}
+			return existingID, existingID, score, nil
 		}
 
 		if err = tx.QueryRowContext(ctx, `
