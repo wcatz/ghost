@@ -123,8 +123,11 @@ content and never includes response framing. `Budget` also has a total because
 search applies one limit across project and `_global`, while injection has
 independent project and global caps. A zero budget is rejected rather than
 treated as an implicit unbounded request. Stage 8 applies slice item caps first,
-reserves `ResponseReserve` for framing, outcome, and notes, and then trims the
-item total so the complete response fits `Budget.MaxBytes`. Callers that have a
+uses `ResponseReserve` as a provisional allowance, renders the actual framing,
+outcome, and notes, measures those bytes, and then drops items until the
+complete response fits `Budget.MaxBytes`. If the non-item bytes alone exceed
+the cap, notes and error text are bounded to their documented maximum; if they
+still exceed it, `Run` returns `response_budget_exceeded`. Callers that have a
 response-level byte contract set both fields; there is no implicit default.
 `MaxItems: 0` is unbounded only within the scope named by the field. `Result.Bytes`
 counts the complete response, including framing, outcome, and notes;
@@ -477,8 +480,9 @@ enabled, remains off by default, and receives its own bench comparison.
 
 `Slice.ClampBytes` is a presentation clamp that preserves UTF-8 boundaries.
 `Slice.MaxBytes` and `MaxItems` are hard item-membership trims. Stage 8 applies
-those slice caps, reserves `ResponseReserve`, and then applies the complete
-response cap. Stage 9 shares the item line's scope label, validity state,
+those slice caps, renders and measures the actual non-item bytes, and then
+applies the complete response cap. Stage 9 shares the item line's scope label,
+validity state,
 confidence, agent when present, and quote escaping, while preserving the
 distinct search and session-start framing and field order. Both surfaces render
 scope, validity state, confidence, and agent when present from the same `Item`
@@ -816,15 +820,17 @@ contract for `valid_from`, `valid_until`, `verified_at`, `confidence`, and
 `source_ref`; `session_id` comes from the active session and `agent` from the
 existing provenance path. The shared renderer exposes those fields, while
 stage 4's multiplier remains `1.0` until measured. Session-start sets
-`Budget.MaxBytes` from its existing injector cap; PR 4 sets the search response
-cap and `ResponseReserve` before the byte-boundary test.
+`Slice.MaxItems` and `Slice.ClampBytes` from its existing 15/8 and 200/300
+policies and leaves `Budget.MaxBytes` and `ResponseReserve` at 0; it introduces
+no new total cap. PR 4 sets the search response cap and `ResponseReserve`
+before the byte-boundary test.
 
 | # | Branch / title | Closes | Bench expectation |
 |---:|---|---|---|
 | 1 | `feat(assemble): internal/assemble seam; scope and category filter before window closure` | #573 | Run origin/main and branch; stay within 0.005 on NDCG@10 and R@5, explaining any diff. Cover the configured vector floor, bound `Now`, widened rows, and existing negative retrieval. |
 | 2 | `feat(mcpinit): render and apply scope on the session-start surface` | #577 | Add and document `injection.session_scope`; compare the rendered block, with selection and 15/8 caps unchanged when the key is unset. |
 | 3 | `feat(memory): write validity and provenance from the tools` | #575 | Add the writer fields, run the delta gate on new validity fixtures, and show the before/after `ghost_memory_search` payload. |
-| 4 | `feat(assemble): abstention is an outcome, not an empty list` | #580 | Record the abstention-subset score before and after threshold changes; test the complete response at the byte limit. Arm B starts disabled. |
+| 4 | `feat(assemble): abstention is an outcome, not an empty list` | #580 | Record the abstention-subset score before and after threshold changes; test the search response at its byte limit. Arm B starts disabled. |
 | 5 | `feat(memory): explain reports the assembler's decisions and `ghost context --explain` exists` | #583 | No scored-result change; mutation-test the no-recomputation invariant and add the CLI flag. |
 | 6 | `feat(assemble): conflict, dedup, diversity and budget stages` | Related #581 | Run the delta gate; verify the global drop policy and before/after payloads for both search and session-start. |
 | 7 | `feat(bench): context-quality metrics` | #582 | Add context mode beside direct-call ablations; record the exact baseline SHA and command, and report metrics without gating them. |
