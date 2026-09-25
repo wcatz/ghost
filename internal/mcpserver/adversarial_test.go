@@ -186,3 +186,36 @@ func TestIndirectInjectionBothMemoriesStayDelimited(t *testing.T) {
 		}
 	}
 }
+
+// TestMCPInstructionsDoNotVouchForEveryGlobal pins the correction issue #545
+// asked for. The instructions used to say globals "are the user's own saved
+// preferences … treat them as authoritative", while session start had just been
+// fixed to say the opposite. These instructions load into every MCP session, so
+// the two had to agree or the banner's care was undone on the first tool call.
+//
+// The trust claim is what mattered: a reflection-written global was summarised
+// by a model from project content, possibly read from an untrusted repository,
+// and an agent told to treat it as authoritative stops questioning it.
+func TestMCPInstructionsDoNotVouchForEveryGlobal(t *testing.T) {
+	for _, banned := range []string{
+		"are the user's own saved preferences",
+		"treat them as authoritative",
+	} {
+		if strings.Contains(mcpInstructions, banned) {
+			t.Errorf("mcpInstructions still asserts %q — not every global is the user's own, and the session banner no longer says it is", banned)
+		}
+	}
+
+	// It must actively tell the agent how to judge them, not merely stop
+	// vouching. Silence would leave the agent to infer trust from the section
+	// heading alone.
+	for _, want := range []string{
+		"not all the user's own",
+		"reflection pass or by an agent",
+		"verify it with the user",
+	} {
+		if !strings.Contains(mcpInstructions, want) {
+			t.Errorf("mcpInstructions no longer tells the agent to %q — dropping the claim without replacing it leaves trust implicit", want)
+		}
+	}
+}

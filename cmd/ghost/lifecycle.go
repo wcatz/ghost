@@ -695,10 +695,7 @@ Flags:
 	if len(projectMems) > 0 {
 		fmt.Printf("  Project-scoped (%d):\n", len(projectMems))
 		for _, m := range projectMems {
-			truncated := m.Content
-			if len(truncated) > 120 {
-				truncated = truncated[:120] + "..."
-			}
+			truncated := truncateForDisplay(m.Content, 120)
 			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, truncated)
 		}
 	}
@@ -709,10 +706,7 @@ Flags:
 			fmt.Printf("  Cross-project (%d) — kept project-scoped unless --promote-globals:\n", len(globalMems))
 		}
 		for _, m := range globalMems {
-			truncated := m.Content
-			if len(truncated) > 120 {
-				truncated = truncated[:120] + "..."
-			}
+			truncated := truncateForDisplay(m.Content, 120)
 			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, truncated)
 		}
 	}
@@ -793,6 +787,7 @@ Flags:
 	}
 
 	var preserved []string
+	consolidated := 0
 	if len(projectMems) > 0 {
 		dbMemories := make([]memory.Memory, len(projectMems))
 		for i, m := range projectMems {
@@ -805,34 +800,45 @@ Flags:
 				Tags:       m.Tags,
 			}
 		}
+		consolidated = len(dbMemories)
 
 		preserved, err = store.ReplaceNonManual(ctx, projectID, dbMemories, consolidatedSince)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 			os.Exit(1)
 		}
+	}
 
-		// Promotion runs here, after the project apply succeeded, rather than
-		// before it and outside the snapshot. In the old order a failure in
-		// ReplaceNonManual exited with an error after the globals were
-		// already written, so memories from a round reported as failed were
-		// nonetheless injected everywhere from then on.
-		if len(globalMems) > 0 && parsed.promoteGlobals {
-			if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: ensure _global project: %v\n", err)
+	// Promotion runs here, unconditionally, after the project apply. It must
+	// not sit inside the project guard: a round can yield only cross-project
+	// memories, and --promote-globals is an explicit request, so nesting it
+	// made the opt-in do nothing at exactly the moment there was nothing else
+	// to write. Running it after the apply keeps the ordering this exists for
+	// — a failed apply never leaves globals injected.
+	promoted, lost := applyPromotion(ctx, store, globalMems, parsed.promoteGlobals)
+	if promoted > 0 {
+		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
+	}
+
+	// A candidate that failed to promote has already been deleted from the
+	// project: with promotion on, global candidates are deliberately kept out
+	// of projectMems, so ReplaceNonManual removed them. Leaving a failure
+	// there would lose the memory outright. Put it back — the worst case has
+	// to be "not promoted", never "gone".
+	if len(lost) > 0 {
+		kept := 0
+		for _, m := range lost {
+			if _, _, _, err := store.Upsert(ctx, projectID, m.Category, m.Content, "reflection", m.Importance, m.Tags); err != nil {
+				fmt.Fprintf(os.Stderr, "error: unpromoted global also failed to return to the project: %v\n", err)
+				continue
 			}
-			promoted := 0
-			for _, m := range globalMems {
-				if _, _, _, err := store.Upsert(ctx, "_global", m.Category, m.Content, "reflection", m.Importance, m.Tags); err != nil {
-					fmt.Fprintf(os.Stderr, "warning: upsert global memory: %v\n", err)
-					continue
-				}
-				promoted++
-			}
-			fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
+			kept++
 		}
+		fmt.Fprintf(os.Stderr, "warning: %d of %d global memories could not be promoted and were kept in the project\n", kept, len(lost))
+	}
 
-		summary := fmt.Sprintf("%d memories consolidated (%s)", len(dbMemories), strings.Join(parts, ", "))
+	if consolidated > 0 {
+		summary := fmt.Sprintf("%d memories consolidated (%s)", consolidated, strings.Join(parts, ", "))
 		if len(globalMems) > 0 {
 			if parsed.promoteGlobals {
 				summary += fmt.Sprintf(", %d promoted to global", len(globalMems))
@@ -1207,4 +1213,67 @@ different harness). The harness owns its authentication and billing.`)
 	if !apply && res.Confirmed+res.Superseded+res.Corrected > 0 {
 		fmt.Println("\nRe-run with --apply to mark these resolved.")
 	}
+}
+
+// truncateForDisplay shortens s to at most n BYTES without splitting a
+// multi-byte character. The dry-run listing used to slice s[:120] directly,
+// which can cut a rune in half and print an invalid byte — harmless to a
+// terminal, but it makes the preview lie about what will be stored.
+func truncateForDisplay(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	// Walk back off any continuation byte (0b10xxxxxx) so the slice ends on a
+	// rune boundary. A leading byte starts a rune; stopping there keeps the
+	// final rune whole.
+	for cut > 0 && s[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return s[:cut] + "..."
+}
+
+// globalPromoter is the slice of `ghost reflect` that writes into _global.
+// Kept as a value rather than inlined so the ordering it depends on stays
+// visible at the call site: promotion must happen AFTER the project apply.
+type globalPromoter interface {
+	EnsureProject(ctx context.Context, id, path, name string) error
+	Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (string, string, float64, error)
+}
+
+// applyPromotion writes cross-project candidates into _global when the caller
+// explicitly asked for it, and returns the ones it could not write.
+//
+// Called unconditionally after the project apply rather than inside it. Two
+// reasons, both found in review:
+//
+//   - Inside `len(projectMems) > 0` it was unreachable when a round produced
+//     only cross-project memories — the one case where asking for promotion
+//     clearly meant it.
+//   - Its failures used to be logged and dropped. Global candidates are kept
+//     out of projectMems when promotion is on, so ReplaceNonManual has already
+//     deleted them from the project; a failed Upsert then left the memory in
+//     neither place. Returning them is what lets the caller put them back, so
+//     the worst case is "not promoted" rather than "lost".
+//
+// promote=false returns immediately and writes nothing: candidates are then
+// part of projectMems and were applied with them.
+func applyPromotion(ctx context.Context, store globalPromoter, globalMems []reflection.ReflectMemory, promote bool) (promoted int, failed []reflection.ReflectMemory) {
+	if !promote || len(globalMems) == 0 {
+		return 0, nil
+	}
+	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: ensure _global project: %v\n", err)
+		// Nothing could be written, so every candidate is unaccounted for.
+		return 0, globalMems
+	}
+	for _, m := range globalMems {
+		if _, _, _, err := store.Upsert(ctx, "_global", m.Category, m.Content, "reflection", m.Importance, m.Tags); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: upsert global memory: %v\n", err)
+			failed = append(failed, m)
+			continue
+		}
+		promoted++
+	}
+	return promoted, failed
 }
