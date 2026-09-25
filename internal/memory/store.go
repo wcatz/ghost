@@ -1107,26 +1107,21 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	// repository whose first checkout already created a project. A path
 	// carries no identity of its own, so it is resolved through the injected
 	// detector; without that, saving from ~/work/ghost and then reading from
-<<<<<<< HEAD
-	// it would disagree about which project it is. Detection runs only for
-	// path-shaped inputs, so resolving by id or name never spawns a process. A
-	// path is tested after the raw input has been normalised as a remote,
-	// because a relative path such as ../checkout can otherwise be mistaken for
-	// a host/path remote. Non-directory remote strings fail the detector's
-	// os.Stat before it starts Git, then normalize normally.
-=======
 	// it would disagree about which project it is.
 	//
 	// Detection is gated on the input being path-shaped rather than on
 	// filepath.IsAbs, because IsAbs is false for a drive-relative Windows
 	// path such as \work\ghost — skipping detection for exactly the shape a
 	// second checkout arrives in is how one repository became two projects.
-	// The cost of that choice is bounded and stated here rather than implied:
-	// an id never spawns a process, and a name never does either unless it
-	// carries a separator, which this function cannot tell apart from a
-	// path. A separator-shaped miss costs one `git config` call, which
-	// returns nothing for anything that is not a directory.
->>>>>>> 04b91bc (fix(memory): decide basename ambiguity on the candidates that agree)
+	// The raw input is normalised as a remote first, because a relative path
+	// such as ../checkout would otherwise be mistaken for a host/path remote;
+	// non-directory remote strings then fail the detector's os.Stat before it
+	// starts Git, and normalise normally. The cost of the gate is bounded and
+	// stated here rather than implied: an id never spawns a process, and a name
+	// never does either unless it carries a separator, which this function
+	// cannot tell apart from a path. A separator-shaped miss costs one
+	// `git config` call, which returns nothing for anything that is not a
+	// directory.
 	remote := NormalizeRepoRemote(input)
 	if remote == "" && strings.ContainsAny(input, `/\`) {
 		remote = NormalizeRepoRemote(detectRemoteForPath(input))

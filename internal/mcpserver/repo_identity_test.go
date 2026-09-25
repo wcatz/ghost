@@ -486,3 +486,67 @@ func TestSaveWithNamedProjectDoesNotSpawnGit(t *testing.T) {
 		t.Errorf("named save crossed a repository detector: MCP=%d store=%d, want 0/0", mcpDetections, storeDetections)
 	}
 }
+
+// TestSaveFromRelativePathJoinsTheKnownRepository is the writer-side half of
+// the same defect the store fixed twice: detection was gated on
+// filepath.IsAbs, which is false for a drive-relative Windows path and for
+// any relative path. A save from such a checkout of a repository Ghost
+// already knew therefore opened a SECOND project, while the reader — which
+// stopped using IsAbs — resolved that same path to the first. The gate is now
+// the shared memory.IsPathShaped predicate, so writer and reader agree.
+func TestSaveFromRelativePathJoinsTheKnownRepository(t *testing.T) {
+	memory.SetDetectRemote(repo.DetectRemote)
+	t.Cleanup(func() { memory.SetDetectRemote(nil) })
+	const origin = "https://github.com/wcatz/ghost.git"
+	checkoutA := repoDir(t, "checkout-a", origin)
+	checkoutB := repoDir(t, "checkout-b", origin)
+
+	// Spell the second checkout relative to the test binary's working
+	// directory, which is what makes filepath.IsAbs false while the value is
+	// still a real path on disk. Cross-volume temp dirs (Windows) cannot be
+	// expressed relatively, so there is nothing to prove in that case.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	relB, err := filepath.Rel(cwd, checkoutB)
+	if err != nil {
+		t.Skipf("cannot express the checkout relative to the working directory: %v", err)
+	}
+	if filepath.IsAbs(relB) {
+		t.Fatalf("relative path came back absolute: %q", relB)
+	}
+
+	_, session := newCapSession(t)
+	if res := callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": checkoutA,
+		"content":    "saved from the absolute checkout",
+		"category":   "fact",
+	}); res.IsError {
+		t.Fatalf("absolute save failed: %s", resultText(res))
+	}
+	if res := callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": relB,
+		"content":    "saved through a relative path",
+		"category":   "fact",
+	}); res.IsError {
+		t.Fatalf("relative save failed: %s", resultText(res))
+	}
+
+	// One repository is one project: the relative save must be reachable
+	// from the first checkout. If detection had been skipped, it would have
+	// opened a project of its own and be invisible here.
+	out := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": checkoutA,
+		"query":      "relative path",
+		"limit":      10,
+	}))
+	if !strings.Contains(out, "saved through a relative path") {
+		t.Errorf("save from relative path %q is not in the project the absolute checkout owns — detection was skipped and a second project was opened:\n%s", relB, out)
+	}
+}
+
+// TestSaveWithNamedProjectDoesNotSpawnGit guards the cost of the feature: a
+// caller that names a project ("ghost", "platform-ops") gives no path to
+// inspect, so detection must not run at all. Without this, every ordinary
+// save would pay for a git process.
