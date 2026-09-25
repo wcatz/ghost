@@ -476,6 +476,73 @@ type LegStatus struct{ Attempted, Available bool; Err string; Truncated bool }
 type EdgeStatus struct{ Status string; Err string } // "ok" | "unavailable" | "err"
 ```
 
+**`CandidateRequest` is the fourth DTO and it is the cross-package contract, so
+it is declared here in full.** Leaving it implicit would let `memory` and
+`assemble` compile while implementing different behaviour — exactly the drift
+`SearchExplain` already has (`explain.go:180-210`), and untestable, because
+every invariant this design depends on is a statement about what `Candidates`
+was asked for.
+
+```go
+// package memory
+type CandidateRequest struct {
+    ProjectID   string            // "" = _global only (see the validation matrix)
+    Query       string            // "" = passive mode
+    QueryVec    []float32
+    Scope       map[string]string // nil = no scope predicate
+    Category    string            // "" = any; over-fetch, then stage 3 confirms
+    Condition   Condition         // hybrid | fts_only | vector_only
+    Params      SearchParams      // resolved, never nil: the store's configured
+                                  // MinSimilarity is already folded in by Run
+    Now         time.Time         // required; AgeDays/DecayFactor derive from it
+    Fetch       Fetch             // how wide each leg over-fetches
+    Passive     []SlicePolicy     // per-bucket passive behaviour, see §2
+    Demotion    map[string]float64 // bucket -> near-dup threshold
+    StorePath   string            // "" when the store is in-memory; see the
+                                  // read-handle note above
+}
+
+type Fetch struct {
+    FTSTopK, VectorTopK int    // per-leg over-fetch, both > limit today (limit*2)
+    Limit               int    // the ranked window; Candidates returns MORE than this
+}
+
+type SlicePolicy struct {
+    Bucket             string
+    Order              string  // "decay" | "pinned_importance_updated"
+    TwoPass            bool    // behavioural floor + category weights (project only)
+    BehaviorFloor      int
+    CategoryWeights    map[string]float64
+    CategoryCaps       map[string]int
+    DropDemotedLosers  bool    // honoured only for SourceSessionStart
+}
+```
+
+**The `Run` → `Candidates` mapping**, since the interesting part is what `Run`
+resolves *before* the call:
+
+- `Params`: `Run` resolves the `*memory.SearchParams` **and re-applies the
+  store's configured `search.min_similarity` floor** on top, exactly as
+  `SearchHybrid` does (`vector.go:433`). A nil reaching `Candidates` is a bug,
+  so the field is a value, not a pointer.
+- `Now`: passed through unchanged. The four-consequence list above ("scoring stays
+  inside `memory`") depends on `Candidates` never calling `time.Now()`.
+- `Condition` → the legs: `CondVectorOnly` runs the vector leg alone, which is why
+  the type has to cross the boundary rather than being a nil-`QueryVec` trick.
+- `Fetch.Limit` is the caller's limit; `Candidates` returns strictly more. The
+  "returns strictly more rows" regression test is a statement about this field.
+- `Passive` is only populated for `Request.Query == ""`, and it is what carries
+  the three passive policies. In query mode it is empty and those fields are
+  never read.
+- `StorePath` is empty for in-memory stores, which is how `Candidates` knows to
+  use the injected handle rather than trying to open one.
+
+`Run` validates before calling: `Now` non-zero, `Params` resolvable,
+`Condition`/`Query`/`QueryVec` consistent, `Budget` non-zero (§ Input/output), and
+the `ProjectID`/`Query` matrix. A validation failure returns an error and never
+becomes a `CandidateSet`, so a malformed request cannot reach a leg as a
+silently-degraded one.
+
 **One snapshot per `Candidates` call — which means refactoring the legs, not
 just wrapping them.** The legs, the hydration and the edge load must run inside a
 **single read transaction**, not as today's separate autocommit queries.
@@ -544,20 +611,46 @@ would block every concurrent `ghost_memory_save` for its whole duration, and a
 read path that can fail with `SQLITE_BUSY` is a **new** failure mode that does
 not exist today.
 
-So the retrieval snapshot needs a handle whose DSN does **not** set
-`_txlock=immediate`. That is not a new idea in this codebase — it is exactly the
-split the session hook already has, opening its own handle through a read-only
-DSN (`roDSN`, `hook.go:417`). The design therefore adds a `memory.OpenReadDB`
-returning a read-only handle with `journal_mode(WAL)`, `foreign_keys(ON)`,
-`busy_timeout(5000)` and **no** `_txlock`, and `Candidates` is served from that
-handle for the whole transaction. Two consequences the spec should not leave
-implicit:
+**The read-handle plan needs constructor injection, and it does not work for an
+in-memory store.** `Store` holds only a `*sql.DB` (`NewStore`, `store.go:141`),
+so it cannot open a second handle itself, and `OpenDB(":memory:")` — which
+`cmd/ghost/bench.go:36` uses for the built-in dataset — creates a **private**
+in-memory database that a second connection cannot see at all. So "just open a
+read handle" is unimplementable for the two callers that matter most for testing
+the invariants.
 
-- The production `*memory.Store` (immediate, read-write) keeps serving writes and
-  single-statement reads. Only the multi-leg snapshot path uses the read handle.
-- The hook's `roDSN` and this new constructor must be **one** function, not two
-  near-identical DSN strings, or the read-only invariant the hook relies on
-  drifts between the two call sites. `roDSN` becomes a call into it.
+The resolution is that the read handle is **injected, not discovered**, and the
+in-memory case is handled explicitly rather than by accident:
+
+```go
+// memory
+type Store struct {
+    db      *sql.DB  // read-write handle, _txlock=immediate
+    readDB  *sql.DB  // optional: deferred-read handle for multi-leg snapshots
+    ...
+}
+
+// NewStore keeps its signature and readDB == nil: a single-statement read
+// through db behaves exactly as today. NewStoreWithRead(db, readDB, logger)
+// is what production and the hook use.
+```
+
+And the strategy differs by handle kind, stated per source:
+
+| Store | Snapshot handle | Why |
+|---|---|---|
+| production file store | second handle, no `_txlock` | the plan above; `roDSN` becomes a call into one shared constructor |
+| **`:memory:` (bench, tests)** | **the same `db`, no second connection** | a second connection sees a *different, empty* database, so it cannot be used. With `SetMaxOpenConns(1)` the legs execute **through the `*sql.Tx`** (the `Queryer` refactor), which prevents the self-deadlock and gives one consistent snapshot — but the transaction is `BEGIN IMMEDIATE` and takes the write lock, because the DSN says so |
+
+That last row is the honest cost, and it is acceptable only because it applies to
+short-lived test and bench processes with no concurrent writer — a property
+`SourceBench` and unit tests satisfy and production does not. It is stated as a
+limitation rather than glossed: **the deferred-read guarantee holds for file
+stores only**, and any future in-memory multi-process use would need a shared
+cache URI (`file::memory:?cache=shared`) or a single-writer strategy, neither of
+which this design introduces. `OpenReadDB` is a constructor for *file* paths and
+returns an error for `:memory:` rather than silently handing back a handle that
+cannot see the data.
 
 **Edge failures are non-fatal, and visibly so.** The edge load introduces a
 failure path that `CandidateSet` must model rather than hide, because the trace
