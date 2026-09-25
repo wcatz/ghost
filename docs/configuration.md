@@ -92,7 +92,7 @@ What decides it is the *open*, not the command. A read-write open tightens where
 - **Read-only opens change nothing.** The stop hook's own database reads, the lifecycle marker, the lifecycle lock and `ghost obsidian sync` all connect read-only. A diagnostic has to be able to report on a database it cannot modify, and a read-only connection cannot create one either.
 - **Read-write opens tighten**, including commands whose job is only to read. `ghost mcp status` and `ghost maintenance status` open the database read-write to check store health and report recent runs, and `ghost project bind` opens it to write the binding. Most other commands reach it through the same shared startup that already ran migrations on their behalf.
 
-Two session events can tighten as a side effect. A session *start* bumps the project's session counter, which is a write. A session *stop* spawns `ghost lifecycle` for a reflection pass when that is configured, and that runs in its own process with its own open.
+Two session events can tighten as a side effect. A genuine session *start* — a new session in a directory that resolves to a project, not a resume, a compaction or a subagent — bumps the project's session counter, which is a write. A session *stop* spawns `ghost lifecycle` for a reflection pass when that is configured, and that runs in its own process with its own open.
 
 On Windows the pass is skipped entirely: access there is carried by an ACL inherited from the parent directory, not by the mode bits `chmod` maps onto read-only, so tightening a number would not change who can read the database.
 
