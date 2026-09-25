@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/repo"
 )
 
 // resolveProjectOrExit resolves projectName to a project ID via store, printing
@@ -202,6 +204,179 @@ func knownProjectNames(ctx context.Context, store *memory.Store) []string {
 		return nil
 	}
 	return names
+}
+
+// resolveProjectBindID checks the project argument of `ghost project bind`
+// names an existing project id, or reports the known names and fails. It is
+// the exact-id lookup rather than ResolveProject on purpose: bind is the
+// command a user runs *because* a project does not resolve from its directory,
+// so the name and path steps of the full resolver are the ones least likely to
+// produce the project they meant, and a name that matches two projects would be
+// a coin flip. A miss therefore names the argument as wrong instead of
+// silently binding whichever project looked closest.
+func resolveProjectBindID(ctx context.Context, store *memory.Store, projectID string) (string, error) {
+	if _, ok, err := store.ResolveExactProjectID(ctx, projectID); err != nil {
+		return "", err
+	} else if !ok {
+		if names := knownProjectNames(ctx, store); len(names) > 0 {
+			return "", fmt.Errorf("project %q not found (bind takes a project id). Known projects: %s",
+				projectID, strings.Join(names, ", "))
+		}
+		return "", fmt.Errorf("project %q not found (bind takes a project id)", projectID)
+	}
+	return projectID, nil
+}
+
+// runProjectBindCore implements `ghost project bind <project> <path>` against
+// an already-open store and prints what changed. detectRemote is injected
+// because it is the only step that has to ask git, and the command's tests
+// must not spawn a process: the CLI passes repo.DetectRemote, the same detector
+// main wires into the store for resolution.
+//
+// The path is resolved here rather than in the store because this package is
+// the one allowed to look at the filesystem. It is made absolute and cleaned,
+// and must be an existing directory — binding a path that does not exist would
+// record a location no session can ever stand in, which is the state the
+// command exists to leave. Everything after that (the recorded-path rules, the
+// claim checks, the write) belongs to the store, which owns them.
+//
+// Pulled out of runProjectBind — which owns arg parsing, bootstrap() and
+// os.Exit — so the refusals are testable without process-exit paths.
+func runProjectBindCore(ctx context.Context, store *memory.Store, out io.Writer, projectID, path string, detectRemote func(string) string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("no path given — usage: ghost project bind <project-id> <checkout-directory>")
+	}
+	id, err := resolveProjectBindID(ctx, store, projectID)
+	if err != nil {
+		return err
+	}
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("cannot resolve %q to an absolute path: %w", path, err)
+	}
+	abs = filepath.Clean(abs)
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no such directory: %s", abs)
+		}
+		return fmt.Errorf("cannot read %s: %w", abs, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory: %s", abs)
+	}
+	// The filesystem root, and only the root, survives Abs+Stat: it is
+	// absolute and it exists, and it is exactly the path that would claim
+	// every directory on the machine.
+	if !memory.StoredPathIsUsable(abs) {
+		return fmt.Errorf("refusing to bind %s: it contains every directory, so sessions anywhere would resolve to this project", abs)
+	}
+
+	remote := ""
+	if detectRemote != nil {
+		remote = detectRemote(abs)
+	}
+
+	binding, err := store.BindProjectPath(ctx, id, abs, remote)
+	if err != nil {
+		return err
+	}
+	return printBinding(out, binding)
+}
+
+// printBinding reports the outcome in one of two shapes: the fields that moved
+// for a real bind, and a single line saying so when the command was a re-run,
+// so a user who cannot remember whether they already ran it learns that from
+// the output instead of having to look.
+func printBinding(out io.Writer, binding memory.ProjectBinding) error {
+	label := projectLabel(binding.Name, binding.ProjectID)
+	if !binding.Changed() {
+		_, err := fmt.Fprintf(out, "already bound: %s → %s\n", label, binding.Path)
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "bound %s → %s\n", label, binding.Path); err != nil {
+		return err
+	}
+	if binding.PathChanged {
+		if _, err := fmt.Fprintf(out, "  path: %s → %s\n", binding.PreviousPath, binding.Path); err != nil {
+			return err
+		}
+	}
+	if binding.RemoteSet {
+		if _, err := fmt.Fprintf(out, "  repo_remote: (none) → %s\n", binding.RepoRemote); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// projectLabel names a project for a human, preferring "name (id)" so the id
+// the command needs stays visible even when the name is what the user knows.
+func projectLabel(name, id string) string {
+	if name == "" || name == id {
+		return id
+	}
+	return fmt.Sprintf("%s (%s)", name, id)
+}
+
+// writeUnboundProjectNotice reports the projects a session directory can never
+// resolve, each with the command that fixes it. It is called by `ghost mcp
+// status` and prints nothing when there is nothing to fix, so a healthy install
+// gains no new output.
+func writeUnboundProjectNotice(ctx context.Context, out io.Writer, store *memory.Store) error {
+	unbound, err := store.ListUnboundProjects(ctx)
+	if err != nil {
+		return fmt.Errorf("list unbound projects: %w", err)
+	}
+	if len(unbound) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(out, "\nProjects with no bound checkout (sessions in them get no injected context):"); err != nil {
+		return err
+	}
+	for _, p := range unbound {
+		if _, err := fmt.Fprintf(out, "  %s — run: ghost project bind %s /path/to/checkout\n",
+			projectLabel(p.Name, p.ID), p.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runProjectBind implements `ghost project bind <project-id> <checkout>`.
+func runProjectBind() {
+	args := os.Args[3:]
+	var positional []string
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", a)
+			os.Exit(1)
+		}
+		positional = append(positional, a)
+	}
+	if len(positional) != 2 {
+		fmt.Fprintln(os.Stderr, "Usage: ghost project bind <project-id> <checkout-directory>")
+		fmt.Fprintln(os.Stderr, `Gives a project a recorded checkout, so a session in that directory
+resolves it. Projects created over MCP — and every project upgraded from a
+v9 database — record only a name, so no directory resolves them and they get
+no session-start context or lifecycle work. Refuses _global, a path another
+project already claims, and a repository another project already claims. Safe
+to re-run.`)
+		os.Exit(1)
+	}
+
+	_, _, store := bootstrap(os.Stderr, cliLogLevel())
+	defer store.Close() //nolint:errcheck
+
+	// repo.DetectRemote is the same detector main injects into the store, so
+	// the remote recorded here is the remote resolution will later compare
+	// against — two spellings of one repository, not two identities.
+	if err := runProjectBindCore(context.Background(), store, os.Stdout, positional[0], positional[1], repo.DetectRemote); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // runProjectMerge implements `ghost project merge <old> <new>`.

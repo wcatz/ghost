@@ -64,8 +64,13 @@ func main() {
 				runProjectMerge()
 				return
 			}
+			if len(os.Args) > 2 && os.Args[2] == "bind" {
+				runProjectBind()
+				return
+			}
 			fmt.Fprintln(os.Stderr, "Usage: ghost project delete <name-or-id> [--apply]")
 			fmt.Fprintln(os.Stderr, "       ghost project merge <old-name-or-id> <new-name-or-id>")
+			fmt.Fprintln(os.Stderr, "       ghost project bind <project-id> <checkout-directory>")
 			os.Exit(1)
 		case "upgrade":
 			runUpgrade()
@@ -118,6 +123,9 @@ Commands:
                               (dry-run by default, --apply + name re-type to confirm)
   project merge <old> <new>   Merge one project into another; child records move to the
                               survivor with memory IDs, links, and pin state preserved
+  project bind <id> <path>     Record a checkout for a project so a session in that
+                              directory resolves it (ghost mcp status reports
+                              projects that have no usable path and no remote)
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
   obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
   context [--cwd <dir>]       Print the passive session-start context block (for opencode)

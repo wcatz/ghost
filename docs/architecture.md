@@ -19,13 +19,16 @@ The same binary provides several modes:
 ```text
 ghost mcp                         MCP server over stdio
 ghost mcp init                    Configure MCP clients
-ghost mcp status                  Check client and store health
+ghost mcp status                  Check client and store health, and list
+                                   projects with no bound checkout
 ghost hook <event> --source <host> Normalize a host lifecycle event
 ghost reflect <project>           Consolidate memories
 ghost resolve <project>           Mark resolved evidence
 ghost supersede <project>         Classify replacement relationships
 ghost lifecycle <project>         Run the detached maintenance phases
 ghost project delete|merge        Manage project records
+ghost project bind <id> <path>     Record a project checkout so a session in
+                                   that directory resolves it
 ghost obsidian export|sync        Mirror the store to Markdown
 ghost context                     Render passive session context
 ghost bench [--sweep]             Run the built-in benchmark

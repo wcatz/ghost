@@ -47,6 +47,8 @@ ghost mcp status --client goose
 
 Without `--client`, status targets Claude Code. The checks include client registration, lifecycle wiring, the database, Ollama reachability, and embedding/link coverage where applicable. A generic MCP client has no Ghost-specific status integration.
 
+Status also lists any project that records no usable checkout and no repository remote, with the `ghost project bind` command that repairs it. Those projects are not a health failure — every check above can pass while sessions in such a checkout silently get no injected context — and the section is omitted entirely when there is nothing to fix.
+
 ## Hooks
 
 ```bash
@@ -150,6 +152,31 @@ ghost project merge old-name new-name
 ```
 
 Both arguments accept a project name, ID, path-prefix match, or basename match. A basename match is accepted only when exactly one candidate survives the recorded-path and repository-remote checks; an ambiguous match is rejected rather than guessed. The command refuses to merge a project into itself.
+
+### `ghost project bind <project-id> <checkout-directory>`
+
+Gives a project a recorded checkout, so a session in that directory resolves it:
+
+```bash
+ghost project bind infrastructure /home/wayne/git/infrastructure
+```
+
+The first argument is an existing project **id** — not a name or a path. A project that records no usable location cannot be resolved from a directory, so it gets no session-start context and no Stop-hook lifecycle work; this is the command that repairs that, and `ghost mcp status` lists every project that needs it.
+
+The directory is made absolute and cleaned, and must exist and be a directory. Ghost also records the checkout's Git remote when the project records none, so a second worktree of the same repository resolves to the same project.
+
+The command refuses, writing nothing, when:
+
+| Refusal | Reason |
+|---|---|
+| the project is `_global` | it holds every project's memories, not a checkout |
+| the project id does not exist | bind never guesses which project was meant |
+| the path is missing, is not a directory, or is the filesystem root | a path that cannot be compared against a session directory would never resolve |
+| another project already records that path | two projects on one checkout leave a session there resolving to whichever row ranked higher |
+| another project already records the detected remote | one repository is one project |
+| the project already belongs to a different remote | merging is the repair; rebinding is not |
+
+Binding the same project to the same directory again succeeds and changes nothing, so the command printed by `ghost mcp status` is safe to re-run.
 
 ## Obsidian
 
