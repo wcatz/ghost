@@ -407,6 +407,13 @@ func TestBindingPrintsTheMCPInitFollowUp(t *testing.T) {
 		if !strings.Contains(out.String(), "ghost mcp init") {
 			t.Errorf("output should say how to finish the repair, got:\n%s", out.String())
 		}
+		// Only the Claude installer writes a redirect, and bind cannot know
+		// which client the user runs, so the sentence has to name the client
+		// rather than send an opencode or goose user after a step that does not
+		// exist for them.
+		if !strings.Contains(out.String(), "Claude") {
+			t.Errorf("the follow-up should say which client it applies to, got:\n%s", out.String())
+		}
 	})
 
 	t.Run("a project that already had a checkout does not", func(t *testing.T) {
@@ -485,9 +492,11 @@ func TestUnboundProjectNotice(t *testing.T) {
 	if !strings.Contains(after, "no longer exists") {
 		t.Errorf("the notice should state what it cannot detect, got:\n%s", after)
 	}
-	// The plan the notice hands out is two commands, and only the first is the
-	// bind: init is what writes the redirect the bind makes status check for.
-	if !strings.Contains(after, "ghost mcp init") {
-		t.Errorf("the notice should name the step that finishes the repair, got:\n%s", after)
+	// The plan the notice hands out is two commands for the Claude client, and
+	// only the first is the bind: init is what writes the redirect the bind makes
+	// status check for. The client is named because the other three have no such
+	// step and this notice prints for all of them.
+	if !strings.Contains(after, "ghost mcp init") || !strings.Contains(after, "Claude") {
+		t.Errorf("the notice should name the client-specific step that finishes the repair, got:\n%s", after)
 	}
 }

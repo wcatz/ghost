@@ -373,38 +373,41 @@ func TestBindProjectPathRefusesUnmatchablePath(t *testing.T) {
 	// characters is dropped by the query while its byte length is over the
 	// limit — and an error that counted bytes would then claim the path passed
 	// the very rule it failed.
-	short := filepath.Join(os.TempDir(), "gb1")
-	multibyte := filepath.Join(os.TempDir(), "日本")
-	cases := []struct {
-		name       string
-		dir        string
-		wantLength int
-	}{
-		{name: "ascii", dir: short, wantLength: len(short)},
-		{name: "multibyte", dir: multibyte, wantLength: len([]rune(multibyte))},
+	//
+	// Both cases need a path of ten characters or fewer, which means resolving
+	// the temp root first: on a host whose TMPDIR is itself deep (macOS
+	// /var/folders/…, TMPDIR=/var/tmp) no such path exists here, and the honest
+	// outcome is to skip rather than to fail on a host that cannot produce one.
+	root, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Skipf("cannot resolve the temp root: %v", err)
+	}
+	cases := []struct{ name, dir string }{
+		{name: "ascii", dir: "gb1"},
+		{name: "multibyte", dir: "日本"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			resolved, err := filepath.EvalSymlinks(tc.dir)
-			if err == nil {
-				if n := len([]rune(resolved)); n > 10 {
-					t.Skipf("no path of %d characters available under %s (temp root is %d)", tc.wantLength, os.TempDir(), n)
-				}
+			dir := filepath.Join(root, tc.dir)
+			wantLength := len([]rune(dir))
+			if wantLength > 10 {
+				t.Skipf("no path of ten characters or fewer exists under %s (%d characters)", root, wantLength)
 			}
-			if err := os.Mkdir(tc.dir, 0o700); err != nil {
-				t.Skipf("cannot create %s: %v", tc.dir, err)
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Skipf("cannot create %s: %v", dir, err)
 			}
-			t.Cleanup(func() { _ = os.RemoveAll(tc.dir) })
+			t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 			s := bindStore(t)
 			sentinelProject(t, s, "infra", "infrastructure")
-			_, err = s.BindProjectPath(ctx, "infra", tc.dir, "")
+			_, err := s.BindProjectPath(ctx, "infra", dir, "")
 			if !errors.Is(err, ErrBindPathUnmatchable) {
 				t.Fatalf("err = %v, want ErrBindPathUnmatchable for a path the resolver skips", err)
 			}
-			// The number in the message must be the number the filter used.
-			if !strings.Contains(err.Error(), fmt.Sprintf("is %d characters", tc.wantLength)) {
-				t.Errorf("error should count the %d characters the filter counted, got %q", tc.wantLength, err)
+			// The number in the message must be the number the filter used,
+			// counted on the resolved path rather than the typed one.
+			if !strings.Contains(err.Error(), fmt.Sprintf("is %d characters", wantLength)) {
+				t.Errorf("error should count the %d characters the filter counted, got %q", wantLength, err)
 			}
 			if got := projectPath(t, s, "infra"); got != "infra" {
 				t.Errorf("the refused bind wrote path %q", got)

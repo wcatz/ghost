@@ -311,12 +311,13 @@ func printBinding(out io.Writer, binding memory.ProjectBinding) error {
 		}
 	}
 	// A project that had no absolute path is one `ghost mcp init` skipped: the
-	// installer writes a Claude memory redirect per absolute checkout, and skips
+	// Claude installer writes a memory redirect per absolute checkout, and skips
 	// the rest. Recording one makes `ghost mcp status` count it, so status goes
-	// red on the redirect check until init runs again. Saying so here is the
-	// difference between a finished repair and one that looks broken.
+	// red on the redirect check until init runs again. Named as the Claude
+	// step it is, because the opencode, codex and goose installers have no such
+	// step and bind cannot know which client the user runs.
 	if binding.PathChanged && !filepath.IsAbs(binding.PreviousPath) {
-		if _, err := fmt.Fprintln(out, "  next: run `ghost mcp init` to write the memory redirect for this checkout (ghost mcp status checks it)"); err != nil {
+		if _, err := fmt.Fprintln(out, "  next: if you use the Claude client, run `ghost mcp init` to write this checkout's memory redirect (its status check counts it)"); err != nil {
 			return err
 		}
 	}
@@ -386,11 +387,13 @@ func writeUnboundProjectNotice(ctx context.Context, out io.Writer, store *memory
 	if _, err := fmt.Fprintln(out, "  A recorded path that no longer exists is not detected here — re-bind it with the new path."); err != nil {
 		return err
 	}
-	// The repair is two commands, and only the first is the bind. `mcp init`
-	// writes the per-checkout memory redirect that a newly absolute path makes
-	// `mcp status` check for, and it skips projects with no absolute path — this
-	// exact set — so without it status reports the repair as half-done.
-	_, err = fmt.Fprintln(out, "  After binding, re-run `ghost mcp init` to write the memory redirect each new checkout needs.")
+	// The repair is two commands for the Claude client, and only the first is
+	// the bind. Its installer writes a per-checkout memory redirect and skips
+	// projects with no absolute path — this exact set — so without it status
+	// reports the repair as half-done. Named as the Claude step it is, because
+	// the other three clients have no redirect to write and this notice is
+	// printed for all of them.
+	_, err = fmt.Fprintln(out, "  If you use the Claude client, re-run `ghost mcp init` afterwards to write each new checkout's memory redirect.")
 	return err
 }
 
