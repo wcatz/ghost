@@ -11,6 +11,7 @@ package config
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,12 +20,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
-	"github.com/knadh/koanf/providers/env"
-	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 )
 
@@ -221,7 +221,8 @@ const systemConfigPath = "/etc/ghost/config.yaml"
 // fallback to the compiled defaults: one typo used to leave every key at its
 // default with nothing to explain why. Callers that must not fail — the
 // host-session hooks — use LoadForHook instead, which reports the same problem
-// as a warning and keeps the defaults.
+// as a warning and keeps the defaults. A file that exists but cannot be read is
+// only a warning; see loadFileIfExists for why the two differ.
 //
 // Unknown keys in a config file are reported the same way but do not fail the
 // load, because a key Ghost does not bind is harmless to everything that does.
@@ -236,20 +237,15 @@ func Load() (*Config, error) {
 	parser := yaml.Parser()
 
 	// Layer 2: /etc/ghost/config.yaml (system-wide).
-	known := k.Keys()
-	if err := loadFileIfExists(k, systemConfigPath, parser); err != nil {
+	if err := loadConfigFile(k, systemConfigPath, parser); err != nil {
 		return nil, err
 	}
-	warnUnknownKeys(k, known, systemConfigPath)
 
 	// Layer 3: the platform's user config path (user-global).
 	if configDir, err := userConfigDir(); err == nil {
-		path := filepath.Join(configDir, "ghost", "config.yaml")
-		known = k.Keys()
-		if err := loadFileIfExists(k, path, parser); err != nil {
+		if err := loadConfigFile(k, filepath.Join(configDir, "ghost", "config.yaml"), parser); err != nil {
 			return nil, err
 		}
-		warnUnknownKeys(k, known, path)
 	}
 
 	// Layer 4: GHOST_* environment variables.
@@ -267,16 +263,49 @@ func Load() (*Config, error) {
 
 // loadEnvLayer applies the GHOST_* environment variables to k: the generic
 // GHOST_ prefix + "_"→"." mapping first, then the explicit envOverrides
-// shortcuts for the keys that transformer cannot reach. An error names the
-// variable, so the user knows which one to fix.
+// shortcuts for the keys that transformer cannot reach.
+//
+// Both passes skip an unreadable value and keep going, collecting every failure
+// into one error. Returning at the first bad value hid the rest behind it — the
+// one behind it was a good value, silently dropped — and, in the generic pass,
+// discarding the whole layer: the bulk env provider loads every variable as a
+// string, so a single value koanf cannot convert surfaces much later as a decode
+// error naming no variable at all, and took GHOST_EMBEDDING_ENABLED=false down
+// with it. Each error names the variable that carried it.
 func loadEnvLayer(k *koanf.Koanf) error {
-	if err := k.Load(env.Provider("GHOST_", ".", func(s string) string {
-		return strings.ToLower(strings.ReplaceAll(
-			strings.TrimPrefix(s, "GHOST_"), "_", "."))
-	}), nil); err != nil {
-		return err
+	var errs []error
+
+	// Pass 1: the generic mapping, built one variable at a time. A value bound
+	// to a Config field is converted here, so an unconvertible one can be
+	// skipped and named rather than failing the decode of everything else.
+	generic := make(map[string]interface{})
+	for _, kv := range os.Environ() {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok || !strings.HasPrefix(name, envPrefix) {
+			continue
+		}
+		key := strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(name, envPrefix), "_", "."))
+		// An empty value is left as the string it has always been: the generic
+		// mapping has no empty-value guard, and adding one would silently change
+		// what `GHOST_EMBEDDING_ENABLED=` means.
+		if t, bound := boundKeyTypes[key]; bound && value != "" {
+			parsed, err := parseEnvValue(t, value)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", name, err))
+				continue
+			}
+			generic[key] = parsed
+			continue
+		}
+		generic[key] = value
+	}
+	if len(generic) > 0 {
+		if err := k.Load(confmap.Provider(generic, "."), nil); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
+	// Pass 2: the explicit shortcuts, which win over the generic mapping.
 	for _, ov := range envOverrides {
 		raw := os.Getenv(ov.env)
 		if raw == "" {
@@ -284,15 +313,38 @@ func loadEnvLayer(k *koanf.Koanf) error {
 		}
 		val, err := ov.parse(raw)
 		if err != nil {
-			return fmt.Errorf("%s: %w", ov.env, err)
+			errs = append(errs, fmt.Errorf("%s: %w", ov.env, err))
+			continue
 		}
 		if err := k.Load(confmap.Provider(map[string]interface{}{
 			ov.key: val,
 		}, "."), nil); err != nil {
-			return fmt.Errorf("%s: %w", ov.env, err)
+			errs = append(errs, fmt.Errorf("%s: %w", ov.env, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// envPrefix is the namespace the generic GHOST_ mapping claims.
+const envPrefix = "GHOST_"
+
+// parseEnvValue converts one GHOST_* value to the type its Config field decodes
+// into. A field that is not a scalar (a slice or a map) cannot come from the
+// environment at all — that is what the envOverrides parsers are for — so it is
+// reported rather than guessed at.
+func parseEnvValue(t reflect.Type, s string) (interface{}, error) {
+	switch t.Kind() {
+	case reflect.String:
+		return s, nil
+	case reflect.Bool:
+		return strconv.ParseBool(s)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.Atoi(s)
+	case reflect.Float32, reflect.Float64:
+		return strconv.ParseFloat(s, 64)
+	default:
+		return nil, fmt.Errorf("cannot be set from the environment (%s)", t.Kind())
+	}
 }
 
 // LoadForHook loads configuration for a hook running inside someone else's
@@ -324,8 +376,9 @@ func LoadForHook() *Config {
 // GHOST_SCRATCH_MAX_BYTES=0) and hand it back to them as the opposite.
 //
 // A GHOST_* value that cannot be read is reported and skipped rather than
-// returned as an error, because this path has no way to fail; the variables
-// applied before it are kept.
+// returned as an error, because this path has no way to fail. Every such
+// variable is skipped, not only the first: loadEnvLayer collects them all, so
+// one bad value no longer costs the operator the rest of their environment.
 //
 // It never returns a near-zero Config. Merging the environment in makes the
 // unmarshal step reachable for a reason the defaults-only version did not have:
@@ -392,7 +445,7 @@ func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
 		return nil, false
 	}
 	if err := applyEnv(k); err != nil {
-		warnf("%v — using the rest of the environment", err)
+		warnf("%v — those variables were skipped", err)
 	}
 	cfg := &Config{}
 	if err := k.Unmarshal("", cfg); err != nil {
@@ -435,16 +488,89 @@ func SetWarningWriter(w io.Writer) (restore func()) {
 	return func() { warnSink.Store(prev) }
 }
 
-// warnf reports a non-fatal configuration problem. Layered config is loaded
-// from inside host-session hooks that must not fail, so the problems that must
-// not stop the caller are reported here rather than returned.
+// warned records the messages already reported. Configuration is loaded more
+// than once per process — a SessionStart hook and a status check in one session,
+// and once per harness spawn on the spawn path — so an un-deduped warning
+// repeats a line the user has already read, which trains them to skip it.
+var warned = struct {
+	sync.Mutex
+	seen map[string]struct{}
+}{seen: map[string]struct{}{}}
+
+// resetWarned clears the dedup set. For tests: one process asserting the same
+// warning twice would otherwise see it once.
+func resetWarned() {
+	warned.Lock()
+	defer warned.Unlock()
+	warned.seen = map[string]struct{}{}
+}
+
+// warnf reports a non-fatal configuration problem, once per distinct message per
+// process. Layered config is loaded from inside host-session hooks that must
+// not fail, so the problems that must not stop the caller are reported here
+// rather than returned. A different problem is still reported, so the dedup
+// cannot hide a second problem behind the first.
 func warnf(format string, args ...interface{}) {
-	_, _ = fmt.Fprintf(*warnSink.Load(), "ghost: config: "+format+"\n", args...)
+	msg := fmt.Sprintf("ghost: config: "+format, args...)
+
+	warned.Lock()
+	if _, dup := warned.seen[msg]; dup {
+		warned.Unlock()
+		return
+	}
+	warned.seen[msg] = struct{}{}
+	warned.Unlock()
+
+	_, _ = fmt.Fprintln(*warnSink.Load(), msg)
 }
 
 // knownKeys is every koanf key the Config struct binds, derived once from its
 // struct tags so it cannot drift as fields are added.
 var knownKeys = collectKeys(reflect.TypeFor[Config]())
+
+// boundKeyTypes is the type each bound key decodes into, so a GHOST_* value can
+// be converted — and an unconvertible one caught and named — before it reaches
+// the decode of the whole config.
+var boundKeyTypes = collectKeyTypes(reflect.TypeFor[Config]())
+
+// withAncestors adds every parent of every key, so a section header is
+// recognised as the parent of the keys it holds.
+func withAncestors(keys map[string]struct{}) map[string]struct{} {
+	out := make(map[string]struct{}, len(keys)*2)
+	for key := range keys {
+		out[key] = struct{}{}
+		for i := strings.LastIndex(key, "."); i >= 0; i = strings.LastIndex(key[:i], ".") {
+			out[key[:i]] = struct{}{}
+		}
+	}
+	return out
+}
+
+// collectKeyTypes is collectKeys keeping the field type, for the leaves.
+func collectKeyTypes(t reflect.Type) map[string]reflect.Type {
+	out := make(map[string]reflect.Type)
+	var walk func(reflect.Type, string)
+	walk = func(t reflect.Type, prefix string) {
+		for i := range t.NumField() {
+			f := t.Field(i)
+			name := f.Tag.Get("koanf")
+			if name == "" {
+				continue
+			}
+			key := name
+			if prefix != "" {
+				key = prefix + "." + name
+			}
+			if f.Type.Kind() == reflect.Struct {
+				walk(f.Type, key)
+				continue
+			}
+			out[key] = f.Type
+		}
+	}
+	walk(t, "")
+	return out
+}
 
 // collectKeys walks a config struct's koanf tags into the flat key set koanf
 // itself uses. Only a nested struct keeps descending; maps, slices and scalars
@@ -475,25 +601,36 @@ func collectKeys(t reflect.Type) map[string]struct{} {
 	return out
 }
 
-// warnUnknownKeys reports the keys a config file introduced that no Config
-// field binds, so a typo is never a silent no-op. before is the key set from
-// the layers loaded so far, so a key those layers already set is not reported
-// against the file that merely repeated it.
-func warnUnknownKeys(k *koanf.Koanf, before []string, path string) {
-	seen := make(map[string]struct{}, len(before))
-	for _, key := range before {
-		seen[key] = struct{}{}
-	}
+// warnUnknownKeys reports the leaf keys a config file sets that no Config field
+// binds, so a typo is never a silent no-op.
+//
+// It walks the file's own tree rather than koanf's flat key set, because a
+// section is not a candidate: `injection:` binds no field of its own — only its
+// children do — so reporting one would call every ordinary section header a
+// typo. Walking through sections is also what makes an ancestor of a known key
+// known, which is the rule that stops a bare `injection:` (pruned as null before
+// it got here, but reachable through a header that also has a child) from being
+// reported, while leaving a genuine typo under the same section visible.
+func warnUnknownKeys(file map[string]interface{}, path string) {
 	var unknown []string
-	for _, key := range k.Keys() {
-		if _, ok := seen[key]; ok {
-			continue
+	var walk func(map[string]interface{}, string)
+	walk = func(m map[string]interface{}, prefix string) {
+		for key, val := range m {
+			full := key
+			if prefix != "" {
+				full = prefix + "." + key
+			}
+			if sub, ok := val.(map[string]interface{}); ok {
+				walk(sub, full)
+				continue
+			}
+			if !isKnownKey(full) {
+				unknown = append(unknown, full)
+			}
 		}
-		if isKnownKey(key) {
-			continue
-		}
-		unknown = append(unknown, key)
 	}
+	walk(file, "")
+
 	if len(unknown) == 0 {
 		return
 	}
@@ -501,11 +638,15 @@ func warnUnknownKeys(k *koanf.Koanf, before []string, path string) {
 	warnf("%s: unknown key(s) ignored: %s", path, strings.Join(unknown, ", "))
 }
 
-// isKnownKey reports whether key, or any of its parent keys, is one Config
-// binds. The parent walk is what makes a map value's entries count as known:
-// koanf flattens injection.category_weights into one key per entry
+// isKnownKey reports whether key is one Config binds, or a child of one. The
+// walk is what makes a map value's entries count as known: koanf flattens
+// injection.category_weights into one key per entry
 // (injection.category_weights.gotcha), and a typo in the parent
 // (…category_weight.gotcha) still walks up to nothing that is bound.
+//
+// Note what it deliberately does NOT do: walk DOWN to a known section. Treating
+// every ancestor as known would make `linking.thresholdd` a non-typo for the
+// same reason `linking` is, which is the whole job of the check.
 func isKnownKey(key string) bool {
 	for {
 		if _, ok := knownKeys[key]; ok {
@@ -726,18 +867,54 @@ func EnsureConfigFile() (path string, created bool, err error) {
 	return path, true, nil
 }
 
-// loadFileIfExists loads a config file into koanf, silently skipping a file
-// that is not there — the layer is optional. A file that IS there but does not
-// parse is an error naming the path: the path is the half of the message the
-// user needs, and it is what made the old swallow impossible to diagnose.
-func loadFileIfExists(k *koanf.Koanf, path string, parser koanf.Parser) error {
-	if _, err := os.Stat(path); err != nil {
+// loadConfigFile loads a config file into koanf and reports the keys in it
+// that Config does not bind. A file that is not there is
+// not an error — the layer is optional — and neither is one that cannot be
+// READ: a root-owned /etc/ghost/config.yaml, or a user file with the wrong
+// mode, is not a configuration mistake worth failing every command over, and
+// the main branch behaved that way. It is warned about and skipped.
+//
+// A file that is readable but does not PARSE is an error naming the path, and
+// that is the distinction worth stopping for: the user wrote a typo, and will
+// keep not getting the settings they asked for until someone says so.
+func loadConfigFile(k *koanf.Koanf, path string, parser koanf.Parser) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		warnf("cannot read %s: %v — skipping it", path, err)
 		return nil
 	}
-	if err := k.Load(file.Provider(path), parser); err != nil {
+	parsed, err := parser.Unmarshal(raw)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	pruneNulls(parsed)
+	warnUnknownKeys(parsed, path)
+	if err := k.Load(confmap.Provider(parsed, "."), nil); err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
 	return nil
+}
+
+// pruneNulls drops the keys whose YAML value is null, in place. A section
+// header with no children — `injection:` on a line of its own — parses to null,
+// and koanf merges that null over the defaults map, erasing the whole subtree:
+// a user who opened their config to change one setting and left the header bare
+// would silently lose every other value under it. Dropping the key leaves the
+// defaults standing, which is what an absent section has always meant.
+func pruneNulls(m map[string]interface{}) map[string]interface{} {
+	for key, val := range m {
+		if val == nil {
+			delete(m, key)
+			continue
+		}
+		if sub, ok := val.(map[string]interface{}); ok {
+			pruneNulls(sub)
+		}
+	}
+	return m
 }
 
 // userConfigDir returns the base user config directory, honoring XDG_CONFIG_HOME

@@ -25,8 +25,11 @@ A config file that exists but does not parse is never ignored. The error names t
 
 "Environment plus the compiled defaults" means every layer that does not read a config file. The `GHOST_*` variables still apply, so a broken file cannot undo an opt-out you set in the environment (`GHOST_EMBEDDING_ENABLED=false`, `GHOST_SCRATCH_MAX_BYTES=0`). Only the file layers are lost.
 
+A file that exists but cannot be **read** — wrong permissions, or one owned by root — is a warning and is skipped, as it always was; only a file that is readable and does not **parse** stops a command.
+
 ```text
 ghost: config: parse /home/you/.config/ghost/config.yaml: yaml: line 3: found unexpected end of stream — falling back to the environment and built-in defaults
+ghost: config: cannot read /etc/ghost/config.yaml: open /etc/ghost/config.yaml: permission denied — skipping it
 ```
 
 ## Unknown keys
@@ -40,7 +43,9 @@ ghost: config: /home/you/.config/ghost/config.yaml: unknown key(s) ignored: link
 This check covers **config files only**, and the limits are worth knowing:
 
 - A misspelled `GHOST_*` variable is still ignored silently. Ghost cannot report it, because most of its variables are not config keys at all — `GHOST_DEBUG`, `GHOST_LOG_FILE`, `GHOST_SCRATCH_DIR`, `GHOST_PASSTHROUGH_ENV` and `GHOST_OPENCODE_MODEL` are documented here or in the harness section below, and none of them binds a `Config` field.
-- A `GHOST_*` value that cannot be read as its key's type is an error naming the variable, but only for the explicit shortcuts in the table below. A generic-mapped value fails later, as a decode error naming the key (`'embedding.enabled' cannot parse value as 'bool'`), which is enough to identify the setting but not the variable that carried it.
+- A `GHOST_*` value that cannot be read as its key's type is an error naming the variable, and only that variable is skipped — the rest of your environment still applies. This is true of the generic mapping too, not just the explicit shortcuts in the table below: `GHOST_EMBEDDING_DIMENSIONS=abc` is reported and ignored, and `GHOST_EMBEDDING_ENABLED=false` beside it still takes effect.
+
+Each distinct warning is printed once per process, so a SessionStart hook and a `ghost mcp status` in the same session do not repeat the same line. A second, different problem is still reported.
 
 ## File locations
 

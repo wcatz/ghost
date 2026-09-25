@@ -74,12 +74,19 @@ func writeUserConfig(t *testing.T, content string) string {
 }
 
 // captureConfigWarnings redirects config warnings to a buffer for the duration
-// of the test, so a test can assert on what a user would see.
+// of the test, so a test can assert on what a user would see. It also clears
+// the per-process dedup set, which warnf consults: without that, a second test
+// asserting the same warning would see nothing because the first one already
+// spent it.
 func captureConfigWarnings(t *testing.T) *bytes.Buffer {
 	t.Helper()
+	resetWarned()
 	var buf bytes.Buffer
 	restore := SetWarningWriter(&buf)
-	t.Cleanup(restore)
+	t.Cleanup(func() {
+		restore()
+		resetWarned()
+	})
 	return &buf
 }
 
@@ -728,7 +735,7 @@ func TestLoad_MalformedYAMLIsAnError(t *testing.T) {
 	}
 }
 
-// TestLoadFileIfExists covers the same failure on the layer Load cannot reach
+// TestLoadConfigFile covers the same failure on the layer Load cannot reach
 // from a test (/etc/ghost/config.yaml is not writable), plus the case that must
 // stay silent: a file layer that is simply absent.
 func TestLoadFileIfExists(t *testing.T) {
@@ -738,14 +745,14 @@ func TestLoadFileIfExists(t *testing.T) {
 	if err := os.WriteFile(present, []byte(malformedYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := loadFileIfExists(koanf.New("."), present, parser); err == nil {
-		t.Error("loadFileIfExists accepted a malformed file; the parse error must propagate")
+	if err := loadConfigFile(koanf.New("."), present, parser); err == nil {
+		t.Error("loadConfigFile accepted a malformed file; the parse error must propagate")
 	} else if !strings.Contains(err.Error(), present) {
 		t.Errorf("error %q must name %q", err, present)
 	}
 
 	absent := filepath.Join(t.TempDir(), "config.yaml")
-	if err := loadFileIfExists(koanf.New("."), absent, parser); err != nil {
+	if err := loadConfigFile(koanf.New("."), absent, parser); err != nil {
 		t.Errorf("loadFileIfExists on an absent file = %v, want nil (the layer is optional)", err)
 	}
 }
@@ -955,12 +962,10 @@ func TestFallbackConfig_UndecodableGenericEnvValue(t *testing.T) {
 	// Only the generic-mapped keys belong here. A key with an envOverrides entry
 	// (GHOST_REFLECTION_LIFECYCLE_TIMEOUT_MINUTES, say) is caught earlier, by
 	// loadEnvLayer's own parser, and is reported by variable name instead.
-	cases := []struct {
-		envKey, value, wantKey string
-	}{
-		{"GHOST_LINKING_THRESHOLD", "high", "linking.threshold"},
-		{"GHOST_EMBEDDING_DIMENSIONS", "abc", "embedding.dimensions"},
-		{"GHOST_EMBEDDING_ENABLED", "yes", "embedding.enabled"},
+	cases := []struct{ envKey, value string }{
+		{"GHOST_LINKING_THRESHOLD", "high"},
+		{"GHOST_EMBEDDING_DIMENSIONS", "abc"},
+		{"GHOST_EMBEDDING_ENABLED", "yes"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.envKey, func(t *testing.T) {
@@ -989,12 +994,10 @@ func TestFallbackConfig_UndecodableGenericEnvValue(t *testing.T) {
 			if cfg.Scratch.MaxBytes != 512*1024*1024 {
 				t.Errorf("scratch.max_bytes = %d, want the compiled default 512 MiB", cfg.Scratch.MaxBytes)
 			}
-			// The bad value must be reported, not swallowed. koanf's decode error
-			// names the config key, not the variable — mapping a variable back to
-			// a key needs the allowlist docs/configuration.md explains we do not
-			// have, so the key is what the user is given.
-			if !strings.Contains(warnings.String(), tc.wantKey) {
-				t.Errorf("warning %q must name the unreadable key %s", warnings.String(), tc.wantKey)
+			// The bad value must be reported, not swallowed, and named by the
+			// variable the user actually set.
+			if !strings.Contains(warnings.String(), tc.envKey) {
+				t.Errorf("warning %q must name the skipped variable %s", warnings.String(), tc.envKey)
 			}
 		})
 	}
@@ -1335,5 +1338,217 @@ func TestLoad_MalformedEnvOverrideIsAnError(t *testing.T) {
 				t.Errorf("error %q must name %s", err, tc.envKey)
 			}
 		})
+	}
+}
+
+// TestLoad_NullSectionKeepsDefaults pins that a section header with no children
+// — `injection:` on its own line, which YAML reads as null — neither trips the
+// unknown-key warning nor erases the defaults under it. Both happened: the null
+// key is not itself bound (only injection.behavior_floor and its siblings are),
+// so it warned; and koanf merges the null over the defaults map, wiping the
+// whole injection.* subtree. A user who opens their config to disable one
+// setting and leaves the section header bare would silently lose every other
+// value in it.
+func TestLoad_NullSectionKeepsDefaults(t *testing.T) {
+	cases := []struct {
+		name, yaml string
+		keep       func(*Config) bool
+	}{
+		{
+			name: "injection",
+			yaml: "injection:\n",
+			keep: func(c *Config) bool {
+				return c.Injection.BehaviorFloor == 8 &&
+					c.Injection.CategoryCaps["gotcha"] == 4 &&
+					len(c.Injection.BehaviorCategories) == 4
+			},
+		},
+		{
+			name: "obsidian",
+			yaml: "obsidian:\n",
+			keep: func(c *Config) bool { return c.Obsidian.Interval == "30s" },
+		},
+		{
+			name: "nested section",
+			yaml: "injection:\n  category_weights:\n",
+			keep: func(c *Config) bool { return c.Injection.BehaviorFloor == 8 },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateConfig(t)
+			writeUserConfig(t, tc.yaml)
+			warnings := captureConfigWarnings(t)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load(): %v", err)
+			}
+			if !tc.keep(cfg) {
+				t.Errorf("a bare section header wiped its defaults: %+v", cfg)
+			}
+			if got := warnings.String(); strings.Contains(got, "unknown key") {
+				t.Errorf("a bare section header was reported as an unknown key: %q", got)
+			}
+		})
+	}
+}
+
+// TestLoad_RealSiblingStillWarns is the other half: pruning bare section
+// headers must not stop the warning for a genuine typo in the same file.
+func TestLoad_RealSiblingStillWarns(t *testing.T) {
+	isolateConfig(t)
+	writeUserConfig(t, "obsidian:\ninjection:\nobsidain:\n  vault_dir: /x\n")
+	warnings := captureConfigWarnings(t)
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	got := warnings.String()
+	if !strings.Contains(got, "obsidain") {
+		t.Errorf("warning %q must still name the genuine typo obsidain", got)
+	}
+	if strings.Contains(got, "obsidian:") || strings.Contains(got, "injection:") {
+		t.Errorf("warning %q must not name the bare section headers", got)
+	}
+}
+
+// TestLoadEnvLayer_ReportsEveryBadOverride pins that one unreadable variable
+// does not hide the ones after it: the bad value here comes FIRST in the
+// override table, so returning early would report only it and silently drop the
+// good variable behind it.
+func TestLoadEnvLayer_ReportsEveryBadOverride(t *testing.T) {
+	isolateConfig(t)
+	// Table order: ..._CATEGORY_WEIGHTS precedes ..._CATEGORY_CAPS.
+	t.Setenv("GHOST_INJECTION_CATEGORY_WEIGHTS", "gotcha=high")
+	t.Setenv("GHOST_INJECTION_CATEGORY_CAPS", "gotcha=four")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() accepted two unreadable GHOST_* values")
+	}
+	for _, name := range []string{"GHOST_INJECTION_CATEGORY_WEIGHTS", "GHOST_INJECTION_CATEGORY_CAPS"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("error %q must name %s; returning at the first bad value hides the rest", err, name)
+		}
+	}
+}
+
+// TestLoadEnvLayer_GenericBadValueKeepsGoodOne is the generic-layer half, and
+// the case that was previously all-or-nothing: one variable koanf cannot weakly
+// convert failed the whole decode, so GHOST_EMBEDDING_ENABLED=false — a
+// deliberate opt-out — was lost along with everything else. Only the bad
+// variable may be skipped, and the report must name it.
+func TestLoadEnvLayer_GenericBadValueKeepsGoodOne(t *testing.T) {
+	// The bad variable is set first in both cases, so it is the earlier of the
+	// two as the layer walks the environment.
+	cases := []struct{ name, badKey, badValue, goodKey, goodValue string }{
+		{"dimensions then enabled", "GHOST_EMBEDDING_DIMENSIONS", "abc", "GHOST_EMBEDDING_ENABLED", "false"},
+		{"threshold then min_similarity", "GHOST_LINKING_THRESHOLD", "high", "GHOST_SEARCH_MIN_SIMILARITY", "0.5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateConfig(t)
+			t.Setenv(tc.badKey, tc.badValue)
+			t.Setenv(tc.goodKey, tc.goodValue)
+			warnings := captureConfigWarnings(t)
+
+			// The fallback is where a skipped variable is survivable: Load
+			// reports the error and yields nothing.
+			writeUserConfig(t, malformedYAML)
+			cfg := LoadForHook()
+			if cfg == nil {
+				t.Fatal("LoadForHook() = nil")
+			}
+			if got := warnings.String(); !strings.Contains(got, tc.badKey) {
+				t.Errorf("warning %q must name the skipped variable %s", got, tc.badKey)
+			}
+			if tc.goodKey == "GHOST_EMBEDDING_ENABLED" && cfg.Embedding.Enabled {
+				t.Error("embedding.enabled = true, want the GHOST_EMBEDDING_ENABLED=false opt-out to survive a bad sibling")
+			}
+			if tc.goodKey == "GHOST_SEARCH_MIN_SIMILARITY" && cfg.Search.MinSimilarity != 0.5 {
+				t.Errorf("search.min_similarity = %f, want 0.5 (the good variable must survive its bad sibling)",
+					cfg.Search.MinSimilarity)
+			}
+			// A skipped variable must not take the rest of the environment with
+			// it, and the defaults must still stand behind what is left.
+			if cfg.Linking.DemotionThreshold != 0.90 {
+				t.Errorf("linking.demotion_threshold = %f, want the default 0.90", cfg.Linking.DemotionThreshold)
+			}
+		})
+	}
+}
+
+// TestWarnf_OncePerDistinctMessage pins the dedup: a SessionStart hook and
+// `ghost mcp status` in one process must not print the same line twice, while a
+// genuinely different problem still gets through. Without it a broken config
+// reported once per harness spawn turns a single typo into a stream of identical
+// lines nobody reads past the first.
+func TestWarnf_OncePerDistinctMessage(t *testing.T) {
+	isolateConfig(t)
+	warnings := captureConfigWarnings(t)
+
+	warnf("the same problem")
+	warnf("the same problem")
+	warnf("a different problem")
+
+	got := warnings.String()
+	if n := strings.Count(got, "the same problem"); n != 1 {
+		t.Errorf("printed the identical warning %d times, want 1:\n%s", n, got)
+	}
+	if n := strings.Count(got, "a different problem"); n != 1 {
+		t.Errorf("printed the second distinct warning %d times, want 1:\n%s", n, got)
+	}
+}
+
+// TestLoad_UnknownKeyWarnedOnceAcrossLoads is the dedup where it earns its
+// keep: two loads in one process, as a hook and a status check do, must produce
+// one line.
+func TestLoad_UnknownKeyWarnedOnceAcrossLoads(t *testing.T) {
+	isolateConfig(t)
+	writeUserConfig(t, "linking:\n  thresholdd: 0.9\n")
+	warnings := captureConfigWarnings(t)
+
+	for i := range 2 {
+		if _, err := Load(); err != nil {
+			t.Fatalf("Load() %d: %v", i, err)
+		}
+	}
+	if n := strings.Count(warnings.String(), "thresholdd"); n != 1 {
+		t.Errorf("warned about the same unknown key %d times across two loads, want 1:\n%s",
+			n, warnings.String())
+	}
+}
+
+// TestLoadConfigFile_UnreadableFileIsSkipped pins the architect's ruling: a
+// config file that exists but cannot be READ is a warning, never a fatal error.
+// The main branch behaved this way, and a permission problem in a file the user
+// did not write must not stop `ghost reflect` with an error about YAML it never
+// got to parse. A file that is readable but does not parse stays fatal.
+func TestLoadConfigFile_UnreadableFileIsSkipped(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: mode 0o000 is still readable")
+	}
+	parser := yaml.Parser()
+
+	unreadable := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(unreadable, []byte("embedding:\n  enabled: true\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	warnings := captureConfigWarnings(t)
+	if err := loadConfigFile(koanf.New("."), unreadable, parser); err != nil {
+		t.Errorf("loadConfigFile on an unreadable file = %v, want nil (warned and skipped)", err)
+	}
+	if got := warnings.String(); !strings.Contains(got, unreadable) {
+		t.Errorf("warning %q must name the unreadable file %q", got, unreadable)
+	}
+
+	// Readable but malformed stays an error: that is the case this PR exists for.
+	malformed := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(malformed, []byte(malformedYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadConfigFile(koanf.New("."), malformed, parser); err == nil {
+		t.Error("loadConfigFile accepted a readable but malformed file; a parse error must stay fatal")
 	}
 }
