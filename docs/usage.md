@@ -137,6 +137,10 @@ Use `--project myproject` to mirror one project plus global records. The mirror 
 - A running sync may overwrite hand-edited notes after a database change.
 - A marker directory protects unrelated files from cleanup.
 
+When you delete a project, Ghost removes the notes it wrote in that project's vault folder, plus any directories those deletions leave empty. Anything you created is never removed — not a note or attachment sitting beside Ghost's, and not an empty folder of your own.
+
+The vault is private to your account: Ghost writes its files and directories owner-only (`0600`/`0700` on POSIX; on Windows it replaces inherited folder access with an explicit list naming your account, SYSTEM, and Administrators).
+
 Set `obsidian.auto_sync: true` only if you want the SessionStart hook to launch a background sync process.
 
 ## Agent workflow

@@ -17,11 +17,23 @@ const markerName = ".ghost-vault"
 // bypass a directory's permission bits).
 var readDirFn atomic.Value // func(string) ([]os.DirEntry, error)
 
-func init() { readDirFn.Store(os.ReadDir) }
-
 func readDir(dir string) ([]os.DirEntry, error) {
 	fn, _ := readDirFn.Load().(func(string) ([]os.DirEntry, error))
 	return fn(dir)
+}
+
+// removeDirFn is swappable so tests can force pruneOrphanFolder's directory
+// cleanup to fail deterministically — the same rationale as readDirFn.
+var removeDirFn atomic.Value // func(string) error
+
+func init() {
+	readDirFn.Store(os.ReadDir)
+	removeDirFn.Store(os.Remove)
+}
+
+func removeDir(path string) error {
+	fn, _ := removeDirFn.Load().(func(string) error)
+	return fn(path)
 }
 
 // ensureVault prepares dir as a Ghost-managed mirror target. Fresh or empty
@@ -81,13 +93,11 @@ func tightenVault(dir string) error {
 	})
 }
 
-// tightenIfLoose chmods path to mode only when its bits already differ, so
-// repeat walks are stats only.
+// tightenIfLoose hands path to the platform's protection only when its mode
+// already differs (POSIX) — the walk's stat, no extra syscall on a tight
+// vault. On Windows the mode is meaningless and the DACL write decides.
 func tightenIfLoose(path string, info os.FileInfo, mode os.FileMode) error {
-	if info.Mode().Perm() == mode {
-		return nil
-	}
-	return os.Chmod(path, mode)
+	return protectPath(path, info, mode)
 }
 
 // ghostManaged reports whether a file is Ghost's own: the vault marker or a
@@ -122,7 +132,7 @@ func writeIfChanged(path, content string) (bool, error) {
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp) //nolint:errcheck // no-op once the rename succeeds
-	if err := f.Chmod(0o600); err != nil {
+	if err := protectFile(f); err != nil {
 		f.Close() //nolint:errcheck
 		return false, err
 	}
@@ -160,26 +170,32 @@ func hasGhostID(path string) (string, bool) {
 	if !s.Scan() || s.Text() != "---" {
 		return "", false
 	}
+	// A candidate id counts only once the closing --- is seen. EOF or a scan
+	// error before that delimiter means this was never frontmatter: a user
+	// note that opens with a horizontal rule and mentions ghost_id further
+	// down (a template, a pasted example) would otherwise be classified as
+	// Ghost's, and prune deletes what it classifies.
+	var id string
+	closed := false
 	for s.Scan() {
 		line := s.Text()
 		if line == "---" { // end of frontmatter — stop before the body
+			closed = true
 			break
 		}
-		if id, ok := strings.CutPrefix(line, "ghost_id: "); ok {
-			return strings.TrimSpace(id), true
+		if id == "" {
+			if candidate, ok := strings.CutPrefix(line, "ghost_id: "); ok {
+				id = strings.TrimSpace(candidate)
+			}
 		}
 	}
-	if err := s.Err(); err != nil {
-		// Scan stopped early: a line past maxFrontmatterLine or a read
-		// failure. The frontmatter is only partly read, so the only safe
-		// classification is "not Ghost's file" — an id we could not read
-		// must never make a file deletable, and leaving a stale Ghost note
-		// behind is the direction every caller already prefers (stale
-		// beats deleted). Checked rather than left to fall through, so a
-		// scan failure is a decision, not an accident.
+	if !closed {
+		// The loop also exits with closed=false on a scan error — a line past
+		// maxFrontmatterLine or a read failure — so an unread frontmatter is
+		// "not Ghost's file" rather than a silent miss.
 		return "", false
 	}
-	return "", false // read cleanly to the closing --- or EOF: no ghost_id
+	return id, id != ""
 }
 
 // pruneOrphanFolder removes Ghost's own notes from a folder the current
@@ -217,6 +233,14 @@ func pruneOrphanFolder(dir string) error {
 		if d.IsDir() {
 			return nil
 		}
+		// Regular files only. A symlink is the user's own indirection: a
+		// "shortcut.md" pointing at a Ghost note must not be classified
+		// through the link (and unlinked), and opening a FIFO blocks
+		// forever — either would hang or damage an export. The permission
+		// pass already holds a symlink to the same rule.
+		if !d.Type().IsRegular() {
+			return nil
+		}
 		if !strings.HasSuffix(path, ".md") {
 			return nil // an attachment — not Ghost's to delete
 		}
@@ -242,13 +266,26 @@ func pruneOrphanFolder(dir string) error {
 	// found still populated), while a user's empty folder sits under no
 	// deletion site and is never offered at all. The climb stops at dir —
 	// the orphan folder itself may close, its parent may not.
+	//
+	// Only "still holds something" and "already gone" pass silently; any
+	// other failure (permissions, a Windows sharing violation, I/O) is
+	// returned, because swallowing it made prune report success while an
+	// empty stale directory sat there for every later export to retry.
 	for _, site := range deletedDirs {
+	climb:
 		for sub := site; ; sub = filepath.Dir(sub) {
-			if err := os.Remove(sub); err != nil {
-				break // not empty (something Ghost doesn't own remains) or gone
+			err := removeDir(sub)
+			if err != nil && !os.IsNotExist(err) {
+				if !isDirNotEmpty(err) {
+					return fmt.Errorf("remove orphan directory %s: %w", sub, err)
+				}
+				break // still holds something Ghost doesn't own: the guard
 			}
 			if sub == dir {
-				break
+				// The orphan root itself may close; never offer its parent,
+				// even when a previous climb already removed it and this
+				// one only sees ENOENT.
+				break climb
 			}
 		}
 	}
@@ -281,6 +318,11 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 			if d.IsDir() {
 				return nil
 			}
+			// Regular files only — same reasoning as the orphan walk: never
+			// open a symlink or a FIFO on the delete path.
+			if !d.Type().IsRegular() {
+				return nil
+			}
 			if strings.HasSuffix(path, ".ghost-tmp") {
 				return os.Remove(path) // orphan from a crashed write
 			}
@@ -300,9 +342,12 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 	}
 	// Orphan cleanup: remove vault top-level directories that are not in the
 	// current project set but contain Ghost-managed content. This handles
-	// projects deleted from the DB since the last export. Skipped when
-	// knownFolders is nil (filtered export — we can't know what's orphaned).
-	if len(knownFolders) > 0 {
+	// projects deleted from the DB since the last export. Runs whenever
+	// knownFolders is non-nil — including when it is empty, which is the
+	// complete set after the last project was deleted and every folder is
+	// an orphan. Only nil (filtered export — we can't know what's orphaned)
+	// skips it.
+	if knownFolders != nil {
 		known := make(map[string]bool, len(knownFolders))
 		for _, f := range knownFolders {
 			known[f] = true

@@ -323,6 +323,40 @@ func TestExportPrunesDeletedProjectFolder(t *testing.T) {
 	}
 }
 
+// TestExportRemovesOrphanFoldersAfterLastProjectDeleted: prune skips orphan
+// cleanup when the known-folder set is nil (filtered export — identity
+// unknown) and runs it when the set is complete. An empty set is still
+// complete: with the last project deleted, every remaining folder IS an
+// orphan, and checking len(set) > 0 instead of set != nil left the whole
+// vault stale forever.
+func TestExportRemovesOrphanFoldersAfterLastProjectDeleted(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	if _, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "Only fact", Importance: 0.8, Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(vault, "ghost")); err != nil {
+		t.Fatalf("initial export: %v", err)
+	}
+
+	// Delete the last project: the next export knows every folder is orphaned.
+	if _, err := store.DeleteProject(ctx, "ghost", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("re-export after deleting the last project: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(vault, "ghost")); !os.IsNotExist(err) {
+		t.Error("with zero projects left, the last project's folder should be removed, not skipped as an empty known-set")
+	}
+}
+
 func TestExportSkipsOrphanCleanupWhenFiltered(t *testing.T) {
 	store := seedStore(t)
 	ctx := context.Background()

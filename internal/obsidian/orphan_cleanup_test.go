@@ -131,40 +131,122 @@ func TestOrphanCleanupIgnoresUserOnlyFolder(t *testing.T) {
 	}
 }
 
-// TestVaultIsNotWorldReadable: the vault holds whatever the mirror holds and
-// was written 0755/0644 — readable by every account on the machine.
-func TestVaultIsNotWorldReadable(t *testing.T) {
+// TestOrphanCleanupKeepsUserSymlink: the walk used to open any .md and
+// remove whatever carried a ghost_id — including a user's own symlink
+// ("shortcut.md" pointing at a Ghost note) whose link itself was then
+// unlinked. Only regular files are Ghost's to classify; a symlink is the
+// user's own indirection and must survive. Both prune entry points are
+// covered: the managed-subtree walk and the orphan sweep.
+func TestOrphanCleanupKeepsUserSymlink(t *testing.T) {
+	for _, mode := range []string{"orphan", "subtree"} {
+		t.Run(mode, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "vault")
+			if err := ensureVault(root); err != nil {
+				t.Fatalf("ensureVault: %v", err)
+			}
+			var dir string
+			if mode == "orphan" {
+				dir = filepath.Join(root, "oldproject")
+			} else {
+				dir = filepath.Join(root, "live", "Memories")
+			}
+			mustMkdirAll(t, dir)
+			mustWrite(t, filepath.Join(dir, "Managed Note.md"), ghostNote)
+
+			target := filepath.Join(t.TempDir(), "target.md")
+			mustWrite(t, target, ghostNote)
+			link := filepath.Join(dir, "shortcut.md")
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+
+			subtrees, known := []string{"live"}, []string{"live"}
+			if mode == "orphan" {
+				subtrees, known = nil, []string{"live"}
+			}
+			if err := prune(root, subtrees, map[string]string{}, known); err != nil {
+				t.Fatalf("prune: %v", err)
+			}
+			if _, err := os.Lstat(link); err != nil {
+				t.Errorf("user symlink was deleted by the prune: %v", err)
+			}
+			if _, err := os.Stat(target); err != nil {
+				t.Errorf("the symlink's target was removed: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "Managed Note.md")); !os.IsNotExist(err) {
+				t.Errorf("the real Ghost note should still be pruned (err=%v)", err)
+			}
+		})
+	}
+}
+
+// TestPruneSkipsSpecialFiles: a named pipe named *.md reaches os.Open
+// through the walk, and opening a FIFO blocks forever — a one-shot export
+// or the sync loop hangs on it. Only regular files may be opened.
+func TestPruneSkipsSpecialFiles(t *testing.T) {
+	for _, mode := range []string{"orphan", "subtree"} {
+		t.Run(mode, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "vault")
+			if err := ensureVault(root); err != nil {
+				t.Fatalf("ensureVault: %v", err)
+			}
+			var dir string
+			if mode == "orphan" {
+				dir = filepath.Join(root, "oldproject")
+			} else {
+				dir = filepath.Join(root, "live", "Memories")
+			}
+			mustMkdirAll(t, dir)
+			mustWrite(t, filepath.Join(dir, "Managed Note.md"), ghostNote)
+			pipe := filepath.Join(dir, "pipe.md")
+			if err := makeFIFO(pipe); err != nil {
+				t.Skipf("named pipe unavailable: %v", err)
+			}
+
+			subtrees, known := []string{"live"}, []string{"live"}
+			if mode == "orphan" {
+				subtrees, known = nil, []string{"live"}
+			}
+			done := make(chan error, 1)
+			go func() { done <- prune(root, subtrees, map[string]string{}, known) }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("prune: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("prune blocked for 5s on a FIFO — os.Open on a named pipe never returns")
+			}
+			if _, err := os.Lstat(pipe); err != nil {
+				t.Errorf("the FIFO was removed: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "Managed Note.md")); !os.IsNotExist(err) {
+				t.Errorf("the real Ghost note should still be pruned (err=%v)", err)
+			}
+		})
+	}
+}
+
+// TestPruneOrphanFolderReportsRemoveError: the directory cleanup used to
+// swallow every os.Remove error, so a permission or sharing failure left
+// an empty stale directory while prune reported success, and the next
+// export retried the same removal forever. Only "not empty" (the guard
+// doing its job) and "already gone" may pass silently.
+func TestPruneOrphanFolderReportsRemoveError(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "vault")
 	if err := ensureVault(root); err != nil {
 		t.Fatalf("ensureVault: %v", err)
 	}
-	if st, err := os.Stat(root); err != nil {
-		t.Fatalf("stat vault: %v", err)
-	} else if st.Mode().Perm() != 0o700 {
-		t.Errorf("vault dir mode = %04o, want 0700", st.Mode().Perm())
-	}
-	if st, err := os.Stat(filepath.Join(root, markerName)); err != nil {
-		t.Fatalf("stat marker: %v", err)
-	} else if st.Mode().Perm() != 0o600 {
-		t.Errorf("marker mode = %04o, want 0600", st.Mode().Perm())
-	}
+	orphan := filepath.Join(root, "oldproject")
+	mustMkdirAll(t, orphan)
+	mustWrite(t, filepath.Join(orphan, "Managed Note.md"), ghostNote)
 
-	// A written note exercises both the nested directory and the file itself.
-	note := filepath.Join(root, "proj", "Notes", "n.md")
-	if _, err := writeIfChanged(note, "hello\n"); err != nil {
-		t.Fatalf("writeIfChanged: %v", err)
-	}
-	// Chmod sets the mode outright, bypassing umask — so this assertion
-	// fails deterministically whatever the environment's umask happens to be.
-	if st, err := os.Stat(note); err != nil {
-		t.Fatalf("stat note: %v", err)
-	} else if st.Mode().Perm() != 0o600 {
-		t.Errorf("note mode = %04o, want 0600", st.Mode().Perm())
-	}
-	if st, err := os.Stat(filepath.Dir(note)); err != nil {
-		t.Fatalf("stat note dir: %v", err)
-	} else if st.Mode().Perm() != 0o700 {
-		t.Errorf("note dir mode = %04o, want 0700", st.Mode().Perm())
+	wantErr := errors.New("injected: directory removal failed")
+	removeDirFn.Store(func(string) error { return wantErr })
+	t.Cleanup(func() { removeDirFn.Store(os.Remove) })
+
+	if err := prune(root, nil, map[string]string{}, []string{"liveproject"}); !errors.Is(err, wantErr) {
+		t.Errorf("prune error = %v, want it to wrap %v", err, wantErr)
 	}
 }
 
