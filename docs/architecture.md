@@ -199,16 +199,6 @@ The main schema tables are:
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
 
-The linking worker skips cosine `related` edges whose endpoint scopes conflict,
-and `DemotionPenalties` ignores scope-conflicting `related` and `duplicate` edges
-even when a legacy or manual edge already exists. Unscoped or one-sided scopes
-remain compatible under `ScopesConflict`. The worker reaches its candidates
-through `SearchVectorScoped`, which applies that rule *before* its candidate
-limit, so the limit counts neighbours the source may link to. Filtering at the
-call site instead — or widening the fetch by a fixed factor — only moves the
-cutoff: enough conflicting rows above a compatible one still hide it, and the
-source is marked scanned once its sweep succeeds, so it is never reconsidered.
-
 ### Retrieval
 
 When embeddings are available, search combines:
@@ -246,7 +236,7 @@ Axis interaction rules:
 
 ## Context assembly (target design)
 
-> **Target design, not current behavior.** Today there is no assembler: `ghost_memory_search` (`internal/mcpserver`) and the session-start injector (`internal/mcpinit`) each run their own ad-hoc retrieve → filter → rank → trim sequence, which is why the two surfaces disagree about scope ([#577](https://github.com/wcatz/ghost/issues/577)). The injector ignores `memories.scope` altogether — `loadSessionContext` never selects the column, so a session-start block can carry rows that conflict with the caller's scope. The formatted `ghost_memory_search` path does honour it, and does so inside hybrid window selection before the cut ([#573](https://github.com/wcatz/ghost/issues/573)), which leaves category as its only post-filter; its `explain: true` branch is the exception, still explaining the unscoped ranking and saying so in a note. The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581).
+> **Target design, not current behavior.** Today there is no assembler: `ghost_memory_search` (`internal/mcpserver`) and the session-start injector (`internal/mcpinit`) each run their own ad-hoc retrieve → filter → rank → trim sequence, which is why the two surfaces disagree about scope ([#577](https://github.com/wcatz/ghost/issues/577)). The injector ignores `memories.scope` altogether — `loadSessionContext` never selects the column, so a session-start block can carry rows that conflict with the caller's scope. The formatted `ghost_memory_search` path does honour it, and does so inside hybrid window selection before the cut ([#573](https://github.com/wcatz/ghost/issues/573)), which leaves category as its only post-filter, and its `explain: true` branch explains that same scoped ranking ([#571](https://github.com/wcatz/ghost/issues/571)). The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581).
 
 Both consumers should call one assembler with an explicit budget, so every surface applies the same predicates in the same order and every stage is testable in isolation:
 
