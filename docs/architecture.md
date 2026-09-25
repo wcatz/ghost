@@ -202,7 +202,10 @@ The main schema tables are:
 The linking worker skips cosine `related` edges whose endpoint scopes conflict,
 and `DemotionPenalties` ignores scope-conflicting `related` and `duplicate` edges
 even when a legacy or manual edge already exists. Unscoped or one-sided scopes
-remain compatible under `ScopesConflict`.
+remain compatible under `ScopesConflict`. Because the scope check runs after the
+vector fetch, the worker oversamples that fetch and caps the edges it writes, so
+a skipped neighbour does not consume the budget of a compatible one ranked below
+it.
 
 ### Retrieval
 

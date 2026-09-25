@@ -34,6 +34,14 @@ type Worker struct {
 const (
 	batchSize     = 50
 	maxCandidates = 6
+	// scopeOversample widens the vector fetch so scope-conflicting rows do not
+	// spend the neighbour budget. SearchVector truncates to the limit it is
+	// given, so a cap applied only after the scope filter would see nothing but
+	// the top-scoring rows and never examine a compatible neighbour ranked just
+	// below them — and the source is marked scanned once its sweep succeeds, so
+	// that row is never reconsidered. The written-link cap is still
+	// maxCandidates; this only decides how deep the search looks for one.
+	scopeOversample = 4
 )
 
 // NewWorker creates a background linking worker. Memories whose cosine
@@ -119,13 +127,17 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			continue
 		}
 		sourceScope := sourceMemories[0].Scope
-		// +1 because the memory itself is its own nearest neighbor.
-		candidates, err := w.store.SearchVector(ctx, projectID, vec, maxCandidates+1)
+		// +1 because the memory itself is its own nearest neighbor. The fetch
+		// is oversampled so that rows the scope check below rejects do not
+		// consume the neighbour budget; maxCandidates still caps the links
+		// written.
+		candidates, err := w.store.SearchVector(ctx, projectID, vec, (maxCandidates+1)*scopeOversample)
 		if err != nil {
 			w.logger.Debug("linking: search", "error", err, "memory_id", id)
 			continue
 		}
 		failed := false
+		created := 0
 		for _, cand := range candidates {
 			if cand.MemoryID == id || cand.Score < w.threshold {
 				continue
@@ -138,8 +150,12 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 				failed = true
 				continue
 			}
-			linked++
+			created++
+			if created == maxCandidates {
+				break
+			}
 		}
+		linked += created
 		// Only mark scanned when every link write succeeded, so missing
 		// edges are retried on the next sweep.
 		if failed {
