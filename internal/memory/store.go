@@ -1237,10 +1237,36 @@ func (s *Store) UpsertWithProvenance(ctx context.Context, projectID, category, c
 	return s.UpsertWithOptions(ctx, projectID, category, content, source, importance, tags, UpsertOptions{Provenance: prov})
 }
 
+// sqlExecutor is the common read/write surface of *sql.DB and *sql.Tx. It
+// lets the reflection apply path reuse Upsert's duplicate/link semantics inside
+// its existing transaction instead of opening a second transaction.
+type sqlExecutor interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+type storeTxContextKey struct{}
+
+func withStoreTx(ctx context.Context, tx *sql.Tx) context.Context {
+	return context.WithValue(ctx, storeTxContextKey{}, tx)
+}
+
+func storeTxFromContext(ctx context.Context) (*sql.Tx, bool) {
+	tx, ok := ctx.Value(storeTxContextKey{}).(*sql.Tx)
+	return tx, ok && tx != nil
+}
+
 // UpsertWithOptions is Upsert plus provenance and/or scope.
 func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts UpsertOptions) (id string, duplicateOf string, score float64, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	parentTx, inTx := storeTxFromContext(ctx)
+	db := sqlExecutor(s.db)
+	if inTx {
+		db = parentTx
+	} else {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+	}
 
 	var existingID string
 	var existingImportance float32
@@ -1251,7 +1277,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// duplicate — the OR-probe alone treats a single shared word as a match,
 	// which silently swallowed unrelated saves.
 	ftsQuery := sanitizeFTSN(content, 30)
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := db.QueryContext(ctx, `
 		SELECT m.id, m.importance, m.content, m.scope
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
@@ -1309,7 +1335,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// excluded here so a re-save can never fold into a dead memory; the
 	// same-category probe predates those exclusions and keeps its behavior.
 	if existingID == "" {
-		crossRows, crossErr := s.db.QueryContext(ctx, `
+		crossRows, crossErr := db.QueryContext(ctx, `
 			SELECT m.id, m.importance, m.content, m.scope
 			FROM memories m
 			JOIN memories_fts f ON f.rowid = m.rowid
@@ -1383,11 +1409,16 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		// all succeed or none should — otherwise a failure partway through
 		// leaves the new memory row orphaned: unlinked, un-embedded (onSave
 		// never fires), and invisible. Same tx pattern as mergeProjectLocked.
-		tx, txErr := s.db.BeginTx(ctx, nil)
-		if txErr != nil {
-			return "", "", 0, fmt.Errorf("begin upsert tx: %w", txErr)
+		tx := parentTx
+		ownTx := !inTx
+		if ownTx {
+			var txErr error
+			tx, txErr = s.db.BeginTx(ctx, nil)
+			if txErr != nil {
+				return "", "", 0, fmt.Errorf("begin upsert tx: %w", txErr)
+			}
+			defer tx.Rollback() //nolint:errcheck
 		}
-		defer tx.Rollback() //nolint:errcheck
 
 		if _, err = tx.ExecContext(ctx, `
 			UPDATE memories
@@ -1423,18 +1454,20 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			return "", "", 0, fmt.Errorf("link duplicate: %w", err)
 		}
 
-		if err = tx.Commit(); err != nil {
-			return "", "", 0, fmt.Errorf("commit upsert tx: %w", err)
+		if ownTx {
+			if err = tx.Commit(); err != nil {
+				return "", "", 0, fmt.Errorf("commit upsert tx: %w", err)
+			}
 		}
 
-		if s.onSave != nil {
+		if !inTx && s.onSave != nil {
 			s.onSave(projectID)
 		}
 		return id, existingID, score, nil
 	}
 
 	// No match — create new.
-	err = s.db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
 		                      agent, session_id, source_ref, confidence, scope)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1446,7 +1479,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	if err != nil {
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
-	if s.onSave != nil {
+	if !inTx && s.onSave != nil {
 		s.onSave(projectID)
 	}
 	return id, "", 0, nil
@@ -2060,14 +2093,21 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		return nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+	parentTx, inTx := storeTxFromContext(ctx)
+	if !inTx {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 	}
-	defer tx.Rollback() //nolint:errcheck
+
+	tx := parentTx
+	ownTx := !inTx
+	if ownTx {
+		tx, err = s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+	}
 
 	// Snapshot existing non-manual memories before deleting. Pinned memories
 	// and resolved memories are excluded throughout this function — like
@@ -2268,9 +2308,13 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		s.logger.Warn("prune old snapshots", "error", err, "project_id", projectID)
 	}
 
-	s.logger.Info("memories snapshotted before replace", "project_id", projectID, "snapshot_id", snapshotID)
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit replace: %w", err)
+	if s.logger != nil {
+		s.logger.Info("memories snapshotted before replace", "project_id", projectID, "snapshot_id", snapshotID)
+	}
+	if ownTx {
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit replace: %w", err)
+		}
 	}
 	return preserved, nil
 }
