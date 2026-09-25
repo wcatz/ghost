@@ -3,6 +3,11 @@ package reflection
 import "strings"
 
 // looksLikeSecret flags content that plausibly contains a credential.
+//
+// It takes the raw text and normalises case itself: the label patterns are
+// case-insensitive, but the credential prefixes below are not, and lowercasing
+// at the call site made AKIA- and AIza-shaped values permanently unmatchable —
+// the same blind spot the label-only version had, one level down.
 func looksLikeSecret(content string) bool {
 	// Lower once here rather than at each call site: the label patterns are
 	// case-insensitive, but the credential prefixes below are not. "AKIA" and
@@ -20,6 +25,18 @@ func looksLikeSecret(content string) bool {
 			return true
 		}
 	}
+	// Assignment syntax is common in operational notes and is easy to miss
+	// when the key and separator are joined without a prose word ("TOKEN=...",
+	// "CLIENT_SECRET:...", "api-key:..."). Normalize separators first, then
+	// require a key boundary so ordinary words such as "tokenizer" do not
+	// become global blockers.
+	normalized := strings.NewReplacer("-", "_", " ", "_", "=", "_", ":", "_").Replace(lower)
+	for _, key := range []string{"api_key", "apikey", "credential", "password", "secret", "token", "private_key", "bearer"} {
+		if strings.Contains(normalized, key+"_") || strings.Contains(normalized, "_"+key+"_") || strings.HasSuffix(normalized, "_"+key) {
+			return true
+		}
+	}
+
 	// Label-free credentials. Every pattern above needs a word — "token",
 	// "password" — followed by a space, so a model that returns the credential
 	// itself passes straight through: "sk-live-4eC39HqLyjWDarjtT1zdp7dc"

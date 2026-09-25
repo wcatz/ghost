@@ -220,3 +220,78 @@ func countMemories(t *testing.T, s *Store, projectID string) int {
 	}
 	return n
 }
+
+// TestUpsertFoldOnlyKeepsContradictingInstruction is why FoldOnly needs a
+// conflict check the default fold does not. The default fold keeps the
+// caller's wording, so "never deploy staging" survives even when it is scored
+// against "always deploy staging" and linked as a duplicate. FoldOnly commits
+// only the strengthening update and returns: folding a contradiction there
+// strengthens the instruction it contradicts and drops the one being promoted,
+// so a promotion reports success while the memory is gone.
+//
+// Both halves are pinned: a contradicting pair must NOT fold, and a
+// non-contradicting pair of similar length still must.
+func TestUpsertFoldOnlyKeepsContradictingInstruction(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("ensure _global: %v", err)
+	}
+	const always = "always deploy staging before merging the release branch"
+	if _, err := s.Create(ctx, "_global", Memory{
+		Category: "gotcha", Content: always, Source: "reflection", Importance: 0.5,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	const never = "never deploy staging before merging the release branch"
+
+	before := countMemories(t, s, "_global")
+	if _, _, _, err := s.UpsertWithOptions(ctx, "_global", "gotcha", never, "reflection", 0.6, nil,
+		UpsertOptions{FoldOnly: true}); err != nil {
+		t.Fatalf("FoldOnly upsert: %v", err)
+	}
+	after := countMemories(t, s, "_global")
+	if after != before+1 {
+		t.Fatalf("_global holds %d memories, want %d — a contradicting instruction was folded away",
+			after, before+1)
+	}
+
+	// The control: a genuine restatement still folds, so the check is not just
+	// refusing everything that scores well.
+	const restate = "always deploy staging before merging a release branch"
+	before = countMemories(t, s, "_global")
+	if _, _, _, err := s.UpsertWithOptions(ctx, "_global", "gotcha", restate, "reflection", 0.6, nil,
+		UpsertOptions{FoldOnly: true}); err != nil {
+		t.Fatalf("FoldOnly restatement: %v", err)
+	}
+	if got := countMemories(t, s, "_global"); got != before {
+		t.Errorf("_global holds %d memories, want %d — a plain restatement stopped folding", got, before)
+	}
+}
+
+// TestUpsertFoldOnlyKeepsContradictingNumber covers the numeric leg: a near
+// match that differs only in a number is a different rule, not a rewording.
+func TestUpsertFoldOnlyKeepsContradictingNumber(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("ensure _global: %v", err)
+	}
+	const port80 = "the health check endpoint listens on port 80"
+	if _, err := s.Create(ctx, "_global", Memory{
+		Category: "fact", Content: port80, Source: "reflection", Importance: 0.5,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	before := countMemories(t, s, "_global")
+	if _, _, _, err := s.UpsertWithOptions(ctx, "_global", "fact",
+		"the health check endpoint listens on port 81", "reflection", 0.6, nil,
+		UpsertOptions{FoldOnly: true}); err != nil {
+		t.Fatalf("FoldOnly upsert: %v", err)
+	}
+	if got := countMemories(t, s, "_global"); got != before+1 {
+		t.Errorf("_global holds %d memories, want %d — a different port folded into port 80", got, before+1)
+	}
+}

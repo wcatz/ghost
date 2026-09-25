@@ -302,7 +302,7 @@ func TestRecoverUnpromotedReportsWriteFailure(t *testing.T) {
 	}
 	// The error must identify the memory WITHOUT reproducing it: the content is
 	// untrusted text that a reflection pass derived from project files, and
-	// stderr is a durable destination.
+	// stderr is a durable, world-readable destination.
 	if strings.Contains(err.Error(), "a cross-project preference") {
 		t.Errorf("error = %v, want it to identify the memory by digest, not by content", err)
 	}

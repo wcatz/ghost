@@ -1354,7 +1354,25 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			if ScopesConflict(opts.Scope, parseScope(candScope)) {
 				continue
 			}
-			sim := mergeScore(newTokens, tokenizeContent(candContent))
+			candTokens := tokenizeContent(candContent)
+			// A near-match that CONTRADICTS is not a restatement, and only
+			// FoldOnly has to care. "always deploy staging" and "never deploy
+			// staging" share every token but one, so the Jaccard bar alone
+			// treats them as the same fact. The default fold is unaffected —
+			// it keeps the caller's wording, so the incoming text survives
+			// either way — but FoldOnly commits only the strengthening update
+			// and returns, so folding a contradiction strengthens the
+			// instruction it contradicts and drops the one being promoted: a
+			// promotion that reports success while the memory is gone.
+			//
+			// Scoped to FoldOnly deliberately. Applied to every upsert it would
+			// also block ordinary links between a fact and a longer restatement
+			// of it that happens to contain a negation, which is a duplicate
+			// relationship the default fold is right to record.
+			if opts.FoldOnly && contradictoryInstruction(newTokens, candTokens) {
+				continue
+			}
+			sim := mergeScore(newTokens, candTokens)
 			if sim > 0 && sim > bestSim {
 				bestSim = sim
 				existingID = candID
