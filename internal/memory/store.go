@@ -72,12 +72,22 @@ type Project struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
+// sqlQueryer is the read surface shared by *sql.DB and *sql.Tx. Search
+// explanations use it to keep their production result and diagnostic reads on
+// one SQLite snapshot.
+type sqlQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
 // Store manages the SQLite memory database.
 type Store struct {
-	db     *sql.DB
-	mu     sync.RWMutex
-	logger *slog.Logger
-	onSave func(projectID string) // optional callback after memory create/upsert
+	db *sql.DB
+	// snapshot is set only on the short-lived Store used by ExplainSearch. It
+	// redirects read-only search helpers to the transaction's consistent view.
+	snapshot *sql.Tx
+	mu       sync.RWMutex
+	logger   *slog.Logger
+	onSave   func(projectID string) // optional callback after memory create/upsert
 
 	// demotionThreshold gates near-duplicate demotion in GetTopMemories (see
 	// DemotionPenalties). Defaults to DefaultDemotionThreshold; callers that
@@ -139,6 +149,13 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Store{db: db, logger: logger, demotionThreshold: DefaultDemotionThreshold}
+}
+
+func (s *Store) queryDB() sqlQueryer {
+	if s.snapshot != nil {
+		return s.snapshot
+	}
+	return s.db
 }
 
 // seedGlobalMemory defines a memory that Ghost ships with out of the box.
@@ -1126,7 +1143,7 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 		for i, m := range results {
 			ids[i] = m.ID
 		}
-		penalty, err := SupersedePenalties(ctx, s.db, ids)
+		penalty, err := SupersedePenalties(ctx, s.queryDB(), ids)
 		if err != nil {
 			s.logger.Debug("get top memories: supersede demotion lookup failed", "error", err)
 		} else if len(penalty) > 0 {
@@ -1140,7 +1157,7 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 			ids[i] = m.ID
 			pinned[m.ID] = m.Pinned
 		}
-		penalty, err := DemotionPenalties(ctx, s.db, ids, pinned, s.demotionThreshold)
+		penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, pinned, s.demotionThreshold)
 		if err != nil {
 			s.logger.Debug("get top memories: demotion lookup failed", "error", err)
 		} else {
@@ -1156,7 +1173,7 @@ func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit in
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT m.id, m.project_id, m.category, m.content, m.importance, m.access_count,
 		       m.last_accessed, m.source, m.tags, m.pinned, m.resolved_at, m.created_at, m.updated_at,
 		       m.agent, m.session_id, m.source_ref, m.confidence, m.scope
@@ -1179,7 +1196,7 @@ func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Me
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT m.id, m.project_id, m.category, m.content, m.importance, m.access_count,
 		       m.last_accessed, m.source, m.tags, m.pinned, m.resolved_at, m.created_at, m.updated_at,
 		       m.agent, m.session_id, m.source_ref, m.confidence, m.scope

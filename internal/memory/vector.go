@@ -97,7 +97,7 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT e.memory_id, e.embedding, e.model, m.scope
 		FROM memory_embeddings e
 		JOIN memories m ON m.id = e.memory_id
@@ -293,7 +293,7 @@ func (s *Store) demoteSuperseded(ctx context.Context, results []Memory, p Search
 		ids[i] = m.ID
 	}
 	s.mu.RLock()
-	penalty, err := SupersedePenalties(ctx, s.db, ids)
+	penalty, err := SupersedePenalties(ctx, s.queryDB(), ids)
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Debug("supersede demote: lookup failed", "error", err)
@@ -740,17 +740,40 @@ func (s *Store) SearchHybridScoped(ctx context.Context, projectID, query string,
 // used by the benchmark harness and by SearchHybridScoped after the store has
 // assembled production parameters.
 func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string, queryVec []float32, limit int, p SearchParams) ([]Memory, error) {
+	final, _, err := s.searchHybridLegs(ctx, projectID, query, queryVec, limit, p)
+	return final, err
+}
+
+// hybridLegs is the raw output of each retrieval leg. vec is the leg before the
+// similarity floor, because a candidate the floor dropped is a distinct,
+// diagnosable outcome that is invisible once the floor has been applied.
+type hybridLegs struct {
+	fts []Memory
+	vec []ScoredMemory
+}
+
+// searchHybridLegs is SearchHybridParams plus the legs it already fetched.
+//
+// Explain mode needs those exact rows — its whole job is to say why the search
+// ranked what it ranked — and re-running each leg inside explain's snapshot
+// transaction would hold the store's single connection across a second FTS
+// scan and a second full embedding scan. The store runs with one connection, so
+// every statement inside that transaction is time a concurrent save, touch or
+// background write cannot have the connection at all.
+func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, queryVec []float32, limit int, p SearchParams) ([]Memory, hybridLegs, error) {
 	// FTS results.
 	ftsResults, err := s.SearchFTS(ctx, projectID, query, limit*2)
 	if err != nil {
 		ftsResults = nil // non-fatal, proceed with vector only
 	}
+	legs := hybridLegs{fts: ftsResults}
 
 	// FTS-only is the same selection seam with an empty vector leg. Use an
 	// unweighted keyword score to preserve the historical FTS-only ordering
 	// and explain-mode score contract.
 	if queryVec == nil {
-		return s.fuseAndRank(ctx, ftsResults, nil, limit, keywordOnlyParams(p))
+		final, err := s.fuseAndRank(ctx, ftsResults, nil, limit, keywordOnlyParams(p))
+		return final, legs, err
 	}
 
 	// Vector results.
@@ -758,14 +781,17 @@ func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string,
 	if err != nil {
 		vecResults = nil // non-fatal, proceed with FTS only
 	}
-	vecResults = filterVectorFloor(vecResults, p.MinSimilarity)
+	legs.vec = vecResults
+	filtered := filterVectorFloor(vecResults, p.MinSimilarity)
 
 	// If only FTS worked, return that through the same selection seam.
-	if len(vecResults) == 0 {
-		return s.fuseAndRank(ctx, ftsResults, nil, limit, keywordOnlyParams(p))
+	if len(filtered) == 0 {
+		final, err := s.fuseAndRank(ctx, ftsResults, nil, limit, keywordOnlyParams(p))
+		return final, legs, err
 	}
 
-	return s.fuseAndRank(ctx, ftsResults, vecResults, limit, p)
+	final, err := s.fuseAndRank(ctx, ftsResults, filtered, limit, p)
+	return final, legs, err
 }
 
 func keywordOnlyParams(p SearchParams) SearchParams {
@@ -797,7 +823,7 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 		WHERE id IN (%s)
 	`, strings.Join(placeholders, ","))
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.queryDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get by ids: %w", err)
 	}
@@ -810,7 +836,7 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT e.memory_id, e.embedding, e.model, m.scope
 		FROM memory_embeddings e
 		JOIN memories m ON m.id = e.memory_id

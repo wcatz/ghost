@@ -547,7 +547,7 @@ func (s *Server) registerTools() {
 		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
 		Scope     any    `json:"scope,omitempty" jsonschema:"Only return memories that do not contradict this scope, as an object of string values — e.g. {\"environment\": \"production\"}. A memory that says nothing about a key still matches, so unscoped knowledge remains available; one that names a different value is excluded."`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
-		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list: per-memory FTS rank, vector rank and cosine, fused RRF score, decay factor, supersede and near-duplicate penalties, plus the reason each excluded candidate was left out. Use when a result looks wrong and you need to know which signal is responsible."`
+		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list: per-memory FTS rank, vector rank and cosine, fused RRF score, decay factor, supersede and near-duplicate penalties, plus the reason each excluded candidate was left out. When scope is supplied, included membership and scope exclusions reflect the scoped search. Use when a result looks wrong and you need to know which signal is responsible."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -601,15 +601,12 @@ func (s *Server) registerTools() {
 		// explain returns the store's ranking diagnosis instead of the
 		// formatted list.
 		if args.Explain {
-			ex, xErr := s.store.ExplainSearch(ctx, args.ProjectID, args.Query, queryVec, searchLimit)
+			ex, xErr := s.store.ExplainSearchScoped(ctx, args.ProjectID, args.Query, queryVec, searchLimit, scopeFilter)
 			if xErr != nil {
 				return nil, nil, fmt.Errorf("explain failed: %w", xErr)
 			}
 			if args.Category != "" {
 				ex.Notes = append(ex.Notes, "a category filter is applied after the search by this tool; rows below are pre-filter")
-			}
-			if len(scopeFilter) > 0 {
-				ex.Notes = append(ex.Notes, "scope is not applied in this explanation; rows show the unscoped candidate ranking, while the formatted search applies scope while selecting the result window")
 			}
 			payload, mErr := json.MarshalIndent(ex, "", "  ")
 			if mErr != nil {

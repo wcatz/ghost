@@ -177,9 +177,11 @@ absence for an eligible row that was retrieved but not selected. The hydration
 backfill after the cut draws from that same narrowed pool, so a row that
 disappears between the leg queries and hydration is replaced by the next
 strongest *in-scope* candidate rather than shortening the result. Category is a
-separate tool-level post-filter and therefore uses a wider store fetch. Ordering
-is deterministic (ties broken by ID), because the demotion penalties applied
-downstream depend on order.
+separate tool-level post-filter and therefore uses a wider store fetch. Explain
+mode calls the same scoped selection entry point, so its included rows and
+scope-exclusion reasons describe the store result rather than an unscoped
+ranking. Ordering is deterministic (ties broken by ID), because the demotion
+penalties applied downstream depend on order.
 
 The main schema tables are:
 
@@ -234,7 +236,7 @@ Axis interaction rules:
 
 ## Context assembly (target design)
 
-> **Target design, not current behavior.** Today there is no assembler: `ghost_memory_search` (`internal/mcpserver`) and the session-start injector (`internal/mcpinit`) each run their own ad-hoc retrieve → filter → rank → trim sequence, which is why the two surfaces disagree about scope ([#577](https://github.com/wcatz/ghost/issues/577)) and why the injector still filters scope after the result window closes. The formatted `ghost_memory_search` path no longer does: it narrows scope inside hybrid window selection, before the cut ([#573](https://github.com/wcatz/ghost/issues/573)), which leaves category as its only post-filter. Its `explain: true` branch is the exception: it still explains the unscoped ranking and says so in a note. The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581).
+> **Target design, not current behavior.** Today there is no assembler: `ghost_memory_search` (`internal/mcpserver`) and the session-start injector (`internal/mcpinit`) each run their own ad-hoc retrieve → filter → rank → trim sequence, which is why the two surfaces disagree about scope ([#577](https://github.com/wcatz/ghost/issues/577)). The injector ignores `memories.scope` altogether — `loadSessionContext` never selects the column, so a session-start block can carry rows that conflict with the caller's scope. The formatted `ghost_memory_search` path does honour it, and does so inside hybrid window selection before the cut ([#573](https://github.com/wcatz/ghost/issues/573)), which leaves category as its only post-filter, and its `explain: true` branch explains that same scoped ranking ([#571](https://github.com/wcatz/ghost/issues/571)). The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581).
 
 Both consumers should call one assembler with an explicit budget, so every surface applies the same predicates in the same order and every stage is testable in isolation:
 
