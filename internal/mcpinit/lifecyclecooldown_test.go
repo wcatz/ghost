@@ -1,7 +1,6 @@
 package mcpinit
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -234,38 +233,41 @@ func TestTouchLifecycleStart(t *testing.T) {
 // hasFileIdentity reports whether the platform can tell one file from another
 // and one file's permissions from another's.
 //
-// It cannot on Windows, and the two reasons are different. NTFS has no POSIX
-// mode bits, so os.CreateTemp yields 0666 whatever perm the open asked for — that
-// one is not in doubt. The other is empirical: on windows-latest,
-// os.SameFile(before, after) over this exact temp+rename compared EQUAL
-// (CI run 36187098324, job 108243082501, "the stamp is still the same file"),
-// whatever the mechanism behind the reused index. Asserting an identity the
-// platform does not deliver would assert something untrue about Windows rather
-// than about this code.
+// It cannot on Windows, for two independently established reasons.
 //
-// So the DISCRIMINATING check is the retained handle in
-// TestTouchLifecycleStart_ReplacesTheStamp, which works on every platform, and
-// these two are extra signal where they can run. The 0600 request still stands
-// on Windows; it is simply not observable there.
+// The mode one is not in doubt: NTFS has no POSIX mode bits, so os.CreateTemp
+// yields 0666 whatever perm the open asked for.
+//
+// The identity one is empirical: on windows-latest, os.SameFile(before, after)
+// across this exact temp+rename compared EQUAL (CI run 36187098324, job
+// 108243082501). I could not settle from here whether the NTFS file index is
+// reused or the path is re-resolved, and it no longer matters: the point is that
+// the check does not discriminate there, so it is not used as one.
+//
+// The portable alternative — hold a read handle open across the touch and check
+// it still reads the old bytes — does not work either, and this is worth
+// recording because it looks obviously right: syscall.Open on Windows uses
+// `sharemode := FILE_SHARE_READ | FILE_SHARE_WRITE` (src/syscall/
+// syscall_windows.go, syscall.Open), with NO FILE_SHARE_DELETE. An open handle
+// therefore denies a rename over that path, and the test fails against correct
+// code with "rename ... lifecycle-p1.last: Access is denied" (CI run 36188063873,
+// job 108246513870). Any observation that needs the destination open cannot
+// coexist with the rename it is trying to observe.
+//
+// So: the two hygiene properties — the stale content is gone and the mtime moved
+// — are asserted everywhere, and the two DISCRIMINATING ones (a different file,
+// mode 0600) run wherever the platform expresses them. Every mutation for this
+// change was run on Linux, where they are live.
 func hasFileIdentity() bool {
 	return runtime.GOOS != "windows"
 }
 
-// TestTouchLifecycleStart_ReplacesTheStamp pins the atomic replace, and it does
-// so with a check that discriminates on EVERY platform — including the Windows
-// builds CI runs and goreleaser ships, where neither the mode nor the file
-// index can be asserted:
-//
-//   - a handle opened on the stamp BEFORE the touch still reads the OLD bytes
-//     afterwards. A rename leaves that handle on the old, unlinked (Windows:
-//     delete-pending) file, whose data survives until the handle closes; an
-//     in-place write truncates the very file object the handle is on, so it
-//     reads back the new timestamp. The other assertions — stale content gone,
-//     mtime moved — pass for BOTH implementations and are only hygiene.
-//
-// Plus, where the platform can express them, that the stamp is a different file
-// and carries 0600. The mtime must MOVE regardless, or a long-lived project
-// would be pinned inside the window by a stamp nobody refreshed.
+// TestTouchLifecycleStart_ReplacesTheStamp pins the properties a write-in-place
+// would lose. The stale content must be gone and the mtime must MOVE, or a
+// long-lived project would be pinned inside the window by a stamp nobody
+// refreshed; and where the platform can express it (hasFileIdentity), the stamp
+// must be a DIFFERENT file carrying 0600 — an in-place write keeps the old
+// inode's identity and the old path's wider mode, so both checks fail for it.
 func TestTouchLifecycleStart_ReplacesTheStamp(t *testing.T) {
 	dataHome := isolatedHome(t)
 	seedProject(t, dataHome, "p1", "/tmp/p1", "p1")
@@ -280,14 +282,6 @@ func TestTouchLifecycleStart_ReplacesTheStamp(t *testing.T) {
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
 	}
-	// The handle is what makes this check platform-independent, so it is opened
-	// before the touch and read after. Go opens with FILE_SHARE_DELETE on
-	// Windows, so the rename over the path this handle names still succeeds.
-	held, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = held.Close() })
 	// Precondition: the stale stamp is outside any cooldown.
 	if skip, _ := lifecycleCooldownActive(dataDir, "p1", 30*time.Minute, time.Now()); skip {
 		t.Fatal("precondition: a 6h-old stamp is outside a 30m window")
@@ -319,17 +313,6 @@ func TestTouchLifecycleStart_ReplacesTheStamp(t *testing.T) {
 	}
 	if strings.Contains(string(b), "stale") {
 		t.Errorf("stamp content = %q, want the previous content replaced", b)
-	}
-	// The discriminating check: the pre-rename handle must still be on the OLD
-	// file. An in-place write truncated this very file object, so it would read
-	// back the new timestamp here instead.
-	throughHeld := make([]byte, len("stale\n"))
-	if _, err := io.ReadFull(held, throughHeld); err != nil {
-		t.Fatalf("read through the pre-rename handle: %v", err)
-	}
-	if string(throughHeld) != "stale\n" {
-		t.Errorf("the pre-rename handle reads %q, want the old %q — the stamp was rewritten in place, not replaced by a rename",
-			throughHeld, "stale\n")
 	}
 	if skip, since := lifecycleCooldownActive(dataDir, "p1", 30*time.Minute, time.Now()); !skip {
 		t.Error("the refreshed stamp must hold the next spawn back")
