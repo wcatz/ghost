@@ -133,11 +133,18 @@ def main(argv):
 
     payload["body"] = body + "\n\n" + marker
 
-    proc = subprocess.run(
-        ["gh", "api", f"repos/{repo}/pulls/{number}/reviews",
-         "--method", "POST", "--input", "-"],
-        input=json.dumps(payload), text=True, capture_output=True, check=False,
-    )
+    proc = _post(repo, number, payload)
+    if proc.returncode != 0 and payload["comments"]:
+        # GitHub rejects the WHOLE review (422) when any one inline anchor
+        # is refused, e.g. "line must be part of the diff" after the head
+        # moved under a long-running review. Losing the review entirely
+        # leaves the gate red with nothing to act on, so fall back once:
+        # fold every inline finding into the body and post without anchors.
+        print("::warning::inline review rejected "
+              f"({_log_safe(_api_error(proc), limit=300)}); "
+              "retrying with findings in the review body")
+        payload = _fold_comments_into_body(payload, marker)
+        proc = _post(repo, number, payload)
     if proc.returncode != 0:
         # GitHub's Reviews API can return a 422 whose body echoes back
         # field-level validation errors, and every field in our payload is
@@ -148,13 +155,49 @@ def main(argv):
         # rather than dropped, and bounded so a pathological response
         # can't flood the log.
         print(f"::error::posting the review failed: "
-              f"{_log_safe(proc.stderr.strip(), limit=2000)}",
+              f"{_log_safe(_api_error(proc), limit=2000)}",
               file=sys.stderr)
         return 1
 
     print(f"posted review: {len(payload['comments'])} inline finding(s), "
           f"{len(dropped)} unanchored")
     return 0
+
+
+def _post(repo, number, payload):
+    return subprocess.run(
+        ["gh", "api", f"repos/{repo}/pulls/{number}/reviews",
+         "--method", "POST", "--input", "-"],
+        input=json.dumps(payload), text=True, capture_output=True, check=False,
+    )
+
+
+def _api_error(proc):
+    """The real failure reason. `gh api` prints only "gh: Unprocessable
+    Entity (HTTP 422)" on stderr; GitHub's validation errors (which field
+    was refused, and why) are the JSON body it prints on stdout."""
+    parts = (getattr(proc, "stderr", ""), getattr(proc, "stdout", ""))
+    return " ".join(x.strip() for x in parts if isinstance(x, str) and x.strip())
+
+
+def _fold_comments_into_body(payload, marker):
+    """Move inline comments into the review body, keeping the trailing
+    <!-- ghost-review:<sha> --> marker as the body's last line."""
+    body = payload["body"]
+    if body.endswith(marker):
+        body = body[:-len(marker)].rstrip("\n")
+    lines = ["", "**Inline findings** (posted in the body because GitHub "
+             "rejected their line anchors):"]
+    for c in payload["comments"]:
+        lines.append(f"- `{c.get('path')}:{c.get('line')}` {c.get('body', '')}")
+    body = body + "\n" + "\n".join(lines)
+    budget = MAX_BODY_CHARS - len("\n\n" + marker)
+    if len(body) > budget:
+        body = body[:budget - 30] + "\n\n_[review body truncated]_"
+    out = dict(payload)
+    out["comments"] = []
+    out["body"] = body + "\n\n" + marker
+    return out
 
 
 if __name__ == "__main__":
