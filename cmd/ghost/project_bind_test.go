@@ -415,12 +415,14 @@ func TestBindingPrintsTheMCPInitFollowUp(t *testing.T) {
 		if !strings.Contains(out.String(), "not the ghost plugin") {
 			t.Errorf("the follow-up should name the installation it applies to, got:\n%s", out.String())
 		}
-		// And it must not promise more than init delivers: init skips a
-		// checkout that already has its own MEMORY.md, and status counts that
-		// as not redirected while printing the same line either way, so
-		// without this clause the advice ends in a red check with no action.
-		if !strings.Contains(out.String(), "MEMORY.md") {
-			t.Errorf("the follow-up should say when init will not write the redirect, got:\n%s", out.String())
+		// And it must not promise more than init delivers. Asserted on the
+		// whole qualified phrase, not the bare filename: init leaves alone a
+		// MEMORY.md Ghost did not write, but it DOES rewrite a redirect of its
+		// own that still carries the stale ghost_list_projects marker, so a
+		// blanket "never overwrites an existing MEMORY.md" would be wrong in the
+		// other direction.
+		if !strings.Contains(out.String(), "never overwrites a MEMORY.md Ghost did not write") {
+			t.Errorf("the follow-up should qualify which MEMORY.md init leaves alone, got:\n%s", out.String())
 		}
 	})
 
@@ -508,7 +510,7 @@ func TestUnboundProjectNotice(t *testing.T) {
 	if !strings.Contains(after, "ghost mcp init") || !strings.Contains(after, "not the ghost plugin") {
 		t.Errorf("the notice should name the installation whose init step finishes the repair, got:\n%s", after)
 	}
-	if !strings.Contains(after, "MEMORY.md") {
-		t.Errorf("the notice should say when init will not write the redirect, got:\n%s", after)
+	if !strings.Contains(after, "never overwrites a MEMORY.md Ghost did not write") {
+		t.Errorf("the notice should qualify which MEMORY.md init leaves alone, got:\n%s", after)
 	}
 }

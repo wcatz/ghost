@@ -322,15 +322,16 @@ func printBinding(out io.Writer, binding memory.ProjectBinding) error {
 	// the redirect check. The other three clients have no redirect at all. Only
 	// the standalone, init-managed wiring has this step.
 	//
-	// It also does not promise more than init does. The installer refuses to
-	// clobber a checkout that already has its own MEMORY.md, and status counts
-	// that project as not redirected while printing the same line either way —
-	// so without this clause the advice would leave the check red with nothing
-	// to act on.
+	// It also does not promise more than init does. The installer leaves alone a
+	// MEMORY.md Ghost did not write, and status counts that project as not
+	// redirected while printing the same line either way — so without this
+	// clause the advice would leave the check red with nothing to act on. The
+	// wording is the qualified one on purpose: init DOES rewrite a redirect it
+	// wrote itself when it still carries the stale ghost_list_projects marker.
 	if binding.PathChanged && !filepath.IsAbs(binding.PreviousPath) {
 		if _, err := fmt.Fprintln(out, "  next: on the standalone Claude Code integration (not the ghost plugin), run\n"+
 			"        `ghost mcp init` to write this checkout's memory redirect\n"+
-			"        (init never overwrites an existing MEMORY.md — merge or remove that first)"); err != nil {
+			"        (init never overwrites a MEMORY.md Ghost did not write — merge or remove one first)"); err != nil {
 			return err
 		}
 	}
@@ -407,11 +408,13 @@ func writeUnboundProjectNotice(ctx context.Context, out io.Writer, store *memory
 	// own wiring and the other three clients have no redirect, so the line names
 	// the only installation this step applies to instead of implying it applies
 	// to whoever is reading. The MEMORY.md clause is here for the same reason as
-	// in printBinding: init will not overwrite one, and status cannot tell that
-	// case from any other failure.
+	// in printBinding: init leaves alone a file Ghost did not write, and status
+	// cannot tell that case from any other failure. Qualified the same way — init
+	// does rewrite a redirect of its own that still carries the stale
+	// ghost_list_projects marker.
 	_, err = fmt.Fprintln(out, "  On the standalone Claude Code integration (not the ghost plugin), re-run\n"+
 		"  `ghost mcp init` afterwards to write each new checkout's memory redirect\n"+
-		"  (init never overwrites an existing MEMORY.md — merge or remove that first).")
+		"  (init never overwrites a MEMORY.md Ghost did not write — merge or remove one first).")
 	return err
 }
 
