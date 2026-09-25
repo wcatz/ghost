@@ -718,6 +718,9 @@ jobs:
               free_status=0
               free_attempt=$((free_attempt + 1))
               if [ "$free_attempt" -eq 1 ]; then
+                # Give the preferred model the same generous window as the
+                # old single-model review; later retries stay bounded so
+                # exhausting the free list leaves time for paid fallback.
                 free_timeout=1200
               else
                 free_timeout=300
