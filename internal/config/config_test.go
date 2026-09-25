@@ -633,3 +633,40 @@ func TestScratchMaxBytesEnvOverride(t *testing.T) {
 		t.Errorf("scratch.max_bytes = %d, want 2048 (env override)", cfg.Scratch.MaxBytes)
 	}
 }
+
+func TestRetentionDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	unsetEnvVars(t, []string{"GHOST_RETENTION_BACKUP_COUNT", "GHOST_RETENTION_LOG_MAX_BYTES"})
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Retention.BackupCount != 3 {
+		t.Errorf("retention.backup_count = %d, want 3", cfg.Retention.BackupCount)
+	}
+	if cfg.Retention.LogMaxBytes != 10*1024*1024 {
+		t.Errorf("retention.log_max_bytes = %d, want 10 MiB", cfg.Retention.LogMaxBytes)
+	}
+}
+
+func TestRetentionEnvOverrides(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("GHOST_RETENTION_BACKUP_COUNT", "7")
+	t.Setenv("GHOST_RETENTION_LOG_MAX_BYTES", "1234")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Retention.BackupCount != 7 {
+		t.Errorf("retention.backup_count = %d, want 7 from env", cfg.Retention.BackupCount)
+	}
+	if cfg.Retention.LogMaxBytes != 1234 {
+		t.Errorf("retention.log_max_bytes = %d, want 1234 from env", cfg.Retention.LogMaxBytes)
+	}
+}

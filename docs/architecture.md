@@ -59,6 +59,7 @@ internal/linking/                   Background related-memory linking worker
 internal/mcpinit/                   Client installers, status checks, hooks
 internal/mcpserver/                 MCP server, tools, resources, prompts
 internal/memory/                    SQLite store, FTS5, vectors, links, schema
+internal/maintenance/               Bounded data-dir backup/log/process-file hygiene
 internal/obsidian/                  One-way Markdown vault exporter/sync
 internal/procstat/                  Cross-platform process liveness/start time
 internal/provider/                  MemoryStore and LLMProvider interfaces
@@ -123,6 +124,8 @@ host Stop
 ```
 
 The lifecycle is opt-in. A phase failure is logged and does not prevent later phases from running. The reflect phase can use a source-matched CLI harness or an explicitly selected offline tier; the autonomous path requires a real harness when it is configured to rewrite memories.
+
+Data-dir hygiene is deliberately separate from memory semantics. `internal/maintenance` bounds the known Ghost-owned backup/log/process-file classes, runs after database opens/migrations and at the start of a detached lifecycle, and fails closed when a candidate's live owner or open-file state cannot be proven safe. It never treats the live database or newest pre-migration copy as disposable cleanup.
 
 ## Persistence and search
 

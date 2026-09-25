@@ -3,10 +3,13 @@ package memory
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/wcatz/ghost/internal/maintenance"
 	_ "modernc.org/sqlite"
 )
 
@@ -346,6 +349,7 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 			_ = db.Close()
 			return nil, fmt.Errorf("stamp schema version: %w", err)
 		}
+		runDataDirRetention(dbPath)
 		return db, nil
 	}
 
@@ -375,6 +379,9 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		}
 	}
 
+	// Retention runs only after a successful open/migration. It is deliberately
+	// best-effort: cleanup must never make a usable database unavailable.
+	runDataDirRetention(dbPath)
 	return db, nil
 }
 
@@ -395,4 +402,16 @@ func backupBeforeMigrate(db *sql.DB, dbPath string) error {
 		return fmt.Errorf("vacuum into %s: %w", backup, err)
 	}
 	return nil
+}
+
+// runDataDirRetention is deliberately best-effort. It runs after OpenDB has
+// reached a usable state, never while a migration is still destructive, and
+// never turns cleanup trouble into a failed database open.
+func runDataDirRetention(dbPath string) {
+	if dbPath == ":memory:" {
+		return
+	}
+	if _, err := maintenance.Run(filepath.Dir(dbPath), dbPath); err != nil {
+		slog.Warn("data-dir maintenance failed", "error", err)
+	}
 }

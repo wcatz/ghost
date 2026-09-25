@@ -16,6 +16,7 @@ import (
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/hostevent"
+	"github.com/wcatz/ghost/internal/maintenance"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -284,6 +285,12 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 		slog.Warn("lifecycle spawn: cannot locate the ghost binary", "error", err)
 		recordSpawnFailure(projectID, cfg, err)
 		return
+	}
+	// Rotate before opening the detached child's log. This is file-only
+	// maintenance on the hook path: it never opens the database or changes
+	// lifecycle policy, and a currently held log is left for a later pass.
+	if _, err := maintenance.RotateLogs(dataDir, cfg.Retention.LogMaxBytes); err != nil {
+		slog.Warn("lifecycle spawn: log rotation failed", "error", err)
 	}
 	logFile, err := os.OpenFile(filepath.Join(dataDir, "lifecycle.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {

@@ -204,7 +204,17 @@ ghost bench --sweep
 
 `--sweep` grid-searches the fusion parameters. See [Benchmarks and methodology](benchmarks.md).
 
-## Scratch hygiene
+## Data-dir retention
+
+Ghost runs a best-effort retention pass after database opens/migrations and at the start of a detached lifecycle. The detached lifecycle and Obsidian-sync launch paths rotate their logs file-only before opening them, without synchronous database maintenance. The pass keeps the newest configured number of pre-migration database copies, trims the newest tail of known lifecycle/Obsidian logs, and removes only dead Ghost PID claims plus retired per-phase lock sidecars that are not held. The live database, newest backup, and files belonging to a running Ghost process are never removed. `ghost maintenance status` remains a read-only report.
+
+```yaml
+retention:
+  backup_count: 3
+  log_max_bytes: 10485760
+```
+
+Set either value to `0` (or a negative value) to disable that cleanup. The equivalent environment variables are `GHOST_RETENTION_BACKUP_COUNT` and `GHOST_RETENTION_LOG_MAX_BYTES`.
 
 ### `ghost maintenance status`
 

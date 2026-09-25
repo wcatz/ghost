@@ -10,6 +10,7 @@
 - `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, resolve, supersede, project, obsidian, bench, upgrade, version, context
 - `internal/ai/` — CLI-harness providers (`CLIClient`/`OpenCodeClient`/`SourceProvider`) used by reflection + resolve + supersede — no Anthropic HTTP API client
 - `internal/memory/` — SQLite CRUD, FTS5 search, vector search, time-decay scoring
+- `internal/maintenance/` — bounded Ghost data-dir backup/log/process-file retention; never removes the live DB, newest backup, or a live process claim
 - `internal/mcpserver/` — MCP server: 20 tools + 4 resources + 2 prompts (`recall_project`, `record_decision`)
 - `internal/mcpinit/` — `ghost mcp init`, `ghost mcp status`, `ghost hook <event> --source <host>` (contract-v1 lifecycle dispatch; installers: claude-code, opencode plugin, codex TOML+hooks.json, goose Agent-Plugins package; goose field aliasing lives in hostevent.Parse)
 - `internal/claudeimport/` — One-time import of Claude Code auto-memory on first contact
@@ -26,6 +27,7 @@
 
 ## Key Patterns
 - Memory categories: architecture, decision, pattern, convention, gotcha, dependency, preference, fact
+- Data-dir retention: `retention.backup_count` keeps the newest pre-migrate copies, `retention.log_max_bytes` trims known logs, and dead PID/lock cleanup is fail-closed around live claims
 - Time-decay scoring: convention/preference/fact never decay; architecture/pattern 45-day; decision/gotcha/dependency 30-day
 - Empty-set guard: never replace all memories with empty reflection output
 - Project lookup: path-prefix match (longest wins) OR basename name fallback; path-shaped MCP saves prefer the observed Git remote and may bind it to one uniquely named, unclaimed project

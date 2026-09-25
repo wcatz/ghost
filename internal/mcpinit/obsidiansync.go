@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/maintenance"
 )
 
 // ensureObsidianSyncRunning starts `ghost obsidian sync` as a detached
@@ -54,6 +55,11 @@ func ensureObsidianSyncRunning() {
 	if err != nil {
 		slog.Warn("obsidian sync spawn: cannot locate the ghost binary", "error", err)
 		return
+	}
+	// Rotate before opening the detached sync log. This is file-only
+	// maintenance; it never opens the database or changes auto-sync policy.
+	if _, err := maintenance.RotateLogs(dataDir, cfg.Retention.LogMaxBytes); err != nil {
+		slog.Warn("obsidian sync spawn: log rotation failed", "error", err)
 	}
 	logFile, err := os.OpenFile(filepath.Join(dataDir, "obsidian-sync.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {

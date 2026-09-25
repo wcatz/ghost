@@ -36,12 +36,20 @@ type Config struct {
 	Obsidian   ObsidianConfig   `koanf:"obsidian"`
 	Routing    RoutingConfig    `koanf:"routing"`
 	Scratch    ScratchConfig    `koanf:"scratch"`
+	Retention  RetentionConfig  `koanf:"retention"`
 }
 
 // DefaultScratchMaxBytes is the compiled per-root scratch budget: 512 MiB.
 // It is the value scratch.max_bytes takes when the key is unset, and the
 // fallback when config loading itself fails.
 const DefaultScratchMaxBytes int64 = 512 * 1024 * 1024
+
+// DefaultRetentionBackupCount is the number of newest pre-migration database
+// copies retained when retention.backup_count is unset.
+const DefaultRetentionBackupCount = 3
+
+// DefaultRetentionLogMaxBytes is the default cap for each known data-dir log.
+const DefaultRetentionLogMaxBytes int64 = 10 * 1024 * 1024
 
 // ScratchConfig bounds the scratch root every harness spawn is confined to
 // (internal/scratch: $GHOST_SCRATCH_DIR or <dataDir>/scratch).
@@ -56,6 +64,16 @@ type ScratchConfig struct {
 	// leaving the key unset, which keeps the 512 MiB default. A negative
 	// value behaves as 0 (the check treats any non-positive budget as off).
 	MaxBytes int64 `koanf:"max_bytes"`
+}
+
+// RetentionConfig bounds Ghost-owned files in the data directory.
+type RetentionConfig struct {
+	// BackupCount is the number of newest pre-migration database copies to
+	// keep. A non-positive value disables backup pruning.
+	BackupCount int `koanf:"backup_count"`
+	// LogMaxBytes is the maximum size of each known data-dir log before its
+	// newest tail is retained in place. A non-positive value disables rotation.
+	LogMaxBytes int64 `koanf:"log_max_bytes"`
 }
 
 // SearchConfig controls hybrid-search ranking behavior.
@@ -201,6 +219,8 @@ var defaults = map[string]interface{}{
 	"obsidian.auto_sync":                       false,
 	"routing.default_project":                  "",
 	"scratch.max_bytes":                        DefaultScratchMaxBytes,
+	"retention.backup_count":                   DefaultRetentionBackupCount,
+	"retention.log_max_bytes":                  DefaultRetentionLogMaxBytes,
 }
 
 // Load reads configuration with layered precedence.
@@ -253,9 +273,11 @@ func Load() (*Config, error) {
 		"GHOST_OLLAMA_URL":                               "embedding.ollama_url",
 		"GHOST_ROUTING_DEFAULT_PROJECT":                  "routing.default_project",
 		"GHOST_SEARCH_MIN_SIMILARITY":                    "search.min_similarity",
-		// GHOST_SCRATCH_MAX_BYTES: the generic _→. transformer would produce
-		// scratch.max.bytes, missing the max_bytes key entirely.
-		"GHOST_SCRATCH_MAX_BYTES": "scratch.max_bytes",
+		// GHOST_* names whose koanf keys contain underscores need explicit
+		// mappings; the generic _→. transformer would split these values.
+		"GHOST_SCRATCH_MAX_BYTES":       "scratch.max_bytes",
+		"GHOST_RETENTION_BACKUP_COUNT":  "retention.backup_count",
+		"GHOST_RETENTION_LOG_MAX_BYTES": "retention.log_max_bytes",
 	}
 	for envKey, koanfKey := range envOverrides {
 		if val := os.Getenv(envKey); val != "" {

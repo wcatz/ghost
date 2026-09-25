@@ -102,6 +102,20 @@ search:
 
 FTS candidates are not subject to this floor. Raise it only after testing against your corpus with `ghost bench`; a higher value can remove weak semantic matches, while `0.0` preserves the historical behavior of dropping only non-positive cosine scores.
 
+## Data-dir retention
+
+Ghost keeps a bounded safety history and bounds its lifecycle and Obsidian logs:
+
+```yaml
+retention:
+  backup_count: 3
+  log_max_bytes: 10485760
+```
+
+`backup_count` keeps that many newest `ghost.db.pre-migrate-*` copies; the live database and the newest copy are never removed. `log_max_bytes` retains the newest tail of each known data-dir log when it exceeds the cap. A value of `0` (or a negative value) disables that cleanup. Ghost also reaps only dead Ghost process claims and unlocked retired per-phase lock sidecars; a live PID or held lock is left for its owner.
+
+The retention pass runs after a database opens or migrates and at the start of a detached lifecycle. The detached lifecycle and Obsidian-sync launch paths also rotate their logs file-only immediately before opening them; neither path performs synchronous database maintenance. It is best-effort and never creates the data directory just to clean it; `ghost maintenance status` remains a read-only report.
+
 ## Session injection
 
 The SessionStart hook injects a bounded context digest. The default category bias reserves slots for high-signal behavioral notes:
@@ -220,6 +234,8 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 | `GHOST_CLI_MODEL_RESOLVE` | `cli.model_resolve` |
 | `GHOST_CLI_MODEL_SUPERSEDE` | `cli.model_supersede` |
 | `GHOST_SEARCH_MIN_SIMILARITY` | `search.min_similarity` |
+| `GHOST_RETENTION_BACKUP_COUNT` | `retention.backup_count` |
+| `GHOST_RETENTION_LOG_MAX_BYTES` | `retention.log_max_bytes` |
 | `GHOST_ROUTING_DEFAULT_PROJECT` | `routing.default_project` |
 
 Other useful variables:

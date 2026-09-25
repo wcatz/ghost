@@ -78,6 +78,13 @@ func writeIfChanged(path, content string) (bool, error) {
 	return true, os.Rename(tmp, path)
 }
 
+// isGhostTempFile recognizes both the original fixed temp suffix and the
+// unique suffix produced by writeIfChanged's os.CreateTemp call.
+func isGhostTempFile(path string) bool {
+	name := filepath.Base(path)
+	return strings.HasSuffix(name, ".ghost-tmp") || strings.Contains(name, ".ghost-tmp-")
+}
+
 // hasGhostID reports whether a file's frontmatter carries a ghost_id key —
 // the only files prune may touch. Only the frontmatter block (between the
 // opening and closing --- lines) is scanned, never the note body.
@@ -147,7 +154,7 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 			if d.IsDir() {
 				return nil
 			}
-			if strings.HasSuffix(path, ".ghost-tmp") {
+			if isGhostTempFile(path) {
 				return os.Remove(path) // orphan from a crashed write
 			}
 			if !strings.HasSuffix(path, ".md") {

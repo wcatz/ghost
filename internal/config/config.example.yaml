@@ -102,6 +102,13 @@
 # scratch:
 #   max_bytes: 536870912        # 512 MiB (default)
 
+# --- Data-dir retention ---
+# Ghost keeps a bounded safety history and rotates its lifecycle/Obsidian logs.
+# Set either value to 0 (or a negative value) to disable that cleanup.
+# retention:
+#   backup_count: 3              # newest pre-migrate DB copies to keep
+#   log_max_bytes: 10485760      # 10 MiB per known data-dir log
+
 # --- Session Injection ---
 # How the SessionStart hook picks which project memories to inject. The hook
 # injects a condensed selection (default 15) so the token budget is spent on

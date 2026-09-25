@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/maintenance"
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
@@ -19,6 +21,23 @@ import (
 	"github.com/wcatz/ghost/internal/scratch"
 	"github.com/wcatz/ghost/internal/supersede"
 )
+
+// runLifecycleDataDirMaintenance bounds data-dir artifacts at the detached
+// lifecycle boundary. It is deliberately best-effort: a cleanup problem must
+// never prevent the maintenance phases from running.
+func runLifecycleDataDirMaintenance(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "lifecycle: warning: locate data dir for maintenance: %v\n", err)
+		return
+	}
+	if _, err := maintenance.RunWithConfig(dataDir, filepath.Join(dataDir, "ghost.db"), cfg.Retention.BackupCount, cfg.Retention.LogMaxBytes); err != nil {
+		fmt.Fprintf(os.Stderr, "lifecycle: warning: data-dir maintenance: %v\n", err)
+	}
+}
 
 // runLifecycle runs the enabled auto-consolidation phases for one project, in
 // order, inside a single process: reflect (which rewrites memories), then
@@ -62,6 +81,7 @@ func runLifecycle() {
 		fmt.Fprintf(os.Stderr, "error: load config: %v\n", err)
 		os.Exit(1)
 	}
+	runLifecycleDataDirMaintenance(cfg)
 	exe, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: locate ghost binary: %v\n", err)

@@ -120,3 +120,28 @@ func TestBackupBeforeMigrate(t *testing.T) {
 		t.Errorf("backup does not contain the pre-migration row: count=%d", n)
 	}
 }
+
+func TestOpenDBRunsRetentionAfterSuccessfulMigration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GHOST_RETENTION_BACKUP_COUNT", "1")
+
+	dbPath := newLegacyDB(t)
+	old := dbPath + ".pre-migrate-1"
+	if err := os.WriteFile(old, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("configured retention left old backup in place after migration: %v", err)
+	}
+	matches, _ := filepath.Glob(dbPath + ".pre-migrate-*")
+	if len(matches) != 1 {
+		t.Fatalf("retention kept %d backups, want 1: %v", len(matches), matches)
+	}
+}
