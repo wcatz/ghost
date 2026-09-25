@@ -772,10 +772,9 @@ ranking logic through callers.
   is not rerouted.
 - **Abstention thresholds:** Arm B remains off until measured data supports a
   threshold; an unmeasured default is not introduced.
-- **Hot files:** `internal/memory/store.go`,
-  `internal/mcpserver/mcpserver.go`, `internal/mcpinit/hook.go`, and
-  `internal/mcpserver/mcpserver.go` call sites stay surgical and are rebased
-  onto current `origin/main` before final push.
+- **Hot files:** `internal/memory/store.go`, `internal/memory/vector.go`,
+  `internal/mcpserver/mcpserver.go`, and `internal/mcpinit/hook.go` call sites
+  stay surgical and are rebased onto current `origin/main` before final push.
 
 ### Non-goals
 
