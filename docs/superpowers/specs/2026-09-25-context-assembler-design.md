@@ -123,8 +123,19 @@ type Slice struct {
     MaxItems   int    // 0 = unbounded by count
     MaxBytes   int    // 0 = unbounded
     ClampBytes int    // 0 = no clamp
+    DropDemotedLosers bool // true for _global today; false elsewhere — see §2
 }
 type Budget []Slice // first matching Bucket wins; "*" is the fallback
+
+// Condition is which retrieval legs run. bench needs all three; zeroing
+// FTSWeight is NOT the vector-only case, because fused FTS candidates still
+// enter the union with a zero base score (runner.go:46-60).
+type Condition string
+const (
+    CondHybrid   Condition = "hybrid"
+    CondFTSOnly  Condition = "fts_only"  // the default: nil QueryVec
+    CondVectorOnly Condition = "vector_only" // bench's second ablation
+)
 
 type Request struct {
     ProjectID string               // "" only with SourceAllProjects
@@ -133,7 +144,8 @@ type Request struct {
     Category  string               // "" = any; stage 3 membership, never post-closure
     Source    Source
     Budget    Budget
-    QueryVec  []float32            // nil → FTS-only; the caller embeds
+    Condition Condition            // which legs run; see §5 and runner.go:46-60
+    QueryVec  []float32            // required unless CondFTSOnly
     Explain   bool
     Params    *memory.SearchParams // nil → DefaultSearchParams() with the store's
                                    // configured MinSimilarity re-applied on top
@@ -176,13 +188,26 @@ type Item struct {
 }
 ```
 
-### The hook's read-only constraint is load-bearing
+### The hook's read-only constraint is load-bearing — but not for the reason I first gave
 
-`internal/mcpinit/hook.go:400-406` is explicit: the hook queries its own
-read-only `*sql.DB` and **deliberately does not depend on `Store`**. If
-`Assemble` took a `*memory.Store`, that comment would become a lie and the hook
-would acquire a read-write handle it has no business holding. So `Assemble` takes
-a narrow interface, not the store:
+`internal/mcpinit/hook.go:400-406` says the memory query "deliberately queries its
+own lightweight `*sql.DB` connection instead of depending on Store", and the
+function opens that handle through `roDSN` (`hook.go:417`).
+
+My first draft justified `Retriever` by claiming the hook has no `Store` at all.
+**That was wrong**: `loadSessionContext` builds one at `hook.go:426` and passes it
+to `resolveSessionProject`. The real invariant is narrower and better: *the handle
+is read-only*, so a `Store` built on it acquires nothing writable. `Retriever` is
+still the right shape, for the two reasons that actually hold:
+
+- It keeps `internal/context` unable to reach a `*sql.DB` at all, which is what
+  makes the one-method interface sufficient (§ the `CandidateSet` edges).
+- It does not force the hook to widen its own dependency for a convenience it does
+  not need, and it leaves room for a future read-only `memory` constructor without
+  the hook having to be the reason one exists.
+
+A follow-up may narrow `resolveSessionProject` to a narrower interface too, but
+that is not a prerequisite for this design and is not claimed as one.
 
 ```go
 // Retriever is what the assembler needs from storage. memory.Store satisfies it;
@@ -211,7 +236,8 @@ type CandidateSet struct {
 }
 
 type Candidate struct {
-    memory.Memory                    // the hydrated row
+    memory.Memory                    // the hydrated row — see the caveat below
+    ValidFrom, ValidUntil, VerifiedAt *time.Time // NOT on memory.Memory yet
     FTSRank, VectorRank   int        // -1 when that leg did not retrieve it
     VectorScore           float64    // cosine; -1 when absent
     Base, Decay, Score    float64    // fused base, DecayFactor, base×decay
@@ -220,6 +246,16 @@ type Candidate struct {
 type LinkEdge struct{ From, To, Relation string; Strength float64 }
 type LegStatus struct{ Attempted, Available bool; Err string; Truncated bool }
 ```
+
+**`memory.Memory` cannot carry stage 2 today.** It has `ResolvedAt` and
+`Confidence` but **no** `ValidFrom`, `ValidUntil` or `VerifiedAt`, and
+`scanMemories` does not bind those three columns at all — so the columns exist in
+the DDL, are copied between `memories` and `memory_snapshots`, and are unreachable
+from Go (#575). The `Candidate` fields above are therefore part of PR 1's scope,
+not an assumption: PR 1 adds the three fields to `Memory`, binds them in
+`scanMemories`, and adds them to the `SELECT` lists in `store.go` and
+`vector.go:481-487`. Until that lands, stage 2 has nothing to read and stage 4's
+`Confidence` comes from the one field `Memory` does carry.
 
 Returning `Edges` from the same call keeps `Retriever` a one-method interface —
 nothing in `internal/context` can reach a `*sql.DB` — at the cost of one batched
@@ -301,32 +337,61 @@ found in the scope one, and the pipeline must not import it.
 
 ### Four stage-level decisions worth defending
 
-**Conflicts: supersede reorders, `contradicts` removes.** Different operations,
-kept different. A superseded row is still *true history* — `demoteSuperseded`
-already sinks it under its replacement, and making that a removal would hide the
-audit trail the axes section calls for. A `contradicts` pair is two incompatible
-assertions; emitting both means the agent reads a contradiction as a fact. So
-supersede → reorder (existing behaviour, moved), contradicts → drop the
-weaker-ranked endpoint and record `AgainstID`, `elaborates` → group (parent and
-child are both wanted), group recorded so #583 can attribute it.
+**Conflicts: supersede reorders, and `contradicts` also reorders in v1.** My
+first draft had `contradicts` *remove* the weaker endpoint. That reverses a
+deliberate, tested product contract, so it is rejected.
+`TestNegativeRetrieval` (`internal/memory/negative_retrieval_test.go:179-196`)
+has a case named **"contradiction stays while duplication sinks"** that seeds
+`db_postgres` ⟷ `db_mysql` as `contradicts` and `db_postgres` ⟷
+`db_postgres_dup` as `duplicate`, and requires the *lowest-importance* row
+(`db_mysql`, 0.1) to survive at full rank while the restatement sinks. The
+comment states the intent outright: "a system that treats both as 'similar' would
+drop the row carrying the actual disagreement." Dropping it would fail that test
+and lose the signal it was written to protect.
 
-**…and the contradicts rule is currently unmeasurable, which the spec says
-rather than papers over.** `contradicts` appears in exactly two places in the
-tree: the schema CHECK (`schema.go:240`, `migrate.go:273`). No code writes it, no
-code reads it. The built-in bench fixture creates no `memory_links` at all, and
-neither do the LongMemEval and LoCoMo runners — they ingest via `Store.Create`,
-and the product classifier emits `supersedes` and `causes`. A rule that fires on
-contradicts is therefore provably a no-op on every corpus Ghost can currently
-score, and PR 7 cannot measure it either. PR 6 must **add a targeted fixture** to
-the built-in dataset (two memories, one `contradicts` edge, a graded relevance
-for each) and show the rule firing on it; without that fixture the rule ships
-with an explicit "unmeasured on every available corpus" caveat, not a bench claim.
+And `contradicts` is not unread. `internal/obsidian/render.go:171` lists it as a
+directed relation and emits it in the vault, so both members are load-bearing
+downstream too. So in v1: supersede → reorder (existing behaviour, moved);
+`contradicts` → **record the pair, reorder nothing** (`elaborates` → group, also
+non-removing). The trace still reports which pairs co-occur, so #583 can answer
+"does this block contain a disagreement?" without changing membership. Making it
+removing is a **separate, deliberate contract reversal** that needs its own
+issue, its own fixture change, and a stated migration note — not a stage in this
+design. That also means PR 6 has no `contradicts` fixture to add, and the
+unmeasurability problem I flagged earlier disappears with the removal.
 
-**Dedup: reorder, not fold.** `Upsert` already folds the *storage*; a second
-fold at assembly time would make "which row won and why" unanswerable — #583's
-entire subject — and would change the ID set the graded bench scores. Reorder
-plus a recorded collapse set gives #582 its duplicate count without changing
-membership.
+**Dedup: reorder, not fold — and the per-bucket policy is not uniform.** Two
+rejections, one of them a real behavioural difference I had flattened.
+
+*Reorder, not fold.* `Upsert` already folds the *storage*; a second fold at
+assembly time would make "which row won and why" unanswerable — #583's entire
+subject — and would change the ID set the graded bench scores. Reorder plus a
+recorded collapse set gives #582 its duplicate count without changing membership.
+
+*But globals already drop their losers, and stage 6 must not quietly un-drop
+them.* `hook.go:364-387` filters a near-duplicate loser out **outright** for
+globals, independent of the cap, with the reasoning in the code: "unlike project
+memories (where `StableDemote` only reorders and relies on the 15-item cap to
+actually drop the loser), globals are capped much tighter (`globalsCap=8`) and
+near-duplicates must not survive merely because the set is small." Search reorders;
+global injection removes. Converging them on membership-preserving reorder would
+retain duplicate globals in the default session-start result and contradict PR 2's
+no-op gate.
+
+So the policy is explicit and per-slice, not global:
+
+```go
+type Slice struct {
+    ...
+    DropDemotedLosers bool // true for _global today (hook.go:364-387);
+                        // false for project memories and for search, where
+                        // reorder + the cap is the established behaviour
+}
+```
+
+The decision is traced either way (`Decision.Stage == "dedup"`, `Kept: false`,
+`Reason: "dedup_dropped_by_slice_policy"`), so §5's duplicate count works and PR
+2's before/after rendered blocks are the check.
 
 **Diversity: a quota, not MMR.** MMR over embeddings is the textbook answer and
 is rejected: it re-scores (so it needs a `--sweep` to justify), it is
@@ -355,16 +420,45 @@ a definitional guarantee that the verdict cannot disagree with the result.
 every retrieval path failed (Candidates returned an error)  → error, not a Result
 QUERY MODE (Request.Query != "")
    stage 1 produced 0 candidates                          → empty
-      reason: no_candidates | vector_backend_unavailable
    candidates existed, 0 reached stage 8                   → empty
-      reason: all_expired | all_out_of_scope | all_demoted | window_exhausted
    ≥1 reached stage 8, ≥1 satisfies a floor arm            → answerable
    ≥1 reached stage 8,  0 satisfies any floor arm          → weak
-      reason: below_floor (with the floor values applied)
 PASSIVE MODE (Request.Query == "" — session_start, project_context)
-   0 rows admitted                                         → empty,  reason: no_memories
+   0 rows admitted                                         → empty,    reason: no_memories
    ≥1 row admitted                                         → answerable, reason: not_applicable
 ```
+
+### The `empty` reason set is closed, with a precedence
+
+An open-ended reason list cannot be a machine-readable contract, so the codes are
+exhaustive and the first match wins. The order is *earliest stage first*, because
+the earliest stage to empty the set is the one that actually explains it — and
+because later stages are membership-preserving by design and so cannot be the
+cause unless nothing earlier did it.
+
+| # | Reason | Fires when |
+|---|---|---|
+| 1 | `no_candidates` | stage 1 produced zero rows, with every leg reporting `Attempted && !Err` |
+| 2 | `retrieval_failed` | at least one leg errored and the survivors yielded nothing (partial leg failure) |
+| 3 | `vector_backend_unavailable` | no embedder, or the embedding call failed, so only FTS ran and matched nothing |
+| 4 | `all_out_of_project` | every candidate failed project membership |
+| 5 | `all_out_of_category` | every candidate failed the category predicate |
+| 6 | `all_expired` | every candidate failed validity (expired or not yet valid) |
+| 7 | `all_out_of_scope` | every candidate failed `ScopeMatches` |
+| 8 | `all_diversity_capped` | every candidate was cut by a per-bucket quota |
+| 9 | `all_over_budget` | every candidate was cut by the byte/count trim |
+| 10 | `all_resolved` | every candidate had `resolved_at` set |
+| 11 | `window_exhausted` | `CandidateSet.Widened` and one of 4–10 did it — the answer is *bounded*, not absent |
+
+Two corrections to my first draft this makes explicit. **`all_demoted` is not in
+the set and cannot be**: supersede and dedup are membership-preserving in v1 (and
+for the default slices), so they reorder rather than empty. It is reachable only
+via reason 9's sibling `Slice.DropDemotedLosers`, and is reported as
+`all_dedup_dropped` when every candidate was removed that way. And reason 11 is a
+*modifier*, not a peer: the specific cause (4–10) is what `Reason` carries, and
+`Result.Notes` says the window was also exhausted — the same way today's
+`maybeIncomplete` caveat works, so a caller can tell "nothing matches" from
+"nothing matched in what I looked at".
 
 The passive branch is not a special case bolted on. `weak` means "these rows
 resemble the question less than I would like" — a claim that only means anything
@@ -380,14 +474,23 @@ explain payload is never guessing.
 Two arms, both reading signals stage 1 already produced, so neither needs a new
 query.
 
-**Arm A — keyword, on by default.** `FTSRank <= 3`. The floor is on the *FTS
-leg's rank*, not an RRF score: RRF values here are 0.005–0.01 (`FuseAndSelectWindow`
-does this arithmetic in its own doc comment) and are a function of *leg depth*,
-not relevance, so an absolute RRF floor moves every time the retrieval width
-changes while BM25 rank is stable and means what it says. The default `3` is
-deliberately narrow — a rank-0 exact match can never be withheld, which is the
-regression test #580 asks for and the same class of hole #543/#591 just fixed
-from the other direction.
+**Arm A — keyword, on by default.** `0 <= FTSRank && FTSRank <= 3`. The lower
+bound is load-bearing and my first draft got it wrong: `FTSRank` is `-1` when the
+leg did not retrieve the row, and a bare `<= 3` test lets every vector-only
+candidate satisfy the keyword arm, so a purely semantic match would be reported
+`answerable` on the strength of a leg that never saw it. `0 <=` excludes the
+sentinel, which is the same reason `ExplainRow` uses `-1` rather than `0`
+("rank 0 is a real first place — an absent leg and a top-ranked one must not look
+alike").
+
+The floor is on the *FTS leg's rank*, not an RRF score: RRF values here are
+0.005–0.01 (`FuseAndSelectWindow` does this arithmetic in its own doc comment) and
+are a function of *leg depth*, not relevance, so an absolute RRF floor moves every
+time the retrieval width changes while BM25 rank is stable and means what it
+says. The default `3` is deliberately narrow — a rank-0 exact match can never be
+withheld, which is the regression test #580 asks for and the same class of hole
+#543/#591 just fixed from the other direction. Regression test: a vector-only
+candidate (FTS leg not run) must never satisfy arm A.
 
 **Arm B — vector, off by default.** `VectorScore >= cfg.Context.AbstainCosine`,
 default `0.0`, i.e. disabled. It cannot default on: `search.min_similarity` is
@@ -575,14 +678,25 @@ while the stage saw the whole candidate set.
 
 ## Decision 5 — The metrics hook for #582
 
-`#582` needs five numbers. All five are computable from `Result` + `Trace` with
-**zero bench-side retrieval code**, because bench calls the same `Assemble` with
-`Source: SourceBench, Explain: true`.
+`#582` needs five numbers, and all five are computable from `Result` + `Trace`.
+Bench calls the same `Assemble` with `Source: SourceBench, Explain: true` and
+`Condition` set per ablation.
+
+**One honest limit on "zero bench-side retrieval code":** `internal/bench.Run`
+(`runner.go:45-62`) scores three conditions, and the third is **vector-only**,
+which `Request` could not express — a nil `QueryVec` means FTS-only, and zeroing
+`FTSWeight` is not a substitute, because fused FTS candidates still enter the
+candidate union with a zero base score and would occupy window slots. That is why
+`Condition` is in the contract. With it, all three ablations go through
+`Assemble`; **without** it, the honest statement is that bench keeps its own
+`store.SearchFTS` / `store.SearchVector` calls for the two single-leg ablations and
+uses `Assemble` for hybrid and for the context mode. The claim as originally
+written was too strong.
 
 | Metric | Computed from | Note |
 |---|---|---|
 | **Context precision** | `Σ relevance(Item.ID) / len(Items)` | bench's existing `Query.Rel` grades. The denominator is the *assembled* block, not a ranked list — that is the whole difference from NDCG. |
-| **Contamination rate** | items whose own `Item` fields are contaminating *at assembly time* | `Item.ResolvedAt != nil`, `Item.ValidUntil < Now`, `Item.Scope` contradicts the request, or `Item.Bucket` is **neither the requested project nor `_global`**. `_global` is *never* contamination: both retrieval legs and `GetTopMemories` include it deliberately (`store.go:1106`, `1165`), so a global preference in the block is the product working, and scoring it as contamination would report correct behaviour as a regression. **Classified from the production exclusion codes in `Decision.Reason`**, not a bench-only re-implementation — #582's second AC. |
+| **Contamination rate** | items whose own `Item` fields are contaminating *at assembly time* | `Item.ResolvedAt != nil`, `Item.ValidUntil < Request.Now`, `Item.Scope` contradicts the request, or `Item.Bucket` is **neither the requested project nor `_global`**. `_global` is *never* contamination: both retrieval legs and `GetTopMemories` include it deliberately (`store.go:1106`, `1165`), so a global preference in the block is the product working, and scoring it as contamination would report correct behaviour as a regression. **Classified from the production exclusion codes in `Decision.Reason`**, not a bench-only re-implementation — #582's second AC. |
 | **Budget adherence** | `Result.Bytes` vs. the matching `Slice.MaxBytes`; dropped IDs from the stage-8 `StageTrace.DroppedIDs` | `DroppedIDs` is what lets bench intersect the trim with `Query.Rel` and measure *relevant rows the trim discarded* — the "low-relevance memory crowding out a relevant one" regression, otherwise invisible. |
 | **Diversity** | `max_b count(Item.Bucket) / len(Items)` | One histogram over `Item.Bucket`, with `_global` as its own bucket. |
 | **Token cost** | `Σ Item.Bytes` per answered question, reported next to accuracy | Bytes, not a tokenizer: the injection budget is already in bytes and `MaxContentLen` is 8,000 bytes. A tokenizer would be a second, disagreeing notion of size. |
@@ -604,20 +718,28 @@ widened window it returns does not exist on `main`.
 
 | # | Branch / title | Closes | Bench expectation |
 |---|---|---|---|
-| 1 | `feat(context): internal/context seam; scope and category filter before window closure` | **#573** (and category's half) | **Neutral by construction.** The seam delegates to the same legs; both post-filters move ahead of the truncation and the window widens for either. The scored path is byte-identical for unscoped, uncategorised queries (the fixture's queries are both), so both tables must be *equal*, not merely within 0.005. Carries three named regression tests: the configured floor with a non-zero `search.min_similarity`, `Request.Now` bounding `AgeDays`/`DecayFactor`, and `Candidates` returning strictly more rows than the current path. |
+| 1 | `feat(context): internal/context seam; scope and category filter before window closure` | **#573** (and category's half) | **Neutral by construction.** The seam delegates to the same legs; both post-filters move ahead of the truncation and the window widens for either. The scored path is byte-identical for unscoped, uncategorised queries (the fixture's queries are both), so both tables must be *equal*, not merely within 0.005. Stage 2 reads validity columns that are always NULL today, which is what keeps it a no-op. Carries four named regression tests: the configured floor with a non-zero `search.min_similarity`, `Request.Now` bounding `AgeDays`/`DecayFactor`, `Candidates` returning strictly more rows than the current path, and `TestNegativeRetrieval` still green (the contradicts contract is unchanged). |
 | 2 | `feat(mcpinit): render and apply scope on the session-start surface` | **#577** | Not applicable — injection is not scored by `ghost bench`. Gate is behavioural: the new `injection.session_scope` key defaults to unset, so the default is a no-op and the change is rendering plus one opt-in predicate. |
-| 3 | `feat(memory): write validity, confidence and provenance from the tools` | **#575** | **Neutral.** Writers only. Nothing reads `confidence` for ranking until PR 6's stage 4 is enabled, which it is not. Includes `Item`/`formatMemories` gaining the fields so they are *visible* before they are *weighted*. |
+| 3 | `feat(memory): write validity, confidence and provenance from the tools` | **#575** | **Not neutral, and I had this wrong.** PR 1 installs stage 2, which *reads* `valid_from`/`valid_until`; the moment this PR starts writing them, that stage changes membership. So the writers and the consumption are split honestly: this PR ships the writers **and** the retrieval change together, and is bench-gated on the new validity fixtures. It is not "writers only" and the PR body must not claim to be. Stage 4's multiplier stays 1.0, so `confidence` remains unread for ranking. |
 | 4 | `feat(context): abstention is an outcome, not an empty list` | **#580** | **Neutral by construction** — `weak` annotates, so no row is withheld. Arm A is a rank ≤ 3 gate that applies *only* when the vector leg ran; passive sources get `answerable`/`not_applicable` and never `weak`. Arm B ships disabled. Regression tests: a rank-≥4 FTS hit with `QueryVec == nil` is `answerable`/`no_vector_leg`; a rank-0 FTS hit is `answerable` with no abstention line. |
 | 5 | `feat(memory): explain reports the assembler's own decisions, and `ghost context --explain` exists` | **#583** (and the class in #571) | Not applicable — explain is a read-only diagnostic and never fed a scored result. The mutation check is on the invariant test: restore the local re-derivation in `explain.go` and `explain_rrf_equals_ordering_score` must fail. Also adds the `--explain` flag to `runContext` (`cmd/ghost/session.go:18`), which today parses only `--cwd` and silently ignores everything else. |
-| 6 | `feat(context): conflict, dedup, diversity and budget stages` | **#581** (remaining ACs) | **At risk — the gated one, and partly unmeasurable.** The `contradicts` rule is the only membership change, and no corpus Ghost can score today contains such an edge (§2). So PR 6 must **first add a contradicts fixture** to the built-in dataset, show the rule firing on it, and only then claim neutrality on the rest. The diversity quota defaults to off. Paste both tables and the fixture diff. |
-| 7 | `feat(bench): context-quality metrics` | **#582** | Not applicable — measurement only, reported not gating. This is the PR that sets `context.abstain_cosine` from the abstention subset, with the before/after in the body. It cannot validate the contradicts rule either: LongMemEval and LoCoMo ingest via `Store.Create` and create no links, so PR 6's fixture is the only contradicts evidence that will exist. |
+| 6 | `feat(context): conflict, dedup, diversity and budget stages` | **#581** (remaining ACs) | **The gated one.** The only membership changes are the diversity quota (default off, so a no-op until #582 sets a number) and `Slice.DropDemotedLosers` for `_global`, which must *preserve* today's removal behaviour rather than converge it to reorder — so the gate is a before/after of the rendered session-start block, not a metric movement. `contradicts` is non-removing in v1, so it contributes nothing here. Paste both tables and the rendered-block diff. |
+| 7 | `feat(bench): context-quality metrics` | **#582** | Not applicable — measurement only, reported not gating. This is the PR that sets `context.abstain_cosine` from the abstention subset, with the before/after in the body. It also wires `Condition` so all three ablations go through `Assemble` instead of bench calling the store directly. |
 
-**Why this order.** #575 (3) before the stages it feeds (2, 4), or those stages
-are no-ops that cannot be tested. #580 (4) before #583 (5), so the outcome is
-already a `Trace` field when explain starts projecting. #583 (5) before the new
-stages (6), so conflicts/diversity/budget get traces for free instead of each
-inventing reporting. #582 (7) last because its own AC says the metrics "only
+**Why this order.** #575 (3) lands the validity *writers* together with the
+retrieval change they enable, because a stage that reads columns nothing writes is
+a no-op that cannot be tested — and splitting them would mean PR 3 claims to be
+neutral while silently changing membership. #580 (4) before #583 (5), so the
+outcome is already a `Trace` field when explain starts projecting. #583 (5) before
+the new stages (6), so conflicts/diversity/budget get traces for free instead of
+each inventing reporting. #582 (7) last because its own AC says the metrics "only
 make sense once stages 2-8 are a single pipeline".
+
+Note what this ordering does *not* claim: PR 1 ships stage 2 **reading** validity
+against columns that are still always NULL, which is provably a no-op today and is
+the reason PR 1's gate is "equal tables, not within 0.005". The first PR whose
+numbers can move is PR 3, and it is the one PR in the sequence that is explicitly
+bench-gated on new fixtures rather than on the existing corpus.
 
 **Not in these seven**, deliberately: `ghost_search_all`
 (`SearchHybridAll`, `mcpserver.go:1077`), `ghost://project/{id}/context`
@@ -640,19 +762,24 @@ an LLM reranker, a two-pass retrieve — edits one slice.
 - **Trace cost on the hot path.** §4 mitigates by always recording and
   measuring; the fallback is dropping `Before`/`After` on non-scoring stages,
   not gating recording.
-- **The `contradicts` rule is unmeasurable today, and shipping it as if it were
-  measured would be the worst outcome.** `contradicts` exists only in the schema
-  CHECK; no code writes or reads it, the built-in fixture creates no
-  `memory_links`, and neither do the LongMemEval or LoCoMo runners. A rule that
-  can never fire is indistinguishable from a rule that is wrong. The mitigation
-  is PR 6's targeted fixture (§2) and an explicit "no corpus evidence" line in
-  the PR body if that fixture is deferred. The alternative — shipping the rule
-  with a synthetic unit test and a clean bench table — would let a green gate
-  vouch for behaviour no gate has observed.
+- **Making `contradicts` removing is a contract reversal, and it stays out of
+  v1.** `TestNegativeRetrieval` ("contradiction stays while duplication sinks")
+  and `internal/obsidian/render.go:171` both depend on the weaker member
+  surviving. My first draft removed it and would have failed that test. The
+  reversal may well be the right long-term design — an agent should not read a
+  contradiction as a fact — but it needs its own issue, its own fixture change and
+  a stated migration note, because it changes a tested guarantee rather than
+  adding a filter.
 - **PR 1 depends on #591 landing.** `FuseAndSelectWindow` is not on `main`, and
   the widened window is the thing PR 1 exists to consume. If #591 slips, PR 1
   slips; there is no partial version that is still worth landing, because the
   whole point of PR 1 is the un-truncated candidate set.
+- **PR 1 must extend `memory.Memory`, which is a wider diff than it looks.**
+  `ValidFrom`, `ValidUntil` and `VerifiedAt` do not exist on the struct and are
+  not bound in `scanMemories`, so stage 2 has nothing to read until they are
+  added, along with the `SELECT` lists in `store.go` and `vector.go:481-487`.
+  That touches the two hot files plus a 17-destination scan, so it belongs in PR 1
+  with its own mutation-checked test rather than arriving piecemeal in PR 3.
 - **Converging the renderer cuts both ways.** `formatMemories` gains nothing
   (it already prints scope) but must not *lose* importance or tags, and
   session-start gains a `scope{…}` suffix on every scoped row — a visible product
