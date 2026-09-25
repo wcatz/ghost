@@ -82,7 +82,6 @@ type Slice struct {
 type Budget struct {
     MaxItems       int     // 0 = unbounded total
     MaxBytes       int     // complete response bytes; 0 = unbounded total
-    ResponseReserve int     // provisional framing/outcome/notes allowance
     MaxNoteBytes   int     // per-note maximum; 0 = use the documented default
     MaxNotesBytes  int     // total notes maximum; 0 = use the documented default
     Slices         []Slice
@@ -125,19 +124,20 @@ var ErrResponseBudgetExceeded = errors.New("response budget exceeded")
 `Slice` is a per-bucket membership budget; `Slice.MaxBytes` bounds item content
 and never includes response framing. `Budget` also has a total because search
 applies one limit across project and `_global`, while injection has independent
-project and global caps. A zero budget is rejected. Stage 8 selects items; after
-stage 9 derives the outcome, a fit pass re-renders and drops the lowest-ranked
-item until `Result.Bytes <= Budget.MaxBytes` and the outcome is stable; when
-`Budget.MaxBytes == 0`, that pass is skipped. `ResponseReserve` is provisional,
-not a guarantee. Notes are bounded by `MaxNoteBytes` and `MaxNotesBytes` (default
-512 and 2048 bytes); diagnostic notes are dropped before the machine or reason
-line, and note dropping never changes `Outcome` or `Reason`.
-If the required envelope still exceeds the cap, `Run` returns the
+project and global caps. An all-zero budget is rejected. Stage 8 owns item caps
+and the response fit; after stage 9 derives the outcome, the fit re-renders and
+drops the lowest-ranked item until `Result.Bytes <= Budget.MaxBytes` and the
+outcome is stable. Fit drops belong to stage 8's `DroppedIDs`; if it removes
+every row, the result is `empty`/`all_over_budget`. When `Budget.MaxBytes == 0`,
+the fit is skipped. Notes are bounded by `MaxNoteBytes` and `MaxNotesBytes`
+(default 512 and 2048 bytes); diagnostic notes are dropped before the machine or
+reason line, and note dropping never changes `Outcome` or `Reason`. If the
+required envelope still exceeds the cap, `Run` returns the
 `ErrResponseBudgetExceeded` sentinel rather than an outcome; `mcpserver` renders
 it as an ordinary tool error with copy `response budget exceeded; no memories
-were returned`. `Result.Bytes` is measured after the fit pass; `Item.Bytes` is
-content only. Callers with a response-level cap set the budget fields; there is
-no implicit default.
+were returned`. `Result.Bytes` is measured after the fit; `Item.Bytes` is content
+only. Callers with a response-level cap set the budget fields; there is no
+implicit default.
 
 `Item` is the shared output type for rendering, explanation, and bench metrics.
 It carries the fields needed to reproduce both existing renderers and to
@@ -184,7 +184,7 @@ const (
 ```
 
 `Run` validates the source, project mode, query mode, condition, query vector,
-clock, and non-zero budget before calling `Candidates`. A nil `QueryVec` with
+clock, and a non-all-zero budget before calling `Candidates`. A nil `QueryVec` with
 `CondHybrid` is legal and marks the vector leg not attempted; only
 `CondVectorOnly` requires a vector.
 
@@ -386,7 +386,7 @@ Request
   ├─7 diversity    per-bucket quota
   ├─8 budget       final order and hard trim
   ├─9 render       shared item rendering
-  └─ outcome       answerable | weak | empty → response-fit loop
+  └─ outcome       answerable | weak | empty → stage-8 response fit
 ```
 
 | Stage | Existing behavior | Assembler behavior |
@@ -398,7 +398,7 @@ Request
 | 5 conflicts | supersede and demotion helpers exist | supersede reorders; `contradicts` pairs are recorded and not acted on in v1; `elaborates` groups without removing |
 | 6 dedup | demotion helpers exist | duplicate and near-duplicate edges reorder; session-start global slices retain their explicit drop policy |
 | 7 diversity | none | per-bucket quota, off by default until measured |
-| 8 budget | separate search and hook trims | UTF-8 item clamp plus whole-item byte/count trim, with total and slice caps |
+| 8 budget | separate search and hook trims | UTF-8 item clamp, slice item caps, and the response-fit pass; fit drops are recorded in stage 8 |
 | 9 render | two renderers | one `Item.Line()` for the shared item prefix; each surface keeps its framing and field order |
 
 ### Stage 1: query and passive retrieval
@@ -486,7 +486,8 @@ enabled, remains off by default, and receives its own bench comparison.
 
 `Slice.ClampBytes` is a presentation clamp that preserves UTF-8 boundaries.
 `Slice.MaxBytes` and `MaxItems` are hard item-membership trims. Stage 8 applies
-those slice caps. Stage 9 shares the item line's scope label, validity state,
+those slice caps and owns the response-fit pass; fit drops are included in its
+`DroppedIDs`. Stage 9 shares the item line's scope label, validity state,
 confidence, agent when present, and quote escaping, while preserving the
 distinct search and session-start framing and field order. Both surfaces render
 scope, validity state, confidence, and agent when present from the same `Item`
@@ -533,7 +534,7 @@ The empty reason set is closed. The first matching stage supplies the reason;
 | `all_out_of_scope` | 3 | every row failed scope |
 | `all_dedup_dropped` | 6 | every row was removed by a source policy |
 | `all_diversity_capped` | 7 | every row was cut by a diversity quota |
-| `all_over_budget` | 8 | every row was cut by the hard budget |
+| `all_over_budget` | 8 | every row was cut by the item or response-fit budget |
 
 There is no `all_out_of_project` reason: project membership is enforced in
 SQL. There is no `all_resolved` reason: query mode deliberately admits resolved
@@ -696,9 +697,10 @@ The trace is always recorded. Only the explain projection is gated by
 `Request.Explain`, because recording is bounded and a flag-dependent second
 ranking path would reintroduce drift. `Signals` replaces re-derived RRF, decay,
 age, and rank values, and carries the scope, validity, confidence, and
-provenance facts. `StageTrace` supplies per-stage counts and dropped IDs;
-`Decision` supplies per-row attribution; `Floors` records the exact threshold
-values. The `SearchExplain` adapter carries the existing project, query, limit,
+provenance facts. `StageTrace` supplies per-stage counts and dropped IDs,
+including stage 8's final post-fit counts; `Decision` supplies per-row
+attribution; `Floors` records the exact threshold values. The `SearchExplain`
+adapter carries the existing project, query, limit,
 vector-availability, and note metadata from `Trace` and adds the scope keys,
 validity state and penalty, confidence and provenance contributions, and the
 `AgainstID` for conflict or diversity effects.
@@ -825,9 +827,9 @@ contract for `valid_from`, `valid_until`, `verified_at`, `confidence`, and
 existing provenance path. The shared renderer exposes those fields, while
 stage 4's multiplier remains `1.0` until measured. Session-start sets
 `Slice.MaxItems` and `Slice.ClampBytes` from its existing 15/8 and 200/300
-policies and leaves `Budget.MaxBytes` and `ResponseReserve` at 0; it introduces
-no new total cap. PR 4 sets the search response cap and `ResponseReserve`
-before the byte-boundary test.
+policies and leaves `Budget.MaxBytes` and note limits at 0/default; it introduces
+no new total cap. PR 4 sets the search response cap before the byte-boundary
+test.
 
 | # | Branch / title | Closes | Bench expectation |
 |---:|---|---|---|
