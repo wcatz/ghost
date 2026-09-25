@@ -125,11 +125,11 @@ var ErrResponseBudgetExceeded = errors.New("response budget exceeded")
 and never includes response framing. `Budget` also has a total because search
 applies one limit across project and `_global`, while injection has independent
 project and global caps. An all-zero budget is rejected. Stage 8 applies slice
-caps. After stage 9 and outcome derivation, a separate `Run` response-fit
-post-pass drops the lowest-ranked row, recomputes the outcome, re-renders, and
-measures the final response; it repeats until that render fits or no rows remain.
-Each iteration records a `response_fit` trace entry, and `Result.Bytes` is the
-last render's count. No rows means `empty`/`all_over_budget`;
+caps. The separate `Run` response-fit post-pass starts from the stage-9 render;
+while it exceeds `Budget.MaxBytes`, it drops the lowest-ranked row, recomputes
+the outcome, re-renders, re-measures, and records a `response_fit` entry. A
+fitting seed does zero iterations; `Result.Bytes` is the last render's count.
+No rows means `empty`/`all_over_budget`;
 `Budget.MaxBytes == 0` skips the pass. Notes are bounded by `MaxNoteBytes` and
 `MaxNotesBytes` (default 512 and 2048 bytes); diagnostic notes drop before the
 machine or reason line and never change the outcome or reason. If the final
