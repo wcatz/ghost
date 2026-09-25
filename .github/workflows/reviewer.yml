@@ -471,20 +471,6 @@ jobs:
 
           Rules: 'line' must be a line that appears in ./pr.diff as added or context — never a line outside it. 'end_line' is optional and must be >= 'line'. Use severity 'nit' for anything that does not affect correctness. If you find nothing, emit verdict 'clean' with an empty findings array. Verify each finding against the code before asserting it; omit anything you cannot verify."
           REVIEW_PROMPT_EOF
-          cat > "${RUNNER_TEMP}/validate-review-reply.py" <<'PY'
-          import sys
-
-          sys.path.insert(0, sys.argv[1])
-          from review_findings import extract_findings_from_reply, validate
-
-          try:
-              with open(sys.argv[2], encoding="utf-8") as reply:
-                  document = extract_findings_from_reply(reply.read())
-              validate(document)
-          except Exception as exc:
-              print(f"reply validation failed: {exc}", file=sys.stderr)
-              raise SystemExit(1)
-          PY
 
       - name: Select review model
         id: select_model
@@ -717,11 +703,29 @@ jobs:
             printf '%s' "$value"
           }
 
+          # This is deliberately the same trusted extraction and schema gate
+          # used by post_review.py; a non-empty event stream alone is not a
+          # successful review.
+          validate_reply() {
+            python3 - "$RUNNER_TEMP/base-scripts" "$1" <<'PY'
+          import sys
+
+          sys.path.insert(0, sys.argv[1])
+          from review_findings import extract_findings_from_reply, validate
+
+          try:
+              with open(sys.argv[2], encoding="utf-8") as reply:
+                  validate(extract_findings_from_reply(reply.read()))
+          except Exception as exc:
+              print(f"reply validation failed: {exc}", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+          }
+
           if [ ! -s "${RUNNER_TEMP}/reviewer-prompt.txt" ] \
-             || [ ! -f "${RUNNER_TEMP}/validate-review-reply.py" ] \
              || [ ! -f "${RUNNER_TEMP}/base-scripts/review_findings.py" ]; then
             printf 'review_status=fatal\n' >> "$GITHUB_OUTPUT"
-            echo "::error::trusted reviewer prompt or validation helper is missing"
+            echo "::error::trusted reviewer prompt or validation inputs are missing"
             exit 0
           fi
           REVIEW_PROMPT="$(cat "${RUNNER_TEMP}/reviewer-prompt.txt")"
@@ -775,9 +779,7 @@ jobs:
               if [ "$free_status" -eq 0 ] && [ -s model-reply.txt ] \
                  && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
                     model-reply.txt >/dev/null 2>&1; then
-                if python3 "${RUNNER_TEMP}/validate-review-reply.py" \
-                     "${RUNNER_TEMP}/base-scripts" model-reply.txt \
-                     2> model-validation.err; then
+                if validate_reply model-reply.txt 2> model-validation.err; then
                   valid_reply=1
                 fi
               fi
@@ -857,11 +859,29 @@ jobs:
             printf '%s' "$value"
           }
 
+          # This is deliberately the same trusted extraction and schema gate
+          # used by post_review.py; a non-empty event stream alone is not a
+          # successful review.
+          validate_reply() {
+            python3 - "$RUNNER_TEMP/base-scripts" "$1" <<'PY'
+          import sys
+
+          sys.path.insert(0, sys.argv[1])
+          from review_findings import extract_findings_from_reply, validate
+
+          try:
+              with open(sys.argv[2], encoding="utf-8") as reply:
+                  validate(extract_findings_from_reply(reply.read()))
+          except Exception as exc:
+              print(f"reply validation failed: {exc}", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+          }
+
           if [ ! -s "${RUNNER_TEMP}/reviewer-prompt.txt" ] \
-             || [ ! -f "${RUNNER_TEMP}/validate-review-reply.py" ] \
              || [ ! -f "${RUNNER_TEMP}/base-scripts/review_findings.py" ]; then
             printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
-            echo "::error::trusted reviewer prompt or validation helper is missing"
+            echo "::error::trusted reviewer prompt or validation inputs are missing"
             exit 0
           fi
           REVIEW_PROMPT="$(cat "${RUNNER_TEMP}/reviewer-prompt.txt")"
@@ -893,9 +913,7 @@ jobs:
           if [ "$paid_status" -eq 0 ] && [ -s model-reply.txt ] \
              && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
                 model-reply.txt >/dev/null 2>&1; then
-            if python3 "${RUNNER_TEMP}/validate-review-reply.py" \
-                 "${RUNNER_TEMP}/base-scripts" model-reply.txt \
-                 2> model-validation.err; then
+            if validate_reply model-reply.txt 2> model-validation.err; then
               valid_reply=1
             fi
           fi
@@ -971,9 +989,9 @@ jobs:
           expected="$(cat pr.head)"
           current="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
           if [ "$current" != "$expected" ]; then
-            echo "::notice::PR head changed from ${expected} to ${current}; skipping stale review"
+            echo "::notice::PR head changed from ${expected} to ${current}; refusing stale review"
             echo "current=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            exit 1
           fi
           echo "current=true" >> "$GITHUB_OUTPUT"
 
@@ -1015,8 +1033,8 @@ jobs:
           expected="$(cat pr.head)"
           current="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid)"
           if [ "$current" != "$expected" ]; then
-            echo "::notice::PR head changed from ${expected} to ${current}; skipping stale review"
-            exit 0
+            echo "::notice::PR head changed from ${expected} to ${current}; refusing stale review"
+            exit 1
           fi
           python3 "${RUNNER_TEMP}/base-scripts/post_review.py" \
             "${GITHUB_REPOSITORY}" "${PR_NUMBER}" "$(cat pr.head)" \
