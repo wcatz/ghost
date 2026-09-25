@@ -2752,6 +2752,31 @@ func reusePreservesAge(stored replaceCandidate, emitted Memory) bool {
 	return stored.content == emitted.Content && stored.category == emitted.Category
 }
 
+// takeReusableRow removes and returns the row an emitted memory should reuse
+// from the same-content candidates left for it, along with the rest. A project
+// legitimately holds one text under several categories — Upsert keeps the
+// incoming category on a linked copy so nothing the caller saved is lost — so
+// the content-only bucket is not a single row, and claiming the wrong one
+// makes reusePreservesAge report a category change: the memory that IS the same
+// knowledge would be deleted, its other-category twin recategorized onto it, and
+// both re-stamped. Preferring the category the consolidator actually emitted
+// keeps the retention case a retention.
+//
+// Falls back to the first candidate when no category matches, so a genuine
+// recategorization still finds its row rather than inserting a duplicate —
+// which is what the content-only match did before. In that case the caller
+// takes the rewrite branch, exactly as it did previously. Callers pass
+// candidates already ordered oldest first (see the candidate query), so the
+// fallback keeps the oldest age and stays deterministic.
+func takeReusableRow(matches []replaceCandidate, emitted Memory) (replaceCandidate, []replaceCandidate) {
+	for i, c := range matches {
+		if c.category == emitted.Category {
+			return c, append(matches[:i:i], matches[i+1:]...)
+		}
+	}
+	return matches[0], matches[1:]
+}
+
 // ReplaceNonManual atomically replaces all non-manual memories for a project.
 // Manual-sourced memories are preserved. Refuses to replace with an empty set.
 //
@@ -2820,9 +2845,18 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// DELETE CASCADE), so identical content used to mean a re-embedded memory
 	// and a lost link graph on every reflection. Rows saved concurrently with
 	// the consolidation round trip are kept in place for the same reason.
+	// ORDER BY pins the order takeReusableRow consumes, so which same-content
+	// row a reuse claims is a decision and not whatever order the planner
+	// happens to return (this predicate is served by idx_memories_project_cat
+	// or idx_memories_project_source). created_at ascending means a duplicate
+	// keeps the age of the oldest copy — the one the age belongs to — and id
+	// breaks same-second ties deterministically. Before #623 the order was
+	// irrelevant, because every reused row was re-stamped created_at = now
+	// anyway; now it decides the age that survives.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, content, category FROM memories
 		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
+		ORDER BY created_at, id
 	`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list replaceable memories: %w", err)
@@ -2897,8 +2931,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		// the insert path instead, which leaves the memory to be re-embedded
 		// rather than keeping a vector that no longer describes its content.
 		if matches := reusable[m.Content]; len(matches) > 0 {
-			reuseFor[i] = matches[0]
-			reusable[m.Content] = matches[1:]
+			chosen, rest := takeReusableRow(matches, m)
+			reuseFor[i] = chosen
+			reusable[m.Content] = rest
 		}
 	}
 

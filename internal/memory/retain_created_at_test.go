@@ -204,3 +204,117 @@ func TestReplaceNonManualUnchangedReuseStillAppliesRewriteFields(t *testing.T) {
 		t.Errorf("created_at = %q, want the stored %q", got.CreatedAt, createdAt)
 	}
 }
+
+// TestReplaceNonManualReusePickPrefersMatchingCategory is the second half of
+// #623, and a real bug the first half left open: the reuse bucket is keyed by
+// content alone, so when a project holds the same text in two categories — a
+// shape Upsert creates deliberately, keeping the incoming category on a linked
+// copy so nothing the caller saved is lost — the emitted memory can be handed
+// the other-category row. reusePreservesAge is then evaluated against that
+// row, sees a category change, and takes the rewrite branch: created_at and
+// source are re-stamped, which is exactly the bug #623 fixes, still happening
+// for that memory. Before the pick is deliberate, which same-content row
+// SQLite returns first is incidental — the candidate query has no ORDER BY and
+// the predicate is served by idx_memories_project_cat or
+// idx_memories_project_source.
+func TestReplaceNonManualReusePickPrefersMatchingCategory(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const content = "the same text stored under two different categories"
+	gotchaID, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: content, Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create gotcha: %v", err)
+	}
+	archID, err := s.Create(ctx, testProject, Memory{
+		Category: "architecture", Content: content, Source: "mcp", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create architecture: %v", err)
+	}
+	// The gotcha row is the OLDER one, so it also comes first in the candidate
+	// query's `ORDER BY created_at, id`. That is what makes the test
+	// discriminate: without a category preference the scan order alone decides,
+	// so a gotcha row is claimed for an architecture emission.
+	setCreatedAtDaysAgo(t, s, gotchaID, 100)
+	setCreatedAtDaysAgo(t, s, archID, 10)
+	archCreatedAt := memoryCreatedAt(t, s, archID)
+
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "architecture", Content: content, Importance: 0.5, Tags: []string{}},
+	}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	rows, err := s.GetByIDs(ctx, []string{archID})
+	if err != nil {
+		t.Fatalf("GetByIDs: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatalf("the architecture row was deleted and the gotcha row recategorized instead — " +
+			"reuse picked the other-category row for an architecture emission")
+	}
+	if rows[0].CreatedAt != archCreatedAt {
+		t.Errorf("created_at = %q, want the stored %q — the same-category row was "+
+			"re-stamped because reuse claimed a row from another category", rows[0].CreatedAt, archCreatedAt)
+	}
+	if rows[0].Source != "mcp" {
+		t.Errorf("source = %q, want mcp", rows[0].Source)
+	}
+}
+
+// TestReplaceNonManualReusePickIsDeterministic pins the other half: with
+// byte-identical duplicates in one category — every re-save of the same fact
+// through ghost_memory_save inserts another row — only one row is reused and
+// the rest are deleted, so which row's created_at survives must be a decision
+// and not an accident. Ordering by created_at then id means the oldest row,
+// the one the age actually belongs to, is the one that keeps it, and the same
+// corpus consolidates to the same ages on every run.
+func TestReplaceNonManualReusePickIsDeterministic(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const content = "the same fact re-saved three times"
+	var ids []string
+	for i := 0; i < 3; i++ {
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "architecture", Content: content, Source: "mcp", Importance: 0.5,
+		})
+		if err != nil {
+			t.Fatalf("create duplicate %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+	// Backdate so the OLDEST row is the LAST one inserted. Insertion order is
+	// what an unordered scan returns rows in, so this is what makes the test
+	// discriminate: picking by scan order keeps the newest duplicate's age,
+	// picking by created_at keeps the real one.
+	for i, id := range ids {
+		setCreatedAtDaysAgo(t, s, id, (i+1)*10)
+	}
+	oldestID := ids[len(ids)-1]
+	oldest := memoryCreatedAt(t, s, oldestID)
+
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "architecture", Content: content, Importance: 0.5, Tags: []string{}},
+	}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	survivors, err := s.GetAll(ctx, testProject, 10)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	if len(survivors) != 1 {
+		t.Fatalf("survivors = %d (%v), want 1 — the duplicates are deduped, not all kept", len(survivors), memoryIDs(survivors))
+	}
+	if survivors[0].ID != oldestID {
+		t.Errorf("survivor = %s, want the oldest row %s — the reuse pick is incidental, so the "+
+			"same corpus consolidates to a different age on each run", survivors[0].ID, oldestID)
+	}
+	if survivors[0].CreatedAt != oldest {
+		t.Errorf("created_at = %q, want the oldest row's %q", survivors[0].CreatedAt, oldest)
+	}
+}
