@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 12
+const schemaVersion = 13
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -32,6 +32,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV10,
 	migrateV11,
 	migrateV12,
+	migrateV13,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -527,6 +528,51 @@ func migrateV12(tx *sql.Tx) error {
 	}
 	if _, err := tx.Exec(`ALTER TABLE memories ADD COLUMN scope TEXT`); err != nil {
 		return fmt.Errorf("add memories.scope: %w", err)
+	}
+	return nil
+}
+
+// migrateV13 widens memory_snapshots so a restore returns the same memory
+// rather than a lookalike.
+//
+// Before this the snapshot stored only the text, so a restore re-inserted
+// every row with a fresh id. Because memory_embeddings and memory_links both
+// reference memories(id) ON DELETE CASCADE, that destroyed the embedding and
+// the row's entire link graph while the text came back looking fine, and the
+// reset created_at/access_count made decay treat an old memory as new.
+//
+// Additive. Existing snapshot rows keep NULL memory_id — the ids were never
+// recorded and cannot be recovered — so RestoreSnapshot matches those by
+// content instead, which is idempotent and can only add a row that is
+// missing, never overwrite a live one.
+//
+// pinned and resolved_at are not added: the snapshot predicate fixes both to
+// 0/NULL, so storing them would record a constant. Restore re-reads them from
+// the live row, where they are the value that can actually have changed.
+func migrateV13(tx *sql.Tx) error {
+	cols := []struct{ name, ddl string }{
+		{"memory_id", `TEXT`},
+		{"access_count", `INTEGER NOT NULL DEFAULT 0`},
+		{"last_accessed", `TEXT`},
+		{"agent", `TEXT`},
+		{"session_id", `TEXT`},
+		{"source_ref", `TEXT`},
+		{"confidence", `REAL`},
+		{"valid_from", `TEXT`},
+		{"valid_until", `TEXT`},
+		{"verified_at", `TEXT`},
+	}
+	for _, c := range cols {
+		exists, err := columnExists(tx, "memory_snapshots", c.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue // hand-migrated DB already has it
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`ALTER TABLE memory_snapshots ADD COLUMN %s %s`, c.name, c.ddl)); err != nil {
+			return fmt.Errorf("add memory_snapshots.%s: %w", c.name, err)
+		}
 	}
 	return nil
 }

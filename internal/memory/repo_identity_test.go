@@ -189,6 +189,20 @@ func TestMigrateV11AddsRepoRemote(t *testing.T) {
     reflect_input_sig   TEXT NOT NULL DEFAULT '',
     updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 )`,
+		// migrate() now continues to v13, which ALTERs memory_snapshots; a real
+		// database of this vintage always has the table (it predates v6 — see the
+		// pre-v6 schema in this file), just not the identity columns v13 adds.
+		`CREATE TABLE memory_snapshots (
+    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    snapshot_id   TEXT NOT NULL,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL,
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL,
+    source        TEXT NOT NULL,
+    tags          TEXT DEFAULT '[]',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+)`,
 		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/very-long-v10-path', 'p1')`,
 		`PRAGMA user_version = 10`,
 	}
