@@ -64,10 +64,11 @@ func bootstrap(logWriter io.Writer, logLevel slog.Level, onBadConfig configHandl
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		// The server stays up on the compiled defaults. The Warn reaches stderr
-		// when the client gives the server no terminal and lands in
-		// GHOST_LOG_FILE when one is set — the channels mcpLogConfig already
-		// documents — and `ghost mcp status` prints the same error on demand.
+		// The server stays up on the compiled defaults. The Warn and every
+		// config warning from the same Load call reach this process's log
+		// channel — stderr, or GHOST_LOG_FILE when set, which runMCP has
+		// already pointed the warning sink at (see config.SetWarningWriter) —
+		// and `ghost mcp status` prints the same error on demand.
 		logger.Warn("config could not be loaded; serving built-in defaults", "error", err)
 		cfg = fallback
 	}

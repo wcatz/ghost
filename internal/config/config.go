@@ -321,9 +321,30 @@ func DefaultConfig() *Config {
 	return cfg
 }
 
-// stderr is where configuration warnings go. It is a variable so a test can
-// assert on what a user would see without swapping the process's os.Stderr.
+// stderr is where configuration warnings go. It is a variable so the sink can
+// be redirected (see SetWarningWriter) and so a test can assert on what a user
+// would see without swapping the process's os.Stderr.
 var stderr io.Writer = os.Stderr
+
+// SetWarningWriter redirects configuration warnings to w, and returns a function
+// that restores the previous sink. A nil w keeps the current one.
+//
+// It exists for the MCP server, whose stderr belongs to the client protocol:
+// cmd/ghost points the sink at the same writer mcpLogConfig returns, so setting
+// GHOST_LOG_FILE keeps config warnings out of the client's face. That is not
+// cosmetic here — the hook-path warnings are not once per process. Every
+// harness spawn goes through scratch.EnforceBudget → LoadForHook inside the
+// server, so an unredirected sink would emit one protocol-noise line per spawn.
+//
+// Not synchronised: call it before starting any goroutine, which is what
+// runMCP does. The returned restore is a convenience for tests.
+func SetWarningWriter(w io.Writer) (restore func()) {
+	prev := stderr
+	if w != nil {
+		stderr = w
+	}
+	return func() { stderr = prev }
+}
 
 // warnf reports a non-fatal configuration problem. Layered config is loaded
 // from inside host-session hooks that must not fail, so the problems that must

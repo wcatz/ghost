@@ -40,13 +40,12 @@ func writeUserConfig(t *testing.T, content string) string {
 }
 
 // captureConfigWarnings redirects config warnings to a buffer for the duration
-// of the test, so a test can assert on what a user would see on stderr.
+// of the test, so a test can assert on what a user would see.
 func captureConfigWarnings(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
-	orig := stderr
-	stderr = &buf
-	t.Cleanup(func() { stderr = orig })
+	restore := SetWarningWriter(&buf)
+	t.Cleanup(restore)
 	return &buf
 }
 
@@ -779,6 +778,65 @@ func TestLoad_UnknownKeyWarns(t *testing.T) {
 	}
 	if !strings.Contains(got, path) {
 		t.Errorf("warning %q must name the file it came from (%q)", got, path)
+	}
+}
+
+// TestSetWarningWriter_RedirectsWarnings pins that config warnings can be sent
+// somewhere other than raw stderr. The MCP server needs that: its stderr belongs
+// to the client protocol, so `ghost mcp` points the sink at the same writer
+// mcpLogConfig returns and a GHOST_LOG_FILE redirect keeps config warnings out
+// of the client's face. That matters because the hook-path warnings are not
+// once-per-start — EnforceBudget calls LoadForHook before every harness spawn,
+// inside the server process.
+func TestSetWarningWriter_RedirectsWarnings(t *testing.T) {
+	t.Run("unknown key", func(t *testing.T) {
+		isolateConfig(t)
+		writeUserConfig(t, "linking:\n  thresholdd: 0.9\n")
+
+		var injected bytes.Buffer
+		restore := SetWarningWriter(&injected)
+		defer restore()
+
+		if _, err := Load(); err != nil {
+			t.Fatalf("Load(): %v", err)
+		}
+		if !strings.Contains(injected.String(), "linking.thresholdd") {
+			t.Errorf("injected sink got %q, want the unknown-key warning", injected.String())
+		}
+	})
+
+	t.Run("hook path", func(t *testing.T) {
+		isolateConfig(t)
+		path := writeUserConfig(t, malformedYAML)
+
+		var injected bytes.Buffer
+		restore := SetWarningWriter(&injected)
+		defer restore()
+
+		if cfg := LoadForHook(); cfg == nil {
+			t.Fatal("LoadForHook() = nil")
+		}
+		if !strings.Contains(injected.String(), path) {
+			t.Errorf("injected sink got %q, want the parse warning naming %q", injected.String(), path)
+		}
+	})
+}
+
+// TestSetWarningWriter_NilKeepsDefault pins that a nil writer is ignored rather
+// than panicking later on the first warning.
+func TestSetWarningWriter_NilKeepsDefault(t *testing.T) {
+	isolateConfig(t)
+	writeUserConfig(t, "linking:\n  thresholdd: 0.9\n")
+
+	warnings := captureConfigWarnings(t)
+	restore := SetWarningWriter(nil)
+	defer restore()
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if !strings.Contains(warnings.String(), "linking.thresholdd") {
+		t.Errorf("SetWarningWriter(nil) discarded the default sink; got %q", warnings.String())
 	}
 }
 

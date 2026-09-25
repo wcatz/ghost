@@ -29,6 +29,11 @@ func runMCP() {
 	if closeLog != nil {
 		defer closeLog()
 	}
+	// Config warnings go where this process's logs go, not to raw stderr: stderr
+	// belongs to the client protocol here, which is exactly what GHOST_LOG_FILE
+	// exists to keep clean. Set before any goroutine starts — SetWarningWriter
+	// is not synchronised — and restored before closeLog closes the file.
+	defer config.SetWarningWriter(logWriter)()
 	cfg, logger, store := bootstrap(logWriter, logLevel, warnOnConfig)
 	defer store.Close() //nolint:errcheck
 
