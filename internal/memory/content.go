@@ -32,18 +32,30 @@ func TruncationMarker() string {
 	return fmt.Sprintf(" …[truncated at %d bytes]", MaxContentLen)
 }
 
+// TruncateUTF8 returns the longest prefix of s that is at most maxBytes bytes
+// and ends on a UTF-8 rune boundary. It does not append a marker; callers that
+// need to explain a lossy display should add their own display marker.
+func TruncateUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
+
 // ClampContent applies MaxContentLen to s. Content that fits is returned
 // byte-identical with cut=false — no marker, no rewrite. Content over the
 // cap is cut at a rune boundary within the cap and TruncationMarker is
-// appended, so truncation is explicit in the stored text; cut=true tells
-// the caller to warn the saving agent that the full text did not land.
+// appended, so truncation is explicit in the stored text; cut=true tells the
+// caller to warn the saving agent that the full text did not land.
 func ClampContent(s string) (string, bool) {
 	if len(s) <= MaxContentLen {
 		return s, false
 	}
-	end := MaxContentLen
-	for end > 0 && !utf8.RuneStart(s[end]) {
-		end--
-	}
-	return s[:end] + TruncationMarker(), true
+	return TruncateUTF8(s, MaxContentLen) + TruncationMarker(), true
 }

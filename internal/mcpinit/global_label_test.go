@@ -104,3 +104,34 @@ func TestSessionContextTagsEveryNonManualGlobal(t *testing.T) {
 		t.Errorf("manual rows must stay untagged, otherwise the marker is meaningless:\n%s", out)
 	}
 }
+
+// TestSessionContextGuidanceNamesTheOriginsActuallyPresent prevents the
+// banner from explaining only reflection and MCP while rendering the other
+// legal source values without context. In particular, onboarding and
+// decision_log are not interchangeable with an agent write.
+func TestSessionContextGuidanceNamesTheOriginsActuallyPresent(t *testing.T) {
+	sources := []string{"reflection", "chat", "tool", "mcp", "onboarding", "decision_log"}
+	globals := make([]sessionMemory, 0, len(sources)+1)
+	for i, source := range sources {
+		globals = append(globals, sessionMemory{
+			ID:       string(rune('a' + i)),
+			Category: "fact",
+			Content:  source,
+			Source:   source,
+		})
+	}
+	globals = append(globals, sessionMemory{ID: "z", Category: "preference", Content: "user row", Source: "manual"})
+
+	out := formatSessionContext("p1", "ghost", nil, "", nil, nil, 1, 0, true, globals, len(globals), true)
+	for _, source := range sources {
+		if !strings.Contains(out, "("+source+")") {
+			t.Errorf("source %q is rendered without its origin tag:\n%s", source, out)
+		}
+		if !strings.Contains(out, source) {
+			t.Errorf("source %q is not named in the guidance:\n%s", source, out)
+		}
+	}
+	if strings.Contains(out, "manual") {
+		t.Errorf("guidance must describe the absence of an origin tag, not tell readers to look for a manual marker:\n%s", out)
+	}
+}

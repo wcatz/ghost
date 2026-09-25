@@ -221,6 +221,27 @@ func TestMCPInstructionsDoNotVouchForEveryGlobal(t *testing.T) {
 	}
 }
 
+// TestSourceLabelUsesSharedOriginClassification keeps the MCP formatter on
+// the same source classification as SessionStart for every schema source.
+func TestSourceLabelUsesSharedOriginClassification(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		want   string
+	}{
+		{source: "manual", want: ""},
+		{source: "reflection", want: " source=reflection"},
+		{source: "chat", want: " source=chat"},
+		{source: "tool", want: " source=tool"},
+		{source: "mcp", want: " source=mcp"},
+		{source: "onboarding", want: " source=onboarding"},
+		{source: "decision_log", want: " source=decision_log"},
+	} {
+		if got := sourceLabel(tc.source); got != tc.want {
+			t.Errorf("sourceLabel(%q) = %q, want %q", tc.source, got, tc.want)
+		}
+	}
+}
+
 // TestFormatMemoriesRendersOriginLabel backs the sentence mcpInstructions
 // now relies on: "The section labels each row's origin — trust that label".
 //

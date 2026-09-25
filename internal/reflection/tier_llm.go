@@ -96,7 +96,7 @@ func parseReflectionResponse(text string) (ReflectionResult, error) {
 	if err := json.Unmarshal([]byte(text), &result); err != nil {
 		snippet := text
 		if len(snippet) > 120 {
-			snippet = snippet[:120] + "..."
+			snippet = memory.TruncateUTF8(snippet, 120) + "..."
 		}
 		return ReflectionResult{}, fmt.Errorf("reflection output is not valid JSON: %w (starts: %q)", err, snippet)
 	}

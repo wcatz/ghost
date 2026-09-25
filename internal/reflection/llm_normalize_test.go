@@ -1,7 +1,9 @@
 package reflection
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestNormalizeReflectMemoriesScopeRules pins the rules that decide what an
@@ -71,6 +73,20 @@ func TestNormalizeReflectMemoriesScopeRules(t *testing.T) {
 // TestNormalizeReflectMemoriesFieldRules covers the rest of the normalization:
 // these guard the apply transaction (an out-of-range importance or unknown
 // category fails a schema CHECK mid-transaction and sinks the whole round).
+func TestParseReflectionResponseErrorSnippetIsRuneSafe(t *testing.T) {
+	bad := "x" + strings.Repeat("🙂", 40) + "not-json"
+	_, err := parseReflectionResponse(bad)
+	if err == nil {
+		t.Fatal("parseReflectionResponse unexpectedly accepted malformed JSON")
+	}
+	if !utf8.ValidString(err.Error()) {
+		t.Errorf("error contains a split UTF-8 rune: %q", err.Error())
+	}
+	if strings.Contains(err.Error(), `\x`) || strings.Contains(err.Error(), `\u`) {
+		t.Errorf("error exposes a split rune as an escape: %q", err.Error())
+	}
+}
+
 func TestNormalizeReflectMemoriesFieldRules(t *testing.T) {
 	result := ReflectionResult{Memories: []ReflectMemory{
 		{Category: "not-a-real-category", Content: "a", Importance: 1.7},
