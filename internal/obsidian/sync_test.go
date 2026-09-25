@@ -135,6 +135,55 @@ func TestSyncRetriesFailedExport(t *testing.T) {
 	}
 }
 
+// TestSyncRetriesFailedInitialExport: when the very first export fails, the
+// next tick must retry it even though no commit ever lands. The baseline was
+// captured before that attempt, so without a sentinel every later poll sees
+// v == last and the vault stays empty until something unrelated commits.
+func TestSyncRetriesFailedInitialExport(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "ghost.db")
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	store := memory.NewStore(db, logger)
+	defer store.Close() //nolint:errcheck
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/tmp/p1", "p1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "first memory", Importance: 0.7, Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf logBuffer
+	vault := filepath.Join(dir, "vault")
+	ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(&buf, nil))}
+
+	readDirFn.Store(func(string) ([]os.DirEntry, error) { return nil, errors.New("injected: vault not mounted") })
+	t.Cleanup(func() { readDirFn.Store(os.ReadDir) })
+
+	syncCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- Sync(syncCtx, ex, db, vault, "", 50*time.Millisecond) }()
+
+	waitForDebug(t, "initial export failure log", func() bool {
+		return strings.Contains(buf.String(), "initial export failed")
+	}, func() string { return buf.String() })
+
+	// Fix the vault. NO commits: only the sentinel baseline makes a tick retry.
+	readDirFn.Store(os.ReadDir)
+	waitFor(t, func() bool {
+		m, _ := filepath.Glob(filepath.Join(vault, "p1", "Memories", "*.md"))
+		return len(m) == 1
+	})
+	cancel()
+	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("sync returned: %v", err)
+	}
+}
+
 // logBuffer is a goroutine-safe io.Writer for capturing slog output from the
 // Sync goroutine while the test polls it.
 type logBuffer struct {

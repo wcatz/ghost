@@ -26,10 +26,12 @@ func Sync(ctx context.Context, ex *Exporter, db *sql.DB, vaultDir, projectFilter
 	// The initial export takes the same failure path as a tick export: log
 	// and keep looping. Returning here would kill auto-sync permanently on a
 	// transient startup blip (vault volume not yet mounted, busy disk), and
-	// silently — the tick loop is what logs. last was captured before the
-	// attempt, so the very next tick retries without needing another commit.
+	// silently — the tick loop is what logs. A failed attempt resets last to
+	// -1, a value data_version never takes, so the very next tick sees a
+	// difference and retries without needing another commit.
 	if err := ex.Export(ctx, vaultDir, projectFilter); err != nil {
 		ex.Logger.Warn("obsidian sync: initial export failed, will retry next tick", "error", err)
+		last = -1
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

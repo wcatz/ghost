@@ -29,7 +29,7 @@ func readDir(dir string) ([]os.DirEntry, error) {
 func ensureVault(dir string) error {
 	entries, err := readDir(dir)
 	if os.IsNotExist(err) {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create vault dir: %w", err)
 		}
 		entries = nil
@@ -42,7 +42,7 @@ func ensureVault(dir string) error {
 	if len(entries) > 0 {
 		return fmt.Errorf("%s exists, is not empty, and has no %s marker — refusing to manage it (use a fresh directory)", dir, markerName)
 	}
-	return os.WriteFile(filepath.Join(dir, markerName), []byte(`{"schema_version":1}`+"\n"), 0o644)
+	return os.WriteFile(filepath.Join(dir, markerName), []byte(`{"schema_version":1}`+"\n"), 0o600)
 }
 
 // writeIfChanged writes content atomically (temp+rename), skipping the write
@@ -51,7 +51,7 @@ func writeIfChanged(path, content string) (bool, error) {
 	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
 		return false, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false, err
 	}
 	// A fixed temp name collides when two syncs write the same note at once
@@ -64,7 +64,7 @@ func writeIfChanged(path, content string) (bool, error) {
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp) //nolint:errcheck // no-op once the rename succeeds
-	if err := f.Chmod(0o644); err != nil {
+	if err := f.Chmod(0o600); err != nil {
 		f.Close() //nolint:errcheck
 		return false, err
 	}
@@ -79,8 +79,9 @@ func writeIfChanged(path, content string) (bool, error) {
 }
 
 // hasGhostID reports whether a file's frontmatter carries a ghost_id key —
-// the only files prune may touch. Only the frontmatter block (between the
-// opening and closing --- lines) is scanned, never the note body.
+// the only files prune may touch. Only a closed frontmatter block (between
+// the opening and closing --- lines) counts: a note that merely starts with a
+// --- horizontal rule and mentions ghost_id later in its body is not Ghost's.
 func hasGhostID(path string) (string, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -90,15 +91,16 @@ func hasGhostID(path string) (string, bool) {
 	if len(lines) == 0 || lines[0] != "---" {
 		return "", false
 	}
+	id, found := "", false
 	for _, line := range lines[1:] {
 		if line == "---" { // end of frontmatter — stop before the body
-			break
+			return id, found
 		}
-		if id, ok := strings.CutPrefix(line, "ghost_id: "); ok {
-			return strings.TrimSpace(id), true
+		if v, ok := strings.CutPrefix(line, "ghost_id: "); ok && !found {
+			id, found = strings.TrimSpace(v), true
 		}
 	}
-	return "", false
+	return "", false // frontmatter never closed
 }
 
 // hasGhostContent reports whether dir contains any .md file with a ghost_id
@@ -189,11 +191,73 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 			}
 			dir := filepath.Join(root, e.Name())
 			if hasGhostContent(dir) {
-				if err := os.RemoveAll(dir); err != nil {
-					return fmt.Errorf("remove orphan folder %s: %w", e.Name(), err)
+				if err := pruneOrphanFolder(dir); err != nil {
+					return fmt.Errorf("prune orphan folder %s: %w", e.Name(), err)
 				}
 			}
 		}
 	}
 	return nil
+}
+
+// pruneOrphanFolder cleans a top-level folder whose project no longer exists.
+// It removes only Ghost's own notes — regular .md files carrying a ghost_id in
+// their frontmatter — and then any directory those removals left empty, deepest
+// first, the orphan folder itself last. A user's file, attachment or subfolder
+// keeps its parent directories. Symlinks are never followed (WalkDir does not
+// descend into them) and never removed, and an entry that cannot be read is
+// left alone rather than failing the export.
+func pruneOrphanFolder(dir string) error {
+	var dirs []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() && path != dir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			// A Windows junction or other reparse point can report as a
+			// directory; never walk through one to files outside the folder.
+			if fi, err := os.Lstat(path); err != nil || fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+				return filepath.SkipDir
+			}
+			dirs = append(dirs, path)
+			return nil
+		}
+		if !d.Type().IsRegular() || !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		if _, ok := hasGhostID(path); !ok {
+			return nil
+		}
+		// A note Ghost cannot remove (a read-only user folder) is left in
+		// place: failing here would fail every export and make sync retry
+		// forever for a file that is merely stale.
+		_ = os.Remove(path)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		removeIfEmptyDir(dirs[i])
+	}
+	return nil
+}
+
+// removeIfEmptyDir removes path only while it is a real directory with no
+// entries. os.Remove refuses a non-empty directory on every platform, so a
+// file that appears between the check and the removal keeps the directory;
+// any failure simply leaves it in place.
+func removeIfEmptyDir(path string) {
+	fi, err := os.Lstat(path)
+	if err != nil || !fi.IsDir() {
+		return
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil || len(entries) > 0 {
+		return
+	}
+	_ = os.Remove(path)
 }

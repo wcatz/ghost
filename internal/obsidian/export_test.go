@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -320,6 +321,196 @@ func TestExportPrunesDeletedProjectFolder(t *testing.T) {
 	ghostNotes, _ := filepath.Glob(filepath.Join(vault, "ghost", "Memories", "*.md"))
 	if len(ghostNotes) != 1 {
 		t.Errorf("surviving project should be untouched, got %d notes", len(ghostNotes))
+	}
+}
+
+// TestExportOrphanCleanupKeepsUserFiles: an orphaned project folder is cleaned
+// one Ghost note at a time. User-authored files and folders inside it — notes
+// without a ghost_id, attachments, a user subfolder — survive, and so does the
+// folder that still holds them. A symlink inside it is never followed.
+func TestExportOrphanCleanupKeepsUserFiles(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "doomed", "/tmp/doomed", "doomed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(ctx, "doomed", memory.Memory{Category: "fact", Content: "Doomed fact", Importance: 0.8, Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	userNote := filepath.Join(vault, "doomed", "Memories", "my-own-note.md")
+	mustWrite(t, userNote, "# mine\nno frontmatter here\n")
+	attachment := filepath.Join(vault, "doomed", "attachments", "diagram.png")
+	outside := filepath.Join(t.TempDir(), "outside")
+	for _, d := range []string{filepath.Dir(attachment), outside} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite(t, attachment, "png")
+	mustWrite(t, filepath.Join(outside, "keep.md"), "---\nghost_id: not-yours\n---\n")
+	if err := os.Symlink(outside, filepath.Join(vault, "doomed", "linked")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.DeleteProject(ctx, "doomed", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	notes, _ := filepath.Glob(filepath.Join(vault, "doomed", "Memories", "*.md"))
+	if len(notes) != 1 || notes[0] != userNote {
+		t.Errorf("only the user's note should remain in the orphan folder, got %v", notes)
+	}
+	for _, p := range []string{userNote, attachment, filepath.Join(outside, "keep.md")} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("user file %s must survive orphan cleanup: %v", p, err)
+		}
+	}
+	if fi, err := os.Lstat(filepath.Join(vault, "doomed", "linked")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("symlink inside the orphan folder must be left alone: %v", err)
+	}
+}
+
+// TestHasGhostIDNeedsClosedFrontmatter: a note that opens with a --- rule and
+// mentions ghost_id later in its body, with no closing ---, is not Ghost's.
+func TestHasGhostIDNeedsClosedFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	open := filepath.Join(dir, "hr.md")
+	mustWrite(t, open, "---\nMy notes after a rule\nghost_id: mentioned in body\nmore text\n")
+	if _, ok := hasGhostID(open); ok {
+		t.Error("unclosed frontmatter must not count as a ghost_id")
+	}
+	closed := filepath.Join(dir, "note.md")
+	mustWrite(t, closed, "---\nghost_id: abc\n---\nbody\n")
+	if id, ok := hasGhostID(closed); !ok || id != "abc" {
+		t.Errorf("closed frontmatter ghost_id = %q, %v; want abc, true", id, ok)
+	}
+}
+
+// TestExportOrphanCleanupSkipsUnremovableNote: a Ghost note Ghost cannot
+// remove (inside a read-only user folder) is left in place and the export
+// still succeeds, so sync does not retry it forever.
+func TestExportOrphanCleanupSkipsUnremovableNote(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX directory permissions enforced for the test user")
+	}
+	store := seedStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "doomed", "/tmp/doomed", "doomed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(ctx, "doomed", memory.Memory{Category: "fact", Content: "Doomed fact", Importance: 0.8, Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatal(err)
+	}
+	ro := filepath.Join(vault, "doomed", "ro")
+	if err := os.MkdirAll(ro, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stuck := filepath.Join(ro, "n.md")
+	mustWrite(t, stuck, "---\nghost_id: stale\n---\n")
+	if err := os.Chmod(ro, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ro, 0o755) })
+	if _, err := store.DeleteProject(ctx, "doomed", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("an unremovable stale note must not fail the export: %v", err)
+	}
+	if _, err := os.Stat(stuck); err != nil {
+		t.Errorf("unremovable note should be left in place: %v", err)
+	}
+}
+
+// TestExportOrphanCleanupRemovesEmptiedDirs: once the Ghost notes are gone,
+// directories left empty are removed, all the way up to the orphan folder.
+func TestExportOrphanCleanupRemovesEmptiedDirs(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "doomed", "/tmp/doomed", "doomed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(ctx, "doomed", memory.Memory{Category: "fact", Content: "Doomed fact", Importance: 0.8, Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(vault, "doomed", "empty", "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DeleteProject(ctx, "doomed", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(vault, "doomed")); !os.IsNotExist(err) {
+		t.Errorf("an orphan folder left empty should be removed: %v", err)
+	}
+}
+
+// TestVaultWritesArePrivate: directories and files Ghost creates are 0700 and
+// 0600; a folder the user created keeps its own mode.
+func TestVaultWritesArePrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits")
+	}
+	store := seedStore(t)
+	ctx := context.Background()
+	if _, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "Ghost fact", Importance: 0.8, Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatal(err)
+	}
+	userDir := filepath.Join(vault, "UserStuff")
+	if err := os.Mkdir(userDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(userDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatal(err)
+	}
+	notes, _ := filepath.Glob(filepath.Join(vault, "ghost", "Memories", "*.md"))
+	if len(notes) != 1 {
+		t.Fatalf("want 1 note, got %d", len(notes))
+	}
+	checks := map[string]os.FileMode{
+		vault:                            0o700,
+		filepath.Join(vault, "ghost"):    0o700,
+		filepath.Join(vault, markerName): 0o600,
+		notes[0]:                         0o600,
+		userDir:                          0o755,
+	}
+	for p, want := range checks {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode().Perm(); got != want {
+			t.Errorf("%s: mode %o, want %o", p, got, want)
+		}
 	}
 }
 
