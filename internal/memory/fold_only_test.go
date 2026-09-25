@@ -154,3 +154,69 @@ func TestUpsertDefaultStillInsertsTheDuplicateRow(t *testing.T) {
 		t.Error("default fold returned no id for the inserted row")
 	}
 }
+
+// TestUpsertFoldOnlyInsertsInsteadOfFoldingIntoResolvedRow is the case the
+// default fold is allowed to get away with and FoldOnly is not. A default
+// upsert that re-saves the text of a resolved memory strengthens it and leaves
+// it resolved, which is what TestUnresolveOnWrite pins. FoldOnly strengthens the
+// row and then returns WITHOUT storing the incoming wording — so if the target
+// is a resolved _global row, loadGlobalMemories and GetTopMemories both exclude
+// it and the promotion reports success while the memory is in no readable place
+// at all. It has to fall through to the insert.
+func TestUpsertFoldOnlyInsertsInsteadOfFoldingIntoResolvedRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("ensure _global: %v", err)
+	}
+	const content = "the gouroboros release checklist is documented in the ops runbook"
+	// Exactly one row, and it is resolved. A live sibling would be a perfectly
+	// good fold target, so the defect only appears when the resolved row is the
+	// sole candidate the probe can return.
+	resolvedID, err := s.Create(ctx, "_global", Memory{
+		Category: "fact", Content: content, Source: "reflection", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.SetResolved(ctx, []string{resolvedID}); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+
+	before := countMemories(t, s, "_global")
+	// The same wording again: the probe will select the resolved row.
+	if _, _, _, err := s.UpsertWithOptions(ctx, "_global", "fact", content, "reflection", 0.6, nil,
+		UpsertOptions{FoldOnly: true}); err != nil {
+		t.Fatalf("FoldOnly upsert: %v", err)
+	}
+
+	after := countMemories(t, s, "_global")
+	if after != before+1 {
+		t.Fatalf("_global holds %d memories, want %d — folding into a resolved row stored nothing anywhere",
+			after, before+1)
+	}
+	// And the live row must be findable, which is the whole point.
+	rows, err := s.GetAll(ctx, "_global", 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	live := 0
+	for _, m := range rows {
+		if m.Content == content {
+			live++
+		}
+	}
+	if live == 0 {
+		t.Error("the promotion left no readable _global row behind")
+	}
+}
+
+func countMemories(t *testing.T, s *Store, projectID string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memories WHERE project_id = ?`, projectID).Scan(&n); err != nil {
+		t.Fatalf("count memories: %v", err)
+	}
+	return n
+}

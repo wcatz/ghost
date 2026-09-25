@@ -114,3 +114,63 @@ func TestNormalizeReflectMemoriesFieldRules(t *testing.T) {
 		t.Error("nil tags left nil — the schema expects a list, not a NULL")
 	}
 }
+
+// TestLooksLikeSecretCatchesLabelFreeCredentials: the value-level guard matters
+// because every label pattern in looksLikeSecret needs a word followed by a
+// space, so a model returning the credential itself — which is the more likely
+// failure when a repository contains a live key — matched nothing and was
+// promoted to _global, widening a live secret into every project's injected
+// context.
+func TestLooksLikeSecretCatchesLabelFreeCredentials(t *testing.T) {
+	// The bodies are deliberately obvious placeholders. An earlier version of
+	// this table used realistic-looking values and GitHub's push protection
+	// rejected the commit as a leaked Slack token, which is the guard working
+	// exactly as intended: what this test must prove is that the FORMAT is
+	// recognised, not that a particular real credential is.
+	const (
+		stripeBody  = "EXAMPLEKEY00000000000000"
+		githubBody  = "EXAMPLE0000000000000000000000000000"
+		slackBody   = "0000000000-0000000000-EXAMPLEPLACEHOLDER"
+		awsBody     = "IOSFODNN7EXAMPLE"
+		gitlabBody  = "EXAMPLEplaceholder000"
+		jwtBody     = "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.EXAMPLEpayload.EXAMPLEsig"
+		opaqueToken = "aB3dEfGh1jKlMn0pQrStUvWxYz456789"
+	)
+	secrets := []string{
+		"the deploy key is sk-live-" + stripeBody,
+		"ghp_" + githubBody,
+		"xoxb-" + slackBody,
+		"AKIA" + awsBody,
+		"glpat-" + gitlabBody,
+		"eyJ" + jwtBody,
+		opaqueToken,
+	}
+	for _, s := range secrets {
+		if !looksLikeSecret(s) {
+			t.Errorf("looksLikeSecret(%q) = false, want true — a label-free credential reached _global", s)
+		}
+	}
+
+	// Prose must not be caught: the guard exists to stop one narrow shape, and
+	// a false positive would demote an ordinary cross-project fact to
+	// project-scoped for no reason.
+	prose := []string{
+		"prefer squash merges and wait for the windows job to finish",
+		"the release checklist lives in docs and the changelog is generated",
+		"ghost projects are identified by longest canonical path prefix first",
+		"a long standing preference about how the team validates cardano node upgrades",
+	}
+	for _, p := range prose {
+		if looksLikeSecret(p) {
+			t.Errorf("looksLikeSecret(%q) = true, want false — ordinary prose is not a credential", p)
+		}
+	}
+
+	// The label forms that already worked still work.
+	labelled := []string{"the api key is in 1password", "password: hunter2", "bearer abc123"}
+	for _, l := range labelled {
+		if !looksLikeSecret(l) {
+			t.Errorf("looksLikeSecret(%q) = false, want true", l)
+		}
+	}
+}

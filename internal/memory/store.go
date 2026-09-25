@@ -1242,6 +1242,39 @@ type UpsertOptions struct {
 	FoldOnly bool
 }
 
+// foldTargetStillLive re-verifies, inside the write transaction, that the row a
+// probe selected is still something worth folding into: still in this project,
+// still unresolved, and not the target of an active 'supersedes' edge.
+//
+// A probe result is a name, not a claim. Between the probe and the write the row
+// can be resolved by a concurrent pass, superseded, or deleted outright, and
+// folding into a dead row is the failure FoldOnly makes unrecoverable: it
+// strengthens a record injection already dropped and then returns without
+// storing the incoming wording, so the memory exists nowhere.
+func foldTargetStillLive(ctx context.Context, tx *sql.Tx, projectID, id string) (bool, error) {
+	if id == "" {
+		return false, nil
+	}
+	var live int
+	err := tx.QueryRowContext(ctx, `
+		SELECT 1 FROM memories m
+		WHERE m.id = ? AND m.project_id = ? AND m.resolved_at IS NULL
+		  AND NOT EXISTS (
+		      SELECT 1 FROM memory_links l
+		      WHERE l.target_id = m.id
+		        AND l.relation = 'supersedes'
+		        AND l.invalidated_at IS NULL
+		  )
+	`, id, projectID).Scan(&live)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return live == 1, nil
+}
+
 func (s *Store) Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (id string, duplicateOf string, score float64, err error) {
 	return s.UpsertWithOptions(ctx, projectID, category, content, source, importance, tags, UpsertOptions{})
 }
@@ -1347,7 +1380,15 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// the linked copy inserted by the fold carries the incoming category.
 	// Resolved records and the targets of active 'supersedes' edges are
 	// excluded here so a re-save can never fold into a dead memory; the
-	// same-category probe predates those exclusions and keeps its behavior.
+	// same-category probe predates those exclusions and keeps its behaviour
+	// deliberately, because a default upsert that re-saves the text of a
+	// resolved memory is supposed to strengthen it and leave it resolved
+	// (TestUnresolveOnWrite). FoldOnly cannot afford that: it strengthens the
+	// row and then returns WITHOUT inserting the incoming wording, so folding
+	// into a dead row would leave a promotion that reports success while the
+	// memory is in neither _global nor anywhere it is read from. Its target is
+	// therefore re-verified inside the write transaction below and the
+	// insertion is taken instead when the probe named a dead row.
 	if existingID == "" {
 		crossRows, crossErr := db.QueryContext(ctx, `
 			SELECT m.id, m.importance, m.content, m.scope
@@ -1434,15 +1475,55 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			defer tx.Rollback() //nolint:errcheck
 		}
 
-		if _, err = tx.ExecContext(ctx, `
-			UPDATE memories
-			SET importance = ?, access_count = access_count + 1
-			WHERE id = ? AND project_id = ?
-		`, newImportance, existingID, projectID); err != nil {
-			return "", "", 0, fmt.Errorf("strengthen memory: %w", err)
+		if opts.FoldOnly {
+			// Re-check the target inside the transaction. The probe above ran
+			// on the connection before the write lock was taken, so a
+			// concurrent promotion for another project — a separate ghost
+			// process, with its own Store and therefore its own mutex — could
+			// have inserted the same fact in between. Both would then take the
+			// insert path, which is exactly the redundancy FoldOnly exists to
+			// prevent, and the whole point of the option is that _global is the
+			// one project every process writes to.
+			//
+			// A target that has been resolved, superseded or deleted since the
+			// probe is not a fold target either: re-verify it here and, if it
+			// is gone, fall through to the insert path so the promotion still
+			// leaves a live row behind.
+			live, liveErr := foldTargetStillLive(ctx, tx, projectID, existingID)
+			if liveErr != nil {
+				return "", "", 0, fmt.Errorf("re-verify fold target: %w", liveErr)
+			}
+			if !live {
+				existingID, newImportance = "", 0
+			}
 		}
 
-		if opts.FoldOnly {
+		if existingID != "" {
+			res, updateErr := tx.ExecContext(ctx, `
+				UPDATE memories
+				SET importance = ?, access_count = access_count + 1
+				WHERE id = ? AND project_id = ?
+			`, newImportance, existingID, projectID)
+			if updateErr != nil {
+				return "", "", 0, fmt.Errorf("strengthen memory: %w", updateErr)
+			}
+			// A target deleted or moved between the in-transaction re-check and
+			// the write leaves zero rows affected. Reporting that as a
+			// successful fold would count a promotion that stored nothing.
+			// The re-check makes it unreachable — this transaction has held the
+			// write lock since before it ran — so it is a check on the
+			// statement's own report, not a race guard, and there is no
+			// schedule that reaches it.
+			affected, affectedErr := res.RowsAffected()
+			if affectedErr != nil {
+				return "", "", 0, fmt.Errorf("strengthen memory rows: %w", affectedErr)
+			}
+			if affected == 0 {
+				return "", "", 0, fmt.Errorf("fold target %s disappeared during the update", existingID)
+			}
+		}
+
+		if opts.FoldOnly && existingID != "" {
 			// The caller does not want the incoming wording stored — a
 			// promotion whose fact _global already knows. The strengthen above
 			// is still the right outcome: the duplicate is evidence the fact
@@ -1470,14 +1551,20 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		// Upsert already holds the lock for its entire body. Inline the same
 		// upsert-link SQL directly instead. Direction is fixed (source_id=new,
 		// target_id=existing), not normalized like symmetric relations.
-		if _, err = tx.ExecContext(ctx, `
-			INSERT INTO memory_links (source_id, target_id, relation, strength, source)
-			VALUES (?, ?, 'duplicate', ?, 'auto')
-			ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
-				strength = MAX(strength, excluded.strength),
-				invalidated_at = NULL
-		`, id, existingID, score); err != nil {
-			return "", "", 0, fmt.Errorf("link duplicate: %w", err)
+		//
+		// No link when the fold target was cleared above: the row that was
+		// re-verified as dead is not a duplicate of anything worth linking to,
+		// and the insert would fail the foreign key on an empty id.
+		if existingID != "" {
+			if _, err = tx.ExecContext(ctx, `
+				INSERT INTO memory_links (source_id, target_id, relation, strength, source)
+				VALUES (?, ?, 'duplicate', ?, 'auto')
+				ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
+					strength = MAX(strength, excluded.strength),
+					invalidated_at = NULL
+			`, id, existingID, score); err != nil {
+				return "", "", 0, fmt.Errorf("link duplicate: %w", err)
+			}
 		}
 
 		if ownTx {

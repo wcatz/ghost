@@ -140,7 +140,7 @@ func normalizeReflectMemories(result *ReflectionResult) {
 		if !memory.IsValidCategory(m.Category) {
 			m.Category = "fact"
 		}
-		if m.Scope == "global" && looksLikeSecret(strings.ToLower(m.Content)) {
+		if m.Scope == "global" && looksLikeSecret(m.Content) {
 			m.Scope = "project"
 		}
 	}

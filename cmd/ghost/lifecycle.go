@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -799,23 +800,88 @@ Flags:
 		projectForSummary = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 	}
 
-	preserved, promoted, keptProject, err := applyReflection(ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
-		os.Exit(1)
+	var preserved []string
+	consolidated := 0
+	// Whether the project replacement actually committed. Promotion can run on
+	// a round that produced no project memories at all, and then no project row
+	// was ever deleted — so the recovery below must not re-insert candidates
+	// that are still exactly where they were.
+	replaced := false
+	if len(projectMems) > 0 {
+		dbMemories := make([]memory.Memory, len(projectMems))
+		for i, m := range projectMems {
+			dbMemories[i] = memory.Memory{
+				ProjectID:  projectID,
+				Category:   m.Category,
+				Content:    m.Content,
+				Importance: m.Importance,
+				Source:     "reflection",
+				Tags:       m.Tags,
+			}
+		}
+		consolidated = len(dbMemories)
+
+		preserved, err = store.ReplaceNonManual(ctx, projectID, dbMemories, consolidatedSince)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
+			os.Exit(1)
+		}
+		replaced = true
 	}
+	// Promotion runs here, unconditionally, after the project apply. It must not
+	// sit inside the project guard: a round can yield only cross-project
+	// memories, and --promote-globals is an explicit request, so nesting it made
+	// the opt-in do nothing at exactly the moment there was nothing else to
+	// write. Running it after the apply keeps the ordering this exists for — a
+	// failed apply never leaves globals injected.
+	promoted, lost := applyPromotion(ctx, store, globalMems, parsed.promoteGlobals)
 	if promoted > 0 {
 		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
 	}
-	if parsed.promoteGlobals {
-		failed := len(globalMems) - promoted
-		if failed > 0 {
-			fmt.Fprintln(os.Stderr, recoveryWarning(keptProject, failed))
-		}
+
+	// A candidate that failed to promote has already been deleted from the
+	// project: with promotion on, global candidates are deliberately kept out
+	// of projectMems, so ReplaceNonManual removed them. Leaving a failure
+	// there would lose the memory outright. Put it back — the worst case has
+	// to be "not promoted", never "gone".
+	kept, err := recoverUnpromoted(ctx, store, projectID, lost, replaced)
+	if err != nil {
+		// The project replacement has already committed, so a candidate that
+		// now exists in neither _global nor the project is gone with no undo.
+		// Exiting 0 would report a successful consolidation that silently lost
+		// a memory; the operator is told, and a restore can roll the
+		// replacement back.
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintln(os.Stderr, "note: the project replacement already committed — run `ghost reflect <project> --restore` to undo it")
+		os.Exit(1)
+	}
+	if kept > 0 {
+		fmt.Fprintf(os.Stderr, "warning: %d of %d global memories could not be promoted and were kept in the project\n", kept, len(lost))
 	}
 
-	if len(projectForSummary) > 0 || len(globalMems) > 0 {
-		summary := appliedSummary(projectForSummary, globalMems, promoted, parsed.promoteGlobals)
+	// The apply is what makes this round count, and promotion is part of it: a
+	// --promote-globals round whose result is entirely cross-project memories
+	// replaces nothing in the project but still applies, and it still produced
+	// a learned context worth recording. Keying this block on the project
+	// memory count silently dropped both the summary and the learned context
+	// for exactly the round the flag was added for.
+	if replaced || promoted > 0 {
+		summary := fmt.Sprintf("%d memories consolidated", consolidated)
+		if counts := categoryCounts(result.Memories); len(counts) > 0 {
+			summary = fmt.Sprintf("%d memories consolidated (%s)", consolidated, strings.Join(counts, ", "))
+		}
+		if consolidated == 0 {
+			// Promotion-only round: nothing in the project was replaced, so the
+			// project count alone would read as a zero-work apply.
+			summary = fmt.Sprintf("%d global memories promoted (no project memories changed)", promoted)
+		}
+		if len(globalMems) > 0 {
+			if parsed.promoteGlobals {
+				summary += fmt.Sprintf(", %d promoted to global", len(globalMems))
+			} else {
+				summary += fmt.Sprintf(", %d cross-project candidates kept project-scoped", len(globalMems))
+			}
+		}
 		fmt.Printf("Applied: %s\n", summary)
 		if len(globalMems) > 0 && !parsed.promoteGlobals {
 			fmt.Println("(re-run with --promote-globals to inject them into every project)")
@@ -1222,6 +1288,21 @@ type globalPromoter interface {
 //
 // promote=false returns immediately and writes nothing: candidates are then
 // part of projectMems and were applied with them.
+// categoryCounts renders "N category" pairs for the applied summary, in the
+// order the categories were counted.
+func categoryCounts(mems []reflection.ReflectMemory) []string {
+	counts := make(map[string]int)
+	for _, m := range mems {
+		counts[m.Category]++
+	}
+	out := make([]string, 0, len(counts))
+	for cat, n := range counts {
+		out = append(out, fmt.Sprintf("%d %s", n, cat))
+	}
+	sort.Strings(out)
+	return out
+}
+
 // recoverUnpromoted puts candidates that failed promotion back into the project,
 // and reports how many are back.
 //

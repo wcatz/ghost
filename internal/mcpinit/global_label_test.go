@@ -1,6 +1,7 @@
 package mcpinit
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -64,7 +65,7 @@ func TestSessionContextDoesNotClaimReflectionGlobalsAreYours(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			out := formatSessionContext(
 				"p1", "ghost", nil, "", nil, nil, 1, 0, true,
-				tc.globals, len(tc.globals), true,
+				tc.globals, len(tc.globals), true, allManualOnly(tc.globals), true,
 			)
 
 			const claim = "the user's own saved cross-project preferences"
@@ -87,7 +88,7 @@ func TestSessionContextDoesNotClaimUnmigratedBuiltinSeed(t *testing.T) {
 	out := formatSessionContext(
 		"p1", "ghost", nil, "", nil, nil, 1, 0, true,
 		[]sessionMemory{{ID: "1", Category: "preference", Content: "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.", Source: "manual"}},
-		1, true,
+		1, true, true, true,
 	)
 	if strings.Contains(out, "the user's own saved cross-project preferences") {
 		t.Errorf("unmigrated builtin seed was presented as user-authored:\n%s", out)
@@ -104,7 +105,7 @@ func TestSessionContextTagsEveryNonManualGlobal(t *testing.T) {
 			{ID: "1", Category: "fact", Content: "Reflection derived this.", Source: "reflection"},
 			{ID: "2", Category: "fact", Content: "An agent saved this.", Source: "mcp"},
 		},
-		2, true,
+		2, true, false, true,
 	)
 
 	for _, want := range []string{"(reflection)", "(mcp)"} {
@@ -119,33 +120,73 @@ func TestSessionContextTagsEveryNonManualGlobal(t *testing.T) {
 	}
 }
 
-// TestSessionContextGuidanceNamesTheOriginsActuallyPresent prevents the
-// banner from explaining only reflection and MCP while rendering the other
-// legal source values without context. In particular, onboarding and
-// decision_log are not interchangeable with an agent write.
-func TestSessionContextGuidanceNamesTheOriginsActuallyPresent(t *testing.T) {
-	sources := []string{"reflection", "chat", "tool", "mcp", "onboarding", "decision_log", "builtin"}
-	globals := make([]sessionMemory, 0, len(sources)+1)
-	for i, source := range sources {
-		globals = append(globals, sessionMemory{
-			ID:       string(rune('a' + i)),
-			Category: "fact",
-			Content:  source,
-			Source:   source,
-		})
+// allManualOnly reports the whole-set trust flag the loader now computes, so a
+// formatting test can state the section's real origin without reaching for a
+// database.
+func allManualOnly(globals []sessionMemory) bool {
+	for _, m := range globals {
+		if m.Source != "manual" {
+			return false
+		}
 	}
-	globals = append(globals, sessionMemory{ID: "z", Category: "preference", Content: "user row", Source: "manual"})
+	return true
+}
 
-	out := formatSessionContext("p1", "ghost", nil, "", nil, nil, 1, 0, true, globals, len(globals), true)
-	for _, source := range sources {
-		if !strings.Contains(out, "("+source+")") {
-			t.Errorf("source %q is rendered without its origin tag:\n%s", source, out)
-		}
-		if !strings.Contains(out, source) {
-			t.Errorf("source %q is not named in the guidance:\n%s", source, out)
+// TestLoadGlobalMemories_TrustFlagCoversHiddenRows: the "these are the user's
+// own" claim is a property of the whole active _global set, not of the rows that
+// survive the cap and the near-duplicate demotion pass. Deriving it from the
+// shown slice let a machine-written row ranked below the cut vouch for the
+// section: eight manual rows on screen, a reflection row hidden underneath, and
+// the header still telling the agent to trust it.
+func TestLoadGlobalMemories_TrustFlagCoversHiddenRows(t *testing.T) {
+	db, dbPath := openFileTestDB(t)
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
+		t.Fatalf("insert _global project: %v", err)
+	}
+	// More manual rows than the loader will show, so at least one reflection
+	// row is guaranteed to fall below the cap.
+	for i := 0; i < globalsCap*2+4; i++ {
+		id := fmt.Sprintf("manual%02d", i)
+		_, err := db.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, importance, updated_at)
+			 VALUES (?, '_global', 'preference', ?, 'manual', 1.0, datetime('now', ?))`,
+			id, fmt.Sprintf("user preference number %d about validation workflow", i),
+			fmt.Sprintf("-%d minutes", i),
+		)
+		if err != nil {
+			t.Fatalf("insert manual %d: %v", i, err)
 		}
 	}
-	if strings.Contains(out, "manual") {
-		t.Errorf("guidance must describe the absence of an origin tag, not tell readers to look for a manual marker:\n%s", out)
+	// The lowest-ranked row of all, and machine-written.
+	if _, err := db.Exec(`
+		INSERT INTO memories (id, project_id, category, content, source, importance, updated_at)
+		VALUES ('hidden01', '_global', 'fact', 'a machine wrote this one', 'reflection', 0.1, datetime('now', '-9999 minutes'))
+	`); err != nil {
+		t.Fatalf("insert hidden reflection row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	globals, _, _, allManual, known := loadGlobalMemories(dbPath)
+	if !known {
+		t.Fatal("the loader could not answer the trust question, so the formatter has to assume the unsafe direction")
+	}
+	if allManual {
+		t.Error("allRowsManual = true while a reflection row is active — the hidden row is invisible to the header")
+	}
+	if len(globals) >= globalsCap*2+4 {
+		t.Fatalf("precondition: the loader showed %d rows, so nothing was actually hidden", len(globals))
+	}
+	for _, m := range globals {
+		if m.Source != "manual" {
+			t.Fatalf("precondition: a non-manual row reached the shown slice: %+v", m)
+		}
+	}
+
+	out := formatSessionContext("p1", "ghost", nil, "", nil, nil, 1, 0, true,
+		globals, 100, true, allManual, known)
+	if strings.Contains(out, "the user's own saved cross-project preferences") {
+		t.Errorf("the header claims the whole section is the user's own while a hidden reflection row is active:\n%s", out)
 	}
 }

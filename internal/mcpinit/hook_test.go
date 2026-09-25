@@ -224,7 +224,7 @@ func TestLoadGlobalMemories(t *testing.T) {
 		t.Fatalf("insert global memory: %v", err)
 	}
 
-	globals, total, totalKnown := loadGlobalMemories(dbPath)
+	globals, total, totalKnown, _, _ := loadGlobalMemories(dbPath)
 	if len(globals) != 1 {
 		t.Fatalf("expected 1 global memory, got %d", len(globals))
 	}
@@ -244,7 +244,7 @@ func TestLoadGlobalMemories(t *testing.T) {
 // to open read-write and materialize a phantom file on first read).
 func TestLoadGlobalMemories_MissingDBNoPhantom(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	globals, total, totalKnown := loadGlobalMemories(dbPath)
+	globals, total, totalKnown, _, _ := loadGlobalMemories(dbPath)
 	if globals != nil || total != 0 || totalKnown {
 		t.Errorf("missing DB should yield no globals, got globals=%v total=%d known=%v", globals, total, totalKnown)
 	}
@@ -279,7 +279,7 @@ func TestLoadGlobalMemories_DedupsNearDuplicates(t *testing.T) {
 		t.Fatalf("insert link: %v", err)
 	}
 
-	globals, _, _ := loadGlobalMemories(dbPath)
+	globals, _, _, _, _ := loadGlobalMemories(dbPath)
 	var sawOriginal, sawRestated bool
 	for _, m := range globals {
 		if strings.Contains(m.Content, "ORIGINAL") {
@@ -322,7 +322,7 @@ func TestLoadGlobalMemories_ExcludesResolved(t *testing.T) {
 		t.Fatalf("insert live global: %v", err)
 	}
 
-	globals, total, totalKnown := loadGlobalMemories(dbPath)
+	globals, total, totalKnown, _, _ := loadGlobalMemories(dbPath)
 	if len(globals) != 1 || globals[0].ID != "glive0001" {
 		t.Fatalf("resolved global must be excluded from fetch, got %+v", globals)
 	}

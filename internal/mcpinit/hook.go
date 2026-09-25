@@ -174,15 +174,15 @@ func runSessionStart(data []byte, stdout io.Writer) {
 		}
 	}
 
-	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals()
+	globals, totalGlobalCount, totalGlobalCountKnown, allRowsManual, allRowsManualKnown := loadGlobals()
 
-	_, _ = fmt.Fprintln(stdout, formatSessionContext(projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, globals, totalGlobalCount, totalGlobalCountKnown))
+	_, _ = fmt.Fprintln(stdout, formatSessionContext(projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, globals, totalGlobalCount, totalGlobalCountKnown, allRowsManual, allRowsManualKnown))
 }
 
 // loadGlobals reads the cross-project global memories for context rendering.
 // It is the shared, read-only global-section loader used by both the
 // SessionStart hook and the `ghost context` command.
-func loadGlobals() (globals []sessionMemory, totalCount int, totalCountKnown bool) {
+func loadGlobals() (globals []sessionMemory, totalCount int, totalCountKnown bool, allRowsManual bool, allRowsManualKnown bool) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
@@ -217,7 +217,7 @@ func globalOriginGuidance(globals []sessionMemory) string {
 // own session-count bumping and worker startup. It handles both the
 // project-matched and no-project branches, and always appends the global
 // section when globals exist.
-func formatSessionContext(projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool, globals []sessionMemory, totalGlobalCount int, totalGlobalCountKnown bool) string {
+func formatSessionContext(projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool, globals []sessionMemory, totalGlobalCount int, totalGlobalCountKnown bool, allRowsManual, allRowsManualKnown bool) string {
 	var gsb strings.Builder
 	if len(globals) > 0 {
 		// Only claim these are the user's preferences when they are. A global
@@ -227,7 +227,19 @@ func formatSessionContext(projectID, project string, memories []sessionMemory, l
 		// Presenting either as "the user's own saved preferences" is how
 		// machine-made material gets replayed into every future session as
 		// something authoritative (issue #545).
-		allOwn := true
+		// The claim is a property of every active global row, not of the ones
+		// that survive the cap and the demotion pass. Deriving it from the
+		// shown slice lets a machine-written row ranked below the cut vouch for
+		// the whole section: eight manual rows on screen, a reflection row
+		// hidden underneath, and the header still calls it the user's own
+		// preferences. So the whole-set flag decides, and the per-row check
+		// below is kept as a second opinion — it can only make the claim
+		// stricter, never looser, which is the direction that matters. When the
+		// whole-set answer is unknown, fall back to the rows on screen.
+		allOwn := allRowsManual
+		if !allRowsManualKnown {
+			allOwn = true
+		}
 		for _, m := range globals {
 			source := memory.CanonicalOriginSource(m.Source, m.Content)
 			own, _ := memory.OriginClass(source)
@@ -346,12 +358,12 @@ func RenderSessionContext(cwd string) string {
 			}
 		}
 	}
-	globals, totalGlobalCount, totalGlobalCountKnown := loadGlobals()
+	globals, totalGlobalCount, totalGlobalCountKnown, allRowsManual, allRowsManualKnown := loadGlobals()
 	// Nothing to surface — don't inject an empty/decorative block.
 	if projectID == "" && len(globals) == 0 {
 		return ""
 	}
-	return formatSessionContext(projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, globals, totalGlobalCount, totalGlobalCountKnown)
+	return formatSessionContext(projectID, project, memories, learned, tasks, decisions, interactionCount, totalMemoryCount, totalCountKnown, globals, totalGlobalCount, totalGlobalCountKnown, allRowsManual, allRowsManualKnown)
 }
 
 // globalsCap is lower than the project-memories cap (sessionMemoriesCap)
@@ -370,18 +382,35 @@ const globalsDemotionThreshold = 0.85
 // the session digest bounded while preserving the most useful memories.
 const sessionMemoriesCap = 15
 
-func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int, totalCountKnown bool) {
+func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int, totalCountKnown bool, allRowsManual bool, allRowsManualKnown bool) {
 	if _, err := os.Stat(dbPath); err != nil {
-		return nil, 0, false // no store yet — never create a phantom empty DB
+		return nil, 0, false, false, false // no store yet — never create a phantom empty DB
 	}
 	db, err := sql.Open("sqlite", roDSN(dbPath))
 	if err != nil {
-		return nil, 0, false
+		return nil, 0, false, false, false
 	}
 	defer db.Close() //nolint:errcheck
 
 	if err := db.QueryRow(`SELECT COUNT(*) FROM memories WHERE project_id = '_global' AND resolved_at IS NULL`).Scan(&totalCount); err == nil {
 		totalCountKnown = true
+	}
+
+	// The trust flag is a property of every active global row, not of the ones
+	// that survive the cap and the demotion pass. Deriving it from the shown
+	// slice means a machine-written row ranked below the cut cannot affect it:
+	// eight manual rows on screen, a reflection row hidden underneath, and the
+	// banner still calls the whole section the user's own preferences. One
+	// EXISTS over the full active set is the only honest input.
+	var anyNonManual int
+	if err := db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM memories
+			WHERE project_id = '_global' AND resolved_at IS NULL AND source != 'manual'
+		)
+	`).Scan(&anyNonManual); err == nil {
+		allRowsManualKnown = true
+		allRowsManual = anyNonManual == 0
 	}
 
 	rows, err := db.Query(`
@@ -391,7 +420,7 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 		LIMIT ?
 	`, globalsCap*2)
 	if err != nil {
-		return nil, totalCount, totalCountKnown
+		return nil, totalCount, totalCountKnown, allRowsManual, allRowsManualKnown
 	}
 	defer rows.Close() //nolint:errcheck
 
@@ -442,7 +471,7 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 		globals = globals[:globalsCap]
 	}
 
-	return globals, totalCount, totalCountKnown
+	return globals, totalCount, totalCountKnown, allRowsManual, allRowsManualKnown
 }
 
 // sessionMemory is loadSessionContext's own memory shape — a local struct
