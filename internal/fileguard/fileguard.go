@@ -154,10 +154,13 @@ func QuarantineDir(path string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	// Prove ownership before changing anything about the directory. A
+	// same-named directory Ghost does not own must be left exactly as found —
+	// including its mode.
+	if err := ensureQuarantineOwned(dir); err != nil {
 		return "", err
 	}
-	if err := ensureQuarantineOwned(dir); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return "", err
 	}
 	return dir, nil

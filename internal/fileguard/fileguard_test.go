@@ -134,6 +134,32 @@ func TestUnmarkedQuarantineWithGhostShapedEntriesIsNotAdopted(t *testing.T) {
 	}
 }
 
+// Refusing a foreign directory must leave it byte-for-byte as found: ownership
+// is proven before any mode change, not after.
+func TestRefusedQuarantineDirKeepsItsMode(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, quarantineDirName)
+	if err := os.Mkdir(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "user-file"), []byte("user"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := QuarantineDir(filepath.Join(root, "candidate")); err == nil {
+		t.Fatal("QuarantineDir adopted a foreign directory")
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o777 {
+		t.Fatalf("refused directory mode = %o, want 777 (unchanged)", perm)
+	}
+}
+
 func TestReaperSelfHealsEmptyUnmarkedQuarantine(t *testing.T) {
 	root := t.TempDir()
 	dir, err := QuarantineDir(filepath.Join(root, "candidate"))
