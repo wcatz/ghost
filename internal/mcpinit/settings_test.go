@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -581,8 +582,10 @@ func TestSettingsFile_SaveBacksUpOnlyOnce(t *testing.T) {
 
 // TestWriteFileAtomic covers the contract the user-owned config writes share:
 // a temp file in the same directory renamed over the target, no leftovers, and
-// an existing file's permissions preserved (a 0600 config.toml must not become
-// world-readable just because ghost rewrote it).
+// an existing file's permissions preserved (a 0600 config.toml must not
+// become world-readable just because ghost rewrote it). The mode a *new* file
+// receives depends on the process umask, so it is pinned separately in
+// settings_unix_test.go.
 func TestWriteFileAtomic(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -591,7 +594,6 @@ func TestWriteFileAtomic(t *testing.T) {
 		t.Fatalf("writeFileAtomic (create): %v", err)
 	}
 	assertFileContent(t, path, "a = 1\n")
-	assertFileMode(t, path, 0644)
 
 	if err := os.Chmod(path, 0600); err != nil {
 		t.Fatal(err)
@@ -657,8 +659,14 @@ func assertFileContent(t *testing.T, path, want string) {
 	}
 }
 
+// assertFileMode checks POSIX permission bits. Windows has no mode bits (every
+// file reports 0666 whatever was asked for), so there is nothing to assert
+// there; the mode contract is exercised on the Unix runners instead.
 func assertFileMode(t *testing.T, path string, want os.FileMode) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)

@@ -479,6 +479,62 @@ func TestRunCodex_TOMLRepairLeavesSubTableKeysAlone(t *testing.T) {
 	}
 }
 
+// TestRunCodex_TOMLRepairNormalizesQuotedOwnedKey pins the quoted spelling of
+// an owned key: TOML reads "command" and command as the same key, so the
+// quoted line has to be rewritten in place. Leaving it beside a freshly
+// inserted bare line would hand codex a duplicate-key document.
+func TestRunCodex_TOMLRepairNormalizesQuotedOwnedKey(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+	seed := "# Ghost persistent memory (managed by `ghost mcp init --client codex`)\n" +
+		"[mcp_servers.ghost]\n" +
+		"\"command\" = '/old/install/ghost'\n" +
+		"'args' = [\"mcp\", \"--stale\"]\n"
+	want := "# Ghost persistent memory (managed by `ghost mcp init --client codex`)\n" +
+		"[mcp_servers.ghost]\n" +
+		"command = " + codexTOMLString(ghostBin) + "\n" +
+		"args = [\"mcp\"]\n"
+
+	if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	got, err := os.ReadFile(codexConfigToml(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+	if strings.Contains(string(got), `"command"`) || strings.Contains(string(got), `'args'`) {
+		t.Error("the quoted owned keys were left beside the bare ones")
+	}
+	// A quoted spelling must also read as current without a rewrite, so init
+	// does not churn a hand-written table on every run.
+	fresh := "# Ghost persistent memory (managed by `ghost mcp init --client codex`)\n" +
+		"[mcp_servers.ghost]\n" +
+		"\"command\" = " + codexTOMLString(ghostBin) + "\n" +
+		"args = [\"mcp\"]\n"
+	if err := os.WriteFile(codexConfigToml(home), []byte(fresh), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var second bytes.Buffer
+	if err := RunCodex(&second, false); err != nil {
+		t.Fatalf("RunCodex (second): %v", err)
+	}
+	if !strings.Contains(second.String(), "✓ ghost MCP server already registered") {
+		t.Errorf("a quoted command key should read as current, got:\n%s", second.String())
+	}
+}
+
 // mustCodexGhostSpan returns the ghost table's own lines in a config.toml body.
 func mustCodexGhostSpan(t *testing.T, content string) []string {
 	t.Helper()
@@ -502,6 +558,13 @@ func TestRunCodex_TOMLDottedGhostEntryLeftAlone(t *testing.T) {
 			"ghost = { command = \"/bin/ghost\", args = [\"mcp\"] }",
 		"dotted key into the server": `mcp_servers.ghost.command = "/bin/ghost"`,
 		"inline mcp_servers table":   `mcp_servers = { ghost = { command = "/bin/ghost", args = ["mcp"] } }`,
+		"multi-line inline mcp_servers table": "mcp_servers = {\n" +
+			"  ghost = { command = \"/bin/ghost\", args = [\"mcp\"] },\n" +
+			"}",
+		"multi-line inline server table": "mcp_servers.ghost = {\n" +
+			"  command = \"/bin/ghost\",\n" +
+			"  args = [\"mcp\"],\n" +
+			"}",
 	}
 	for name, ghostLine := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -261,10 +261,13 @@ func findCodexTOMLTable(lines []string, key string) (start, end int, ok bool) {
 	return 0, 0, false
 }
 
-// splitCodexAssignment splits a `key = value` line into its two halves.
-// ok is false for a line that carries no assignment (a blank, a comment, an
-// orphaned fragment of a multi-line value). The first `=` separates them, which
-// is safe because a TOML key can never contain one.
+// splitCodexAssignment splits a `key = value` line into its two halves, with
+// the key normalized to its bare spelling: TOML treats "command" and command as
+// the same key, so a quoted owned key has to be recognized as ours rather than
+// left in the file to collide with the bare one we write. ok is false for a
+// line that carries no assignment (a blank, a comment, an orphaned fragment of
+// a multi-line value). The first `=` separates them, which is safe because a
+// TOML key can never contain one.
 func splitCodexAssignment(line string) (key, value string, ok bool) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -274,7 +277,11 @@ func splitCodexAssignment(line string) (key, value string, ok bool) {
 	if eq < 0 {
 		return "", "", false
 	}
-	return strings.TrimSpace(trimmed[:eq]), strings.TrimSpace(trimmed[eq+1:]), true
+	key = strings.TrimSpace(trimmed[:eq])
+	if len(key) >= 2 && (key[0] == '\'' || key[0] == '"') && key[len(key)-1] == key[0] {
+		key = key[1 : len(key)-1]
+	}
+	return key, strings.TrimSpace(trimmed[eq+1:]), true
 }
 
 // codexValueComplete reports whether a value's brackets and braces balance,
@@ -341,12 +348,24 @@ func findCodexDottedGhost(lines []string, key string) (at int, text string, ok b
 		if (full == key || strings.HasPrefix(full, key+".")) && !codexTableWithin(table, key) {
 			return i + 1, strings.TrimSpace(line), true
 		}
-		// The entry can also hide as a key of an inline mcp_servers table.
-		if full == "mcp_servers" && codexInlineNamesKey(value, "ghost") {
+		// The entry can also hide as a key of an inline mcp_servers table,
+		// written either on one line or spread over several.
+		if full == "mcp_servers" && codexInlineNamesKey(codexValueText(value, lines, i), "ghost") {
 			return i + 1, strings.TrimSpace(line), true
 		}
 	}
 	return 0, "", false
+}
+
+// codexValueText returns a key's value with its continuation lines folded in, so
+// a multi-line inline table (mcp_servers = { … }) is scanned whole: a `ghost`
+// key on a later line would otherwise read as a top-level key of its own and
+// slip past the guard. An unterminated value runs to the end of the file.
+func codexValueText(value string, lines []string, i int) string {
+	if codexValueComplete(value) {
+		return value
+	}
+	return strings.Join(lines[i:codexValueLastLine(value, lines, i, len(lines))+1], " ")
 }
 
 // codexTableWithin reports whether table is key or a sub-table of it.
@@ -391,22 +410,17 @@ type codexMCPServerValues struct {
 }
 
 // parseCodexMCPServerBlock extracts command/args from a ghost table's lines.
-// Comments, blank lines, and sub-tables ([mcp_servers.ghost.env]) are
-// skipped — a hand-tuned env sub-table never makes a working registration
-// read as drifted.
+// Comments, blank lines, and anything that is not a `key = value` line are
+// skipped, and a quoted key spelling counts as its bare form, so a hand-tuned
+// table (including one carrying an env sub-table outside this span) never
+// makes a working registration read as drifted.
 func parseCodexMCPServerBlock(lines []string) codexMCPServerValues {
 	var vals codexMCPServerValues
 	for _, line := range lines[1:] {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "[") {
+		key, value, ok := splitCodexAssignment(line)
+		if !ok {
 			continue
 		}
-		eq := strings.Index(trimmed, "=")
-		if eq < 0 {
-			continue
-		}
-		key := strings.TrimSpace(trimmed[:eq])
-		value := strings.TrimSpace(trimmed[eq+1:])
 		switch key {
 		case "command":
 			vals.Command = decodeCodexTOMLString(value)

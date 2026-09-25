@@ -123,9 +123,11 @@ func writeBackupOnce(path string, data []byte) error {
 	}
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
+		_ = os.Remove(path) // a half-written backup must not survive for O_EXCL to keep
 		return fmt.Errorf("backup %s: %w", path, err)
 	}
 	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
 		return fmt.Errorf("backup %s: %w", path, err)
 	}
 	return nil
@@ -138,16 +140,20 @@ func writeBackupOnce(path string, data []byte) error {
 // os.WriteFile. A symlinked config (a dotfiles checkout, say) is resolved
 // first: renaming over the link itself would replace it with a regular file
 // and strand the real config. An existing file keeps its own permissions, so
-// rewriting a 0600 config.toml cannot silently widen it; perm applies on create.
+// rewriting a 0600 config.toml cannot silently widen it; a new one is created
+// with perm, which the kernel narrows by the caller's umask just as
+// os.WriteFile would.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved
 	}
 	dir := filepath.Dir(path)
+	replace := false
 	if info, err := os.Stat(path); err == nil {
 		perm = info.Mode().Perm()
+		replace = true
 	}
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*.tmp")
+	tmp, err := createTempWithMode(dir, filepath.Base(path), perm)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -162,15 +168,40 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
-	if err := os.Chmod(tmpPath, perm); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("chmod temp file: %w", err)
+	// A created file already has the right mode; only a replacement needs the
+	// umask undone to land on the original file's exact permissions.
+	if replace {
+		if err := os.Chmod(tmpPath, perm); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("chmod temp file: %w", err)
+		}
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename temp file: %w", err)
 	}
 	return nil
+}
+
+// createTempWithMode opens a uniquely named new file in dir carrying perm, so
+// the kernel applies the caller's umask to it. os.CreateTemp would fix the mode
+// at 0600 and force a later chmod, which bypasses the umask and would leave a
+// new config.toml world-readable on a host with a restrictive umask. A name
+// collision retries the next index; O_EXCL keeps two writers from sharing one.
+func createTempWithMode(dir, base string, perm os.FileMode) (*os.File, error) {
+	var err error
+	for i := 0; i < 16; i++ {
+		var f *os.File
+		f, err = os.OpenFile(filepath.Join(dir, fmt.Sprintf(".%s-%d.tmp", base, i)),
+			os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+	}
+	return nil, err
 }
 
 // getPermissions extracts the permissions.allow string slice.
