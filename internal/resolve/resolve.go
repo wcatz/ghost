@@ -48,22 +48,39 @@ var resolveKeywords = []string{
 	"completed",
 }
 
-// Classifier decides whether each memory's content is resolved evidence (true)
-// or a terminal conclusion / still-active knowledge (false). The LLM
-// implementation lives in resolution.go; tests inject a deterministic fake. It
-// is biased to KEEP (return false when uncertain): a false resolve buries a
-// useful memory, a missed resolve merely leaves the status quo. Batched so one
-// call adjudicates many notes; the KEEP-cache skip happens in Run.
+// Verdict is the classifier's answer for one memory. UNKNOWN means the reply
+// did not contain an explicit, parseable KEEP or RESOLVED verdict; it is kept
+// visible and is deliberately not entered into the KEEP cache so the next pass
+// can ask again.
+type Verdict string
+
+const (
+	// VerdictResolved means the note is resolved evidence and may be stamped.
+	VerdictResolved Verdict = "resolved"
+	// VerdictKeep means the note is an explicit terminal conclusion or other
+	// still-active knowledge.
+	VerdictKeep Verdict = "keep"
+	// VerdictUnknown means no explicit verdict could be parsed.
+	VerdictUnknown Verdict = "unknown"
+)
+
+// Classifier decides whether each memory is resolved evidence, an explicit
+// terminal conclusion / still-active knowledge, or an unparseable answer. The
+// LLM implementation lives in resolution.go; tests inject a deterministic fake.
+// It is biased to KEEP when the model expresses uncertainty, but a parse
+// failure is UNKNOWN rather than an implicit KEEP. Batched so one call
+// adjudicates many notes; the KEEP-cache skip happens in Run.
 type Classifier interface {
-	IsResolvedBatch(ctx context.Context, contents []string) ([]bool, error)
+	IsResolvedBatch(ctx context.Context, contents []string) ([]Verdict, error)
 }
 
 // ContentHash is the KEEP-cache key: resolve's question is content-only, so a
-// tag or importance edit must not invalidate a cached verdict. The "v1\x00"
-// prefix versions the key — a future prompt/rubric change that could flip
-// verdicts bumps it to reset every cached KEEP in one step.
+// tag or importance edit must not invalidate a cached verdict. The "v2\x00"
+// prefix versions the key — v1 treated every non-RESOLVED result, including a
+// parse failure, as KEEP; the new meaning caches only explicit KEEP verdicts,
+// so stale v1 entries are deliberately re-asked.
 func ContentHash(content string) string {
-	sum := sha256.Sum256([]byte("v1\x00" + content))
+	sum := sha256.Sum256([]byte("v2\x00" + content))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -85,6 +102,7 @@ type Result struct {
 	Superseded int // older endpoint of a live 'supersedes'/'llm' link, demoted deterministically
 	Corrected  int // older prefilter-passing memory tied to a correction, demoted deterministically
 	Skipped    int // candidates skipped via the KEEP cache
+	Unknown    int // candidates whose verdict could not be parsed; eligible for a later pass
 	Resolved   int // rows written (0 in dry-run)
 }
 
@@ -208,19 +226,25 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 			return res, nil, fmt.Errorf("classify %d candidate(s): classifier returned %d verdict(s)", len(pendingContents), len(verdicts))
 		}
 		for i, m := range pending {
-			if !verdicts[i] {
+			switch verdicts[i] {
+			case VerdictKeep:
 				newKept[m.ID] = ContentHash(m.Content)
-				continue
+			case VerdictResolved:
+				res.Confirmed++
+				llmConfirmed++
+				addConfirmed(m)
+			default:
+				// UNKNOWN (or an invalid classifier value) is not an implicit
+				// KEEP. Leave the memory unclassified so a later pass can ask
+				// it again instead of locking a parse failure into the cache.
+				res.Unknown++
 			}
-			res.Confirmed++
-			llmConfirmed++
-			addConfirmed(m)
 		}
 	}
 	if logger != nil {
 		logger.Info("resolve classified",
 			"confirmed", llmConfirmed, "superseded", res.Superseded,
-			"corrected", res.Corrected, "cached", res.Skipped)
+			"corrected", res.Corrected, "cached", res.Skipped, "unknown", res.Unknown)
 	}
 
 	if apply {

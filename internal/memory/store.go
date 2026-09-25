@@ -159,8 +159,8 @@ func (s *Store) queryDB() sqlQueryer {
 }
 
 // seedGlobalMemory defines a memory that Ghost ships with out of the box.
-// These are inserted as source='manual', pinned=1, so consolidation never
-// touches them.
+// These are inserted as source='builtin', pinned=1, so consolidation never
+// touches them and provenance surfaces can distinguish them from user writes.
 type seedGlobalMemory struct {
 	Category   string
 	Content    string
@@ -172,16 +172,16 @@ type seedGlobalMemory struct {
 var defaultSeedMemories = []seedGlobalMemory{
 	{
 		Category:   "preference",
-		Content:    "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.",
+		Content:    builtinSeedContent,
 		Importance: 1.0,
 		Tags:       []string{"git", "commits", "non-negotiable"},
 	},
 }
 
 // SeedGlobalMemories ensures the _global project exists and inserts any
-// missing seed memories. Seeds are pinned and source='manual' so they
-// survive consolidation. Idempotent — skips memories whose content already
-// exists.
+// missing seed memories. Seeds are pinned and source='builtin' so they
+// survive consolidation without being presented as user-authored. Idempotent —
+// skips memories whose content already exists.
 func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -211,7 +211,7 @@ func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 		tags, _ := json.Marshal(seed.Tags)
 		_, err = s.db.ExecContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags, pinned)
-			VALUES ('_global', ?, ?, 'manual', ?, ?, 1)
+			VALUES ('_global', ?, ?, 'builtin', ?, ?, 1)
 		`, seed.Category, seed.Content, seed.Importance, string(tags))
 		if err != nil {
 			s.logger.Warn("seed memory insert failed", "content", seed.Content, "error", err)
@@ -296,6 +296,317 @@ func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoR
 	return s.ensureProjectLocked(ctx, id, path, name, repoRemote)
 }
 
+// ResolveOrCreateRepoProject resolves a repository-aware save to one project
+// and creates that project when no identity match exists. The complete
+// resolve-or-create sequence runs in one immediate SQLite transaction, so
+// separate Ghost processes cannot both create the first project for a remote.
+//
+// projectRef is the id or path ordinary resolution produced; repoName is the
+// final component of the normalized remote, never a directory basename. An
+// explicit project already bound to another repository is an error rather than
+// a reason to route the save to that remote's existing owner.
+func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, error) {
+	repoRemote = NormalizeRepoRemote(repoRemote)
+	if repoRemote == "" {
+		return "", fmt.Errorf("resolve or create repository project: empty remote")
+	}
+	if id == "" {
+		return "", fmt.Errorf("resolve or create repository project: empty project id")
+	}
+	if id == "_global" {
+		return "", fmt.Errorf("refusing to assign a repository to the _global project")
+	}
+	if path == "" {
+		path = id
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// OpenDB configures database/sql transactions as BEGIN IMMEDIATE. Holding
+	// SQLite's write lock before the first lookup serializes repository-project
+	// creation across Store handles and independent processes.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin repository project tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	canonical, err := s.resolveRepoProjectTx(ctx, tx, projectRef, repoName, repoRemote)
+	if err != nil {
+		return "", err
+	}
+	if canonical == "" {
+		canonical, err = s.createRepoProjectTx(ctx, tx, id, path, name, repoRemote)
+		if err != nil {
+			return "", err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit repository project tx: %w", err)
+	}
+	return canonical, nil
+}
+
+func (s *Store) resolveRepoProjectTx(ctx context.Context, tx *sql.Tx, projectRef, repoName, repoRemote string) (string, error) {
+	if id, found, err := s.resolveExplicitProjectRepoTx(ctx, tx, projectRef, repoRemote); found || err != nil {
+		return id, err
+	}
+	if id, err := s.findProjectByRepoRemoteTx(ctx, tx, repoRemote, ""); err != nil {
+		return "", err
+	} else if id != "" {
+		return id, nil
+	}
+	if repoName == "" {
+		return "", nil
+	}
+	return s.bindUniqueProjectNameRepoTx(ctx, tx, repoName, repoRemote)
+}
+
+func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, projectRef, repoRemote string) (id string, found bool, err error) {
+	if projectRef == "" {
+		return "", false, nil
+	}
+
+	var count int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM projects
+		WHERE (id = ? OR path = ?) AND id != '_global'
+	`, projectRef, projectRef).Scan(&count); err != nil {
+		return "", false, fmt.Errorf("count explicit projects for repository: %w", err)
+	}
+	if count > 1 {
+		return "", false, fmt.Errorf("project reference %q matches multiple projects", projectRef)
+	}
+	var existingRemote string
+	if count == 0 {
+		norm := strings.ReplaceAll(projectRef, `\`, "/")
+		prefixErr := tx.QueryRowContext(ctx, `
+			SELECT id, COALESCE(repo_remote, '')
+			FROM projects
+			WHERE (
+				path = ?
+				OR REPLACE(path, '\', '/') = ?
+				OR substr(?, 1, LENGTH(REPLACE(path, '\', '/')) + 1) = REPLACE(path, '\', '/') || '/'
+			)
+			  AND LENGTH(path) > 10
+			  AND id != '_global'
+			ORDER BY LENGTH(path) DESC
+			LIMIT 1
+		`, projectRef, norm, norm).Scan(&id, &existingRemote)
+		if prefixErr == sql.ErrNoRows {
+			return "", false, nil
+		}
+		if prefixErr != nil {
+			return "", false, fmt.Errorf("find project by path prefix for repository: %w", prefixErr)
+		}
+	} else {
+		if err := tx.QueryRowContext(ctx, `
+			SELECT id, COALESCE(repo_remote, '')
+			FROM projects
+			WHERE (id = ? OR path = ?) AND id != '_global'
+		`, projectRef, projectRef).Scan(&id, &existingRemote); err != nil {
+			return "", true, fmt.Errorf("read explicit project for repository: %w", err)
+		}
+	}
+	if existingRemote == repoRemote {
+		return id, true, nil
+	}
+	if existingRemote != "" {
+		return "", true, fmt.Errorf("project %q belongs to a different repository", id)
+	}
+
+	ownerID, err := s.findProjectByRepoRemoteTx(ctx, tx, repoRemote, id)
+	if err != nil {
+		return "", true, err
+	}
+	if ownerID != "" {
+		if err := s.mergeProjectTx(ctx, tx, id, ownerID); err != nil {
+			return "", true, fmt.Errorf("merge explicit project into repository owner: %w", err)
+		}
+		return ownerID, true, nil
+	}
+	if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, id, repoRemote); err != nil {
+		return "", true, fmt.Errorf("bind repository to explicit project: %w", err)
+	}
+	return id, true, nil
+}
+
+func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, name, repoRemote string) (string, error) {
+	var count int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM projects
+		WHERE name = ? AND id != '_global'
+	`, name).Scan(&count); err != nil {
+		return "", fmt.Errorf("count projects by name for repository: %w", err)
+	}
+	if count != 1 {
+		return "", nil
+	}
+
+	var id, existingRemote string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT id, COALESCE(repo_remote, '')
+		FROM projects
+		WHERE name = ? AND id != '_global'
+	`, name).Scan(&id, &existingRemote); err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("read project by name for repository: %w", err)
+	}
+	if existingRemote != "" {
+		if existingRemote == repoRemote {
+			return id, nil
+		}
+		return "", nil
+	}
+	if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, id, repoRemote); err != nil {
+		return "", fmt.Errorf("bind repository to named project: %w", err)
+	}
+	return id, nil
+}
+
+func (s *Store) findProjectByRepoRemoteTx(ctx context.Context, tx *sql.Tx, repoRemote, excludeID string) (string, error) {
+	var id string
+	err := tx.QueryRowContext(ctx, `
+		SELECT id FROM projects
+		WHERE repo_remote = ? AND id NOT IN ('_global', ?)
+		LIMIT 1
+	`, repoRemote, excludeID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("find project by repository: %w", err)
+	}
+	return id, nil
+}
+
+func (s *Store) bindRepoRemoteIfUnsetTx(ctx context.Context, tx *sql.Tx, id, repoRemote string) error {
+	result, err := tx.ExecContext(ctx, `
+		UPDATE projects
+		SET repo_remote = ?, updated_at = datetime('now')
+		WHERE id = ? AND COALESCE(repo_remote, '') = ''
+	`, repoRemote, id)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return fmt.Errorf("project %q repository changed concurrently", id)
+	}
+	return nil
+}
+
+func (s *Store) createRepoProjectTx(ctx context.Context, tx *sql.Tx, id, path, name, repoRemote string) (string, error) {
+	var existingRemote string
+	existingErr := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, id).Scan(&existingRemote)
+	if existingErr != nil && existingErr != sql.ErrNoRows {
+		return "", fmt.Errorf("query fallback project for repository: %w", existingErr)
+	}
+	if existingErr == nil {
+		if existingRemote != "" && existingRemote != repoRemote {
+			return "", fmt.Errorf("project %q belongs to a different repository", id)
+		}
+		if existingRemote == "" {
+			if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, id, repoRemote); err != nil {
+				return "", fmt.Errorf("bind repository to fallback project: %w", err)
+			}
+		}
+		return id, nil
+	}
+
+	if path != id {
+		var ownerID, ownerRemote string
+		err := tx.QueryRowContext(ctx, `
+			SELECT id, COALESCE(repo_remote, '')
+			FROM projects
+			WHERE path = ? AND id != ?
+			LIMIT 1
+		`, path, id).Scan(&ownerID, &ownerRemote)
+		if err != nil && err != sql.ErrNoRows {
+			return "", fmt.Errorf("query path owner for repository: %w", err)
+		}
+		if err == nil {
+			if ownerID == "_global" {
+				return "", fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", id, ownerID)
+			}
+			if ownerRemote != "" && ownerRemote != repoRemote {
+				return "", fmt.Errorf("project %q belongs to a different repository", ownerID)
+			}
+			if ownerRemote == "" {
+				if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, ownerID, repoRemote); err != nil {
+					return "", fmt.Errorf("bind repository to path owner: %w", err)
+				}
+			}
+			if err := s.mergeProjectTx(ctx, tx, id, ownerID); err != nil {
+				return "", fmt.Errorf("merge project into path owner: %w", err)
+			}
+			return ownerID, nil
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO projects (id, path, name, repo_remote) VALUES (?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			path = CASE WHEN excluded.path = excluded.id THEN projects.path ELSE excluded.path END,
+			repo_remote = CASE
+				WHEN excluded.repo_remote = '' THEN projects.repo_remote
+				WHEN projects.repo_remote IS NULL OR projects.repo_remote = '' THEN excluded.repo_remote
+				ELSE projects.repo_remote
+			END,
+			updated_at = datetime('now')
+	`, id, path, name, repoRemote); err != nil {
+		return "", fmt.Errorf("create repository project: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, id); err != nil {
+		return "", fmt.Errorf("create repository project state: %w", err)
+	}
+	return id, nil
+}
+
+func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemote string) error {
+	if repoRemote == "" {
+		return nil
+	}
+	var existingRemote string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, existingID).Scan(&existingRemote); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return fmt.Errorf("read merge target repository: %w", err)
+	}
+	if existingRemote != "" {
+		if existingRemote != repoRemote {
+			return fmt.Errorf("project %q belongs to a different repository", existingID)
+		}
+		return nil
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE projects
+		SET repo_remote = ?, updated_at = datetime('now')
+		WHERE id = ? AND COALESCE(repo_remote, '') = ''
+	`, repoRemote, existingID)
+	if err != nil {
+		return fmt.Errorf("bind repository to merge target: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check merge target repository: %w", err)
+	}
+	if updated != 1 {
+		return fmt.Errorf("project %q repository changed concurrently", existingID)
+	}
+	return nil
+}
+
 func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRemote string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -307,24 +618,56 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 	if path == "" {
 		path = id
 	}
+	repoRemote = NormalizeRepoRemote(repoRemote)
+	if id == "_global" && repoRemote != "" {
+		return fmt.Errorf("refusing to assign a repository to the _global project")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin ensure project tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var mergedOld, mergedNew string
+	commit := func() error {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit ensure project tx: %w", err)
+		}
+		if mergedOld != "" {
+			s.logger.Info("merged duplicate project", "old_id", mergedOld, "new_id", mergedNew)
+		}
+		return nil
+	}
 
 	// Repository identity: one remote means one project, whatever the local
 	// checkout path happens to be. _global is excluded on both sides for the
 	// same reason MergeProject refuses it — merging it would move or dump the
 	// bucket that global injection reads from.
-	repoRemote = NormalizeRepoRemote(repoRemote)
 	if repoRemote != "" && id != "_global" {
+		var incomingRemote string
+		incomingErr := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, id).Scan(&incomingRemote)
+		if incomingErr != nil && incomingErr != sql.ErrNoRows {
+			return fmt.Errorf("check project repository: %w", incomingErr)
+		}
+		if incomingRemote != "" && incomingRemote != repoRemote {
+			return fmt.Errorf("project %q belongs to a different repository", id)
+		}
+
 		var existingID string
-		scanErr := s.db.QueryRowContext(ctx,
-			`SELECT id FROM projects WHERE repo_remote = ? AND id != ? LIMIT 1`,
+		scanErr := tx.QueryRowContext(ctx,
+			`SELECT id FROM projects WHERE repo_remote = ? AND id NOT IN ('_global', ?) LIMIT 1`,
 			repoRemote, id).Scan(&existingID)
-		if scanErr == nil && existingID != "" && existingID != "_global" {
-			// mergeProjectLocked does not lock internally (only the public
-			// MergeProject wrapper does), and we already hold s.mu.
-			if err := s.mergeProjectLocked(ctx, id, existingID); err != nil {
+		if scanErr != nil && scanErr != sql.ErrNoRows {
+			return fmt.Errorf("find repository project: %w", scanErr)
+		}
+		if existingID != "" {
+			if err := s.mergeProjectWithRepoTx(ctx, tx, id, existingID, repoRemote); err != nil {
 				return fmt.Errorf("auto-merge repository duplicate: %w", err)
 			}
-			return nil
+			mergedOld, mergedNew = id, existingID
+			return commit()
 		}
 	}
 
@@ -334,57 +677,68 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 	// passing raw filesystem paths as project IDs.
 	if filepath.IsAbs(path) && path != id {
 		var existingID string
-		scanErr := s.db.QueryRowContext(ctx,
+		scanErr := tx.QueryRowContext(ctx,
 			`SELECT id FROM projects WHERE path = ? AND id != ? LIMIT 1`,
 			path, id).Scan(&existingID)
-		if scanErr == nil && existingID != "" {
-			// Merge any child records from the incoming ID into the canonical
-			// project. mergeProjectLocked does not lock internally (only the
-			// public MergeProject wrapper does), so it's safe to call directly
-			// here while we already hold s.mu.
-			if err := s.mergeProjectLocked(ctx, id, existingID); err != nil {
+		if scanErr != nil && scanErr != sql.ErrNoRows {
+			return fmt.Errorf("find path project: %w", scanErr)
+		}
+		if existingID != "" {
+			if err := s.mergeProjectWithRepoTx(ctx, tx, id, existingID, repoRemote); err != nil {
 				return fmt.Errorf("auto-merge path duplicate: %w", err)
 			}
-			return nil
+			mergedOld, mergedNew = id, existingID
+			return commit()
 		}
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO projects (id, path, name, repo_remote) VALUES (?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			path = CASE WHEN excluded.path = excluded.id THEN projects.path ELSE excluded.path END,
-			repo_remote = CASE WHEN excluded.repo_remote = '' THEN projects.repo_remote ELSE excluded.repo_remote END,
+			repo_remote = CASE
+				WHEN excluded.repo_remote = '' THEN projects.repo_remote
+				WHEN projects.repo_remote IS NULL OR projects.repo_remote = '' THEN excluded.repo_remote
+				ELSE projects.repo_remote
+			END,
 			updated_at = datetime('now')
-	`, id, path, name, repoRemote)
-	if err != nil {
+	`, id, path, name, repoRemote); err != nil {
 		return fmt.Errorf("ensure project: %w", err)
 	}
-
-	// Also ensure ghost_state exists.
-	_, err = s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)
-	`, id)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, id); err != nil {
 		return err
 	}
 
-	// Auto-merge: if this project has a real filesystem path, look for
-	// a same-name project created by MCP with a non-absolute path.
+	// Auto-merge: if this project has a real filesystem path, merge a
+	// same-name project created by MCP only when that name has one candidate.
+	// Two candidates are ambiguous, not an arbitrary LIMIT 1 choice.
 	if path != id && filepath.IsAbs(path) {
-		var dupID string
-		scanErr := s.db.QueryRowContext(ctx,
-			`SELECT id FROM projects WHERE name = ? AND id != ? AND path NOT LIKE '/%' LIMIT 1`,
-			name, id).Scan(&dupID)
-		if scanErr == nil && dupID != "" {
-			// Call mergeProjectLocked directly to avoid deadlock (we already
-			// hold s.mu; only the public MergeProject wrapper locks).
-			if err := s.mergeProjectLocked(ctx, dupID, id); err != nil {
+		var candidateCount int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM projects
+			WHERE name = ? AND id NOT IN (?, '_global')
+			  AND instr(path, '/') = 0 AND instr(path, '\') = 0
+		`, name, id).Scan(&candidateCount); err != nil {
+			return fmt.Errorf("count same-name projects: %w", err)
+		}
+		if candidateCount == 1 {
+			var dupID string
+			if err := tx.QueryRowContext(ctx, `
+				SELECT id FROM projects
+				WHERE name = ? AND id NOT IN (?, '_global')
+				  AND instr(path, '/') = 0 AND instr(path, '\') = 0
+			`, name, id).Scan(&dupID); err != nil {
+				return fmt.Errorf("read same-name project: %w", err)
+			}
+			if err := s.mergeProjectWithRepoTx(ctx, tx, dupID, id, repoRemote); err != nil {
 				return fmt.Errorf("auto-merge duplicate project: %w", err)
 			}
+			mergedOld, mergedNew = dupID, id
 		}
 	}
 
-	return nil
+	return commit()
 }
 
 // MergeProject reassigns all child records from oldID to newID, then deletes
@@ -403,15 +757,49 @@ func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
 }
 
 func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) error {
-	if oldID == newID {
-		return nil
-	}
+	return s.mergeProjectWithRepoLocked(ctx, oldID, newID, "")
+}
 
+func (s *Store) mergeProjectWithRepoLocked(ctx context.Context, oldID, newID, repoRemote string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin merge tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if err := s.mergeProjectWithRepoTx(ctx, tx, oldID, newID, repoRemote); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("merge commit: %w", err)
+	}
+
+	s.logger.Info("merged duplicate project", "old_id", oldID, "new_id", newID)
+	return nil
+}
+
+func (s *Store) mergeProjectWithRepoTx(ctx context.Context, tx *sql.Tx, oldID, newID, repoRemote string) error {
+	if oldID == newID {
+		return nil
+	}
+	if oldID == "_global" || newID == "_global" {
+		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
+	}
+	if err := reconcileMergeRepoTx(ctx, tx, oldID, repoRemote); err != nil {
+		return err
+	}
+	if err := reconcileMergeRepoTx(ctx, tx, newID, repoRemote); err != nil {
+		return err
+	}
+	return s.mergeProjectTx(ctx, tx, oldID, newID)
+}
+
+func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
+	if oldID == newID {
+		return nil
+	}
+	if oldID == "_global" || newID == "_global" {
+		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
+	}
 
 	// Reassign all child records from old project to new.
 	stmts := []string{
@@ -424,6 +812,7 @@ func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) err
 		// omitting this would let the DELETE FROM projects below silently
 		// destroy the merged project's entire undo history.
 		`UPDATE memory_snapshots SET project_id = ? WHERE project_id = ?`,
+		`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt, newID, oldID); err != nil {
@@ -435,17 +824,9 @@ func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) err
 	if _, err := tx.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, oldID); err != nil {
 		return fmt.Errorf("merge delete ghost_state: %w", err)
 	}
-
-	// Delete the old project row.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, oldID); err != nil {
 		return fmt.Errorf("merge delete project: %w", err)
 	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("merge commit: %w", err)
-	}
-
-	s.logger.Info("merged duplicate project", "old_id", oldID, "new_id", newID)
 	return nil
 }
 
@@ -724,13 +1105,20 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	// carries no identity of its own, so it is resolved through the injected
 	// detector; without that, saving from ~/work/ghost and then reading from
 	// it would disagree about which project it is. Detection runs only for
-	// absolute inputs, so resolving by id or name never spawns a process.
-	remote := NormalizeRepoRemote(input)
-	if remote == "" && filepath.IsAbs(input) {
+	// path-shaped inputs (containing '/' or '\'), so resolving by id or name
+	// never spawns a process. A path is tested before the raw input is treated
+	// as a remote because a relative path such as ../checkout can otherwise be
+	// mistaken for a host/path remote. Non-directory remote strings fail the
+	// detector's os.Stat before it starts Git, then normalize normally.
+	remote := ""
+	if strings.ContainsAny(input, `/\`) {
 		remote = NormalizeRepoRemote(detectRemoteForPath(input))
 	}
+	if remote == "" {
+		remote = NormalizeRepoRemote(input)
+	}
 	if remote != "" {
-		err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE repo_remote = ? LIMIT 1`, remote).Scan(&id, &name)
+		err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE repo_remote = ? AND id != '_global' LIMIT 1`, remote).Scan(&id, &name)
 		if err == nil {
 			return id, name, nil
 		}
@@ -866,10 +1254,36 @@ func (s *Store) UpsertWithProvenance(ctx context.Context, projectID, category, c
 	return s.UpsertWithOptions(ctx, projectID, category, content, source, importance, tags, UpsertOptions{Provenance: prov})
 }
 
+// sqlExecutor is the common read/write surface of *sql.DB and *sql.Tx. It
+// lets the reflection apply path reuse Upsert's duplicate/link semantics inside
+// its existing transaction instead of opening a second transaction.
+type sqlExecutor interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+type storeTxContextKey struct{}
+
+func withStoreTx(ctx context.Context, tx *sql.Tx) context.Context {
+	return context.WithValue(ctx, storeTxContextKey{}, tx)
+}
+
+func storeTxFromContext(ctx context.Context) (*sql.Tx, bool) {
+	tx, ok := ctx.Value(storeTxContextKey{}).(*sql.Tx)
+	return tx, ok && tx != nil
+}
+
 // UpsertWithOptions is Upsert plus provenance and/or scope.
 func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts UpsertOptions) (id string, duplicateOf string, score float64, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	parentTx, inTx := storeTxFromContext(ctx)
+	db := sqlExecutor(s.db)
+	if inTx {
+		db = parentTx
+	} else {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+	}
 
 	var existingID string
 	var existingImportance float32
@@ -880,7 +1294,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// duplicate — the OR-probe alone treats a single shared word as a match,
 	// which silently swallowed unrelated saves.
 	ftsQuery := sanitizeFTSN(content, 30)
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := db.QueryContext(ctx, `
 		SELECT m.id, m.importance, m.content, m.scope
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
@@ -938,7 +1352,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// excluded here so a re-save can never fold into a dead memory; the
 	// same-category probe predates those exclusions and keeps its behavior.
 	if existingID == "" {
-		crossRows, crossErr := s.db.QueryContext(ctx, `
+		crossRows, crossErr := db.QueryContext(ctx, `
 			SELECT m.id, m.importance, m.content, m.scope
 			FROM memories m
 			JOIN memories_fts f ON f.rowid = m.rowid
@@ -1012,11 +1426,16 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		// all succeed or none should — otherwise a failure partway through
 		// leaves the new memory row orphaned: unlinked, un-embedded (onSave
 		// never fires), and invisible. Same tx pattern as mergeProjectLocked.
-		tx, txErr := s.db.BeginTx(ctx, nil)
-		if txErr != nil {
-			return "", "", 0, fmt.Errorf("begin upsert tx: %w", txErr)
+		tx := parentTx
+		ownTx := !inTx
+		if ownTx {
+			var txErr error
+			tx, txErr = s.db.BeginTx(ctx, nil)
+			if txErr != nil {
+				return "", "", 0, fmt.Errorf("begin upsert tx: %w", txErr)
+			}
+			defer tx.Rollback() //nolint:errcheck
 		}
-		defer tx.Rollback() //nolint:errcheck
 
 		if _, err = tx.ExecContext(ctx, `
 			UPDATE memories
@@ -1052,18 +1471,20 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			return "", "", 0, fmt.Errorf("link duplicate: %w", err)
 		}
 
-		if err = tx.Commit(); err != nil {
-			return "", "", 0, fmt.Errorf("commit upsert tx: %w", err)
+		if ownTx {
+			if err = tx.Commit(); err != nil {
+				return "", "", 0, fmt.Errorf("commit upsert tx: %w", err)
+			}
 		}
 
-		if s.onSave != nil {
+		if !inTx && s.onSave != nil {
 			s.onSave(projectID)
 		}
 		return id, existingID, score, nil
 	}
 
 	// No match — create new.
-	err = s.db.QueryRowContext(ctx, `
+	err = db.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
 		                      agent, session_id, source_ref, confidence, scope)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1075,7 +1496,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	if err != nil {
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
-	if s.onSave != nil {
+	if !inTx && s.onSave != nil {
 		s.onSave(projectID)
 	}
 	return id, "", 0, nil
@@ -1689,34 +2110,42 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		return nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+	parentTx, inTx := storeTxFromContext(ctx)
+	if !inTx {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 	}
-	defer tx.Rollback() //nolint:errcheck
 
-	// Snapshot existing non-manual memories before deleting. Pinned memories
-	// and resolved memories are excluded throughout this function — like
-	// source='manual', a pin is an explicit user override and a resolved_at
-	// stamp is a resolve pass's verdict, both of which reflection must never
-	// delete, rewrite, or silently drop (it has no way to know a consolidated
-	// memory it emits corresponds to a pinned/resolved one it never saw as
-	// such, so preservation has to mean "don't touch it" rather than "carry the
-	// flag through"). See issue #318.
+	tx := parentTx
+	ownTx := !inTx
+	if ownTx {
+		tx, err = s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+	}
+
+	// Snapshot existing non-manual/non-builtin memories before deleting.
+	// Pinned memories and resolved memories are excluded throughout this
+	// function — manual and builtin sources are explicit preservation classes,
+	// while a pin is an explicit user override and a resolved_at stamp is a
+	// resolve pass's verdict. Reflection must never delete, rewrite, or
+	// silently drop any of them (it has no way to know a consolidated memory
+	// it emits corresponds to a pinned/resolved one it never saw as such, so
+	// preservation has to mean "don't touch it" rather than "carry the flag
+	// through"). See issue #318.
 	snapshotID := fmt.Sprintf("%s-%d", projectID, time.Now().UnixNano())
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags,
 		                              created_at, memory_id, access_count, last_accessed,
 		                              agent, session_id, source_ref, confidence,
-		                              valid_from, valid_until, verified_at)
+		                              valid_from, valid_until, verified_at, scope, scope_captured)
 		SELECT ?, project_id, category, content, importance, source, tags,
 		       created_at, id, access_count, last_accessed,
 		       agent, session_id, source_ref, confidence,
-		       valid_from, valid_until, verified_at
-		FROM memories WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL
+		       valid_from, valid_until, verified_at, scope, 1
+		FROM memories WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
 	`, snapshotID, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot memories: %w", err)
@@ -1731,7 +2160,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// the consolidation round trip are kept in place for the same reason.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, content FROM memories
-		WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL
+		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
 	`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list replaceable memories: %w", err)
@@ -1764,7 +2193,7 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	if consolidatedSince != "" {
 		crows, err := tx.QueryContext(ctx, `
 			SELECT id FROM memories
-			WHERE project_id = ? AND source != 'manual' AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
+			WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL AND created_at >= ?
 		`, projectID, consolidatedSince)
 		if err != nil {
 			return nil, fmt.Errorf("find concurrent memories: %w", err)
@@ -1838,21 +2267,34 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// created_at is reset deliberately: consolidated knowledge counts
 			// as refreshed (issue #279). The row identity — and with it its
 			// embeddings, links, and access stats — survives.
+			// A replacement that states no scope must not erase the scope the
+			// live row already carries. `ghost reflect --apply` is the only
+			// caller and reflection.ReflectMemory has no machine-readable
+			// scope, so every emitted memory arrives here with Scope nil: with
+			// a plain `scope = ?` the reuse path NULLed out a real scope on
+			// every reflection that re-emitted a scoped fact verbatim, and
+			// nothing else about the row moved to make it visible. COALESCE
+			// keeps "not stated" reading as "leave it alone" and still lets a
+			// replacement that does state a scope rewrite it. There is no
+			// clear-the-scope operation anywhere in the API, so nothing can
+			// express "deliberately unscoped" and the ambiguity is not
+			// hiding a real case.
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE memories
 				SET category = ?, content = ?, importance = ?, source = 'reflection', tags = ?,
+				    scope = COALESCE(?, scope),
 				    created_at = datetime('now'), updated_at = datetime('now')
 				WHERE id = ?
-			`, m.Category, m.Content, m.Importance, string(tags), id); err != nil {
+			`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
 				return nil, fmt.Errorf("update reused memory: %w", err)
 			}
 			reused++
 			continue
 		}
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO memories (project_id, category, content, source, importance, tags)
-			VALUES (?, ?, ?, 'reflection', ?, ?)
-		`, projectID, m.Category, m.Content, m.Importance, string(tags))
+			INSERT INTO memories (project_id, category, content, source, importance, tags, scope)
+			VALUES (?, ?, ?, 'reflection', ?, ?, ?)
+		`, projectID, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope))
 		if err != nil {
 			return nil, fmt.Errorf("insert memory: %w", err)
 		}
@@ -1884,9 +2326,13 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		s.logger.Warn("prune old snapshots", "error", err, "project_id", projectID)
 	}
 
-	s.logger.Info("memories snapshotted before replace", "project_id", projectID, "snapshot_id", snapshotID)
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit replace: %w", err)
+	if s.logger != nil {
+		s.logger.Info("memories snapshotted before replace", "project_id", projectID, "snapshot_id", snapshotID)
+	}
+	if ownTx {
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit replace: %w", err)
+		}
 	}
 	return preserved, nil
 }
@@ -1974,7 +2420,18 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		    access_count = s.access_count, last_accessed = s.last_accessed,
 		    agent = s.agent, session_id = s.session_id, source_ref = s.source_ref,
 		    confidence = s.confidence, valid_from = s.valid_from,
-		    valid_until = s.valid_until, verified_at = s.verified_at
+		    valid_until = s.valid_until, verified_at = s.verified_at,
+		    -- scope_captured distinguishes a snapshot that recorded the
+		    -- memory's scope from a pre-v14 one whose scope column is NULL
+		    -- because that build had no column to write. For the former the
+		    -- recorded value wins, NULL included (the memory was unscoped
+		    -- then, and the restore is a revert, not an upgrade). For the
+		    -- latter the snapshot says nothing about scope, so the live row
+		    -- keeps its own — otherwise rolling back to an old snapshot
+		    -- silently unscoped a fact a later reflection had scoped
+		    -- correctly, making the corpus less specific than it was before
+		    -- the replace being undone.
+		    scope = CASE WHEN s.scope_captured = 1 THEN s.scope ELSE memories.scope END
 		FROM memory_snapshots s
 		WHERE s.snapshot_id = ? AND s.memory_id = memories.id
 		  AND memories.pinned = 0 AND memories.resolved_at IS NULL
@@ -1995,11 +2452,20 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		INSERT INTO memories (id, project_id, category, content, source, importance, tags,
 		                      created_at, updated_at, access_count, last_accessed,
 		                      agent, session_id, source_ref, confidence,
-		                      valid_from, valid_until, verified_at)
+		                      valid_from, valid_until, verified_at, scope)
 		SELECT COALESCE(memory_id, hex(randomblob(16))), project_id, category, content,
 		       source, importance, tags, created_at, created_at, access_count, last_accessed,
 		       agent, session_id, source_ref, confidence,
-		       valid_from, valid_until, verified_at
+		       valid_from, valid_until, verified_at,
+		       -- The same marker the UPDATE above honours. A snapshot whose
+		       -- scope_captured is 0 either predates the column or was
+		       -- backfilled by hand, and migrateV14 deliberately calls such a
+		       -- value unverified — so a row restored from one comes back
+		       -- unscoped rather than carrying a scope nobody recorded. The
+		       -- alternative is restoring a scope that was never true of that
+		       -- memory, which is worse than restoring none: there is no
+		       -- provenance to tell the two apart afterwards.
+		       CASE WHEN scope_captured = 1 THEN scope ELSE NULL END
 		FROM memory_snapshots
 		WHERE snapshot_id = ?
 		  AND ((memory_id IS NOT NULL AND memory_id NOT IN (SELECT id FROM memories))

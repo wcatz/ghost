@@ -188,3 +188,9 @@ jobs:
 
       - name: mcpinit package tests
         run: go test -count=1 ./internal/mcpinit/
+
+      # The harness environment policy is part of the native runtime contract:
+      # this exercises USERPROFILE/APPDATA and a real child process on Windows,
+      # rather than relying only on a cross-compile.
+      - name: ai package tests
+        run: go test -count=1 ./internal/ai/

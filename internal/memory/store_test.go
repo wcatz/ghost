@@ -3368,7 +3368,8 @@ func TestSeedGlobalMemories(t *testing.T) {
 		t.Fatal("_global project not created")
 	}
 
-	// Verify seed memories are present, pinned, and manual source.
+	// Verify seed memories are present, pinned, and carry the distinct builtin
+	// source rather than being presented as user-authored manual rows.
 	mems, err := s.GetAll(ctx, "_global", 50)
 	if err != nil {
 		t.Fatalf("GetAll _global: %v", err)
@@ -3381,8 +3382,8 @@ func TestSeedGlobalMemories(t *testing.T) {
 	for _, m := range mems {
 		if strings.Contains(m.Content, "Co-Authored-By") {
 			coAuthorFound = true
-			if m.Source != "manual" {
-				t.Errorf("seed memory source = %q, want 'manual'", m.Source)
+			if m.Source != "builtin" {
+				t.Errorf("seed memory source = %q, want 'builtin'", m.Source)
 			}
 			if !m.Pinned {
 				t.Error("seed memory should be pinned")
