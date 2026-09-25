@@ -256,6 +256,73 @@ right now the bottleneck is adoption, not pricing structure.
 
 ---
 
+## Part 9 — Architecture direction: memory axes and context assembly (P0–P3)
+
+> Added 2026-09-25 from an architecture-direction review of `main` (`cab4236`).
+> The target design is documented in [`architecture.md`](architecture.md#memory-axes)
+> and [`architecture.md`](architecture.md#context-assembly-target-design). This
+> section is the sequence; the issues are the work. Nothing here is a commitment
+> beyond P0, which is correctness work against already-shipped behavior.
+
+Verified as already delivered and therefore not repeated below: repository
+identity across checkouts ([#539](https://github.com/wcatz/ghost/pull/539)),
+machine-readable scope ([#562](https://github.com/wcatz/ghost/pull/562),
+[#563](https://github.com/wcatz/ghost/pull/563)), identity-based snapshot restore
+([#564](https://github.com/wcatz/ghost/pull/564)), and the GhostMem rebrand
+(`672fb42`, [#525](https://github.com/wcatz/ghost/pull/525)).
+
+### P0 — correctness first (make the axes mean something)
+
+The four axes are named in [`architecture.md`](architecture.md#memory-axes), but
+three of them are inert today. P0 is the smallest set of changes that makes
+"validity", "confidence", and "scope" mean what the schema says they mean, and
+stops two active defects.
+
+| Issue | Why it is P0 |
+|---|---|
+| [#575](https://github.com/wcatz/ghost/issues/575) | Five of the seven schema-v10 columns are unreachable and the two written are never read — validity and confidence are decorative until this lands |
+| [#573](https://github.com/wcatz/ghost/issues/573) | Scope post-filter runs over an unnarrowed window, so filtered results are already lossy |
+| [#574](https://github.com/wcatz/ghost/issues/574) | The linker's `related` edges bypass the scope exemption added in #563 |
+| [#571](https://github.com/wcatz/ghost/issues/571) | Explain mode reports rows the tool would exclude |
+| [#577](https://github.com/wcatz/ghost/issues/577) | Session-start injection neither renders nor filters scope — the surface that most needs it |
+| [#579](https://github.com/wcatz/ghost/issues/579) | Define the four axes and their invariants; the documentation half can land first and this section already starts it |
+| [#580](https://github.com/wcatz/ghost/issues/580) | Retrieval never abstains: weak matches are returned as if authoritative |
+| [#588](https://github.com/wcatz/ghost/issues/588) | **Bug.** Every lifecycle call leaks a `[ghost]` OpenCode session into the user's session list (6,397 measured); needs an isolated data dir plus post-call deletion |
+
+### P1 — one context assembler, explainable
+
+| Issue | Why it is P1 |
+|---|---|
+| [#581](https://github.com/wcatz/ghost/issues/581) | The target pipeline: retrieve → validity → scope → provenance → conflicts → dedup → diversity → budget → render, with a per-stage trace |
+| [#583](https://github.com/wcatz/ghost/issues/583) | Explain reports the pipeline's own computations (validity, confidence, scope, contradiction, diversity) instead of only RRF mechanics |
+| [#578](https://github.com/wcatz/ghost/issues/578) | Append-only `memory_provenance`: who changed what, when — provenance is a mutable column with no history today |
+| [#584](https://github.com/wcatz/ghost/issues/584) | Stress the documented multi-process contract with the real entry points (MCP + CLI + maintenance), including read-snapshot-across-write and batch atomicity |
+| [#585](https://github.com/wcatz/ghost/issues/585) | Adversarial fixtures for the import, host-event, and Obsidian parse paths, defending the fixes in #545/#546/#552/#553 |
+
+### P2 — data ownership
+
+| Issue | Why it is P2 |
+|---|---|
+| [#586](https://github.com/wcatz/ghost/issues/586) | First-class backup/export/import (online backup API, inspectable artifact, verified restore) instead of "copy the data dir"; prerequisite for merging two machines' databases |
+| [#587](https://github.com/wcatz/ghost/issues/587) | Retention/ownership tiers: `session` expires, `project` is the default, `persistent` is exempt from consolidation and pruning |
+| [#582](https://github.com/wcatz/ghost/issues/582) | Context-quality metrics (precision, contamination, budget adherence, diversity, token cost) — coordinate with [#561](https://github.com/wcatz/ghost/issues/561) rather than duplicating its methodology fixes |
+
+P2 depends on P1: export must serialise the axes, pruning needs provenance to
+audit it, and context metrics only make sense once stages 2–8 are one pipeline.
+
+### P3 — gated hardening
+
+| Issue | Why it is P3 |
+|---|---|
+| [#558](https://github.com/wcatz/ghost/issues/558) | Release signing: checksums are published but never signed, so `ghost upgrade` cannot verify provenance; gated on the upgrade path being worth a signature format |
+| [#542](https://github.com/wcatz/ghost/issues/542) | Data-dir growth (pre-migrate backups, unrotated logs, stale lock files) — becomes tractable once #586 gives backups a retention policy |
+| [#552](https://github.com/wcatz/ghost/issues/552) / [#545](https://github.com/wcatz/ghost/issues/545) / [#546](https://github.com/wcatz/ghost/issues/546) | Harness env allowlist and the two reflection/resolution privilege findings; the adversarial fixtures in #585 are the regression net |
+
+Team mode (Part 4) and compliance controls (Part 5) remain gated on real demand
+and are unaffected by this sequence.
+
+---
+
 ## Closing principle
 
 Keep the free tier genuinely complete — it's the trust anchor, not a lure.
