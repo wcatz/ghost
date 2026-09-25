@@ -220,3 +220,4 @@
 {"name": "q_long_validation", "text": "how do I run long tests without dirtying main", "rel": {"worktree_before_long": 3}}
 {"name": "q_scope_before", "text": "what should I state before editing files", "rel": {"state_scope_before_edit": 3, "scope_discipline": 1}}
 {"name": "q_regression_guard", "text": "what is forbidden when a feature blocks another", "rel": {"never_remove_for_add": 3, "run_tests_before_after": 1}}
+{"name":"q_sops_age_key","text":"the listener on 8090 timed out, who owns it","rel":{"tx_submit_port":3}}
