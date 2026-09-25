@@ -46,9 +46,11 @@ class TestFileLevelFallback(unittest.TestCase):
         self.assertEqual(p.call_args_list[1].args[2]["comments"], [])
         self.assertEqual(fp.call_count, 1)
 
-    def test_file_level_failure_fails_closed(self):
-        rc, _, _ = self._run([_proc(1, "gh: HTTP 422"), _proc(0)], [_proc(1, "HTTP 422")])
+    def test_file_level_failure_fails_closed_before_marker(self):
+        rc, p, _ = self._run([_proc(1, "gh: HTTP 422"), _proc(0)], [_proc(1, "HTTP 422")])
         self.assertEqual(rc, 1)
+        # the marker-bearing review is never posted after a lost finding
+        self.assertEqual(p.call_count, 1)
 
     def test_non_422_is_not_retried(self):
         rc, p, fp = self._run([_proc(1, "gh: HTTP 401")], [])

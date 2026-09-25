@@ -147,6 +147,15 @@ def main(argv):
               f"({_log_safe(_api_error(proc), limit=300)}); "
               "retrying with file-level comments")
         file_level, payload = payload["comments"], dict(payload, comments=[])
+        # Threads first, marker-bearing review last: the marker tells the
+        # next run this commit was reviewed, so it must never be posted
+        # while any finding still lacks a thread.
+        for c in file_level:
+            fp = _post_file_comment(repo, number, payload["commit_id"], c)
+            if fp.returncode != 0:
+                print(f"::error::posting a file-level finding failed: "
+                      f"{_log_safe(_api_error(fp), limit=500)}", file=sys.stderr)
+                return 1
         proc = _post(repo, number, payload)
     if proc.returncode != 0:
         # GitHub's Reviews API can return a 422 whose body echoes back
@@ -162,13 +171,6 @@ def main(argv):
               file=sys.stderr)
         return 1
 
-    for c in file_level:
-        fp = _post_file_comment(repo, number, payload["commit_id"], c)
-        if fp.returncode != 0:
-            # Fail closed: a finding the gate cannot see must not pass.
-            print(f"::error::posting a file-level finding failed: "
-                  f"{_log_safe(_api_error(fp), limit=500)}", file=sys.stderr)
-            return 1
     print(f"posted review: {len(payload['comments'])} inline finding(s), "
           f"{len(file_level)} file-level, "
           f"{len(dropped)} unanchored")
