@@ -211,18 +211,29 @@ func parseCodexTOMLStringArray(val string) []string {
 	return out
 }
 
-// codexValueComplete reports whether a value's brackets and braces balance.
-// Three things that look like structure are not: a "#" opens a comment that runs
-// to the end of the line, a backslash escapes the next byte inside a basic
-// "..." string, and a literal '...' string has no escapes at all. Misreading any
-// of them makes a finished value look unfinished, and a repair that believes it
-// is still running swallows every following line as part of it.
+// codexValueComplete reports whether a value's brackets and braces balance. A
+// value split over several lines (args = [ ... ]) has continuation lines that
+// belong to the key above them, so a value that does not balance on its own line
+// is the signal to look further down. Three things that look like structure are
+// not: a "#" opens a comment running to the end of the line, a backslash escapes
+// the next byte inside a basic "..." string, and a literal '...' string has no
+// escapes at all. Misreading any of them makes a finished value look unfinished,
+// and a repair that believes it is still running deletes the user's keys below.
+//
+// A comment ends the value only at depth 0, where the value is finished anyway.
+// Deeper in a bracket the comment is skipped and the scan carries on, because
+// the closing bracket usually sits on a later line.
 func codexValueComplete(value string) bool {
 	depth := 0
 	for i := 0; i < len(value); i++ {
 		switch c := value[i]; c {
 		case '#':
-			return depth == 0 // the rest of the line is a comment, not a value
+			if depth == 0 {
+				return true // the rest of the line is a comment, not a value
+			}
+			for i < len(value) && value[i] != '\n' {
+				i++ // skip the comment, keeping any bracket depth
+			}
 		case '\'', '"':
 			i = codexStringEnd(value, i)
 		case '[', '{':
@@ -290,18 +301,16 @@ func normaliseCodexTableName(line string) (name string, ok bool) {
 	if inner == "" {
 		return "", false
 	}
-	parts := strings.Split(inner, ".")
-	for i, part := range parts {
-		part = strings.TrimSpace(part)
-		if len(part) >= 2 && (part[0] == '\'' || part[0] == '"') && part[len(part)-1] == part[0] {
-			part = part[1 : len(part)-1]
-		}
-		if part == "" || strings.ContainsAny(part, "[]") {
-			return "", false
-		}
-		parts[i] = part
+	name, isPath := codexDottedKeyPath(inner)
+	if !isPath {
+		// ["mcp_servers.ghost"] declares one literal key holding a dot, which
+		// is a different table from the mcp_servers.ghost path.
+		return "", false
 	}
-	return strings.Join(parts, "."), true
+	if strings.ContainsAny(name, "[]") {
+		return "", false
+	}
+	return name, true
 }
 
 // codexIsTableHeader reports whether line opens a TOML table. The '=' guard
@@ -334,14 +343,19 @@ func codexTableName(line string) string {
 // ["a","b"] inside a multi-line array is bracketed exactly like a header, so a
 // scanner that ignores continuations can end the ghost table's span early and
 // then insert owned keys that already exist further down the table.
+//
+// A table header ends an open value even when that value is malformed, because
+// treating it as yet another line of the value hides every table below the typo
+// from all three scanners: the ghost table itself can become invisible (so init
+// appends a second copy of a table already in the file), or a neighbouring
+// server's keys get swept into the ghost span and dropped. codexHeaderClosesValue
+// draws the line between that and a nested array element, which is bracketed
+// exactly like a header.
 func codexValueContinuationLines(lines []string) map[int]bool {
 	continuation := make(map[int]bool)
 	value, open := "", false
 	for i, line := range lines {
-		if !open && codexIsTableHeader(line) {
-			continue // a header always closes an open value
-		}
-		if open {
+		if open && !codexHeaderClosesValue(line) {
 			continuation[i] = true
 			value += "\n" + line
 			if codexValueComplete(value) {
@@ -349,11 +363,67 @@ func codexValueContinuationLines(lines []string) map[int]bool {
 			}
 			continue
 		}
+		open, value = false, ""
+		if codexIsTableHeader(line) {
+			continue
+		}
 		if _, v, ok := splitCodexAssignment(line); ok && !codexValueComplete(v) {
 			open, value = true, v
 		}
 	}
 	return continuation
+}
+
+// codexHeaderClosesValue reports whether a line is a table header that must end a
+// value still open above it. A bare-key header ([mcp_servers.other]) always
+// does. A header with any quoted key part does not, because a nested array
+// element such as ["b"] is indistinguishable from it and is far more common
+// inside a value than a quoted table header is; the residual risk is a quoted
+// table header directly below a malformed value, which stays part of the value.
+func codexHeaderClosesValue(line string) bool {
+	if !codexIsTableHeader(line) {
+		return false
+	}
+	return !strings.ContainsAny(codexStripComment(strings.TrimSpace(line)), `'"`)
+}
+
+// codexDottedKeyPath returns the dotted key path a `key = value` assignment
+// declares, and whether the text really is a path. A quoted token is one literal
+// key part, so "mcp_servers".ghost is the path mcp_servers.ghost and
+// mcp_servers . ghost is the same path with spacing, while "mcp_servers.ghost"
+// is a single key whose name happens to contain a dot, which is a different key
+// and must not be read as the ghost server.
+func codexDottedKeyPath(text string) (path string, isPath bool) {
+	// Split on the dots that separate key parts, not on a dot inside a quoted
+	// token: in "mcp_servers.ghost" the dot belongs to the key's name.
+	var parts []string
+	start := 0
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case '\'', '"':
+			i = codexStringEnd(text, i)
+		case '.':
+			parts = append(parts, text[start:i])
+			start = i + 1
+		}
+	}
+	parts = append(parts, text[start:])
+
+	names := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if len(part) >= 2 && (part[0] == '\'' || part[0] == '"') && part[len(part)-1] == part[0] {
+			if strings.ContainsRune(part[1:len(part)-1], '.') {
+				return "", false
+			}
+			part = part[1 : len(part)-1]
+		}
+		if part == "" {
+			return "", false
+		}
+		names = append(names, part)
+	}
+	return strings.Join(names, "."), true
 }
 
 // findCodexTOMLTable locates the [key] table header in lines and returns the
@@ -512,9 +582,13 @@ func findCodexDottedGhost(lines []string, key string) (at int, text string, ok b
 		if !isAssign {
 			continue
 		}
-		full := assigned
+		assignedPath, isPath := codexDottedKeyPath(assigned)
+		if !isPath {
+			continue // a single literal key, not a path
+		}
+		full := assignedPath
 		if table != "" {
-			full = table + "." + assigned
+			full = table + "." + assignedPath
 		}
 		if (full == key || strings.HasPrefix(full, key+".")) && !codexTableWithin(table, key) {
 			return i + 1, strings.TrimSpace(line), true
