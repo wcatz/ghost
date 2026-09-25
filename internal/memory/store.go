@@ -472,37 +472,48 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 	// prefix match has already answered, so resolution stops here, which is
 	// deliberate: the save was told a directory, not a repository, and #612's
 	// `ghost project bind` is the command that states which checkout is which
-	// project.
+	// project — once the enclosing project records a remote, which is what
+	// checkBindPathConflicts requires before it will bind a path inside one. A
+	// save from the enclosing checkout's own root is what gives it one.
 	//
 	// Logged for the same reason the unique-name refusal is: the save landed
 	// somewhere and the project that answered for it is deliberately left
 	// unclaimed, which is a fact a user with a nested checkout will want.
 	//
-	// The projectID comparison is the guard's own evidence check: the answer
-	// describes one project, read before the lock, and it is consulted only when
-	// the transaction matched that same project. Every other case — no answer, or
-	// an answer about a different row — is no evidence, and no evidence refuses,
-	// because this guard exists to stop a wrong remote being written and a
-	// missing reading is not permission to write one.
+	// The evidence checks are the guard's own: the answer describes one project
+	// at one path, read before the lock, and it is consulted only when the
+	// transaction matched that same project at that same path. Both are needed.
+	// The id alone is not enough, because a project re-pointed by
+	// BindProjectPath between the two reads is the same row at a different
+	// checkout, and the answer says nothing about the checkout it now records —
+	// a remote identified at /a/infra does not describe /b/other. The window
+	// between the two reads is not small: it contains s.mu.Lock() and a BEGIN
+	// IMMEDIATE that can block on another process's write lock. Every other
+	// case — no answer, an answer about another row, an answer about a
+	// different path — is no evidence, and no evidence refuses, because this
+	// guard exists to stop a wrong remote being written and a missing reading is
+	// not permission to write one.
 	//
 	// The evidence keys are the pre-lock read's and describe a row that is not
 	// necessarily the one matched here, so they are named as what they are
-	// rather than as properties of recorded_path. Three causes reach this line
-	// and each needs a different fix, so they have to be tellable apart: a
+	// rather than as properties of recorded_path. The causes that reach this
+	// line have to be tellable apart, because each needs a different fix: a
 	// different repository found at the recorded path (evidence_project == id
-	// and evidence_recorded_remote names another remote), nothing readable
-	// there (same id, empty remote), and evidence that was never collected or
-	// was about another project (evidence_project "" or different, which is a
-	// project created or re-pointed between the two reads). Reporting the
-	// pre-lock remote next to the transaction's recorded_path as if they
-	// described the same row would read as the second cause in the first and
-	// third, sending an operator after a nested checkout they do not have.
-	if prefixMatch && (saving.projectID != id || !saving.speaksForProject) {
+	// and evidence_recorded_remote names another remote), nothing readable there
+	// (same id, empty remote), and evidence that was never collected, or was
+	// about another row or another path (evidence_project or evidence_path
+	// empty or different, which is a project created or re-pointed between the
+	// two reads). Reporting the pre-lock values next to the transaction's
+	// recorded_path as if they described the same row would read as the second
+	// cause in the first and third, sending an operator after a nested checkout
+	// they do not have.
+	if prefixMatch && (saving.projectID != id || saving.recordedPath != matchedPath || !saving.speaksForProject) {
 		s.logger.Warn("refused to bind a repository to a project whose checkout contains this save: could not establish that the saving directory belongs to that project's own repository",
 			"project", id,
 			"recorded_path", matchedPath,
 			"saving_path", projectRef, "saving_path_remote", repoRemote,
-			"evidence_project", saving.projectID, "evidence_recorded_remote", saving.recordedRemote)
+			"evidence_project", saving.projectID, "evidence_path", saving.recordedPath,
+			"evidence_recorded_remote", saving.recordedRemote)
 		return id, true, nil
 	}
 
@@ -531,16 +542,22 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 // connection too.
 //
 // It carries the row it was read from rather than a bare yes, because the
-// transaction has to be able to tell an answer about the project it matched from
-// no answer at all. The transaction is the authority: it consults this only when
-// projectID is the project it just matched, and a winner it did not confirm — a
-// project created or re-pointed between the two reads, or a read that failed —
-// leaves the guard with no evidence, which refuses. A guard that treated a
-// missing answer as permission would be no guard at all on exactly the paths
-// where its input could not be collected.
+// transaction has to be able to tell an answer about the project it matched, at
+// the path it matched, from no answer at all. The transaction is the authority:
+// it consults this only when projectID is the project it just matched and
+// recordedPath is the path that project records, and anything else — a project
+// created or re-pointed between the two reads, or a read that failed — leaves
+// the guard with no evidence, which refuses. A guard that treated a missing
+// answer as permission would be no guard at all on exactly the paths where its
+// input could not be collected.
 type savingRepository struct {
 	// projectID is the project this answer describes, "" when there is none.
 	projectID string
+	// recordedPath is the path the answer was decided from, which is not the
+	// same question as projectID: BindProjectPath re-points a project in place,
+	// so the same id can begin recording a different checkout between this read
+	// and the transaction. Empty when there is no answer.
+	recordedPath string
 	// recordedRemote is what that project records for itself. A project that
 	// records one is never decided by this answer — the transaction returns
 	// before the guard — so it is read to skip the detection rather than to
@@ -614,7 +631,12 @@ func (s *Store) savingRepository(ctx context.Context, projectRef, repoRemote str
 	if winner.id == "" {
 		return savingRepository{}
 	}
-	saving := savingRepository{projectID: winner.id, recordedRemote: winner.remote, speaksForProject: true}
+	saving := savingRepository{
+		projectID:        winner.id,
+		recordedPath:     winner.path,
+		recordedRemote:   winner.remote,
+		speaksForProject: true,
+	}
 	// The project already says which repository it is, and the transaction
 	// returns on that before the guard: this answer cannot change what happens,
 	// so it costs nothing to leave it at "speaks" and spend no detection.
