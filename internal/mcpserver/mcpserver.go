@@ -62,28 +62,32 @@ var detectRemoteForSave = repo.DetectRemote
 // repository, so detection is confined to that case: an ordinary named save
 // never spawns a process.
 //
-// A detected repository is carried through ordinary path/name lookup rather
-// than discarded when a location-shaped input resolves. Any project found that
-// way is rechecked against the observed remote before the save proceeds; a
-// lookup miss can then fall back to the write-side repository-name binding.
-// Resolution cannot live in Store.ResolveProject: a path carries no repository
-// identity of its own, so asking the store "which project is this path?" would
-// need the store to run git — which it deliberately never does.
+// For a path-shaped input with a detected remote, the transactional store
+// operation repeats exact/longest-prefix path resolution and rechecks the
+// result against that remote. Only after both miss may a unique project name
+// derived from the repository claim the save. Resolution cannot live entirely
+// in Store.ResolveProject: a path carries no repository identity of its own,
+// so the MCP boundary must run git and hand the result to the store.
 //
 // The caller must use the returned id rather than the argument. Ensuring can
 // fold an already-duplicate row into its canonical project, and writing to
 // the folded-away id afterwards fails on a foreign key against a project that
 // was deliberately not created.
 func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string, error) {
+	pathShaped := strings.ContainsAny(projectID, `/\`)
 	remote := ""
-	if strings.ContainsAny(projectID, `/\`) {
+	if pathShaped {
 		remote = detectRemoteForSave(projectID)
 	}
+	if pathShaped && memory.NormalizeRepoRemote(remote) != "" {
+		// The transactional store operation repeats exact/longest-prefix path
+		// resolution without the basename fallback. Going through ResolveProject
+		// first could turn an arbitrary duplicate basename into an explicit id
+		// and bypass the unique-name rule.
+		return s.ensureProjectForWithRemote(ctx, projectID, remote)
+	}
 
-	// Resolve ordinary id/name/path evidence while retaining the observed
-	// remote. A longest-prefix hit must be checked against that remote before a
-	// repository-name candidate can claim the save. On a miss, the write-side
-	// helper below binds the remote to a unique named project when safe.
+	// With no usable repository identity, retain ordinary id/name/path lookup.
 	id, _, err := s.store.ResolveProject(ctx, projectID)
 	if err != nil {
 		return "", fmt.Errorf("resolve project: %w", err)
@@ -100,30 +104,19 @@ func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string
 func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repoRemote string) (string, error) {
 	normalizedRemote := memory.NormalizeRepoRemote(repoRemote)
 	if normalizedRemote != "" {
-		id, matched, err := s.store.ResolveOrBindRepoRemote(ctx, projectID, path.Base(normalizedRemote), repoRemote)
-		if err != nil {
-			return "", fmt.Errorf("resolve or bind project by repository: %w", err)
-		}
-		if matched {
-			return id, nil
-		}
+		return s.store.ResolveOrCreateRepoProject(
+			ctx,
+			projectID,
+			path.Base(normalizedRemote),
+			projectID,
+			projectID,
+			projectID,
+			repoRemote,
+		)
 	}
 
 	if err := s.store.EnsureProjectWithRepo(ctx, projectID, "", projectID, repoRemote); err != nil {
 		return "", err
-	}
-
-	// Ensure may have folded an existing duplicate row into its canonical
-	// project, so ask again before handing the id back.
-	if normalizedRemote != "" {
-		id, matched, err := s.store.ResolveOrBindRepoRemote(ctx, projectID, path.Base(normalizedRemote), repoRemote)
-		if err != nil {
-			return "", fmt.Errorf("resolve project by repository after ensure: %w", err)
-		}
-		if matched {
-			return id, nil
-		}
-		return "", fmt.Errorf("project %q belongs to a different repository", projectID)
 	}
 	return projectID, nil
 }

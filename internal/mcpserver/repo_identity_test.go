@@ -2,6 +2,8 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +90,121 @@ func TestSaveAcrossCheckoutsOfOneRepositoryIsOneProject(t *testing.T) {
 	for _, want := range []string{"saved from the first checkout", "saved from the second checkout"} {
 		if !strings.Contains(back, want) {
 			t.Errorf("search from the second checkout did not return %q:\n%s", want, back)
+		}
+	}
+}
+
+// TestConcurrentFirstPathSavesShareOneRepositoryProject uses separate SQLite
+// handles to model independent Ghost processes. The first save for a
+// repository has no remote owner to merge into, so resolve-and-create must be
+// one write transaction; a per-Store mutex plus autocommit is not enough.
+func TestConcurrentFirstPathSavesShareOneRepositoryProject(t *testing.T) {
+	const handles = 8
+	dbPath := filepath.Join(t.TempDir(), "concurrent-project.sqlite")
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	stores := make([]*memory.Store, 0, handles)
+	servers := make([]*Server, 0, handles)
+	for i := 0; i < handles; i++ {
+		db, err := memory.OpenDB(dbPath)
+		if err != nil {
+			t.Fatalf("OpenDB %d: %v", i, err)
+		}
+		t.Cleanup(func() { _ = db.Close() })
+		store := memory.NewStore(db, logger)
+		stores = append(stores, store)
+		servers = append(servers, New(store, logger, "test"))
+	}
+
+	type result struct {
+		id  string
+		err error
+	}
+	const remote = "https://github.com/wcatz/ghost.git"
+	start := make(chan struct{})
+	results := make(chan result, handles)
+	for i, server := range servers {
+		projectID := fmt.Sprintf("/checkout-%d", i)
+		go func(server *Server, projectID string) {
+			<-start
+			id, err := server.ensureProjectForWithRemote(ctx, projectID, remote)
+			results <- result{id: id, err: err}
+		}(server, projectID)
+	}
+	close(start)
+
+	ids := make(map[string]struct{})
+	for i := 0; i < handles; i++ {
+		got := <-results
+		if got.err != nil {
+			t.Fatalf("concurrent ensure %d: %v", i, got.err)
+		}
+		ids[got.id] = struct{}{}
+	}
+	if len(ids) != 1 {
+		t.Errorf("concurrent first saves returned %d canonical ids, want 1", len(ids))
+	}
+
+	projects, err := stores[0].ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	repositoryProjects := 0
+	for _, project := range projects {
+		if project.ID != "_global" {
+			repositoryProjects++
+		}
+	}
+	if repositoryProjects != 1 {
+		t.Errorf("concurrent first saves created %d repository projects, want 1", repositoryProjects)
+	}
+}
+
+// TestPathSaveDoesNotBindAmbiguousRepositoryName proves ordinary basename
+// resolution cannot bypass the unique-name rule on the write path. Two
+// projects named ghost make a LIMIT 1 basename hit arbitrary; the path-shaped
+// save must create its own project instead of binding either candidate.
+func TestPathSaveDoesNotBindAmbiguousRepositoryName(t *testing.T) {
+	memory.SetDetectRemote(repo.DetectRemote)
+	t.Cleanup(func() { memory.SetDetectRemote(nil) })
+
+	const origin = "https://github.com/wcatz/ghost.git"
+	checkout := repoDir(t, "ghost", origin)
+	srv, session := newCapSession(t)
+	ctx := context.Background()
+	for _, id := range []string{"first", "second"} {
+		if err := srv.store.EnsureProject(ctx, id, "", "ghost"); err != nil {
+			t.Fatalf("EnsureProject %s: %v", id, err)
+		}
+	}
+
+	res := callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": checkout,
+		"content":    "saved without choosing an ambiguous project name",
+		"category":   "fact",
+	})
+	if res.IsError {
+		t.Fatalf("save failed: %s", resultText(res))
+	}
+	projects, err := srv.store.ListProjects(ctx)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if len(projects) != 4 { // test-project, two ambiguous names, path project
+		t.Fatalf("ambiguous path save got %d projects, want 4", len(projects))
+	}
+	for _, id := range []string{"first", "second", checkout} {
+		count, err := srv.store.CountMemories(ctx, id)
+		if err != nil {
+			t.Fatalf("CountMemories(%q): %v", id, err)
+		}
+		want := 0
+		if id == checkout {
+			want = 1
+		}
+		if count != want {
+			t.Errorf("memory count for %q = %d, want %d", id, count, want)
 		}
 	}
 }
