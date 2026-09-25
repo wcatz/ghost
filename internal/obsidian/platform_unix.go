@@ -39,3 +39,11 @@ func isDirNotEmpty(err error) bool {
 func makeFIFO(path string) error {
 	return syscall.Mkfifo(path, 0o600)
 }
+
+// isTransientRenameErr reports whether a failed rename is worth retrying.
+// POSIX rename either lands or fails for a reason a retry cannot change (a
+// missing path, a cross-device link), so nothing is transient here — unlike
+// Windows, where the replace can lose a race with any reader.
+func isTransientRenameErr(err error) bool {
+	return false
+}

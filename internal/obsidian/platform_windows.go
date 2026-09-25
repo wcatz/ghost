@@ -120,3 +120,16 @@ func isDirNotEmpty(err error) bool {
 func makeFIFO(path string) error {
 	return errors.New("named pipes are not a filesystem concept on Windows")
 }
+
+// isTransientRenameErr reports whether a failed rename may succeed on a
+// retry. MoveFileEx's replace step fails with a sharing violation whenever
+// another process holds the destination open without FILE_SHARE_DELETE —
+// Obsidian, Search Indexer, or Defender reading the vault is routine, not
+// exceptional — and the same race between two concurrent syncs surfaces as
+// ERROR_ACCESS_DENIED. A genuinely denied rename (read-only attribute, real
+// DACL denial) just spends the same bounded backoff and then reports.
+func isTransientRenameErr(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
+		errors.Is(err, windows.ERROR_LOCK_VIOLATION) ||
+		errors.Is(err, windows.ERROR_ACCESS_DENIED)
+}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 const markerName = ".ghost-vault"
@@ -26,14 +27,40 @@ func readDir(dir string) ([]os.DirEntry, error) {
 // cleanup to fail deterministically — the same rationale as readDirFn.
 var removeDirFn atomic.Value // func(string) error
 
+// renameFn is swappable so tests can force the publish step to fail with a
+// platform-specific transient error (see renameWithRetry).
+var renameFn atomic.Value // func(string, string) error
+
 func init() {
 	readDirFn.Store(os.ReadDir)
 	removeDirFn.Store(os.Remove)
+	renameFn.Store(os.Rename)
 }
 
 func removeDir(path string) error {
 	fn, _ := removeDirFn.Load().(func(string) error)
 	return fn(path)
+}
+
+// renameWithRetry publishes the temp file over the destination, retrying a
+// transient failure. On Windows the replace can lose a race with any reader
+// that holds the destination open (Obsidian, Search Indexer, Defender), or
+// with a concurrent sync — on a vault that exists to be read, that is
+// routine, so a bounded backoff beats failing the export. The predicate is
+// per-platform: POSIX rename has no such transient state.
+func renameWithRetry(oldPath, newPath string) error {
+	const attempts = 4
+	var err error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(time.Duration(i) * 20 * time.Millisecond)
+		}
+		fn, _ := renameFn.Load().(func(string, string) error)
+		if err = fn(oldPath, newPath); err == nil || !isTransientRenameErr(err) {
+			return err
+		}
+	}
+	return err
 }
 
 // ensureVault prepares dir as a Ghost-managed mirror target. Fresh or empty
@@ -143,7 +170,7 @@ func writeIfChanged(path, content string) (bool, error) {
 	if err := f.Close(); err != nil {
 		return false, err
 	}
-	return true, os.Rename(tmp, path)
+	return true, renameWithRetry(tmp, path)
 }
 
 // maxFrontmatterLine bounds a single frontmatter line for hasGhostID's
