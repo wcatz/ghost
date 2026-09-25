@@ -22,18 +22,22 @@ import (
 func TestSearchHybridKeywordOnlyBackfillsDeletedRow(t *testing.T) {
 	store, ctx := setupTestStore(t)
 
-	// Enough candidates that losing the top one still leaves a full window.
-	ids := make([]string, 0, 6)
+	// Enough candidates that losing the top-ranked one still leaves a full window.
 	for i := 0; i < 6; i++ {
-		id := createTestMemory(t, store, ctx, fmt.Sprintf("database configuration candidate %d", i))
-		ids = append(ids, id)
+		createTestMemory(t, store, ctx, fmt.Sprintf("database configuration candidate %d", i))
 	}
 
+	// Record which row the hook removed rather than assuming which one it is. The
+	// fixture documents are structurally identical for the query terms and all
+	// share an importance, so every row ties on both keys of the FTS ORDER BY and
+	// SQLite is free to break that tie any way it likes.
+	var deleted string
 	beforeHybridHydrateFn.Store(func(selected []string) {
 		if len(selected) == 0 {
 			return
 		}
-		if err := store.Delete(ctx, selected[0]); err != nil {
+		deleted = selected[0]
+		if err := store.Delete(ctx, deleted); err != nil {
 			t.Fatalf("delete selected candidate: %v", err)
 		}
 	})
@@ -43,12 +47,15 @@ func TestSearchHybridKeywordOnlyBackfillsDeletedRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchHybrid: %v", err)
 	}
+	if deleted == "" {
+		t.Fatalf("the hydration hook never ran, so this test did not exercise the race")
+	}
 	if len(got) != 5 {
 		t.Fatalf("got %d results after the top-ranked row was deleted, want 5: the keyword-only "+
 			"path must re-read by id so the vanished row can be backfilled", len(got))
 	}
 	for _, m := range got {
-		if m.ID == ids[0] {
+		if m.ID == deleted {
 			t.Fatalf("result set still contains the deleted row %s", m.ID)
 		}
 	}
@@ -63,12 +70,12 @@ func TestSearchHybridKeywordOnlyBackfillsDeletedRow(t *testing.T) {
 
 	// And the store must agree the row is gone, so the assertion above is about
 	// this search and not about the delete silently failing.
-	remaining, err := store.GetByIDs(ctx, ids[:1])
+	remaining, err := store.GetByIDs(ctx, []string{deleted})
 	if err != nil {
 		t.Fatalf("GetByIDs(deleted): %v", err)
 	}
 	if len(remaining) != 0 {
-		t.Fatalf("deleted row %s is still in the store; the fixture is not testing the race", ids[0])
+		t.Fatalf("deleted row %s is still in the store; the fixture is not testing the race", deleted)
 	}
 }
 
@@ -103,16 +110,19 @@ func TestSearchHybridReadsOnlyTheWindowWhenNothingVanished(t *testing.T) {
 // a selected row is deleted between the leg query and hydration.
 func TestSearchHybridReadsThePoolWhenAWindowRowVanished(t *testing.T) {
 	store, ctx, reads := hydrationCountingStore(t)
-	ids := make([]string, 0, 6)
 	for i := 0; i < 6; i++ {
-		ids = append(ids, createTestMemory(t, store, ctx, fmt.Sprintf("database configuration candidate %d", i)))
+		createTestMemory(t, store, ctx, fmt.Sprintf("database configuration candidate %d", i))
 	}
 
+	// The rows tie on FTS rank and importance, so which one the window puts first
+	// is SQLite's choice. Assert against the row the hook actually removed.
+	var deleted string
 	beforeHybridHydrateFn.Store(func(selected []string) {
 		if len(selected) == 0 {
 			return
 		}
-		if err := store.Delete(ctx, selected[0]); err != nil {
+		deleted = selected[0]
+		if err := store.Delete(ctx, deleted); err != nil {
 			t.Fatalf("delete selected candidate: %v", err)
 		}
 	})
@@ -123,12 +133,15 @@ func TestSearchHybridReadsThePoolWhenAWindowRowVanished(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchHybrid: %v", err)
 	}
+	if deleted == "" {
+		t.Fatalf("the hydration hook never ran, so this test did not exercise the race")
+	}
 	if len(got) != 5 {
 		t.Fatalf("got %d results after the top-ranked row was deleted, want 5: the keyword-only "+
 			"path must re-read by id so the vanished row can be backfilled", len(got))
 	}
 	for _, m := range got {
-		if m.ID == ids[0] {
+		if m.ID == deleted {
 			t.Fatalf("result set still contains the deleted row %s", m.ID)
 		}
 		// A backfill that only padded the slice would pass the length check, so
@@ -144,8 +157,9 @@ func TestSearchHybridReadsThePoolWhenAWindowRowVanished(t *testing.T) {
 		t.Fatalf("issued %d id-list reads %v, want a second read of the candidate pool: that is "+
 			"where the backfill replacement comes from", len(sizes), sizes)
 	}
-	if sizes[len(sizes)-1] <= sizes[0] {
-		t.Errorf("backfill read %v is not wider than the window read %v; the pool must be the "+
-			"larger of the two", sizes, sizes[0])
+	backfill, window := sizes[len(sizes)-1], sizes[0]
+	if backfill <= window {
+		t.Errorf("backfill read %d ids, not wider than the %d-id window read; the pool must be "+
+			"the larger of the two (all reads: %v)", backfill, window, sizes)
 	}
 }
