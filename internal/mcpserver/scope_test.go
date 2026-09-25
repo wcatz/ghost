@@ -202,8 +202,17 @@ func TestScopeNarrowingIsReported(t *testing.T) {
 	}
 	out := resultText(res)
 
-	if strings.Contains(out, "for development") {
-		t.Errorf("development row survived a production-scoped search:\n%s", out)
+	// Assert against the row contents that are actually seeded. An earlier
+	// revision checked "for development", a substring no surviving row
+	// contains — an assertion that can never fail says nothing about the
+	// filter, which is worse than no assertion at all.
+	for _, devRow := range []string{
+		"The development database is SQLite.",
+		"Backups of the analytics database run nightly.",
+	} {
+		if strings.Contains(out, devRow) {
+			t.Errorf("development row survived a production-scoped search: %q\n%s", devRow, out)
+		}
 	}
 	// Assert the note exists AND names scope, rather than matching one
 	// phrasing: with both filters applied it reads "category and scope
