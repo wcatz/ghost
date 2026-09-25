@@ -420,7 +420,12 @@ func parseProjectBindArgs(args []string) (projectID, path string, showHelp bool,
 func runProjectBind() {
 	project, path, showHelp, err := parseProjectBindArgs(os.Args[3:])
 	if showHelp {
-		fmt.Fprint(os.Stdout, projectBindUsage)
+		// Reported rather than discarded: `-h` is a user who asked a question,
+		// and help text that silently failed to print is indistinguishable from
+		// a command that took no arguments.
+		if _, err := fmt.Fprint(os.Stdout, projectBindUsage); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cannot print usage: %v\n", err)
+		}
 		return
 	}
 	if err != nil {
