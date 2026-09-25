@@ -155,7 +155,7 @@ type seedGlobalMemory struct {
 var defaultSeedMemories = []seedGlobalMemory{
 	{
 		Category:   "preference",
-		Content:    "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.",
+		Content:    builtinSeedContent,
 		Importance: 1.0,
 		Tags:       []string{"git", "commits", "non-negotiable"},
 	},

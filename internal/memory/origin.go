@@ -1,5 +1,18 @@
 package memory
 
+const builtinSeedContent = "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user."
+
+// CanonicalOriginSource applies the small compatibility correction needed by
+// read-only context paths that can render a database before the v15 migration
+// has run. A legacy builtin row is identifiable by its frozen shipped content;
+// all other manual rows retain their source.
+func CanonicalOriginSource(source, content string) string {
+	if source == "manual" && content == builtinSeedContent {
+		return "builtin"
+	}
+	return source
+}
+
 // OriginClass interprets a memories.source value for surfaces that inject or
 // list stored material. The first result reports whether the source is direct
 // user material; the second is the label to show when it is not.

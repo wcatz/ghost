@@ -6,6 +6,15 @@ import "testing"
 // one place. The session banner and MCP listing both consume memories.source;
 // a new legal source must not silently acquire a different trust rule in one
 // surface than in the other.
+func TestCanonicalOriginSourceRelabelsLegacyBuiltin(t *testing.T) {
+	if got := CanonicalOriginSource("manual", builtinSeedContent); got != "builtin" {
+		t.Errorf("CanonicalOriginSource legacy seed = %q, want builtin", got)
+	}
+	if got := CanonicalOriginSource("manual", "a user's own preference"); got != "manual" {
+		t.Errorf("CanonicalOriginSource user memory = %q, want manual", got)
+	}
+}
+
 func TestOriginClassCoversEverySchemaSource(t *testing.T) {
 	cases := []struct {
 		source    string

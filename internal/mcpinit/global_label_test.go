@@ -83,6 +83,20 @@ func TestSessionContextDoesNotClaimReflectionGlobalsAreYours(t *testing.T) {
 // actual source rather than a generic "not yours", because reflection-derived
 // and agent-written rows deserve different suspicion — one came from a model
 // summarising possibly-untrusted content, the other from an explicit save.
+func TestSessionContextDoesNotClaimUnmigratedBuiltinSeed(t *testing.T) {
+	out := formatSessionContext(
+		"p1", "ghost", nil, "", nil, nil, 1, 0, true,
+		[]sessionMemory{{ID: "1", Category: "preference", Content: "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.", Source: "manual"}},
+		1, true,
+	)
+	if strings.Contains(out, "the user's own saved cross-project preferences") {
+		t.Errorf("unmigrated builtin seed was presented as user-authored:\n%s", out)
+	}
+	if !strings.Contains(out, "(builtin)") {
+		t.Errorf("unmigrated builtin seed was not labelled builtin:\n%s", out)
+	}
+}
+
 func TestSessionContextTagsEveryNonManualGlobal(t *testing.T) {
 	out := formatSessionContext(
 		"p1", "ghost", nil, "", nil, nil, 1, 0, true,

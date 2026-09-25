@@ -229,7 +229,8 @@ func formatSessionContext(projectID, project string, memories []sessionMemory, l
 		// something authoritative (issue #545).
 		allOwn := true
 		for _, m := range globals {
-			own, _ := memory.OriginClass(m.Source)
+			source := memory.CanonicalOriginSource(m.Source, m.Content)
+			own, _ := memory.OriginClass(source)
 			if !own {
 				allOwn = false
 				break
@@ -244,7 +245,8 @@ func formatSessionContext(projectID, project string, memories []sessionMemory, l
 			fmt.Fprintf(&gsb, "(%d shown of %d total — %d not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)\n", len(globals), totalGlobalCount, totalGlobalCount-len(globals))
 		}
 		for _, m := range globals {
-			_, label := memory.OriginClass(m.Source)
+			source := memory.CanonicalOriginSource(m.Source, m.Content)
+			_, label := memory.OriginClass(source)
 			origin := ""
 			if label != "" {
 				origin = " (" + label + ")"

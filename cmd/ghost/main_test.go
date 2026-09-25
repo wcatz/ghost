@@ -895,6 +895,15 @@ func TestReflectSkipDecision(t *testing.T) {
 	}
 }
 
+func TestReflectMaySkipDoesNotSkipExplicitPromotion(t *testing.T) {
+	if reflectMaySkip(true, true, true, "same", "same") {
+		t.Fatal("explicit --promote-globals was skipped as unchanged")
+	}
+	if !reflectMaySkip(true, true, false, "same", "same") {
+		t.Fatal("ordinary unchanged apply should still skip")
+	}
+}
+
 func TestConsolidatableFilters(t *testing.T) {
 	now := "2026-09-21 00:00:00"
 	mems := []memory.Memory{

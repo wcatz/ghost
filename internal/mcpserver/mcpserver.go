@@ -2176,7 +2176,7 @@ func formatMemories(memories []memory.Memory) string {
 		if m.ResolvedAt != nil {
 			resolved = " [resolved]"
 		}
-		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, scopeLabel(m.Scope), sourceLabel(m.Source), quoteData(m.Content))
+		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, scopeLabel(m.Scope), sourceLabelForContent(m.Source, m.Content), quoteData(m.Content))
 	}
 	return sb.String()
 }
@@ -2215,6 +2215,12 @@ func scopeLabel(scope map[string]string) string {
 	}
 	b.WriteString("}")
 	return b.String()
+}
+
+// sourceLabelForContent applies the read-only compatibility correction for a
+// legacy builtin row that has not yet passed the schema migration.
+func sourceLabelForContent(source, content string) string {
+	return sourceLabel(memory.CanonicalOriginSource(source, content))
 }
 
 // sourceLabel names who wrote a row, or nothing when it was direct user

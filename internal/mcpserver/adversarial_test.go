@@ -254,6 +254,13 @@ func TestSourceLabelUsesSharedOriginClassification(t *testing.T) {
 // manual renders as no label, and that absence is load-bearing — it is what
 // marks a row as the user's own, the same rule the banner uses. Tagging it
 // too would make the marker mean nothing by applying it to everything.
+func TestSourceLabelForContentRelabelsLegacyBuiltin(t *testing.T) {
+	got := sourceLabelForContent("manual", "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.")
+	if got != " source=builtin" {
+		t.Errorf("legacy builtin source label = %q, want source=builtin", got)
+	}
+}
+
 func TestFormatMemoriesRendersOriginLabel(t *testing.T) {
 	srv, session := newCapSession(t)
 
