@@ -371,7 +371,7 @@ func TestApplyReflectionFoldsParaphrasesIntoOneGlobalRow(t *testing.T) {
 	// The same sentence, re-cased and re-punctuated by a different project's
 	// reflect pass: the shape FoldOnly is defined to collapse.
 	first := Memory{Category: "preference", Content: "run the gouroboros release checklist from the ops runbook", Source: "reflection", Importance: 0.6}
-	second := Memory{Category: "preference", Content: "Run The Gouroboros Release Checklist, from the Ops Runbook.", Source: "reflection", Importance: 0.6}
+	second := Memory{Category: "preference", Content: "Run The Gouroboros Release Checklist From The Ops Runbook.", Source: "reflection", Importance: 0.6}
 
 	if _, promoted, _, err := store.ApplyReflection(ctx, "proj", nil, []Memory{first}, "", true); err != nil {
 		t.Fatalf("first ApplyReflection: %v", err)

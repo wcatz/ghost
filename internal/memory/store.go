@@ -1650,9 +1650,10 @@ type UpsertOptions struct {
 	Provenance Provenance
 	Scope      map[string]string
 
-	// FoldOnly changes what happens when a near-duplicate is found: the
-	// existing row is strengthened and returned, and the incoming text is
-	// NOT inserted as a new row.
+	// FoldOnly changes what happens when an equivalent row is found (the same
+	// text after foldOnlyEquivalent's normalization): the existing row is
+	// strengthened and returned, and the incoming text is NOT inserted as a
+	// new row. Any other text is inserted as its own row.
 	//
 	// The default fold keeps the new wording, and that is right for a save —
 	// the caller explicitly asked for that text to be stored. It is wrong for
@@ -1778,20 +1779,13 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 				continue
 			}
 			candTokens := tokenizeContent(candContent)
-			// A near-match that CONTRADICTS is not a restatement, and only
-			// FoldOnly has to care. "always deploy staging" and "never deploy
-			// staging" share every token but one, so the Jaccard bar alone
-			// treats them as the same fact. The default fold is unaffected —
-			// it keeps the caller's wording, so the incoming text survives
-			// either way — but FoldOnly commits only the strengthening update
-			// and returns, so folding a contradiction strengthens the
-			// instruction it contradicts and drops the one being promoted: a
-			// promotion that reports success while the memory is gone.
-			//
-			// Scoped to FoldOnly deliberately. Applied to every upsert it would
-			// also block ordinary links between a fact and a longer restatement
-			// of it that happens to contain a negation, which is a duplicate
-			// relationship the default fold is right to record.
+			// The Jaccard bar above is a similarity test, and a similar text
+			// can state the opposite ("always deploy staging" / "never deploy
+			// staging"). The default fold keeps the caller's wording, so the
+			// incoming text survives either way; FoldOnly drops it, so it may
+			// only fold into a row whose text is equivalent — see
+			// foldOnlyEquivalent. Scoped to FoldOnly so the default fold keeps
+			// recording ordinary near-duplicate links.
 			if opts.FoldOnly && !foldOnlyEquivalent(content, candContent) {
 				continue
 			}
@@ -1929,14 +1923,10 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		}
 
 		if opts.FoldOnly {
-			// Re-check the target inside the transaction. The probe above ran
-			// on the connection before the write lock was taken, so a
-			// concurrent promotion for another project — a separate ghost
-			// process, with its own Store and therefore its own mutex — could
-			// have inserted the same fact in between. Both would then take the
-			// insert path, which is exactly the redundancy FoldOnly exists to
-			// prevent, and the whole point of the option is that _global is the
-			// one project every process writes to.
+			// Re-check the chosen target inside the transaction. This does not
+			// prevent a concurrent process from inserting the same fact between
+			// the probe and the write — at worst that leaves one redundant row,
+			// never a lost one.
 			//
 			// A target that has been resolved, superseded or deleted since the
 			// probe is not a fold target either: re-verify it here and, if it

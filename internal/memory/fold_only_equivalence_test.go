@@ -50,6 +50,15 @@ func TestFoldOnlyEquivalentIsEqualityOnly(t *testing.T) {
 			"prefer tabs over spaces",
 			"prefer spaces over tabs",
 		},
+		// Punctuation and symbols carry meaning inside a sentence; each pair
+		// below folded (and lost its second memory) when every mark was dropped.
+		{"comparison operator", "version >= 1.24", "version <= 1.24"},
+		{"decimal point", "timeout is 1.5 seconds", "timeout is 15 seconds"},
+		{"language name", "write it in C++", "write it in C"},
+		{"sign", "set the offset to -5", "set the offset to 5"},
+		{"percent", "the fee is 5%", "the fee is 5"},
+		{"address", "bind to 10.0.0.1", "bind to 1000.1"},
+		{"internal comma", "no, run the linter", "no run the linter"},
 	}
 	for _, c := range mustNotFold {
 		t.Run("not fold/"+c.name, func(t *testing.T) {
@@ -80,8 +89,13 @@ func TestFoldOnlyEquivalentIsEqualityOnly(t *testing.T) {
 			"run the linter before pushing",
 		},
 		{
-			"punctuation",
-			"run the linter, before pushing.",
+			"trailing sentence punctuation",
+			"run the linter before pushing.",
+			"run the linter before pushing",
+		},
+		{
+			"trailing punctuation and whitespace",
+			"run the linter before pushing!  ",
 			"run the linter before pushing",
 		},
 		{

@@ -3,7 +3,6 @@ package memory
 import (
 	"golang.org/x/text/unicode/norm"
 	"strings"
-	"unicode"
 )
 
 // foldOnlyEquivalent reports whether two texts are the same memory.
@@ -24,53 +23,32 @@ import (
 // information that nothing in the database can reconstruct. Only one of those is
 // worth the risk.
 //
-// Normalization, in order:
+// Normalization changes only what cannot change meaning, in order:
 //
 //   - NFKC, so a compatibility character (a fullwidth letter, a ligature) is
 //     the character it renders as rather than a separate one;
 //   - lowercase, since case is presentation;
 //   - U+2019 and U+02BC mapped to the ASCII apostrophe, because those are the
-//     same character in a different keyboard layout and the apostrophe is what
-//     separates a contraction from the word before it;
-//   - every Unicode punctuation and symbol character removed, since "don't" and
-//     "dont" differ only by a mark that carries no meaning here;
-//   - whitespace collapsed to single spaces and trimmed.
+//     same character typed on a different keyboard;
+//   - whitespace collapsed to single spaces and trimmed;
+//   - sentence punctuation (. , ; : ! ?) removed from the very END only.
 //
-// Letters, digits and everything else are kept, so a difference in any of them
-// survives to be compared.
+// Every other character is kept, punctuation and symbols included. Inside a
+// sentence a mark is meaning, not presentation: dropping them made
+// "version >= 1.24" equal "version <= 1.24", "1.5 seconds" equal "15 seconds"
+// and "C++" equal "C", and folding either pair loses the second memory. A pair
+// that differs only in a mid-sentence mark ("state-of-the-art" / "state of the
+// art") is therefore stored twice, which is the safe way to be wrong.
 func foldOnlyEquivalent(a, b string) bool {
 	return normalizeForCompare(a) == normalizeForCompare(b)
 }
 
-// normalizeForCompare renders two texts into the form the equality test
-// compares. Anything removed here is a difference the test is blind to, so each
-// removal has to be one that cannot carry meaning.
+// normalizeForCompare renders a text into the form the equality test compares.
+// Anything removed here is a difference the test is blind to, so each removal
+// has to be one that cannot carry meaning.
 func normalizeForCompare(s string) string {
 	s = strings.ToLower(norm.NFKC.String(s))
-	// The typographic apostrophe, the modifier letter apostrophe, and the ASCII
-	// one are one character to a reader. Left alone, "don't" and "don’t" would
-	// normalize to different strings and never fold, which is precisely the
-	// re-punctuation this is meant to be blind to.
-	s = strings.NewReplacer("’", "'", "ʼ", "'").Replace(s)
-
-	var b strings.Builder
-	b.Grow(len(s))
-	pendingSpace := true // also strips leading whitespace
-	for _, r := range s {
-		switch {
-		case unicode.IsSpace(r):
-			if !pendingSpace {
-				b.WriteByte(' ')
-				pendingSpace = true
-			}
-		case unicode.IsPunct(r), unicode.IsSymbol(r):
-			// Dropped entirely: a mark between two words cannot change what
-			// the words say. Dropping it also means "state-of-the-art" and
-			// "state of the art" compare equal, which is the intent.
-		default:
-			b.WriteRune(r)
-			pendingSpace = false
-		}
-	}
-	return strings.TrimSpace(b.String())
+	s = strings.NewReplacer("\u2019", "'", "\u02bc", "'").Replace(s)
+	s = strings.Join(strings.Fields(s), " ")
+	return strings.TrimRight(s, ".,;:!? ")
 }
