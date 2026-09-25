@@ -66,6 +66,7 @@ func TestHarnessEnvKeepsWhatAHarnessNeeds(t *testing.T) {
 		"HTTP_PROXY=http://proxy:3128", "SSL_CERT_FILE=/etc/ssl/certs/ca.pem",
 		"TERM=xterm-256color",
 		"GHOST_OPENCODE_MODEL=opencode/big-pickle",
+		"GHOST_EMBEDDING_OLLAMA_URL=http://localhost:11434",
 		"GHOST_CLI_CLAUDE_BINARY=/usr/local/bin/claude",
 		"GHOST_SCRATCH_DIR=/tmp/scratch",
 	}
@@ -75,9 +76,10 @@ func TestHarnessEnvKeepsWhatAHarnessNeeds(t *testing.T) {
 		"PATH": "/usr/bin", "HOME": "/home/u", "TMPDIR": "/tmp/ghost",
 		"LANG": "C.UTF-8", "XDG_CONFIG_HOME": "/home/u/.config",
 		"HTTP_PROXY": "http://proxy:3128", "SSL_CERT_FILE": "/etc/ssl/certs/ca.pem",
-		"GHOST_OPENCODE_MODEL":    "opencode/big-pickle",
-		"GHOST_CLI_CLAUDE_BINARY": "/usr/local/bin/claude",
-		"GHOST_SCRATCH_DIR":       "/tmp/scratch",
+		"GHOST_OPENCODE_MODEL":       "opencode/big-pickle",
+		"GHOST_EMBEDDING_OLLAMA_URL": "http://localhost:11434",
+		"GHOST_CLI_CLAUDE_BINARY":    "/usr/local/bin/claude",
+		"GHOST_SCRATCH_DIR":          "/tmp/scratch",
 	} {
 		if got[k] != want {
 			t.Errorf("%s = %q, want %q", k, got[k], want)
