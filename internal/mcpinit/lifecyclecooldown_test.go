@@ -197,9 +197,9 @@ func TestTouchLifecycleStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected the stamp for the resolved id: %v", err)
 	}
-	if want, ok := wantStampMode(); ok {
-		if perm := st.Mode().Perm(); perm != want {
-			t.Errorf("stamp mode = %o, want %o", perm, want)
+	if hasFileIdentity() {
+		if perm := st.Mode().Perm(); perm != 0o600 {
+			t.Errorf("stamp mode = %o, want 0600", perm)
 		}
 	}
 	entries, err := os.ReadDir(dataDir)
@@ -230,31 +230,27 @@ func TestTouchLifecycleStart(t *testing.T) {
 	}
 }
 
-// wantStampMode is the mode the stamp must carry, and whether the platform has
-// Unix mode bits to assert it with. Windows reports 0666 for a writable file
-// whatever perm was passed to open — there are no POSIX modes on NTFS — so
-// asserting 0600 there would be asserting something untrue about the platform
-// rather than about this code. The 0600 request still stands, and is asserted
-// everywhere that has modes to assert it with (see also os.SameFile below, which
-// pins the atomic replace on every platform).
-func wantStampMode() (os.FileMode, bool) {
-	if runtime.GOOS == "windows" {
-		return 0, false
-	}
-	return 0o600, true
+// hasFileIdentity reports whether the platform can tell one file from another
+// and one file's permissions from another's.
+//
+// It cannot on Windows: NTFS has no POSIX mode bits, so os.CreateTemp yields
+// 0666 whatever perm the open asked for, and the file index that os.SameFile
+// compares is recycled aggressively enough that a temp-file rename over an
+// existing path compares EQUAL to the file it replaced. Asserting either there
+// would assert something untrue about the platform rather than about this code.
+// The 0600 request still stands, and the checks that do have a platform to run
+// on (every mutation was run on Linux, where these are live) assert it.
+func hasFileIdentity() bool {
+	return runtime.GOOS != "windows"
 }
 
 // TestTouchLifecycleStart_ReplacesTheStamp pins the properties a write-in-place
-// would lose, in two independent ways so neither is a Unix-only assertion:
-//
-//   - the stamp must be a DIFFERENT file afterwards (os.SameFile compares the
-//     Windows file index and the Unix inode alike), which is what temp+rename
-//     gives and an in-place truncate cannot;
-//   - and on a platform with mode bits it must come back 0600, where an in-place
-//     write would keep the old path's wider mode.
-//
-// The stale content must be gone and the mtime must MOVE, or a long-lived
-// project would be pinned inside the window by a stamp nobody refreshed.
+// would lose. The stale content must be gone and the mtime must MOVE, or a
+// long-lived project would be pinned inside the window by a stamp nobody
+// refreshed; and where the platform can express it (hasFileIdentity), the stamp
+// must be a DIFFERENT file with 0600 — an in-place truncate keeps the old
+// inode's identity and the old path's wider mode, so both checks fail for
+// os.WriteFile.
 func TestTouchLifecycleStart_ReplacesTheStamp(t *testing.T) {
 	dataHome := isolatedHome(t)
 	seedProject(t, dataHome, "p1", "/tmp/p1", "p1")
@@ -286,12 +282,12 @@ func TestTouchLifecycleStart_ReplacesTheStamp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if os.SameFile(before, st) {
-		t.Error("the stamp is still the same file: it was written in place, not replaced by a rename")
-	}
-	if want, ok := wantStampMode(); ok {
-		if perm := st.Mode().Perm(); perm != want {
-			t.Errorf("stamp mode = %o, want %o (an in-place write would keep the old mode)", perm, want)
+	if hasFileIdentity() {
+		if os.SameFile(before, st) {
+			t.Error("the stamp is still the same file: it was written in place, not replaced by a rename")
+		}
+		if perm := st.Mode().Perm(); perm != 0o600 {
+			t.Errorf("stamp mode = %o, want 0600 (an in-place write would keep the old mode)", perm)
 		}
 	}
 	b, err := os.ReadFile(path)
