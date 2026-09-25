@@ -96,6 +96,9 @@ type MemoryStore interface {
 	// ResolveOrCreateRepoProject resolves repository identity and creates the
 	// fallback project in one write transaction. projectRef is the ordinary
 	// resolved id/path; repoName is derived from the remote, not a directory.
+	// path must be the session's directory on this filesystem: a project of the
+	// same name is claimed by its unique name only when its recorded path is
+	// unusable or contains path, so a synthetic path disables that fallback.
 	ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, error)
 	ResolveProject(ctx context.Context, input string) (id, name string, err error)
 	// ResolveExactProjectID reports whether input is literally a project's id,
