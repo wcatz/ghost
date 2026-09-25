@@ -131,11 +131,47 @@ The lifecycle is opt-in. A phase failure is logged and does not prevent later ph
 - Project and memory CRUD
 - FTS5 indexing and query sanitization
 - Optional vector storage and cosine similarity
-- Reciprocal Rank Fusion for hybrid results
+- Reciprocal Rank Fusion for hybrid results, with the result window chosen by
+  `FuseAndSelectWindow` (see [Hybrid fusion and window selection](#hybrid-fusion-and-window-selection))
 - Category-aware time-decay ordering
 - Pinned and near-duplicate handling
 - Directed memory links
 - Snapshots, audit history, tasks, decisions, and usage data
+
+### Hybrid fusion and window selection
+
+`FuseAndSelectWindow` (`internal/memory/vector.go`) owns both halves of hybrid
+retrieval: it fuses the FTS5 and vector legs into one ranking, and it decides
+which memories form the result window. They live in one function because
+window selection is not separable from fusion — the rule that keeps a keyword
+hit has to be stated in terms of the scores fusion produced.
+
+Fusion is Reciprocal Rank Fusion, weighted 0.3 FTS / 0.7 vector with k=60.
+A memory retrieved by both legs accumulates both contributions, so a two-leg
+match always outranks a single-leg one.
+
+Window selection reserves real estate for the keyword leg. A plain cut on the
+fused score could not admit a keyword-only hit at all: the keyword leg's rank-1
+row scores 0.3/61 ≈ 0.0049, while the vector leg's 20th row — still well
+inside the fetched window — scores 0.7/80 ≈ 0.0088. A full vector leg
+therefore outranked the best keyword match every time, and an exact identifier
+match could never reach the results, which is the case FTS exists for.
+
+So the best `limit/5` keyword hits the vector leg did **not** retrieve are
+guaranteed a place in the window, evicting the weakest admitted rows for them.
+Position is left to the fused score: admission is the defect, and the stronger
+interventions were built and measured against the built-in dataset first.
+Reordering the selected slice does nothing beyond admission, because
+`decayRank` re-sorts by score on the way out. Flooring a reserved hit's score
+does work, but the floor cannot be made safe — at the top of the window it
+costs hybrid R@1 0.507 → 0.366 and NDCG@10 0.812 → 0.738, and at the median it
+sits close enough to the row below that decay, which multiplies scores by a
+category- and age-dependent factor, reorders it and breaks the invariant that
+uniform timestamps leave the graded ranking untouched.
+
+The window's width is `limit`, or twice that under `DecayReselect`, where decay
+still has to narrow the set afterwards. Ordering is deterministic (ties broken
+by ID), because the demotion penalties applied downstream depend on order.
 
 The main schema tables are:
 
