@@ -2,8 +2,10 @@ package selfupdate
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -124,42 +126,58 @@ func TestClientsHaveDeadlines(t *testing.T) {
 	}
 }
 
-func TestFetchReleaseTimesOutOnAStalledAPI(t *testing.T) {
+// stallAfter is how long a stalled-server handler waits before answering,
+// unless the test unblocks it first. A client with a deadline returns long
+// before that, so the assertion is about the deadline, not about how fast the
+// machine is.
+const stallAfter = 2 * time.Second
+
+// stalledServer serves one request that does not answer for stallAfter, and
+// returns a func that releases the handler and closes the server. Releasing it
+// before Close keeps teardown instant: srv.Close waits for the handler, and the
+// handler is what is being stalled.
+func stalledServer(t *testing.T, body string) (url string, release func()) {
+	t.Helper()
+	releaseHandler := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Longer than the test deadline, shorter than a real upgrade: the
-		// answer arrives, just too late.
-		time.Sleep(300 * time.Millisecond)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"tag_name":"v0.32.0"}`)
+		select {
+		case <-releaseHandler:
+		case <-time.After(stallAfter):
+		}
+		_, _ = io.WriteString(w, body)
 	}))
-	defer srv.Close()
+	return srv.URL, func() {
+		close(releaseHandler)
+		srv.Close()
+	}
+}
+
+func TestFetchReleaseTimesOutOnAStalledAPI(t *testing.T) {
+	url, release := stalledServer(t, `{"tag_name":"v0.32.0"}`)
+	defer release()
 
 	useTestClient(t, &apiClient, 20*time.Millisecond)
 
-	start := time.Now()
-	if _, err := fetchRelease(srv.URL); err == nil {
+	// An unbounded client would return the JSON after stallAfter with no error
+	// at all, so the error is the whole assertion: no wall-clock threshold to
+	// flake on a loaded runner.
+	_, err := fetchRelease(url)
+	if err == nil {
 		t.Fatal("expected a deadline error when the release API does not answer in time")
 	}
-	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
-		t.Errorf("fetchRelease returned after %s: nothing stopped it from waiting on a stalled connection", elapsed)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("want a deadline error, got: %v", err)
 	}
 }
 
 func TestDownloadTimesOutOnAStalledServer(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(300 * time.Millisecond)
-		_, _ = io.WriteString(w, "archive bytes")
-	}))
-	defer srv.Close()
+	url, release := stalledServer(t, "archive bytes")
+	defer release()
 
 	useTestClient(t, &downloadClient, 20*time.Millisecond)
 
-	start := time.Now()
-	if _, err := Download(srv.URL); err == nil {
+	if _, err := Download(url); err == nil {
 		t.Fatal("expected a deadline error when the asset server does not answer in time")
-	}
-	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
-		t.Errorf("Download returned after %s: nothing stopped it from waiting on a stalled connection", elapsed)
 	}
 }
 

@@ -130,7 +130,8 @@ func ReadChecksums(r io.Reader) ([]byte, error) {
 }
 
 // ReadArchive reads a release archive, refusing anything over maxArchiveBytes
-// (200 MiB).
+// (200 MiB). The cap is on the compressed transfer; ExtractBinary is what turns
+// that into a binary, and reading the tar entry is not separately capped.
 func ReadArchive(r io.Reader) ([]byte, error) {
 	return readCapped(r, archiveCap, "release archive")
 }

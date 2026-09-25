@@ -6,10 +6,11 @@ import (
 	"strings"
 )
 
-// CompareVersions compares two semantic versions and returns -1, 0 or 1 as a is
-// older than, equal to, or newer than b. A leading "v" and any build metadata
-// are ignored, and prerelease identifiers are ordered by the semver rules, so
-// "0.9.0" is older than "0.10.0" and "1.0.0-rc.1" is older than "1.0.0".
+// CompareVersions compares two semantic versions and returns -1 if a is older
+// than b, 0 if they are equal, and 1 if a is newer than b. A leading "v" and
+// any build metadata are ignored, and prerelease identifiers are ordered by the
+// semver rules, so "0.9.0" is older than "0.10.0" and "1.0.0-rc.1" is older
+// than "1.0.0".
 //
 // It returns an error when either side is not a semantic version — a "dev"
 // build, an empty string, a tag like "vscode-pre-rewrite" — because an
