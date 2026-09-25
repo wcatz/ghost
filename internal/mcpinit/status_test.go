@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -489,6 +490,37 @@ func TestReportConfigFile_MalformedReported(t *testing.T) {
 	}
 	if !strings.Contains(got, "parse "+path) {
 		t.Errorf("expected the parse error for %q in output, got: %s", path, got)
+	}
+}
+
+// TestCheckStoreHealth_MalformedConfigStillRunsChecks pins that a config file
+// which does not parse costs the user the embedding/linking health checks. It
+// did once: they were gated on config.Load succeeding, so a broken file — the
+// exact case `ghost mcp status` is documented to diagnose — dropped the Ollama,
+// embedding-coverage and link lines and could still print "All checks passed."
+// while vector search and linking were in fact off. reportConfigFile reports
+// the parse error; these checks must still run, on the compiled defaults.
+func TestCheckStoreHealth_MalformedConfigStillRunsChecks(t *testing.T) {
+	statusEnv(t)
+	writeGhostConfigFile(t, "embedding:\n  model: \"nomic-embed-text\n")
+
+	var out bytes.Buffer
+	var ran []string
+	store := checkStoreHealth(&out, func(ok bool, pass, fail string) {
+		ran = append(ran, pass+fail)
+	})
+	if store != nil {
+		store.Close() //nolint:errcheck
+	}
+
+	if len(ran) == 0 {
+		t.Errorf("no health check ran on a broken config; the embedding/linking checks were dropped:\n%s", out.String())
+	}
+	// The defaults have embedding on, so the Ollama check is the one that must
+	// appear — whichever way the live probe goes, it reports through the check
+	// closure with a message naming Ollama.
+	if !slices.ContainsFunc(ran, func(s string) bool { return strings.Contains(s, "Ollama") }) {
+		t.Errorf("expected the Ollama check to run on the compiled defaults, got checks: %v", ran)
 	}
 }
 
