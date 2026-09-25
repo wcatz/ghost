@@ -565,13 +565,13 @@ func (s *Server) registerTools() {
 		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
 		Scope     any    `json:"scope,omitempty" jsonschema:"Only return memories that do not contradict this scope, as an object of string values — e.g. {\"environment\": \"production\"}. A memory that says nothing about a key still matches, so unscoped knowledge remains available; one that names a different value is excluded."`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
-		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list: per-memory FTS rank, vector rank and cosine, fused RRF score, decay factor, supersede and near-duplicate penalties, plus the reason each excluded candidate was left out. Use when a result looks wrong and you need to know which signal is responsible."`
+		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list: per-memory FTS rank, vector rank and cosine, fused RRF score, decay factor, supersede and near-duplicate penalties, plus the reason each excluded candidate was left out. When scope is supplied, included membership and scope exclusions reflect the scoped search. Use when a result looks wrong and you need to know which signal is responsible."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_search",
 		Title:       "Search Memories",
-		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. When category is set, the search fetches limit*3 results then post-filters — results may be incomplete if that category is sparse in the index. For exhaustive category browsing use ghost_memories_list. Example: project_id='ghost', query='approval flow', category='architecture'.",
+		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category is applied after a limit*3 fetch and may be incomplete in a sparse index; use ghost_memories_list for exhaustive category browsing. Scope is applied while the result window is selected, so eligible rows can replace conflicting candidates, but retrieval remains windowed and filtered results may still be incomplete. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -599,19 +599,27 @@ func (s *Server) registerTools() {
 				queryVec = vec
 			}
 		}
+		// Parse scope once at the tool boundary so plain search can pass the
+		// same normalized map into window selection.
+		scopeFilter, err := optScope(args.Scope, "scope")
+		if err != nil {
+			return nil, nil, err
+		}
+
 		searchLimit := args.Limit
+		// Category remains a post-filter, so its fetch has to leave room for
+		// non-matching rows. Scope does not: SearchHybridScoped applies it
+		// inside window selection, where eligible rows can backfill the window.
 		if args.Category != "" {
 			searchLimit = args.Limit * 3
 			if searchLimit > 100 {
 				searchLimit = 100
 			}
 		}
-		// explain runs the same pipeline and returns the diagnosis instead of
-		// the formatted list. Membership is identical to the non-explain path
-		// because both come from SearchHybrid over the same window, so the
-		// breakdown can only describe a result this tool would really return.
+		// explain returns the store's ranking diagnosis instead of the
+		// formatted list.
 		if args.Explain {
-			ex, xErr := s.store.ExplainSearch(ctx, args.ProjectID, args.Query, queryVec, searchLimit)
+			ex, xErr := s.store.ExplainSearchScoped(ctx, args.ProjectID, args.Query, queryVec, searchLimit, scopeFilter)
 			if xErr != nil {
 				return nil, nil, fmt.Errorf("explain failed: %w", xErr)
 			}
@@ -626,22 +634,15 @@ func (s *Server) registerTools() {
 				Content: []mcp.Content{&mcp.TextContent{Text: string(payload)}},
 			}, nil, nil
 		}
-		memories, err := s.store.SearchHybrid(ctx, args.ProjectID, args.Query, queryVec, searchLimit)
+		// Scope goes down into search selection, not around the finished
+		// window. Ineligible candidates are dropped before the cut, so the
+		// window is filled from the rows beyond it.
+		memories, err := s.store.SearchHybridScoped(ctx, args.ProjectID, args.Query, queryVec, searchLimit, scopeFilter)
 		if err != nil {
 			return nil, nil, fmt.Errorf("search failed: %w", err)
 		}
 
-		// Whether SearchHybrid filled the fetch window, captured BEFORE any
-		// post-filter. Every later filter narrows the same pool, so measuring
-		// "was the window full" after one of them has already run would lose
-		// the signal: a category that shrank the pool first would make a
-		// subsequent scope filter look like it never had more matches to
-		// exclude, and the caller would be told its truncated result was
-		// exhaustive.
-		fullWindow := len(memories) == searchLimit
-
-		// Post-filter by category if specified.
-		maybeIncomplete := false
+		// Category remains the one tool-level post-filter.
 		if args.Category != "" {
 			filtered := memories[:0]
 			for _, m := range memories {
@@ -650,74 +651,37 @@ func (s *Server) registerTools() {
 				}
 			}
 			memories = filtered
-			// A full window means SearchHybrid may have had more matches
-			// beyond what we fetched, so a narrowed result is not provably
-			// exhaustive.
-			maybeIncomplete = fullWindow && len(memories) < args.Limit
 		}
 
-		// Post-filter by scope. A row that names a differing scope is a
-		// different claim about where knowledge applies, not a weaker match —
-		// semantic similarity cannot reliably separate "development uses
-		// SQLite" from "production uses PostgreSQL", but a scope value can.
-		// Rows that say nothing about a requested key stay eligible: general
-		// knowledge applies everywhere, and hiding it would make missing scope
-		// a reason to drop the most reusable facts in the store.
-		scopeFilter, err := optScope(args.Scope, "scope")
-		if err != nil {
-			return nil, nil, err
-		}
-		if len(scopeFilter) > 0 {
-			filtered := memories[:0]
-			for _, m := range memories {
-				if memory.ScopeMatches(m.Scope, scopeFilter) {
-					filtered = append(filtered, m)
-				}
-			}
-			memories = filtered
-			if fullWindow && len(memories) < args.Limit {
-				maybeIncomplete = true
-			}
-		}
-
-		// Apply the limit once, after every post-filter. Truncating inside
-		// each filter lets an earlier one drop rows a later filter would have
-		// kept: with category first, a limit of 2 trimmed the pool to two
-		// before scope ran, and the production row was gone before scope ever
-		// saw it — the filter that was asked for did the opposite of what it
-		// was asked.
+		// Apply the requested limit once, after category filtering. Scope has
+		// already backfilled the selected window and must not be reintroduced
+		// here as a post-filter.
 		if len(memories) > args.Limit {
 			memories = memories[:args.Limit]
 		}
-		if fullWindow && len(memories) < args.Limit {
-			maybeIncomplete = true
-		}
+		// A filtered result shorter than the requested limit may reflect a
+		// finite candidate window rather than the whole store. This conservative
+		// check runs after category filtering so a scope-filled pre-category
+		// window cannot hide a category shortfall.
+		maybeIncomplete := (args.Category != "" || len(scopeFilter) > 0) && len(memories) < args.Limit
 
 		if len(memories) == 0 {
+			// A filtered zero result describes the searched candidate window,
+			// not the whole store. Keep that caveat on the empty answer too.
+			text := "No matching memories found."
+			if caveat := filterCaveat(args.Category, scopeFilter); caveat != "" {
+				text += "\n\n" + caveat
+			}
 			return &mcp.CallToolResult{
-				Content: []mcp.Content{&mcp.TextContent{Text: "No matching memories found."}},
+				Content: []mcp.Content{&mcp.TextContent{Text: text}},
 			}, nil, nil
 		}
 
 		text := formatMemories(memories)
 		if maybeIncomplete {
-			// Name whichever filter actually narrowed the window. Saying
-			// "category filter" when scope did the narrowing sends the reader
-			// looking for a filter that was never applied.
-			var narrowed []string
-			if args.Category != "" {
-				narrowed = append(narrowed, "category")
+			if caveat := filterCaveat(args.Category, scopeFilter); caveat != "" {
+				text += "\n\n" + caveat
 			}
-			if len(scopeFilter) > 0 {
-				narrowed = append(narrowed, "scope")
-			}
-			which := "a post-filter"
-			if len(narrowed) == 1 {
-				which = "the " + narrowed[0] + " filter"
-			} else if len(narrowed) > 1 {
-				which = "the " + strings.Join(narrowed, " and ") + " filters"
-			}
-			text += "\n\n(Note: " + which + " may have missed further matches beyond the search window — use ghost_memories_list for exhaustive category browsing.)"
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: text}},
@@ -2235,4 +2199,33 @@ func sourceLabel(source string) string {
 		return ""
 	}
 	return " source=" + label
+}
+
+// filterCaveat names the filters that can make a windowed result short and
+// gives the caller a filter-appropriate next step. Scope is selected before the
+// final cut, but its candidate pool is still finite; category remains a
+// post-filter over a deliberately wider fetch.
+func filterCaveat(category string, scope map[string]string) string {
+	var filters []string
+	if category != "" {
+		filters = append(filters, "category")
+	}
+	if len(scope) > 0 {
+		filters = append(filters, "scope")
+	}
+	if len(filters) == 0 {
+		return ""
+	}
+
+	which := "the " + filters[0] + " filter"
+	verb := "was"
+	if len(filters) > 1 {
+		which = "the " + strings.Join(filters, " and ") + " filters"
+		verb = "were"
+	}
+	next := "raise the limit"
+	if category != "" {
+		next += " or use ghost_memories_list for exhaustive category browsing"
+	}
+	return "(Note: " + which + " " + verb + " applied to a finite search window, so further matches may exist beyond the retrieved candidates — " + next + ".)"
 }

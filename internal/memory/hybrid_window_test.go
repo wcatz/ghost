@@ -174,6 +174,61 @@ func TestFuseAndRankBackfillsDeletedCandidate(t *testing.T) {
 	}
 }
 
+// TestFuseAndRankBackfillStaysInScope is the interaction between the two
+// behaviours that meet in this file. Scope is narrowed from the candidate pool
+// before the window is cut, and a selected row that disappears before hydration
+// is backfilled from that same pool — so the backfill has to be narrowed too.
+// Filtering only the window would let an out-of-scope row return in the deleted
+// row's place, which is the one thing the narrowing exists to prevent.
+func TestFuseAndRankBackfillStaysInScope(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	createScoped := func(content, environment string) string {
+		t.Helper()
+		id, err := store.Create(ctx, "test-proj", Memory{
+			Category: "fact",
+			Content:  content,
+			Source:   "tool",
+			Scope:    map[string]string{"environment": environment},
+		})
+		if err != nil {
+			t.Fatalf("create %s memory: %v", environment, err)
+		}
+		return id
+	}
+
+	// The one in-scope row ranks first, so it is the one selected and then
+	// deleted; the two development rows rank below it and are what a backfill
+	// ignoring scope would return in its place.
+	inScope := createScoped("in scope candidate", "production")
+	vec := []ScoredMemory{{MemoryID: inScope, Score: 0.9, Scope: map[string]string{"environment": "production"}}}
+	for i, score := range []float32{0.8, 0.7} {
+		id := createScoped(fmt.Sprintf("out of scope candidate %d", i), "development")
+		vec = append(vec, ScoredMemory{MemoryID: id, Score: score, Scope: map[string]string{"environment": "development"}})
+	}
+
+	beforeHybridHydrateFn.Store(func(selected []string) {
+		if len(selected) == 0 {
+			return
+		}
+		if err := store.Delete(ctx, selected[0]); err != nil {
+			t.Fatalf("delete selected candidate: %v", err)
+		}
+	})
+	t.Cleanup(func() { beforeHybridHydrateFn.Store(func([]string) {}) })
+
+	p := DefaultSearchParams()
+	p.DecayEnabled = false
+	p.Scope = map[string]string{"environment": "production"}
+	got, err := store.fuseAndRank(ctx, nil, vec, 3, p)
+	if err != nil {
+		t.Fatalf("fuseAndRank: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %d results (%v), want none: the only in-scope candidate was deleted, and "+
+			"an out-of-scope row must not backfill it", len(got), got)
+	}
+}
+
 // TestFuseAndSelectWindowWidth pins the function's own contract, which the
 // search path cannot show: decayRank trims the window again on its way out, so
 // an over-wide return would be invisible through SearchHybrid even though the
@@ -227,4 +282,153 @@ func TestFuseAndSelectWindowWidth(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestFuseAndSelectWindowAppliesScope covers the fusion path directly, which
+// the tool-level tests cannot reach: they run against a store with no
+// embeddings, so they take the FTS-only fallback and never enter fusion. The
+// development rows are vector-only, so this also proves the vector leg carries
+// each candidate's scope into selection rather than relying on a second lookup
+// or on scope already present in the FTS result.
+func TestFuseAndSelectWindowAppliesScope(t *testing.T) {
+	prod := map[string]string{"environment": "production"}
+	fts := []Memory{{ID: "p1", Content: "production one", Scope: prod}}
+	vec := []ScoredMemory{
+		{MemoryID: "d1", Score: 0.9, Scope: map[string]string{"environment": "development"}},
+		{MemoryID: "d2", Score: 0.8, Scope: map[string]string{"environment": "development"}},
+		{MemoryID: "d3", Score: 0.7, Scope: map[string]string{"environment": "development"}},
+		{MemoryID: "p1", Score: 0.1, Scope: prod},
+	}
+
+	p := DefaultSearchParams()
+	p.Scope = prod
+	// limit 2 with three development rows ranked above the production one: the
+	// window can only contain p1 if the ineligible rows are dropped from the
+	// combined pool before the cut, not filtered after it.
+	got := FuseAndSelectWindow(fts, vec, 2, p)
+	if len(got.IDs) != 1 || got.IDs[0] != "p1" {
+		t.Errorf("window = %v, want [p1] — the three development vector candidates would otherwise "+
+			"fill both slots before scope narrows the pool", got.IDs)
+	}
+
+	// And with no scope set, selection is unchanged.
+	plain := FuseAndSelectWindow(fts, vec, 2, DefaultSearchParams())
+	if len(plain.IDs) != 2 {
+		t.Errorf("unscoped window = %v, want 2 ids", plain.IDs)
+	}
+}
+
+// TestFuseAndSelectWindowScopeKeepsUnmentionedRows: silence about a requested
+// key is not disagreement, so a row with no scope at all stays eligible.
+func TestFuseAndSelectWindowScopeKeepsUnmentionedRows(t *testing.T) {
+	fts := []Memory{{ID: "u1", Content: "general knowledge"}}
+	vec := []ScoredMemory{{MemoryID: "u1", Score: 0.5}}
+	p := DefaultSearchParams()
+	p.Scope = map[string]string{"environment": "production"}
+
+	got := FuseAndSelectWindow(fts, vec, 5, p)
+	if len(got.IDs) != 1 || got.IDs[0] != "u1" {
+		t.Errorf("window = %v, want [u1] — an unscoped row is not in conflict with a requested scope", got.IDs)
+	}
+}
+
+func TestSearchHybridScopedFTSOnlyUsesSelectionSeam(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	createScoped := func(content, environment string) string {
+		t.Helper()
+		id, err := store.Create(ctx, "test-proj", Memory{
+			Category: "fact",
+			Content:  content,
+			Source:   "tool",
+			Scope:    map[string]string{"environment": environment},
+		})
+		if err != nil {
+			t.Fatalf("create %s memory: %v", environment, err)
+		}
+		return id
+	}
+	for _, content := range []string{
+		"database configuration pooling timeout retry",
+		"database configuration isolation repeatable read",
+		"database configuration index tuning planner",
+	} {
+		createScoped(content, "development")
+	}
+	want := createScoped("database configuration replication lag failover quorum elections together with enough neutral detail to rank below the shorter rows", "production")
+
+	got, err := store.SearchHybridScoped(ctx, "test-proj", "database configuration", nil, 2, map[string]string{"environment": "production"})
+	if err != nil {
+		t.Fatalf("SearchHybridScoped: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != want {
+		t.Fatalf("scoped FTS-only results = %v, want only %s", got, want)
+	}
+}
+
+func TestSearchHybridScopedCarriesVectorOnlyScope(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	createScoped := func(content, environment string) string {
+		t.Helper()
+		id, err := store.Create(ctx, "test-proj", Memory{
+			Category: "fact",
+			Content:  content,
+			Source:   "tool",
+			Scope:    map[string]string{"environment": environment},
+		})
+		if err != nil {
+			t.Fatalf("create %s memory: %v", environment, err)
+		}
+		return id
+	}
+
+	want := createScoped("database configuration production", "production")
+	for i, score := range []float32{0.9, 0.8, 0.7} {
+		id := createScoped(fmt.Sprintf("semantic-only development candidate %d", i), "development")
+		if err := store.StoreEmbedding(ctx, id, []float32{score, 1 - score}, "test-model"); err != nil {
+			t.Fatalf("store development embedding %d: %v", i, err)
+		}
+	}
+	if err := store.StoreEmbedding(ctx, want, []float32{0.1, 0.99}, "test-model"); err != nil {
+		t.Fatalf("store production embedding: %v", err)
+	}
+
+	got, err := store.SearchHybridScoped(ctx, "test-proj", "database configuration", []float32{1, 0}, 2, map[string]string{"environment": "production"})
+	if err != nil {
+		t.Fatalf("SearchHybridScoped: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != want {
+		t.Fatalf("scoped hybrid results = %v, want only %s; vector-only scope did not reach selection", got, want)
+	}
+}
+
+func TestSearchHybridScopedUsesConfiguredVectorFloor(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	weak, err := store.Create(ctx, "test-proj", Memory{Category: "fact", Content: "semantic-only weak match", Source: "tool"})
+	if err != nil {
+		t.Fatalf("create weak memory: %v", err)
+	}
+	strong, err := store.Create(ctx, "test-proj", Memory{
+		Category: "fact",
+		Content:  "database configuration replication failover",
+		Source:   "tool",
+		Scope:    map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("create strong memory: %v", err)
+	}
+	if err := store.StoreEmbedding(ctx, weak, []float32{0.8, 0.6}, "test-model"); err != nil {
+		t.Fatalf("store weak embedding: %v", err)
+	}
+	if err := store.StoreEmbedding(ctx, strong, []float32{1, 0}, "test-model"); err != nil {
+		t.Fatalf("store strong embedding: %v", err)
+	}
+	store.SetVectorMinSimilarity(0.9)
+
+	got, err := store.SearchHybridScoped(ctx, "test-proj", "database configuration", []float32{1, 0}, 2, map[string]string{"environment": "production"})
+	if err != nil {
+		t.Fatalf("SearchHybridScoped: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != strong {
+		t.Fatalf("results = %v, want only %s; the scoped entry point bypassed the configured vector floor", got, strong)
+	}
 }

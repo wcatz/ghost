@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -48,7 +49,9 @@ func TestSweep(t *testing.T) {
 	byCond := byCondition(runTestdata(t))
 	find := func(p memory.SearchParams) Result {
 		for _, pt := range points {
-			if pt.Params == p {
+			// DeepEqual, not ==: SearchParams carries a Scope map and is
+			// therefore not comparable with ==.
+			if reflect.DeepEqual(pt.Params, p) {
 				return pt.Result
 			}
 		}
@@ -74,7 +77,7 @@ func TestSweepGrid(t *testing.T) {
 		if p.RRFK != def.RRFK {
 			t.Errorf("non-swept knobs must stay at defaults: %+v", p)
 		}
-		if p == def {
+		if reflect.DeepEqual(p, def) {
 			foundDefault = true
 		}
 	}
