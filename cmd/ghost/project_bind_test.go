@@ -407,12 +407,13 @@ func TestBindingPrintsTheMCPInitFollowUp(t *testing.T) {
 		if !strings.Contains(out.String(), "ghost mcp init") {
 			t.Errorf("output should say how to finish the repair, got:\n%s", out.String())
 		}
-		// Only the Claude installer writes a redirect, and bind cannot know
-		// which client the user runs, so the sentence has to name the client
-		// rather than send an opencode or goose user after a step that does not
-		// exist for them.
-		if !strings.Contains(out.String(), "Claude") {
-			t.Errorf("the follow-up should say which client it applies to, got:\n%s", out.String())
+		// Only the standalone, init-managed Claude install has this step: the
+		// ghost plugin manages its own wiring (mcp init returns early writing
+		// nothing), and the other three clients have no redirect at all. bind
+		// cannot ask the host which one it is, so the sentence has to name the
+		// installation rather than send a plugin user after a no-op.
+		if !strings.Contains(out.String(), "not the ghost plugin") {
+			t.Errorf("the follow-up should name the installation it applies to, got:\n%s", out.String())
 		}
 	})
 
@@ -492,11 +493,12 @@ func TestUnboundProjectNotice(t *testing.T) {
 	if !strings.Contains(after, "no longer exists") {
 		t.Errorf("the notice should state what it cannot detect, got:\n%s", after)
 	}
-	// The plan the notice hands out is two commands for the Claude client, and
-	// only the first is the bind: init is what writes the redirect the bind makes
-	// status check for. The client is named because the other three have no such
-	// step and this notice prints for all of them.
-	if !strings.Contains(after, "ghost mcp init") || !strings.Contains(after, "Claude") {
-		t.Errorf("the notice should name the client-specific step that finishes the repair, got:\n%s", after)
+	// The plan the notice hands out is two commands on the standalone Claude
+	// integration, and only the first is the bind: init is what writes the
+	// redirect the bind makes status check for. The installation is named
+	// because the plugin manages its own wiring and the other three clients
+	// have no redirect, and this notice prints for all of them.
+	if !strings.Contains(after, "ghost mcp init") || !strings.Contains(after, "not the ghost plugin") {
+		t.Errorf("the notice should name the installation whose init step finishes the repair, got:\n%s", after)
 	}
 }
