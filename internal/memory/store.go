@@ -389,11 +389,21 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 	if count > 1 {
 		return "", false, fmt.Errorf("project reference %q matches multiple projects", projectRef)
 	}
-	var existingRemote string
+	var existingRemote, matchedPath string
+	norm := strings.ReplaceAll(projectRef, `\`, "/")
+	// prefixMatch records that the project was found by a project's recorded
+	// path containing the saving directory rather than by the caller's own
+	// reference, which is the only difference between the two lookups below and
+	// the reason one of them may not write repository identity. The exact
+	// lookup matched id = ? OR path = ?, so its candidate is the project the
+	// caller named; the prefix lookup matched a project whose path is an
+	// ANCESTOR of the saving directory, and a directory inside a checkout is not
+	// that checkout.
+	prefixMatch := false
 	if count == 0 {
-		norm := strings.ReplaceAll(projectRef, `\`, "/")
+		prefixMatch = true
 		prefixErr := tx.QueryRowContext(ctx, `
-			SELECT id, COALESCE(repo_remote, '')
+			SELECT id, COALESCE(repo_remote, ''), path
 			FROM projects
 			WHERE (
 				path = ?
@@ -404,7 +414,7 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 			  AND id != '_global'
 			ORDER BY LENGTH(path) DESC
 			LIMIT 1
-		`, projectRef, norm, norm).Scan(&id, &existingRemote)
+		`, projectRef, norm, norm).Scan(&id, &existingRemote, &matchedPath)
 		if prefixErr == sql.ErrNoRows {
 			return "", false, nil
 		}
@@ -427,6 +437,38 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 		return "", true, fmt.Errorf("project %q belongs to a different repository", id)
 	}
 
+	// A checkout inside the matched project's directory is a different
+	// repository — a submodule, a vendored clone, a second worktree of
+	// something else — so its remote says nothing about the project that
+	// encloses it. Binding it, or merging the enclosing project into the
+	// nested checkout's own, is how a save from ~/git/infra/vendor/lib took
+	// other/lib away from ~/git/infra and then locked the real checkout out
+	// of its own project at every path except exactly its root. Only the
+	// project's own root may speak for its repository.
+	//
+	// The save still lands in the enclosing project, which is what the prefix
+	// step decided and what a session standing in that directory expects.
+	// Routing a save is not the same claim as identifying the repository, so
+	// the refusal covers both writes below and only those; the exact-id lookup
+	// above is untouched, because there the caller named the project and a
+	// save made from inside it says nothing to contradict that.
+	//
+	// A nested checkout does not open a project of its own as a result. The
+	// prefix match has already answered, so resolution stops here, which is
+	// deliberate: the save was told a directory, not a repository, and #612's
+	// `ghost project bind` is the command that states which checkout is which
+	// project. The alternative — inventing a project per nested checkout — is
+	// what made this lookup ambiguous in the first place.
+	//
+	// Logged for the same reason the unique-name refusal is: the save landed
+	// somewhere and the project that answered for it is deliberately left
+	// unclaimed, which is a fact a user with a nested checkout will want.
+	if prefixMatch && !savingPathIsProjectRoot(matchedPath, norm) {
+		s.logger.Warn("refused to bind a repository to an enclosing project: the save came from a directory inside it",
+			"project", id, "recorded_path", matchedPath, "saving_path", projectRef, "remote", repoRemote)
+		return id, true, nil
+	}
+
 	ownerID, err := s.findProjectByRepoRemoteTx(ctx, tx, repoRemote, id)
 	if err != nil {
 		return "", true, err
@@ -441,6 +483,33 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 		return "", true, fmt.Errorf("bind repository to explicit project: %w", err)
 	}
 	return id, true, nil
+}
+
+// savingPathIsProjectRoot reports whether the directory a save came from is the
+// project's recorded checkout root rather than a directory inside it.
+//
+// The comparison is canonicalPath on both sides followed by exact equality,
+// because canonicalPath is already this file's one definition of how a path is
+// resolved: two spellings of one directory must agree, and a symlinked checkout
+// must not read as a different place. pathsAgree is deliberately not used here:
+// it accepts a directory inside the recorded path, which is exactly the
+// containment being refused — it answers "is the session standing in that
+// project", where this answers "is the session standing at its root".
+//
+// A path that cannot be resolved is not the root. canonicalPath fails on a
+// directory that does not exist, and a recorded path that no longer resolves
+// cannot be shown to be the directory the save came from, so the conservative
+// answer is the one that writes nothing.
+func savingPathIsProjectRoot(recorded, saving string) bool {
+	physicalRecorded, err := canonicalPath(recorded)
+	if err != nil {
+		return false
+	}
+	physicalSaving, err := canonicalPath(saving)
+	if err != nil {
+		return false
+	}
+	return physicalSaving == physicalRecorded
 }
 
 // bindUniqueProjectNameRepoTx is the last resort of write-side resolution: a
