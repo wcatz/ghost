@@ -102,7 +102,8 @@ func TestBumpSessionCountTightensPermissions(t *testing.T) {
 // on disk past the hook in production, so the stand-in below is a second
 // connection. It is read-only, which is the production case for a *second*
 // connection: the stop hook's own reads, the lifecycle marker and the lifecycle
-// lock all use OpenDBReadOnly, and none of them runs the pass.
+// lock all build their DSN through this package's roDSN, and none of them runs
+// the pass.
 //
 // Scope of what this can prove, since it is narrower than it looks. Whoever
 // creates the -wal and -shm, the file ends this function at 0600 — but that is
