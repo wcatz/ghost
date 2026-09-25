@@ -12,6 +12,41 @@ Later layers override earlier layers:
 4. `GHOST_*` environment variables
 5. Supported command-line flags, applied by the command after loading
 
+## Invalid configuration
+
+A config file that exists but does not parse is never ignored. The error names the file and the line, so it is reported differently depending on who asked for the configuration:
+
+| Caller | Behaviour |
+|---|---|
+| CLI subcommands (`ghost reflect`, `ghost resolve`, `ghost supersede`, `ghost obsidian …`, `ghost maintenance status`, `ghost project …`) | Exit non-zero with the parse error. Nothing is run against half the intended configuration. |
+| The `ghost mcp` server | Warn on its log channel — stderr, or `GHOST_LOG_FILE` when set — and serve the environment plus the compiled defaults. It does not exit: that would not fail a command, it would leave your editor with no Ghost tools at all, because of a typo in a file you may not know exists. The warning sink follows the server's log channel rather than raw stderr, so setting `GHOST_LOG_FILE` keeps it out of the MCP client's face. |
+| Host-session hooks (SessionStart injection, the stop hook, obsidian auto-sync, session routing) | Report the same error on stderr and continue with the environment plus the compiled defaults. A typo in the config must not fail the session you are currently working in. |
+| `ghost mcp status` | Prints the path as informational, then a `!` line carrying the parse error. The remaining checks then run on the defaults, so nothing is missing from the output — but the run is **not** marked unhealthy, because the `!` line is the pointer, not a verdict. |
+
+"Environment plus the compiled defaults" means every layer that does not read a config file. The `GHOST_*` variables still apply, so a broken file cannot undo an opt-out you set in the environment (`GHOST_EMBEDDING_ENABLED=false`, `GHOST_SCRATCH_MAX_BYTES=0`). Only the file layers are lost.
+
+A file that exists but cannot be **read** — wrong permissions, or one owned by root — is a warning and is skipped, as it always was; only a file that is readable and does not **parse** stops a command.
+
+```text
+ghost: config: parse /home/you/.config/ghost/config.yaml: yaml: line 3: found unexpected end of stream — falling back to the environment and built-in defaults
+ghost: config: cannot read /etc/ghost/config.yaml: open /etc/ghost/config.yaml: permission denied — skipping it
+```
+
+## Unknown keys
+
+A key in a config file that no setting binds — a typo such as `linking.thresholdd` — is a warning on stderr rather than a failure: it cannot affect anything, so it should not stop a session, and the other keys in the same file still load.
+
+```text
+ghost: config: /home/you/.config/ghost/config.yaml: unknown key(s) ignored: linking.thresholdd
+```
+
+This check covers **config files only**, and the limits are worth knowing:
+
+- A misspelled `GHOST_*` variable is still ignored silently. Ghost cannot report it, because most of its variables are not config keys at all — `GHOST_DEBUG`, `GHOST_LOG_FILE`, `GHOST_SCRATCH_DIR`, `GHOST_PASSTHROUGH_ENV` and `GHOST_OPENCODE_MODEL` are documented here or in the harness section below, and none of them binds a `Config` field.
+- A `GHOST_*` value that cannot be read as its key's type is an error naming the variable, and only that variable is skipped — the rest of your environment still applies. This is true of the generic mapping too, not just the explicit shortcuts in the table below: `GHOST_EMBEDDING_DIMENSIONS=abc` is reported and ignored, and `GHOST_EMBEDDING_ENABLED=false` beside it still takes effect.
+
+Each distinct warning is printed once per process, so a SessionStart hook and a `ghost mcp status` in the same session do not repeat the same line. A second, different problem is still reported.
+
 ## File locations
 
 The user config file is normally:
@@ -212,6 +247,7 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 |---|---|
 | `GHOST_OLLAMA_URL` | `embedding.ollama_url` |
 | `GHOST_OBSIDIAN_VAULT_DIR` | `obsidian.vault_dir` |
+| `GHOST_OBSIDIAN_AUTO_SYNC` | `obsidian.auto_sync` |
 | `GHOST_CLI_CLAUDE_BINARY` | `cli.claude_binary` |
 | `GHOST_CLI_OPENCODE_BINARY` | `cli.opencode_binary` |
 | `GHOST_CLI_CODEX_BINARY` | `cli.codex_binary` |
@@ -219,8 +255,23 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 | `GHOST_CLI_MODEL_REFLECT` | `cli.model_reflect` |
 | `GHOST_CLI_MODEL_RESOLVE` | `cli.model_resolve` |
 | `GHOST_CLI_MODEL_SUPERSEDE` | `cli.model_supersede` |
+| `GHOST_LINKING_DEMOTION_THRESHOLD` | `linking.demotion_threshold` |
+| `GHOST_INJECTION_BEHAVIOR_FLOOR` | `injection.behavior_floor` |
+| `GHOST_INJECTION_BEHAVIOR_CATEGORIES` | `injection.behavior_categories` |
+| `GHOST_INJECTION_CATEGORY_WEIGHTS` | `injection.category_weights` |
+| `GHOST_INJECTION_CATEGORY_CAPS` | `injection.category_caps` |
 | `GHOST_SEARCH_MIN_SIMILARITY` | `search.min_similarity` |
 | `GHOST_ROUTING_DEFAULT_PROJECT` | `routing.default_project` |
+
+The four `injection.*` variables take structured values, so they use a comma-separated form rather than YAML syntax. Whitespace around the separators is ignored:
+
+```bash
+GHOST_INJECTION_BEHAVIOR_CATEGORIES="gotcha,decision"
+GHOST_INJECTION_CATEGORY_WEIGHTS="gotcha=1.2,decision=1.5"
+GHOST_INJECTION_CATEGORY_CAPS="gotcha=4,decision=2"
+```
+
+A value that cannot be read as its key's type is an error naming the variable, not a silently ignored setting.
 
 Other useful variables:
 

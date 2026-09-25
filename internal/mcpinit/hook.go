@@ -565,11 +565,14 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	// rank-only ordering. behavior_floor=0 disables the bias entirely and
 	// reproduces the historical rank-only selection.
 	behaviorFloor := 0
-	injection := config.DefaultInjectionConfig()
-	cfg, cfgErr := config.Load()
-	if cfgErr == nil {
-		injection = cfg.Injection
-	}
+	// LoadForHook, not Load: this runs inside the host's editor session, so a
+	// broken config must not fail it. LoadForHook reports the failure on stderr
+	// and returns the environment plus the compiled defaults, which pin the same
+	// injection.* and linking.demotion_threshold values the two former
+	// fallbacks did. Loaded once and reused — it reads the config files and the
+	// environment, and this is the session-start hot path.
+	cfg := config.LoadForHook()
+	injection := cfg.Injection
 	if injection.BehaviorFloor > 0 {
 		behaviorFloor = injection.BehaviorFloor
 		if behaviorFloor > sessionMemoriesCap {
@@ -671,10 +674,7 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	}
 
 	if len(memories) > sessionMemoriesCap {
-		demotionThreshold := memory.DefaultDemotionThreshold
-		if cfgErr == nil {
-			demotionThreshold = cfg.Linking.DemotionThreshold
-		}
+		demotionThreshold := cfg.Linking.DemotionThreshold
 		ids := make([]string, len(memories))
 		pinned := make(map[string]bool, len(memories))
 		for i, m := range memories {

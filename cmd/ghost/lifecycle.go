@@ -441,7 +441,7 @@ Flags:
 		os.Exit(1)
 	}
 
-	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel())
+	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
 
 	ctx := context.Background()
@@ -1004,7 +1004,7 @@ authentication and billing.`)
 		os.Exit(1)
 	}
 
-	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel())
+	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
 
@@ -1157,7 +1157,7 @@ different harness). The harness owns its authentication and billing.`)
 		os.Exit(1)
 	}
 
-	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel())
+	cfg, logger, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
 

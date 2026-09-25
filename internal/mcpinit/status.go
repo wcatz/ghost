@@ -344,10 +344,13 @@ func opencodeDirOrEmpty() string {
 	return dir
 }
 
-// reportConfigFile prints the user config file's location informationally.
-// It never fails the health check — the config file is optional, since
-// compiled defaults work without one — so it deliberately doesn't take a
-// check closure.
+// reportConfigFile prints the user config file's location, and any problem with
+// reading it. It never fails the health check — the config file is optional,
+// since compiled defaults work without one — so it deliberately doesn't take a
+// check closure; the `!` line it prints for a broken file is the pointer, not a
+// verdict. The rest of the status run continues on the environment plus the
+// compiled defaults (see checkStoreHealth), so a broken file costs the user no
+// other check.
 func reportConfigFile(w io.Writer) {
 	path, err := config.ConfigFilePath()
 	if err != nil {
@@ -358,6 +361,9 @@ func reportConfigFile(w io.Writer) {
 		_, _ = fmt.Fprintf(w, "  - config file: %s\n", path)
 	} else {
 		_, _ = fmt.Fprintf(w, "  - no config file (run ghost mcp init)\n")
+	}
+	if _, err := config.Load(); err != nil {
+		_, _ = fmt.Fprintf(w, "  ! config: %v (environment and built-in defaults in use)\n", err)
 	}
 }
 
@@ -381,19 +387,26 @@ func checkEmbeddingStats(check func(ok bool, pass, fail string), embedded, total
 // reports embedding health. It returns the opened store (or nil) so callers
 // can run additional store-dependent checks; the caller must Close a non-nil
 // store.
+//
+// The config is read once, through LoadForHook, and a file that does not parse
+// must not cost the user these checks. reportConfigFile has already reported
+// the parse error, and gating on config.Load here would drop the Ollama,
+// embedding-coverage and link lines on exactly the run where a user needs them:
+// a broken config silently disabling vector search is the thing this command
+// exists to explain. On the fallback these checks still run and still
+// report the truth about the store in front of them.
 func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memory.Store {
 	// 8. Embedding & linking health — silent embed failures leave vector
 	// search and memory linking inactive. Ollama checks run regardless of
 	// whether a database exists.
-	if cfg, cfgErr := config.Load(); cfgErr == nil {
-		// reportOllamaDownDuration only fires when embedding is enabled AND
-		// checkOllama's live probe just found Ollama unreachable — see that
-		// function's doc comment for why a stale marker must never be printed
-		// next to a currently-passing Ollama check.
-		if alive := checkOllama(w, cfg, check); cfg.Embedding.Enabled && !alive {
-			if dataDir, ddErr := config.DataDir(); ddErr == nil {
-				reportOllamaDownDuration(w, dataDir)
-			}
+	cfg := config.LoadForHook()
+	// reportOllamaDownDuration only fires when embedding is enabled AND
+	// checkOllama's live probe just found Ollama unreachable — see that
+	// function's doc comment for why a stale marker must never be printed
+	// next to a currently-passing Ollama check.
+	if alive := checkOllama(w, cfg, check); cfg.Embedding.Enabled && !alive {
+		if dataDir, ddErr := config.DataDir(); ddErr == nil {
+			reportOllamaDownDuration(w, dataDir)
 		}
 	}
 
@@ -419,7 +432,7 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := memory.NewStore(db, logger)
-	if cfg, cfgErr := config.Load(); cfgErr == nil && cfg.Embedding.Enabled {
+	if cfg.Embedding.Enabled {
 		ctx := context.Background()
 		if embedded, total, sErr := store.EmbeddingStats(ctx); sErr == nil {
 			checkEmbeddingStats(check, embedded, total)

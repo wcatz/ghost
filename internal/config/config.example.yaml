@@ -15,7 +15,8 @@
 # authentication and billing. Ghost has no direct Anthropic HTTP API client,
 # so no provider API-key config exists. By default the binaries are resolved
 # from PATH; set these to explicit paths when they live somewhere not on the
-# Stop hook process's PATH (e.g. ~/.opencode/bin).
+# Stop hook process's PATH (e.g. ~/.opencode/bin). Each also has a GHOST_CLI_*
+# environment override; see docs/configuration.md.
 
 # --- Local Embeddings (Ollama) ---
 # Enables hybrid FTS5 + vector search. Requires Ollama running locally.
@@ -39,6 +40,7 @@
 #                              # near-duplicate from GetTopMemories/session-start
 #                              # injection; stricter than threshold since
 #                              # "related" isn't the same bar as "redundant"
+#                              # (env: GHOST_LINKING_DEMOTION_THRESHOLD)
 
 # --- Search ranking ---
 # Cosine floor applied to the vector leg of hybrid search BEFORE RRF fusion.
@@ -56,6 +58,8 @@
 # cli:
 #   claude_binary: ""                 # e.g. "/opt/homebrew/bin/claude"
 #   opencode_binary: ""               # e.g. "/Users/you/.opencode/bin/opencode"
+#   codex_binary: ""                  # e.g. "/opt/homebrew/bin/codex"
+#   goose_binary: ""                  # e.g. "/usr/local/bin/goose"
 #   model_reflect: ""                 # pin ghost reflect's opencode harness model,
 #   model_resolve: ""                 # and likewise resolve / supersede, e.g.
 #   model_supersede: ""               # "opencode/big-pickle". Empty = any inherited
@@ -90,6 +94,7 @@
 #   vault_dir: ""                    # or set GHOST_OBSIDIAN_VAULT_DIR
 #   interval: "30s"                  # sync poll cadence (Go duration, e.g. "1m")
 #   auto_sync: false                 # true = auto-start sync from session-start
+#                                    # (env: GHOST_OBSIDIAN_AUTO_SYNC)
 
 # --- Scratch root budget ---
 # Every harness spawn is confined to a scratch root (dataDir/scratch or
@@ -113,14 +118,41 @@
 # the historical rank-only selection.
 # injection:
 #   behavior_floor: 8              # 0 = disable category bias (legacy behavior)
+#                                  # (env: GHOST_INJECTION_BEHAVIOR_FLOOR)
 #   behavior_categories:           # what counts as "behavioral" for the floor
 #     - gotcha
 #     - convention
 #     - preference
 #     - decision
+#                                  # (env: GHOST_INJECTION_BEHAVIOR_CATEGORIES,
+#                                  #  comma-separated: "gotcha,decision")
 #   category_weights: {}           # optional per-category ordering boost in pass 1,
 #                                  # e.g. {gotcha: 1.2} (default all 1.0)
+#                                  # (env: GHOST_INJECTION_CATEGORY_WEIGHTS,
+#                                  #  comma-separated: "gotcha=1.2")
 #   category_caps:                 # max pass-1 reserved slots per category
 #     gotcha: 4                    # default: gotcha may take at most half the
 #                                  # floor so a gotcha-heavy corpus cannot fill
 #                                  # every guaranteed slot with gotchas
+#                                  # (env: GHOST_INJECTION_CATEGORY_CAPS,
+#                                  #  comma-separated: "gotcha=4")
+
+# --- Session routing ---
+# Sessions started in your home directory or at the filesystem root match no
+# project, so they normally get no memory context. default_project names a
+# project (name or id) for those sessions to fall back to; empty (the default)
+# keeps the no-match behavior.
+# routing:
+#   default_project: ""            # (env: GHOST_ROUTING_DEFAULT_PROJECT)
+
+# --- When this file is wrong ---
+# A file that exists but does not parse is reported, not ignored: CLI commands
+# exit with the error, the SessionStart/Stop hooks and the `ghost mcp` server
+# warn and continue on the GHOST_* environment plus the defaults above (so your
+# session still works, and a GHOST_* opt-out is not undone), and `ghost mcp
+# status` prints it. A file that exists but cannot be READ (wrong permissions)
+# is only a warning and is skipped. A key Ghost does not recognize (a typo such
+# as `thresholdd`) is likewise reported, and the rest of the file still loads.
+# Leaving a section header bare (`injection:` with nothing under it) is not a
+# mistake: the defaults under it stand.
+# See docs/configuration.md.

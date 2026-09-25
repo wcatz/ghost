@@ -151,7 +151,7 @@ Irreversible. Refuses to delete _global.`)
 		os.Exit(1)
 	}
 
-	_, _, store := bootstrap(os.Stderr, cliLogLevel())
+	_, _, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
 	ctx := context.Background()
 
@@ -220,7 +220,7 @@ func runProjectMerge() {
 		os.Exit(1)
 	}
 
-	_, _, store := bootstrap(os.Stderr, cliLogLevel())
+	_, _, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
 
 	if err := runProjectMergeCore(context.Background(), store, os.Stdout, positional[0], positional[1]); err != nil {

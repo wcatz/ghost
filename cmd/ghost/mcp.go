@@ -29,7 +29,14 @@ func runMCP() {
 	if closeLog != nil {
 		defer closeLog()
 	}
-	cfg, logger, store := bootstrap(logWriter, logLevel)
+	// Config warnings go where this process's logs go, not to raw stderr: stderr
+	// belongs to the client protocol here, which is exactly what GHOST_LOG_FILE
+	// exists to keep clean. No deferred restore — the process is exiting, so
+	// there is nothing to restore, and restoring at return would touch the sink
+	// while the embed/link workers and any in-flight tool handler are still
+	// inside a warnf (every harness spawn loads the config).
+	config.SetWarningWriter(logWriter)
+	cfg, logger, store := bootstrap(logWriter, logLevel, warnOnConfig)
 	defer store.Close() //nolint:errcheck
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
