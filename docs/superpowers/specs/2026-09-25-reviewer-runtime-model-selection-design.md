@@ -15,7 +15,11 @@ can fail before a currently usable model is tried.
 The `review` job keeps one ordered `MODELS` environment variable as the maintainer-facing
 preference and fallback. A new selection phase runs before the real review and invokes
 `opencode models` from `$RUNNER_TEMP`; OpenCode therefore never discovers project config or
-plugins from the pull-request checkout during selection.
+plugins from the pull-request checkout during selection. The catalog command intentionally
+uses the normal model service (not `--standalone`): the private standalone service has no
+provider catalog on a keyless runner, while the normal command can query one when the runner
+exposes it. The working directory still isolates project configuration. Probes use
+`--standalone` so they cannot attach to a project-local service.
 
 The catalog is reduced to anonymous free-tier candidates:
 
@@ -25,8 +29,9 @@ The catalog is reduced to anonymous free-tier candidates:
 `opencode-go/*` is never eligible, even when its model name ends in `-free`, because it is a
 paid endpoint. Other providers and non-free ids are not selected. When the catalog is
 available, the static `MODELS` ids that are present retain their listed order, followed by
-other catalog free ids in catalog order. If catalog discovery fails, the static list is
-filtered and used as the fallback order.
+other catalog free ids in catalog order. Safe static entries missing from the catalog are
+retained as last-resort fallbacks after the discovered candidates; if catalog discovery
+fails, the filtered static list is used directly.
 
 Each candidate is probed with a tiny prompt using the same `--agent ghost-reviewer`
 read-only agent and an explicit `-m`. Probes use `--standalone` and execute from
@@ -55,4 +60,5 @@ The workflow is checked with `actionlint` and the review job on the implementati
 the end-to-end proof. The PR body records the selection and skip log lines from that run.
 A focused behavior harness exercises catalog ordering, fallback, free-tier filtering,
 probe skips, fatal agent errors, and workflow-command escaping before the workflow change
-is made; its mutants are checked by temporarily reverting the corresponding behavior.
+is made; its mutants are checked by temporarily reverting the corresponding behavior. It
+also proves that a static model missing from a catalog remains a last-resort probe candidate.
