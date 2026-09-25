@@ -111,12 +111,12 @@ func parseVerdict(result string) Verdict {
 	}
 
 	first := strings.Trim(fields[0], ".,!\"'`:;—-*")
-	switch {
-	case first == "keep":
+	switch first {
+	case "keep":
 		return VerdictKeep
-	case first == "resolved" || first == "resolve":
+	case "resolved", "resolve":
 		return VerdictResolved
-	case first == "unresolved" || first == "non-resolved" || first == "not-resolved":
+	case "unresolved", "non-resolved", "not-resolved":
 		// These are explicit negated forms. A broad suffix match would also
 		// accept malformed prose such as "already-resolved" as KEEP.
 		return VerdictKeep
