@@ -89,6 +89,9 @@ ghost reflect myproject --apply
 
 The `auto` tier uses the explicit source when provided, otherwise detects the calling harness. It does not silently switch to a different harness or billing path. When a source is known but its CLI binary is unavailable, auto can fall back to SQLite; the offline tier is also available for an explicit local run.
 
+CLI-backed maintenance runs each harness with an allowlisted environment, isolated configuration, and tools/MCP disabled; see [Harness subprocess environment](configuration.md#harness-subprocess-environment).
+
+
 ### `ghost resolve <project>`
 
 Marks resolved-evidence memories so they leave ranked session injection while remaining searchable:

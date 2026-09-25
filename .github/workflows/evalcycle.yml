@@ -11,12 +11,13 @@ name: evalcycle
 # enough to catch gross breakage like a classifier path failing to zero.
 #
 # Auth: pass the existing opencode credential as the OPENCODE_GO_API_KEY
-# Actions secret; it flows into OPENCODE_API_KEY on the run step. The harness
-# → ghost → opencode subprocess chain carries it through automatically
-# (ai.stripLLMKeys strips ANTHROPIC/OPENAI/GOOSE keys but passes OPENCODE_*
-# by design). The credential affects the harness's own authentication and
-# billing; it does not change the model Ghost passes. With an empty model input,
-# Ghost explicitly uses opencode/big-pickle. Model pins must be provider-scoped:
+# Actions secret; it flows into OPENCODE_API_KEY on the run step. Ghost passes
+# that variable only to the opencode backend, where it is the supported auth
+# path for the isolated child. The other harness backends receive their own
+# reviewed configuration and never receive this credential. The credential
+# affects the harness's own authentication and billing; it does not change the
+# model Ghost passes. With an empty model input, Ghost explicitly uses
+# opencode/big-pickle. Model pins must be provider-scoped:
 # `opencode-go/ox-alpha-free`, not bare `ox-alpha-free`.
 
 on:
