@@ -458,27 +458,30 @@ func (s *Store) fuseAndRank(ctx context.Context, ftsResults []Memory, vecResults
 	// reorder the window, and hydration via GetByIDs does not preserve order, so
 	// the final sort lives there too.
 	//
-	// The keyword-only path is exempt. With no vector leg its narrowed pool is a
-	// subset of ftsResults, and those arrive fully hydrated because SearchFTS
-	// selects every column — so re-reading them by id would spend a
-	// WHERE id IN (...) round trip rebuilding the slice already in hand. That is
-	// the degraded path, taken whenever there is no embedder or the vector floor
-	// empties the leg, so it is the one that can least afford the extra query.
-	//
-	// The hybrid path still re-reads the whole pool. There a row deleted between
-	// the leg queries and hydration is exactly what the backfill below exists to
-	// replace, and reusing the leg's copy would hide the delete.
+	// The leg results are NOT a substitute for this read, on either path. They
+	// are the snapshot an earlier statement returned, and a concurrent writer can
+	// delete or update a row before this function returns. Reading by id is what
+	// makes a vanished window ID disappear so selectHydratedWindow can backfill
+	// the next candidate; taking the leg's copy instead would emit a row that no
+	// longer exists, with stale category, pinned and created_at feeding decay.
 	beforeHybridHydrate(window.IDs)
-	var memories []Memory
-	if len(vecResults) == 0 {
-		memories = selectHydratedWindow(ftsResults, window, poolIDs)
-	} else {
-		hydrated, err := s.GetByIDs(ctx, poolIDs)
+
+	// Re-read the window first, which is all the common case needs. The wider pool
+	// is only consulted when a window ID is genuinely missing, so the deleted-row
+	// backfill still has somewhere to draw from without every keyword-only search
+	// paying for a limit*2-row read it will not use.
+	hydrated, err := s.GetByIDs(ctx, window.IDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(window.IDs) > 0 && len(hydrated) < len(window.IDs) {
+		pool, err := s.GetByIDs(ctx, poolIDs)
 		if err != nil {
 			return nil, err
 		}
-		memories = selectHydratedWindow(hydrated, window, poolIDs)
+		hydrated = pool
 	}
+	memories := selectHydratedWindow(hydrated, window, poolIDs)
 	memories = decayRank(memories, window.Scores, p, limit, time.Now().UTC())
 	return s.demoteResults(ctx, memories, p), nil
 }
