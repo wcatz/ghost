@@ -148,12 +148,20 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		path = resolved
 	}
 	dir := filepath.Dir(path)
+	// The two cases differ. A new file is created with the requested mode, so
+	// the kernel narrows it by the umask. A replacement is created 0600 and only
+	// afterwards given the target's exact mode: that is the shape the
+	// settings.json write has always had, and it keeps the write independent of
+	// the target's owner-write bit instead of relying on the exemption a
+	// just-created inode gets.
+	createMode, finalMode := perm, perm
 	replace := false
 	if info, err := os.Stat(path); err == nil {
-		perm = info.Mode().Perm()
+		finalMode = info.Mode().Perm()
+		createMode = 0600
 		replace = true
 	}
-	tmp, err := createTempWithMode(dir, filepath.Base(path), perm)
+	tmp, err := createTempWithMode(dir, filepath.Base(path), createMode)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -168,10 +176,10 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
-	// A created file already has the right mode; only a replacement needs the
-	// umask undone to land on the original file's exact permissions.
+	// A created file already carries the mode the kernel gave it; only a
+	// replacement needs the target's exact permissions forced onto it.
 	if replace {
-		if err := os.Chmod(tmpPath, perm); err != nil {
+		if err := os.Chmod(tmpPath, finalMode); err != nil {
 			_ = os.Remove(tmpPath)
 			return fmt.Errorf("chmod temp file: %w", err)
 		}
