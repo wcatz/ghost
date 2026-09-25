@@ -20,6 +20,12 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
+    # The ONE place the review models are listed: an ordered list of free
+    # models, tried in turn by the Review step (the first is also written
+    # into the agent file and checked by the catalog preflight). Job
+    # scope, because shell variables do not survive between steps.
+    env:
+      MODELS: opencode/space-bunny-free opencode/big-pickle opencode/mimo-v2.6-flash-free
     # Must stay above the model step's own timeout plus the ~3 min of
     # checkout/install/prepare ahead of it, or the job ceiling kills the
     # run first and the step timeout never fires.
@@ -117,7 +123,7 @@ jobs:
           key: opencode-tarball-linux-x64-2.0.15-5ba4e87d9ee5dd5c
 
       - name: Install opencode
-        # Binary from GitHub Releases with SHA256 verification — no
+        # Binary from the npm registry with SHA256 verification — no
         # unpinned curl|bash. The PATH export is REQUIRED: the old
         # curl|bash installer wrote $GITHUB_PATH itself, and dropping it
         # is what gave PR #421 "opencode: command not found" (exit 127).
@@ -165,7 +171,9 @@ jobs:
           echo "${OC_SHA256}  /tmp/opencode.tar.gz" | sha256sum -c -
           tar -xzf /tmp/opencode.tar.gz -C "$HOME/.opencode/bin" --strip-components=2 package/bin/opencode
           chmod +x "$HOME/.opencode/bin/opencode"
-          "$HOME/.opencode/bin/opencode" --version
+          # Run from a scratch dir: V2 loads project config and plugins
+          # from the working directory, which here is the untrusted PR tree.
+          (cd "$RUNNER_TEMP" && "$HOME/.opencode/bin/opencode" --version)
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: Install the read-only reviewer agent
@@ -196,8 +204,9 @@ jobs:
           # puts it next to the tool restrictions, so rotating the model
           # is a one-line edit in one place.
           #
-          # MODELS is an ordered list of FREE models, tried in turn by the
-          # Review step; the first is also written into the agent file.
+          # MODELS (job env above) is an ordered list of FREE models, tried
+          # in turn by the Review step; the first is also written into the
+          # agent file.
           # No API key: the review runs on the anonymous free tier, so it
           # never spends account credits. Verified 2026-09-25 on 2.0.15:
           # opencode/space-bunny-free accepts this read-only agent (tools
@@ -207,10 +216,9 @@ jobs:
           # even when authenticated. They stay in the list so the review
           # picks them up automatically if the free tier relaxes. Free
           # models rotate: when the first one disappears from the catalog,
-          # the preflight below warns, and this line is the only place to
-          # change. V2 ignores the agent file's model: line, so the Review
+          # the preflight below warns, and the job-level MODELS is the only
+          # place to change. V2 ignores the agent file's model: line, so the Review
           # step passes -m explicitly.
-          MODELS="opencode/space-bunny-free opencode/big-pickle opencode/mimo-v2.6-flash-free"
           MODEL=${MODELS%% *}
           mkdir -p "$HOME/.config/opencode/agent"
           AGENT=$HOME/.config/opencode/agent/ghost-reviewer.md
@@ -275,7 +283,12 @@ jobs:
           # every review on the repo to guard against a rotation that
           # already fails loudly on its own. So: warn, and let the run
           # produce the real verdict.
-          if catalog=$(opencode models 2>/dev/null) && [ -n "$catalog" ]; then
+          # From a scratch dir, never the workspace: V2 loads project config
+          # and plugins (.opencode/, opencode.json) from the working
+          # directory, and at this point the workspace is still the
+          # untrusted PR checkout, so a PR could otherwise run code here or
+          # replace the read-only agent before the review.
+          if catalog=$(cd "$RUNNER_TEMP" && opencode models 2>/dev/null) && [ -n "$catalog" ]; then
             printf '%s\n' "$catalog" | grep -qxF "$MODEL" \
               || echo "::warning::${MODEL} (first of MODELS) is not in the opencode model catalog. Either it was rotated or retired — if the review step now fails with an opaque gateway error, that is why, and MODEL in this step is the only place to change it — or 'opencode models' no longer prints one provider-qualified id per line, in which case this preflight is stale and the review below is unaffected."
           else
@@ -473,8 +486,6 @@ jobs:
         # never spend account credits. (Until 2026-09-25 this step ran a
         # paid go-endpoint model via OPENCODE_API_KEY; when that balance ran
         # out every review failed with an opaque gateway error.)
-        env:
-          MODELS: opencode/space-bunny-free opencode/big-pickle opencode/mimo-v2.6-flash-free
         run: |
           cd "${GITHUB_WORKSPACE}"
           # Hard-fail rather than hand a credential to a model fed
@@ -525,7 +536,7 @@ jobs:
             if opencode run --standalone --agent ghost-reviewer -m "$m" --format json \
                  "$REVIEW_PROMPT" > model-reply.try 2> model-stderr.txt \
                && [ -s model-reply.try ] \
-               && ! jq -e 'select(.type == "error")' model-reply.try >/dev/null 2>&1; then
+               && jq -s -e 'length > 0 and all(.[]; .type != "error")' model-reply.try >/dev/null 2>&1; then
               mv model-reply.try model-reply.txt
               echo "review produced by ${m}"
               break
@@ -537,6 +548,10 @@ jobs:
                 echo "::error::ghost-reviewer agent did not register — refusing to review with the default (write-capable) tool set"
                 exit 1 ;;
             esac
+            # reason is provider/model-derived: percent-escape it (as
+            # base_ref_safe does) so a %0A in an error body cannot open a new
+            # workflow command such as ::stop-commands::.
+            reason=${reason//%/%25}
             echo "::warning::review model ${m} failed: ${reason:-no output}"
           done
           rm -f model-reply.try
