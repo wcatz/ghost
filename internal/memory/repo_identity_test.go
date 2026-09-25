@@ -152,6 +152,100 @@ func TestResolveProjectByRemote(t *testing.T) {
 	}
 }
 
+// TestResolveExplicitProjectRepoTxRefusesEvidenceAboutAnotherCheckout covers the
+// arm of the nested-checkout guard that no ordinary save reaches: a project
+// re-pointed between the pre-lock evidence read and the transaction that reads
+// it again.
+//
+// The evidence says the project speaks for the repository detected at the
+// checkout it used to record. If the row is then re-pointed at a different
+// checkout that still contains the saving directory — `ghost project bind` on a
+// subdirectory of it, say — the transaction still routes the save to that
+// project, and binding the remote would put the old checkout's repository on a
+// project that no longer records that checkout. The id is the same row either
+// way, which is why comparing the project alone is not enough.
+//
+// Both halves are driven directly rather than raced for: the evidence through
+// s.savingRepository, the re-point through the public bind, then the transaction
+// with the stale answer in hand. A test that waited for the two to collide would
+// pass without ever reaching the branch.
+func TestResolveExplicitProjectRepoTxRefusesEvidenceAboutAnotherCheckout(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const own = "https://github.com/wcatz/infra.git"
+	// ResolveOrCreateRepoProject normalizes the caller's remote once, before the
+	// evidence read and before the transaction, so both sides of every
+	// comparison here see the normalized spelling rather than the detected URL.
+	canon := NormalizeRepoRemote(own)
+	root := t.TempDir()
+	checkout := filepath.Join(root, "git", "infra")
+	saving := filepath.Join(checkout, "src", "api")
+	repointed := filepath.Join(checkout, "src")
+	for _, dir := range []string{checkout, saving, repointed} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+	if err := s.EnsureProject(ctx, checkout, checkout, "infra"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	SetDetectRemote(func(string) string { return own })
+	t.Cleanup(func() { SetDetectRemote(nil) })
+
+	// What a save from the subdirectory collects while the project still
+	// records the checkout root.
+	evidence := s.savingRepository(ctx, saving, canon)
+	if evidence.projectID != checkout || evidence.recordedPath != checkout {
+		t.Fatalf("evidence = %+v, want it to describe %q at %q", evidence, checkout, checkout)
+	}
+	if !evidence.speaksForProject {
+		t.Fatalf("evidence says the subdirectory does not speak for the project: %+v", evidence)
+	}
+
+	// The same row, re-pointed at a shorter ancestor of the saving directory, so
+	// the transaction's prefix query still answers with this project.
+	binding, err := s.BindProjectPath(ctx, checkout, repointed, "")
+	if err != nil {
+		t.Fatalf("BindProjectPath: %v", err)
+	}
+	if binding.Path != repointed {
+		t.Fatalf("bind recorded path %q, want %q", binding.Path, repointed)
+	}
+
+	s.mu.Lock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatalf("begin tx: %v", err)
+	}
+	id, found, resolveErr := s.resolveExplicitProjectRepoTx(ctx, tx, saving, canon, evidence)
+	// Committed, not rolled back: the assertion is about whether a remote was
+	// written, and a rollback would discard the write under test and pass the
+	// test whatever the guard did.
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	s.mu.Unlock()
+	if resolveErr != nil {
+		t.Fatalf("resolveExplicitProjectRepoTx error = %v, want nil", resolveErr)
+	}
+	if !found || id != checkout {
+		t.Errorf("resolveExplicitProjectRepoTx = (%q, %v), want (%q, true): the re-pointed project still encloses the save", id, found, checkout)
+	}
+
+	// The point: the save is routed, and the project is left unclaimed rather
+	// than given a remote detected at the checkout it no longer records.
+	var got string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, checkout).Scan(&got); err != nil {
+		t.Fatalf("read project repository: %v", err)
+	}
+	if got != "" {
+		t.Errorf("evidence about %q bound %q to a project now recording %q", checkout, got, repointed)
+	}
+}
+
 // TestResolveOrCreateRepoProject covers the transactional write-side identity
 // bridge used when a repository-aware save arrives before the named project
 // has recorded a remote.
