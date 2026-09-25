@@ -15,9 +15,48 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const repoAPI = "https://api.github.com/repos/wcatz/ghost/releases/latest"
+
+const (
+	// apiTimeout bounds the release metadata lookup. It is a small JSON
+	// request: either GitHub answers in seconds or the network is broken, and
+	// an interactive command has no business waiting longer.
+	apiTimeout = 30 * time.Second
+	// downloadTimeout bounds one release-asset transfer, which is a
+	// multi-megabyte body on a link of unknown speed rather than a metadata
+	// lookup.
+	downloadTimeout = 10 * time.Minute
+)
+
+const (
+	// maxReleaseJSONBytes bounds the release metadata read from GitHub. A real
+	// payload is a few KiB; 4 MiB is generous while still bounding what a
+	// stalled-but-open connection can push into memory before the deadline.
+	maxReleaseJSONBytes int64 = 4 << 20
+	// maxChecksumBytes bounds checksums.txt. A real manifest is one 64-hex
+	// digest per asset, well under a KiB.
+	maxChecksumBytes int64 = 1 << 20
+	// maxArchiveBytes bounds a release archive. Compressed ghost binaries are
+	// tens of MiB, so this leaves room to grow while keeping an endless or
+	// hostile response from exhausting memory.
+	maxArchiveBytes int64 = 200 << 20
+)
+
+// archiveCap is the limit ReadArchive enforces. It is a var only so a test can
+// lower it and prove the cap holds without pushing 200 MiB through a socket;
+// production never reassigns it.
+var archiveCap = maxArchiveBytes
+
+// The clients carry a Timeout rather than relying on http.DefaultClient, which
+// has none: an accept-then-stall connection would otherwise block
+// `ghost upgrade` until the OS gave up, which can be minutes of nothing.
+var (
+	apiClient      = &http.Client{Timeout: apiTimeout}
+	downloadClient = &http.Client{Timeout: downloadTimeout}
+)
 
 // Release represents the subset of GitHub release API we need.
 type Release struct {
@@ -33,13 +72,19 @@ type Asset struct {
 
 // LatestRelease fetches the latest release metadata from GitHub.
 func LatestRelease() (*Release, error) {
-	req, err := http.NewRequest("GET", repoAPI, nil)
+	return fetchRelease(repoAPI)
+}
+
+// fetchRelease is LatestRelease against an explicit URL, so tests can point it
+// at a local server instead of GitHub.
+func fetchRelease(url string) (*Release, error) {
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := apiClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch latest release: %w", err)
 	}
@@ -49,11 +94,46 @@ func LatestRelease() (*Release, error) {
 		return nil, fmt.Errorf("github API returned %d", resp.StatusCode)
 	}
 
+	body, err := readCapped(resp.Body, maxReleaseJSONBytes, "release metadata")
+	if err != nil {
+		return nil, err
+	}
+
 	var rel Release
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	if err := json.Unmarshal(body, &rel); err != nil {
 		return nil, fmt.Errorf("decode release: %w", err)
 	}
 	return &rel, nil
+}
+
+// readCapped reads r into memory and refuses anything larger than limit.
+// Exceeding the cap is an error rather than a silent truncation: a short read
+// of checksums.txt or of an archive is not a smaller valid file, it is a
+// different file that must not reach Replace.
+func readCapped(r io.Reader, limit int64, what string) ([]byte, error) {
+	// One byte past the cap is what distinguishes "exactly at the cap" from
+	// "over it".
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", what, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s is larger than the %d-byte cap", what, limit)
+	}
+	return data, nil
+}
+
+// ReadChecksums reads a checksums.txt manifest, refusing anything over
+// maxChecksumBytes.
+func ReadChecksums(r io.Reader) ([]byte, error) {
+	return readCapped(r, maxChecksumBytes, "checksums.txt")
+}
+
+// ReadArchive reads a release archive, refusing anything over maxArchiveBytes
+// (200 MiB). The cap is on the compressed transfer; ExtractBinary is what turns
+// that into a binary, and reading the tar entry is not separately capped.
+func ReadArchive(r io.Reader) ([]byte, error) {
+	return readCapped(r, archiveCap, "release archive")
 }
 
 // AssetName returns the expected archive name for the current platform.
@@ -79,9 +159,11 @@ func FindAsset(rel *Release) (*Asset, error) {
 	return nil, fmt.Errorf("no release asset for %s/%s (expected %s)", runtime.GOOS, runtime.GOARCH, want)
 }
 
-// Download fetches the asset and returns the reader. Caller must close.
+// Download fetches the asset and returns the reader. Caller must close. The
+// body is not bounded here — read it through ReadArchive or ReadChecksums so
+// the size it is allowed to reach is named in one place.
 func Download(url string) (io.ReadCloser, error) {
-	resp, err := http.Get(url)
+	resp, err := downloadClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("download: %w", err)
 	}
