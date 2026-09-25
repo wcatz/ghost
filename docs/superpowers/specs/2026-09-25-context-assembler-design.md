@@ -168,39 +168,23 @@ const (
 // the whole-item hard trim (membership). They are separate mechanisms.
 type Slice struct {
     Bucket     string // project id, "_global", or "*" for the fallback slice
-    MaxItems   int    // 0 = unbounded by count
-    MaxBytes   int    // 0 = unbounded
+    MaxItems   int    // 0 = unbounded by count *within this slice*
+    MaxBytes   int    // 0 = unbounded within this slice
     ClampBytes int    // 0 = no clamp
-    DropDemotedLosers bool // true for _global today; false elsewhere — see §2
+    DropDemotedLosers bool // per-SOURCE, not per-bucket — see "DropDemotedLosers is
+                          // source-scoped" below. Never set this without reading it.
 }
-type Budget []Slice // first matching Bucket wins; "*" is the fallback
-```
 
-**A per-slice `MaxItems` cannot express the search tool's single total limit.**
-`ghost_memory_search` takes one `limit` and applies it to the **combined** result
-(`args.Limit`, `mcpserver.go:671`), across both the project bucket and `_global`.
-`Budget` is a list of per-bucket `Slice`s, so "at most 10 items" expressed as
-`MaxItems: 10` on each of two slices permits 20 — and a caller cannot express the
-difference between "10 per bucket" and "10 total" at all. Injection is the
-opposite shape: two independent caps, 15 project and 8 globals, which is exactly
-what per-slice is right for.
-
-So `Budget` needs a total alongside the per-slice caps:
-
-```go
+// Budget is a total cap plus the per-bucket slices, because the two surfaces
+// need different things: ghost_memory_search has ONE limit across the project
+// bucket and _global combined, while injection has two genuinely independent
+// caps. Per-slice alone cannot express the first — "at most 10" on two slices
+// permits 20, and "10 per bucket" vs "10 total" is inexpressible.
 type Budget struct {
-    MaxItems int      // 0 = unbounded TOTAL across all slices; the search tool's `limit`
-    MaxBytes int      // 0 = unbounded total
-    Slices   []Slice  // per-bucket caps, applied within the total
+    MaxItems int     // 0 = unbounded TOTAL across all slices; search's `limit`
+    MaxBytes int     // 0 = unbounded total
+    Slices   []Slice // per-bucket caps, applied within the total
 }
-```
-
-Stage 8 applies the per-slice caps first (preserving the 15/8 injection split) and
-then the total, so today's search behaviour — one combined `limit` — is expressed
-as `MaxItems: limit` with per-slice `MaxItems: 0`, and today's injection behaviour
-is expressed with the total unset. Without the total field the seam cannot
-reproduce `ghost_memory_search` and would quietly double its result size, which is
-exactly the kind of default-path change PR 1 is gated against.
 
 // Condition is which retrieval legs run. bench needs all three; zeroing
 // FTSWeight is NOT the vector-only case, because fused FTS candidates still
@@ -213,8 +197,8 @@ const (
 )
 
 type Request struct {
-    ProjectID string               // "" for SourceAllProjects AND for a projectless
-                                  // session_start — see "Projectless session start"
+    ProjectID string               // see the validation matrix below — legal values
+                                  // depend on Source, not on Query
     Query     string               // "" = passive mode, see §2 stage 1
     Scope     map[string]string    // nil = no scope predicate
     Category  string               // "" = any; stage 3 membership, never post-closure
@@ -237,6 +221,21 @@ type Result struct {
     Bytes   int
 }
 ```
+
+Stage 8 applies the per-slice caps first — preserving injection's 15/8 split —
+and then the total. Today's search behaviour is `MaxItems: limit` with per-slice
+`MaxItems: 0`; today's injection behaviour is the total left at 0.
+
+**`MaxItems: 0` means unbounded, not "unset, effectively a no-op".** Those are the
+same value with very different consequences here, because `Candidates` returns a
+widened, untrimmed set and stage 8 *is* the trim: a request with `MaxItems: 0` and
+no slices admits the whole discarded tail, changing IDs, counts and every metric.
+So `Budget` has no implicit default. Every caller sets it explicitly, and `Run`
+**errors** when a budget is entirely zero rather than silently returning an
+unbounded block — a search tool that can be handed an unbounded budget is a
+footgun with no upside. In particular the bench request sets `MaxItems` to its
+current `limit` (its `Result` truncates the same way today); #582 does not get to
+leave it unset and compare against a trimmed baseline.
 
 `Item` is the assembler's currency — what the renderer prints, what `explain`
 reports per row, and what bench scores. It carries the axis fields (#582's
@@ -302,22 +301,62 @@ retrieval path, both of which defeat the point of the seam. So:
 - For `SourceAllProjects` it keeps its current meaning (no project filter at
   all), so the two are distinguished by `Source`, not by the emptiness of the
   field.
-- The invariant that *is* kept, narrowly: `ProjectID == ""` is **rejected** only
-  for `SourceSearch`, where the caller named a project context and the empty value
-  can only be a bug. `ghost_memory_search` today always passes a project
-  (`mcpserver.go:627-671`), so this guards a caller error rather than describing
-  a supported mode, and `Run` returns an error rather than silently degrading to
-  a global-only keyword search nobody asked for.
-- For `SourceAllProjects` an empty `ProjectID` is the **whole point** — it is the
-  no-project-filter search — so it is explicitly *not* an error there, with or
-  without a query.
+- `ProjectID == ""` is **legal** for `SourceSessionStart` (globals-only mode
+  above) and for `SourceAllProjects` (no project filter — with or without a
+  query; that is what `ghost_search_all` does, `mcpserver.go:1077`).
+- `ProjectID == ""` for `SourceSearch` is **not** an error either — see below.
 
-I first wrote this as "`ProjectID == ""` with a non-empty `Query` is rejected",
-which would have broken `ghost_search_all`: that tool (`mcpserver.go:1077`,
-`SearchHybridAll`) searches **all** projects *with* a query and no project id, and
-it is the one case the empty value exists for. The rejection is scoped to
-`SourceSearch` because that is the only source where an empty project id is
-meaningless rather than deliberate.
+**Unknown projects fall back to `_global` today, and that must be preserved.**
+My first draft rejected an empty `ProjectID` for `SourceSearch` on the stated
+ground that "`ghost_memory_search` always passes a project
+(`mcpserver.go:627-671`)". **That claim was false**, and the correction matters
+because rejecting it would change user-visible behaviour. The handler requires
+`args.ProjectID != ""` (`:562-564`), but then resolves it and assigns the result
+**without an empty check**:
+
+```go
+resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)  // :571
+if err != nil { ... }                                            // empty ID is NOT an error
+args.ProjectID = resolved                                        // :575
+```
+
+`ResolveProject` returns an empty id with a **nil** error for an unknown name, and
+`SearchHybrid`'s SQL is `project_id = ? OR project_id = '_global'`, so an empty
+id matches only the `_global` bucket. Today's behaviour for an unknown project is
+therefore a **globals-only search result**, not an error. `mcpserver` is the
+outlier here: `ghost_memory_update` (`:434`) and `ghost_memory_delete` (`:516`)
+both check `resolvedProjectID == ""` and return "project not found", so search
+being lenient is an inconsistency in the tool, not a designed feature.
+
+Two options, and this design takes the second:
+
+- Make an unresolved project an explicit tool error, matching the other tools.
+  Rejected for this PR: it converts a working globals-only response into an error
+  for any user with a typo'd or unrecognised project name, and #598 is not the
+  issue that asks for it. Silently changing a default-path response is exactly the
+  class of change the gates here exist to prevent.
+- **Preserve and document the fallback.** `ProjectID == ""` with `SourceSearch`
+  runs the globals-only path, and the behaviour is specified rather than
+  accidental. The regression test asserts a search with an unknown project name
+  returns the `_global` rows and does not error. If the inconsistency with
+  `ghost_memory_update`/`delete` is worth fixing, it gets its own issue — as a
+  deliberate, separately gated decision rather than a side effect of a seam.
+
+**The full validation matrix**, so this cannot be under-specified again — the
+previous two attempts each closed one source and left the others implicit:
+
+| Source | `ProjectID` | `Query` | Behaviour |
+|---|---|---|---|
+| `SourceSearch` | required non-empty **by the tool** | required non-empty by the tool | the tool guarantees both; an id that resolves to empty runs globals-only (§ above) |
+| `SourceProjectCtx` | required non-empty | must be empty (passive) | project + `_global`, as `buildProjectContext` does today |
+| `SourceSessionStart` | non-empty, or `""` | must be empty (passive) | `""` selects globals-only (`hook.go:428-430`, `:303`) |
+| `SourceAllProjects` | ignored, may be `""` | optional | no project filter; empty is the normal case |
+| `SourceBench` | required non-empty, or `""` for an all-projects ablation | optional | mirrors the condition being ablated |
+
+`Run` validates the `Query`/passive split and the `Budget` and rejects the
+combinations marked required-empty; it does **not** invent a project. The
+per-source test asserts each row, which is what makes "legal values depend on
+Source" a checkable statement rather than a convention.
 
 The regression test is the rendered block for a projectless session: project
 bucket absent, `_global` bucket present and capped by the existing `globalsCap`,
@@ -766,16 +805,25 @@ global injection removes. Converging them on membership-preserving reorder would
 retain duplicate globals in the default session-start result and contradict PR 2's
 no-op gate.
 
-So the policy is explicit and per-slice, not global:
+So the policy is explicit and **scoped by `Source` first, bucket second** — not a
+per-bucket flag, which is what I originally specified and which contradicts both
+the search path and my own §5 table:
 
-```go
-type Slice struct {
-    ...
-    DropDemotedLosers bool // true for _global today (hook.go:364-387);
-                        // false for project memories and for search, where
-                        // reorder + the cap is the established behaviour
-}
-```
+| Source | Bucket | `DropDemotedLosers` | Why |
+|---|---|---|---|
+| `SourceSearch` | project **and** `_global` | **false** | `SearchHybrid` only reorders; both legs demote in place (`vector.go:426`). Removing losers here would change search membership on the default path. |
+| `SourceSessionStart` | `_global` | **true** | `hook.go:364-387` filters a global near-duplicate loser outright, independent of the cap |
+| `SourceSessionStart` | project | false | project injection relies on the 15-item cap to drop the loser |
+| `SourceProjectCtx` | project + `_global` | false | `buildProjectContext` does not demote-drop |
+| `SourceAllProjects`, `SourceBench` | — | false | no established drop behaviour to preserve |
+
+The bucket distinction only matters *within* `SourceSessionStart`, which is the
+one source with a drop policy at all. So the field lives on `Slice` but is only
+honoured for that source, and a `SourceSearch` budget that sets it is a
+programming error the config validation rejects. My §5 table previously said
+`DropDemotedLosers` was "`true` for `_global` only" in the context of rerouting
+`hybrid` — which contradicts the `false` in the row above it. `hybrid` is
+`SourceSearch`, so it is **false**, and the `_global` row there was wrong.
 
 The decision is traced either way (`Decision.Stage == "dedup"`, `Kept: false`,
 `Reason: "dedup_dropped_by_slice_policy"`), so §5's duplicate count works and PR
@@ -812,9 +860,19 @@ QUERY MODE (Request.Query != "")
    ≥1 reached stage 8, ≥1 satisfies a floor arm            → answerable
    ≥1 reached stage 8,  0 satisfies any floor arm          → weak
 PASSIVE MODE (Request.Query == "" — session_start, project_context)
-   0 rows admitted                                         → empty,    reason: no_memories
+   stage 1 produced 0 rows                                → empty, reason: no_memories
+   rows existed, 0 reached stage 8                        → empty, reason: the
+                                                          stage that emptied them
    ≥1 row admitted                                         → answerable, reason: not_applicable
 ```
+
+Passive empties report **the stage that emptied them**, not `no_memories`.
+`no_memories` is specifically "stage 1 produced nothing" — the passable case. My
+first draft collapsed every passive empty to `no_memories`, which made
+`all_dedup_dropped` unreachable: the only source that sets `DropDemotedLosers` is
+`SourceSessionStart`, whose empties could only ever report `no_memories`, so the
+one reason that genuinely empties a global block had no way to surface. Both
+halves of that were wrong and they only became visible together.
 
 ### The `empty` reason set is closed, in actual stage order
 
@@ -1178,9 +1236,9 @@ real.
 | 3 predicates | No change on the bench fixture, which is unscoped and uncategorised. The ordering fix — predicates ahead of window closure — is real but a no-op when no predicate is set. |
 | 4 provenance | No change; the multiplier is pinned to 1.0. |
 | 5 conflicts | **Changes membership, not just order.** `demoteSuperseded` already runs, but over a *wider* row set than today: it reorders the whole `CandidateSet.Rows`, and stage 8 then trims to the window. A row that sits mid-window today can be pushed below the cut by a superseder that is itself below the cut, so the demotion decides membership *through* the trim. This is the correction to my earlier claim that stage 5 is a no-op for hybrid — it is order-preserving within a fixed set, not membership-preserving once a later stage truncates. |
-| 6 dedup | **Same shape as stage 5, and the same correction.** `demoteNearDuplicates` reorders, and the reorder can evict a row from the trimmed window. The addition on top is `Slice.DropDemotedLosers`, `true` for `_global` only, which changes membership outright for global rows. |
+| 6 dedup | **Same shape as stage 5, and the same correction.** `demoteNearDuplicates` reorders, and the reorder can evict a row from the trimmed window. `DropDemotedLosers` is **false** for `SourceSearch`, so it contributes nothing here — the `_global` drop policy belongs to `SourceSessionStart` only (see "scoped by `Source` first"). |
 | 7 diversity | No change; default off. |
-| 8 budget | No change, provided bench sets `MaxItems`/`MaxBytes` to the current limit — and unset is equally a no-op. |
+| 8 budget | **No change only if bench sets the total.** `MaxItems: 0` is unbounded, not a no-op: `Candidates` returns an untrimmed set and stage 8 is the trim, so an unset budget admits the discarded tail and changes IDs, counts and metrics. The bench request must set `MaxItems` to its current limit, and `Run` rejects an all-zero budget rather than defaulting. |
 | 9 render | No change to the metrics; bench scores IDs, not rendered text. |
 | outcome | No change; `weak` annotates and withholds no row. |
 
@@ -1362,7 +1420,7 @@ widened window it returns does not exist on `main`.
 
 | # | Branch / title | Closes | Bench expectation |
 |---|---|---|---|
-| 1 | `feat(assemble): internal/assemble seam; scope and category filter before window closure` | **#573** (and category's half) | **Neutral by construction.** The seam delegates to the same legs; both post-filters move ahead of the truncation and the window widens for either. The scored path is byte-identical for unscoped, uncategorised queries (the fixture's queries are both), so both tables must be *equal*, not merely within 0.005. Stage 2 reads validity columns that are always NULL today, which is what keeps it a no-op. Carries four named regression tests: the configured floor with a non-zero `search.min_similarity`, `Request.Now` bounding `AgeDays`/`DecayFactor`, `Candidates` returning strictly more rows than the current path, and `TestNegativeRetrieval` still green (the contradicts contract is unchanged). |
+| 1 | `feat(assemble): internal/assemble seam; scope and category filter before window closure` | **#573** (and category's half) | **Neutral only under a stated fixture invariant — not unconditionally, and my earlier "equal tables" claim was unsound.** §5 establishes that rerouting through `Candidates` widens the candidate pool, which *can* move IDs and order. So the gate is not "the tables are equal"; it is: **equal, on a fixture where the widening provably changes nothing**, and that needs proving rather than assuming. Two specific claims I have to drop or qualify. (a) "Stage 2 reads validity columns that are always NULL today" is not a property of the schema — `valid_from`/`valid_until` are writable and `provenance_validity_test.go` already stores non-NULL values — it is a property of *the bench corpus*, and the gate must assert the corpus has no such rows rather than rest on the column default. (b) "Byte-identical for unscoped, uncategorised queries" holds only if the widened window does not promote a row past the old `limit` cut; the regression test is therefore `Candidates` returning the same top-N IDs as the current path on a corpus whose Nth and N+1th candidates are separated by a margin the widening cannot close. If either invariant fails, the gate is "within 0.005 with the diff explained", not "equal". Carries the four named regression tests: the configured floor with a non-zero `search.min_similarity`, `Request.Now` bounding `AgeDays`/`DecayFactor`, `Candidates` returning strictly more rows than the current path, and `TestNegativeRetrieval` still green. |
 | 2 | `feat(mcpinit): render and apply scope on the session-start surface` | **#577** | Not applicable — injection is not scored by `ghost bench`. The gate is the rendered block, and it is **not** a pure no-op: `Item.Line()` now emits the scope label unconditionally, so a memory that carries a scope gains a label it did not have before. That is a *rendering* change on existing data, which is what #577 asked for, so it is expected rather than a regression — but "the default is a no-op" is too strong and the gate has to say so. Correct statement: with `injection.session_scope` unset, the *selection* is byte-identical (no predicate is applied, so no row is withheld), and the only difference is the scope label appearing on rows that carry a scope. Gate on that diff explicitly, and on the `_global` slice and the 15/8 caps being unchanged. |
 | 3 | `feat(memory): write validity, confidence and provenance from the tools` | **#575** | **Not neutral, and I had this wrong twice.** PR 1 installs stage 2, which *reads* `valid_from`/`valid_until`; the moment this PR starts writing them, that stage changes membership, so the writers and the consumption ship together and the PR is bench-gated on the new validity fixtures. Separately, the title claims a **confidence** writer and there is not one: `confidence` is writable through `Store.Create` and `UpsertWithOptions` today, but no product tool sets it, and this PR's scope is validity plus provenance. Either the title drops "confidence" or the PR adds the tool that sets it; claiming a writer that does not exist makes the PR look like it unblocks stage 4 when stage 4's multiplier stays pinned at 1.0 regardless. Stage 4 remains inert until a real writer lands. |
 | 4 | `feat(assemble): abstention is an outcome, not an empty list` | **#580** | **Neutral by construction** — `weak` annotates, so no row is withheld. Arm A is a rank ≤ 3 gate that applies *only* when the vector leg ran; passive sources get `answerable`/`not_applicable` and never `weak`. Arm B ships disabled. Regression tests: a rank-≥4 FTS hit with `QueryVec == nil` is `answerable`/`no_vector_leg`; a rank-0 FTS hit is `answerable` with no abstention line. |
