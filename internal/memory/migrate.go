@@ -704,7 +704,60 @@ func migrateV16(tx *sql.Tx) error {
 	if !exists {
 		return nil
 	}
+	// _global must not carry a repository identity, ever. Older builds wrote one
+	// whenever EnsureProjectWithRepo was called for that id, so a real database
+	// can hold it, and a lookup that matched would resolve a checkout to the
+	// bucket injected into every project. Clearing is the recoverable direction:
+	// it is one value on one row, and nothing reads it. Failing the migration
+	// instead would brick a working install over a field that is about to be
+	// ignored anyway.
+	if _, err := tx.Exec(`
+		UPDATE projects SET repo_remote = NULL
+		WHERE id = '_global' AND repo_remote IS NOT NULL AND repo_remote <> ''
+	`); err != nil {
+		return fmt.Errorf("clear _global repository identity: %w", err)
+	}
 	rows, err := tx.Query(`
+		SELECT repo_remote, group_concat(id, '	')
+		FROM projects
+		WHERE repo_remote IS NOT NULL AND repo_remote <> ''
+		GROUP BY repo_remote HAVING count(*) > 1
+		ORDER BY repo_remote
+	`)
+	if err != nil {
+		return fmt.Errorf("find duplicate repository identities: %w", err)
+	}
+	// A duplicate group that includes _global cannot be merged by this step: the
+	// merge primitive refuses every merge involving _global, because it is the
+	// bucket global injection reads from rather than a project. Refuse the
+	// migration with the group named instead of picking a merge order that
+	// happens to leave _global alone — the order is a guess, and the guess moves
+	// somebody's whole corpus if it is wrong.
+	var globalRemote string
+	for rows.Next() {
+		var remote, ids string
+		if err := rows.Scan(&remote, &ids); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan duplicate repository identity: %w", err)
+		}
+		for _, id := range strings.Split(ids, "	") {
+			if id == "_global" {
+				globalRemote = remote
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate duplicate repository identities: %w", err)
+	}
+	_ = rows.Close()
+	if globalRemote != "" {
+		return fmt.Errorf("%w: repository %q is recorded on the _global project as well as on a regular project; "+
+			"clear _global's repo_remote before upgrading, since _global is the bucket global injection reads from and cannot be merged",
+			ErrAmbiguousProject, globalRemote)
+	}
+
+	rows, err = tx.Query(`
 		SELECT repo_remote FROM projects
 		WHERE repo_remote IS NOT NULL AND repo_remote <> ''
 		GROUP BY repo_remote HAVING count(*) > 1

@@ -776,6 +776,19 @@ var projectMergeStatements = []string{
 	`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
 }
 
+// mergeProjectTx folds oldID's rows into newID and deletes oldID.
+//
+// The _global refusal lives here, not in MergeProject, because this primitive
+// has three callers and only one of them is the public wrapper. migrateV14
+// discovers duplicate repository identities and picks an order for them, and
+// ensureProjectLocked's unique-constraint recovery merges whichever row already
+// holds the remote — and a v13 database can legitimately hold that remote on
+// _global, because EnsureProjectWithRepo has always written the supplied remote
+// for that ID. A guard only the wrapper applies would leave both of those paths
+// able to move a project's entire corpus into the global bucket, or delete
+// _global outright. The bucket global injection reads from is not a project, so
+// every merge involving it is refused; callers that discover such a group return
+// this error rather than choosing an order that happens to spare it.
 func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
 	if oldID == newID {
 		return nil
@@ -1218,7 +1231,9 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	remote = s.inputRemote(input)
 	if remote != "" && hasRepoRemote {
 		rows, queryErr := s.db.QueryContext(ctx, `
-			SELECT id, name FROM projects WHERE repo_remote = ? ORDER BY id
+			SELECT id, name FROM projects
+			WHERE repo_remote = ? AND id != '_global'
+			ORDER BY id
 		`, remote)
 		if queryErr != nil {
 			return "", "", fmt.Errorf("resolve project by repository: %w", queryErr)
@@ -1330,14 +1345,14 @@ func (s *Store) pathCandidates(ctx context.Context, input string, hasRepoRemote 
 	if hasRepoRemote {
 		remoteColumn = "COALESCE(repo_remote, '')"
 	}
-	norm := strings.ReplaceAll(input, `\`, "/")
+	norm := absoluteSessionPath(input)
 	query := `SELECT id, name, path, ` + remoteColumn + ` FROM projects
 		WHERE (path = ?
 		   OR REPLACE(path, '\', '/') = ?
 		   OR substr(?, 1, LENGTH(REPLACE(path, '\', '/')) + 1) = REPLACE(path, '\', '/') || '/')
 		  AND LENGTH(path) > 10
 		ORDER BY LENGTH(path) DESC`
-	rows, err := s.db.QueryContext(ctx, query, input, norm, norm)
+	rows, err := s.db.QueryContext(ctx, query, norm, norm, norm)
 	if err != nil {
 		return nil, err
 	}
@@ -1368,11 +1383,57 @@ func (c basenameCandidate) agreesWithSession(input, remote string) bool {
 	if !storedPathIsUsable(c.path) {
 		return false
 	}
-	return pathsAgree(input, c.path)
+	// Compare the absolute form, for the same reason the SQL prefilter above
+	// uses it: a relative input otherwise never matches, because EvalSymlinks
+	// leaves a relative path relative and every usable stored path is absolute.
+	return pathsAgree(absoluteSessionPath(input), c.path)
+}
+
+// absoluteSessionPath normalizes a caller-reported session directory to the
+// absolute, forward-slash form the rest of resolution compares in.
+//
+// A relative path is resolved against the process's working directory, which is
+// where a caller reporting a relative directory is standing. Paths that are
+// already absolute in either spelling are only separator-normalized: a Windows
+// path arriving on a POSIX host is absolute, and prefixing the process's
+// working directory onto it would both corrupt the string and hide a project
+// that the prefilter had already matched. So the "is it absolute" test is
+// deliberately spelling-agnostic rather than filepath.IsAbs, which is false for
+// a backslash path on Linux and for a drive-relative path on Windows.
+func absoluteSessionPath(input string) string {
+	norm := strings.ReplaceAll(input, `\`, "/")
+	if strings.HasPrefix(norm, "/") || isWindowsDrivePath(norm) || isDriveRelative(norm) {
+		return norm
+	}
+	abs, err := filepath.Abs(norm)
+	if err != nil {
+		return norm
+	}
+	return strings.ReplaceAll(abs, `\`, "/")
+}
+
+// isWindowsDrivePath reports whether p begins with a drive specifier and a
+// separator, e.g. "C:/repo" — the absolute Windows form.
+func isWindowsDrivePath(p string) bool {
+	return len(p) >= 3 && p[1] == ':' && p[2] == '/' && isASCIILetter(p[0])
+}
+
+// isDriveRelative reports whether p begins with a bare drive specifier, e.g.
+// "C:repo". It is relative to that drive's current directory, which the process
+// cannot know, so it is left in its own spelling rather than resolved against
+// this host's working directory — resolving it would claim a location the
+// caller never reported.
+func isDriveRelative(p string) bool {
+	return len(p) >= 2 && p[1] == ':' && isASCIILetter(p[0])
+}
+
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // IsPathShaped reports whether s looks like a filesystem path rather than a
-// project name or a repository remote: it contains a path separator.
+// project name or a repository remote: it contains a path separator, or it
+// begins with a drive-relative Windows prefix such as C:repo.
 //
 // This is the one definition of "the caller is reporting a location", shared
 // by store resolution (the path steps and the basename evidence rules) and
@@ -1382,9 +1443,18 @@ func (c basenameCandidate) agreesWithSession(input, remote string) bool {
 //
 // filepath.IsAbs is deliberately not this test: it is false for a
 // drive-relative Windows path such as \work\ghost, which is exactly the
-// shape a second checkout of a repository arrives in.
+// shape a second checkout of a repository arrives in. The separator check alone
+// was not enough either, because C:repo carries no separator at all — a
+// single ASCII letter, a colon, and then text — so it read as a project name
+// and both the resolver's path steps and the server's repository detection
+// skipped it. A one-letter prefix is what makes this unambiguous: it is the
+// whole of a Windows drive specifier, and a project name that begins with a
+// single letter and a colon is not a shape anything else produces.
 func IsPathShaped(s string) bool {
-	return strings.ContainsAny(s, `/\`)
+	if strings.ContainsAny(s, `/\`) {
+		return true
+	}
+	return isDriveRelative(s)
 }
 
 // storedPathIsUsable reports whether a recorded path is a location a session
@@ -1404,8 +1474,7 @@ func storedPathIsUsable(stored string) bool {
 	norm := strings.ReplaceAll(stored, `\`, "/")
 	// Drop a Windows drive prefix so the root test is the same one on both
 	// platforms: "C:/x" and "/x" are the same shape.
-	if len(norm) >= 3 && norm[1] == ':' && norm[2] == '/' &&
-		((norm[0] >= 'a' && norm[0] <= 'z') || (norm[0] >= 'A' && norm[0] <= 'Z')) {
+	if isWindowsDrivePath(norm) {
 		norm = norm[2:]
 	}
 	norm = pathpkg.Clean(norm)
