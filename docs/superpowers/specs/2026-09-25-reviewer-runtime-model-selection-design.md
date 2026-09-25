@@ -39,9 +39,10 @@ read-only agent and an explicit `-m`. Probes use `--standalone` and execute from
 or other probe error skips the candidate. `Agent not found` is fatal and is never converted
 into a fallback to OpenCode's default, write-capable agent.
 
-The first passing free candidate is selected for the one free review invocation. If every
-free probe fails, or that free review fails for a non-agent reason, the same review step
-invokes the single job-level `PAID_MODEL`. The paid route is deliberately
+The probe phase records every free candidate that accepts the agent. The review tries those
+free models in order, using the first one initially and continuing to the next only when a
+free review fails for a non-agent reason. If every free candidate fails at either stage,
+the same review step invokes the single job-level `PAID_MODEL`. The paid route is deliberately
 `opencode-go/muse-spark-1.3-contributor`: it is the cheapest suitable current Go coding
 model and is not Kimi. The `OPENCODE_GO_API_KEY` secret is mapped to `OPENCODE_API_KEY` only
 on the paid child process, so neither the free probes nor the free review receives it. A

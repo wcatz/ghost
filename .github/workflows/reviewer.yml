@@ -34,10 +34,10 @@ jobs:
       MODELS: opencode/space-bunny-free opencode/big-pickle opencode/mimo-v2.6-flash-free
       PAID_MODEL: opencode-go/muse-spark-1.3-contributor
     # Must stay above the bounded model-selection phase (15 min), the real
-    # review (35 min), and the ~3 min of checkout/install/prepare ahead of
+    # review (75 min), and the ~3 min of checkout/install/prepare ahead of
     # them, or the job ceiling kills the run first and a step timeout never
     # fires.
-    timeout-minutes: 60
+    timeout-minutes: 90
     # Fork PRs get a read-only token and no repo secrets by GitHub's design,
     # so the App mint below would fail and the whole pipeline would run
     # anyway, wasting an LLM invocation to reach a guaranteed failure at
@@ -497,7 +497,9 @@ jobs:
           catalog_file="$RUNNER_TEMP/reviewer-model-catalog.txt"
           catalog_err="$RUNNER_TEMP/reviewer-model-catalog.err"
           free_catalog="$RUNNER_TEMP/reviewer-model-free.txt"
+          free_models_file="$RUNNER_TEMP/reviewer-free-models.txt"
           catalog_ok=0
+          : > "$free_models_file"
           : > "$catalog_file"
           : > "$catalog_err"
           # Do not add --standalone here: V2's private server has no
@@ -579,11 +581,6 @@ jobs:
           probe_out="$RUNNER_TEMP/reviewer-model-probe.jsonl"
           probe_err="$RUNNER_TEMP/reviewer-model-probe.err"
           for model in "${candidates[@]}"; do
-            if [ -n "$selected_model" ]; then
-              notice "review model ${model} skipped: ${selected_model} passed the read-only probe first"
-              continue
-            fi
-
             notice "probing review model ${model} with ghost-reviewer from RUNNER_TEMP"
             rm -rf "$probe_dir"
             mkdir -p "$probe_dir"
@@ -598,8 +595,13 @@ jobs:
             if [ "$probe_status" -eq 0 ] && [ -s "$probe_out" ] \
                && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
                   "$probe_out" >/dev/null 2>&1; then
-              selected_model=$model
-              notice "selected review model: ${model} (probe passed)"
+              printf '%s\n' "$model" >> "$free_models_file"
+              if [ -z "$selected_model" ]; then
+                selected_model=$model
+                notice "selected review model: ${model} (probe passed)"
+              else
+                notice "review model ${model} passed the read-only probe; queued behind ${selected_model}"
+              fi
               continue
             fi
 
@@ -631,8 +633,8 @@ jobs:
         # read-only agent reads more than the write-capable one did (21
         # tool calls against 9 on a comparable diff) because it has no
         # shortcut, so a larger diff would have tripped it. Leave room for
-        # one paid retry after a free-model failure.
-        timeout-minutes: 35
+        # every probed free model, then one paid retry.
+        timeout-minutes: 75
         # The free invocation is keyless. If it fails for a provider/model
         # reason, the fallback below scopes OPENCODE_API_KEY to one child
         # process; the credential guard intentionally allows inference-scoped
@@ -677,10 +679,9 @@ jobs:
 
           Rules: 'line' must be a line that appears in ./pr.diff as added or context — never a line outside it. 'end_line' is optional and must be >= 'line'. Use severity 'nit' for anything that does not affect correctness. If you find nothing, emit verdict 'clean' with an empty findings array. Verify each finding against the code before asserting it; omit anything you cannot verify."
 
-          # The probe phase selected the first model that accepted this
-          # read-only agent. An empty selection means every free probe
-          # failed; in either case, only the non-agent failure reaches the
-          # paid fallback below.
+          # The probe phase records every free model that accepted this
+          # read-only agent. Reviews try those models in order; only after
+          # all of them fail for non-agent reasons does the paid fallback run.
           workflow_escape() {
             local value="${1-}"
             value=${value//%/%25}
@@ -690,23 +691,42 @@ jobs:
           }
 
           free_failure_reason=
-          if [[ -n "${SELECTED_MODEL:-}" ]]; then
-            if [[ "${SELECTED_MODEL}" != "opencode/big-pickle" \
-                  && ! "${SELECTED_MODEL}" =~ ^opencode/[A-Za-z0-9][A-Za-z0-9._-]*-free$ ]]; then
-              echo "::error::selected review model is not an anonymous opencode free-tier id — refusing the real review"
-              exit 1
-            fi
-            echo "selected review model: ${SELECTED_MODEL}"
-            : > model-reply.txt
-            free_status=0
-            # Leave enough of this step's budget for the paid retry below.
-            env -u OPENCODE_API_KEY -u OPENCODE_GO_API_KEY \
-              timeout --foreground 1200s opencode run --standalone \
-              --agent ghost-reviewer -m "$SELECTED_MODEL" --format json \
-              "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || free_status=$?
-            if [ "$free_status" -ne 0 ] || [ ! -s model-reply.txt ] \
-               || ! jq -s -e 'length > 0 and all(.[]; .type != "error")' \
-                  model-reply.txt >/dev/null 2>&1; then
+          free_failure_detail=
+          free_review_success=0
+          free_models_file="${RUNNER_TEMP}/reviewer-free-models.txt"
+          if [[ -n "${SELECTED_MODEL:-}" \
+                && "${SELECTED_MODEL}" != "opencode/big-pickle" \
+                && ! "${SELECTED_MODEL}" =~ ^opencode/[A-Za-z0-9][A-Za-z0-9._-]*-free$ ]]; then
+            echo "::error::selected review model is not an anonymous opencode free-tier id — refusing the real review"
+            exit 1
+          fi
+          if [ -s "$free_models_file" ]; then
+            while IFS= read -r model; do
+              [ -n "$model" ] || continue
+              if [[ "$model" != "opencode/big-pickle" \
+                    && ! "$model" =~ ^opencode/[A-Za-z0-9][A-Za-z0-9._-]*-free$ ]]; then
+                echo "::error::free review model is not an anonymous opencode free-tier id — refusing the real review"
+                exit 1
+              fi
+              if [ "$model" = "${SELECTED_MODEL:-}" ]; then
+                echo "selected review model: ${model}"
+              else
+                echo "trying free review model: ${model}"
+              fi
+              : > model-reply.txt
+              free_status=0
+              # Leave enough of this step's budget for the paid retry below.
+              env -u OPENCODE_API_KEY -u OPENCODE_GO_API_KEY \
+                timeout --foreground 1200s opencode run --standalone \
+                --agent ghost-reviewer -m "$model" --format json \
+                "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || free_status=$?
+              if [ "$free_status" -eq 0 ] && [ -s model-reply.txt ] \
+                 && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
+                    model-reply.txt >/dev/null 2>&1; then
+                free_review_success=1
+                echo "review produced by ${model}"
+                break
+              fi
               free_failure_reason=$(
                 {
                   jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
@@ -718,12 +738,17 @@ jobs:
                 exit 1
               fi
               [ -n "$free_failure_reason" ] || free_failure_reason="free review exited ${free_status} without a valid JSON event stream"
-            fi
-          else
-            free_failure_reason="no free candidate passed the read-only probe"
+              free_failure_detail+="${model}: ${free_failure_reason}; "
+              echo "::warning::free review model ${model} failed: $(workflow_escape "$free_failure_reason"); trying remaining free candidates"
+            done < "$free_models_file"
           fi
 
-          if [ -n "$free_failure_reason" ]; then
+          if [ "$free_review_success" -eq 0 ]; then
+            if [ -n "$free_failure_detail" ]; then
+              free_failure_reason=$(printf '%s' "$free_failure_detail" | head -c 400 || true)
+            else
+              free_failure_reason="no free candidate passed the read-only probe"
+            fi
             if [[ "${PAID_MODEL:-}" != opencode-go/* || "${PAID_MODEL:-}" == *kimi* ]]; then
               echo "::error::paid fallback must be a non-Kimi opencode-go model — refusing the fallback"
               exit 1
@@ -756,8 +781,6 @@ jobs:
               exit 1
             fi
             echo "review produced by paid fallback ${PAID_MODEL}"
-          else
-            echo "review produced by ${SELECTED_MODEL}"
           fi
 
           [ -s model-reply.txt ] || { echo "::error::model produced no output at all"; exit 1; }
