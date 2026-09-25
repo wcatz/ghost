@@ -82,7 +82,10 @@ Two things it deliberately does not do:
 
 A mode that cannot be tightened (a read-only or foreign-owned mount) is logged as a warning and the command continues. Refusing to run over a mode bit would be the worse outcome.
 
-Read-only commands — `ghost mcp status`, `ghost doctor` and the rest — do not change any mode. They must be able to report on a database they cannot modify, so the pass runs on the write paths only.
+The pass runs on the two functions that open the database read-write, so which commands tighten a mode follows from which of them they use:
+
+- Anything reaching the database through a read-only open changes nothing. That covers the stop hook's reads, the lifecycle marker and lock, `ghost obsidian sync` and `ghost project bind`. A diagnostic has to be able to report on a database it cannot modify, and a read-only connection cannot create one either.
+- `ghost mcp status` and `ghost maintenance status` **do** tighten, because both check store health through a read-write open even though they only read. That is a pre-existing choice, not one this pass introduces: they already ran migrations and stamped `user_version` before printing a health line.
 
 On Windows the pass is skipped entirely: access there is carried by an ACL inherited from the parent directory, not by the mode bits `chmod` maps onto read-only, so tightening a number would not change who can read the database.
 

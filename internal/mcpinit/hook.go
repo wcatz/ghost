@@ -94,6 +94,16 @@ func bumpSessionCount(dbPath, projectID string) int {
 	if err != nil {
 		return 0
 	}
+	// Again, and this is not redundant. The pass above ran before this
+	// connection existed, so it could only see a database left over from
+	// before. A clean close deletes the -wal and -shm files, so on this
+	// connection SQLite creates both from scratch, at whatever mode it gives a
+	// new file — and the counter just written into ghost.db is in them until
+	// the deferred Close checkpoints them away. With a live MCP server holding
+	// the same database, those files outlive this function, so they have to be
+	// tightened while it still can. Cheap when they do not exist: an Lstat
+	// each, and a no-op.
+	memory.TightenPermissions(dbPath)
 	return n
 }
 
