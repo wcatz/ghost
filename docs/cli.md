@@ -104,7 +104,7 @@ ghost resolve myproject --apply
 | `--source <host>` | Classify through `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
-The classifier uses a local keyword prefilter and batched KEEP-biased calls. It fails when no source-specific harness can be selected; it never silently falls back to another harness.
+The classifier uses a local keyword prefilter and batched KEEP-biased calls. Only explicit KEEP verdicts enter the content-hash cache; missing or garbled verdicts are counted as UNKNOWN and retried on a later pass. It fails when no source-specific harness can be selected; it never silently falls back to another harness.
 
 ### `ghost supersede <project>`
 

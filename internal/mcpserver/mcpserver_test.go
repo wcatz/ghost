@@ -1433,6 +1433,49 @@ func TestGhostResolve_DryRunByDefault(t *testing.T) {
 	}
 }
 
+// TestGhostResolve_ReportsUnknownVerdict verifies that an unparseable fake
+// harness reply is surfaced as UNKNOWN rather than silently looking like a
+// successful KEEP-only pass.
+func TestGhostResolve_ReportsUnknownVerdict(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires a POSIX shell")
+	}
+	store := testStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	srv := New(store, logger, "test")
+
+	ctx := context.Background()
+	const content = "root cause: fixed in v2, no further action needed"
+	if _, _, _, err := store.Upsert(ctx, "abc123", "gotcha", content, "manual", 0.5, []string{}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\nprintf '%s' MAYBE\n"), 0o755); err != nil {
+		t.Fatalf("write fake claude binary: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	session := connectedClientNamed(t, srv, "claude-code")
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "ghost_resolve",
+		Arguments: map[string]any{"project": "test-project"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool ghost_resolve: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("ghost_resolve returned an error result: %+v", result.Content)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", result.Content[0])
+	}
+	if !strings.Contains(text.Text, "1 UNKNOWN") {
+		t.Errorf("expected UNKNOWN count in resolve summary, got %q", text.Text)
+	}
+}
+
 // TestGhostResolve_UsesSessionHarness covers the session-scoped backend
 // selection: an MCP client that reports itself as `opencode` must classify via
 // the opencode binary even though `claude` sorts first in the PATH fallback
