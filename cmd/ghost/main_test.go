@@ -1010,6 +1010,16 @@ func TestParseReflectArgs(t *testing.T) {
 	}{
 		{"positional", []string{"myproj"}, reflectArgs{project: "myproj", tier: "auto"}},
 		{"positional with apply", []string{"myproj", "--apply"}, reflectArgs{project: "myproj", tier: "auto", apply: true}},
+		// Promotion into _global is opt-in. The default is asserted explicitly
+		// rather than left implicit in every other case: _global is injected
+		// into every future session in every project, so a silent default of
+		// true here is issue #545.
+		{"promotion stays off unless asked", []string{"myproj", "--apply"},
+			reflectArgs{project: "myproj", tier: "auto", apply: true, promoteGlobals: false}},
+		{"promotion is opt-in", []string{"myproj", "--apply", "--promote-globals"},
+			reflectArgs{project: "myproj", tier: "auto", apply: true, promoteGlobals: true}},
+		{"promotion with lifecycle shape", []string{"--project", "myproj", "--apply", "--require-llm", "--skip-unchanged", "--promote-globals", "--source", "claude"},
+			reflectArgs{project: "myproj", tier: "auto", apply: true, requireLLM: true, skipUnchanged: true, promoteGlobals: true, source: "claude"}},
 		{"positional with lifecycle flags", []string{"myproj", "--apply", "--require-llm", "--skip-unchanged", "--source", "claude"},
 			reflectArgs{project: "myproj", tier: "auto", apply: true, requireLLM: true, skipUnchanged: true, source: "claude"}},
 		{"tier separate value", []string{"myproj", "--tier", "cli"}, reflectArgs{project: "myproj", tier: "cli"}},

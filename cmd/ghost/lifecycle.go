@@ -320,14 +320,15 @@ func reflectSkipDecision(skipUnchanged, apply bool, stored, current string) bool
 
 // reflectArgs is one parsed `ghost reflect` invocation.
 type reflectArgs struct {
-	project       string
-	tier          string
-	source        string
-	apply         bool
-	restore       bool
-	requireLLM    bool
-	allowDrops    bool
-	skipUnchanged bool
+	project        string
+	tier           string
+	source         string
+	apply          bool
+	restore        bool
+	requireLLM     bool
+	allowDrops     bool
+	skipUnchanged  bool
+	promoteGlobals bool
 }
 
 // parseReflectArgs parses `ghost reflect`'s arguments (everything after the
@@ -372,6 +373,8 @@ func parseReflectArgs(args []string) (reflectArgs, error) {
 			p.allowDrops = true
 		case args[i] == "--skip-unchanged":
 			p.skipUnchanged = true
+		case args[i] == "--promote-globals":
+			p.promoteGlobals = true
 		case args[i] == "--source" && i+1 < len(args):
 			p.source = args[i+1]
 			i++
@@ -700,7 +703,11 @@ Flags:
 		}
 	}
 	if len(globalMems) > 0 {
-		fmt.Printf("  Global-scoped (%d):\n", len(globalMems))
+		if parsed.promoteGlobals {
+			fmt.Printf("  Global-scoped (%d):\n", len(globalMems))
+		} else {
+			fmt.Printf("  Cross-project (%d) — kept project-scoped unless --promote-globals:\n", len(globalMems))
+		}
 		for _, m := range globalMems {
 			truncated := m.Content
 			if len(truncated) > 120 {
@@ -772,16 +779,17 @@ Flags:
 		return
 	}
 
-	if len(globalMems) > 0 {
-		if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: ensure _global project: %v\n", err)
-		}
-		for _, m := range globalMems {
-			if _, _, _, err := store.Upsert(ctx, "_global", m.Category, m.Content, "reflection", m.Importance, m.Tags); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: upsert global memory: %v\n", err)
-			}
-		}
-		fmt.Printf("Upserted %d global memories\n", len(globalMems))
+	// Cross-project candidates are NOT promoted to _global unless asked.
+	//
+	// _global is injected into every future session in every project, and
+	// session start describes it as authoritative. Letting a reflection pass
+	// write there unattended moved content — potentially summarised from an
+	// untrusted repository — straight into every project's trusted context
+	// with no human in the loop (issue #545). Keeping them project-scoped is
+	// still useful and fully reversible, so promotion is now an explicit
+	// decision: `ghost reflect --apply --promote-globals`.
+	if len(globalMems) > 0 && !parsed.promoteGlobals {
+		projectMems = append(projectMems, globalMems...)
 	}
 
 	var preserved []string
@@ -804,11 +812,38 @@ Flags:
 			os.Exit(1)
 		}
 
+		// Promotion runs here, after the project apply succeeded, rather than
+		// before it and outside the snapshot. In the old order a failure in
+		// ReplaceNonManual exited with an error after the globals were
+		// already written, so memories from a round reported as failed were
+		// nonetheless injected everywhere from then on.
+		if len(globalMems) > 0 && parsed.promoteGlobals {
+			if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: ensure _global project: %v\n", err)
+			}
+			promoted := 0
+			for _, m := range globalMems {
+				if _, _, _, err := store.Upsert(ctx, "_global", m.Category, m.Content, "reflection", m.Importance, m.Tags); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: upsert global memory: %v\n", err)
+					continue
+				}
+				promoted++
+			}
+			fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
+		}
+
 		summary := fmt.Sprintf("%d memories consolidated (%s)", len(dbMemories), strings.Join(parts, ", "))
 		if len(globalMems) > 0 {
-			summary += fmt.Sprintf(", %d promoted to global", len(globalMems))
+			if parsed.promoteGlobals {
+				summary += fmt.Sprintf(", %d promoted to global", len(globalMems))
+			} else {
+				summary += fmt.Sprintf(", %d cross-project candidates kept project-scoped", len(globalMems))
+			}
 		}
 		fmt.Printf("Applied: %s\n", summary)
+		if len(globalMems) > 0 && !parsed.promoteGlobals {
+			fmt.Println("(re-run with --promote-globals to inject them into every project)")
+		}
 		fmt.Println("(use --restore to undo)")
 
 		// One cap for every writer, learned-context summary included: the

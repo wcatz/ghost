@@ -198,12 +198,36 @@ func loadGlobals() (globals []sessionMemory, totalCount int, totalCountKnown boo
 func formatSessionContext(projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool, globals []sessionMemory, totalGlobalCount int, totalGlobalCountKnown bool) string {
 	var gsb strings.Builder
 	if len(globals) > 0 {
-		fmt.Fprintf(&gsb, "\n**Global (applies to all projects):** the user's own saved cross-project preferences.\n")
+		// Only claim these are the user's preferences when they are. A global
+		// written by reflection was derived from project content by a model —
+		// content that may have come from an untrusted repository — and a
+		// global written through the MCP server was written by an agent.
+		// Presenting either as "the user's own saved preferences" is how
+		// machine-made material gets replayed into every future session as
+		// something authoritative (issue #545).
+		allOwn := true
+		for _, m := range globals {
+			if m.Source != "manual" {
+				allOwn = false
+				break
+			}
+		}
+		if allOwn {
+			fmt.Fprintf(&gsb, "\n**Global (applies to all projects):** the user's own saved cross-project preferences.\n")
+		} else {
+			fmt.Fprintf(&gsb, "\n**Global (applies to all projects):** cross-project memories from mixed origins. "+
+				"Anything not marked \"manual\" was written by reflection or by an agent, not by you — "+
+				"verify before treating it as a preference.\n")
+		}
 		if totalGlobalCountKnown && totalGlobalCount > len(globals) {
 			fmt.Fprintf(&gsb, "(%d shown of %d total — %d not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)\n", len(globals), totalGlobalCount, totalGlobalCount-len(globals))
 		}
 		for _, m := range globals {
-			fmt.Fprintf(&gsb, "- [%s] %s\n", m.Category, quoteData(m.Content))
+			origin := ""
+			if m.Source != "" && m.Source != "manual" {
+				origin = " (" + m.Source + ")"
+			}
+			fmt.Fprintf(&gsb, "- [%s] %s%s\n", m.Category, quoteData(m.Content), origin)
 		}
 	}
 	globalSection := gsb.String()
@@ -337,7 +361,7 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 	}
 
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned FROM memories
+		SELECT id, category, content, pinned, source FROM memories
 		WHERE project_id = '_global' AND resolved_at IS NULL
 		ORDER BY pinned DESC, importance DESC, updated_at DESC
 		LIMIT ?
@@ -348,9 +372,9 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 	defer rows.Close() //nolint:errcheck
 
 	for rows.Next() {
-		var id, cat, content string
+		var id, cat, content, source string
 		var pinnedInt int
-		if err := rows.Scan(&id, &cat, &content, &pinnedInt); err != nil {
+		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &source); err != nil {
 			continue
 		}
 		// 300 bytes here vs. 200 for project memories below is deliberate,
@@ -358,7 +382,7 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 		// count (globalsCap=8), so a larger per-item byte budget still
 		// keeps the total globals-section bytes low.
 		content = truncateUTF8(content, 300)
-		globals = append(globals, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1})
+		globals = append(globals, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1, Source: source})
 	}
 
 	// Dedup: unlike project memories (where StableDemote only reorders and
@@ -403,6 +427,11 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 type sessionMemory struct {
 	ID, Category, Content string
 	Pinned                bool
+	// Source is who wrote this row — 'manual' for the user's own, 'reflection'
+	// for something a summarisation pass derived from project content, 'mcp'
+	// for an agent's save. It decides how the row may be described when it is
+	// injected: only the user's own can be presented as their preference.
+	Source string
 }
 
 func loadSessionContext(cwd string) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool) {
