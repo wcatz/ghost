@@ -410,24 +410,25 @@ const (
 
 // codexBracketedKind classifies a bracketed line that could be a table header.
 // A nested array element inside a multi-line value is bracketed exactly like a
-// header, so the distinction has to come from the content: every dot-separated
-// part must look like a key (a bare key or one quoted string) before the line is
+// header, so the distinction comes from the content: every dot-separated part
+// must look like a key (a bare key or one quoted string) before the line is
 // treated as a header at all, and a single part only counts when nothing else
-// fits. What stays ambiguous is a single-element array of a bare value, [true]
-// or [1], which is read as value content; a table codex declared with exactly
-// that name would then be swept up by the repair.
+// fits. Two readings stay ambiguous, and both are resolved toward value content
+// because that is the reading that cannot lose a neighbouring table's keys: a
+// single-element array of a bare value ([true], [1]) and a [[...]] line. A table
+// codex declared with exactly those shapes would be swept up by the repair.
 func codexBracketedKind(line string) codexBracketed {
 	if !codexIsTableHeader(line) {
 		return codexNotAKey
 	}
 	t := codexStripComment(strings.TrimSpace(line))
-	inner := strings.TrimSpace(strings.TrimPrefix(t, "[["))
-	inner = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(inner, "["), "]"))
-	if strings.HasPrefix(strings.TrimSpace(t), "[[") {
-		// An array-of-tables header can never be an array element, so it always
-		// reads as a table even when the value above it never closed.
+	if strings.HasPrefix(t, "[[") {
+		// Read as a table. It usually is one, and the alternative reading (a
+		// nested array of a nested array, which TOML allows) is the rarer of the
+		// two; guessing wrong only ends an already-malformed value early.
 		return codexTableKey
 	}
+	inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(t, "["), "]"))
 	parts := codexDottedParts(inner)
 	quoted := 0
 	for _, part := range parts {
@@ -600,20 +601,21 @@ func findCodexAmbiguousGhostHeader(lines []string, key string) (at int, text str
 	if i := strings.LastIndex(key, "."); i >= 0 {
 		leaf = key[i+1:]
 	}
-	continuation := codexValueContinuationLines(lines)
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, "[") {
 			continue
 		}
-		if name, named := normaliseCodexTableName(line); named {
-			if name != key || !continuation[i] {
-				continue // another table, or one the normal path repairs
-			}
-			// Our own header, hidden inside a value that never closed: the
-			// repair cannot see it either, so appending is the one outcome
-			// that must not happen.
+		if _, named := normaliseCodexTableName(line); named {
+			continue // a parseable header: the repair path matches or ignores it
 		}
+		// A line a malformed value swallowed is deliberately not skipped: it
+		// cannot be one of our own headers, because a multi-part key path always
+		// reads as a table and so is never tracked as value content. What is left
+		// that names ghost is a form the repair cannot manage, and refusing is
+		// the one outcome that cannot duplicate the server. The cost is a
+		// refusal on a bracketed line that only happens to contain the word, such
+		// as a nested array element holding "mcp_servers.ghost" as a string.
 		if codexHeaderNamesPart(line, leaf) {
 			return i + 1, trimmed, true
 		}
