@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -279,11 +280,22 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Age it past the reclaim grace period: a temp file younger than that is
+	// a concurrent writer's live file, not a crash artifact.
+	if err := os.Chtimes(stray, time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := ex.Export(ctx, vault, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(stray); !os.IsNotExist(err) {
 		t.Errorf("orphaned tmp in managed subtree should be reclaimed: %v", err)
+	}
+	// Age the outside one too: the subtree guard, not the age, is what keeps
+	// it, so it must survive even when it looks exactly like an artifact.
+	if err := os.Chtimes(outside, time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Errorf("tmp file outside managed subtrees must survive: %v", err)

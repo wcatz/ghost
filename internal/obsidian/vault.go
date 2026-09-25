@@ -39,7 +39,25 @@ var beforeDirCleanupFn atomic.Value // func()
 
 func beforeDirCleanup() {
 	fn, _ := beforeDirCleanupFn.Load().(func())
+	if fn == nil {
+		return
+	}
 	fn()
+}
+
+// beforeClassifyFn is a test seam between the permission walk's lstat and the
+// frontmatter read. It is the only way to reach the "was a regular file a
+// moment ago, is not readable now" case deterministically: a file that is
+// already a special file is skipped by the walk before classification, and
+// permission-based unreadability is unreliable across CI privilege levels.
+var beforeClassifyFn atomic.Value // func(string)
+
+func beforeClassify(path string) {
+	fn, _ := beforeClassifyFn.Load().(func(string))
+	if fn == nil {
+		return
+	}
+	fn(path)
 }
 
 // renameFn is swappable so tests can force the publish step to fail with a
@@ -61,20 +79,44 @@ func removeFile(path string) error {
 // crashed write leaves a name like "My Note.md.ghost-tmp-4821".
 const crashTempMarker = ".ghost-tmp-"
 
-// isCrashTemp reports whether path is a leftover from an interrupted publish.
+// crashTempGrace is how long a temp file must have existed before the reclaim
+// sweep will remove it.
+//
+// writeIfChanged publishes through a temp file in the same directory and
+// renames it into place. Between CreateTemp and that rename the file is a LIVE
+// file: a concurrent sync that is mid-write owns it, and deleting it would
+// destroy a note the other writer is about to publish. A crash artifact is
+// indistinguishable from that window by name alone, so age is the discriminator —
+// an hour is far longer than any publish takes, and a leftover is only a
+// leftover for as long as it is not being written to.
+const crashTempGrace = time.Hour
+
+// isCrashTemp reports whether path is a leftover from an interrupted publish,
+// and not a temp file a concurrent writer is still using.
 //
 // The pattern has to match what CreateTemp is actually given, and the trailing
 // "-*" matters as much as the infix: an earlier test on the bare ".ghost-tmp"
 // suffix matched no real artifact at all, while a test on the infix alone would
 // delete a user's own file called "notes.ghost-tmp". Requiring both the infix
 // and a non-empty random suffix keeps the sweep pointed at Ghost's files.
-func isCrashTemp(path string) bool {
+//
+// The age check is what makes it safe to remove one at all. mtime is the only
+// signal available, and a stat failure means "cannot prove it is old", which is
+// the answer that must not delete.
+func isCrashTemp(path string, now time.Time) bool {
 	name := filepath.Base(path)
 	idx := strings.LastIndex(name, crashTempMarker)
 	if idx < 0 {
 		return false
 	}
-	return len(name) > idx+len(crashTempMarker)
+	if len(name) <= idx+len(crashTempMarker) {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false // cannot prove it is abandoned
+	}
+	return now.Sub(info.ModTime()) > crashTempGrace
 }
 
 func init() {
@@ -82,6 +124,7 @@ func init() {
 	removeDirFn.Store(os.Remove)
 	pruneBeforeRemoveFn.Store(func(string) {})
 	beforeDirCleanupFn.Store(func() {})
+	beforeClassifyFn.Store(func(string) {})
 	renameFn.Store(os.Rename)
 	removeFileFn.Store(os.Remove)
 }
@@ -275,9 +318,20 @@ func tightenVault(dir string) error {
 		case !info.Mode().IsRegular():
 			return nil
 		default:
+			beforeClassify(path)
 			managed, err := ghostManagedFile(path)
 			if err != nil {
-				return err
+				// An unreadable .md must not end the whole pass. The only
+				// question tightenVault answers is whether to chmod something
+				// Ghost owns, and an entry it cannot classify is not something
+				// it should chmod on a guess — so it is skipped and reported.
+				// Failing the export instead turned one locked or vanished
+				// note into "no vault at all", which is a far worse outcome
+				// than one file keeping its old permissions for a run. The
+				// warning is deliberate: the file is left loose until it can
+				// be read, and the operator needs to know that.
+				fmt.Fprintf(os.Stderr, "warning: could not read %s, leaving its permissions unchanged: %v\n", path, err)
+				return nil
 			}
 			if !managed {
 				return nil // a user note or attachment keeps its own mode
@@ -610,7 +664,7 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 			if !d.Type().IsRegular() {
 				return nil
 			}
-			if isCrashTemp(path) {
+			if isCrashTemp(path, time.Now()) {
 				// Orphan from a crashed writeIfChanged. The name must match
 				// what writeIfChanged actually produces — CreateTemp's
 				// "<base>.ghost-tmp-<random>" — because a bare ".ghost-tmp"

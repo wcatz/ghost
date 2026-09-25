@@ -795,3 +795,95 @@ func TestProtectPathRefusesSymlinkTargetWindows(t *testing.T) {
 		t.Error("protectPath secured a symlink, want it refused")
 	}
 }
+
+// TestPruneKeepsCrashTempYoungerThanGrace is the concurrency half of the crash
+// reclaim. writeIfChanged publishes through a temp file in the same directory
+// and renames it into place, so between CreateTemp and that rename the file is a
+// LIVE file owned by a concurrent sync. Deleting it destroys a note that writer
+// is about to publish, and the name alone cannot tell the two apart — only age
+// can.
+func TestPruneKeepsCrashTempYoungerThanGrace(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "vault")
+	if err := ensureVault(root); err != nil {
+		t.Fatalf("ensureVault: %v", err)
+	}
+	dir := filepath.Join(root, "live", "Memories")
+	mustMkdirAll(t, dir)
+	mustWrite(t, filepath.Join(dir, "Managed Note.md"), ghostNote)
+
+	// A temp file created just now, exactly as a concurrent publish would look.
+	live := filepath.Join(dir, "Other Note.md.ghost-tmp-1234")
+	mustWrite(t, live, "half-written note")
+
+	// An old one, from a publish that died hours ago.
+	abandoned := filepath.Join(dir, "Dead Note.md.ghost-tmp-5678")
+	mustWrite(t, abandoned, "abandoned")
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(abandoned, old, old); err != nil {
+		t.Fatalf("age the abandoned temp: %v", err)
+	}
+
+	if err := prune(root, []string{"live"}, map[string]string{}, []string{"live"}); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("a concurrent writer's live temp file was deleted: %v", err)
+	}
+	if _, err := os.Stat(abandoned); !os.IsNotExist(err) {
+		t.Errorf("an abandoned temp file older than the grace period was not reclaimed (err=%v)", err)
+	}
+}
+
+// TestTightenVaultSkipsUnreadableNote: one unreadable .md must not end the
+// export. tightenVault only answers "should this be chmod'ed", and a file it
+// cannot classify is not one it should chmod on a guess — but returning an error
+// aborted the whole pass, turning a single locked note into no vault at all.
+//
+// The unreadable entry is produced by swapping a regular file for a FIFO in the
+// seam between the walk's lstat and the frontmatter read. A file that is
+// ALREADY special is skipped by the walk before classification, and
+// permission-based unreadability is unreliable across CI privilege levels, so
+// this is the only shape that reaches the branch deterministically. It is also
+// the real one: that is exactly the window in which the type can change.
+func TestTightenVaultSkipsUnreadableNote(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "vault")
+	if err := ensureVault(root); err != nil {
+		t.Fatalf("ensureVault: %v", err)
+	}
+	dir := filepath.Join(root, "live")
+	mustMkdirAll(t, dir)
+
+	// The note that will become unreadable, and the readable one the walk must
+	// still reach afterwards.
+	doomed := filepath.Join(dir, "Swapped.md")
+	mustWrite(t, doomed, ghostNote)
+	loose := filepath.Join(dir, "Managed Note.md")
+	mustWrite(t, loose, ghostNote)
+	if err := os.Chmod(loose, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	beforeClassifyFn.Store(func(path string) {
+		if path != doomed {
+			return
+		}
+		if err := os.Remove(path); err != nil {
+			t.Errorf("remove doomed: %v", err)
+		}
+		if err := makeFIFO(path); err != nil {
+			t.Skipf("named pipe unavailable: %v", err)
+		}
+	})
+	t.Cleanup(func() { beforeClassifyFn.Store(func(string) {}) })
+
+	if err := tightenVault(root); err != nil {
+		t.Fatalf("tightenVault aborted on an unreadable note: %v", err)
+	}
+	info, err := os.Lstat(loose)
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("the walk stopped before the readable note: mode = %o, want 0600", info.Mode().Perm())
+	}
+}
