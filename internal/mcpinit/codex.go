@@ -612,8 +612,11 @@ func findCodexAmbiguousGhostHeader(lines []string, key string) (at int, text str
 		}
 		// A line a malformed value swallowed is not skipped outright, or a
 		// broken header hidden behind the typo would be appended to. It has to
-		// look like the start of a header first, so an array element that merely
-		// contains the word stays value content.
+		// look like the start of a header first, which keeps an array element
+		// written with a trailing comma, ["ghost"], as value content. An element
+		// written without one still refuses, because it ends in ] and is then
+		// indistinguishable from a table quoting a literal name; the file is left
+		// untouched, so that costs a warning rather than a key.
 		if !codexIsTableHeader(line) && !codexHeaderCandidate(line) {
 			continue
 		}
@@ -628,9 +631,11 @@ func findCodexAmbiguousGhostHeader(lines []string, key string) (at int, text str
 // header is at least shaped like the start of one, which is how a header broken
 // by a typo is told apart from an array element that happens to hold the same
 // word: [mcp_servers.ghost.] and ["mcp_servers".ghost are candidates, while
-// ["ghost"], is an element.
+// ["ghost"], is an element. A truncated array-of-tables header, [[name, is one
+// too, and the leading brackets are stripped rather than trimmed as a pair so it
+// is not mistaken for a line that is not a header at all.
 func codexHeaderCandidate(line string) bool {
-	t := strings.TrimSpace(strings.TrimPrefix(codexStripComment(strings.TrimSpace(line)), "[["))
+	t := codexStripComment(strings.TrimSpace(line))
 	if !strings.HasPrefix(t, "[") {
 		return false
 	}

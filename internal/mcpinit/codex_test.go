@@ -745,6 +745,7 @@ func TestRunCodex_TOMLAmbiguousGhostHeaderLeftAlone(t *testing.T) {
 		"[mcp_servers.ghost.]",    // trailing dot: no such key path
 		"[mcp_servers..ghost]",    // empty key part
 		"[[mcp_servers.ghost]]",   // array of tables, not a table
+		"[[mcp_servers.ghost",     // truncated array-of-tables header
 		"[\"mcp_servers.ghost\"]", // one literal key holding a dot, not a path
 		"[\"mcp_servers\".ghost",  // unterminated header
 	} {
