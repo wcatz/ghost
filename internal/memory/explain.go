@@ -99,28 +99,23 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		vectorMinSimilarity: floor,
 	}
 
-	// Membership comes from the same production search the formatted path uses.
-	final, err := traceStore.SearchHybridScoped(ctx, projectID, query, queryVec, limit, scope)
+	// Membership comes from the same production search the formatted path uses,
+	// and the diagnostics reuse the legs that search already fetched. OpenDB
+	// caps the pool at one connection, so a second FTS scan and a second full
+	// embedding scan inside this transaction would each be time a concurrent
+	// writer could not have the connection — the trace would be the only thing
+	// holding it, and nothing here needs the rows fetched twice.
+	final, legs, err := traceStore.searchHybridLegs(ctx, projectID, query, queryVec, limit, p)
 	if err != nil {
 		return ex, fmt.Errorf("search: %w", err)
-	}
-
-	fts, err := traceStore.SearchFTS(ctx, projectID, query, limit*2)
-	if err != nil {
-		fts = nil // SearchHybrid treats a failing leg as non-fatal; do the same
 	}
 
 	// Both the raw and floor-filtered vector legs are needed: a candidate
 	// dropped by the floor is a distinct, diagnosable outcome ("your query
 	// matched nothing strongly enough"), and it is invisible if only the
 	// filtered leg is kept.
-	var rawVec, vec []ScoredMemory
-	if queryVec != nil {
-		if v, vErr := traceStore.SearchVector(ctx, projectID, queryVec, limit*2); vErr == nil {
-			rawVec = v
-			vec = filterVectorFloor(v, p.MinSimilarity)
-		}
-	}
+	fts, rawVec := legs.fts, legs.vec
+	vec := filterVectorFloor(rawVec, p.MinSimilarity)
 
 	ftsRank := make(map[string]int, len(fts))
 	for i, m := range fts {

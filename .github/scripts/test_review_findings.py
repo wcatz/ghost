@@ -42,10 +42,18 @@ class TestValidate(unittest.TestCase):
         with self.assertRaises(ValidationError):
             validate(doc)
 
-    def test_rejects_unknown_severity(self):
+    def test_unknown_string_severity_normalises_to_should_fix(self):
+        doc = _doc(findings=[{
+            "file": "a.go", "line": 1, "severity": "critical",
+            "title": "t", "body": "b",
+        }])
+        validate(doc)
+        self.assertEqual(doc["findings"][0]["severity"], "should-fix")
+
+    def test_rejects_non_string_severity(self):
         with self.assertRaises(ValidationError):
             validate(_doc(findings=[{
-                "file": "a.go", "line": 1, "severity": "critical",
+                "file": "a.go", "line": 1, "severity": 3,
                 "title": "t", "body": "b",
             }]))
 

@@ -223,6 +223,54 @@ Without Ollama, the same API remains available with FTS5-only results. Search me
 
 `reflect` replaces non-manual memories through a tiered consolidator. It snapshots before replacement, rejects empty results, preserves manual memories, and can restore the latest snapshot. `resolve` stamps resolved evidence so it leaves injection but remains searchable. `supersede` creates directed replacement links after source-matched classification.
 
+## Memory axes
+
+A memory is described along four independent axes. The axes are orthogonal: a row can be live, in-date, contradicted, and low-confidence at the same time, and each of those facts is stored and judged separately. This section is the normative definition of the axes; the gaps listed against each one are tracked as issues and are the plan in [`ROADMAP.md`](ROADMAP.md#part-9--architecture-direction-memory-axes-and-context-assembly-p0p3).
+
+| Axis | Question it answers | Storage today | Status |
+|---|---|---|---|
+| **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `audit_log` | Partial — no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
+| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Partial — snapshot replacement and restore preserve these fields, but normal reads and ranking do not expose or consult them ([#575](https://github.com/wcatz/ghost/issues/575)); wiring them into retrieval is part of the assembler ([#581](https://github.com/wcatz/ghost/issues/581)) |
+| **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Partial — the linker's `related` edges bypass the scope exemption ([#574](https://github.com/wcatz/ghost/issues/574)) |
+| **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref` | Inert — written on some paths, never read by ranking ([#575](https://github.com/wcatz/ghost/issues/575)); history is missing entirely ([#578](https://github.com/wcatz/ghost/issues/578)) |
+
+Axis interaction rules:
+
+- **Supersede wins over time.** A memory that has a live replacement is demoted regardless of a later `verified_at` or higher confidence on the old row.
+- **Resolved leaves injection, not the database.** `resolved_at` removes a row from ranked session injection ([#559](https://github.com/wcatz/ghost/issues/559)) but keeps it searchable and auditable.
+- **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled block; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)).
+- **Scope and project membership are not axes.** They are access predicates applied before scoring ([#577](https://github.com/wcatz/ghost/issues/577)); a memory that fails them is out of scope regardless of its other axes.
+- **Provenance is history, not a weight.** `agent`/`session_id`/`source_ref` describe who wrote a row; append-only history of those changes is [#578](https://github.com/wcatz/ghost/issues/578).
+
+## Context assembly (target design)
+
+> **Target design, not current behavior.** Today there is no assembler: `ghost_memory_search` (`internal/mcpserver`) and the session-start injector (`internal/mcpinit`) each run their own ad-hoc retrieve → filter → rank → trim sequence, which is why the two surfaces disagree about scope ([#577](https://github.com/wcatz/ghost/issues/577)) and why filters run after the result window closes ([#573](https://github.com/wcatz/ghost/issues/573)). The plan to converge them is [#581](https://github.com/wcatz/ghost/issues/581).
+
+Both consumers should call one assembler with an explicit budget, so every surface applies the same predicates in the same order and every stage is testable in isolation:
+
+```text
+query
+  1. retrieve       hybrid FTS + vector candidates, widened window (0.3 FTS / 0.7 vector RRF)
+  2. validity       drop or bound rows outside valid_from/valid_until, flag unverified
+  3. scope          machine-readable memories.scope match, project membership
+  4. provenance     bounded penalty for unattributed or low-confidence rows
+  5. conflicts      suppress superseded rows; never emit a contradicts pair together
+  6. dedup          collapse duplicate/near-duplicate links to one representative
+  7. diversity      cap per-source share so one project cannot crowd out the rest
+  8. budget         final ordering, then a hard byte/token trim
+  9. render         one renderer shared by search output and injected context
+       → Trace      per-stage row counts and per-row exclusion reasons
+```
+
+Rules the pipeline must hold:
+
+- **Filters precede window closure.** Stages 2-4 run over the widened candidate set from stage 1, never over an already-truncated list.
+- **One renderer, one field set.** Scope, validity state, and confidence appear identically in `ghost_memory_search` output and in the injected session-start block.
+- **The trace is the explain payload.** `explain:true` ([#583](https://github.com/wcatz/ghost/issues/583)) reports the stages above, so explain and ranking cannot disagree.
+- **Abstention is an outcome.** If no row clears the relevance floor, the assembler returns `weak` or `empty` with a reason rather than passing stale candidates through ([#580](https://github.com/wcatz/ghost/issues/580)).
+- **The budget is a hard boundary.** Stage 8 trims deterministically and is tested at, just under, and just over the limit; injection and search use different budgets but the same code.
+- **The pipeline is measurable.** Bench gains context precision, contamination rate, budget adherence, diversity, and token cost ([#582](https://github.com/wcatz/ghost/issues/582)), and contamination classification reuses the production exclusion reasons so the two cannot drift.
+
 ## Concurrency contract
 
 **Multiple Ghost processes may open the same database concurrently, and SQLite is the synchronization layer.** This is a supported mode, not an accident: a CLI command, a live MCP server, a hook-spawned lifecycle subprocess, and a maintenance run routinely overlap.
