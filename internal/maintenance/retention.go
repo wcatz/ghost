@@ -6,37 +6,26 @@
 package maintenance
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/fileguard"
 	"github.com/wcatz/ghost/internal/procstat"
 )
 
-const (
-	openProbeTimeout = 2 * time.Second
-	quarantineGrace  = time.Hour
-)
+const quarantineGrace = fileguard.QuarantineGrace
 
 var (
-	// openFileProbe is a narrow seam for tests and for the production
-	// lsof/fuser probe with a native fallback. A probe error is fail-closed:
-	// the candidate is left alone.
-	openFileProbe = detectOpenFile
-
-	runOpenProbeTool = func(ctx context.Context, tool, path string) error {
-		return exec.CommandContext(ctx, tool, path).Run()
-	}
+	// openFileProbe is a narrow test seam. Production uses fileguard's bounded
+	// lsof/fuser probe with native fallback.
+	openFileProbe fileguard.OpenFileProbe = fileguard.DetectOpenFile
 
 	knownLogNames = []string{
 		"lifecycle.log",
@@ -46,25 +35,8 @@ var (
 		"supersede.log",
 	}
 
-	quarantineNamePattern = regexp.MustCompile(`^\..+\.retention-[A-Za-z0-9]+$`)
+	beforePublishLog = func(string) {}
 )
-
-// OpenFileProbe reports whether a path is held by a process. It is exported so
-// tests in dependent packages can pin the probe instead of inheriting whatever
-// lsof, fuser, or procfs state the host happens to have.
-type OpenFileProbe func(string) (bool, error)
-
-// SetOpenFileProbeForTest installs a deterministic probe and returns a restore
-// function. It is a test seam inside an internal package, not a runtime option.
-func SetOpenFileProbeForTest(probe OpenFileProbe) func() {
-	old := openFileProbe
-	if probe == nil {
-		openFileProbe = detectOpenFile
-	} else {
-		openFileProbe = probe
-	}
-	return func() { openFileProbe = old }
-}
 
 // Result is the count of files changed by one retention pass.
 type Result struct {
@@ -76,10 +48,13 @@ type Result struct {
 // Run loads the retention settings and performs one best-effort pass. Each
 // component runs even if an earlier component reports an error; the combined
 // error is for diagnostics and must not be treated as a failed Ghost open.
+var loadConfig = config.Load
+
 func Run(dataDir, dbPath string) (Result, error) {
-	cfg, err := config.Load()
+	cfg, err := loadConfig()
 	if err != nil {
-		return Result{}, fmt.Errorf("load retention config: %w", err)
+		result, runErr := RunWithConfig(dataDir, dbPath, config.DefaultRetentionBackupCount, config.DefaultRetentionLogMaxBytes)
+		return result, errors.Join(fmt.Errorf("load retention config; using defaults: %w", err), runErr)
 	}
 	return RunWithConfig(dataDir, dbPath, cfg.Retention.BackupCount, cfg.Retention.LogMaxBytes)
 }
@@ -204,37 +179,7 @@ func ReapStaleQuarantineFiles(dataDir string) (int, error) {
 	if dataDir == "" {
 		return 0, nil
 	}
-	entries, err := os.ReadDir(dataDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("read data dir %s: %w", dataDir, err)
-	}
-	removed := 0
-	var errs []error
-	for _, entry := range entries {
-		if entry.IsDir() || !quarantineNamePattern.MatchString(entry.Name()) {
-			continue
-		}
-		path := filepath.Join(dataDir, entry.Name())
-		info, statErr := os.Lstat(path)
-		if statErr != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			continue
-		}
-		if time.Since(info.ModTime()) < quarantineGrace {
-			continue
-		}
-		ok, removeErr := removeUnheldFile(path)
-		if removeErr != nil {
-			errs = append(errs, removeErr)
-			continue
-		}
-		if ok {
-			removed++
-		}
-	}
-	return removed, errors.Join(errs...)
+	return fileguard.ReapStaleQuarantineWithProbe(dataDir, openFileProbe)
 }
 
 // RotateLogs bounds the known Ghost-owned data-dir logs without deleting an
@@ -261,6 +206,15 @@ func RotateLogs(dataDir string, maxBytes int64) (int, error) {
 }
 
 func rotateLog(path string, maxBytes int64) (bool, error) {
+	lock, acquired, err := fileguard.TryAcquireLock(path + ".lock")
+	if err != nil {
+		return false, err
+	}
+	if !acquired {
+		return false, nil
+	}
+	defer lock.Close() //nolint:errcheck
+
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -271,78 +225,49 @@ func rotateLog(path string, maxBytes int64) (bool, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() <= maxBytes {
 		return false, nil
 	}
-	inUse, probeErr := openFileProbe(path)
-	if probeErr != nil {
-		return false, probeErr
-	}
-	if inUse {
+	tombstone, err := fileguard.Quarantine(path, openFileProbe)
+	if errors.Is(err, fileguard.ErrHeld) || os.IsNotExist(err) {
 		return false, nil
 	}
-	tombstone, err := quarantinePath(path)
 	if err != nil {
-		if renameMeansHeld(err) {
-			return false, nil
-		}
 		return false, err
-	}
-	inUse, probeErr = openFileProbe(tombstone)
-	if probeErr != nil {
-		return false, errorsJoinRestore(path, tombstone, probeErr)
-	}
-	if inUse {
-		return false, errorsJoinRestore(path, tombstone, nil)
 	}
 	tail, err := readLogTail(tombstone, maxBytes)
 	if err != nil {
-		return false, errorsJoinRestore(path, tombstone, err)
+		return false, errors.Join(err, fileguard.Restore(path, tombstone))
 	}
-	out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
-	if errors.Is(err, os.ErrExist) {
-		// A writer recreated the visible path after quarantine. Preserve that
-		// writer's file, bound the old inode in place, and let the grace-period
-		// tombstone reaper remove the hidden copy later.
-		if rewriteErr := rewriteQuarantine(tombstone, tail); rewriteErr != nil {
+	stage, err := fileguard.StageFile(path)
+	if err != nil {
+		return false, errors.Join(err, fileguard.Restore(path, tombstone))
+	}
+	stagePath := stage.Name()
+	defer os.Remove(stagePath) //nolint:errcheck
+	if _, err := stage.Write(tail); err != nil {
+		_ = stage.Close()
+		return false, errors.Join(err, fileguard.Restore(path, tombstone))
+	}
+	if err := stage.Sync(); err != nil {
+		_ = stage.Close()
+		return false, errors.Join(err, fileguard.Restore(path, tombstone))
+	}
+	if err := stage.Close(); err != nil {
+		return false, errors.Join(err, fileguard.Restore(path, tombstone))
+	}
+	beforePublishLog(path)
+	if err := fileguard.PublishNoReplace(stagePath, path); errors.Is(err, fileguard.ErrPublishExists) {
+		// A non-cooperating writer recreated the visible path. Preserve it,
+		// bound the old inode in place, and let the tombstone reaper remove it.
+		if rewriteErr := fileguard.RewriteQuarantine(tombstone, tail); rewriteErr != nil {
 			return false, rewriteErr
 		}
 		return false, nil
+	} else if err != nil {
+		return false, errors.Join(err, fileguard.Restore(path, tombstone))
 	}
-	if err != nil {
-		return false, errorsJoinRestore(path, tombstone, err)
-	}
-	if _, err := out.Write(tail); err != nil {
-		_ = out.Close()
-		_ = os.Remove(path)
-		return false, errorsJoinRestore(path, tombstone, err)
-	}
-	if err := out.Sync(); err != nil {
-		_ = out.Close()
-		_ = os.Remove(path)
-		return false, errorsJoinRestore(path, tombstone, err)
-	}
-	if err := out.Close(); err != nil {
-		_ = os.Remove(path)
-		return false, errorsJoinRestore(path, tombstone, err)
-	}
-	if err := removeQuarantine(tombstone); err != nil {
+	if err := fileguard.RemoveQuarantine(tombstone); err != nil {
 		return false, err
 	}
 	return true, nil
-}
-
-func rewriteQuarantine(path string, tail []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
-	if err != nil {
-		return err
-	}
-	if _, err := file.Write(tail); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	return file.Close()
 }
 
 func readLogTail(path string, maxBytes int64) ([]byte, error) {
@@ -455,26 +380,14 @@ func removeStaleClaim(pidPath string) (int, error) {
 	}
 
 	lockPath := pidPath + ".lock"
-	lock, err := openProcessLock(lockPath)
-	if err != nil {
-		return 0, err
-	}
-	lockHeld, lockOpen := true, true
-	defer func() {
-		if lockHeld {
-			_ = unlockProcessLock(lock)
-		}
-		if lockOpen {
-			_ = lock.Close()
-		}
-	}()
-	locked, err := tryLockExclusive(lock)
+	lock, acquired, err := fileguard.TryAcquireLock(lockPath)
 	if err != nil {
 		return 0, fmt.Errorf("lock %s: %w", lockPath, err)
 	}
-	if !locked {
+	if !acquired {
 		return 0, nil
 	}
+	defer lock.Close() //nolint:errcheck
 
 	state, known, err = claimState(pidPath)
 	if err != nil {
@@ -499,10 +412,7 @@ func removeStaleClaim(pidPath string) (int, error) {
 
 	// Only retired names reach this path. Close the legacy lock before
 	// quarantining its inode; current protocol locks are never candidates.
-	_ = unlockProcessLock(lock)
-	lockHeld = false
 	_ = lock.Close()
-	lockOpen = false
 	if removedLock, err := removeUnheldFile(lockPath); err != nil {
 		return removed, err
 	} else if removedLock {
@@ -512,20 +422,13 @@ func removeStaleClaim(pidPath string) (int, error) {
 }
 
 func removeOrphanLock(lockPath string) (int, error) {
-	lock, err := openProcessLock(lockPath)
+	lock, acquired, err := fileguard.TryAcquireLock(lockPath)
 	if err != nil {
-		return 0, err
-	}
-	locked, err := tryLockExclusive(lock)
-	if err != nil {
-		_ = lock.Close()
 		return 0, fmt.Errorf("lock %s: %w", lockPath, err)
 	}
-	if !locked {
-		_ = lock.Close()
+	if !acquired {
 		return 0, nil
 	}
-	_ = unlockProcessLock(lock)
 	_ = lock.Close()
 	removed, err := removeUnheldFile(lockPath)
 	if err != nil {
@@ -548,22 +451,17 @@ func removeOrphanTemp(path string) (int, error) {
 	return 0, nil
 }
 
-func openProcessLock(path string) (*os.File, error) {
-	if info, err := os.Lstat(path); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("process lock is not a regular file: %s", path)
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("stat process lock %s: %w", path, err)
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open process lock %s: %w", path, err)
-	}
-	return file, nil
-}
-
 func claimState(path string) (procstat.State, bool, error) {
+	info, statErr := os.Lstat(path)
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			return procstat.StateDead, false, nil
+		}
+		return procstat.StateUnknown, false, fmt.Errorf("stat PID file %s: %w", path, statErr)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > 4096 {
+		return procstat.StateUnknown, false, nil
+	}
 	data, readErr := os.ReadFile(path)
 	if readErr != nil {
 		if os.IsNotExist(readErr) {
@@ -579,47 +477,6 @@ func claimState(path string) (procstat.State, bool, error) {
 	return procstat.Check(pid, token, haveToken), true, nil
 }
 
-// RemoveFileIfUnheld removes a regular file only after atomically moving it
-// to a private quarantine name and proving that no process holds that inode.
-// It is exported for the Obsidian orphan-temp reaper so it shares the same
-// race-safe deletion boundary as data-dir retention.
-func RemoveFileIfUnheld(path string) (bool, error) {
-	return removeUnheldFile(path)
-}
-
-func detectOpenFile(path string) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), openProbeTimeout)
-	defer cancel()
-
-	tool, err := exec.LookPath("lsof")
-	if err != nil {
-		tool, err = exec.LookPath("fuser")
-	}
-	var toolErr error
-	if err == nil {
-		inUse, known, probeErr := probeOpenFileWithTool(ctx, tool, path)
-		if known {
-			return inUse, probeErr
-		}
-		toolErr = probeErr
-	}
-	if inUse, known, nativeErr := nativeOpenProbe(path); known {
-		return inUse, nativeErr
-	}
-	if err != nil {
-		return false, errors.New("neither a native open-file probe nor lsof/fuser is available")
-	}
-	return false, toolErr
-}
-
-func probeOpenFileWithTool(ctx context.Context, tool, path string) (inUse, known bool, err error) {
-	runErr := runOpenProbeTool(ctx, tool, path)
-	if runErr == nil {
-		return true, true, nil
-	}
-	var exitErr *exec.ExitError
-	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 1 {
-		return false, true, nil
-	}
-	return false, false, fmt.Errorf("%s: %w", filepath.Base(tool), runErr)
+func removeUnheldFile(path string) (bool, error) {
+	return fileguard.RemoveIfUnheldWithProbe(path, openFileProbe)
 }

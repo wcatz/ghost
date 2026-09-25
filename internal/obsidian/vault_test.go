@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wcatz/ghost/internal/maintenance"
+	"github.com/wcatz/ghost/internal/fileguard"
 )
 
 // mustWrite / mustMkdirAll fail the test on setup errors instead of
@@ -113,6 +113,37 @@ consistent:
 	}
 }
 
+func TestPruneReapsOldVaultQuarantine(t *testing.T) {
+	restore := fileguard.SetProbeForTest(func(string) (bool, error) { return false, nil })
+	defer restore()
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
+	sub := filepath.Join(root, "proj", "Memories")
+	mustMkdirAll(t, sub)
+	quarantineDir, err := fileguard.QuarantineDir(filepath.Join(sub, "placeholder"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(quarantineDir, "tombstone-old-1")
+	recent := filepath.Join(quarantineDir, "tombstone-recent-1")
+	mustWrite(t, old, "old")
+	mustWrite(t, recent, "recent")
+	oldTime := time.Now().Add(-2 * fileguard.QuarantineGrace)
+	if err := os.Chtimes(old, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := prune(root, []string{"proj"}, map[string]string{}, nil); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("old vault tombstone survived: %v", err)
+	}
+	if _, err := os.Stat(recent); err != nil {
+		t.Errorf("recent vault tombstone removed: %v", err)
+	}
+}
+
 func TestPruneDefersUnverifiableGhostTemp(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)
@@ -124,7 +155,7 @@ func TestPruneDefersUnverifiableGhostTemp(t *testing.T) {
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
 	}
-	restore := maintenance.SetOpenFileProbeForTest(func(string) (bool, error) {
+	restore := fileguard.SetProbeForTest(func(string) (bool, error) {
 		return false, errors.New("probe unavailable")
 	})
 	defer restore()
@@ -153,7 +184,7 @@ func TestPruneLeavesOpenOldGhostTemp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close() //nolint:errcheck
-	restore := maintenance.SetOpenFileProbeForTest(func(probed string) (bool, error) {
+	restore := fileguard.SetProbeForTest(func(probed string) (bool, error) {
 		return probed == path || strings.HasPrefix(filepath.Base(probed), ".active.md.ghost-tmp-abc123.retention-"), nil
 	})
 	defer restore()

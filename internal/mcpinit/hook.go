@@ -16,6 +16,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/sqlitedsn"
 	_ "modernc.org/sqlite"
 )
 
@@ -34,12 +35,7 @@ import (
 // concurrent writer for its snapshot, so this path is not exposed to the
 // write-lock contention #288 describes — that fix is scoped to rwDSN.
 func roDSN(dbPath string) string {
-	u := url.URL{
-		Scheme:   "file",
-		Opaque:   (&url.URL{Path: dbPath}).EscapedPath(),
-		RawQuery: "mode=ro&_pragma=busy_timeout(1000)",
-	}
-	return u.String()
+	return sqlitedsn.ReadOnlyURI(dbPath, 1000)
 }
 
 // rwDSN builds a read-write DSN for dbPath, URI-escaped like roDSN. Its

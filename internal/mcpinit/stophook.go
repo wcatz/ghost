@@ -15,6 +15,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/fileguard"
 	"github.com/wcatz/ghost/internal/hostevent"
 	"github.com/wcatz/ghost/internal/maintenance"
 	"github.com/wcatz/ghost/internal/memory"
@@ -292,7 +293,15 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 	if _, err := maintenance.RotateLogs(dataDir, cfg.Retention.LogMaxBytes); err != nil {
 		slog.Warn("lifecycle spawn: log rotation failed", "error", err)
 	}
-	logFile, err := os.OpenFile(filepath.Join(dataDir, "lifecycle.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	logPath := filepath.Join(dataDir, "lifecycle.log")
+	logLock, err := fileguard.AcquireLock(logPath + ".lock")
+	if err != nil {
+		slog.Warn("lifecycle spawn: cannot lock log", "error", err)
+		recordSpawnFailure(projectID, cfg, err)
+		return
+	}
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	_ = logLock.Close()
 	if err != nil {
 		slog.Warn("lifecycle spawn: cannot open log", "error", err)
 		recordSpawnFailure(projectID, cfg, err)

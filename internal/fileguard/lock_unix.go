@@ -1,6 +1,6 @@
 //go:build !windows
 
-package maintenance
+package fileguard
 
 import (
 	"errors"
@@ -19,6 +19,12 @@ func tryLockExclusive(file *os.File) (bool, error) {
 	return false, err
 }
 
+func lockProcessLock(file *os.File) error {
+	return syscall.Flock(int(file.Fd()), syscall.LOCK_EX)
+}
+
 func unlockProcessLock(file *os.File) error {
 	return syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 }
+
+func renameMeansHeld(error) bool { return false }

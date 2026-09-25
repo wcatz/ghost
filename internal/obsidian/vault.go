@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/wcatz/ghost/internal/maintenance"
+	"github.com/wcatz/ghost/internal/fileguard"
 )
 
 const (
@@ -168,13 +168,17 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 				return err
 			}
 			if d.IsDir() {
+				if fileguard.IsQuarantineDir(path) {
+					_, _ = fileguard.ReapQuarantineDir(path)
+					return filepath.SkipDir
+				}
 				return nil
 			}
 			if isGhostTempFile(path) {
 				if !ghostTempIsOld(path) {
 					return nil // concurrent writer or recently crashed write
 				}
-				_, err := maintenance.RemoveFileIfUnheld(path)
+				_, err := fileguard.RemoveIfUnheld(path)
 				if err != nil {
 					return nil // unverifiable or transiently busy: defer the temp
 				}

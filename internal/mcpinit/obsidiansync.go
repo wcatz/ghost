@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/fileguard"
 	"github.com/wcatz/ghost/internal/maintenance"
 )
 
@@ -61,7 +62,14 @@ func ensureObsidianSyncRunning() {
 	if _, err := maintenance.RotateLogs(dataDir, cfg.Retention.LogMaxBytes); err != nil {
 		slog.Warn("obsidian sync spawn: log rotation failed", "error", err)
 	}
-	logFile, err := os.OpenFile(filepath.Join(dataDir, "obsidian-sync.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	logPath := filepath.Join(dataDir, "obsidian-sync.log")
+	logLock, err := fileguard.AcquireLock(logPath + ".lock")
+	if err != nil {
+		slog.Warn("obsidian sync spawn: cannot lock log", "error", err)
+		return
+	}
+	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	_ = logLock.Close()
 	if err != nil {
 		slog.Warn("obsidian sync spawn: cannot open log", "error", err)
 		return

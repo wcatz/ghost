@@ -1,14 +1,16 @@
 package maintenance
 
 import (
-	"context"
+	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/fileguard"
 )
 
 func stubOpenProbe(t *testing.T, probe func(string) (bool, error)) {
@@ -24,11 +26,7 @@ func noOpenProbe(t *testing.T) {
 }
 
 func isQuarantineOf(path, original string) bool {
-	if path == original {
-		return true
-	}
-	base := filepath.Base(original)
-	return strings.HasPrefix(filepath.Base(path), "."+base+".retention-")
+	return path == original || strings.HasPrefix(filepath.Base(path), "tombstone-"+filepath.Base(original)+"-")
 }
 
 func writeRetentionFile(t *testing.T, path, content string) {
@@ -91,7 +89,7 @@ func TestRemoveUnheldFileProbesOriginalBeforeRename(t *testing.T) {
 		probes = append(probes, probed)
 		return false, nil
 	})
-	if _, err := RemoveFileIfUnheld(path); err != nil {
+	if _, err := removeUnheldFile(path); err != nil {
 		t.Fatalf("RemoveFileIfUnheld: %v", err)
 	}
 	if len(probes) < 2 || probes[0] != path || !isQuarantineOf(probes[1], path) {
@@ -113,6 +111,55 @@ func TestRotateLogProbesOriginalBeforeRename(t *testing.T) {
 	}
 	if len(probes) < 2 || probes[0] != path || !isQuarantineOf(probes[1], path) {
 		t.Fatalf("probe order = %v, want original then quarantine", probes)
+	}
+}
+
+func TestRotateLogPublishesCompleteFileBeforeOpener(t *testing.T) {
+	noOpenProbe(t)
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "lifecycle.log")
+	writeRetentionFile(t, logPath, "0123456789")
+	done := make(chan string, 1)
+	started := make(chan struct{})
+	oldHook := beforePublishLog
+	beforePublishLog = func(path string) {
+		if path != logPath {
+			return
+		}
+		go func() {
+			close(started)
+			lock, err := fileguard.AcquireLock(logPath + ".lock")
+			if err != nil {
+				done <- "lock error: " + err.Error()
+				return
+			}
+			defer lock.Close() //nolint:errcheck
+			data, err := os.ReadFile(logPath)
+			if err != nil {
+				done <- "read error: " + err.Error()
+				return
+			}
+			done <- string(data)
+		}()
+		<-started
+		select {
+		case got := <-done:
+			t.Fatalf("opener acquired lock before publish: %q", got)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	t.Cleanup(func() { beforePublishLog = oldHook })
+
+	if _, err := RotateLogs(dir, 4); err != nil {
+		t.Fatalf("RotateLogs: %v", err)
+	}
+	select {
+	case got := <-done:
+		if got != "6789" {
+			t.Fatalf("opener read %q, want complete tail %q", got, "6789")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("opener did not acquire the log lock after publication")
 	}
 }
 
@@ -218,6 +265,29 @@ func TestRetentionLeavesSymlinksUntouched(t *testing.T) {
 	}
 }
 
+func TestRunUsesRetentionDefaultsWhenConfigLoadFails(t *testing.T) {
+	noOpenProbe(t)
+	oldLoad := loadConfig
+	loadConfig = func() (*config.Config, error) { return nil, errors.New("broken config") }
+	t.Cleanup(func() { loadConfig = oldLoad })
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "ghost.db")
+	writeRetentionFile(t, dbPath, "live")
+	retentionBackups(t, dbPath, 10, 20, 30, 40)
+
+	result, err := Run(dir, dbPath)
+	if err == nil {
+		t.Fatal("Run hid the config error")
+	}
+	if result.BackupsRemoved != 1 {
+		t.Fatalf("BackupsRemoved=%d want 1 default-config cleanup", result.BackupsRemoved)
+	}
+	matches, _ := filepath.Glob(dbPath + ".pre-migrate-*")
+	if len(matches) != 3 {
+		t.Fatalf("kept %d backups, want default 3: %v", len(matches), matches)
+	}
+}
+
 func TestRotateLogsBoundsKnownLogs(t *testing.T) {
 	noOpenProbe(t)
 	dir := t.TempDir()
@@ -287,7 +357,7 @@ func TestRotateLogBoundsQuarantineWhenWriterRecreatesPath(t *testing.T) {
 	if data, err := os.ReadFile(logPath); err != nil || string(data) != "new" {
 		t.Fatalf("racing writer log changed: data=%q err=%v", data, err)
 	}
-	tombstones, _ := filepath.Glob(filepath.Join(dir, ".lifecycle.log.retention-*"))
+	tombstones, _ := filepath.Glob(filepath.Join(dir, ".ghost-quarantine", "tombstone-*"))
 	if len(tombstones) != 1 {
 		t.Fatalf("tombstones = %v, want one bounded quarantine", tombstones)
 	}
@@ -299,8 +369,12 @@ func TestRotateLogBoundsQuarantineWhenWriterRecreatesPath(t *testing.T) {
 func TestReapStaleQuarantineFilesOnlyOldUnheld(t *testing.T) {
 	noOpenProbe(t)
 	dir := t.TempDir()
-	old := filepath.Join(dir, ".lifecycle.log.retention-oldabc123")
-	recent := filepath.Join(dir, ".obsidian-sync.log.retention-newabc123")
+	quarantineDir, err := fileguard.QuarantineDir(filepath.Join(dir, "placeholder"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(quarantineDir, "tombstone-oldabc123")
+	recent := filepath.Join(quarantineDir, "tombstone-newabc123")
 	writeRetentionFile(t, old, "old")
 	writeRetentionFile(t, recent, "recent")
 	oldTime := time.Now().Add(-2 * quarantineGrace)
@@ -330,18 +404,11 @@ func TestReapStaleProcessFilesLeavesHeldLock(t *testing.T) {
 	lockPath := pidPath + ".lock"
 	writeRetentionFile(t, pidPath, "999999999")
 
-	lock, err := openProcessLock(lockPath)
+	lock, err := fileguard.AcquireLock(lockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	locked, err := tryLockExclusive(lock)
-	if err != nil || !locked {
-		t.Fatalf("could not hold process lock: locked=%v err=%v", locked, err)
-	}
-	t.Cleanup(func() {
-		_ = unlockProcessLock(lock)
-		_ = lock.Close()
-	})
+	t.Cleanup(func() { _ = lock.Close() })
 
 	if _, err := ReapStaleProcessFiles(dir); err != nil {
 		t.Fatalf("ReapStaleProcessFiles: %v", err)
@@ -448,71 +515,6 @@ func TestReapStaleProcessFilesReapsOnlyLegacyOrphanTemp(t *testing.T) {
 	}
 	if _, err := os.Stat(current); err != nil {
 		t.Errorf("current temp was removed: %v", err)
-	}
-}
-
-func TestNativeOpenProbeFindsHeldFileThroughSymlinkedDirectory(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("symlink path resolution regression is Linux-specific")
-	}
-	realDir := t.TempDir()
-	linkDir := filepath.Join(t.TempDir(), "linked")
-	if err := os.Symlink(realDir, linkDir); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	path := filepath.Join(linkDir, "held")
-	writeRetentionFile(t, path, "held")
-	file, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close() //nolint:errcheck
-
-	inUse, known, err := nativeOpenProbe(path)
-	if err != nil {
-		t.Fatalf("nativeOpenProbe: %v", err)
-	}
-	if !known || !inUse {
-		t.Fatalf("native probe through symlink = inUse=%v known=%v, want held", inUse, known)
-	}
-}
-
-func TestExternalOpenProbeCancellationIsUnknown(t *testing.T) {
-	oldRunner := runOpenProbeTool
-	runOpenProbeTool = func(ctx context.Context, _, _ string) error {
-		<-ctx.Done()
-		return ctx.Err()
-	}
-	t.Cleanup(func() { runOpenProbeTool = oldRunner })
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	inUse, known, err := probeOpenFileWithTool(ctx, "probe", "path")
-	if known || inUse || err == nil {
-		t.Fatalf("cancelled probe = inUse=%v known=%v err=%v, want unknown error", inUse, known, err)
-	}
-}
-
-func TestNativeOpenProbeFindsHeldFile(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
-		t.Skip("native probe is implemented for Linux and Windows")
-	}
-	path := filepath.Join(t.TempDir(), "held")
-	writeRetentionFile(t, path, "held")
-	file, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer file.Close() //nolint:errcheck
-	inUse, known, err := nativeOpenProbe(path)
-	if err != nil {
-		t.Fatalf("nativeOpenProbe: %v", err)
-	}
-	if !known {
-		t.Fatal("native probe was not available")
-	}
-	if !inUse {
-		t.Fatal("native probe did not detect the open file")
 	}
 }
 

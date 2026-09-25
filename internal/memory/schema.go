@@ -11,6 +11,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/maintenance"
+	"github.com/wcatz/ghost/internal/sqlitedsn"
 	_ "modernc.org/sqlite"
 )
 
@@ -307,8 +308,7 @@ func OpenDBReadOnly(dbPath string) (*sql.DB, error) {
 	if dbPath == ":memory:" {
 		return nil, fmt.Errorf("read-only database open requires a file path")
 	}
-	u := url.URL{Scheme: "file", Opaque: (&url.URL{Path: dbPath}).EscapedPath()}
-	db, err := sql.Open("sqlite", u.String()+"?mode=ro&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", sqlitedsn.ReadOnlyURI(dbPath, 5000))
 	if err != nil {
 		return nil, fmt.Errorf("open read-only database: %w", err)
 	}

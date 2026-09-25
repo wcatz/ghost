@@ -27,7 +27,7 @@
 
 ## Key Patterns
 - Memory categories: architecture, decision, pattern, convention, gotcha, dependency, preference, fact
-- Data-dir retention: `retention.backup_count` keeps the newest pre-migrate copies, `retention.log_max_bytes` trims known logs, and retired per-phase PID/temp/lock cleanup is fail-closed around live claims; destructive file operations probe, quarantine, re-probe, and reap old unheld tombstones
+- Data-dir retention: `retention.backup_count` keeps the newest pre-migrate copies, `retention.log_max_bytes` trims known logs, and retired per-phase PID/temp/lock cleanup is fail-closed around live claims; `internal/fileguard` owns probe/quarantine/lock primitives, staged no-replace log publication, and bounded tombstone reaping for data-dir and Obsidian paths
 - Time-decay scoring: convention/preference/fact never decay; architecture/pattern 45-day; decision/gotcha/dependency 30-day
 - Empty-set guard: never replace all memories with empty reflection output
 - Project lookup: path-prefix match (longest wins) OR basename name fallback; path-shaped MCP saves prefer the observed Git remote and may bind it to one uniquely named, unclaimed project

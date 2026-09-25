@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/obsidian"
+	"github.com/wcatz/ghost/internal/sqlitedsn"
 )
 
 // parseObsidianFlags parses the flags following `ghost obsidian <mode>`. It
@@ -62,12 +62,7 @@ func parseObsidianFlags(args []string) (out, project, interval string, err error
 // read-only connection cannot do — it would fail against a non-WAL database
 // and is a pure no-op against a WAL one.
 func roDSN(dbPath string) string {
-	u := url.URL{
-		Scheme:   "file",
-		Opaque:   (&url.URL{Path: dbPath}).EscapedPath(),
-		RawQuery: "mode=ro&_pragma=busy_timeout(1000)",
-	}
-	return u.String()
+	return sqlitedsn.ReadOnlyURI(dbPath, 1000)
 }
 
 // runObsidian implements `ghost obsidian export|sync` — a one-way mirror of

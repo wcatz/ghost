@@ -54,6 +54,7 @@ internal/bench/                     Built-in retrieval benchmark and sweeps
 internal/claudeimport/              One-time Claude Code memory import
 internal/config/                    Layered YAML/environment configuration
 internal/embedding/                 Optional Ollama embedding client/worker
+internal/fileguard/                 Leaf file probe/quarantine/log-publication guards
 internal/hostevent/                 Normalized host-event contract and scanners
 internal/linking/                   Background related-memory linking worker
 internal/mcpinit/                   Client installers, status checks, hooks
@@ -67,6 +68,7 @@ internal/reflection/                Tiered memory consolidation
 internal/resolve/                   Resolved-evidence classifier and cache
 internal/scratch/                   Ghost-owned scratch root cleanup
 internal/selfupdate/                Checksum-verified GitHub release updater
+internal/sqlitedsn/                 Shared SQLite URI construction
 internal/supersede/                 Directed supersession relation classifier
 ```
 
@@ -125,7 +127,7 @@ host Stop
 
 The lifecycle is opt-in. A phase failure is logged and does not prevent later phases from running. The reflect phase can use a source-matched CLI harness or an explicitly selected offline tier; the autonomous path requires a real harness when it is configured to rewrite memories.
 
-Data-dir hygiene is deliberately separate from memory semantics. `internal/maintenance` bounds the known Ghost-owned backup/log classes, reaps only retired per-phase PID/temp/lock claims, runs after configured Ghost database opens/migrations and at the start of a detached lifecycle, and fails closed when a candidate's live owner or open-file state cannot be proven safe. Destructive operations probe the original path, move the candidate to a private quarantine name, then probe the moved inode, so a writer that raced the probe is detected before removal and Windows-held files defer without an error. Old unheld tombstones are themselves reaped after a grace period. It never treats the live database or newest pre-migration copy as disposable cleanup.
+Data-dir hygiene is deliberately separate from memory semantics. `internal/maintenance` bounds the known Ghost-owned backup/log classes, reaps only retired per-phase PID/temp/lock claims, runs after configured Ghost database opens/migrations and at the start of a detached lifecycle, and fails closed when a candidate's live owner or open-file state cannot be proven safe. Destructive primitives live in the leaf `internal/fileguard` package: they probe the original path, move the candidate into a private per-parent quarantine directory, probe the moved inode, and remove it only when unheld. Log rotation holds a persistent per-log lock while a fully written tail is published with a no-replace operation, so cooperating openers never observe a partial file. Old unheld tombstones are reaped after a grace period in both the Ghost data directory and every managed Obsidian subtree. It never treats the live database or newest pre-migration copy as disposable cleanup.
 
 ## Persistence and search
 
