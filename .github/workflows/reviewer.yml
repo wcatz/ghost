@@ -823,6 +823,7 @@ jobs:
           steps.free_review.outputs.agent_fatal != 'true' &&
           (steps.select_model.outcome == 'failure' ||
            steps.select_model.outputs.free_status == 'failed' ||
+           steps.free_review.outcome == 'failure' ||
            (steps.free_review.outcome == 'success' &&
             steps.free_review.outputs.review_status == 'failed'))
         continue-on-error: true
