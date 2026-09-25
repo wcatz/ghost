@@ -180,6 +180,24 @@ reflect → resolve → supersede
 - The lifecycle process is fire-and-forget. Failures are logged in the Ghost data directory and do not block the Stop hook.
 - The unattended reflect path requires a real CLI harness; it does not silently use the offline fallback for an automatic rewrite.
 
+### How often the chain runs
+
+The Stop hook fires after **every** turn, so a second setting bounds how often a project's chain may start. Without it, a chatty session paid for a full `reflect → resolve → supersede` chain per turn:
+
+```yaml
+lifecycle:
+  min_interval: 30m
+```
+
+`lifecycle.min_interval` is the shortest gap between two lifecycle **starts**, per project. It is a Go duration string (`"45s"`, `"30m"`, `"1h30m"`); the default is `30m`, and `0` disables the cooldown and restores the old every-turn behavior.
+
+- The window is measured from when the last run **started**, not when it finished, so a long run cannot push the next one further away.
+- The stamp is a per-project file in the data directory, `lifecycle-<project>.last`, beside the `lifecycle-<project>.pid` lock the two guards share. Its mtime is the record; the file's contents are diagnostic.
+- The Stop hook only ever reads it. The detached `ghost lifecycle` process writes it, when the run it actually starts begins — so a spawn that never started, or one turned away because a run was already in progress, does not burn the window.
+- Every unknown reads as "run": no stamp, an unreadable one, or a value that is not a regular file all mean the chain proceeds. A cooldown that could silently stop maintenance is the worse failure.
+- A value that is not a duration (`min_interval: soon`) is reported by name and falls back to the default, not to `0` — guessing `0` would switch off the guard you asked for.
+- A skip leaves one line in `lifecycle.log` in the data directory. Nothing is printed to the host's stderr, which belongs to the editor and would otherwise get a line per turn.
+
 ## CLI harness paths and model pins
 
 LLM-backed maintenance uses the calling session's CLI harness. Ghost resolves binaries from `PATH` unless a path is configured explicitly:
@@ -262,6 +280,7 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 | `GHOST_INJECTION_CATEGORY_CAPS` | `injection.category_caps` |
 | `GHOST_SEARCH_MIN_SIMILARITY` | `search.min_similarity` |
 | `GHOST_ROUTING_DEFAULT_PROJECT` | `routing.default_project` |
+| `GHOST_LIFECYCLE_MIN_INTERVAL` | `lifecycle.min_interval` |
 
 The four `injection.*` variables take structured values, so they use a comma-separated form rather than YAML syntax. Whitespace around the separators is ignored:
 

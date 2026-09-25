@@ -69,6 +69,7 @@ func TestHarnessEnvKeepsWhatAHarnessNeeds(t *testing.T) {
 		"GHOST_EMBEDDING_OLLAMA_URL=http://localhost:11434",
 		"GHOST_CLI_CLAUDE_BINARY=/usr/local/bin/claude",
 		"GHOST_SCRATCH_DIR=/tmp/scratch",
+		"GHOST_LIFECYCLE_MIN_INTERVAL=30m",
 	}
 	got := namesOf(harnessEnv(base, harnessClaude))
 
@@ -80,6 +81,11 @@ func TestHarnessEnvKeepsWhatAHarnessNeeds(t *testing.T) {
 		"GHOST_EMBEDDING_OLLAMA_URL": "http://localhost:11434",
 		"GHOST_CLI_CLAUDE_BINARY":    "/usr/local/bin/claude",
 		"GHOST_SCRATCH_DIR":          "/tmp/scratch",
+		// A configuration variable must reach a harness child on the same terms
+		// as every other one: a reflect/resolve/supersede phase that spawns
+		// opencode must not see a different configuration than the lifecycle
+		// coordinator that spawned it.
+		"GHOST_LIFECYCLE_MIN_INTERVAL": "30m",
 	} {
 		if got[k] != want {
 			t.Errorf("%s = %q, want %q", k, got[k], want)

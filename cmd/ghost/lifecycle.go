@@ -58,6 +58,15 @@ func runLifecycle() {
 	}
 	defer release()
 
+	// Record the START for lifecycle.min_interval (#541): the stop hook reads
+	// this stamp to decide whether the next turn's spawn is inside the cooldown.
+	// Written here, by the process that actually runs and only after the lock
+	// says this run is the one, so a spawn that never started cannot burn the
+	// window. Best-effort — a missing stamp only costs one extra spawn.
+	if err := mcpinit.TouchLifecycleStart(projectName); err != nil {
+		fmt.Fprintf(os.Stderr, "lifecycle: warning: could not record the run start (%v)\n", err)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: load config: %v\n", err)
