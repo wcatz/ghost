@@ -472,6 +472,26 @@ func TestReportConfigFile_Present(t *testing.T) {
 	}
 }
 
+// TestReportConfigFile_MalformedReported pins that an unparseable config file
+// is surfaced here. `ghost mcp status` is where a user goes when their
+// settings "don't take effect", and while the parse error was dropped every
+// downstream check silently ran on the compiled defaults.
+func TestReportConfigFile_MalformedReported(t *testing.T) {
+	statusEnv(t)
+	path := writeGhostConfigFile(t, "embedding:\n  model: \"nomic-embed-text\n")
+
+	var out bytes.Buffer
+	reportConfigFile(&out)
+
+	got := out.String()
+	if !strings.Contains(got, path) {
+		t.Errorf("expected the config path %q in output, got: %s", path, got)
+	}
+	if !strings.Contains(got, "parse "+path) {
+		t.Errorf("expected the parse error for %q in output, got: %s", path, got)
+	}
+}
+
 // TestCheckEmbeddingStats pins the embedding-stats classification: an empty
 // store passes with "(store empty)", a populated store passes only when some
 // memories are embedded, and a populated store with zero embeddings fails.

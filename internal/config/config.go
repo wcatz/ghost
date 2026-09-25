@@ -11,8 +11,13 @@ package config
 
 import (
 	_ "embed"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/knadh/koanf/parsers/yaml"
@@ -203,9 +208,22 @@ var defaults = map[string]interface{}{
 	"scratch.max_bytes":                        DefaultScratchMaxBytes,
 }
 
+// systemConfigPath is the system-wide config layer. Named so the load path and
+// the errors it produces say the same file.
+const systemConfigPath = "/etc/ghost/config.yaml"
+
 // Load reads configuration with layered precedence.
 // After Load returns, the caller may apply CLI flag overrides by mutating
 // fields directly.
+//
+// A config file that exists but does not parse is an error, not a silent
+// fallback to the compiled defaults: one typo used to leave every key at its
+// default with nothing to explain why. Callers that must not fail — the
+// host-session hooks — use LoadForHook instead, which reports the same problem
+// as a warning and keeps the defaults.
+//
+// Unknown keys in a config file are reported the same way but do not fail the
+// load, because a key Ghost does not bind is harmless to everything that does.
 func Load() (*Config, error) {
 	k := koanf.New(".")
 
@@ -217,11 +235,20 @@ func Load() (*Config, error) {
 	parser := yaml.Parser()
 
 	// Layer 2: /etc/ghost/config.yaml (system-wide).
-	loadFileIfExists(k, "/etc/ghost/config.yaml", parser)
+	known := k.Keys()
+	if err := loadFileIfExists(k, systemConfigPath, parser); err != nil {
+		return nil, err
+	}
+	warnUnknownKeys(k, known, systemConfigPath)
 
 	// Layer 3: the platform's user config path (user-global).
 	if configDir, err := userConfigDir(); err == nil {
-		loadFileIfExists(k, filepath.Join(configDir, "ghost", "config.yaml"), parser)
+		path := filepath.Join(configDir, "ghost", "config.yaml")
+		known = k.Keys()
+		if err := loadFileIfExists(k, path, parser); err != nil {
+			return nil, err
+		}
+		warnUnknownKeys(k, known, path)
 	}
 
 	// Layer 4: GHOST_* environment variables.
@@ -233,35 +260,20 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	// Explicit env overrides for keys with underscores in koanf tags.
-	// koanf's _ → . transformer would map e.g. GHOST_OBSIDIAN_VAULT_DIR
-	// to obsidian.vault.dir instead of obsidian.vault_dir.
-	envOverrides := map[string]string{
-		"GHOST_OBSIDIAN_VAULT_DIR":                       "obsidian.vault_dir",
-		"GHOST_CLI_CLAUDE_BINARY":                        "cli.claude_binary",
-		"GHOST_CLI_OPENCODE_BINARY":                      "cli.opencode_binary",
-		"GHOST_CLI_CODEX_BINARY":                         "cli.codex_binary",
-		"GHOST_CLI_GOOSE_BINARY":                         "cli.goose_binary",
-		"GHOST_CLI_MODEL_REFLECT":                        "cli.model_reflect",
-		"GHOST_CLI_MODEL_RESOLVE":                        "cli.model_resolve",
-		"GHOST_CLI_MODEL_SUPERSEDE":                      "cli.model_supersede",
-		"GHOST_REFLECTION_AUTO_REFLECT":                  "reflection.auto_reflect",
-		"GHOST_REFLECTION_AUTO_RESOLVE":                  "reflection.auto_resolve",
-		"GHOST_REFLECTION_AUTO_SUPERSEDE":                "reflection.auto_supersede",
-		"GHOST_REFLECTION_LIFECYCLE_TIMEOUT_MINUTES":     "reflection.lifecycle_timeout_minutes",
-		"GHOST_REFLECTION_CONSOLIDATION_TIMEOUT_MINUTES": "reflection.consolidation_timeout_minutes",
-		"GHOST_OLLAMA_URL":                               "embedding.ollama_url",
-		"GHOST_ROUTING_DEFAULT_PROJECT":                  "routing.default_project",
-		"GHOST_SEARCH_MIN_SIMILARITY":                    "search.min_similarity",
-		// GHOST_SCRATCH_MAX_BYTES: the generic _→. transformer would produce
-		// scratch.max.bytes, missing the max_bytes key entirely.
-		"GHOST_SCRATCH_MAX_BYTES": "scratch.max_bytes",
-	}
-	for envKey, koanfKey := range envOverrides {
-		if val := os.Getenv(envKey); val != "" {
-			_ = k.Load(confmap.Provider(map[string]interface{}{
-				koanfKey: val,
-			}, "."), nil)
+	// Explicit env overrides for keys the generic transformer cannot reach.
+	for _, ov := range envOverrides {
+		raw := os.Getenv(ov.env)
+		if raw == "" {
+			continue
+		}
+		val, err := ov.parse(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", ov.env, err)
+		}
+		if err := k.Load(confmap.Provider(map[string]interface{}{
+			ov.key: val,
+		}, "."), nil); err != nil {
+			return nil, fmt.Errorf("%s: %w", ov.env, err)
 		}
 	}
 
@@ -270,6 +282,279 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// LoadForHook loads configuration for a hook running inside someone else's
+// editor session (SessionStart injection, obsidian auto-sync, stop-hook
+// reflection, session routing). A broken config must not fail the host's
+// session, so the error is reported on stderr and the compiled defaults are
+// returned: the session still gets its context, and the user still finds out
+// why their settings are not taking effect.
+//
+// CLI subcommands use Load instead, and fail with the same error.
+func LoadForHook() *Config {
+	cfg, err := Load()
+	if err == nil {
+		return cfg
+	}
+	warnf("%v — falling back to built-in defaults", err)
+	return DefaultConfig()
+}
+
+// DefaultConfig returns the Config compiled from the defaults layer alone — the
+// same values an empty config file produces. It is the one fallback for every
+// caller that must not fail on a broken config file (LoadForHook, and the MCP
+// server via cmd/ghost's bootstrap), so a broken file can never change which
+// values those paths use.
+func DefaultConfig() *Config {
+	cfg := &Config{}
+	k := koanf.New(".")
+	if err := k.Load(confmap.Provider(defaults, "."), nil); err == nil {
+		if err := k.Unmarshal("", cfg); err == nil {
+			return cfg
+		}
+	}
+	// Unreachable for the literal defaults map above; still fill in the two
+	// values the fallback paths read rather than returning a zero Config.
+	cfg.Injection = DefaultInjectionConfig()
+	cfg.Scratch.MaxBytes = DefaultScratchMaxBytes
+	return cfg
+}
+
+// stderr is where configuration warnings go. It is a variable so a test can
+// assert on what a user would see without swapping the process's os.Stderr.
+var stderr io.Writer = os.Stderr
+
+// warnf reports a non-fatal configuration problem. Layered config is loaded
+// from inside host-session hooks that must not fail, so the problems that must
+// not stop the caller are reported here rather than returned.
+func warnf(format string, args ...interface{}) {
+	_, _ = fmt.Fprintf(stderr, "ghost: config: "+format+"\n", args...)
+}
+
+// knownKeys is every koanf key the Config struct binds, derived once from its
+// struct tags so it cannot drift as fields are added.
+var knownKeys = collectKeys(reflect.TypeFor[Config]())
+
+// collectKeys walks a config struct's koanf tags into the flat key set koanf
+// itself uses. Only a nested struct keeps descending; maps, slices and scalars
+// are leaves as far as the key set is concerned, because koanf addresses them
+// by the key that holds the collection.
+func collectKeys(t reflect.Type) map[string]struct{} {
+	out := make(map[string]struct{})
+	var walk func(reflect.Type, string)
+	walk = func(t reflect.Type, prefix string) {
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			name := f.Tag.Get("koanf")
+			if name == "" {
+				continue
+			}
+			key := name
+			if prefix != "" {
+				key = prefix + "." + name
+			}
+			if f.Type.Kind() == reflect.Struct {
+				walk(f.Type, key)
+				continue
+			}
+			out[key] = struct{}{}
+		}
+	}
+	walk(t, "")
+	return out
+}
+
+// warnUnknownKeys reports the keys a config file introduced that no Config
+// field binds, so a typo is never a silent no-op. before is the key set from
+// the layers loaded so far, so a key those layers already set is not reported
+// against the file that merely repeated it.
+func warnUnknownKeys(k *koanf.Koanf, before []string, path string) {
+	seen := make(map[string]struct{}, len(before))
+	for _, key := range before {
+		seen[key] = struct{}{}
+	}
+	var unknown []string
+	for _, key := range k.Keys() {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		if isKnownKey(key) {
+			continue
+		}
+		unknown = append(unknown, key)
+	}
+	if len(unknown) == 0 {
+		return
+	}
+	slices.Sort(unknown)
+	warnf("%s: unknown key(s) ignored: %s", path, strings.Join(unknown, ", "))
+}
+
+// isKnownKey reports whether key, or any of its parent keys, is one Config
+// binds. The parent walk is what makes a map value's entries count as known:
+// koanf flattens injection.category_weights into one key per entry
+// (injection.category_weights.gotcha), and a typo in the parent
+// (…category_weight.gotcha) still walks up to nothing that is bound.
+func isKnownKey(key string) bool {
+	for {
+		if _, ok := knownKeys[key]; ok {
+			return true
+		}
+		i := strings.LastIndex(key, ".")
+		if i < 0 {
+			return false
+		}
+		key = key[:i]
+	}
+}
+
+// envOverride names a GHOST_* variable the generic GHOST_ prefix plus "_"→"."
+// transformer cannot map onto a config key, together with the parser that turns
+// its raw string into the Go type the Config field needs.
+//
+// Two distinct gaps are covered:
+//
+//   - a koanf tag that itself contains "_" (obsidian.vault_dir), which the
+//     transformer would split into obsidian.vault.dir; and
+//   - a non-scalar field (injection.behavior_categories and the two injection
+//     maps), which koanf's weakly-typed decode cannot build from a bare string:
+//     "gotcha,decision" would arrive as the single element ["gotcha,decision"],
+//     and a string never becomes a map at all.
+type envOverride struct {
+	env   string
+	key   string
+	parse func(string) (interface{}, error)
+}
+
+// stringValue passes a string through untouched. Every parser below names the
+// type it produces, so a value that cannot be read as its key's type is
+// reported against the variable that carried it instead of surfacing much later
+// as an unmarshal error that only names the key.
+func stringValue(s string) (interface{}, error) { return s, nil }
+
+// boolValue parses a Go boolean ("true", "1", "off").
+func boolValue(s string) (interface{}, error) {
+	v, err := strconv.ParseBool(s)
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// intValue parses a base-10 integer.
+func intValue(s string) (interface{}, error) {
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// floatValue parses a 64-bit float.
+func floatValue(s string) (interface{}, error) {
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// commaList parses "a,b,c" into the []string a config key expects.
+func commaList(s string) (interface{}, error) {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// commaPairs splits "key=value,key=value" on commas, then on the first "=" of
+// each pair.
+func commaPairs(s string) ([][2]string, error) {
+	var out [][2]string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(p, "=")
+		if k, v = strings.TrimSpace(k), strings.TrimSpace(v); !ok || k == "" {
+			return nil, fmt.Errorf("expected key=value, got %q", p)
+		}
+		out = append(out, [2]string{k, v})
+	}
+	return out, nil
+}
+
+// floatMap parses "key=value,..." into the map[string]float64 a config key
+// expects, naming the offending key when a value is not a number.
+func floatMap(s string) (interface{}, error) {
+	pairs, err := commaPairs(s)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]float64, len(pairs))
+	for _, p := range pairs {
+		f, err := strconv.ParseFloat(p[1], 64)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", p[0], err)
+		}
+		out[p[0]] = f
+	}
+	return out, nil
+}
+
+// intMap parses "key=value,..." into the map[string]int a config key expects.
+func intMap(s string) (interface{}, error) {
+	pairs, err := commaPairs(s)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]int, len(pairs))
+	for _, p := range pairs {
+		n, err := strconv.Atoi(p[1])
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", p[0], err)
+		}
+		out[p[0]] = n
+	}
+	return out, nil
+}
+
+// envOverrides is a slice rather than a map so the order the variables are
+// applied in is fixed instead of randomized by map iteration.
+var envOverrides = []envOverride{
+	{"GHOST_OBSIDIAN_VAULT_DIR", "obsidian.vault_dir", stringValue},
+	{"GHOST_CLI_CLAUDE_BINARY", "cli.claude_binary", stringValue},
+	{"GHOST_CLI_OPENCODE_BINARY", "cli.opencode_binary", stringValue},
+	{"GHOST_CLI_CODEX_BINARY", "cli.codex_binary", stringValue},
+	{"GHOST_CLI_GOOSE_BINARY", "cli.goose_binary", stringValue},
+	{"GHOST_CLI_MODEL_REFLECT", "cli.model_reflect", stringValue},
+	{"GHOST_CLI_MODEL_RESOLVE", "cli.model_resolve", stringValue},
+	{"GHOST_CLI_MODEL_SUPERSEDE", "cli.model_supersede", stringValue},
+	{"GHOST_REFLECTION_AUTO_REFLECT", "reflection.auto_reflect", boolValue},
+	{"GHOST_REFLECTION_AUTO_RESOLVE", "reflection.auto_resolve", boolValue},
+	{"GHOST_REFLECTION_AUTO_SUPERSEDE", "reflection.auto_supersede", boolValue},
+	{"GHOST_REFLECTION_LIFECYCLE_TIMEOUT_MINUTES", "reflection.lifecycle_timeout_minutes", intValue},
+	{"GHOST_REFLECTION_CONSOLIDATION_TIMEOUT_MINUTES", "reflection.consolidation_timeout_minutes", intValue},
+	{"GHOST_OLLAMA_URL", "embedding.ollama_url", stringValue},
+	{"GHOST_ROUTING_DEFAULT_PROJECT", "routing.default_project", stringValue},
+	{"GHOST_SEARCH_MIN_SIMILARITY", "search.min_similarity", floatValue},
+	// GHOST_SCRATCH_MAX_BYTES: the generic _→. transformer would produce
+	// scratch.max.bytes, missing the max_bytes key entirely.
+	{"GHOST_SCRATCH_MAX_BYTES", "scratch.max_bytes", intValue},
+	{"GHOST_LINKING_DEMOTION_THRESHOLD", "linking.demotion_threshold", floatValue},
+	{"GHOST_OBSIDIAN_AUTO_SYNC", "obsidian.auto_sync", boolValue},
+	{"GHOST_INJECTION_BEHAVIOR_FLOOR", "injection.behavior_floor", intValue},
+	// The list and the two maps need parsing, not just remapping — see
+	// envOverride's doc comment.
+	{"GHOST_INJECTION_BEHAVIOR_CATEGORIES", "injection.behavior_categories", commaList},
+	{"GHOST_INJECTION_CATEGORY_WEIGHTS", "injection.category_weights", floatMap},
+	{"GHOST_INJECTION_CATEGORY_CAPS", "injection.category_caps", intMap},
 }
 
 // DataDirPath returns the ghost data directory path WITHOUT creating it, so
@@ -331,11 +616,18 @@ func EnsureConfigFile() (path string, created bool, err error) {
 	return path, true, nil
 }
 
-// loadFileIfExists loads a config file into koanf if it exists, silently skipping missing files.
-func loadFileIfExists(k *koanf.Koanf, path string, parser koanf.Parser) {
-	if _, err := os.Stat(path); err == nil {
-		_ = k.Load(file.Provider(path), parser)
+// loadFileIfExists loads a config file into koanf, silently skipping a file
+// that is not there — the layer is optional. A file that IS there but does not
+// parse is an error naming the path: the path is the half of the message the
+// user needs, and it is what made the old swallow impossible to diagnose.
+func loadFileIfExists(k *koanf.Koanf, path string, parser koanf.Parser) error {
+	if _, err := os.Stat(path); err != nil {
+		return nil
 	}
+	if err := k.Load(file.Provider(path), parser); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	return nil
 }
 
 // userConfigDir returns the base user config directory, honoring XDG_CONFIG_HOME

@@ -34,11 +34,7 @@ func resolve(ctx context.Context, store *memory.Store, input string) (string, st
 }
 
 func defaultProjectForSessions() string {
-	cfg, err := config.Load()
-	if err != nil {
-		return ""
-	}
-	return cfg.Routing.DefaultProject
+	return config.LoadForHook().Routing.DefaultProject
 }
 
 // isHomeOrRoot reports whether cwd is the user's home directory or the

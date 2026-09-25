@@ -29,8 +29,9 @@ func ensureObsidianSyncRunning() {
 		return
 	}
 
-	cfg, err := config.Load()
-	if err != nil || !cfg.Obsidian.AutoSync {
+	// LoadForHook, not Load: this runs inside the session-start hook, so a
+	// broken config is reported rather than fatal.
+	if !config.LoadForHook().Obsidian.AutoSync {
 		return
 	}
 

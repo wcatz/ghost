@@ -93,13 +93,10 @@ func Size(dir string) (bytes int64, files int, err error) {
 // scratch.max_bytes <= 0 disables the check entirely (the explicit opt-out;
 // an unset key is the compiled 512 MiB default — see config.ScratchConfig).
 func EnforceBudget() BudgetResult {
-	maxBytes := config.DefaultScratchMaxBytes
-	if cfg, err := config.Load(); err == nil {
-		maxBytes = cfg.Scratch.MaxBytes
-	} else {
-		slog.Debug("scratch budget: config load failed, using compiled default",
-			"error", err, "max_bytes", maxBytes)
-	}
+	// LoadForHook, not Load: a broken config must not block a spawn, but the
+	// fallback must not be quiet either. LoadForHook reports the failure and
+	// returns the compiled default, which is this function's own fallback.
+	maxBytes := config.LoadForHook().Scratch.MaxBytes
 	if maxBytes <= 0 {
 		return BudgetResult{} // enforcement explicitly disabled
 	}

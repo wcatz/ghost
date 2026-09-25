@@ -207,10 +207,7 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 	if cwd == "" {
 		return
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		return
-	}
+	cfg := config.LoadForHook()
 	if !cfg.Reflection.AutoReflect && !cfg.Reflection.AutoResolve && !cfg.Reflection.AutoSupersede {
 		return
 	}

@@ -21,7 +21,7 @@
 - `internal/obsidian/` — One-way Markdown vault mirror (`ghost obsidian export|sync`)
 - `internal/reflection/` — Memory consolidation: LlmConsolidator + SQLiteConsolidator
 - `internal/provider/` — Interface contracts: LLMProvider, MemoryStore
-- `internal/config/` — Layered YAML + env config (koanf)
+- `internal/config/` — Layered YAML + env config (koanf). `Load` returns an error for a config file that exists but does not parse, for a `GHOST_*` value that is not readable as its key's type, and warns on keys no `Config` field binds; CLI subcommands call it and fail. `LoadForHook` is the host-session path (SessionStart/Stop hooks, obsidian auto-sync, routing, the scratch budget): it reports the same problem on stderr and returns the compiled defaults, so a typo cannot fail someone's session. `envOverrides` lists the `GHOST_*` names the generic `GHOST_` prefix + `_`→`.` transformer cannot map, each with the parser for its key's type.
 - `internal/selfupdate/` — `ghost upgrade` self-update from GitHub Releases
 
 ## Key Patterns

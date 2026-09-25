@@ -29,7 +29,7 @@ func runMCP() {
 	if closeLog != nil {
 		defer closeLog()
 	}
-	cfg, logger, store := bootstrap(logWriter, logLevel)
+	cfg, logger, store := bootstrap(logWriter, logLevel, warnOnConfig)
 	defer store.Close() //nolint:errcheck
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

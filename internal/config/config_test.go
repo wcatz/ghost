@@ -1,10 +1,54 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+
+	"github.com/knadh/koanf/parsers/yaml"
+	"github.com/knadh/koanf/v2"
 )
+
+// malformedYAML is what a human typo produces: an unterminated quoted scalar.
+const malformedYAML = "embedding:\n  model: \"nomic-embed-text\n"
+
+// isolateConfig points HOME and XDG_CONFIG_HOME at a temp dir so neither a real
+// config file nor a host GHOST_* variable can reach the assertions.
+func isolateConfig(t *testing.T) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+}
+
+// writeUserConfig writes content to the exact user config path Load() reads
+// (XDG_CONFIG_HOME/ghost/config.yaml) and returns that path.
+func writeUserConfig(t *testing.T, content string) string {
+	t.Helper()
+	dir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "ghost")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// captureConfigWarnings redirects config warnings to a buffer for the duration
+// of the test, so a test can assert on what a user would see on stderr.
+func captureConfigWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	orig := stderr
+	stderr = &buf
+	t.Cleanup(func() { stderr = orig })
+	return &buf
+}
 
 // unsetEnvVars unsets the given env vars for the duration of the test,
 // restoring original values on cleanup.
@@ -631,5 +675,272 @@ func TestScratchMaxBytesEnvOverride(t *testing.T) {
 	}
 	if cfg.Scratch.MaxBytes != 2048 {
 		t.Errorf("scratch.max_bytes = %d, want 2048 (env override)", cfg.Scratch.MaxBytes)
+	}
+}
+
+// TestLoad_MalformedYAMLIsAnError pins that a config file which exists but does
+// not parse is reported rather than swallowed. Before this, k.Load's error was
+// discarded, so a typo left every key at its compiled default with nothing to
+// explain why the user's settings were having no effect.
+func TestLoad_MalformedYAMLIsAnError(t *testing.T) {
+	isolateConfig(t)
+	path := writeUserConfig(t, malformedYAML)
+
+	cfg, err := Load()
+	if err == nil {
+		t.Fatalf("Load() = %+v, nil; a malformed config must be an error, not a silent fallback to defaults", cfg)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q must name the offending file %q", err, path)
+	}
+}
+
+// TestLoadFileIfExists covers the same failure on the layer Load cannot reach
+// from a test (/etc/ghost/config.yaml is not writable), plus the case that must
+// stay silent: a file layer that is simply absent.
+func TestLoadFileIfExists(t *testing.T) {
+	parser := yaml.Parser()
+
+	present := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(present, []byte(malformedYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := loadFileIfExists(koanf.New("."), present, parser); err == nil {
+		t.Error("loadFileIfExists accepted a malformed file; the parse error must propagate")
+	} else if !strings.Contains(err.Error(), present) {
+		t.Errorf("error %q must name %q", err, present)
+	}
+
+	absent := filepath.Join(t.TempDir(), "config.yaml")
+	if err := loadFileIfExists(koanf.New("."), absent, parser); err != nil {
+		t.Errorf("loadFileIfExists on an absent file = %v, want nil (the layer is optional)", err)
+	}
+}
+
+// TestLoadForHook_MalformedYAMLFallsBackWithWarning is the host-session half of
+// the same problem: the SessionStart hook runs inside someone else's editor and
+// must not fail their session over a typo, but must still say so.
+func TestLoadForHook_MalformedYAMLFallsBackWithWarning(t *testing.T) {
+	isolateConfig(t)
+	path := writeUserConfig(t, malformedYAML)
+	warnings := captureConfigWarnings(t)
+
+	cfg := LoadForHook()
+	if cfg == nil {
+		t.Fatal("LoadForHook() = nil; the hook path must always be given a config")
+	}
+	if !cfg.Embedding.Enabled {
+		t.Error("embedding.enabled = false, want the compiled default true")
+	}
+	if cfg.Linking.DemotionThreshold != 0.90 {
+		t.Errorf("linking.demotion_threshold = %f, want the compiled default 0.90", cfg.Linking.DemotionThreshold)
+	}
+	if cfg.Injection.BehaviorFloor != 8 {
+		t.Errorf("injection.behavior_floor = %d, want the compiled default 8", cfg.Injection.BehaviorFloor)
+	}
+	if got := warnings.String(); !strings.Contains(got, path) {
+		t.Errorf("warning %q must name the file that failed to parse (%q)", got, path)
+	}
+}
+
+// TestLoadForHook_ValidConfigLoadsWithoutWarning is the other half of the hook
+// contract: the fallback must not fire (or warn) on a config that loads fine.
+func TestLoadForHook_ValidConfigLoadsWithoutWarning(t *testing.T) {
+	isolateConfig(t)
+	writeUserConfig(t, "linking:\n  demotion_threshold: 0.42\n")
+	warnings := captureConfigWarnings(t)
+
+	cfg := LoadForHook()
+	if cfg.Linking.DemotionThreshold != 0.42 {
+		t.Errorf("linking.demotion_threshold = %f, want 0.42 (a valid config must still load)", cfg.Linking.DemotionThreshold)
+	}
+	if got := warnings.String(); got != "" {
+		t.Errorf("LoadForHook() warned on a valid config: %q", got)
+	}
+}
+
+// TestLoad_UnknownKeyWarns pins that a key no Config field binds is reported.
+// A typo like linking.thresholdd otherwise does nothing at all, silently.
+func TestLoad_UnknownKeyWarns(t *testing.T) {
+	isolateConfig(t)
+	path := writeUserConfig(t, "linking:\n  thresholdd: 0.9\n  threshold: 0.85\n")
+	warnings := captureConfigWarnings(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.Linking.Threshold != 0.85 {
+		t.Errorf("linking.threshold = %f, want 0.85 (the valid sibling key must still load)", cfg.Linking.Threshold)
+	}
+	got := warnings.String()
+	if !strings.Contains(got, "linking.thresholdd") {
+		t.Errorf("warning %q must name the unknown key linking.thresholdd", got)
+	}
+	if !strings.Contains(got, path) {
+		t.Errorf("warning %q must name the file it came from (%q)", got, path)
+	}
+}
+
+// TestLoad_AllKnownKeysDoNotWarn guards the unknown-key warning against false
+// positives: if it fired on Ghost's own keys it would mean nothing, so every
+// key the compiled defaults set must be bound by a Config field, and a file
+// naming one key per section (including the two map/list kinds) must be silent.
+func TestLoad_AllKnownKeysDoNotWarn(t *testing.T) {
+	isolateConfig(t)
+	warnings := captureConfigWarnings(t)
+
+	for key := range defaults {
+		if _, ok := knownKeys[key]; !ok {
+			t.Errorf("defaults key %q is not bound by any Config field", key)
+		}
+	}
+
+	writeUserConfig(t, strings.Join([]string{
+		"embedding:",
+		"  enabled: true",
+		"  ollama_url: http://localhost:11434",
+		"  model: nomic-embed-text:v1.5",
+		"  dimensions: 768",
+		"reflection:",
+		"  auto_resolve: true",
+		"  auto_supersede: true",
+		"  auto_reflect: true",
+		"  lifecycle_timeout_minutes: 60",
+		"  consolidation_timeout_minutes: 10",
+		"cli:",
+		`  claude_binary: ""`,
+		`  opencode_binary: ""`,
+		`  codex_binary: ""`,
+		`  goose_binary: ""`,
+		`  model_reflect: ""`,
+		`  model_resolve: ""`,
+		`  model_supersede: ""`,
+		"linking:",
+		"  enabled: true",
+		"  threshold: 0.7",
+		"  demotion_threshold: 0.9",
+		"injection:",
+		"  behavior_floor: 8",
+		"  behavior_categories:",
+		"    - gotcha",
+		"  category_weights:",
+		"    gotcha: 1.2",
+		"  category_caps:",
+		"    gotcha: 4",
+		"search:",
+		"  min_similarity: 0.0",
+		"obsidian:",
+		`  vault_dir: ""`,
+		`  interval: "30s"`,
+		"  auto_sync: false",
+		"routing:",
+		`  default_project: ""`,
+		"scratch:",
+		"  max_bytes: 536870912",
+		"",
+	}, "\n"))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.Injection.CategoryWeights["gotcha"] != 1.2 {
+		t.Errorf("injection.category_weights = %v, want gotcha:1.2 to load", cfg.Injection.CategoryWeights)
+	}
+	if got := warnings.String(); got != "" {
+		t.Errorf("Load() warned for keys that are all bound: %q", got)
+	}
+}
+
+// TestLoad_LinkingDemotionThresholdEnvOverride: GHOST_LINKING_DEMOTION_THRESHOLD
+// must reach linking.demotion_threshold — the generic transformer produces
+// linking.demotion.threshold and misses the key entirely.
+func TestLoad_LinkingDemotionThresholdEnvOverride(t *testing.T) {
+	isolateConfig(t)
+	t.Setenv("GHOST_LINKING_DEMOTION_THRESHOLD", "0.42")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.Linking.DemotionThreshold != 0.42 {
+		t.Errorf("linking.demotion_threshold = %f, want 0.42 (env override)", cfg.Linking.DemotionThreshold)
+	}
+}
+
+// TestLoad_ObsidianAutoSyncEnvOverride: GHOST_OBSIDIAN_AUTO_SYNC must reach
+// obsidian.auto_sync; the generic transformer produces obsidian.auto.sync.
+func TestLoad_ObsidianAutoSyncEnvOverride(t *testing.T) {
+	isolateConfig(t)
+	t.Setenv("GHOST_OBSIDIAN_AUTO_SYNC", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if !cfg.Obsidian.AutoSync {
+		t.Error("obsidian.auto_sync = false, want true (env override)")
+	}
+}
+
+// TestLoad_InjectionEnvOverrides gives every injection.* key a GHOST_ variable.
+// The list and the two maps cannot be decoded by koanf's weakly-typed unmarshal
+// from a bare string: "gotcha,decision" would arrive as the single element
+// ["gotcha,decision"], and a string never becomes a map.
+func TestLoad_InjectionEnvOverrides(t *testing.T) {
+	isolateConfig(t)
+	t.Setenv("GHOST_INJECTION_BEHAVIOR_FLOOR", "3")
+	t.Setenv("GHOST_INJECTION_BEHAVIOR_CATEGORIES", "gotcha, decision")
+	t.Setenv("GHOST_INJECTION_CATEGORY_WEIGHTS", "gotcha=1.2,decision=1.5")
+	t.Setenv("GHOST_INJECTION_CATEGORY_CAPS", "gotcha=2,decision=1")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.Injection.BehaviorFloor != 3 {
+		t.Errorf("injection.behavior_floor = %d, want 3 (env override)", cfg.Injection.BehaviorFloor)
+	}
+	if want := []string{"gotcha", "decision"}; !slices.Equal(cfg.Injection.BehaviorCategories, want) {
+		t.Errorf("injection.behavior_categories = %v, want %v (comma-separated env override)",
+			cfg.Injection.BehaviorCategories, want)
+	}
+	if got := cfg.Injection.CategoryWeights; got["gotcha"] != 1.2 || got["decision"] != 1.5 {
+		t.Errorf("injection.category_weights = %v, want gotcha:1.2 decision:1.5", got)
+	}
+	// gotcha:2 also proves the override beat the compiled default of 4.
+	if got := cfg.Injection.CategoryCaps; got["gotcha"] != 2 || got["decision"] != 1 {
+		t.Errorf("injection.category_caps = %v, want gotcha:2 decision:1", got)
+	}
+}
+
+// TestLoad_MalformedEnvOverrideIsAnError pins that a GHOST_ value which cannot
+// be read as the key's type is reported against the variable that carried it,
+// naming the variable so the user knows which one to fix.
+func TestLoad_MalformedEnvOverrideIsAnError(t *testing.T) {
+	cases := []struct {
+		name, envKey, value string
+	}{
+		{"behavior floor", "GHOST_INJECTION_BEHAVIOR_FLOOR", "eight"},
+		{"category weights missing value", "GHOST_INJECTION_CATEGORY_WEIGHTS", "gotcha"},
+		{"category weights bad value", "GHOST_INJECTION_CATEGORY_WEIGHTS", "gotcha=high"},
+		{"category caps bad value", "GHOST_INJECTION_CATEGORY_CAPS", "gotcha=four"},
+		{"demotion threshold", "GHOST_LINKING_DEMOTION_THRESHOLD", "high"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateConfig(t)
+			t.Setenv(tc.envKey, tc.value)
+
+			cfg, err := Load()
+			if err == nil {
+				t.Fatalf("Load() = %+v, nil; %s=%q cannot be read as its key's type",
+					cfg, tc.envKey, tc.value)
+			}
+			if !strings.Contains(err.Error(), tc.envKey) {
+				t.Errorf("error %q must name %s", err, tc.envKey)
+			}
+		})
 	}
 }

@@ -344,10 +344,13 @@ func opencodeDirOrEmpty() string {
 	return dir
 }
 
-// reportConfigFile prints the user config file's location informationally.
-// It never fails the health check — the config file is optional, since
-// compiled defaults work without one — so it deliberately doesn't take a
-// check closure.
+// reportConfigFile prints the user config file's location, and any problem with
+// reading it. It never fails the health check — the config file is optional,
+// since compiled defaults work without one — so it deliberately doesn't take a
+// check closure; the `!` line it prints for a broken file is the pointer, not a
+// verdict. That line matters because every check below runs on the compiled
+// defaults when the file does not parse, and this is where a user goes to find
+// out why their settings are having no effect.
 func reportConfigFile(w io.Writer) {
 	path, err := config.ConfigFilePath()
 	if err != nil {
@@ -358,6 +361,9 @@ func reportConfigFile(w io.Writer) {
 		_, _ = fmt.Fprintf(w, "  - config file: %s\n", path)
 	} else {
 		_, _ = fmt.Fprintf(w, "  - no config file (run ghost mcp init)\n")
+	}
+	if _, err := config.Load(); err != nil {
+		_, _ = fmt.Fprintf(w, "  ! config: %v (built-in defaults in use)\n", err)
 	}
 }
 

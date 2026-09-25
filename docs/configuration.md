@@ -12,6 +12,24 @@ Later layers override earlier layers:
 4. `GHOST_*` environment variables
 5. Supported command-line flags, applied by the command after loading
 
+## Invalid configuration
+
+A config file that exists but does not parse is never ignored. The error names the file and the line, so it is reported differently depending on who asked for the configuration:
+
+| Caller | Behaviour |
+|---|---|
+| CLI subcommands (`ghost reflect`, `ghost resolve`, `ghost supersede`, `ghost obsidian …`, `ghost maintenance status`, `ghost project …`) | Exit non-zero with the parse error. Nothing is run against half the intended configuration. |
+| The `ghost mcp` server | Warn on its log channel — stderr, or `GHOST_LOG_FILE` when set — and serve the compiled defaults. It does not exit: that would not fail a command, it would leave your editor with no Ghost tools at all, because of a typo in a file you may not know exists. |
+| Host-session hooks (SessionStart injection, the stop hook, obsidian auto-sync, session routing) | Report the same error on stderr and continue with the compiled defaults. A typo in the config must not fail the session you are currently working in. |
+| `ghost mcp status` | Prints the path as informational, then a `!` line carrying the parse error. Every other check below it then runs on the compiled defaults, so this line is the only explanation for why a setting appears to do nothing. |
+
+A key that no setting binds — a typo such as `linking.thresholdd` — is a warning on stderr rather than a failure: it cannot affect anything, so it should not stop a session. The other keys in the same file still load. `GHOST_*` values are checked the same way, and an unreadable one is an error naming the variable.
+
+```text
+ghost: config: parse /home/you/.config/ghost/config.yaml: yaml: line 3: found unexpected end of stream — falling back to built-in defaults
+ghost: config: /home/you/.config/ghost/config.yaml: unknown key(s) ignored: linking.thresholdd
+```
+
 ## File locations
 
 The user config file is normally:
@@ -212,6 +230,7 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 |---|---|
 | `GHOST_OLLAMA_URL` | `embedding.ollama_url` |
 | `GHOST_OBSIDIAN_VAULT_DIR` | `obsidian.vault_dir` |
+| `GHOST_OBSIDIAN_AUTO_SYNC` | `obsidian.auto_sync` |
 | `GHOST_CLI_CLAUDE_BINARY` | `cli.claude_binary` |
 | `GHOST_CLI_OPENCODE_BINARY` | `cli.opencode_binary` |
 | `GHOST_CLI_CODEX_BINARY` | `cli.codex_binary` |
@@ -219,8 +238,23 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 | `GHOST_CLI_MODEL_REFLECT` | `cli.model_reflect` |
 | `GHOST_CLI_MODEL_RESOLVE` | `cli.model_resolve` |
 | `GHOST_CLI_MODEL_SUPERSEDE` | `cli.model_supersede` |
+| `GHOST_LINKING_DEMOTION_THRESHOLD` | `linking.demotion_threshold` |
+| `GHOST_INJECTION_BEHAVIOR_FLOOR` | `injection.behavior_floor` |
+| `GHOST_INJECTION_BEHAVIOR_CATEGORIES` | `injection.behavior_categories` |
+| `GHOST_INJECTION_CATEGORY_WEIGHTS` | `injection.category_weights` |
+| `GHOST_INJECTION_CATEGORY_CAPS` | `injection.category_caps` |
 | `GHOST_SEARCH_MIN_SIMILARITY` | `search.min_similarity` |
 | `GHOST_ROUTING_DEFAULT_PROJECT` | `routing.default_project` |
+
+The four `injection.*` variables take structured values, so they use a comma-separated form rather than YAML syntax. Whitespace around the separators is ignored:
+
+```bash
+GHOST_INJECTION_BEHAVIOR_CATEGORIES="gotcha,decision"
+GHOST_INJECTION_CATEGORY_WEIGHTS="gotcha=1.2,decision=1.5"
+GHOST_INJECTION_CATEGORY_CAPS="gotcha=4,decision=2"
+```
+
+A value that cannot be read as its key's type is an error naming the variable, not a silently ignored setting.
 
 Other useful variables:
 
