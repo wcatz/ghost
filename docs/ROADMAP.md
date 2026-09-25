@@ -273,12 +273,11 @@ machine-readable scope ([#562](https://github.com/wcatz/ghost/pull/562),
 
 ### P0 — correctness first (make the axes mean something)
 
-The four axes are named in [`architecture.md`](architecture.md#memory-axes). Validity and confidence are inert today; scope is partially implemented because it is persisted and searchable, but session-start injection still ignores it. P0 is the smallest set of changes that makes those axes mean what the schema says they mean, and stops two active defects.
+The four axes are named in [`architecture.md`](architecture.md#memory-axes). Validity and confidence are inert today; scope is partially implemented because it is persisted and searchable, but session-start injection still ignores it. P0 is the smallest set of changes that makes those axes mean what the schema says they mean, and stops the active defects below.
 
 | Issue | Why it is P0 |
 |---|---|
 | [#575](https://github.com/wcatz/ghost/issues/575) | Validity is preserved by snapshot replacement/restore but is not exposed or consulted by normal retrieval; confidence is written but not read by ranking |
-| [#573](https://github.com/wcatz/ghost/issues/573) | Scope post-filter runs over an unnarrowed window, so filtered results are already lossy |
 | [#574](https://github.com/wcatz/ghost/issues/574) | The linker's `related` edges bypass the scope exemption added in #563 |
 | [#571](https://github.com/wcatz/ghost/issues/571) | Explain mode reports rows the tool would exclude |
 | [#577](https://github.com/wcatz/ghost/issues/577) | Session-start injection neither renders nor filters scope — the surface that most needs it |

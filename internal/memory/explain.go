@@ -37,6 +37,8 @@ type ExplainRow struct {
 // Membership is never re-derived here. Rows are marked included by asking the
 // same scoped or unscoped production search the formatted path uses, so an
 // explanation describes the ranking Ghost actually produced for that query.
+// Recomputing membership locally would let the explanation drift from the
+// behavior it explains.
 type SearchExplain struct {
 	ProjectID       string            `json:"project_id"`
 	Query           string            `json:"query"`
@@ -191,10 +193,10 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		nearDup = nil
 	}
 
-	// SearchHybrid reports an unweighted base when the vector leg contributes
-	// nothing: it passes a nil score map to decayRank, which synthesises
-	// 1/(K+rank+1). Reporting the weighted form there would show a number
-	// 0.3x the one that actually ranked the results.
+	// When the vector leg contributes nothing, ranking used the unweighted
+	// keyword base: keywordOnlyParams sets FTSWeight=1, VecWeight=0, so the fused
+	// score is 1/(K+rank+1). Reporting the weighted form there would show a
+	// number 0.3x the one that actually ranked the results.
 	ftsOnly := len(vec) == 0
 	if ftsOnly {
 		ex.Notes = append(ex.Notes, "no vector matches survived — ranking used the unweighted FTS base score, so rrf_score reports that base rather than a weighted sum")
@@ -220,9 +222,9 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		if r, hit := ftsRank[id]; hit {
 			row.FTSRank = r
 			if ftsOnly {
-				// Matches decayRank's synthesized base: SearchHybrid passes a
-				// nil score map on this path, so ranking used 1/(K+rank+1)
-				// with no leg weight applied.
+				// Matches the score the search actually ranked on:
+				// keywordOnlyParams applies no leg weight, so the base is
+				// 1/(K+rank+1).
 				row.RRFScore += 1.0 / float64(p.RRFK+r+1)
 			} else {
 				row.RRFScore += p.FTSWeight / float64(p.RRFK+r+1)
