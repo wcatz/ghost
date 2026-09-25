@@ -27,6 +27,11 @@ func readDir(dir string) ([]os.DirEntry, error) {
 // cleanup to fail deterministically — the same rationale as readDirFn.
 var removeDirFn atomic.Value // func(string) error
 
+// pruneBeforeRemoveFn is a test seam between Ghost-note classification and
+// removal. Production leaves it as a no-op; tests use it to model a concurrent
+// replacement without relying on scheduler timing.
+var pruneBeforeRemoveFn atomic.Value // func(string)
+
 // renameFn is swappable so tests can force the publish step to fail with a
 // platform-specific transient error (see renameWithRetry).
 var renameFn atomic.Value // func(string, string) error
@@ -34,12 +39,70 @@ var renameFn atomic.Value // func(string, string) error
 func init() {
 	readDirFn.Store(os.ReadDir)
 	removeDirFn.Store(os.Remove)
+	pruneBeforeRemoveFn.Store(func(string) {})
 	renameFn.Store(os.Rename)
 }
 
 func removeDir(path string) error {
 	fn, _ := removeDirFn.Load().(func(string) error)
 	return fn(path)
+}
+
+func beforePruneRemove(path string) {
+	fn, _ := pruneBeforeRemoveFn.Load().(func(string))
+	fn(path)
+}
+
+// removeGhostFile atomically moves path aside, verifies the moved object is
+// still a Ghost note, and only then removes it. A concurrent replacement is
+// restored instead of deleted.
+func removeGhostFile(path string) (bool, error) {
+	beforePruneRemove(path)
+
+	temp, err := os.CreateTemp(filepath.Dir(path), ".ghost-prune-*")
+	if err != nil {
+		return false, err
+	}
+	tempPath := temp.Name()
+	if err := temp.Close(); err != nil {
+		_ = os.Remove(tempPath)
+		return false, err
+	}
+	if err := os.Remove(tempPath); err != nil {
+		return false, err
+	}
+	if err := os.Rename(path, tempPath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	restore := func() error {
+		if _, err := os.Lstat(path); err == nil {
+			return fmt.Errorf("cannot restore replaced prune candidate %s", path)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		return os.Rename(tempPath, path)
+	}
+	info, err := os.Lstat(tempPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, restore()
+	}
+	if _, ok := hasGhostID(tempPath); !ok {
+		return false, restore()
+	}
+	if err := os.Remove(tempPath); err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	return true, nil
 }
 
 // renameWithRetry publishes the temp file over the destination, retrying a
@@ -274,8 +337,12 @@ func pruneOrphanFolder(dir string) error {
 		if _, ok := hasGhostID(path); !ok {
 			return nil // a note the user wrote — never touched
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		deleted, err := removeGhostFile(path)
+		if err != nil {
 			return err
+		}
+		if !deleted {
+			return nil
 		}
 		found = true
 		deletedDirs = append(deletedDirs, filepath.Dir(path))
@@ -358,7 +425,8 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 			}
 			if id, ok := hasGhostID(path); ok {
 				if canonical, kept := keep[id]; !kept || canonical != filepath.Base(path) {
-					return os.Remove(path)
+					_, err := removeGhostFile(path)
+					return err
 				}
 			}
 			return nil

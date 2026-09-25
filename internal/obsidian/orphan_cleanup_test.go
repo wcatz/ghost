@@ -57,6 +57,78 @@ func TestOrphanCleanupKeepsUserFiles(t *testing.T) {
 	}
 }
 
+func TestOrphanCleanupDoesNotDeleteConcurrentReplacement(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "vault")
+	if err := ensureVault(root); err != nil {
+		t.Fatalf("ensureVault: %v", err)
+	}
+	orphan := filepath.Join(root, "oldproject")
+	mustMkdirAll(t, orphan)
+	target := filepath.Join(orphan, "Managed Note.md")
+	mustWrite(t, target, ghostNote)
+
+	pruneBeforeRemoveFn.Store(func(path string) {
+		if path != target {
+			return
+		}
+		replacement := path + ".replacement"
+		if err := os.WriteFile(replacement, []byte(userNote), 0o600); err != nil {
+			t.Fatalf("write replacement: %v", err)
+		}
+		if err := os.Rename(replacement, path); err != nil {
+			t.Fatalf("replace target: %v", err)
+		}
+	})
+	t.Cleanup(func() { pruneBeforeRemoveFn.Store(func(string) {}) })
+
+	if err := prune(root, nil, map[string]string{}, []string{"liveproject"}); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("replacement was deleted: %v", err)
+	}
+	if string(got) != userNote {
+		t.Fatalf("replacement content = %q, want user note preserved", got)
+	}
+}
+
+func TestManagedPruneDoesNotDeleteConcurrentReplacement(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "vault")
+	if err := ensureVault(root); err != nil {
+		t.Fatalf("ensureVault: %v", err)
+	}
+	dir := filepath.Join(root, "live", "Memories")
+	mustMkdirAll(t, dir)
+	target := filepath.Join(dir, "Managed Note.md")
+	mustWrite(t, target, ghostNote)
+
+	pruneBeforeRemoveFn.Store(func(path string) {
+		if path != target {
+			return
+		}
+		replacement := path + ".replacement"
+		if err := os.WriteFile(replacement, []byte(userNote), 0o600); err != nil {
+			t.Fatalf("write replacement: %v", err)
+		}
+		if err := os.Rename(replacement, path); err != nil {
+			t.Fatalf("replace target: %v", err)
+		}
+	})
+	t.Cleanup(func() { pruneBeforeRemoveFn.Store(func(string) {}) })
+
+	if err := prune(root, []string{"live"}, map[string]string{}, []string{"live"}); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("replacement was deleted: %v", err)
+	}
+	if string(got) != userNote {
+		t.Fatalf("replacement content = %q, want user note preserved", got)
+	}
+}
+
 // TestOrphanCleanupRemovesFullyGhostFolder keeps the sweep useful. A folder
 // holding nothing but Ghost's own notes is dead weight after the project
 // goes, and leaving every one of them behind would trade one silent loss for
