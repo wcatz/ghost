@@ -558,10 +558,12 @@ type savingRepository struct {
 // project already records a remote, so when the transaction matches that same
 // row — the ordinary case — it returns before the guard is ever reached, and
 // nothing here can change what happens. (When the pre-lock read named a
-// different row, that row typically records no remote, the guard is reached, and
-// the refusal is decided by the projectID comparison alone.) The saving
-// directory IS the project's recorded root: one directory, so there is no second
-// repository to have meant, and still no detection spent.
+// different row, that answer is not evidence for the row the transaction
+// matched, whatever remote it recorded: the guard is reached and refuses on the
+// projectID comparison alone — unless the matched row records a remote of its
+// own, in which case the transaction has already returned or failed above.) The
+// saving directory IS the project's recorded root: one directory, so there is no
+// second repository to have meant, and still no detection spent.
 //
 // Only the third is a decision, and it is the one that costs: the saving
 // directory is somewhere else under the recorded path, so the question is
