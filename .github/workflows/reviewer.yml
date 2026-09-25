@@ -693,6 +693,7 @@ jobs:
           free_failure_reason=
           free_failure_detail=
           free_review_success=0
+          free_attempt=0
           free_models_file="${RUNNER_TEMP}/reviewer-free-models.txt"
           if [[ -n "${SELECTED_MODEL:-}" \
                 && "${SELECTED_MODEL}" != "opencode/big-pickle" \
@@ -715,9 +716,15 @@ jobs:
               fi
               : > model-reply.txt
               free_status=0
+              free_attempt=$((free_attempt + 1))
+              if [ "$free_attempt" -eq 1 ]; then
+                free_timeout=1200
+              else
+                free_timeout=300
+              fi
               # Leave enough of this step's budget for the paid retry below.
               env -u OPENCODE_API_KEY -u OPENCODE_GO_API_KEY \
-                timeout --foreground 1200s opencode run --standalone \
+                timeout --foreground "${free_timeout}s" opencode run --standalone \
                 --agent ghost-reviewer -m "$model" --format json \
                 "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || free_status=$?
               if [ "$free_status" -eq 0 ] && [ -s model-reply.txt ] \
