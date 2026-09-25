@@ -107,6 +107,29 @@ func TestEnsureVaultTightensLegacyPermissions(t *testing.T) {
 	}
 }
 
+// TestHasGhostIDLongFrontmatterLines: Scanner's default 64 KiB token cap
+// silently classified a Ghost note with one long frontmatter value as the
+// user's file — prune would then leave the stale note behind and the
+// permission pass would skip it. Lines up to maxFrontmatterLine must scan;
+// a line past the cap must classify as "not Ghost's file", the safe
+// direction (stale beats deleted), rather than an unknown id ever making a
+// file deletable.
+func TestHasGhostIDLongFrontmatterLines(t *testing.T) {
+	dir := t.TempDir()
+
+	under := filepath.Join(dir, "long-value.md")
+	mustWrite(t, under, "---\nurls: "+strings.Repeat("u", 128<<10)+"\nghost_id: abc123\n---\nbody\n")
+	if id, found := hasGhostID(under); !found || id != "abc123" {
+		t.Errorf("hasGhostID with a long frontmatter line = (%q, %v), want (abc123, true)", id, found)
+	}
+
+	past := filepath.Join(dir, "over-cap.md")
+	mustWrite(t, past, "---\nurls: "+strings.Repeat("u", maxFrontmatterLine+4096)+"\nghost_id: abc123\n---\nbody\n")
+	if id, found := hasGhostID(past); found {
+		t.Errorf("hasGhostID past the line cap = (%q, true), want the note left alone as non-Ghost", id)
+	}
+}
+
 func TestWriteIfChanged(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "a.md")
 	w1, err := writeIfChanged(p, "hello")

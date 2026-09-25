@@ -136,6 +136,13 @@ func writeIfChanged(path, content string) (bool, error) {
 	return true, os.Rename(tmp, path)
 }
 
+// maxFrontmatterLine bounds a single frontmatter line for hasGhostID's
+// scanner. Ghost's renderer puts every value on one short line, so this sits
+// orders of magnitude above anything a real note produces — but Scanner's
+// default 64 KiB cap could be reached by a hand-edited note with one long
+// value, which would silently misclassify a Ghost note as the user's file.
+const maxFrontmatterLine = 1 << 20
+
 // hasGhostID reports whether a file's frontmatter carries a ghost_id key —
 // the only files prune may touch. Only the frontmatter block (between the
 // opening and closing --- lines) is scanned, never the note body, so the
@@ -149,6 +156,7 @@ func hasGhostID(path string) (string, bool) {
 	}
 	defer f.Close() //nolint:errcheck // read-only: close errors are meaningless here
 	s := bufio.NewScanner(f)
+	s.Buffer(make([]byte, 0, 4096), maxFrontmatterLine)
 	if !s.Scan() || s.Text() != "---" {
 		return "", false
 	}
@@ -161,7 +169,17 @@ func hasGhostID(path string) (string, bool) {
 			return strings.TrimSpace(id), true
 		}
 	}
-	return "", false // no ghost_id (or an unscannable line): not Ghost's file
+	if err := s.Err(); err != nil {
+		// Scan stopped early: a line past maxFrontmatterLine or a read
+		// failure. The frontmatter is only partly read, so the only safe
+		// classification is "not Ghost's file" — an id we could not read
+		// must never make a file deletable, and leaving a stale Ghost note
+		// behind is the direction every caller already prefers (stale
+		// beats deleted). Checked rather than left to fall through, so a
+		// scan failure is a decision, not an accident.
+		return "", false
+	}
+	return "", false // read cleanly to the closing --- or EOF: no ghost_id
 }
 
 // pruneOrphanFolder removes Ghost's own notes from a folder the current
