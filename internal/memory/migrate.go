@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 14
+const schemaVersion = 15
 
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
@@ -34,6 +34,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV12,
 	migrateV13,
 	migrateV14,
+	migrateV15,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -578,17 +579,17 @@ func migrateV13(tx *sql.Tx) error {
 	return nil
 }
 
-// migrateV14 adds the builtin source and relabels Ghost's shipped global
+// migrateV15 adds the builtin source and relabels Ghost's shipped global
 // seeds. A pinned manual row is still protected from reflection, but its
 // source must not make SessionStart call a Ghost-authored rule the user's own
 // preference.
-func migrateV14(tx *sql.Tx) error {
+func migrateV15(tx *sql.Tx) error {
 	stale, err := tableDDLLacks(tx, "memories", "'builtin'")
 	if err != nil {
 		return err
 	}
 	if stale {
-		if err := rebuildMemoriesV14(tx); err != nil {
+		if err := rebuildMemoriesV15(tx); err != nil {
 			return fmt.Errorf("rebuild memories for builtin source: %w", err)
 		}
 	}
@@ -609,7 +610,7 @@ func migrateV14(tx *sql.Tx) error {
 	return nil
 }
 
-func rebuildMemoriesV14(tx *sql.Tx) error {
+func rebuildMemoriesV15(tx *sql.Tx) error {
 	stmts := []string{
 		`DROP TRIGGER IF EXISTS memories_ai`,
 		`DROP TRIGGER IF EXISTS memories_ad`,

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestMigrateV14RelabelsBuiltinSeed(t *testing.T) {
+func TestMigrateV15RelabelsBuiltinSeed(t *testing.T) {
 	path := newV3DB(t)
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
