@@ -602,7 +602,6 @@ func migrateV14(tx *sql.Tx) error {
 		SET source = 'builtin'
 		WHERE project_id = '_global'
 		  AND source = 'manual'
-		  AND pinned = 1
 		  AND content = 'NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.'
 	`); err != nil {
 		return fmt.Errorf("relabel builtin seed: %w", err)
@@ -653,7 +652,7 @@ func rebuildMemoriesV14(tx *sql.Tx) error {
 )
 SELECT rowid, id, project_id, category, content, importance, access_count,
        last_accessed,
-       CASE WHEN project_id = '_global' AND source = 'manual' AND pinned = 1
+       CASE WHEN project_id = '_global' AND source = 'manual'
                  AND content = 'NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.'
             THEN 'builtin' ELSE source END,
        tags, pinned, created_at, updated_at, resolved_at, resolve_kept_hash,
