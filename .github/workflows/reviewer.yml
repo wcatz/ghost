@@ -34,7 +34,7 @@ jobs:
       MODELS: opencode/space-bunny-free opencode/big-pickle opencode/mimo-v2.6-flash-free
       PAID_MODEL: opencode-go/muse-spark-1.3-contributor
     # Must stay above the bounded model-selection phase (15 min), the real
-    # review (75 min), and the ~3 min of checkout/install/prepare ahead of
+    # review (70 min), and the ~3 min of checkout/install/prepare ahead of
     # them, or the job ceiling kills the run first and a step timeout never
     # fires.
     timeout-minutes: 90
@@ -634,7 +634,7 @@ jobs:
         # tool calls against 9 on a comparable diff) because it has no
         # shortcut, so a larger diff would have tripped it. Leave room for
         # every probed free model, then one paid retry.
-        timeout-minutes: 75
+        timeout-minutes: 70
         # The free invocation is keyless. If it fails for a provider/model
         # reason, the fallback below scopes OPENCODE_API_KEY to one child
         # process; the credential guard intentionally allows inference-scoped
