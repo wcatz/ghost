@@ -379,6 +379,63 @@ func TestExportOrphanCleanupKeepsUserFiles(t *testing.T) {
 	}
 }
 
+// TestHasGhostIDNeedsClosedFrontmatter: a note that opens with a --- rule and
+// mentions ghost_id later in its body, with no closing ---, is not Ghost's.
+func TestHasGhostIDNeedsClosedFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	open := filepath.Join(dir, "hr.md")
+	mustWrite(t, open, "---\nMy notes after a rule\nghost_id: mentioned in body\nmore text\n")
+	if _, ok := hasGhostID(open); ok {
+		t.Error("unclosed frontmatter must not count as a ghost_id")
+	}
+	closed := filepath.Join(dir, "note.md")
+	mustWrite(t, closed, "---\nghost_id: abc\n---\nbody\n")
+	if id, ok := hasGhostID(closed); !ok || id != "abc" {
+		t.Errorf("closed frontmatter ghost_id = %q, %v; want abc, true", id, ok)
+	}
+}
+
+// TestExportOrphanCleanupSkipsUnremovableNote: a Ghost note Ghost cannot
+// remove (inside a read-only user folder) is left in place and the export
+// still succeeds, so sync does not retry it forever.
+func TestExportOrphanCleanupSkipsUnremovableNote(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX directory permissions enforced for the test user")
+	}
+	store := seedStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "doomed", "/tmp/doomed", "doomed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(ctx, "doomed", memory.Memory{Category: "fact", Content: "Doomed fact", Importance: 0.8, Source: "mcp"}); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.Default()}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatal(err)
+	}
+	ro := filepath.Join(vault, "doomed", "ro")
+	if err := os.MkdirAll(ro, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stuck := filepath.Join(ro, "n.md")
+	mustWrite(t, stuck, "---\nghost_id: stale\n---\n")
+	if err := os.Chmod(ro, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ro, 0o755) })
+	if _, err := store.DeleteProject(ctx, "doomed", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Export(ctx, vault, ""); err != nil {
+		t.Fatalf("an unremovable stale note must not fail the export: %v", err)
+	}
+	if _, err := os.Stat(stuck); err != nil {
+		t.Errorf("unremovable note should be left in place: %v", err)
+	}
+}
+
 // TestExportOrphanCleanupRemovesEmptiedDirs: once the Ghost notes are gone,
 // directories left empty are removed, all the way up to the orphan folder.
 func TestExportOrphanCleanupRemovesEmptiedDirs(t *testing.T) {

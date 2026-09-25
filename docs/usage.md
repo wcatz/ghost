@@ -139,8 +139,8 @@ Use `--project myproject` to mirror one project plus global records. The mirror 
 - Vault edits are not imported back into Ghost.
 - A running sync may overwrite hand-edited notes after a database change.
 - A marker directory protects unrelated files from cleanup.
-- Cleanup only ever deletes Ghost's own notes (`.md` files whose frontmatter carries a `ghost_id`). When a project leaves the database, its folder loses those notes and any directory left empty; your own notes, attachments and subfolders stay, and so does the folder that holds them.
-- Directories and files Ghost creates are private to your account (`0700`/`0600`); folders you created keep their own permissions.
+- Cleanup only ever deletes Ghost's own notes (`.md` files whose closed frontmatter block carries a `ghost_id`); a note it cannot remove is left in place. When a project leaves the database, its folder loses those notes and any directory left empty; your own notes, attachments and subfolders stay, and so does the folder that holds them.
+- New directories and files Ghost creates are private to your account (`0700`/`0600`); folders you created keep their own permissions. Notes and folders from an older export keep their existing modes until Ghost next rewrites them.
 
 Set `obsidian.auto_sync: true` only if you want the SessionStart hook to launch a background sync process.
 

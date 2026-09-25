@@ -79,8 +79,9 @@ func writeIfChanged(path, content string) (bool, error) {
 }
 
 // hasGhostID reports whether a file's frontmatter carries a ghost_id key —
-// the only files prune may touch. Only the frontmatter block (between the
-// opening and closing --- lines) is scanned, never the note body.
+// the only files prune may touch. Only a closed frontmatter block (between
+// the opening and closing --- lines) counts: a note that merely starts with a
+// --- horizontal rule and mentions ghost_id later in its body is not Ghost's.
 func hasGhostID(path string) (string, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -90,15 +91,16 @@ func hasGhostID(path string) (string, bool) {
 	if len(lines) == 0 || lines[0] != "---" {
 		return "", false
 	}
+	id, found := "", false
 	for _, line := range lines[1:] {
 		if line == "---" { // end of frontmatter — stop before the body
-			break
+			return id, found
 		}
-		if id, ok := strings.CutPrefix(line, "ghost_id: "); ok {
-			return strings.TrimSpace(id), true
+		if v, ok := strings.CutPrefix(line, "ghost_id: "); ok && !found {
+			id, found = strings.TrimSpace(v), true
 		}
 	}
-	return "", false
+	return "", false // frontmatter never closed
 }
 
 // hasGhostContent reports whether dir contains any .md file with a ghost_id
@@ -215,6 +217,11 @@ func pruneOrphanFolder(dir string) error {
 			return nil
 		}
 		if d.IsDir() {
+			// A Windows junction or other reparse point can report as a
+			// directory; never walk through one to files outside the folder.
+			if fi, err := os.Lstat(path); err != nil || fi.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+				return filepath.SkipDir
+			}
 			dirs = append(dirs, path)
 			return nil
 		}
@@ -224,9 +231,10 @@ func pruneOrphanFolder(dir string) error {
 		if _, ok := hasGhostID(path); !ok {
 			return nil
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+		// A note Ghost cannot remove (a read-only user folder) is left in
+		// place: failing here would fail every export and make sync retry
+		// forever for a file that is merely stale.
+		_ = os.Remove(path)
 		return nil
 	})
 	if err != nil {
