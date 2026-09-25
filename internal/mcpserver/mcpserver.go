@@ -2183,7 +2183,7 @@ func formatMemories(memories []memory.Memory) string {
 		if m.ResolvedAt != nil {
 			resolved = " [resolved]"
 		}
-		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, scopeLabel(m.Scope), quoteData(m.Content))
+		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, scopeLabel(m.Scope), sourceLabel(m.Source), quoteData(m.Content))
 	}
 	return sb.String()
 }
@@ -2196,6 +2196,24 @@ func formatMemories(memories []memory.Memory) string {
 // Keys are sorted: map iteration order is random in Go, so an unsorted
 // rendering would show the same scope in a different order on each read and
 // look like the scope itself was changing.
+// sourceLabel names who wrote a row, or nothing when it was the user's own.
+//
+// mcpInstructions tells the agent to trust the origin label rather than the
+// fact that a row is global — so the label has to actually be here, in the
+// output that instruction is read alongside. Before this, that sentence
+// described the session-start banner and silently overclaimed for every MCP
+// listing, where source was fetched and then dropped.
+//
+// manual is rendered as no label at all: absence is what marks a row as the
+// user's own, which is the same rule the session banner uses. Tagging it
+// would make the marker meaningless by applying it to everything.
+func sourceLabel(source string) string {
+	if source == "" || source == "manual" {
+		return ""
+	}
+	return " source=" + source
+}
+
 func scopeLabel(scope map[string]string) string {
 	if len(scope) == 0 {
 		return ""

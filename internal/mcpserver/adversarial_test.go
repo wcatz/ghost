@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -217,5 +218,47 @@ func TestMCPInstructionsDoNotVouchForEveryGlobal(t *testing.T) {
 		if !strings.Contains(mcpInstructions, want) {
 			t.Errorf("mcpInstructions no longer tells the agent to %q — dropping the claim without replacing it leaves trust implicit", want)
 		}
+	}
+}
+
+// TestFormatMemoriesRendersOriginLabel backs the sentence mcpInstructions
+// now relies on: "The section labels each row's origin — trust that label".
+//
+// Review caught that the label existed only in the session-start banner while
+// MCP listings fetched source and dropped it, so the instruction described
+// output the agent never receives. Making the claim true also serves #545
+// directly: an MCP agent can only judge provenance it can see.
+//
+// manual renders as no label, and that absence is load-bearing — it is what
+// marks a row as the user's own, the same rule the banner uses. Tagging it
+// too would make the marker mean nothing by applying it to everything.
+func TestFormatMemoriesRendersOriginLabel(t *testing.T) {
+	srv, session := newCapSession(t)
+
+	// Saved through MCP: agent-written, so source = mcp.
+	saveScoped(t, session, "agent-written origin row", "production")
+
+	// Written straight through the store with source = manual.
+	// testStore registers the project as id "abc123" with name "test-project";
+	// Create takes the id, so passing the name hits a foreign key.
+	if _, err := srv.store.Create(context.Background(), "abc123", memory.Memory{
+		Category: "preference", Content: "user-written origin row",
+		Source: "manual", Importance: 0.9, Tags: []string{},
+	}); err != nil {
+		t.Fatalf("Create manual row: %v", err)
+	}
+
+	out := searchScoped(t, session, "origin", nil)
+
+	if !strings.Contains(out, "source=mcp") {
+		t.Errorf("an agent-written row is unlabelled, so the instruction's claim is false:\n%s", out)
+	}
+	// The manual row must still be listed — dropping it would make the
+	// assertion above pass for the wrong reason.
+	if !strings.Contains(out, "user-written origin row") {
+		t.Errorf("the user's own row did not come back:\n%s", out)
+	}
+	if strings.Contains(out, "source=manual") {
+		t.Errorf("manual rows must stay unlabelled, or absence stops marking what is the user's own:\n%s", out)
 	}
 }
