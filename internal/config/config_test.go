@@ -876,6 +876,40 @@ func TestFallbackConfig_BadEnvValueDegrades(t *testing.T) {
 	}
 }
 
+// TestFallbackConfig_NeverPanicsOnDecodeFailure pins that FallbackConfig
+// returns a usable Config on the paths where decodeFallback reports failure, and
+// in particular does not dereference the nil it returns. It is the function that
+// exists to absorb a broken config, so a panic here is the one outcome it must
+// not have. The defaults map is a literal that always decodes, so the real
+// fallback is reached by breaking that assumption: an unbindable defaults entry
+// makes every decode fail, both the real one and the env-free retry.
+func TestFallbackConfig_NeverPanicsOnDecodeFailure(t *testing.T) {
+	isolateConfig(t)
+	writeUserConfig(t, malformedYAML)
+	// A map value koanf cannot flatten into its key space: every decode of the
+	// defaults layer now fails, not just the one carrying the environment.
+	defaults["injection.category_caps"] = func() {}
+	t.Cleanup(func() {
+		defaults["injection.category_caps"] = map[string]interface{}{"gotcha": 4}
+	})
+	warnings := captureConfigWarnings(t)
+
+	cfg := FallbackConfig() // must not panic
+	if cfg == nil {
+		t.Fatal("FallbackConfig() = nil")
+	}
+	if cfg.Scratch.MaxBytes != DefaultScratchMaxBytes {
+		t.Errorf("scratch.max_bytes = %d, want %d", cfg.Scratch.MaxBytes, DefaultScratchMaxBytes)
+	}
+	if cfg.Injection.BehaviorFloor != DefaultInjectionConfig().BehaviorFloor {
+		t.Errorf("injection.behavior_floor = %d, want the filled-in default %d",
+			cfg.Injection.BehaviorFloor, DefaultInjectionConfig().BehaviorFloor)
+	}
+	if !strings.Contains(warnings.String(), "built-in defaults") {
+		t.Errorf("warning %q must say the built-in defaults are in use", warnings.String())
+	}
+}
+
 // TestFallbackConfig_UndecodableGenericEnvValue pins that a GHOST_* value the
 // generic provider cannot weakly convert yields the compiled defaults, never a
 // near-zero Config. These four keys have no envOverrides entry, so loadEnvLayer

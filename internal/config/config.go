@@ -340,10 +340,15 @@ func FallbackConfig() *Config {
 	if cfg, ok := decodeFallback(loadEnvLayer); ok {
 		return cfg
 	}
-	// The defaults map is a literal that always decodes, so this cannot fail
-	// either; the two fills are belt and braces for a nil deref, not a path
-	// anyone should reach.
-	cfg, _ := decodeFallback(func(*koanf.Koanf) error { return nil })
+	// The defaults map is a literal that always decodes, so this retry cannot
+	// fail in practice. It is still checked: decodeFallback reports failure with
+	// a nil *Config*, and the two fills below would dereference it — and a panic
+	// in the one function that exists to absorb a broken config is precisely the
+	// failure mode that must not be reachable.
+	cfg, ok := decodeFallback(func(*koanf.Koanf) error { return nil })
+	if !ok || cfg == nil {
+		cfg = &Config{}
+	}
 	cfg.Injection = DefaultInjectionConfig()
 	cfg.Scratch.MaxBytes = DefaultScratchMaxBytes
 	return cfg
