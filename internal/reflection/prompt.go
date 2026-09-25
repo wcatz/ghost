@@ -78,8 +78,8 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 	// Existing memories for consolidation.
 	if len(input.ExistingMemories) > 0 {
 		_, _ = fmt.Fprintf(&sb, "\n\n## Existing Memories (%d total) — CONSOLIDATE THESE\n", len(input.ExistingMemories))
-		sb.WriteString("Review each memory. Merge duplicates, combine similar items into one stronger memory, drop stale/irrelevant ones, and keep confirmed facts.\n")
-		sb.WriteString("Hard rule: never DROP a memory whose category is gotcha, dependency, preference, or convention, or that records operational configuration (ports, hosts, paths, credentials locations) — fold its substance into a surviving memory instead. These facts still guide future work even when the surrounding thread is stale.\n")
+		sb.WriteString("Review each memory. Merge duplicates, combine similar items into one stronger memory, drop stale/irrelevant ones, and keep confirmed facts. Dropping is not deletion: an input you do not fold into a survivor is kept verbatim by the apply, so omitting a memory never removes it.\n")
+		sb.WriteString("Hard rule: EVERY category is protected — gotcha, dependency, preference, convention, architecture, decision, pattern and fact — as is anything recording operational configuration (ports, hosts, paths, credentials locations). A memory you do not fold into a surviving memory is re-added verbatim, so the only way to remove one is to fold its substance into a memory that replaces it. These facts still guide future work even when the surrounding thread is stale.\n")
 		for _, m := range input.ExistingMemories {
 			line := fmt.Sprintf("- [%s] (imp:%.1f, src:%s", m.Category, m.Importance, m.Source)
 			if m.AccessCount > 0 {
@@ -101,12 +101,12 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 Produce a JSON object with two fields:
 1. "learned_context": A concise paragraph (max 200 words) describing this project's architecture, the developer's patterns, and key technical decisions.
 2. "memories": The COMPLETE consolidated memory set. This REPLACES all existing non-manual memories. Rules:
-   - Merge duplicates into one stronger memory (higher importance)
+   - Merge duplicates into one stronger memory (higher importance). A merge must carry the input's substance into the survivor — restate the specifics, do not summarize them away: a loose summary is not recognized as a merge, and the input returns verbatim beside it.
    - Keep identity facts (architecture, conventions) — never drop these
-   - Drop stale situational memories (old gotchas that were fixed)
+   - Drop stale situational memories (old gotchas that were fixed) — fold them into the memory that replaces them, since omitting one does not remove it
    - Each memory: "category" (architecture/decision/pattern/convention/gotcha/dependency/preference/fact), "content" (1-2 sentences), "importance" (0.0-1.0), "tags" (1-3 keywords), "scope" ("project" or "global")
    - Tags: when carrying a memory forward, keep its existing tags (shown as tags:[...] above); when merging memories, union their tags. Only invent tags for memories that have none — and derive them from THAT memory's content, never from neighboring memories
-   - Aim for 10-25 high-quality memories, not 50 repetitive ones
+   - Aim for 10-25 high-quality memories, not 50 repetitive ones — and get there by FOLDING inputs into survivors, never by omitting them. A count you reach by dropping is undone by the verbatim re-add.
    - Scope: most memories are "project". Mark as "global" ONLY if the knowledge applies across ALL repositories — examples: user preferences, cross-repo workflows (deploying from one repo to another), personal tooling choices, SSH hosts, infrastructure topology. Project-specific architecture, patterns, or conventions are always "project".
    - Anti-fabrication: the input above is the ONLY source of truth. Never invent specifics that do not appear in it — commit SHAs, version numbers, file paths, package names, feature names, ports, hosts, or model names. If you cannot verify an identifier in the input, omit it or describe the fact generically ("a fix was applied", not "fixed in fdf4583"). A plausible-looking but unverified SHA, feature, or version is a hallucination.
    - Project-scoping: every emitted memory must be about the project named under "Project" above. Do not import facts about other projects, repositories, or tools from your own knowledge — the corpus only contains this project plus explicit "global" user preferences that were already present in the input. If a memory is not traceable to the input data, drop it rather than emit it.

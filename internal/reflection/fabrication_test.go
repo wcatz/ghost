@@ -123,6 +123,34 @@ func TestBuildReflectionPrompt_ForbidsFabrication(t *testing.T) {
 	}
 }
 
+// TestBuildReflectionPrompt_ProtectsEveryCategory pins the prompt half of the
+// drop guard. AuditGuardedDrops retained every category from #549, so a prompt
+// still naming only gotcha/dependency/preference/convention would leave the
+// model compressing away memories the apply then re-adds verbatim beside its own
+// rewrites. It also has to say that omitting is not deletion, or "drop stale
+// ones" reads as permission to lose them.
+func TestBuildReflectionPrompt_ProtectsEveryCategory(t *testing.T) {
+	prompt := BuildReflectionPrompt(ReflectionInput{
+		ProjectName:      "ghost",
+		ExistingMemories: []memory.Memory{{Category: "decision", Content: "chose X"}},
+	})
+	for _, want := range []string{
+		"EVERY category is protected",
+		"architecture, decision, pattern",
+		"Dropping is not deletion",
+		"re-added verbatim",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+	// The old rule's own wording is what narrows the guard to four categories; if
+	// it came back, the assertions above could still pass on the same sentence.
+	if strings.Contains(prompt, "whose category is gotcha") {
+		t.Error("prompt still protects only four categories by name")
+	}
+}
+
 // TestDropFabricatedMemories_LogsDrop pins the surfacing fix: a dropped memory
 // used to vanish with no trace, making a fabricated-output run look identical
 // to a clean one. It passes an explicit logger, so it also pins that drops go
