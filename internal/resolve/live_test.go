@@ -11,8 +11,10 @@ import (
 )
 
 // liveTestSource prefers GHOST_TEST_SOURCE and otherwise detects the calling
-// harness, so the live labeled-set tests keep running from a session shell
-// instead of silently skipping.
+// harness to decide WHICH harness to call. It no longer decides WHETHER to
+// call one: that is GHOST_LIVE_TESTS=1 alone, so running the suite from a
+// session shell no longer starts billable work merely because a harness is
+// around (issue #548).
 func liveTestSource() string {
 	if s := os.Getenv("GHOST_TEST_SOURCE"); s != "" {
 		return s
@@ -53,12 +55,16 @@ var liveResolveCases = []struct {
 }
 
 // TestResolutionClassifierLive validates the actual prompt against the labeled
-// set. It needs a working LLM CLI (claude, opencode, codex, or goose), so it is
-// skipped in CI when none answers; run it manually to get a KEEP-bias signal on
+// set. It needs a working LLM CLI (claude, opencode, codex, or goose), and it is
+// OFF by default because it makes real, billable calls — set GHOST_LIVE_TESTS=1
+// to run it, then it skips if no CLI answers. Run it manually to get a KEEP-bias signal on
 // the classifier (the one piece of the resolve path with no deterministic
 // test). The KEEP side is the dangerous direction: a false RESOLVED drops a
 // live memory from ranked injection, so the prompt biases KEEP when uncertain.
 func TestResolutionClassifierLive(t *testing.T) {
+	if !ai.LiveTestsEnabled() {
+		t.Skip("live LLM test makes billable harness calls; set GHOST_LIVE_TESTS=1 to run")
+	}
 	cli := ai.NewSourceProviderForSource(liveTestSource(), "", "", "", "")
 	if !cli.Available() {
 		t.Skip("no LLM CLI (claude/opencode/codex/goose) available; skipping live classifier test")
@@ -108,9 +114,12 @@ func TestResolutionClassifierLive(t *testing.T) {
 // TestResolutionClassifierLiveBatch runs the same labeled set through the
 // batched path (chunks of 3), validating the numbered-line prompt and parser
 // against a real harness, and holding the batched path to the same KEEP-bias
-// bar. Skipped when no harness is detected; set GHOST_TEST_SOURCE=opencode to
-// compel one.
+// bar. Off by default: set GHOST_LIVE_TESTS=1, plus GHOST_TEST_SOURCE=opencode
+// to compel a particular harness.
 func TestResolutionClassifierLiveBatch(t *testing.T) {
+	if !ai.LiveTestsEnabled() {
+		t.Skip("live LLM test makes billable harness calls; set GHOST_LIVE_TESTS=1 to run")
+	}
 	cli := ai.NewSourceProviderForSource(liveTestSource(), "", "", "", "")
 	if !cli.Available() {
 		t.Skip("no LLM CLI (claude/opencode/codex/goose) available; skipping live batch test")
