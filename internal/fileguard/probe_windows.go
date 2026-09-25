@@ -19,6 +19,9 @@ func nativeOpenProbe(ctx context.Context, path string) (inUse, known bool, err e
 	}
 	type result struct{ err error }
 	done := make(chan result, 1)
+	// A timed-out CreateFile goroutine may keep its read handle until the
+	// filtered/network filesystem returns; closing that handle from the
+	// timeout path would race the probe itself.
 	go func() {
 		handle, createErr := windows.CreateFile(name, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
 		if createErr == nil {

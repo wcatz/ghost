@@ -34,6 +34,7 @@ var (
 	}
 
 	beforePublishLog = func(string) {}
+	errLogShrank     = errors.New("log shrank during rotation")
 )
 
 // SetProbeForTest pins the policy package's explicit probe and returns a
@@ -254,14 +255,10 @@ func rotateLog(path string, maxBytes int64) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	quarantined, err := os.Stat(tombstone)
-	if err != nil {
-		return false, errors.Join(err, fileguard.Restore(path, tombstone))
-	}
-	if quarantined.Size() <= maxBytes {
+	tail, err := readLogTail(tombstone, maxBytes)
+	if errors.Is(err, errLogShrank) {
 		return false, fileguard.Restore(path, tombstone)
 	}
-	tail, err := readLogTail(tombstone, maxBytes)
 	if err != nil {
 		return false, errors.Join(err, fileguard.Restore(path, tombstone))
 	}
@@ -310,7 +307,7 @@ func readLogTail(path string, maxBytes int64) ([]byte, error) {
 		return nil, err
 	}
 	if info.Size() <= maxBytes {
-		return nil, nil
+		return nil, errLogShrank
 	}
 	start := info.Size() - maxBytes
 	tail := make([]byte, maxBytes)

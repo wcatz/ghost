@@ -29,6 +29,34 @@ func TestQuarantineRestoresWhenGraceStampFails(t *testing.T) {
 	}
 }
 
+func TestQuarantineMarkerSurvivesReapAndSelfHeals(t *testing.T) {
+	root := t.TempDir()
+	dir, err := QuarantineDir(filepath.Join(root, "candidate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := filepath.Join(dir, quarantineOwnerName)
+	old := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(owner, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReapStaleQuarantineWithProbe(root, func(string) (bool, error) { return false, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(owner); err != nil {
+		t.Fatalf("reaper removed ownership marker: %v", err)
+	}
+	if err := os.Remove(owner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := QuarantineDir(filepath.Join(root, "candidate")); err != nil {
+		t.Fatalf("QuarantineDir did not self-heal marker: %v", err)
+	}
+	if !quarantineOwned(dir) {
+		t.Fatal("ownership marker was not restored")
+	}
+}
+
 func TestUnownedQuarantineDirIsNeverReaped(t *testing.T) {
 	root := t.TempDir()
 	dir := filepath.Join(root, ".ghost-quarantine")

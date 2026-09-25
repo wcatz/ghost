@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -63,12 +64,22 @@ func ensureObsidianSyncRunning() {
 	lockCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	logLock, acquired, err := fileguard.TryAcquireLockContext(lockCtx, logPath+".lock")
 	cancel()
-	if err != nil || !acquired {
-		slog.Warn("obsidian sync spawn: log lock busy", "error", err)
-		return
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			slog.Debug("obsidian sync spawn: log rotation busy; opening without lock")
+			logLock = nil
+		} else {
+			slog.Warn("obsidian sync spawn: cannot lock log", "error", err)
+			return
+		}
+	} else if !acquired {
+		slog.Debug("obsidian sync spawn: log rotation busy; opening without lock")
+		logLock = nil
 	}
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	_ = logLock.Close()
+	if logLock != nil {
+		_ = logLock.Close()
+	}
 	if err != nil {
 		slog.Warn("obsidian sync spawn: cannot open log", "error", err)
 		return

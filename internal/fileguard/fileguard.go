@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -148,9 +149,6 @@ func QuarantineDir(path string) (string, error) {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 			return "", fmt.Errorf("quarantine path is not a directory: %s", dir)
 		}
-		if !quarantineOwned(dir) {
-			return "", fmt.Errorf("refusing unowned quarantine directory: %s", dir)
-		}
 	} else if !os.IsNotExist(err) {
 		return "", err
 	}
@@ -160,13 +158,37 @@ func QuarantineDir(path string) (string, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return "", err
 	}
-	owner := filepath.Join(dir, quarantineOwnerName)
-	if _, err := os.Lstat(owner); os.IsNotExist(err) {
-		if err := os.WriteFile(owner, []byte(quarantineOwnerMarker), 0o600); err != nil {
+	if !quarantineOwned(dir) {
+		adoptable, err := quarantineDirAdoptable(dir)
+		if err != nil {
 			return "", err
+		}
+		if !adoptable {
+			return "", fmt.Errorf("refusing unowned quarantine directory: %s", dir)
+		}
+		if err := os.WriteFile(filepath.Join(dir, quarantineOwnerName), []byte(quarantineOwnerMarker), 0o600); err != nil {
+			return "", err
+		}
+		if !quarantineOwned(dir) {
+			return "", fmt.Errorf("cannot mark quarantine directory: %s", dir)
 		}
 	}
 	return dir, nil
+}
+
+func quarantineDirAdoptable(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == quarantineOwnerName || strings.HasPrefix(name, "tombstone-") || strings.HasPrefix(name, "stage-") {
+			continue
+		}
+		return false, nil
+	}
+	return true, nil
 }
 
 func quarantineOwned(dir string) bool {
@@ -337,6 +359,9 @@ func ReapQuarantineDirWithProbe(dir string, probe OpenFileProbe) (int, error) {
 	removed := 0
 	var errs []error
 	for _, entry := range entries {
+		if entry.Name() == quarantineOwnerName {
+			continue // ownership marker, never a tombstone
+		}
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
@@ -378,7 +403,10 @@ var linkFile = os.Link
 // without replacing a file a non-cooperating writer created in the meantime.
 func PublishNoReplace(stage, path string) error {
 	if err := linkFile(stage, path); err == nil {
-		return os.Remove(stage)
+		// The complete file is already visible. A leftover stage link is
+		// harmless and reaped with other quarantine debris.
+		_ = os.Remove(stage)
+		return nil
 	} else if os.IsExist(err) {
 		return ErrPublishExists
 	}
