@@ -1088,13 +1088,13 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	// carries no identity of its own, so it is resolved through the injected
 	// detector; without that, saving from ~/work/ghost and then reading from
 	// it would disagree about which project it is. Detection runs only for
-	// path-shaped inputs (containing '/' or '\'), so resolving by id or name
-	// never spawns a process. A path is tested before the raw input is treated
-	// as a remote because a relative path such as ../checkout can otherwise be
-	// mistaken for a host/path remote. Non-directory remote strings fail the
-	// detector's os.Stat before it starts Git, then normalize normally.
-	remote := ""
-	if strings.ContainsAny(input, `/\`) {
+	// path-shaped inputs, so resolving by id or name never spawns a process. A
+	// path is tested after the raw input has been normalised as a remote,
+	// because a relative path such as ../checkout can otherwise be mistaken for
+	// a host/path remote. Non-directory remote strings fail the detector's
+	// os.Stat before it starts Git, then normalize normally.
+	remote := NormalizeRepoRemote(input)
+	if remote == "" && IsPathShaped(input) {
 		remote = NormalizeRepoRemote(detectRemoteForPath(input))
 	}
 	if remote == "" {
@@ -1128,10 +1128,11 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	//  2. The candidate's recorded path agrees. A project that has recorded a
 	//     real location only accepts a session actually inside that tree.
 	//     One that has never said where it lives — path = id, the sentinel
-	//     ensureProjectLocked normalizes an empty path to — has nothing to
-	//     contradict, so it keeps matching on name alone. Refusing there
-	//     would strand every MCP-created project for want of evidence that
-	//     was never collected.
+	//     ensureProjectLocked normalizes an empty path to — has no location
+	//     for any directory to agree with, so a path-shaped input is refused
+	//     there too: a folder that merely shares its basename is the #546
+	//     claim, and there is nothing recorded to check it against. Naming
+	//     the project outright still resolves it — see below.
 	//
 	//  3. No proven remote conflict. When both sides assert an identity and
 	//     they disagree, that is a contradiction to act on. A candidate with
@@ -1182,11 +1183,21 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	// are resolved on disk and compared again, because two spellings of one
 	// directory are one directory. A path that does not resolve gets no
 	// benefit of the doubt: refusing is the safe answer.
-	if strings.ContainsAny(input, `/\`) && strings.ContainsAny(c.path, `/\`) {
+	//
+	// A sentinel path (no separator — ensureProjectLocked normalized an empty
+	// path to the id) has nothing to compare against, so rule 2 above refuses
+	// a path-shaped input instead of falling back to the name alone.
+	if strings.ContainsAny(input, `/\`) {
+		if !strings.ContainsAny(c.path, `/\`) {
+			return "", "", nil // sentinel project: no recorded location to agree with
+		}
 		if !pathsAgree(input, c.path) {
 			return "", "", nil // session is not inside where the project says it lives
 		}
 	}
+	// remote != c.remote is redundant here — an exact repo_remote match
+	// returned above, so equality is impossible once both sides are non-empty
+	// — but it is spelled out because it states the rule being enforced.
 	if remote != "" && c.remote != "" && remote != c.remote {
 		return "", "", nil // both asserted an identity, and they disagree
 	}
@@ -1207,6 +1218,10 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 func pathsAgree(input, stored string) bool {
 	norm := func(p string) string { return strings.ReplaceAll(p, `\`, "/") }
 	a, b := norm(input), norm(stored)
+	// Textual agreement is nearly unreachable: an input textually inside a
+	// stored path already matched in the SQL path step, which only skips
+	// stored paths of 10 bytes or fewer — so the EvalSymlinks fallback, not
+	// this, is what answers in practice; keep both.
 	if samePath(a, b) {
 		return true
 	}

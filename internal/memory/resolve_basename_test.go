@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -176,32 +177,102 @@ func TestResolveProjectByBareNameStillWorks(t *testing.T) {
 	}
 }
 
-// TestResolveBasenameProjectWithoutRealPath: a project created over MCP has
-// path == id, a non-absolute value — it has never said where it lives, so
-// there is nothing for a directory to contradict. It must keep matching on
-// name alone, or every MCP-created project becomes unreachable.
-func TestResolveBasenameProjectWithoutRealPath(t *testing.T) {
+// TestResolveBasenameSentinelProjectRefusesPathShapedInput closes the gap
+// review caught on #565: the path-agreement guard only ran when the stored
+// path contained a separator, and a sentinel path (path == id) never does —
+// so every MCP-created project still accepted any directory that merely
+// shared its basename, which is issue #546 still reachable. A project that
+// recorded no location cannot agree with any directory, so a path-shaped
+// input gets no name-only match from it.
+func TestResolveBasenameSentinelProjectRefusesPathShapedInput(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
 	// path = id, the sentinel ensureProjectLocked normalizes empty to.
-	if err := s.EnsureProject(ctx, "infra", "", "infra"); err != nil {
+	if err := s.EnsureProject(ctx, "infra-id", "", "infra"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	var path string
-	if err := s.db.QueryRowContext(ctx, `SELECT path FROM projects WHERE id = 'infra'`).Scan(&path); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT path FROM projects WHERE id = 'infra-id'`).Scan(&path); err != nil {
 		t.Fatalf("read path: %v", err)
 	}
-	if path != "infra" {
-		t.Fatalf("precondition: path = %q, want the id sentinel %q", path, "infra")
+	if path != "infra-id" {
+		t.Fatalf("precondition: path = %q, want the id sentinel %q", path, "infra-id")
+	}
+	if strings.ContainsAny(path, `/\`) {
+		t.Fatalf("precondition: path %q contains a separator, so this is not the sentinel case", path)
 	}
 
 	id, name, err := s.ResolveProject(ctx, "/some/other/place/infra")
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
-	if id != "infra" || name != "infra" {
-		t.Errorf("project that recorded no path refused a session: id=%q name=%q — there was nothing to contradict", id, name)
+	if id != "" || name != "" {
+		t.Errorf("a directory claiming a project that recorded no location resolved to %q (%q) — the #546 scenario is still reachable for sentinel-path projects", id, name)
+	}
+}
+
+// TestResolveBasenameProjectWithoutRealPath keeps the other half honest: a
+// project created over MCP has path == id, a non-absolute value — it has
+// never said where it lives. Refusing a directory that merely shares its
+// basename (see TestResolveBasenameSentinelProjectRefusesPathShapedInput)
+// must not strand it, because a caller holding the name alone — MCP tools,
+// the CLI, ghost_resolve — is naming the project, not reporting a location.
+func TestResolveBasenameProjectWithoutRealPath(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// path = id, the sentinel ensureProjectLocked normalizes empty to.
+	if err := s.EnsureProject(ctx, "infra-id", "", "infra"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	var path string
+	if err := s.db.QueryRowContext(ctx, `SELECT path FROM projects WHERE id = 'infra-id'`).Scan(&path); err != nil {
+		t.Fatalf("read path: %v", err)
+	}
+	if path != "infra-id" {
+		t.Fatalf("precondition: path = %q, want the id sentinel %q", path, "infra-id")
+	}
+
+	// The name, not the id, so this exercises the name-only match rather
+	// than the exact-id step above it.
+	id, name, err := s.ResolveProject(ctx, "infra")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "infra-id" || name != "infra" {
+		t.Errorf("project that recorded no path refused a bare name: id=%q name=%q — every MCP-created project would be unreachable", id, name)
+	}
+}
+
+// TestResolveRemoteDetectionDoesNotDependOnIsAbs pins the same gap for the
+// repository-identity step: it gated on filepath.IsAbs, which is false for a
+// drive-relative Windows path (\work\ghost) on every platform, so detection
+// was skipped for exactly the shape the path guard was fixed for. Detection
+// is gated on the input merely LOOKING like a path — the same separator test
+// every other path-shaped step here uses — so a bare name still never spawns
+// a process.
+func TestResolveRemoteDetectionDoesNotDependOnIsAbs(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const remote = "github.com/me/infra"
+	if err := s.EnsureProjectWithRepo(ctx, "infra-id", "/x/infra", "infra", remote); err != nil {
+		t.Fatalf("EnsureProjectWithRepo: %v", err)
+	}
+	SetDetectRemote(func(string) string { return remote })
+	t.Cleanup(func() { SetDetectRemote(nil) })
+
+	// Drive-relative, so IsAbs reports false and an IsAbs-gated detector is
+	// never asked; the remote is the only thing that can answer, because the
+	// path step cannot (stored path is under the LENGTH > 10 guard) and
+	// filepath.Base does not split backslashes off-Windows.
+	id, name, err := s.ResolveProject(ctx, `\work\ghost`)
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	if id != "infra-id" || name != "infra" {
+		t.Errorf("repository identity was skipped for a path-shaped input: id=%q name=%q, want infra-id/infra", id, name)
 	}
 }
 
