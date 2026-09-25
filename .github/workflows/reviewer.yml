@@ -363,13 +363,19 @@ jobs:
             # carry the base's changes into pr.diff: the model reviews code
             # that is not in the PR, and GitHub rejects every comment on
             # those paths ("Path could not be resolved"), failing the post.
-            gh pr diff "$PR_NUMBER" --name-only > pr.files
-            if [ -s pr.files ]; then
-              mapfile -t pr_files < pr.files
-              git diff "${LAST_SHA}" HEAD -- "${pr_files[@]}" > pr.diff
+            # The list lives under RUNNER_TEMP, not the PR-controlled
+            # checkout, and the paths are literal pathspecs so a filename
+            # such as '*.go' or ':(exclude)x' cannot widen or empty the diff.
+            # (Names containing a newline are not supported by --name-only.)
+            pr_files_list="$(mktemp "${RUNNER_TEMP}/pr-files.XXXXXX")"
+            gh pr diff "$PR_NUMBER" --name-only > "$pr_files_list"
+            if [ -s "$pr_files_list" ]; then
+              mapfile -t pr_files < "$pr_files_list"
+              git --literal-pathspecs diff "${LAST_SHA}" HEAD -- "${pr_files[@]}" > pr.diff
             else
               : > pr.diff
             fi
+            rm -f "$pr_files_list"
           else
             echo "full review (no usable prior marker)"
             gh pr diff "$PR_NUMBER" > pr.diff
