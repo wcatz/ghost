@@ -476,23 +476,33 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 	//
 	// Logged for the same reason the unique-name refusal is: the save landed
 	// somewhere and the project that answered for it is deliberately left
-	// unclaimed, which is a fact a user with a nested checkout will want. Both
-	// remotes are in the line because the refusal has two causes that need
-	// different fixes — a different repository found, or no repository readable
-	// at the recorded path — and a message naming only the first sends an
-	// operator with the second looking for a nested checkout they do not have.
+	// unclaimed, which is a fact a user with a nested checkout will want.
 	//
 	// The projectID comparison is the guard's own evidence check: the answer
-	// above describes one project, read before the lock, and it is consulted
-	// only when the transaction matched that same project. Every other case —
-	// no answer, or an answer about a different row — is no evidence, and no
-	// evidence refuses, because this guard exists to stop a wrong remote being
-	// written and a missing reading is not permission to write one.
+	// describes one project, read before the lock, and it is consulted only when
+	// the transaction matched that same project. Every other case — no answer, or
+	// an answer about a different row — is no evidence, and no evidence refuses,
+	// because this guard exists to stop a wrong remote being written and a
+	// missing reading is not permission to write one.
+	//
+	// The evidence keys are the pre-lock read's and describe a row that is not
+	// necessarily the one matched here, so they are named as what they are
+	// rather than as properties of recorded_path. Three causes reach this line
+	// and each needs a different fix, so they have to be tellable apart: a
+	// different repository found at the recorded path (evidence_project == id
+	// and evidence_recorded_remote names another remote), nothing readable
+	// there (same id, empty remote), and evidence that was never collected or
+	// was about another project (evidence_project "" or different, which is a
+	// project created or re-pointed between the two reads). Reporting the
+	// pre-lock remote next to the transaction's recorded_path as if they
+	// described the same row would read as the second cause in the first and
+	// third, sending an operator after a nested checkout they do not have.
 	if prefixMatch && (saving.projectID != id || !saving.speaksForProject) {
 		s.logger.Warn("refused to bind a repository to a project whose checkout contains this save: could not establish that the saving directory belongs to that project's own repository",
 			"project", id,
-			"recorded_path", matchedPath, "recorded_path_remote", saving.recordedRemote,
-			"saving_path", projectRef, "saving_path_remote", repoRemote)
+			"recorded_path", matchedPath,
+			"saving_path", projectRef, "saving_path_remote", repoRemote,
+			"evidence_project", saving.projectID, "evidence_recorded_remote", saving.recordedRemote)
 		return id, true, nil
 	}
 
@@ -544,19 +554,25 @@ type savingRepository struct {
 // savingRepository answers savingRepository for a save from projectRef, whose
 // repository the caller has already detected as repoRemote.
 //
-// Two things establish the answer, and the first is the cheap one. The saving
-// directory IS the project's recorded root: one directory, so there is no second
-// repository to have meant, and no detection is spent. Failing that, the two
-// directories report the same remote, which is what an ordinary subdirectory of
-// the checkout looks like — sessions start in src/api more often than at the
-// root, and `git config` walks up. The remote at the saving directory is the one
-// the caller already detected and passed in, so the only detection here is the
-// one at the recorded path: at most one additional `git config`, bounded by
-// repo.detectTimeout.
+// Three answers, and the first two are permissions that cost nothing. The
+// project already records a remote, so the transaction returns before the guard
+// is ever reached and nothing here can change what happens. The saving directory
+// IS the project's recorded root: one directory, so there is no second
+// repository to have meant, and still no detection spent.
 //
-// Anything else is a nested checkout, and a remote that cannot be detected at the
-// recorded path proves nothing at all. Both refusals take the same direction: the
-// enclosing project is not identified, and the save still lands in it.
+// Only the third is a decision, and it is the one that costs: the saving
+// directory is somewhere else under the recorded path, so the question is
+// whether it belongs to the same repository. That is what an ordinary
+// subdirectory of the checkout looks like — sessions start in src/api more often
+// than at the root, and `git config` walks up — and what a nested checkout does
+// not. The remote at the saving directory is the one the caller already detected
+// and passed in, so the only detection here is the one at the recorded path: at
+// most one additional `git config`, bounded by repo.detectTimeout.
+//
+// Anything else refuses, and so does a recorded path whose remote cannot be
+// detected at all: that proves nothing, and it is the same direction as a
+// subdirectory that turns out to be another repository. Both refusals leave the
+// enclosing project unidentified while the save still lands in it.
 // internal/memory never spawns git itself, so a store built without a detector —
 // the default, and what every test but the ones that pin one gets — cannot tell a
 // subdirectory from a submodule here, and guessing towards handing one
