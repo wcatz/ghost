@@ -32,6 +32,9 @@ func TestDecideUpgrade(t *testing.T) {
 		{name: "dev build is never blocked", running: "dev", latest: "0.0.1", want: upgradeProceed},
 		{name: "empty running version proceeds", running: "", latest: "0.32.0", want: upgradeProceed},
 		{name: "unorderable release tag proceeds", running: "0.32.0", latest: "nightly", want: upgradeProceed},
+		// Unorderable but identical is still the release already installed.
+		{name: "identical unorderable version is current", running: "nightly", latest: "nightly", want: upgradeCurrent},
+		{name: "identical unorderable version with v prefix is current", running: "nightly", latest: "vnightly", want: upgradeCurrent},
 	}
 
 	for _, tt := range tests {

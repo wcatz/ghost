@@ -31,8 +31,12 @@ const (
 // A version that cannot be ordered — a "dev" build, a tag like
 // "vscode-pre-rewrite" — keeps the pre-guard behaviour of going ahead, because
 // the alternative is refusing to update every developer build, and the archive
-// checksum still has to agree before anything is installed.
+// checksum still has to agree before anything is installed. An unorderable
+// version identical to the release is still the one installed, as before.
 func decideUpgrade(running, latest string) upgradeOutcome {
+	if strings.TrimPrefix(running, "v") == strings.TrimPrefix(latest, "v") {
+		return upgradeCurrent
+	}
 	cmp, err := selfupdate.CompareVersions(latest, running)
 	switch {
 	case err != nil:
