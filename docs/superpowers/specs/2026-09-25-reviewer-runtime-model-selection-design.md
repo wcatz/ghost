@@ -70,6 +70,8 @@ are unchanged.
   tool permissions.
 - Every free catalog/probe command runs from `$RUNNER_TEMP`, not the PR workspace.
 - A missing agent is a hard error and never triggers the paid fallback.
+- Cancellation and a changed PR head stop paid/model/post steps; the post step rechecks the
+  head immediately before creating a review, so superseded runs cannot spend or post.
 - Trusted post-review scripts continue to come from the default branch.
 
 ## Verification
