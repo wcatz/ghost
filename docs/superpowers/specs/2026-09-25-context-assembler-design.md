@@ -124,20 +124,18 @@ var ErrResponseBudgetExceeded = errors.New("response budget exceeded")
 `Slice` is a per-bucket membership budget; `Slice.MaxBytes` bounds item content
 and never includes response framing. `Budget` also has a total because search
 applies one limit across project and `_global`, while injection has independent
-project and global caps. An all-zero budget is rejected. Stage 8 owns item caps
-and the response fit; after stage 9 derives the outcome, the fit re-renders and
-drops the lowest-ranked item until `Result.Bytes <= Budget.MaxBytes` and the
-outcome is stable. Fit drops belong to stage 8's `DroppedIDs`; if it removes
-every row, the result is `empty`/`all_over_budget`. When `Budget.MaxBytes == 0`,
-the fit is skipped. Notes are bounded by `MaxNoteBytes` and `MaxNotesBytes`
-(default 512 and 2048 bytes); diagnostic notes are dropped before the machine or
-reason line, and note dropping never changes `Outcome` or `Reason`. If the
-required envelope still exceeds the cap, `Run` returns the
-`ErrResponseBudgetExceeded` sentinel rather than an outcome; `mcpserver` renders
-it as an ordinary tool error with copy `response budget exceeded; no memories
-were returned`. `Result.Bytes` is measured after the fit; `Item.Bytes` is content
-only. Callers with a response-level cap set the budget fields; there is no
-implicit default.
+project and global caps. An all-zero budget is rejected. Stage 8 applies slice
+caps. After stage 9 and outcome derivation, a separate `Run` response-fit
+post-pass renders, measures, drops the lowest-ranked row, recomputes the outcome,
+and records a `response_fit` trace entry until the bytes fit or no rows remain.
+No rows means `empty`/`all_over_budget`; `Budget.MaxBytes == 0` skips the pass.
+Notes are bounded by `MaxNoteBytes` and `MaxNotesBytes` (default 512 and 2048
+bytes); diagnostic notes drop before the machine or reason line and never change
+the outcome or reason. If the envelope still exceeds the cap, `Run` returns
+`ErrResponseBudgetExceeded` rather than an outcome, and `mcpserver` renders it
+as a tool error with copy `response budget exceeded`. `Result.Bytes` is measured
+after the pass; `Item.Bytes` is content only. Callers with a response-level cap
+set the budget fields; there is no implicit default.
 
 `Item` is the shared output type for rendering, explanation, and bench metrics.
 It carries the fields needed to reproduce both existing renderers and to
@@ -386,7 +384,7 @@ Request
   ├─7 diversity    per-bucket quota
   ├─8 budget       final order and hard trim
   ├─9 render       shared item rendering
-  └─ outcome       answerable | weak | empty → stage-8 response fit
+  └─ outcome       answerable | weak | empty → Run response-fit post-pass
 ```
 
 | Stage | Existing behavior | Assembler behavior |
@@ -398,7 +396,7 @@ Request
 | 5 conflicts | supersede and demotion helpers exist | supersede reorders; `contradicts` pairs are recorded and not acted on in v1; `elaborates` groups without removing |
 | 6 dedup | demotion helpers exist | duplicate and near-duplicate edges reorder; session-start global slices retain their explicit drop policy |
 | 7 diversity | none | per-bucket quota, off by default until measured |
-| 8 budget | separate search and hook trims | UTF-8 item clamp, slice item caps, and the response-fit pass; fit drops are recorded in stage 8 |
+| 8 budget | separate search and hook trims | UTF-8 item clamp and slice item caps; the response fit is a separate `Run` post-pass |
 | 9 render | two renderers | one `Item.Line()` for the shared item prefix; each surface keeps its framing and field order |
 
 ### Stage 1: query and passive retrieval
@@ -486,8 +484,7 @@ enabled, remains off by default, and receives its own bench comparison.
 
 `Slice.ClampBytes` is a presentation clamp that preserves UTF-8 boundaries.
 `Slice.MaxBytes` and `MaxItems` are hard item-membership trims. Stage 8 applies
-those slice caps and owns the response-fit pass; fit drops are included in its
-`DroppedIDs`. Stage 9 shares the item line's scope label, validity state,
+those slice caps. Stage 9 shares the item line's scope label, validity state,
 confidence, agent when present, and quote escaping, while preserving the
 distinct search and session-start framing and field order. Both surfaces render
 scope, validity state, confidence, and agent when present from the same `Item`
@@ -579,9 +576,10 @@ fault-injected FTS error with vector survivors yielding `answerable` with a
 `retrieval_partial` note and no `below_floor` reason, and a fault-injected FTS
 error with zero vector survivors yielding `empty`/`retrieval_failed`.
 
-`weak` annotates the returned items and abstention line. It withholds no row,
-which keeps the outcome decision orthogonal to ranking and bench results. The
-response-budget test covers the complete response, including the human and
+`weak` annotates the returned items and abstention line. It withholds no row;
+only the response-fit post-pass can remove rows for a byte cap, and it records a
+`response_fit` decision, so result rate is budget-dependent when a cap is set.
+The response-budget test covers the complete response, including the human and
 machine lines, at the limit, one byte over, and well under it after the fit
 pass. The abstention subset score is recorded before and after any Arm B
 threshold change with the exact benchmark command and base commit.
@@ -697,10 +695,11 @@ The trace is always recorded. Only the explain projection is gated by
 `Request.Explain`, because recording is bounded and a flag-dependent second
 ranking path would reintroduce drift. `Signals` replaces re-derived RRF, decay,
 age, and rank values, and carries the scope, validity, confidence, and
-provenance facts. `StageTrace` supplies per-stage counts and dropped IDs,
-including stage 8's final post-fit counts; `Decision` supplies per-row
-attribution; `Floors` records the exact threshold values. The `SearchExplain`
-adapter carries the existing project, query, limit,
+provenance facts. `StageTrace` supplies per-stage counts and dropped IDs;
+the response-fit post-pass writes its own `response_fit` entry and per-row
+`Decision`s, separate from stage 8's slice trims. `Floors` records the exact
+threshold values. The `SearchExplain` adapter carries the existing project,
+query, limit,
 vector-availability, and note metadata from `Trace` and adds the scope keys,
 validity state and penalty, confidence and provenance contributions, and the
 `AgainstID` for conflict or diversity effects.
@@ -758,7 +757,7 @@ The six context metrics are:
 |---|---|---|
 | Context precision | `count(Item.ID where relevance(Item.ID) > 0) / len(Items)` | binary relevance, scored over admitted items only |
 | Contamination rate | any contamination predicate over admitted items | disjunction of the five arms below |
-| Budget adherence | `Result.Bytes` against `Budget.MaxBytes` and stage-8 `DroppedIDs` against the matching slice | exposes relevant rows discarded by a trim |
+| Budget adherence | `Result.Bytes` against `Budget.MaxBytes`, stage-8 `DroppedIDs` against the matching slice, and `response_fit` `DroppedIDs` separately | exposes relevant rows discarded by either trim |
 | Diversity | `max_b count(Item.Bucket) / len(Items)` | `_global` is its own bucket |
 | Result rate | `count(Outcome != empty) / count(queries)` | reported separately so abstention cannot look like quality |
 | Token cost | `sum(Item.Bytes)` per answered question | bytes, matching existing content and injection budgets |
@@ -836,9 +835,9 @@ test.
 | 1 | `feat(assemble): internal/assemble seam; scope and category filter before window closure` | #573 | Run origin/main and branch; stay within 0.005 on NDCG@10 and R@5, explaining any diff. Cover the configured vector floor, bound `Now`, widened rows, and existing negative retrieval. |
 | 2 | `feat(mcpinit): render and apply scope on the session-start surface` | #577 | Add and document `injection.session_scope`; compare the rendered block, with selection and 15/8 caps unchanged when the key is unset. |
 | 3 | `feat(memory): write validity and provenance from the tools` | #575 | Add the writer fields, run the delta gate on new validity fixtures, and show the before/after `ghost_memory_search` payload. |
-| 4 | `feat(assemble): abstention is an outcome, not an empty list` | #580 | Record the abstention-subset score before and after threshold changes; test the search response at its byte limit. Arm B starts disabled. |
+| 4 | `feat(assemble): abstention is an outcome, not an empty list` | #580 | Record the abstention-subset score before and after threshold changes; unit-test the `response_fit` post-pass at the search byte limit. Arm B starts disabled. |
 | 5 | `feat(memory): explain reports the assembler's decisions and `ghost context --explain` exists` | #583 | No scored-result change; mutation-test the no-recomputation invariant and add the CLI flag. |
-| 6 | `feat(assemble): conflict, dedup, diversity and budget stages` | Related #581 | Run the delta gate; verify the global drop policy and before/after payloads for both search and session-start. |
+| 6 | `feat(assemble): conflict, dedup, diversity and budget stages` | Related #581 | Run the delta gate; wire and verify `response_fit`, the global drop policy, and before/after payloads for both surfaces. |
 | 7 | `feat(bench): context-quality metrics` | #582 | Add context mode beside direct-call ablations; record the exact baseline SHA and command, and report metrics without gating them. |
 
 PR 6 deliberately does not claim to close #581's contradiction-separation or
@@ -854,9 +853,10 @@ remaining membership stages; PR 7 adds metrics after the pipeline is complete.
 separate changes.
 
 The ordered stages are implemented as one `[]stage` in
-`internal/assemble/pipeline.go`; `assemble.Run` owns orchestration. A future
-LLM reranker or different retrieval pass changes that list rather than scattering
-ranking logic through callers.
+`internal/assemble/pipeline.go`; `assemble.Run` owns orchestration and runs the
+`response_fit` post-pass after the outcome. A future LLM reranker or different
+retrieval pass changes that list rather than scattering ranking logic through
+callers.
 
 ## Decision 7 — Risks and non-goals
 
