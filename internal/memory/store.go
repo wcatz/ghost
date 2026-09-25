@@ -2765,10 +2765,13 @@ func reusePreservesAge(stored replaceCandidate, emitted Memory) bool {
 // Falls back to the first candidate when no category matches, so a genuine
 // recategorization still updates its row in place — the behaviour the
 // content-only match had, and the one the rewrite branch's "must still be
-// applied in place" case depends on. Without the fallback a recategorized
-// emission would find no same-category candidate and insert a duplicate beside
-// the row it was recategorizing. In that case the caller takes the rewrite
-// branch, exactly as it did previously.
+// applied in place" case depends on. Without the fallback the recategorized
+// row would be left in the bucket, deleted with the rest of the unmatched
+// candidates, and the emission inserted under a fresh id: the row identity
+// gone and, because memory_embeddings and memory_links are ON DELETE CASCADE,
+// its embedding and link graph with it (#452), plus a reset created_at. So the
+// failure mode this guards is a lost row, not a redundant one. In the fallback
+// case the caller takes the rewrite branch, exactly as it did previously.
 //
 // Returns false for an empty bucket, so a future caller cannot index an empty
 // slice here. Callers pass candidates already ordered oldest first (see the
