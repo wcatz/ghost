@@ -2168,12 +2168,25 @@ func TestStoreResolveProject_BasenameFallback(t *testing.T) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
-	id, name, err := s.ResolveProject(ctx, "/some/unrelated/path/ghost")
+	id, name, err := s.ResolveProject(ctx, "/x/ghost")
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
 	if id != "ghostid" || name != "ghost" {
 		t.Errorf("basename fallback: got id=%q name=%q, want id=%q name=%q", id, name, "ghostid", "ghost")
+	}
+
+	// The input has to be the project's own directory. It used to accept any
+	// path ending in the same basename — that is issue #546: an unrelated
+	// clone at ~/Downloads/ghost received this project's memories as trusted
+	// context. Refusing it is what makes the fallback safe to keep at all;
+	// see resolve_basename_test.go.
+	id, name, err = s.ResolveProject(ctx, "/some/unrelated/path/ghost")
+	if err != nil {
+		t.Fatalf("ResolveProject unrelated: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("unrelated directory matched by basename: id=%q name=%q, want no match", id, name)
 	}
 }
 

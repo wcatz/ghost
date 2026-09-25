@@ -146,13 +146,29 @@ func TestLookupProject_NameFallback(t *testing.T) {
 	// The name fallback fires when cwd basename matches a project name.
 	insertProject(t, db, "abc123", "/x/ghost", "ghost")
 
-	// cwd basename is "ghost" — should match by name even when path doesn't match.
-	id, name, err := testStore(db).ResolveProject(context.Background(), filepath.Join("/some/unrelated/path", "ghost"))
+	// cwd is the project's own directory. Prefix matching cannot answer for a
+	// path this short, so it is the name fallback doing the work — which is
+	// what this test exists to show.
+	id, name, err := testStore(db).ResolveProject(context.Background(), "/x/ghost")
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
 	if id != "abc123" || name != "ghost" {
 		t.Errorf("name fallback: got id=%q name=%q, want abc123/ghost", id, name)
+	}
+
+	// An unrelated directory that merely ends in the same basename must not
+	// match. This expression is issue #546 verbatim: it used to resolve, and
+	// because loadSessionContext feeds its output straight into session-start
+	// injection, a clone parked at ~/Downloads/ghost was handed the real
+	// project's memories as trusted context — while every save it made landed
+	// in that project too. Sharing a directory name is not sharing a location.
+	id, name, err = testStore(db).ResolveProject(context.Background(), filepath.Join("/some/unrelated/path", "ghost"))
+	if err != nil {
+		t.Fatalf("ResolveProject unrelated: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("name fallback claimed an unrelated directory: got id=%q name=%q, want no match", id, name)
 	}
 }
 

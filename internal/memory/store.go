@@ -1110,16 +1110,72 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 		}
 	}
 
+	// The basename fallback is the weakest signal in this function, and it
+	// decides what a session has injected into it: projects.name carries no
+	// uniqueness constraint, so an unrelated clone parked at ~/Downloads/infra
+	// used to be enough to receive the real infra project's memories — hosts,
+	// IPs, topology — as trusted context, with its own saves landing in that
+	// project too (issue #546).
+	//
+	// A directory is evidence about where a session is standing, so three
+	// things are checked before a bare name is trusted:
+	//
+	//  1. Exactly one project answers to it. Two candidates is not a weaker
+	//     match but no match: LIMIT 1 picked one arbitrarily and the caller
+	//     had no way to know which, so a save landed in whichever row the
+	//     index happened to surface first.
+	//
+	//  2. The candidate's recorded path agrees. A project that has recorded a
+	//     real location only accepts a session actually inside that tree.
+	//     One that has never said where it lives — path = id, the sentinel
+	//     ensureProjectLocked normalizes an empty path to — has nothing to
+	//     contradict, so it keeps matching on name alone. Refusing there
+	//     would strand every MCP-created project for want of evidence that
+	//     was never collected.
+	//
+	//  3. No proven remote conflict. When both sides assert an identity and
+	//     they disagree, that is a contradiction to act on. A candidate with
+	//     no recorded remote has asserted nothing, so a session arriving
+	//     with one does not disprove it — only a demonstrably different
+	//     repository does.
+	//
+	// A bare name skips all three: a caller naming "infra" is saying which
+	// project it means, not reporting where it is standing.
 	base := filepath.Base(input)
-	err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE name = ? LIMIT 1`, base).Scan(&id, &name)
-	if err == nil {
-		return id, name, nil
+	candRows, qErr := s.db.QueryContext(ctx,
+		`SELECT id, name, path, COALESCE(repo_remote, '') FROM projects WHERE name = ?`, base)
+	if qErr != nil {
+		return "", "", fmt.Errorf("resolve project by basename: %w", qErr)
 	}
-	if err != sql.ErrNoRows {
-		return "", "", fmt.Errorf("resolve project by basename: %w", err)
+	type basenameCandidate struct{ id, name, path, remote string }
+	var candidates []basenameCandidate
+	for candRows.Next() {
+		var c basenameCandidate
+		if scanErr := candRows.Scan(&c.id, &c.name, &c.path, &c.remote); scanErr != nil {
+			candRows.Close() //nolint:errcheck
+			return "", "", fmt.Errorf("scan basename candidate: %w", scanErr)
+		}
+		candidates = append(candidates, c)
 	}
+	if scanErr := candRows.Err(); scanErr != nil {
+		candRows.Close() //nolint:errcheck
+		return "", "", fmt.Errorf("iterate basename candidates: %w", scanErr)
+	}
+	candRows.Close() //nolint:errcheck
 
-	return "", "", nil
+	if len(candidates) != 1 {
+		return "", "", nil // none, or ambiguous — no single right answer exists
+	}
+	c := candidates[0]
+
+	if filepath.IsAbs(input) && filepath.IsAbs(c.path) &&
+		input != c.path && !strings.HasPrefix(input, c.path+"/") {
+		return "", "", nil // session is not inside where the project says it lives
+	}
+	if remote != "" && c.remote != "" && remote != c.remote {
+		return "", "", nil // both asserted an identity, and they disagree
+	}
+	return c.id, c.name, nil
 }
 
 // ListProjectNames returns all known project names, ordered the same way as

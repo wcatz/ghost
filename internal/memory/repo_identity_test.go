@@ -29,6 +29,16 @@ func TestEnsureProjectWithRepoMergesSameRepositoryAcrossPaths(t *testing.T) {
 
 	const remote = "git@github.com:wcatz/ghost.git"
 
+	// Repository detection is wired once in main() for the whole binary
+	// (cmd/ghost/main.go), so every shipped entry point resolves absolute
+	// inputs through it. A store built without a detector has no repository
+	// identity for a path at all — the comment on SetDetectRemote says so
+	// explicitly — and would be resolving the second checkout by directory
+	// name, which is not what this test is about. Injecting here keeps the
+	// store in the state the binary actually runs in.
+	SetDetectRemote(func(string) string { return remote })
+	t.Cleanup(func() { SetDetectRemote(nil) })
+
 	// First checkout creates the project.
 	if err := s.EnsureProjectWithRepo(ctx, "proj-src", "/home/u/src/ghost", "ghost", remote); err != nil {
 		t.Fatalf("ensure first checkout: %v", err)
