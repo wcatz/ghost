@@ -41,17 +41,20 @@ func (f *fakeProvider) Classify(_ context.Context, systemPrompt, userContent str
 func TestIsResolvedParsesResolved(t *testing.T) {
 	cases := []struct {
 		resp string
-		want bool
+		want Verdict
 	}{
-		{"RESOLVED", true},
-		{"resolved.", true},
-		{"KEEP", false},
-		{"keep — still a live decision", false},
-		{"", false},                // empty → KEEP bias
-		{"I think... KEEP", false}, // first decisive token wins
-		{"unsure, but RESOLVED", true},
+		{"RESOLVED", VerdictResolved},
+		{"resolved.", VerdictResolved},
+		{"KEEP", VerdictKeep},
+		{"keep — still a live decision", VerdictKeep},
+		{"", VerdictUnknown},                // no explicit verdict → UNKNOWN
+		{"I think... KEEP", VerdictUnknown}, // only the first field may decide
+		{"unsure, but RESOLVED", VerdictUnknown},
+		{"already-resolved", VerdictUnknown},
+		{"self-resolved", VerdictUnknown},
+		{"previously-resolved", VerdictUnknown},
 		// A verdict that appears before any negation still resolves.
-		{"RESOLVED, no doubt", true},
+		{"RESOLVED, no doubt", VerdictResolved},
 	}
 	for _, c := range cases {
 		fp := &fakeProvider{resp: c.resp}
@@ -79,30 +82,32 @@ func TestIsResolvedWrapsContentAsData(t *testing.T) {
 
 // TestIsResolvedRejectsNegatedResolved guards the KEEP bias: a model reply that
 // negates "resolved" must not be read as RESOLVED, which would bury a live
-// memory out of ranked injection on a single stray word.
+// memory out of ranked injection on a single stray word. Only an immediately
+// negated form is an explicit KEEP; looser prose remains UNKNOWN.
 func TestIsResolvedRejectsNegatedResolved(t *testing.T) {
-	for _, resp := range []string{
-		"not resolved",
-		"NOT RESOLVED",
-		"never resolved",
-		"isn't resolved",
-		"unresolved",
-		"not-resolved",
-		"non-resolved",
-		// A negation does not have to be adjacent to "resolved": "no longer
-		// resolved" and "not a resolved issue" must both read as KEEP, or a
-		// false RESOLVED drops a live memory from ranked injection.
-		"no longer resolved",
-		"not a resolved issue",
-		"this was not resolved",
-	} {
-		fp := &fakeProvider{resp: resp}
+	cases := []struct {
+		resp string
+		want Verdict
+	}{
+		{"not resolved", VerdictKeep},
+		{"NOT RESOLVED", VerdictKeep},
+		{"never resolved", VerdictKeep},
+		{"isn't resolved", VerdictKeep},
+		{"unresolved", VerdictKeep},
+		{"not-resolved", VerdictKeep},
+		{"non-resolved", VerdictKeep},
+		{"no longer resolved", VerdictUnknown},
+		{"not a resolved issue", VerdictUnknown},
+		{"this was not resolved", VerdictUnknown},
+	}
+	for _, tc := range cases {
+		fp := &fakeProvider{resp: tc.resp}
 		got, err := NewResolutionClassifier(fp).IsResolved(context.Background(), "content")
 		if err != nil {
-			t.Fatalf("IsResolved(%q): %v", resp, err)
+			t.Fatalf("IsResolved(%q): %v", tc.resp, err)
 		}
-		if got {
-			t.Errorf("IsResolved(%q) = true, want false (KEEP)", resp)
+		if got != tc.want {
+			t.Errorf("IsResolved(%q) = %v, want %v", tc.resp, got, tc.want)
 		}
 	}
 }
@@ -116,8 +121,8 @@ func TestIsResolvedBatchMapsNumberedLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IsResolvedBatch: %v", err)
 	}
-	if len(got) != 2 || got[0] != false || got[1] != true {
-		t.Fatalf("got %v, want [false true]", got)
+	if len(got) != 2 || got[0] != VerdictKeep || got[1] != VerdictResolved {
+		t.Fatalf("got %v, want [keep resolved]", got)
 	}
 	if fp.calls != 1 {
 		t.Errorf("provider calls = %d, want 1 batched call", fp.calls)
@@ -143,7 +148,7 @@ func TestIsResolvedBatchExplicitVerdictsAndNegation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IsResolvedBatch: %v", err)
 	}
-	want := []bool{true, false, false, true, false}
+	want := []Verdict{VerdictResolved, VerdictKeep, VerdictKeep, VerdictResolved, VerdictKeep}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("verdict[%d] = %v, want %v (got %v)", i, got[i], want[i], got)
@@ -151,15 +156,15 @@ func TestIsResolvedBatchExplicitVerdictsAndNegation(t *testing.T) {
 	}
 }
 
-func TestIsResolvedBatchMissingLineDefaultsKEEP(t *testing.T) {
+func TestIsResolvedBatchMissingLineIsUnknown(t *testing.T) {
 	fp := &fakeProvider{resp: "1: RESOLVED\n"}
 	cls := NewResolutionClassifier(fp)
 	got, err := cls.IsResolvedBatch(context.Background(), []string{"a", "b"})
 	if err != nil {
 		t.Fatalf("IsResolvedBatch: %v", err)
 	}
-	if len(got) != 2 || got[0] != true || got[1] != false {
-		t.Fatalf("got %v, want [true false] (missing line defaults to KEEP)", got)
+	if len(got) != 2 || got[0] != VerdictResolved || got[1] != VerdictUnknown {
+		t.Fatalf("got %v, want [resolved unknown] (missing line is not KEEP)", got)
 	}
 	// A partial parse must not trigger the fallback.
 	if fp.calls != 1 {
@@ -177,8 +182,8 @@ func TestIsResolvedBatchDuplicateNumberFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IsResolvedBatch: %v", err)
 	}
-	if len(got) != 2 || got[0] != true || got[1] != false {
-		t.Fatalf("got %v, want [true false] from the single-note fallback", got)
+	if len(got) != 2 || got[0] != VerdictResolved || got[1] != VerdictKeep {
+		t.Fatalf("got %v, want [resolved keep] from the single-note fallback", got)
 	}
 	if fp.calls != 1+2 {
 		t.Errorf("provider calls = %d, want 3 (1 duplicate batch + 2 singles)", fp.calls)
@@ -192,11 +197,33 @@ func TestIsResolvedBatchZeroRecognizedFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IsResolvedBatch: %v", err)
 	}
-	if len(got) != 3 || got[0] != false || got[1] != false || got[2] != true {
-		t.Fatalf("got %v, want [false false true] from the single-note fallback", got)
+	if len(got) != 3 || got[0] != VerdictKeep || got[1] != VerdictKeep || got[2] != VerdictResolved {
+		t.Fatalf("got %v, want [keep keep resolved] from the single-note fallback", got)
 	}
 	if fp.calls != 1+3 {
 		t.Errorf("provider calls = %d, want 4 (1 unparseable batch + 3 singles)", fp.calls)
+	}
+}
+
+// TestIsResolvedBatchFallbackUsesStrictSingleParser proves that the
+// per-note fallback does not resurrect the old loose word scan: a verdict in
+// prose is UNKNOWN, while a canonical single-word reply is still recognized.
+func TestIsResolvedBatchFallbackUsesStrictSingleParser(t *testing.T) {
+	fp := &fakeProvider{resps: []string{
+		"MAYBE",
+		"I think this was resolved, but KEEP it",
+		"RESOLVED",
+	}}
+	cls := NewResolutionClassifier(fp)
+	got, err := cls.IsResolvedBatch(context.Background(), []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("IsResolvedBatch: %v", err)
+	}
+	if len(got) != 2 || got[0] != VerdictUnknown || got[1] != VerdictResolved {
+		t.Fatalf("got %v, want [unknown resolved] from strict single-note fallback", got)
+	}
+	if fp.calls != 3 {
+		t.Errorf("provider calls = %d, want 3 (1 unparseable batch + 2 singles)", fp.calls)
 	}
 }
 
@@ -229,7 +256,11 @@ func TestIsResolvedBatchTransportErrorIsFatal(t *testing.T) {
 }
 
 func TestIsResolvedBatchChunksBySize(t *testing.T) {
-	fp := &fakeProvider{resp: "1: KEEP\n2: KEEP"}
+	fp := &fakeProvider{resps: []string{
+		"1: KEEP\n2: KEEP",
+		"1: KEEP\n2: KEEP",
+		"KEEP",
+	}}
 	cls := NewResolutionClassifier(fp)
 	cls.batchSize = 2
 	got, err := cls.IsResolvedBatch(context.Background(), []string{"a", "b", "c", "d", "e"})
@@ -240,8 +271,8 @@ func TestIsResolvedBatchChunksBySize(t *testing.T) {
 		t.Fatalf("got %d verdicts, want 5", len(got))
 	}
 	for i, v := range got {
-		if v {
-			t.Errorf("verdict[%d] = true, want all KEEP", i)
+		if v != VerdictKeep {
+			t.Errorf("verdict[%d] = %v, want all KEEP", i, v)
 		}
 	}
 	// 5 notes at batchSize 2 → 2 batched calls + 1 single-note tail.
@@ -260,8 +291,8 @@ func TestIsResolvedBatchDecoratedLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IsResolvedBatch: %v", err)
 	}
-	if len(got) != 2 || got[0] != true || got[1] != false {
-		t.Fatalf("got %v, want [true false] from decorated lines", got)
+	if len(got) != 2 || got[0] != VerdictResolved || got[1] != VerdictKeep {
+		t.Fatalf("got %v, want [resolved keep] from decorated lines", got)
 	}
 	if fp.calls != 1 {
 		t.Errorf("decorated lines must parse without fallback: provider calls = %d, want 1", fp.calls)
@@ -286,8 +317,8 @@ func TestIsResolvedBatchLoneNoteUsesSinglePrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IsResolvedBatch: %v", err)
 	}
-	if len(got) != 1 || got[0] != true {
-		t.Fatalf("got %v, want [true]", got)
+	if len(got) != 1 || got[0] != VerdictResolved {
+		t.Fatalf("got %v, want [resolved]", got)
 	}
 	if fp.lastSystem != classifySystemPrompt {
 		t.Errorf("lone note must use the single-note prompt, got system prompt:\n%s", fp.lastSystem)
@@ -326,51 +357,51 @@ func TestIsResolvedBatchLogsUnparseableFallback(t *testing.T) {
 func TestParseBatchVerdicts(t *testing.T) {
 	// Lines map by number, not position.
 	got, ok := parseBatchVerdicts("2: RESOLVED\n1: KEEP\n", 2)
-	if !ok || got[0] != false || got[1] != true {
-		t.Errorf("out-of-order lines: got %v ok=%v, want [false true] ok=true", got, ok)
+	if !ok || got[0] != VerdictKeep || got[1] != VerdictResolved {
+		t.Errorf("out-of-order lines: got %v ok=%v, want [keep resolved] ok=true", got, ok)
 	}
 
-	// Missing entries default to KEEP; out-of-range numbers are ignored.
+	// Missing entries are UNKNOWN; out-of-range numbers are ignored.
 	got, ok = parseBatchVerdicts("1: RESOLVED\n9: RESOLVED\n", 2)
-	if !ok || got[0] != true || got[1] != false {
-		t.Errorf("missing/out-of-range: got %v ok=%v, want [true false] ok=true", got, ok)
+	if !ok || got[0] != VerdictResolved || got[1] != VerdictUnknown {
+		t.Errorf("missing/out-of-range: got %v ok=%v, want [resolved unknown] ok=true", got, ok)
 	}
 
 	// A duplicated note number invalidates the whole reply, so an injected or
 	// echoed line cannot win by coming first.
 	got, ok = parseBatchVerdicts("1: RESOLVED\n1: KEEP", 1)
-	if ok || got[0] != false {
-		t.Errorf("duplicate number must invalidate the reply: got %v ok=%v, want [false] ok=false", got, ok)
+	if ok || got[0] != VerdictUnknown {
+		t.Errorf("duplicate number must invalidate the reply: got %v ok=%v, want [unknown] ok=false", got, ok)
 	}
 
 	// A reply with no recognizable verdict is not a parse.
 	got, ok = parseBatchVerdicts("I'm not sure, maybe both?", 1)
-	if ok || got[0] != false {
+	if ok || got[0] != VerdictUnknown {
 		t.Errorf("garbage must not parse: got %v ok=%v", got, ok)
 	}
 
 	// Prose lines and markdown decoration are tolerated, including a bold
 	// number/separator pair and a bulleted line.
 	got, ok = parseBatchVerdicts("Here are the verdicts:\n**1:** RESOLVED", 1)
-	if !ok || got[0] != true {
-		t.Errorf("decorated line: got %v ok=%v, want [true] ok=true", got, ok)
+	if !ok || got[0] != VerdictResolved {
+		t.Errorf("decorated line: got %v ok=%v, want [resolved] ok=true", got, ok)
 	}
 	got, ok = parseBatchVerdicts("- 2: KEEP", 2)
-	if !ok || got[0] != false || got[1] != false {
-		t.Errorf("bulleted KEEP: got %v ok=%v, want [false false] ok=true", got, ok)
+	if !ok || got[0] != VerdictUnknown || got[1] != VerdictKeep {
+		t.Errorf("bulleted KEEP: got %v ok=%v, want [unknown keep] ok=true", got, ok)
 	}
 
 	// A trailing explanation after the verdict still parses.
 	got, ok = parseBatchVerdicts("1: RESOLVED because the work concluded", 1)
-	if !ok || got[0] != true {
-		t.Errorf("verdict with trailing explanation: got %v ok=%v, want [true] ok=true", got, ok)
+	if !ok || got[0] != VerdictResolved {
+		t.Errorf("verdict with trailing explanation: got %v ok=%v, want [resolved] ok=true", got, ok)
 	}
 
-	// Garbled lines are KEEP but do not invalidate a reply that recognized
+	// Garbled lines are UNKNOWN but do not invalidate a reply that recognized
 	// at least one line.
 	got, ok = parseBatchVerdicts("1: nonsense\n2: RESOLVED", 2)
-	if !ok || got[0] != false || got[1] != true {
-		t.Errorf("partially garbled reply: got %v ok=%v, want [false true] ok=true", got, ok)
+	if !ok || got[0] != VerdictUnknown || got[1] != VerdictResolved {
+		t.Errorf("partially garbled reply: got %v ok=%v, want [unknown resolved] ok=true", got, ok)
 	}
 }
 
@@ -391,33 +422,33 @@ func TestParseBatchVerdictProseDoesNotDecide(t *testing.T) {
 			t.Errorf("parseBatchVerdicts(%q): reply unexpectedly unparseable", probe)
 			continue
 		}
-		if got[0] {
-			t.Errorf("parseBatchVerdicts(%q) resolved note 1 from a word buried in prose; want KEEP", probe)
+		if got[0] != VerdictUnknown {
+			t.Errorf("parseBatchVerdicts(%q) = %v for note 1, want UNKNOWN when a verdict is buried in prose", probe, got[0])
 		}
-		if got[1] {
-			t.Errorf("parseBatchVerdicts(%q): note 2 must stay KEEP, got true", probe)
+		if got[1] != VerdictKeep {
+			t.Errorf("parseBatchVerdicts(%q): note 2 = %v, want KEEP", probe, got[1])
 		}
 	}
 }
 
 func TestParseBatchVerdictStrictLineRules(t *testing.T) {
 	// A canonical first field decides, including a trailing explanation.
-	if got, ok := parseBatchVerdicts("1: RESOLVED because the PR merged", 1); !ok || !got[0] {
-		t.Errorf("canonical RESOLVED with trailing prose: got %v ok=%v, want [true] ok=true", got, ok)
+	if got, ok := parseBatchVerdicts("1: RESOLVED because the PR merged", 1); !ok || got[0] != VerdictResolved {
+		t.Errorf("canonical RESOLVED with trailing prose: got %v ok=%v, want [resolved] ok=true", got, ok)
 	}
 	// An emphasized verdict still parses.
-	if got, ok := parseBatchVerdicts("1: **KEEP**", 1); !ok || got[0] {
-		t.Errorf("bold KEEP: got %v ok=%v, want [false] ok=true", got, ok)
+	if got, ok := parseBatchVerdicts("1: **KEEP**", 1); !ok || got[0] != VerdictKeep {
+		t.Errorf("bold KEEP: got %v ok=%v, want [keep] ok=true", got, ok)
 	}
 	// A leading negation plus RESOLVED is a recognized KEEP, so a chunk of
 	// "not resolved" lines cannot trip the zero-recognized fallback.
-	if got, ok := parseBatchVerdicts("1: not resolved", 1); !ok || got[0] {
-		t.Errorf("negated RESOLVED: got %v ok=%v, want [false] ok=true", got, ok)
+	if got, ok := parseBatchVerdicts("1: not resolved", 1); !ok || got[0] != VerdictKeep {
+		t.Errorf("negated RESOLVED: got %v ok=%v, want [keep] ok=true", got, ok)
 	}
 	// A word that merely ends in -resolvable is neither verdict and
 	// contributes to the zero-recognized fallback.
-	if got, ok := parseBatchVerdicts("1: unresolvable prose", 1); ok || got[0] {
-		t.Errorf("non-verdict prose: got %v ok=%v, want [false] ok=false", got, ok)
+	if got, ok := parseBatchVerdicts("1: unresolvable prose", 1); ok || got[0] != VerdictUnknown {
+		t.Errorf("non-verdict prose: got %v ok=%v, want [unknown] ok=false", got, ok)
 	}
 }
 
@@ -431,8 +462,8 @@ func TestIsResolvedBatchProseDoesNotResolve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IsResolvedBatch: %v", err)
 	}
-	if len(got) != 2 || got[0] || got[1] {
-		t.Fatalf("got %v, want [false false]", got)
+	if len(got) != 2 || got[0] != VerdictUnknown || got[1] != VerdictKeep {
+		t.Fatalf("got %v, want [unknown keep]", got)
 	}
 	if fp.calls != 1 {
 		t.Errorf("provider calls = %d, want 1 (recognized KEEP line, no fallback)", fp.calls)

@@ -21,6 +21,7 @@ import (
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
+	"github.com/wcatz/ghost/internal/resolve"
 )
 
 // testDeleteStore returns a real in-memory Store with one project ("proj",
@@ -1109,6 +1110,18 @@ func TestParseResolveArgs(t *testing.T) {
 				t.Errorf("error %q must contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestResolveSummaryLineReportsUnknown(t *testing.T) {
+	got := resolveSummaryLine("proj", resolve.Result{
+		Loaded:     1,
+		Candidates: 1,
+		Unknown:    1,
+	}, false, 0, 1)
+	want := "proj: 1 loaded, 1 after prefilter, 0 confirmed evidence, 0 KEEP cached, 1 UNKNOWN, would resolve 0 (1 classify call(s))\n"
+	if got != want {
+		t.Errorf("resolveSummaryLine() = %q, want %q", got, want)
 	}
 }
 

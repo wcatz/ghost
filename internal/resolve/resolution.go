@@ -19,8 +19,9 @@ type classifyProvider interface {
 // ResolutionClassifier answers the conclusion-vs-evidence question, batching up
 // to batchSize notes per classify call (see IsResolvedBatch). It is biased to
 // KEEP: a false RESOLVED buries a still-useful memory (dropping it from
-// injection), whereas a missed one merely leaves the status quo — so anything
-// short of an explicit RESOLVED is KEEP.
+// injection), whereas a missed one merely leaves the status quo. A reply that
+// contains no explicit verdict is UNKNOWN, however; parse failures must not be
+// mistaken for an explicit KEEP or enter the KEEP cache.
 //
 // The name is deliberately provider- and model-agnostic: it only needs a
 // classifyProvider with a Classify method (typically *ai.CLIProvider or an
@@ -84,53 +85,49 @@ const classifyBatchSystemPrompt = classifyRubric + classifyBatchInstructions
 // contract. Tests override batchSize on ResolutionClassifier.
 const classifyBatchSize = 8
 
-// IsResolved returns true iff the classifier explicitly answers RESOLVED.
-// Every call goes through one CLI-harness provider, so there is no fallback
-// distinction for callers to withhold — a degraded answer simply doesn't
-// count as RESOLVED (KEEP bias).
-func (h *ResolutionClassifier) IsResolved(ctx context.Context, content string) (resolved bool, err error) {
+// IsResolved returns the classifier's explicit verdict for one note. A
+// transport error is returned separately from an unparseable reply; the latter
+// is VerdictUnknown, not an implicit KEEP. Every call goes through one
+// CLI-harness provider, so callers do not need a second provider fallback.
+func (h *ResolutionClassifier) IsResolved(ctx context.Context, content string) (Verdict, error) {
 	h.calls++
 	result, err := h.client.Classify(ctx, classifySystemPrompt, "NOTE: "+quoteData(content))
 	if err != nil {
-		return false, err
+		return VerdictUnknown, err
 	}
-	resolved, _ = parseReply(result)
-	return resolved, nil
+	return parseVerdict(result), nil
 }
 
-// parseReply scans a classify reply for the first decisive KEEP/RESOLVED token.
-// recognized is false when the reply contains neither. It is the single-note
-// path only (batch lines use parseBatchVerdict); IsResolved ignores recognized,
-// treating an unrecognized reply as KEEP.
-//
-// A negation anywhere earlier in the reply negates a later "resolved" —
-// "no longer resolved" and "not a resolved issue" must both read as KEEP, or a
-// false RESOLVED drops a live memory from ranked injection. A verdict that
-// appears before any negation still resolves.
-func parseReply(result string) (resolved, recognized bool) {
-	negated := false
-	for _, field := range strings.Fields(strings.ToLower(result)) {
-		t := strings.Trim(field, ".,!\"'`:;—-*")
-		if t == "" {
-			continue
-		}
-		switch {
-		case t == "keep":
-			return false, true
-		case t == "resolved" || t == "resolve":
-			if negated {
-				return false, true
-			}
-			return true, true
-		case strings.HasSuffix(t, "resolved"):
-			// "unresolved", "non-resolved", "not-resolved": a negated form.
-			return false, true
-		}
-		if isNegation(t) {
-			negated = true
+// parseVerdict is the strict first-field parser shared by single-note replies
+// and the remainder of numbered batch lines. Only the first meaningful field
+// may decide a note; a verdict buried in explanatory prose is UNKNOWN. A
+// leading negation immediately followed by RESOLVED/RESOLVE, and negated forms
+// such as UNRESOLVED or NOT-RESOLVED, are recognized as KEEP.
+func parseVerdict(result string) Verdict {
+	result = strings.TrimLeft(result, "*_#` ")
+	fields := strings.Fields(strings.ToLower(result))
+	if len(fields) == 0 {
+		return VerdictUnknown
+	}
+
+	first := strings.Trim(fields[0], ".,!\"'`:;—-*")
+	switch {
+	case first == "keep":
+		return VerdictKeep
+	case first == "resolved" || first == "resolve":
+		return VerdictResolved
+	case first == "unresolved" || first == "non-resolved" || first == "not-resolved":
+		// These are explicit negated forms. A broad suffix match would also
+		// accept malformed prose such as "already-resolved" as KEEP.
+		return VerdictKeep
+	}
+	if isNegation(first) && len(fields) > 1 {
+		second := strings.Trim(fields[1], ".,!\"'`:;—-*")
+		if second == "resolved" || second == "resolve" {
+			return VerdictKeep
 		}
 	}
-	return false, false
+	return VerdictUnknown
 }
 
 // isNegation reports whether a token negates the word that follows it.
@@ -145,22 +142,21 @@ func isNegation(t string) bool {
 }
 
 // IsResolvedBatch classifies one or more notes, chunking them into calls of at
-// most batchSize notes, and returns one verdict per note in the same order. A
-// false entry means KEEP; the parser defaults missing or garbled lines to KEEP
-// so only an explicit, un-negated RESOLVED resolves a note.
+// most batchSize notes, and returns one verdict per note in the same order.
+// VerdictUnknown means that note's reply line was missing or garbled; it is
+// not treated as an explicit KEEP.
 //
 // A chunk whose reply parses to no verdict at all falls back to the
 // single-note path for that chunk: one ignored numbering convention must not
-// silently KEEP a whole chunk of genuinely-resolved notes, and the fallback is
-// bounded (at most one extra call per note, only for a fully unparseable
+// silently discard a whole chunk of genuinely-resolved notes, and the fallback
+// is bounded (at most one extra call per note, only for a fully unparseable
 // chunk). A transport error stays fatal, as in IsResolved.
 //
 // A chunk that parses only partially — some numbered lines present, others
-// missing or garbled — is NOT retried: those notes stay KEEP, matching the
-// single-note path's bias, and a fresh candidate is re-proposed on the next
-// pass; the zero-verdict fallback exists only so an ignored numbering
-// convention cannot KEEP a whole chunk at once.
-func (h *ResolutionClassifier) IsResolvedBatch(ctx context.Context, contents []string) ([]bool, error) {
+// missing or garbled — is NOT retried: those notes remain UNKNOWN, so a fresh
+// candidate is re-proposed on the next pass; the zero-verdict fallback exists
+// only so an ignored numbering convention cannot discard a whole chunk at once.
+func (h *ResolutionClassifier) IsResolvedBatch(ctx context.Context, contents []string) ([]Verdict, error) {
 	if len(contents) == 0 {
 		return nil, nil
 	}
@@ -168,7 +164,7 @@ func (h *ResolutionClassifier) IsResolvedBatch(ctx context.Context, contents []s
 	if size <= 0 {
 		size = classifyBatchSize
 	}
-	out := make([]bool, 0, len(contents))
+	out := make([]Verdict, 0, len(contents))
 	for start := 0; start < len(contents); start += size {
 		end := start + size
 		if end > len(contents) {
@@ -178,11 +174,11 @@ func (h *ResolutionClassifier) IsResolvedBatch(ctx context.Context, contents []s
 		if len(chunk) == 1 {
 			// A lone tail note uses the single-note prompt: no reason to
 			// depend on batch formatting for one item.
-			resolved, err := h.IsResolved(ctx, chunk[0])
+			verdict, err := h.IsResolved(ctx, chunk[0])
 			if err != nil {
 				return nil, fmt.Errorf("note %d: %w", start+1, err)
 			}
-			out = append(out, resolved)
+			out = append(out, verdict)
 			continue
 		}
 		verdicts, err := h.classifyChunk(ctx, chunk)
@@ -196,7 +192,7 @@ func (h *ResolutionClassifier) IsResolvedBatch(ctx context.Context, contents []s
 
 // classifyChunk issues one batched call for a chunk of two or more notes and
 // maps its numbered reply lines onto verdicts.
-func (h *ResolutionClassifier) classifyChunk(ctx context.Context, chunk []string) ([]bool, error) {
+func (h *ResolutionClassifier) classifyChunk(ctx context.Context, chunk []string) ([]Verdict, error) {
 	h.calls++
 	resp, err := h.client.Classify(ctx, classifyBatchSystemPrompt, formatBatchContent(chunk))
 	if err != nil {
@@ -209,11 +205,11 @@ func (h *ResolutionClassifier) classifyChunk(ctx context.Context, chunk []string
 				"reply", strings.TrimSpace(resp))
 		}
 		for i := range chunk {
-			resolved, err := h.IsResolved(ctx, chunk[i])
+			verdict, err := h.IsResolved(ctx, chunk[i])
 			if err != nil {
 				return nil, fmt.Errorf("note %d: %w", i+1, err)
 			}
-			verdicts[i] = resolved
+			verdicts[i] = verdict
 		}
 		return verdicts, nil
 	}
@@ -227,15 +223,13 @@ func (h *ResolutionClassifier) classifyChunk(ctx context.Context, chunk []string
 }
 
 // parseBatchVerdicts maps numbered reply lines onto n KEEP/RESOLVED verdicts.
-// Each line is judged by parseBatchVerdict (strict first-field parsing), and
-// missing or garbled entries default to false (KEEP), preserving the
-// classifier's bias that only an explicit, un-negated RESOLVED resolves a note.
-// ok is false when no line was recognized at all or when a duplicated note
-// number invalidated the whole reply — IsResolvedBatch's single-note fallback
-// then re-judges each note in isolation rather than letting an echoed or
-// injected line decide one.
-func parseBatchVerdicts(resp string, n int) (verdicts []bool, ok bool) {
-	out := make([]bool, n)
+// Each line is judged by the shared strict first-field parser, and missing or
+// garbled entries remain VerdictUnknown. ok is false when no line was recognized
+// at all or when a duplicated note number invalidated the whole reply — the
+// single-note fallback then re-judges each note in isolation rather than
+// letting an echoed or injected line decide one.
+func parseBatchVerdicts(resp string, n int) (verdicts []Verdict, ok bool) {
+	out := unknownVerdicts(n)
 	seen := make([]bool, n)
 	recognized := 0
 	duplicate := false
@@ -249,55 +243,39 @@ func parseBatchVerdicts(resp string, n int) (verdicts []bool, ok bool) {
 			continue
 		}
 		seen[num-1] = true
-		resolved, recognizedLine := parseBatchVerdict(rest)
-		if recognizedLine {
+		verdict := parseVerdict(rest)
+		if verdict != VerdictUnknown {
 			recognized++
 		}
-		out[num-1] = resolved
+		out[num-1] = verdict
 	}
 	if duplicate || recognized == 0 {
-		return make([]bool, n), false
+		return unknownVerdicts(n), false
 	}
 	return out, true
 }
 
-// parseBatchVerdict parses the remainder of a numbered batch line ("RESOLVED",
-// "**KEEP** because ..."). Unlike parseReply it trusts only the FIRST field of
-// the line, not any word in it: a model that prefixes reasoning to a numbered
-// line ("1. This was resolved, but keep it") must not decide the note from a
-// word buried in prose — a false RESOLVED drops a live memory from ranked
-// injection. A negation followed by "resolved" is a recognized KEEP (so a
-// chunk of "not resolved" lines does not trip the zero-recognized fallback);
-// negated forms ("unresolved", "not-resolved") are KEEP too.
+func unknownVerdicts(n int) []Verdict {
+	out := make([]Verdict, n)
+	for i := range out {
+		out[i] = VerdictUnknown
+	}
+	return out
+}
+
+// parseBatchVerdict retains the old bool-shaped helper for package-local
+// callers while delegating to the same strict parser used by single-note
+// replies. New code should use parseVerdict directly.
 func parseBatchVerdict(rest string) (resolved, recognized bool) {
-	rest = strings.TrimLeft(rest, "*_#` ")
-	fields := strings.Fields(strings.ToLower(rest))
-	if len(fields) == 0 {
-		return false, false
-	}
-	first := strings.Trim(fields[0], ".,!\"'`:;—-*")
-	switch {
-	case first == "keep":
-		return false, true
-	case first == "resolved" || first == "resolve":
-		return true, true
-	case strings.HasSuffix(first, "resolved"):
-		return false, true
-	}
-	if isNegation(first) && len(fields) > 1 {
-		second := strings.Trim(fields[1], ".,!\"'`:;—-*")
-		if second == "resolved" || second == "resolve" {
-			return false, true
-		}
-	}
-	return false, false
+	verdict := parseVerdict(rest)
+	return verdict == VerdictResolved, verdict != VerdictUnknown
 }
 
 // missingVerdicts returns the 1-based note numbers whose numbered reply line
 // was absent or carried no recognizable KEEP/RESOLVED verdict. It exists only
 // for the missing-verdict warning: parseBatchVerdicts deliberately folds that
-// detail into its single (verdicts, ok) pair, since a KEEP verdict and a
-// missing line are the same to the caller.
+// detail into its single (verdicts, ok) pair, while the returned verdict keeps
+// UNKNOWN distinct from an explicit KEEP.
 func missingVerdicts(resp string, n int) []int {
 	seen := make([]bool, n)
 	for _, line := range strings.Split(resp, "\n") {

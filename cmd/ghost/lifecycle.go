@@ -1086,13 +1086,28 @@ func parseResolveArgs(args []string) (project, source string, apply bool, err er
 	return project, source, apply, nil
 }
 
+// resolveSummaryLine renders the one-line resolve result, including UNKNOWN
+// verdicts that remain eligible for a later pass.
+func resolveSummaryLine(projectName string, res resolve.Result, apply bool, confirmed int, calls int) string {
+	verb := "would resolve"
+	count := confirmed
+	if apply {
+		verb = "resolved"
+		count = res.Resolved
+	}
+	return fmt.Sprintf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP cached, %d UNKNOWN, %s %d (%d classify call(s))\n",
+		projectName, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
+		res.Skipped, res.Unknown, verb, count, calls)
+}
+
 // runResolve is the CLI entry for `ghost resolve`. It marks resolved-evidence
 // memories (concluded work: findings, changelog notes, PR locators) so they
 // drop out of session-start injection while staying searchable. Cheap local
 // keyword prefilter proposes candidates; the hosting CLI harness adjudicates
 // them in batches with a crisp conclusion-vs-evidence question biased to KEEP,
-// and KEEP verdicts are cached by content hash so a converged project makes no
-// calls. Dry-run by default; --apply writes resolved_at and the cache.
+// and explicit KEEP verdicts are cached by content hash so a converged project
+// makes no calls; UNKNOWN replies remain eligible for a later pass. Dry-run by
+// default; --apply writes resolved_at and the cache.
 // Re-runnable and reversible: any later Upsert/UpdateMemory of a memory clears
 // its resolved_at. The stop hook spawns `ghost lifecycle` detached
 // (internal/mcpinit/stophook.go); its resolve phase runs this with --apply.
@@ -1147,21 +1162,13 @@ different harness). The harness owns its authentication and billing.`)
 		os.Exit(1)
 	}
 
-	verb := "would resolve"
-	count := len(confirmed)
-	if apply {
-		verb = "resolved"
-		count = res.Resolved
-	}
 	short := func(id string) string {
 		if len(id) > 8 {
 			return id[:8]
 		}
 		return id
 	}
-	fmt.Printf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP cached, %s %d (%d classify call(s))\n",
-		projectName, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
-		res.Skipped, verb, count, cls.Calls())
+	fmt.Print(resolveSummaryLine(projectName, res, apply, len(confirmed), cls.Calls()))
 	if res.Superseded > 0 || res.Corrected > 0 {
 		fmt.Printf("  (%d via supersedes links, %d via correction pairing, %d via LLM)\n",
 			res.Superseded, res.Corrected, res.Confirmed)

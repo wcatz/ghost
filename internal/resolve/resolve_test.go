@@ -3,6 +3,8 @@ package resolve
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"strings"
@@ -11,11 +13,12 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// fakeClassifier returns KEEP for everything except contents in drop, and
-// counts how many times the batch path was invoked (one count per
-// IsResolvedBatch call, whatever the chunking).
+// fakeClassifier returns an explicit verdict for each content, and counts how
+// many times the batch path was invoked (one count per IsResolvedBatch call,
+// whatever the chunking).
 type fakeClassifier struct {
-	drop map[string]bool
+	drop    map[string]bool
+	unknown map[string]bool
 	// errOn, when set, is the content for which IsResolvedBatch returns err
 	// instead of a normal answer. If err is set and errOn is empty, every call
 	// errors.
@@ -27,7 +30,7 @@ type fakeClassifier struct {
 	calls    int
 }
 
-func (f *fakeClassifier) IsResolvedBatch(_ context.Context, contents []string) ([]bool, error) {
+func (f *fakeClassifier) IsResolvedBatch(_ context.Context, contents []string) ([]Verdict, error) {
 	f.calls++
 	if f.err != nil {
 		for _, c := range contents {
@@ -36,9 +39,16 @@ func (f *fakeClassifier) IsResolvedBatch(_ context.Context, contents []string) (
 			}
 		}
 	}
-	out := make([]bool, len(contents))
+	out := make([]Verdict, len(contents))
 	for i, c := range contents {
-		out[i] = f.drop[c]
+		switch {
+		case f.unknown[c]:
+			out[i] = VerdictUnknown
+		case f.drop[c]:
+			out[i] = VerdictResolved
+		default:
+			out[i] = VerdictKeep
+		}
 	}
 	if f.truncate && len(out) > 0 {
 		out = out[:len(out)-1]
@@ -82,6 +92,12 @@ func (s *fakeStore) ResolveKeptHashes(_ context.Context, _ string) (map[string]s
 func (s *fakeStore) MarkResolveKept(_ context.Context, _ string, hashes map[string]string) error {
 	if s.markErr != nil {
 		return s.markErr
+	}
+	if s.kept == nil {
+		s.kept = make(map[string]string)
+	}
+	for id, hash := range hashes {
+		s.kept[id] = hash
 	}
 	s.markedKept = append(s.markedKept, hashes)
 	return nil
@@ -336,9 +352,97 @@ func TestRunSkipsCachedKeepVerdicts(t *testing.T) {
 	}
 }
 
+func TestContentHashVersionsExplicitKeepCache(t *testing.T) {
+	const content = "kill experiment finding: 7.3% cross-session links, removed"
+	sum := sha256.Sum256([]byte("v2\x00" + content))
+	want := hex.EncodeToString(sum[:])
+	if got := ContentHash(content); got != want {
+		t.Errorf("ContentHash(%q) = %q, want v2 hash %q", content, got, want)
+	}
+}
+
+// TestRunDoesNotCacheGarbledBatchLine exercises the complete cache boundary:
+// a missing or malformed numbered line becomes UNKNOWN in the real batch
+// parser, is not written to the KEEP cache, and is retried on the next pass.
+func TestRunDoesNotCacheGarbledBatchLine(t *testing.T) {
+	first := memory.Memory{ID: "first", Content: "kill experiment finding: removed"}
+	second := memory.Memory{ID: "second", Content: "fixed in PR #210, removed"}
+	store := &fakeStore{candidates: []memory.Memory{first, second}}
+	provider := &fakeProvider{resps: []string{"1: KEEP\n2: already-resolved\n", "KEEP"}}
+	cls := NewResolutionClassifier(provider)
+
+	res, _, err := Run(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Run first apply: %v", err)
+	}
+	if res.Unknown != 1 {
+		t.Errorf("first pass Unknown = %d, want 1", res.Unknown)
+	}
+	if len(store.markedKept) != 1 {
+		t.Fatalf("first pass markedKept = %v, want one explicit KEEP", store.markedKept)
+	}
+	if _, ok := store.markedKept[0][second.ID]; ok {
+		t.Fatalf("garbled batch line was KEEP-cached: %v", store.markedKept[0])
+	}
+
+	res, _, err = Run(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Run second apply: %v", err)
+	}
+	if res.Unknown != 0 {
+		t.Errorf("second pass Unknown = %d, want 0 after explicit KEEP", res.Unknown)
+	}
+	if provider.calls != 2 {
+		t.Errorf("provider calls = %d, want 2 (garbled candidate re-asked)", provider.calls)
+	}
+	if _, ok := store.kept[second.ID]; !ok {
+		t.Errorf("second pass did not cache its explicit KEEP: %v", store.kept)
+	}
+}
+
+// TestRunDoesNotCacheUnparseableVerdict is the regression guard for the KEEP
+// cache's meaning: a classifier reply that cannot be parsed is UNKNOWN, not an
+// explicit KEEP, and must be offered again on the next pass.
+func TestRunDoesNotCacheUnparseableVerdict(t *testing.T) {
+	content := "kill experiment finding: 7.3% cross-session links, removed"
+	store := &fakeStore{candidates: []memory.Memory{{ID: "m", Content: content}}}
+	cls := &fakeClassifier{unknown: map[string]bool{content: true}}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+
+	res, _, err := Run(context.Background(), store, cls, "proj", true, logger)
+	if err != nil {
+		t.Fatalf("Run apply: %v", err)
+	}
+	if res.Unknown != 1 {
+		t.Errorf("Unknown = %d, want 1", res.Unknown)
+	}
+	if !strings.Contains(logs.String(), "unknown=1") {
+		t.Errorf("resolve log must report UNKNOWN count, log:\n%s", logs.String())
+	}
+	if len(store.markedKept) != 0 {
+		t.Fatalf("unparseable verdict must not be KEEP-cached: markedKept = %v", store.markedKept)
+	}
+	if _, ok := store.kept["m"]; ok {
+		t.Fatalf("unparseable verdict must not be present in the KEEP cache: %v", store.kept)
+	}
+
+	// The next pass must offer the same unknown candidate again.
+	res, _, err = Run(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Run second apply: %v", err)
+	}
+	if res.Unknown != 1 {
+		t.Errorf("second pass Unknown = %d, want 1", res.Unknown)
+	}
+	if cls.calls != 2 {
+		t.Errorf("classifier calls = %d, want 2 (unknown candidate re-asked)", cls.calls)
+	}
+}
+
 // TestRunRecordsKeepHashesOnlyOnApply: a cache miss goes through one batched
-// call; false verdicts are hash-cached only when apply is set, so dry-run
-// remains side-effect-free.
+// call; explicit KEEP verdicts are hash-cached only when apply is set, so
+// dry-run remains side-effect-free.
 func TestRunRecordsKeepHashesOnlyOnApply(t *testing.T) {
 	keepContent := "kill experiment finding: 7.3% cross-session links, removed"
 	dropContent := "fixed in PR #210, dead ranking bonus removed"
