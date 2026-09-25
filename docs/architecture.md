@@ -132,7 +132,8 @@ The lifecycle is opt-in. A phase failure is logged and does not prevent later ph
 - FTS5 indexing and query sanitization
 - Optional vector storage and cosine similarity
 - Reciprocal Rank Fusion for hybrid results, with the result window chosen by
-  `FuseAndSelectWindow` (see [Hybrid fusion and window selection](#hybrid-fusion-and-window-selection))
+  `Store.fuseAndRank` delegating to `selectWindow` (see
+  [Hybrid fusion and window selection](#hybrid-fusion-and-window-selection))
 - Category-aware time-decay ordering
 - Pinned and near-duplicate handling
 - Directed memory links
@@ -140,11 +141,15 @@ The lifecycle is opt-in. A phase failure is logged and does not prevent later ph
 
 ### Hybrid fusion and window selection
 
-`FuseAndSelectWindow` (`internal/memory/vector.go`) owns both halves of hybrid
-retrieval: it fuses the FTS5 and vector legs into one ranking, and it decides
-which memories form the result window. They live in one function because
-window selection is not separable from fusion — the rule that keeps a keyword
-hit has to be stated in terms of the scores fusion produced.
+Window selection lives in `internal/memory/vector.go` as three steps:
+`fuseCandidatePool` fuses the FTS5 and vector legs into one ranking,
+`scopeEligiblePool` narrows it, and `selectWindow` decides which memories
+form the result window. They stay together because window selection is not
+separable from fusion — the rule that keeps a keyword hit has to be stated in
+terms of the scores fusion produced. Every production search reaches them
+through `Store.fuseAndRank`, which fuses once and then cuts;
+`FuseAndSelectWindow` is the exported entry point over the same seam, called
+only from the fusion tests.
 
 Fusion is Reciprocal Rank Fusion, weighted 0.3 FTS / 0.7 vector with k=60.
 A memory retrieved by both legs accumulates both contributions, so a two-leg
