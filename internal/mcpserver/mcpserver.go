@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -46,9 +47,13 @@ func boolPtr(b bool) *bool { return &b }
 // otherwise make that case environment-dependent.
 var detectCallingSource = ai.DetectSource
 
-// ensureProjectFor creates the project for a save and returns the id the
-// caller must write to, adding repository identity when the caller identified
-// it by a filesystem path.
+// detectRemoteForSave is the process boundary used for repository identity on
+// MCP saves. Tests replace it to prove named saves never cross this boundary.
+var detectRemoteForSave = repo.DetectRemote
+
+// ensureProjectFor resolves or creates the project for a save and returns the
+// id the caller must write to, adding repository identity when the caller
+// identified it by a filesystem path.
 //
 // MCP callers normally pass a project *name*, which says nothing about a
 // repository — but project_id is sometimes an absolute path, and that is
@@ -57,12 +62,13 @@ var detectCallingSource = ai.DetectSource
 // repository, so detection is confined to that case: an ordinary named save
 // never spawns a process.
 //
-// The returned id is not always the argument. When the path belongs to a
-// repository Ghost already knows, this resolves to the project that owns it
-// instead of opening a second one. Resolution cannot live in
-// Store.ResolveProject: a path carries no repository identity of its own, so
-// asking the store "which project is this path?" would need the store to run
-// git — which it deliberately never does.
+// A detected repository is carried through ordinary path/name lookup rather
+// than discarded when a location-shaped input resolves. Any project found that
+// way is rechecked against the observed remote before the save proceeds; a
+// lookup miss can then fall back to the write-side repository-name binding.
+// Resolution cannot live in Store.ResolveProject: a path carries no repository
+// identity of its own, so asking the store "which project is this path?" would
+// need the store to run git — which it deliberately never does.
 //
 // The caller must use the returned id rather than the argument. Ensuring can
 // fold an already-duplicate row into its canonical project, and writing to
@@ -70,34 +76,54 @@ var detectCallingSource = ai.DetectSource
 // was deliberately not created.
 func (s *Server) ensureProjectFor(ctx context.Context, projectID string) (string, error) {
 	remote := ""
-	if filepath.IsAbs(projectID) {
-		remote = repo.DetectRemote(projectID)
+	if strings.ContainsAny(projectID, `/\`) {
+		remote = detectRemoteForSave(projectID)
 	}
 
-	if remote != "" {
-		id, _, err := s.store.ResolveProject(ctx, remote)
+	// Resolve ordinary id/name/path evidence while retaining the observed
+	// remote. A longest-prefix hit must be checked against that remote before a
+	// repository-name candidate can claim the save. On a miss, the write-side
+	// helper below binds the remote to a unique named project when safe.
+	id, _, err := s.store.ResolveProject(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("resolve project: %w", err)
+	}
+	if id != "" {
+		projectID = id
+	}
+	return s.ensureProjectForWithRemote(ctx, projectID, remote)
+}
+
+// ensureProjectForWithRemote performs the write-side half of project
+// resolution. repoRemote must come from the caller: an empty value preserves
+// the ordinary create-or-resolve behavior and never clears recorded identity.
+func (s *Server) ensureProjectForWithRemote(ctx context.Context, projectID, repoRemote string) (string, error) {
+	normalizedRemote := memory.NormalizeRepoRemote(repoRemote)
+	if normalizedRemote != "" {
+		id, matched, err := s.store.ResolveOrBindRepoRemote(ctx, projectID, path.Base(normalizedRemote), repoRemote)
 		if err != nil {
-			return "", fmt.Errorf("resolve project by repository: %w", err)
+			return "", fmt.Errorf("resolve or bind project by repository: %w", err)
 		}
-		if id != "" {
+		if matched {
 			return id, nil
 		}
 	}
 
-	if err := s.store.EnsureProjectWithRepo(ctx, projectID, "", projectID, remote); err != nil {
+	if err := s.store.EnsureProjectWithRepo(ctx, projectID, "", projectID, repoRemote); err != nil {
 		return "", err
 	}
 
 	// Ensure may have folded an existing duplicate row into its canonical
 	// project, so ask again before handing the id back.
-	if remote != "" {
-		id, _, err := s.store.ResolveProject(ctx, remote)
+	if normalizedRemote != "" {
+		id, matched, err := s.store.ResolveOrBindRepoRemote(ctx, projectID, path.Base(normalizedRemote), repoRemote)
 		if err != nil {
-			return "", fmt.Errorf("resolve project after ensure: %w", err)
+			return "", fmt.Errorf("resolve project by repository after ensure: %w", err)
 		}
-		if id != "" {
+		if matched {
 			return id, nil
 		}
+		return "", fmt.Errorf("project %q belongs to a different repository", projectID)
 	}
 	return projectID, nil
 }
@@ -749,16 +775,6 @@ func (s *Server) registerTools() {
 			tags = []string{}
 		}
 		tags = validateTags(tags)
-		resolved, _, err := s.store.ResolveProject(ctx, args.ProjectID)
-		if err != nil {
-			return nil, nil, fmt.Errorf("resolve project: %w", err)
-		}
-		if resolved != "" {
-			// Only overwrite with the resolved ID on a hit. On a miss, keep the
-			// raw input so EnsureProject below can auto-create a new project —
-			// preserving today's create-on-first-save behavior.
-			args.ProjectID = resolved
-		}
 
 		var truncated bool
 		args.Content, truncated = memory.ClampContent(args.Content)

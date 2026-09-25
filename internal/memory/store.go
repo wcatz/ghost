@@ -279,6 +279,146 @@ func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoR
 	return s.ensureProjectLocked(ctx, id, path, name, repoRemote)
 }
 
+// ResolveOrBindRepoRemote returns the project already carrying repoRemote. If
+// none exists, it first considers an explicit projectRef (the id or path the
+// caller supplied), then attaches the remote to the one project named name when
+// that project has not claimed a different repository. An explicit projectRef
+// already bound elsewhere is an error: falling through to its same-named
+// project would route the save away from the location the caller supplied.
+//
+// Callers must pass a name derived from the repository itself, not a directory
+// basename. This is a write-side bridge for a repository-aware save arriving
+// before a named project has recorded its remote; it deliberately does not
+// participate in Store.ResolveProject's location-sensitive lookup rules.
+func (s *Store) ResolveOrBindRepoRemote(ctx context.Context, projectRef, name, repoRemote string) (id string, matched bool, err error) {
+	repoRemote = NormalizeRepoRemote(repoRemote)
+	if repoRemote == "" {
+		return "", false, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var existingID string
+	existingErr := s.db.QueryRowContext(ctx, `
+		SELECT id FROM projects
+		WHERE repo_remote = ? AND id != '_global'
+		LIMIT 1
+	`, repoRemote).Scan(&existingID)
+	if existingErr == nil {
+		return existingID, true, nil
+	}
+	if existingErr != sql.ErrNoRows {
+		return "", false, fmt.Errorf("resolve project by repository: %w", existingErr)
+	}
+
+	if id, found, err := s.resolveExplicitProjectRepoLocked(ctx, projectRef, repoRemote); found || err != nil {
+		return id, found, err
+	}
+	if name == "" {
+		return "", false, nil
+	}
+	return s.bindUniqueProjectNameRepoLocked(ctx, name, repoRemote)
+}
+
+func (s *Store) resolveExplicitProjectRepoLocked(ctx context.Context, projectRef, repoRemote string) (id string, found bool, err error) {
+	if projectRef == "" {
+		return "", false, nil
+	}
+
+	var count int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM projects
+		WHERE (id = ? OR path = ?) AND id != '_global'
+	`, projectRef, projectRef).Scan(&count); err != nil {
+		return "", false, fmt.Errorf("count explicit projects for repository: %w", err)
+	}
+	if count > 1 {
+		return "", false, fmt.Errorf("project reference %q matches multiple projects", projectRef)
+	}
+	if count == 0 {
+		return "", false, nil
+	}
+
+	var existingRemote string
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT id, COALESCE(repo_remote, '')
+		FROM projects
+		WHERE (id = ? OR path = ?) AND id != '_global'
+	`, projectRef, projectRef).Scan(&id, &existingRemote); err != nil {
+		return "", true, fmt.Errorf("read explicit project for repository: %w", err)
+	}
+	if existingRemote == repoRemote {
+		return id, true, nil
+	}
+	if existingRemote != "" {
+		return "", true, fmt.Errorf("project %q belongs to a different repository", id)
+	}
+
+	bound, err := s.bindRepoRemoteIfUnsetLocked(ctx, id, repoRemote)
+	if err != nil {
+		return "", true, fmt.Errorf("bind repository to explicit project: %w", err)
+	}
+	if !bound {
+		return "", true, fmt.Errorf("project %q repository changed concurrently", id)
+	}
+	return id, true, nil
+}
+
+func (s *Store) bindUniqueProjectNameRepoLocked(ctx context.Context, name, repoRemote string) (id string, matched bool, err error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM projects
+		WHERE name = ? AND id != '_global'
+	`, name).Scan(&count); err != nil {
+		return "", false, fmt.Errorf("count projects by name for repository: %w", err)
+	}
+	if count != 1 {
+		return "", false, nil
+	}
+
+	var existingRemote string
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT id, COALESCE(repo_remote, '')
+		FROM projects
+		WHERE name = ? AND id != '_global'
+	`, name).Scan(&id, &existingRemote); err != nil {
+		if err == sql.ErrNoRows {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read project by name for repository: %w", err)
+	}
+	if existingRemote != "" {
+		if existingRemote == repoRemote {
+			return id, true, nil
+		}
+		return "", false, nil
+	}
+
+	bound, err := s.bindRepoRemoteIfUnsetLocked(ctx, id, repoRemote)
+	if err != nil {
+		return "", false, fmt.Errorf("bind repository to named project: %w", err)
+	}
+	return id, bound, nil
+}
+
+func (s *Store) bindRepoRemoteIfUnsetLocked(ctx context.Context, id, repoRemote string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE projects
+		SET repo_remote = ?, updated_at = datetime('now')
+		WHERE id = ? AND COALESCE(repo_remote, '') = ''
+	`, repoRemote, id)
+	if err != nil {
+		return false, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return updated == 1, nil
+}
+
 func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRemote string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -297,6 +437,16 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 	// bucket that global injection reads from.
 	repoRemote = NormalizeRepoRemote(repoRemote)
 	if repoRemote != "" && id != "_global" {
+		var incomingRemote string
+		incomingErr := s.db.QueryRowContext(ctx,
+			`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, id).Scan(&incomingRemote)
+		if incomingErr != nil && incomingErr != sql.ErrNoRows {
+			return fmt.Errorf("check project repository: %w", incomingErr)
+		}
+		if incomingRemote != "" && incomingRemote != repoRemote {
+			return fmt.Errorf("project %q belongs to a different repository", id)
+		}
+
 		var existingID string
 		scanErr := s.db.QueryRowContext(ctx,
 			`SELECT id FROM projects WHERE repo_remote = ? AND id != ? LIMIT 1`,
@@ -336,7 +486,11 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 		INSERT INTO projects (id, path, name, repo_remote) VALUES (?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			path = CASE WHEN excluded.path = excluded.id THEN projects.path ELSE excluded.path END,
-			repo_remote = CASE WHEN excluded.repo_remote = '' THEN projects.repo_remote ELSE excluded.repo_remote END,
+			repo_remote = CASE
+				WHEN excluded.repo_remote = '' THEN projects.repo_remote
+				WHEN projects.repo_remote IS NULL OR projects.repo_remote = '' THEN excluded.repo_remote
+				ELSE projects.repo_remote
+			END,
 			updated_at = datetime('now')
 	`, id, path, name, repoRemote)
 	if err != nil {

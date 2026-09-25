@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -128,6 +129,147 @@ func TestResolveProjectByRemote(t *testing.T) {
 			t.Errorf("ResolveProject(%q) = %q, want %q — the same repository must be reachable by any spelling of its remote", in, id, "proj")
 		}
 	}
+}
+
+// TestResolveOrBindRepoRemote covers the write-side identity bridge used when a
+// repository-aware save arrives before the named project has ever recorded a
+// remote. A name match is evidence only when it is unique and unclaimed.
+func TestResolveOrBindRepoRemote(t *testing.T) {
+	const (
+		remote  = "https://github.com/wcatz/ghost.git"
+		other   = "https://github.com/someone/ghost.git"
+		canon   = "github.com/wcatz/ghost"
+		otherID = "github.com/someone/ghost"
+	)
+
+	t.Run("binds the unique unclaimed project", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		if err := s.EnsureProject(ctx, "ghost", "", "ghost"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+
+		id, bound, err := s.ResolveOrBindRepoRemote(ctx, "", "ghost", remote)
+		if err != nil {
+			t.Fatalf("ResolveOrBindRepoRemote: %v", err)
+		}
+		if !bound || id != "ghost" {
+			t.Fatalf("ResolveOrBindRepoRemote = (%q, %v), want (ghost, true)", id, bound)
+		}
+		var got string
+		if err := s.db.QueryRowContext(ctx, `SELECT repo_remote FROM projects WHERE id = 'ghost'`).Scan(&got); err != nil {
+			t.Fatalf("read bound repository: %v", err)
+		}
+		if got != canon {
+			t.Errorf("persisted repository = %q, want %q", got, canon)
+		}
+
+		id, bound, err = s.ResolveOrBindRepoRemote(ctx, "", "ghost", remote)
+		if err != nil {
+			t.Fatalf("second ResolveOrBindRepoRemote: %v", err)
+		}
+		if !bound || id != "ghost" {
+			t.Errorf("same binding is not idempotent: got (%q, %v), want (ghost, true)", id, bound)
+		}
+	})
+
+	t.Run("resolves an existing remote independently of name", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		if err := s.EnsureProjectWithRepo(ctx, "custom-id", "", "project-display-name", remote); err != nil {
+			t.Fatalf("EnsureProjectWithRepo: %v", err)
+		}
+
+		id, bound, err := s.ResolveOrBindRepoRemote(ctx, "", "ghost", remote)
+		if err != nil {
+			t.Fatalf("ResolveOrBindRepoRemote: %v", err)
+		}
+		if !bound || id != "custom-id" {
+			t.Errorf("existing repository resolved to (%q, %v), want (custom-id, true)", id, bound)
+		}
+	})
+
+	t.Run("explicit path conflict takes precedence over a unique name", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		const pathID = "/work/ghost"
+		if err := s.EnsureProjectWithRepo(ctx, pathID, pathID, "checkout", other); err != nil {
+			t.Fatalf("EnsureProjectWithRepo path: %v", err)
+		}
+		if err := s.EnsureProject(ctx, "ghost", "", "ghost"); err != nil {
+			t.Fatalf("EnsureProject name: %v", err)
+		}
+
+		id, matched, err := s.ResolveOrBindRepoRemote(ctx, pathID, "ghost", remote)
+		if err == nil || !strings.Contains(err.Error(), "different repository") {
+			t.Fatalf("ResolveOrBindRepoRemote = (%q, %v, %v), want a different-repository error", id, matched, err)
+		}
+		var pathRemote, nameRemote string
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, pathID).Scan(&pathRemote); err != nil {
+			t.Fatalf("read path repository: %v", err)
+		}
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(repo_remote, '') FROM projects WHERE id = 'ghost'`).Scan(&nameRemote); err != nil {
+			t.Fatalf("read named repository: %v", err)
+		}
+		if pathRemote != otherID || nameRemote != "" {
+			t.Errorf("repositories after conflict: path=%q name=%q, want original %q and unclaimed", pathRemote, nameRemote, otherID)
+		}
+	})
+
+	t.Run("refuses an ambiguous name", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		for _, id := range []string{"first", "second"} {
+			if err := s.EnsureProject(ctx, id, "", "ghost"); err != nil {
+				t.Fatalf("EnsureProject %s: %v", id, err)
+			}
+		}
+
+		id, bound, err := s.ResolveOrBindRepoRemote(ctx, "", "ghost", remote)
+		if err != nil {
+			t.Fatalf("ResolveOrBindRepoRemote: %v", err)
+		}
+		if bound || id != "" {
+			t.Fatalf("ambiguous name was bound to %q (bound=%v), want no match", id, bound)
+		}
+		var count int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE repo_remote = ?`, canon).Scan(&count); err != nil {
+			t.Fatalf("count bound repositories: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("ambiguous binding recorded %d project repositories, want 0", count)
+		}
+	})
+
+	t.Run("does not overwrite a different remote", func(t *testing.T) {
+		s := testStore(t)
+		ctx := context.Background()
+		if err := s.EnsureProjectWithRepo(ctx, "ghost", "", "ghost", other); err != nil {
+			t.Fatalf("EnsureProjectWithRepo: %v", err)
+		}
+
+		id, bound, err := s.ResolveOrBindRepoRemote(ctx, "", "ghost", remote)
+		if err != nil {
+			t.Fatalf("ResolveOrBindRepoRemote: %v", err)
+		}
+		if bound || id != "" {
+			t.Fatalf("conflicting name was rebound to %q (bound=%v), want no match", id, bound)
+		}
+		var got string
+		if err := s.db.QueryRowContext(ctx, `SELECT repo_remote FROM projects WHERE id = 'ghost'`).Scan(&got); err != nil {
+			t.Fatalf("read original repository: %v", err)
+		}
+		if got != otherID {
+			t.Errorf("persisted repository = %q, want original %q", got, otherID)
+		}
+		var count int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE repo_remote = ?`, canon).Scan(&count); err != nil {
+			t.Fatalf("count attempted repository: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("conflicting binding recorded %d attempted repositories, want 0", count)
+		}
+	})
 }
 
 // TestMigrateV11AddsRepoRemote upgrades a schema-v10 database — the projects
@@ -298,6 +440,74 @@ func TestEnsureProjectDoesNotClearRecordedRemote(t *testing.T) {
 	}
 	if !got.Valid || got.String == "" {
 		t.Errorf("repo_remote = %v after a named save, want %q preserved — an empty update must not erase identity", got.String, remote)
+	}
+}
+
+// TestEnsureProjectWithRepoDoesNotOverwriteDifferentRemote keeps project
+// identity immutable once recorded. A later path save that detects another
+// repository must not relabel the existing project and redirect writes to it.
+func TestEnsureProjectWithRepoDoesNotOverwriteDifferentRemote(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const (
+		original = "https://github.com/someone/ghost.git"
+		attempt  = "https://github.com/wcatz/ghost.git"
+	)
+	if err := s.EnsureProjectWithRepo(ctx, "proj", "/work/ghost", "ghost", original); err != nil {
+		t.Fatalf("EnsureProjectWithRepo original: %v", err)
+	}
+	if err := s.EnsureProjectWithRepo(ctx, "proj", "/work/ghost", "ghost", attempt); err == nil {
+		t.Fatal("EnsureProjectWithRepo accepted a different remote for an existing project")
+	} else if !strings.Contains(err.Error(), "different repository") {
+		t.Fatalf("conflict error = %q, want different-repository explanation", err)
+	}
+
+	var got string
+	if err := s.db.QueryRowContext(ctx, `SELECT repo_remote FROM projects WHERE id = 'proj'`).Scan(&got); err != nil {
+		t.Fatalf("read repository: %v", err)
+	}
+	if want := "github.com/someone/ghost"; got != want {
+		t.Errorf("persisted repository = %q, want original %q", got, want)
+	}
+}
+
+// TestEnsureProjectWithRepoDoesNotMergeDifferentRemoteProject stops the
+// repository-duplicate merge before it can erase a project's prior identity.
+// The incoming project already belongs to one repository; matching another
+// project is a contradiction, not evidence that the first should be merged.
+func TestEnsureProjectWithRepoDoesNotMergeDifferentRemoteProject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	const (
+		original   = "https://github.com/someone/project.git"
+		attempt    = "https://github.com/wcatz/project.git"
+		originalID = "github.com/someone/project"
+		attemptID  = "github.com/wcatz/project"
+	)
+	if err := s.EnsureProjectWithRepo(ctx, "original-id", "/original", "original", original); err != nil {
+		t.Fatalf("EnsureProjectWithRepo original: %v", err)
+	}
+	if err := s.EnsureProjectWithRepo(ctx, "attempt-id", "/attempt", "attempt", attempt); err != nil {
+		t.Fatalf("EnsureProjectWithRepo attempt: %v", err)
+	}
+
+	if err := s.EnsureProjectWithRepo(ctx, "original-id", "/original", "original", attempt); err == nil {
+		t.Fatal("EnsureProjectWithRepo merged a project across conflicting repositories")
+	} else if !strings.Contains(err.Error(), "different repository") {
+		t.Fatalf("conflict error = %q, want different-repository explanation", err)
+	}
+
+	for id, want := range map[string]string{
+		"original-id": originalID,
+		"attempt-id":  attemptID,
+	} {
+		var got string
+		if err := s.db.QueryRowContext(ctx, `SELECT repo_remote FROM projects WHERE id = ?`, id).Scan(&got); err != nil {
+			t.Fatalf("read repository for %s: %v", id, err)
+		}
+		if got != want {
+			t.Errorf("repository for %s = %q, want %q", id, got, want)
+		}
 	}
 }
 
