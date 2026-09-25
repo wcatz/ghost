@@ -134,16 +134,19 @@ def main(argv):
     payload["body"] = body + "\n\n" + marker
 
     proc = _post(repo, number, payload)
-    if proc.returncode != 0 and payload["comments"]:
-        # GitHub rejects the WHOLE review (422) when any one inline anchor
-        # is refused, e.g. "line must be part of the diff" after the head
-        # moved under a long-running review. Losing the review entirely
-        # leaves the gate red with nothing to act on, so fall back once:
-        # fold every inline finding into the body and post without anchors.
+    file_level = []
+    if proc.returncode != 0 and payload["comments"] and _is_422(proc):
+        # GitHub rejects the WHOLE review (422) when one inline anchor is
+        # refused ("line must be part of the diff"). Retry once without line
+        # anchors, then post each finding as a FILE-level review comment:
+        # those are still review threads, so sweeper's thread count (the
+        # merge gate) sees them. Only a 422 is retried — auth, rate-limit or
+        # transport errors are not fixed by dropping anchors, and retrying
+        # them could post a duplicate review.
         print("::warning::inline review rejected "
               f"({_log_safe(_api_error(proc), limit=300)}); "
-              "retrying with findings in the review body")
-        payload = _fold_comments_into_body(payload, marker)
+              "retrying with file-level comments")
+        file_level, payload = payload["comments"], dict(payload, comments=[])
         proc = _post(repo, number, payload)
     if proc.returncode != 0:
         # GitHub's Reviews API can return a 422 whose body echoes back
@@ -159,7 +162,15 @@ def main(argv):
               file=sys.stderr)
         return 1
 
+    for c in file_level:
+        fp = _post_file_comment(repo, number, payload["commit_id"], c)
+        if fp.returncode != 0:
+            # Fail closed: a finding the gate cannot see must not pass.
+            print(f"::error::posting a file-level finding failed: "
+                  f"{_log_safe(_api_error(fp), limit=500)}", file=sys.stderr)
+            return 1
     print(f"posted review: {len(payload['comments'])} inline finding(s), "
+          f"{len(file_level)} file-level, "
           f"{len(dropped)} unanchored")
     return 0
 
@@ -180,24 +191,19 @@ def _api_error(proc):
     return " ".join(x.strip() for x in parts if isinstance(x, str) and x.strip())
 
 
-def _fold_comments_into_body(payload, marker):
-    """Move inline comments into the review body, keeping the trailing
-    <!-- ghost-review:<sha> --> marker as the body's last line."""
-    body = payload["body"]
-    if body.endswith(marker):
-        body = body[:-len(marker)].rstrip("\n")
-    lines = ["", "**Inline findings** (posted in the body because GitHub "
-             "rejected their line anchors):"]
-    for c in payload["comments"]:
-        lines.append(f"- `{c.get('path')}:{c.get('line')}` {c.get('body', '')}")
-    body = body + "\n" + "\n".join(lines)
-    budget = MAX_BODY_CHARS - len("\n\n" + marker)
-    if len(body) > budget:
-        body = body[:budget - 30] + "\n\n_[review body truncated]_"
-    out = dict(payload)
-    out["comments"] = []
-    out["body"] = body + "\n\n" + marker
-    return out
+def _is_422(proc):
+    return "422" in _api_error(proc)
+
+
+def _post_file_comment(repo, number, commit_id, c):
+    body = f"**Line {c.get('line')}:** {c.get('body', '')}"
+    return subprocess.run(
+        ["gh", "api", f"repos/{repo}/pulls/{number}/comments",
+         "--method", "POST", "--input", "-"],
+        input=json.dumps({"body": body, "commit_id": commit_id,
+                          "path": c["path"], "subject_type": "file"}),
+        text=True, capture_output=True, check=False,
+    )
 
 
 if __name__ == "__main__":

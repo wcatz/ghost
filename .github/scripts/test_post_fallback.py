@@ -1,49 +1,65 @@
-"""A 422 on the inline review must not lose the review: post_review retries
-once with every inline finding folded into the body, marker kept last."""
+"""A 422 on the inline review must not lose findings or hide them from the
+merge gate: post_review retries once without anchors and posts each finding
+as a file-level review comment (a review thread), failing closed."""
 import json
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
 
 import post_review
 
+DIFF = """diff --git a/a.go b/a.go
+--- a/a.go
++++ b/a.go
+@@ -1,1 +1,2 @@
+ package a
++var x = 1
+"""
+REPLY = {"verdict": "blocker", "summary": "s", "findings": [
+    {"file": "a.go", "line": 2, "severity": "blocker", "title": "t", "body": "b"}]}
 
-class TestFoldFallback(unittest.TestCase):
-    def test_fold_keeps_marker_last_and_drops_anchors(self):
-        marker = post_review.MARKER.format(sha="abc123")
-        payload = {"commit_id": "abc123", "event": "COMMENT",
-                   "body": "**should-fix** — 1 inline finding\n\n" + marker,
-                   "comments": [{"path": "a.go", "line": 7, "body": "bad"}]}
-        out = post_review._fold_comments_into_body(payload, marker)
-        self.assertEqual(out["comments"], [])
-        self.assertTrue(out["body"].endswith(marker))
-        self.assertIn("`a.go:7` bad", out["body"])
-        self.assertEqual(out["body"].count(marker), 1)
+
+def _proc(rc, err=""):
+    return SimpleNamespace(returncode=rc, stderr=err, stdout="")
+
+
+class TestFileLevelFallback(unittest.TestCase):
+    def _run(self, posts, file_posts):
+        with tempfile.TemporaryDirectory() as d:
+            reply, diff = os.path.join(d, "r.txt"), os.path.join(d, "p.diff")
+            with open(reply, "w") as fh:
+                json.dump(REPLY, fh)
+            with open(diff, "w") as fh:
+                fh.write(DIFF)
+            with mock.patch.object(post_review, "_post", side_effect=posts) as p, \
+                 mock.patch.object(post_review, "_post_file_comment",
+                                   side_effect=file_posts) as fp:
+                rc = post_review.main(["x", "o/r", "1", "sha1", reply, diff])
+            return rc, p, fp
+
+    def test_422_retries_and_posts_file_level_threads(self):
+        rc, p, fp = self._run([_proc(1, "gh: HTTP 422"), _proc(0)], [_proc(0)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(p.call_count, 2)
+        self.assertEqual(p.call_args_list[1].args[2]["comments"], [])
+        self.assertEqual(fp.call_count, 1)
+
+    def test_file_level_failure_fails_closed(self):
+        rc, _, _ = self._run([_proc(1, "gh: HTTP 422"), _proc(0)], [_proc(1, "HTTP 422")])
+        self.assertEqual(rc, 1)
+
+    def test_non_422_is_not_retried(self):
+        rc, p, fp = self._run([_proc(1, "gh: HTTP 401")], [])
+        self.assertEqual(rc, 1)
+        self.assertEqual(p.call_count, 1)
+        self.assertEqual(fp.call_count, 0)
 
     def test_api_error_includes_stdout_body(self):
         proc = SimpleNamespace(stderr="gh: Unprocessable Entity (HTTP 422)",
                                stdout='{"message":"line must be part of the diff"}')
         self.assertIn("line must be part of the diff", post_review._api_error(proc))
-
-    def test_retry_posts_without_comments_after_422(self):
-        calls = []
-
-        def fake_post(repo, number, payload):
-            calls.append(json.loads(json.dumps(payload)))
-            rc = 1 if len(calls) == 1 else 0
-            return SimpleNamespace(returncode=rc, stderr="gh: HTTP 422",
-                                   stdout='{"message":"Validation Failed"}')
-
-        payload = {"commit_id": "abc", "event": "COMMENT", "body": "b",
-                   "comments": [{"path": "a.go", "line": 1, "body": "x"}]}
-        with mock.patch.object(post_review, "_post", side_effect=fake_post):
-            proc = post_review._post("r", 1, payload)
-            if proc.returncode != 0 and payload["comments"]:
-                payload = post_review._fold_comments_into_body(payload, "<!-- m -->")
-                proc = post_review._post("r", 1, payload)
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[1]["comments"], [])
-        self.assertEqual(proc.returncode, 0)
 
 
 if __name__ == "__main__":
