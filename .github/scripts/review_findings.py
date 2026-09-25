@@ -24,7 +24,11 @@ def _require(cond, msg):
 
 
 def validate(doc):
-    """Raise ValidationError unless doc matches the findings.json contract."""
+    """Raise ValidationError unless doc matches the findings.json contract.
+
+    Normalises in place one recoverable deviation: an unknown string
+    severity becomes "should-fix" (still blocking) rather than failing
+    the whole review."""
     _require(isinstance(doc, dict), "top level must be an object")
     _require(doc.get("verdict") in VERDICTS,
              f"verdict must be one of {VERDICTS}, got {doc.get('verdict')!r}")
@@ -63,6 +67,13 @@ def validate(doc):
         # the nits and dropped-findings lines of the review body.
         _require("<!--" not in path,
                  f"{where}.file must not contain an HTML comment marker")
+        # Free models occasionally emit a severity outside the schema
+        # (e.g. "high", "minor"). Rejecting the whole review for that loses
+        # every other finding and leaves the gate red with nothing to act
+        # on, so normalise a string severity to the strictest non-blocker
+        # level instead: should-fix still blocks the merge gate.
+        if f.get("severity") not in SEVERITIES and isinstance(f.get("severity"), str):
+            f["severity"] = "should-fix"
         _require(f.get("severity") in SEVERITIES,
                  f"{where}.severity must be one of {SEVERITIES}")
         # bool is a subclass of int; reject it explicitly.
