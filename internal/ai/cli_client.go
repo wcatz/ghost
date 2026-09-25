@@ -24,11 +24,10 @@ const defaultTimeout = 5 * time.Minute
 // ANTHROPIC_API_KEY is stripped from the subprocess environment: if present,
 // it would override subscription/OAuth login and bill the call as
 // pay-per-token API usage instead, defeating the point of this client.
-// --setting-sources project,local excludes the user settings source so the
-// real, unwrapped SessionStart hook in ~/.claude/settings.json never fires —
-// without that, a headless ghost process shelling out to `claude -p` could
-// trigger `ghost hook session-start`, which opens the same SQLite DB this
-// process already holds open.
+// The invocation also runs in restricted/safe mode with an empty built-in
+// tool set and strict MCP configuration. This keeps an untrusted memory
+// prompt from reaching shell, plugin, or MCP operations while preserving the
+// caller's Claude authentication in CLAUDE_CONFIG_DIR.
 type CLIClient struct {
 	binary string
 }
@@ -66,9 +65,19 @@ func (c *CLIClient) run(ctx context.Context, prompt string, extraArgs ...string)
 		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
 		defer cancel()
 	}
-	args := append([]string{"-p", "--setting-sources", "project,local"}, extraArgs...)
+	args := []string{
+		"-p",
+		"--safe-mode",
+		"--restricted",
+		"--strict-mcp-config",
+		"--disable-slash-commands",
+		"--tools", "",
+		"--disallowedTools", "mcp__*",
+		"--setting-sources", "project,local",
+	}
+	args = append(args, extraArgs...)
 	args = append(args, prompt)
-	cmd, release, _ := harnessCommand(ctx, c.binary, args, harnessEnv(os.Environ()), "claude")
+	cmd, release, _ := harnessCommand(ctx, c.binary, args, os.Environ(), harnessClaude)
 	defer release()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

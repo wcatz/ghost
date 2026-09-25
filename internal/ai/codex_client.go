@@ -35,9 +35,28 @@ func (c *CodexClient) run(ctx context.Context, prompt string) (string, error) {
 		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
 		defer cancel()
 	}
-	args := []string{"exec", "--sandbox", "read-only"}
+	// Ignore user config/rules so a project or user MCP/plugin definition cannot
+	// enter this untrusted prompt. The feature overrides remove the remaining
+	// side-effecting surfaces; read-only remains a second boundary for any
+	// model-provided file operation.
+	args := []string{
+		"exec",
+		"--sandbox", "read-only",
+		"--ignore-user-config",
+		"--ignore-rules",
+		"--skip-git-repo-check",
+		"--ephemeral",
+		"-c", "features.shell_tool=false",
+		"-c", "features.unified_exec=false",
+		"-c", "features.apps=false",
+		"-c", "features.remote_plugin=false",
+		"-c", "features.hooks=false",
+		"-c", "features.multi_agent=false",
+		"-c", "agents.enabled=false",
+		"-c", `web_search="disabled"`,
+	}
 	args = append(args, prompt)
-	cmd, release, _ := harnessCommand(ctx, c.binary, args, harnessEnv(os.Environ()), "codex")
+	cmd, release, _ := harnessCommand(ctx, c.binary, args, os.Environ(), harnessCodex)
 	defer release()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

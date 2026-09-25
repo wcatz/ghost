@@ -343,7 +343,9 @@ func reportReflect(rr ReflectReport) {
 // scratchEnv builds the child-process env for ghost: inherited vars minus any
 // pre-existing XDG overrides and ANTHROPIC_API_KEY, plus the scratch pair. The
 // strip prevents a direct Anthropic credential from being inherited; current
-// Ghost still routes memory management through its CLI harness.
+// Ghost still routes memory management through its CLI harness. OPENCODE_API_KEY
+// remains available to the eval's opencode child, where Ghost selects it as that
+// backend's explicit auth path.
 func scratchEnv(scratch string) []string {
 	env := make([]string, 0, len(os.Environ())+2)
 	for _, kv := range os.Environ() {

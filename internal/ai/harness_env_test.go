@@ -31,12 +31,18 @@ func TestHarnessEnvDropsCredentialsNotOurs(t *testing.T) {
 		"KUBECONFIG=/home/u/.kube/config",
 		"VAULT_TOKEN=hvs.secret",
 		"DATABASE_URL=postgres://user:pass@host/db",
+		"SSH_AUTH_SOCK=/tmp/ssh-agent",
+		"GIT_ASKPASS=/tmp/askpass",
+		"SSH_ASKPASS=/tmp/ssh-askpass",
+		"GHOST_DEBUG=1",
+		"GHOST_LOG_FILE=/tmp/ghost.log",
 	}
-	got := namesOf(harnessEnv(base))
+	got := namesOf(harnessEnv(base, harnessClaude))
 
 	for _, gone := range []string{
 		"AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "GITHUB_TOKEN",
 		"SOPS_AGE_KEY_FILE", "AGE_KEY", "KUBECONFIG", "VAULT_TOKEN", "DATABASE_URL",
+		"SSH_AUTH_SOCK", "GIT_ASKPASS", "SSH_ASKPASS", "GHOST_DEBUG", "GHOST_LOG_FILE",
 	} {
 		if v, present := got[gone]; present {
 			t.Errorf("%s passed to the harness child (value %q) — it has no business with it", gone, v)
@@ -58,18 +64,17 @@ func TestHarnessEnvKeepsWhatAHarnessNeeds(t *testing.T) {
 		"TMPDIR=/tmp/ghost", "LANG=C.UTF-8", "TZ=UTC",
 		"XDG_CONFIG_HOME=/home/u/.config", "XDG_DATA_HOME=/home/u/.local/share",
 		"HTTP_PROXY=http://proxy:3128", "SSL_CERT_FILE=/etc/ssl/certs/ca.pem",
-		"SSH_AUTH_SOCK=/tmp/ssh-agent", "TERM=xterm-256color",
+		"TERM=xterm-256color",
 		"GHOST_OPENCODE_MODEL=opencode/big-pickle",
 		"GHOST_CLI_CLAUDE_BINARY=/usr/local/bin/claude",
 		"GHOST_SCRATCH_DIR=/tmp/scratch",
 	}
-	got := namesOf(harnessEnv(base))
+	got := namesOf(harnessEnv(base, harnessClaude))
 
 	for k, want := range map[string]string{
 		"PATH": "/usr/bin", "HOME": "/home/u", "TMPDIR": "/tmp/ghost",
 		"LANG": "C.UTF-8", "XDG_CONFIG_HOME": "/home/u/.config",
 		"HTTP_PROXY": "http://proxy:3128", "SSL_CERT_FILE": "/etc/ssl/certs/ca.pem",
-		"SSH_AUTH_SOCK":           "/tmp/ssh-agent",
 		"GHOST_OPENCODE_MODEL":    "opencode/big-pickle",
 		"GHOST_CLI_CLAUDE_BINARY": "/usr/local/bin/claude",
 		"GHOST_SCRATCH_DIR":       "/tmp/scratch",
@@ -89,7 +94,7 @@ func TestHarnessEnvPassthroughEscapeHatch(t *testing.T) {
 
 	got := namesOf(harnessEnv([]string{
 		"PATH=/usr/bin", "MY_SITE_VAR=yes", "ANOTHER_ONE=2", "STILL_DROPPED=no",
-	}))
+	}, harnessClaude))
 
 	if got["MY_SITE_VAR"] != "yes" || got["ANOTHER_ONE"] != "2" {
 		t.Errorf("opted-in variables not passed through: %v", got)
@@ -114,7 +119,7 @@ func TestHarnessEnvNeverPassesLLMKeysEvenWhenOptedIn(t *testing.T) {
 		"ANTHROPIC_API_KEY=sk-should-never-pass",
 		"OPENAI_API_KEY=sk-openai-should-never-pass",
 		"GOOSE_PROVIDER__API_KEY=goose-should-never-pass",
-	}))
+	}, harnessClaude))
 
 	for _, k := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOSE_PROVIDER__API_KEY"} {
 		if v, present := got[k]; present {
@@ -123,10 +128,9 @@ func TestHarnessEnvNeverPassesLLMKeysEvenWhenOptedIn(t *testing.T) {
 	}
 }
 
-// TestCLIClient_ChildDoesNotInheritSecrets proves the wiring rather than the
-// helper: the fake binary reads its own environment, so this fails if any of
-// the four clients stops routing through harnessEnv, which no unit test of
-// harnessEnv itself could catch.
+// TestCLIClient_ChildDoesNotInheritSecrets is the focused Claude wiring
+// regression. The table-driven policy tests in harness_policy_test.go cover
+// the same spawn funnel for all four clients.
 func TestCLIClient_ChildDoesNotInheritSecrets(t *testing.T) {
 	bin := fakeClaudeBinary(t, `
 for v in AWS_SECRET_ACCESS_KEY GITHUB_TOKEN SOPS_AGE_KEY_FILE KUBECONFIG; do
@@ -135,7 +139,7 @@ for v in AWS_SECRET_ACCESS_KEY GITHUB_TOKEN SOPS_AGE_KEY_FILE KUBECONFIG; do
 done
 if [ -z "$PATH" ]; then echo "PATH missing from child" >&2; exit 1; fi
 if [ -z "$HOME" ]; then echo "HOME missing from child" >&2; exit 1; fi
-if [ -z "$GHOST_SCRATCH_DIR" ]; then echo "GHOST_* not passed to child" >&2; exit 1; fi
+if [ -z "$GHOST_SCRATCH_DIR" ]; then echo "GHOST_SCRATCH_DIR not passed to child" >&2; exit 1; fi
 printf '%s' '{"memories":[]}'
 `)
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "AKIAsecret")
@@ -154,15 +158,15 @@ printf '%s' '{"memories":[]}'
 }
 
 // TestHarnessEnvSurvivesAnEmptyParent keeps the function total: a parent with
-// no environment at all must produce a child that still has a PATH, not an
-// empty env that cannot exec anything.
+// no environment produces an empty child environment, while any PATH present
+// in the parent is never silently dropped.
 func TestHarnessEnvSurvivesAnEmptyParent(t *testing.T) {
-	got := namesOf(harnessEnv(nil))
+	got := namesOf(harnessEnv(nil, harnessClaude))
 	if len(got) != 0 {
 		t.Errorf("with no parent env the child should get nothing, got %v", got)
 	}
 	// The real guarantee: if PATH exists it is kept, never silently dropped.
-	got = namesOf(harnessEnv([]string{"PATH=/bin"}))
+	got = namesOf(harnessEnv([]string{"PATH=/bin"}, harnessClaude))
 	if got["PATH"] != "/bin" {
 		t.Errorf("PATH = %q, want /bin", got["PATH"])
 	}
@@ -191,9 +195,9 @@ func TestHarnessEnvAcceptsWindowsVariableSpelling(t *testing.T) {
 		"Path=C:\\Windows\\system32", // Windows' own spelling of PATH
 		"Home=C:\\Users\\u",
 		"Lang=en_US.UTF-8",
-		"Ghost_OpenCode_Model=opencode/big-pickle", // prefix check too
+		"Ghost_OpenCode_Model=opencode/big-pickle", // explicit Ghost name, case-insensitive
 		"AWS_SECRET_ACCESS_KEY=AKIAsecret",         // still must not pass
-	})
+	}, harnessClaude)
 
 	for name, want := range map[string]string{
 		"Path":                 "C:\\Windows\\system32",

@@ -228,6 +228,21 @@ Other useful variables:
 - `GHOST_DEBUG` — enable debug logging.
 - `GHOST_LOG_FILE` — redirect MCP logs to a file; useful when a client surfaces stderr as protocol noise.
 
+### Harness subprocess environment
+
+Ghost gives each LLM harness child a case-insensitive environment allowlist. The common set contains process/home variables (including `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `PATHEXT`, and `COMSPEC` on Windows), locale, proxy/CA settings, the owned scratch temp variables, and the documented Ghost configuration variables. It does not pass arbitrary credentials or an entire `GHOST_*` namespace. In particular, `GHOST_API_KEY`, `GHOST_DATABASE_URL`, unknown `GHOST_*_TOKEN`/`*_SECRET` names, and SSH agent/askpass variables are dropped by default.
+
+Backend-specific configuration is selected only for the selected child:
+
+- Claude receives `CLAUDE_CONFIG_DIR` for its configured authentication store.
+- Codex receives `CODEX_HOME` for its configured state and credentials.
+- Goose receives its documented safe `GOOSE_*` model/provider settings and `GOOSE_PATH_ROOT`.
+- OpenCode receives `OPENCODE_API_KEY`, the supported authentication path for its isolated child. The child uses an invocation-owned home/config tree and a deny-all tool/MCP policy, so Ghost does not load the user's OpenCode config or plugins.
+
+`GHOST_PASSTHROUGH_ENV=NAME1,NAME2` is an explicit escape hatch for an additional variable. Names are matched case-insensitively. Opting in can re-expose credentials to the selected harness; use it only for a value whose exposure you intend. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GOOSE_PROVIDER__API_KEY` are always removed, even when named in the hatch.
+
+The harness commands also disable their tool surfaces explicitly: Claude runs restricted/safe mode with no built-in tools or MCP, Codex ignores user config/rules and disables shell, web, app, hook, and agent features, Goose uses `--no-profile --no-session`, and OpenCode receives a deny-all config. The allowlist is applied inside the shared spawn helper, including OpenCode's version probe.
+
 ## After changing configuration
 
 Run the relevant health check:

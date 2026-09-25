@@ -10,7 +10,9 @@
 
 ## Architecture Patterns
 - CLI subprocess clients (CLIClient, OpenCodeClient, CodexClient, GooseClient) all follow the same shape: struct with `binary` field, `Reflect`/`Classify` methods, `run` helper with timeout + env stripping
-- `stripLLMKeys` strips provider API keys from subprocess env — add new keys here when adding CLI backends
+- `harnessCommand` is the single spawn funnel: it applies the backend-specific `harnessEnv` allowlist, scratch confinement, and no-tools policy inputs; probes and new clients must use it
+- `harnessEnv` keeps only reviewed common and backend-specific variables; `GHOST_PASSTHROUGH_ENV` is an explicit, security-sensitive escape hatch
+- `stripLLMKeys` strips provider API keys from subprocess env — add new always-stripped keys here when adding CLI backends
 - Stop hook spawns reflect/resolve/supersede as detached processes with `--source` forwarding
 - SourceProvider maps host source strings to CLI backends; `CLIProvider` is the best-on-PATH availability probe, not source-aware routing
 - There is no `FallbackProvider` in the current architecture: a missing or undetectable CLI harness fails fast, while offline consolidation is an explicit SQLite tier
@@ -30,6 +32,8 @@
 
 ## Security
 - Strip API keys from subprocess environments (ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOSE_PROVIDER__API_KEY)
+- Keep harness tool/MCP surfaces disabled; do not rely on a scratch working directory as a sandbox
+- Pass only reviewed environment variables; document any new public configuration or escape hatch
 - Never log or commit secrets
 - SOPS-encrypted secrets only — never git restore encrypted files
 
