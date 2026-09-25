@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
@@ -321,10 +322,16 @@ func DefaultConfig() *Config {
 	return cfg
 }
 
-// stderr is where configuration warnings go. It is a variable so the sink can
-// be redirected (see SetWarningWriter) and so a test can assert on what a user
-// would see without swapping the process's os.Stderr.
-var stderr io.Writer = os.Stderr
+// warnSink is where configuration warnings go. It is atomic because the sink is
+// replaced at MCP-server startup while other goroutines are already running, and
+// a two-word io.Writer read racing a write can tear.
+var warnSink = newWarnSink(os.Stderr)
+
+func newWarnSink(w io.Writer) *atomic.Pointer[io.Writer] {
+	p := new(atomic.Pointer[io.Writer])
+	p.Store(&w)
+	return p
+}
 
 // SetWarningWriter redirects configuration warnings to w, and returns a function
 // that restores the previous sink. A nil w keeps the current one.
@@ -336,21 +343,23 @@ var stderr io.Writer = os.Stderr
 // harness spawn goes through scratch.EnforceBudget → LoadForHook inside the
 // server, so an unredirected sink would emit one protocol-noise line per spawn.
 //
-// Not synchronised: call it before starting any goroutine, which is what
-// runMCP does. The returned restore is a convenience for tests.
+// Safe to call concurrently with in-flight warnings; nothing here needs a
+// "call it before starting goroutines" precondition.
 func SetWarningWriter(w io.Writer) (restore func()) {
-	prev := stderr
-	if w != nil {
-		stderr = w
+	if w == nil {
+		return func() {}
 	}
-	return func() { stderr = prev }
+	prev := warnSink.Load()
+	replacement := io.Writer(w)
+	warnSink.Store(&replacement)
+	return func() { warnSink.Store(prev) }
 }
 
 // warnf reports a non-fatal configuration problem. Layered config is loaded
 // from inside host-session hooks that must not fail, so the problems that must
 // not stop the caller are reported here rather than returned.
 func warnf(format string, args ...interface{}) {
-	_, _ = fmt.Fprintf(stderr, "ghost: config: "+format+"\n", args...)
+	_, _ = fmt.Fprintf(*warnSink.Load(), "ghost: config: "+format+"\n", args...)
 }
 
 // knownKeys is every koanf key the Config struct binds, derived once from its

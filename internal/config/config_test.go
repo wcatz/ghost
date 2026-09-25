@@ -2,10 +2,12 @@ package config
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/knadh/koanf/parsers/yaml"
@@ -838,6 +840,47 @@ func TestSetWarningWriter_NilKeepsDefault(t *testing.T) {
 	if !strings.Contains(warnings.String(), "linking.thresholdd") {
 		t.Errorf("SetWarningWriter(nil) discarded the default sink; got %q", warnings.String())
 	}
+}
+
+// TestSetWarningWriter_ConcurrentWithWarnings is the race the MCP server can
+// hit: an in-flight tool handler sits inside a warnf — every harness spawn goes
+// through scratch.EnforceBudget → LoadForHook, so ghost_resolve reaches it —
+// while the sink is being replaced. A plain io.Writer variable fails this under
+// -race, which CI runs (`go test -race -count=1 ./...`); a torn two-word
+// interface read can fault, not just trip the detector.
+func TestSetWarningWriter_ConcurrentWithWarnings(t *testing.T) {
+	isolateConfig(t)
+	writeUserConfig(t, "linking:\n  thresholdd: 0.9\n")
+	restore := SetWarningWriter(io.Discard)
+	defer restore()
+
+	// Both sides are released from the same barrier and run a fixed number of
+	// iterations, so neither can finish before the other starts — a loop that
+	// exits early (say, on a `done` channel the main goroutine closes
+	// immediately) can let the warning side run zero times and pass vacuously.
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { // the warning side: every spawn does this via LoadForHook
+		defer wg.Done()
+		<-start
+		for range 200 {
+			if _, err := Load(); err != nil {
+				t.Errorf("Load(): %v", err)
+				return
+			}
+		}
+	}()
+	go func() { // the replacing side, as runMCP does at server startup
+		defer wg.Done()
+		<-start
+		for range 200 {
+			restore := SetWarningWriter(io.Discard)
+			restore()
+		}
+	}()
+	close(start)
+	wg.Wait()
 }
 
 // TestLoad_AllKnownKeysDoNotWarn guards the unknown-key warning against false
