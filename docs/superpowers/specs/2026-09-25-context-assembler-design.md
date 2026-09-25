@@ -74,15 +74,16 @@ const (
 type Slice struct {
     Bucket              string
     MaxItems            int // 0 = unbounded within this slice
-    MaxBytes            int // 0 = unbounded within this slice
+    MaxBytes            int // item-content bytes; 0 = unbounded within this slice
     ClampBytes          int // 0 = no per-item presentation clamp
     DropDemotedLosers   bool // honored only for session-start
 }
 
 type Budget struct {
-    MaxItems int     // 0 = unbounded total
-    MaxBytes int     // 0 = unbounded total
-    Slices   []Slice
+    MaxItems       int     // 0 = unbounded total
+    MaxBytes       int     // complete response bytes; 0 = unbounded total
+    ResponseReserve int     // reserved framing/outcome/notes bytes
+    Slices         []Slice
 }
 
 type Condition = memory.Condition
@@ -95,7 +96,7 @@ const (
 type Request struct {
     ProjectID string
     Query     string            // empty selects passive mode
-    QueryVec  []float32         // required unless CondFTSOnly
+    QueryVec  []float32         // nil skips the vector leg; required for CondVectorOnly
     Scope     map[string]string
     Category  string
     Source    Source
@@ -117,15 +118,17 @@ type Result struct {
 }
 ```
 
-`Slice` is a per-bucket budget; `Budget` also has a total because search applies
-one limit across project and `_global`, while injection has independent
-project and global caps. A zero budget is rejected rather than treated as an
-implicit unbounded request. Stage 8 applies slice caps first and the total
-second. `MaxItems: 0` is unbounded only within the scope named by the field;
-callers set every total and slice budget explicitly. `Result.Bytes` counts the
-complete response, including framing, outcome, and notes; `Item.Bytes` counts
-only content. Stage 8 reserves the rendered-line overhead before selecting items
-and keeps the complete response within the total budget.
+`Slice` is a per-bucket membership budget; `Slice.MaxBytes` bounds item
+content and never includes response framing. `Budget` also has a total because
+search applies one limit across project and `_global`, while injection has
+independent project and global caps. A zero budget is rejected rather than
+treated as an implicit unbounded request. Stage 8 applies slice item caps first,
+reserves `ResponseReserve` for framing, outcome, and notes, and then trims the
+item total so the complete response fits `Budget.MaxBytes`. Callers that have a
+response-level byte contract set both fields; there is no implicit default.
+`MaxItems: 0` is unbounded only within the scope named by the field. `Result.Bytes`
+counts the complete response, including framing, outcome, and notes;
+`Item.Bytes` counts only content.
 
 `Item` is the shared output type for rendering, explanation, and bench metrics.
 It carries the fields needed to reproduce both existing renderers and to
@@ -172,7 +175,9 @@ const (
 ```
 
 `Run` validates the source, project mode, query mode, condition, query vector,
-clock, and non-zero budget before calling `Candidates`.
+clock, and non-zero budget before calling `Candidates`. A nil `QueryVec` with
+`CondHybrid` is legal and marks the vector leg not attempted; only
+`CondVectorOnly` requires a vector.
 
 | Source | `ProjectID` | `Query` | Retrieval mode |
 |---|---|---|---|
@@ -244,6 +249,7 @@ type SlicePolicy struct {
     CategoryCaps       map[string]int
     OverFetch          int
     DemotionThreshold  float64
+    ExcludeSeen        bool
     DropDemotedLosers  bool
 }
 
@@ -351,7 +357,9 @@ means stages 5 and 6 ran; `"err"` leaves the edges empty, marks both stages
 skipped with `edges_unavailable`, and adds the error to notes; `"unavailable"`
 means a successful query returned no edges. A validation or transaction
 failure, including failure of every applicable retrieval leg, is returned as
-an error and never becomes a successful empty `Result`.
+an error. When one applicable leg fails and another completes with no rows,
+`Candidates` returns the zero `CandidateSet` with leg statuses so `Run` can
+report `retrieval_failed`; it never turns that case into a false absence.
 
 ## Decision 2 — The nine stages
 
@@ -393,13 +401,22 @@ and the facts needed by the trace. The configured vector floor is applied by
 `DecayRankingSQL` path receives a bound `Now` parameter, so ranking and trace
 timestamps cannot use different instants.
 
-Passive mode is not `GetTopMemories`. It has two bucket policies and three
-policy dimensions that the candidate path must reproduce:
+Session-start passive mode is not `GetTopMemories`. It has two bucket policies
+and three policy dimensions that the candidate path must reproduce:
 
 | Bucket | Fetch and order | Selection and cap | Near-duplicate policy |
 |---|---|---|---|
 | project | `resolved_at IS NULL`, over-fetch `sessionMemoriesCap*3` (45), `DecayRankingSQL` then importance/time/id | two-pass behavioral floor with category weights and caps, then decay fill; cap 15 | configured `linking.demotion_threshold`, default `0.90`; project relies on the cap |
 | `_global` | `resolved_at IS NULL`, over-fetch `globalsCap*2` (16), pinned/importance/updated order | no decay or two-pass selection; cap 8 | threshold `0.85`; global losers are removed |
+
+`SourceProjectCtx` has a separate passive policy: the project bucket uses
+`GetTopMemories(projectID, 20)` semantics with decay order, a 40-row over-fetch,
+and no two-pass selection; the additional `_global` bucket uses
+`GetTopMemories("_global", 15)` semantics with decay order, a 30-row
+over-fetch, `ExcludeSeen`, and no two-pass selection. Both use the configured
+project demotion threshold and do not drop demoted losers. The project-context
+migration remains separate, but its policies are explicit here rather than
+inheriting session-start's 45/16 and 15/8 caps.
 
 `injection.behavior_categories` is explicit in `SlicePolicy`; it cannot be
 inferred from `CategoryWeights`, which is nil by default. `DemotionThreshold`
@@ -459,12 +476,16 @@ enabled, remains off by default, and receives its own bench comparison.
 ### Stages 8–9: budget and rendering
 
 `Slice.ClampBytes` is a presentation clamp that preserves UTF-8 boundaries.
-`Slice.MaxBytes` and `MaxItems` are hard membership trims. Stage 8 applies
-slice caps and then the total. Stage 9 shares the item line's scope label,
-validity state, confidence, agent when present, and quote escaping, while
-preserving the distinct search and session-start framing and field order.
-Session-start output may gain a scope label for a row that already carries
-scope; that visible change is intentional.
+`Slice.MaxBytes` and `MaxItems` are hard item-membership trims. Stage 8 applies
+those slice caps, reserves `ResponseReserve`, and then applies the complete
+response cap. Stage 9 shares the item line's scope label, validity state,
+confidence, agent when present, and quote escaping, while preserving the
+distinct search and session-start framing and field order. Both surfaces render
+scope, validity state, confidence, and agent when present from the same `Item`
+fields. Session-start output may gain a scope label for a row that already
+carries scope; PR 3's validity/provenance fields also change the
+machine-facing search payload, so PR 3 and PR 6 each include a before/after
+payload for the affected surface.
 
 ## Decision 3 — Abstention
 
@@ -496,6 +517,7 @@ The empty reason set is closed. The first matching stage supplies the reason;
 | Reason | Stage | Meaning |
 |---|---:|---|
 | `no_candidates` | 1 | query retrieval returned no candidates over applicable, complete coverage |
+| `retrieval_failed` | 1 | an applicable leg errored and the completed legs yielded no rows |
 | `vector_backend_unavailable` | 1 | an applicable vector leg could not run |
 | `no_memories` | 1 | passive retrieval returned no rows |
 | `all_invalid` | 2 | every row was expired or not yet valid |
@@ -545,7 +567,8 @@ Regression coverage includes an empty explicit `CondFTSOnly` request yielding
 `no_candidates` rather than `vector_backend_unavailable`, a rank-4 FTS hit with
 no attempted vector leg yielding `answerable`/`no_vector_leg`, and a
 fault-injected FTS error with vector survivors yielding `answerable` with a
-`retrieval_partial` note and no `below_floor` reason.
+`retrieval_partial` note and no `below_floor` reason, and a fault-injected FTS
+error with zero vector survivors yielding `empty`/`retrieval_failed`.
 
 `weak` annotates the returned items and abstention line. It withholds no row,
 which keeps the outcome decision orthogonal to ranking and bench results. The
@@ -573,6 +596,7 @@ blocks remain free of a relevance banner. Empty copy is reason-specific:
 |---|---|
 | `no_candidates` | may say that no stored memory matches, only under complete applicable-leg coverage |
 | `no_memories` | describes the empty passive window, not store-wide absence |
+| `retrieval_failed` | says search was incomplete because a retrieval leg failed |
 | `all_invalid` | says the found rows were withheld as out of date |
 | `all_dedup_dropped`, `all_diversity_capped`, `all_over_budget` | identifies the limit and suggests raising it |
 | `vector_backend_unavailable` | says keyword-only retrieval may be less complete |
@@ -724,7 +748,7 @@ The six context metrics are:
 |---|---|---|
 | Context precision | `count(Item.ID where relevance(Item.ID) > 0) / len(Items)` | binary relevance, scored over admitted items only |
 | Contamination rate | any contamination predicate over admitted items | disjunction of the five arms below |
-| Budget adherence | `Result.Bytes` and stage-8 `DroppedIDs` against the matching slice | exposes relevant rows discarded by a trim |
+| Budget adherence | `Result.Bytes` against `Budget.MaxBytes` and stage-8 `DroppedIDs` against the matching slice | exposes relevant rows discarded by a trim |
 | Diversity | `max_b count(Item.Bucket) / len(Items)` | `_global` is its own bucket |
 | Result rate | `count(Outcome != empty) / count(queries)` | reported separately so abstention cannot look like quality |
 | Token cost | `sum(Item.Bytes)` per answered question | bytes, matching existing content and injection budgets |
@@ -791,16 +815,18 @@ an unset key means rendering without scope filtering. PR 3 defines the writer
 contract for `valid_from`, `valid_until`, `verified_at`, `confidence`, and
 `source_ref`; `session_id` comes from the active session and `agent` from the
 existing provenance path. The shared renderer exposes those fields, while
-stage 4's multiplier remains `1.0` until measured.
+stage 4's multiplier remains `1.0` until measured. Session-start sets
+`Budget.MaxBytes` from its existing injector cap; PR 4 sets the search response
+cap and `ResponseReserve` before the byte-boundary test.
 
 | # | Branch / title | Closes | Bench expectation |
 |---:|---|---|---|
 | 1 | `feat(assemble): internal/assemble seam; scope and category filter before window closure` | #573 | Run origin/main and branch; stay within 0.005 on NDCG@10 and R@5, explaining any diff. Cover the configured vector floor, bound `Now`, widened rows, and existing negative retrieval. |
 | 2 | `feat(mcpinit): render and apply scope on the session-start surface` | #577 | Add and document `injection.session_scope`; compare the rendered block, with selection and 15/8 caps unchanged when the key is unset. |
-| 3 | `feat(memory): write validity and provenance from the tools` | #575 | Add the validity, confidence, and source-reference writer fields; run the delta gate on new validity fixtures. |
+| 3 | `feat(memory): write validity and provenance from the tools` | #575 | Add the writer fields, run the delta gate on new validity fixtures, and show the before/after `ghost_memory_search` payload. |
 | 4 | `feat(assemble): abstention is an outcome, not an empty list` | #580 | Record the abstention-subset score before and after threshold changes; test the complete response at the byte limit. Arm B starts disabled. |
 | 5 | `feat(memory): explain reports the assembler's decisions and `ghost context --explain` exists` | #583 | No scored-result change; mutation-test the no-recomputation invariant and add the CLI flag. |
-| 6 | `feat(assemble): conflict, dedup, diversity and budget stages` | Related #581 | Run the delta gate; verify the global drop policy, shared field set, and rendered session-start block. |
+| 6 | `feat(assemble): conflict, dedup, diversity and budget stages` | Related #581 | Run the delta gate; verify the global drop policy and before/after payloads for both search and session-start. |
 | 7 | `feat(bench): context-quality metrics` | #582 | Add context mode beside direct-call ablations; record the exact baseline SHA and command, and report metrics without gating them. |
 
 PR 6 deliberately does not claim to close #581's contradiction-separation or
@@ -838,7 +864,8 @@ ranking logic through callers.
 - **Category behavior:** moving category before closure can turn a previously
   empty result into a correct match; PR 1 records the before/after.
 - **Renderer convergence:** the shared item line must preserve importance,
-  tags, and each surface's framing while adding scope labels where needed.
+  tags, and each surface's framing while adding scope, validity, confidence,
+  and agent fields; the machine-facing search payload is gated explicitly.
 - **Demotion and trimming:** supersede and dedup reordering is not membership
   neutral when a wider pool is trimmed later. This is why the hybrid baseline
   is not rerouted.
