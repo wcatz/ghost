@@ -32,8 +32,8 @@ const DefaultDemotionThreshold = 0.90
 // instead regardless of rank, since pinning is an explicit user signal to
 // keep a memory visible. No locking: callers that need Store's s.mu.RLock
 // (i.e. GetTopMemories) take it themselves around the call, same as every
-// other Store method taking a raw *sql.DB.
-func DemotionPenalties(ctx context.Context, db *sql.DB, ids []string, pinned map[string]bool, threshold float64) (map[string]int, error) {
+// other Store method taking a raw SQL read handle.
+func DemotionPenalties(ctx context.Context, db sqlQueryer, ids []string, pinned map[string]bool, threshold float64) (map[string]int, error) {
 	if len(ids) < 2 {
 		return nil, nil
 	}
@@ -110,9 +110,9 @@ func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) [
 // mirrors DemotionPenalties so injection paths (GetTopMemories, the session
 // hook) can share one query with the search path's demoteSuperseded. No
 // locking: same contract as DemotionPenalties — callers holding Store's
-// s.mu.RLock (GetTopMemories) pass s.db directly; the hook passes its own
+// s.mu.RLock (GetTopMemories) pass its read handle; the hook passes its own
 // read-only handle.
-func SupersedePenalties(ctx context.Context, db *sql.DB, ids []string) (map[string]int, error) {
+func SupersedePenalties(ctx context.Context, db sqlQueryer, ids []string) (map[string]int, error) {
 	if len(ids) < 2 {
 		return nil, nil
 	}
@@ -180,7 +180,7 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory) []Me
 		pinned[m.ID] = m.Pinned
 	}
 	s.mu.RLock()
-	penalty, err := DemotionPenalties(ctx, s.db, ids, pinned, s.demotionThreshold)
+	penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, pinned, s.demotionThreshold)
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Debug("near-duplicate demote: lookup failed", "error", err)

@@ -82,7 +82,7 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT e.memory_id, e.embedding, e.model, m.scope
 		FROM memory_embeddings e
 		JOIN memories m ON m.id = e.memory_id
@@ -278,7 +278,7 @@ func (s *Store) demoteSuperseded(ctx context.Context, results []Memory, p Search
 		ids[i] = m.ID
 	}
 	s.mu.RLock()
-	penalty, err := SupersedePenalties(ctx, s.db, ids)
+	penalty, err := SupersedePenalties(ctx, s.queryDB(), ids)
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Debug("supersede demote: lookup failed", "error", err)
@@ -703,7 +703,7 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 		WHERE id IN (%s)
 	`, strings.Join(placeholders, ","))
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.queryDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get by ids: %w", err)
 	}
@@ -716,7 +716,7 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT e.memory_id, e.embedding, e.model, m.scope
 		FROM memory_embeddings e
 		JOIN memories m ON m.id = e.memory_id

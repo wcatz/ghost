@@ -4,8 +4,76 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func makeExplainScopedMemory(t *testing.T, s *Store, content, environment string) string {
+	t.Helper()
+	id, err := s.Create(context.Background(), testProject, Memory{
+		Category: "fact", Content: content, Source: "manual", Importance: 0.7,
+		Scope: map[string]string{"environment": environment},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	return id
+}
+
+func TestExplainSearchClassifiesDualLegVectorFloor(t *testing.T) {
+	db, err := OpenDB(filepath.Join(t.TempDir(), "explain-floor-scope.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx := context.Background()
+	s := NewStore(db, nil)
+	if err := s.EnsureProject(ctx, testProject, "/tmp/explain-floor", testProject); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	dev := makeExplainScopedMemory(t, s, "development database configuration", "development")
+	prod := makeExplainScopedMemory(t, s, "production database configuration", "production")
+	if err := s.StoreEmbedding(ctx, dev, []float32{0.1, 0.99}, "test"); err != nil {
+		t.Fatalf("StoreEmbedding(dev): %v", err)
+	}
+	if err := s.StoreEmbedding(ctx, prod, []float32{1, 0}, "test"); err != nil {
+		t.Fatalf("StoreEmbedding(prod): %v", err)
+	}
+	s.SetVectorMinSimilarity(0.5)
+
+	find := func(rows []ExplainRow, content string) ExplainRow {
+		t.Helper()
+		for _, row := range rows {
+			if row.Content == content {
+				return row
+			}
+		}
+		t.Fatalf("row %q missing from explanation: %+v", content, rows)
+		return ExplainRow{}
+	}
+
+	scoped, err := s.ExplainSearchScoped(ctx, testProject, "database configuration", []float32{1, 0}, 1, map[string]string{"environment": "production"})
+	if err != nil {
+		t.Fatalf("ExplainSearchScoped(scope): %v", err)
+	}
+	devRow := find(scoped.Rows, "development database configuration")
+	if devRow.Included || !strings.Contains(devRow.Reason, "scope") || strings.Contains(devRow.Reason, "floor") {
+		t.Errorf("scope exclusion misclassified a dual-leg row: %+v", devRow)
+	}
+	if prodRow := find(scoped.Rows, "production database configuration"); !prodRow.Included {
+		t.Errorf("in-scope row was not included: %+v", prodRow)
+	}
+
+	window, err := s.ExplainSearchScoped(ctx, testProject, "database configuration", []float32{1, 0}, 1, nil)
+	if err != nil {
+		t.Fatalf("ExplainSearchScoped(window): %v", err)
+	}
+	devRow = find(window.Rows, "development database configuration")
+	if devRow.Included || !strings.Contains(devRow.Reason, "outside the result window") || strings.Contains(devRow.Reason, "floor") {
+		t.Errorf("window exclusion misclassified a dual-leg row: %+v", devRow)
+	}
+}
 
 // TestExplainSearchReportsPerLegRanks: when an agent gets bad context it has
 // no way to tell whether FTS, the vector leg, RRF, decay or the result window

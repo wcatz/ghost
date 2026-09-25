@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 )
@@ -75,13 +76,36 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		ex.Notes = append(ex.Notes, "scope is applied inside hybrid window selection; included membership below matches the scoped search")
 	}
 
+	// Keep every explain read on one SQLite snapshot. The production search and
+	// its diagnostic leg reads must describe the same database state even when
+	// another process writes between individual queries.
+	s.mu.RLock()
+	floor := s.vectorMinSimilarity
+	demotionThreshold := s.demotionThreshold
+	s.mu.RUnlock()
+	p.MinSimilarity = floor
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return ex, fmt.Errorf("begin explain snapshot: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	traceStore := &Store{
+		db:                  s.db,
+		snapshot:            tx,
+		logger:              s.logger,
+		demotionThreshold:   demotionThreshold,
+		vectorMinSimilarity: floor,
+	}
+
 	// Membership comes from the same production search the formatted path uses.
-	final, err := s.SearchHybridScoped(ctx, projectID, query, queryVec, limit, scope)
+	final, err := traceStore.SearchHybridScoped(ctx, projectID, query, queryVec, limit, scope)
 	if err != nil {
 		return ex, fmt.Errorf("search: %w", err)
 	}
 
-	fts, err := s.SearchFTS(ctx, projectID, query, limit*2)
+	fts, err := traceStore.SearchFTS(ctx, projectID, query, limit*2)
 	if err != nil {
 		fts = nil // SearchHybrid treats a failing leg as non-fatal; do the same
 	}
@@ -92,7 +116,7 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	// filtered leg is kept.
 	var rawVec, vec []ScoredMemory
 	if queryVec != nil {
-		if v, vErr := s.SearchVector(ctx, projectID, queryVec, limit*2); vErr == nil {
+		if v, vErr := traceStore.SearchVector(ctx, projectID, queryVec, limit*2); vErr == nil {
 			rawVec = v
 			vec = filterVectorFloor(v, p.MinSimilarity)
 		}
@@ -130,20 +154,20 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 			ids = append(ids, id)
 		}
 	}
-	for id := range ftsRank {
-		add(id)
+	for _, m := range fts {
+		add(m.ID)
 	}
-	for id := range rawRank {
-		add(id)
+	for _, v := range rawVec {
+		add(v.MemoryID)
 	}
-	for id := range finalRank {
-		add(id)
+	for _, m := range final {
+		add(m.ID)
 	}
 	if len(ids) == 0 {
 		return ex, nil
 	}
 
-	candidates, err := s.GetByIDs(ctx, ids)
+	candidates, err := traceStore.GetByIDs(ctx, ids)
 	if err != nil {
 		return ex, fmt.Errorf("hydrate candidates: %w", err)
 	}
@@ -159,16 +183,12 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	// order, and DemotionPenalties decides which member of a near-duplicate
 	// pair loses from its position in that slice (rank[b] > rank[a]) — so
 	// passing anything else both widens the set and changes the verdict.
-	// Collecting ids by ranging over maps would additionally randomize the
-	// order Go uses, assigning the penalty to a different member on each run.
 	finalIDs := make([]string, len(final))
 	for i, m := range final {
 		finalIDs[i] = m.ID
 	}
-	s.mu.RLock()
-	supersede, supErr := SupersedePenalties(ctx, s.db, finalIDs)
-	nearDup, nearErr := DemotionPenalties(ctx, s.db, finalIDs, pinned, s.demotionThreshold)
-	s.mu.RUnlock()
+	supersede, supErr := SupersedePenalties(ctx, traceStore.queryDB(), finalIDs)
+	nearDup, nearErr := DemotionPenalties(ctx, traceStore.queryDB(), finalIDs, pinned, demotionThreshold)
 	if supErr != nil {
 		supersede = nil
 	}
@@ -227,12 +247,16 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 		}
 
 		// Excluded. Demotions in this system are membership-preserving, so
-		// absence is the vector floor, the scope constraint, or the result
-		// window, in the same order the production search applies them.
+		// absence is the vector floor (for a vector-only candidate), the scope
+		// constraint, or the result window, in the same order production
+		// applies them. A vector floor removes only the vector contribution of
+		// a dual-leg FTS candidate, so that row must not be labeled as if the
+		// whole memory had been dropped.
 		_, onFloor := rawRank[id]
 		_, survived := vecRank[id]
+		_, ftsHit := ftsRank[id]
 		switch {
-		case onFloor && !survived:
+		case onFloor && !survived && !ftsHit:
 			row.Reason = fmt.Sprintf("dropped by the vector similarity floor: cosine %.4f is below the minimum %.4f",
 				rawScore[id], float64(p.MinSimilarity))
 		case len(scope) > 0 && !ScopeMatches(m.Scope, scope):

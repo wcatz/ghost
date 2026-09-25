@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -12,7 +13,7 @@ import (
 // formatted scoped search returns. An out-of-scope candidate may remain in the
 // diagnostic union, but it must be marked excluded and carry the scope reason.
 func TestSearchExplainAppliesScope(t *testing.T) {
-	_, session := newCapSession(t)
+	srv, session := newCapSession(t)
 	saveScoped(t, session, "development database uses SQLite", "development")
 	saveScoped(t, session, "production database uses PostgreSQL", "production")
 	saveScoped(t, session, "unscoped database uses the shared service", "")
@@ -68,6 +69,52 @@ func TestSearchExplainAppliesScope(t *testing.T) {
 	}
 	if !sawScopeNote {
 		t.Errorf("scoped explanation did not identify the selection seam: %v", ex.Notes)
+	}
+
+	store, ok := srv.store.(*memory.Store)
+	if !ok {
+		t.Fatalf("test server store = %T, want *memory.Store", srv.store)
+	}
+	resolvedProject, _, err := store.ResolveProject(context.Background(), "test-project")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	expected, err := store.SearchHybridScoped(context.Background(), resolvedProject, "database", nil, 3, map[string]string{"environment": "production"})
+	if err != nil {
+		t.Fatalf("SearchHybridScoped: %v", err)
+	}
+	expectedIDs := make(map[string]bool, len(expected))
+	for _, m := range expected {
+		expectedIDs[m.ID] = true
+	}
+	for _, row := range ex.Rows {
+		if row.Included != expectedIDs[row.ID] {
+			t.Errorf("row %s included=%v, production search membership=%v", row.ID, row.Included, expectedIDs[row.ID])
+		}
+	}
+
+	categoryRes := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "database",
+		"category":   "fact",
+		"limit":      3,
+		"explain":    true,
+		"scope":      map[string]any{"environment": "production"},
+	})
+	if categoryRes.IsError {
+		t.Fatalf("category+scope explain errored: %s", resultText(categoryRes))
+	}
+	var categoryEx memory.SearchExplain
+	if err := json.Unmarshal([]byte(resultText(categoryRes)), &categoryEx); err != nil {
+		t.Fatalf("category+scope response is not JSON: %v", err)
+	}
+	hasCategoryNote, hasScopeNote := false, false
+	for _, note := range categoryEx.Notes {
+		hasCategoryNote = hasCategoryNote || strings.Contains(note, "category filter is applied")
+		hasScopeNote = hasScopeNote || strings.Contains(note, "scope is applied inside hybrid window selection")
+	}
+	if !hasCategoryNote || !hasScopeNote {
+		t.Errorf("category+scope notes = %v, want both filter disclosures", categoryEx.Notes)
 	}
 }
 
