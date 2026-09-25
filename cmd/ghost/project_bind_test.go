@@ -30,6 +30,17 @@ func bindStore(t *testing.T) *memory.Store {
 // in particular. It never spawns git.
 func noRemote(string) string { return "" }
 
+// physicalDir is the path a bind is expected to record and print: the
+// symlink-resolved directory a session would actually be standing in.
+func physicalDir(t *testing.T, dir string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
+	}
+	return resolved
+}
+
 // TestRunProjectBindCoreResolvesCheckout is the reason the command exists: a
 // project upgraded from a v9 database records its bare name as its path, so a
 // session standing in the real checkout resolves nothing and gets no
@@ -49,8 +60,78 @@ func TestRunProjectBindCoreResolvesCheckout(t *testing.T) {
 	if id, _, err := store.ResolveProject(ctx, dir); err != nil || id != "infra" {
 		t.Fatalf("ResolveProject(%q) = (%q, %v), want the bound project", dir, id, err)
 	}
-	if !strings.Contains(out.String(), dir) {
+	if !strings.Contains(out.String(), physicalDir(t, dir)) {
 		t.Errorf("output should report the bound path, got:\n%s", out.String())
+	}
+}
+
+// TestRunProjectBindCorePrintsStoredPath — binding through a symlink must print
+// the path that was actually stored, not the alias that was typed, or the user
+// reads back a path Ghost does not hold.
+func TestRunProjectBindCorePrintsStoredPath(t *testing.T) {
+	ctx := context.Background()
+	store := bindStore(t)
+	if err := store.EnsureProject(ctx, "infra", "", "infrastructure"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := runProjectBindCore(ctx, store, &out, "infra", link, noRemote); err != nil {
+		t.Fatalf("runProjectBindCore: %v", err)
+	}
+	if !strings.Contains(out.String(), physicalDir(t, real)) {
+		t.Errorf("output should report the stored (physical) path, got:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), link) {
+		t.Errorf("output should not report the alias that was typed, got:\n%s", out.String())
+	}
+}
+
+// TestParseProjectBindArgs covers the argument contract, including -h/--help:
+// a user who cannot remember the syntax types `ghost project bind -h`, and a
+// usage line printed to stderr with exit 1 is not an answer to that.
+func TestParseProjectBindArgs(t *testing.T) {
+	cases := []struct {
+		name     string
+		args     []string
+		project  string
+		path     string
+		help     bool
+		wantFail bool
+	}{
+		{name: "two positionals", args: []string{"infra", "/x/infra"}, project: "infra", path: "/x/infra"},
+		{name: "short help", args: []string{"-h"}, help: true},
+		{name: "long help", args: []string{"--help"}, help: true},
+		{name: "help with a project", args: []string{"infra", "-h"}, help: true},
+		{name: "no arguments", args: nil, wantFail: true},
+		{name: "one argument", args: []string{"infra"}, wantFail: true},
+		{name: "three arguments", args: []string{"a", "b", "c"}, wantFail: true},
+		{name: "unknown flag", args: []string{"--apply", "infra", "/x"}, wantFail: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			project, path, help, err := parseProjectBindArgs(tc.args)
+			if tc.wantFail {
+				if err == nil {
+					t.Fatalf("expected an error, got project=%q path=%q help=%v", project, path, help)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if help != tc.help {
+				t.Errorf("help = %v, want %v", help, tc.help)
+			}
+			if project != tc.project || path != tc.path {
+				t.Errorf("got project=%q path=%q, want %q / %q", project, path, tc.project, tc.path)
+			}
+		})
 	}
 }
 

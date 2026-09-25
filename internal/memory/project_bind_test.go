@@ -36,6 +36,31 @@ func sentinelProject(t *testing.T, s *Store, id, name string) {
 	}
 }
 
+// physical is the path a bind is expected to record for dir: EvalSymlinks, the
+// same resolution the session hook applies to a reported cwd. Asserting the
+// stored string against this rather than against dir is the whole point — a
+// bind that records the path as typed stores a spelling a session may never
+// report.
+func physical(t *testing.T, dir string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
+	}
+	return resolved
+}
+
+// symlinkTo creates a symlink to target inside a fresh temp dir and returns it.
+// Skips when symlinks are unavailable (Windows without developer mode).
+func symlinkTo(t *testing.T, target string) string {
+	t.Helper()
+	link := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	return link
+}
+
 // projectPath and projectRemote read the row straight from SQLite rather than
 // through a store accessor: these tests assert what a bind actually persisted,
 // and a reader that shared the writer's normalization would agree with a bug
@@ -82,8 +107,8 @@ func TestBindProjectPathBindsSentinelProject(t *testing.T) {
 	if !got.PathChanged || !got.RemoteSet {
 		t.Fatalf("binding a sentinel project should change path and set remote: %+v", got)
 	}
-	if got.Path != dir {
-		t.Errorf("recorded path = %q, want %q", projectPath(t, s, "infra"), dir)
+	if got := projectPath(t, s, "infra"); got != physical(t, dir) {
+		t.Errorf("recorded path = %q, want %q", got, physical(t, dir))
 	}
 	if remote := projectRemote(t, s, "infra"); remote != "github.com/owner/infra" {
 		t.Errorf("repo_remote = %q, want %q", remote, "github.com/owner/infra")
@@ -146,6 +171,256 @@ func TestBindProjectPathIsIdempotent(t *testing.T) {
 		t.Errorf("a no-op bind should report the same path on both sides, got %q → %q",
 			second.PreviousPath, second.Path)
 	}
+}
+
+// TestBindProjectPathStoresPhysicalPath — a bind records the physical path,
+// not the one that was typed. A session reports the directory it is standing
+// in, which is the physical one; a bind that stored a symlink's own spelling
+// would leave the project resolving only for callers who happened to type the
+// same alias, and would not be the path the user reads back in the output.
+func TestBindProjectPathStoresPhysicalPath(t *testing.T) {
+	ctx := context.Background()
+	s := bindStore(t)
+	sentinelProject(t, s, "infra", "infrastructure")
+	real := t.TempDir()
+	link := symlinkTo(t, real)
+
+	got, err := s.BindProjectPath(ctx, "infra", link, "")
+	if err != nil {
+		t.Fatalf("BindProjectPath: %v", err)
+	}
+	if want := physical(t, real); got.Path != want {
+		t.Errorf("reported path = %q, want the physical path %q", got.Path, want)
+	}
+	if want := physical(t, real); projectPath(t, s, "infra") != want {
+		t.Errorf("stored path = %q, want the physical path %q", projectPath(t, s, "infra"), want)
+	}
+	if id, _, err := s.ResolveProject(ctx, physical(t, real)); err != nil || id != "infra" {
+		t.Errorf("ResolveProject of the physical path = (%q, %v), want infra", id, err)
+	}
+}
+
+// TestBindProjectPathRefusesSymlinkToAnotherProject — the same directory
+// reached through a symlink is the same place. Textual comparison treats the
+// two spellings as different projects, and the second binding would then sit
+// one UNIQUE-constraint violation away from splitting a checkout in half.
+func TestBindProjectPathRefusesSymlinkToAnotherProject(t *testing.T) {
+	ctx := context.Background()
+	s := bindStore(t)
+	sentinelProject(t, s, "first", "first")
+	sentinelProject(t, s, "second", "second")
+	real := t.TempDir()
+
+	if _, err := s.BindProjectPath(ctx, "first", real, ""); err != nil {
+		t.Fatalf("binding the first project: %v", err)
+	}
+	_, err := s.BindProjectPath(ctx, "second", symlinkTo(t, real), "")
+	if !errors.Is(err, ErrBindPathClaimed) {
+		t.Fatalf("err = %v, want ErrBindPathClaimed for a symlink to the same directory", err)
+	}
+	if !strings.Contains(err.Error(), "first") {
+		t.Errorf("error should name the project that already claims the directory, got %q", err)
+	}
+	if got := projectPath(t, s, "second"); got != "second" {
+		t.Errorf("the refused bind wrote path %q", got)
+	}
+}
+
+// TestBindProjectPathRefusesPhysicalPathOfAliasedProject is the same
+// directory reached from both ends: the first project's recorded path is a
+// symlink's own spelling, written by some earlier caller, and the second bind
+// arrives with the physical path. Comparing the stored TEXT would see two
+// different strings and let the physical directory be claimed a second time.
+func TestBindProjectPathRefusesPhysicalPathOfAliasedProject(t *testing.T) {
+	ctx := context.Background()
+	s := bindStore(t)
+	sentinelProject(t, s, "first", "first")
+	sentinelProject(t, s, "second", "second")
+	real := t.TempDir()
+	link := symlinkTo(t, real)
+
+	// Record the alias directly, the way a save over MCP with a path-shaped
+	// project_id would have.
+	if err := s.EnsureProject(ctx, "first", link, "first"); err != nil {
+		t.Fatalf("EnsureProject with an aliased path: %v", err)
+	}
+	_, err := s.BindProjectPath(ctx, "second", real, "")
+	if !errors.Is(err, ErrBindPathClaimed) {
+		t.Fatalf("err = %v, want ErrBindPathClaimed — the alias and the physical path are one directory", err)
+	}
+	if got := projectPath(t, s, "second"); got != "second" {
+		t.Errorf("the refused bind wrote path %q", got)
+	}
+}
+
+// TestBindProjectPathIsIdempotentThroughASymlink — the same checkout re-bound
+// through the same alias is the same binding. It matters because bind now
+// records the physical path: comparing only the text would report the re-run
+// as a change and rewrite updated_at every time a user re-ran the command
+// printed by `ghost mcp status`.
+func TestBindProjectPathIsIdempotentThroughASymlink(t *testing.T) {
+	ctx := context.Background()
+	s := bindStore(t)
+	sentinelProject(t, s, "infra", "infrastructure")
+	real := t.TempDir()
+	link := symlinkTo(t, real)
+
+	first, err := s.BindProjectPath(ctx, "infra", link, "")
+	if err != nil {
+		t.Fatalf("first bind: %v", err)
+	}
+	second, err := s.BindProjectPath(ctx, "infra", link, "")
+	if err != nil {
+		t.Fatalf("re-binding through the same symlink: %v", err)
+	}
+	if second.Changed() {
+		t.Errorf("re-binding the same directory through the same symlink must report no change, got %+v (first %+v)", second, first)
+	}
+}
+
+// TestBindProjectPathRewritesAnAliasedPath — a project recorded under a
+// symlink's own spelling is rewritten to the physical path, and the rewrite is
+// reported. It has to be: the resolver narrows its candidate query on the
+// stored TEXT, so an alias and its target share no prefix, and a session
+// reporting the physical directory — which is what a shell's working directory
+// is — would find nothing. Leaving the alias in place would leave the project
+// exactly as unresolvable as bind was called to fix it.
+func TestBindProjectPathRewritesAnAliasedPath(t *testing.T) {
+	ctx := context.Background()
+	s := bindStore(t)
+	sentinelProject(t, s, "infra", "infrastructure")
+	real := t.TempDir()
+	link := symlinkTo(t, real)
+	if err := s.EnsureProject(ctx, "infra", link, "infrastructure"); err != nil {
+		t.Fatalf("EnsureProject with an aliased path: %v", err)
+	}
+
+	got, err := s.BindProjectPath(ctx, "infra", real, "")
+	if err != nil {
+		t.Fatalf("BindProjectPath: %v", err)
+	}
+	if !got.PathChanged {
+		t.Errorf("rewriting the alias to the physical path is a change: %+v", got)
+	}
+	if recorded := projectPath(t, s, "infra"); recorded != physical(t, real) {
+		t.Errorf("stored path = %q, want the physical path %q", recorded, physical(t, real))
+	}
+	if id, _, err := s.ResolveProject(ctx, real); err != nil || id != "infra" {
+		t.Errorf("ResolveProject of the physical directory = (%q, %v), want infra", id, err)
+	}
+}
+
+// TestBindProjectPathRefusesUnmatchablePath — the resolver's candidate query
+// skips recorded paths of ten characters or fewer, so binding one records a
+// project that no session directory can ever find. The command exists to make
+// a project resolvable, so a path it would leave unresolvable is a refusal,
+// not a success.
+func TestBindProjectPathRefusesUnmatchablePath(t *testing.T) {
+	ctx := context.Background()
+	s := bindStore(t)
+	sentinelProject(t, s, "infra", "infrastructure")
+
+	// The filter is on the stored path's length, so the test needs a real
+	// directory whose PHYSICAL path is short. A deep temp root cannot provide
+	// one, which is why this skips rather than silently passing.
+	short := filepath.Join(os.TempDir(), "gb1")
+	if resolved, err := filepath.EvalSymlinks(short); err == nil && len(resolved) > 10 {
+		t.Skipf("no short physical path available under %s (temp root is %d chars)", os.TempDir(), len(resolved))
+	}
+	if err := os.Mkdir(short, 0o700); err != nil {
+		t.Skipf("cannot create %s: %v", short, err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(short) })
+
+	if _, err := s.BindProjectPath(ctx, "infra", short, ""); !errors.Is(err, ErrBindPathUnmatchable) {
+		t.Fatalf("err = %v, want ErrBindPathUnmatchable for a path the resolver skips", err)
+	}
+	if got := projectPath(t, s, "infra"); got != "infra" {
+		t.Errorf("the refused bind wrote path %q", got)
+	}
+}
+
+// TestBindProjectPathRefusesAncestorOfAnotherProject is the #546 shape aimed
+// at bind: binding ~/git would record a prefix that matches every unregistered
+// clone beneath it, so a session in one of those clones would resolve to this
+// project and read its memories.
+func TestBindProjectPathRefusesAncestorOfAnotherProject(t *testing.T) {
+	ctx := context.Background()
+	s := bindStore(t)
+	sentinelProject(t, s, "inner", "inner")
+	sentinelProject(t, s, "outer", "outer")
+	parent := t.TempDir()
+	inner := filepath.Join(parent, "checkout")
+	if err := os.Mkdir(inner, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	if _, err := s.BindProjectPath(ctx, "inner", inner, ""); err != nil {
+		t.Fatalf("binding the inner project: %v", err)
+	}
+	_, err := s.BindProjectPath(ctx, "outer", parent, "")
+	if !errors.Is(err, ErrBindPathContainsOther) {
+		t.Fatalf("err = %v, want ErrBindPathContainsOther for an ancestor of another checkout", err)
+	}
+	if !strings.Contains(err.Error(), "inner") {
+		t.Errorf("error should name the project inside the path, got %q", err)
+	}
+	if got := projectPath(t, s, "outer"); got != "outer" {
+		t.Errorf("the refused bind wrote path %q", got)
+	}
+}
+
+// TestBindProjectPathRefusesDescendantOfUnidentifiedProject — a project
+// recorded at ~/git claims every directory under it by path prefix, so a
+// project bound inside that subtree could never be returned by the resolver.
+// When the enclosing project records a repository remote it is identified by
+// repository rather than by directory, and a nested checkout (a submodule, a
+// vendored repo) is legitimately a different project — so that case binds and
+// resolves to the nested project.
+func TestBindProjectPathRefusesDescendantOfUnidentifiedProject(t *testing.T) {
+	ctx := context.Background()
+
+	setup := func(t *testing.T, enclosingRemote string) (*Store, string) {
+		t.Helper()
+		s := bindStore(t)
+		sentinelProject(t, s, "enclosing", "enclosing")
+		sentinelProject(t, s, "nested", "nested")
+		enclosing := t.TempDir()
+		if _, err := s.BindProjectPath(ctx, "enclosing", enclosing, enclosingRemote); err != nil {
+			t.Fatalf("binding the enclosing project: %v", err)
+		}
+		nested := filepath.Join(enclosing, "vendor", "lib")
+		if err := os.MkdirAll(nested, 0o700); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		return s, nested
+	}
+
+	t.Run("enclosing project has no remote", func(t *testing.T) {
+		s, nested := setup(t, "")
+		_, err := s.BindProjectPath(ctx, "nested", nested, "")
+		if !errors.Is(err, ErrBindPathInsideOther) {
+			t.Fatalf("err = %v, want ErrBindPathInsideOther", err)
+		}
+		if !strings.Contains(err.Error(), "enclosing") {
+			t.Errorf("error should name the enclosing project, got %q", err)
+		}
+		if got := projectPath(t, s, "nested"); got != "nested" {
+			t.Errorf("the refused bind wrote path %q", got)
+		}
+	})
+
+	t.Run("enclosing project has a remote", func(t *testing.T) {
+		s, nested := setup(t, "github.com/owner/enclosing")
+		if _, err := s.BindProjectPath(ctx, "nested", nested, "github.com/owner/nested"); err != nil {
+			t.Fatalf("a nested checkout under a repository-identified project must bind: %v", err)
+		}
+		// The longer recorded path has to win, or the nested project would be
+		// unreachable and the bind would have been pointless.
+		if id, _, err := s.ResolveProject(ctx, nested); err != nil || id != "nested" {
+			t.Errorf("ResolveProject(%q) = (%q, %v), want nested", nested, id, err)
+		}
+	})
 }
 
 // TestBindProjectPathTreatsSpellingsAsOneLocation — a project written by some

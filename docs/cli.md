@@ -161,11 +161,11 @@ Gives a project a recorded checkout, so a session in that directory resolves it:
 ghost project bind infrastructure /home/wayne/git/infrastructure
 ```
 
-The first argument is an existing project **id** — not a name or a path. A project that records no usable location cannot be resolved from a directory, so it gets no session-start context and no Stop-hook lifecycle work; this is the command that repairs that, and `ghost mcp status` lists every project that needs it.
+The first argument is an existing project **id** — not a name or a path. A project that records no usable location cannot be resolved from a directory, so it gets no session-start context and no Stop-hook lifecycle work; this is the command that repairs that, and `ghost mcp status` lists every project that needs it. Pass `-h` or `--help` for this section.
 
 It is also the repair for a checkout that has moved or been deleted, which `ghost mcp status` does *not* report: the status notice tests the recorded path's shape, not whether the directory still exists, so a moved checkout needs this command with its new path.
 
-The directory is made absolute and cleaned, and must exist and be a directory. Ghost also records the checkout's Git remote when the project records none, so a second worktree of the same repository resolves to the same project.
+The directory is made absolute and cleaned, must exist and be a directory, and is stored as its **physical** path — symlinks resolved, because that is the directory a session reports. Ghost also records the checkout's Git remote when the project records none, so a second worktree of the same repository resolves to the same project.
 
 The command refuses, writing nothing, when:
 
@@ -174,8 +174,11 @@ The command refuses, writing nothing, when:
 | the project is `_global` | it holds every project's memories, not a checkout |
 | the project id does not exist | bind never guesses which project was meant |
 | the path is missing, is not a directory, or is the filesystem root | a path that cannot be compared against a session directory would never resolve |
-| another project already records that path | two projects on one checkout leave a session there resolving to whichever row ranked higher |
-| another project already records the detected remote | one repository is one project |
+| another project already records that directory | two projects on one checkout leave a session there resolving to whichever row ranked higher; the same directory reached through a symlink counts as already recorded |
+| the path contains another project's checkout | a recorded path matches by prefix, so binding `~/git` while a project records `~/git/infra` would hand that project every unregistered clone beneath it |
+| the path is inside another project's checkout, and that project has no remote | such a project claims every directory below itself, so a project bound inside its subtree could never be resolved; a project with a remote is identified by repository instead, and a nested checkout is legitimately a separate project |
+| path resolution could never match the path | resolution only considers recorded paths longer than ten characters, and refuses a tie for the longest match, so binding one would record a project no session can find |
+| another project already records the detected remote | one repository is one project (git-ssh and https spellings normalize to the same remote) |
 | the project already belongs to a different remote | merging is the repair; rebinding is not |
 
 Binding the same project to the same directory again succeeds and changes nothing, so the command printed by `ghost mcp status` is safe to re-run.

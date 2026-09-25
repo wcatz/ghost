@@ -1415,6 +1415,24 @@ func (s *Store) basenameCandidates(ctx context.Context, name string, hasRepoRemo
 	return scanProjectCandidates(rows)
 }
 
+// pathCandidatesQuery selects the rows whose recorded path text could contain
+// input, longest first. It is only a narrowing step, never proof of a project
+// match: the caller still applies storedPathIsUsable, pathsAgree, and the
+// remote checks.
+//
+// LENGTH(path) > 10 is part of the narrowing, not a rule about what a location
+// is: it drops the id sentinel and paths too short to be worth a directory
+// match, so a project whose recorded path is that short is invisible to path
+// resolution. Project binding therefore has to apply the same filter, which is
+// why the query is a named constant rather than a literal inside one function —
+// changing the filter here changes what bind is allowed to record.
+const pathCandidatesQuery = `SELECT id, name, path, %s FROM projects
+		WHERE (path = ?
+		   OR REPLACE(path, '\', '/') = ?
+		   OR substr(?, 1, LENGTH(REPLACE(path, '\', '/')) + 1) = REPLACE(path, '\', '/') || '/')
+		  AND LENGTH(path) > 10
+		ORDER BY LENGTH(path) DESC`
+
 // pathCandidates returns rows whose recorded path text could contain input.
 // The caller still applies storedPathIsUsable, pathsAgree, and remote checks;
 // this query is only a narrowing step, never proof of a project match.
@@ -1424,13 +1442,7 @@ func (s *Store) pathCandidates(ctx context.Context, input string, hasRepoRemote 
 		remoteColumn = "COALESCE(repo_remote, '')"
 	}
 	norm := absoluteSessionPath(input)
-	query := `SELECT id, name, path, ` + remoteColumn + ` FROM projects
-		WHERE (path = ?
-		   OR REPLACE(path, '\', '/') = ?
-		   OR substr(?, 1, LENGTH(REPLACE(path, '\', '/')) + 1) = REPLACE(path, '\', '/') || '/')
-		  AND LENGTH(path) > 10
-		ORDER BY LENGTH(path) DESC`
-	rows, err := s.db.QueryContext(ctx, query, norm, norm, norm)
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(pathCandidatesQuery, remoteColumn), norm, norm, norm)
 	if err != nil {
 		return nil, err
 	}

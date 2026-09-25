@@ -374,26 +374,54 @@ func writeUnboundProjectNotice(ctx context.Context, out io.Writer, store *memory
 	return nil
 }
 
-// runProjectBind implements `ghost project bind <project-id> <checkout>`.
-func runProjectBind() {
-	args := os.Args[3:]
+// projectBindUsage is the help for `ghost project bind`. It goes to stdout for
+// -h/--help, which a user reaches for precisely because they do not remember
+// the syntax, and to stderr alongside an error otherwise.
+const projectBindUsage = `Usage: ghost project bind <project-id> <checkout-directory>
+
+Gives a project a recorded checkout, so a session in that directory resolves it.
+A project created over MCP records only a name, and a project upgraded from a
+v9 database recorded its name as its path, so until something records a real
+path or a repository remote no directory resolves them and they get no
+session-start context or lifecycle work. ghost mcp status lists them.
+
+The directory is stored as its physical (symlink-resolved) path. Refuses
+_global, an unknown project, a path that another project already records or
+that contains one, a path inside another project that has no repository
+remote, a path resolution could never match, and a repository another project
+already claims. Safe to re-run.
+`
+
+// parseProjectBindArgs splits `ghost project bind`'s arguments. Help wins over
+// everything else, so "ghost project bind -h" answers the question rather than
+// complaining about the missing project.
+func parseProjectBindArgs(args []string) (projectID, path string, showHelp bool, err error) {
 	var positional []string
 	for _, a := range args {
-		if strings.HasPrefix(a, "-") {
-			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n", a)
-			os.Exit(1)
+		switch {
+		case a == "-h" || a == "--help":
+			return "", "", true, nil
+		case strings.HasPrefix(a, "-"):
+			return "", "", false, fmt.Errorf("unknown flag %q", a)
+		default:
+			positional = append(positional, a)
 		}
-		positional = append(positional, a)
 	}
 	if len(positional) != 2 {
-		fmt.Fprintln(os.Stderr, "Usage: ghost project bind <project-id> <checkout-directory>")
-		fmt.Fprintln(os.Stderr, `Gives a project a recorded checkout, so a session in that directory
-resolves it. A project created over MCP records only a name, and a project
-upgraded from a v9 database recorded its name as its path, so until something
-records a real path or a repository remote no directory resolves them and they
-get no session-start context or lifecycle work. Refuses _global, a path
-another project already claims, and a repository another project already
-claims. Safe to re-run.`)
+		return "", "", false, fmt.Errorf("expected a project id and a checkout directory, got %d argument(s)", len(positional))
+	}
+	return positional[0], positional[1], false, nil
+}
+
+// runProjectBind implements `ghost project bind <project-id> <checkout>`.
+func runProjectBind() {
+	project, path, showHelp, err := parseProjectBindArgs(os.Args[3:])
+	if showHelp {
+		fmt.Fprint(os.Stdout, projectBindUsage)
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n\n%s", err, projectBindUsage)
 		os.Exit(1)
 	}
 
@@ -402,8 +430,11 @@ claims. Safe to re-run.`)
 
 	// repo.DetectRemote is the same detector main injects into the store, so
 	// the remote recorded here is the remote resolution will later compare
-	// against — two spellings of one repository, not two identities.
-	if err := runProjectBindCore(context.Background(), store, os.Stdout, positional[0], positional[1], repo.DetectRemote); err != nil {
+	// against — two spellings of one repository, not two identities. It is
+	// asked about the path as typed, which is the same repository: git
+	// resolves the symlinks on the way in, and the store records the physical
+	// path either way.
+	if err := runProjectBindCore(context.Background(), store, os.Stdout, project, path, repo.DetectRemote); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}

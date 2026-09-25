@@ -25,10 +25,6 @@ import (
 // is URI-escaped so a '?' or '#' in it can't corrupt the query, and no
 // journal_mode pragma is set (a read-only connection cannot write the header).
 //
-// The DSN itself is memory.ReadOnlyDSN, so this package and a diagnostic
-// command reading the same database share one connection definition and one
-// busy_timeout rather than two that can drift apart.
-//
 // busy_timeout is intentionally left at 1000ms here — shorter than rwDSN's
 // 5000ms below, and deliberately not raised to match it for #288. Store
 // (memory.OpenDB, internal/memory/schema.go) opens the database in WAL mode,
@@ -38,7 +34,12 @@ import (
 // concurrent writer for its snapshot, so this path is not exposed to the
 // write-lock contention #288 describes — that fix is scoped to rwDSN.
 func roDSN(dbPath string) string {
-	return memory.ReadOnlyDSN(dbPath)
+	u := url.URL{
+		Scheme:   "file",
+		Opaque:   (&url.URL{Path: dbPath}).EscapedPath(),
+		RawQuery: "mode=ro&_pragma=busy_timeout(1000)",
+	}
+	return u.String()
 }
 
 // rwDSN builds a read-write DSN for dbPath, URI-escaped like roDSN. Its

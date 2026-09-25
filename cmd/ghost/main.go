@@ -123,7 +123,7 @@ Commands:
                               (dry-run by default, --apply + name re-type to confirm)
   project merge <old> <new>   Merge one project into another; child records move to the
                               survivor with memory IDs, links, and pin state preserved
-  project bind <id> <path>     Record a checkout for a project so a session in that
+  project bind <id> <path>    Record a checkout for a project so a session in that
                               directory resolves it (ghost mcp status reports
                               projects that have no usable path and no remote)
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)

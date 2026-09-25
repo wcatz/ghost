@@ -292,19 +292,14 @@ CREATE TABLE IF NOT EXISTS maintenance_runs (
 CREATE INDEX IF NOT EXISTS idx_maintenance_runs_at ON maintenance_runs(recorded_at DESC);
 `
 
-// ReadOnlyDSN builds the read-only DSN for dbPath. The file: URI form is
+// readOnlyDSN builds the read-only DSN for dbPath. The file: URI form is
 // required — modernc.org/sqlite honors mode=ro only on URI DSNs, and a bare
 // path opens read-write and would create a phantom empty ghost.db on first
 // read. The path is URI-escaped so a '?' or '#' in it cannot corrupt the
 // query, and no journal_mode pragma is set (a read-only connection cannot
 // write the header). WAL is persisted in the database file itself rather than
 // negotiated per connection, so this connection is in WAL mode too.
-//
-// This is the one read-only DSN constructor: mcpinit's hooks and lifecycle
-// locks read through it too, so a second spelling of the same connection
-// cannot drift into a different busy_timeout and start timing out under the
-// contention OpenDB's 5000ms exists to ride out (#288).
-func ReadOnlyDSN(dbPath string) string {
+func readOnlyDSN(dbPath string) string {
 	u := url.URL{
 		Scheme:   "file",
 		Opaque:   (&url.URL{Path: dbPath}).EscapedPath(),
@@ -329,7 +324,7 @@ func OpenDBReadOnly(dbPath string) (*sql.DB, error) {
 		}
 		return nil, fmt.Errorf("stat database: %w", err)
 	}
-	db, err := sql.Open("sqlite", ReadOnlyDSN(dbPath))
+	db, err := sql.Open("sqlite", readOnlyDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("open database read-only: %w", err)
 	}
