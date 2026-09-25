@@ -330,7 +330,10 @@ func projectLabel(name, id string) string {
 // is nil rather than an error, because the caller has nothing to add to a
 // report another check already produced.
 func openDiagnosticStore() *memory.Store {
-	dataDir, err := config.DataDir()
+	// DataDirPath, not DataDir: the latter creates the directory, and this
+	// helper's whole contract is that it leaves nothing behind. mcpinit's
+	// non-creating paths use the same choice.
+	dataDir, err := config.DataDirPath()
 	if err != nil {
 		return nil
 	}
@@ -370,8 +373,8 @@ func writeUnboundProjectNotice(ctx context.Context, out io.Writer, store *memory
 	// new path, and detecting it would mean a stat whose transient failure
 	// (an unmounted volume, a permission error) would invite an overwrite of a
 	// path that was correct a moment ago.
-	_, _ = fmt.Fprintln(out, "  A recorded path that no longer exists is not detected here — re-bind it with the new path.")
-	return nil
+	_, err = fmt.Fprintln(out, "  A recorded path that no longer exists is not detected here — re-bind it with the new path.")
+	return err
 }
 
 // projectBindUsage is the help for `ghost project bind`. It goes to stdout for

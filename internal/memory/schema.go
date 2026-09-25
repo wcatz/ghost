@@ -292,13 +292,18 @@ CREATE TABLE IF NOT EXISTS maintenance_runs (
 CREATE INDEX IF NOT EXISTS idx_maintenance_runs_at ON maintenance_runs(recorded_at DESC);
 `
 
-// readOnlyDSN builds the read-only DSN for dbPath. The file: URI form is
-// required — modernc.org/sqlite honors mode=ro only on URI DSNs, and a bare
-// path opens read-write and would create a phantom empty ghost.db on first
-// read. The path is URI-escaped so a '?' or '#' in it cannot corrupt the
+// readOnlyDSN builds the read-only DSN OpenDBReadOnly opens. The file: URI
+// form is required — modernc.org/sqlite honors mode=ro only on URI DSNs, and
+// a bare path opens read-write and would create a phantom empty ghost.db on
+// first read. The path is URI-escaped so a '?' or '#' in it cannot corrupt the
 // query, and no journal_mode pragma is set (a read-only connection cannot
 // write the header). WAL is persisted in the database file itself rather than
 // negotiated per connection, so this connection is in WAL mode too.
+//
+// Deliberately unexported: mcpinit and cmd/ghost each already build this same
+// URI for their own read-only paths, and consolidating them is a separate
+// change with its own blast radius. This one exists for OpenDBReadOnly and
+// does not claim to be the only spelling in the tree.
 func readOnlyDSN(dbPath string) string {
 	u := url.URL{
 		Scheme:   "file",

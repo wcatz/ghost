@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -292,15 +293,56 @@ func TestRunProjectBindCoreMakesPathAbsolute(t *testing.T) {
 	}
 }
 
+// failingWriter fails the nth Write and succeeds before it, so a test can aim
+// at one specific line of a multi-write report.
+type failingWriter struct {
+	failOn int
+	writes int
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes == w.failOn {
+		return 0, errors.New("write failed")
+	}
+	return len(p), nil
+}
+
+// TestWriteUnboundProjectNoticeReportsWriteFailure — the caveat line is the
+// part of the notice that tells the user what it cannot see, so a truncated
+// notice is worse than a missing one: the caller has to be able to tell a
+// complete report from a partial one, which means every write's error is
+// returned, including the last.
+func TestWriteUnboundProjectNoticeReportsWriteFailure(t *testing.T) {
+	ctx := context.Background()
+	store := bindStore(t)
+	for _, id := range []string{"infra", "ledger"} {
+		if err := store.EnsureProject(ctx, id, "", id); err != nil {
+			t.Fatalf("EnsureProject(%q): %v", id, err)
+		}
+	}
+
+	// One write per line: the header, one per project, then the caveat.
+	for failOn := 1; failOn <= 4; failOn++ {
+		out := &failingWriter{failOn: failOn}
+		if err := writeUnboundProjectNotice(ctx, out, store); err == nil {
+			t.Errorf("write %d failed but writeUnboundProjectNotice returned nil", failOn)
+		}
+	}
+}
+
 // TestOpenDiagnosticStoreDoesNotCreateTheDatabase — `ghost mcp status` reports
 // on the store, so it must not be the command that brings one into being. A
 // bootstrap() here would create ghost.db, stamp its schema version and seed the
 // builtin rows, and the next status run would report a healthy database where
-// it should report none — the check invalidating its own result.
+// it should report none — the check invalidating its own result. The data
+// directory counts too: a helper that promises to create nothing must not leave
+// an empty ~/.local/share/ghost behind either.
 func TestOpenDiagnosticStoreDoesNotCreateTheDatabase(t *testing.T) {
 	dataHome := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dataHome)
-	dbPath := filepath.Join(dataHome, "ghost", "ghost.db")
+	dataDir := filepath.Join(dataHome, "ghost")
+	dbPath := filepath.Join(dataDir, "ghost.db")
 
 	if store := openDiagnosticStore(); store != nil {
 		store.Close() //nolint:errcheck
@@ -309,9 +351,12 @@ func TestOpenDiagnosticStoreDoesNotCreateTheDatabase(t *testing.T) {
 	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
 		t.Fatalf("the diagnostic read created %s", dbPath)
 	}
+	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+		t.Fatalf("the diagnostic read created the data directory %s", dataDir)
+	}
 
 	// With a real database present it does read, and it reports the projects.
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	rw, err := memory.OpenDB(dbPath)
