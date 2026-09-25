@@ -10,9 +10,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
@@ -186,6 +186,28 @@ func loadGlobals() (globals []sessionMemory, totalCount int, totalCountKnown boo
 	return loadGlobalMemories(filepath.Join(dataDir, "ghost.db"))
 }
 
+// globalOriginGuidance explains the origin labels actually present in the
+// displayed rows. It names absence as the user's marker instead of inventing
+// a "(manual)" row label, and it does not collapse imported or decision-log
+// sources into the narrower claim "reflection or agent".
+func globalOriginGuidance(globals []sessionMemory) string {
+	seen := make(map[string]bool)
+	labels := make([]string, 0, len(globals))
+	for _, m := range globals {
+		_, label := memory.OriginClass(m.Source)
+		if label == "" || seen[label] {
+			continue
+		}
+		seen[label] = true
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	if len(labels) == 0 {
+		return "Rows with no origin tag have no recorded automated origin."
+	}
+	return fmt.Sprintf("Rows with no origin tag are treated as direct user material; parenthesized tags (%s) identify the source that wrote or imported tagged rows. Verify tagged rows with the user before treating them as preferences.", strings.Join(labels, ", "))
+}
+
 // formatSessionContext renders the session-start context markdown from
 // preloaded data. It performs no database access and no side effects — callers
 // own session-count bumping and worker startup. It handles both the
@@ -194,12 +216,38 @@ func loadGlobals() (globals []sessionMemory, totalCount int, totalCountKnown boo
 func formatSessionContext(projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool, globals []sessionMemory, totalGlobalCount int, totalGlobalCountKnown bool) string {
 	var gsb strings.Builder
 	if len(globals) > 0 {
-		fmt.Fprintf(&gsb, "\n**Global (applies to all projects):** the user's own saved cross-project preferences.\n")
+		// Only claim these are the user's preferences when they are. A global
+		// written by reflection was derived from project content by a model —
+		// content that may have come from an untrusted repository — and a
+		// global written through the MCP server was written by an agent.
+		// Presenting either as "the user's own saved preferences" is how
+		// machine-made material gets replayed into every future session as
+		// something authoritative (issue #545).
+		allOwn := true
+		for _, m := range globals {
+			source := memory.CanonicalOriginSource(m.Source, m.Content)
+			own, _ := memory.OriginClass(source)
+			if !own {
+				allOwn = false
+				break
+			}
+		}
+		if allOwn {
+			fmt.Fprintf(&gsb, "\n**Global (applies to all projects):** the user's own saved cross-project preferences.\n")
+		} else {
+			fmt.Fprintf(&gsb, "\n**Global (applies to all projects):** cross-project memories from mixed origins. %s\n", globalOriginGuidance(globals))
+		}
 		if totalGlobalCountKnown && totalGlobalCount > len(globals) {
 			fmt.Fprintf(&gsb, "(%d shown of %d total — %d not shown, ranked by pinned status, then importance, then most-recently-updated; use ghost_search_all for the rest)\n", len(globals), totalGlobalCount, totalGlobalCount-len(globals))
 		}
 		for _, m := range globals {
-			fmt.Fprintf(&gsb, "- [%s] %s\n", m.Category, quoteData(m.Content))
+			source := memory.CanonicalOriginSource(m.Source, m.Content)
+			_, label := memory.OriginClass(source)
+			origin := ""
+			if label != "" {
+				origin = " (" + label + ")"
+			}
+			fmt.Fprintf(&gsb, "- [%s] %s%s\n", m.Category, quoteData(m.Content), origin)
 		}
 	}
 	globalSection := gsb.String()
@@ -333,7 +381,7 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 	}
 
 	rows, err := db.Query(`
-		SELECT id, category, content, pinned FROM memories
+		SELECT id, category, content, pinned, source FROM memories
 		WHERE project_id = '_global' AND resolved_at IS NULL
 		ORDER BY pinned DESC, importance DESC, updated_at DESC
 		LIMIT ?
@@ -344,9 +392,9 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 	defer rows.Close() //nolint:errcheck
 
 	for rows.Next() {
-		var id, cat, content string
+		var id, cat, content, source string
 		var pinnedInt int
-		if err := rows.Scan(&id, &cat, &content, &pinnedInt); err != nil {
+		if err := rows.Scan(&id, &cat, &content, &pinnedInt, &source); err != nil {
 			continue
 		}
 		// 300 bytes here vs. 200 for project memories below is deliberate,
@@ -354,7 +402,7 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 		// count (globalsCap=8), so a larger per-item byte budget still
 		// keeps the total globals-section bytes low.
 		content = truncateUTF8(content, 300)
-		globals = append(globals, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1})
+		globals = append(globals, sessionMemory{ID: id, Category: cat, Content: content, Pinned: pinnedInt == 1, Source: source})
 	}
 
 	// Dedup: unlike project memories (where StableDemote only reorders and
@@ -399,6 +447,10 @@ func loadGlobalMemories(dbPath string) (globals []sessionMemory, totalCount int,
 type sessionMemory struct {
 	ID, Category, Content string
 	Pinned                bool
+	// Source identifies who wrote or imported this row. memory.OriginClass
+	// owns the trust classification; the renderer uses its label rather than
+	// repeating a second source policy here.
+	Source string
 }
 
 func loadSessionContext(cwd string) (projectID, project string, memories []sessionMemory, learned string, tasks [][4]string, decisions [][3]string, interactionCount, totalMemoryCount int, totalCountKnown bool) {
@@ -696,9 +748,5 @@ func truncateUTF8(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s
 	}
-	// Walk backward from maxBytes to find a valid rune boundary.
-	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
-		maxBytes--
-	}
-	return s[:maxBytes] + "…"
+	return memory.TruncateUTF8(s, maxBytes) + "…"
 }

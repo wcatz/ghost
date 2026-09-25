@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,6 +16,85 @@ import (
 // network stall, hung MCP init inside it) blocks the classify/reflect loop
 // indefinitely, since resolve/supersede classify candidates one at a time.
 const defaultTimeout = 5 * time.Minute
+
+type claudeCapabilities struct {
+	safeMode        bool
+	restricted      bool
+	strictMCP       bool
+	disableSlash    bool
+	tools           bool
+	disallowedTools bool
+	settingSources  bool
+}
+
+type claudeBinaryID struct {
+	path    string
+	size    int64
+	modTime time.Time
+}
+
+var claudeCapabilityCache sync.Map // claudeBinaryID -> claudeCapabilities
+
+func parseClaudeCapabilities(help string) claudeCapabilities {
+	help = strings.ToLower(help)
+	return claudeCapabilities{
+		safeMode:        strings.Contains(help, "--safe-mode"),
+		restricted:      strings.Contains(help, "--restricted"),
+		strictMCP:       strings.Contains(help, "--strict-mcp-config"),
+		disableSlash:    strings.Contains(help, "--disable-slash-commands"),
+		tools:           strings.Contains(help, "--tools"),
+		disallowedTools: strings.Contains(help, "--disallowedtools"),
+		settingSources:  strings.Contains(help, "--setting-sources"),
+	}
+}
+
+func claudeCapabilitiesFor(ctx context.Context, binary string) (claudeCapabilities, error) {
+	path, err := exec.LookPath(binary)
+	if err != nil {
+		return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", err)
+	}
+	id := claudeBinaryID{path: path, size: info.Size(), modTime: info.ModTime()}
+	if cached, ok := claudeCapabilityCache.Load(id); ok {
+		return cached.(claudeCapabilities), nil
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	probe, release, _ := harnessCommand(probeCtx, path, []string{"--help"}, os.Environ(), harnessClaude)
+	defer release()
+	out, err := probe.Output()
+	if err != nil {
+		return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", err)
+	}
+	caps := parseClaudeCapabilities(string(out))
+	claudeCapabilityCache.Store(id, caps)
+	return caps, nil
+}
+
+func claudeInvocationArgs(caps claudeCapabilities) ([]string, error) {
+	if !caps.safeMode || !caps.restricted || !caps.strictMCP || !caps.tools || !caps.disallowedTools {
+		return nil, fmt.Errorf("installed claude lacks required no-tools flags; upgrade claude")
+	}
+	args := []string{
+		"-p",
+		"--safe-mode",
+		"--restricted",
+		"--strict-mcp-config",
+		"--tools", "",
+		"--disallowedTools", "mcp__*",
+	}
+	if caps.disableSlash {
+		args = append(args, "--disable-slash-commands")
+	}
+	if caps.settingSources {
+		args = append(args, "--setting-sources", "project,local")
+	}
+	return args, nil
+}
 
 // CLIClient drives Claude via the `claude` CLI (a `claude -p` subprocess).
 // Authentication and billing belong to the caller's Claude CLI configuration.
@@ -24,11 +105,10 @@ const defaultTimeout = 5 * time.Minute
 // ANTHROPIC_API_KEY is stripped from the subprocess environment: if present,
 // it would override subscription/OAuth login and bill the call as
 // pay-per-token API usage instead, defeating the point of this client.
-// --setting-sources project,local excludes the user settings source so the
-// real, unwrapped SessionStart hook in ~/.claude/settings.json never fires —
-// without that, a headless ghost process shelling out to `claude -p` could
-// trigger `ghost hook session-start`, which opens the same SQLite DB this
-// process already holds open.
+// The invocation also runs in restricted/safe mode with an empty built-in
+// tool set and strict MCP configuration. This keeps an untrusted memory
+// prompt from reaching shell, plugin, or MCP operations while preserving the
+// caller's Claude authentication in CLAUDE_CONFIG_DIR.
 type CLIClient struct {
 	binary string
 }
@@ -66,15 +146,23 @@ func (c *CLIClient) run(ctx context.Context, prompt string, extraArgs ...string)
 		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
 		defer cancel()
 	}
-	args := append([]string{"-p", "--setting-sources", "project,local"}, extraArgs...)
+	caps, err := claudeCapabilitiesFor(ctx, c.binary)
+	if err != nil {
+		return "", err
+	}
+	args, err := claudeInvocationArgs(caps)
+	if err != nil {
+		return "", err
+	}
+	args = append(args, extraArgs...)
 	args = append(args, prompt)
-	cmd, release, _ := harnessCommand(ctx, c.binary, args, stripLLMKeys(os.Environ()), "claude")
+	cmd, release, _ := harnessCommand(ctx, c.binary, args, os.Environ(), harnessClaude)
 	defer release()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("claude -p: %w: %s", err, stderr.String())
+		return "", fmt.Errorf("claude -p: %w: %s", err, harnessFailureOutput(stdout.String(), stderr.String()))
 	}
 	return stdout.String(), nil
 }

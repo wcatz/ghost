@@ -35,7 +35,8 @@ func fakeClaudeBinary(t *testing.T, script string) string {
 	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
 	dir := t.TempDir()
 	path := filepath.Join(dir, "claude")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o755); err != nil {
+	helpProbe := "if [ \"$1\" = \"--help\" ]; then\n  printf '%s\\n' '--safe-mode' '--restricted' '--strict-mcp-config' '--disable-slash-commands' '--tools' '--disallowedTools' '--setting-sources'\n  exit 0\nfi\n"
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+helpProbe+script), 0o755); err != nil {
 		t.Fatalf("write fake binary: %v", err)
 	}
 	return path

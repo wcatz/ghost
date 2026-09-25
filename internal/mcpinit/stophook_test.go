@@ -435,7 +435,9 @@ func TestSpawnLifecycle_ReflectOnlyNoLLMWritesMarker(t *testing.T) {
 
 	spawnLifecycleIfConfigured(canonical, "")
 
-	b, err := os.ReadFile(filepath.Join(dataHome, "ghost", "lifecycle-last-failure.json"))
+	// Per-project marker: the seed above registers p1, and the spawn resolves
+	// the session directory to it, so that is the file written.
+	b, err := os.ReadFile(filepath.Join(dataHome, "ghost", projectMarkerFile("p1")))
 	if err != nil {
 		t.Fatalf("expected a failure marker for the skipped reflect spawn: %v", err)
 	}
