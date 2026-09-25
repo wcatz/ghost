@@ -22,7 +22,9 @@ const DefaultDemotionThreshold = 0.90
 // gated them at upsertMergeThreshold, so their strength is a Jaccard score,
 // not the higher cosine threshold 'related' edges use. Without including them,
 // a lexically near-identical save pair survives at full rank unless the
-// linker separately wrote a cosine 'related' edge at 0.90.
+// linker separately wrote a cosine 'related' edge at 0.90. Scope-conflicting
+// endpoint pairs are ignored even when a legacy or manual edge already exists;
+// their claims belong to different environments and must not demote one another.
 //
 // ids order encodes rank (index 0 = highest-ranked). For every 'related' pair
 // found, the lower-ranked ID's penalty is incremented — unless that ID is
@@ -30,8 +32,8 @@ const DefaultDemotionThreshold = 0.90
 // instead regardless of rank, since pinning is an explicit user signal to
 // keep a memory visible. No locking: callers that need Store's s.mu.RLock
 // (i.e. GetTopMemories) take it themselves around the call, same as every
-// other Store method taking a raw *sql.DB.
-func DemotionPenalties(ctx context.Context, db *sql.DB, ids []string, pinned map[string]bool, threshold float64) (map[string]int, error) {
+// other Store method taking a raw SQL read handle.
+func DemotionPenalties(ctx context.Context, db sqlQueryer, ids []string, pinned map[string]bool, threshold float64) (map[string]int, error) {
 	if len(ids) < 2 {
 		return nil, nil
 	}
@@ -52,10 +54,13 @@ func DemotionPenalties(ctx context.Context, db *sql.DB, ids []string, pinned map
 	args = append(args, idArgs...)
 
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
-		SELECT source_id, target_id FROM memory_links
-		WHERE invalidated_at IS NULL
-		  AND ((relation = 'related' AND strength >= ?) OR relation = 'duplicate')
-		  AND source_id IN (%s) AND target_id IN (%s)
+		SELECT l.source_id, l.target_id, source_mem.scope, target_mem.scope
+		FROM memory_links l
+		JOIN memories source_mem ON source_mem.id = l.source_id
+		JOIN memories target_mem ON target_mem.id = l.target_id
+		WHERE l.invalidated_at IS NULL
+		  AND ((l.relation = 'related' AND l.strength >= ?) OR l.relation = 'duplicate')
+		  AND l.source_id IN (%s) AND l.target_id IN (%s)
 	`, list, list), args...)
 	if err != nil {
 		return nil, fmt.Errorf("demotion penalties: %w", err)
@@ -65,8 +70,12 @@ func DemotionPenalties(ctx context.Context, db *sql.DB, ids []string, pinned map
 	penalty := make(map[string]int, len(ids))
 	for rows.Next() {
 		var a, b string
-		if err := rows.Scan(&a, &b); err != nil {
+		var sourceScope, targetScope sql.NullString
+		if err := rows.Scan(&a, &b, &sourceScope, &targetScope); err != nil {
 			return nil, fmt.Errorf("demotion penalties: %w", err)
+		}
+		if ScopesConflict(parseScope(sourceScope), parseScope(targetScope)) {
+			continue
 		}
 		loser, winner := a, b
 		if rank[b] > rank[a] {
@@ -101,9 +110,9 @@ func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) [
 // mirrors DemotionPenalties so injection paths (GetTopMemories, the session
 // hook) can share one query with the search path's demoteSuperseded. No
 // locking: same contract as DemotionPenalties — callers holding Store's
-// s.mu.RLock (GetTopMemories) pass s.db directly; the hook passes its own
+// s.mu.RLock (GetTopMemories) pass its read handle; the hook passes its own
 // read-only handle.
-func SupersedePenalties(ctx context.Context, db *sql.DB, ids []string) (map[string]int, error) {
+func SupersedePenalties(ctx context.Context, db sqlQueryer, ids []string) (map[string]int, error) {
 	if len(ids) < 2 {
 		return nil, nil
 	}
@@ -171,7 +180,7 @@ func (s *Store) demoteNearDuplicates(ctx context.Context, results []Memory) []Me
 		pinned[m.ID] = m.Pinned
 	}
 	s.mu.RLock()
-	penalty, err := DemotionPenalties(ctx, s.db, ids, pinned, s.demotionThreshold)
+	penalty, err := DemotionPenalties(ctx, s.queryDB(), ids, pinned, s.demotionThreshold)
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Debug("near-duplicate demote: lookup failed", "error", err)

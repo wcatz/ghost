@@ -903,6 +903,33 @@ func TestSearchVectorDropsNonPositiveSimilarity(t *testing.T) {
 	}
 }
 
+func TestSearchVectorAllCarriesScope(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	if err := store.EnsureProject(ctx, "other-proj", "/other", "other"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	scoped, err := store.Create(ctx, "other-proj", Memory{
+		Category: "fact",
+		Content:  "cross-project scoped memory",
+		Source:   "tool",
+		Scope:    map[string]string{"environment": "production"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.StoreEmbedding(ctx, scoped, []float32{1, 0}, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+
+	got, err := store.SearchVectorAll(ctx, []float32{1, 0}, 10)
+	if err != nil {
+		t.Fatalf("SearchVectorAll: %v", err)
+	}
+	if len(got) != 1 || got[0].MemoryID != scoped || got[0].Scope["environment"] != "production" {
+		t.Fatalf("SearchVectorAll result = %+v, want scoped memory %s", got, scoped)
+	}
+}
+
 // TestVectorSearchDimensionMismatchIsSurfaced pins the surfacing fix: when the
 // embedding model changes, stored vectors no longer match the query dimension
 // and every row is skipped — previously indistinguishable from an empty index.

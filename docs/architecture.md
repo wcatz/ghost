@@ -132,7 +132,8 @@ The lifecycle is opt-in. A phase failure is logged and does not prevent later ph
 - FTS5 indexing and query sanitization
 - Optional vector storage and cosine similarity
 - Reciprocal Rank Fusion for hybrid results, with the result window chosen by
-  `FuseAndSelectWindow` (see [Hybrid fusion and window selection](#hybrid-fusion-and-window-selection))
+  `Store.fuseAndRank` delegating to `selectWindow` (see
+  [Hybrid fusion and window selection](#hybrid-fusion-and-window-selection))
 - Category-aware time-decay ordering
 - Pinned and near-duplicate handling
 - Directed memory links
@@ -140,11 +141,15 @@ The lifecycle is opt-in. A phase failure is logged and does not prevent later ph
 
 ### Hybrid fusion and window selection
 
-`FuseAndSelectWindow` (`internal/memory/vector.go`) owns both halves of hybrid
-retrieval: it fuses the FTS5 and vector legs into one ranking, and it decides
-which memories form the result window. They live in one function because
-window selection is not separable from fusion — the rule that keeps a keyword
-hit has to be stated in terms of the scores fusion produced.
+Window selection lives in `internal/memory/vector.go` as three steps:
+`fuseCandidatePool` fuses the FTS5 and vector legs into one ranking,
+`scopeEligiblePool` narrows it, and `selectWindow` decides which memories
+form the result window. They stay together because window selection is not
+separable from fusion — the rule that keeps a keyword hit has to be stated in
+terms of the scores fusion produced. Every production search reaches them
+through `Store.fuseAndRank`, which fuses once and then cuts;
+`FuseAndSelectWindow` is the exported entry point over the same seam, called
+only from the fusion tests.
 
 Fusion is Reciprocal Rank Fusion, weighted 0.3 FTS / 0.7 vector with k=60.
 A memory retrieved by both legs accumulates both contributions, so a two-leg
@@ -170,8 +175,18 @@ category- and age-dependent factor, reorders it and breaks the invariant that
 uniform timestamps leave the graded ranking untouched.
 
 The window's width is `limit`, or twice that under `DecayReselect`, where decay
-still has to narrow the set afterwards. Ordering is deterministic (ties broken
-by ID), because the demotion penalties applied downstream depend on order.
+still has to narrow the set afterwards. Scope constraints are narrowed from the
+combined candidate pool before this cut, including when one leg is unavailable,
+so an out-of-scope row cannot consume a result slot and force the tool to report
+absence for an eligible row that was retrieved but not selected. The hydration
+backfill after the cut draws from that same narrowed pool, so a row that
+disappears between the leg queries and hydration is replaced by the next
+strongest *in-scope* candidate rather than shortening the result. Category is a
+separate tool-level post-filter and therefore uses a wider store fetch. Explain
+mode calls the same scoped selection entry point, so its included rows and
+scope-exclusion reasons describe the store result rather than an unscoped
+ranking. Ordering is deterministic (ties broken by ID), because the demotion
+penalties applied downstream depend on order.
 
 The main schema tables are:
 
@@ -213,7 +228,7 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 |---|---|---|---|
 | **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `audit_log` | Partial — no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
 | **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Partial — snapshot replacement and restore preserve these fields, but normal reads and ranking do not expose or consult them ([#575](https://github.com/wcatz/ghost/issues/575)); wiring them into retrieval is part of the assembler ([#581](https://github.com/wcatz/ghost/issues/581)) |
-| **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Partial — the linker's `related` edges bypass the scope exemption ([#574](https://github.com/wcatz/ghost/issues/574)) |
+| **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | The linker's `related` edges and near-duplicate demotion ignore scope conflicts ([#574](https://github.com/wcatz/ghost/issues/574)); the `supersedes`/`causes` relation does not yet, and is still tracked under #574 |
 | **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref` | Inert — written on some paths, never read by ranking ([#575](https://github.com/wcatz/ghost/issues/575)); history is missing entirely ([#578](https://github.com/wcatz/ghost/issues/578)) |
 
 Axis interaction rules:
@@ -226,7 +241,7 @@ Axis interaction rules:
 
 ## Context assembly (target design)
 
-> **Target design, not current behavior.** Today there is no assembler: `ghost_memory_search` (`internal/mcpserver`) and the session-start injector (`internal/mcpinit`) each run their own ad-hoc retrieve → filter → rank → trim sequence, which is why the two surfaces disagree about scope ([#577](https://github.com/wcatz/ghost/issues/577)) and why filters run after the result window closes ([#573](https://github.com/wcatz/ghost/issues/573)). The plan to converge them is [#581](https://github.com/wcatz/ghost/issues/581).
+> **Target design, not current behavior.** Today there is no assembler: `ghost_memory_search` (`internal/mcpserver`) and the session-start injector (`internal/mcpinit`) each run their own ad-hoc retrieve → filter → rank → trim sequence, which is why the two surfaces disagree about scope ([#577](https://github.com/wcatz/ghost/issues/577)). The injector ignores `memories.scope` altogether — `loadSessionContext` never selects the column, so a session-start block can carry rows that conflict with the caller's scope. The formatted `ghost_memory_search` path does honour it, and does so inside hybrid window selection before the cut ([#573](https://github.com/wcatz/ghost/issues/573)), which leaves category as its only post-filter, and its `explain: true` branch explains that same scoped ranking ([#571](https://github.com/wcatz/ghost/issues/571)). The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581).
 
 Both consumers should call one assembler with an explicit budget, so every surface applies the same predicates in the same order and every stage is testable in isolation:
 

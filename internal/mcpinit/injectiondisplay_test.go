@@ -22,12 +22,16 @@ func TestSessionContextDisplayCapIndependentOfStoreCap(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	dbPath := filepath.Join(ghostDir, "ghost.db")
+	projectPath := filepath.Join(t.TempDir(), "capproj")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatalf("mkdir project path: %v", err)
+	}
 
 	db, err := memory.OpenDB(dbPath)
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
-	insertProject(t, db, "cap00001", "/tmp/capproj", "capproj")
+	insertProject(t, db, "cap00001", projectPath, "capproj")
 
 	// A record far over the injection display budget, well under the store
 	// cap: 5000 chars stored, ~200 bytes injected.
@@ -42,7 +46,7 @@ func TestSessionContextDisplayCapIndependentOfStoreCap(t *testing.T) {
 
 	t.Setenv("XDG_DATA_HOME", xdgHome)
 
-	_, _, mems, _, _, _, _, _, _ := loadSessionContext("/tmp/capproj")
+	_, _, mems, _, _, _, _, _, _ := loadSessionContext(projectPath)
 	if len(mems) != 1 {
 		t.Fatalf("expected 1 injected memory, got %d", len(mems))
 	}

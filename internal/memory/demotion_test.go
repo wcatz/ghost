@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func makeScopedMemory(t *testing.T, s *Store, content, environment string) string {
+	t.Helper()
+	id, err := s.Create(context.Background(), testProject, Memory{
+		Category: "fact", Content: content, Source: "manual", Importance: 0.7,
+		Scope: map[string]string{"environment": environment},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	return id
+}
+
 func TestDemotionPenaltiesDemotesLowerRanked(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -24,6 +36,49 @@ func TestDemotionPenaltiesDemotesLowerRanked(t *testing.T) {
 	}
 	if penalty[a] != 0 {
 		t.Errorf("penalty[a] = %d, want 0", penalty[a])
+	}
+}
+
+func TestDemotionPenaltiesIgnoresScopeConflictingRelatedEdge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	dev := makeScopedMemory(t, s, "development database uses SQLite", "development")
+	prod := makeScopedMemory(t, s, "production database uses PostgreSQL", "production")
+	if err := s.CreateLink(ctx, dev, prod, "related", 0.95, "manual"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+
+	links, err := s.GetLinks(ctx, dev)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	if len(links) != 1 {
+		t.Fatalf("scope guard must not delete the existing edge, got %+v", links)
+	}
+	penalty, err := DemotionPenalties(ctx, s.db, []string{dev, prod}, map[string]bool{}, 0.90)
+	if err != nil {
+		t.Fatalf("DemotionPenalties: %v", err)
+	}
+	if len(penalty) != 0 {
+		t.Fatalf("scope-conflicting related edge produced demotion penalties: %v", penalty)
+	}
+}
+
+func TestDemotionPenaltiesKeepsOneSidedScopeRelatedEdge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	scoped := makeScopedMemory(t, s, "production database uses PostgreSQL", "production")
+	unscoped := makeMemory(t, s, "database guidance applies generally")
+	if err := s.CreateLink(ctx, scoped, unscoped, "related", 0.95, "manual"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+
+	penalty, err := DemotionPenalties(ctx, s.db, []string{scoped, unscoped}, map[string]bool{}, 0.90)
+	if err != nil {
+		t.Fatalf("DemotionPenalties: %v", err)
+	}
+	if penalty[unscoped] != 1 {
+		t.Errorf("one-sided scope should remain compatible, got penalties %v", penalty)
 	}
 }
 

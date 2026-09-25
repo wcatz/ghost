@@ -38,9 +38,15 @@ type MemoryStore interface {
 	SearchFTS(ctx context.Context, projectID, query string, limit int) ([]memory.Memory, error)
 	SearchFTSAll(ctx context.Context, query string, limit int) ([]memory.Memory, error)
 	SearchHybrid(ctx context.Context, projectID, query string, queryVec []float32, limit int) ([]memory.Memory, error)
-	// ExplainSearch reports how each candidate was scored by the same
-	// pipeline SearchHybrid uses, including why anything was excluded.
+	// SearchHybridScoped is SearchHybrid with a scope constraint applied
+	// inside fusion and window selection. The store owns production search
+	// parameters so scoped MCP searches retain the configured vector floor.
+	SearchHybridScoped(ctx context.Context, projectID, query string, queryVec []float32, limit int, scope map[string]string) ([]memory.Memory, error)
+	// ExplainSearch reports an unscoped ranking diagnosis.
 	ExplainSearch(ctx context.Context, projectID, query string, queryVec []float32, limit int) (memory.SearchExplain, error)
+	// ExplainSearchScoped reports the ranking produced by the same scoped
+	// search the formatted path uses, including scope-based exclusions.
+	ExplainSearchScoped(ctx context.Context, projectID, query string, queryVec []float32, limit int, scope map[string]string) (memory.SearchExplain, error)
 	SearchHybridAll(ctx context.Context, query string, queryVec []float32, limit int) ([]memory.Memory, error)
 	SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]memory.ScoredMemory, error)
 	GetByCategory(ctx context.Context, projectID, category string, limit int) ([]memory.Memory, error)
@@ -92,6 +98,10 @@ type MemoryStore interface {
 	// resolved id/path; repoName is derived from the remote, not a directory.
 	ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, error)
 	ResolveProject(ctx context.Context, input string) (id, name string, err error)
+	// ResolveExactProjectID reports whether input is literally a project's id,
+	// with no path, remote or basename fallback. The write side needs it to
+	// avoid re-deriving an id the caller already supplied.
+	ResolveExactProjectID(ctx context.Context, id string) (string, bool, error)
 	ListProjectNames(ctx context.Context) ([]string, error)
 	MergeProject(ctx context.Context, oldID, newID string) error
 	DeleteProject(ctx context.Context, input string, apply bool) (memory.DeleteProjectSummary, error)

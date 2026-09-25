@@ -27,10 +27,15 @@ func saveScoped(t *testing.T, session *mcp.ClientSession, content, env string) {
 // rendered listing.
 func searchScoped(t *testing.T, session *mcp.ClientSession, query string, scope any) string {
 	t.Helper()
+	return searchScopedWithLimit(t, session, query, scope, 10)
+}
+
+func searchScopedWithLimit(t *testing.T, session *mcp.ClientSession, query string, scope any, limit int) string {
+	t.Helper()
 	args := map[string]any{
 		"project_id": "test-project",
 		"query":      query,
-		"limit":      10,
+		"limit":      limit,
 	}
 	if scope != nil {
 		args["scope"] = scope
@@ -151,15 +156,10 @@ func TestScopeRejectsNonStringValues(t *testing.T) {
 	}
 }
 
-// TestScopeNarrowingIsReported: when the scope filter drops rows from a full
-// window, the caller must be told the result may be short rather than
-// presented with a truncated list as everything that matched.
-//
-// The flag is computed once, before any post-filter runs, and this test
-// deliberately runs BOTH filters to catch the case that was reported: with
-// category applied first, a scope filter that measures "was the window full"
-// against the already-shrunk pool sees a count below the fetch limit and
-// concludes nothing was ever withheld.
+// TestScopeNarrowingIsReported: a filtered result shorter than the requested
+// limit must be reported as potentially incomplete rather than presented as
+// everything that matched. Running both filters also exercises the combined
+// scope/category caveat after scope has backfilled the selection window.
 func TestScopeNarrowingIsReported(t *testing.T) {
 	_, session := newCapSession(t)
 
@@ -218,7 +218,7 @@ func TestScopeNarrowingIsReported(t *testing.T) {
 	// phrasing: with both filters applied it reads "category and scope
 	// filters", and pinning that exact string would make a harmless wording
 	// change look like a regression.
-	idx := strings.Index(out, "may have missed")
+	idx := strings.Index(out, "may exist")
 	if idx < 0 {
 		t.Errorf("scope narrowing was not reported — a truncated result presented as complete:\n%s", out)
 	} else {
