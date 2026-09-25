@@ -437,34 +437,41 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 		return "", true, fmt.Errorf("project %q belongs to a different repository", id)
 	}
 
-	// A checkout inside the matched project's directory is a different
-	// repository — a submodule, a vendored clone, a second worktree of
-	// something else — so its remote says nothing about the project that
-	// encloses it. Binding it, or merging the enclosing project into the
-	// nested checkout's own, is how a save from ~/git/infra/vendor/lib took
-	// other/lib away from ~/git/infra and then locked the real checkout out
-	// of its own project at every path except exactly its root. Only the
-	// project's own root may speak for its repository.
+	// The repository found in a directory is that directory's own, so the
+	// question before writing one onto a project is whether it is the project's
+	// repository at all. A checkout inside the project's directory is a
+	// different repository — a submodule, a vendored clone, a worktree of
+	// something else — and binding its remote, or merging the enclosing project
+	// into the nested checkout's own, is how a save from ~/git/infra/vendor/lib
+	// took other/lib away from ~/git/infra and then locked the real checkout out
+	// of its own project at every path except exactly its root.
 	//
 	// The save still lands in the enclosing project, which is what the prefix
 	// step decided and what a session standing in that directory expects.
 	// Routing a save is not the same claim as identifying the repository, so
 	// the refusal covers both writes below and only those; the exact-id lookup
-	// above is untouched, because there the caller named the project and a
-	// save made from inside it says nothing to contradict that.
+	// above is untouched, because there the caller named the project and a save
+	// made from inside it says nothing to contradict that.
+	//
+	// "Is the same repository" is deliberately not "is the root". A session is
+	// usually started in a subdirectory, and `git config --get remote.origin.url`
+	// walks up, so the remote found there is the enclosing checkout's own — and
+	// for a v11-era row, which is a recorded path and no remote, that save is
+	// the only thing that will ever identify the project. Keying the guard on
+	// containment instead of on the repository leaves every pre-v11 project
+	// unclaimed forever.
 	//
 	// A nested checkout does not open a project of its own as a result. The
 	// prefix match has already answered, so resolution stops here, which is
 	// deliberate: the save was told a directory, not a repository, and #612's
 	// `ghost project bind` is the command that states which checkout is which
-	// project. The alternative — inventing a project per nested checkout — is
-	// what made this lookup ambiguous in the first place.
+	// project.
 	//
 	// Logged for the same reason the unique-name refusal is: the save landed
 	// somewhere and the project that answered for it is deliberately left
 	// unclaimed, which is a fact a user with a nested checkout will want.
-	if prefixMatch && !savingPathIsProjectRoot(matchedPath, norm) {
-		s.logger.Warn("refused to bind a repository to an enclosing project: the save came from a directory inside it",
+	if prefixMatch && !s.savingDirectorySpeaksForProject(matchedPath, norm, repoRemote) {
+		s.logger.Warn("refused to bind a repository to an enclosing project: the save came from a directory inside a different repository",
 			"project", id, "recorded_path", matchedPath, "saving_path", projectRef, "remote", repoRemote)
 		return id, true, nil
 	}
@@ -485,6 +492,39 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 	return id, true, nil
 }
 
+// savingDirectorySpeaksForProject reports whether the repository detected at a
+// saving directory is the one the matched project is a checkout of, which is
+// the only thing that lets a save identify the project it was routed to. Two
+// things establish it, and the first is the cheap one.
+//
+// The saving directory IS the project's recorded root: one directory, so there
+// is no second repository to have meant, and no detection is spent.
+//
+// Failing that, the two directories report the same remote. That is what an
+// ordinary subdirectory of the checkout looks like — sessions start in
+// src/api more often than at the root, and `git config` walks up — and it is
+// also what a worktree of the same repository looks like, which is the case
+// repository identity exists for. The remote at the saving directory is the one
+// the caller already detected and passed in, so this costs at most one
+// additional `git config` (bounded by repo.detectTimeout), and only on the
+// prefix branch with a non-root saving directory.
+//
+// Anything else is a nested checkout, and a remote that cannot be detected at
+// the recorded path proves nothing at all. Both refusals take the same
+// direction: the enclosing project is not identified, and the save still lands
+// in it. internal/memory never spawns git itself, so a store built without a
+// detector — the default, and what every test but the ones that pin one gets —
+// cannot tell a subdirectory from a submodule here, and guessing towards
+// handing one repository's identity to another is the failure this exists to
+// stop.
+func (s *Store) savingDirectorySpeaksForProject(recorded, saving, savingRemote string) bool {
+	if savingPathIsProjectRoot(recorded, saving) {
+		return true
+	}
+	recordedRemote := s.inputRemote(recorded)
+	return recordedRemote != "" && recordedRemote == savingRemote
+}
+
 // savingPathIsProjectRoot reports whether the directory a save came from is the
 // project's recorded checkout root rather than a directory inside it.
 //
@@ -493,8 +533,8 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 // resolved: two spellings of one directory must agree, and a symlinked checkout
 // must not read as a different place. pathsAgree is deliberately not used here:
 // it accepts a directory inside the recorded path, which is exactly the
-// containment being refused — it answers "is the session standing in that
-// project", where this answers "is the session standing at its root".
+// containment this is not asking about — it answers "is the session standing in
+// that project", where this answers "is the session standing at its root".
 //
 // A path that cannot be resolved is not the root. canonicalPath fails on a
 // directory that does not exist, and a recorded path that no longer resolves
