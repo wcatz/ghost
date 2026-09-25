@@ -316,8 +316,17 @@ through one read transaction. Existing methods that receive a `*sql.DB` must
 accept a queryer so the transaction is used directly; otherwise a transaction
 would hold the Store's single connection while those methods wait for another
 connection. The refactor includes `SearchHybridAll` and the passive global
-query so the all-projects path has the same snapshot guarantee. The transaction
-contains no embedding, LLM, or rendering work.
+query so the all-projects path has the same snapshot guarantee. The queryer
+seam is:
+
+```go
+type Queryer interface {
+    QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+    QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+```
+
+The transaction contains no embedding, LLM, or rendering work.
 
 `OpenReadDB` is the single read-only database constructor, matching `OpenDB`.
 `NewStoreWithRead(db, readDB, logger)` injects the read handle. `Store` holds
