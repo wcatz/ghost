@@ -294,21 +294,9 @@ func tightenIfLoose(path string, info os.FileInfo, mode os.FileMode) error {
 	return protectPath(path, info, mode)
 }
 
-// ghostManaged reports whether a file is Ghost's own: the vault marker or a
-// note whose frontmatter carries a ghost_id.
-func ghostManaged(path string) bool {
-	if filepath.Base(path) == markerName {
-		return true
-	}
-	if !strings.HasSuffix(path, ".md") {
-		return false
-	}
-	_, ok := hasGhostID(path)
-	return ok
-}
-
-// ghostManagedFile is ghostManaged for a caller that must be able to tell "not
-// Ghost's" from "could not be read".
+// ghostManagedFile reports whether a file is Ghost's own — the vault marker or a
+// note whose frontmatter carries a ghost_id — for a caller that must be able to
+// tell "not Ghost's" from "could not be read".
 //
 // The permission pass uses it rather than ghostManaged because a note whose
 // frontmatter could not be read is not the same as a user's note, and
@@ -357,11 +345,12 @@ func writeIfChanged(path, content string) (bool, error) {
 	case err == nil:
 		// Regular file: the unchanged-content check still applies, so an
 		// already-correct note costs no write and no mtime churn.
-		existing, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return false, readErr
-		}
-		if string(existing) == content {
+		// A read failure here is not a write failure. On Windows a file another
+		// process holds open cannot be read at all, and the original code
+		// treated that as "contents unknown, go ahead and write" — returning
+		// the error instead failed the whole export over a file Ghost was
+		// about to replace anyway.
+		if existing, readErr := os.ReadFile(path); readErr == nil && string(existing) == content {
 			return false, nil
 		}
 	}

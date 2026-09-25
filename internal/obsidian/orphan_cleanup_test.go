@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -568,6 +569,14 @@ func TestGhostManagedFileDistinguishesUnreadableFromUnowned(t *testing.T) {
 // follow it and change a target outside the vault — widening access to exactly
 // the thing the lstat exists to keep out of reach.
 func TestProtectPathRefusesSymlinkTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows has no mode bits: protectPath writes a DACL, and os.Chmod
+		// there toggles only the read-only attribute. Neither the 0600/0644
+		// assertions nor the chmod-follows-a-symlink mechanism this pins are
+		// observable on that platform, so asserting them there tests nothing.
+		// The Windows path is covered by TestProtectPathRefusesSymlinkTargetWindows.
+		t.Skip("POSIX mode semantics; see TestProtectPathRefusesSymlinkTargetWindows")
+	}
 	dir := t.TempDir()
 	outside := filepath.Join(dir, "outside.md")
 	mustWrite(t, outside, "not Ghost's\n")
@@ -758,5 +767,31 @@ func TestSyncRetriesFailedInitialExport(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("sync returned: %v", err)
+	}
+}
+
+// TestProtectPathRefusesSymlinkTargetWindows is the Windows counterpart. The
+// mode bits are meaningless there, so the observable contract is different: the
+// target outside the vault must not gain a private DACL, and an ambiguous path
+// must be refused rather than secured quietly.
+func TestProtectPathRefusesSymlinkTargetWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows DACL semantics")
+	}
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "outside.md")
+	mustWrite(t, outside, "not Ghost's\n")
+	link := filepath.Join(dir, "Inside.md")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	probe := filepath.Join(dir, "probe.md")
+	mustWrite(t, probe, "probe\n")
+	probeInfo, err := os.Lstat(probe)
+	if err != nil {
+		t.Fatalf("lstat probe: %v", err)
+	}
+	if err := protectPath(link, probeInfo, 0o600); err == nil {
+		t.Error("protectPath secured a symlink, want it refused")
 	}
 }
