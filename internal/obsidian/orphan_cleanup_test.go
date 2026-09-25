@@ -129,6 +129,60 @@ func TestManagedPruneDoesNotDeleteConcurrentReplacement(t *testing.T) {
 	}
 }
 
+// TestOrphanCleanupKeepsReplacementDirectory covers the gap the per-file
+// replacement guard leaves: the directory cleanup runs after the walk, so a
+// directory replaced in that window shares its path with the one the walk
+// emptied while being a different object entirely. os.Remove answers on the
+// name, so the replacement goes — with anything the user put in it.
+//
+// The seam fires once, between the walk finishing and the climb starting, which
+// is the only window where this is expressible without racing the scheduler.
+func TestOrphanCleanupKeepsReplacementDirectory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "vault")
+	if err := ensureVault(root); err != nil {
+		t.Fatalf("ensureVault: %v", err)
+	}
+	orphan := filepath.Join(root, "oldproject")
+	nested := filepath.Join(orphan, "Memories")
+	mustMkdirAll(t, nested)
+	mustWrite(t, filepath.Join(nested, "Managed Note.md"), ghostNote)
+
+	var replaced string
+	beforeDirCleanupFn.Store(func() {
+		replaced = nested
+		// Swap the emptied directory for a fresh one. It has to be empty:
+		// a replacement holding a file would make os.Remove answer ENOTEMPTY
+		// and the guard would appear to work for the wrong reason. An empty
+		// replacement is exactly the case where an identity-blind os.Remove
+		// succeeds on a directory the walk never saw.
+		staging := nested + ".staging"
+		mustMkdirAll(t, staging)
+		if err := os.Rename(nested, nested+".original"); err != nil {
+			t.Fatalf("move original aside: %v", err)
+		}
+		if err := os.Rename(staging, nested); err != nil {
+			t.Fatalf("put replacement in place: %v", err)
+		}
+	})
+	t.Cleanup(func() { beforeDirCleanupFn.Store(func() {}) })
+
+	if err := prune(root, nil, map[string]string{}, []string{"liveproject"}); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if replaced == "" {
+		t.Fatal("the seam never fired, so the replacement was never modelled")
+	}
+	if _, err := os.Stat(replaced); err != nil {
+		t.Errorf("replacement directory was removed: %v", err)
+	}
+	// The original directory is still recorded, so its own emptiness check can
+	// be told apart from the replacement's: the guard must stop the climb at
+	// the replacement rather than skipping past it and closing an ancestor.
+	if _, err := os.Stat(nested + ".original"); err != nil {
+		t.Errorf("the walk's own emptied directory was removed: %v", err)
+	}
+}
+
 // TestOrphanCleanupRemovesFullyGhostFolder keeps the sweep useful. A folder
 // holding nothing but Ghost's own notes is dead weight after the project
 // goes, and leaving every one of them behind would trade one silent loss for
@@ -296,6 +350,185 @@ func TestPruneSkipsSpecialFiles(t *testing.T) {
 				t.Errorf("the real Ghost note should still be pruned (err=%v)", err)
 			}
 		})
+	}
+}
+
+// TestHasGhostIDRefusesSpecialFiles covers the second half of the special-file
+// guard. The walk's own d.Type() check is not enough, because hasGhostID
+// reopens the pathname: between the entry being stat'ed as a regular file and
+// the open, the name can be rebound to something else. os.Open on a FIFO then
+// blocks forever, which is the export hang the guard exists to prevent — the
+// check that was supposed to prevent it happened to the wrong object.
+func TestHasGhostIDRefusesSpecialFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	pipe := filepath.Join(dir, "note.md")
+	if err := makeFIFO(pipe); err != nil {
+		t.Skipf("named pipe unavailable: %v", err)
+	}
+	link := filepath.Join(dir, "link.md")
+	if err := os.Symlink(pipe, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	real := filepath.Join(dir, "real.md")
+	mustWrite(t, real, ghostNote)
+
+	for _, tc := range []struct{ name, path string }{
+		{"named pipe", pipe},
+		{"symlink to a named pipe", link},
+		{"directory", dir},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan struct{})
+			var id string
+			var ok bool
+			go func() {
+				defer close(done)
+				id, ok = hasGhostID(tc.path)
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("hasGhostID blocked for 5s on a special file — the open must not block on a FIFO")
+			}
+			if ok {
+				t.Errorf("hasGhostID(%s) = (%q, true), want (false) — only a regular file is Ghost's to touch", tc.path, id)
+			}
+		})
+	}
+
+	// The control: the same call on a real note still reads the id, so the
+	// special-file refusals above are not the function failing outright.
+	if id, ok := hasGhostID(real); !ok || id != "abc123" {
+		t.Errorf("hasGhostID on a regular Ghost note = (%q, %v), want (abc123, true)", id, ok)
+	}
+}
+
+// TestRestoreDoesNotOverwriteConcurrentFile closes the restore race. Restoring
+// checked that the original path was free and then renamed onto it, but on
+// POSIX a rename replaces whatever is there: a file created in that window was
+// unlinked and its contents lost, silently, by the code whose entire purpose is
+// to avoid destroying files it did not inspect. The no-replace rename has to
+// fail instead, and the quarantined object has to stay put for the next pass.
+func TestRestoreDoesNotOverwriteConcurrentFile(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "vault")
+	if err := ensureVault(root); err != nil {
+		t.Fatalf("ensureVault: %v", err)
+	}
+	dir := filepath.Join(root, "oldproject")
+	mustMkdirAll(t, dir)
+	target := filepath.Join(dir, "Managed Note.md")
+	mustWrite(t, target, ghostNote)
+
+	// Model the concurrent writer landing between the quarantine and the
+	// restore — the window the old Lstat-then-rename left open.
+	pruneBeforeRemoveFn.Store(func(path string) {
+		if path != target {
+			return
+		}
+		mustWrite(t, path, userNote)
+	})
+	t.Cleanup(func() { pruneBeforeRemoveFn.Store(func(string) {}) })
+
+	deleted, err := removeGhostFile(target)
+	if err != nil {
+		t.Fatalf("removeGhostFile: %v", err)
+	}
+	if deleted {
+		t.Fatal("removeGhostFile deleted a file that was replaced, want it left alone")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("the concurrent file was destroyed: %v", err)
+	}
+	if string(got) != userNote {
+		t.Errorf("content = %q, want the concurrent writer's note intact", got)
+	}
+}
+
+// TestRestoreDoesNotOverwriteConcurrentFileOnReplace covers the same race from
+// the other side: the original path still exists when the restore runs, and the
+// restore must not replace it.
+func TestRestoreKeepsExistingFileWhenRestoring(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "vault")
+	if err := ensureVault(root); err != nil {
+		t.Fatalf("ensureVault: %v", err)
+	}
+	dir := filepath.Join(root, "oldproject")
+	mustMkdirAll(t, dir)
+	target := filepath.Join(dir, "Managed Note.md")
+	// The path is already occupied by a file the user wrote, and the object
+	// being restored is a Ghost note that must not take its place.
+	mustWrite(t, target, userNote)
+	quarantine := filepath.Join(dir, ".ghost-prune-restoretest")
+	mustWrite(t, quarantine, ghostNote)
+
+	if err := restoreQuarantined(quarantine, target); err == nil {
+		t.Fatal("restore onto an occupied path succeeded, want a refusal")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("the occupying file was destroyed: %v", err)
+	}
+	if string(got) != userNote {
+		t.Errorf("content = %q, want the occupying file intact", got)
+	}
+	if _, err := os.Stat(quarantine); err != nil {
+		t.Errorf("the quarantined object was consumed by a refused restore: %v", err)
+	}
+}
+
+// TestRemoveGhostFileRestoresAfterFailedRemoval covers a note stranded under a
+// name prune can never see. By the time the final os.Remove runs, the note has
+// already been moved aside, so a failed deletion returned without putting it
+// back — leaving it under a .ghost-prune-* name, which every later pass
+// ignores. The mirror then reports success while permanently missing a note it
+// still owns.
+func TestRemoveGhostFileRestoresAfterFailedRemoval(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "vault")
+	if err := ensureVault(root); err != nil {
+		t.Fatalf("ensureVault: %v", err)
+	}
+	dir := filepath.Join(root, "oldproject")
+	mustMkdirAll(t, dir)
+	target := filepath.Join(dir, "Managed Note.md")
+	mustWrite(t, target, ghostNote)
+
+	// Fail the deletion of the quarantined object, and only that: the walk
+	// creates and removes temp names of its own, so the hook keys on the
+	// .ghost-prune- prefix.
+	removeFileFn.Store(func(name string) error {
+		if strings.HasPrefix(filepath.Base(name), ".ghost-prune-") {
+			return errors.New("injected: cannot delete quarantined note")
+		}
+		return os.Remove(name)
+	})
+	t.Cleanup(func() { removeFileFn.Store(os.Remove) })
+
+	deleted, err := removeGhostFile(target)
+	if err == nil {
+		t.Fatal("removeGhostFile reported success, want the deletion failure")
+	}
+	if deleted {
+		t.Error("removeGhostFile claimed a deletion it could not complete")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("the note was not restored to its original path: %v", err)
+	}
+	if string(got) != ghostNote {
+		t.Errorf("restored content = %q, want the original note", got)
+	}
+	// Nothing left behind under the name prune ignores.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".ghost-prune-") {
+			t.Errorf("a quarantined copy was stranded: %s", e.Name())
+		}
 	}
 }
 

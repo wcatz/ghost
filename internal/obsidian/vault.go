@@ -32,15 +32,38 @@ var removeDirFn atomic.Value // func(string) error
 // replacement without relying on scheduler timing.
 var pruneBeforeRemoveFn atomic.Value // func(string)
 
+// beforeDirCleanupFn is a test seam between the orphan walk and its directory
+// cleanup climb, for the same reason: a replacement in that window cannot be
+// produced by scheduler timing alone.
+var beforeDirCleanupFn atomic.Value // func()
+
+func beforeDirCleanup() {
+	fn, _ := beforeDirCleanupFn.Load().(func())
+	fn()
+}
+
 // renameFn is swappable so tests can force the publish step to fail with a
 // platform-specific transient error (see renameWithRetry).
 var renameFn atomic.Value // func(string, string) error
+
+// removeFileFn is swappable so tests can force the final deletion of a
+// quarantined note to fail — the step whose failure has to roll back, and the
+// one os.Chmod-based injection cannot reach reliably across CI privilege
+// levels.
+var removeFileFn atomic.Value // func(string) error
+
+func removeFile(path string) error {
+	fn, _ := removeFileFn.Load().(func(string) error)
+	return fn(path)
+}
 
 func init() {
 	readDirFn.Store(os.ReadDir)
 	removeDirFn.Store(os.Remove)
 	pruneBeforeRemoveFn.Store(func(string) {})
+	beforeDirCleanupFn.Store(func() {})
 	renameFn.Store(os.Rename)
+	removeFileFn.Store(os.Remove)
 }
 
 func removeDir(path string) error {
@@ -51,6 +74,31 @@ func removeDir(path string) error {
 func beforePruneRemove(path string) {
 	fn, _ := pruneBeforeRemoveFn.Load().(func(string))
 	fn(path)
+}
+
+// restoreQuarantined moves a quarantined object back to the path it came from,
+// but only onto a free path.
+//
+// The no-replace rename is the whole point. A check-then-rename pair is a race:
+// on POSIX the rename replaces whatever now occupies the destination, so a file
+// created in that window is unlinked and its contents destroyed — silently, by
+// the code written to make sure Ghost never deletes a file it did not
+// inspect. Failing leaves the quarantined object where it is, which a later
+// pass can find and this one can report.
+//
+// A source that no longer exists is not an error: a concurrent prune took it,
+// and there is nothing to restore and nothing to report.
+func restoreQuarantined(quarantinePath, destPath string) error {
+	if err := renameNoReplace(quarantinePath, destPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if os.IsExist(err) {
+			return fmt.Errorf("cannot restore replaced prune candidate %s: %w", destPath, err)
+		}
+		return err
+	}
+	return nil
 }
 
 // removeGhostFile atomically moves path aside, verifies the moved object is
@@ -78,13 +126,15 @@ func removeGhostFile(path string) (bool, error) {
 		return false, err
 	}
 
+	// Put the quarantined note back only if nothing now occupies the original
+	// path, and do it with a no-replace rename. An existence check followed by
+	// os.Rename is a race, not a guard: on POSIX the rename replaces whatever
+	// created the file in between, so the concurrent writer's data is lost
+	// silently. renameNoReplace fails instead, which leaves the quarantined
+	// object in place for the next pass to find rather than destroying
+	// something Ghost never inspected.
 	restore := func() error {
-		if _, err := os.Lstat(path); err == nil {
-			return fmt.Errorf("cannot restore replaced prune candidate %s", path)
-		} else if !os.IsNotExist(err) {
-			return err
-		}
-		return os.Rename(tempPath, path)
+		return restoreQuarantined(tempPath, path)
 	}
 	info, err := os.Lstat(tempPath)
 	if err != nil {
@@ -99,7 +149,17 @@ func removeGhostFile(path string) (bool, error) {
 	if _, ok := hasGhostID(tempPath); !ok {
 		return false, restore()
 	}
-	if err := os.Remove(tempPath); err != nil && !os.IsNotExist(err) {
+	if err := removeFile(tempPath); err != nil && !os.IsNotExist(err) {
+		// The note has already left its original name, so a bare return here
+		// strands it under the .ghost-prune-* name — a name every later pass
+		// ignores, which means the mirror silently loses a note it still owns
+		// and nothing reports it. Put it back where it came from. If that also
+		// fails, both errors are reported: the caller can no longer assume the
+		// note is where it left it, and a single error would hide which of the
+		// two problems actually needs attention.
+		if restoreErr := restore(); restoreErr != nil {
+			return false, fmt.Errorf("remove quarantined note: %w (and it could not be restored: %v)", err, restoreErr)
+		}
 		return false, err
 	}
 	return true, nil
@@ -250,7 +310,13 @@ const maxFrontmatterLine = 1 << 20
 // and the permission tighten both ask this of every .md in the vault, and
 // whole-file reads made the orphan sweep read each note twice.
 func hasGhostID(path string) (string, bool) {
-	f, err := os.Open(path)
+	// openRegular, not os.Open: the caller's regular-file check came from a
+	// directory entry stat'ed before this point, and re-opening the name leaves
+	// a window in which the object behind it is no longer that entry. Deciding
+	// the type on the handle that is read closes it — a symlink is refused, a
+	// FIFO cannot block the open, and a directory is rejected before a read is
+	// attempted.
+	f, err := openRegular(path)
 	if err != nil {
 		return "", false
 	}
@@ -315,12 +381,25 @@ func hasGhostID(path string) (string, bool) {
 // the old hasGhostContent probe gave, for free.
 func pruneOrphanFolder(dir string) error {
 	var deletedDirs []string
+	// Identity of every directory the walk descended through, so the cleanup
+	// climb can prove it is still removing the directory it emptied rather than
+	// one that replaced it. See the SameFile check below.
+	walkedDirs := make(map[string]os.FileInfo)
 	found := false
 	if err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // unreadable entry: leave it and everything under it alone
 		}
 		if d.IsDir() {
+			// Remember what this directory is, by identity rather than by name.
+			// The cleanup climb runs after the walk, and a directory that was
+			// replaced in between is a different object that happens to have the
+			// same path — os.Remove would delete the replacement, which is the
+			// one thing this whole function is written to never do. lstat, so a
+			// symlinked directory records the link and not its target.
+			if info, infoErr := d.Info(); infoErr == nil {
+				walkedDirs[path] = info
+			}
 			return nil
 		}
 		// Regular files only. A symlink is the user's own indirection: a
@@ -365,9 +444,29 @@ func pruneOrphanFolder(dir string) error {
 	// other failure (permissions, a Windows sharing violation, I/O) is
 	// returned, because swallowing it made prune report success while an
 	// empty stale directory sat there for every later export to retry.
+	beforeDirCleanup()
 	for _, site := range deletedDirs {
 	climb:
 		for sub := site; ; sub = filepath.Dir(sub) {
+			// Only remove the directory the walk emptied. A directory replaced
+			// after the walk — by a sync, a sync client, or the user — shares
+			// its path but is a different object, and os.Remove would take it,
+			// along with anything inside it, on the strength of a name the walk
+			// never saw. Leaving an ambiguous directory behind costs an empty
+			// folder; removing the wrong one costs a user's files. A directory
+			// with no recorded identity (created during the walk, so never
+			// descended into) is treated the same way.
+			if walked, ok := walkedDirs[sub]; ok {
+				now, lstatErr := os.Lstat(sub)
+				if lstatErr != nil || !os.SameFile(walked, now) {
+					if lstatErr != nil && !os.IsNotExist(lstatErr) {
+						return fmt.Errorf("verify orphan directory %s before removal: %w", sub, lstatErr)
+					}
+					break // gone, or replaced: nothing here is ours to remove
+				}
+			} else {
+				break
+			}
 			err := removeDir(sub)
 			if err != nil && !os.IsNotExist(err) {
 				if !isDirNotEmpty(err) {

@@ -133,3 +133,47 @@ func isTransientRenameErr(err error) bool {
 		errors.Is(err, windows.ERROR_LOCK_VIOLATION) ||
 		errors.Is(err, windows.ERROR_ACCESS_DENIED)
 }
+
+// renameNoReplace moves oldPath to newPath only if newPath does not exist.
+// MoveFileEx without MOVEFILE_REPLACE_EXISTING is the no-replace rename here:
+// it fails with ERROR_ALREADY_EXISTS rather than overwriting, and unlike the
+// link(2) trick used on POSIX it needs no write permission on the directory
+// beyond what the move itself requires.
+func renameNoReplace(oldPath, newPath string) error {
+	from, err := windows.UTF16PtrFromString(oldPath)
+	if err != nil {
+		return err
+	}
+	to, err := extendedPath(newPath)
+	if err != nil {
+		return err
+	}
+	toPtr, err := windows.UTF16PtrFromString(to)
+	if err != nil {
+		return err
+	}
+	return windows.MoveFileEx(from, toPtr, 0)
+}
+
+// openRegular opens path for reading and returns the handle only if the object
+// it refers to is a regular file, decided by fstat on the handle being read.
+// Windows has no filesystem FIFOs, so the blocking half of the POSIX problem
+// does not exist here, but the file-type decision is still made on the opened
+// object rather than on a directory entry stat'ed earlier, so a replacement
+// between the two cannot be classified by the stale entry.
+func openRegular(path string) (*os.File, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, &os.PathError{Op: "open", Path: path, Err: windows.ERROR_ACCESS_DENIED}
+	}
+	return f, nil
+}
