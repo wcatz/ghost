@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -88,6 +89,51 @@ func TestConfigureOpenCodeIsolationWritesDenyConfig(t *testing.T) {
 	}
 	if len(config.MCP) != 0 || len(config.Plugin) != 0 {
 		t.Errorf("MCP/plugins survived isolation: mcp=%v plugin=%v", config.MCP, config.Plugin)
+	}
+}
+
+func TestClaudeInvocationArgsRequiresNoToolsCapabilities(t *testing.T) {
+	_, err := claudeInvocationArgs(claudeCapabilities{restricted: true, strictMCP: true, tools: true, disallowedTools: true})
+	if err == nil || !strings.Contains(err.Error(), "upgrade claude") {
+		t.Fatalf("missing capability error = %v, want explicit upgrade guidance", err)
+	}
+
+	args, err := claudeInvocationArgs(claudeCapabilities{
+		safeMode: true, restricted: true, strictMCP: true, tools: true, disallowedTools: true,
+	})
+	if err != nil {
+		t.Fatalf("supported capabilities rejected: %v", err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--safe-mode", "--restricted", "--strict-mcp-config", "--tools", "--disallowedTools"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("args %q missing %s", joined, want)
+		}
+	}
+}
+
+func TestConfigureOpenCodeIsolationCopiesAuthFile(t *testing.T) {
+	sourceRoot := t.TempDir()
+	sourceAuthDir := filepath.Join(sourceRoot, "opencode")
+	if err := os.MkdirAll(sourceAuthDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	auth := []byte(`{"opencode":{"type":"api","key":"test-only"}}`)
+	if err := os.WriteFile(filepath.Join(sourceAuthDir, "auth.json"), auth, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	cmd := &exec.Cmd{Dir: dir, Env: []string{"XDG_DATA_HOME=" + sourceRoot, "HOME=" + filepath.Join(sourceRoot, "home")}}
+	if err := configureOpenCodeIsolation(cmd); err != nil {
+		t.Fatalf("configureOpenCodeIsolation: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "opencode-data", "opencode", "auth.json"))
+	if err != nil {
+		t.Fatalf("isolated auth file missing: %v", err)
+	}
+	if string(got) != string(auth) {
+		t.Fatalf("isolated auth file = %q, want seeded auth", got)
 	}
 }
 
@@ -175,6 +221,10 @@ func TestHarnessEnvKeepsNativeWindowsHomeVariables(t *testing.T) {
 func TestCLIClientUsesNoToolPolicy(t *testing.T) {
 	setHarnessPolicyParentEnv(t)
 	bin := fakeHarnessPolicyBinary(t, "claude", `
+if [ "$1" = "--help" ]; then
+  printf '%s\n' '--safe-mode' '--restricted' '--strict-mcp-config' '--disable-slash-commands' '--tools' '--disallowedTools' '--setting-sources'
+  exit 0
+fi
 for name in AWS_SECRET_ACCESS_KEY GITHUB_TOKEN GHOST_API_KEY GHOST_DATABASE_URL; do
   eval "value=\${$name-}"
   [ -z "$value" ] || { echo "leaked $name" >&2; exit 1; }

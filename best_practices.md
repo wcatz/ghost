@@ -11,6 +11,7 @@
 ## Architecture Patterns
 - CLI subprocess clients (CLIClient, OpenCodeClient, CodexClient, GooseClient) all follow the same shape: struct with `binary` field, `Reflect`/`Classify` methods, `run` helper with timeout + env stripping
 - `harnessCommand` is the single spawn funnel: it applies the backend-specific `harnessEnv` allowlist, scratch confinement, and no-tools policy inputs; probes and new clients must use it
+- Probe version-specific CLI capabilities before adding optional flags; fail closed with an upgrade message when a required safety flag is unavailable
 - `harnessEnv` keeps only reviewed common and backend-specific variables; `GHOST_PASSTHROUGH_ENV` is an explicit, security-sensitive escape hatch
 - `stripLLMKeys` strips provider API keys from subprocess env — add new always-stripped keys here when adding CLI backends
 - Stop hook spawns reflect/resolve/supersede as detached processes with `--source` forwarding
@@ -28,6 +29,7 @@
 - Use `t.TempDir()` for filesystem tests
 - Check `os.WriteFile` errors in test setup
 - Test both available and unavailable binary paths for CLI providers
+- Live LLM tests are opt-in: set `GHOST_LIVE_TESTS=1` (and optionally `GHOST_TEST_SOURCE`) before running them
 - SQLite schema migrations: each step wrapped in tx with foreign_key_check
 
 ## Security

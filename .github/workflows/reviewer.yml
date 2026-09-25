@@ -530,10 +530,24 @@ jobs:
           # free-tier refusal, rotated out of the catalog) must not fail the
           # review opaquely: its error text becomes a ::warning:: and the
           # next model is tried; only when every model fails is it an error.
+          # Each attempt is bounded below the step ceiling, and the remaining
+          # budget is checked before starting another model, so a slow gateway
+          # cannot consume the whole step before the fallback loop can run.
           : > model-reply.txt
+          review_deadline=$(( $(date +%s) + 23 * 60 ))
           for m in $MODELS; do
-            echo "reviewing with ${m}"
-            if opencode run --standalone --agent ghost-reviewer -m "$m" --format json \
+            remaining=$(( review_deadline - $(date +%s) ))
+            if [ "$remaining" -le 120 ]; then
+              echo "::warning::review budget exhausted before ${m}; no model slot remains"
+              break
+            fi
+            attempt_seconds=600
+            if [ "$remaining" -lt "$attempt_seconds" ]; then
+              attempt_seconds=$remaining
+            fi
+            echo "reviewing with ${m} (timeout ${attempt_seconds}s)"
+            if timeout --signal=TERM --kill-after=30s "${attempt_seconds}s" \
+                 opencode run --standalone --agent ghost-reviewer -m "$m" --format json \
                  "$REVIEW_PROMPT" > model-reply.try 2> model-stderr.txt \
                && [ -s model-reply.try ] \
                && jq -s -e 'length > 0 and all(.[]; .type != "error")' model-reply.try >/dev/null 2>&1; then

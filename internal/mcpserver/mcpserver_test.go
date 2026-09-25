@@ -1366,6 +1366,20 @@ func TestResourceSubscription_RejectsUnknownURI(t *testing.T) {
 	}
 }
 
+func writeFakeClaude(t *testing.T, path, answer string) {
+	t.Helper()
+	script := `#!/bin/sh
+if [ "$1" = "--help" ]; then
+  printf '%s\n' '--safe-mode' '--restricted' '--strict-mcp-config' '--disable-slash-commands' '--tools' '--disallowedTools' '--setting-sources'
+  exit 0
+fi
+printf '%s' '` + answer + `'
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake claude binary: %v", err)
+	}
+}
+
 // TestGhostResolve_DryRunByDefault covers the plain dry-run path: a fake
 // `claude` CLI on PATH classifies (unknown client name falls back to the best
 // CLI on PATH), the seeded memory is confirmed as resolved evidence, and the
@@ -1391,9 +1405,7 @@ func TestGhostResolve_DryRunByDefault(t *testing.T) {
 	// no longer fall back to claude-first PATH ordering.
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "claude")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s' RESOLVED\n"), 0o755); err != nil {
-		t.Fatalf("write fake claude binary: %v", err)
-	}
+	writeFakeClaude(t, bin, "RESOLVED")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	session := connectedClientNamed(t, srv, "claude-code")
@@ -1454,9 +1466,7 @@ func TestGhostResolve_UsesSessionHarness(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\nprintf '%s' KEEP\n"), 0o755); err != nil {
-		t.Fatalf("write fake claude binary: %v", err)
-	}
+	writeFakeClaude(t, filepath.Join(dir, "claude"), "KEEP")
 	// opencode answers with its JSON-lines format (see
 	// internal/ai/opencode_client_test.go's fakeOpenCodeBinary).
 	if err := os.WriteFile(filepath.Join(dir, "opencode"), []byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"RESOLVED\"}}'\n"), 0o755); err != nil {
@@ -1579,9 +1589,7 @@ func TestGhostResolve_AppliesWithCLI(t *testing.T) {
 
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "claude")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s' RESOLVED\n"), 0o755); err != nil {
-		t.Fatalf("write fake claude binary: %v", err)
-	}
+	writeFakeClaude(t, bin, "RESOLVED")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	session := connectedClientNamed(t, srv, "claude-code")
@@ -1675,9 +1683,7 @@ func TestGhostResolve_UnknownClientUndetectedErrors(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\nprintf '%s' RESOLVED\n"), 0o755); err != nil {
-		t.Fatalf("write fake claude binary: %v", err)
-	}
+	writeFakeClaude(t, filepath.Join(dir, "claude"), "RESOLVED")
 	t.Setenv("PATH", dir)
 
 	old := detectCallingSource
@@ -1726,9 +1732,7 @@ func TestGhostResolve_DetectedHarnessMissingDoesNotFallBackToClaude(t *testing.T
 	}
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\nprintf '%s' RESOLVED\n"), 0o755); err != nil {
-		t.Fatalf("write fake claude binary: %v", err)
-	}
+	writeFakeClaude(t, filepath.Join(dir, "claude"), "RESOLVED")
 	// Only the temp dir is on PATH: the fake claude resolves, opencode cannot.
 	t.Setenv("PATH", dir)
 	t.Setenv("OPENCODE", "1")

@@ -270,9 +270,10 @@ func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string) (*exe
 
 // configureOpenCodeIsolation gives the child a private home and config tree,
 // writes the no-tools policy into it, and replaces inherited duplicates with
-// the exact values the child should see. It intentionally does not copy the
-// user's OpenCode config or auth files into the tree; OPENCODE_API_KEY is the
-// supported authentication path for this isolated invocation.
+// the exact values the child should see. It copies only an existing OpenCode
+// auth.json (never the user's config, plugins, or MCP definitions) when no
+// OPENCODE_API_KEY is supplied; the credential file is then reachable under the
+// invocation-owned data root without reopening the global config tree.
 func configureOpenCodeIsolation(cmd *exec.Cmd) error {
 	if cmd.Dir == "" {
 		return fmt.Errorf("opencode scratch directory is empty")
@@ -291,6 +292,9 @@ func configureOpenCodeIsolation(cmd *exec.Cmd) error {
 	configPath := filepath.Join(configDir, "opencode.json")
 	if err := os.WriteFile(configPath, []byte(openCodeNoToolsConfig), 0o600); err != nil {
 		return fmt.Errorf("opencode isolated config: %w", err)
+	}
+	if err := copyOpenCodeAuth(cmd.Env, dataDir); err != nil {
+		return err
 	}
 
 	env := cmd.Env
@@ -311,6 +315,79 @@ func configureOpenCodeIsolation(cmd *exec.Cmd) error {
 	}
 	cmd.Env = env
 	return nil
+}
+
+// copyOpenCodeAuth carries forward only the credential file that OpenCode
+// needs to authenticate. The source is discovered before HOME/XDG_DATA_HOME
+// are replaced, so both a normal login and the evaluation harness's seeded
+// auth.json continue to work without exposing the user's config or MCP tree.
+func copyOpenCodeAuth(env []string, dataDir string) error {
+	if harnessEnvValue(env, "OPENCODE_API_KEY") != "" {
+		return nil
+	}
+	source := openCodeAuthSource(env)
+	if source == "" {
+		return nil
+	}
+	contents, err := os.ReadFile(source)
+	if err != nil {
+		return fmt.Errorf("read opencode auth file: %w", err)
+	}
+	authDir := filepath.Join(dataDir, "opencode")
+	if err := os.MkdirAll(authDir, 0o700); err != nil {
+		return fmt.Errorf("create opencode auth directory: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "auth.json"), contents, 0o600); err != nil {
+		return fmt.Errorf("copy opencode auth file: %w", err)
+	}
+	return nil
+}
+
+func openCodeAuthSource(env []string) string {
+	var candidates []string
+	seen := make(map[string]bool)
+	add := func(parts ...string) {
+		if len(parts) == 0 || parts[0] == "" {
+			return
+		}
+		path := filepath.Join(parts...)
+		if !seen[path] {
+			seen[path] = true
+			candidates = append(candidates, path)
+		}
+	}
+
+	if dataHome := harnessEnvValue(env, "XDG_DATA_HOME"); dataHome != "" {
+		add(dataHome, "opencode", "auth.json")
+	}
+	for _, homeKey := range []string{"HOME", "USERPROFILE"} {
+		if home := harnessEnvValue(env, homeKey); home != "" {
+			add(home, ".local", "share", "opencode", "auth.json")
+			add(home, ".config", "opencode", "auth.json")
+			add(home, "Library", "Application Support", "opencode", "auth.json")
+		}
+	}
+	for _, dataKey := range []string{"LOCALAPPDATA", "APPDATA"} {
+		if dataHome := harnessEnvValue(env, dataKey); dataHome != "" {
+			add(dataHome, "opencode", "auth.json")
+		}
+	}
+	for _, path := range candidates {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+			return path
+		}
+	}
+	return ""
+}
+
+func harnessEnvValue(env []string, key string) string {
+	for _, kv := range env {
+		name, value, ok := strings.Cut(kv, "=")
+		if ok && strings.EqualFold(name, key) {
+			return value
+		}
+	}
+	return ""
 }
 
 func setHarnessEnvValue(env []string, key, value string) []string {
