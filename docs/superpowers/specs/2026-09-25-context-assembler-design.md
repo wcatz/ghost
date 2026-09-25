@@ -6,8 +6,7 @@
 > [#583](https://github.com/wcatz/ghost/issues/583) and
 > [#582](https://github.com/wcatz/ghost/issues/582) build on.
 > **Related:** the target-design vocabulary in
-> [`architecture.md`](../../architecture.md) and the current hybrid retrieval
-> primitives in `internal/memory`.
+> [`architecture.md`](../../architecture.md) and `internal/memory` retrieval.
 
 ## Problem
 
@@ -124,22 +123,23 @@ var ErrResponseBudgetExceeded = errors.New("response budget exceeded")
 `Slice` is a per-bucket membership budget; `Slice.MaxBytes` bounds item content
 and never includes response framing. `Budget` also has a total because search
 applies one limit across project and `_global`, while injection has independent
-project and global caps. An all-zero budget is rejected. Stage 8 applies slice caps. The separate `Run` response-fit post-pass seeds from the complete envelope
-(items, framing, human copy, machine outcome line, and bounded notes) for the initial outcome; while
-it exceeds `Budget.MaxBytes`, it drops the lowest-ranked row, recomputes the
-outcome, re-derives and re-bounds notes, re-renders, re-measures, and records
-a `response_fit` entry. A fitting seed means the complete response fits and does zero iterations.
-No rows means `empty`/`all_over_budget`;
-`Budget.MaxBytes == 0` skips the pass. Notes are bounded by `MaxNoteBytes` and
-`MaxNotesBytes` (default 512 and 2048 bytes); diagnostic notes drop before the
-machine or reason line and never change the outcome or reason. If the final
-envelope still exceeds the cap, `Run` returns `ErrResponseBudgetExceeded` rather
-than an outcome, and `mcpserver` renders it as a tool error with copy
-"response budget exceeded". `Item.Bytes` is content only; callers set the budget
-fields, with no implicit default.
+project and global caps. An all-zero budget is rejected. Stage 8 applies slice
+caps. The separate `Run` response-fit post-pass seeds from the complete envelope
+(items, framing, human copy, machine outcome line, and notes bounded to 512/2048
+bytes) for the initial outcome. While that render exceeds `Budget.MaxBytes`, it
+drops the lowest-ranked row, recomputes the outcome, re-derives and re-bounds
+notes into `Result.Notes` and `Trace.Notes`, records each dropped note in the
+`response_fit` `StageTrace.Notes`, then re-renders and re-measures.
+`Result.Bytes` is the last render's count; a fitting seed needs zero iterations.
+No rows means `empty`/`all_over_budget`; `Budget.MaxBytes == 0` skips the pass,
+and diagnostic notes always drop before the machine or reason line without
+changing the outcome or reason. If the final envelope still exceeds the cap,
+`Run` returns `ErrResponseBudgetExceeded` rather than an outcome, and
+`mcpserver` renders it as a tool error with copy "response budget exceeded".
+`Item.Bytes` is content only; callers set the budget fields, with no implicit
+default.
 
-`Item` is the shared output type for rendering, explanation, and bench metrics;
-it carries the fields needed to reproduce both renderers and measure Decision 5.
+`Item` is the shared output type for rendering, explanation, and bench metrics.
 
 ```go
 type Item struct {
@@ -182,9 +182,9 @@ const (
 ```
 
 `Run` validates the source, project mode, query mode, condition, query vector,
-clock, and a non-all-zero budget before calling `Candidates`. A nil `QueryVec` with
-`CondHybrid` is legal and marks the vector leg not attempted; only
-`CondVectorOnly` requires a vector.
+clock, and a non-all-zero budget before calling `Candidates`. A nil `QueryVec`
+is legal and marks the vector leg not attempted; only `CondVectorOnly` requires
+a vector.
 
 | Source | `ProjectID` | `Query` | Retrieval mode |
 |---|---|---|---|
