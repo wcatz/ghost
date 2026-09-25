@@ -323,14 +323,14 @@ func printBinding(out io.Writer, binding memory.ProjectBinding) error {
 	// the standalone, init-managed wiring has this step.
 	//
 	// It also does not promise more than init does. writeRedirects branches on
-	// the file's CONTENT, not on who wrote it: it skips anything that does not
-	// contain "stored in Ghost", and rewrites what does when that content still
-	// carries the stale ghost_list_projects marker — so a hand-written file
-	// mentioning Ghost can be replaced. Status counts a skipped project as not
-	// redirected and prints the same line either way, so without this clause
-	// the advice would leave the check red with nothing to act on. The wording
-	// is the code's own test rather than a claim about provenance, which the
-	// installer has no way to know.
+	// the file's CONTENT, not on who wrote it: it skips anything without the
+	// "stored in Ghost" marker, and rewrites what has that marker when the
+	// content still carries the stale ghost_list_projects tool-call marker — so a
+	// hand-written file carrying both can be replaced. Status counts a skipped
+	// project as not redirected and prints the same line either way, so without
+	// this clause the advice would leave the check red with nothing to act on.
+	// The wording is the code's own test rather than a claim about provenance,
+	// which the installer has no way to know.
 	if binding.PathChanged && !filepath.IsAbs(binding.PreviousPath) {
 		if _, err := fmt.Fprintln(out, "  next: on the standalone Claude Code integration (not the ghost plugin), run\n"+
 			"        `ghost mcp init` to write this checkout's memory redirect\n"+
