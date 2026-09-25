@@ -19,16 +19,28 @@ A config file that exists but does not parse is never ignored. The error names t
 | Caller | Behaviour |
 |---|---|
 | CLI subcommands (`ghost reflect`, `ghost resolve`, `ghost supersede`, `ghost obsidian …`, `ghost maintenance status`, `ghost project …`) | Exit non-zero with the parse error. Nothing is run against half the intended configuration. |
-| The `ghost mcp` server | Warn on its log channel — stderr, or `GHOST_LOG_FILE` when set — and serve the compiled defaults. It does not exit: that would not fail a command, it would leave your editor with no Ghost tools at all, because of a typo in a file you may not know exists. The warning sink follows the server's log channel rather than raw stderr, so setting `GHOST_LOG_FILE` keeps it out of the MCP client's face. |
-| Host-session hooks (SessionStart injection, the stop hook, obsidian auto-sync, session routing) | Report the same error on stderr and continue with the compiled defaults. A typo in the config must not fail the session you are currently working in. |
-| `ghost mcp status` | Prints the path as informational, then a `!` line carrying the parse error. The remaining checks then run on the compiled defaults, so nothing is missing from the output — but the run is **not** marked unhealthy, because the `!` line is the pointer, not a verdict. |
+| The `ghost mcp` server | Warn on its log channel — stderr, or `GHOST_LOG_FILE` when set — and serve the environment plus the compiled defaults. It does not exit: that would not fail a command, it would leave your editor with no Ghost tools at all, because of a typo in a file you may not know exists. The warning sink follows the server's log channel rather than raw stderr, so setting `GHOST_LOG_FILE` keeps it out of the MCP client's face. |
+| Host-session hooks (SessionStart injection, the stop hook, obsidian auto-sync, session routing) | Report the same error on stderr and continue with the environment plus the compiled defaults. A typo in the config must not fail the session you are currently working in. |
+| `ghost mcp status` | Prints the path as informational, then a `!` line carrying the parse error. The remaining checks then run on the defaults, so nothing is missing from the output — but the run is **not** marked unhealthy, because the `!` line is the pointer, not a verdict. |
 
-A key that no setting binds — a typo such as `linking.thresholdd` — is a warning on stderr rather than a failure: it cannot affect anything, so it should not stop a session. The other keys in the same file still load. `GHOST_*` values are checked the same way, and an unreadable one is an error naming the variable.
+"Environment plus the compiled defaults" means every layer that does not read a config file. The `GHOST_*` variables still apply, so a broken file cannot undo an opt-out you set in the environment (`GHOST_EMBEDDING_ENABLED=false`, `GHOST_SCRATCH_MAX_BYTES=0`). Only the file layers are lost.
 
 ```text
-ghost: config: parse /home/you/.config/ghost/config.yaml: yaml: line 3: found unexpected end of stream — falling back to built-in defaults
+ghost: config: parse /home/you/.config/ghost/config.yaml: yaml: line 3: found unexpected end of stream — falling back to the environment and built-in defaults
+```
+
+## Unknown keys
+
+A key in a config file that no setting binds — a typo such as `linking.thresholdd` — is a warning on stderr rather than a failure: it cannot affect anything, so it should not stop a session, and the other keys in the same file still load.
+
+```text
 ghost: config: /home/you/.config/ghost/config.yaml: unknown key(s) ignored: linking.thresholdd
 ```
+
+This check covers **config files only**, and the limits are worth knowing:
+
+- A misspelled `GHOST_*` variable is still ignored silently. Ghost cannot report it, because most of its variables are not config keys at all — `GHOST_DEBUG`, `GHOST_LOG_FILE`, `GHOST_SCRATCH_DIR`, `GHOST_PASSTHROUGH_ENV` and `GHOST_OPENCODE_MODEL` are documented here or in the harness section below, and none of them binds a `Config` field.
+- A `GHOST_*` value that cannot be read as its key's type is an error naming the variable, but only for the explicit shortcuts in the table below. A generic-mapped value fails later, as a decode error naming the key (`'embedding.enabled' cannot parse value as 'bool'`), which is enough to identify the setting but not the variable that carried it.
 
 ## File locations
 

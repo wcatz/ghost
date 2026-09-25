@@ -348,8 +348,9 @@ func opencodeDirOrEmpty() string {
 // reading it. It never fails the health check — the config file is optional,
 // since compiled defaults work without one — so it deliberately doesn't take a
 // check closure; the `!` line it prints for a broken file is the pointer, not a
-// verdict. The rest of the status run continues on the compiled defaults
-// (see checkStoreHealth), so a broken file costs the user no other check.
+// verdict. The rest of the status run continues on the environment plus the
+// compiled defaults (see checkStoreHealth), so a broken file costs the user no
+// other check.
 func reportConfigFile(w io.Writer) {
 	path, err := config.ConfigFilePath()
 	if err != nil {
@@ -362,7 +363,7 @@ func reportConfigFile(w io.Writer) {
 		_, _ = fmt.Fprintf(w, "  - no config file (run ghost mcp init)\n")
 	}
 	if _, err := config.Load(); err != nil {
-		_, _ = fmt.Fprintf(w, "  ! config: %v (built-in defaults in use)\n", err)
+		_, _ = fmt.Fprintf(w, "  ! config: %v (environment and built-in defaults in use)\n", err)
 	}
 }
 
@@ -392,7 +393,7 @@ func checkEmbeddingStats(check func(ok bool, pass, fail string), embedded, total
 // the parse error, and gating on config.Load here would drop the Ollama,
 // embedding-coverage and link lines on exactly the run where a user needs them:
 // a broken config silently disabling vector search is the thing this command
-// exists to explain. On the compiled defaults these checks still run and still
+// exists to explain. On the fallback these checks still run and still
 // report the truth about the store in front of them.
 func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memory.Store {
 	// 8. Embedding & linking health — silent embed failures leave vector

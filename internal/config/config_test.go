@@ -17,13 +17,43 @@ import (
 // malformedYAML is what a human typo produces: an unterminated quoted scalar.
 const malformedYAML = "embedding:\n  model: \"nomic-embed-text\n"
 
-// isolateConfig points HOME and XDG_CONFIG_HOME at a temp dir so neither a real
-// config file nor a host GHOST_* variable can reach the assertions.
+// isolateConfig points HOME and XDG_CONFIG_HOME at a temp dir and clears every
+// GHOST_* variable in the environment, so neither a real config file nor a
+// host-exported variable can reach the assertions. Both sources are used: the
+// names derived from the two env layers, so a variable added later is covered
+// the day it is added, and the ambient environment, so a host that exports
+// something this package has never heard of cannot skew a default either.
+//
+// The system-wide layer is the one input this does NOT isolate:
+// /etc/ghost/config.yaml is a real file on a machine that installed Ghost
+// system-wide, and the loader takes its path from a constant with no override,
+// so no test can point it elsewhere. A machine with that file installed
+// system-wide runs these tests against it.
 func isolateConfig(t *testing.T) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	unsetEnvVars(t, configEnvVarNames())
+}
+
+// configEnvVarNames lists every GHOST_* variable in the environment plus every
+// name the two env layers can read: the explicit shortcuts, and the name koanf's
+// generic GHOST_ prefix + "_"→"." transformer derives for each bound key.
+func configEnvVarNames() []string {
+	names := make([]string, 0, len(envOverrides)+len(knownKeys))
+	for _, ov := range envOverrides {
+		names = append(names, ov.env)
+	}
+	for key := range knownKeys {
+		names = append(names, "GHOST_"+strings.ToUpper(strings.ReplaceAll(key, ".", "_")))
+	}
+	for _, kv := range os.Environ() {
+		if name, _, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(name, "GHOST_") {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // writeUserConfig writes content to the exact user config path Load() reads
@@ -780,6 +810,144 @@ func TestLoad_UnknownKeyWarns(t *testing.T) {
 	}
 	if !strings.Contains(got, path) {
 		t.Errorf("warning %q must name the file it came from (%q)", got, path)
+	}
+}
+
+// TestFallbackConfig_KeepsEnvLayer pins that the fallback is every layer that
+// does not read a config file — the compiled defaults AND the GHOST_*
+// environment — not the compiled defaults alone. Dropping the env layer would
+// be a regression, not a narrowing: before, a parse error was swallowed and the
+// load carried on to the env layer, so a deployment that opts out with
+// GHOST_EMBEDDING_ENABLED=false (or disables the scratch budget with
+// GHOST_SCRATCH_MAX_BYTES=0) kept that opt-out even with a broken file beside
+// it. Returning defaults alone would silently re-enable exactly what the
+// operator turned off.
+func TestFallbackConfig_KeepsEnvLayer(t *testing.T) {
+	isolateConfig(t)
+	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
+	t.Setenv("GHOST_LINKING_DEMOTION_THRESHOLD", "0.42")
+	t.Setenv("GHOST_INJECTION_BEHAVIOR_FLOOR", "3")
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "0")
+	// A broken file is the whole point: these must still take effect.
+	writeUserConfig(t, malformedYAML)
+	warnings := captureConfigWarnings(t)
+
+	cfg := LoadForHook()
+	if cfg == nil {
+		t.Fatal("LoadForHook() = nil")
+	}
+	if cfg.Embedding.Enabled {
+		t.Error("embedding.enabled = true, want the GHOST_EMBEDDING_ENABLED=false opt-out to survive a broken file")
+	}
+	if cfg.Linking.DemotionThreshold != 0.42 {
+		t.Errorf("linking.demotion_threshold = %f, want 0.42 (env layer must survive a broken file)", cfg.Linking.DemotionThreshold)
+	}
+	if cfg.Injection.BehaviorFloor != 3 {
+		t.Errorf("injection.behavior_floor = %d, want 3 (env layer must survive a broken file)", cfg.Injection.BehaviorFloor)
+	}
+	if cfg.Scratch.MaxBytes != 0 {
+		t.Errorf("scratch.max_bytes = %d, want 0 (the documented GHOST_SCRATCH_MAX_BYTES=0 opt-out)", cfg.Scratch.MaxBytes)
+	}
+	// Still the one fallback, still loud: the file problem is still reported.
+	if !strings.Contains(warnings.String(), os.Getenv("XDG_CONFIG_HOME")) {
+		t.Errorf("warning %q must still name the file that failed to parse", warnings.String())
+	}
+}
+
+// TestFallbackConfig_BadEnvValueDegrades pins that an unreadable GHOST_* value
+// does not take the fallback down with it. The hook path cannot return an
+// error, so the bad variable is reported and the rest of the config stands.
+func TestFallbackConfig_BadEnvValueDegrades(t *testing.T) {
+	isolateConfig(t)
+	t.Setenv("GHOST_INJECTION_CATEGORY_WEIGHTS", "gotcha")
+	t.Setenv("GHOST_ROUTING_DEFAULT_PROJECT", "infrastructure")
+	writeUserConfig(t, malformedYAML)
+	warnings := captureConfigWarnings(t)
+
+	cfg := LoadForHook()
+	if cfg == nil {
+		t.Fatal("LoadForHook() = nil; a bad env value must not take the fallback down")
+	}
+	if cfg.Routing.DefaultProject != "infrastructure" {
+		t.Errorf("routing.default_project = %q, want the env value to survive a bad sibling", cfg.Routing.DefaultProject)
+	}
+	if !strings.Contains(warnings.String(), "GHOST_INJECTION_CATEGORY_WEIGHTS") {
+		t.Errorf("warning %q must name the unreadable variable", warnings.String())
+	}
+}
+
+// TestIsolateConfig_ClearsConfigEnvVars makes the helper's claim testable: a
+// host GHOST_* variable must not reach an assertion that a compiled default
+// holds. The names are derived from the two env layers, so a variable added
+// later is covered the day it is added.
+// TestIsolateConfig_ClearsAmbientGhostVars covers the ambient half of the
+// helper, which configEnvVarNames' derived list cannot: a name this package has
+// no mapping for still reaches koanf's generic env provider, so it belongs in
+// the cleared set even though it cannot change a Config field today. Pinning
+// the helper's contract is the only way to keep that sweep from being dropped
+// as apparently redundant.
+func TestIsolateConfig_ClearsAmbientGhostVars(t *testing.T) {
+	const unknown = "GHOST_NOT_A_CONFIG_KEY"
+	t.Setenv(unknown, "1")
+
+	isolateConfig(t)
+
+	if v, ok := os.LookupEnv(unknown); ok {
+		t.Errorf("isolateConfig left %s=%q set; a host GHOST_* export must not reach the load", unknown, v)
+	}
+}
+
+func TestIsolateConfig_ClearsConfigEnvVars(t *testing.T) {
+	for k, v := range map[string]string{
+		"GHOST_LINKING_DEMOTION_THRESHOLD":           "0.42",
+		"GHOST_INJECTION_BEHAVIOR_FLOOR":             "3",
+		"GHOST_INJECTION_CATEGORY_WEIGHTS":           "gotcha=1.2",
+		"GHOST_SCRATCH_MAX_BYTES":                    "1024",
+		"GHOST_OBSIDIAN_AUTO_SYNC":                   "true",
+		"GHOST_EMBEDDING_ENABLED":                    "false",
+		"GHOST_ROUTING_DEFAULT_PROJECT":              "infrastructure",
+		"GHOST_SEARCH_MIN_SIMILARITY":                "0.9",
+		"GHOST_REFLECTION_AUTO_REFLECT":              "true",
+		"GHOST_REFLECTION_LIFECYCLE_TIMEOUT_MINUTES": "5",
+	} {
+		t.Setenv(k, v)
+	}
+
+	isolateConfig(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if cfg.Linking.DemotionThreshold != 0.90 {
+		t.Errorf("linking.demotion_threshold = %f, want the compiled default 0.90", cfg.Linking.DemotionThreshold)
+	}
+	if cfg.Injection.BehaviorFloor != 8 {
+		t.Errorf("injection.behavior_floor = %d, want the compiled default 8", cfg.Injection.BehaviorFloor)
+	}
+	if cfg.Injection.CategoryWeights != nil {
+		t.Errorf("injection.category_weights = %v, want the compiled default nil", cfg.Injection.CategoryWeights)
+	}
+	if cfg.Scratch.MaxBytes != 512*1024*1024 {
+		t.Errorf("scratch.max_bytes = %d, want the compiled default 512 MiB", cfg.Scratch.MaxBytes)
+	}
+	if cfg.Obsidian.AutoSync {
+		t.Error("obsidian.auto_sync = true, want the compiled default false")
+	}
+	if !cfg.Embedding.Enabled {
+		t.Error("embedding.enabled = false, want the compiled default true")
+	}
+	if cfg.Routing.DefaultProject != "" {
+		t.Errorf("routing.default_project = %q, want the compiled default empty", cfg.Routing.DefaultProject)
+	}
+	if cfg.Search.MinSimilarity != 0 {
+		t.Errorf("search.min_similarity = %f, want the compiled default 0", cfg.Search.MinSimilarity)
+	}
+	if cfg.Reflection.AutoReflect {
+		t.Error("reflection.auto_reflect = true, want the compiled default false")
+	}
+	if cfg.Reflection.LifecycleTimeoutMinutes != 60 {
+		t.Errorf("reflection.lifecycle_timeout_minutes = %d, want the compiled default 60", cfg.Reflection.LifecycleTimeoutMinutes)
 	}
 }
 

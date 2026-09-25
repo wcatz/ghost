@@ -499,9 +499,16 @@ func TestReportConfigFile_MalformedReported(t *testing.T) {
 // exact case `ghost mcp status` is documented to diagnose — dropped the Ollama,
 // embedding-coverage and link lines and could still print "All checks passed."
 // while vector search and linking were in fact off. reportConfigFile reports
-// the parse error; these checks must still run, on the compiled defaults.
+// the parse error; these checks must still run, on the fallback config.
 func TestCheckStoreHealth_MalformedConfigStillRunsChecks(t *testing.T) {
 	statusEnv(t)
+	// statusEnv disables embedding so the other status tests make no network
+	// call. Here that would be self-defeating: the fallback is the environment
+	// plus the compiled defaults, and with embedding off checkOllama returns
+	// early without reporting through the check closure, so the test could not
+	// tell "the checks were dropped" from "embedding is off". Turn it back on so
+	// the Ollama check is the one that must appear.
+	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
 	writeGhostConfigFile(t, "embedding:\n  model: \"nomic-embed-text\n")
 
 	var out bytes.Buffer
@@ -516,11 +523,10 @@ func TestCheckStoreHealth_MalformedConfigStillRunsChecks(t *testing.T) {
 	if len(ran) == 0 {
 		t.Errorf("no health check ran on a broken config; the embedding/linking checks were dropped:\n%s", out.String())
 	}
-	// The defaults have embedding on, so the Ollama check is the one that must
-	// appear — whichever way the live probe goes, it reports through the check
-	// closure with a message naming Ollama.
+	// Whichever way the live probe goes, the Ollama check reports through the
+	// check closure with a message naming Ollama.
 	if !slices.ContainsFunc(ran, func(s string) bool { return strings.Contains(s, "Ollama") }) {
-		t.Errorf("expected the Ollama check to run on the compiled defaults, got checks: %v", ran)
+		t.Errorf("expected the Ollama check to run on the fallback config, got checks: %v", ran)
 	}
 }
 

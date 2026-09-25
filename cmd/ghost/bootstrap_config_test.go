@@ -27,7 +27,7 @@ func TestConfigOnLoadError(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("warnOnConfig fallback = nil, want the compiled defaults")
 	}
-	// The fallback must be config.DefaultConfig() itself, so the server and the
+	// The fallback must be config.FallbackConfig() itself, so the server and the
 	// session hooks can never drift onto different values.
 	if !cfg.Embedding.Enabled || cfg.Scratch.MaxBytes != config.DefaultScratchMaxBytes ||
 		cfg.Linking.DemotionThreshold != 0.90 || cfg.Injection.BehaviorFloor != 8 {

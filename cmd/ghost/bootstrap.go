@@ -38,7 +38,7 @@ func configOnLoadError(onBadConfig configHandling, err error) (*config.Config, b
 	if onBadConfig == failOnConfig {
 		return nil, true
 	}
-	return config.DefaultConfig(), false
+	return config.FallbackConfig(), false
 }
 
 // bootstrap loads config, opens the database, and returns the wiring every
@@ -64,12 +64,13 @@ func bootstrap(logWriter io.Writer, logLevel slog.Level, onBadConfig configHandl
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
-		// The server stays up on the compiled defaults. The Warn and every
+		// The server stays up on the environment plus the compiled defaults.
+		// The Warn and every
 		// config warning from the same Load call reach this process's log
 		// channel — stderr, or GHOST_LOG_FILE when set, which runMCP has
 		// already pointed the warning sink at (see config.SetWarningWriter) —
 		// and `ghost mcp status` prints the same error on demand.
-		logger.Warn("config could not be loaded; serving built-in defaults", "error", err)
+		logger.Warn("config could not be loaded; serving the environment and built-in defaults", "error", err)
 		cfg = fallback
 	}
 

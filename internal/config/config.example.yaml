@@ -147,7 +147,9 @@
 
 # --- When this file is wrong ---
 # A file that exists but does not parse is reported, not ignored: CLI commands
-# exit with the error, the SessionStart/Stop hooks warn on stderr and use the
-# defaults above so your session still works, and `ghost mcp status` prints it.
-# A key Ghost does not recognize (a typo such as `thresholdd`) is likewise
-# reported, and the rest of the file still loads. See docs/configuration.md.
+# exit with the error, the SessionStart/Stop hooks and the `ghost mcp` server
+# warn and continue on the GHOST_* environment plus the defaults above (so your
+# session still works, and a GHOST_* opt-out is not undone), and `ghost mcp
+# status` prints it. A key Ghost does not recognize (a typo such as
+# `thresholdd`) is likewise reported, and the rest of the file still loads.
+# See docs/configuration.md.

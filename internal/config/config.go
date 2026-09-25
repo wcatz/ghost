@@ -254,28 +254,8 @@ func Load() (*Config, error) {
 
 	// Layer 4: GHOST_* environment variables.
 	// e.g. GHOST_CLI_CLAUDE_BINARY → cli.claude_binary (see envOverrides below).
-	if err := k.Load(env.Provider("GHOST_", ".", func(s string) string {
-		return strings.ToLower(strings.ReplaceAll(
-			strings.TrimPrefix(s, "GHOST_"), "_", "."))
-	}), nil); err != nil {
+	if err := loadEnvLayer(k); err != nil {
 		return nil, err
-	}
-
-	// Explicit env overrides for keys the generic transformer cannot reach.
-	for _, ov := range envOverrides {
-		raw := os.Getenv(ov.env)
-		if raw == "" {
-			continue
-		}
-		val, err := ov.parse(raw)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", ov.env, err)
-		}
-		if err := k.Load(confmap.Provider(map[string]interface{}{
-			ov.key: val,
-		}, "."), nil); err != nil {
-			return nil, fmt.Errorf("%s: %w", ov.env, err)
-		}
 	}
 
 	cfg := &Config{}
@@ -285,12 +265,42 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+// loadEnvLayer applies the GHOST_* environment variables to k: the generic
+// GHOST_ prefix + "_"→"." mapping first, then the explicit envOverrides
+// shortcuts for the keys that transformer cannot reach. An error names the
+// variable, so the user knows which one to fix.
+func loadEnvLayer(k *koanf.Koanf) error {
+	if err := k.Load(env.Provider("GHOST_", ".", func(s string) string {
+		return strings.ToLower(strings.ReplaceAll(
+			strings.TrimPrefix(s, "GHOST_"), "_", "."))
+	}), nil); err != nil {
+		return err
+	}
+
+	for _, ov := range envOverrides {
+		raw := os.Getenv(ov.env)
+		if raw == "" {
+			continue
+		}
+		val, err := ov.parse(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", ov.env, err)
+		}
+		if err := k.Load(confmap.Provider(map[string]interface{}{
+			ov.key: val,
+		}, "."), nil); err != nil {
+			return fmt.Errorf("%s: %w", ov.env, err)
+		}
+	}
+	return nil
+}
+
 // LoadForHook loads configuration for a hook running inside someone else's
 // editor session (SessionStart injection, obsidian auto-sync, stop-hook
 // reflection, session routing). A broken config must not fail the host's
-// session, so the error is reported on stderr and the compiled defaults are
-// returned: the session still gets its context, and the user still finds out
-// why their settings are not taking effect.
+// session, so the error is reported on stderr and FallbackConfig is returned:
+// the session still gets its context, and the user still finds out why their
+// settings are not taking effect.
 //
 // CLI subcommands use Load instead, and fail with the same error.
 func LoadForHook() *Config {
@@ -298,19 +308,31 @@ func LoadForHook() *Config {
 	if err == nil {
 		return cfg
 	}
-	warnf("%v — falling back to built-in defaults", err)
-	return DefaultConfig()
+	warnf("%v — falling back to the environment and built-in defaults", err)
+	return FallbackConfig()
 }
 
-// DefaultConfig returns the Config compiled from the defaults layer alone — the
-// same values an empty config file produces. It is the one fallback for every
-// caller that must not fail on a broken config file (LoadForHook, and the MCP
-// server via cmd/ghost's bootstrap), so a broken file can never change which
-// values those paths use.
-func DefaultConfig() *Config {
+// FallbackConfig returns the Config for callers that must not fail on a broken
+// config file (LoadForHook, and the MCP server via cmd/ghost's bootstrap), so
+// one broken file can never change which values those paths use.
+//
+// It is every layer that does not read a config file: the compiled defaults
+// plus the GHOST_* environment. Keeping the env layer is not a nicety — before
+// the parse error was surfaced at all, a malformed file was skipped and the load
+// carried on to the environment, so returning the defaults alone would
+// silently undo an operator's opt-out (GHOST_EMBEDDING_ENABLED=false,
+// GHOST_SCRATCH_MAX_BYTES=0) and hand it back to them as the opposite.
+//
+// A GHOST_* value that cannot be read is reported and skipped rather than
+// returned as an error, because this path has no way to fail; the variables
+// applied before it are kept.
+func FallbackConfig() *Config {
 	cfg := &Config{}
 	k := koanf.New(".")
 	if err := k.Load(confmap.Provider(defaults, "."), nil); err == nil {
+		if err := loadEnvLayer(k); err != nil {
+			warnf("%v — using the rest of the environment", err)
+		}
 		if err := k.Unmarshal("", cfg); err == nil {
 			return cfg
 		}

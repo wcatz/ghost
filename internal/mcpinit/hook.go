@@ -567,10 +567,10 @@ func loadSessionContext(cwd string) (projectID, project string, memories []sessi
 	behaviorFloor := 0
 	// LoadForHook, not Load: this runs inside the host's editor session, so a
 	// broken config must not fail it. LoadForHook reports the failure on stderr
-	// and returns the compiled defaults, which pin the same injection.* and
-	// linking.demotion_threshold values the two former fallbacks did. Loaded
-	// once and reused — it reads the config files and the environment, and this
-	// is the session-start hot path.
+	// and returns the environment plus the compiled defaults, which pin the same
+	// injection.* and linking.demotion_threshold values the two former
+	// fallbacks did. Loaded once and reused — it reads the config files and the
+	// environment, and this is the session-start hot path.
 	cfg := config.LoadForHook()
 	injection := cfg.Injection
 	if injection.BehaviorFloor > 0 {
