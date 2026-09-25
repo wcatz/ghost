@@ -113,6 +113,67 @@ func TestHybridWindowNeverReturnsMoreThanLimit(t *testing.T) {
 	}
 }
 
+func TestFuseAndSelectWindowSkipsFTSReservationWhenWeightZero(t *testing.T) {
+	fts := []Memory{{ID: "keyword-only"}}
+	vec := make([]ScoredMemory, 0, 20)
+	for i := 0; i < 20; i++ {
+		vec = append(vec, ScoredMemory{MemoryID: fmt.Sprintf("vector-%02d", i), Score: float32(20 - i)})
+	}
+	p := DefaultSearchParams()
+	p.FTSWeight = 0
+	p.VecWeight = 1
+
+	window := FuseAndSelectWindow(fts, vec, 10, p)
+	for _, id := range window.IDs {
+		if id == "keyword-only" {
+			t.Fatal("zero FTS weight still reserved a keyword-only candidate")
+		}
+	}
+}
+
+func TestFuseAndRankBackfillsDeletedCandidate(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	vec := make([]ScoredMemory, 0, 6)
+	ids := make([]string, 0, 6)
+	for i := 0; i < 6; i++ {
+		id := createTestMemory(t, store, ctx, fmt.Sprintf("candidate %d", i))
+		ids = append(ids, id)
+		vec = append(vec, ScoredMemory{MemoryID: id, Score: float32(6 - i)})
+	}
+
+	beforeHybridHydrateFn.Store(func(selected []string) {
+		if len(selected) == 0 {
+			return
+		}
+		if err := store.Delete(ctx, selected[0]); err != nil {
+			t.Fatalf("delete selected candidate: %v", err)
+		}
+	})
+	t.Cleanup(func() { beforeHybridHydrateFn.Store(func([]string) {}) })
+
+	p := DefaultSearchParams()
+	p.DecayEnabled = false
+	got, err := store.fuseAndRank(ctx, nil, vec, 5, p)
+	if err != nil {
+		t.Fatalf("fuseAndRank: %v", err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("got %d results after selected-row deletion, want 5", len(got))
+	}
+	for _, want := range ids[1:] {
+		found := false
+		for _, memory := range got {
+			if memory.ID == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("lower-ranked candidate %s was not backfilled", want)
+		}
+	}
+}
+
 // TestFuseAndSelectWindowWidth pins the function's own contract, which the
 // search path cannot show: decayRank trims the window again on its way out, so
 // an over-wide return would be invisible through SearchHybrid even though the
