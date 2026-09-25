@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/repo"
 )
 
 // resolveProjectOrExit resolves projectName to a project ID via store, printing
@@ -202,6 +205,303 @@ func knownProjectNames(ctx context.Context, store *memory.Store) []string {
 		return nil
 	}
 	return names
+}
+
+// resolveProjectBindID checks the project argument of `ghost project bind`
+// names an existing project id, or reports the known names and fails. It is
+// the exact-id lookup rather than ResolveProject on purpose: bind is the
+// command a user runs *because* a project does not resolve from its directory,
+// so the name and path steps of the full resolver are the ones least likely to
+// produce the project they meant, and a name that matches two projects would be
+// a coin flip. A miss therefore names the argument as wrong instead of
+// silently binding whichever project looked closest.
+func resolveProjectBindID(ctx context.Context, store *memory.Store, projectID string) (string, error) {
+	if _, ok, err := store.ResolveExactProjectID(ctx, projectID); err != nil {
+		return "", err
+	} else if !ok {
+		if names := knownProjectNames(ctx, store); len(names) > 0 {
+			return "", fmt.Errorf("project %q not found (bind takes a project id). Known projects: %s",
+				projectID, strings.Join(names, ", "))
+		}
+		return "", fmt.Errorf("project %q not found (bind takes a project id)", projectID)
+	}
+	return projectID, nil
+}
+
+// runProjectBindCore implements `ghost project bind <project> <path>` against
+// an already-open store and prints what changed. detectRemote is injected
+// because it is the only step that has to ask git, and the command's tests
+// must not spawn a process: the CLI passes repo.DetectRemote, the same detector
+// main wires into the store for resolution.
+//
+// The path is resolved here rather than in the store because this package is
+// the one allowed to look at the filesystem. It is made absolute and cleaned,
+// and must be an existing directory — binding a path that does not exist would
+// record a location no session can ever stand in, which is the state the
+// command exists to leave. Everything after that (the recorded-path rules, the
+// claim checks, the write) belongs to the store, which owns them.
+//
+// Pulled out of runProjectBind — which owns arg parsing, bootstrap() and
+// os.Exit — so the refusals are testable without process-exit paths.
+func runProjectBindCore(ctx context.Context, store *memory.Store, out io.Writer, projectID, path string, detectRemote func(string) string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("no path given — usage: ghost project bind <project-id> <checkout-directory>")
+	}
+	id, err := resolveProjectBindID(ctx, store, projectID)
+	if err != nil {
+		return err
+	}
+
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("cannot resolve %q to an absolute path: %w", path, err)
+	}
+	abs = filepath.Clean(abs)
+
+	info, err := os.Stat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no such directory: %s", abs)
+		}
+		return fmt.Errorf("cannot read %s: %w", abs, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory: %s", abs)
+	}
+	// The filesystem root, and only the root, survives Abs+Stat: it is
+	// absolute and it exists, and it is exactly the path that would claim
+	// every directory on the machine.
+	if !memory.StoredPathIsUsable(abs) {
+		return fmt.Errorf("refusing to bind %s: it contains every directory, so sessions anywhere would resolve to this project", abs)
+	}
+
+	remote := ""
+	if detectRemote != nil {
+		remote = detectRemote(abs)
+	}
+
+	binding, err := store.BindProjectPath(ctx, id, abs, remote)
+	if err != nil {
+		return err
+	}
+	return printBinding(out, binding)
+}
+
+// printBinding reports the outcome in one of two shapes: the fields that moved
+// for a real bind, and a single line saying so when the command was a re-run,
+// so a user who cannot remember whether they already ran it learns that from
+// the output instead of having to look.
+func printBinding(out io.Writer, binding memory.ProjectBinding) error {
+	label := projectLabel(binding.Name, binding.ProjectID)
+	if !binding.Changed() {
+		_, err := fmt.Fprintf(out, "already bound: %s → %s\n", label, binding.Path)
+		return err
+	}
+	if _, err := fmt.Fprintf(out, "bound %s → %s\n", label, binding.Path); err != nil {
+		return err
+	}
+	if binding.PathChanged {
+		if _, err := fmt.Fprintf(out, "  path: %s → %s\n", binding.PreviousPath, binding.Path); err != nil {
+			return err
+		}
+	}
+	if binding.RemoteSet {
+		if _, err := fmt.Fprintf(out, "  repo_remote: (none) → %s\n", binding.RepoRemote); err != nil {
+			return err
+		}
+	}
+	// A project that had no absolute path is one `ghost mcp init` skipped: the
+	// Claude installer writes a memory redirect per absolute checkout, and skips
+	// the rest. Recording one makes `ghost mcp status` count it, so status goes
+	// red on the redirect check until init runs again.
+	//
+	// The sentence names its audience rather than asking the host about it,
+	// because bind cannot know how the user runs Claude Code and the two modes
+	// differ: the ghost Claude Code plugin manages the integration itself, so
+	// `mcp init` returns early writing nothing and `mcp status` returns before
+	// the redirect check. The other three clients have no redirect at all. Only
+	// the standalone, init-managed wiring has this step.
+	//
+	// It also does not promise more than init does. writeRedirects branches on
+	// the file's CONTENT, not on who wrote it: it skips anything without the
+	// "stored in Ghost" marker, and rewrites what has that marker when the
+	// content still carries the stale ghost_list_projects tool-call marker — so a
+	// hand-written file carrying both can be replaced. Status counts a skipped
+	// project as not redirected and prints the same line either way, so without
+	// this clause the advice would leave the check red with nothing to act on.
+	// The wording is the code's own test rather than a claim about provenance,
+	// which the installer has no way to know.
+	// Any newly recorded directory has no redirect yet — writeRedirects only
+	// runs over absolute paths, and it skips a file that is not its own stale
+	// redirect. Status counts the redirect under the path NOW recorded, so a
+	// re-point to a moved checkout goes red exactly like a first bind: the one
+	// on disk is under the old directory and EncodeProjectPath is a pure string
+	// transform of the current path. That is why the guard is PathChanged
+	// rather than "had no absolute path": both cases leave status reporting a
+	// finished repair as broken.
+	if binding.PathChanged {
+		if _, err := fmt.Fprintln(out, "  next: on the standalone Claude Code integration (not the ghost plugin), run\n"+
+			"        `ghost mcp init` to write this checkout's memory redirect\n"+
+			"        (init overwrites only a MEMORY.md it recognises as its own\n"+
+			"         stale redirect — merge or remove any other one first)"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// projectLabel names a project for a human, preferring "name (id)" so the id
+// the command needs stays visible even when the name is what the user knows.
+func projectLabel(name, id string) string {
+	if name == "" || name == id {
+		return id
+	}
+	return fmt.Sprintf("%s (%s)", name, id)
+}
+
+// openDiagnosticStore opens the Ghost database for a command that only
+// reports on it, or returns nil when there is nothing to report. It never
+// creates the file: a diagnostic that bootstraps the store it is diagnosing
+// makes its own "no database" line untrue on the next run. Every failure — a
+// missing database, an unreadable one, a data dir that cannot be resolved —
+// is nil rather than an error, because the caller has nothing to add to a
+// report another check already produced.
+func openDiagnosticStore() *memory.Store {
+	// DataDirPath, not DataDir: the latter creates the directory, and this
+	// helper's whole contract is that it leaves nothing behind. mcpinit's
+	// non-creating paths use the same choice.
+	dataDir, err := config.DataDirPath()
+	if err != nil {
+		return nil
+	}
+	db, err := memory.OpenDBReadOnly(filepath.Join(dataDir, "ghost.db"))
+	if err != nil {
+		return nil
+	}
+	// A nil logger is honoured as silence; this store never writes, so it has
+	// nothing to report about itself.
+	return memory.NewStore(db, nil)
+}
+
+// writeUnboundProjectNotice reports the projects a session directory can never
+// resolve, each with the command that fixes it. It is called by `ghost mcp
+// status` and prints nothing when there is nothing to fix, so a healthy install
+// gains no new output.
+func writeUnboundProjectNotice(ctx context.Context, out io.Writer, store *memory.Store) error {
+	unbound, err := store.ListUnboundProjects(ctx)
+	if err != nil {
+		return fmt.Errorf("list unbound projects: %w", err)
+	}
+	if len(unbound) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(out, "\nProjects with no bound checkout (sessions in them get no injected context):"); err != nil {
+		return err
+	}
+	for _, p := range unbound {
+		if _, err := fmt.Fprintf(out, "  %s — run: ghost project bind %s /path/to/checkout\n",
+			projectLabel(p.Name, p.ID), p.ID); err != nil {
+			return err
+		}
+	}
+	// The limit is stated rather than papered over. This notice tests the
+	// recorded path's SHAPE, so a project bound to a checkout that has since
+	// been moved or deleted is not listed — it needs the same command with the
+	// new path, and detecting it would mean a stat whose transient failure
+	// (an unmounted volume, a permission error) would invite an overwrite of a
+	// path that was correct a moment ago.
+	if _, err := fmt.Fprintln(out, "  A recorded path that no longer exists is not detected here — re-bind it with the new path."); err != nil {
+		return err
+	}
+	// The repair is two commands on the standalone Claude Code integration, and
+	// only the first is the bind: its installer writes a per-checkout memory
+	// redirect and skips projects with no absolute path — this exact set — so
+	// without it status reports the repair as half-done. The plugin manages its
+	// own wiring and the other three clients have no redirect, so the line names
+	// the only installation this step applies to instead of implying it applies
+	// to whoever is reading. The MEMORY.md clause is here for the same reason as
+	// in printBinding, in the same terms: init skips a file that does not look
+	// like a Ghost redirect and rewrites one that does but is stale, deciding
+	// by content alone, and status cannot tell that from any other failure.
+	_, err = fmt.Fprintln(out, "  On the standalone Claude Code integration (not the ghost plugin), re-run\n"+
+		"  `ghost mcp init` afterwards to write each new checkout's memory redirect\n"+
+		"  (init overwrites only a MEMORY.md it recognises as its own stale\n"+
+		"   redirect — merge or remove any other one first).")
+	return err
+}
+
+// projectBindUsage is the help for `ghost project bind`. It goes to stdout for
+// -h/--help, which a user reaches for precisely because they do not remember
+// the syntax, and to stderr alongside an error otherwise.
+const projectBindUsage = `Usage: ghost project bind <project-id> <checkout-directory>
+
+Gives a project a recorded checkout, so a session in that directory resolves it.
+A project created over MCP records only a name, and a project upgraded from a
+v9 database recorded its name as its path, so until something records a real
+path or a repository remote no directory resolves them and they get no
+session-start context or lifecycle work. ghost mcp status lists them.
+
+The directory is stored as its physical (symlink-resolved) path. Refuses
+_global, an unknown project, a path that another project already records or
+that contains one, a path inside another project that has no repository
+remote, a path resolution could never match, and a repository another project
+already claims. Safe to re-run.
+`
+
+// parseProjectBindArgs splits `ghost project bind`'s arguments. Help wins over
+// everything else, so "ghost project bind -h" answers the question rather than
+// complaining about the missing project.
+func parseProjectBindArgs(args []string) (projectID, path string, showHelp bool, err error) {
+	var positional []string
+	for _, a := range args {
+		switch {
+		case a == "-h" || a == "--help":
+			return "", "", true, nil
+		case strings.HasPrefix(a, "-"):
+			return "", "", false, fmt.Errorf("unknown flag %q", a)
+		default:
+			positional = append(positional, a)
+		}
+	}
+	if len(positional) != 2 {
+		return "", "", false, fmt.Errorf("expected a project id and a checkout directory, got %d argument(s)", len(positional))
+	}
+	return positional[0], positional[1], false, nil
+}
+
+// runProjectBind implements `ghost project bind <project-id> <checkout>`.
+func runProjectBind() {
+	project, path, showHelp, err := parseProjectBindArgs(os.Args[3:])
+	if showHelp {
+		// Reported rather than discarded: `-h` is a user who asked a question,
+		// and help text that silently failed to print is indistinguishable from
+		// a command that took no arguments.
+		if _, err := fmt.Fprint(os.Stdout, projectBindUsage); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: cannot print usage: %v\n", err)
+		}
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n\n%s", err, projectBindUsage)
+		os.Exit(1)
+	}
+
+	// failOnConfig, like every other CLI subcommand: the user asked for this
+	// command by name, and running it against half the intended configuration is
+	// worse than an error that names the file.
+	_, _, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
+	defer store.Close() //nolint:errcheck
+
+	// repo.DetectRemote is the same detector main injects into the store, so
+	// the remote recorded here is the remote resolution will later compare
+	// against — two spellings of one repository, not two identities. It is
+	// asked about the path as typed, which is the same repository: git
+	// resolves the symlinks on the way in, and the store records the physical
+	// path either way.
+	if err := runProjectBindCore(context.Background(), store, os.Stdout, project, path, repo.DetectRemote); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 // runProjectMerge implements `ghost project merge <old> <new>`.

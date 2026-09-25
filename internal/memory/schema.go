@@ -2,6 +2,7 @@ package memory
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -290,6 +291,56 @@ CREATE TABLE IF NOT EXISTS maintenance_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_maintenance_runs_at ON maintenance_runs(recorded_at DESC);
 `
+
+// readOnlyDSN builds the read-only DSN OpenDBReadOnly opens. The file: URI
+// form is required — modernc.org/sqlite honors mode=ro only on URI DSNs, and
+// a bare path opens read-write and would create a phantom empty ghost.db on
+// first read. The path is URI-escaped so a '?' or '#' in it cannot corrupt the
+// query, and no journal_mode pragma is set (a read-only connection cannot
+// write the header). WAL is persisted in the database file itself rather than
+// negotiated per connection, so this connection is in WAL mode too.
+//
+// Deliberately unexported: mcpinit and cmd/ghost each already build this same
+// URI for their own read-only paths, and consolidating them is a separate
+// change with its own blast radius. This one exists for OpenDBReadOnly and
+// does not claim to be the only spelling in the tree.
+func readOnlyDSN(dbPath string) string {
+	u := url.URL{
+		Scheme:   "file",
+		Opaque:   (&url.URL{Path: dbPath}).EscapedPath(),
+		RawQuery: "mode=ro&_pragma=busy_timeout(1000)",
+	}
+	return u.String()
+}
+
+// OpenDBReadOnly opens an EXISTING database for reading only. It runs no DDL
+// and no migrations, and it refuses a path that does not exist rather than
+// creating one.
+//
+// A diagnostic command must be able to report "there is no database" without
+// making that statement untrue: OpenDB would create the file, stamp
+// user_version and seed the builtin global rows, so the first status run on a
+// fresh install would turn the next one's missing-database line into a healthy
+// one. Callers stat first, or treat ErrNoDatabase as "nothing to report".
+func OpenDBReadOnly(dbPath string) (*sql.DB, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: %s", ErrNoDatabase, dbPath)
+		}
+		return nil, fmt.Errorf("stat database: %w", err)
+	}
+	db, err := sql.Open("sqlite", readOnlyDSN(dbPath))
+	if err != nil {
+		return nil, fmt.Errorf("open database read-only: %w", err)
+	}
+	db.SetMaxOpenConns(1) // matches OpenDB; SQLite is single-writer
+	return db, nil
+}
+
+// ErrNoDatabase means the database file does not exist yet. A read-only caller
+// distinguishes it from other open failures because the correct response is to
+// report nothing, not to retry or to create one.
+var ErrNoDatabase = errors.New("no Ghost database")
 
 // OpenDB opens or creates the SQLite database and runs migrations.
 func OpenDB(dbPath string) (*sql.DB, error) {

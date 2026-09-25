@@ -47,6 +47,8 @@ ghost mcp status --client goose
 
 Without `--client`, status targets Claude Code. The checks include client registration, lifecycle wiring, the database, Ollama reachability, and embedding/link coverage where applicable. A generic MCP client has no Ghost-specific status integration.
 
+Status also lists any project that records no usable checkout and no repository remote, with the `ghost project bind` command that repairs it. Those projects are not a health failure — every check above can pass while sessions in such a checkout silently get no injected context — and the section is omitted entirely when there is nothing to fix. The listing reads the database without opening it for writing, so a status run never creates the store it is reporting on. The section also names the follow-up step for the standalone, init-managed Claude integration: after binding, `ghost mcp init` writes the per-checkout memory redirect that a newly absolute path makes the redirect check expect — unless that checkout has a `MEMORY.md` of its own, which init only overwrites when the content looks like a stale Ghost redirect.
+
 ## Hooks
 
 ```bash
@@ -150,6 +152,40 @@ ghost project merge old-name new-name
 ```
 
 Both arguments accept a project name, ID, path-prefix match, or basename match. A basename match is accepted only when exactly one candidate survives the recorded-path and repository-remote checks; an ambiguous match is rejected rather than guessed. The command refuses to merge a project into itself.
+
+### `ghost project bind <project-id> <checkout-directory>`
+
+Gives a project a recorded checkout, so a session in that directory resolves it:
+
+```bash
+ghost project bind infrastructure /home/wayne/git/infrastructure
+```
+
+The first argument is an existing project **id** — not a name or a path. A project that records no usable location cannot be resolved from a directory, so it gets no session-start context and no Stop-hook lifecycle work; this is the command that repairs that, and `ghost mcp status` lists every project that needs it. Pass `-h` or `--help` for this section.
+
+It is also the repair for a checkout that has moved or been deleted, which `ghost mcp status` does *not* report: the status notice tests the recorded path's shape, not whether the directory still exists, so a moved checkout needs this command with its new path.
+
+The directory is made absolute and cleaned, must exist and be a directory, and is stored as its **physical** path — symlinks resolved, because that is the directory a session reports. Ghost also records the checkout's Git remote when the project records none, so a second worktree of the same repository resolves to the same project.
+
+The command refuses, writing nothing, when:
+
+| Refusal | Reason |
+|---|---|
+| the project is `_global` | it holds every project's memories, not a checkout |
+| the project id does not exist | bind never guesses which project was meant |
+| the path is missing, is not a directory, or is the filesystem root | a path that cannot be compared against a session directory would never resolve |
+| another project already records that directory | two projects on one checkout leave a session there resolving to whichever row ranked higher; the same directory reached through a symlink counts as already recorded |
+| the path contains another project's checkout | a recorded path matches by prefix, so binding `~/git` while a project records `~/git/infra` would hand that project every unregistered clone beneath it |
+| the path is inside another project's checkout, and that project has no remote | that project answers for every directory beneath it, clones of unrelated repositories included, so nesting a second project there entrenches an overlap only a repository identity resolves. Give the enclosing project a remote and the same bind succeeds: a session in a different repository then contradicts it, so a nested checkout — a submodule, a vendored repository — is legitimately its own project |
+| path resolution could never match the path | resolution only considers recorded paths longer than ten characters, and refuses a tie for the longest match, so binding one would record a project no session can find |
+| another project already records the detected remote | one repository is one project (git-ssh and https spellings normalize to the same remote) |
+| the project already belongs to a different remote | merging is the repair; rebinding is not |
+
+Binding the same project to the same directory again succeeds and changes nothing, so the command printed by `ghost mcp status` is safe to re-run. "The same directory" is compared as text, not as location: a row some earlier writer left as `/x/checkout/` is invisible to path resolution — the candidate query matches stored text, and that spelling is neither equal to a session's `/x/checkout` nor a prefix of it — so bind rewrites it to the spelling resolution can return rather than deciding the two are the same location. Such a project is not in the unbound notice either, so this is the only repair.
+
+A successful bind that records a directory is followed by one more step **on the standalone, init-managed Claude Code integration**: run `ghost mcp init` to write that checkout's memory redirect. The installer only writes redirects for projects with an absolute path, and `ghost mcp status` counts every project that has one — looking under the path currently recorded — so until init runs again the redirect check reports the repair as incomplete. That includes **re-pointing** a project at a moved checkout: the redirect on disk is under the old directory, so status goes red exactly as it does after a first bind. A re-run that records the same directory again changes nothing and needs no step. This applies to neither of the other setups: the ghost Claude Code plugin manages its own wiring (its `mcp init` returns early writing nothing, and `mcp status` returns before the redirect check), and the opencode, codex and goose installers have no redirect at all.
+
+One case needs action before init will write anything: `writeRedirects` decides by file content, not by who wrote the file. It skips a `MEMORY.md` that does not contain the `stored in Ghost` marker, and rewrites one that does when it still carries the stale `ghost_list_projects` tool-call marker — so a checkout whose own `MEMORY.md` still holds an old Ghost redirect can be replaced, while one that merely mentions Ghost is left alone. Merge or remove such a file first. `mcp status` counts a skipped project as not redirected and prints the same line as any other failure, so the bind output states the condition init uses rather than promising a redirect that will not appear. The bind output names the installation the step belongs to as well.
 
 ## Obsidian
 

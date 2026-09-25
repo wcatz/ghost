@@ -34,11 +34,21 @@ If a choice was made after considering alternatives, record a decision rather th
 
 ## Projects and global memory
 
-A project is normally identified by the directory where the agent is working. Ghost resolves projects by longest canonical path prefix first, then by repository remote, then by basename. A basename match is accepted only when exactly one candidate survives the recorded-path and repository-remote checks; an ambiguous name is rejected rather than guessed. This keeps worktrees and moved checkouts associated with the intended project.
+A project is normally identified by the directory where the agent is working. Ghost resolves a project id first, then an exact name, then the longest canonical path prefix, then the repository remote. A trailing basename match is accepted only when exactly one candidate survives the recorded-path and repository-remote checks, and never for a path-shaped input whose candidate records no usable path; an ambiguous name is rejected rather than guessed. This keeps worktrees and moved checkouts associated with the intended project, and stops an unrelated clone of a similarly named directory from claiming one.
 
 For compatibility with clients that supply a path-shaped `project_id` on a save, Ghost also detects the checkout's normalized Git remote, so worktrees and moved checkouts remain one project. If the project was first created under its plain name and has no recorded remote yet, that path binds the remote only when the repository name identifies exactly one unclaimed project; ambiguous or conflicting names are never guessed.
 
 A project created over MCP has no recorded location — a name was all it was given — and a session directory deliberately does not resolve it. Adopting whichever directory happened to start a session would let an unrelated clone claim the project and read its memories, which is the failure this rules out. Name the project instead (every MCP tool takes a name), or give it a location once by saving from the real checkout: the recorded path or repository remote is what the path rules can then agree with. Until a project has one, a session in its directory reports no match, and the Stop hook's lifecycle work — reflection, consolidation, resolve — does not run for it either, because it resolves the same way.
+
+A project can reach that state without ever being created over MCP. A v9 database stored the bare project name as the project's path rather than a real location (`path='infrastructure'`), and it stayed that way when #565 removed the directory-resolution fallback to a project's *name* — the fallback that let an unrelated clone parked in a similarly named folder read and inject another project's memories (#546). So those projects upgraded into a state no directory can resolve: they are still found by name when you ask for one by name, but a session standing in the checkout reports no match and gets no context or lifecycle work. `ghost mcp status` lists every project in that state with the command that repairs it:
+
+```bash
+ghost mcp status                      # lists projects that need a checkout
+ghost project bind infrastructure ~/git/infrastructure
+```
+
+Binding records the directory as its **physical** path — symlinks resolved, because that is the directory a session reports — plus the checkout's Git remote when the project records none, so worktrees and moved checkouts of the same repository keep resolving to the same project. It refuses a path or repository another project already claims, a path that would swallow another project's checkout, and a path resolution could never match, because the repair is meant to be explicit and correct — see the [CLI reference](cli.md#project-operations).
+
 Project-specific knowledge belongs in that project. Use the special `_global` project for preferences and facts that should apply everywhere, such as a preferred validation workflow or a personal communication preference. Use `ghost_search_all` when the relevant knowledge might be stored under another project.
 
 When the SessionStart hook reports that no project matched, ask the agent to establish or choose the correct project before saving new memories.
