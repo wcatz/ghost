@@ -86,9 +86,13 @@ func insertProject(t *testing.T, db *sql.DB, id, path, name string) {
 
 func TestLookupProject_ExactMatch(t *testing.T) {
 	db := openTestDB(t)
-	insertProject(t, db, "abc123", "/home/wayne/git/ghost", "ghost")
+	projectPath := filepath.Join(t.TempDir(), "ghost")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	insertProject(t, db, "abc123", projectPath, "ghost")
 
-	id, name, err := testStore(db).ResolveProject(context.Background(), "/home/wayne/git/ghost")
+	id, name, err := testStore(db).ResolveProject(context.Background(), projectPath)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -99,9 +103,14 @@ func TestLookupProject_ExactMatch(t *testing.T) {
 
 func TestLookupProject_SubdirMatch(t *testing.T) {
 	db := openTestDB(t)
-	insertProject(t, db, "abc123", "/home/wayne/git/ghost", "ghost")
+	projectPath := filepath.Join(t.TempDir(), "ghost")
+	child := filepath.Join(projectPath, "internal", "mcpinit")
+	if err := os.MkdirAll(child, 0o755); err != nil {
+		t.Fatalf("mkdir child: %v", err)
+	}
+	insertProject(t, db, "abc123", projectPath, "ghost")
 
-	id, name, err := testStore(db).ResolveProject(context.Background(), "/home/wayne/git/ghost/internal/mcpinit")
+	id, name, err := testStore(db).ResolveProject(context.Background(), child)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -114,24 +123,34 @@ func TestLookupProject_SubdirMatch(t *testing.T) {
 // a CWD of /home/wayne/git/ghost-extra must NOT match a project at /home/wayne/git/ghost.
 func TestLookupProject_NoPrefixFalseMatch(t *testing.T) {
 	db := openTestDB(t)
-	insertProject(t, db, "abc123", "/home/wayne/git/ghost", "ghost")
+	projectPath := filepath.Join(t.TempDir(), "ghost")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	insertProject(t, db, "abc123", projectPath, "ghost")
 
-	id, name, err := testStore(db).ResolveProject(context.Background(), "/home/wayne/git/ghost-extra")
+	id, name, err := testStore(db).ResolveProject(context.Background(), filepath.Join(filepath.Dir(projectPath), "ghost-extra"))
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
 	if id != "" || name != "" {
-		t.Errorf("prefix false match: /home/wayne/git/ghost-extra should NOT match /home/wayne/git/ghost, got id=%q name=%q", id, name)
+		t.Errorf("prefix false match: got id=%q name=%q, want no match", id, name)
 	}
 }
 
 func TestLookupProject_LongestPathWins(t *testing.T) {
 	db := openTestDB(t)
-	insertProject(t, db, "parent", "/home/wayne/git", "parent")
-	insertProject(t, db, "child", "/home/wayne/git/ghost", "ghost")
+	root := t.TempDir()
+	parentPath := filepath.Join(root, "repo")
+	childPath := filepath.Join(parentPath, "ghost")
+	input := filepath.Join(childPath, "cmd")
+	if err := os.MkdirAll(input, 0o755); err != nil {
+		t.Fatalf("mkdir input: %v", err)
+	}
+	insertProject(t, db, "parent", parentPath, "parent")
+	insertProject(t, db, "child", childPath, "ghost")
 
-	// CWD inside ghost should match the longer (more specific) path.
-	id, _, err := testStore(db).ResolveProject(context.Background(), "/home/wayne/git/ghost/cmd")
+	id, _, err := testStore(db).ResolveProject(context.Background(), input)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -142,25 +161,46 @@ func TestLookupProject_LongestPathWins(t *testing.T) {
 
 func TestLookupProject_NameFallback(t *testing.T) {
 	db := openTestDB(t)
-	// Use a short path so path prefix matching won't trigger (LENGTH(path) > 10 guard).
-	// The name fallback fires when cwd basename matches a project name.
-	insertProject(t, db, "abc123", "/x/ghost", "ghost")
+	root := t.TempDir()
+	realPath := filepath.Join(root, "real", "ghost")
+	aliasPath := filepath.Join(root, "alias", "ghost")
+	if err := os.MkdirAll(realPath, 0o755); err != nil {
+		t.Fatalf("mkdir real path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(aliasPath), 0o755); err != nil {
+		t.Fatalf("mkdir alias parent: %v", err)
+	}
+	if err := os.Symlink(realPath, aliasPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	insertProject(t, db, "abc123", aliasPath, "ghost")
 
-	// cwd basename is "ghost" — should match by name even when path doesn't match.
-	id, name, err := testStore(db).ResolveProject(context.Background(), filepath.Join("/some/unrelated/path", "ghost"))
+	id, name, err := testStore(db).ResolveProject(context.Background(), realPath)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
 	if id != "abc123" || name != "ghost" {
 		t.Errorf("name fallback: got id=%q name=%q, want abc123/ghost", id, name)
 	}
+
+	id, name, err = testStore(db).ResolveProject(context.Background(), filepath.Join(root, "unrelated", "ghost"))
+	if err != nil {
+		t.Fatalf("ResolveProject unrelated: %v", err)
+	}
+	if id != "" || name != "" {
+		t.Errorf("name fallback claimed an unrelated directory: got id=%q name=%q, want no match", id, name)
+	}
 }
 
 func TestLookupProject_NoMatch(t *testing.T) {
 	db := openTestDB(t)
-	insertProject(t, db, "abc123", "/home/wayne/git/ghost", "ghost")
+	projectPath := filepath.Join(t.TempDir(), "ghost")
+	if err := os.MkdirAll(projectPath, 0o755); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	insertProject(t, db, "abc123", projectPath, "ghost")
 
-	id, name, err := testStore(db).ResolveProject(context.Background(), "/home/user/other-project")
+	id, name, err := testStore(db).ResolveProject(context.Background(), filepath.Join(t.TempDir(), "other-project"))
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -174,11 +214,15 @@ func TestLookupProject_NoMatch(t *testing.T) {
 // wildcards and false-match an unrelated sibling directory.
 func TestLookupProject_PathWithLikeWildcards(t *testing.T) {
 	db := openTestDB(t)
-	insertProject(t, db, "abc123", "/home/wayne/git/foo_bar", "foo_bar")
+	root := t.TempDir()
+	stored := filepath.Join(root, "foo_bar")
+	exactChild := filepath.Join(stored, "sub")
+	if err := os.MkdirAll(exactChild, 0o755); err != nil {
+		t.Fatalf("mkdir exact child: %v", err)
+	}
+	insertProject(t, db, "abc123", stored, "foo_bar")
 
-	// Without escaping, "foo_bar/%" as a LIKE pattern would also match
-	// "fooXbar/anything" since '_' matches any single character.
-	id, name, err := testStore(db).ResolveProject(context.Background(), "/home/wayne/git/fooXbar/sub")
+	id, name, err := testStore(db).ResolveProject(context.Background(), filepath.Join(root, "fooXbar", "sub"))
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}
@@ -186,8 +230,7 @@ func TestLookupProject_PathWithLikeWildcards(t *testing.T) {
 		t.Errorf("unescaped underscore false match: got id=%q name=%q, want no match", id, name)
 	}
 
-	// The real subdirectory should still match correctly.
-	id, name, err = testStore(db).ResolveProject(context.Background(), "/home/wayne/git/foo_bar/sub")
+	id, name, err = testStore(db).ResolveProject(context.Background(), exactChild)
 	if err != nil {
 		t.Fatalf("ResolveProject: %v", err)
 	}

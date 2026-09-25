@@ -342,6 +342,13 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	}
 
 	if tableCount == 0 {
+		if _, err := db.Exec(`
+			CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_repo_remote
+			ON projects(repo_remote) WHERE repo_remote IS NOT NULL AND repo_remote <> ''
+		`); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("create repository identity index: %w", err)
+		}
 		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("stamp schema version: %w", err)
@@ -373,6 +380,13 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 			_ = db.Close()
 			return nil, fmt.Errorf("migrate schema v%d→v%d: %w", version, schemaVersion, err)
 		}
+	}
+	if _, err := db.Exec(`
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_repo_remote
+		ON projects(repo_remote) WHERE repo_remote IS NOT NULL AND repo_remote <> ''
+	`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ensure repository identity index: %w", err)
 	}
 
 	return db, nil

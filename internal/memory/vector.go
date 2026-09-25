@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"math"
@@ -87,6 +88,7 @@ func (s *Store) GetMemoryContent(ctx context.Context, id string) (string, error)
 type vecEntry struct {
 	memoryID  string
 	embedding []float32
+	scope     map[string]string
 }
 
 // SearchVector performs brute-force cosine similarity search against stored embeddings.
@@ -95,8 +97,8 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT e.memory_id, e.embedding, e.model
+	rows, err := s.queryDB().QueryContext(ctx, `
+		SELECT e.memory_id, e.embedding, e.model, m.scope
 		FROM memory_embeddings e
 		JOIN memories m ON m.id = e.memory_id
 		WHERE m.project_id = ? OR m.project_id = '_global'
@@ -115,12 +117,13 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 	for rows.Next() {
 		var id, model string
 		var blob []byte
-		if err := rows.Scan(&id, &blob, &model); err != nil {
+		var scopeCol sql.NullString
+		if err := rows.Scan(&id, &blob, &model, &scopeCol); err != nil {
 			return nil, err
 		}
 		vec := bytesToFloat32s(blob)
 		if len(vec) == len(queryVec) {
-			entries = append(entries, vecEntry{memoryID: id, embedding: vec})
+			entries = append(entries, vecEntry{memoryID: id, embedding: vec, scope: parseScope(scopeCol)})
 			continue
 		}
 		mismatched++
@@ -143,7 +146,7 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 	scored := make([]ScoredMemory, 0, len(entries))
 	for _, e := range entries {
 		if sim := cosineSimilarity(queryVec, e.embedding); sim > minVectorSimilarity {
-			scored = append(scored, ScoredMemory{MemoryID: e.memoryID, Score: sim})
+			scored = append(scored, ScoredMemory{MemoryID: e.memoryID, Score: sim, Scope: e.scope})
 		}
 	}
 
@@ -167,6 +170,9 @@ const minVectorSimilarity float32 = 0
 type ScoredMemory struct {
 	MemoryID string
 	Score    float32
+	// Scope lets fusion and window selection apply the memory's own scope
+	// without a second lookup.
+	Scope map[string]string
 }
 
 // SearchParams parameterizes hybrid-search fusion. The zero value disables
@@ -208,6 +214,10 @@ type SearchParams struct {
 	// only dropping non-positives. Production overrides this from config via
 	// Store.SetVectorMinSimilarity (search.min_similarity).
 	MinSimilarity float32
+	// Scope is applied before the fused window cut so eligible candidates can
+	// backfill rows excluded by scope. It follows ScopeMatches semantics: a
+	// row that does not mention a requested key remains eligible.
+	Scope map[string]string
 }
 
 // DefaultSearchParams returns the production fusion parameters.
@@ -283,7 +293,7 @@ func (s *Store) demoteSuperseded(ctx context.Context, results []Memory, p Search
 		ids[i] = m.ID
 	}
 	s.mu.RLock()
-	penalty, err := SupersedePenalties(ctx, s.db, ids)
+	penalty, err := SupersedePenalties(ctx, s.queryDB(), ids)
 	s.mu.RUnlock()
 	if err != nil {
 		s.logger.Debug("supersede demote: lookup failed", "error", err)
@@ -352,6 +362,11 @@ func decayRank(results []Memory, scores map[string]float64, p SearchParams, limi
 	for i, m := range results {
 		base := scores[m.ID]
 		if scores == nil {
+			// No production caller reaches this: every path into decayRank comes
+			// from fuseAndRank, which always supplies a score map (the keyword-only
+			// path's is the unweighted 1/(K+rank+1) base, not a missing map). Kept
+			// so a caller that has no fused scores at all still ranks on rank
+			// order rather than on a map miss reading as 0.
 			base = 1.0 / float64(p.RRFK+i+1)
 		}
 		scored[i] = struct {
@@ -410,16 +425,21 @@ func ageDays(createdAt string, now time.Time) float64 {
 	return ageDays
 }
 
-// fuseAndRank runs the shared hybrid pipeline: RRF-fuse the two result legs,
-// hydrate the candidate pool, then rank and truncate (inside decayRank).
+// fuseAndRank runs the shared selection pipeline for hybrid and FTS-only
+// searches. Window selection — fusion, scope narrowing and membership — lives in
+// FuseAndSelectWindow and the unexported selectWindow it delegates to; this
+// function materializes that window, hydrates it, ranks it, and applies final
+// demotion.
 func (s *Store) fuseAndRank(ctx context.Context, ftsResults []Memory, vecResults []ScoredMemory, limit int, p SearchParams) ([]Memory, error) {
-	window := FuseAndSelectWindow(ftsResults, vecResults, limit, p)
+	// Fuse once, narrow scope, then cut the window. The same narrowed pool feeds
+	// the hydration backfill below, which is why narrowing happens here rather
+	// than inside the selection seam alone.
+	pool := scopeEligiblePool(fuseCandidatePool(ftsResults, vecResults, p), p)
+	window := selectWindow(pool, limit, p)
 
 	// Hydrate the full candidate pool before ranking — decayRank needs
 	// category/pinned/created_at to reorder the window, and hydration via
 	// GetByIDs does not preserve order, so the final sort lives there too.
-	beforeHybridHydrate(window.IDs)
-	pool := fuseCandidatePool(ftsResults, vecResults, p)
 	poolIDs := make([]string, len(pool))
 	if window.Scores == nil {
 		window.Scores = make(map[string]float64, len(pool))
@@ -433,11 +453,35 @@ func (s *Store) fuseAndRank(ctx context.Context, ftsResults []Memory, vecResults
 	if len(poolIDs) == 0 {
 		poolIDs = window.IDs
 	}
-	memories, err := s.GetByIDs(ctx, poolIDs)
+
+	// Hydrate before ranking — decayRank needs category/pinned/created_at to
+	// reorder the window, and hydration via GetByIDs does not preserve order, so
+	// the final sort lives there too.
+	//
+	// The leg results are NOT a substitute for this read, on either path. They
+	// are the snapshot an earlier statement returned, and a concurrent writer can
+	// delete or update a row before this function returns. Reading by id is what
+	// makes a vanished window ID disappear so selectHydratedWindow can backfill
+	// the next candidate; taking the leg's copy instead would emit a row that no
+	// longer exists, with stale category, pinned and created_at feeding decay.
+	beforeHybridHydrate(window.IDs)
+
+	// Re-read the window first, which is all the common case needs. The wider pool
+	// is only consulted when a window ID is genuinely missing, so the deleted-row
+	// backfill still has somewhere to draw from without every keyword-only search
+	// paying for a limit*2-row read it will not use.
+	hydrated, err := s.GetByIDs(ctx, window.IDs)
 	if err != nil {
 		return nil, err
 	}
-	memories = selectHydratedWindow(memories, window, poolIDs)
+	if len(window.IDs) > 0 && len(hydrated) < len(window.IDs) {
+		pool, err := s.GetByIDs(ctx, poolIDs)
+		if err != nil {
+			return nil, err
+		}
+		hydrated = pool
+	}
+	memories := selectHydratedWindow(hydrated, window, poolIDs)
 	memories = decayRank(memories, window.Scores, p, limit, time.Now().UTC())
 	return s.demoteResults(ctx, memories, p), nil
 }
@@ -494,11 +538,18 @@ func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchP
 	for rank, memory := range ftsResults {
 		candidate := get(memory.ID)
 		candidate.fts = rank + 1
+		candidate.scope = memory.Scope
 		candidate.score += p.FTSWeight / float64(p.RRFK+rank+1)
 	}
 	for rank, scored := range vecResults {
 		candidate := get(scored.MemoryID)
 		candidate.vec = rank + 1
+		// Only fill in scope from the vector leg when the keyword leg did not
+		// supply it: both describe the same row, so they agree, and a nil map
+		// from either leg is a row that genuinely has no scope.
+		if candidate.scope == nil {
+			candidate.scope = scored.Scope
+		}
 		candidate.score += p.VecWeight / float64(p.RRFK+rank+1)
 	}
 
@@ -506,6 +557,9 @@ func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchP
 	for _, candidate := range byID {
 		pool = append(pool, candidate)
 	}
+	// Deterministic order: map iteration is randomized, and an unstable sort
+	// over tied scores made result order — and the demotion penalties that
+	// depend on it — vary between runs of the same query.
 	sort.Slice(pool, func(i, j int) bool {
 		if pool[i].score != pool[j].score {
 			return pool[i].score > pool[j].score
@@ -515,10 +569,30 @@ func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchP
 	return pool
 }
 
+// scopeEligiblePool drops the candidates the requested scope excludes. It runs
+// before the cut so an eligible candidate can backfill a row scope removed, and
+// both the window and fuseAndRank's hydration backfill read its result, so an
+// out-of-scope row can neither take a result slot nor stand in for a selected
+// row that vanished. ScopeMatches keeps rows that do not mention a requested
+// key eligible; silence is not disagreement.
+func scopeEligiblePool(pool []*hybridCandidate, p SearchParams) []*hybridCandidate {
+	if len(p.Scope) == 0 {
+		return pool
+	}
+	eligible := pool[:0]
+	for _, c := range pool {
+		if ScopeMatches(c.scope, p.Scope) {
+			eligible = append(eligible, c)
+		}
+	}
+	return eligible
+}
+
 // FuseAndSelectWindow owns both halves of hybrid retrieval — fusing the
 // keyword and vector legs into one ranking, and deciding which memories form
 // the result window — in one place, because window selection is not separable
-// from fusion.
+// from fusion. Scope constraints are narrowed from the combined candidate pool
+// before the cut, so eligible rows can backfill candidates excluded by scope.
 //
 // Selecting by fused score alone is what made the window unable to admit a
 // keyword-only hit. RRF weights the vector leg 0.7 and the keyword leg 0.3, so
@@ -540,8 +614,17 @@ func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchP
 // always been given. Either way this is the eligible set, and decayRank orders
 // and trims within it.
 func FuseAndSelectWindow(ftsResults []Memory, vecResults []ScoredMemory, limit int, p SearchParams) HybridWindow {
-	pool := fuseCandidatePool(ftsResults, vecResults, p)
+	return selectWindow(scopeEligiblePool(fuseCandidatePool(ftsResults, vecResults, p), p), limit, p)
+}
 
+// selectWindow cuts an already-fused, already-narrowed candidate pool down to
+// the result window. It is the same seam fuseAndRank uses once it holds that
+// pool, so a candidate excluded by scope cannot re-enter through the backfill.
+//
+// It reorders the slice it is handed — the reservation promotes keyword hits in
+// place — so it cuts a copy, leaving the caller's pool in fused-score order for
+// use as a hydration backfill source.
+func selectWindow(pool []*hybridCandidate, limit int, p SearchParams) HybridWindow {
 	width := limit
 	if p.DecayReselect && p.DecayEnabled {
 		width = limit * 2
@@ -549,6 +632,7 @@ func FuseAndSelectWindow(ftsResults []Memory, vecResults []ScoredMemory, limit i
 	if width <= 0 {
 		return HybridWindow{}
 	}
+	pool = append([]*hybridCandidate(nil), pool...)
 	// Reserve slots for the top keyword hits: the best `limit/5` of them are
 	// guaranteed a place in the window even when the vector leg would have
 	// filled every row. A fifth of the window, and only when that is at least
@@ -612,17 +696,17 @@ func FuseAndSelectWindow(ftsResults []Memory, vecResults []ScoredMemory, limit i
 	return hybridWindowOf(pool)
 }
 
-//
-
 // hybridCandidate is one memory's fused standing: the rank each leg gave it
 // and the score those ranks produced. fts or vec is 0 when that leg did not
 // retrieve it, which is what distinguishes a two-leg hit from a keyword-only
-// one.
+// one. scope is the row's own scope, carried by whichever leg retrieved it, so
+// selection can narrow the pool without a second lookup.
 type hybridCandidate struct {
 	id    string
 	fts   int
 	vec   int
 	score float64
+	scope map[string]string
 }
 
 // hybridWindowOf materialises the selected candidates, keeping the fused score
@@ -639,23 +723,57 @@ func hybridWindowOf(cands []*hybridCandidate) HybridWindow {
 // SearchHybrid combines FTS5 keyword search with vector similarity using
 // Reciprocal Rank Fusion (RRF). Falls back to FTS-only if queryVec is nil.
 func (s *Store) SearchHybrid(ctx context.Context, projectID, query string, queryVec []float32, limit int) ([]Memory, error) {
+	return s.SearchHybridScoped(ctx, projectID, query, queryVec, limit, nil)
+}
+
+// SearchHybridScoped is the production search entry point with a scope
+// constraint. It deliberately builds the parameters here rather than accepting
+// them from MCP so the configured vector similarity floor cannot be bypassed.
+func (s *Store) SearchHybridScoped(ctx context.Context, projectID, query string, queryVec []float32, limit int, scope map[string]string) ([]Memory, error) {
 	p := DefaultSearchParams()
 	p.MinSimilarity = s.vectorMinSimilarityFloor()
+	p.Scope = scope
 	return s.SearchHybridParams(ctx, projectID, query, queryVec, limit, p)
 }
 
-// SearchHybridParams is SearchHybrid with explicit fusion parameters. It
-// exists for the benchmark harness; production callers use SearchHybrid.
+// SearchHybridParams is SearchHybrid with explicit fusion parameters. It is
+// used by the benchmark harness and by SearchHybridScoped after the store has
+// assembled production parameters.
 func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string, queryVec []float32, limit int, p SearchParams) ([]Memory, error) {
+	final, _, err := s.searchHybridLegs(ctx, projectID, query, queryVec, limit, p)
+	return final, err
+}
+
+// hybridLegs is the raw output of each retrieval leg. vec is the leg before the
+// similarity floor, because a candidate the floor dropped is a distinct,
+// diagnosable outcome that is invisible once the floor has been applied.
+type hybridLegs struct {
+	fts []Memory
+	vec []ScoredMemory
+}
+
+// searchHybridLegs is SearchHybridParams plus the legs it already fetched.
+//
+// Explain mode needs those exact rows — its whole job is to say why the search
+// ranked what it ranked — and re-running each leg inside explain's snapshot
+// transaction would hold the store's single connection across a second FTS
+// scan and a second full embedding scan. The store runs with one connection, so
+// every statement inside that transaction is time a concurrent save, touch or
+// background write cannot have the connection at all.
+func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, queryVec []float32, limit int, p SearchParams) ([]Memory, hybridLegs, error) {
 	// FTS results.
 	ftsResults, err := s.SearchFTS(ctx, projectID, query, limit*2)
 	if err != nil {
 		ftsResults = nil // non-fatal, proceed with vector only
 	}
+	legs := hybridLegs{fts: ftsResults}
 
-	// If no vector, return FTS results directly.
+	// FTS-only is the same selection seam with an empty vector leg. Use an
+	// unweighted keyword score to preserve the historical FTS-only ordering
+	// and explain-mode score contract.
 	if queryVec == nil {
-		return s.demoteResults(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
+		final, err := s.fuseAndRank(ctx, ftsResults, nil, limit, keywordOnlyParams(p))
+		return final, legs, err
 	}
 
 	// Vector results.
@@ -663,14 +781,23 @@ func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string,
 	if err != nil {
 		vecResults = nil // non-fatal, proceed with FTS only
 	}
-	vecResults = filterVectorFloor(vecResults, p.MinSimilarity)
+	legs.vec = vecResults
+	filtered := filterVectorFloor(vecResults, p.MinSimilarity)
 
-	// If only FTS worked, return that.
-	if len(vecResults) == 0 {
-		return s.demoteResults(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
+	// If only FTS worked, return that through the same selection seam.
+	if len(filtered) == 0 {
+		final, err := s.fuseAndRank(ctx, ftsResults, nil, limit, keywordOnlyParams(p))
+		return final, legs, err
 	}
 
-	return s.fuseAndRank(ctx, ftsResults, vecResults, limit, p)
+	final, err := s.fuseAndRank(ctx, ftsResults, filtered, limit, p)
+	return final, legs, err
+}
+
+func keywordOnlyParams(p SearchParams) SearchParams {
+	p.FTSWeight = 1
+	p.VecWeight = 0
+	return p
 }
 
 // GetByIDs fetches memories by a list of IDs.
@@ -696,7 +823,7 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 		WHERE id IN (%s)
 	`, strings.Join(placeholders, ","))
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.queryDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get by ids: %w", err)
 	}
@@ -709,8 +836,10 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT memory_id, embedding, model FROM memory_embeddings
+	rows, err := s.queryDB().QueryContext(ctx, `
+		SELECT e.memory_id, e.embedding, e.model, m.scope
+		FROM memory_embeddings e
+		JOIN memories m ON m.id = e.memory_id
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("load embeddings: %w", err)
@@ -726,12 +855,13 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	for rows.Next() {
 		var id, model string
 		var blob []byte
-		if err := rows.Scan(&id, &blob, &model); err != nil {
+		var scopeCol sql.NullString
+		if err := rows.Scan(&id, &blob, &model, &scopeCol); err != nil {
 			return nil, err
 		}
 		vec := bytesToFloat32s(blob)
 		if len(vec) == len(queryVec) {
-			entries = append(entries, vecEntry{memoryID: id, embedding: vec})
+			entries = append(entries, vecEntry{memoryID: id, embedding: vec, scope: parseScope(scopeCol)})
 			continue
 		}
 		mismatched++
@@ -750,7 +880,7 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	scored := make([]ScoredMemory, 0, len(entries))
 	for _, e := range entries {
 		if sim := cosineSimilarity(queryVec, e.embedding); sim > minVectorSimilarity {
-			scored = append(scored, ScoredMemory{MemoryID: e.memoryID, Score: sim})
+			scored = append(scored, ScoredMemory{MemoryID: e.memoryID, Score: sim, Scope: e.scope})
 		}
 	}
 	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
@@ -770,11 +900,11 @@ func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []fl
 		ftsResults = nil
 	}
 
-	// The FTS-only fallbacks below must apply the same supersede demote the
-	// fused path does — otherwise cross-project search silently ranks
+	// The FTS-only fallbacks below must use the same selection and supersede
+	// path as hybrid search — otherwise cross-project search silently ranks
 	// superseded memories above their replacements whenever Ollama is down.
 	if queryVec == nil {
-		return s.demoteResults(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
+		return s.fuseAndRank(ctx, ftsResults, nil, limit, keywordOnlyParams(p))
 	}
 
 	vecResults, err := s.SearchVectorAll(ctx, queryVec, limit*2)
@@ -784,7 +914,7 @@ func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []fl
 	vecResults = filterVectorFloor(vecResults, p.MinSimilarity)
 
 	if len(vecResults) == 0 {
-		return s.demoteResults(ctx, decayRank(ftsResults, nil, p, limit, time.Now().UTC()), p), nil
+		return s.fuseAndRank(ctx, ftsResults, nil, limit, keywordOnlyParams(p))
 	}
 
 	return s.fuseAndRank(ctx, ftsResults, vecResults, limit, p)

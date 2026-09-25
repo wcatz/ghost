@@ -15,7 +15,7 @@ import (
 // for issue #391: an unmatched cwd normally resolves to nothing, but with
 // routing.default_project configured a $HOME or "/" session falls back to it.
 func TestResolveSessionProject(t *testing.T) {
-	setup := func(t *testing.T, defaultProject string) *memory.Store {
+	setup := func(t *testing.T, defaultProject string) (*memory.Store, string) {
 		t.Helper()
 		t.Setenv("GHOST_ROUTING_DEFAULT_PROJECT", defaultProject)
 		db, err := memory.OpenDB(":memory:")
@@ -24,15 +24,19 @@ func TestResolveSessionProject(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = db.Close() })
 		store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-		if err := store.EnsureProject(context.Background(), "infra", "/home/wayne/git/infra", "infrastructure"); err != nil {
+		projectPath := filepath.Join(t.TempDir(), "infra")
+		if err := os.MkdirAll(filepath.Join(projectPath, "internal", "x"), 0o755); err != nil {
+			t.Fatalf("mkdir project path: %v", err)
+		}
+		if err := store.EnsureProject(context.Background(), "infra", projectPath, "infrastructure"); err != nil {
 			t.Fatalf("EnsureProject: %v", err)
 		}
-		return store
+		return store, projectPath
 	}
 
 	t.Run("direct path hit needs no routing", func(t *testing.T) {
-		store := setup(t, "")
-		id, name := resolveSessionProject(context.Background(), store, "/home/wayne/git/infra/internal/x")
+		store, projectPath := setup(t, "")
+		id, name := resolveSessionProject(context.Background(), store, filepath.Join(projectPath, "internal", "x"))
 		if id != "infra" || name != "infrastructure" {
 			t.Fatalf("got (%q, %q), want (infra, infrastructure)", id, name)
 		}
@@ -42,7 +46,7 @@ func TestResolveSessionProject(t *testing.T) {
 		home := t.TempDir()
 		setHome(t, home)
 		t.Setenv("XDG_CONFIG_HOME", home)
-		store := setup(t, "infrastructure")
+		store, _ := setup(t, "infrastructure")
 		id, name := resolveSessionProject(context.Background(), store, home)
 		if id != "infra" || name != "infrastructure" {
 			t.Fatalf("got (%q, %q), want (infra, infrastructure)", id, name)
@@ -53,7 +57,7 @@ func TestResolveSessionProject(t *testing.T) {
 		home := t.TempDir()
 		setHome(t, home)
 		t.Setenv("XDG_CONFIG_HOME", home)
-		store := setup(t, "infrastructure")
+		store, _ := setup(t, "infrastructure")
 		id, _ := resolveSessionProject(context.Background(), store, "/")
 		if id != "infra" {
 			t.Fatalf("got %q, want infra", id)
@@ -64,7 +68,7 @@ func TestResolveSessionProject(t *testing.T) {
 		home := t.TempDir()
 		setHome(t, home)
 		t.Setenv("XDG_CONFIG_HOME", home)
-		store := setup(t, "")
+		store, _ := setup(t, "")
 		id, name := resolveSessionProject(context.Background(), store, home)
 		if id != "" || name != "" {
 			t.Fatalf("got (%q, %q), want empty", id, name)
@@ -75,7 +79,7 @@ func TestResolveSessionProject(t *testing.T) {
 		home := t.TempDir()
 		setHome(t, home)
 		t.Setenv("XDG_CONFIG_HOME", home)
-		store := setup(t, "infrastructure")
+		store, _ := setup(t, "infrastructure")
 		other := filepath.Join(home, "unrelated")
 		if err := os.MkdirAll(other, 0o755); err != nil {
 			t.Fatal(err)
@@ -90,7 +94,7 @@ func TestResolveSessionProject(t *testing.T) {
 		home := t.TempDir()
 		setHome(t, home)
 		t.Setenv("XDG_CONFIG_HOME", home)
-		store := setup(t, "does-not-exist")
+		store, _ := setup(t, "does-not-exist")
 		id, name := resolveSessionProject(context.Background(), store, home)
 		if id != "" || name != "" {
 			t.Fatalf("got (%q, %q), want empty", id, name)
