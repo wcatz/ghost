@@ -1792,7 +1792,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			// also block ordinary links between a fact and a longer restatement
 			// of it that happens to contain a negation, which is a duplicate
 			// relationship the default fold is right to record.
-			if opts.FoldOnly && contradictoryInstruction(newTokens, candTokens) {
+			if opts.FoldOnly && !foldOnlyEquivalent(content, candContent) {
 				continue
 			}
 			sim := mergeScore(newTokens, candTokens)
@@ -1875,7 +1875,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 				// 0.7 bar easily, and the fold would strengthen one and drop the
 				// other. Scoped to FoldOnly for the same reason as before — the
 				// default fold keeps the caller's wording either way.
-				if opts.FoldOnly && contradictoryInstruction(newTokens, candTokens) {
+				if opts.FoldOnly && !foldOnlyEquivalent(content, candContent) {
 					continue
 				}
 				j := jaccard(newTokens, candTokens)
@@ -3269,16 +3269,61 @@ const (
 // tokenizeContent lowercases s and splits it into a set of alphanumeric
 // tokens longer than one rune. Mirrors reflection's tokenize so both dedup
 // layers score similarity identically.
+// contractionNegations maps the fragment left behind when an apostrophe is
+// treated as a separator. The order matters: these are checked before the bare
+// "not", so "doesn't" contributes "doesnt" — which is a negation — rather than a
+// positive "does".
+var contractionNegations = []string{"don", "doesn", "didn", "isn", "aren", "wasn", "weren", "won", "can", "couldn", "shouldn", "wouldn", "ain", "hasn", "haven", "hadn", "mustn"}
+
+// tokenizeContent lowercases and splits on every non-alphanumeric character.
+//
+// Splitting on the apostrophe is what makes the contraction handling necessary
+// rather than incidental: "don't" became "don" plus "t", and "don" reads as
+// nothing, so a negated instruction tokenized identically to its positive form
+// wherever the following word was shared. Any token ending in "n"/"nt" whose
+// stem is one of the contraction stems is therefore recorded as "not" — one
+// canonical negation token — so "don't", "doesn't", "isn't", "shouldn't",
+// "won't" and "can't" all land on the same word and compare equal to a plain
+// "not". The apostrophe itself is not information; the negation is.
 func tokenizeContent(s string) map[string]bool {
 	tokens := make(map[string]bool)
 	for _, word := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	}) {
-		if len(word) > 1 {
-			tokens[word] = true
+		if len(word) <= 1 {
+			continue
 		}
+		if isContractionNegation(word) {
+			tokens["not"] = true
+			continue
+		}
+		tokens[word] = true
 	}
 	return tokens
+}
+
+func isContractionNegation(word string) bool {
+	// "don't" splits into "don" + "t"; "dont" stays whole. Both spellings, and
+	// the same for every other contraction, have to land on the negation token
+	// or the apostrophe-free spelling would read as a positive claim.
+	for _, stem := range contractionNegations {
+		if word == stem || word == stem+"t" || word == stem+"nt" {
+			return true
+		}
+	}
+	return word == "cannot"
+}
+
+// containsNegation reports whether a token set states a negation, in any of the
+// spellings: the canonical "not" a contraction folds into, or a bare word that
+// negates on its own.
+func containsNegation(tokens map[string]bool) bool {
+	for token := range negationTokens {
+		if tokens[token] {
+			return true
+		}
+	}
+	return false
 }
 
 // jaccard computes the Jaccard similarity coefficient between two token sets.

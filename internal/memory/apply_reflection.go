@@ -106,9 +106,20 @@ func (s *Store) promoteReflectionCandidate(ctx context.Context, tx *sql.Tx, proj
 	if source == "" {
 		source = "reflection"
 	}
+	// FoldOnly, and only here. This is the one caller that is promoting a fact
+	// _global already knows: the same cross-project fact arrives as a fresh
+	// paraphrase from every project's reflect, and the default fold would store
+	// each of them as its own row — which is issue #544, 68 redundant rows in 19
+	// clusters, nine of them paraphrases of one gouroboros fact.
+	//
+	// Deliberately NOT in upsertMemoriesTx below. That is the recovery path: a
+	// candidate that could not be promoted is going back into the project
+	// verbatim, and folding there would silently drop the exact text the caller
+	// asked to keep.
 	_, _, _, upsertErr := s.UpsertWithOptions(withStoreTx(ctx, tx), "_global", m.Category, m.Content, source, m.Importance, m.Tags, UpsertOptions{
 		Provenance: provenanceFromMemory(m),
 		Scope:      m.Scope,
+		FoldOnly:   true,
 	})
 	if upsertErr == nil {
 		if _, err := tx.ExecContext(ctx, `RELEASE `+savepoint); err != nil {

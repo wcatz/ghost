@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 )
 
@@ -342,4 +343,51 @@ func containsMemoryContent(memories []Memory, content string) bool {
 		}
 	}
 	return false
+}
+
+// TestApplyReflectionFoldsParaphrasesIntoOneGlobalRow is the #544 regression at
+// the level that actually runs it. The option existed and was unit-tested, but
+// promoteReflectionCandidate never passed it, so FoldOnly had no production
+// caller and the default fold stored every paraphrase as its own row — the exact
+// shape issue #544 measured, 68 redundant rows in 19 clusters with nine
+// paraphrases of a single gouroboros fact.
+//
+// Two promotions of the same fact, in separate rounds, must leave one _global
+// row. Asserted against a real store because the wiring, not the option, is what
+// is under test.
+func TestApplyReflectionFoldsParaphrasesIntoOneGlobalRow(t *testing.T) {
+	db, err := OpenDB(filepath.Join(t.TempDir(), "promote.sqlite"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	store := NewStore(db, nil)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "proj", "/tmp/proj", "proj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	// The same fact as two different projects' reflect passes would phrase it.
+	// The same sentence, re-cased and re-punctuated by a different project's
+	// reflect pass: the shape FoldOnly is defined to collapse.
+	first := Memory{Category: "preference", Content: "run the gouroboros release checklist from the ops runbook", Source: "reflection", Importance: 0.6}
+	second := Memory{Category: "preference", Content: "Run The Gouroboros Release Checklist, from the Ops Runbook.", Source: "reflection", Importance: 0.6}
+
+	if _, promoted, _, err := store.ApplyReflection(ctx, "proj", nil, []Memory{first}, "", true); err != nil {
+		t.Fatalf("first ApplyReflection: %v", err)
+	} else if promoted != 1 {
+		t.Fatalf("first promotion = %d, want 1", promoted)
+	}
+	if _, _, _, err := store.ApplyReflection(ctx, "proj", nil, []Memory{second}, "", true); err != nil {
+		t.Fatalf("second ApplyReflection: %v", err)
+	}
+
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM memories WHERE project_id = '_global'`).Scan(&n); err != nil {
+		t.Fatalf("count _global: %v", err)
+	}
+	if n != 1 {
+		rows, _ := store.GetAll(ctx, "_global", 10)
+		t.Errorf("_global holds %d rows, want 1 — FoldOnly is not reaching the promotion path: %+v", n, rows)
+	}
 }

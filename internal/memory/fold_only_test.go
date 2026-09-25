@@ -29,9 +29,11 @@ func TestUpsertFoldOnlyDoesNotInsertTheIncomingText(t *testing.T) {
 		t.Fatalf("first Upsert: %v", err)
 	}
 
-	// A paraphrase, as a second project's reflect would produce.
+	// The same sentence as a second project's reflect would re-emit it: same
+	// words, different case and spacing. FoldOnly collapses this and only this
+	// — see TestFoldOnlyEquivalentTable for the near-matches it must refuse.
 	id, dupOf, score, err := s.UpsertWithOptions(ctx, testProject, "fact",
-		"the gouroboros PR workflow pushes from the laptop clone too",
+		"The  Gouroboros PR Workflow Pushes From The Laptop Clone",
 		"reflection", 0.7, nil, UpsertOptions{FoldOnly: true})
 	if err != nil {
 		t.Fatalf("fold-only Upsert: %v", err)
@@ -52,7 +54,7 @@ func TestUpsertFoldOnlyDoesNotInsertTheIncomingText(t *testing.T) {
 		t.Fatalf("GetAll: %v", err)
 	}
 	if len(all) != 1 {
-		t.Errorf("project holds %d memories, want 1 — fold-only inserted the paraphrase: %+v", len(all), all)
+		t.Errorf("project holds %d memories, want 1 — fold-only inserted the restatement: %+v", len(all), all)
 	}
 	if all[0].Content != "the gouroboros PR workflow pushes from the laptop clone" {
 		t.Errorf("content = %q, want the original wording preserved", all[0].Content)
@@ -78,8 +80,9 @@ func TestUpsertFoldOnlyStillStrengthens(t *testing.T) {
 		t.Fatalf("GetByIDs before: %v", err)
 	}
 
+	// The same sentence, re-cased: near-identical, so it folds and strengthens.
 	if _, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
-		"the gouroboros PR workflow pushes from the laptop clone too",
+		"The Gouroboros PR Workflow Pushes From The Laptop Clone",
 		"reflection", 0.7, nil, UpsertOptions{FoldOnly: true}); err != nil {
 		t.Fatalf("fold-only Upsert: %v", err)
 	}
@@ -259,14 +262,16 @@ func TestUpsertFoldOnlyKeepsContradictingInstruction(t *testing.T) {
 
 	// The control: a genuine restatement still folds, so the check is not just
 	// refusing everything that scores well.
-	const restate = "always deploy staging before merging a release branch"
+	// Same sentence, re-cased: near-identical, so it still folds. The ruling is
+	// that FoldOnly collapses restatements, not that it refuses to fold.
+	const restate = "Always Deploy Staging Before Merging The Release Branch"
 	before = countMemories(t, s, "_global")
 	if _, _, _, err := s.UpsertWithOptions(ctx, "_global", "gotcha", restate, "reflection", 0.6, nil,
 		UpsertOptions{FoldOnly: true}); err != nil {
 		t.Fatalf("FoldOnly restatement: %v", err)
 	}
 	if got := countMemories(t, s, "_global"); got != before {
-		t.Errorf("_global holds %d memories, want %d — a plain restatement stopped folding", got, before)
+		t.Errorf("_global holds %d memories, want %d — a near-identical restatement stopped folding", got, before)
 	}
 }
 

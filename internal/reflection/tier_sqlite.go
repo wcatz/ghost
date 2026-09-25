@@ -148,7 +148,7 @@ func tokenize(s string) map[string]bool {
 func inferGlobalScope(category, content string) string {
 	lower := strings.ToLower(content)
 
-	if looksLikeSecret(content) {
+	if looksLikeSecret(lower) {
 		return "project"
 	}
 
@@ -199,59 +199,6 @@ func inferGlobalScope(category, content string) string {
 	}
 
 	return "project"
-}
-
-// credentialPrefixes are the leading, publicly documented markers of a
-// credential. They are prefixes rather than the whole value because the body is
-// random; the prefix is the only part that identifies the format.
-var credentialPrefixes = []string{
-	"sk-live-", "sk-test-", "rk-live-", "rk-test-", // Stripe
-	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", // GitHub
-	"xoxb-", "xoxp-", "xoxa-", "xoxr-", // Slack
-	"sk-", "pk-", // generic/Stripe-style
-	"glpat-",       // GitLab
-	"AKIA", "ASIA", // AWS access key ids
-	"AIza",                        // Google
-	"npm_",                        // npm
-	"dop_v1_", "glpat-", "shpat_", // Shopify
-	"eyj", // JWT
-}
-
-// containsOpaqueCredential reports whether content carries a recognisable
-// credential: a known prefix, or a single token long and mixed enough to be one.
-func containsOpaqueCredential(content string) bool {
-	for _, prefix := range credentialPrefixes {
-		if strings.Contains(content, prefix) {
-			return true
-		}
-	}
-	// Prefix-free fallback: a token of at least 24 characters that mixes upper
-	// and lower case and contains a digit. Real prose words are separated by
-	// spaces, so a 24+ character single token is almost never a word; a
-	// base64 or hex credential of any vendor is caught here even if the format
-	// is not in the list above, which is the property that matters — the list
-	// cannot be complete.
-	var hasUpper, hasLower, hasDigit bool
-	run := 0
-	for _, r := range content {
-		switch {
-		case r >= 'a' && r <= 'z':
-			hasLower = true
-		case r >= 'A' && r <= 'Z':
-			hasUpper = true
-		case r >= '0' && r <= '9':
-			hasDigit = true
-		}
-		if r == ' ' || r == '\n' || r == '\t' || r == ',' {
-			if run >= 24 && hasUpper && hasLower && hasDigit {
-				return true
-			}
-			hasUpper, hasLower, hasDigit, run = false, false, false, 0
-			continue
-		}
-		run++
-	}
-	return run >= 24 && hasUpper && hasLower && hasDigit
 }
 
 // containment is the overlap coefficient |A∩B| / min(|A|,|B|): it catches a

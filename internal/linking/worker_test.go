@@ -2,6 +2,7 @@ package linking
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"sync/atomic"
@@ -30,9 +31,14 @@ func testStore(t *testing.T) *memory.Store {
 
 func addEmbedded(t *testing.T, s *memory.Store, content string, vec []float32) string {
 	t.Helper()
+	return addEmbeddedScoped(t, s, content, vec, nil)
+}
+
+func addEmbeddedScoped(t *testing.T, s *memory.Store, content string, vec []float32, scope map[string]string) string {
+	t.Helper()
 	ctx := context.Background()
 	id, err := s.Create(ctx, testProject, memory.Memory{
-		Category: "fact", Content: content, Source: "manual", Importance: 0.7,
+		Category: "fact", Content: content, Source: "manual", Importance: 0.7, Scope: scope,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -86,6 +92,77 @@ func TestSweepOnceLinksSimilarMemories(t *testing.T) {
 	}
 	if len(ids) != 0 {
 		t.Fatalf("got %d unscanned after sweep, want 0", len(ids))
+	}
+}
+
+// TestSweepOnceFindsCompatibleNeighbourBelowConflictingOnes covers the
+// interaction between the scope guard and the neighbor budget. SearchVector
+// truncates to the limit it is given, so applying the scope check after that cut
+// spends the budget on rows that can never be linked: here seven
+// scope-conflicting neighbours outrank the one compatible row, and with a fetch
+// of maxCandidates+1 the compatible row is never examined. The source is marked
+// scanned once the sweep succeeds, so it is never reconsidered — the
+// same-scope duplicate stays unlinked, and therefore undemoted.
+func TestSweepOnceFindsCompatibleNeighbourBelowConflictingOnes(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Source and the compatible neighbour are nearest to each other in angle;
+	// the seven conflicting rows sit between them, all above the 0.70
+	// threshold, so nothing but the ordering decides the outcome.
+	source := addEmbeddedScoped(t, s, "production pooling timeout", []float32{1, 0}, map[string]string{"environment": "production"})
+	compatible := addEmbeddedScoped(t, s, "production replication failover", []float32{0.9, 0.44}, map[string]string{"environment": "production"})
+	conflicting := make([]string, 0, 7)
+	for i := 0; i < 7; i++ {
+		conflicting = append(conflicting, addEmbeddedScoped(t, s,
+			fmt.Sprintf("development candidate %d", i),
+			[]float32{1, 0.02 * float32(i+1)},
+			map[string]string{"environment": "development"}))
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	NewWorker(s, logger, time.Minute, 0.70).SweepOnce(ctx)
+
+	links, err := s.GetLinks(ctx, source)
+	if err != nil {
+		t.Fatalf("GetLinks(source): %v", err)
+	}
+	got := map[string]bool{}
+	for _, l := range links {
+		other := l.SourceID
+		if other == source {
+			other = l.TargetID
+		}
+		got[other] = true
+	}
+	if !got[compatible] {
+		t.Errorf("source is not linked to the compatible neighbour: the scope filter ran after the "+
+			"candidate cut, so the budget was spent on %d conflicting rows ranked above it", len(conflicting))
+	}
+	for _, id := range conflicting {
+		if got[id] {
+			t.Errorf("source linked to scope-conflicting memory %s", id)
+		}
+	}
+}
+
+func TestSweepOnceDoesNotLinkScopeConflictingMemories(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	dev := addEmbeddedScoped(t, s, "development database uses SQLite", []float32{1, 0, 0.1}, map[string]string{"environment": "development"})
+	prod := addEmbeddedScoped(t, s, "production database uses SQLite", []float32{1, 0.1, 0}, map[string]string{"environment": "production"})
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	NewWorker(s, logger, time.Minute, 0.70).SweepOnce(ctx)
+
+	for _, id := range []string{dev, prod} {
+		links, err := s.GetLinks(ctx, id)
+		if err != nil {
+			t.Fatalf("GetLinks(%s): %v", id, err)
+		}
+		if len(links) != 0 {
+			t.Errorf("scope-conflicting memory %s received related links: %+v", id, links)
+		}
 	}
 }
 

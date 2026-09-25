@@ -17,7 +17,8 @@ type linkStore interface {
 	ListProjects(ctx context.Context) ([]memory.Project, error)
 	UnscannedEmbeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error)
 	GetEmbedding(ctx context.Context, memoryID string) ([]float32, error)
-	SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]memory.ScoredMemory, error)
+	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
+	SearchVectorScoped(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]memory.ScoredMemory, error)
 	CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error
 	MarkLinkScanned(ctx context.Context, memoryID string) error
 }
@@ -108,8 +109,25 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			w.logger.Debug("linking: get embedding", "error", err, "memory_id", id)
 			continue
 		}
+		sourceMemories, err := w.store.GetByIDs(ctx, []string{id})
+		if err != nil {
+			w.logger.Debug("linking: get source scope", "error", err, "memory_id", id)
+			continue
+		}
+		if len(sourceMemories) != 1 {
+			w.logger.Debug("linking: source memory disappeared", "memory_id", id)
+			continue
+		}
+		sourceScope := sourceMemories[0].Scope
+		// The scope filter runs inside the store, before its candidate limit, so
+		// the limit counts neighbours this source is allowed to link to. Filtering
+		// here instead — or widening the fetch by a fixed factor to compensate —
+		// only moves the cutoff: enough conflicting rows above the compatible one
+		// still hide it, and the source is marked scanned below, so it is never
+		// reconsidered.
+		//
 		// +1 because the memory itself is its own nearest neighbor.
-		candidates, err := w.store.SearchVector(ctx, projectID, vec, maxCandidates+1)
+		candidates, err := w.store.SearchVectorScoped(ctx, projectID, vec, maxCandidates+1, sourceScope)
 		if err != nil {
 			w.logger.Debug("linking: search", "error", err, "memory_id", id)
 			continue
@@ -117,6 +135,12 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 		failed := false
 		for _, cand := range candidates {
 			if cand.MemoryID == id || cand.Score < w.threshold {
+				continue
+			}
+			// The store already applied this filter. Kept because linkStore is an
+			// interface: it is the invariant the candidate list must satisfy, not a
+			// property of the one implementation behind it today.
+			if memory.ScopesConflict(sourceScope, cand.Scope) {
 				continue
 			}
 			if err := w.store.CreateLink(ctx, id, cand.MemoryID, "related", cand.Score, "auto"); err != nil {

@@ -831,14 +831,25 @@ Flags:
 	// a learned context worth recording. Keying this block on the project
 	// memory count silently dropped both the summary and the learned context
 	// for exactly the round the flag was added for.
-	if len(preserved) >= 0 && (promoted > 0 || keptProject > 0 || len(projectMems) > 0 || len(globalMems) > 0) {
+	// A round that wrote something. "Something" includes a candidate that was
+	// kept in the project because it could not be promoted — it is a row the
+	// project now holds, so it belongs in the consolidated count and in the
+	// category breakdown below, or the summary reports fewer memories than the
+	// project actually has.
+	if promoted > 0 || keptProject > 0 || len(projectMems) > 0 || len(globalMems) > 0 {
 		// appliedSummary counts the rows that were actually written to the
 		// project, and reports the REAL promoted count rather than the number
 		// of candidates — a partial promotion must not print "3 promoted to
 		// global" one line after "Promoted 1/3".
-		appliedProjectMems := projectMems
+		// Everything the project ends up holding, which is projectMems plus,
+		// when promotion is off, the candidates folded back into it — and, when
+		// promotion is on, any candidate that failed to promote and was kept.
+		// appliedSummary counts rows, so leaving these out would understate it.
+		appliedProjectMems := append([]reflection.ReflectMemory(nil), projectMems...)
 		if !parsed.promoteGlobals {
-			appliedProjectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
+			appliedProjectMems = append(appliedProjectMems, globalMems...)
+		} else if keptProject > 0 {
+			appliedProjectMems = append(appliedProjectMems, globalMems...)
 		}
 		summary := appliedSummary(appliedProjectMems, globalMems, promoted, parsed.promoteGlobals)
 		fmt.Printf("Applied: %s\n", summary)
