@@ -3,6 +3,7 @@
 package mcpinit
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,7 +105,7 @@ func (s *settingsFile) save() error {
 	}
 	out = append(out, '\n')
 
-	return writeFileAtomic(s.path, out, 0600)
+	return writeFileAtomicPrivate(s.path, out, 0600)
 }
 
 // writeBackupOnce captures data at path only when nothing is there yet. The
@@ -144,6 +145,20 @@ func writeBackupOnce(path string, data []byte) error {
 // with perm, which the kernel narrows by the caller's umask just as
 // os.WriteFile would.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return writeFileMode(path, data, perm, false)
+}
+
+// writeFileAtomicPrivate is writeFileAtomic with a ceiling: the result can never
+// be more permissive than perm, whatever mode the target already had. A file
+// that can hold credentials uses this one. settings.json carries hook commands
+// and env, and every save before the atomic-write refactor chmod'd it to 0600,
+// so a user copy left at 0644 by hand or by another tool must not stay readable
+// by group or world once ghost merges into it.
+func writeFileAtomicPrivate(path string, data []byte, perm os.FileMode) error {
+	return writeFileMode(path, data, perm, true)
+}
+
+func writeFileMode(path string, data []byte, perm os.FileMode, private bool) error {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved
 	}
@@ -160,6 +175,11 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		finalMode = info.Mode().Perm()
 		createMode = 0600
 		replace = true
+	}
+	if private {
+		// Clamp, never raise: a 0400 file stays 0400.
+		createMode &= perm
+		finalMode &= perm
 	}
 	tmp, err := createTempWithMode(dir, filepath.Base(path), createMode)
 	if err != nil {
@@ -194,13 +214,18 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 // createTempWithMode opens a uniquely named new file in dir carrying perm, so
 // the kernel applies the caller's umask to it. os.CreateTemp would fix the mode
 // at 0600 and force a later chmod, which bypasses the umask and would leave a
-// new config.toml world-readable on a host with a restrictive umask. A name
-// collision retries the next index; O_EXCL keeps two writers from sharing one.
+// new config.toml world-readable on a host with a restrictive umask. The name
+// carries random bytes so a leftover file, or one planted in the user's home by
+// something else, cannot predict or collide with it; O_EXCL keeps two writers
+// from sharing one.
 func createTempWithMode(dir, base string, perm os.FileMode) (*os.File, error) {
-	var err error
-	for i := 0; i < 16; i++ {
-		var f *os.File
-		f, err = os.OpenFile(filepath.Join(dir, fmt.Sprintf(".%s-%d.tmp", base, i)),
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		var buf [8]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			return nil, err
+		}
+		f, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf(".%s-%x.tmp", base, buf[:5])),
 			os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 		if err == nil {
 			return f, nil
@@ -208,8 +233,9 @@ func createTempWithMode(dir, base string, perm os.FileMode) (*os.File, error) {
 		if !errors.Is(err, os.ErrExist) {
 			return nil, err
 		}
+		lastErr = err
 	}
-	return nil, err
+	return nil, lastErr
 }
 
 // getPermissions extracts the permissions.allow string slice.

@@ -211,21 +211,116 @@ func parseCodexTOMLStringArray(val string) []string {
 	return out
 }
 
+// codexValueComplete reports whether a value's brackets and braces balance.
+// Three things that look like structure are not: a "#" opens a comment that runs
+// to the end of the line, a backslash escapes the next byte inside a basic
+// "..." string, and a literal '...' string has no escapes at all. Misreading any
+// of them makes a finished value look unfinished, and a repair that believes it
+// is still running swallows every following line as part of it.
+func codexValueComplete(value string) bool {
+	depth := 0
+	for i := 0; i < len(value); i++ {
+		switch c := value[i]; c {
+		case '#':
+			return depth == 0 // the rest of the line is a comment, not a value
+		case '\'', '"':
+			i = codexStringEnd(value, i)
+		case '[', '{':
+			depth++
+		case ']', '}':
+			depth--
+			if depth < 0 {
+				return true // malformed; treat as self-contained
+			}
+		}
+	}
+	return depth == 0
+}
+
+// codexStringEnd returns the index of the quote closing the string that opens at
+// i, or the last index of value when the string is unterminated. Inside a basic
+// "..." string a backslash escapes the next byte, so an escaped quote does not
+// close it; inside a literal '...' string nothing is escaped.
+func codexStringEnd(value string, i int) int {
+	quote := value[i]
+	for i++; i < len(value); i++ {
+		switch value[i] {
+		case quote:
+			return i
+		case '\\':
+			if quote == '"' {
+				i++ // the escaped byte cannot close the string
+			}
+		}
+	}
+	return len(value) - 1
+}
+
+// codexStripComment returns line with any "#" comment removed. A "#" inside a
+// quoted run belongs to the value, not to a comment.
+func codexStripComment(line string) string {
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '\'', '"':
+			i = codexStringEnd(line, i)
+		case '#':
+			return strings.TrimRight(line[:i], " \t")
+		}
+	}
+	return line
+}
+
+// normaliseCodexTableName returns the dotted key path a table header declares,
+// with each part trimmed of surrounding space and of one layer of quotes, and
+// ok=false when the header cannot be read with confidence. A trailing comment
+// is stripped first, so "[mcp_servers.ghost] # mine" names the same table as the
+// bare spelling, and ["mcp_servers"."ghost"] and [ mcp_servers . ghost ]
+// normalise to it as well. An array-of-tables header ([[name]]) is not a table
+// ghost manages, so it reports false.
+func normaliseCodexTableName(line string) (name string, ok bool) {
+	t := strings.TrimSpace(line)
+	if !strings.HasPrefix(t, "[") || strings.HasPrefix(t, "[[") {
+		return "", false
+	}
+	t = codexStripComment(t)
+	if !strings.HasSuffix(t, "]") {
+		return "", false
+	}
+	inner := strings.TrimSpace(t[1 : len(t)-1])
+	if inner == "" {
+		return "", false
+	}
+	parts := strings.Split(inner, ".")
+	for i, part := range parts {
+		part = strings.TrimSpace(part)
+		if len(part) >= 2 && (part[0] == '\'' || part[0] == '"') && part[len(part)-1] == part[0] {
+			part = part[1 : len(part)-1]
+		}
+		if part == "" || strings.ContainsAny(part, "[]") {
+			return "", false
+		}
+		parts[i] = part
+	}
+	return strings.Join(parts, "."), true
+}
+
 // codexIsTableHeader reports whether line opens a TOML table. The '=' guard
 // keeps an array element like ["a","b"] inside a multi-line value from being
-// mistaken for a header; real headers never carry an assignment.
+// mistaken for a header; real headers never carry an assignment. A trailing
+// comment does not disqualify a header.
 func codexIsTableHeader(line string) bool {
-	trimmed := strings.TrimSpace(line)
+	trimmed := codexStripComment(strings.TrimSpace(line))
 	if !strings.HasPrefix(trimmed, "[") || !strings.HasSuffix(trimmed, "]") {
 		return false
 	}
 	return !strings.Contains(trimmed, "=")
 }
 
-// codexTableName extracts the table name from a header line, handling both
-// [table] and [[array-of-tables]] forms.
+// codexTableName extracts the raw table name from a header line, handling both
+// [table] and [[array-of-tables]] forms. Prefer normaliseCodexTableName when
+// the name is compared against a key path.
 func codexTableName(line string) string {
-	t := strings.TrimSpace(line)
+	t := codexStripComment(strings.TrimSpace(line))
 	t = strings.TrimPrefix(t, "[[")
 	t = strings.TrimPrefix(t, "[")
 	if end := strings.Index(t, "]"); end >= 0 {
@@ -234,19 +329,53 @@ func codexTableName(line string) string {
 	return strings.TrimSpace(t)
 }
 
+// codexValueContinuationLines returns the indexes of lines that continue an
+// unterminated value begun on an earlier line. A nested array element such as
+// ["a","b"] inside a multi-line array is bracketed exactly like a header, so a
+// scanner that ignores continuations can end the ghost table's span early and
+// then insert owned keys that already exist further down the table.
+func codexValueContinuationLines(lines []string) map[int]bool {
+	continuation := make(map[int]bool)
+	value, open := "", false
+	for i, line := range lines {
+		if !open && codexIsTableHeader(line) {
+			continue // a header always closes an open value
+		}
+		if open {
+			continuation[i] = true
+			value += "\n" + line
+			if codexValueComplete(value) {
+				open, value = false, ""
+			}
+			continue
+		}
+		if _, v, ok := splitCodexAssignment(line); ok && !codexValueComplete(v) {
+			open, value = true, v
+		}
+	}
+	return continuation
+}
+
 // findCodexTOMLTable locates the [key] table header in lines and returns the
 // half-open span [start, end) of the table's OWN key lines: everything up to
 // the next table header of any name, minus trailing blank/comment lines so the
 // spacing and lead-in comments of the next section survive a replacement.
 // Sub-tables ([key.env]) start at their own header, so they fall outside the
-// span and can never be rewritten by a caller that replaces it.
+// span and can never be rewritten by a caller that replaces it. The name is
+// compared in normalised form, so any spelling of the key path matches, and
+// lines continuing a multi-line value are skipped so a nested array element
+// cannot be mistaken for the header that ends the span.
 func findCodexTOMLTable(lines []string, key string) (start, end int, ok bool) {
+	continuation := codexValueContinuationLines(lines)
 	for i, line := range lines {
-		if !codexIsTableHeader(line) || codexTableName(line) != key {
+		if continuation[i] || !codexIsTableHeader(line) {
+			continue
+		}
+		if name, named := normaliseCodexTableName(line); !named || name != key {
 			continue
 		}
 		j := i + 1
-		for j < len(lines) && !codexIsTableHeader(lines[j]) {
+		for j < len(lines) && (continuation[j] || !codexIsTableHeader(lines[j])) {
 			j++
 		}
 		for j > i+1 {
@@ -259,6 +388,62 @@ func findCodexTOMLTable(lines []string, key string) (start, end int, ok bool) {
 		return i, j, true
 	}
 	return 0, 0, false
+}
+
+// findCodexAmbiguousGhostHeader reports a bracketed line that names the ghost
+// server but cannot be matched with confidence: a key path that does not parse (a
+// stray or empty key part, an unterminated header) yet still carries a "ghost"
+// part, or the array-of-tables form [[mcp_servers.ghost]], which is a different
+// structure from the table ghost manages. init must refuse such a file rather
+// than append, because reading it as an absent table emits a second definition of
+// the server, and repairing inside a table whose shape we do not understand risks
+// eating the user's keys. A line that parses to a different key path is left
+// alone, and a line continuing a multi-line value is not a header at all.
+func findCodexAmbiguousGhostHeader(lines []string, key string) (at int, text string, ok bool) {
+	leaf := key
+	if i := strings.LastIndex(key, "."); i >= 0 {
+		leaf = key[i+1:]
+	}
+	continuation := codexValueContinuationLines(lines)
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if continuation[i] || !strings.HasPrefix(trimmed, "[") {
+			continue
+		}
+		if _, named := normaliseCodexTableName(line); named {
+			continue // a parseable header: the normal path matches or ignores it
+		}
+		if codexHeaderNamesPart(line, leaf) {
+			return i + 1, trimmed, true
+		}
+	}
+	return 0, "", false
+}
+
+// codexHeaderNamesPart reports whether an unparseable table header still names
+// the given key part, comparing with quotes and spaces removed so [a . "ghost"]
+// reads the same as [a.ghost]. The check only runs on headers that failed to
+// parse, and a false positive merely makes init warn instead of writing.
+func codexHeaderNamesPart(line, part string) bool {
+	t := strings.Map(func(r rune) rune {
+		if r == '\'' || r == '"' || r == ' ' || r == '\t' {
+			return -1
+		}
+		return r
+	}, codexStripComment(strings.TrimSpace(line)))
+	for i := 0; i+len(part) <= len(t); i++ {
+		if t[i:i+len(part)] != part {
+			continue
+		}
+		if i > 0 && isCodexIdentByte(t[i-1]) {
+			continue // part of a longer key, e.g. ghost_profile
+		}
+		if i+len(part) < len(t) && isCodexIdentByte(t[i+len(part)]) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // splitCodexAssignment splits a `key = value` line into its two halves, with
@@ -282,28 +467,6 @@ func splitCodexAssignment(line string) (key, value string, ok bool) {
 		key = key[1 : len(key)-1]
 	}
 	return key, strings.TrimSpace(trimmed[eq+1:]), true
-}
-
-// codexValueComplete reports whether a value's brackets and braces balance,
-// ignoring quoted runs. A value split over several lines (args = [ … ]) has
-// continuation lines that belong to the key above them.
-func codexValueComplete(value string) bool {
-	depth := 0
-	for i := 0; i < len(value); i++ {
-		switch c := value[i]; c {
-		case '\'', '"':
-			for i++; i < len(value) && value[i] != c; i++ {
-			}
-		case '[', '{':
-			depth++
-		case ']', '}':
-			depth--
-			if depth < 0 {
-				return true // malformed; treat as self-contained
-			}
-		}
-	}
-	return depth == 0
 }
 
 // codexValueLastLine returns the index of the line completing an unterminated
@@ -331,10 +494,18 @@ func codexValueLastLine(value string, lines []string, i, end int) int {
 // Definitions made inside the ghost table itself are the long form this
 // installer writes and are not reported.
 func findCodexDottedGhost(lines []string, key string) (at int, text string, ok bool) {
+	continuation := codexValueContinuationLines(lines)
 	table := ""
 	for i, line := range lines {
+		if continuation[i] {
+			continue
+		}
 		if codexIsTableHeader(line) {
-			table = codexTableName(line)
+			if name, named := normaliseCodexTableName(line); named {
+				table = name
+			} else {
+				table = codexTableName(line) // best effort for an odd header
+			}
 			continue
 		}
 		assigned, value, isAssign := splitCodexAssignment(line)
@@ -596,6 +767,16 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 		_, _ = fmt.Fprintf(w, "  ! %s defines the ghost MCP server with a dotted or inline key (line %d: %s)\n", path, at, text)
 		_, _ = fmt.Fprintln(w, "    ghost manages the [mcp_servers.ghost] table only, so the file was left unchanged.")
 		_, _ = fmt.Fprintln(w, "    Rewrite the entry as a [mcp_servers.ghost] table and re-run, or register the server yourself.")
+		return false, nil
+	}
+
+	// A header that names the ghost server but cannot be read with confidence is
+	// not the table we manage. Appending a second one would be a duplicate-key
+	// document, so leave the file alone and say why.
+	if at, text, ambiguous := findCodexAmbiguousGhostHeader(lines, codexMCPServerKey); ambiguous {
+		_, _ = fmt.Fprintf(w, "  ! %s has a table header ghost cannot parse (line %d: %s)\n", path, at, text)
+		_, _ = fmt.Fprintln(w, "    ghost manages a plain [mcp_servers.ghost] table only, so the file was left unchanged.")
+		_, _ = fmt.Fprintln(w, "    Rewrite the header as [mcp_servers.ghost] and re-run, or register the server yourself.")
 		return false, nil
 	}
 
@@ -1000,6 +1181,9 @@ func codexMCPEntryStatus(ghostBin string) (bool, string) {
 	lines := strings.Split(string(data), "\n")
 	if at, text, dotted := findCodexDottedGhost(lines, codexMCPServerKey); dotted {
 		return false, fmt.Sprintf("ghost MCP server defined by a dotted or inline key in config.toml (line %d: %s), a form ghost cannot manage", at, text)
+	}
+	if at, text, ambiguous := findCodexAmbiguousGhostHeader(lines, codexMCPServerKey); ambiguous {
+		return false, fmt.Sprintf("ghost MCP server behind a table header ghost cannot parse in config.toml (line %d: %s)", at, text)
 	}
 	start, end, found := findCodexTOMLTable(lines, codexMCPServerKey)
 	if !found {

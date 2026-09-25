@@ -662,6 +662,20 @@ func assertFileContent(t *testing.T, path, want string) {
 // assertFileMode checks POSIX permission bits. Windows has no mode bits (every
 // file reports 0666 whatever was asked for), so there is nothing to assert
 // there; the mode contract is exercised on the Unix runners instead.
+// filePerm returns a file's current permission bits, or 0 on Windows where
+// there are none to read.
+func filePerm(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return 0
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
+}
+
 func assertFileMode(t *testing.T, path string, want os.FileMode) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -674,4 +688,106 @@ func assertFileMode(t *testing.T, path string, want os.FileMode) {
 	if got := info.Mode().Perm(); got != want {
 		t.Errorf("%s mode = %v, want %v", filepath.Base(path), got, want)
 	}
+}
+
+// TestSettingsFile_SaveNeverWidensMode pins that a file able to hold
+// credentials cannot end up more permissive than 0600, even when the user's
+// copy was group- or world-readable. Before the atomic-write refactor every
+// save chmod'd the file to 0600, so keeping a 0644 settings.json readable by
+// others was a regression.
+func TestSettingsFile_SaveNeverWidensMode(t *testing.T) {
+	cases := map[string]os.FileMode{
+		"world-readable copy": 0644,
+		"group-readable copy": 0640,
+		"already private":     0600,
+		"narrower than 0600":  0400,
+	}
+	for name, mode := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := tempSettings(t, `{"effortLevel":"high"}`)
+			if err := os.Chmod(path, mode); err != nil {
+				t.Fatal(err)
+			}
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatalf("loadSettings: %v", err)
+			}
+			if err := sf.save(); err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			assertFileMode(t, path, mode&0600)
+		})
+	}
+}
+
+// TestWriteFileAtomicPrivateVersusPreserving pins the two helper flavours: one
+// that keeps whatever mode the target already had, and one that additionally
+// clamps the result so it can never be wider than the mode it was asked for.
+func TestWriteFileAtomicPrivateVersusPreserving(t *testing.T) {
+	dir := t.TempDir()
+
+	// Seed, then read back the mode the umask actually granted, so the
+	// assertion does not depend on the machine's umask.
+	preserved := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(preserved, []byte("a = 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	before := filePerm(t, preserved)
+	if err := writeFileAtomic(preserved, []byte("b = 2\n"), 0644); err != nil {
+		t.Fatalf("writeFileAtomic: %v", err)
+	}
+	assertFileMode(t, preserved, before)
+
+	clamped := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(clamped, []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomicPrivate(clamped, []byte(`{"a":1}`), 0600); err != nil {
+		t.Fatalf("writeFileAtomicPrivate: %v", err)
+	}
+	assertFileContent(t, clamped, `{"a":1}`)
+	assertFileMode(t, clamped, filePerm(t, clamped)&0600)
+}
+
+// TestCreateTempWithModeNames pins the temp file's properties: a fresh name on
+// every call, so a leftover or pre-planted file in the user's home cannot
+// predict or collide with it, and the requested mode with the umask applied.
+func TestCreateTempWithModeNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits; the umask contract is pinned in settings_unix_test.go")
+	}
+	dir := t.TempDir()
+
+	first, err := createTempWithMode(dir, "config.toml", 0600)
+	if err != nil {
+		t.Fatalf("createTempWithMode (first): %v", err)
+	}
+	second, err := createTempWithMode(dir, "config.toml", 0600)
+	if err != nil {
+		t.Fatalf("createTempWithMode (second): %v", err)
+	}
+	firstName, secondName := first.Name(), second.Name()
+	if firstName == secondName {
+		t.Errorf("two temp files share the name %q", firstName)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The name is derived from the target but carries a random suffix, and it is
+	// hidden so it does not show up in a directory listing the user reads.
+	base := filepath.Base(firstName)
+	if !strings.HasPrefix(base, ".config.toml-") || !strings.HasSuffix(base, ".tmp") {
+		t.Errorf("temp name %q should be a hidden .config.toml-<random>.tmp", base)
+	}
+	suffix := strings.TrimSuffix(strings.TrimPrefix(base, ".config.toml-"), ".tmp")
+	if len(suffix) < 8 {
+		t.Errorf("temp name %q should carry a random suffix of at least 8 hex characters, got %q", base, suffix)
+	}
+	if strings.Trim(suffix, "0123456789abcdef") != "" {
+		t.Errorf("temp name %q should end in hex random bytes, got %q", base, suffix)
+	}
+	assertFileMode(t, firstName, 0600)
 }

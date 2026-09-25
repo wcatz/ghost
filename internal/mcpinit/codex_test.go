@@ -535,6 +535,256 @@ func TestRunCodex_TOMLRepairNormalizesQuotedOwnedKey(t *testing.T) {
 	}
 }
 
+// TestRunCodex_TOMLRepairValueEndings covers the two ways a value's bracket
+// count lies about where the value ends. A "#" comment can hold an unbalanced
+// bracket, and a backslash-escaped quote inside a basic string can look like
+// the end of the string. If the scanner believes the value is still running,
+// the repair swallows every following line as part of it and deletes the
+// user's keys.
+func TestRunCodex_TOMLRepairValueEndings(t *testing.T) {
+	cases := map[string]struct{ seed, want string }{
+		"trailing comment holding an unbalanced bracket": {
+			// The "[" in the comment is not TOML structure.
+			seed: "[mcp_servers.ghost]\n" +
+				"command = \"/old/install/ghost\" # was [v1\n" +
+				"startup_timeout_sec = 30\n" +
+				"cwd = \"/x\"\n" +
+				"args = [\"mcp\", \"--stale\"]\n",
+			want: "[mcp_servers.ghost]\n" +
+				"command = {BIN}\n" +
+				"startup_timeout_sec = 30\n" +
+				"cwd = \"/x\"\n" +
+				"args = [\"mcp\"]\n",
+		},
+		"escaped quote inside a basic string": {
+			// args = ["a\"["] holds one element, a"[ , so it ends on that line.
+			seed: "[mcp_servers.ghost]\n" +
+				"command = \"/old/install/ghost\"\n" +
+				"args = [\"a\\\"[\"]\n" +
+				"keep = 1\n",
+			want: "[mcp_servers.ghost]\n" +
+				"command = {BIN}\n" +
+				"args = [\"mcp\"]\n" +
+				"keep = 1\n",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			home, _ := setupCodexTestEnv(t)
+			ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+			// A table that carries no managed marker gets one added above it.
+			want := codexMCPServerComment + "\n" +
+				strings.ReplaceAll(tc.want, "{BIN}", codexTOMLString(ghostBin))
+
+			if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(codexConfigToml(home), []byte(tc.seed), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := RunCodex(&out, false); err != nil {
+				t.Fatalf("RunCodex: %v", err)
+			}
+			got, err := os.ReadFile(codexConfigToml(home))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != want {
+				t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+			}
+		})
+	}
+}
+
+// TestRunCodex_TOMLHeaderSpellings covers the ways a user can spell the ghost
+// table header. Every spelling that names mcp_servers.ghost must be repaired in
+// place: treating an unrecognised spelling as "absent" appends a second table,
+// which is a duplicate-key document codex cannot parse.
+func TestRunCodex_TOMLHeaderSpellings(t *testing.T) {
+	for _, header := range []string{
+		"[mcp_servers.ghost]",          // the canonical spelling
+		"[mcp_servers.ghost] # mine",   // trailing comment
+		"[\"mcp_servers\".\"ghost\"]",  // quoted key parts
+		"[ mcp_servers . ghost ]",      // whitespace around the dots
+		"[mcp_servers.ghost ]  # mine", // both
+	} {
+		t.Run(header, func(t *testing.T) {
+			home, _ := setupCodexTestEnv(t)
+			ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+			seed := header + "\n" +
+				"command = '/old/install/ghost'\n" +
+				"args = [\"mcp\"]\n" +
+				"\n" +
+				"[profiles.ci]\n" +
+				"model = \"gpt-5-mini\"\n"
+			// The user's header line is preserved verbatim; only the two owned
+			// keys are rewritten, and the managed marker is added above.
+			want := codexMCPServerComment + "\n" +
+				header + "\n" +
+				"command = " + codexTOMLString(ghostBin) + "\n" +
+				"args = [\"mcp\"]\n" +
+				"\n" +
+				"[profiles.ci]\n" +
+				"model = \"gpt-5-mini\"\n"
+
+			if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := RunCodex(&out, false); err != nil {
+				t.Fatalf("RunCodex: %v", err)
+			}
+			got, err := os.ReadFile(codexConfigToml(home))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != want {
+				t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+			}
+			if n := countCodexGhostHeaders(string(got)); n != 1 {
+				t.Errorf("the ghost table must have exactly one header, got %d:\n%s", n, got)
+			}
+			if !strings.Contains(out.String(), "+ repaired the ghost MCP server entry") {
+				t.Errorf("expected a repair, got:\n%s", out.String())
+			}
+		})
+	}
+}
+
+// TestRunCodex_TOMLAmbiguousGhostHeaderLeftAlone covers headers that name ghost
+// but cannot be parsed with confidence, or that use a structure ghost does not
+// manage. init must leave such a file alone: reading it as "absent" would append
+// a duplicate table, and rewriting inside a table whose shape we do not
+// understand risks eating the user's keys.
+func TestRunCodex_TOMLAmbiguousGhostHeaderLeftAlone(t *testing.T) {
+	for _, header := range []string{
+		"[mcp_servers.ghost.]",   // trailing dot: no such key path
+		"[mcp_servers..ghost]",   // empty key part
+		"[[mcp_servers.ghost]]",  // array of tables, not a table
+		"[\"mcp_servers\".ghost", // unterminated header
+	} {
+		t.Run(header, func(t *testing.T) {
+			home, _ := setupCodexTestEnv(t)
+
+			seed := "# my model settings\n" +
+				"model = \"gpt-5.6\"\n" +
+				"\n" +
+				header + "\n" +
+				"command = \"/bin/ghost\"\n" +
+				"\n" +
+				"[profiles.ci]\n" +
+				"model = \"gpt-5-mini\"\n"
+			if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := RunCodex(&out, false); err != nil {
+				t.Fatalf("RunCodex: %v", err)
+			}
+			got, err := os.ReadFile(codexConfigToml(home))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != seed {
+				t.Errorf("config.toml must be left byte-for-byte unchanged, got:\n%s", got)
+			}
+			output := out.String()
+			if !strings.Contains(output, "left unchanged") {
+				t.Errorf("expected a warning that the file was left unchanged, got:\n%s", output)
+			}
+			if !strings.Contains(output, header) {
+				t.Errorf("the warning should quote the offending header %q, got:\n%s", header, output)
+			}
+
+			var status bytes.Buffer
+			if _, err := StatusCodex(&status); err != nil {
+				t.Fatalf("StatusCodex: %v", err)
+			}
+			if strings.Contains(status.String(), "missing from config.toml") {
+				t.Errorf("status must not call a present server missing, got:\n%s", status.String())
+			}
+		})
+	}
+}
+
+// countCodexGhostHeaders counts table headers in a config.toml body that name
+// the ghost MCP server, in any spelling. A repair must leave exactly one: a
+// second one is a duplicate-key document codex cannot parse.
+func countCodexGhostHeaders(content string) int {
+	n := 0
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if name, ok := normaliseCodexTableName(trimmed); ok && name == codexMCPServerKey {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRunCodex_TOMLRepairKeepsNestedArray covers a bracketed line that is not a
+// table header: an array element nested inside a multi-line value. Read as a
+// header it would end the ghost table's span early, so the repair would insert a
+// fresh command/args pair above the user's own keys and leave the originals
+// below, which codex rejects as a duplicate-key document.
+func TestRunCodex_TOMLRepairKeepsNestedArray(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	ghostBin := stubPath(filepath.Join(home, "bin"), "ghost")
+
+	// The nested ["b"] element is bracketed and carries no '=', so only
+	// continuation tracking tells it apart from a table header.
+	seed := "[mcp_servers.ghost]\n" +
+		"command = '/old/install/ghost'\n" +
+		"env_keep = [\n" +
+		"  \"a\",\n" +
+		"  [\"b\"]\n" +
+		"]\n" +
+		"args = [\"mcp\", \"--stale\"]\n"
+	want := codexMCPServerComment + "\n" +
+		"[mcp_servers.ghost]\n" +
+		"command = " + codexTOMLString(ghostBin) + "\n" +
+		"env_keep = [\n" +
+		"  \"a\",\n" +
+		"  [\"b\"]\n" +
+		"]\n" +
+		"args = [\"mcp\"]\n"
+
+	if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex: %v", err)
+	}
+	got, err := os.ReadFile(codexConfigToml(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("repaired config.toml mismatch:\nwant:\n%q\ngot:\n%q", want, got)
+	}
+	if n := countCodexGhostHeaders(string(got)); n != 1 {
+		t.Errorf("the ghost table must have exactly one header, got %d:\n%s", n, got)
+	}
+}
+
 // mustCodexGhostSpan returns the ghost table's own lines in a config.toml body.
 func mustCodexGhostSpan(t *testing.T, content string) []string {
 	t.Helper()
