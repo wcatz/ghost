@@ -171,7 +171,7 @@ clock, and non-zero budget before calling `Candidates`.
 
 | Source | `ProjectID` | `Query` | Retrieval mode |
 |---|---|---|---|
-| `SourceSearch` | required by the tool; an unresolved name may become `""` | required by the tool | `ProjectScoped`; empty resolved ID preserves today's globals-only result |
+| `SourceSearch` | required by the tool; an unresolved name may become `""` | required by the tool | `GlobalOnly` when the resolved ID is empty; otherwise `ProjectScoped` |
 | `SourceProjectCtx` | required non-empty | empty | `ProjectScoped` |
 | `SourceSessionStart` | non-empty or `""` | empty | `ProjectScoped`, or `GlobalOnly` when empty |
 | `SourceAllProjects` | ignored, may be empty | optional | `AllProjects` |
@@ -179,10 +179,11 @@ clock, and non-zero budget before calling `Candidates`.
 
 A projectless session start is a supported rendered state: global memories are
 loaded on a separate path and are still shown when no project matches. The
-empty project ID therefore means `GlobalOnly` only for session start and
-`AllProjects` for the all-projects source. Search's unknown-project fallback is
-preserved rather than converted to an error; the test suite covers that
-behavior. The inconsistency with update and delete remains outside this seam.
+empty project ID therefore means `GlobalOnly` for session start and unresolved
+search, while `AllProjects` applies to the all-projects source. Search's
+unknown-project fallback is preserved rather than converted to an error; the
+test suite covers that behavior. The inconsistency with update and delete
+remains outside this seam.
 
 ### Retriever contract and DTOs
 
@@ -272,9 +273,9 @@ type EdgeStatus struct { Status, Err string } // ok, unavailable, or err
 `Run` maps its request to `CandidateRequest` without changing the caller's
 semantics:
 
-- `SourceSessionStart` with an empty project maps to `GlobalOnly`; the
-  all-projects source maps to `AllProjects`; other sources map to
-  `ProjectScoped`.
+- `SourceSessionStart` with an empty project maps to `GlobalOnly`;
+  `SourceSearch` with an unresolved empty ID also maps to `GlobalOnly`;
+  `SourceAllProjects` maps to `AllProjects`; other sources map to `ProjectScoped`.
 - `Now` is passed unchanged. The candidate path never calls the wall clock.
 - `Condition` selects the legs. `CondVectorOnly` runs the vector leg alone.
 - `Fetch.Limit` is the requested window. `Candidates` returns a wider,
