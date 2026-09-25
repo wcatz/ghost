@@ -2006,7 +2006,16 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 		SELECT COALESCE(memory_id, hex(randomblob(16))), project_id, category, content,
 		       source, importance, tags, created_at, created_at, access_count, last_accessed,
 		       agent, session_id, source_ref, confidence,
-		       valid_from, valid_until, verified_at, scope
+		       valid_from, valid_until, verified_at,
+		       -- The same marker the UPDATE above honours. A snapshot whose
+		       -- scope_captured is 0 either predates the column or was
+		       -- backfilled by hand, and migrateV14 deliberately calls such a
+		       -- value unverified — so a row restored from one comes back
+		       -- unscoped rather than carrying a scope nobody recorded. The
+		       -- alternative is restoring a scope that was never true of that
+		       -- memory, which is worse than restoring none: there is no
+		       -- provenance to tell the two apart afterwards.
+		       CASE WHEN scope_captured = 1 THEN scope ELSE NULL END
 		FROM memory_snapshots
 		WHERE snapshot_id = ?
 		  AND ((memory_id IS NOT NULL AND memory_id NOT IN (SELECT id FROM memories))

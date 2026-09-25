@@ -122,6 +122,65 @@ func TestReplaceNonManualKeepsScopeWhenReflectionOmitsIt(t *testing.T) {
 	}
 }
 
+// TestRestoreSnapshotSkipsUnverifiedScopeOnInsert is the other half of the
+// legacy-snapshot boundary: the row is missing rather than present, so restore
+// reinserts it instead of updating in place.
+//
+// migrateV14 leaves scope_captured at 0 for a snapshot that predates the column
+// and for one an operator backfilled by hand, and calls both unverified. The
+// UPDATE path already refuses to believe such a scope; if the INSERT path copied
+// it anyway, a hand-backfilled "environment=production" would be restored onto a
+// memory that may never have had that scope, with no provenance afterwards to
+// tell a restored fact from an invented one. A row restored from an unverified
+// snapshot comes back unscoped instead.
+func TestRestoreSnapshotSkipsUnverifiedScopeOnInsert(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const content = "a fact whose snapshot scope was never actually recorded"
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: content, Source: "reflection", Importance: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "an unrelated consolidated fact", Importance: 0.6},
+	}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	all, err := s.GetAll(ctx, testProject, 100)
+	if err != nil {
+		t.Fatalf("GetAll: %v", err)
+	}
+	for _, m := range all {
+		if m.Content == content {
+			t.Fatal("precondition: the fact should have been replaced away")
+		}
+	}
+
+	// Stand in for a hand-migrated snapshot: a scope value present, but with
+	// nothing asserting it was ever recorded. migrateV14 stamps exactly this
+	// shape with scope_captured = 0.
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE memory_snapshots SET scope = ?, scope_captured = 0 WHERE content = ?
+	`, `{"environment":"production"}`, content); err != nil {
+		t.Fatalf("mark snapshot unverified: %v", err)
+	}
+
+	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+
+	rows, err := s.GetByIDs(ctx, []string{id})
+	if err != nil || len(rows) == 0 {
+		t.Fatalf("restore did not bring the fact back: %v", err)
+	}
+	if len(rows[0].Scope) != 0 {
+		t.Errorf("scope = %v, want unscoped — an unverified snapshot value must not be restored as fact", rows[0].Scope)
+	}
+}
+
 // TestRestoreSnapshotKeepsLiveScopeForLegacySnapshot pins the v13-to-v14
 // boundary. migrateV14 adds memory_snapshots.scope as a nullable column, and for
 // a snapshot written before v14 that NULL means "this build never recorded it",
