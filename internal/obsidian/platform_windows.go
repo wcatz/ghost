@@ -107,11 +107,24 @@ func extendedPath(path string) (string, error) {
 
 // isDirNotEmpty reports whether os.Remove failed only because the directory
 // still holds entries — the guard doing its job — as opposed to a
-// permission, sharing, or I/O failure that prune must surface. On Windows
-// that is ERROR_DIR_NOT_EMPTY; Go's syscall.ENOTEMPTY is an unrelated
-// application-error sentinel here.
+// permission, sharing, or I/O failure that prune must surface.
+//
+// On Windows that is NOT simply ERROR_DIR_NOT_EMPTY. Go's os.Remove tries
+// DeleteFile first, which cannot remove a directory and fails with
+// ERROR_ACCESS_DENIED, and only then RemoveDirectory. When the directory is
+// not empty the two calls report different things, and Go returns the FIRST
+// error unless the attribute probe says otherwise — so the caller sees
+// ERROR_ACCESS_DENIED and never ERROR_DIR_NOT_EMPTY at all. With the old
+// predicate this was therefore never true on Windows, and a single user file
+// beside a Ghost note in an orphan folder failed the whole export instead of
+// producing the ordinary "still holds something" answer.
+//
+// ERROR_ACCESS_DENIED is so treated as well. The cost is that an empty but
+// locked directory is left in place too — the same outcome, retried on the next
+// export, which is the recoverable direction. Failing the export is not.
 func isDirNotEmpty(err error) bool {
-	return errors.Is(err, syscall.ERROR_DIR_NOT_EMPTY)
+	return errors.Is(err, syscall.ERROR_DIR_NOT_EMPTY) ||
+		errors.Is(err, windows.ERROR_ACCESS_DENIED)
 }
 
 // makeFIFO reports that the special-file prune regression cannot run here:
