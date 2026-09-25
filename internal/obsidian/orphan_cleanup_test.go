@@ -649,7 +649,7 @@ func TestPruneKeepsCrashTempYoungerThanGrace(t *testing.T) {
 
 	// An old one, from a publish that died hours ago.
 	abandoned := filepath.Join(dir, "Dead Note.md.ghost-tmp-5678")
-	mustWrite(t, abandoned, "abandoned")
+	mustWrite(t, abandoned, ghostNote)
 	old := time.Now().Add(-2 * time.Hour)
 	if err := os.Chtimes(abandoned, old, old); err != nil {
 		t.Fatalf("age the abandoned temp: %v", err)

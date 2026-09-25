@@ -582,6 +582,21 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 				// happened to end in those five characters. The trailing
 				// wildcard is what makes it a claim on Ghost's own files
 				// rather than on the user's.
+				//
+				// The name is a claim, not proof. A user who copied a note
+				// beside the vault can end up with a file whose name ends
+				// exactly this way, and age is not ownership. The ghost_id
+				// check is: a crashed publish leaves a half-written RENDERED
+				// NOTE, which carries frontmatter, and a file that does not
+				// is not Ghost's whatever it is called. A prune-quarantine
+				// file is exempt, because that object is moved aside
+				// precisely so it can be examined this way before the
+				// delete.
+				if !strings.HasPrefix(filepath.Base(path), pruneQuarantineMarker) {
+					if _, ok := hasGhostID(path); !ok {
+						return nil
+					}
+				}
 				return removeFile(path)
 			}
 			if !strings.HasSuffix(path, ".md") {

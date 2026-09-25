@@ -261,7 +261,15 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 	// a bare ".ghost-tmp" suffix, which no real leftover carries, so it removed
 	// none of them and deleted any user file ending that way instead.
 	stray := filepath.Join(vault, "ghost", "Memories", "foo.md.ghost-tmp-4821")
-	if err := os.WriteFile(stray, []byte("orphan"), 0o644); err != nil {
+	// A half-written rendered note: a crashed publish always leaves frontmatter,
+	// which is what the ownership check reads.
+	if err := os.WriteFile(stray, []byte(ghostNote), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A user's own file whose NAME matches the pattern but whose content is not
+	// a Ghost note. Age is not ownership, so this must survive.
+	impostor := filepath.Join(vault, "ghost", "Memories", "shopping.md.ghost-tmp-7777")
+	if err := os.WriteFile(impostor, []byte("# my shopping list\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// A temp outside managed subtrees is none of our business.
@@ -280,10 +288,16 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Age it past the reclaim grace period: a temp file younger than that is
-	// a concurrent writer's live file, not a crash artifact.
-	if err := os.Chtimes(stray, time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour)); err != nil {
-		t.Fatal(err)
+	// Age both before the export that would reclaim them. A temp younger than
+	// the grace period is a concurrent writer's live file, so ageing afterwards
+	// would leave the sweep nothing to decide — and the outside fixture would
+	// pass the assertion on the grace period alone, which is the opposite of
+	// what the subtree guard is being tested for.
+	aged := time.Now().Add(-2 * time.Hour)
+	for _, f := range []string{stray, outside, impostor} {
+		if err := os.Chtimes(f, aged, aged); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if err := ex.Export(ctx, vault, ""); err != nil {
@@ -292,16 +306,14 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 	if _, err := os.Stat(stray); !os.IsNotExist(err) {
 		t.Errorf("orphaned tmp in managed subtree should be reclaimed: %v", err)
 	}
-	// Age the outside one too: the subtree guard, not the age, is what keeps
-	// it, so it must survive even when it looks exactly like an artifact.
-	if err := os.Chtimes(outside, time.Now().Add(-2*time.Hour), time.Now().Add(-2*time.Hour)); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Errorf("tmp file outside managed subtrees must survive: %v", err)
 	}
 	if _, err := os.Stat(mine); err != nil {
 		t.Errorf("a user file ending in the marker without a temp suffix must survive: %v", err)
+	}
+	if _, err := os.Stat(impostor); err != nil {
+		t.Errorf("a user file matching the temp NAME but not Ghost's content was reclaimed: %v", err)
 	}
 }
 
