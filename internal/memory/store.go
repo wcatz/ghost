@@ -529,7 +529,9 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 // The remote detected at the recorded path is returned so that a caller refusing
 // on this answer can report it: "" there is what separates a nested checkout
 // from a recorded path git cannot read — moved, deleted, owned by someone else,
-// or a store with no detector wired.
+// or a store with no detector wired. "" is also what the root fast path returns,
+// because it spent no detection, so a caller must read the boolean first: this
+// value says something only on a false answer.
 func (s *Store) savingDirectorySpeaksForProject(recorded, saving, savingRemote string) (bool, string) {
 	if savingPathIsProjectRoot(recorded, saving) {
 		return true, ""
