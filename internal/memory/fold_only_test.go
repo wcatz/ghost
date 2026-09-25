@@ -295,3 +295,82 @@ func TestUpsertFoldOnlyKeepsContradictingNumber(t *testing.T) {
 		t.Errorf("_global holds %d memories, want %d — a different port folded into port 80", got, before+1)
 	}
 }
+
+// TestFoldOnlyDoesNotCommitCallersTransaction covers Eu_S. FoldOnly's early
+// return used to commit unconditionally, while the default path's commit is
+// guarded by ownTx. An upsert that arrives inside a caller's transaction then
+// ends that transaction: every later statement of the caller fails with
+// "transaction has already been committed or rolled back", and the caller's own
+// Rollback can no longer undo the partial work. ApplyReflection is exactly that
+// caller — it wraps a savepoint around a _global upsert — so the fold path
+// would have committed the savepoint's parent.
+//
+// The test asserts the transaction is still usable after the fold, which is the
+// property the caller actually depends on.
+func TestFoldOnlyDoesNotCommitCallersTransaction(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("ensure _global: %v", err)
+	}
+	const content = "run the smoke test suite before tagging a release"
+	if _, err := s.Create(ctx, "_global", Memory{
+		Category: "preference", Content: content, Source: "reflection", Importance: 0.5,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	txCtx := withStoreTx(ctx, tx)
+
+	if _, _, _, err := s.UpsertWithOptions(txCtx, "_global", "preference", content, "reflection", 0.6, nil,
+		UpsertOptions{FoldOnly: true}); err != nil {
+		t.Fatalf("FoldOnly inside a transaction: %v", err)
+	}
+
+	// The caller's transaction must still be open: this statement is the test.
+	if _, err := tx.ExecContext(ctx, `SELECT 1`); err != nil {
+		t.Fatalf("caller transaction was committed by FoldOnly: %v", err)
+	}
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM memories WHERE project_id = '_global'`).Scan(&n); err != nil {
+		t.Fatalf("caller cannot read after a FoldOnly upsert: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+// TestUpsertFoldOnlyKeepsContradictingInstructionAcrossCategories covers Eu_K.
+// The contradiction guard was applied only to the same-category probe, but the
+// cross-category probe runs whenever the same-category one misses — and a
+// candidate that differs only in category is exactly the shape it exists for.
+func TestUpsertFoldOnlyKeepsContradictingInstructionAcrossCategories(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("ensure _global: %v", err)
+	}
+	const port80 = "the health check endpoint listens on port 80"
+	if _, err := s.Create(ctx, "_global", Memory{
+		Category: "fact", Content: port80, Source: "reflection", Importance: 0.5,
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	before := countMemories(t, s, "_global")
+	// Same wording, different category, different port: the cross-category
+	// probe's territory, and 7/9 of the tokens shared.
+	if _, _, _, err := s.UpsertWithOptions(ctx, "_global", "gotcha",
+		"the health check endpoint listens on port 81", "reflection", 0.6, nil,
+		UpsertOptions{FoldOnly: true}); err != nil {
+		t.Fatalf("FoldOnly upsert: %v", err)
+	}
+	if got := countMemories(t, s, "_global"); got != before+1 {
+		t.Errorf("_global holds %d memories, want %d — a contradicting cross-category candidate was folded away",
+			got, before+1)
+	}
+}

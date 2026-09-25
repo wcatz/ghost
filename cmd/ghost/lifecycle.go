@@ -2,14 +2,11 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -800,63 +797,32 @@ Flags:
 		projectForSummary = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 	}
 
-	var preserved []string
-	consolidated := 0
-	// Whether the project replacement actually committed. Promotion can run on
-	// a round that produced no project memories at all, and then no project row
-	// was ever deleted — so the recovery below must not re-insert candidates
-	// that are still exactly where they were.
-	replaced := false
-	if len(projectMems) > 0 {
-		dbMemories := make([]memory.Memory, len(projectMems))
-		for i, m := range projectMems {
-			dbMemories[i] = memory.Memory{
-				ProjectID:  projectID,
-				Category:   m.Category,
-				Content:    m.Content,
-				Importance: m.Importance,
-				Source:     "reflection",
-				Tags:       m.Tags,
-			}
-		}
-		consolidated = len(dbMemories)
-
-		preserved, err = store.ReplaceNonManual(ctx, projectID, dbMemories, consolidatedSince)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
-			os.Exit(1)
-		}
-		replaced = true
+	// One call, one transaction. applyReflection is the store's apply
+	// boundary: the project replace, every _global write, and the recovery of
+	// any candidate that could not be promoted either commit together or roll
+	// back together. Doing the parts here instead — as an earlier revision of
+	// this PR did — put two failure windows between them. A crash or a signal
+	// after the replace and before promotion left a candidate in neither place,
+	// and with promotion OFF every cross-project candidate was deleted from the
+	// project by the replace and then written nowhere at all, because promotion
+	// returns early and the recovery list was empty. applyReflection folds
+	// those candidates back into the project itself when promotion is off.
+	preserved, promoted, keptProject, err := applyReflection(
+		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
+		os.Exit(1)
 	}
-	// Promotion runs here, unconditionally, after the project apply. It must not
-	// sit inside the project guard: a round can yield only cross-project
-	// memories, and --promote-globals is an explicit request, so nesting it made
-	// the opt-in do nothing at exactly the moment there was nothing else to
-	// write. Running it after the apply keeps the ordering this exists for — a
-	// failed apply never leaves globals injected.
-	promoted, lost := applyPromotion(ctx, store, globalMems, parsed.promoteGlobals)
 	if promoted > 0 {
 		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
 	}
-
-	// A candidate that failed to promote has already been deleted from the
-	// project: with promotion on, global candidates are deliberately kept out
-	// of projectMems, so ReplaceNonManual removed them. Leaving a failure
-	// there would lose the memory outright. Put it back — the worst case has
-	// to be "not promoted", never "gone".
-	kept, err := recoverUnpromoted(ctx, store, projectID, lost, replaced)
-	if err != nil {
-		// The project replacement has already committed, so a candidate that
-		// now exists in neither _global nor the project is gone with no undo.
-		// Exiting 0 would report a successful consolidation that silently lost
-		// a memory; the operator is told, and a restore can roll the
-		// replacement back.
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		fmt.Fprintln(os.Stderr, "note: the project replacement already committed — run `ghost reflect <project> --restore` to undo it")
-		os.Exit(1)
-	}
-	if kept > 0 {
-		fmt.Fprintf(os.Stderr, "warning: %d of %d global memories could not be promoted and were kept in the project\n", kept, len(lost))
+	if len(globalMems) > 0 && parsed.promoteGlobals {
+		// A partial promotion is reported, never counted as a clean success:
+		// the candidate is back in the project, so the count of "kept" is the
+		// part that still needs a decision from the operator.
+		if keptProject > 0 {
+			fmt.Fprintln(os.Stderr, recoveryWarning(keptProject, len(globalMems)))
+		}
 	}
 
 	// The apply is what makes this round count, and promotion is part of it: a
@@ -865,23 +831,16 @@ Flags:
 	// a learned context worth recording. Keying this block on the project
 	// memory count silently dropped both the summary and the learned context
 	// for exactly the round the flag was added for.
-	if replaced || promoted > 0 {
-		summary := fmt.Sprintf("%d memories consolidated", consolidated)
-		if counts := categoryCounts(result.Memories); len(counts) > 0 {
-			summary = fmt.Sprintf("%d memories consolidated (%s)", consolidated, strings.Join(counts, ", "))
+	if len(preserved) >= 0 && (promoted > 0 || keptProject > 0 || len(projectMems) > 0 || len(globalMems) > 0) {
+		// appliedSummary counts the rows that were actually written to the
+		// project, and reports the REAL promoted count rather than the number
+		// of candidates — a partial promotion must not print "3 promoted to
+		// global" one line after "Promoted 1/3".
+		appliedProjectMems := projectMems
+		if !parsed.promoteGlobals {
+			appliedProjectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 		}
-		if consolidated == 0 {
-			// Promotion-only round: nothing in the project was replaced, so the
-			// project count alone would read as a zero-work apply.
-			summary = fmt.Sprintf("%d global memories promoted (no project memories changed)", promoted)
-		}
-		if len(globalMems) > 0 {
-			if parsed.promoteGlobals {
-				summary += fmt.Sprintf(", %d promoted to global", len(globalMems))
-			} else {
-				summary += fmt.Sprintf(", %d cross-project candidates kept project-scoped", len(globalMems))
-			}
-		}
+		summary := appliedSummary(appliedProjectMems, globalMems, promoted, parsed.promoteGlobals)
 		fmt.Printf("Applied: %s\n", summary)
 		if len(globalMems) > 0 && !parsed.promoteGlobals {
 			fmt.Println("(re-run with --promote-globals to inject them into every project)")
@@ -1261,125 +1220,4 @@ different harness). The harness owns its authentication and billing.`)
 	if !apply && res.Confirmed+res.Superseded+res.Corrected > 0 {
 		fmt.Println("\nRe-run with --apply to mark these resolved.")
 	}
-}
-
-// globalPromoter is the slice of `ghost reflect` that writes into _global.
-// Kept as a value rather than inlined so the ordering it depends on stays
-// visible at the call site: promotion must happen AFTER the project apply.
-type globalPromoter interface {
-	EnsureProject(ctx context.Context, id, path, name string) error
-	UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts memory.UpsertOptions) (string, string, float64, error)
-}
-
-// applyPromotion writes cross-project candidates into _global when the caller
-// explicitly asked for it, and returns the ones it could not write.
-//
-// Called unconditionally after the project apply rather than inside it. Two
-// reasons, both found in review:
-//
-//   - Inside `len(projectMems) > 0` it was unreachable when a round produced
-//     only cross-project memories — the one case where asking for promotion
-//     clearly meant it.
-//   - Its failures used to be logged and dropped. Global candidates are kept
-//     out of projectMems when promotion is on, so ReplaceNonManual has already
-//     deleted them from the project; a failed Upsert then left the memory in
-//     neither place. Returning them is what lets the caller put them back, so
-//     the worst case is "not promoted" rather than "lost".
-//
-// promote=false returns immediately and writes nothing: candidates are then
-// part of projectMems and were applied with them.
-// categoryCounts renders "N category" pairs for the applied summary, in the
-// order the categories were counted.
-func categoryCounts(mems []reflection.ReflectMemory) []string {
-	counts := make(map[string]int)
-	for _, m := range mems {
-		counts[m.Category]++
-	}
-	out := make([]string, 0, len(counts))
-	for cat, n := range counts {
-		out = append(out, fmt.Sprintf("%d %s", n, cat))
-	}
-	sort.Strings(out)
-	return out
-}
-
-// recoverUnpromoted puts candidates that failed promotion back into the project,
-// and reports how many are back.
-//
-// replaced says whether the project replacement actually committed. It decides
-// whether recovery is needed at all: promotion runs on rounds that produced no
-// project memories, and in those rounds nothing was deleted from the project, so
-// the candidates are already exactly where they should be and re-inserting them
-// would duplicate every one. An unconditional recovery is therefore only
-// correct for the half of the cases it was written for.
-//
-// A write that fails here is returned, not logged. By this point
-// ReplaceNonManual has committed, so the memory exists in neither _global nor
-// the project; carrying on and exiting 0 would report a successful
-// consolidation that lost a memory, with nothing to point at.
-func recoverUnpromoted(ctx context.Context, store *memory.Store, projectID string, lost []reflection.ReflectMemory, replaced bool) (int, error) {
-	if len(lost) == 0 || !replaced {
-		return 0, nil
-	}
-	kept := 0
-	var failures []string
-	for _, m := range lost {
-		if _, _, _, err := store.Upsert(ctx, projectID, m.Category, m.Content, "reflection", m.Importance, m.Tags); err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", contentRef(m.Content), err))
-			continue
-		}
-		kept++
-	}
-	if len(failures) > 0 {
-		return kept, fmt.Errorf("%d of %d unpromoted global memories could not be returned to project %q: %s",
-			len(failures), len(lost), projectID, strings.Join(failures, "; "))
-	}
-	return kept, nil
-}
-
-// contentRef identifies a memory in an error without reproducing it.
-//
-// The candidates are untrusted text: a reflection pass derived them from
-// project content, which may have come from a repository the user has never
-// reviewed. Quoting a slice of that text into an error puts it on stderr, into
-// lifecycle markers, and into whatever CI captures the log — so a credential
-// the secret heuristic missed would be copied somewhere durable and
-// world-readable. A short digest names the same row for anyone following the
-// failure back to the snapshot, which holds the full text and is already the
-// undo record.
-func contentRef(content string) string {
-	sum := sha256.Sum256([]byte(content))
-	return "memory sha256:" + hex.EncodeToString(sum[:6])
-}
-
-func applyPromotion(ctx context.Context, store globalPromoter, globalMems []reflection.ReflectMemory, promote bool) (promoted int, failed []reflection.ReflectMemory) {
-	if !promote || len(globalMems) == 0 {
-		return 0, nil
-	}
-	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: ensure _global project: %v\n", err)
-		// Nothing could be written, so every candidate is unaccounted for.
-		return 0, globalMems
-	}
-	for _, m := range globalMems {
-		// FoldOnly, and the reason is specific to _global. A save keeps the
-		// caller's wording because the caller asked for it; a promotion does
-		// not. The same cross-project fact arrives as a fresh paraphrase from
-		// every project's reflect, and _global accumulated 68 redundant rows
-		// in 19 clusters this way — nine of them paraphrases of a single
-		// gouroboros fact — while every project scope had none, because a
-		// project memory is written once by one project (issue #544).
-		//
-		// The existing row is still strengthened, so a fact that keeps
-		// recurring across projects keeps gaining weight; only the redundant
-		// copy is dropped.
-		if _, _, _, err := store.UpsertWithOptions(ctx, "_global", m.Category, m.Content, "reflection", m.Importance, m.Tags,
-			memory.UpsertOptions{FoldOnly: true}); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: upsert global memory: %v\n", err)
-			failed = append(failed, m)
-			continue
-		}
-		promoted++
-	}
-	return promoted, failed
 }

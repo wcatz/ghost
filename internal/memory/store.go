@@ -1866,7 +1866,19 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 				if ScopesConflict(opts.Scope, parseScope(candScope)) {
 					continue
 				}
-				j := jaccard(newTokens, tokenizeContent(candContent))
+				candTokens := tokenizeContent(candContent)
+				// The same contradiction guard the same-category probe uses, for
+				// the same reason. This probe runs whenever the same-category one
+				// misses, so a FoldOnly promotion whose candidate happens to
+				// differ in category would otherwise fold into a contradicting
+				// row: "port 80" as a fact and "port 81" as a gotcha clear the
+				// 0.7 bar easily, and the fold would strengthen one and drop the
+				// other. Scoped to FoldOnly for the same reason as before — the
+				// default fold keeps the caller's wording either way.
+				if opts.FoldOnly && contradictoryInstruction(newTokens, candTokens) {
+					continue
+				}
+				j := jaccard(newTokens, candTokens)
 				if j >= upsertCrossCategoryThreshold && j > bestJaccard {
 					bestJaccard = j
 					existingID = candID
@@ -1969,9 +1981,20 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			// promotion whose fact _global already knows. The strengthen above
 			// is still the right outcome: the duplicate is evidence the fact
 			// keeps recurring, and throwing that away would make promotion
-			// lose the signal. Commit just the UPDATE.
-			if err = tx.Commit(); err != nil {
-				return "", "", 0, fmt.Errorf("commit upsert tx: %w", err)
+			// lose the signal. Only the UPDATE is wanted.
+			//
+			// Commit only a transaction this call opened. When the upsert
+			// arrives inside a caller's transaction, committing here would end
+			// it: every later statement of the caller fails with "transaction
+			// has already been committed or rolled back", and the caller's own
+			// deferred Rollback can no longer undo the partial work. The default
+			// path below already guards its commit with ownTx; the early return
+			// has to hold the same rule, or the guard is a property of one exit
+			// rather than of the function.
+			if ownTx {
+				if err = tx.Commit(); err != nil {
+					return "", "", 0, fmt.Errorf("commit upsert tx: %w", err)
+				}
 			}
 			return existingID, existingID, score, nil
 		}
