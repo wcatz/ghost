@@ -376,25 +376,60 @@ type LegStatus struct{ Attempted, Available bool; Err string; Truncated bool }
 type EdgeStatus struct{ Status string; Err string } // "ok" | "unavailable" | "err"
 ```
 
-**One snapshot per `Candidates` call.** The legs, the hydration and the edge
-load must run inside a **single read transaction**, not as today's separate
-autocommit queries. `SearchFTS` (`store.go:1159`), `SearchVector` (`vector.go:83`),
-`GetByIDs` (`store.go:482`) and the penalty/edge lookups each open their own
-implicit transaction today, so a concurrent write landing between them can
-produce an FTS rank computed over old content, a body hydrated *after* the write,
-and an edge set that lost a cascade-deleted link — three views of one store that
-disagree. That is not a theoretical hazard here: the session hook and the MCP
-server write through `ghost_memory_save` while a search is in flight. It also
-corrupts the trace, which is presented as the *authoritative* record of why a
-result looks as it does (#583).
+**One snapshot per `Candidates` call — which means refactoring the legs, not
+just wrapping them.** The legs, the hydration and the edge load must run inside a
+**single read transaction**, not as today's separate autocommit queries.
+`SearchFTS` (`store.go:1159`), `SearchVector` (`vector.go:83`), `GetByIDs`
+(`store.go:482`) and the penalty/edge lookups each open their own implicit
+transaction today, so a concurrent write landing between them can produce an FTS
+rank computed over old content, a body hydrated *after* the write, and an edge
+set that lost a cascade-deleted link — three views of one store that disagree.
+That is not a theoretical hazard here: the session hook and the MCP server write
+through `ghost_memory_save` while a search is in flight. It also corrupts the
+trace, which is presented as the *authoritative* record of why a result looks as
+it does (#583).
 
-So `Candidates` takes a `queryer` and every leg runs through it inside one
-`BEGIN DEFERRED`. Under WAL this is a consistent snapshot for the whole call.
-One caveat carried forward from the store's existing transaction notes: a
-deferred read transaction can still surface `SQLITE_BUSY_SNAPSHOT` if a writer
-commits between the snapshot and a read, which bypasses `busy_timeout`; the
-assembler must treat that as the same non-fatal leg error it already handles, not
-as a panic and not as a silent partial result.
+The obvious plan — `BEGIN DEFERRED` and call the existing methods inside it —
+**deadlocks, and I nearly specified it.** `memory.OpenDB` sets
+`db.SetMaxOpenConns(1)` (`schema.go:310`), so the handle has exactly one
+connection. The open transaction holds it, and every `s.db.QueryContext` inside
+`SearchFTS`/`SearchVector`/`GetByIDs` then waits for a connection that cannot be
+handed out until the transaction closes. That is a self-deadlock, not a slow
+path, and no `busy_timeout` covers it because no lock is being waited on — the
+pool is.
+
+So the legs have to be refactored to take a queryer and be executed *through* it:
+
+```go
+type Queryer interface {
+    QueryContext(ctx context.Context, q string, args ...any) (*sql.Rows, error)
+    QueryRowContext(ctx context.Context, q string, args ...any) *sql.Row
+}
+```
+
+`Candidates` opens one `*sql.Tx` and passes the `Tx` to `SearchFTS`,
+`SearchVector`, `GetByIDs`, `SupersedePenalties`, `DemotionPenalties` and the new
+edge query. That is a mechanical signature change on six functions and is the
+real cost of this section — worth stating plainly, because it is a prerequisite
+in PR 1, not a refinement of a later one.
+
+Two consequences that follow from `SetMaxOpenConns(1)` and are not optional:
+
+- The transaction must be **read-only for its whole life**. It is `BEGIN DEFERRED`
+  and never writes, so no read→write upgrade is ever attempted. That also disposes
+  of the caveat I first wrote here: `SQLITE_BUSY_SNAPSHOT` is a *read-to-write
+  upgrade* failure — it is returned when a deferred transaction that has already
+  read tries to become a writer after another connection committed — so a
+  read-only transaction cannot produce it. The real contention risk is plain
+  `SQLITE_BUSY` from a concurrent writer, which `busy_timeout=5000` already
+  covers and which must stay a non-fatal leg error, never a panic.
+- Holding the single connection **serialises every other database user** for the
+  duration of the call — including `ghost_memory_save` on another goroutine. That
+  is already true of any single query on this handle, but a four-leg transaction
+  makes the window wider and the consequence measurable. The transaction must
+  therefore stay as short as possible: no LLM calls, no embedding generation, and
+  no rendering inside it. Embeddings are fetched by `SearchVector` rather than
+  computed, which keeps the embed call outside the transaction by construction.
 
 **Edge failures are non-fatal, and visibly so.** The edge load introduces a
 failure path that `CandidateSet` must model rather than hide, because the trace
@@ -426,10 +461,24 @@ to `Memory`, binds them in `scanMemories`, and adds them to the `SELECT` lists i
 also on `Candidate`: a duplicate declaration on the outer struct would shadow the
 promoted embedded field and leave `Candidate.ValidUntil` and
 `Candidate.Memory.ValidUntil` as two independent values, of which stage 2 would
-read the wrong one. Moving the DTOs into `memory` (§ "Where the DTOs live") makes
-that shadowing structurally impossible rather than merely discouraged: `Candidate`
-lives in the same package as `Memory`, embeds it directly, and the compiler
-rejects a redeclaration of a promoted field at the same depth.
+read the wrong one. Moving the DTOs into `memory` (§ "Where the DTOs live") does
+**not** fix that by itself, and I claimed it did: an outer field shadowing a
+promoted one at a shallower depth is **legal Go**, not a compile error (only a
+redeclaration at the *same* depth is). The move's real benefit is different and
+weaker — it puts `Candidate` and `Memory` in one package so a reviewer can see
+the embedding and the fields together — so the prohibition has to be a **review
+invariant plus a test**, not something the compiler enforces:
+
+```go
+// Candidate must not redeclare these; memory_test asserts it by reflection,
+// so a future edit that adds one fails the suite rather than silently
+// shadowing the promoted field.
+```
+
+The reflection test walks `Candidate`'s fields and fails if any name collides
+with a promoted `Memory` field. That is the check that makes the claim true, and
+it is a behavioural assertion about the type's field set, not a source-text
+assertion.
 
 **They are `*string`, not `*time.Time`, and stage 2 owns the parsing.** Three
 reasons, all from the existing code rather than preference:
@@ -514,7 +563,7 @@ distinct policies are in play:
 | Order | `DecayRankingSQL` DESC, then `importance`, `created_at`, `id` | `pinned DESC, importance DESC, updated_at DESC` (`hook.go:342`) — **not** decay-ranked at all |
 | Selection | **two-pass**: pass 1 reserves up to `injection.behavior_floor` slots for behavioural categories scored by `importance × DecayFactor × category_weight` under per-category caps; pass 2 fills the rest by plain decay score (`hook.go:507-571`) | no two-pass, no weights — a flat `globalsCap` = 8 cut |
 | Cap | `sessionMemoriesCap` = 15 (`:323`) | `globalsCap` = 8 (`:311`) |
-| Near-dup | demoted before the cap, at the `injection` override or `DefaultDemotionThreshold` 0.90 (`hook.go:604`) | `globalsDemotionThreshold` = 0.85 (`:317`), lower on purpose — a live global pair linked at 0.8857 |
+| Near-dup | demoted before the cap, at the threshold from `linking.demotion_threshold` (default 0.90, `config.go:194`), pushed into the store by `SetDemotionThreshold` (`store.go:105`) (`hook.go:604`) | `globalsDemotionThreshold` = 0.85 (`:317`), lower on purpose — a live global pair linked at 0.8857 |
 
 Three consequences the pipeline has to respect:
 
@@ -530,8 +579,14 @@ Three consequences the pipeline has to respect:
    every global by age, which today it is not. The bucket therefore selects the
    scoring function, exactly as it already selects the cap and the demotion
    threshold. This is the single most load-bearing row in the table above.
-3. **The demotion threshold is per-bucket** (0.90 vs 0.85), so it belongs on
-   `Slice` next to `DropDemotedLosers` rather than in a global config default.
+3. **The demotion threshold is per-bucket** (0.90 from
+   `linking.demotion_threshold` vs 0.85 for globals), so it belongs on `Slice`
+   next to `DropDemotedLosers` rather than in a global config default. Note the
+   key is under `linking`, not `injection` — the two injection knobs in this
+   table (`behavior_floor`, `category_weights`) live in a different config
+   section from the threshold, and conflating them would make the globals
+   override look like a documented injection setting when it is a hardcoded
+   constant with a comment explaining why (`hook.go:313-317`).
 
 **How this stays a no-op for PR 2.** PR 2 only changes the *rendering* and adds
 one opt-in scope predicate. The passive policy table is therefore a
@@ -688,7 +743,7 @@ claims.
 | 1 | `no_candidates` | 1 | retrieval returned zero rows, every leg `Attempted && !Err` (query mode) |
 | 2 | `retrieval_failed` | 1 | ≥1 leg errored and the survivors yielded nothing (partial leg failure) |
 | 3 | `vector_backend_unavailable` | 1 | no embedder, or the embed call failed, so only FTS ran and matched nothing |
-| 4 | `no_memories` | 1 | retrieval returned zero rows (passive mode) — the passive counterpart of 1 |
+| 4 | `no_memories` | 1 | retrieval returned zero rows (passive mode) — the passive counterpart of 1, and **windowed**: it means the over-fetched set was empty, not that the store is empty, so it never licenses an absence claim (§ Output shape) |
 | 5 | `all_invalid` | 2 | every candidate failed validity — expired, **or** not yet valid |
 | 6 | `all_out_of_category` | 3 | every candidate failed the category predicate |
 | 7 | `all_out_of_scope` | 3 | every candidate failed `ScopeMatches` |
@@ -836,18 +891,43 @@ one case that actually establishes it:
 
 | Reason | Copy |
 |---|---|
-| `no_candidates`, `no_memories` | "no stored memory matches this question" — **absence**, because retrieval completed successfully over the whole store and found nothing |
+| `no_candidates` | "no stored memory matches this question" — **absence**, the only case entitled to claim it: every leg completed with no error, and the fetch was exhaustive over the store rather than windowed |
+| `no_memories` | "no memories recorded for this project yet" — **not** absence. Passive fetch is capped (`sessionMemoriesCap*3` / `globalsCap*2`), so an empty passive block means the *window* was empty, not the store. It is a "nothing recorded yet" statement about the over-fetched set |
 | `all_invalid` | "everything I found for this is out of date; it is not being suggested" — the rows exist, they were correctly withheld |
 | `all_dedup_dropped`, `all_diversity_capped`, `all_over_budget` | "found N, all withheld by the <dedup / diversity / budget> limit; raise the limit to see more" — a knob, not a claim |
 | `retrieval_failed` | "search could not complete (<leg> failed); this is not evidence that nothing exists" — explicitly **not** absence |
 | `vector_backend_unavailable` | "keyword-only search, no vector index available; this may be less complete than usual" |
-| `all_out_of_category`, `all_out_of_scope` | "nothing matches the <category / scope> filter you set" — and, when `window_exhausted` is set, append "in what I searched" |
-| any reason **with** `window_exhausted` | every row above gains a "in what I searched" suffix, and the absence claim is suppressed entirely |
+| `all_out_of_category`, `all_out_of_scope` | "nothing matches the <category / scope> filter you set" |
 
-The rule that makes this checkable: **the word "none" / "no … exists" may appear
-only when `Legs` shows every leg completed with no error and `Widened` is false.**
-That is a one-line assertion in the renderer and a one-line test — set
-`Widened = true` and assert the absence sentence does not appear.
+`no_memories` is the row worth dwelling on, because I initially put it in the
+absence row alongside `no_candidates` and that was wrong. Passive retrieval is
+**windowed by construction** — 45 rows for the project bucket, 16 for globals —
+so an empty passive result cannot distinguish "this project has no memories" from
+"this project has more than 45 and none of the first 45 matched". The honest copy
+claims only what the fetch supports. If a caller needs true absence semantics for
+a project, that is a different query with a different contract, and faking it here
+would put a claim in the payload that the retrieval never made.
+
+**One rendering of the bounded case, not two.** My first pass had the copy table
+append "in what I searched" while the *Honest absence* section (§ below) quoted a
+second, different sentence for the same condition. Two renderings of one state is
+a bug in the making, so there is now exactly one:
+
+```text
+Ghost memory: no match within the searched window — widen the limit or drop the
+scope filter. This is not evidence that nothing exists.
+```
+
+It is appended as a `Note` whenever `CandidateSet.Widened` is true, regardless of
+the stage reason, and it **suppresses the absence claim** — so it is only ever
+combined with a non-absence reason, since the absence case requires
+`Widened == false` by definition.
+
+The rule that makes all of this checkable: **the absence claim is permitted only
+when every leg reports `Attempted && Err == ""` and `Widened` is false.** That is
+a one-line assertion in the renderer and three tests — set `Widened = true`, set
+`Legs["fts"].Err`, and set `Source: SourceSessionStart`, and assert the absence
+sentence does not appear in any of them.
 
 Each sentence is byte-bounded by the same `Slice.MaxBytes` as the items — #580's
 last AC — and each includes the `Result.Notes` for its reason, so a truncated
@@ -870,10 +950,13 @@ it lands, `explain:true` on `ghost_memory_search` is the only trace surface.
 `empty` and a *bounded* search are different claims. When stage 1's widened set
 was itself truncated (`CandidateSet.Widened == true`) and a later stage then
 emptied it, absence is not provable. Consistent with the reason table, the
-**specific stage reason stays in `Reason`** and the boundedness is a `Note` — the
-message becomes *"no match within the searched window — widen limit or drop the
-scope filter"* rather than *"no memory exists"*, and the absence claim is
-suppressed. `LegStatus.Truncated` distinguishes "the backend answered" from "the
+**specific stage reason stays in `Reason`** and the boundedness is carried in
+`Notes`, which renders the single bounded sentence quoted in § Output shape —
+*"no match within the searched window — widen the limit or drop the scope
+filter. This is not evidence that nothing exists."* There is deliberately no
+second rendering of this state; an earlier draft had one here and one in the copy
+table, and two sentences for one condition is a defect regardless of which is
+better. `LegStatus.Truncated` distinguishes "the backend answered" from "the
 backend was cut off", and a failing leg is reported as a `Note` rather than
 silently narrowing the set — the current `SearchHybridParams` (`vector.go:442/454`)
 discards a leg error, which is how #580's "FTS-only hits must not be reported as
@@ -1032,10 +1115,10 @@ a later PR can unify the ablations on purpose, as its own bench-gated change.
 | Metric | Computed from | Note |
 |---|---|---|
 | **Context precision** | `Σ relevance(Item.ID) / len(Items)` | bench's existing `Query.Rel` grades. The denominator is the *assembled* block, not a ranked list — that is the whole difference from NDCG. Empty blocks are **excluded** from the ratio and counted separately — see "Empty blocks" below. |
-| **Contamination rate** | admitted `Item`s whose own fields are contaminating *at assembly time*, from `assemble.Contaminating(item, req)` | `Item.ResolvedAt != nil`, **or** `Item.ValidUntil != nil && Item.ValidUntil.Before(req.Now)` (expired), **or** `Item.ValidFrom != nil && Item.ValidFrom.After(req.Now)` (not yet valid), **or** `Item.Scope` contradicts the request, **or** `Item.Bucket` is neither the requested project nor `_global`. The nil checks are explicit because the fields are pointers — a bare `<`/`>` against `req.Now` does not compile, and a bare dereference can panic. **Both validity arms are required**: stage 2 drops on `valid_until < now` *and* on `valid_from > now` (Decision 2, stage 2), and an earlier draft checked only the first. A half-mirrored predicate is worse than a re-implementation, because it reports 0% contamination for a not-yet-valid row stage 2 would have dropped, reading as "the filter works" when the metric never looked. Hence the fixture below. `_global` is *never* contamination: both retrieval legs and `GetTopMemories` include it deliberately (`store.go:1106`, `1165`), so a global preference is the product working. Classified from fields, **not** from `Decision.Reason` — see the next paragraph. |
+| **Contamination rate** | admitted `Item`s for which `ExpiredAt‖NotYetValidAt‖ScopeContradicts‖BucketUnexpected` all hold, composed by the metric from the shared leaf predicates | `Item.ResolvedAt != nil` (no stage drops resolved rows in query mode, so this arm is metric-only), **or** `Item.ValidUntil != nil && Item.ValidUntil.Before(req.Now)` (expired), **or** `Item.ValidFrom != nil && Item.ValidFrom.After(req.Now)` (not yet valid), **or** `Item.Scope` contradicts the request, **or** `Item.Bucket` is neither the requested project nor `_global`. The nil checks are explicit because the fields are pointers — a bare `<`/`>` against `req.Now` does not compile, and a bare dereference can panic. **Both validity arms are required**: stage 2 drops on `valid_until < now` *and* on `valid_from > now` (Decision 2, stage 2), and an earlier draft checked only the first. A half-mirrored predicate is worse than a re-implementation, because it reports 0% contamination for a not-yet-valid row stage 2 would have dropped, reading as "the filter works" when the metric never looked. Hence the fixture below. `_global` is *never* contamination: both retrieval legs and `GetTopMemories` include it deliberately (`store.go:1106`, `1165`), so a global preference is the product working. The metric composes the leaf predicates itself rather than calling a shared drop function — see the next paragraph for why that distinction is what keeps the metric non-vacuous. |
 | **Budget adherence** | `Result.Bytes` vs. the matching `Slice.MaxBytes`; dropped IDs from the stage-8 `StageTrace.DroppedIDs` | `DroppedIDs` is what lets bench intersect the trim with `Query.Rel` and measure *relevant rows the trim discarded* — the "low-relevance memory crowding out a relevant one" regression, otherwise invisible. |
 | **Diversity** | `max_b count(Item.Bucket) / len(Items)` | One histogram over `Item.Bucket`, with `_global` as its own bucket. Empty blocks excluded, as above. |
-| **Result rate** | `count(Outcome != empty) / count(queries)` | Reported **separately** and never folded into a ratio. An assembler that returns nothing scores 0% precision and 0% contamination, so without this number the other metrics can be gamed by abstention. |
+| **Result rate** | `count(Outcome != empty) / count(queries)` | Reported **separately**, and it is the metric that makes the others readable. Because empty blocks are excluded from precision and contamination, an assembler that returns nothing has *no* precision sample rather than a bad one — so on its own it would post a clean scoreboard. Result rate is the number that makes that visible. |
 | **Token cost** | `Σ Item.Bytes` per answered question, reported next to accuracy | Bytes, not a tokenizer: the injection budget is already in bytes and `MaxContentLen` is 8,000 bytes. A tokenizer would be a second, disagreeing notion of size. |
 
 **Empty blocks are excluded from every ratio, and never aggregated as zero.**
@@ -1065,10 +1148,17 @@ assert the reported triple is `(result rate 2/3, precision 1/2, n/a never
 averaged)`. A change that counts empty blocks as 0.0 fails it on precision; a
 change that averages `NaN` fails it on the report.
 
-**Corroborated by the trace, classified from the fields.** #582's AC says the
-metric must be derived from production code rather than re-implemented in bench.
-There are two ways to honour that, and my first draft picked the one that cannot
-work: it claimed the classifier reads the production **exclusion** codes in
+**Corroborated by the trace; shared at the leaf, not at the top.** #582's AC says
+the metric must be derived from production code rather than re-implemented in
+bench. Two things about my first two attempts were wrong, and the second is worse
+than the first.
+
+**Corroborated by the trace; shared at the leaf, not at the top.** #582's AC says
+the metric must be derived from production code rather than re-implemented in
+bench. Two things about my first two attempts were wrong, and the second is worse
+than the first.
+
+*Attempt 1* claimed the classifier reads the production **exclusion** codes in
 `Decision.Reason`. It cannot. `Decision.Reason` describes rows a stage
 *excluded*, and contamination is measured over rows that were **admitted** — so
 every correctly filtered contaminant is invisible to the metric by construction,
@@ -1076,21 +1166,43 @@ and a row that leaks through is recorded as `Kept: true`, carrying no exclusion
 code to classify. The two populations are disjoint. A metric built that way would
 report 0% contamination on a store where every filter is broken.
 
-What actually honours the AC: the classifier is a **pure function over the
-fields the production stages read** — `assemble.Contaminating(item, req)`,
-sitting in `internal/assemble` beside the stage predicates rather than in
-`internal/bench`, and called *by* those stages. It is the same code path in the
-sense that matters — one definition, changed once, and the production stages and
-the metric cannot drift by construction rather than by discipline.
+*Attempt 2* made `assemble.Contaminating(item, req)` the drop predicate that the
+stages call. That is worse, because it makes the metric **vacuous**: if stages 2
+and 3 drop every row the classifier flags, then by construction no admitted item
+can be flagged, so contamination is 0% on a healthy store *and* on a store where
+every filter is silently broken. The metric would be a tautology wearing a
+percentage sign.
+
+The resolution is to share the **leaf predicates** and compose them separately:
+
+```go
+// Leaf predicates: each is the single definition of one filter, called by the
+// production stage that owns it AND by the metric's own composition.
+func ExpiredAt(validUntil *time.Time, now time.Time) bool
+func NotYetValidAt(validFrom *time.Time, now time.Time) bool
+func ScopeContradicts(scope, want map[string]string) bool
+func BucketUnexpected(bucket, projectID string) bool
+
+// stage 2 drops when ExpiredAt(..) || NotYetValidAt(..)
+// stage 3 drops when ScopeContradicts(..) || BucketUnexpected(..)
+// the metric flags when all four hold — its own composition, not a call
+// into a shared drop function
+```
+
+So a stage that forgets to call `NotYetValidAt` is caught by the metric, and a
+change to what "expired" means is still made in exactly one place. That is what
+honours the AC — the field-level definitions are single-sourced and cannot drift
+— while the metric stays an *independent composition*, which is the only shape in
+which it can report anything other than zero. It is also why the
+`future_scheduled` fixture row is load-bearing: with a shared drop function that
+row could never be flagged, so the test would be asserting a tautology.
+
 `Decision.Reason` is then used for what it actually supports, as
 **corroboration**: bench cross-checks that a row the classifier flags as
 contaminated was *not* excluded, which is exactly the leak case the exclusion
 codes can express. `Decision` therefore needs no change — a `Kept: true` row is
 enough to detect the leak — and the trace gains a real use rather than a
 ceremonial one.
-| **Budget adherence** | `Result.Bytes` vs. the matching `Slice.MaxBytes`; dropped IDs from the stage-8 `StageTrace.DroppedIDs` | `DroppedIDs` is what lets bench intersect the trim with `Query.Rel` and measure *relevant rows the trim discarded* — the "low-relevance memory crowding out a relevant one" regression, otherwise invisible. |
-| **Diversity** | `max_b count(Item.Bucket) / len(Items)` | One histogram over `Item.Bucket`, with `_global` as its own bucket. |
-| **Token cost** | `Σ Item.Bytes` per answered question, reported next to accuracy | Bytes, not a tokenizer: the injection budget is already in bytes and `MaxContentLen` is 8,000 bytes. A tokenizer would be a second, disagreeing notion of size. |
 
 **The design constraint this imposes on `Item`:** contamination is a property of
 an *included* row, so `Item` must carry `Scope`, `ResolvedAt`, `ValidFrom`,
