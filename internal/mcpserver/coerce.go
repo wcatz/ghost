@@ -157,3 +157,55 @@ func finiteFloat64(f float64, name, raw string) (*float64, error) {
 	}
 	return &f, nil
 }
+
+// optScope normalizes the scope argument.
+//
+// Scope is declared `any` for the same reason importance and tags are: some
+// MCP clients stringify an object when the advertised schema is a union, and
+// the value then fails validation before a handler ever sees it. Every shape
+// a client might reasonably send is accepted — a native map, a map of `any`
+// (json.Unmarshal's default), or a JSON string — and anything else is an
+// actionable error rather than a silent drop, because a scope that quietly
+// disappears would make retrieval filter on a scope nobody wrote.
+//
+// An absent or empty scope returns nil, which reads as "no scope stated" and
+// matches every request.
+func optScope(v any, name string) (map[string]string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	switch t := v.(type) {
+	case map[string]string:
+		if len(t) == 0 {
+			return nil, nil
+		}
+		return t, nil
+	case map[string]any:
+		if len(t) == 0 {
+			return nil, nil
+		}
+		out := make(map[string]string, len(t))
+		for k, raw := range t {
+			s, ok := raw.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s[%q] must be a string value, got %T", name, k, raw)
+			}
+			out[k] = s
+		}
+		return out, nil
+	case string:
+		if strings.TrimSpace(t) == "" {
+			return nil, nil
+		}
+		var m map[string]string
+		if err := json.Unmarshal([]byte(t), &m); err != nil {
+			return nil, fmt.Errorf("%s must be a JSON object of string values: %w", name, err)
+		}
+		if len(m) == 0 {
+			return nil, nil
+		}
+		return m, nil
+	default:
+		return nil, fmt.Errorf("%s must be an object of string values, got %T", name, v)
+	}
+}

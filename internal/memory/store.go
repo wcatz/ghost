@@ -51,6 +51,16 @@ type Memory struct {
 	SessionID  string   `json:"session_id,omitempty"`
 	SourceRef  string   `json:"source_ref,omitempty"`
 	Confidence *float64 `json:"confidence,omitempty"`
+
+	// Scope names where this memory applies — environment, component, and so
+	// on — as machine-readable values rather than words in the sentence.
+	//
+	// nil means "applies everywhere", which is not the same as "applies
+	// nowhere": a memory with no stated scope is the general knowledge worth
+	// keeping, and ScopeMatches treats it as eligible for every request. The
+	// column is NULL for anything written before schema v12, since inventing
+	// a scope for existing memories would claim where they apply.
+	Scope map[string]string `json:"scope,omitempty"`
 }
 
 // Project represents a registered project.
@@ -749,12 +759,12 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 	var id string
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
-		                      agent, session_id, source_ref, confidence)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      agent, session_id, source_ref, confidence, scope)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`, projectID, m.Category, m.Content, m.Source, m.Importance, string(tags),
 		nullIfEmpty(m.Agent), nullIfEmpty(m.SessionID),
-		nullIfEmpty(m.SourceRef), m.Confidence).Scan(&id)
+		nullIfEmpty(m.SourceRef), m.Confidence, scopeJSON(m.Scope)).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("create memory: %w", err)
 	}
@@ -821,12 +831,26 @@ func nullIfEmpty(s string) any {
 }
 
 // Upsert stores a memory with no provenance, exactly as before.
+// UpsertOptions carries the optional facts about one save. Provenance and
+// scope are orthogonal — where a memory came from and where it applies — so
+// they are separate fields rather than one growing parameter list, and a zero
+// UpsertOptions is exactly what plain Upsert passes.
+type UpsertOptions struct {
+	Provenance Provenance
+	Scope      map[string]string
+}
+
 func (s *Store) Upsert(ctx context.Context, projectID, category, content, source string, importance float32, tags []string) (id string, duplicateOf string, score float64, err error) {
-	return s.UpsertWithProvenance(ctx, projectID, category, content, source, importance, tags, Provenance{})
+	return s.UpsertWithOptions(ctx, projectID, category, content, source, importance, tags, UpsertOptions{})
 }
 
 // UpsertWithProvenance is Upsert plus optional write-time provenance.
 func (s *Store) UpsertWithProvenance(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, prov Provenance) (id string, duplicateOf string, score float64, err error) {
+	return s.UpsertWithOptions(ctx, projectID, category, content, source, importance, tags, UpsertOptions{Provenance: prov})
+}
+
+// UpsertWithOptions is Upsert plus provenance and/or scope.
+func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts UpsertOptions) (id string, duplicateOf string, score float64, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -972,12 +996,13 @@ func (s *Store) UpsertWithProvenance(ctx context.Context, projectID, category, c
 
 		if err = tx.QueryRowContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, importance, tags,
-			                      agent, session_id, source_ref, confidence)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			                      agent, session_id, source_ref, confidence, scope)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id
 		`, projectID, category, content, source, importance, string(tagsJSON),
-			nullIfEmpty(prov.Agent), nullIfEmpty(prov.SessionID),
-			nullIfEmpty(prov.SourceRef), prov.Confidence).Scan(&id); err != nil {
+			nullIfEmpty(opts.Provenance.Agent), nullIfEmpty(opts.Provenance.SessionID),
+			nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
+			scopeJSON(opts.Scope)).Scan(&id); err != nil {
 			return "", "", 0, fmt.Errorf("create memory: %w", err)
 		}
 
@@ -1008,12 +1033,13 @@ func (s *Store) UpsertWithProvenance(ctx context.Context, projectID, category, c
 	// No match — create new.
 	err = s.db.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
-		                      agent, session_id, source_ref, confidence)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      agent, session_id, source_ref, confidence, scope)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		RETURNING id
 	`, projectID, category, content, source, importance, string(tagsJSON),
-		nullIfEmpty(prov.Agent), nullIfEmpty(prov.SessionID),
-		nullIfEmpty(prov.SourceRef), prov.Confidence).Scan(&id)
+		nullIfEmpty(opts.Provenance.Agent), nullIfEmpty(opts.Provenance.SessionID),
+		nullIfEmpty(opts.Provenance.SourceRef), opts.Provenance.Confidence,
+		scopeJSON(opts.Scope)).Scan(&id)
 	if err != nil {
 		return "", "", 0, fmt.Errorf("create memory: %w", err)
 	}
@@ -1060,7 +1086,7 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence
+		       agent, session_id, source_ref, confidence, scope
 		FROM memories
 		WHERE (project_id = ? OR project_id = '_global')
 		  AND resolved_at IS NULL
@@ -1118,7 +1144,7 @@ func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit in
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, m.project_id, m.category, m.content, m.importance, m.access_count,
 		       m.last_accessed, m.source, m.tags, m.pinned, m.resolved_at, m.created_at, m.updated_at,
-		       m.agent, m.session_id, m.source_ref, m.confidence
+		       m.agent, m.session_id, m.source_ref, m.confidence, m.scope
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE (m.project_id = ? OR m.project_id = '_global')
@@ -1141,7 +1167,7 @@ func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Me
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, m.project_id, m.category, m.content, m.importance, m.access_count,
 		       m.last_accessed, m.source, m.tags, m.pinned, m.resolved_at, m.created_at, m.updated_at,
-		       m.agent, m.session_id, m.source_ref, m.confidence
+		       m.agent, m.session_id, m.source_ref, m.confidence, m.scope
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE memories_fts MATCH ?
@@ -1163,7 +1189,7 @@ func (s *Store) GetByCategory(ctx context.Context, projectID, category string, l
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence
+		       agent, session_id, source_ref, confidence, scope
 		FROM memories
 		WHERE (project_id = ? OR project_id = '_global') AND category = ?
 		ORDER BY importance DESC, created_at DESC
@@ -1184,7 +1210,7 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence
+		       agent, session_id, source_ref, confidence, scope
 		FROM memories
 		WHERE project_id = ?
 		ORDER BY importance DESC, created_at DESC
@@ -1236,7 +1262,7 @@ func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memo
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence
+		       agent, session_id, source_ref, confidence, scope
 		FROM memories
 		WHERE project_id = ?
 		  AND resolved_at IS NULL
@@ -1985,12 +2011,13 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 		var pinned int
 		var agent, sessionID, sourceRef sql.NullString
 		var confidence sql.NullFloat64
+		var scopeRaw sql.NullString
 
 		if err := rows.Scan(
 			&m.ID, &m.ProjectID, &m.Category, &m.Content, &m.Importance,
 			&m.AccessCount, &lastAccessed, &m.Source, &tagsJSON,
 			&pinned, &resolvedAt, &m.CreatedAt, &m.UpdatedAt,
-			&agent, &sessionID, &sourceRef, &confidence,
+			&agent, &sessionID, &sourceRef, &confidence, &scopeRaw,
 		); err != nil {
 			return nil, fmt.Errorf("scan memory: %w", err)
 		}
@@ -2020,6 +2047,7 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 		if confidence.Valid {
 			m.Confidence = &confidence.Float64
 		}
+		m.Scope = parseScope(scopeRaw)
 
 		if err := json.Unmarshal([]byte(tagsJSON), &m.Tags); err != nil {
 			m.Tags = []string{}

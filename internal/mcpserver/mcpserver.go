@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -544,6 +545,7 @@ func (s *Server) registerTools() {
 		ProjectID string `json:"project_id" jsonschema:"Project name (e.g. 'ghost', 'platform-ops', 'web-app')"`
 		Query     string `json:"query" jsonschema:"Search query — natural language or FTS5 (e.g. 'helm deploy', 'sqlite*'; trailing * is a prefix match, terms are OR'd)"`
 		Category  string `json:"category,omitempty" jsonschema:"Filter results to this category (optional)"`
+		Scope     any    `json:"scope,omitempty" jsonschema:"Only return memories that do not contradict this scope, as an object of string values — e.g. {\"environment\": \"production\"}. A memory that says nothing about a key still matches, so unscoped knowledge remains available; one that names a different value is excluded."`
 		Limit     int    `json:"limit,omitempty" jsonschema:"Max results (default 10)"`
 		Explain   bool   `json:"explain,omitempty" jsonschema:"Return a JSON scoring breakdown instead of the formatted list: per-memory FTS rank, vector rank and cosine, fused RRF score, decay factor, supersede and near-duplicate penalties, plus the reason each excluded candidate was left out. Use when a result looks wrong and you need to know which signal is responsible."`
 	}
@@ -611,25 +613,66 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("search failed: %w", err)
 		}
 
+		// Whether SearchHybrid filled the fetch window, captured BEFORE any
+		// post-filter. Every later filter narrows the same pool, so measuring
+		// "was the window full" after one of them has already run would lose
+		// the signal: a category that shrank the pool first would make a
+		// subsequent scope filter look like it never had more matches to
+		// exclude, and the caller would be told its truncated result was
+		// exhaustive.
+		fullWindow := len(memories) == searchLimit
+
 		// Post-filter by category if specified.
 		maybeIncomplete := false
 		if args.Category != "" {
-			rawCount := len(memories)
 			filtered := memories[:0]
 			for _, m := range memories {
 				if m.Category == args.Category {
 					filtered = append(filtered, m)
 				}
 			}
-			if len(filtered) > args.Limit {
-				filtered = filtered[:args.Limit]
+			memories = filtered
+			// A full window means SearchHybrid may have had more matches
+			// beyond what we fetched, so a narrowed result is not provably
+			// exhaustive.
+			maybeIncomplete = fullWindow && len(memories) < args.Limit
+		}
+
+		// Post-filter by scope. A row that names a differing scope is a
+		// different claim about where knowledge applies, not a weaker match —
+		// semantic similarity cannot reliably separate "development uses
+		// SQLite" from "production uses PostgreSQL", but a scope value can.
+		// Rows that say nothing about a requested key stay eligible: general
+		// knowledge applies everywhere, and hiding it would make missing scope
+		// a reason to drop the most reusable facts in the store.
+		scopeFilter, err := optScope(args.Scope, "scope")
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(scopeFilter) > 0 {
+			filtered := memories[:0]
+			for _, m := range memories {
+				if memory.ScopeMatches(m.Scope, scopeFilter) {
+					filtered = append(filtered, m)
+				}
 			}
 			memories = filtered
-			// rawCount == searchLimit means SearchHybrid may have had more
-			// matches beyond what we fetched — the category filter narrowed
-			// an unknown-sized pool, so under-limit results aren't provably
-			// exhaustive.
-			maybeIncomplete = rawCount == searchLimit && len(memories) < args.Limit
+			if fullWindow && len(memories) < args.Limit {
+				maybeIncomplete = true
+			}
+		}
+
+		// Apply the limit once, after every post-filter. Truncating inside
+		// each filter lets an earlier one drop rows a later filter would have
+		// kept: with category first, a limit of 2 trimmed the pool to two
+		// before scope ran, and the production row was gone before scope ever
+		// saw it — the filter that was asked for did the opposite of what it
+		// was asked.
+		if len(memories) > args.Limit {
+			memories = memories[:args.Limit]
+		}
+		if fullWindow && len(memories) < args.Limit {
+			maybeIncomplete = true
 		}
 
 		if len(memories) == 0 {
@@ -640,7 +683,23 @@ func (s *Server) registerTools() {
 
 		text := formatMemories(memories)
 		if maybeIncomplete {
-			text += "\n\n(Note: category filter may have missed further matches beyond the search window — use ghost_memories_list for exhaustive category browsing.)"
+			// Name whichever filter actually narrowed the window. Saying
+			// "category filter" when scope did the narrowing sends the reader
+			// looking for a filter that was never applied.
+			var narrowed []string
+			if args.Category != "" {
+				narrowed = append(narrowed, "category")
+			}
+			if len(scopeFilter) > 0 {
+				narrowed = append(narrowed, "scope")
+			}
+			which := "a post-filter"
+			if len(narrowed) == 1 {
+				which = "the " + narrowed[0] + " filter"
+			} else if len(narrowed) > 1 {
+				which = "the " + strings.Join(narrowed, " and ") + " filters"
+			}
+			text += "\n\n(Note: " + which + " may have missed further matches beyond the search window — use ghost_memories_list for exhaustive category browsing.)"
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: text}},
@@ -656,6 +715,7 @@ func (s *Server) registerTools() {
 		// values survive schema validation and are normalized in-handler.
 		Importance any `json:"importance,omitempty" jsonschema:"Importance score, a number 0.0-1.0 (e.g. 0.7). Default 0.7"`
 		Tags       any `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
+		Scope      any `json:"scope,omitempty" jsonschema:"Where this memory applies, as an object of string values — e.g. {\"environment\": \"production\", \"component\": \"api\"}. Omit for knowledge that applies everywhere. Retrieval can then exclude a memory scoped elsewhere instead of guessing from its wording."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -714,7 +774,11 @@ func (s *Server) registerTools() {
 		}
 		args.ProjectID = canonical
 
-		id, duplicateOf, score, err := s.store.UpsertWithProvenance(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, provenanceFor(req))
+		scope, err := optScope(args.Scope, "scope")
+		if err != nil {
+			return nil, nil, err
+		}
+		id, duplicateOf, score, err := s.store.UpsertWithOptions(ctx, args.ProjectID, args.Category, args.Content, "mcp", importance, tags, memory.UpsertOptions{Provenance: provenanceFor(req), Scope: scope})
 		if err != nil {
 			return nil, nil, fmt.Errorf("save failed: %w", err)
 		}
@@ -2110,7 +2174,7 @@ func formatMemories(memories []memory.Memory) string {
 		if m.ResolvedAt != nil {
 			resolved = " [resolved]"
 		}
-		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, quoteData(m.Content))
+		fmt.Fprintf(&sb, "- [%s] `%s` (%.1f%s%s%s%s) %s\n", m.Category, m.ID, m.Importance, pin, tags, resolved, scopeLabel(m.Scope), quoteData(m.Content))
 	}
 	return sb.String()
 }
@@ -2118,6 +2182,35 @@ func formatMemories(memories []memory.Memory) string {
 // quoteData wraps untrusted stored text in «...» data delimiters, first
 // rewriting any literal « or » inside it so embedded delimiters can't
 // terminate the data block early and smuggle text back out as instructions.
+// scopeLabel renders a memory's scope for the listing, or "" when unscoped.
+//
+// Keys are sorted: map iteration order is random in Go, so an unsorted
+// rendering would show the same scope in a different order on each read and
+// look like the scope itself was changing.
+func scopeLabel(scope map[string]string) string {
+	if len(scope) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(scope))
+	for k := range scope {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	b.WriteString(" scope{")
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(k)
+		b.WriteString("=")
+		b.WriteString(scope[k])
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
 func quoteData(s string) string {
 	return "«" + strings.NewReplacer("«", "<<", "»", ">>").Replace(s) + "»"
 }
