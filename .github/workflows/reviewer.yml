@@ -541,7 +541,7 @@ jobs:
               echo "::warning::review budget exhausted before ${m}; no model slot remains"
               break
             fi
-            attempt_seconds=600
+            attempt_seconds=780
             if [ "$remaining" -lt "$attempt_seconds" ]; then
               attempt_seconds=$remaining
             fi
