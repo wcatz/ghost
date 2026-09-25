@@ -103,6 +103,7 @@ type Request struct {
     Condition Condition
     Params    *memory.SearchParams // unresolved caller params; nil uses defaults
     Now       time.Time            // required and used end to end
+    AbstainCosine float32          // caller-resolved cfg.Context.AbstainCosine; 0 disables arm B
     Explain   bool
 }
 
@@ -112,7 +113,7 @@ type Result struct {
     Reason  string
     Notes   []string
     Trace   *Trace
-    Bytes   int
+    Bytes   int // complete rendered response, including framing and outcome
 }
 ```
 
@@ -121,7 +122,10 @@ one limit across project and `_global`, while injection has independent
 project and global caps. A zero budget is rejected rather than treated as an
 implicit unbounded request. Stage 8 applies slice caps first and the total
 second. `MaxItems: 0` is unbounded only within the scope named by the field;
-callers set every total and slice budget explicitly.
+callers set every total and slice budget explicitly. `Result.Bytes` counts the
+complete response, including framing, outcome, and notes; `Item.Bytes` counts
+only content. Stage 8 reserves the rendered-line overhead before selecting items
+and keeps the complete response within the total budget.
 
 `Item` is the shared output type for rendering, explanation, and bench metrics.
 It carries the fields needed to reproduce both existing renderers and to
@@ -141,6 +145,7 @@ type Item struct {
     ResolvedAt            *time.Time
     ValidFrom, ValidUntil *time.Time
     VerifiedAt            *time.Time
+    ValidityState         string // valid, future, expired, unverified, or unset
     Confidence            *float64
     Agent                 string
     Score                 float64
@@ -175,7 +180,7 @@ clock, and non-zero budget before calling `Candidates`.
 | `SourceProjectCtx` | required non-empty | empty | `ProjectScoped` |
 | `SourceSessionStart` | non-empty or `""` | empty | `ProjectScoped`, or `GlobalOnly` when empty |
 | `SourceAllProjects` | ignored, may be empty | optional | `AllProjects` |
-| `SourceBench` | non-empty, or empty for an all-projects condition | optional | follows the condition |
+| `SourceBench` | non-empty, or empty for an all-projects condition | optional | `AllProjects` when empty; otherwise `ProjectScoped` |
 
 A projectless session start is a supported rendered state: global memories are
 loaded on a separate path and are still shown when no project matches. The
@@ -264,8 +269,8 @@ type LegStatus struct {
     Err                  string
     Truncated            bool
     Applicable           bool
-    Indexed, Eligible    int
-    DimMismatch          int
+    Expected, Indexed, Eligible, DimMismatch, Unembedded int
+    CoverageComplete     bool
 }
 type EdgeStatus struct { Status, Err string } // ok, unavailable, or err
 ```
@@ -275,7 +280,8 @@ semantics:
 
 - `SourceSessionStart` with an empty project maps to `GlobalOnly`;
   `SourceSearch` with an unresolved empty ID also maps to `GlobalOnly`;
-  `SourceAllProjects` maps to `AllProjects`; other sources map to `ProjectScoped`.
+  `SourceAllProjects` and `SourceBench` with an empty project map to
+  `AllProjects`; other sources map to `ProjectScoped`.
 - `Now` is passed unchanged. The candidate path never calls the wall clock.
 - `Condition` selects the legs. `CondVectorOnly` runs the vector leg alone.
 - `Fetch.Limit` is the requested window. `Candidates` returns a wider,
@@ -331,12 +337,12 @@ through the transaction; the deferred-read guarantee is limited to file
 stores. Those tests and bench runs are short-lived and have no concurrent
 writer.
 
-Edge lookup failure is non-fatal and explicit. `EdgesStatus == "ok"` means
-stages 5 and 6 ran; `"err"` leaves the edges empty, marks both stages skipped
-with `edges_unavailable`, and adds the error to notes; `"unavailable"` means a
-successful query returned no edges. `Candidates` returns an error only when
-all retrieval paths fail, never an empty set that could be mistaken for a
-successful negative result.
+Edge lookup failure is non-fatal and explicit. `EdgesStatus.Status == "ok"`
+means stages 5 and 6 ran; `"err"` leaves the edges empty, marks both stages
+skipped with `edges_unavailable`, and adds the error to notes; `"unavailable"`
+means a successful query returned no edges. A validation or transaction
+failure, including failure of every applicable retrieval leg, is returned as
+an error and never becomes a successful empty `Result`.
 
 ## Decision 2 — The nine stages
 
@@ -378,8 +384,8 @@ and the facts needed by the trace. The configured vector floor is applied by
 `DecayRankingSQL` path receives a bound `Now` parameter, so ranking and trace
 timestamps cannot use different instants.
 
-Passive mode is not `GetTopMemories`. The hook has three policies that the
-candidate path must reproduce:
+Passive mode is not `GetTopMemories`. It has two bucket policies and three
+policy dimensions that the candidate path must reproduce:
 
 | Bucket | Fetch and order | Selection and cap | Near-duplicate policy |
 |---|---|---|---|
@@ -392,7 +398,10 @@ is populated per bucket from `linking.demotion_threshold` and the global
 `0.85` policy. The global order and threshold are separate policies, not
 accidental variations of project ranking. The passive paths are therefore
 specification of existing behavior, not a redesign. PR 2 verifies the
-rendered block before changing rendering.
+rendered block before changing rendering. For `SourceSessionStart`,
+`Request.Scope` comes from `injection.session_scope`; when that key is unset,
+no scope predicate is applied and selection is unchanged. Search scope remains
+caller-supplied.
 
 ### Stages 2–4: validity and provenance
 
@@ -418,7 +427,8 @@ the contradiction relation. Removing the weaker endpoint would reverse a
 tested product contract. The trace records co-occurring contradiction pairs
 without changing membership or order. PR 6 therefore adds no contradiction
 fixture; any removing behavior requires a separate contract change and
-migration.
+migration. This leaves #581's contradiction-separation and storage-fold
+acceptance criteria outside v1; those require a separate contract change.
 
 Near-duplicate handling is a reorder, not a second storage fold. The policy is
 scoped by source before bucket:
@@ -441,10 +451,11 @@ enabled, remains off by default, and receives its own bench comparison.
 
 `Slice.ClampBytes` is a presentation clamp that preserves UTF-8 boundaries.
 `Slice.MaxBytes` and `MaxItems` are hard membership trims. Stage 8 applies
-slice caps and then the total. Stage 9 shares the item line's scope label and
-quote escaping, while preserving the distinct search and session-start
-framing and field order. Session-start output may gain a scope label for a row
-that already carries scope; that visible change is intentional.
+slice caps and then the total. Stage 9 shares the item line's scope label,
+validity state, confidence, agent when present, and quote escaping, while
+preserving the distinct search and session-start framing and field order.
+Session-start output may gain a scope label for a row that already carries
+scope; that visible change is intentional.
 
 ## Decision 3 — Abstention
 
@@ -476,7 +487,6 @@ The empty reason set is closed. The first matching stage supplies the reason;
 | Reason | Stage | Meaning |
 |---|---:|---|
 | `no_candidates` | 1 | query retrieval returned no candidates over applicable, complete coverage |
-| `retrieval_failed` | 1 | all usable paths failed and no rows survived |
 | `vector_backend_unavailable` | 1 | an applicable vector leg could not run |
 | `no_memories` | 1 | passive retrieval returned no rows |
 | `all_invalid` | 2 | every row was expired or not yet valid |
@@ -488,20 +498,22 @@ The empty reason set is closed. The first matching stage supplies the reason;
 
 There is no `all_out_of_project` reason: project membership is enforced in
 SQL. There is no `all_resolved` reason: query mode deliberately admits resolved
-rows, while passive fetch excludes them in SQL. Supersede and dedup do not
-empty a set except through the named global drop policy.
+rows, while passive fetch excludes them in SQL. A total leg failure is an error,
+not an empty outcome. Supersede and dedup do not empty a set except through the
+named global drop policy.
 
 ### Floor arms
 
-Arm A is the keyword arm and is enabled by default. A row satisfies it when
-`0 <= FTSRank && FTSRank <= 3`; `-1` means the keyword leg did not retrieve the
-row. The floor is based on BM25 rank, not RRF score, because rank remains
-meaningful when retrieval depth changes.
+Arm A is the keyword arm and is enabled by default. A row satisfies it when its
+FTS rank is between 0 and 3 inclusive; `-1` means the keyword leg did not
+retrieve the row. The floor is based on BM25 rank, not RRF score, because rank
+remains meaningful when retrieval depth changes.
 
-Arm B is the vector arm and is disabled by default:
-`VectorScore >= cfg.Context.AbstainCosine`, with a default threshold of `0.0`.
-PR 4 introduces the key; PR 7 supplies a measured threshold when comparable
-LongMemEval data is available.
+Arm B is the vector arm and is disabled by default. A row satisfies it when
+`VectorScore >= Request.AbstainCosine`; the caller passes the resolved
+`cfg.Context.AbstainCosine` value, whose default is `0.0`. PR 4 introduces the
+key; PR 7 supplies a measured threshold when comparable LongMemEval data is
+available.
 
 The vector-leg attempt, not its result count, determines whether Arm A is a
 floor:
@@ -527,7 +539,11 @@ fault-injected FTS error with vector survivors yielding `answerable` with a
 `retrieval_partial` note and no `below_floor` reason.
 
 `weak` annotates the returned items and abstention line. It withholds no row,
-which keeps the outcome decision orthogonal to ranking and bench results.
+which keeps the outcome decision orthogonal to ranking and bench results. The
+response-budget test covers the complete response, including the human and
+machine lines, at the limit, one byte over, and well under it. The abstention
+subset score is recorded before and after any Arm B threshold change with the
+exact benchmark command and base commit.
 
 ### Output and absence
 
@@ -550,28 +566,30 @@ blocks remain free of a relevance banner. Empty copy is reason-specific:
 | `no_memories` | describes the empty passive window, not store-wide absence |
 | `all_invalid` | says the found rows were withheld as out of date |
 | `all_dedup_dropped`, `all_diversity_capped`, `all_over_budget` | identifies the limit and suggests raising it |
-| `retrieval_failed` | explicitly says search was incomplete |
 | `vector_backend_unavailable` | says keyword-only retrieval may be less complete |
 | category/scope reasons | names the filter that excluded the rows |
 
-A bounded search always receives the single note:
+An empty result that was windowed receives the single note:
 
 ```text
 Ghost memory: no match within the searched window — widen the limit or drop the
 scope filter. This is not evidence that nothing exists.
 ```
 
-The note suppresses an absence claim. `LegStatus` makes absence possible only
-when every applicable leg is available, error-free, and untruncated, with
-index coverage and eligible counts sufficient for the selected mode. A vector
-leg that skips dimension-mismatched rows or cannot see unembedded rows is not
+A non-empty answerable or weak result keeps its existing shown/not-shown count
+instead of this absence sentence. The note suppresses an absence claim.
+`LegStatus` makes absence possible only when every applicable leg is available,
+error-free, and untruncated, with `CoverageComplete` true. `Expected`,
+`Indexed`, `Unembedded`, and `DimMismatch` account for the rows a leg could
+see; a vector leg that skips dimension-mismatched or unembedded rows is not
 complete coverage. A non-applicable leg is not a failure. Partial failure is
 reported in notes and the machine payload rather than converted into a
 relevance verdict.
 
-The existing `maybeIncomplete` caveat moves into this single note path. A
-bounded result, a failed leg, and an unscoped store must not all render as
-“nothing exists.”
+The existing `maybeIncomplete` caveat is rendered from this same result path:
+empty bounded results use the absence-safe note, while non-empty results keep
+their shown/not-shown count. A bounded result, a failed leg, and an unscoped
+store must not all render as “nothing exists.”
 
 ## Decision 4 — Explainability: the trace is the explain payload
 
@@ -582,11 +600,22 @@ ranking facts locally. The assembler removes that second implementation:
 
 ```go
 type Trace struct {
-    Mode      string
-    Signals   map[string]Signals
-    Stages    []StageTrace
-    Decisions []Decision
-    Floors    Floors
+    ProjectID, Query string
+    Limit            int
+    VectorAvailable  bool
+    Notes            []string
+    Mode             string
+    Legs             map[string]memory.LegStatus
+    Signals          map[string]Signals
+    Stages           []StageTrace
+    Decisions        []Decision
+    Floors           Floors
+}
+
+type Floors struct {
+    FTSRankMax     int
+    VectorCosine   float32
+    VectorArmOn    bool
 }
 
 type Signals struct {
@@ -595,6 +624,15 @@ type Signals struct {
     Base, DecayFactor   float64
     AgeDays             float64
     CreatedAt           time.Time
+    ProjectMatch        bool
+    ScopeMatched        bool
+    ScopeKeysCompared   []string
+    ValidityState       string
+    ValidityPenalty     float64
+    Confidence          *float64
+    ConfidenceContribution float64
+    ProvenanceWeight    string
+    ProvenanceContribution float64
 }
 
 type StageTrace struct {
@@ -615,9 +653,13 @@ type Decision struct {
 The trace is always recorded. Only the explain projection is gated by
 `Request.Explain`, because recording is bounded and a flag-dependent second
 ranking path would reintroduce drift. `Signals` replaces re-derived RRF, decay,
-age, and rank values. `StageTrace` supplies per-stage counts and dropped IDs;
+age, and rank values, and carries the scope, validity, confidence, and
+provenance facts. `StageTrace` supplies per-stage counts and dropped IDs;
 `Decision` supplies per-row attribution; `Floors` records the exact threshold
-values.
+values. The `SearchExplain` adapter carries the existing project, query, limit,
+vector-availability, and note metadata from `Trace` and adds the scope keys,
+validity state and penalty, confidence and provenance contributions, and the
+`AgainstID` for conflict or diversity effects.
 
 The projection has three invariants:
 
@@ -628,9 +670,10 @@ The projection has three invariants:
 
 The payload is capped at 32KB. Complete rows are removed from the lowest-ranked
 end and the payload records `truncated.dropped_rows` and
-`truncated.reason=payload_budget`; rows are never cut mid-item. The migration
-adapter preserves the existing explain fields and reads supersede and
-near-duplicate penalties from the conflict and dedup decisions.
+`truncated.reason=payload_budget`; rows are never cut mid-item. A
+`BenchmarkAssemble` guard keeps always-on trace overhead below 40µs on the
+built-in fixture; if that limit is exceeded, non-scoring fields are reduced
+before recording becomes conditional.
 
 `ghost context --explain` does not exist in the current command parser. PR 5
 adds the flag and the trace-to-payload projection. Until then, `Explain: true`
@@ -669,7 +712,7 @@ The six context metrics are:
 
 | Metric | Computation | Contract |
 |---|---|---|
-| Context precision | `sum(relevance(Item.ID)) / len(Items)` | scored over admitted items only |
+| Context precision | `count(Item.ID where relevance(Item.ID) > 0) / len(Items)` | binary relevance, scored over admitted items only |
 | Contamination rate | any contamination predicate over admitted items | disjunction of the five arms below |
 | Budget adherence | `Result.Bytes` and stage-8 `DroppedIDs` against the matching slice | exposes relevant rows discarded by a trim |
 | Diversity | `max_b count(Item.Bucket) / len(Items)` | `_global` is its own bucket |
@@ -694,8 +737,9 @@ BucketUnexpected(Item.Bucket, req.ProjectID)
 `_global` is never contamination because both legs and the passive global
 path deliberately include it. Project membership remains in SQL, so
 `BucketUnexpected` is a metric predicate only and is not a stage-3 drop
-condition. The production stages and the metric share leaf definitions, but
-the metric composes them independently:
+condition. In `AllProjects` mode it is false by definition because no project
+bucket is unexpected. The production stages and the metric share leaf
+definitions, but the metric composes them independently:
 
 ```go
 func ExpiredAt(*time.Time, time.Time) bool
@@ -717,6 +761,11 @@ unflagged. The open-window row prevents an over-broad “any validity column”
 predicate, while the all-null row prevents an always-flag predicate. Removing
 the not-yet-valid arm must fail the fixture.
 
+The context report records the exact `origin/main` SHA and the
+`go run ./cmd/ghost bench` command for both baseline and branch. Context
+metrics are reported rather than gated until two independent changes have been
+measured.
+
 ## Decision 6 — Migration
 
 Seven independently revertible PRs implement the contract. The current
@@ -727,15 +776,27 @@ R@5 within `0.005`, with every difference explained. PR 1 uses that same numeric
 gate because the widened candidate pool can move IDs and order. PR 3 uses new
 validity fixtures because the existing corpus does not exercise stage 2.
 
+PR 2 adds the `injection.session_scope` configuration key and its documentation;
+an unset key means rendering without scope filtering. PR 3 defines the writer
+contract for `valid_from`, `valid_until`, `verified_at`, `confidence`, and
+`source_ref`; `session_id` comes from the active session and `agent` from the
+existing provenance path. The shared renderer exposes those fields, while
+stage 4's multiplier remains `1.0` until measured.
+
 | # | Branch / title | Closes | Bench expectation |
 |---:|---|---|---|
 | 1 | `feat(assemble): internal/assemble seam; scope and category filter before window closure` | #573 | Run origin/main and branch; stay within 0.005 on NDCG@10 and R@5, explaining any diff. Cover the configured vector floor, bound `Now`, widened rows, and existing negative retrieval. |
-| 2 | `feat(mcpinit): render and apply scope on the session-start surface` | #577 | Rendered block comparison; selection and 15/8 caps unchanged, with scope labels appearing on scoped rows. |
-| 3 | `feat(memory): write validity and provenance from the tools` | #575 | New validity fixtures; run the same delta gate because writers activate stage 2 and change membership. |
-| 4 | `feat(assemble): abstention is an outcome, not an empty list` | #580 | Weak results annotate rather than withhold; run the delta gate. Arm B is initially disabled. |
+| 2 | `feat(mcpinit): render and apply scope on the session-start surface` | #577 | Add and document `injection.session_scope`; compare the rendered block, with selection and 15/8 caps unchanged when the key is unset. |
+| 3 | `feat(memory): write validity and provenance from the tools` | #575 | Add the validity, confidence, and source-reference writer fields; run the delta gate on new validity fixtures. |
+| 4 | `feat(assemble): abstention is an outcome, not an empty list` | #580 | Record the abstention-subset score before and after threshold changes; test the complete response at the byte limit. Arm B starts disabled. |
 | 5 | `feat(memory): explain reports the assembler's decisions and `ghost context --explain` exists` | #583 | No scored-result change; mutation-test the no-recomputation invariant and add the CLI flag. |
-| 6 | `feat(assemble): conflict, dedup, diversity and budget stages` | #581 | Run the delta gate; verify the global drop policy and rendered session-start block. |
-| 7 | `feat(bench): context-quality metrics` | #582 | Add context mode beside existing direct-call ablations; do not redefine their baseline. |
+| 6 | `feat(assemble): conflict, dedup, diversity and budget stages` | Related #581 | Run the delta gate; verify the global drop policy, shared field set, and rendered session-start block. |
+| 7 | `feat(bench): context-quality metrics` | #582 | Add context mode beside direct-call ablations; record the exact baseline SHA and command, and report metrics without gating them. |
+
+PR 6 deliberately does not claim to close #581's contradiction-separation or
+storage-fold criteria; the v1 conflict and dedup contracts are trace-and-order
+operations. A follow-up contract change must address those criteria before the
+issue can be closed.
 
 The order is deliberate: PR 1 establishes the seam and the transaction/read
 contract; PR 3 ships validity writers with the stage that consumes them; PR 4
@@ -753,9 +814,9 @@ ranking logic through callers.
 
 ### Risks
 
-- **Trace cost:** always-on recording is bounded; if the benchmark exceeds the
-  agreed cost, reduce non-scoring fields before considering conditional
-  recording.
+- **Trace cost:** `BenchmarkAssemble` keeps always-on recording below 40µs on
+  the built-in fixture; reduce non-scoring fields before making recording
+  conditional.
 - **Snapshot contention:** the read transaction must stay short and read-only.
   File stores use the injected read handle; in-memory bench stores accept the
   `BEGIN IMMEDIATE` limitation because they have no concurrent writer.
@@ -782,7 +843,8 @@ ranking logic through callers.
 - No LLM reranking, summarization, or model call in the assembler.
 - No tokenizer-based budget; bytes remain the unit.
 - No retention tiers (#587), export/import (#586), or provenance history (#578).
-- No new `confidence=` product-tool parameter in these seven PRs.
+- No automatic confidence multiplier; the writer contract does not enable
+  stage 4 until a measured change justifies one.
 - No big-bang rewrite and no change to the session-leak or linker-scope issues.
 - No automatic unification of existing bench ablations; context metrics are an
   additional condition until a separately gated change proves equivalence.
