@@ -279,6 +279,317 @@ func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoR
 	return s.ensureProjectLocked(ctx, id, path, name, repoRemote)
 }
 
+// ResolveOrCreateRepoProject resolves a repository-aware save to one project
+// and creates that project when no identity match exists. The complete
+// resolve-or-create sequence runs in one immediate SQLite transaction, so
+// separate Ghost processes cannot both create the first project for a remote.
+//
+// projectRef is the id or path ordinary resolution produced; repoName is the
+// final component of the normalized remote, never a directory basename. An
+// explicit project already bound to another repository is an error rather than
+// a reason to route the save to that remote's existing owner.
+func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, error) {
+	repoRemote = NormalizeRepoRemote(repoRemote)
+	if repoRemote == "" {
+		return "", fmt.Errorf("resolve or create repository project: empty remote")
+	}
+	if id == "" {
+		return "", fmt.Errorf("resolve or create repository project: empty project id")
+	}
+	if id == "_global" {
+		return "", fmt.Errorf("refusing to assign a repository to the _global project")
+	}
+	if path == "" {
+		path = id
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// OpenDB configures database/sql transactions as BEGIN IMMEDIATE. Holding
+	// SQLite's write lock before the first lookup serializes repository-project
+	// creation across Store handles and independent processes.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin repository project tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	canonical, err := s.resolveRepoProjectTx(ctx, tx, projectRef, repoName, repoRemote)
+	if err != nil {
+		return "", err
+	}
+	if canonical == "" {
+		canonical, err = s.createRepoProjectTx(ctx, tx, id, path, name, repoRemote)
+		if err != nil {
+			return "", err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit repository project tx: %w", err)
+	}
+	return canonical, nil
+}
+
+func (s *Store) resolveRepoProjectTx(ctx context.Context, tx *sql.Tx, projectRef, repoName, repoRemote string) (string, error) {
+	if id, found, err := s.resolveExplicitProjectRepoTx(ctx, tx, projectRef, repoRemote); found || err != nil {
+		return id, err
+	}
+	if id, err := s.findProjectByRepoRemoteTx(ctx, tx, repoRemote, ""); err != nil {
+		return "", err
+	} else if id != "" {
+		return id, nil
+	}
+	if repoName == "" {
+		return "", nil
+	}
+	return s.bindUniqueProjectNameRepoTx(ctx, tx, repoName, repoRemote)
+}
+
+func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, projectRef, repoRemote string) (id string, found bool, err error) {
+	if projectRef == "" {
+		return "", false, nil
+	}
+
+	var count int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM projects
+		WHERE (id = ? OR path = ?) AND id != '_global'
+	`, projectRef, projectRef).Scan(&count); err != nil {
+		return "", false, fmt.Errorf("count explicit projects for repository: %w", err)
+	}
+	if count > 1 {
+		return "", false, fmt.Errorf("project reference %q matches multiple projects", projectRef)
+	}
+	var existingRemote string
+	if count == 0 {
+		norm := strings.ReplaceAll(projectRef, `\`, "/")
+		prefixErr := tx.QueryRowContext(ctx, `
+			SELECT id, COALESCE(repo_remote, '')
+			FROM projects
+			WHERE (
+				path = ?
+				OR REPLACE(path, '\', '/') = ?
+				OR substr(?, 1, LENGTH(REPLACE(path, '\', '/')) + 1) = REPLACE(path, '\', '/') || '/'
+			)
+			  AND LENGTH(path) > 10
+			  AND id != '_global'
+			ORDER BY LENGTH(path) DESC
+			LIMIT 1
+		`, projectRef, norm, norm).Scan(&id, &existingRemote)
+		if prefixErr == sql.ErrNoRows {
+			return "", false, nil
+		}
+		if prefixErr != nil {
+			return "", false, fmt.Errorf("find project by path prefix for repository: %w", prefixErr)
+		}
+	} else {
+		if err := tx.QueryRowContext(ctx, `
+			SELECT id, COALESCE(repo_remote, '')
+			FROM projects
+			WHERE (id = ? OR path = ?) AND id != '_global'
+		`, projectRef, projectRef).Scan(&id, &existingRemote); err != nil {
+			return "", true, fmt.Errorf("read explicit project for repository: %w", err)
+		}
+	}
+	if existingRemote == repoRemote {
+		return id, true, nil
+	}
+	if existingRemote != "" {
+		return "", true, fmt.Errorf("project %q belongs to a different repository", id)
+	}
+
+	ownerID, err := s.findProjectByRepoRemoteTx(ctx, tx, repoRemote, id)
+	if err != nil {
+		return "", true, err
+	}
+	if ownerID != "" {
+		if err := s.mergeProjectTx(ctx, tx, id, ownerID); err != nil {
+			return "", true, fmt.Errorf("merge explicit project into repository owner: %w", err)
+		}
+		return ownerID, true, nil
+	}
+	if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, id, repoRemote); err != nil {
+		return "", true, fmt.Errorf("bind repository to explicit project: %w", err)
+	}
+	return id, true, nil
+}
+
+func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, name, repoRemote string) (string, error) {
+	var count int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM projects
+		WHERE name = ? AND id != '_global'
+	`, name).Scan(&count); err != nil {
+		return "", fmt.Errorf("count projects by name for repository: %w", err)
+	}
+	if count != 1 {
+		return "", nil
+	}
+
+	var id, existingRemote string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT id, COALESCE(repo_remote, '')
+		FROM projects
+		WHERE name = ? AND id != '_global'
+	`, name).Scan(&id, &existingRemote); err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("read project by name for repository: %w", err)
+	}
+	if existingRemote != "" {
+		if existingRemote == repoRemote {
+			return id, nil
+		}
+		return "", nil
+	}
+	if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, id, repoRemote); err != nil {
+		return "", fmt.Errorf("bind repository to named project: %w", err)
+	}
+	return id, nil
+}
+
+func (s *Store) findProjectByRepoRemoteTx(ctx context.Context, tx *sql.Tx, repoRemote, excludeID string) (string, error) {
+	var id string
+	err := tx.QueryRowContext(ctx, `
+		SELECT id FROM projects
+		WHERE repo_remote = ? AND id NOT IN ('_global', ?)
+		LIMIT 1
+	`, repoRemote, excludeID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("find project by repository: %w", err)
+	}
+	return id, nil
+}
+
+func (s *Store) bindRepoRemoteIfUnsetTx(ctx context.Context, tx *sql.Tx, id, repoRemote string) error {
+	result, err := tx.ExecContext(ctx, `
+		UPDATE projects
+		SET repo_remote = ?, updated_at = datetime('now')
+		WHERE id = ? AND COALESCE(repo_remote, '') = ''
+	`, repoRemote, id)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return fmt.Errorf("project %q repository changed concurrently", id)
+	}
+	return nil
+}
+
+func (s *Store) createRepoProjectTx(ctx context.Context, tx *sql.Tx, id, path, name, repoRemote string) (string, error) {
+	var existingRemote string
+	existingErr := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, id).Scan(&existingRemote)
+	if existingErr != nil && existingErr != sql.ErrNoRows {
+		return "", fmt.Errorf("query fallback project for repository: %w", existingErr)
+	}
+	if existingErr == nil {
+		if existingRemote != "" && existingRemote != repoRemote {
+			return "", fmt.Errorf("project %q belongs to a different repository", id)
+		}
+		if existingRemote == "" {
+			if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, id, repoRemote); err != nil {
+				return "", fmt.Errorf("bind repository to fallback project: %w", err)
+			}
+		}
+		return id, nil
+	}
+
+	if path != id {
+		var ownerID, ownerRemote string
+		err := tx.QueryRowContext(ctx, `
+			SELECT id, COALESCE(repo_remote, '')
+			FROM projects
+			WHERE path = ? AND id != ?
+			LIMIT 1
+		`, path, id).Scan(&ownerID, &ownerRemote)
+		if err != nil && err != sql.ErrNoRows {
+			return "", fmt.Errorf("query path owner for repository: %w", err)
+		}
+		if err == nil {
+			if ownerID == "_global" {
+				return "", fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", id, ownerID)
+			}
+			if ownerRemote != "" && ownerRemote != repoRemote {
+				return "", fmt.Errorf("project %q belongs to a different repository", ownerID)
+			}
+			if ownerRemote == "" {
+				if err := s.bindRepoRemoteIfUnsetTx(ctx, tx, ownerID, repoRemote); err != nil {
+					return "", fmt.Errorf("bind repository to path owner: %w", err)
+				}
+			}
+			if err := s.mergeProjectTx(ctx, tx, id, ownerID); err != nil {
+				return "", fmt.Errorf("merge project into path owner: %w", err)
+			}
+			return ownerID, nil
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO projects (id, path, name, repo_remote) VALUES (?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			path = CASE WHEN excluded.path = excluded.id THEN projects.path ELSE excluded.path END,
+			repo_remote = CASE
+				WHEN excluded.repo_remote = '' THEN projects.repo_remote
+				WHEN projects.repo_remote IS NULL OR projects.repo_remote = '' THEN excluded.repo_remote
+				ELSE projects.repo_remote
+			END,
+			updated_at = datetime('now')
+	`, id, path, name, repoRemote); err != nil {
+		return "", fmt.Errorf("create repository project: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, id); err != nil {
+		return "", fmt.Errorf("create repository project state: %w", err)
+	}
+	return id, nil
+}
+
+func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemote string) error {
+	if repoRemote == "" {
+		return nil
+	}
+	var existingRemote string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, existingID).Scan(&existingRemote); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return fmt.Errorf("read merge target repository: %w", err)
+	}
+	if existingRemote != "" {
+		if existingRemote != repoRemote {
+			return fmt.Errorf("project %q belongs to a different repository", existingID)
+		}
+		return nil
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE projects
+		SET repo_remote = ?, updated_at = datetime('now')
+		WHERE id = ? AND COALESCE(repo_remote, '') = ''
+	`, repoRemote, existingID)
+	if err != nil {
+		return fmt.Errorf("bind repository to merge target: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check merge target repository: %w", err)
+	}
+	if updated != 1 {
+		return fmt.Errorf("project %q repository changed concurrently", existingID)
+	}
+	return nil
+}
+
 func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRemote string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -290,24 +601,56 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 	if path == "" {
 		path = id
 	}
+	repoRemote = NormalizeRepoRemote(repoRemote)
+	if id == "_global" && repoRemote != "" {
+		return fmt.Errorf("refusing to assign a repository to the _global project")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin ensure project tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var mergedOld, mergedNew string
+	commit := func() error {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit ensure project tx: %w", err)
+		}
+		if mergedOld != "" {
+			s.logger.Info("merged duplicate project", "old_id", mergedOld, "new_id", mergedNew)
+		}
+		return nil
+	}
 
 	// Repository identity: one remote means one project, whatever the local
 	// checkout path happens to be. _global is excluded on both sides for the
 	// same reason MergeProject refuses it — merging it would move or dump the
 	// bucket that global injection reads from.
-	repoRemote = NormalizeRepoRemote(repoRemote)
 	if repoRemote != "" && id != "_global" {
+		var incomingRemote string
+		incomingErr := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, id).Scan(&incomingRemote)
+		if incomingErr != nil && incomingErr != sql.ErrNoRows {
+			return fmt.Errorf("check project repository: %w", incomingErr)
+		}
+		if incomingRemote != "" && incomingRemote != repoRemote {
+			return fmt.Errorf("project %q belongs to a different repository", id)
+		}
+
 		var existingID string
-		scanErr := s.db.QueryRowContext(ctx,
-			`SELECT id FROM projects WHERE repo_remote = ? AND id != ? LIMIT 1`,
+		scanErr := tx.QueryRowContext(ctx,
+			`SELECT id FROM projects WHERE repo_remote = ? AND id NOT IN ('_global', ?) LIMIT 1`,
 			repoRemote, id).Scan(&existingID)
-		if scanErr == nil && existingID != "" && existingID != "_global" {
-			// mergeProjectLocked does not lock internally (only the public
-			// MergeProject wrapper does), and we already hold s.mu.
-			if err := s.mergeProjectLocked(ctx, id, existingID); err != nil {
+		if scanErr != nil && scanErr != sql.ErrNoRows {
+			return fmt.Errorf("find repository project: %w", scanErr)
+		}
+		if existingID != "" {
+			if err := s.mergeProjectWithRepoTx(ctx, tx, id, existingID, repoRemote); err != nil {
 				return fmt.Errorf("auto-merge repository duplicate: %w", err)
 			}
-			return nil
+			mergedOld, mergedNew = id, existingID
+			return commit()
 		}
 	}
 
@@ -317,57 +660,68 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 	// passing raw filesystem paths as project IDs.
 	if filepath.IsAbs(path) && path != id {
 		var existingID string
-		scanErr := s.db.QueryRowContext(ctx,
+		scanErr := tx.QueryRowContext(ctx,
 			`SELECT id FROM projects WHERE path = ? AND id != ? LIMIT 1`,
 			path, id).Scan(&existingID)
-		if scanErr == nil && existingID != "" {
-			// Merge any child records from the incoming ID into the canonical
-			// project. mergeProjectLocked does not lock internally (only the
-			// public MergeProject wrapper does), so it's safe to call directly
-			// here while we already hold s.mu.
-			if err := s.mergeProjectLocked(ctx, id, existingID); err != nil {
+		if scanErr != nil && scanErr != sql.ErrNoRows {
+			return fmt.Errorf("find path project: %w", scanErr)
+		}
+		if existingID != "" {
+			if err := s.mergeProjectWithRepoTx(ctx, tx, id, existingID, repoRemote); err != nil {
 				return fmt.Errorf("auto-merge path duplicate: %w", err)
 			}
-			return nil
+			mergedOld, mergedNew = id, existingID
+			return commit()
 		}
 	}
 
-	_, err := s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO projects (id, path, name, repo_remote) VALUES (?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			path = CASE WHEN excluded.path = excluded.id THEN projects.path ELSE excluded.path END,
-			repo_remote = CASE WHEN excluded.repo_remote = '' THEN projects.repo_remote ELSE excluded.repo_remote END,
+			repo_remote = CASE
+				WHEN excluded.repo_remote = '' THEN projects.repo_remote
+				WHEN projects.repo_remote IS NULL OR projects.repo_remote = '' THEN excluded.repo_remote
+				ELSE projects.repo_remote
+			END,
 			updated_at = datetime('now')
-	`, id, path, name, repoRemote)
-	if err != nil {
+	`, id, path, name, repoRemote); err != nil {
 		return fmt.Errorf("ensure project: %w", err)
 	}
-
-	// Also ensure ghost_state exists.
-	_, err = s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)
-	`, id)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, id); err != nil {
 		return err
 	}
 
-	// Auto-merge: if this project has a real filesystem path, look for
-	// a same-name project created by MCP with a non-absolute path.
+	// Auto-merge: if this project has a real filesystem path, merge a
+	// same-name project created by MCP only when that name has one candidate.
+	// Two candidates are ambiguous, not an arbitrary LIMIT 1 choice.
 	if path != id && filepath.IsAbs(path) {
-		var dupID string
-		scanErr := s.db.QueryRowContext(ctx,
-			`SELECT id FROM projects WHERE name = ? AND id != ? AND path NOT LIKE '/%' LIMIT 1`,
-			name, id).Scan(&dupID)
-		if scanErr == nil && dupID != "" {
-			// Call mergeProjectLocked directly to avoid deadlock (we already
-			// hold s.mu; only the public MergeProject wrapper locks).
-			if err := s.mergeProjectLocked(ctx, dupID, id); err != nil {
+		var candidateCount int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM projects
+			WHERE name = ? AND id NOT IN (?, '_global')
+			  AND instr(path, '/') = 0 AND instr(path, '\') = 0
+		`, name, id).Scan(&candidateCount); err != nil {
+			return fmt.Errorf("count same-name projects: %w", err)
+		}
+		if candidateCount == 1 {
+			var dupID string
+			if err := tx.QueryRowContext(ctx, `
+				SELECT id FROM projects
+				WHERE name = ? AND id NOT IN (?, '_global')
+				  AND instr(path, '/') = 0 AND instr(path, '\') = 0
+			`, name, id).Scan(&dupID); err != nil {
+				return fmt.Errorf("read same-name project: %w", err)
+			}
+			if err := s.mergeProjectWithRepoTx(ctx, tx, dupID, id, repoRemote); err != nil {
 				return fmt.Errorf("auto-merge duplicate project: %w", err)
 			}
+			mergedOld, mergedNew = dupID, id
 		}
 	}
 
-	return nil
+	return commit()
 }
 
 // MergeProject reassigns all child records from oldID to newID, then deletes
@@ -386,15 +740,49 @@ func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
 }
 
 func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) error {
-	if oldID == newID {
-		return nil
-	}
+	return s.mergeProjectWithRepoLocked(ctx, oldID, newID, "")
+}
 
+func (s *Store) mergeProjectWithRepoLocked(ctx context.Context, oldID, newID, repoRemote string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin merge tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if err := s.mergeProjectWithRepoTx(ctx, tx, oldID, newID, repoRemote); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("merge commit: %w", err)
+	}
+
+	s.logger.Info("merged duplicate project", "old_id", oldID, "new_id", newID)
+	return nil
+}
+
+func (s *Store) mergeProjectWithRepoTx(ctx context.Context, tx *sql.Tx, oldID, newID, repoRemote string) error {
+	if oldID == newID {
+		return nil
+	}
+	if oldID == "_global" || newID == "_global" {
+		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
+	}
+	if err := reconcileMergeRepoTx(ctx, tx, oldID, repoRemote); err != nil {
+		return err
+	}
+	if err := reconcileMergeRepoTx(ctx, tx, newID, repoRemote); err != nil {
+		return err
+	}
+	return s.mergeProjectTx(ctx, tx, oldID, newID)
+}
+
+func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
+	if oldID == newID {
+		return nil
+	}
+	if oldID == "_global" || newID == "_global" {
+		return fmt.Errorf("refusing to merge the _global project (old=%q new=%q)", oldID, newID)
+	}
 
 	// Reassign all child records from old project to new.
 	stmts := []string{
@@ -407,6 +795,7 @@ func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) err
 		// omitting this would let the DELETE FROM projects below silently
 		// destroy the merged project's entire undo history.
 		`UPDATE memory_snapshots SET project_id = ? WHERE project_id = ?`,
+		`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.ExecContext(ctx, stmt, newID, oldID); err != nil {
@@ -418,17 +807,9 @@ func (s *Store) mergeProjectLocked(ctx context.Context, oldID, newID string) err
 	if _, err := tx.ExecContext(ctx, `DELETE FROM ghost_state WHERE project_id = ?`, oldID); err != nil {
 		return fmt.Errorf("merge delete ghost_state: %w", err)
 	}
-
-	// Delete the old project row.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, oldID); err != nil {
 		return fmt.Errorf("merge delete project: %w", err)
 	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("merge commit: %w", err)
-	}
-
-	s.logger.Info("merged duplicate project", "old_id", oldID, "new_id", newID)
 	return nil
 }
 
@@ -707,13 +1088,20 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	// carries no identity of its own, so it is resolved through the injected
 	// detector; without that, saving from ~/work/ghost and then reading from
 	// it would disagree about which project it is. Detection runs only for
-	// absolute inputs, so resolving by id or name never spawns a process.
-	remote := NormalizeRepoRemote(input)
-	if remote == "" && filepath.IsAbs(input) {
+	// path-shaped inputs (containing '/' or '\'), so resolving by id or name
+	// never spawns a process. A path is tested before the raw input is treated
+	// as a remote because a relative path such as ../checkout can otherwise be
+	// mistaken for a host/path remote. Non-directory remote strings fail the
+	// detector's os.Stat before it starts Git, then normalize normally.
+	remote := ""
+	if strings.ContainsAny(input, `/\`) {
 		remote = NormalizeRepoRemote(detectRemoteForPath(input))
 	}
+	if remote == "" {
+		remote = NormalizeRepoRemote(input)
+	}
 	if remote != "" {
-		err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE repo_remote = ? LIMIT 1`, remote).Scan(&id, &name)
+		err = s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE repo_remote = ? AND id != '_global' LIMIT 1`, remote).Scan(&id, &name)
 		if err == nil {
 			return id, name, nil
 		}
