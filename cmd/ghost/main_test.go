@@ -896,6 +896,15 @@ func TestReflectSkipDecision(t *testing.T) {
 	}
 }
 
+func TestReflectMaySkipDoesNotSkipExplicitPromotion(t *testing.T) {
+	if reflectMaySkip(true, true, true, "same", "same") {
+		t.Fatal("explicit --promote-globals was skipped as unchanged")
+	}
+	if !reflectMaySkip(true, true, false, "same", "same") {
+		t.Fatal("ordinary unchanged apply should still skip")
+	}
+}
+
 func TestConsolidatableFilters(t *testing.T) {
 	now := "2026-09-21 00:00:00"
 	mems := []memory.Memory{
@@ -1011,6 +1020,10 @@ func TestParseReflectArgs(t *testing.T) {
 	}{
 		{"positional", []string{"myproj"}, reflectArgs{project: "myproj", tier: "auto"}},
 		{"positional with apply", []string{"myproj", "--apply"}, reflectArgs{project: "myproj", tier: "auto", apply: true}},
+		{"promotion is opt-in", []string{"myproj", "--apply", "--promote-globals"},
+			reflectArgs{project: "myproj", tier: "auto", apply: true, promoteGlobals: true}},
+		{"promotion with lifecycle shape", []string{"--project", "myproj", "--apply", "--require-llm", "--skip-unchanged", "--promote-globals", "--source", "claude"},
+			reflectArgs{project: "myproj", tier: "auto", apply: true, requireLLM: true, skipUnchanged: true, promoteGlobals: true, source: "claude"}},
 		{"positional with lifecycle flags", []string{"myproj", "--apply", "--require-llm", "--skip-unchanged", "--source", "claude"},
 			reflectArgs{project: "myproj", tier: "auto", apply: true, requireLLM: true, skipUnchanged: true, source: "claude"}},
 		{"tier separate value", []string{"myproj", "--tier", "cli"}, reflectArgs{project: "myproj", tier: "cli"}},

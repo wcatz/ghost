@@ -309,13 +309,13 @@ func clampReflectMemories(mems []reflection.ReflectMemory) int {
 }
 
 // consolidatable returns the memories reflection may rewrite: non-resolved,
-// unpinned, non-manual rows. ReplaceNonManual preserves exactly the excluded
-// set, so this is the input the consolidator sees — and therefore the set the
-// skip-unchanged fingerprint must cover.
+// unpinned, non-manual/non-builtin rows. ReplaceNonManual preserves exactly
+// the excluded set, so this is the input the consolidator sees — and
+// therefore the set the skip-unchanged fingerprint must cover.
 func consolidatable(mems []memory.Memory) []memory.Memory {
 	out := make([]memory.Memory, 0, len(mems))
 	for _, m := range mems {
-		if m.ResolvedAt != nil || m.Pinned || m.Source == "manual" {
+		if m.ResolvedAt != nil || m.Pinned || m.Source == "manual" || m.Source == "builtin" {
 			continue
 		}
 		out = append(out, m)
@@ -330,16 +330,25 @@ func reflectSkipDecision(skipUnchanged, apply bool, stored, current string) bool
 	return skipUnchanged && apply && stored != "" && stored == current
 }
 
+// reflectMaySkip additionally honors the explicit promotion request. The
+// input signature describes the project corpus, not whether cross-project
+// candidates were already moved to _global, so promotion must never inherit a
+// prior default apply's unchanged verdict.
+func reflectMaySkip(skipUnchanged, apply, promoteGlobals bool, stored, current string) bool {
+	return !promoteGlobals && reflectSkipDecision(skipUnchanged, apply, stored, current)
+}
+
 // reflectArgs is one parsed `ghost reflect` invocation.
 type reflectArgs struct {
-	project       string
-	tier          string
-	source        string
-	apply         bool
-	restore       bool
-	requireLLM    bool
-	allowDrops    bool
-	skipUnchanged bool
+	project        string
+	tier           string
+	source         string
+	apply          bool
+	restore        bool
+	requireLLM     bool
+	allowDrops     bool
+	skipUnchanged  bool
+	promoteGlobals bool
 }
 
 // parseReflectArgs parses `ghost reflect`'s arguments (everything after the
@@ -384,6 +393,8 @@ func parseReflectArgs(args []string) (reflectArgs, error) {
 			p.allowDrops = true
 		case args[i] == "--skip-unchanged":
 			p.skipUnchanged = true
+		case args[i] == "--promote-globals":
+			p.promoteGlobals = true
 		case args[i] == "--source" && i+1 < len(args):
 			p.source = args[i+1]
 			i++
@@ -418,6 +429,7 @@ Flags:
   --restore       Undo the last consolidation from snapshot
   --require-llm   Fail instead of falling back to the Jaccard-only sqlite tier
   --allow-drops   Apply even when guarded-category memories would be deleted without a merge
+  --promote-globals Write cross-project candidates to _global (default: keep them project-scoped)
   --skip-unchanged Skip when the consolidatable set is unchanged since the last
                    applied consolidation (used by the auto lifecycle)
   --source string CLI harness for the auto tier: claude-code, opencode, codex,
@@ -611,7 +623,7 @@ Flags:
 		storedSig, err := store.GetReflectInputSignature(ctx, projectID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: read reflect signature: %v\n", err)
-		} else if reflectSkipDecision(skipUnchanged, apply, storedSig, currentSig) {
+		} else if reflectMaySkip(skipUnchanged, apply, parsed.promoteGlobals, storedSig, currentSig) {
 			fmt.Printf("reflect: consolidatable set unchanged since the last applied consolidation — skipping (%d memories, no LLM call)\n", len(live))
 			return
 		}
@@ -681,15 +693,7 @@ Flags:
 	}
 	result.Memories = validMemories
 
-	catCounts := make(map[string]int)
-	for _, m := range result.Memories {
-		catCounts[m.Category]++
-	}
-	var parts []string
-	for cat, n := range catCounts {
-		parts = append(parts, fmt.Sprintf("%d %s", n, cat))
-	}
-	fmt.Printf("Result:       %d memories (%s)\n", len(result.Memories), strings.Join(parts, ", "))
+	fmt.Printf("Result:       %d memories (%s)\n", len(result.Memories), reflectCategoryParts(result.Memories))
 	fmt.Println()
 
 	var projectMems, globalMems []reflection.ReflectMemory
@@ -704,20 +708,18 @@ Flags:
 	if len(projectMems) > 0 {
 		fmt.Printf("  Project-scoped (%d):\n", len(projectMems))
 		for _, m := range projectMems {
-			truncated := m.Content
-			if len(truncated) > 120 {
-				truncated = truncated[:120] + "..."
-			}
+			truncated := truncateForDisplay(m.Content, 120)
 			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, truncated)
 		}
 	}
 	if len(globalMems) > 0 {
-		fmt.Printf("  Global-scoped (%d):\n", len(globalMems))
+		if parsed.promoteGlobals {
+			fmt.Printf("  Global-scoped (%d):\n", len(globalMems))
+		} else {
+			fmt.Printf("  Cross-project (%d) — kept project-scoped unless --promote-globals:\n", len(globalMems))
+		}
 		for _, m := range globalMems {
-			truncated := m.Content
-			if len(truncated) > 120 {
-				truncated = truncated[:120] + "..."
-			}
+			truncated := truncateForDisplay(m.Content, 120)
 			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, truncated)
 		}
 	}
@@ -741,11 +743,7 @@ Flags:
 	if len(guardedDrops) > 0 {
 		fmt.Fprintf(os.Stderr, "WARNING: %d guarded-category memory(ies) had no surviving merge target:\n", len(guardedDrops))
 		for _, d := range guardedDrops {
-			truncated := d.Content
-			if len(truncated) > 100 {
-				truncated = truncated[:100] + "..."
-			}
-			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, truncated)
+			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, truncateForDisplay(d.Content, 100))
 		}
 		if allowDrops {
 			fmt.Fprintf(os.Stderr, "  --allow-drops set: these %d memories will be DELETED\n", len(guardedDrops))
@@ -784,49 +782,53 @@ Flags:
 		return
 	}
 
-	if len(globalMems) > 0 {
-		if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: ensure _global project: %v\n", err)
-		}
-		for _, m := range globalMems {
-			if _, _, _, err := store.Upsert(ctx, "_global", m.Category, m.Content, "reflection", m.Importance, m.Tags); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: upsert global memory: %v\n", err)
-			}
-		}
-		fmt.Printf("Upserted %d global memories\n", len(globalMems))
+	// Cross-project candidates are NOT promoted to _global unless asked.
+	//
+	// _global is injected into every future session in every project. Even the
+	// cautious session-start wording does not make reflection output
+	// user-confirmed, so letting a reflection pass write there unattended
+	// moved content — potentially summarised from an untrusted repository —
+	// straight into every project's shared context with no human in the loop
+	// (issue #545). Keeping them project-scoped is
+	// still useful and fully reversible, so promotion is now an explicit
+	// decision: `ghost reflect --apply --promote-globals`.
+	projectForSummary := projectMems
+	if !parsed.promoteGlobals && len(globalMems) > 0 {
+		projectForSummary = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 	}
 
-	var preserved []string
-	if len(projectMems) > 0 {
-		dbMemories := make([]memory.Memory, len(projectMems))
-		for i, m := range projectMems {
-			dbMemories[i] = memory.Memory{
-				ProjectID:  projectID,
-				Category:   m.Category,
-				Content:    m.Content,
-				Importance: m.Importance,
-				Source:     "reflection",
-				Tags:       m.Tags,
-			}
+	preserved, promoted, keptProject, err := applyReflection(ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
+		os.Exit(1)
+	}
+	if promoted > 0 {
+		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
+	}
+	if parsed.promoteGlobals {
+		failed := len(globalMems) - promoted
+		if failed > 0 {
+			fmt.Fprintln(os.Stderr, recoveryWarning(keptProject, failed))
 		}
+	}
 
-		preserved, err = store.ReplaceNonManual(ctx, projectID, dbMemories, consolidatedSince)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
-			os.Exit(1)
-		}
-
-		summary := fmt.Sprintf("%d memories consolidated (%s)", len(dbMemories), strings.Join(parts, ", "))
-		if len(globalMems) > 0 {
-			summary += fmt.Sprintf(", %d promoted to global", len(globalMems))
-		}
+	if len(projectForSummary) > 0 || len(globalMems) > 0 {
+		summary := appliedSummary(projectForSummary, globalMems, promoted, parsed.promoteGlobals)
 		fmt.Printf("Applied: %s\n", summary)
-		fmt.Println("(use --restore to undo)")
+		if len(globalMems) > 0 && !parsed.promoteGlobals {
+			fmt.Println("(re-run with --promote-globals to inject them into every project)")
+		}
+		if len(projectForSummary) > 0 {
+			fmt.Println(restoreHint(promoted))
+		} else if promoted > 0 {
+			fmt.Println("(promoted globals must be removed from _global by hand; no project snapshot was created)")
+		}
 
 		// One cap for every writer, learned-context summary included: the
 		// consolidator's own output is clamped with the same marker as its
 		// memories so the "any Ghost writer" claim on memory.MaxContentLen
-		// holds for every field this command writes.
+		// holds for every field this command writes. This stays outside the
+		// project-count guard so an only-global round still records context.
 		if learned, learnedCut := memory.ClampContent(result.LearnedContext); learned != "" {
 			if learnedCut {
 				fmt.Fprintf(os.Stderr, "warning: learned context exceeded the %d-byte content cap and was truncated with an explicit marker\n", memory.MaxContentLen)

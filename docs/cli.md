@@ -83,6 +83,7 @@ ghost reflect myproject --apply
 | `--restore` | Restore the most recent consolidation snapshot. |
 | `--require-llm` | Fail instead of falling back to the offline SQLite/Jaccard tier. |
 | `--allow-drops` | Apply even when guarded-category memories would be removed without a merge. |
+| `--promote-globals` | Promote cross-project candidates into `_global`; without this flag they remain project-scoped. |
 | `--skip-unchanged` | Skip the LLM call when the consolidatable set is unchanged since the last applied pass. |
 | `--source <host>` | Explicit harness: `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
