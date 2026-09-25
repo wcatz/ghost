@@ -479,6 +479,140 @@ func TestRestoreKeepsExistingFileWhenRestoring(t *testing.T) {
 	}
 }
 
+// TestWriteIfChangedRefusesSpecialDestination covers the publish path's version
+// of the special-file hazard. writeIfChanged opened the destination with
+// os.ReadFile before checking what it was: a FIFO at a canonical note path
+// blocks that open until a writer appears, so the export hangs on a file it was
+// going to refuse anyway, and a symlink is read through while the rename below
+// replaces the link entry — the target gets compared, the link gets unlinked.
+func TestWriteIfChangedRefusesSpecialDestination(t *testing.T) {
+	dir := t.TempDir()
+
+	pipe := filepath.Join(dir, "Memory.md")
+	if err := makeFIFO(pipe); err != nil {
+		t.Skipf("named pipe unavailable: %v", err)
+	}
+	target := filepath.Join(dir, "secret.md")
+	mustWrite(t, target, "target content\n")
+	link := filepath.Join(dir, "Linked.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	pipeDone := make(chan error, 1)
+	go func() {
+		_, err := writeIfChanged(pipe, "---\nghost_id: abc\n---\nbody\n")
+		pipeDone <- err
+	}()
+	select {
+	case err := <-pipeDone:
+		if err == nil {
+			t.Error("writeIfChanged published over a named pipe, want a refusal")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("writeIfChanged blocked for 5s on a FIFO — the destination must be typed before it is read")
+	}
+
+	if _, err := writeIfChanged(link, "---\nghost_id: abc\n---\nreplaced\n"); err == nil {
+		t.Error("writeIfChanged published over a symlink, want a refusal")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read symlink target: %v", err)
+	}
+	if string(got) != "target content\n" {
+		t.Errorf("symlink target = %q, want it untouched", got)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the symlink itself was replaced (err=%v), want it left in place", err)
+	}
+
+	// The control: an ordinary destination still publishes.
+	plain := filepath.Join(dir, "Plain.md")
+	if _, err := writeIfChanged(plain, "---\nghost_id: abc\n---\nbody\n"); err != nil {
+		t.Fatalf("writeIfChanged on a regular path: %v", err)
+	}
+}
+
+// TestGhostManagedFileDistinguishesUnreadableFromUnowned backs the permission
+// pass. The old classifier returned a bool, so a note whose frontmatter could
+// not be read looked exactly like a user's note and kept its 0644 mode while
+// the export reported the vault tight. An unreadable entry has to be an error.
+func TestGhostManagedFileDistinguishesUnreadableFromUnowned(t *testing.T) {
+	dir := t.TempDir()
+
+	user := filepath.Join(dir, "Mine.md")
+	mustWrite(t, user, userNote)
+	if managed, err := ghostManagedFile(user); err != nil || managed {
+		t.Errorf("ghostManagedFile(user note) = (%v, %v), want (false, nil)", managed, err)
+	}
+
+	ghost := filepath.Join(dir, "Theirs.md")
+	mustWrite(t, ghost, ghostNote)
+	if managed, err := ghostManagedFile(ghost); err != nil || !managed {
+		t.Errorf("ghostManagedFile(Ghost note) = (%v, %v), want (true, nil)", managed, err)
+	}
+
+	pipe := filepath.Join(dir, "Pipe.md")
+	if err := makeFIFO(pipe); err != nil {
+		t.Skipf("named pipe unavailable: %v", err)
+	}
+	if _, err := ghostManagedFile(pipe); err == nil {
+		t.Error("ghostManagedFile on a named pipe returned no error, want the unreadable entry reported")
+	}
+}
+
+// TestProtectPathRefusesSymlinkTarget covers the POSIX chmod. The caller's
+// lstat had already established the entry was not a symlink, but os.Chmod
+// takes a pathname: replacing the entry with a symlink in between made chmod
+// follow it and change a target outside the vault — widening access to exactly
+// the thing the lstat exists to keep out of reach.
+func TestProtectPathRefusesSymlinkTarget(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "outside.md")
+	mustWrite(t, outside, "not Ghost's\n")
+	if err := os.Chmod(outside, 0o644); err != nil {
+		t.Fatalf("chmod target: %v", err)
+	}
+	link := filepath.Join(dir, "Inside.md")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	// The info the walk would have handed over for a loose regular file.
+	probe := filepath.Join(dir, "probe.md")
+	mustWrite(t, probe, "probe\n")
+	probeInfo, err := os.Lstat(probe)
+	if err != nil {
+		t.Fatalf("lstat probe: %v", err)
+	}
+
+	if err := protectPath(link, probeInfo, 0o600); err == nil {
+		t.Error("protectPath tightened a symlink, want it refused")
+	}
+	fi, err := os.Lstat(outside)
+	if err != nil {
+		t.Fatalf("lstat target: %v", err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("symlink target mode = %o, want 0644 — protection followed a link outside the vault", fi.Mode().Perm())
+	}
+
+	// The control: a real loose file is still tightened through its handle.
+	loose := filepath.Join(dir, "loose.md")
+	mustWrite(t, loose, "loose\n")
+	looseInfo, err := os.Lstat(loose)
+	if err != nil {
+		t.Fatalf("lstat loose: %v", err)
+	}
+	if err := protectPath(loose, looseInfo, 0o600); err != nil {
+		t.Fatalf("protectPath on a regular file: %v", err)
+	}
+	if fi, err := os.Lstat(loose); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("loose mode = %v (err=%v), want 0600", fi.Mode().Perm(), err)
+	}
+}
+
 // TestRemoveGhostFileRestoresAfterFailedRemoval covers a note stranded under a
 // name prune can never see. By the time the final os.Remove runs, the note has
 // already been moved aside, so a failed deletion returned without putting it

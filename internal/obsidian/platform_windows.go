@@ -140,7 +140,16 @@ func isTransientRenameErr(err error) bool {
 // link(2) trick used on POSIX it needs no write permission on the directory
 // beyond what the move itself requires.
 func renameNoReplace(oldPath, newPath string) error {
-	from, err := windows.UTF16PtrFromString(oldPath)
+	// Both operands go through extendedPath. MoveFileEx is a raw Win32 call
+	// that gets none of Go's long-path handling, and the quarantine source sits
+	// in the same possibly-over-MAX_PATH vault directory as the destination —
+	// converting only the destination made a long-path restore fail, stranding
+	// the note under its .ghost-prune-* name.
+	from, err := extendedPath(oldPath)
+	if err != nil {
+		return err
+	}
+	fromPtr, err := windows.UTF16PtrFromString(from)
 	if err != nil {
 		return err
 	}
@@ -152,7 +161,7 @@ func renameNoReplace(oldPath, newPath string) error {
 	if err != nil {
 		return err
 	}
-	return windows.MoveFileEx(from, toPtr, 0)
+	return windows.MoveFileEx(fromPtr, toPtr, 0)
 }
 
 // openRegular opens path for reading and returns the handle only if the object

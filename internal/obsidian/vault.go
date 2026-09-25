@@ -57,6 +57,26 @@ func removeFile(path string) error {
 	return fn(path)
 }
 
+// crashTempMarker is the infix writeIfChanged gives os.CreateTemp, so a
+// crashed write leaves a name like "My Note.md.ghost-tmp-4821".
+const crashTempMarker = ".ghost-tmp-"
+
+// isCrashTemp reports whether path is a leftover from an interrupted publish.
+//
+// The pattern has to match what CreateTemp is actually given, and the trailing
+// "-*" matters as much as the infix: an earlier test on the bare ".ghost-tmp"
+// suffix matched no real artifact at all, while a test on the infix alone would
+// delete a user's own file called "notes.ghost-tmp". Requiring both the infix
+// and a non-empty random suffix keeps the sweep pointed at Ghost's files.
+func isCrashTemp(path string) bool {
+	name := filepath.Base(path)
+	idx := strings.LastIndex(name, crashTempMarker)
+	if idx < 0 {
+		return false
+	}
+	return len(name) > idx+len(crashTempMarker)
+}
+
 func init() {
 	readDirFn.Store(os.ReadDir)
 	removeDirFn.Store(os.Remove)
@@ -141,6 +161,14 @@ func removeGhostFile(path string) (bool, error) {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
+		// Same strand as the failed deletion below: the note has already left
+		// its original name, so returning here leaves it under the
+		// .ghost-prune-* prefix that no later pass searches. An unreadable
+		// quarantine is exactly when restoring matters most, since the object
+		// is the only copy.
+		if restoreErr := restore(); restoreErr != nil {
+			return false, fmt.Errorf("inspect quarantined note: %w (and it could not be restored: %v)", err, restoreErr)
+		}
 		return false, err
 	}
 	if !info.Mode().IsRegular() {
@@ -222,22 +250,38 @@ func ensureVault(dir string) error {
 func tightenVault(dir string) error {
 	return filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			return nil // unreadable entry: leave it; writes surface real problems
+			// A concurrent disappearance is not a permission problem: the entry
+			// is gone, so there is nothing left to tighten. Anything else means
+			// the entry could not be inspected, and saying so is the point —
+			// swallowing it let a legacy 0644 note or a 0755 subtree keep its
+			// permissive bits while Export reported the vault tight.
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("inspect %s for tightening: %w", path, err)
 		}
 		// lstat, so a symlink is neither of the two kinds below and Ghost
 		// never chmods through one to a target outside the vault.
 		info, err := d.Info()
 		if err != nil {
-			return nil
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("stat %s for tightening: %w", path, err)
 		}
 		switch {
 		case info.IsDir():
 			return tightenIfLoose(path, info, 0o700)
 		case !info.Mode().IsRegular():
 			return nil
-		case !ghostManaged(path):
-			return nil // a user note or attachment keeps its own mode
 		default:
+			managed, err := ghostManagedFile(path)
+			if err != nil {
+				return err
+			}
+			if !managed {
+				return nil // a user note or attachment keeps its own mode
+			}
 			return tightenIfLoose(path, info, 0o600)
 		}
 	})
@@ -263,11 +307,63 @@ func ghostManaged(path string) bool {
 	return ok
 }
 
+// ghostManagedFile is ghostManaged for a caller that must be able to tell "not
+// Ghost's" from "could not be read".
+//
+// The permission pass uses it rather than ghostManaged because a note whose
+// frontmatter could not be read is not the same as a user's note, and
+// collapsing the two is how a legacy world-readable note keeps its mode while
+// the export reports success. A concurrent disappearance is not a failure — the
+// entry is gone — but any other open or read error is returned.
+func ghostManagedFile(path string) (bool, error) {
+	if filepath.Base(path) == markerName {
+		return true, nil
+	}
+	if !strings.HasSuffix(path, ".md") {
+		return false, nil
+	}
+	f, err := openRegular(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	defer f.Close() //nolint:errcheck // read-only: close errors are meaningless here
+	_, ok := frontmatterHasGhostID(f)
+	return ok, nil
+}
+
 // writeIfChanged writes content atomically (temp+rename), skipping the write
 // when the file already has identical content — no mtime churn.
 func writeIfChanged(path, content string) (bool, error) {
-	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
-		return false, nil
+	// Decide the destination's type before reading it, not after. os.ReadFile
+	// on a FIFO blocks until a writer appears, so a FIFO sitting at a
+	// canonical note path would hang the export indefinitely; and a symlink
+	// would be read through, so a link pointing outside the vault has its
+	// target compared against Ghost's content while the publish step below
+	// replaces the link entry — the same special-file hazard the delete path
+	// guards, on the write path.
+	//
+	// A destination that is not a regular file is refused rather than replaced.
+	// Replacing it is what the special file actually is not: a named pipe or a
+	// symlink is something a user or another tool put there, and silently
+	// unlinking it is the data loss this package exists to avoid.
+	switch info, err := os.Lstat(path); {
+	case err != nil && !os.IsNotExist(err):
+		return false, err
+	case err == nil && !info.Mode().IsRegular():
+		return false, fmt.Errorf("refusing to publish over %s: not a regular file", path)
+	case err == nil:
+		// Regular file: the unchanged-content check still applies, so an
+		// already-correct note costs no write and no mtime churn.
+		existing, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return false, readErr
+		}
+		if string(existing) == content {
+			return false, nil
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false, err
@@ -321,6 +417,15 @@ func hasGhostID(path string) (string, bool) {
 		return "", false
 	}
 	defer f.Close() //nolint:errcheck // read-only: close errors are meaningless here
+	id, ok := frontmatterHasGhostID(f)
+	return id, ok
+}
+
+// frontmatterHasGhostID scans an open regular file's frontmatter for a
+// ghost_id key. Split from hasGhostID so a caller that must distinguish "not
+// Ghost's" from "could not be read" can open the file itself and get the
+// failure reason rather than a flattened false.
+func frontmatterHasGhostID(f *os.File) (string, bool) {
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 0, 4096), maxFrontmatterLine)
 	if !s.Scan() || s.Text() != "---" {
@@ -516,8 +621,16 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 			if !d.Type().IsRegular() {
 				return nil
 			}
-			if strings.HasSuffix(path, ".ghost-tmp") {
-				return os.Remove(path) // orphan from a crashed write
+			if isCrashTemp(path) {
+				// Orphan from a crashed writeIfChanged. The name must match
+				// what writeIfChanged actually produces — CreateTemp's
+				// "<base>.ghost-tmp-<random>" — because a bare ".ghost-tmp"
+				// suffix test never matched a real leftover, so the sweep both
+				// missed every crash artifact and deleted any user file that
+				// happened to end in those five characters. The trailing
+				// wildcard is what makes it a claim on Ghost's own files
+				// rather than on the user's.
+				return removeFile(path)
 			}
 			if !strings.HasSuffix(path, ".md") {
 				return nil

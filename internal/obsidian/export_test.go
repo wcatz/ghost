@@ -254,17 +254,28 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Simulate a crashed write: orphaned tmp inside a managed subtree.
-	stray := filepath.Join(vault, "ghost", "Memories", "foo.md.ghost-tmp")
+	// Simulate a crashed write: an orphaned temp inside a managed subtree. The
+	// name has to be the one writeIfChanged actually produces —
+	// CreateTemp's "<base>.ghost-tmp-<random>" — because the old sweep matched
+	// a bare ".ghost-tmp" suffix, which no real leftover carries, so it removed
+	// none of them and deleted any user file ending that way instead.
+	stray := filepath.Join(vault, "ghost", "Memories", "foo.md.ghost-tmp-4821")
 	if err := os.WriteFile(stray, []byte("orphan"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// A tmp file outside managed subtrees is none of our business.
-	outside := filepath.Join(vault, "user-notes", "bar.md.ghost-tmp")
+	// A temp outside managed subtrees is none of our business.
+	outside := filepath.Join(vault, "user-notes", "bar.md.ghost-tmp-9137")
 	if err := os.MkdirAll(filepath.Dir(outside), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(outside, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A user's own file that merely ends in the marker, with no random suffix,
+	// is not a crash artifact and must survive: the suffix test used to delete
+	// exactly this.
+	mine := filepath.Join(vault, "ghost", "Memories", "my-backup.md.ghost-tmp")
+	if err := os.WriteFile(mine, []byte("mine"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -276,6 +287,9 @@ func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(outside); err != nil {
 		t.Errorf("tmp file outside managed subtrees must survive: %v", err)
+	}
+	if _, err := os.Stat(mine); err != nil {
+		t.Errorf("a user file ending in the marker without a temp suffix must survive: %v", err)
 	}
 }
 
