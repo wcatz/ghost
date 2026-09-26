@@ -379,6 +379,55 @@ func TestSearchDemotesVectorOnlyRows(t *testing.T) {
 	}
 }
 
+// TestKeywordOnlyGlobalHitReturnsWhenWindowHasRoom: the reservation gate must
+// not turn the demotion into a lookup filter. The `_global` row below is
+// keyword-only — never embedded, so only the FTS leg can reach it — and it is
+// the best keyword hit. In a hybrid search with room for every candidate it
+// must still come back, ranked below the live rows like every other demoted
+// row; the gate only ever bites when the window is full, which is the case
+// TestKeywordReservationSkipsDemotedRows pins from the other side.
+func TestKeywordOnlyGlobalHitReturnsWhenWindowHasRoom(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	if err := store.EnsureProject(ctx, "_global", "/global", "global"); err != nil {
+		t.Fatalf("EnsureProject(_global): %v", err)
+	}
+
+	const needle = "the shared opsign runbook forbids failover drills"
+	globalID := createStatusMemory(t, store, ctx, "_global", needle, 0.9)
+
+	// Live rows the vector leg reaches too, so the search is genuinely
+	// hybrid (full RRF parameters) rather than the keyword-only fallback.
+	queryVec := []float32{1, 0}
+	live := make([]string, 0, 3)
+	for i, importance := range []float32{0.8, 0.7, 0.6} {
+		id := createStatusMemory(t, store, ctx, "test-proj", needle, importance)
+		if err := store.StoreEmbedding(ctx, id, []float32{1, 0.1 * float32(i+1)}, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding live %d: %v", i, err)
+		}
+		live = append(live, id)
+	}
+
+	// limit 10 over four candidates: no cut runs, so the only thing that
+	// could have dropped the _global row is a status rule.
+	results, err := store.SearchHybrid(ctx, "test-proj", needle, queryVec, 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid: %v", err)
+	}
+	pos := positions(results)
+	requireBothPresent(t, pos, globalID, live[0], live[1], live[2])
+	if _, ok := pos[globalID]; !ok {
+		return // requireBothPresent already reported the missing row
+	}
+
+	for _, id := range live {
+		if pos[globalID] < pos[id] {
+			t.Errorf("_global row at position %d outranked a live project memory at %d — the demoted row must "+
+				"still rank below the live ones when both come back (results = %s)",
+				pos[globalID], pos[id], contents(results))
+		}
+	}
+}
+
 // contents renders result content for failure messages, truncated so a failing
 // assertion stays readable.
 func contents(results []Memory) string {
