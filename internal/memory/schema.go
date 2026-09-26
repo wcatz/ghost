@@ -4,8 +4,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -430,10 +435,24 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		// Migration steps rebuild and DROP tables, so a bug in a step is
 		// unrecoverable without a copy. Fail closed: if the backup cannot be
 		// written, do not migrate.
-		if err := backupBeforeMigrate(db, dbPath); err != nil {
+		fresh, err := backupBeforeMigrate(db, dbPath)
+		if err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("pre-migration backup: %w", err)
 		}
+		// The copy landed, so the safety net for THIS upgrade exists and the
+		// older ones can stop accumulating (#542: a directory that has seen a
+		// dozen upgrades held a dozen full copies of the database). Only now,
+		// and only on this path — an open with nothing to migrate writes no
+		// backup and prunes nothing.
+		//
+		// The path is passed in rather than re-derived from the clock, and
+		// excluded from removal outright: the directory can hold backups
+		// stamped further ahead than this machine's own clock (a data dir
+		// restored from one that ran ahead, a corrected clock, a hand-seeded
+		// file), and deciding "the newest is mine" from the stamp could name
+		// the wrong file — deleting the copy this migrate is about to need.
+		prunePreMigrateBackups(dbPath, fresh)
 		if err := migrate(db, version); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("migrate schema v%d→v%d: %w", version, schemaVersion, err)
@@ -451,20 +470,23 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 }
 
 // backupBeforeMigrate writes a one-shot copy of dbPath beside it before any
-// migration step runs, named "<db>.pre-migrate-<unix>". In-memory databases are
-// skipped. A failure aborts the open rather than proceeding without a fallback
-// — the caller decides whether an un-migratable database is acceptable, and the
-// only alternative is an unrecoverable destructive migration.
-func backupBeforeMigrate(db *sql.DB, dbPath string) error {
+// migration step runs, named "<db>.pre-migrate-<unix>", and returns the path it
+// wrote so the caller can name it later — deciding which files are deletable by
+// re-reading the clock would race the clock this name came from. In-memory
+// databases are skipped and return an empty path. A failure aborts the open
+// rather than proceeding without a fallback — the caller decides whether an
+// un-migratable database is acceptable, and the only alternative is an
+// unrecoverable destructive migration.
+func backupBeforeMigrate(db *sql.DB, dbPath string) (string, error) {
 	if dbPath == ":memory:" {
-		return nil
+		return "", nil
 	}
 	backup := fmt.Sprintf("%s.pre-migrate-%d", dbPath, time.Now().Unix())
 	if _, err := os.Stat(backup); err == nil {
-		return fmt.Errorf("backup path already exists: %s", backup)
+		return "", fmt.Errorf("backup path already exists: %s", backup)
 	}
 	if _, err := db.Exec(`VACUUM INTO ?`, backup); err != nil {
-		return fmt.Errorf("vacuum into %s: %w", backup, err)
+		return "", fmt.Errorf("vacuum into %s: %w", backup, err)
 	}
 	// VACUUM INTO names no mode for the file it creates, so the copy lands at
 	// whatever SQLite's default is minus the umask — a full copy of the memory
@@ -475,5 +497,108 @@ func backupBeforeMigrate(db *sql.DB, dbPath string) error {
 	// chmod failure is reported, not fatal: the migration's safety net exists
 	// either way.
 	TightenPermissions(backup)
-	return nil
+	return backup, nil
+}
+
+// preMigrateBackupKeep is how many pre-migration copies of one database stay in
+// the data directory: the one just written plus the two it supersedes. Each is
+// a full copy of the database, so a set that nothing ever culls grows with
+// every upgrade (#542) while its only reader is the human deciding which
+// upgrade to roll back to — three is more hindsight than that needs.
+const preMigrateBackupKeep = 3
+
+// prunePreMigrateBackups keeps the newest preMigrateBackupKeep regular files
+// named "<db>.pre-migrate-<unix>" beside dbPath and removes the older ones,
+// where fresh — the path backupBeforeMigrate just wrote, or "" when there is
+// none — is always one of the kept slots. The prefix is built from the path
+// rather than a constant so a database called anything but ghost.db only ever
+// prunes its own copies.
+//
+// fresh is passed in rather than inferred. The directory can hold backups
+// stamped further ahead than this machine's clock — a data dir restored from a
+// machine whose clock ran ahead, a corrected clock, a file a user renamed — and
+// an implementation that picked "the newest by stamp" and kept that would
+// treat a stranger's timestamp as proof that the copy this migrate is about to
+// need is expendable. It is excluded by name before any ordering happens.
+//
+// The match is deliberately narrow: the suffix must be a bare unix timestamp
+// (numeric order, not the lexicographic order a glob would impose), the entry
+// must be a regular file as reported by Lstat — a symlink wearing the name is
+// left as the link it is, never renamed, never followed — and every other file
+// in the directory (hand-made ghost.db.backup-*, ghost.db.pre-<version>-*, the
+// database and its sidecars) is outside the match entirely.
+//
+// Best effort: a directory that cannot be read or a file that cannot be removed
+// is a warning, never an error. Losing a cleanup pass must not stand between a
+// migration and the backup it just wrote.
+func prunePreMigrateBackups(dbPath, fresh string) {
+	if dbPath == ":memory:" {
+		// Dir(":memory:") would name the working directory, which holds
+		// nothing of this database's and is not ours to walk.
+		return
+	}
+	dir := filepath.Dir(dbPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		slog.Warn("could not list directory to prune pre-migration backups", "dir", dir, "error", err)
+		return
+	}
+
+	freshName := ""
+	if fresh != "" {
+		freshName = filepath.Base(fresh)
+	}
+	prefix := filepath.Base(dbPath) + ".pre-migrate-"
+	type candidate struct {
+		path  string
+		stamp int64
+	}
+	var found []candidate
+	for _, e := range entries {
+		name := e.Name()
+		if name == freshName {
+			// The copy this open depends on. Removed from the pool outright
+			// rather than sorted to the top, so no ordering of the remaining
+			// stamps can ever reach it.
+			continue
+		}
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		suffix := name[len(prefix):]
+		stamp, convErr := strconv.ParseInt(suffix, 10, 64)
+		// ParseInt accepts "+7"; FormatInt never produces it, and a negative
+		// stamp is not a timestamp. Both would widen the match past what
+		// backupBeforeMigrate can write.
+		if convErr != nil || stamp < 0 || strconv.FormatInt(stamp, 10) != suffix {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		fi, statErr := os.Lstat(full)
+		if statErr != nil || !fi.Mode().IsRegular() {
+			// Symlink, directory, or a file that vanished between ReadDir
+			// and here: not a backup this function wrote, so not one it may
+			// remove.
+			continue
+		}
+		found = append(found, candidate{path: full, stamp: stamp})
+	}
+
+	// One slot of the budget is already spent on the copy just written, so the
+	// rest get preMigrateBackupKeep-1 between them.
+	keep := preMigrateBackupKeep
+	if freshName != "" {
+		keep--
+	}
+	if len(found) <= keep {
+		return
+	}
+	// Newest first by the numeric suffix. Sorting the names as strings would
+	// rank "999" above "1003" and prune the wrong end.
+	sort.Slice(found, func(i, j int) bool { return found[i].stamp > found[j].stamp })
+	for _, c := range found[keep:] {
+		if err := os.Remove(c.path); err != nil {
+			slog.Warn("could not prune old pre-migration backup", "path", c.path, "error", err)
+		}
+	}
 }
