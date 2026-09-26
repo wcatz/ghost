@@ -125,8 +125,10 @@ const (
 // below 1, because reservation reads raw FTS rank and would otherwise hand a
 // demoted row back the window slot the factor just took from it — so a
 // demoted keyword-only hit makes the window cut on its demoted score rather
-// than on the reservation, and comes back when it clears that cut or the
-// window has room. Nothing here drops a row by status rule.
+// than on the reservation, and comes back when the window has room or it
+// clears that cut with no reserved keyword hit waiting to evict it (eviction
+// is score-blind, and a demoted row is never reserved). Nothing in this
+// function removes a row; it only multiplies.
 func statusDemotionFactor(resolved bool, rowProjectID, searchProjectID string) float64 {
 	factor := 1.0
 	if resolved {

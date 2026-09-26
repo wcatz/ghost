@@ -214,10 +214,14 @@ guaranteed a place in the window, evicting the weakest admitted rows for them
 keyword rank while the demotion writes the fused score, so reserving a
 demoted `_global` or resolved rank-1 hit would hand back exactly the slot the
 factor had just taken from it; such a row still enters on its demoted score
-like any other candidate — it comes back when the window has room or its
-demoted score clears the cut, and drops out of a window full of rows that
-outscore it, which at default limits is any full window whose live candidates
-the weights already put above a halved keyword score. Position is left to the
+like any other candidate — it comes back when the window has room and its
+demoted score clears the cut, and drops out of a full window by either of the
+window's two ordinary paths: enough candidates outscore it (at default
+limits, any full window of live candidates the weights already put above a
+halved keyword score), or the reservation's score-blind eviction hands its
+slot to a top-`limit/5` keyword hit that scored below it — eviction replaces
+the weakest admitted row that is not itself reserved, and a demoted row is
+never reserved, so it is always an eviction target. Position is left to the
 fused score: admission is
 the defect, and the stronger
 interventions were built and measured against the built-in dataset first.

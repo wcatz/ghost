@@ -736,7 +736,10 @@ func selectWindow(pool []*hybridCandidate, limit int, p SearchParams) HybridWind
 	// the #543 repair rescues an undemoted keyword-only hit from the score
 	// cut the weights cause, a demoted one is not rescued — it comes back
 	// when it makes that cut or the window has room, and drops out of a full
-	// window of rows that outscore it.
+	// window two ways: enough rows outscore it, or the reservation's
+	// score-blind eviction hands its slot to a top-limit/5 keyword hit
+	// scoring below it (eviction targets the weakest admitted row that is
+	// not reserved, and a demoted row never is).
 	//
 	// Two stronger interventions were built and measured against
 	// the built-in dataset before settling here:
