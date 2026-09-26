@@ -125,11 +125,13 @@ func TestOpenReadOnlyTransferStoreAcceptsACurrentDatabase(t *testing.T) {
 // every column this build's readers select.
 //
 // The cost is stated rather than hidden: a v12-v15 user must run one read-write
-// open (`ghost mcp init`, or any session) before `ghost export` or a dry-run
-// import will work on their store, where before this PR it did. `ghost backup`
-// has no version check and is the escape hatch — it reads no columns, so it works
-// on any store it can open. The error names the remedy, so the user is not left
-// guessing which command they need.
+// open before `ghost export` or a dry-run import will work on their store, where
+// before this PR it did — `ghost mcp init`, any session, or `ghost backup`, which
+// is reached through bootstrap() and so migrates and seeds rather than reading
+// the store, and is refused for a store from a newer Ghost exactly as OpenDB
+// refuses it. `ghost backup` is a way to pay this cost, not a way around it. The
+// error names the remedy, so the user is not left guessing which command they
+// need.
 //
 // This test is the one that makes the choice visible: it builds a store at v15
 // whose every column is present, so the *only* reason to refuse it is the

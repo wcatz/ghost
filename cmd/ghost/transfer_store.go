@@ -101,11 +101,13 @@ func openReadOnlyTransferStoreUnchecked(dataDir string) (*memory.Store, *sql.DB,
 // build selects.
 //
 // The cost is stated rather than hidden. A v12-v15 user must run one read-write
-// open — `ghost mcp init`, or any session — before `ghost export` or a dry-run
-// import will work on their store, where before this PR it did. `ghost backup`
-// carries no version check and is the escape hatch: it reads no columns, so it
-// works on any store it can open. The error names the remedy, so the user is not
-// left guessing which command they need.
+// open before `ghost export` or a dry-run import will work on their store, where
+// before this PR it did: `ghost mcp init`, any session, or `ghost backup` — which
+// is itself reached through bootstrap() and so migrates and seeds, and is refused
+// for a store from a newer Ghost exactly as OpenDB refuses it. `ghost backup` is
+// therefore a way to pay this cost, not a way around it, and there is no
+// read-only way in this build to get a copy. The error names the remedy, so the
+// user is not left guessing which command they need.
 // TestReadOnlyTransferStoreIsStrictAboutTheSchemaVersionNotAFloor pins this and is
 // the thing to delete if the decision is ever reversed on purpose.
 func requireMigratedSchema(db *sql.DB, dbPath string) error {

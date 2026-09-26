@@ -219,10 +219,20 @@ func exportDefaultPath(dataDir, out string, at time.Time) (string, error) {
 
 // runBackup implements `ghost backup [--out <path>]`.
 //
-// The database is opened read-write because VACUUM INTO needs a connection that
-// is not read-only, but nothing on the source is written: the command is a read
-// of the store that happens to also produce a file. It is safe to run against a
-// live MCP server, which is the point of using the online path at all.
+// The store is reached through bootstrap(), so this is a read-WRITE open: it
+// runs migrations and seeds the builtin rows, and it is refused outright for a
+// store from a newer Ghost. An earlier version of this comment said "nothing on
+// the source is written", which was false and load-bearing — it made `ghost
+// backup` sound like the read-only way to get a copy, and a user acting on that
+// would have been migrated by a command that read as a read. (VACUUM INTO itself
+// writes only the destination, so the vacuum is not the reason; the open is.)
+//
+// Read-write is kept deliberately. A store behind the current schema is exactly
+// the store a user most wants a restorable copy of, and a read-only open would
+// refuse it — the same version gate export has. So a migration is what this
+// command does on such a store, and it is a migration they need before export
+// works at all. It is safe to run against a live MCP server, which is the point
+// of using the online path rather than copying the files.
 func runBackup() {
 	opts, err := parseBackupArgs(os.Args[2:])
 	if err != nil {
