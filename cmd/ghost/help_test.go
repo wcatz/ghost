@@ -119,6 +119,9 @@ var helpCases = []struct {
 	{name: "obsidian", path: []string{"obsidian"}, want: "ghost obsidian <export|sync> [flags]"},
 	{name: "obsidian export", path: []string{"obsidian", "export"}, want: "ghost obsidian <export|sync> [flags]"},
 	{name: "obsidian sync", path: []string{"obsidian", "sync"}, want: "ghost obsidian <export|sync> [flags]"},
+	{name: "opencode", path: []string{"opencode"}, want: "ghost opencode cleanup-sessions [--grace <duration>]"},
+	{name: "opencode cleanup-sessions", path: []string{"opencode", "cleanup-sessions"}, want: "ghost opencode cleanup-sessions [--grace <duration>]"},
+	{name: "opencode cleanup-sessions with grace", path: []string{"opencode", "cleanup-sessions"}, pre: []string{"--grace", "24h"}, want: "ghost opencode cleanup-sessions [--grace <duration>]"},
 	{name: "bench", path: []string{"bench"}, want: "ghost bench [--sweep]"},
 	{name: "upgrade", path: []string{"upgrade"}, want: "ghost upgrade"},
 	{name: "context", path: []string{"context"}, want: "ghost context [--cwd <dir>]"},
@@ -192,6 +195,7 @@ func TestRunCLI_DispatchesWithoutHelp(t *testing.T) {
 		{"resolve", "--project", "-h"},
 		{"supersede", "--project", "ghost", "--apply"},
 		{"project", "bind", "infra", "/tmp/checkout"},
+		{"opencode", "cleanup-sessions"},
 	} {
 		var got []string
 		stdout, stderr := captureStreams(t, func() {

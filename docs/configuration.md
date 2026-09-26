@@ -169,6 +169,13 @@ search:
 
 FTS candidates are not subject to this floor. Raise it only after testing against your corpus with `ghost bench`; a higher value can remove weak semantic matches, while `0.0` preserves the historical behavior of dropping only non-positive cosine scores.
 
+Two more ranking signals are fixed rather than configurable, because they describe the rows being ranked instead of a preference:
+
+- A resolved memory's fused score is multiplied by `0.5`.
+- A `_global` memory's fused score is multiplied by `0.5` when a specific project is searched (never in `ghost_search_all`).
+
+Both apply before the result window is chosen, so they affect which memories are returned as well as their order. Neither removes a memory from the candidate pool, but both can drop it from the window: a demoted row is cut as soon as enough candidates outscore its halved score, or loses its slot to the keyword reservation's score-blind eviction when a top-`limit/5` keyword hit is admitted — an exchange that can put a strictly lower-scoring row in its place; and the reservation never admits a row whose factor is below 1, so a demoted keyword hit must make that cut on its demoted score. With RRF k=60 the factors effectively rank a demoted row below every live candidate in the fetched pool: the best fused score any row can earn is 1/61 ≈ 0.0164, so a halved row sits at ≈ 0.0082 — under the 0.7/80 ≈ 0.0088 the deepest vector-leg row in a default `limit`-10 window still scores, and under the 1/80 = 0.0125 of the deepest row in a keyword-only search. They only reorder what the legs fetched: each leg pulls `limit*2` rows from the project plus `_global`, and `_global` rows count against that budget, so a project that matches fewer rows than the limit still has demoted `_global` rows fill the remainder. Session injection never sees either factor: `loadSessionContext` (`internal/mcpinit/hook.go`) builds the session-start digest and `Store.GetTopMemories` backs the MCP tool surface, both rank in SQL without reaching fusion, and both queries already exclude resolved rows. `ghost_memory_search` with `explain: true` reports them per row as `status_factor`.
+
 ## Session injection
 
 The SessionStart hook injects a bounded context digest. The default category bias reserves slots for high-signal behavioral notes:
@@ -341,7 +348,7 @@ Backend-specific configuration is selected only for the selected child:
 - Claude receives `CLAUDE_CONFIG_DIR` for its configured authentication store.
 - Codex receives `CODEX_HOME` for its configured state and credentials.
 - Goose receives its documented safe `GOOSE_*` model/provider settings and `GOOSE_PATH_ROOT`.
-- OpenCode receives `OPENCODE_API_KEY` when configured. If authentication is file-based, Ghost copies only the existing `auth.json` into the invocation-owned data directory; the child still uses an invocation-owned home/config tree and no MCP servers or plugins and, on opencode V2, an ask-every-tool policy (V2's non-interactive `run` declines every ask; a deny policy would strip tools from the request, which OpenCode's free tier rejects with 403) — V1 keeps a deny-all policy, since its handling of an ask is unverified — so Ghost does not load the user's OpenCode config or plugins.
+- OpenCode receives `OPENCODE_API_KEY` when configured. If authentication is file-based, Ghost copies only the existing `auth.json` into the invocation-owned data directory; the child still uses an invocation-owned home/config tree and no MCP servers or plugins and, on opencode V2, an ask-every-tool policy (V2's non-interactive `run` declines every ask; a deny policy would strip tools from the request, which OpenCode's free tier rejects with 403) — V1 keeps a deny-all policy, since its handling of an ask is unverified — so Ghost does not load the user's OpenCode config or plugins. The invocation-owned tree covers `XDG_DATA_HOME` as well as `HOME`, so the child's sessions are written to a scratch store that dies with the invocation instead of entering the user's session list (#588); the sessions that predate that isolation are removed once by `ghost opencode cleanup-sessions`.
 
 `GHOST_PASSTHROUGH_ENV=NAME1,NAME2` is an explicit escape hatch for an additional variable. Names are matched case-insensitively. Opting in can re-expose credentials to the selected harness; use it only for a value whose exposure you intend. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GOOSE_PROVIDER__API_KEY` are always removed, even when named in the hatch.
 

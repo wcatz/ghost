@@ -96,6 +96,13 @@ func dispatchCommand(argv []string) int {
 		case "obsidian":
 			runObsidian()
 			return 0
+		case "opencode":
+			if len(os.Args) > 2 && os.Args[2] == "cleanup-sessions" {
+				runOpenCodeCleanupSessions(os.Args[3:])
+				return 0
+			}
+			fmt.Fprintln(os.Stderr, "Usage: "+usageCleanupSessions)
+			return 1
 		case "bench":
 			runBench()
 			return 0
@@ -157,6 +164,10 @@ Commands:
   maintenance status          Show live scratch usage and recent hygiene runs
   maintenance clean-scratch   Report pre-scratch-root legacy debris
                               (dry-run by default, --apply to remove strict matches)
+  opencode cleanup-sessions [flags]
+                              One-shot cleanup of lifecycle sessions titled
+                              exactly "[ghost]" (dry-run by default; --apply
+                              to delete, --grace 1h, --limit 20000)
   bench [--sweep]             Run the retrieval-quality benchmark (built-in dataset);
                               --sweep grid-searches the fusion parameters
   upgrade                     Update ghost to the latest release
