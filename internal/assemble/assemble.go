@@ -131,6 +131,14 @@ type Retriever interface {
 // search retrieves and returns exactly what it always did.
 const categoryFetchWiden = 3
 
+// maxRetrievalWindow bounds the widened window. The tool clamped its category
+// fetch at 100 rows, and the ceiling is kept deliberately: reachability past the
+// window comes from the retriever's discarded tail, so a deeper window buys rows
+// that are hydrated, edge-loaded and then trimmed away. The cost is real —
+// three times the hydration, and three times the edge queries, on a live tool
+// surface — while the answer is unchanged.
+const maxRetrievalWindow = 100
+
 // legDepthFactor is how deep each leg fetches relative to the window. Two is
 // the historical production depth: it is what gives fusion a pool to rank
 // inside rather than a list already trimmed to the answer.
@@ -228,6 +236,9 @@ func retrievalWindow(req Request) int {
 		if widened := total * categoryFetchWiden; widened > total {
 			total = widened
 		}
+	}
+	if total > maxRetrievalWindow {
+		total = maxRetrievalWindow
 	}
 	return total
 }

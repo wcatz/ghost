@@ -110,9 +110,12 @@ func TestSearchExplainAppliesScope(t *testing.T) {
 	}
 	hasCategoryNote, hasScopeNote := false, false
 	for _, note := range categoryEx.Notes {
-		hasCategoryNote = hasCategoryNote || strings.Contains(note, "category filter is applied")
+		hasCategoryNote = hasCategoryNote || strings.Contains(note, "category filter is not evaluated here")
 		hasScopeNote = hasScopeNote || strings.Contains(note, "scope is applied inside hybrid window selection")
 	}
+	// Both filters have to be disclosed, and the category disclosure has to be
+	// the honest one: explain evaluates no category, so a note claiming the
+	// rows are filtered would describe a ranking the caller cannot see.
 	if !hasCategoryNote || !hasScopeNote {
 		t.Errorf("category+scope notes = %v, want both filter disclosures", categoryEx.Notes)
 	}

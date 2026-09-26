@@ -506,6 +506,50 @@ func TestCandidateEmbedsMemoryWithoutRedeclaringValidity(t *testing.T) {
 	}
 }
 
+// TestCandidatesHonoursTheConfiguredEmbeddingIdentity: the store's snapshot
+// copy has to carry every knob that steers retrieval, and the embedding identity
+// is the one that decides whether a stored vector may be scored at all. A
+// candidate set built without it would rank the foreign-space vectors the real
+// search excludes, so a search would return rows no caller could reproduce.
+func TestCandidatesHonoursTheConfiguredEmbeddingIdentity(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	store.SetEmbeddingIdentity(identityCurrent)
+	current, stale := seedIdentityRows(t, store, ctx)
+
+	// The query term is in the current row's content only, so the stale row can
+	// reach the candidate set through the vector leg and nothing else: what this
+	// asserts is the leg's verdict, not the keyword leg's.
+	req := candidateRequest("configured", 10, time.Now().UTC())
+	req.ProjectID = "test-proj" // the project setupTestStore seeds
+	req.QueryVec = []float32{1, 0, 0}
+	req.Condition = CondHybrid
+	set, err := store.Candidates(ctx, req)
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	for _, c := range set.Rows {
+		if c.ID == stale {
+			t.Errorf("candidate %s carries a vector from another space: the snapshot store lost the "+
+				"configured embedding identity, so its vector leg scored a vector production search excludes", stale)
+		}
+	}
+	if got := set.Legs["vector"]; got.Applicable && !got.Attempted {
+		t.Error("vector leg reported applicable but not attempted for a hybrid request with a query vector")
+	}
+	if !containsID(set, current) {
+		t.Errorf("candidates = %v, want the current-identity row %s", candidateIDs(t, set), current)
+	}
+}
+
+func containsID(set *CandidateSet, id string) bool {
+	for _, c := range set.Rows {
+		if c.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // TestCandidatesReportsLegStatuses: absence is only claimable when every
 // applicable leg ran, and a truncated leg is not complete coverage. The
 // statuses are what makes that decidable downstream.

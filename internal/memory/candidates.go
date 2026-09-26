@@ -231,16 +231,24 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	s.mu.RLock()
 	demotion := s.demotionThreshold
 	floor := s.vectorMinSimilarity
+	identity := s.embeddingIdentity
 	s.mu.RUnlock()
 	// A store bound to the transaction: every read below has to come from the
 	// snapshot, and the primary handle's single connection is held by the
 	// transaction itself.
+	//
+	// Every knob that steers retrieval is carried across, or this store would
+	// run a different search than the one it is standing in for: without the
+	// embedding identity the vector leg here scores the foreign-space vectors
+	// the real search excludes, and without the floor or the demotion threshold
+	// the rows it returns are ones no caller could reproduce.
 	cand := &Store{
 		db:                  s.db,
 		snapshot:            tx,
 		logger:              s.logger,
 		demotionThreshold:   demotion,
 		vectorMinSimilarity: floor,
+		embeddingIdentity:   identity,
 	}
 
 	set := &CandidateSet{Legs: map[string]LegStatus{}}

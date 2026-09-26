@@ -136,12 +136,13 @@ func runPredicates(p *pipeline) {
 	p.trace.record(stagePredicates, in, len(kept), dropped, false)
 }
 
-// provenanceWeight is stage 4's multiplier, as the trace records it: pinned, so
-// confidence is copied rather than scored. Confidence is writable today and may
-// be non-NULL on existing rows, so a multiplier that changed the order would
-// change results with no measured justification behind it. Shipping the stage
-// with the decision recorded is what makes a later change a one-line, measured
-// one — a single weight applied where ProvenanceContribution is computed.
+// provenanceWeight is stage 4's weight, as the trace records it, and only that:
+// no score is multiplied by it in v1. Confidence is writable today and may be
+// non-NULL on existing rows, so a weight that changed the order would change
+// results with no measured justification behind it. Shipping the stage with the
+// decision recorded is what makes a later change measurable — but it is not a
+// one-line change: a real multiplier needs a float here, applied where
+// ProvenanceContribution and ConfidenceContribution are computed.
 const provenanceWeight = "1.0"
 
 // runProvenance is stage 4: the weight is pinned and the decision is recorded

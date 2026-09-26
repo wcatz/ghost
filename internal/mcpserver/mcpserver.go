@@ -656,7 +656,7 @@ func (s *Server) registerTools() {
 				return nil, nil, fmt.Errorf("explain failed: %w", xErr)
 			}
 			if args.Category != "" {
-				ex.Notes = append(ex.Notes, "a category filter is applied inside the result window rather than after it; rows below are pre-filter")
+				ex.Notes = append(ex.Notes, "a category filter is not evaluated here: the rows below are the unfiltered window of the requested limit, while the formatted path for the same request widens the window and filters it, so an included row here may not be in that answer")
 			}
 			payload, mErr := json.MarshalIndent(ex, "", "  ")
 			if mErr != nil {
