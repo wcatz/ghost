@@ -103,7 +103,7 @@ func TestZZLatencyProbe(t *testing.T) {
 			return err
 		})
 		measure("hybrid "+scale, func(question string) error {
-			qv, err := emb.Embed(ctx, question)
+			qv, err := emb.EmbedQuery(ctx, question)
 			if err != nil {
 				return err
 			}

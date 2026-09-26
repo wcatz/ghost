@@ -532,20 +532,34 @@ func TestCheckStoreHealth_MalformedConfigStillRunsChecks(t *testing.T) {
 
 // TestCheckEmbeddingStats pins the embedding-stats classification: an empty
 // store passes with "(store empty)", a populated store passes only when some
-// memories are embedded, and a populated store with zero embeddings fails.
+// memories are embedded, and a populated store with zero embeddings fails. It
+// also pins the split of the gap: stale rows (a vector under a retired
+// identity) are named separately from rows that never had one, but only when
+// there is at least one of them.
 func TestCheckEmbeddingStats(t *testing.T) {
 	cases := []struct {
-		embedded, total int
-		wantPass        bool
-		wantText        string
+		embedded, stale, total int
+		wantPass               bool
+		wantText               string
 	}{
-		{0, 0, true, "embeddings: 0 memories (store empty)"},
-		{0, 5, false, "embeddings: 0/5 memories — vector search and linking inactive"},
-		{5, 5, true, "embeddings: 5/5 memories"},
+		{0, 0, 0, true, "embeddings: 0 memories (store empty)"},
+		{0, 0, 5, false, "embeddings: 0/5 memories — vector search and linking inactive"},
+		{5, 0, 5, true, "embeddings: 5/5 memories"},
 		// Partial coverage is the state a model/dimension/task-prefix change
 		// leaves behind, so the line has to say the gap is pending work rather
 		// than let "3/5" read as three-fifths of the corpus being searchable.
-		{3, 5, true, "embeddings: 3/5 memories (2 awaiting re-embed)"},
+		// With nothing stale the plain form stands: "0 stale" beside the
+		// ordinary first-embed gap would name a diagnosis that does not apply.
+		{3, 0, 5, true, "embeddings: 3/5 memories (2 awaiting re-embed)"},
+		// Stale rows are the re-embed worker's queued work; unembedded rows
+		// have never had a vector. Telling them apart is the whole point of
+		// the split — "wait for the worker" and "find out why it never ran"
+		// are different answers to "why is search missing memories?".
+		{3, 2, 5, true, "embeddings: 3/5 memories (2 awaiting re-embed: 2 stale, 0 unembedded)"},
+		{1, 1, 5, true, "embeddings: 1/5 memories (4 awaiting re-embed: 1 stale, 3 unembedded)"},
+		// A fully retired store fails, and the failing line is where the
+		// operator most needs to see that the vectors exist but are unusable.
+		{0, 5, 5, false, "embeddings: 0/5 memories — vector search and linking inactive: 5 stale, 0 unembedded"},
 	}
 	for _, c := range cases {
 		var passed bool
@@ -555,16 +569,16 @@ func TestCheckEmbeddingStats(t *testing.T) {
 			passText = pass
 			failText = fail
 		}
-		checkEmbeddingStats(check, c.embedded, c.total)
+		checkEmbeddingStats(check, c.embedded, c.stale, c.total)
 		if passed != c.wantPass {
-			t.Errorf("embedded=%d total=%d: want ok=%v, got %v", c.embedded, c.total, c.wantPass, passed)
+			t.Errorf("embedded=%d stale=%d total=%d: want ok=%v, got %v", c.embedded, c.stale, c.total, c.wantPass, passed)
 		}
 		text := passText
 		if !passed {
 			text = failText
 		}
 		if text != c.wantText {
-			t.Errorf("embedded=%d total=%d: want text %q, got %q", c.embedded, c.total, c.wantText, text)
+			t.Errorf("embedded=%d stale=%d total=%d: want text %q, got %q", c.embedded, c.stale, c.total, c.wantText, text)
 		}
 	}
 }

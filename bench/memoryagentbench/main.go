@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -137,6 +138,37 @@ func main() {
 	}
 }
 
+// seedDemo ingests demo d's facts into store (list-order backdated timestamps)
+// and resolves every document embedding for them before any search runs,
+// returning the seeded memory IDs in fact order. It is split out of runDemo so
+// the embedding half of the harness can be driven without running the
+// supersede classifier, which makes billable LLM calls.
+//
+// The batch is the facts and nothing else: questions are embedded per search
+// through searchQuestion → EmbedQuery, and seeding them here would embed each
+// one in the document space and cache that vector under the question's own
+// text, where no search ever looks.
+func seedDemo(ctx context.Context, store *memory.Store, db *sql.DB, project string, d Demo, embedder *cachedEmbedder) ([]string, error) {
+	facts := splitFacts(d.Context)
+	ids, err := seedFacts(ctx, store, db, project, facts)
+	if err != nil {
+		return nil, err
+	}
+	if err := embedder.EnsureBatch(ctx, facts); err != nil {
+		return nil, fmt.Errorf("embed: %w", err)
+	}
+	for i, id := range ids {
+		vec, err := embedder.EmbedDocument(ctx, facts[i])
+		if err != nil {
+			return nil, err
+		}
+		if err := store.StoreEmbedding(ctx, id, vec, embedModel); err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
+}
+
 // runDemo seeds one demo's facts into a fresh in-memory store (list-order
 // backdated timestamps), embeds everything, runs the real supersede
 // classifier with apply=true, then scores every question under both
@@ -155,24 +187,8 @@ func runDemo(ctx context.Context, d Demo, cls *supersede.RelationClassifier, emb
 		return demoResult{}, err
 	}
 
-	facts := splitFacts(d.Context)
-	ids, err := seedFacts(ctx, store, db, project, facts)
-	if err != nil {
+	if _, err := seedDemo(ctx, store, db, project, d, embedder); err != nil {
 		return demoResult{}, err
-	}
-
-	texts := append(append([]string{}, facts...), d.Questions...)
-	if err := embedder.EnsureBatch(ctx, texts); err != nil {
-		return demoResult{}, fmt.Errorf("embed: %w", err)
-	}
-	for i, id := range ids {
-		vec, err := embedder.Embed(ctx, facts[i])
-		if err != nil {
-			return demoResult{}, err
-		}
-		if err := store.StoreEmbedding(ctx, id, vec, embedModel); err != nil {
-			return demoResult{}, err
-		}
 	}
 
 	res, _, err := supersede.Run(ctx, store, cls, project, float32(threshold), true, logger)

@@ -11,14 +11,17 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/wcatz/ghost/internal/embedding"
 )
 
 const embedModel = "nomic-embed-text:v1.5"
 const embedBatchSize = 64
 
 // cachedEmbedder resolves text embeddings through an append-only JSONL cache
-// keyed by content hash, batching cache misses to Ollama. Shared sessions
-// across questions (and across runs) are embedded exactly once.
+// keyed by the hash of the role-prefixed input (see documentInput/queryInput),
+// batching cache misses to Ollama. Shared sessions across questions (and across
+// runs) are embedded exactly once.
 type cachedEmbedder struct {
 	ollamaURL string
 	client    *http.Client
@@ -92,11 +95,39 @@ func hashContent(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// EnsureBatch resolves every text into the cache, batching misses to Ollama.
+// documentInput and queryInput are the exact strings sent to Ollama for the
+// two roles, and therefore the text the cache is keyed on: the task prefix
+// changes every vector the model emits (embedding.VectorIdentity folds it into
+// the stored identity), so a key over the raw text would hand back a vector
+// embedded without it.
+//
+// Both go through the helpers Client.EmbedDocument and Client.EmbedQuery build
+// their requests from, rather than repeating the prefix here, so the harness
+// cannot drift into a vector space production never searches.
+func documentInput(text string) string { return embedding.PrefixedDocument(embedModel, text) }
+func queryInput(text string) string    { return embedding.PrefixedQuery(embedModel, text) }
+
+// EnsureBatch resolves every document into the cache, batching misses to
+// Ollama. texts are stored turns (or about to be stored), so each is embedded
+// in the document role. Questions must not be passed here: each is embedded
+// per search through EmbedQuery, and a question seeded into this batch would
+// be embedded as a document and cached under the query's own text — a vector
+// no search ever looks up.
 func (e *cachedEmbedder) EnsureBatch(ctx context.Context, texts []string) error {
+	inputs := make([]string, len(texts))
+	for i, t := range texts {
+		inputs[i] = documentInput(t)
+	}
+	return e.ensure(ctx, inputs)
+}
+
+// ensure resolves inputs already in their final, role-prefixed form: the cache
+// key and the Ollama payload are the same string, so a hit means "this exact
+// text was embedded in this exact role".
+func (e *cachedEmbedder) ensure(ctx context.Context, inputs []string) error {
 	var missing []string
 	seen := make(map[string]bool)
-	for _, t := range texts {
+	for _, t := range inputs {
 		h := hashContent(t)
 		if _, ok := e.cache[h]; ok || seen[h] {
 			continue
@@ -126,16 +157,29 @@ func (e *cachedEmbedder) EnsureBatch(ctx context.Context, texts []string) error 
 	return nil
 }
 
-// Embed returns the cached vector for text, resolving it remotely on a miss.
-func (e *cachedEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
-	if v, ok := e.cache[hashContent(text)]; ok {
+// EmbedDocument returns the cached vector for text that is stored and
+// searched over, resolving it remotely on a miss. The counterpart of
+// production's Client.EmbedDocument.
+func (e *cachedEmbedder) EmbedDocument(ctx context.Context, text string) ([]float32, error) {
+	return e.embedInput(ctx, documentInput(text))
+}
+
+// EmbedQuery returns the cached vector for a search query, resolving it
+// remotely on a miss. Only vectors from here may be compared against stored
+// ones — the counterpart of production's Client.EmbedQuery.
+func (e *cachedEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	return e.embedInput(ctx, queryInput(text))
+}
+
+func (e *cachedEmbedder) embedInput(ctx context.Context, input string) ([]float32, error) {
+	if v, ok := e.cache[hashContent(input)]; ok {
 		e.hits++
 		return v, nil
 	}
-	if err := e.EnsureBatch(ctx, []string{text}); err != nil {
+	if err := e.ensure(ctx, []string{input}); err != nil {
 		return nil, err
 	}
-	return e.cache[hashContent(text)], nil
+	return e.cache[hashContent(input)], nil
 }
 
 type ollamaEmbedRequest struct {

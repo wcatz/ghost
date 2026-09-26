@@ -295,7 +295,15 @@ are four, deliberately separate by caller:
 | may this stored vector enter a search? | `usableVectorEntries` | both vector scans (`SearchVector`, `SearchVectorAll`) |
 | may this stored vector act as a *query* vector? | `GetEmbedding` (returns nil) | the link worker and `ghost supersede`, which both search from a stored vector |
 | may this memory be compared at all yet? | `UnscannedEmbeddedMemoryIDs` | the link worker's queue, so a foreign row is neither paired across spaces nor marked scanned |
-| is this memory covered? | `EmbeddingStats` | `ghost mcp status` and `ghost_health`, which must not report full coverage mid-re-embed |
+| is this memory covered? | `EmbeddingStats` | `ghost mcp status` and `ghost_health`, which must not report full coverage mid-re-embed — and split the uncovered rows into stale (a vector under a retired identity) and unembedded (no vector at all), since only the first kind has something to rewrite |
+
+Rewriting a row under a new identity also clears the `link_scans` slot the
+memory earned in the old space (in `StoreEmbedding`, before the upsert), so the
+memory is re-queued for linking instead of keeping links built from
+similarities nothing will ever recompute; the failure ordering fails safe in
+both directions, so the delete and the upsert need no transaction. The
+foreign-vector warning in `usableVectorEntries` is likewise logged once per
+process rather than once per search.
 
 The query-side rules matter because the filter only guards the *rows*: a stale
 vector used as a query would be a cosine between two spaces, and the number it

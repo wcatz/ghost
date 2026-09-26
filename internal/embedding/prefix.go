@@ -112,3 +112,24 @@ func (p TaskPrefixes) prefixedQuery(text string) string {
 	}
 	return p.Query + text
 }
+
+// PrefixedDocument returns text exactly as it must reach Ollama to be embedded
+// in the document role for model: the model's document task prefix where the
+// family requires one, text unchanged otherwise. It is the package-level form
+// of Client.EmbedDocument for callers that do not hold a Client — the bench
+// harnesses embed through their own content-addressed cache — so they can
+// reproduce byte for byte what production sends instead of drifting into a
+// vector space production never searches.
+//
+// The prefixed text is also what those caches should be keyed on: the prefix
+// changes every vector the model emits (see VectorIdentity), so a key over the
+// raw text would hand back a vector embedded without it.
+func PrefixedDocument(model, text string) string {
+	return TaskPrefixesFor(model).prefixedDocument(text)
+}
+
+// PrefixedQuery is PrefixedDocument for the query role, and must be used for
+// anything used as a search query vector, for the same reason.
+func PrefixedQuery(model, text string) string {
+	return TaskPrefixesFor(model).prefixedQuery(text)
+}

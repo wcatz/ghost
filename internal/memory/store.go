@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -111,6 +112,15 @@ type Store struct {
 	// of tests) means no identity is configured: every recorded vector is
 	// searched and only the presence of a row matters.
 	embeddingIdentity string
+
+	// foreignWarned gates the warning usableVectorEntries logs when a search
+	// skips vectors recorded under a retired identity: it is claimed by the
+	// first such search, so the warning is logged once per process rather than
+	// once per search — a re-embed lasts many queries, and one line per query
+	// buries the state it reports. It is a pointer so ExplainSearch can hand
+	// its trace store the same gate (see explain.go): an explain run must not
+	// spend a second warning on rows the real search already reported.
+	foreignWarned *atomic.Bool
 }
 
 // SetOnSave registers a callback invoked after each successful memory save.
@@ -186,7 +196,7 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Store{db: db, logger: logger, demotionThreshold: DefaultDemotionThreshold}
+	return &Store{db: db, logger: logger, demotionThreshold: DefaultDemotionThreshold, foreignWarned: new(atomic.Bool)}
 }
 
 func (s *Store) queryDB() sqlQueryer {

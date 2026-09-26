@@ -175,31 +175,42 @@ func (s *Store) GetEmbedding(ctx context.Context, memoryID string) ([]float32, e
 	return bytesToFloat32s(blob), nil
 }
 
-// EmbeddingStats returns how many memories have embeddings versus the total
-// memory count, across all projects. Used by health/status diagnostics.
+// EmbeddingStats returns how many memories have embeddings, how many of those
+// embeddings are stale, and the total memory count, across all projects. Used
+// by health/status diagnostics.
 //
 // "Has an embedding" means "has one this process can search with": with a
 // vector identity configured, rows recorded under another one are counted as
 // not embedded, because a re-embed is still pending for them and reporting
 // them as covered is what would let `ghost mcp status` print a passing
 // coverage line while the vector leg returns nothing.
-func (s *Store) EmbeddingStats(ctx context.Context) (embedded, total int, err error) {
+//
+// Those stale rows are returned separately rather than folded into a single
+// gap, because the two halves of the gap are different diagnoses: stale rows
+// are work the re-embed worker has queued and will finish, while a row with no
+// vector at all has never been embedded — the state of a worker that never ran
+// or of an install whose embedding was only just enabled. Both are reported by
+// `ghost mcp status` and `ghost_health`.
+//
+// The three counts come from one statement so they describe one snapshot.
+// Three separate COUNTs could straddle a write and report embedded+stale >
+// total, which in a coverage line reads as corruption rather than as a race.
+func (s *Store) EmbeddingStats(ctx context.Context) (embedded, stale, total int, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	countQuery := `SELECT COUNT(*) FROM memory_embeddings`
-	args := []any{}
-	if s.embeddingIdentity != "" {
-		countQuery = `SELECT COUNT(*) FROM memory_embeddings WHERE model = ?`
-		args = []any{s.embeddingIdentity}
+	identity := s.embeddingIdentity
+	const countQuery = `
+		SELECT
+			(SELECT COUNT(*) FROM memory_embeddings WHERE ? = '' OR model = ?),
+			(SELECT COUNT(*) FROM memory_embeddings WHERE ? <> '' AND model <> ?),
+			(SELECT COUNT(*) FROM memories)
+	`
+	if err = s.db.QueryRowContext(ctx, countQuery, identity, identity, identity, identity).
+		Scan(&embedded, &stale, &total); err != nil {
+		return 0, 0, 0, fmt.Errorf("count embeddings: %w", err)
 	}
-	if err = s.db.QueryRowContext(ctx, countQuery, args...).Scan(&embedded); err != nil {
-		return 0, 0, fmt.Errorf("count embeddings: %w", err)
-	}
-	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories`).Scan(&total); err != nil {
-		return 0, 0, fmt.Errorf("count memories: %w", err)
-	}
-	return embedded, total, nil
+	return embedded, stale, total, nil
 }
 
 // LinkStats returns the number of valid links and link-scanned memories

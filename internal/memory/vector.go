@@ -32,8 +32,28 @@ func beforeHybridHydrate(ids []string) {
 // "<model>[:<dimensions>][+prefix]" string from embedding.VectorIdentity — and
 // is what vector search matches against the configured identity and the
 // embedding worker matches to decide a row needs rewriting.
+//
+// Rewriting a row under a different identity also retires the link scan the
+// memory earned in the old space: link_scans records that its neighbours were
+// compared in ONE vector space, and a scan slot that survives the change means
+// the memory is never scanned again — it keeps links nothing will ever rebuild,
+// feeding `ghost supersede` and the Obsidian graph forever. The delete runs
+// before the upsert only because it has to read the old model first; the
+// ordering fails safe in both directions, so no transaction is needed. If the
+// upsert then fails, the memory is merely re-queued for a scan it did not need,
+// which the linker repeats idempotently. If the delete fails, this returns
+// before touching the vector, so the state is exactly what it was.
 func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float32, model string) error {
 	blob := float32sToBytes(vec)
+
+	if _, err := s.db.ExecContext(ctx, `
+		DELETE FROM link_scans
+		WHERE memory_id = ? AND EXISTS (
+			SELECT 1 FROM memory_embeddings WHERE memory_id = ? AND model <> ?
+		)
+	`, memoryID, memoryID, model); err != nil {
+		return fmt.Errorf("invalidate link scan: %w", err)
+	}
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO memory_embeddings (memory_id, embedding, model)
@@ -209,20 +229,37 @@ func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []f
 	return scored, nil
 }
 
+// warnForeignOnce claims the store's foreign-vector warning for this process
+// and reports whether it may be logged. The first search to skip rows from a
+// retired identity wins the gate; every later search during the same re-embed
+// stays quiet, because one line per query buries the state it reports. A store
+// with no gate (a literal built without one) shares nothing with an explain
+// trace store and falls back to warning every time — the pre-gate behavior,
+// which is no worse than staying silent about a reconfiguration.
+func (s *Store) warnForeignOnce() bool {
+	return s.foreignWarned == nil || s.foreignWarned.CompareAndSwap(false, true)
+}
+
 // usableVectorEntries reads an open embeddings query and keeps only the rows
 // this search may compare against queryVec: a row whose recorded identity is
 // not the configured one belongs to another vector space (a model, dimension
 // or task-prefix change — see embedding.VectorIdentity), and one whose width
 // differs was written by a model that does not produce queryVec. Both are
-// skipped rather than scored, and both are surfaced: silently dropping them
-// turns a reconfiguration into "vector search found nothing" with no
-// explanation, and a reconfiguration is exactly when the operator is watching
-// the log.
+// skipped rather than scored, and neither is dropped silently: silently
+// dropping them turns a reconfiguration into "vector search found nothing"
+// with no explanation, and a reconfiguration is exactly when the operator is
+// watching the log.
 //
 // identity is passed in rather than read here: both callers hold the store's
 // read lock, and taking it again would risk the RWMutex recursive-read deadlock
 // documented at searchVector. An empty identity disables the identity check
 // (a store with no embedding model configured).
+//
+// The foreign-identity warning is logged once per process (warnForeignOnce)
+// rather than once per search: during a re-embed every search skips the same
+// rows, and a line per query buries the state it reports. The dimension
+// warning keeps its per-search reporting — it cannot repeat during a re-embed,
+// because the identity check above it takes those rows first.
 func (s *Store) usableVectorEntries(rows *sql.Rows, queryVec []float32, identity string) ([]vecEntry, error) {
 	var entries []vecEntry
 	foreign, foreignModel := 0, ""
@@ -258,8 +295,8 @@ func (s *Store) usableVectorEntries(rows *sql.Rows, queryVec []float32, identity
 		return nil, err
 	}
 	if s.logger != nil {
-		if foreign > 0 {
-			s.logger.Warn("vector search skipped embeddings from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded",
+		if foreign > 0 && s.warnForeignOnce() {
+			s.logger.Warn("vector search skipped embeddings from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded (reported once per process)",
 				"skipped", foreign, "usable", len(entries), "configured_identity", identity, "stored_identity", foreignModel)
 		}
 		if mismatched > 0 {

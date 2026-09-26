@@ -256,6 +256,38 @@ func TestTaskPrefixesForUnknownFamily(t *testing.T) {
 	}
 }
 
+// TestPrefixedHelpersMatchClient: callers with no Client of their own — the
+// bench harnesses, which embed through a content-addressed cache — build their
+// inputs with PrefixedDocument/PrefixedQuery, so those two have to be the
+// byte-for-byte inputs EmbedDocument/EmbedQuery send. A divergence would put
+// such a caller in a vector space production never searches while looking
+// correct to every test that only consulted the helper.
+func TestPrefixedHelpersMatchClient(t *testing.T) {
+	const text = "the WAL lives in the data directory"
+	for _, model := range []string{"nomic-embed-text:v1.5", "mxbai-embed-large"} {
+		rec := newEmbedRecorder(3)
+		c := NewClient(rec.server(t).URL, model, 3)
+		ctx := context.Background()
+
+		if _, err := c.EmbedDocument(ctx, text); err != nil {
+			t.Fatalf("%s EmbedDocument: %v", model, err)
+		}
+		if _, err := c.EmbedQuery(ctx, text); err != nil {
+			t.Fatalf("%s EmbedQuery: %v", model, err)
+		}
+		sent := rec.sent()
+		if len(sent) != 2 {
+			t.Fatalf("%s: sent %d inputs, want 2: %q", model, len(sent), sent)
+		}
+		if got, want := sent[0], PrefixedDocument(model, text); got != want {
+			t.Errorf("%s: EmbedDocument sent %q, PrefixedDocument says %q", model, got, want)
+		}
+		if got, want := sent[1], PrefixedQuery(model, text); got != want {
+			t.Errorf("%s: EmbedQuery sent %q, PrefixedQuery says %q", model, got, want)
+		}
+	}
+}
+
 // TestEmbedRejectsWrongDimensions keeps the dimension contract intact now that
 // the request body carries a prefix: a short vector is still an error, not a
 // silently stored row.
