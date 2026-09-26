@@ -109,6 +109,28 @@ func runLifecycle() {
 		recordFailure("reflect", mcpinit.NoLLMBackendError)
 	}
 
+	// Record the START for lifecycle.min_interval (#541): the stop hook reads
+	// this stamp to decide whether the next turn's spawn is inside the cooldown.
+	//
+	// Placed here, after every precondition above that can exit non-zero — a
+	// config file that does not parse, an unlocatable binary — because a run
+	// that dies before doing any work must not burn a 30m window, and because
+	// such a death precedes FinishLifecycleRun and so leaves no failure marker
+	// either. This is the silent-death class the marker exists to catch, and
+	// the stamp must not add to it.
+	//
+	// It is NOT conditional on holding the lock. A run turned away because
+	// another one holds it has already returned above; this one proceeds, and
+	// whether it held the lock or merely failed to take it, it is a real run
+	// that the next turn's cooldown should account for. A foreground
+	// `ghost lifecycle` writes it too, which is what a user retrying the alert's
+	// command wants.
+	//
+	// Best-effort: a missing stamp only costs one extra spawn.
+	if err := mcpinit.TouchLifecycleStart(projectName); err != nil {
+		fmt.Fprintf(os.Stderr, "lifecycle: warning: could not record the run start (%v)\n", err)
+	}
+
 	for _, ph := range lifecyclePhases(cfg, projectName, llmOK) {
 		phaseArgs := append([]string{}, ph.args...)
 		if source != "" {

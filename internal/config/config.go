@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
@@ -36,12 +37,72 @@ type Config struct {
 	CLI        CLIConfig        `koanf:"cli"`
 	Embedding  EmbeddingConfig  `koanf:"embedding"`
 	Reflection ReflectionConfig `koanf:"reflection"`
+	Lifecycle  LifecycleConfig  `koanf:"lifecycle"`
 	Linking    LinkingConfig    `koanf:"linking"`
 	Injection  InjectionConfig  `koanf:"injection"`
 	Search     SearchConfig     `koanf:"search"`
 	Obsidian   ObsidianConfig   `koanf:"obsidian"`
 	Routing    RoutingConfig    `koanf:"routing"`
 	Scratch    ScratchConfig    `koanf:"scratch"`
+}
+
+// The lifecycle cooldown (#541). Kept as a duration STRING in Config — the key
+// is written by a human in YAML — and resolved to a time.Duration at the point
+// of use, exactly as obsidian.interval is.
+const (
+	// defaultLifecycleMinInterval is the compiled value of
+	// lifecycle.min_interval. It is the string literal, because the defaults map
+	// and defaultConfig's hand-written mirror are compared by
+	// TestDefaultConfig_MatchesTheDefaultsMap and must carry the same text.
+	defaultLifecycleMinInterval = "30m"
+	// DefaultLifecycleMinInterval is that default as a duration, for callers
+	// that need the number rather than the key. TestDefaultLifecycleMinInterval_
+	// MatchesItsLiteral fails if the two ever disagree.
+	DefaultLifecycleMinInterval = 30 * time.Minute
+)
+
+// LifecycleConfig controls when the Stop hook may spawn the auto-consolidation
+// chain. It is a separate section from reflection.* on purpose: reflection.*
+// says WHICH phases run, this says HOW OFTEN.
+type LifecycleConfig struct {
+	// MinInterval is the shortest gap between two lifecycle STARTS for one
+	// project. The Stop hook fires after every turn, so without a cooldown each
+	// turn paid for a full reflect→resolve→supersede chain — issue #541 counted
+	// 543 runs in one lifecycle.log — even though reflect's input signature
+	// skipped the unchanged set most of the time.
+	//
+	// A Go duration string ("30m", "1h30m"); "0" (or any non-positive value)
+	// disables the cooldown and restores the old every-turn behavior. The
+	// compiled default is 30m: long enough that a chatty session consolidates
+	// about hourly, short enough that a project that saves memories in bursts
+	// still consolidates while it is being worked on.
+	MinInterval string `koanf:"min_interval"`
+}
+
+// MinIntervalDuration resolves MinInterval to the cooldown to enforce, for a
+// caller that has a Config value in hand.
+//
+// A value that cannot be read falls back to the compiled default, NOT to zero.
+// The distinction is the whole reason this lives in config rather than in the
+// hook: zero means "no cooldown", so guessing it for a typo would silently switch
+// off the guard the user asked for — the same near-zero-Config trap
+// defaultConfig exists to prevent. A blank value is unset, not a mistake, and is
+// silent. A non-positive interval means "off", matching scratch.max_bytes.
+func (c LifecycleConfig) MinIntervalDuration() time.Duration {
+	raw := strings.TrimSpace(c.MinInterval)
+	if raw == "" {
+		return DefaultLifecycleMinInterval
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		warnf("lifecycle.min_interval: cannot read %q as a duration — using %s (set it to 0 to disable the cooldown)", raw, DefaultLifecycleMinInterval)
+		return DefaultLifecycleMinInterval
+	}
+	if d < 0 {
+		warnf("lifecycle.min_interval: %s is negative; treating it as 0 (no cooldown)", d)
+		return 0
+	}
+	return d
 }
 
 // DefaultScratchMaxBytes is the compiled per-root scratch budget: 512 MiB.
@@ -191,6 +252,7 @@ var defaults = map[string]interface{}{
 	"reflection.auto_reflect":                  false,
 	"reflection.lifecycle_timeout_minutes":     60,
 	"reflection.consolidation_timeout_minutes": 10,
+	"lifecycle.min_interval":                   defaultLifecycleMinInterval,
 	"cli.claude_binary":                        "",
 	"cli.opencode_binary":                      "",
 	"cli.codex_binary":                         "",
@@ -423,6 +485,7 @@ func defaultConfig() *Config {
 			ConsolidationTimeoutMinutes: 10,
 			LifecycleTimeoutMinutes:     60,
 		},
+		Lifecycle: LifecycleConfig{MinInterval: defaultLifecycleMinInterval},
 		Linking: LinkingConfig{
 			Enabled:           true,
 			Threshold:         0.70,
@@ -779,6 +842,10 @@ var envOverrides = []envOverride{
 	{"GHOST_REFLECTION_AUTO_SUPERSEDE", "reflection.auto_supersede", boolValue},
 	{"GHOST_REFLECTION_LIFECYCLE_TIMEOUT_MINUTES", "reflection.lifecycle_timeout_minutes", intValue},
 	{"GHOST_REFLECTION_CONSOLIDATION_TIMEOUT_MINUTES", "reflection.consolidation_timeout_minutes", intValue},
+	// GHOST_LIFECYCLE_MIN_INTERVAL: the generic transformer replaces every
+	// underscore with a dot, so it would produce lifecycle.min.interval and miss
+	// the key entirely.
+	{"GHOST_LIFECYCLE_MIN_INTERVAL", "lifecycle.min_interval", stringValue},
 	{"GHOST_OLLAMA_URL", "embedding.ollama_url", stringValue},
 	{"GHOST_ROUTING_DEFAULT_PROJECT", "routing.default_project", stringValue},
 	{"GHOST_SEARCH_MIN_SIMILARITY", "search.min_similarity", floatValue},

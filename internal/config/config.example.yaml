@@ -83,6 +83,21 @@
 #                                     # minutes on a CLI harness, and the kill is fatal on the
 #                                     # autonomous path (--require-llm has no fallback tier).
 
+# --- How often the chain runs ---
+# The Stop hook fires after every turn, so `min_interval` bounds how often a
+# project's chain may START (default 30m). Without it, a chatty session paid for
+# a full reflect/resolve/supersede chain per turn. The record is a per-project
+# file in the data dir, lifecycle-<project>.last, whose mtime is the last start;
+# the Stop hook only reads it, the spawned `ghost lifecycle` writes it. Every
+# unknown reads as "run", and a skip appends one line to lifecycle.log rather
+# than printing to the editor's stderr. A value that is not a duration is
+# reported and falls back to the default — never to 0, which means "no
+# cooldown".
+# lifecycle:
+#   min_interval: 30m               # 0 = no cooldown, i.e. every turn (the old
+#                                    # behavior). Negative behaves the same.
+#                                    # (env: GHOST_LIFECYCLE_MIN_INTERVAL)
+
 # --- Obsidian Vault Mirror ---
 # One-way Markdown mirror of memories, decisions, and tasks
 # (ghost obsidian export|sync). Empty vault_dir means ~/Documents/GhostVault.

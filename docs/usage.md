@@ -136,6 +136,8 @@ reflect → resolve → supersede
 
 The phases are disabled by default. When enabled, each phase has a timeout and failures are logged without blocking the hook. The lifecycle log is stored in Ghost's data directory. Keep automatic lifecycle work off until you understand the maintenance model and have a backup strategy.
 
+Because the Stop hook fires after every turn, a project consolidates at most once per `lifecycle.min_interval` (default `30m`, `0` to disable) — so enabling the phases does not mean a full `reflect → resolve → supersede` chain per turn. A skip is recorded as one line in `lifecycle.log`; see the [configuration reference](configuration.md#how-often-the-chain-runs).
+
 ## Obsidian vault mirror
 
 Ghost can export memories, decisions, and tasks as Markdown for browsing in Obsidian:

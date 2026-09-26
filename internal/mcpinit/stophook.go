@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
@@ -201,8 +202,9 @@ func safeProjectIDComponent(id string) bool {
 // and lost resolved_at stamps. One PID file now guards all three phases.
 //
 // Opt in per phase via reflection.auto_reflect / auto_resolve / auto_supersede
-// (all default false). Every failure path returns silently: this must never
-// block or fail the stop hook.
+// (all default false), and bound how often the chain may start with
+// lifecycle.min_interval (default 30m, 0 to disable). Every failure path returns
+// silently: this must never block or fail the stop hook.
 func spawnLifecycleIfConfigured(cwd, source string) {
 	if cwd == "" {
 		return
@@ -273,6 +275,15 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 	// one child wins the claim and the other exits.
 	pidPath := filepath.Join(dataDir, "lifecycle-"+projectID+".pid")
 	if isAlive(pidPath) {
+		return
+	}
+	// Cooldown (#541): the hook fires after every turn, so without this a chatty
+	// session paid for a full chain per turn. Read here, after the already-running
+	// guard (which is the stronger, liveness-based one) and before the spawn log
+	// is opened; a skip leaves one line in lifecycle.log.
+	minInterval := cfg.Lifecycle.MinIntervalDuration()
+	if skip, since := lifecycleCooldownActive(dataDir, projectID, minInterval, time.Now()); skip {
+		logLifecycleCooldownSkip(dataDir, projectID, since, minInterval)
 		return
 	}
 
