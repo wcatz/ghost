@@ -69,6 +69,10 @@ Search uses SQLite FTS5 by default. When local embeddings are available, Ghost c
 
 Ranking is category-aware. Preferences, conventions, and facts do not decay. Architecture and patterns use a longer decay scale; decisions, gotchas, and dependencies use a shorter one. Pinned memories are always treated as stable. Decay changes ordering, not whether a memory can be found.
 
+Ranking is also status-aware. A resolved memory, and a `_global` row when you search a specific project, are multiplied by 0.5 before the result window is chosen. With Reciprocal Rank Fusion at k=60 that effectively ranks them below every live candidate the search fetched, not merely below one equally good match. Like decay it is a score multiplier rather than a lookup filter — no query excludes a memory from the candidate pool — but unlike decay it is applied before the window is cut: a demoted memory drops out when the window fills with rows that outscore its halved score — or when the keyword reservation hands its slot to a top-`limit/5` keyword hit, even one that scores below it — and it is never let in by that reservation, so a demoted keyword hit has to make that cut on its demoted score. It is still the answer when nothing live outranks it. Cross-project search does not demote `_global` rows. `explain: true` reports the factor per row as `status_factor`.
+
+Demotion only reorders what the legs already fetched: each leg pulls `limit*2` rows from the project plus `_global`, and `_global` rows count against that budget, so a project with fewer matches than the limit still gets `_global` rows filling the rest — demoted, but present. Session-start injection is unaffected by all of this: it ranks in SQL on two separate paths — `loadSessionContext` (`internal/mcpinit/hook.go`) builds the session-start digest and `Store.GetTopMemories` backs the MCP tool surface — neither reaches fusion, and both already filter resolved rows.
+
 ## Tasks
 
 Tasks are work items that should survive across sessions. They have a title, optional description, priority, and one of these statuses:
