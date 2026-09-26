@@ -216,13 +216,36 @@ func TestModelFamily(t *testing.T) {
 		{"nomic-embed-text:v1.5", "nomic-embed-text"},
 		{"nomic-embed-text", "nomic-embed-text"},
 		{"nomic-embed-text:latest", "nomic-embed-text"},
+		// Fully-qualified spellings are the same weights, and a family table
+		// that missed them would skip the prefixes for a model the user
+		// configured by its registry name.
+		{"registry.ollama.ai/library/nomic-embed-text:v1.5", "nomic-embed-text"},
+		{"library/nomic-embed-text", "nomic-embed-text"},
+		{"mxbai-embed-large:335M", "mxbai-embed-large"},
 		{"", ""},
 		{":v1", ""},
+		{"/nomic-embed-text:v1", "nomic-embed-text"},
 	}
 	for _, tc := range tests {
 		if got := ModelFamily(tc.model); got != tc.want {
 			t.Errorf("ModelFamily(%q) = %q, want %q", tc.model, got, tc.want)
 		}
+	}
+}
+
+// TestTaskPrefixesForQualifiedNomicName: the prefixes are keyed by family, so a
+// registry-qualified name that resolved to a different family would embed
+// asymmetric queries unprefixed and stamp an identity with no prefix marker —
+// the fixture drift this whole mechanism exists to prevent, arrived at from the
+// other direction.
+func TestTaskPrefixesForQualifiedNomicName(t *testing.T) {
+	const model = "registry.ollama.ai/library/nomic-embed-text:v1.5"
+	p := TaskPrefixesFor(model)
+	if p.Document != NomicTaskDocument || p.Query != NomicTaskQuery {
+		t.Errorf("TaskPrefixesFor(%q) = %+v, want the nomic pair", model, p)
+	}
+	if got, want := VectorIdentity(model, 768), "registry.ollama.ai/library/nomic-embed-text:v1.5:768+prefix"; got != want {
+		t.Errorf("VectorIdentity(%q) = %q, want %q", model, got, want)
 	}
 }
 

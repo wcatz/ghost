@@ -62,20 +62,44 @@ vector-only      0.506   0.694   0.764   0.885   0.801
 hybrid           0.520   0.712   0.763   0.902   0.818
 ```
 
-The `fts-only` row is fixture-independent (it never reads a vector). The
-`vector-only` and `hybrid` rows come from the committed `embeddings.json`
-fixture, which is produced by `nomic-embed-text:v1.5` **with its task
-prefixes** — `search_document: ` on each memory, `search_query: ` on each query,
-the same two the production client applies. Prefix-free embedding is the
-mistake that fixture used to carry; regenerating it moved hybrid NDCG@10
-0.814 → 0.818 and R@5 0.697 → 0.712, and vector-only NDCG@10 0.795 → 0.801 with
-R@1 0.484 → 0.506. Vector-only R@5 gives back 0.014 (0.708 → 0.694) while its
-top-of-list metrics all improve: the prefixes make the two halves of the space
-more separable, which sharpens the head of the pure vector ranking at some cost
-to its deep tail. Hybrid — the shipped path — improves R@1, R@5, MRR@10 and
-NDCG@10, and gives back 0.014 on R@10 (0.777 → 0.763): the sharper vector head
-takes window slots the deep tail used to hold, and fusion does not fully
-replace them. The two gated metrics, R@5 and NDCG@10, both improve.
+Every row above was measured on this build from the committed dataset and
+fixture, and reproduces exactly with `go run ./cmd/ghost bench` (or
+`go test ./internal/bench -run TestBenchDatasetReport -v`). Two things moved
+when the fixture was regenerated, and they need separating, because only one of
+them is the fixture's doing:
+
+- **The `vector-only` and `hybrid` rows come from the committed
+  `embeddings.json`**, which is produced by `nomic-embed-text:v1.5` **with its
+  task prefixes** — `search_document: ` on each memory, `search_query: ` on each
+  query, the same two the production client applies. Prefix-free embedding is
+  the mistake that fixture used to carry. Measured against the same build with
+  the pre-regeneration fixture, the prefixes moved hybrid NDCG@10
+  0.814 → 0.818 and R@5 0.697 → 0.712, and vector-only NDCG@10 0.795 → 0.801
+  with R@1 0.484 → 0.506. Vector-only R@5 gives back 0.014 (0.708 → 0.694)
+  while its top-of-list metrics all improve: the prefixes make the two halves
+  of the space more separable, which sharpens the head of the pure vector
+  ranking at some cost to its deep tail. Hybrid — the shipped path — improves
+  R@1, R@5, MRR@10 and NDCG@10, and gives back 0.014 on R@10
+  (0.777 → 0.763): the sharper vector head takes window slots the deep tail
+  used to hold, and fusion does not fully replace them. The two gated metrics,
+  R@5 and NDCG@10, both improve.
+- **The `fts-only` row moved by 0.002–0.008 and had nothing to do with the
+  fixture** — it never reads a vector. It is in this diff because the table it
+  replaces had drifted from the committed dataset: it published
+  `fts-only 0.469 0.623 0.689 0.837 0.748` where the committed `memories.jsonl`
+  and `queries.jsonl` produce `0.467 0.626 0.697 0.836 0.749` (measured on
+  `origin/main` with the old fixture, so the drift predates the regeneration).
+  The vector rows of that published table were stale for the same reason, which
+  is why the "before" numbers quoted above are a re-measurement rather than the
+  published ones: a delta against a table no build produces would be meaningless.
+
+To regenerate the fixture after a dataset change, embed `memories.jsonl` and
+`queries.jsonl` through `internal/embedding`'s client — `EmbedDocument` for the
+memory keys and `EmbedQuery` for the query names, at the configured
+`embedding.dimensions` — and write the result as a single JSON object of
+key → vector, keys sorted. Going through the client is what keeps the fixture
+in the same space as production, prefixes and all; a fixture built by hand from
+raw `/api/embed` calls drifts the moment either side changes.
 
 To regenerate the fixture after a dataset change, embed `memories.jsonl` and
 `queries.jsonl` through `internal/embedding`'s client — `EmbedDocument` for the

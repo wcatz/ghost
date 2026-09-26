@@ -42,10 +42,20 @@ var taskPrefixesByFamily = map[string]TaskPrefixes{
 	"nomic-embed-text": {Document: NomicTaskDocument, Query: NomicTaskQuery},
 }
 
-// ModelFamily returns the family of an Ollama model name: everything before the
-// tag separator, so "nomic-embed-text:v1.5" and "nomic-embed-text" are one
-// family. A name that is only a tag has no family.
+// ModelFamily returns the family of an Ollama model name: the last path
+// element, tag stripped. Ollama accepts a fully-qualified name
+// ("registry.ollama.ai/library/nomic-embed-text:v1.5", "library/nomic-embed-text")
+// as readily as the bare one, and a family keyed on the raw string would miss
+// every fully-qualified spelling of the very models the table is meant to
+// cover — the prefixes would be skipped and the identity would record no
+// prefix, silently. So the qualifier goes first, then the tag:
+// "nomic-embed-text:v1.5", "nomic-embed-text" and "library/nomic-embed-text:latest"
+// are one family. A name that is only a qualifier or a tag has no family.
 func ModelFamily(model string) string {
+	if i := strings.LastIndexByte(model, '/'); i >= 0 {
+		model = model[i+1:]
+	}
+	model = strings.TrimPrefix(model, "library/")
 	if i := strings.IndexByte(model, ':'); i >= 0 {
 		return model[:i]
 	}
