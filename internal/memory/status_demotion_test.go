@@ -9,12 +9,12 @@ import (
 // Issue #559: `ghost_memory_search` ranked resolved memories and unrelated
 // `_global` rows equally with live project memories. The fix is a
 // multiplicative demotion applied inside the fusion seam, before the window
-// cut, so a comparable live project memory both outranks them and takes the
+// cut, so a live project memory both outranks them and takes the
 // slot a raw-score cut would have given them. Nothing here filters by rule —
 // the demotion only scales a score — so a demoted row's fate is the window's
 // ordinary rank question: TestResolvedMemoryStaysSearchable pins the case
 // where it is the only match and must come back, TestStatusDemotionOwnsTheWindowCut
-// the case where a comparable live row takes its slot instead.
+// the case where a live row takes its slot instead.
 //
 // Every case below gives the demoted row the *better* raw standing (identical
 // wording, higher importance, so FTS lists it first), which makes the expected

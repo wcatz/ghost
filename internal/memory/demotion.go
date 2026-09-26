@@ -98,8 +98,12 @@ func DemotionPenalties(ctx context.Context, db sqlQueryer, ids []string, pinned 
 // (ExplainSearchScoped) read the same constants through one function.
 const (
 	// resolvedDemotionFactor halves a resolved row: the resolve verdict means
-	// "stop surfacing this first", not "forget it", so it must lose to a
-	// comparable live memory and still win when nothing better matched.
+	// "stop surfacing this first", not "forget it". With RRF k=60 every fused
+	// score sits in a band of a few thousandths — a rank-1 two-leg hit is
+	// 0.3/61 + 0.7/61 ≈ 0.0164 — so halving lands the row at ≈ 0.0082, under
+	// the 0.7/80 ≈ 0.0088 floor of the deepest vector-leg row in a default
+	// window: effectively below the live pool rather than below one
+	// comparable neighbour, and still the answer when nothing live matched.
 	resolvedDemotionFactor = 0.5
 	// globalDemotionFactor halves a _global row in a project-scoped search:
 	// shared rows enter every project's legs, so without this they pad a

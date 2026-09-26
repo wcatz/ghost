@@ -171,11 +171,29 @@ row, and a `_global` row when a specific project is being searched, score
 too — a live project memory a raw-score cut would have lost to a demoted row
 takes that slot. It only ever scales, so the demotion itself never excludes a
 row: whether a demoted row comes back is the window's ordinary question of
-rank, not a filter. Before decay reorders the surviving window, a demoted row
-still leads whenever no undemoted row comes within the factor of it;
-otherwise a comparable live row takes its place. That is what keeps resolved
+rank, not a filter. With RRF k=60 the factor effectively ranks a demoted row
+below every live candidate in the pool rather than below one comparable
+neighbour: every fused score lives in a band of a few thousandths — the best
+any row can earn is a rank-1 hit in both legs, 0.3/61 + 0.7/61 ≈ 0.0164 — so
+halving one lands at ≈ 0.0082, under the ≈ 0.0088 that the deepest vector-leg
+row in a default `limit`-10 window still scores and under the 0.0125 of the
+deepest row in a keyword-only search. The only live rows a demoted leader can
+still outrank are ones the vector leg never fetched (no embedding yet), whose
+keyword-only score is capped at 0.3/61 ≈ 0.0049. That is what keeps resolved
 memories and shared rules findable while stopping them from leading every
-result. A cross-project
+result.
+
+The demotion only reorders what the legs already fetched: each leg pulls
+`limit*2` rows from the project *plus* `_global`, so `_global` rows count
+against that budget and neither leg drops them. When a project matches fewer
+rows than the limit, the demoted `_global` rows are the only candidates left
+and they fill the remainder — demotion decides which fetched rows lead, never
+which rows are eligible. Session-start injection is outside all of this:
+`GetTopMemories` never reaches fusion — it ranks in SQL — and its query
+already filters `resolved_at IS NULL`, so no status factor changes what is
+injected.
+
+A cross-project
 search leaves `_global` undemoted (there is no project whose own memories it
 could be padding), and explain mode reports the factor per row
 as `status_factor`, computed by the same `statusDemotionFactor` the ranking
@@ -189,8 +207,13 @@ therefore outranked the best keyword match every time, and an exact identifier
 match could never reach the results, which is the case FTS exists for.
 
 So the best `limit/5` keyword hits the vector leg did **not** retrieve are
-guaranteed a place in the window, evicting the weakest admitted rows for them.
-Position is left to the fused score: admission is the defect, and the stronger
+guaranteed a place in the window, evicting the weakest admitted rows for them
+— unless the hit's status factor is below 1. The reservation reads raw
+keyword rank while the demotion writes the fused score, so reserving a
+demoted `_global` or resolved rank-1 hit would hand back exactly the slot the
+factor had just taken from it; such a row still enters on its demoted score
+like any other candidate. Position is left to the fused score: admission is
+the defect, and the stronger
 interventions were built and measured against the built-in dataset first.
 Reordering the selected slice does nothing beyond admission, because
 `decayRank` re-sorts by score on the way out. Flooring a reserved hit's score
