@@ -139,6 +139,62 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"OK"}}'
 	}
 }
 
+// TestOpenCodeClient_SessionStoreStaysInScratchRoot pins the #588 isolation:
+// the lifecycle child must never see the user's XDG_DATA_HOME, because that
+// is where `opencode session list` reads the session store — a child pointed
+// at it files every titled "[ghost]" run into the user's session list (6,844
+// measured on one workstation before the fix). The fake binary refuses to run
+// unless both HOME and XDG_DATA_HOME are inside the scratch root, writes the
+// session file OpenCode would write under the data dir it sees, and reports
+// that path back; the test asserts the reported path is inside the scratch
+// root and that the temp home's own store was never created, let alone
+// written to.
+func TestOpenCodeClient_SessionStoreStaysInScratchRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires a POSIX shell")
+	}
+	bin := fakeOpenCodeBinary(t, `
+case "$HOME" in
+  "$GHOST_SCRATCH_DIR"/*) ;;
+  *) echo "HOME not inside the scratch root: $HOME" >&2; exit 1;;
+esac
+case "$XDG_DATA_HOME" in
+  "$GHOST_SCRATCH_DIR"/*) ;;
+  *) echo "XDG_DATA_HOME not inside the scratch root: $XDG_DATA_HOME" >&2; exit 1;;
+esac
+mkdir -p "$XDG_DATA_HOME/opencode/storage/session" || exit 1
+printf '%s\n' '{}' > "$XDG_DATA_HOME/opencode/storage/session/ses_ghost.json" || exit 1
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$XDG_DATA_HOME"'"}}'
+`)
+	// fakeOpenCodeBinary pinned its own scratch root first; pin the one this
+	// test asserts against, so the parent can compare against the same path
+	// the child reports.
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	// A temp home with the default XDG data path under it: nothing real is at
+	// risk, and a child that leaked into it would leave the store behind.
+	home := t.TempDir()
+	userData := filepath.Join(home, ".local", "share")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_DATA_HOME", userData)
+
+	c := &OpenCodeClient{binary: bin}
+	dataDir, _, err := c.Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if !strings.HasPrefix(dataDir, root+string(os.PathSeparator)) {
+		t.Errorf("child XDG_DATA_HOME = %q, want it inside the scratch root %q", dataDir, root)
+	}
+	if strings.HasPrefix(dataDir, home) {
+		t.Errorf("child XDG_DATA_HOME = %q is inside the user's home %q", dataDir, home)
+	}
+	if _, err := os.Stat(userData); !os.IsNotExist(err) {
+		t.Errorf("the user's data dir %s must stay untouched (stat err=%v)", userData, err)
+	}
+}
+
 // TestOpenCodeClient_ModelFlagFromEnv: when GHOST_OPENCODE_MODEL is set the
 // subprocess invocation must carry `-m <model>` so callers can pin the model
 // (e.g. deepseek) despite opencode's scrubbed config dir.
