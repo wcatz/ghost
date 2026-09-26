@@ -461,8 +461,10 @@ func advancesIndex(indexed map[string]bool, cc *ast.CaseClause) bool {
 }
 
 // indexExprIdents returns every identifier appearing inside an IndexExpr
-// under n — the identifiers that actually index something, i.e. the loop
-// variables a parser advances.
+// under n — both the indexed slice (`args` in `args[i]`) and the index
+// expression's variables, i.e. the names a parser advances or reslices.
+// advancesIndex needs the slice name too: `args = args[1:]` matches on
+// indexed[lhs.Name], where lhs is the slice, not the index.
 func indexExprIdents(n ast.Node) map[string]bool {
 	ids := map[string]bool{}
 	ast.Inspect(n, func(m ast.Node) bool {
