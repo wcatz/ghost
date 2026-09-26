@@ -44,7 +44,7 @@ func setHarnessPolicyParentEnv(t *testing.T) {
 	}
 }
 
-func TestConfigureOpenCodeIsolationWritesDenyConfig(t *testing.T) {
+func TestConfigureOpenCodeIsolationWritesAskConfig(t *testing.T) {
 	dir := t.TempDir()
 	cmd := &exec.Cmd{
 		Dir: dir,
@@ -55,7 +55,7 @@ func TestConfigureOpenCodeIsolationWritesDenyConfig(t *testing.T) {
 			"OPENCODE_API_KEY=opencode-key",
 		},
 	}
-	if err := configureOpenCodeIsolation(cmd); err != nil {
+	if err := configureOpenCodeIsolation(cmd, openCodeAskConfig); err != nil {
 		t.Fatalf("configureOpenCodeIsolation: %v", err)
 	}
 	if got := envValue(cmd.Env, "HOME"); got != filepath.Join(dir, "home") {
@@ -128,7 +128,7 @@ func TestConfigureOpenCodeIsolationCopiesAuthFile(t *testing.T) {
 
 	dir := t.TempDir()
 	cmd := &exec.Cmd{Dir: dir, Env: []string{"XDG_DATA_HOME=" + sourceRoot, "HOME=" + filepath.Join(sourceRoot, "home")}}
-	if err := configureOpenCodeIsolation(cmd); err != nil {
+	if err := configureOpenCodeIsolation(cmd, openCodeAskConfig); err != nil {
 		t.Fatalf("configureOpenCodeIsolation: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "opencode-data", "opencode", "auth.json"))
@@ -341,6 +341,27 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}'
 	}
 	if text != "KEEP" {
 		t.Fatalf("stdout = %q", text)
+	}
+}
+
+// TestOpenCodeV1ClientKeepsDenyPolicy: ask-and-decline is verified only for
+// opencode V2's non-interactive run, so a V1 binary keeps the deny-all policy.
+func TestOpenCodeV1ClientKeepsDenyPolicy(t *testing.T) {
+	setHarnessPolicyParentEnv(t)
+	bin := fakeHarnessPolicyBinary(t, "opencode", `
+if [ "$1" = "--version" ]; then
+  printf '%s\n' 'opencode v1.14.0'
+  exit 0
+fi
+grep -q '"\*"[[:space:]]*:[[:space:]]*"deny"' "$OPENCODE_CONFIG" || { echo "V1 deny config missing" >&2; exit 1; }
+if grep -q '"ask"' "$OPENCODE_CONFIG"; then echo "V1 got the ask policy" >&2; exit 1; fi
+case "$OPENCODE_CONFIG_CONTENT" in *'"deny"'*) ;; *) echo "V1 config content is not deny" >&2; exit 1;; esac
+case " $* " in *" --pure "*) ;; *) echo "missing --pure" >&2; exit 1;; esac
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}'
+`)
+
+	if _, _, err := (&OpenCodeClient{binary: bin}).Reflect(context.Background(), "prompt"); err != nil {
+		t.Fatalf("Reflect: %v", err)
 	}
 }
 
