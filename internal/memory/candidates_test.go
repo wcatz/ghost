@@ -172,9 +172,8 @@ func TestCandidatesReturnsUntrimmedWidenedSet(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	var ids []string
 	for i := range 12 {
-		ids = append(ids, makeMemory(t, s, "vector search window candidate number "+string(rune('a'+i))))
+		makeMemory(t, s, "vector search window candidate number "+string(rune('a'+i)))
 	}
 	req := candidateRequest("vector search window candidate", 3, time.Now().UTC())
 
@@ -414,7 +413,7 @@ func TestCandidatesCarriesScoringFacts(t *testing.T) {
 	if row.Base <= 0 {
 		t.Errorf("base = %v, want a positive fused score", row.Base)
 	}
-	if row.Memory.ID != hit || row.Memory.Content == "" {
+	if row.ID != hit || row.Content == "" {
 		t.Error("candidate does not carry the hydrated memory")
 	}
 	if byID[miss].VectorScore <= 0 {

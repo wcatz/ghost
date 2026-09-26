@@ -6,13 +6,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// provenanceMultiplier is stage 4's weight. It ships pinned at 1.0: confidence
-// is writable today and may be non-NULL on existing rows, so a multiplier that
-// changed the order would change results with no measured justification behind
-// it. Shipping the stage with the decision recorded is what makes a later
-// change a one-line, measured one.
-const provenanceMultiplier = 1.0
-
 // pipeline is the working state the stages share. Stages run in the order of
 // the stages slice and communicate only through it, so a new stage cannot
 // quietly depend on one that happens to run before it.
@@ -143,14 +136,23 @@ func runPredicates(p *pipeline) {
 	p.trace.record(stagePredicates, in, len(kept), dropped, false)
 }
 
-// runProvenance is stage 4: the multiplier is pinned at 1.0 and the decision is
-// recorded for every row. Confidence is copied, not applied, so a caller can
-// already see what a future multiplier would act on.
+// provenanceWeight is stage 4's multiplier, as the trace records it: pinned, so
+// confidence is copied rather than scored. Confidence is writable today and may
+// be non-NULL on existing rows, so a multiplier that changed the order would
+// change results with no measured justification behind it. Shipping the stage
+// with the decision recorded is what makes a later change a one-line, measured
+// one — a single weight applied where ProvenanceContribution is computed.
+const provenanceWeight = "1.0"
+
+// runProvenance is stage 4: the weight is pinned and the decision is recorded
+// for every row, so a caller can already see what a future multiplier would act
+// on. Both contributions are zero while the weight is 1.0, which is what makes a
+// seeded confidence value unable to change the order.
 func runProvenance(p *pipeline) {
 	for id, sig := range p.trace.Signals {
 		sig.Confidence = p.confidenceOf(id)
 		sig.ConfidenceContribution = 0
-		sig.ProvenanceWeight = "1.0"
+		sig.ProvenanceWeight = provenanceWeight
 		sig.ProvenanceContribution = 0
 		p.trace.Signals[id] = sig
 	}
