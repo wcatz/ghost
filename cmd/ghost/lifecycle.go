@@ -21,6 +21,18 @@ import (
 	"github.com/wcatz/ghost/internal/supersede"
 )
 
+// lifecycleUsage is the help for the internal `ghost lifecycle` subcommand:
+// stderr for its usage error, stdout for -h/--help (see handleHelp).
+const lifecycleUsage = `Usage: ghost lifecycle --project <name> [--source <src>]
+
+Internal subcommand spawned by the Stop hook: runs the enabled
+auto-consolidation phases — reflect, then resolve, then supersede — for one
+project in order, in a single process. Not the normal way to start
+maintenance; run ghost reflect <project> (or resolve/supersede) by hand.
+A positional project is accepted, but --project takes the next argument
+verbatim, so dash-prefixed names work.
+`
+
 // runLifecycle runs the enabled auto-consolidation phases for one project, in
 // order, inside a single process: reflect (which rewrites memories), then
 // resolve (which stamps resolved_at), then supersede (which links memories).
@@ -431,21 +443,11 @@ func parseReflectArgs(args []string) (reflectArgs, error) {
 	return p, nil
 }
 
-// runReflect manually triggers memory consolidation for a project.
-// Defaults to dry-run (preview only). Use --apply to save results.
-// Use --restore to undo the last consolidation from snapshot.
-func runReflect() {
-	parsed, parseErr := parseReflectArgs(os.Args[2:])
-	if parseErr != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
-		os.Exit(1)
-	}
-	projectName := parsed.project
-	tierValue := parsed.tier
-	source := parsed.source
-	apply, restore, requireLLM, allowDrops, skipUnchanged := parsed.apply, parsed.restore, parsed.requireLLM, parsed.allowDrops, parsed.skipUnchanged
-	if projectName == "" {
-		fmt.Fprintln(os.Stderr, `Usage: ghost reflect <project> [flags]
+// reflectUsage is the help for `ghost reflect`: stderr when the project comes
+// out empty (a usage error, exit 1), stdout for -h/--help (help is a
+// question, not an error, exit 0 — see handleHelp). One text for both, so the
+// two can never drift.
+const reflectUsage = `Usage: ghost reflect <project> [flags]
 
 Flags:
   --tier string   Consolidation tier: auto, cli, opencode, sqlite (default "auto")
@@ -461,7 +463,24 @@ Flags:
                    the environment and process ancestry); an undetectable
                    caller is an error. Ignored by explicit --tier cli/opencode/sqlite.
   --project string Project name; an alternative to the positional form that
-                   takes the next argument verbatim, so dash-prefixed names work.`)
+                   takes the next argument verbatim, so dash-prefixed names work.
+`
+
+// runReflect manually triggers memory consolidation for a project.
+// Defaults to dry-run (preview only). Use --apply to save results.
+// Use --restore to undo the last consolidation from snapshot.
+func runReflect() {
+	parsed, parseErr := parseReflectArgs(os.Args[2:])
+	if parseErr != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
+		os.Exit(1)
+	}
+	projectName := parsed.project
+	tierValue := parsed.tier
+	source := parsed.source
+	apply, restore, requireLLM, allowDrops, skipUnchanged := parsed.apply, parsed.restore, parsed.requireLLM, parsed.allowDrops, parsed.skipUnchanged
+	if projectName == "" {
+		fmt.Fprint(os.Stderr, reflectUsage)
 		os.Exit(1)
 	}
 
@@ -1043,20 +1062,10 @@ func parseSupersedeArgs(args []string) (project, source string, apply bool, thre
 	return project, source, apply, threshold, nil
 }
 
-// runSupersede implements `ghost supersede <project> [--apply]` — the creation
-// half of staleness-aware ranking. It proposes newer→older 'supersedes' links
-// over the project's live memories (cosine-similar candidates, CLI-harness
-// confirmed) and, with --apply, writes them. Dry-run by default. Re-runnable:
-// it self-heals after `ghost reflect` cascade-deletes links. Consumed by
-// search only when SupersedeDemote is set. See docs/benchmarks.md Phase 3.
-func runSupersede() {
-	projectName, source, apply, threshold, parseErr := parseSupersedeArgs(os.Args[2:])
-	if parseErr != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
-		os.Exit(1)
-	}
-	if projectName == "" {
-		fmt.Fprintln(os.Stderr, `Usage: ghost supersede <project> [flags]
+// supersedeUsage is the help for `ghost supersede`: stderr when the project
+// comes out empty (a usage error, exit 1), stdout for -h/--help (see
+// handleHelp). One text for both, so the two can never drift.
+const supersedeUsage = `Usage: ghost supersede <project> [flags]
 
 Flags:
   --apply             Write the supersedes/causes links (default is dry-run/preview)
@@ -1072,7 +1081,23 @@ Classifies each candidate as supersedes, causes, or neither. Runs through the
 configured CLI harness of the calling session (--source overrides; otherwise
 detected from the environment and process ancestry — an undetectable caller is
 an error, never a fallback to a different harness). The harness owns its
-authentication and billing.`)
+authentication and billing.
+`
+
+// runSupersede implements `ghost supersede <project> [--apply]` — the creation
+// half of staleness-aware ranking. It proposes newer→older 'supersedes' links
+// over the project's live memories (cosine-similar candidates, CLI-harness
+// confirmed) and, with --apply, writes them. Dry-run by default. Re-runnable:
+// it self-heals after `ghost reflect` cascade-deletes links. Consumed by
+// search only when SupersedeDemote is set. See docs/benchmarks.md Phase 3.
+func runSupersede() {
+	projectName, source, apply, threshold, parseErr := parseSupersedeArgs(os.Args[2:])
+	if parseErr != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
+		os.Exit(1)
+	}
+	if projectName == "" {
+		fmt.Fprint(os.Stderr, supersedeUsage)
 		os.Exit(1)
 	}
 
@@ -1178,6 +1203,27 @@ func parseResolveArgs(args []string) (project, source string, apply bool, err er
 	return project, source, apply, nil
 }
 
+// resolveUsage is the help for `ghost resolve`: stderr when the project comes
+// out empty (a usage error, exit 1), stdout for -h/--help (see handleHelp).
+// One text for both, so the two can never drift.
+const resolveUsage = `Usage: ghost resolve <project> [flags]
+
+Flags:
+  --apply         Stamp resolved_at on confirmed memories (default is dry-run/preview)
+  --source string CLI harness to classify through: claude-code, opencode,
+                  codex, or goose. Defaults to the calling harness (detected
+                  from the environment and process ancestry); an undetectable
+                  caller is an error.
+  --project string Project name; an alternative to the positional form that
+                  takes the next argument verbatim, so dash-prefixed names work.
+
+Marks resolved-evidence memories so they drop from session-start injection
+(still searchable). Runs through the configured CLI harness of the calling
+session (--source overrides; otherwise detected from the environment and
+process ancestry — an undetectable caller is an error, never a fallback to a
+different harness). The harness owns its authentication and billing.
+`
+
 // resolveSummaryLine renders the one-line resolve result, including UNKNOWN
 // verdicts that remain eligible for a later pass.
 func resolveSummaryLine(projectName string, res resolve.Result, apply bool, confirmed int, calls int) string {
@@ -1210,22 +1256,7 @@ func runResolve() {
 		os.Exit(1)
 	}
 	if projectName == "" {
-		fmt.Fprintln(os.Stderr, `Usage: ghost resolve <project> [flags]
-
-Flags:
-  --apply         Stamp resolved_at on confirmed memories (default is dry-run/preview)
-  --source string CLI harness to classify through: claude-code, opencode,
-                  codex, or goose. Defaults to the calling harness (detected
-                  from the environment and process ancestry); an undetectable
-                  caller is an error.
-  --project string Project name; an alternative to the positional form that
-                  takes the next argument verbatim, so dash-prefixed names work.
-
-Marks resolved-evidence memories so they drop from session-start injection
-(still searchable). Runs through the configured CLI harness of the calling
-session (--source overrides; otherwise detected from the environment and
-process ancestry — an undetectable caller is an error, never a fallback to a
-different harness). The harness owns its authentication and billing.`)
+		fmt.Fprint(os.Stderr, resolveUsage)
 		os.Exit(1)
 	}
 

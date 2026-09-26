@@ -70,16 +70,22 @@ func roDSN(dbPath string) string {
 	return u.String()
 }
 
-// runObsidian implements `ghost obsidian export|sync` — a one-way mirror of
-// the store into an Obsidian-readable Markdown vault.
-func runObsidian() {
-	if len(os.Args) < 3 || (os.Args[2] != "export" && os.Args[2] != "sync") {
-		fmt.Fprintln(os.Stderr, `Usage: ghost obsidian <export|sync> [flags]
+// obsidianUsage is the help for `ghost obsidian`: stderr when the mode is
+// missing or unknown (a usage error, exit 1), stdout for -h/--help (see
+// handleHelp). One text for both, so the two can never drift.
+const obsidianUsage = `Usage: ghost obsidian <export|sync> [flags]
 
 Flags:
   --out string       Vault directory (default ~/Documents/GhostVault or obsidian.vault_dir)
   --project string   Mirror a single project (plus Global)
-  --interval string  sync only: poll cadence (default 30s or obsidian.interval)`)
+  --interval string  sync only: poll cadence (default 30s or obsidian.interval)
+`
+
+// runObsidian implements `ghost obsidian export|sync` — a one-way mirror of
+// the store into an Obsidian-readable Markdown vault.
+func runObsidian() {
+	if len(os.Args) < 3 || (os.Args[2] != "export" && os.Args[2] != "sync") {
+		fmt.Fprint(os.Stderr, obsidianUsage)
 		os.Exit(1)
 	}
 	mode := os.Args[2]
