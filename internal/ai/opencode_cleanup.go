@@ -114,10 +114,11 @@ type OpenCodeCleanupOptions struct {
 
 // OpenCodeCleanupResult reports what one cleanup run did.
 type OpenCodeCleanupResult struct {
-	Listed   int // sessions `session list` returned
-	Eligible int // exact-title matches older than the grace period
-	Deleted  int // sessions `session delete` confirmed
-	Failed   int // eligible sessions whose deletion never succeeded
+	Listed      int // sessions `session list` returned
+	Eligible    int // exact-title matches older than the grace period
+	Implausible int // titled sessions refused for a timestamp outside the plausible window
+	Deleted     int // sessions `session delete` confirmed
+	Failed      int // eligible sessions whose deletion never succeeded
 }
 
 // openCodeSession is the subset of one `opencode session list --format json`
@@ -151,8 +152,9 @@ func (s openCodeSession) lastActivity() int64 {
 // (an unusable list, unparseable output, a rejected option) return an error
 // before anything is deleted.
 //
-// out receives the whole human report: the summary, progress, per-session
-// failure lines, and the final deleted/failed counts.
+// out receives the whole human report: the summary, every warning (a
+// truncated list, a refused timestamp), progress, per-session failure lines,
+// and the final deleted/failed counts.
 func CleanupOpenCodeSessions(ctx context.Context, binary string, opts OpenCodeCleanupOptions, out io.Writer) (OpenCodeCleanupResult, error) {
 	var res OpenCodeCleanupResult
 	if opts.Grace < 0 {
@@ -187,12 +189,23 @@ func CleanupOpenCodeSessions(ctx context.Context, binary string, opts OpenCodeCl
 	if err != nil {
 		return res, err
 	}
-	eligible := selectCleanupSessions(sessions, opts.Grace, now)
-	res = OpenCodeCleanupResult{Listed: len(sessions), Eligible: len(eligible)}
+	eligible, implausible := selectCleanupSessions(sessions, opts.Grace, now)
+	res = OpenCodeCleanupResult{Listed: len(sessions), Eligible: len(eligible), Implausible: implausible}
 
 	if _, err := fmt.Fprintf(out, "listed %d opencode session(s); %d titled %q older than %s\n",
 		res.Listed, res.Eligible, ghostSessionTitle, opts.Grace); err != nil {
 		return res, err
+	}
+	// A refusal the guard fires on must never read as a clean, empty run: if
+	// OpenCode changed its timestamp unit, every titled session is refused
+	// and the summary above would say "0 older than 1h" with exit 0, which a
+	// user reads as "the backlog is gone". Same rule as the truncation
+	// warning below — a bounded or guarded read says so out loud.
+	if res.Implausible > 0 {
+		if _, err := fmt.Fprintf(out, "warning: %d titled session(s) had a timestamp outside [%s, now+%s] and were skipped — opencode may have changed the timestamp unit; run GHOST_LIVE_TESTS=1 go test ./internal/ai/ -run TestOpenCodeSessionList_TimestampsAreMilliseconds to check before trusting this count\n",
+			res.Implausible, sessionTimestampFloor.Format(time.RFC3339), sessionFutureSkew); err != nil {
+			return res, err
+		}
 	}
 	if res.Listed >= limit {
 		if _, err := fmt.Fprintf(out, "warning: the list reached the --limit of %d sessions and may be truncated; re-run with a higher --limit if you expect more\n", limit); err != nil {
@@ -230,15 +243,22 @@ func CleanupOpenCodeSessions(ctx context.Context, binary string, opts OpenCodeCl
 	return res, nil
 }
 
-// selectCleanupSessions picks the sessions a run may delete. Each condition
+// selectCleanupSessions picks the sessions a run may delete, and reports how
+// many it refused for an implausible timestamp alongside them. Each condition
 // is a refusal rather than a preference: the title must be exactly
 // ghostSessionTitle, the id must be usable as a plain argument, the session
 // must carry a timestamp that proves it is strictly older than the grace
 // period and that is itself an instant worth believing, and nothing else
 // about a session can widen the selection.
-func selectCleanupSessions(sessions []openCodeSession, grace time.Duration, now time.Time) []openCodeSession {
+//
+// The implausible count is returned rather than dropped because it is the
+// only signal that the timestamp unit assumption failed: those sessions
+// passed the title and id checks, so without a count they vanish into a
+// summary that reads like "nothing to clean".
+func selectCleanupSessions(sessions []openCodeSession, grace time.Duration, now time.Time) ([]openCodeSession, int) {
 	cutoff := now.Add(-grace)
 	out := make([]openCodeSession, 0, len(sessions))
+	implausible := 0
 	for _, s := range sessions {
 		if s.Title != ghostSessionTitle {
 			continue
@@ -255,13 +275,14 @@ func selectCleanupSessions(sessions []openCodeSession, grace time.Duration, now 
 		}
 		at := time.UnixMilli(activity)
 		if !plausibleSessionTime(at, now) {
+			implausible++
 			continue
 		}
 		if at.Before(cutoff) {
 			out = append(out, s)
 		}
 	}
-	return out
+	return out, implausible
 }
 
 // plausibleSessionTime reports whether at, a timestamp read as Unix

@@ -197,6 +197,9 @@ func TestCleanupOpenCodeSessions_DryRunCountsAndDeletesNothing(t *testing.T) {
 	if res.Listed != 6 || res.Eligible != 1 {
 		t.Errorf("Listed=%d Eligible=%d, want 6 and 1", res.Listed, res.Eligible)
 	}
+	if res.Implausible != 0 {
+		t.Errorf("Implausible=%d, want 0 — every timestamp here is a healthy millisecond value", res.Implausible)
+	}
 	if res.Deleted != 0 || res.Failed != 0 {
 		t.Errorf("dry run Deleted=%d Failed=%d, want 0 and 0", res.Deleted, res.Failed)
 	}
@@ -209,6 +212,48 @@ func TestCleanupOpenCodeSessions_DryRunCountsAndDeletesNothing(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "dry run") {
 		t.Errorf("dry-run report missing from output:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "warning:") {
+		t.Errorf("a healthy list must not print a warning:\n%s", out.String())
+	}
+}
+
+// TestCleanupOpenCodeSessions_ImplausibleTimestampsAreReported pins the
+// visibility half of the plausibility guard (#588 review): a refusal the guard
+// fires on must not read as a clean, empty run. If opencode changed its
+// timestamp unit every titled session is refused, and the summary alone would
+// say '0 older than 1h' with exit 0 — which a reader takes as "the backlog is
+// gone". The run stays report-only and deletes nothing either way.
+func TestCleanupOpenCodeSessions_ImplausibleTimestampsAreReported(t *testing.T) {
+	now := time.Now()
+	secondsNow := now.Unix() // the unit change the guard exists for
+	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
+		map[string]any{"id": "ses_sec_a", "title": ghostSessionTitle, "created": secondsNow - 7200, "updated": secondsNow - 7200},
+		map[string]any{"id": "ses_sec_b", "title": ghostSessionTitle, "created": secondsNow - 3600, "updated": secondsNow - 3600},
+		session("ses_own", "my own session", 9*time.Hour, 9*time.Hour, now), // not titled [ghost]: never counted
+	))
+
+	var out bytes.Buffer
+	res, err := CleanupOpenCodeSessions(context.Background(), "opencode",
+		OpenCodeCleanupOptions{Grace: time.Hour, Now: now}, &out)
+	if err != nil {
+		t.Fatalf("CleanupOpenCodeSessions: %v", err)
+	}
+	if res.Listed != 3 || res.Eligible != 0 || res.Implausible != 2 {
+		t.Errorf("Listed=%d Eligible=%d Implausible=%d, want 3/0/2", res.Listed, res.Eligible, res.Implausible)
+	}
+	report := out.String()
+	if !strings.Contains(report, "warning:") || !strings.Contains(report, "timestamp outside") {
+		t.Errorf("report never says the timestamp was refused, so a 0-eligible summary reads as a clean run:\n%s", report)
+	}
+	if !strings.Contains(report, "TestOpenCodeSessionList_TimestampsAreMilliseconds") {
+		t.Errorf("warning does not point at the live check that verifies the unit:\n%s", report)
+	}
+	if !strings.Contains(report, "dry run") {
+		t.Errorf("dry-run report missing from output:\n%s", report)
+	}
+	if got := fakeDeletes(t, dir); len(got) != 0 {
+		t.Errorf("deleted %v, want none — a refused session is never a delete target", got)
 	}
 }
 
@@ -384,10 +429,11 @@ func TestCleanupOpenCodeSessions_MalformedListOutputIsAnError(t *testing.T) {
 func TestSelectCleanupSessions(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	cases := []struct {
-		name    string
-		session openCodeSession
-		grace   time.Duration
-		want    bool
+		name            string
+		session         openCodeSession
+		grace           time.Duration
+		want            bool
+		wantImplausible int // refused by plausibleSessionTime, not by the other rules
 	}{
 		{name: "old ghost session", session: openCodeSession{ID: "ses_a", Title: ghostSessionTitle, Updated: now.Add(-2 * time.Hour).UnixMilli()}, grace: time.Hour, want: true},
 		{name: "exactly at the grace boundary is not older", session: openCodeSession{ID: "ses_b", Title: ghostSessionTitle, Updated: now.Add(-time.Hour).UnixMilli()}, grace: time.Hour, want: false},
@@ -402,18 +448,21 @@ func TestSelectCleanupSessions(t *testing.T) {
 		{name: "empty id", session: openCodeSession{Title: ghostSessionTitle, Updated: now.Add(-9 * time.Hour).UnixMilli()}, grace: time.Hour, want: false},
 		{name: "flag-shaped id", session: openCodeSession{ID: "--version", Title: ghostSessionTitle, Updated: now.Add(-9 * time.Hour).UnixMilli()}, grace: time.Hour, want: false},
 		{name: "updated later than created counts as recent activity", session: openCodeSession{ID: "ses_k", Title: ghostSessionTitle, Created: now.Add(-9 * time.Hour).UnixMilli(), Updated: now.Add(-time.Minute).UnixMilli()}, grace: time.Hour, want: false},
-		{name: "a seconds-unit timestamp lands in 1970 and is refused", session: openCodeSession{ID: "ses_l", Title: ghostSessionTitle, Updated: now.Add(-2 * time.Hour).Unix()}, grace: time.Hour, want: false},
-		{name: "a nanosecond-unit timestamp lands far in the future and is refused", session: openCodeSession{ID: "ses_m", Title: ghostSessionTitle, Updated: now.Add(-2 * time.Hour).UnixNano()}, grace: time.Hour, want: false},
-		{name: "a timestamp before the floor epoch is refused", session: openCodeSession{ID: "ses_n", Title: ghostSessionTitle, Updated: sessionTimestampFloor.Add(-time.Millisecond).UnixMilli()}, grace: 0, want: false},
+		{name: "a seconds-unit timestamp lands in 1970 and is refused", session: openCodeSession{ID: "ses_l", Title: ghostSessionTitle, Updated: now.Add(-2 * time.Hour).Unix()}, grace: time.Hour, want: false, wantImplausible: 1},
+		{name: "a nanosecond-unit timestamp lands far in the future and is refused", session: openCodeSession{ID: "ses_m", Title: ghostSessionTitle, Updated: now.Add(-2 * time.Hour).UnixNano()}, grace: time.Hour, want: false, wantImplausible: 1},
+		{name: "a timestamp before the floor epoch is refused", session: openCodeSession{ID: "ses_n", Title: ghostSessionTitle, Updated: sessionTimestampFloor.Add(-time.Millisecond).UnixMilli()}, grace: 0, want: false, wantImplausible: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := selectCleanupSessions([]openCodeSession{tc.session}, tc.grace, now)
+			got, implausible := selectCleanupSessions([]openCodeSession{tc.session}, tc.grace, now)
 			if tc.want && len(got) != 1 {
 				t.Errorf("selected %d, want the session eligible", len(got))
 			}
 			if !tc.want && len(got) != 0 {
 				t.Errorf("selected %v, want refused", got)
+			}
+			if implausible != tc.wantImplausible {
+				t.Errorf("implausible = %d, want %d", implausible, tc.wantImplausible)
 			}
 		})
 	}

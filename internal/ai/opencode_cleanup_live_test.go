@@ -2,7 +2,9 @@ package ai
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,6 +41,7 @@ func TestOpenCodeSessionList_TimestampsAreMilliseconds(t *testing.T) {
 		t.Fatalf("session list: %v", err)
 	}
 	now := time.Now()
+	checked := 0
 	for _, s := range sessions {
 		fields := []struct {
 			name string
@@ -48,6 +51,7 @@ func TestOpenCodeSessionList_TimestampsAreMilliseconds(t *testing.T) {
 			if f.ms == 0 {
 				continue // an absent timestamp is refused by selection, not an error
 			}
+			checked++
 			at := time.UnixMilli(f.ms)
 			if !plausibleSessionTime(at, now) {
 				t.Errorf("session %s %s timestamp %d reads as %v, outside [%v, %v] — opencode is not reporting Unix milliseconds",
@@ -55,5 +59,55 @@ func TestOpenCodeSessionList_TimestampsAreMilliseconds(t *testing.T) {
 			}
 		}
 	}
-	t.Logf("checked %d session(s) against the plausible window", len(sessions))
+	// A pass that inspected nothing proves nothing, and plain `go test`
+	// prints no log line for a passing test — say so out loud instead.
+	if reason := uncheckedSessionsReason(len(sessions), checked); reason != "" {
+		t.Skip(reason)
+	}
+	t.Logf("checked %d timestamp(s) across %d session(s) against the plausible window", checked, len(sessions))
+}
+
+// uncheckedSessionsReason returns why a live run inspected no timestamps, or
+// "" when it inspected at least one. The live test must not pass vacuously: a
+// listing that came back empty (or full of zeroed rows) would run no
+// assertion at all, and `go test` prints no log line for a passing test, so
+// the reader of a plain `ok github.com/wcatz/ghost/internal/ai` could not
+// tell a verified millisecond assumption from an unchecked one.
+func uncheckedSessionsReason(listed, checked int) string {
+	if listed == 0 {
+		return "opencode listed no sessions for this project — the millisecond assumption was NOT checked; re-run from a checkout that has opencode sessions"
+	}
+	if checked == 0 {
+		return fmt.Sprintf("opencode listed %d session(s) but none carried a non-zero timestamp — the millisecond assumption was NOT checked", listed)
+	}
+	return ""
+}
+
+// TestUncheckedSessionsReason pins the non-vacuity guard itself: an empty or
+// zeroed listing must say "NOT checked" rather than let the live test pass on
+// no assertions at all. Unlike the live test above, this runs on every plain
+// `go test` — it needs neither the opt-in gate nor a CLI.
+func TestUncheckedSessionsReason(t *testing.T) {
+	cases := []struct {
+		name     string
+		listed   int
+		checked  int
+		wantSkip bool
+	}{
+		{name: "an empty listing checked nothing", listed: 0, checked: 0, wantSkip: true},
+		{name: "rows carrying no timestamp checked nothing", listed: 5, checked: 0, wantSkip: true},
+		{name: "one checked timestamp is enough", listed: 1, checked: 1, wantSkip: false},
+		{name: "both timestamps of every row count", listed: 3, checked: 6, wantSkip: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reason := uncheckedSessionsReason(tc.listed, tc.checked)
+			if gotSkip := reason != ""; gotSkip != tc.wantSkip {
+				t.Errorf("uncheckedSessionsReason(%d, %d) = %q, want skip=%v", tc.listed, tc.checked, reason, tc.wantSkip)
+			}
+			if tc.wantSkip && !strings.Contains(reason, "NOT checked") {
+				t.Errorf("reason = %q, want it to say the assumption was NOT checked", reason)
+			}
+		})
+	}
 }
