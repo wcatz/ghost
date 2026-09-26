@@ -98,6 +98,26 @@ A session *stop* can tighten indirectly, on any host that has one: when lifecycl
 
 On Windows the pass is skipped entirely: access there is carried by an ACL inherited from the parent directory, not by the mode bits `chmod` maps onto read-only, so tightening a number would not change who can read the database.
 
+### Data directory growth
+
+Two kinds of file in the data directory grow on their own, and Ghost bounds both.
+
+**Pre-migration backups.** A schema upgrade writes one full copy of the database beside it first, named `ghost.db.pre-migrate-<unix timestamp>`. That copy is the only way back if a migration step destroys something, so it is written before anything runs and an upgrade that cannot write it does not start. Once it exists, Ghost keeps the **three newest** copies of that database and deletes the older ones — the new one plus two upgrades of hindsight, rather than one per upgrade forever.
+
+- The match is exact: only `ghost.db.pre-migrate-<digits>` regular files are considered, ordered by the timestamp as a number (a string sort would rank `999` above `1003`). A directory, a symlink wearing the name, or a file with any other suffix is left as it is — a symlink is never followed, so pruning cannot delete what it points at.
+- Nothing else in the directory is in scope. Hand-made copies (`ghost.db.backup-…`), backups taken before an earlier version's naming (`ghost.db.pre-0.33.0-…`), the database itself and its `-wal`/`-shm` sidecars are never touched.
+- Deletion is best effort. A file that cannot be removed is logged as a warning and the migration continues; a cleanup pass failing is not a reason to hold up an open.
+
+Backups are only culled when this open has just written a fresh one, so an ordinary open — no upgrade to run — leaves every existing backup exactly where it was.
+
+**Logs.** The logs Ghost appends to in the data directory — `lifecycle.log` and `obsidian-sync.log`, plus any phase log a build writes — are opened through one helper that rotates them at **5 MiB**: an existing file at or above the cap is renamed to `<name>.1`, replacing the previous `.1`, and appending continues in a fresh file. One rotation, one spare copy, instead of a chain of them. Rotation happens where the log is opened, so the cap applies to every writer of that file.
+
+- Rotation is best effort for the same reason: it fails open. A rename that cannot happen (a directory at `<name>.1`, a read-only mount) leaves the log growing in place and the append still lands, because every caller treats the log as diagnostic — the spawn sites would otherwise lose the spawned process's stdout entirely.
+- A symlink wearing the log's name is appended through but never renamed; untangling what it points at is yours.
+- If you want history past two generations, rotate or archive the files yourself — Ghost only guarantees the cap.
+
+Earlier versions wrote `reflect.log`, `resolve.log` and `supersede.log` directly; those phases now log to `lifecycle.log`, so files with those names are leftovers of a retired code path. Ghost does not delete them — remove them yourself if they are in the way.
+
 ## Minimal example
 
 ```yaml
