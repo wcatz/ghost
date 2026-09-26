@@ -95,8 +95,10 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	// included, defeating the scrub above. V2 therefore gets --standalone,
 	// so the child runs a private server on the scrubbed config instead.
 	args := []string{"run", "--format", "json", "--pure", "--title", "[ghost]"}
+	policy := openCodeDenyConfig
 	if c.majorVersion(ctx) >= 2 {
 		args = []string{"run", "--format", "json", "--standalone", "--title", "[ghost]"}
+		policy = openCodeAskConfig
 	}
 	model := c.model
 	if model == "" {
@@ -107,7 +109,7 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	}
 	args = append(args, "-m", model)
 	args = append(args, prompt)
-	cmd, cleanup, err := c.subprocessEnv(ctx, args)
+	cmd, cleanup, err := c.subprocessEnv(ctx, args, policy)
 	if err != nil {
 		return "", err
 	}
@@ -185,12 +187,28 @@ func OpencodeMajorVersion(out string) int {
 	return 0
 }
 
-// openCodeNoToolsConfig is written into an invocation-owned config tree. The
-// wildcard permission denies every tool, while the explicit tool map keeps
-// older OpenCode versions from exposing a built-in tool that predates the
-// wildcard rule. An empty MCP map and an empty plugin list make the isolation
-// intent visible in the child config as well as in the command line.
-const openCodeNoToolsConfig = `{
+// openCodeAskConfig is the isolated child's policy on opencode V2. Every tool
+// is "ask", and V2's non-interactive `run` auto-rejects each ask, so no tool
+// call executes; Ghost never passes an auto-approve flag (--auto, --yolo,
+// --dangerously-skip-permissions). V2 cannot use a deny policy: a deny rule or
+// a disabled tool strips tools from the request, and OpenCode's free tier
+// answers such a request with 403 provider.auth ("free tier can only be used
+// from within OpenCode"), which failed every lifecycle phase. An empty MCP map
+// and an empty plugin list keep the user's servers and plugins out of the child.
+const openCodeAskConfig = `{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "*": "ask"
+  },
+  "mcp": {},
+  "plugin": []
+}`
+
+// openCodeDenyConfig is the policy for opencode V1, whose handling of an ask in
+// a non-interactive run has not been verified: the wildcard permission denies
+// every tool, and the explicit tool map keeps older versions from exposing a
+// built-in tool that predates the wildcard rule.
+const openCodeDenyConfig = `{
   "$schema": "https://opencode.ai/config.json",
   "permission": {
     "*": "deny",
@@ -236,10 +254,10 @@ const openCodeNoToolsConfig = `{
 // When the scratch root is unusable, harnessCommand has already logged a WARN;
 // this falls back to a private MkdirTemp tree under the inherited temp dir,
 // while retaining the same allowlisted environment and no-tools config.
-func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string) (*exec.Cmd, func(), error) {
+func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string, policy string) (*exec.Cmd, func(), error) {
 	cmd, release, ok := harnessCommand(ctx, c.binary, args, os.Environ(), harnessOpencode)
 	if ok {
-		if err := configureOpenCodeIsolation(cmd); err != nil {
+		if err := configureOpenCodeIsolation(cmd, policy); err != nil {
 			release()
 			return nil, nil, err
 		}
@@ -263,7 +281,7 @@ func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string) (*exe
 		env = append(env, key+"="+dir)
 	}
 	cmd.Env = env
-	if err := configureOpenCodeIsolation(cmd); err != nil {
+	if err := configureOpenCodeIsolation(cmd, policy); err != nil {
 		_ = os.RemoveAll(dir)
 		release()
 		return nil, nil, err
@@ -272,12 +290,12 @@ func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string) (*exe
 }
 
 // configureOpenCodeIsolation gives the child a private home and config tree,
-// writes the no-tools policy into it, and replaces inherited duplicates with
+// writes the given tool policy into it, and replaces inherited duplicates with
 // the exact values the child should see. It copies only an existing OpenCode
 // auth.json (never the user's config, plugins, or MCP definitions) when no
 // OPENCODE_API_KEY is supplied; the credential file is then reachable under the
 // invocation-owned data root without reopening the global config tree.
-func configureOpenCodeIsolation(cmd *exec.Cmd) error {
+func configureOpenCodeIsolation(cmd *exec.Cmd, policy string) error {
 	if cmd.Dir == "" {
 		return fmt.Errorf("opencode scratch directory is empty")
 	}
@@ -293,7 +311,7 @@ func configureOpenCodeIsolation(cmd *exec.Cmd) error {
 		}
 	}
 	configPath := filepath.Join(configDir, "opencode.json")
-	if err := os.WriteFile(configPath, []byte(openCodeNoToolsConfig), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(policy), 0o600); err != nil {
 		return fmt.Errorf("opencode isolated config: %w", err)
 	}
 	if err := copyOpenCodeAuth(cmd.Env, dataDir); err != nil {
@@ -311,7 +329,8 @@ func configureOpenCodeIsolation(cmd *exec.Cmd) error {
 		"XDG_RUNTIME_DIR":                 runtimeDir,
 		"OPENCODE_CONFIG_DIR":             configDir,
 		"OPENCODE_CONFIG":                 configPath,
-		"OPENCODE_CONFIG_CONTENT":         openCodeNoToolsConfig,
+		"OPENCODE_CONFIG_CONTENT":         policy,
+		"OPENCODE_CLI_CONFIG_CONTENT":     policy,
 		"OPENCODE_DISABLE_PROJECT_CONFIG": "1",
 	} {
 		env = setHarnessEnvValue(env, key, value)

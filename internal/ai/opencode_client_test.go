@@ -206,7 +206,7 @@ func TestSubprocessEnvConfinesTempDir(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", decoy)
 
 	client := &OpenCodeClient{binary: "opencode"}
-	cmd, cleanup, err := client.subprocessEnv(context.Background(), []string{"run"})
+	cmd, cleanup, err := client.subprocessEnv(context.Background(), []string{"run"}, openCodeAskConfig)
 	if err != nil {
 		t.Fatalf("subprocessEnv: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestSubprocessEnvFallsBackToTempDirWhenScratchUnavailable(t *testing.T) {
 	}
 
 	client := &OpenCodeClient{binary: "opencode"}
-	cmd, cleanup, err := client.subprocessEnv(context.Background(), []string{"run"})
+	cmd, cleanup, err := client.subprocessEnv(context.Background(), []string{"run"}, openCodeAskConfig)
 	if err != nil {
 		t.Fatalf("subprocessEnv: %v", err)
 	}
