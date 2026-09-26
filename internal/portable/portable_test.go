@@ -76,13 +76,19 @@ func exportBytes(t *testing.T, s *memory.Store, projectFilter string) []byte {
 // the format, so it is asserted on the stores rather than on the bytes: an
 // export that merely looked right on disk would pass a shape check and still
 // lose the store.
+//
+// The round trip runs with TrustProvenance, because that is the case in which
+// the store must come back exactly as it went in — a user restoring their own
+// database. The default's rewrite of source and pinned is the other case, and
+// TestExportImportDowngradesProvenanceByDefault asserts it.
 func TestExportImportRoundTripIntoAnEmptyStore(t *testing.T) {
 	src := newTestStore(t)
 	seed(t, src)
 	artifact := exportBytes(t, src, "")
 
 	dst := newTestStore(t)
-	report, err := Import(context.Background(), dst, bytes.NewReader(artifact), true, nil)
+	report, err := Import(context.Background(), dst, bytes.NewReader(artifact),
+		ImportOptions{Apply: true, TrustProvenance: true}, nil)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -164,6 +170,110 @@ func TestExportImportRoundTripIntoAnEmptyStore(t *testing.T) {
 	}
 }
 
+// TestExportImportDowngradesProvenanceByDefault: the default import is the case
+// where the artifact came from somewhere else, so every memory in it comes back
+// stamped as having arrived rather than as the user's own words or as a rule
+// Ghost ships. It is asserted end to end — through a real export and a real
+// import — because the two halves are what could disagree: the export writes the
+// artifact's source, and it is the import that must not honour it.
+func TestExportImportDowngradesProvenanceByDefault(t *testing.T) {
+	ctx := context.Background()
+	src := newTestStore(t)
+	if err := src.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	// One memory of each kind the downgrade exists to neutralise: the user's own
+	// words, a rule Ghost ships, and a pinned agent save.
+	if err := src.SeedGlobalMemories(ctx); err != nil {
+		t.Fatalf("SeedGlobalMemories: %v", err)
+	}
+	if _, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the user's own words", Source: "manual"}); err != nil {
+		t.Fatalf("Create(manual): %v", err)
+	}
+	pinned, err := src.Create(ctx, "p1", memory.Memory{Category: "gotcha", Content: "an agent's pinned note", Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create(mcp): %v", err)
+	}
+	if err := src.TogglePin(ctx, pinned, true); err != nil {
+		t.Fatalf("TogglePin: %v", err)
+	}
+	artifact := exportBytes(t, src, "")
+
+	dst := newTestStore(t)
+	report, err := Import(ctx, dst, bytes.NewReader(artifact), ImportOptions{Apply: true}, nil)
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if report.Rejected != 0 {
+		t.Fatalf("rejected %d records: %v", report.Rejected, report.Errors)
+	}
+	// Every memory the artifact carried is back, and none of them carries the
+	// source or the pin the artifact stated.
+	got, err := dst.PortableMemories(ctx, nil)
+	if err != nil {
+		t.Fatalf("PortableMemories: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("the destination holds %d memories, want all 3 from the artifact", len(got))
+	}
+	for _, m := range got {
+		if m.Source != memory.DowngradedSource {
+			t.Errorf("memory %q came back as %q, want %q", m.Content, m.Source, memory.DowngradedSource)
+		}
+		if m.Pinned {
+			t.Errorf("memory %q came back pinned", m.Content)
+		}
+	}
+	// And the per-record report says so, once per memory, because the stored
+	// source is the downgraded one and the artifact's own value is gone from the
+	// store entirely.
+	var downgraded int
+	if _, err := Import(ctx, dst, bytes.NewReader(artifact), ImportOptions{Apply: true},
+		func(r RecordResult) {
+			if r.Downgraded {
+				downgraded++
+			}
+		}); err != nil {
+		t.Fatalf("second Import: %v", err)
+	}
+	// The second run skips everything (the ids are all present), so nothing is
+	// downgraded and nothing is created: the report is per *attempted* write.
+	if downgraded != 0 {
+		t.Errorf("a re-import reported %d downgrades, want none — every record was skipped", downgraded)
+	}
+
+	// With the flag, the same artifact restores its own provenance exactly.
+	trusted := newTestStore(t)
+	if _, err := Import(ctx, trusted, bytes.NewReader(artifact),
+		ImportOptions{Apply: true, TrustProvenance: true}, nil); err != nil {
+		t.Fatalf("Import(trusted): %v", err)
+	}
+	gotTrusted, err := trusted.PortableMemories(ctx, nil)
+	if err != nil {
+		t.Fatalf("PortableMemories(trusted): %v", err)
+	}
+	if len(gotTrusted) != len(got) {
+		t.Fatalf("the trusted import holds %d memories, want the same %d", len(gotTrusted), len(got))
+	}
+	sources := map[string]int{}
+	pins := 0
+	for _, m := range gotTrusted {
+		sources[m.Source]++
+		if m.Pinned {
+			pins++
+		}
+	}
+	if sources["manual"] != 1 || sources["builtin"] != 1 || sources["mcp"] != 1 {
+		t.Errorf("trusted sources = %v, want the artifact's own manual/builtin/mcp", sources)
+	}
+	// Two, not one: the artifact also carries the builtin _global seed, which
+	// Ghost itself writes pinned. The count is asserted rather than computed so
+	// that a change to what an import preserves shows up here.
+	if pins != 2 {
+		t.Errorf("trusted import pinned %d memories, want 2 (the artifact's own pin plus the builtin seed)", pins)
+	}
+}
+
 // TestExportIsDeterministic: two exports of an unchanged store must be
 // byte-identical, or the artifact cannot be diffed, checksummed against a
 // previous copy, or reviewed in a pull request.
@@ -217,7 +327,7 @@ func TestImportSkipsExistingIDs(t *testing.T) {
 
 	dst := newTestStore(t)
 	ctx := context.Background()
-	if _, err := Import(ctx, dst, bytes.NewReader(artifact), true, nil); err != nil {
+	if _, err := Import(ctx, dst, bytes.NewReader(artifact), ImportOptions{Apply: true}, nil); err != nil {
 		t.Fatalf("first Import: %v", err)
 	}
 	before, err := dst.PortableMemories(ctx, nil)
@@ -226,7 +336,7 @@ func TestImportSkipsExistingIDs(t *testing.T) {
 	}
 
 	var seen []RecordResult
-	report, err := Import(ctx, dst, bytes.NewReader(artifact), true, func(r RecordResult) { seen = append(seen, r) })
+	report, err := Import(ctx, dst, bytes.NewReader(artifact), ImportOptions{Apply: true}, func(r RecordResult) { seen = append(seen, r) })
 	if err != nil {
 		t.Fatalf("second Import: %v", err)
 	}
@@ -274,7 +384,7 @@ func TestImportDryRunWritesNothing(t *testing.T) {
 	}
 
 	var seen []RecordResult
-	report, err := Import(ctx, dst, bytes.NewReader(artifact), false, func(r RecordResult) { seen = append(seen, r) })
+	report, err := Import(ctx, dst, bytes.NewReader(artifact), ImportOptions{}, func(r RecordResult) { seen = append(seen, r) })
 	if err != nil {
 		t.Fatalf("Import(dry run): %v", err)
 	}
@@ -323,7 +433,7 @@ func TestImportRejectsAnUnknownSchemaVersion(t *testing.T) {
 			store := newTestStore(t)
 			body := `{"type":"header","schema_version":` + version + "}\n" +
 				`{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one"}}` + "\n"
-			_, err := Import(context.Background(), store, strings.NewReader(body), true, nil)
+			_, err := Import(context.Background(), store, strings.NewReader(body), ImportOptions{Apply: true}, nil)
 			if err == nil {
 				t.Fatalf("import accepted schema version %s", version)
 			}
@@ -387,7 +497,7 @@ func TestImportRejectsAMalformedOrMisorderedArtifact(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newTestStore(t)
-			_, err := Import(context.Background(), store, strings.NewReader(tc.body), true, nil)
+			_, err := Import(context.Background(), store, strings.NewReader(tc.body), ImportOptions{Apply: true}, nil)
 			if err == nil {
 				t.Fatal("import accepted a file that is not a readable artifact")
 			}
@@ -423,7 +533,7 @@ func TestImportAppliesTheRecordsAroundAnUnreadableLine(t *testing.T) {
 		`{"type":"memory","memory":{"id":"after","project_id":"p1","category":"fact","content":"also kept","source":"mcp"}}` + "\n"
 
 	var seen []RecordResult
-	report, err := Import(ctx, store, strings.NewReader(body), true, func(r RecordResult) { seen = append(seen, r) })
+	report, err := Import(ctx, store, strings.NewReader(body), ImportOptions{Apply: true}, func(r RecordResult) { seen = append(seen, r) })
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -471,7 +581,7 @@ func TestImportRejectsRecordsOneByOneAndKeepsGoing(t *testing.T) {
 		`{"type":"memory","memory":{"id":"bad","project_id":"p1","category":"not-a-category","content":"x","source":"mcp"}}` + "\n" +
 		`{"type":"memory","memory":{"id":"good","project_id":"p1","category":"gotcha","content":"kept","source":"mcp"}}` + "\n"
 	var seen []RecordResult
-	report, err := Import(context.Background(), store, strings.NewReader(body), true, func(r RecordResult) { seen = append(seen, r) })
+	report, err := Import(context.Background(), store, strings.NewReader(body), ImportOptions{Apply: true}, func(r RecordResult) { seen = append(seen, r) })
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -515,7 +625,7 @@ func TestImportCreatesMissingProjects(t *testing.T) {
 		`{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one","repo_remote":"git@github.com:wcatz/one.git"}}` + "\n" +
 		`{"type":"memory","memory":{"id":"m1","project_id":"p1","category":"gotcha","content":"y","source":"mcp"}}` + "\n" +
 		`{"type":"memory","memory":{"id":"m2","project_id":"absent","category":"gotcha","content":"z","source":"mcp"}}` + "\n"
-	report, err := Import(context.Background(), store, strings.NewReader(body), true, nil)
+	report, err := Import(context.Background(), store, strings.NewReader(body), ImportOptions{Apply: true}, nil)
 	if err != nil {
 		t.Fatalf("Import: %v", err)
 	}
@@ -633,7 +743,7 @@ func (failingWriter) Write([]byte) (int, error) { return 0, os.ErrClosed }
 // successful import.
 func TestImportReportsAReadFailure(t *testing.T) {
 	store := newTestStore(t)
-	_, err := Import(context.Background(), store, failingReader{}, true, nil)
+	_, err := Import(context.Background(), store, failingReader{}, ImportOptions{Apply: true}, nil)
 	if err == nil {
 		t.Error("Import must report a read failure")
 	}
@@ -772,7 +882,7 @@ func TestImportAttachesToTheProjectThisStoreAlreadyHas(t *testing.T) {
 			tc.setup(t, dst)
 
 			// A dry run first: it must not promise a project the write cannot make.
-			dry, err := Import(ctx, dst, strings.NewReader(artifact), false, nil)
+			dry, err := Import(ctx, dst, strings.NewReader(artifact), ImportOptions{}, nil)
 			if err != nil {
 				t.Fatalf("dry run: %v", err)
 			}
@@ -793,7 +903,7 @@ func TestImportAttachesToTheProjectThisStoreAlreadyHas(t *testing.T) {
 				t.Fatalf("a dry run left %d projects, want 1", len(projects))
 			}
 
-			report, err := Import(ctx, dst, strings.NewReader(artifact), true, nil)
+			report, err := Import(ctx, dst, strings.NewReader(artifact), ImportOptions{Apply: true}, nil)
 			if err != nil {
 				t.Fatalf("apply: %v", err)
 			}
@@ -888,11 +998,11 @@ func TestDryRunClassifiesExactlyWhatApplyWould(t *testing.T) {
 	collect := func(t *testing.T, applyRun bool) map[string]Action {
 		t.Helper()
 		s := newTestStore(t)
-		if _, err := Import(ctx, s, strings.NewReader(existing), true, nil); err != nil {
+		if _, err := Import(ctx, s, strings.NewReader(existing), ImportOptions{Apply: true}, nil); err != nil {
 			t.Fatalf("seed state: %v", err)
 		}
 		got := map[string]Action{}
-		if _, err := Import(ctx, s, strings.NewReader(artifact), applyRun, func(r RecordResult) {
+		if _, err := Import(ctx, s, strings.NewReader(artifact), ImportOptions{Apply: applyRun}, func(r RecordResult) {
 			got[fmt.Sprintf("%s/%s", r.Type, r.ID)] = r.Action
 		}); err != nil && applyRun {
 			t.Fatalf("Import(apply): %v", err)

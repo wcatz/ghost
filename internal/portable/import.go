@@ -13,6 +13,12 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
+// ImportOptions is one import run's settings. It is an alias rather than a
+// second struct because the store owns these semantics — it is the store that
+// downgrades provenance and that decides what a dry run may check — and a
+// separate type here would be a second place for the two to drift.
+type ImportOptions = memory.ImportOptions
+
 // Action is what an import did, or would do, with one record.
 type Action string
 
@@ -45,7 +51,13 @@ type RecordResult struct {
 	// is set for a create, including a dry run's, because the cut is what the
 	// user needs to know about before applying.
 	Clamped bool
-	Error   error
+	// Downgraded reports that the memory's own source and pin state were
+	// replaced, because the run was not told to trust the artifact's provenance
+	// (see memory.ImportOptions.TrustProvenance). It is set for a dry run's
+	// create too, for the same reason Clamped is: the rewrite is the thing to
+	// read the preview for.
+	Downgraded bool
+	Error      error
 }
 
 // ImportReport summarises one import run, counted per record type.
@@ -102,9 +114,9 @@ func (r *ImportReport) count(m map[string]int, kind string) {
 // file imports. That is what the line-oriented format buys: the readable prefix
 // of a damaged artifact is still worth having, and the rejected line is reported
 // rather than swallowed.
-func Import(ctx context.Context, s *memory.Store, r io.Reader, apply bool, onRecord func(RecordResult)) (ImportReport, error) {
+func Import(ctx context.Context, s *memory.Store, r io.Reader, opts ImportOptions, onRecord func(RecordResult)) (ImportReport, error) {
 	report := ImportReport{
-		Applied: apply,
+		Applied: opts.Apply,
 		Created: map[string]int{},
 		Skipped: map[string]int{},
 	}
@@ -118,7 +130,7 @@ func Import(ctx context.Context, s *memory.Store, r io.Reader, apply bool, onRec
 	// apply run would, because "would this be created" depends on what earlier
 	// records create — a project, most of all. Projecting the whole set first
 	// and then replaying it means one ordering, used by both modes.
-	plan, err := planRecords(recs, s, ctx)
+	plan, err := planRecords(recs, s, ctx, opts)
 	if err != nil {
 		return report, err
 	}
@@ -133,7 +145,7 @@ func Import(ctx context.Context, s *memory.Store, r io.Reader, apply bool, onRec
 		}
 	}
 	for _, step := range plan {
-		step.run(ctx, s, apply, &report, onRecord)
+		step.run(ctx, s, &report, onRecord)
 	}
 	return report, nil
 }
@@ -283,7 +295,19 @@ type step struct {
 	kind    string
 	detail  string
 	check   *projectCheck
-	runFunc func(ctx context.Context, s *memory.Store, apply bool) (Action, bool, error)
+	opts    ImportOptions
+	runFunc func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome
+}
+
+// outcome is what running one step produced. A struct rather than a tuple
+// because a step's result has grown past what a return line can carry legibly:
+// what happened, whether the content was cut, and whether the memory's
+// provenance was downgraded on the way in.
+type outcome struct {
+	action     Action
+	clamped    bool
+	downgraded bool
+	err        error
 }
 
 // planRecords turns the parsed records into an ordered list of steps, in the
@@ -308,7 +332,7 @@ type step struct {
 // own project records have created by then. That set is what lets a dry run
 // classify a child record exactly as the apply run it previews will, even though
 // the dry run has created nothing.
-func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context) ([]step, error) {
+func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts ImportOptions) ([]step, error) {
 	var (
 		projects  []parsedRecord
 		memories  []parsedRecord
@@ -367,7 +391,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context) ([]s
 		return &projectCheck{projectID: under(projectID), available: func(id string) bool { return known[id] }}
 	}
 
-	var steps []step
+	steps := make([]step, 0, len(recs))
 	for _, p := range projects {
 		project := p.rec.Project
 		adopted := local[project.ID]
@@ -382,58 +406,58 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context) ([]s
 				project.Name, adopted)
 		}
 		adoptedElsewhere := adopted != project.ID
-		steps = append(steps, step{rec: p, kind: TypeProject, detail: detail,
-			runFunc: func(ctx context.Context, s *memory.Store, apply bool) (Action, bool, error) {
+		steps = append(steps, step{rec: p, kind: TypeProject, detail: detail, opts: opts,
+			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				if adoptedElsewhere {
 					// Nothing to write, and nothing that could be: the id belongs
 					// to a project this store already has.
-					return ActionSkip, false, nil
+					return outcome{action: ActionSkip}
 				}
-				created, err := s.ImportProject(ctx, *project, apply)
+				created, err := s.ImportProject(ctx, *project, opts.Apply)
 				if err != nil {
-					return ActionReject, false, err
+					return outcome{action: ActionReject, err: err}
 				}
 				// A project this artifact adds is available to the children
 				// below it whether or not it was actually written, which is
 				// what makes a dry run's classification match the apply run's.
 				known[project.ID] = true
-				return actionFor(created), false, nil
+				return outcome{action: actionFor(created)}
 			}})
 	}
 	for _, p := range memories {
 		m := p.rec.Memory
 		m.ProjectID = under(m.ProjectID)
-		steps = append(steps, step{rec: p, kind: TypeMemory, detail: contentPrefix(m.Content), check: checkFor(m.ProjectID),
-			runFunc: func(ctx context.Context, s *memory.Store, apply bool) (Action, bool, error) {
-				created, clamped, err := s.ImportMemory(ctx, *m, apply)
+		steps = append(steps, step{rec: p, kind: TypeMemory, detail: contentPrefix(m.Content), check: checkFor(m.ProjectID), opts: opts,
+			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
+				created, clamped, downgraded, err := s.ImportMemory(ctx, *m, opts)
 				if err != nil {
-					return ActionReject, false, err
+					return outcome{action: ActionReject, err: err}
 				}
-				return actionFor(created), clamped, nil
+				return outcome{action: actionFor(created), clamped: clamped, downgraded: downgraded}
 			}})
 	}
 	for _, p := range orderTasks(tasks) {
 		t := p.rec.Task
 		t.ProjectID = under(t.ProjectID)
-		steps = append(steps, step{rec: p, kind: TypeTask, detail: t.Title, check: checkFor(t.ProjectID),
-			runFunc: func(ctx context.Context, s *memory.Store, apply bool) (Action, bool, error) {
-				created, err := s.ImportTask(ctx, *t, apply)
+		steps = append(steps, step{rec: p, kind: TypeTask, detail: t.Title, check: checkFor(t.ProjectID), opts: opts,
+			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
+				created, err := s.ImportTask(ctx, *t, opts.Apply)
 				if err != nil {
-					return ActionReject, false, err
+					return outcome{action: ActionReject, err: err}
 				}
-				return actionFor(created), false, nil
+				return outcome{action: actionFor(created)}
 			}})
 	}
 	for _, p := range orderDecisions(decisions) {
 		d := p.rec.Decision
 		d.ProjectID = under(d.ProjectID)
-		steps = append(steps, step{rec: p, kind: TypeDecision, detail: d.Title, check: checkFor(d.ProjectID),
-			runFunc: func(ctx context.Context, s *memory.Store, apply bool) (Action, bool, error) {
-				created, err := s.ImportDecision(ctx, *d, apply)
+		steps = append(steps, step{rec: p, kind: TypeDecision, detail: d.Title, check: checkFor(d.ProjectID), opts: opts,
+			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
+				created, err := s.ImportDecision(ctx, *d, opts.Apply)
 				if err != nil {
-					return ActionReject, false, err
+					return outcome{action: ActionReject, err: err}
 				}
-				return actionFor(created), false, nil
+				return outcome{action: actionFor(created)}
 			}})
 	}
 	return steps, nil
@@ -558,33 +582,31 @@ func actionFor(created bool) Action {
 }
 
 // run performs one step and records the outcome.
-func (st step) run(ctx context.Context, s *memory.Store, apply bool, report *ImportReport, onRecord func(RecordResult)) {
-	var (
-		action  Action
-		clamped bool
-		err     error
-	)
+func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, onRecord func(RecordResult)) {
+	var got outcome
 	if st.check != nil && !st.check.available(st.check.projectID) {
 		// The project is available neither in the store nor from this run's
 		// earlier records, so there is nothing to attach the record to. Refused
 		// here rather than left to the store's own pre-write check, so a dry run
 		// reaches the same verdict an apply run would. The reason alone: the
 		// report line names the record and the line number around it.
-		action, err = ActionReject, fmt.Errorf(
+		got = outcome{action: ActionReject, err: fmt.Errorf(
 			"project %q not found — the artifact carries no record for it and this store does not have it",
-			st.check.projectID)
+			st.check.projectID)}
 	} else {
-		action, clamped, err = st.runFunc(ctx, s, apply)
+		got = st.runFunc(ctx, s, st.opts)
 	}
 	result := RecordResult{
-		Type:    st.kind,
-		ID:      st.rec.id(),
-		Line:    st.rec.line,
-		Action:  action,
-		Detail:  st.detail,
-		Clamped: clamped,
-		Error:   err,
+		Type:       st.kind,
+		ID:         st.rec.id(),
+		Line:       st.rec.line,
+		Action:     got.action,
+		Detail:     st.detail,
+		Clamped:    got.clamped,
+		Downgraded: got.downgraded,
+		Error:      got.err,
 	}
+	action, err := got.action, got.err
 	switch action {
 	case ActionCreate:
 		report.count(report.Created, st.kind)

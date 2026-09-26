@@ -77,6 +77,42 @@ type PortableMemory struct {
 	Scope        map[string]string `json:"scope,omitempty"`
 }
 
+// ImportOptions is what one import run is doing with the records it is given.
+type ImportOptions struct {
+	// Apply writes. False is a dry run: every check that does not depend on what
+	// the same run has already written runs, the action that would be taken is
+	// returned, and nothing is written.
+	Apply bool
+
+	// TrustProvenance keeps each memory's own source and pin state instead of
+	// downgrading them. It is off by default, and the default is the safe one to
+	// ship: an artifact is a file that arrived from somewhere, and on its own
+	// authority it gets to say that a row is `manual` (the user's own words, and
+	// exempt from consolidation) or `builtin` (a rule Ghost ships, which
+	// CanonicalOriginSource presents as such) or `pinned` (exempt from
+	// consolidation whatever its source). A file a user downloaded would then be
+	// able to plant rows that read as the user's own material and as Ghost's own
+	// rules, permanently exempt from consolidation and indistinguishable from
+	// rows Ghost wrote itself. Off, every imported memory is stamped
+	// `onboarding` and unpinned — the same source internal/claudeimport uses for
+	// memories imported from outside Ghost at first contact — which keeps it
+	// consolidatable and honest about where it came from.
+	//
+	// A user importing their OWN export wants the fidelity, and gets it with
+	// this flag. That asymmetry is deliberate: the cost of the default being
+	// wrong is planted provenance, and the cost of the flag being wrong is a
+	// user who has to pass it once.
+	TrustProvenance bool
+}
+
+// DowngradedSource is the source every imported memory is stamped with unless
+// the run was told to trust the artifact's own. `onboarding` is the value
+// internal/claudeimport already uses for memories brought in from outside Ghost
+// at first contact, and it is the only one of the eight that means "this did not
+// originate in a session" without also claiming authorship. It is in the
+// memories table's CHECK already, so downgrading needs no migration.
+const DowngradedSource = "onboarding"
+
 // validMemorySources is the set the memories table's source CHECK accepts, and
 // is what ImportMemory validates against. The CHECK is the schema's own truth;
 // this map is the same list spelled out so an import can name the offending
@@ -428,21 +464,22 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 // and a caller importing an artifact in dependency order is exactly that. The
 // portable package is such a caller, and it makes the check itself, so a dry run
 // and the apply run it previews classify every record the same way.
-func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, apply bool) (created, clamped bool, err error) {
+func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportOptions) (created, clamped, downgraded bool, err error) {
+	apply := opts.Apply
 	if m.ID == "" {
-		return false, false, fmt.Errorf("memory id is required")
+		return false, false, false, fmt.Errorf("memory id is required")
 	}
 	if m.ProjectID == "" {
-		return false, false, fmt.Errorf("memory %s: project_id is required", m.ID)
+		return false, false, false, fmt.Errorf("memory %s: project_id is required", m.ID)
 	}
 	if m.Content == "" {
-		return false, false, fmt.Errorf("memory %s: content is required", m.ID)
+		return false, false, false, fmt.Errorf("memory %s: content is required", m.ID)
 	}
 	if !IsValidCategory(m.Category) {
-		return false, false, fmt.Errorf("memory %s: invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", m.ID, m.Category)
+		return false, false, false, fmt.Errorf("memory %s: invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", m.ID, m.Category)
 	}
 	if !IsValidSource(m.Source) {
-		return false, false, fmt.Errorf("memory %s: invalid source %q — must be one of: reflection, chat, manual, tool, mcp, onboarding, decision_log, builtin", m.ID, m.Source)
+		return false, false, false, fmt.Errorf("memory %s: invalid source %q — must be one of: reflection, chat, manual, tool, mcp, onboarding, decision_log, builtin", m.ID, m.Source)
 	}
 
 	content, cut := ClampContent(m.Content)
@@ -461,6 +498,16 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, apply bool) 
 		}
 		importance = clamped
 	}
+	// Provenance is rewritten before anything else, so a dry run reports the
+	// rewrite it would make and not the one the artifact asked for. The flag is
+	// what stands between "I am importing someone's file" and "these are my own
+	// rows" — see ImportOptions.TrustProvenance for what each of the two values
+	// is protecting.
+	source, pinned := m.Source, m.Pinned
+	if !opts.TrustProvenance {
+		source, pinned = DowngradedSource, false
+		downgraded = true
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -468,20 +515,20 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, apply bool) 
 	var present int
 	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM memories WHERE id = ?`, m.ID).Scan(&present); err != nil {
 		if err != sql.ErrNoRows {
-			return false, false, fmt.Errorf("import memory %s: %w", m.ID, err)
+			return false, false, false, fmt.Errorf("import memory %s: %w", m.ID, err)
 		}
 	} else {
-		return false, false, nil
+		return false, false, false, nil
 	}
 	if !apply {
-		return true, cut, nil
+		return true, cut, downgraded, nil
 	}
 
 	// The project is checked immediately before the write, so a memory naming a
 	// project the store does not hold is reported as a missing project rather
 	// than as a foreign-key failure at the INSERT.
 	if err := requireProject(ctx, s.db, "memory", m.ID, m.ProjectID); err != nil {
-		return false, false, err
+		return false, false, downgraded, err
 	}
 
 	tags, _ := json.Marshal(m.Tags)
@@ -504,13 +551,13 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, apply bool) 
 		        COALESCE(NULLIF(?, ''), datetime('now')), ?,
 		        ?, ?, ?, ?, ?, ?, ?, ?)
 	`, m.ID, m.ProjectID, m.Category, content, importance, m.AccessCount,
-		m.LastAccessed, m.Source, string(tags), m.Pinned,
+		m.LastAccessed, source, string(tags), pinned,
 		m.CreatedAt, m.UpdatedAt, m.ResolvedAt,
 		m.ValidFrom, m.ValidUntil, m.VerifiedAt,
 		nullIfEmpty(m.Agent), nullIfEmpty(m.SessionID), nullIfEmpty(m.SourceRef),
 		m.Confidence, scopeJSON(m.Scope))
 	if err != nil {
-		return false, false, fmt.Errorf("import memory %s: %w", m.ID, err)
+		return false, false, downgraded, fmt.Errorf("import memory %s: %w", m.ID, err)
 	}
 	if s.onSave != nil {
 		// The embedding worker is told there is something new to vectorize. A
@@ -519,7 +566,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, apply bool) 
 		// notification a normal save gives.
 		s.onSave(m.ProjectID)
 	}
-	return true, cut, nil
+	return true, cut, downgraded, nil
 }
 
 // ImportTask inserts a task under the artifact's id, reporting created=false

@@ -56,12 +56,19 @@ Two exports of an unchanged database are byte-identical, so an artifact can be
 diffed against the previous one. Use ` + "`ghost import`" + ` to load one back.
 `
 
-	importUsage = `Usage: ghost import <file.jsonl> [--apply]
+	importUsage = `Usage: ghost import <file.jsonl> [--apply] [--trust-provenance]
 
 Loads a JSONL artifact written by ` + "`ghost export`" + `.
 
-  --apply   Actually write. Without it the command is a dry run that reports
-            what it would create, skip and reject, and writes nothing.
+  --apply              Actually write. Without it the command is a dry run that
+                       reports what it would create, skip and reject, and writes
+                       nothing — over a read-only connection, so the preview
+                       cannot migrate or seed the store either.
+  --trust-provenance   Keep each memory's own source and pin state. Without it
+                       every imported memory is stamped "onboarding" and
+                       unpinned, so a file from somewhere else cannot plant rows
+                       that read as your own words or as Ghost's shipped rules.
+                       Pass it when the artifact is your own export.
 
 A record whose id is already in the database is skipped, never overwritten: the
 artifact is the older of the two copies, so overwriting would restore stale data
@@ -88,6 +95,12 @@ type (
 	importOptions struct {
 		File  string
 		Apply bool
+		// TrustProvenance keeps each memory's own source and pin state instead
+		// of downgrading them. See memory.ImportOptions.TrustProvenance; the
+		// short version is that an artifact is a file that arrived from
+		// somewhere, and on its own authority it does not get to plant rows that
+		// read as your own words or as Ghost's shipped rules.
+		TrustProvenance bool
 	}
 )
 
@@ -155,6 +168,8 @@ func parseImportArgs(args []string) (importOptions, error) {
 		switch {
 		case arg == "--apply":
 			opts.Apply = true
+		case arg == "--trust-provenance":
+			opts.TrustProvenance = true
 		case strings.HasPrefix(arg, "-"):
 			return opts, fmt.Errorf("unknown flag %q", arg)
 		default:
@@ -377,8 +392,42 @@ func printExportSummary(out io.Writer, path string, stats portable.Stats) error 
 
 // printImportReport states what an import did, or — for a dry run — what it
 // would do. The headline leads with the count because that is what a reader
+// printRecordLine reports one record's outcome, and is what makes a dry run
+// reviewable: the reader sees each memory's content prefix, not just a count.
+func printRecordLine(out io.Writer, r portable.RecordResult) error {
+	detail := r.Detail
+	// Only a memory has provenance to speak of. A project or a task line that
+	// said "provenance kept as exported" would be a sentence about a field the
+	// record does not have.
+	isCreate := r.Action == portable.ActionCreate && r.Type == portable.TypeMemory
+	switch {
+	case isCreate && r.Downgraded:
+		// The provenance rewrite is the one thing about the record that is not
+		// visible afterwards: the stored source is the downgraded one, so the
+		// artifact's own value is gone from the store entirely. It is said here
+		// or not at all.
+		detail = strings.TrimSpace(detail) + " (provenance downgraded to " + memory.DowngradedSource + ", unpinned)"
+	case isCreate && r.Clamped:
+		// A clamp is the other thing a reader cannot see in the file afterwards,
+		// because the stored text is the cut version.
+		detail = strings.TrimSpace(detail) + " …(truncated at the content cap)"
+	case isCreate:
+		detail = strings.TrimSpace(detail) + " (provenance kept as exported)"
+	}
+	switch {
+	case detail == "":
+		detail = r.ID
+	case r.ID != "":
+		detail = fmt.Sprintf("%q (%s)", detail, r.ID)
+	}
+	_, err := fmt.Fprintf(out, "  %-7s %-9s line %d  %s\n", r.Action, r.Type+":", r.Line, detail)
+	return err
+}
+
+// printImportReport states what an import did, or — for a dry run — what it
+// would do. The headline leads with the count because that is what a reader
 // scans for; the per-record lines came before it and the rejected ones follow.
-func printImportReport(out io.Writer, path string, report portable.ImportReport, apply bool) error {
+func printImportReport(out io.Writer, path string, report portable.ImportReport, opts portable.ImportOptions) error {
 	created := report.Created["project"] + report.Created["memory"] +
 		report.Created["task"] + report.Created["decision"]
 	skipped := report.Skipped["project"] + report.Skipped["memory"] +
@@ -393,7 +442,7 @@ func printImportReport(out io.Writer, path string, report portable.ImportReport,
 	switch {
 	case created == 0:
 		headline = fmt.Sprintf("nothing to import from %s", path)
-	case apply:
+	case opts.Apply:
 		headline = fmt.Sprintf("imported %s from %s", summary, path)
 	default:
 		headline = fmt.Sprintf("would import %s from %s", summary, path)
@@ -403,6 +452,18 @@ func printImportReport(out io.Writer, path string, report portable.ImportReport,
 	}
 	if skipped > 0 {
 		if _, err := fmt.Fprintf(out, "skipped %s already present\n", countLabel(skipped)); err != nil {
+			return err
+		}
+	}
+	// The provenance policy is stated in the summary and not only on the record
+	// lines: it decides what every memory in the file becomes, so a reader who
+	// skips the per-record output still has to learn it.
+	if report.Created["memory"] > 0 {
+		note := "provenance downgraded to " + memory.DowngradedSource + " and unpinned — pass --trust-provenance to keep the artifact's own"
+		if opts.TrustProvenance {
+			note = "provenance kept as the artifact states it (--trust-provenance)"
+		}
+		if _, err := fmt.Fprintf(out, "  %s\n", note); err != nil {
 			return err
 		}
 	}
@@ -416,38 +477,22 @@ func printImportReport(out io.Writer, path string, report portable.ImportReport,
 			}
 		}
 	}
-	if !apply {
+	if !opts.Apply {
 		_, err := fmt.Fprintln(out, "\nnothing written — pass --apply to import")
 		return err
 	}
 	return nil
 }
 
-// printRecordLine reports one record's outcome, and is what makes a dry run
-// reviewable: the reader sees each memory's content prefix, not just a count.
-func printRecordLine(out io.Writer, r portable.RecordResult) error {
-	detail := r.Detail
-	if r.Action == portable.ActionCreate && r.Clamped {
-		// A clamp is the one thing about a record the reader cannot see in the
-		// file afterwards, because the stored text is the cut version.
-		detail = strings.TrimSpace(detail) + " …(truncated at the content cap)"
-	}
-	switch {
-	case detail == "":
-		detail = r.ID
-	case r.ID != "":
-		detail = fmt.Sprintf("%q (%s)", detail, r.ID)
-	}
-	_, err := fmt.Fprintf(out, "  %-7s %-9s line %d  %s\n", r.Action, r.Type+":", r.Line, detail)
-	return err
-}
-
-// runImport implements `ghost import <file.jsonl> [--apply]`.
+// runImport implements `ghost import <file.jsonl> [--apply] [--trust-provenance]`.
 //
-// The store is opened read-write, so the import is a normal write through the
-// same store methods a session uses — including the content cap and the category
-// and source validation. An artifact from another machine is another way to
-// reach the memories table, and it must not be a way around its rules.
+// The store is opened read-write only when the run will write. A dry run opens
+// read-only, so it cannot migrate a database whose schema is behind or seed the
+// builtin rows — see openImportStore for why that is not a detail. An import
+// that writes goes through the same store methods a session uses, including the
+// content cap and the category, source and importance validation: an artifact
+// from another machine is another way to reach the memories table, and it must
+// not be a way around its rules.
 //
 // A rejected record makes the command exit non-zero even though the rest of the
 // file was applied. A partial import reported as a success is the failure mode
@@ -460,20 +505,31 @@ func runImport() {
 		os.Exit(1)
 	}
 
-	_, _, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
-	defer store.Close() //nolint:errcheck
-
-	if err := runImportCore(context.Background(), store, opts.File, opts.Apply, os.Stdout); err != nil {
+	store, err := openImportStore(opts.Apply)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	defer store.Close() //nolint:errcheck
+
+	if err := runImportCore(context.Background(), store, opts.File, importOptionsFrom(opts), os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// importOptionsFrom converts the parsed flags into the run's options. The two
+// booleans are the whole of it, and the conversion is named rather than
+// inlined so runImport and a test build the same thing.
+func importOptionsFrom(opts importOptions) portable.ImportOptions {
+	return portable.ImportOptions{Apply: opts.Apply, TrustProvenance: opts.TrustProvenance}
 }
 
 // runImportCore imports one artifact and prints the per-record outcome and the
 // summary. Split out of runImport so the whole path is testable against a
 // temp-dir store, without argument parsing, the config load or a process exit —
 // and without re-executing the test binary.
-func runImportCore(ctx context.Context, store *memory.Store, path string, apply bool, out io.Writer) error {
+func runImportCore(ctx context.Context, store *memory.Store, path string, opts portable.ImportOptions, out io.Writer) error {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -483,20 +539,20 @@ func runImportCore(ctx context.Context, store *memory.Store, path string, apply 
 	}
 	defer f.Close() //nolint:errcheck
 
-	report, err := portable.Import(ctx, store, f, apply, func(r portable.RecordResult) {
+	report, err := portable.Import(ctx, store, f, opts, func(r portable.RecordResult) {
 		// A per-record write failure is reported inline and not propagated: the
 		// summary and the exit code carry the outcome, and a report that stopped
 		// at the first such failure would hide the records that did land.
 		_ = printRecordLine(out, r)
 	})
 	if err != nil {
-		// The file itself was refused — no header, an unreadable schema version,
-		// malformed JSON. Nothing was applied, so there is no run to summarise,
-		// and a summary here would read as "an import happened and found
-		// nothing", which is a different and wrong statement.
+		// The file itself was refused — no header, an unreadable schema version.
+		// Nothing was applied, so there is no run to summarise, and a summary here
+		// would read as "an import happened and found nothing", which is a
+		// different and wrong statement.
 		return err
 	}
-	if err := printImportReport(out, path, report, apply); err != nil {
+	if err := printImportReport(out, path, report, opts); err != nil {
 		return err
 	}
 	if report.Rejected > 0 {

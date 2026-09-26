@@ -124,6 +124,23 @@ func TestParseImportArgs(t *testing.T) {
 			t.Errorf("opts = %+v, want file=x.jsonl and a dry run", opts)
 		}
 	})
+	t.Run("trust-provenance is opt-in", func(t *testing.T) {
+		opts, err := parseImportArgs([]string{"x.jsonl"})
+		if err != nil {
+			t.Fatalf("parseImportArgs: %v", err)
+		}
+		if opts.TrustProvenance {
+			t.Error("trusting an artifact's provenance must be asked for, never the default")
+		}
+		opts, err = parseImportArgs([]string{"--trust-provenance", "x.jsonl"})
+		if err != nil || !opts.TrustProvenance {
+			t.Errorf("opts = %+v (err %v), want TrustProvenance set", opts, err)
+		}
+		// The flag on its own is not a file, exactly as --apply is not.
+		if _, err := parseImportArgs([]string{"--trust-provenance"}); err == nil {
+			t.Error("--trust-provenance alone must not satisfy the file argument")
+		}
+	})
 	t.Run("apply and extra positionals", func(t *testing.T) {
 		opts, err := parseImportArgs([]string{"--apply", "x.jsonl"})
 		if err != nil || !opts.Apply || opts.File != "x.jsonl" {
@@ -245,7 +262,7 @@ func TestRunExportCoreThenRunImportCoreRoundTrip(t *testing.T) {
 	dst := transferTestStore(t)
 	// Dry run: reports what it would do and writes nothing.
 	var dry strings.Builder
-	if err := runImportCore(ctx, dst, artifact, false, &dry); err != nil {
+	if err := runImportCore(ctx, dst, artifact, portable.ImportOptions{}, &dry); err != nil {
 		t.Fatalf("runImportCore(dry run): %v", err)
 	}
 	if !strings.Contains(dry.String(), "would import") {
@@ -259,7 +276,7 @@ func TestRunExportCoreThenRunImportCoreRoundTrip(t *testing.T) {
 	}
 
 	var applied strings.Builder
-	if err := runImportCore(ctx, dst, artifact, true, &applied); err != nil {
+	if err := runImportCore(ctx, dst, artifact, portable.ImportOptions{Apply: true}, &applied); err != nil {
 		t.Fatalf("runImportCore(apply): %v", err)
 	}
 	if !strings.Contains(applied.String(), "imported") {
@@ -272,7 +289,7 @@ func TestRunExportCoreThenRunImportCoreRoundTrip(t *testing.T) {
 	// Re-running is a no-op that says so, which is what makes a re-run the
 	// repair after a rejected record.
 	var again strings.Builder
-	if err := runImportCore(ctx, dst, artifact, true, &again); err != nil {
+	if err := runImportCore(ctx, dst, artifact, portable.ImportOptions{Apply: true}, &again); err != nil {
 		t.Fatalf("second runImportCore: %v", err)
 	}
 	if !strings.Contains(again.String(), "skipped") {
@@ -296,7 +313,7 @@ func TestRunImportCoreReportsARejectedRecordAndFails(t *testing.T) {
 	}
 	store := transferTestStore(t)
 	var out strings.Builder
-	err := runImportCore(context.Background(), store, path, true, &out)
+	err := runImportCore(context.Background(), store, path, portable.ImportOptions{Apply: true}, &out)
 	if err == nil {
 		t.Fatal("an import with a rejected record must report an error")
 	}
@@ -319,7 +336,7 @@ func TestRunImportCoreRefusesAnUnknownSchemaVersion(t *testing.T) {
 		t.Fatalf("write artifact: %v", err)
 	}
 	store := transferTestStore(t)
-	err := runImportCore(context.Background(), store, path, true, &strings.Builder{})
+	err := runImportCore(context.Background(), store, path, portable.ImportOptions{Apply: true}, &strings.Builder{})
 	if err == nil {
 		t.Fatal("an unknown schema version must be refused")
 	}
@@ -330,7 +347,7 @@ func TestRunImportCoreRefusesAnUnknownSchemaVersion(t *testing.T) {
 
 func TestRunImportCoreReportsAMissingFile(t *testing.T) {
 	store := transferTestStore(t)
-	err := runImportCore(context.Background(), store, filepath.Join(t.TempDir(), "gone.jsonl"), true, &strings.Builder{})
+	err := runImportCore(context.Background(), store, filepath.Join(t.TempDir(), "gone.jsonl"), portable.ImportOptions{Apply: true}, &strings.Builder{})
 	if err == nil {
 		t.Fatal("a missing artifact must be an error")
 	}
@@ -391,7 +408,7 @@ func TestPrintImportReportNamesTheFileAndTheCounts(t *testing.T) {
 		Skipped: map[string]int{"memory": 2},
 	}
 	var out strings.Builder
-	if err := printImportReport(&out, "/tmp/x.jsonl", report, true); err != nil {
+	if err := printImportReport(&out, "/tmp/x.jsonl", report, portable.ImportOptions{Apply: true}); err != nil {
 		t.Fatalf("printImportReport: %v", err)
 	}
 	text := out.String()
@@ -404,11 +421,28 @@ func TestPrintImportReportNamesTheFileAndTheCounts(t *testing.T) {
 	if !strings.Contains(text, "skipped 2") {
 		t.Errorf("report does not state the skips:\n%s", text)
 	}
+	// The provenance policy is in the summary, not only on the record lines: it
+	// decides what every memory in the file becomes, and the stored source is the
+	// rewritten one, so the artifact's own value is gone from the store.
+	if !strings.Contains(text, "provenance downgraded") {
+		t.Errorf("report does not state the provenance downgrade:\n%s", text)
+	}
+	if !strings.Contains(text, "--trust-provenance") {
+		t.Errorf("report does not name the flag that changes it:\n%s", text)
+	}
+	trusted := portable.ImportReport{Applied: true, Created: map[string]int{"memory": 1}}
+	out.Reset()
+	if err := printImportReport(&out, "x.jsonl", trusted, portable.ImportOptions{Apply: true, TrustProvenance: true}); err != nil {
+		t.Fatalf("printImportReport(trusted): %v", err)
+	}
+	if !strings.Contains(out.String(), "kept as the artifact states it") {
+		t.Errorf("a --trust-provenance run does not say it kept the provenance:\n%s", out.String())
+	}
 	// A plural-aware noun for a count of 1, so a single record is not reported
 	// as "1 memories".
 	report = portable.ImportReport{Applied: false, Created: map[string]int{"task": 1}}
 	out.Reset()
-	if err := printImportReport(&out, "x.jsonl", report, false); err != nil {
+	if err := printImportReport(&out, "x.jsonl", report, portable.ImportOptions{}); err != nil {
 		t.Fatalf("printImportReport: %v", err)
 	}
 	if strings.Contains(out.String(), "1 tasks") {

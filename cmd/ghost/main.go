@@ -183,9 +183,12 @@ Commands:
                                while the MCP server runs; prints path and row counts
   export [--project <name>]   Write memories, tasks, decisions and projects as JSONL
     [--out <file.jsonl>]      (--out - for stdout; embeddings are not exported)
-  import <file.jsonl> [--apply]
-                              Load a JSONL artifact (dry-run by default; never
-                               overwrites a record whose id already exists)
+  import <file.jsonl> [--apply] [--trust-provenance]
+                              Load a JSONL artifact (dry-run by default over a
+                               read-only connection; never overwrites a record
+                               whose id already exists; imported memories are
+                               downgraded to source "onboarding" and unpinned
+                               unless --trust-provenance)
   upgrade                     Update ghost to the latest release
   version                     Print version
 

@@ -44,3 +44,31 @@ func openReadOnlyTransferStore(dataDir string) (*memory.Store, error) {
 	// A nil logger is honoured as silence: this store only reads.
 	return memory.NewStore(db, nil), nil
 }
+
+// openImportStore opens the database for an import run whose apply flag is
+// `apply`.
+//
+// A dry run opens read-only, and that is the whole reason this is a function
+// rather than a line in runImport. bootstrap() is a read-write open, and a
+// read-write open is not a neutral way to look: memory.OpenDB runs migrations
+// and stamps user_version, and the caller then seeds the builtin global rows. So
+// a dry run reached through bootstrap() could migrate a database whose schema is
+// behind, insert rows, and report "nothing written" while having written them —
+// a preview that changes the thing it is previewing. The import's dry run writes
+// nothing on every path (every store import method returns before its INSERT when
+// apply is false), so the read-only connection loses no capability it needs.
+//
+// The apply path goes through bootstrap as every other writing command does, so
+// it still fails on a config file that does not parse, and still gets the
+// logger and the demotion threshold.
+func openImportStore(apply bool) (*memory.Store, error) {
+	if apply {
+		_, _, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
+		return store, nil
+	}
+	dataDir, err := dataDirPath()
+	if err != nil {
+		return nil, err
+	}
+	return openReadOnlyTransferStore(dataDir)
+}

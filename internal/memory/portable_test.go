@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -198,9 +199,13 @@ func TestImportMemoryRoundTripsEveryColumn(t *testing.T) {
 	if created, err := dst.ImportProject(ctx, projects[0], true); err != nil || !created {
 		t.Fatalf("ImportProject = %v, %v; want created", created, err)
 	}
-	created, clamped, err := dst.ImportMemory(ctx, memories[0], true)
-	if err != nil || !created || clamped {
-		t.Fatalf("ImportMemory = %v, %v, %v; want created, unclamped", created, clamped, err)
+	// TrustProvenance, because this test is about the columns: the source and
+	// pin rewrite is a policy the default applies on purpose, and asserting the
+	// row comes back identical means asserting that policy is off.
+	created, clamped, downgraded, err := dst.ImportMemory(ctx, memories[0],
+		ImportOptions{Apply: true, TrustProvenance: true})
+	if err != nil || !created || clamped || downgraded {
+		t.Fatalf("ImportMemory = %v, %v, %v, %v; want created, unclamped, not downgraded", created, clamped, downgraded, err)
 	}
 
 	got, err := dst.PortableMemories(ctx, nil)
@@ -249,7 +254,7 @@ func TestImportSkipsAnExistingIDAndNeverOverwrites(t *testing.T) {
 		CreatedAt: "2026-01-01 00:00:00",
 		UpdatedAt: "2026-01-01 00:00:00",
 	}
-	created, _, err := store.ImportMemory(ctx, incoming, true)
+	created, _, _, err := store.ImportMemory(ctx, incoming, ImportOptions{Apply: true})
 	if err != nil {
 		t.Fatalf("ImportMemory: %v", err)
 	}
@@ -281,7 +286,7 @@ func TestImportDryRunWritesNothing(t *testing.T) {
 		ID: "m9", ProjectID: "p1", Category: "gotcha", Content: "would be written",
 		Source: "mcp", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00",
 	}
-	created, _, err := store.ImportMemory(ctx, m, false)
+	created, _, _, err := store.ImportMemory(ctx, m, ImportOptions{})
 	if err != nil {
 		t.Fatalf("ImportMemory(dry run): %v", err)
 	}
@@ -308,10 +313,10 @@ func TestImportMemoryClampsOversizedContent(t *testing.T) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	long := strings.Repeat("x", MaxContentLen+500)
-	created, clamped, err := store.ImportMemory(ctx, PortableMemory{
+	created, clamped, _, err := store.ImportMemory(ctx, PortableMemory{
 		ID: "m1", ProjectID: "p1", Category: "gotcha", Content: long, Source: "mcp",
 		CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00",
-	}, true)
+	}, ImportOptions{Apply: true})
 	if err != nil || !created || !clamped {
 		t.Fatalf("ImportMemory = %v, %v, %v; want created and clamped", created, clamped, err)
 	}
@@ -385,7 +390,7 @@ func TestImportMemoryRejectsInvalidRecords(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, _, err := store.ImportMemory(ctx, tc.rec, true); err == nil {
+			if _, _, _, err := store.ImportMemory(ctx, tc.rec, ImportOptions{Apply: true}); err == nil {
 				t.Fatalf("ImportMemory must reject %s", tc.name)
 			} else if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error must say %q, got %v", tc.want, err)
@@ -397,7 +402,7 @@ func TestImportMemoryRejectsInvalidRecords(t *testing.T) {
 			// knows what the same run will have created — see ImportMemory's
 			// comment on apply=false.
 			if tc.want != "project" {
-				created, _, err := store.ImportMemory(ctx, tc.rec, false)
+				created, _, _, err := store.ImportMemory(ctx, tc.rec, ImportOptions{})
 				if err == nil {
 					t.Errorf("a dry run accepted %s (created=%v)", tc.name, created)
 				}
@@ -428,9 +433,9 @@ func TestImportMemoryDefaultsAbsentTimestampsAndImportance(t *testing.T) {
 	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
-	if _, _, err := store.ImportMemory(ctx, PortableMemory{
+	if _, _, _, err := store.ImportMemory(ctx, PortableMemory{
 		ID: "m1", ProjectID: "p1", Category: "fact", Content: "x", Source: "mcp",
-	}, true); err != nil {
+	}, ImportOptions{Apply: true}); err != nil {
 		t.Fatalf("ImportMemory: %v", err)
 	}
 	var created, updated string
@@ -489,7 +494,7 @@ func TestImportMemoryDistinguishesAStatedZeroImportanceFromAnAbsentOne(t *testin
 	if _, err := dst.ImportProject(ctx, PortableProject{ID: "p1", Path: "/src/p1", Name: "p1"}, true); err != nil {
 		t.Fatalf("ImportProject: %v", err)
 	}
-	if _, _, err := dst.ImportMemory(ctx, exported[0], true); err != nil {
+	if _, _, _, err := dst.ImportMemory(ctx, exported[0], ImportOptions{Apply: true}); err != nil {
 		t.Fatalf("ImportMemory: %v", err)
 	}
 	var got float64
@@ -501,9 +506,9 @@ func TestImportMemoryDistinguishesAStatedZeroImportanceFromAnAbsentOne(t *testin
 	}
 
 	// A record that states none is a different case, and takes the default.
-	if _, _, err := dst.ImportMemory(ctx, PortableMemory{
+	if _, _, _, err := dst.ImportMemory(ctx, PortableMemory{
 		ID: "m-absent", ProjectID: "p1", Category: "fact", Content: "x", Source: "mcp",
-	}, true); err != nil {
+	}, ImportOptions{Apply: true}); err != nil {
 		t.Fatalf("ImportMemory(absent): %v", err)
 	}
 	if err := dst.db.QueryRowContext(ctx, `SELECT importance FROM memories WHERE id = 'm-absent'`).Scan(&got); err != nil {
@@ -560,6 +565,157 @@ func TestImportProjectAcceptsARemoteLessProjectBesideOtherRemoteLessProjects(t *
 	}
 }
 
+// TestImportMemoryDowngradesProvenanceUnlessTrusted: an artifact is a file
+// that arrived from somewhere, and on its own authority it must not be able to
+// plant rows that read as the user's own material (`manual`) or as Ghost's
+// shipped rules (`builtin`) — both of which the store exempts from consolidation
+// — nor rows that are pinned, which is exempt whatever their source.
+//
+// The downgrade happens before the id check, so a dry run reports the rewrite it
+// would make rather than the one the artifact asked for.
+func TestImportMemoryDowngradesProvenanceUnlessTrusted(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		source     string
+		pinned     bool
+		trust      bool
+		wantSource string
+		wantPinned bool
+	}{
+		{name: "manual", source: "manual", wantSource: DowngradedSource},
+		{name: "builtin", source: "builtin", wantSource: DowngradedSource},
+		{name: "pinned mcp", source: "mcp", pinned: true, wantSource: DowngradedSource},
+		{name: "reflection", source: "reflection", wantSource: DowngradedSource},
+		{name: "manual, trusted", source: "manual", trust: true, wantSource: "manual"},
+		{name: "builtin, trusted", source: "builtin", trust: true, wantSource: "builtin"},
+		{name: "pinned mcp, trusted", source: "mcp", pinned: true, trust: true, wantSource: "mcp", wantPinned: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := portableTestStore(t)
+			ctx := context.Background()
+			if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			rec := PortableMemory{
+				ID: "m1", ProjectID: "p1", Category: "fact", Content: "from an artifact",
+				Source: tc.source, Pinned: tc.pinned,
+				CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00",
+			}
+			created, _, downgraded, err := store.ImportMemory(ctx, rec, ImportOptions{Apply: true, TrustProvenance: tc.trust})
+			if err != nil || !created {
+				t.Fatalf("ImportMemory = %v, %v; want created", created, err)
+			}
+			wantDowngraded := tc.source != tc.wantSource || tc.pinned != tc.wantPinned
+			if downgraded != wantDowngraded {
+				t.Errorf("downgraded = %v, want %v", downgraded, wantDowngraded)
+			}
+			var gotSource string
+			var gotPinned int
+			if err := store.db.QueryRowContext(ctx,
+				`SELECT source, pinned FROM memories WHERE id = 'm1'`).Scan(&gotSource, &gotPinned); err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			if gotSource != tc.wantSource {
+				t.Errorf("source = %q, want %q", gotSource, tc.wantSource)
+			}
+			if (gotPinned == 1) != tc.wantPinned {
+				t.Errorf("pinned = %v, want %v", gotPinned == 1, tc.wantPinned)
+			}
+		})
+	}
+}
+
+// TestImportedMemoriesAreConsolidatable: the point of downgrading is not only
+// that the provenance reads honestly but that the rows stay ordinary. Both
+// `manual` and `builtin` are excluded from ReplaceNonManual by name, and a
+// pinned row is excluded whatever its source — so a planted row that kept either
+// would be permanently exempt from consolidation. This asserts the exclusion
+// itself rather than the label, because the label is an implementation detail of
+// the same rule.
+func TestImportedMemoriesAreConsolidatable(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	// Every source the artifact could claim, pinned and not, as a user would
+	// write them.
+	for i, source := range []string{"manual", "builtin", "mcp", "chat", "reflection", "decision_log"} {
+		rec := PortableMemory{
+			ID:        fmt.Sprintf("m%d", i),
+			ProjectID: "p1", Category: "fact", Content: "planted " + source,
+			Source: source, Pinned: true,
+			CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00",
+		}
+		if _, _, _, err := store.ImportMemory(ctx, rec, ImportOptions{Apply: true}); err != nil {
+			t.Fatalf("ImportMemory(%s): %v", source, err)
+		}
+	}
+	var exempt int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM memories
+		WHERE source IN ('manual', 'builtin') OR pinned = 1`).Scan(&exempt); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if exempt != 0 {
+		t.Errorf("%d imported rows are exempt from consolidation — an untrusted artifact must not be able to plant any", exempt)
+	}
+	// And the two the store itself writes, for contrast, so the assertion above
+	// is about the import and not about a store that never pins anything.
+	if err := store.SeedGlobalMemories(ctx); err != nil {
+		t.Fatalf("SeedGlobalMemories: %v", err)
+	}
+	var seeds int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM memories WHERE source = 'builtin' AND pinned = 1`).Scan(&seeds); err != nil {
+		t.Fatalf("count seeds: %v", err)
+	}
+	if seeds == 0 {
+		t.Error("no builtin seed row is pinned, so the check above would pass against any store")
+	}
+}
+
+// TestImportMemoryDryRunReportsTheDowngradeItWouldMake: the preview exists so
+// the user can read what will happen before it happens, and the provenance
+// rewrite is the part of that a reader cannot verify afterwards — the stored
+// source is the downgraded one, so the artifact's own value is gone from the
+// store entirely.
+func TestImportMemoryDryRunReportsTheDowngradeItWouldMake(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	rec := PortableMemory{
+		ID: "m1", ProjectID: "p1", Category: "fact", Content: "x", Source: "builtin", Pinned: true,
+	}
+	created, _, downgraded, err := store.ImportMemory(ctx, rec, ImportOptions{})
+	if err != nil {
+		t.Fatalf("ImportMemory(dry run): %v", err)
+	}
+	if !created {
+		t.Error("a dry run must report what it would create")
+	}
+	if !downgraded {
+		t.Error("a dry run must report the provenance downgrade it would make")
+	}
+	// With the flag, the dry run says nothing is being downgraded.
+	_, _, downgraded, err = store.ImportMemory(ctx, rec, ImportOptions{TrustProvenance: true})
+	if err != nil {
+		t.Fatalf("ImportMemory(dry run, trusted): %v", err)
+	}
+	if downgraded {
+		t.Error("--trust-provenance must not report a downgrade")
+	}
+	var n int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM memories`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("a dry run wrote %d rows", n)
+	}
+}
+
 // TestImportMemoryClampsImportance: a normal save clamps importance to [0,1]
 // before the write. An import that skipped that would be the only way an
 // importance outside the range reaches the database.
@@ -578,7 +734,7 @@ func TestImportMemoryClampsImportance(t *testing.T) {
 			ID: "m-" + string(rune('a'+int(tc.in))), ProjectID: "p1", Category: "fact",
 			Content: "x", Source: "mcp", Importance: &in,
 		}
-		if _, _, err := store.ImportMemory(ctx, rec, true); err != nil {
+		if _, _, _, err := store.ImportMemory(ctx, rec, ImportOptions{Apply: true}); err != nil {
 			t.Fatalf("ImportMemory(%v): %v", tc.in, err)
 		}
 		var got float64
