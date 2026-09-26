@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -114,13 +113,24 @@ type Store struct {
 	embeddingIdentity string
 
 	// foreignWarned gates the warning usableVectorEntries logs when a search
-	// skips vectors recorded under a retired identity: it is claimed by the
-	// first such search, so the warning is logged once per process rather than
-	// once per search — a re-embed lasts many queries, and one line per query
-	// buries the state it reports. It is a pointer so ExplainSearch can hand
-	// its trace store the same gate (see explain.go): an explain run must not
-	// spend a second warning on rows the real search already reported.
-	foreignWarned *atomic.Bool
+	// skips vectors recorded under a retired identity: it records which
+	// retired identities have already been reported, so each is logged once
+	// per process rather than once per search — a re-embed lasts many queries,
+	// and one line per query buries the state it reports. The gate is keyed on
+	// the identity rather than being a single flag because a long-lived MCP
+	// server can reconfigure twice in one session; the second retirement is a
+	// new diagnosis with its own stored_identity and must warn again. It is a
+	// pointer so ExplainSearch can hand its trace store the same gate (see
+	// explain.go): an explain run must not spend a second warning on rows the
+	// real search already reported.
+	foreignWarned *foreignWarnGate
+}
+
+// foreignWarnGate is the per-identity warning gate: the set of retired
+// identities whose foreign-vector warning this process has already logged.
+type foreignWarnGate struct {
+	mu     sync.Mutex
+	warned map[string]bool
 }
 
 // SetOnSave registers a callback invoked after each successful memory save.
@@ -196,7 +206,7 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Store{db: db, logger: logger, demotionThreshold: DefaultDemotionThreshold, foreignWarned: new(atomic.Bool)}
+	return &Store{db: db, logger: logger, demotionThreshold: DefaultDemotionThreshold, foreignWarned: &foreignWarnGate{warned: make(map[string]bool)}}
 }
 
 func (s *Store) queryDB() sqlQueryer {

@@ -36,8 +36,12 @@ func beforeHybridHydrate(ids []string) {
 // Rewriting a row under a different identity also retires the link scan the
 // memory earned in the old space: link_scans records that its neighbours were
 // compared in ONE vector space, and a scan slot that survives the change means
-// the memory is never scanned again — it keeps links nothing will ever rebuild,
-// feeding `ghost supersede` and the Obsidian graph forever. The delete runs
+// the memory is never scanned again — its links would stay exactly the ones
+// the retired space produced, feeding `ghost supersede` and the Obsidian graph
+// forever. Clearing the slot re-queues the memory so the linker compares it
+// again in the new space; the re-scan adds current-space edges alongside the
+// old ones rather than replacing them (only supersede invalidates edges, and
+// CreateLink keeps MAX(strength)). The delete runs
 // before the upsert only because it has to read the old model first; the
 // ordering fails safe in both directions, so no transaction is needed. If the
 // upsert then fails, the memory is merely re-queued for a scan it did not need,
@@ -229,15 +233,27 @@ func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []f
 	return scored, nil
 }
 
-// warnForeignOnce claims the store's foreign-vector warning for this process
-// and reports whether it may be logged. The first search to skip rows from a
-// retired identity wins the gate; every later search during the same re-embed
-// stays quiet, because one line per query buries the state it reports. A store
-// with no gate (a literal built without one) shares nothing with an explain
-// trace store and falls back to warning every time — the pre-gate behavior,
-// which is no worse than staying silent about a reconfiguration.
-func (s *Store) warnForeignOnce() bool {
-	return s.foreignWarned == nil || s.foreignWarned.CompareAndSwap(false, true)
+// warnForeignOnce claims the store's foreign-vector warning for storedIdentity
+// and reports whether it may be logged. The gate is keyed on the retired
+// identity: the first search to skip rows from a given identity wins it, every
+// later search during the same re-embed stays quiet (one line per query buries
+// the state it reports), but a second reconfiguration in the same process —
+// a different retired identity — warns again, because that is a new diagnosis
+// with its own stored_identity. A store with no gate (a literal built without
+// one) shares nothing with an explain trace store and falls back to warning
+// every time — the pre-gate behavior, which is no worse than staying silent
+// about a reconfiguration.
+func (s *Store) warnForeignOnce(storedIdentity string) bool {
+	if s.foreignWarned == nil {
+		return true
+	}
+	s.foreignWarned.mu.Lock()
+	defer s.foreignWarned.mu.Unlock()
+	if s.foreignWarned.warned[storedIdentity] {
+		return false
+	}
+	s.foreignWarned.warned[storedIdentity] = true
+	return true
 }
 
 // usableVectorEntries reads an open embeddings query and keeps only the rows
@@ -255,7 +271,8 @@ func (s *Store) warnForeignOnce() bool {
 // documented at searchVector. An empty identity disables the identity check
 // (a store with no embedding model configured).
 //
-// The foreign-identity warning is logged once per process (warnForeignOnce)
+// The foreign-identity warning is logged once per retired identity
+// (warnForeignOnce)
 // rather than once per search: during a re-embed every search skips the same
 // rows, and a line per query buries the state it reports. The dimension
 // warning keeps its per-search reporting — it cannot repeat during a re-embed,
@@ -295,8 +312,8 @@ func (s *Store) usableVectorEntries(rows *sql.Rows, queryVec []float32, identity
 		return nil, err
 	}
 	if s.logger != nil {
-		if foreign > 0 && s.warnForeignOnce() {
-			s.logger.Warn("vector search skipped embeddings from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded (reported once per process)",
+		if foreign > 0 && s.warnForeignOnce(foreignModel) {
+			s.logger.Warn("vector search skipped embeddings from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded (reported once per retired identity)",
 				"skipped", foreign, "usable", len(entries), "configured_identity", identity, "stored_identity", foreignModel)
 		}
 		if mismatched > 0 {

@@ -125,3 +125,58 @@ func TestForeignVectorWarningLoggedOnce(t *testing.T) {
 		t.Errorf("foreign-vector warning logged %d times across 3 searches, want 1: the re-embed window lasts many searches, the warning must not", got)
 	}
 }
+
+// TestForeignVectorWarningRetiresPerIdentity: the gate that silences the
+// repeat warnings must be keyed on the retired identity, not the process. A
+// long-lived MCP server can reconfigure twice in one session (a second model,
+// dimension or prefix change), and the second retirement is a genuinely new
+// diagnosis with its own stored_identity — a process-wide gate would swallow
+// it and log nothing while the first retirement's rows are long gone. Each
+// retired identity warns once; repeats within one identity stay quiet.
+func TestForeignVectorWarningRetiresPerIdentity(t *testing.T) {
+	db, err := OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	var buf bytes.Buffer
+	store := NewStore(db, slog.New(slog.NewTextHandler(&buf, nil)))
+	store.SetEmbeddingIdentity(identityCurrent)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "test-proj", "/test", "test"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	first := createTestMemory(t, store, ctx, "memory from the first retired space")
+	if err := store.StoreEmbedding(ctx, first, []float32{1, 0, 0}, identityStale); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := store.SearchVector(ctx, "test-proj", []float32{1, 0, 0}, 10); err != nil {
+			t.Fatalf("SearchVector #%d: %v", i+1, err)
+		}
+	}
+	if got := strings.Count(buf.String(), "another vector space"); got != 1 {
+		t.Fatalf("after the first retirement the warning logged %d times across 2 searches, want 1", got)
+	}
+
+	// The first reconfiguration completes (its rows are rewritten in the
+	// configured space) and a second, different identity retires in the same
+	// process — a model change after a prefix change, say.
+	const identitySecond = "another-model:384+prefix"
+	if err := store.StoreEmbedding(ctx, first, []float32{1, 0, 0}, identityCurrent); err != nil {
+		t.Fatalf("StoreEmbedding(current): %v", err)
+	}
+	second := createTestMemory(t, store, ctx, "memory from the second retired space")
+	if err := store.StoreEmbedding(ctx, second, []float32{0, 1, 0}, identitySecond); err != nil {
+		t.Fatalf("StoreEmbedding(second identity): %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := store.SearchVector(ctx, "test-proj", []float32{1, 0, 0}, 10); err != nil {
+			t.Fatalf("SearchVector (second identity) #%d: %v", i+1, err)
+		}
+	}
+	if got := strings.Count(buf.String(), "another vector space"); got != 2 {
+		t.Errorf("after a second retired identity the warning logged %d times total, want 2: the gate is per identity, so a new retirement in the same process must warn again", got)
+	}
+}

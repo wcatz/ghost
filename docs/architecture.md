@@ -299,11 +299,16 @@ are four, deliberately separate by caller:
 
 Rewriting a row under a new identity also clears the `link_scans` slot the
 memory earned in the old space (in `StoreEmbedding`, before the upsert), so the
-memory is re-queued for linking instead of keeping links built from
-similarities nothing will ever recompute; the failure ordering fails safe in
-both directions, so the delete and the upsert need no transaction. The
-foreign-vector warning in `usableVectorEntries` is likewise logged once per
-process rather than once per search.
+memory is re-queued for linking and the linker compares it again in the new
+space. The re-scan adds current-space edges alongside the ones the old space
+produced — nothing deletes the old `related` rows (only `supersede` calls
+`InvalidateLink`), and `CreateLink` upserts with `MAX(strength, ...)`, so an
+edge whose new-space similarity is lower keeps the strength the old space gave
+it; retiring those edges is a separate decision this change does not make. The
+failure ordering of the delete and the upsert fails safe in both directions, so
+they need no transaction. The foreign-vector warning in `usableVectorEntries`
+is likewise logged once per retired identity rather than once per search — a
+process that reconfigures twice warns about both retirements.
 
 The query-side rules matter because the filter only guards the *rows*: a stale
 vector used as a query would be a cosine between two spaces, and the number it

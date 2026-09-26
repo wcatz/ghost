@@ -184,7 +184,8 @@ recorded identity stops matching the configured one, so those vectors are:
 
 Until a memory is rewritten it is full-text searchable only — its text is never
 hidden, only its vector retires — and the state is visible in three places: the
-log carries one warning per process (not per search) naming how many vectors
+log carries one warning per retired identity (not one per search, but a second
+model change warns again) naming how many vectors
 were skipped and which identity wrote them, `ghost mcp status` counts only
 vectors in the configured space and splits the remainder
 (`embeddings: 120/547 memories (427 awaiting re-embed: 45 stale, 382 unembedded)`),
@@ -194,8 +195,9 @@ vector at all). Linking and `ghost supersede` skip a memory whose
 vector is not in the current space, and re-check it on their next pass rather
 than linking it from a cross-space similarity. Rewriting a memory's vector under
 a new identity also retires the link scan it earned in the old space, so the
-memory is re-queued for linking instead of keeping links nothing will ever
-rebuild. Expect a one-time re-embed of the
+memory is re-queued for linking and its next scan adds edges built in the new
+space alongside any the old space produced (existing `related` edges are not
+deleted). Expect a one-time re-embed of the
 whole corpus on the first run after upgrading to a version that records the
 prefix setting, even if your model did not change.
 
