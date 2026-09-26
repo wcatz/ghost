@@ -272,13 +272,21 @@ func TestOpenLogForAppendKeepsWorkingWhenTheFreshFileCannotBeCreated(t *testing.
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Errorf("the fresh file was not created (that is the point of this test), Lstat err = %v", err)
 	}
-	// The caller cannot see this fallback, so it has to be logged — naming
-	// both paths, since "<path>" is the one that has gone missing.
-	for _, want := range []string{path, path + ".1"} {
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("the fallback must be logged with both paths, got %q", logs.String())
-		}
+	// The caller cannot see this fallback, so it has to be logged — as the
+	// two attributes, not as substrings: path is a prefix of path+".1", so
+	// searching for the bare path would pass on the rotated attribute alone,
+	// and the log's own name is the attribute that matters here.
+	if !hasAttr(logs.String(), "path", path) || !hasAttr(logs.String(), "rotated", path+".1") {
+		t.Errorf("the fallback must be logged with path=%s and rotated=%s, got %q", path, path+".1", logs.String())
 	}
+}
+
+// hasAttr reports whether a captured TextHandler line carries key=value.
+// TextHandler quotes a value only when it holds a space or an '=', which a
+// TempDir path normally does not, so both renderings count rather than the
+// assertion pinning itself to that accident.
+func hasAttr(logs, key, value string) bool {
+	return strings.Contains(logs, key+"="+value) || strings.Contains(logs, key+`="`+value+`"`)
 }
 
 // TestOpenLogForAppendKeepsWorkingWhileTheFilesystemStaysFull: the fallback is
@@ -341,6 +349,49 @@ func captureLogOutput(t *testing.T) *bytes.Buffer {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	return &buf
+}
+
+// TestOpenLogForAppendDoesNotSpliceIntoStaleRotatedCopy: the fallback is for a
+// name that is GONE — the rename put the recent lines into "<path>.1", so the
+// copy is where a new run belongs. A name that still exists but will not open
+// is the opposite situation: the recent lines are under that name and the ".1"
+// beside it is an earlier generation. Appending a fresh run there would join
+// two runs with no boundary, and nothing would rotate the copy again (rotation
+// only ever looks at the name), so this is the failure that must come back as
+// an error instead. No stub: a directory wearing the log's name fails to open
+// for exactly the EISDIR reason the real case does, and no rename happens
+// because a directory is not a regular file.
+func TestOpenLogForAppendDoesNotSpliceIntoStaleRotatedCopy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lifecycle.log")
+	stale := []byte("an earlier generation\n")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("put a directory at the log's name: %v", err)
+	}
+	if err := os.WriteFile(path+".1", stale, 0o600); err != nil {
+		t.Fatalf("seed stale rotated copy: %v", err)
+	}
+
+	f, err := openLogForAppend(path)
+	if f != nil {
+		_ = f.Close()
+		t.Fatal("openLogForAppend returned a descriptor alongside an error")
+	}
+	if err == nil {
+		t.Fatal("a name that exists but will not open must be reported, not worked around")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q must name the log's own path", err)
+	}
+
+	got, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("read stale copy: %v", err)
+	}
+	if !bytes.Equal(got, stale) {
+		t.Errorf("the stale copy was written to: holds %d bytes ending %q, want the original %d bytes ending %q",
+			len(got), tail(got, 40), len(stale), tail(stale, 40))
+	}
 }
 
 // TestOpenLogForAppendNamesBothFailuresWhenNeitherFileOpens: every other
