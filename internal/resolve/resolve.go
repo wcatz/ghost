@@ -4,16 +4,20 @@
 // predicate on the injection/browse queries.
 //
 // Design mirrors internal/supersede: a cheap local prefilter proposes
-// candidates, an LLM Classifier adjudicates them in batches of up to eight with
-// a numbered KEEP/RESOLVED question (biased to KEEP), and — with apply — the
-// confirmed set is stamped via SetResolved while newly-judged KEEP verdicts are
-// cached by content hash in memories.resolve_kept_hash so a converged project
-// makes no classifier calls at all. The LLM Classifier implementation lives in
-// resolution.go; the hosting binary supplies a CLI-harness provider (see
-// internal/ai). The stop hook spawns `ghost lifecycle --project <id>` as a
-// detached background process (internal/mcpinit/stophook.go), whose resolve
-// phase runs this command with --apply. The pass is re-runnable and
-// idempotent — already-resolved rows are excluded by ResolveCandidates.
+// candidates, a deterministic KEEP veto (veto.go) settles the notes that state a
+// standing rule or an open problem without asking anything, an LLM Classifier
+// adjudicates the rest in batches of up to eight with a numbered
+// KEEP/RESOLVED question (biased to KEEP, and a RESOLVED must name what closed
+// the note), and — with apply — the confirmed set is stamped via SetResolved
+// while newly-judged KEEP verdicts are cached by content hash in
+// memories.resolve_kept_hash so a converged project makes no classifier calls at
+// all. The LLM Classifier implementation lives in resolution.go; the hosting
+// binary supplies a CLI-harness provider (see internal/ai). The stop hook spawns
+// `ghost lifecycle --project <id>` as a detached background process
+// (internal/mcpinit/stophook.go), whose resolve phase runs this command with
+// --apply. The pass is re-runnable and idempotent — already-resolved rows are
+// excluded by ResolveCandidates, and Reassess (reassess.go) is the repair pass
+// for the rows this one already got wrong.
 package resolve
 
 import (
@@ -74,13 +78,23 @@ type Classifier interface {
 	IsResolvedBatch(ctx context.Context, contents []string) ([]Verdict, error)
 }
 
+// keepCacheHashVersion versions the KEEP-cache key. Bump it whenever a cached
+// KEEP verdict would mean something new, so rows judged under the old rules are
+// re-asked instead of trusted — the same reason v2 existed.
+//
+//   - v1: every non-RESOLVED result, including a parse failure, was KEEP.
+//   - v2: only an explicit KEEP verdict is cached; a parse failure is UNKNOWN.
+//   - v3: a KEEP verdict also requires the classifier to have named what closed
+//     the note, and a note carrying an imperative or an open marker is KEEP
+//     before the call (issue #640). Every v2 entry was judged without those
+//     rules, so all of them are deliberately re-asked.
+const keepCacheHashVersion = "v3"
+
 // ContentHash is the KEEP-cache key: resolve's question is content-only, so a
-// tag or importance edit must not invalidate a cached verdict. The "v2\x00"
-// prefix versions the key — v1 treated every non-RESOLVED result, including a
-// parse failure, as KEEP; the new meaning caches only explicit KEEP verdicts,
-// so stale v1 entries are deliberately re-asked.
+// tag or importance edit must not invalidate a cached verdict. The version
+// prefix is hashed in with the content (see keepCacheHashVersion).
 func ContentHash(content string) string {
-	sum := sha256.Sum256([]byte("v2\x00" + content))
+	sum := sha256.Sum256([]byte(keepCacheHashVersion + "\x00" + content))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -101,6 +115,7 @@ type Result struct {
 	Confirmed  int // classified as resolved evidence by the LLM
 	Superseded int // older endpoint of a live 'supersedes'/'llm' link, demoted deterministically
 	Corrected  int // older prefilter-passing memory tied to a correction, demoted deterministically
+	Vetoed     int // candidates settled KEEP by the deterministic veto, no classifier call
 	Skipped    int // candidates skipped via the KEEP cache
 	Unknown    int // candidates whose verdict could not be parsed; eligible for a later pass
 	Resolved   int // rows written (0 in dry-run)
@@ -123,12 +138,19 @@ func Prefilter(mems []memory.Memory) []memory.Memory {
 }
 
 // Run loads eligible candidates, applies two deterministic demotion signals,
-// prefilters the rest, skips candidates whose content already earned a KEEP
-// verdict (the content-hash cache), classifies the remainder in batches, and —
-// when apply is true — stamps resolved_at on every confirmed memory in one
-// batch and records the newly-judged KEEP hashes. Dry-run (apply=false) writes
-// nothing but returns the confirmed set for preview. A classifier error on any
-// batch is fatal so a partial pass is never silently applied.
+// prefilters the rest, settles the KEEP vetoes and the KEEP cache, classifies
+// what is left in batches, and — when apply is true — stamps resolved_at on
+// every confirmed memory in one batch and records the newly-judged KEEP hashes.
+// Dry-run (apply=false) writes nothing but returns the confirmed set for
+// preview. A classifier error on any batch is fatal so a partial pass is never
+// silently applied.
+//
+// The veto is not a demotion: a candidate VetoKeep settles is KEEP, so it is
+// never classified and never cached. Issue #640 measured the pass burying about
+// one note in three, overwhelmingly notes that stated a rule in imperative form
+// or an unfinished problem in open-marker form, so that signal is now read
+// before the model is asked. It does not touch the two deterministic demotions
+// below, which act on evidence resolve never asked about.
 //
 // Deterministic demotions (no LLM call, so no extra CLI spend):
 //
@@ -206,6 +228,17 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 		if confirmedSet[m.ID] {
 			continue
 		}
+		// The veto runs before the cache lookup and before the classifier: a
+		// note that states a rule or an open problem on its face is KEEP, so
+		// it costs no harness call and no cache entry (the veto is free to
+		// recompute every pass).
+		if reason, vetoed := VetoKeep(m.Content); vetoed {
+			res.Vetoed++
+			if logger != nil {
+				logger.Debug("resolve veto kept memory", "id", m.ID, "pattern", reason)
+			}
+			continue
+		}
 		if keptHashes[m.ID] == ContentHash(m.Content) {
 			res.Skipped++
 			continue
@@ -244,7 +277,8 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	if logger != nil {
 		logger.Info("resolve classified",
 			"confirmed", llmConfirmed, "superseded", res.Superseded,
-			"corrected", res.Corrected, "cached", res.Skipped, "unknown", res.Unknown)
+			"corrected", res.Corrected, "vetoed", res.Vetoed,
+			"cached", res.Skipped, "unknown", res.Unknown)
 	}
 
 	if apply {

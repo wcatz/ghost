@@ -1280,9 +1280,12 @@ func (s *Server) registerTools() {
 			s.notifyProjectResource(ctx, projectID, "context")
 		}
 		var sb strings.Builder
-		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP cached, %d UNKNOWN, %s %d (%d classify call(s))\n",
+		// The veto count is reported so a caller can tell a pass that asked
+		// about nothing (every candidate settled by a rule) from a pass that
+		// decided everything was KEEP.
+		fmt.Fprintf(&sb, "%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP vetoed, %d KEEP cached, %d UNKNOWN, %s %d (%d classify call(s))\n",
 			args.Project, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
-			res.Skipped, res.Unknown, verb, count, cls.Calls())
+			res.Vetoed, res.Skipped, res.Unknown, verb, count, cls.Calls())
 		if res.Superseded > 0 || res.Corrected > 0 {
 			fmt.Fprintf(&sb, "  (%d via supersedes links, %d via correction pairing, %d via LLM)\n",
 				res.Superseded, res.Corrected, res.Confirmed)

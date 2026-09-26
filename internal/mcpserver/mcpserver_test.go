@@ -1366,6 +1366,11 @@ func TestResourceSubscription_RejectsUnknownURI(t *testing.T) {
 	}
 }
 
+// resolveAnswer is the canonical resolve RESOLVED reply under the #640 verdict
+// contract: a RESOLVED must name what closed the note, or the parser reads it
+// as a KEEP. Fakes that mean "this harness says resolved" must use it.
+const resolveAnswer = "RESOLVED | closed-by: the tracking issue closed"
+
 func writeFakeClaude(t *testing.T, path, answer string) {
 	t.Helper()
 	script := `#!/bin/sh
@@ -1405,7 +1410,7 @@ func TestGhostResolve_DryRunByDefault(t *testing.T) {
 	// no longer fall back to claude-first PATH ordering.
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "claude")
-	writeFakeClaude(t, bin, "RESOLVED")
+	writeFakeClaude(t, bin, resolveAnswer)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	session := connectedClientNamed(t, srv, "claude-code")
@@ -1510,7 +1515,7 @@ func TestGhostResolve_UsesSessionHarness(t *testing.T) {
 	writeFakeClaude(t, filepath.Join(dir, "claude"), "KEEP")
 	// opencode answers with its JSON-lines format (see
 	// internal/ai/opencode_client_test.go's fakeOpenCodeBinary).
-	if err := os.WriteFile(filepath.Join(dir, "opencode"), []byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"RESOLVED\"}}'\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "opencode"), []byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"RESOLVED | closed-by: the tracking issue closed\"}}'\n"), 0o755); err != nil {
 		t.Fatalf("write fake opencode binary: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1564,7 +1569,7 @@ func TestGhostResolve_UsesConfiguredBinaryAndModelPin(t *testing.T) {
 	openBin := filepath.Join(dir, "opencode")
 	script := `#!/bin/sh
 case " $* " in
-  *" -m opencode/big-pickle "*) printf '%s\n' '{"type":"text","part":{"type":"text","text":"RESOLVED"}}';;
+  *" -m opencode/big-pickle "*) printf '%s\n' '{"type":"text","part":{"type":"text","text":"RESOLVED | closed-by: the tracking issue closed"}}';;
   *) printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}';;
 esac
 `
@@ -1630,7 +1635,7 @@ func TestGhostResolve_AppliesWithCLI(t *testing.T) {
 
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "claude")
-	writeFakeClaude(t, bin, "RESOLVED")
+	writeFakeClaude(t, bin, resolveAnswer)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	session := connectedClientNamed(t, srv, "claude-code")
@@ -1724,7 +1729,7 @@ func TestGhostResolve_UnknownClientUndetectedErrors(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	writeFakeClaude(t, filepath.Join(dir, "claude"), "RESOLVED")
+	writeFakeClaude(t, filepath.Join(dir, "claude"), resolveAnswer)
 	t.Setenv("PATH", dir)
 
 	old := detectCallingSource
@@ -1773,7 +1778,7 @@ func TestGhostResolve_DetectedHarnessMissingDoesNotFallBackToClaude(t *testing.T
 	}
 
 	dir := t.TempDir()
-	writeFakeClaude(t, filepath.Join(dir, "claude"), "RESOLVED")
+	writeFakeClaude(t, filepath.Join(dir, "claude"), resolveAnswer)
 	// Only the temp dir is on PATH: the fake claude resolves, opencode cannot.
 	t.Setenv("PATH", dir)
 	t.Setenv("OPENCODE", "1")

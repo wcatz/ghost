@@ -43,8 +43,8 @@ func TestIsResolvedParsesResolved(t *testing.T) {
 		resp string
 		want Verdict
 	}{
-		{"RESOLVED", VerdictResolved},
-		{"resolved.", VerdictResolved},
+		{"RESOLVED | closed-by: the runbook it described was replaced", VerdictResolved},
+		{"resolved.", VerdictKeep}, // a bare RESOLVED is a KEEP (#640)
 		{"KEEP", VerdictKeep},
 		{"keep — still a live decision", VerdictKeep},
 		{"", VerdictUnknown},                // no explicit verdict → UNKNOWN
@@ -53,8 +53,9 @@ func TestIsResolvedParsesResolved(t *testing.T) {
 		{"already-resolved", VerdictUnknown},
 		{"self-resolved", VerdictUnknown},
 		{"previously-resolved", VerdictUnknown},
-		// A verdict that appears before any negation still resolves.
-		{"RESOLVED, no doubt", VerdictResolved},
+		// A verdict that appears before any other field still resolves, as
+		// long as it names what closed it.
+		{"RESOLVED, no doubt | closed-by: superseded by the v0.9 rubric", VerdictResolved},
 	}
 	for _, c := range cases {
 		fp := &fakeProvider{resp: c.resp}
@@ -65,6 +66,119 @@ func TestIsResolvedParsesResolved(t *testing.T) {
 		}
 		if got != c.want {
 			t.Errorf("IsResolved(%q) = %v, want %v", c.resp, got, c.want)
+		}
+	}
+}
+
+// TestIsResolvedRequiresClosedByReason is the #640 contract: a RESOLVED verdict
+// buries the note from session-start injection, so it must name what made the
+// note obsolete. A reply that says RESOLVED without that reason is read as
+// KEEP — the safe direction, where a wrongly-KEPT note merely stays visible.
+func TestIsResolvedRequiresClosedByReason(t *testing.T) {
+	for _, resp := range []string{
+		"RESOLVED",
+		"RESOLVED, the work is done",
+		"RESOLVED |",
+		"RESOLVED | closed-by:",
+		"RESOLVED | closed-by:   ",
+		"RESOLVED | closed by: the feature was dropped",
+		"RESOLVED because the thread concluded",
+	} {
+		fp := &fakeProvider{resp: resp}
+		got, err := NewResolutionClassifier(fp).IsResolved(context.Background(), "content")
+		if err != nil {
+			t.Fatalf("IsResolved(%q): %v", resp, err)
+		}
+		if got != VerdictKeep {
+			t.Errorf("IsResolved(%q) = %v, want KEEP without a non-empty closed-by", resp, got)
+		}
+	}
+}
+
+// TestIsResolvedAcceptsClosedByShapes covers the field shapes a harness
+// actually emits: the reason attached to the key, in the following field, with
+// or without the `|` separator, and with the key's own casing.
+func TestIsResolvedAcceptsClosedByShapes(t *testing.T) {
+	for _, resp := range []string{
+		"RESOLVED | closed-by: the runbook was replaced by the lifecycle spec",
+		"RESOLVED | CLOSED-BY: PR #240 closed the tracking issue",
+		"RESOLVED closed-by: PR #240 closed the tracking issue",
+		"  RESOLVED | Closed-By: the experiment was superseded  ",
+		"RESOLVED | closed-by:\nthe runbook was replaced by the lifecycle spec",
+	} {
+		fp := &fakeProvider{resp: resp}
+		got, err := NewResolutionClassifier(fp).IsResolved(context.Background(), "content")
+		if err != nil {
+			t.Fatalf("IsResolved(%q): %v", resp, err)
+		}
+		if got != VerdictResolved {
+			t.Errorf("IsResolved(%q) = %v, want RESOLVED", resp, got)
+		}
+	}
+}
+
+// TestPromptStatesTheKEEPQuestionAndDatedEvidenceRule: the two things the
+// maintenance benchmark says the old prompt got wrong are stated in the prompt
+// itself — the fresh-session question, and the fact that a date, PR number,
+// commit hash or "fixed in" does not resolve a note.
+func TestPromptStatesTheKEEPQuestionAndDatedEvidenceRule(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"single": classifySystemPrompt,
+		"batch":  classifyBatchSystemPrompt,
+	} {
+		if !strings.Contains(prompt, "starting a fresh session make a mistake, repeat work, or break a rule") {
+			t.Errorf("%s prompt must ask the fresh-session question:\n%s", name, prompt)
+		}
+		if !strings.Contains(prompt, "KEEP, even if it is written as a fix") &&
+			!strings.Contains(prompt, "KEEP — even if the note is written as a fix") {
+			t.Errorf("%s prompt must say a fix or incident narrative is still KEEP:\n%s", name, prompt)
+		}
+		if !strings.Contains(prompt, "do not make a note resolved") {
+			t.Errorf("%s prompt must say dates, PR numbers, commit hashes and \"fixed in\" are not resolution:\n%s", name, prompt)
+		}
+		if !strings.Contains(prompt, "closed-by:") {
+			t.Errorf("%s prompt must require a closed-by reason on RESOLVED:\n%s", name, prompt)
+		}
+	}
+}
+
+// TestClassifierKeepsIssueExamplesWithoutClosedBy runs the issue #640 examples
+// through the real prompt and parser with a harness that answers a bare
+// RESOLVED for every note — the exact failure mode the maintenance benchmark
+// measured. Without a reason naming what closed the note, every verdict parses
+// as KEEP, so the pass buries nothing. This is the load-bearing half of the
+// fix: a veto cannot help a note the harness itself judges wrongly.
+func TestClassifierKeepsIssueExamplesWithoutClosedBy(t *testing.T) {
+	notes := []string{
+		"Fixed (PR #240): the CI job leaked the pull-request token; never echo it in a log line.",
+		"Fixed (PR #241): `DINGO_PLUGINS_STORAGE_*_DATA_DIR` silently overrides `--data-dir`.",
+		"Fixed (PR #242): the restore path is safe on a single spindle. It is not.",
+	}
+	fp := &fakeProvider{resp: "1: RESOLVED\n2: RESOLVED\n3: RESOLVED\n"}
+	got, err := NewResolutionClassifier(fp).IsResolvedBatch(context.Background(), notes)
+	if err != nil {
+		t.Fatalf("IsResolvedBatch: %v", err)
+	}
+	for i, v := range got {
+		if v != VerdictKeep {
+			t.Errorf("verdict[%d] = %v, want KEEP (no closed-by reason given)", i, v)
+		}
+	}
+	if fp.calls != 1 {
+		t.Errorf("provider calls = %d, want 1 batched call", fp.calls)
+	}
+
+	// The same notes DO resolve once the harness names what closed them.
+	fp = &fakeProvider{resp: "1: RESOLVED | closed-by: a follow-up note documents the replacement rule\n" +
+		"2: RESOLVED | closed-by: superseded by the plugin-loader doc\n" +
+		"3: RESOLVED | closed-by: the one-spindle rule is documented now\n"}
+	got, err = NewResolutionClassifier(fp).IsResolvedBatch(context.Background(), notes)
+	if err != nil {
+		t.Fatalf("IsResolvedBatch with reasons: %v", err)
+	}
+	for i, v := range got {
+		if v != VerdictResolved {
+			t.Errorf("verdict[%d] = %v, want RESOLVED when a reason is given", i, v)
 		}
 	}
 }
@@ -115,7 +229,7 @@ func TestIsResolvedRejectsNegatedResolved(t *testing.T) {
 // TestIsResolvedBatchMapsNumberedLines: reply lines map by number, not
 // position, and one batched call replaces one call per note.
 func TestIsResolvedBatchMapsNumberedLines(t *testing.T) {
-	fp := &fakeProvider{resp: "2: RESOLVED\n1: KEEP\n"}
+	fp := &fakeProvider{resp: "2: RESOLVED | closed-by: superseded by the v0.9 rubric\n1: KEEP\n"}
 	cls := NewResolutionClassifier(fp)
 	got, err := cls.IsResolvedBatch(context.Background(), []string{"n1", "n2"})
 	if err != nil {
@@ -142,13 +256,14 @@ func TestIsResolvedBatchMapsNumberedLines(t *testing.T) {
 // answers and negated forms through the batched path: only an explicit,
 // un-negated RESOLVED may resolve a note.
 func TestIsResolvedBatchExplicitVerdictsAndNegation(t *testing.T) {
-	fp := &fakeProvider{resp: "1: RESOLVED\n2: KEEP\n3: not resolved\n4: resolved.\n5: unresolved\n"}
+	fp := &fakeProvider{resp: "1: RESOLVED | closed-by: the tracking issue closed\n2: KEEP\n3: not resolved\n4: resolved.\n5: unresolved\n"}
 	cls := NewResolutionClassifier(fp)
 	got, err := cls.IsResolvedBatch(context.Background(), []string{"a", "b", "c", "d", "e"})
 	if err != nil {
 		t.Fatalf("IsResolvedBatch: %v", err)
 	}
-	want := []Verdict{VerdictResolved, VerdictKeep, VerdictKeep, VerdictResolved, VerdictKeep}
+	// Note 4 answers a bare "resolved." with no reason: that is a KEEP (#640).
+	want := []Verdict{VerdictResolved, VerdictKeep, VerdictKeep, VerdictKeep, VerdictKeep}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("verdict[%d] = %v, want %v (got %v)", i, got[i], want[i], got)
@@ -157,7 +272,7 @@ func TestIsResolvedBatchExplicitVerdictsAndNegation(t *testing.T) {
 }
 
 func TestIsResolvedBatchMissingLineIsUnknown(t *testing.T) {
-	fp := &fakeProvider{resp: "1: RESOLVED\n"}
+	fp := &fakeProvider{resp: "1: RESOLVED | closed-by: the tracking issue closed\n"}
 	cls := NewResolutionClassifier(fp)
 	got, err := cls.IsResolvedBatch(context.Background(), []string{"a", "b"})
 	if err != nil {
@@ -176,7 +291,7 @@ func TestIsResolvedBatchMissingLineIsUnknown(t *testing.T) {
 // ambiguous (possibly an echoed/injected line), so the whole reply is
 // re-judged one note at a time.
 func TestIsResolvedBatchDuplicateNumberFallsBack(t *testing.T) {
-	fp := &fakeProvider{resps: []string{"1: RESOLVED\n1: KEEP", "RESOLVED", "KEEP"}}
+	fp := &fakeProvider{resps: []string{"1: RESOLVED | closed-by: closed by PR #240\n1: KEEP", "RESOLVED | closed-by: closed by PR #240", "KEEP"}}
 	cls := NewResolutionClassifier(fp)
 	got, err := cls.IsResolvedBatch(context.Background(), []string{"a", "b"})
 	if err != nil {
@@ -191,7 +306,7 @@ func TestIsResolvedBatchDuplicateNumberFallsBack(t *testing.T) {
 }
 
 func TestIsResolvedBatchZeroRecognizedFallsBack(t *testing.T) {
-	fp := &fakeProvider{resps: []string{"MAYBE", "KEEP", "KEEP", "RESOLVED"}}
+	fp := &fakeProvider{resps: []string{"MAYBE", "KEEP", "KEEP", "RESOLVED | closed-by: closed by PR #240"}}
 	cls := NewResolutionClassifier(fp)
 	got, err := cls.IsResolvedBatch(context.Background(), []string{"a", "b", "c"})
 	if err != nil {
@@ -212,7 +327,7 @@ func TestIsResolvedBatchFallbackUsesStrictSingleParser(t *testing.T) {
 	fp := &fakeProvider{resps: []string{
 		"MAYBE",
 		"I think this was resolved, but KEEP it",
-		"RESOLVED",
+		"RESOLVED | closed-by: closed by PR #240",
 	}}
 	cls := NewResolutionClassifier(fp)
 	got, err := cls.IsResolvedBatch(context.Background(), []string{"a", "b"})
@@ -285,7 +400,7 @@ func TestIsResolvedBatchChunksBySize(t *testing.T) {
 }
 
 func TestIsResolvedBatchDecoratedLines(t *testing.T) {
-	fp := &fakeProvider{resp: "**1:** RESOLVED\n- 2: KEEP\n"}
+	fp := &fakeProvider{resp: "**1:** RESOLVED | closed-by: closed by PR #240\n- 2: KEEP\n"}
 	cls := NewResolutionClassifier(fp)
 	got, err := cls.IsResolvedBatch(context.Background(), []string{"a", "b"})
 	if err != nil {
@@ -311,7 +426,7 @@ func TestIsResolvedBatchEmpty(t *testing.T) {
 }
 
 func TestIsResolvedBatchLoneNoteUsesSinglePrompt(t *testing.T) {
-	fp := &fakeProvider{resp: "RESOLVED"}
+	fp := &fakeProvider{resp: "RESOLVED | closed-by: closed by PR #240"}
 	cls := NewResolutionClassifier(fp)
 	got, err := cls.IsResolvedBatch(context.Background(), []string{"a"})
 	if err != nil {
@@ -329,7 +444,7 @@ func TestIsResolvedBatchLoneNoteUsesSinglePrompt(t *testing.T) {
 }
 
 func TestIsResolvedBatchLogsMissingVerdicts(t *testing.T) {
-	fp := &fakeProvider{resp: "1: RESOLVED\n"} // verdict for note 2 missing
+	fp := &fakeProvider{resp: "1: RESOLVED | closed-by: closed by PR #240\n"} // verdict for note 2 missing
 	cls := NewResolutionClassifier(fp)
 	var buf bytes.Buffer
 	cls.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
@@ -356,20 +471,20 @@ func TestIsResolvedBatchLogsUnparseableFallback(t *testing.T) {
 
 func TestParseBatchVerdicts(t *testing.T) {
 	// Lines map by number, not position.
-	got, ok := parseBatchVerdicts("2: RESOLVED\n1: KEEP\n", 2)
+	got, ok := parseBatchVerdicts("2: RESOLVED | closed-by: closed by PR #240\n1: KEEP\n", 2)
 	if !ok || got[0] != VerdictKeep || got[1] != VerdictResolved {
 		t.Errorf("out-of-order lines: got %v ok=%v, want [keep resolved] ok=true", got, ok)
 	}
 
 	// Missing entries are UNKNOWN; out-of-range numbers are ignored.
-	got, ok = parseBatchVerdicts("1: RESOLVED\n9: RESOLVED\n", 2)
+	got, ok = parseBatchVerdicts("1: RESOLVED | closed-by: closed by PR #240\n9: RESOLVED | closed-by: closed by PR #241\n", 2)
 	if !ok || got[0] != VerdictResolved || got[1] != VerdictUnknown {
 		t.Errorf("missing/out-of-range: got %v ok=%v, want [resolved unknown] ok=true", got, ok)
 	}
 
 	// A duplicated note number invalidates the whole reply, so an injected or
 	// echoed line cannot win by coming first.
-	got, ok = parseBatchVerdicts("1: RESOLVED\n1: KEEP", 1)
+	got, ok = parseBatchVerdicts("1: RESOLVED | closed-by: closed by PR #240\n1: KEEP", 1)
 	if ok || got[0] != VerdictUnknown {
 		t.Errorf("duplicate number must invalidate the reply: got %v ok=%v, want [unknown] ok=false", got, ok)
 	}
@@ -382,7 +497,7 @@ func TestParseBatchVerdicts(t *testing.T) {
 
 	// Prose lines and markdown decoration are tolerated, including a bold
 	// number/separator pair and a bulleted line.
-	got, ok = parseBatchVerdicts("Here are the verdicts:\n**1:** RESOLVED", 1)
+	got, ok = parseBatchVerdicts("Here are the verdicts:\n**1:** RESOLVED | closed-by: closed by PR #240", 1)
 	if !ok || got[0] != VerdictResolved {
 		t.Errorf("decorated line: got %v ok=%v, want [resolved] ok=true", got, ok)
 	}
@@ -391,15 +506,22 @@ func TestParseBatchVerdicts(t *testing.T) {
 		t.Errorf("bulleted KEEP: got %v ok=%v, want [unknown keep] ok=true", got, ok)
 	}
 
-	// A trailing explanation after the verdict still parses.
-	got, ok = parseBatchVerdicts("1: RESOLVED because the work concluded", 1)
+	// A closed-by reason after the verdict still parses.
+	got, ok = parseBatchVerdicts("1: RESOLVED | closed-by: the work concluded", 1)
 	if !ok || got[0] != VerdictResolved {
-		t.Errorf("verdict with trailing explanation: got %v ok=%v, want [resolved] ok=true", got, ok)
+		t.Errorf("verdict with a closed-by reason: got %v ok=%v, want [resolved] ok=true", got, ok)
+	}
+
+	// A verdict with only a trailing explanation is a KEEP: no reason, no
+	// burial (issue #640).
+	got, ok = parseBatchVerdicts("1: RESOLVED because the work concluded", 1)
+	if !ok || got[0] != VerdictKeep {
+		t.Errorf("reasonless RESOLVED: got %v ok=%v, want [keep] ok=true", got, ok)
 	}
 
 	// Garbled lines are UNKNOWN but do not invalidate a reply that recognized
 	// at least one line.
-	got, ok = parseBatchVerdicts("1: nonsense\n2: RESOLVED", 2)
+	got, ok = parseBatchVerdicts("1: nonsense\n2: RESOLVED | closed-by: closed by PR #240", 2)
 	if !ok || got[0] != VerdictUnknown || got[1] != VerdictResolved {
 		t.Errorf("partially garbled reply: got %v ok=%v, want [unknown resolved] ok=true", got, ok)
 	}
@@ -432,9 +554,9 @@ func TestParseBatchVerdictProseDoesNotDecide(t *testing.T) {
 }
 
 func TestParseBatchVerdictStrictLineRules(t *testing.T) {
-	// A canonical first field decides, including a trailing explanation.
-	if got, ok := parseBatchVerdicts("1: RESOLVED because the PR merged", 1); !ok || got[0] != VerdictResolved {
-		t.Errorf("canonical RESOLVED with trailing prose: got %v ok=%v, want [resolved] ok=true", got, ok)
+	// A canonical first field decides once a reason is present.
+	if got, ok := parseBatchVerdicts("1: RESOLVED | closed-by: the PR merged it", 1); !ok || got[0] != VerdictResolved {
+		t.Errorf("canonical RESOLVED with a reason: got %v ok=%v, want [resolved] ok=true", got, ok)
 	}
 	// An emphasized verdict still parses.
 	if got, ok := parseBatchVerdicts("1: **KEEP**", 1); !ok || got[0] != VerdictKeep {

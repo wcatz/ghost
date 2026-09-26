@@ -2585,6 +2585,88 @@ func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memo
 	return scanMemories(rows)
 }
 
+// ResolvedCandidates returns the project's memories resolve has ALREADY
+// stamped resolved_at, in ResolveCandidates' eligibility shape with the
+// resolved_at predicate inverted: not pinned, and not in a standing-preference
+// category. Those two exclusions are load-bearing for the repair path
+// (internal/resolve.Reassess, issue #640) — a pin is an explicit user override
+// and an exempt category is never resolve's to change — and Newest first, so
+// the report reads like the ordinary pass. Globals are excluded by the
+// project_id filter.
+func (s *Store) ResolvedCandidates(ctx context.Context, projectID string) ([]Memory, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, project_id, category, content, importance, access_count,
+		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
+		       agent, session_id, source_ref, confidence, scope
+		FROM memories
+		WHERE project_id = ?
+		  AND resolved_at IS NOT NULL
+		  AND pinned = 0
+		  AND category NOT IN ('convention', 'preference')
+		ORDER BY created_at DESC
+	`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("resolved candidates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanMemories(rows)
+}
+
+// ClearResolved clears resolved_at on the given memory IDs, returning them to
+// ranked injection and browse while leaving them searchable — the inverse of
+// SetResolved, used by `ghost resolve --reassess` to repair a resolution that
+// should not have been made (issue #640). The WHERE clause re-checks the same
+// guard as SetResolved (already resolved, unpinned) and binds project_id, so a
+// stale or wrong-project caller cannot resurrect another project's rows.
+// Returns the count actually cleared, which callers should report instead of
+// len(ids). A no-op on an empty slice.
+//
+// updated_at is deliberately untouched: nothing about the memory's content or
+// authorship changed, only resolve's verdict about it, and bumping freshness
+// would perturb the reflect signature and decay ranking for every repaired note.
+func (s *Store) ClearResolved(ctx context.Context, projectID string, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	total := 0
+	for len(ids) > 0 {
+		batch := ids
+		if len(batch) > setResolvedBatchSize {
+			batch = ids[:setResolvedBatchSize]
+		}
+		ids = ids[len(batch):]
+
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, 0, len(batch)+1)
+		for i, id := range batch {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		args = append(args, projectID)
+		q := `UPDATE memories SET resolved_at = NULL
+		      WHERE id IN (` + strings.Join(placeholders, ",") + `)
+		        AND project_id = ?
+		        AND resolved_at IS NOT NULL
+		        AND pinned = 0`
+		result, err := s.db.ExecContext(ctx, q, args...)
+		if err != nil {
+			return total, fmt.Errorf("clear resolved: %w", err)
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("clear resolved rows affected: %w", err)
+		}
+		total += int(n)
+	}
+	return total, nil
+}
+
 // setResolvedBatchSize bounds how many IDs go into a single IN (...) clause
 // per SetResolved call, well under SQLite's SQLITE_MAX_VARIABLE_NUMBER
 // (32766 on modern builds) so an unusually large batch can't hit that limit.

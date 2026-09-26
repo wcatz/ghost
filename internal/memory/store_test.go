@@ -4093,6 +4093,118 @@ func TestSetResolvedRechecksEligibilityAtWriteTime(t *testing.T) {
 	}
 }
 
+// TestResolvedCandidatesAndClearResolved covers the reassess repair path
+// (issue #640): ResolvedCandidates returns exactly the rows resolve stamped,
+// in ResolveCandidates' eligibility shape with the resolved_at predicate
+// inverted, and ClearResolved returns a memory to ranked injection without
+// touching anything else.
+func TestResolvedCandidatesAndClearResolved(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	resolved, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "NEVER run restore with one spindle", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create resolved: %v", err)
+	}
+	active, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "kill experiment returned NO-GO", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create active: %v", err)
+	}
+	// Stamped, then pinned: a pin is a user override, so reassess leaves it.
+	pinned, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "the plugin env vars override --data-dir", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create pinned: %v", err)
+	}
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "convention", Content: "never push to main", Source: "manual", Importance: 0.9,
+	}); err != nil {
+		t.Fatalf("create convention: %v", err)
+	}
+	if _, err := s.SetResolved(ctx, []string{resolved, pinned}); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+	if err := s.TogglePin(ctx, pinned, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+
+	got, err := s.ResolvedCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolvedCandidates: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != resolved {
+		t.Fatalf("resolved candidates = %v, want exactly [%s]", got, resolved)
+	}
+	if got[0].ResolvedAt == nil {
+		t.Error("ResolvedCandidates must return the stamped resolved_at, or the caller cannot tell what it is undoing")
+	}
+
+	// Clearing is project-scoped and only touches already-resolved rows.
+	n, err := s.ClearResolved(ctx, testProject, []string{resolved, active, pinned})
+	if err != nil {
+		t.Fatalf("ClearResolved: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("ClearResolved returned %d, want 1 (only the stamped, unpinned row)", n)
+	}
+	cands, err := s.ResolveCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveCandidates: %v", err)
+	}
+	found := false
+	for _, c := range cands {
+		if c.ID == resolved {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("a cleared memory must be a resolve candidate again")
+	}
+	if empty, err := s.ClearResolved(ctx, testProject, nil); err != nil || empty != 0 {
+		t.Errorf("ClearResolved(nil) = (%d, %v), want a no-op", empty, err)
+	}
+}
+
+// TestClearResolvedIsProjectScoped: the WHERE clause binds project_id, so a
+// stale or wrong-project caller cannot return another project's rows to ranked
+// injection.
+func TestClearResolvedIsProjectScoped(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "other-id", "/tmp/other", "other"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := s.Create(ctx, "other-id", Memory{
+		Category: "gotcha", Content: "kill experiment returned NO-GO", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create in other project: %v", err)
+	}
+	if _, err := s.SetResolved(ctx, []string{id}); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+
+	n, err := s.ClearResolved(ctx, testProject, []string{id})
+	if err != nil {
+		t.Fatalf("ClearResolved: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("ClearResolved returned %d, want 0 — another project's row must not be cleared", n)
+	}
+	got, err := s.ResolvedCandidates(ctx, "other-id")
+	if err != nil {
+		t.Fatalf("ResolvedCandidates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("other project resolved candidates = %d, want 1 (still resolved)", len(got))
+	}
+}
+
 // TestStoreResolveKeptHashesRoundTrip: MarkResolveKept records id -> content
 // hash and ResolveKeptHashes reads them back keyed by ID; rows never marked
 // are absent, and an empty mark call is a no-op.

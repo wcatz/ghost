@@ -1087,32 +1087,37 @@ func TestParseReflectArgs(t *testing.T) {
 // positionally (unchanged back-compat) or via --project, which takes the NEXT
 // argument verbatim so dash-leading names parse as names; a second project in
 // any mixture stays the "expected exactly one project" error; valueless
-// --project and unknown flags stay clear errors.
+// --project and unknown flags stay clear errors; --reassess selects the
+// re-evaluation pass over already-resolved memories.
 func TestParseResolveArgs(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		args    []string
-		project string
-		source  string
-		apply   bool
+		name     string
+		args     []string
+		project  string
+		source   string
+		apply    bool
+		reassess bool
 	}{
-		{"positional", []string{"myproj"}, "myproj", "", false},
-		{"positional with apply", []string{"myproj", "--apply"}, "myproj", "", true},
-		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false},
-		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false},
-		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true},
-		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false},
-		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true},
-		{"project equals form", []string{"--project=-eq"}, "-eq", "", false},
+		{"positional", []string{"myproj"}, "myproj", "", false, false},
+		{"positional with apply", []string{"myproj", "--apply"}, "myproj", "", true, false},
+		{"reassess", []string{"myproj", "--reassess"}, "myproj", "", false, true},
+		{"reassess with apply", []string{"myproj", "--reassess", "--apply"}, "myproj", "", true, true},
+		{"reassess before project", []string{"--reassess", "myproj"}, "myproj", "", false, true},
+		{"source separate value", []string{"myproj", "--source", "opencode"}, "myproj", "opencode", false, false},
+		{"source equals value", []string{"myproj", "--source=codex"}, "myproj", "codex", false, false},
+		{"project flag dash value", []string{"--project", "-x", "--apply"}, "-x", "", true, false},
+		{"project flag double-dash value", []string{"--project", "--odd"}, "--odd", "", false, false},
+		{"project flag lifecycle shape", []string{"--project", "-myproj", "--apply", "--source", "claude"}, "-myproj", "claude", true, false},
+		{"project equals form", []string{"--project=-eq"}, "-eq", "", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			project, source, apply, err := parseResolveArgs(tc.args)
+			project, source, apply, reassess, err := parseResolveArgs(tc.args)
 			if err != nil {
 				t.Fatalf("parseResolveArgs(%v): %v", tc.args, err)
 			}
-			if project != tc.project || source != tc.source || apply != tc.apply {
-				t.Errorf("parseResolveArgs(%v) = (%q, %q, %v), want (%q, %q, %v)",
-					tc.args, project, source, apply, tc.project, tc.source, tc.apply)
+			if project != tc.project || source != tc.source || apply != tc.apply || reassess != tc.reassess {
+				t.Errorf("parseResolveArgs(%v) = (%q, %q, %v, %v), want (%q, %q, %v, %v)",
+					tc.args, project, source, apply, reassess, tc.project, tc.source, tc.apply, tc.reassess)
 			}
 		})
 	}
@@ -1131,7 +1136,7 @@ func TestParseResolveArgs(t *testing.T) {
 		{"source missing value", []string{"myproj", "--source"}, `unknown flag "--source"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, _, err := parseResolveArgs(tc.args)
+			_, _, _, _, err := parseResolveArgs(tc.args)
 			if err == nil {
 				t.Fatalf("parseResolveArgs(%v) must fail", tc.args)
 			}
@@ -1148,9 +1153,35 @@ func TestResolveSummaryLineReportsUnknown(t *testing.T) {
 		Candidates: 1,
 		Unknown:    1,
 	}, false, 0, 1)
-	want := "proj: 1 loaded, 1 after prefilter, 0 confirmed evidence, 0 KEEP cached, 1 UNKNOWN, would resolve 0 (1 classify call(s))\n"
+	want := "proj: 1 loaded, 1 after prefilter, 0 confirmed evidence, 0 KEEP vetoed, 0 KEEP cached, 1 UNKNOWN, would resolve 0 (1 classify call(s))\n"
 	if got != want {
 		t.Errorf("resolveSummaryLine() = %q, want %q", got, want)
+	}
+}
+
+// TestResolveSummaryLineReportsVetoes: the vetoed count is part of the summary,
+// because a pass that stops asking is otherwise indistinguishable from a pass
+// that decided everything was RESOLVED.
+func TestResolveSummaryLineReportsVetoes(t *testing.T) {
+	got := resolveSummaryLine("proj", resolve.Result{Loaded: 4, Candidates: 4, Confirmed: 1, Resolved: 1, Vetoed: 3}, true, 1, 1)
+	want := "proj: 4 loaded, 4 after prefilter, 1 confirmed evidence, 3 KEEP vetoed, 0 KEEP cached, 0 UNKNOWN, resolved 1 (1 classify call(s))\n"
+	if got != want {
+		t.Errorf("resolveSummaryLine() = %q, want %q", got, want)
+	}
+}
+
+// TestReassessSummaryLine: the reassess pass reports what it found per outcome
+// and what --apply would clear, in both the dry-run and apply verb forms.
+func TestReassessSummaryLine(t *testing.T) {
+	res := resolve.ReassessResult{Loaded: 40, Vetoed: 6, Cached: 1, ReKept: 9, StillResolved: 24, Unknown: 0, Cleared: 9}
+	wantDry := "proj: 40 already resolved, 6 KEEP vetoed, 1 KEEP cached, 24 still RESOLVED, 0 UNKNOWN, would clear resolved_at for 9 (2 classify call(s))\n"
+	if got := reassessSummaryLine("proj", res, false, 9, 2); got != wantDry {
+		t.Errorf("reassessSummaryLine() dry = %q, want %q", got, wantDry)
+	}
+	res.Cleared = 8 // a concurrent clear can stamp fewer rows than were judged
+	wantApply := "proj: 40 already resolved, 6 KEEP vetoed, 1 KEEP cached, 24 still RESOLVED, 0 UNKNOWN, cleared resolved_at for 8 (2 classify call(s))\n"
+	if got := reassessSummaryLine("proj", res, true, 9, 2); got != wantApply {
+		t.Errorf("reassessSummaryLine() apply = %q, want %q", got, wantApply)
 	}
 }
 
@@ -1260,9 +1291,12 @@ func TestDashProjectLifecycleRoundTrip(t *testing.T) {
 				t.Errorf("reflect phase flags lost: %+v", p)
 			}
 		case "resolve":
-			project, _, a, perr := parseResolveArgs(args)
+			project, _, a, reassess, perr := parseResolveArgs(args)
 			if perr != nil {
 				t.Fatalf("parseResolveArgs(%v): %v", ph.args, perr)
+			}
+			if reassess {
+				t.Errorf("the resolve phase must never emit --reassess (phase argv: %v)", ph.args)
 			}
 			got, apply = project, a
 		case "supersede":

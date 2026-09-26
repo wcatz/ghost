@@ -104,15 +104,30 @@ Marks resolved-evidence memories so they leave ranked session injection while re
 ```bash
 ghost resolve myproject
 ghost resolve myproject --apply
+ghost resolve myproject --reassess
 ```
 
 | Flag | Meaning |
 |---|---|
 | `--apply` | Stamp `resolved_at` on confirmed memories. |
+| `--reassess` | Re-judge memories that are already resolved instead of unresolved ones. |
 | `--source <host>` | Classify through `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
-The classifier uses a local keyword prefilter and batched KEEP-biased calls. Only explicit KEEP verdicts enter the content-hash cache; missing or garbled verdicts are counted as UNKNOWN and retried on a later pass. It fails when no source-specific harness can be selected; it never silently falls back to another harness.
+The classifier is KEEP-biased in code, not only in prose. A local keyword prefilter proposes candidates, then a deterministic veto settles a candidate as KEEP with no harness call when its text carries a standing imperative (`never`, `do not`, `don't`, `must`, `always`, `required`) or an open marker (`not yet`, `outstanding`, `still pending`, `still open`, `still stale`, `unresolved`, `todo`) — case-insensitive and word-bounded. The prompt asks whether an agent starting a fresh session would make a mistake, repeat work, or break a rule without the note, and states that a date, PR number, commit hash, or "fixed in" does not resolve one. A `RESOLVED` verdict must carry a `closed-by:` fact naming what made the note obsolete; a verdict without one is read as KEEP, so a note the harness cannot explain away stays injectable.
+
+Only explicit KEEP verdicts enter the content-hash cache (`memories.resolve_kept_hash`, prefix `v3` — `v1` and `v2` entries are re-asked, since they predate the veto and the `closed-by` rule); missing or garbled verdicts are counted as UNKNOWN and retried on a later pass. It fails when no source-specific harness can be selected; it never silently falls back to another harness.
+
+#### `--reassess`
+
+Re-runs the vetoes and the classifier over the memories that are **already** resolved, and repairs the ones that now come back KEEP:
+
+```bash
+ghost resolve myproject --reassess           # preview: prints the list
+ghost resolve myproject --reassess --apply   # clear resolved_at on those rows
+```
+
+It is how a wrong resolution gets undone — the ordinary pass never looks at a row that already carries `resolved_at`, so a rule it buried was invisible to every later pass. The repair pass skips the keyword prefilter on purpose: the pool is already the small resolved subset, and a wrongly resolved note is usually hidden by the *absence* of a resolution keyword or by a narrative that reads like a fix. With `--apply` it clears `resolved_at` so the notes return to ranked session-start injection, and records the classifier's KEEP verdicts in the content-hash cache so the ordinary pass does not ask about them again. A classify or clear failure is fatal and repairs nothing; an UNKNOWN verdict leaves `resolved_at` alone and is offered again. The stop hook's lifecycle phase never passes `--reassess`: it is an operator command.
 
 ### `ghost supersede <project>`
 
