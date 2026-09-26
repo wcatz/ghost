@@ -456,7 +456,7 @@ func FormatMaintenance(results []MaintenanceResult) string {
 		// is absent from the window as well as for one that is present and
 		// outranked, so listing every !LiveWins under "outranked" would claim a
 		// copy beat an answer that was never returned — and for a question with
-		// no named distractors (the shared-row probes) that claim is provably
+		// no named distractors (q_commits, q_verify) that claim is provably
 		// backwards, since LiveWins is then just Found. A demotion that sinks a
 		// row is a reorder; one that evicts it is a deletion, and the report is
 		// where that difference becomes visible.

@@ -72,40 +72,100 @@ func TestMaintenanceStateReport(t *testing.T) {
 	if !strings.Contains(report, "live-wins") || !strings.Contains(report, "shared _global answers") {
 		t.Errorf("report is missing its columns:\n%s", report)
 	}
-	// The two loss modes must not be reported as one. A not-found answer has
-	// nothing to be outranked by, and under the shipped defaults the suite has
-	// both kinds (the shared-row answers are evicted, the rest are outranked), so
-	// a report that merged them would be asserting something false about a
-	// question it never retrieved.
-	hybrid := hybridResult(results)
-	if hybrid == nil {
-		t.Fatal("no hybrid result")
-	}
-	var outranked, notFound []string
-	for _, o := range hybrid.Outcomes {
-		switch {
-		case !o.Found:
-			notFound = append(notFound, o.Query)
-		case !o.LiveWins:
-			outranked = append(outranked, o.Query)
-		}
-	}
-	if len(outranked) == 0 {
-		t.Error("expected at least one question a copy outranks, so the outranked list is exercised")
-	}
-	if len(notFound) == 0 {
-		t.Error("expected at least one question whose answer is not retrieved, so the not-found list is exercised")
-	}
-	block := report[strings.Index(report, "\n"+CondHybrid+": "):]
-	if i := strings.Index(block, "whose answer was not retrieved"); i > 0 {
-		block = block[:i]
-	}
-	for _, name := range notFound {
-		if strings.Contains(block, name) {
-			t.Errorf("%s: its answer was not retrieved, so it is listed as outranked by a copy:\n%s", name, block)
-		}
+	// Nothing here asserts a metric, a floor, or even that a particular question
+	// was lost: this suite is report-only, and a guard of the form "at least one
+	// question must be outranked" would fail the moment a ranking change makes
+	// every question win. What the report must get right is checked against
+	// synthetic outcomes in TestFormatMaintenanceSeparatesLostQuestions.
+	if !strings.Contains(report, "live-wins") || !strings.Contains(report, "shared _global answers") {
+		t.Errorf("report is missing its columns:\n%s", report)
 	}
 	t.Logf("maintenance-state suite (report-only, DefaultSearchParams):\n%s", report)
+}
+
+// The headers FormatMaintenance prints for the two ways a question can be lost.
+const (
+	outrankedHeader = "where a resolved/_global/superseded copy outranked the answer"
+	notFoundHeader  = "whose answer was not retrieved at all"
+)
+
+// TestFormatMaintenanceSeparatesLostQuestions checks the report's one real
+// correctness claim — an answer that was never retrieved is not reported as
+// outranked by something — against synthetic outcomes rather than against a
+// live run. That is deliberate on both sides: a live assertion would be a floor
+// on today's ranking (this suite is report-only, and the finding it documents is
+// expected to be fixed), and the live report's own wording would then be the
+// thing under test, which is how the two failure modes got conflated in the
+// first place.
+func TestFormatMaintenanceSeparatesLostQuestions(t *testing.T) {
+	both := []MaintenanceOutcome{
+		{Query: "q_outranked", Probe: probeLive, Found: true, LiveWins: false},
+		{Query: "q_evicted", Probe: probeGlobal, Found: false, LiveWins: false},
+		{Query: "q_won", Probe: probeLive, Found: true, LiveWins: true},
+	}
+	report := FormatMaintenance([]MaintenanceResult{{Condition: CondHybrid, Queries: 3, Outcomes: both}})
+
+	outranked, notFound := lostSections(t, report, true, true)
+	if !strings.Contains(outranked, "q_outranked") {
+		t.Errorf("the outranked list does not name the question a copy outranked:\n%s", report)
+	}
+	if !strings.Contains(notFound, "q_evicted") {
+		t.Errorf("the not-retrieved list does not name the evicted answer:\n%s", report)
+	}
+	for _, absent := range []struct{ name, section, why string }{
+		{"q_evicted", outranked, "its answer was never returned, so nothing outranked it"},
+		{"q_outranked", notFound, "its answer was returned and outranked, so it was not lost"},
+		{"q_won", outranked + notFound, "it won"},
+	} {
+		if strings.Contains(absent.section, absent.name) {
+			t.Errorf("%s is listed as lost (%s)", absent.name, absent.why)
+		}
+	}
+
+	// Only the not-retrieved list non-empty: the outranked header must not be
+	// printed at all, so a reader is not sent looking for a distractor that beat
+	// an answer which was never in the window.
+	onlyEvicted := FormatMaintenance([]MaintenanceResult{{Condition: CondHybrid, Queries: 1, Outcomes: both[1:2]}})
+	if strings.Contains(onlyEvicted, outrankedHeader) {
+		t.Errorf("an outranked list is printed with nothing to put in it:\n%s", onlyEvicted)
+	}
+	if _, ev := lostSections(t, onlyEvicted, false, true); !strings.Contains(ev, "q_evicted") {
+		t.Errorf("the not-retrieved list is missing its only entry:\n%s", onlyEvicted)
+	}
+}
+
+// lostSections returns the two lost-question lists from a rendered report. Each
+// list is bounded by the headers rather than by a fixed offset, so a section
+// cannot silently absorb another condition's, and a missing header is a failure
+// rather than an empty string that makes every containment check pass.
+func lostSections(t *testing.T, report string, wantOutranked, wantNotFound bool) (outranked, notFound string) {
+	t.Helper()
+	section := func(header string, endsAt ...string) string {
+		i := strings.Index(report, header)
+		if i < 0 {
+			return ""
+		}
+		rest := report[i+len(header):]
+		for _, end := range endsAt {
+			if j := strings.Index(rest, end); j >= 0 {
+				rest = rest[:j]
+			}
+		}
+		return rest
+	}
+	if wantOutranked {
+		outranked = section(outrankedHeader, notFoundHeader)
+		if outranked == "" {
+			t.Fatalf("report has no outranked section:\n%s", report)
+		}
+	}
+	if wantNotFound {
+		notFound = section(notFoundHeader)
+		if notFound == "" {
+			t.Fatalf("report has no not-retrieved section:\n%s", report)
+		}
+	}
+	return outranked, notFound
 }
 
 // TestMaintenanceFixtureCarriesState is the meta-test that keeps this suite able
