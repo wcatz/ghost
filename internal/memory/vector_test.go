@@ -416,7 +416,7 @@ func TestVectorUnembeddedMemoryIDs(t *testing.T) {
 		t.Fatalf("StoreEmbedding: %v", err)
 	}
 
-	ids, err := store.UnembeddedMemoryIDs(ctx, "test-proj", 10)
+	ids, err := store.UnembeddedMemoryIDs(ctx, "test-proj", "", 10)
 	if err != nil {
 		t.Fatalf("UnembeddedMemoryIDs: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestVectorUnembeddedMemoryIDs_AllEmbedded(t *testing.T) {
 		t.Fatalf("StoreEmbedding: %v", err)
 	}
 
-	ids, err := store.UnembeddedMemoryIDs(ctx, "test-proj", 10)
+	ids, err := store.UnembeddedMemoryIDs(ctx, "test-proj", "", 10)
 	if err != nil {
 		t.Fatalf("UnembeddedMemoryIDs: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestVectorUnembeddedMemoryIDs_Limit(t *testing.T) {
 		createTestMemory(t, store, ctx, "unembedded")
 	}
 
-	ids, err := store.UnembeddedMemoryIDs(ctx, "test-proj", 2)
+	ids, err := store.UnembeddedMemoryIDs(ctx, "test-proj", "", 2)
 	if err != nil {
 		t.Fatalf("UnembeddedMemoryIDs: %v", err)
 	}

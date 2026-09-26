@@ -26,7 +26,11 @@ import (
 
 // Embedder generates vector embeddings for text. Optional — when nil, search falls back to FTS only.
 type Embedder interface {
-	Embed(ctx context.Context, text string) ([]float32, error)
+	// EmbedQuery embeds a search query. Only queries are embedded here: the
+	// stored side belongs to the embedding worker, and the two are not
+	// interchangeable for a model that requires a task prefix (nomic-embed-text
+	// prefixes documents and queries differently — see embedding.EmbedDocument).
+	EmbedQuery(ctx context.Context, text string) ([]float32, error)
 }
 
 // embedderDiagnostics is optionally implemented by embedders that can report
@@ -610,7 +614,7 @@ func (s *Server) registerTools() {
 		// Use hybrid search (FTS5 + vector) when embedder is available.
 		var queryVec []float32
 		if s.embedder != nil {
-			if vec, err := s.embedder.Embed(ctx, args.Query); err == nil {
+			if vec, err := s.embedder.EmbedQuery(ctx, args.Query); err == nil {
 				queryVec = vec
 			}
 		}
@@ -1057,7 +1061,7 @@ func (s *Server) registerTools() {
 
 		var queryVec []float32
 		if s.embedder != nil {
-			if vec, err := s.embedder.Embed(ctx, args.Query); err == nil {
+			if vec, err := s.embedder.EmbedQuery(ctx, args.Query); err == nil {
 				queryVec = vec
 			}
 		}

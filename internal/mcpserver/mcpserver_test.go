@@ -233,7 +233,7 @@ func TestSetEmbedder(t *testing.T) {
 
 type mockEmbedder struct{}
 
-func (m *mockEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
+func (m *mockEmbedder) EmbedQuery(_ context.Context, _ string) ([]float32, error) {
 	return []float32{0.1, 0.2, 0.3}, nil
 }
 
@@ -427,9 +427,9 @@ func TestSaveAndSearch_WithEmbedder(t *testing.T) {
 	}
 
 	// Embed + search (mock embedder returns [0.1, 0.2, 0.3]).
-	vec, err := srv.embedder.Embed(ctx, "SQLite FTS5")
+	vec, err := srv.embedder.EmbedQuery(ctx, "SQLite FTS5")
 	if err != nil {
-		t.Fatalf("Embed: %v", err)
+		t.Fatalf("EmbedQuery: %v", err)
 	}
 	results, err := store.SearchHybrid(ctx, "abc123", "SQLite", vec, 10)
 	if err != nil {

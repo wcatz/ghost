@@ -142,6 +142,26 @@ embedding:
 
 The embedding worker runs asynchronously. A newly saved memory may appear in full-text search before its vector is available.
 
+### Model changes re-embed in the background
+
+Every stored vector records the identity of the space that produced it — the
+model, its `dimensions`, and whether a task prefix is applied (`nomic-embed-text`
+is embedded with `search_document: ` for stored text and `search_query: ` for
+queries, so both halves stay comparable). Change `model` or `dimensions` and the
+recorded identity stops matching the configured one, so those vectors are:
+
+- excluded from the vector leg, because a vector from one model is not
+  comparable with a query embedded by another, and
+- reported back to the embedding worker as unembedded, which rewrites them in
+  the background — 50 memories per project per sweep, on the worker's own
+  schedule, never blocking a search or a startup.
+
+Until a memory is rewritten it is full-text searchable only, and the log carries
+one warning per search naming how many vectors were skipped and which identity
+wrote them. Expect a one-time re-embed of the whole corpus on the first run
+after upgrading to a version that records the prefix setting, even if your model
+did not change.
+
 ## Linking
 
 Linking is active when embeddings are enabled:

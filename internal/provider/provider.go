@@ -57,7 +57,10 @@ type MemoryStore interface {
 	// Embeddings
 	StoreEmbedding(ctx context.Context, memoryID string, vec []float32, model string) error
 	DeleteEmbedding(ctx context.Context, memoryID string) error
-	UnembeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error)
+	// UnembeddedMemoryIDs returns the rows that still need a vector for the
+	// given identity, which includes rows whose vector was recorded under a
+	// different one. An empty identity means any recorded vector counts.
+	UnembeddedMemoryIDs(ctx context.Context, projectID, identity string, limit int) ([]string, error)
 	GetMemoryContent(ctx context.Context, id string) (string, error)
 	EmbeddingStats(ctx context.Context) (embedded, total int, err error)
 

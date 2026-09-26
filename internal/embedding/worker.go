@@ -11,9 +11,12 @@ import (
 )
 
 // memoryStore is the subset of provider.MemoryStore needed by the worker.
+// UnembeddedMemoryIDs is asked for the worker's own identity, so a vector
+// written by a previous model (or a previous task-prefix setting) comes back as
+// unembedded and is rewritten — the worker needs no separate refresh path.
 type memoryStore interface {
 	ListProjects(ctx context.Context) ([]memory.Project, error)
-	UnembeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error)
+	UnembeddedMemoryIDs(ctx context.Context, projectID, identity string, limit int) ([]string, error)
 	GetMemoryContent(ctx context.Context, id string) (string, error)
 	StoreEmbedding(ctx context.Context, memoryID string, vec []float32, model string) error
 }
@@ -165,13 +168,13 @@ func (w *Worker) EmbedOne(ctx context.Context, memoryID string) {
 		return
 	}
 
-	vec, err := w.client.Embed(ctx, content)
+	vec, err := w.client.EmbedDocument(ctx, content)
 	if err != nil {
 		w.logger.Debug("embed: ollama", "error", err, "memory_id", memoryID)
 		return
 	}
 
-	if err := w.store.StoreEmbedding(ctx, memoryID, vec, w.client.model); err != nil {
+	if err := w.store.StoreEmbedding(ctx, memoryID, vec, w.client.Identity()); err != nil {
 		w.logger.Error("embed: store", "error", err, "memory_id", memoryID)
 	}
 }
@@ -182,7 +185,10 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 		return
 	}
 
-	ids, err := w.store.UnembeddedMemoryIDs(ctx, projectID, 50)
+	// Asking for this client's own identity is what makes a model change
+	// self-healing: rows whose vector was written by another model come back
+	// here and are re-embedded in bounded batches, off the startup path.
+	ids, err := w.store.UnembeddedMemoryIDs(ctx, projectID, w.client.Identity(), 50)
 	if err != nil {
 		w.logger.Error("embed: list unembedded", "error", err, "project_id", projectID)
 		return
@@ -207,7 +213,7 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			continue
 		}
 
-		vec, err := w.client.Embed(ctx, content)
+		vec, err := w.client.EmbedDocument(ctx, content)
 		if err != nil {
 			failed++
 			lastErr = err
@@ -220,7 +226,7 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			continue
 		}
 
-		if err := w.store.StoreEmbedding(ctx, id, vec, w.client.model); err != nil {
+		if err := w.store.StoreEmbedding(ctx, id, vec, w.client.Identity()); err != nil {
 			w.logger.Error("embed: store", "error", err, "memory_id", id)
 			continue
 		}

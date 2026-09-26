@@ -18,6 +18,13 @@ type Client struct {
 	baseURL    string
 	model      string
 	dimensions int
+	// prefixes is the task-prefix pair this model requires (see prefix.go),
+	// resolved once at construction so neither embed path re-derives it.
+	prefixes TaskPrefixes
+	// identity is what this client stamps into memory_embeddings.model, and so
+	// what decides whether the vectors it wrote are still comparable with a
+	// query vector. See VectorIdentity.
+	identity   string
 	httpClient *http.Client
 }
 
@@ -28,6 +35,8 @@ func NewClient(baseURL, model string, dimensions int) *Client {
 		baseURL:    baseURL,
 		model:      model,
 		dimensions: dimensions,
+		prefixes:   TaskPrefixesFor(model),
+		identity:   VectorIdentity(model, dimensions),
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -43,12 +52,30 @@ type embedResponse struct {
 	Embeddings [][]float32 `json:"embeddings"`
 }
 
-// Embed generates an embedding vector for the given text.
-// Returns nil if the service is unavailable (graceful degradation).
-func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
+// EmbedDocument generates the embedding for text that will be STORED and
+// searched over later. Models that separate the two roles (nomic-embed-text)
+// need the document task prefix, which is applied here; the worker embeds
+// every memory through this method, so a memory never enters the index in the
+// wrong space.
+//
+// Returns an error if the service is unavailable.
+func (c *Client) EmbedDocument(ctx context.Context, text string) ([]float32, error) {
+	return c.embed(ctx, c.prefixes.prefixedDocument(text))
+}
+
+// EmbedQuery generates the embedding for a SEARCH QUERY, applying the query
+// task prefix where the model requires one. Only vectors from this method may
+// be compared against stored vectors, for the same reason EmbedDocument
+// carries the document prefix.
+func (c *Client) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
+	return c.embed(ctx, c.prefixes.prefixedQuery(text))
+}
+
+// embed performs one /api/embed round trip with input already prepared.
+func (c *Client) embed(ctx context.Context, input string) ([]float32, error) {
 	body, err := json.Marshal(embedRequest{
 		Model: c.model,
-		Input: text,
+		Input: input,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal embed request: %w", err)
@@ -157,4 +184,14 @@ func (c *Client) Model() string {
 // Dimensions returns the expected embedding dimensionality.
 func (c *Client) Dimensions() int {
 	return c.dimensions
+}
+
+// Identity returns the vector-space identity of everything this client embeds:
+// the model, its dimensions, and whether a task prefix is applied (see
+// VectorIdentity). It is the value stored alongside each vector, and the value
+// memory.Store compares against to decide a stored vector is still usable —
+// so the store must be given the same string (SetEmbeddingIdentity) or it will
+// neither trust this client's vectors nor retire the previous ones.
+func (c *Client) Identity() string {
+	return c.identity
 }

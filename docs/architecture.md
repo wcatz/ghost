@@ -257,7 +257,7 @@ The main schema tables are:
 | `projects` | Project names, IDs, and paths |
 | `memories` | Core memory content, category, importance, tags, and state |
 | `memories_fts` | FTS5 virtual table |
-| `memory_embeddings` | Float32 embedding vectors |
+| `memory_embeddings` | Float32 embedding vectors, each stamped with the identity of the space that produced it (model, dimensions, task prefix), so a model change retires the old vectors instead of comparing across spaces |
 | `memory_links` | Related, supersedes, causes, and other graph edges |
 | `tasks` | Cross-session work items |
 | `decisions` | Decisions, rationale, alternatives, and status |
@@ -277,6 +277,19 @@ When embeddings are available, search combines:
 - Targeted demotion when a present memory is superseded by another present memory
 
 Without Ollama, the same API remains available with FTS5-only results. Search membership is not discarded solely because of age; decay changes ordering.
+
+A vector candidate is only scored when its stored vector belongs to the vector
+space this process embeds into. Every embedding records that identity — model,
+dimensions, and whether the model needs a task prefix (`nomic-embed-text` takes
+`search_document: ` on stored text and `search_query: ` on queries, which is why
+both halves have to move together) — as
+`<model>[:<dimensions>][+prefix]` in `memory_embeddings.model`. A row recorded
+under a different identity is a vector from another space, so it is excluded
+from the leg and handed back to the embedding worker as unembedded rather than
+compared with a query it cannot be compared to. The filter is the same rule on
+both vector scans, in `usableVectorEntries`, and it is the only place that
+decides whether a stored vector is usable; `SetEmbeddingIdentity` supplies the
+configured side from `embedding.VectorIdentity`.
 
 ### Memory lifecycle
 

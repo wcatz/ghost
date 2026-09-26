@@ -28,6 +28,10 @@ func beforeHybridHydrate(ids []string) {
 
 // StoreEmbedding saves an embedding vector for a memory.
 // The vector is stored as raw little-endian float32 bytes.
+// model records the identity of the space that produced vec — the
+// "<model>[:<dimensions>][+prefix]" string from embedding.VectorIdentity — and
+// is what vector search matches against the configured identity and the
+// embedding worker matches to decide a row needs rewriting.
 func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float32, model string) error {
 	blob := float32sToBytes(vec)
 
@@ -48,16 +52,43 @@ func (s *Store) DeleteEmbedding(ctx context.Context, memoryID string) error {
 	return err
 }
 
-// UnembeddedMemoryIDs returns memory IDs that don't have embeddings yet.
-func (s *Store) UnembeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
+// UnembeddedMemoryIDs returns memory IDs that still need an embedding produced
+// by identity: rows with no vector at all, and rows whose vector was stamped
+// with a different identity — a model, dimension or task-prefix change (see
+// embedding.VectorIdentity for what an identity is). Both are re-embedded by
+// the worker, so a model change retires the old vectors instead of leaving
+// them to be compared with queries embedded in the new space.
+//
+// An empty identity means "any recorded vector counts", which is the
+// pre-identity existence check and the state of a store nobody has configured
+// an embedding model for (the bench harness, tests).
+func (s *Store) UnembeddedMemoryIDs(ctx context.Context, projectID, identity string, limit int) ([]string, error) {
+	// Two statements rather than one with a conditional predicate: the
+	// identity-less form has to be exactly the existence check it was before,
+	// and a single statement expressing "…OR (identity <> '' AND e.model <> ?)"
+	// would restate that rule in a way a later edit can easily turn inside out.
+	query := `
 		SELECT m.id
 		FROM memories m
 		LEFT JOIN memory_embeddings e ON e.memory_id = m.id
 		WHERE m.project_id = ? AND e.memory_id IS NULL
 		ORDER BY m.created_at DESC
 		LIMIT ?
-	`, projectID, limit)
+	`
+	args := []any{projectID, limit}
+	if identity != "" {
+		query = `
+		SELECT m.id
+		FROM memories m
+		LEFT JOIN memory_embeddings e ON e.memory_id = m.id
+		WHERE m.project_id = ? AND (e.memory_id IS NULL OR e.model <> ?)
+		ORDER BY m.created_at DESC
+		LIMIT ?
+		`
+		args = []any{projectID, identity, limit}
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("unembedded memories: %w", err)
 	}
@@ -118,6 +149,11 @@ func (s *Store) SearchVectorScoped(ctx context.Context, projectID string, queryV
 }
 
 func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]ScoredMemory, error) {
+	// Read the identity before taking the lock: the helper below runs with the
+	// read lock held, and a second RLock on a RWMutex that has a writer waiting
+	// blocks that writer's readers — including this one, forever.
+	identity := s.configuredEmbeddingIdentity()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -132,38 +168,9 @@ func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []f
 	}
 	defer rows.Close() //nolint:errcheck
 
-	var entries []vecEntry
-	// Embeddings are stored per-model. A dimension mismatch means the rows
-	// were written by a different model than the one producing queryVec, and
-	// skipping them silently turns changed-model setups into "vector search
-	// found nothing" with no explanation.
-	mismatched, mismatchedModel := 0, ""
-	for rows.Next() {
-		var id, model, rowProject string
-		var blob []byte
-		var scopeCol, resolvedCol sql.NullString
-		if err := rows.Scan(&id, &blob, &model, &scopeCol, &rowProject, &resolvedCol); err != nil {
-			return nil, err
-		}
-		vec := bytesToFloat32s(blob)
-		if len(vec) == len(queryVec) {
-			entries = append(entries, vecEntry{
-				memoryID: id, embedding: vec, scope: parseScope(scopeCol),
-				projectID: rowProject, resolved: resolvedCol.Valid && resolvedCol.String != "",
-			})
-			continue
-		}
-		mismatched++
-		if mismatchedModel == "" {
-			mismatchedModel = model
-		}
-	}
-	if err := rows.Err(); err != nil {
+	entries, err := s.usableVectorEntries(rows, queryVec, identity)
+	if err != nil {
 		return nil, err
-	}
-	if mismatched > 0 && s.logger != nil {
-		s.logger.Warn("vector search skipped embeddings whose dimension does not match the query — the embedding model likely changed; re-embed to restore vector recall",
-			"skipped", mismatched, "usable", len(entries), "query_dims", len(queryVec), "stored_model", mismatchedModel)
 	}
 
 	// Compute cosine similarity for each entry, dropping non-positive scores: a
@@ -200,6 +207,67 @@ func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []f
 		scored = scored[:limit]
 	}
 	return scored, nil
+}
+
+// usableVectorEntries reads an open embeddings query and keeps only the rows
+// this search may compare against queryVec: a row whose recorded identity is
+// not the configured one belongs to another vector space (a model, dimension
+// or task-prefix change — see embedding.VectorIdentity), and one whose width
+// differs was written by a model that does not produce queryVec. Both are
+// skipped rather than scored, and both are surfaced: silently dropping them
+// turns a reconfiguration into "vector search found nothing" with no
+// explanation, and a reconfiguration is exactly when the operator is watching
+// the log.
+//
+// identity is passed in rather than read here: both callers hold the store's
+// read lock, and taking it again would risk the RWMutex recursive-read deadlock
+// documented at searchVector. An empty identity disables the identity check
+// (a store with no embedding model configured).
+func (s *Store) usableVectorEntries(rows *sql.Rows, queryVec []float32, identity string) ([]vecEntry, error) {
+	var entries []vecEntry
+	foreign, foreignModel := 0, ""
+	mismatched, mismatchedModel := 0, ""
+	for rows.Next() {
+		var id, model, rowProject string
+		var blob []byte
+		var scopeCol, resolvedCol sql.NullString
+		if err := rows.Scan(&id, &blob, &model, &scopeCol, &rowProject, &resolvedCol); err != nil {
+			return nil, err
+		}
+		if identity != "" && model != identity {
+			foreign++
+			if foreignModel == "" {
+				foreignModel = model
+			}
+			continue
+		}
+		vec := bytesToFloat32s(blob)
+		if len(vec) != len(queryVec) {
+			mismatched++
+			if mismatchedModel == "" {
+				mismatchedModel = model
+			}
+			continue
+		}
+		entries = append(entries, vecEntry{
+			memoryID: id, embedding: vec, scope: parseScope(scopeCol),
+			projectID: rowProject, resolved: resolvedCol.Valid && resolvedCol.String != "",
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if s.logger != nil {
+		if foreign > 0 {
+			s.logger.Warn("vector search skipped embeddings from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded",
+				"skipped", foreign, "usable", len(entries), "configured_identity", identity, "stored_identity", foreignModel)
+		}
+		if mismatched > 0 {
+			s.logger.Warn("vector search skipped embeddings whose dimension does not match the query — the embedding model likely changed; re-embed to restore vector recall",
+				"skipped", mismatched, "usable", len(entries), "query_dims", len(queryVec), "stored_model", mismatchedModel)
+		}
+	}
+	return entries, nil
 }
 
 // minVectorSimilarity is the cosine floor below which a vector candidate is
@@ -946,6 +1014,8 @@ func (s *Store) GetByIDs(ctx context.Context, ids []string) ([]Memory, error) {
 
 // SearchVectorAll performs brute-force cosine similarity search across ALL projects.
 func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit int) ([]ScoredMemory, error) {
+	identity := s.configuredEmbeddingIdentity()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -959,38 +1029,9 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	}
 	defer rows.Close() //nolint:errcheck
 
-	var entries []vecEntry
-	// Embeddings are stored per-model. A dimension mismatch means the rows
-	// were written by a different model than the one producing queryVec, and
-	// skipping them silently turns changed-model setups into "vector search
-	// found nothing" with no explanation.
-	mismatched, mismatchedModel := 0, ""
-	for rows.Next() {
-		var id, model, rowProject string
-		var blob []byte
-		var scopeCol, resolvedCol sql.NullString
-		if err := rows.Scan(&id, &blob, &model, &scopeCol, &rowProject, &resolvedCol); err != nil {
-			return nil, err
-		}
-		vec := bytesToFloat32s(blob)
-		if len(vec) == len(queryVec) {
-			entries = append(entries, vecEntry{
-				memoryID: id, embedding: vec, scope: parseScope(scopeCol),
-				projectID: rowProject, resolved: resolvedCol.Valid && resolvedCol.String != "",
-			})
-			continue
-		}
-		mismatched++
-		if mismatchedModel == "" {
-			mismatchedModel = model
-		}
-	}
-	if err := rows.Err(); err != nil {
+	entries, err := s.usableVectorEntries(rows, queryVec, identity)
+	if err != nil {
 		return nil, err
-	}
-	if mismatched > 0 && s.logger != nil {
-		s.logger.Warn("vector search skipped embeddings whose dimension does not match the query — the embedding model likely changed; re-embed to restore vector recall",
-			"skipped", mismatched, "usable", len(entries), "query_dims", len(queryVec), "stored_model", mismatchedModel)
 	}
 
 	scored := make([]ScoredMemory, 0, len(entries))

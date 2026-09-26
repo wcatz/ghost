@@ -49,13 +49,16 @@ func newMockStore() *mockStore {
 	}
 }
 
-func (m *mockStore) UnembeddedMemoryIDs(_ context.Context, _ string, limit int) ([]string, error) {
+// UnembeddedMemoryIDs mirrors the store's identity-aware selection: a row
+// whose vector was stamped with another identity counts as unembedded, which is
+// what makes a model change re-embed itself.
+func (m *mockStore) UnembeddedMemoryIDs(_ context.Context, _ string, identity string, limit int) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var ids []string
 	for id := range m.memories {
-		if _, hasEmb := m.embeddings[id]; !hasEmb {
+		if model, hasEmb := m.embModel[id]; !hasEmb || (identity != "" && model != identity) {
 			ids = append(ids, id)
 			if len(ids) >= limit {
 				break
@@ -111,11 +114,11 @@ func (p *panicOnceStore) ListProjects(ctx context.Context) ([]memory.Project, er
 	return p.mockStore.ListProjects(ctx)
 }
 
-func (p *panicOnceStore) UnembeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error) {
+func (p *panicOnceStore) UnembeddedMemoryIDs(ctx context.Context, projectID, identity string, limit int) ([]string, error) {
 	if p.method == "UnembeddedMemoryIDs" && p.fired.CompareAndSwap(false, true) {
 		panic("simulated panic in UnembeddedMemoryIDs")
 	}
-	return p.mockStore.UnembeddedMemoryIDs(ctx, projectID, limit)
+	return p.mockStore.UnembeddedMemoryIDs(ctx, projectID, identity, limit)
 }
 
 // embedOllamaStub returns an httptest server that answers Alive() checks at
@@ -390,9 +393,11 @@ func TestClientAlive_Unreachable(t *testing.T) {
 
 func TestClientEmbed_Unreachable(t *testing.T) {
 	c := NewClient("http://localhost:0", "nomic-embed-text", 768)
-	_, err := c.Embed(context.Background(), "test text")
-	if err == nil {
-		t.Error("Embed should return error for unreachable server")
+	if _, err := c.EmbedDocument(context.Background(), "test text"); err == nil {
+		t.Error("EmbedDocument should return error for unreachable server")
+	}
+	if _, err := c.EmbedQuery(context.Background(), "test text"); err == nil {
+		t.Error("EmbedQuery should return error for unreachable server")
 	}
 }
 
