@@ -387,6 +387,13 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("inspect schema: %w", err)
 	}
 
+	// The database file and the -wal and -shm files SQLite maintains beside it
+	// all exist now, so their modes are the ones that will be on disk from
+	// here on. This is the one place any ghost opens the database read-write,
+	// so it is the one place that can guarantee the modes. It cannot fail the
+	// open, and it does not need the schema to be current to be correct.
+	TightenPermissions(dbPath)
+
 	if _, err := db.Exec(initSQL); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
@@ -459,5 +466,14 @@ func backupBeforeMigrate(db *sql.DB, dbPath string) error {
 	if _, err := db.Exec(`VACUUM INTO ?`, backup); err != nil {
 		return fmt.Errorf("vacuum into %s: %w", backup, err)
 	}
+	// VACUUM INTO names no mode for the file it creates, so the copy lands at
+	// whatever SQLite's default is minus the umask — a full copy of the memory
+	// database, at the same width this open is in the middle of removing. It is
+	// only shielded by the 0700 data directory, and a database opened outside
+	// that directory (eval, bench) has no such shield, so tighten the copy here
+	// rather than leave it to a pass that walks only the three live files. A
+	// chmod failure is reported, not fatal: the migration's safety net exists
+	// either way.
+	TightenPermissions(backup)
 	return nil
 }

@@ -66,6 +66,38 @@ The data directory is separate from the config directory:
 
 The data path is intentionally consistent across operating systems. A Windows installation therefore commonly uses `%USERPROFILE%\.local\share\ghost\ghost.db` for the database, while the config file follows the platform convention above.
 
+### Data directory permissions
+
+Ghost treats the database as private to your account. Whenever it writes to the database — starting the MCP server, running a command, or a Claude Code session starting — it strips the group and other permission bits from:
+
+- the data directory itself (`ghost/`, which becomes `0700`), and
+- `ghost.db`, `ghost.db-wal` and `ghost.db-shm` (which become `0600`).
+
+Why the modes needed enforcing at all: `MkdirAll` only applies its mode when it creates a directory, so a directory that already existed keeps whatever mode it had, and SQLite names no mode for the files it creates, so a new database takes your umask. A data directory that something outside Ghost created first — a packaging script, a pre-existing `XDG_DATA_HOME`, a `mkdir` you ran by hand — was therefore typically `0750` or `0755` instead of `0700`, and a `0644` or `0640` `ghost.db` beside it: the whole memory store readable by everyone in your group. The pass above runs on the open path, so it also repairs a mode that drifts later.
+
+Three things it deliberately does not do:
+
+- **It never widens a mode.** Only group and other bits are cleared, so a database you locked down yourself — `chmod 0400 ghost.db` — is left alone rather than handed back `0600`. The setuid, setgid and sticky bits are not preserved either: a data directory that was group-shared with `setgid` (`2775`) loses it, which is the intended direction — the directory is no longer shared.
+- **It touches nothing else.** Every other file in the directory keeps the mode it has. A pre-migration backup Ghost writes during a schema upgrade (`ghost.db.pre-migrate-<timestamp>`) is tightened to `0600` as it is created, since it is a full copy of the database; backups from earlier versions keep the modes they were given.
+- **It does not follow a symlinked `ghost.db`.** If your `ghost.db` is a symlink — a synced data directory, a dotfiles checkout — the pass skips it, because chmod'ing through the link would change the mode of whatever it points at, which may not be yours to change. It logs a warning naming the path, since a symlinked database means the real one keeps whatever mode it has. Point Ghost at the database directly if you want it protected.
+
+A database Ghost opens outside the data directory — an `eval` or bench scratch tree, a directory you pointed an environment variable at — has its three files tightened but not the directory holding it.
+
+A mode that cannot be tightened (a read-only or foreign-owned mount) is logged as a warning and the command continues. Refusing to run over a mode bit would be the worse outcome.
+
+The pass runs on the two functions that open the database read-write, so which commands tighten a mode follows from which of them they use:
+
+What decides it is the *open*, not the command. A read-write open tightens wherever it is called; a read-only one never does.
+
+- **Read-only opens change nothing.** The stop hook's own database reads, the lifecycle marker, the lifecycle lock and `ghost obsidian sync` all connect read-only. A diagnostic has to be able to report on a database it cannot modify, and a read-only connection cannot create one either.
+- **Read-write opens tighten**, including commands whose job is only to read. `ghost mcp status` and `ghost maintenance status` open the database read-write to check store health and report recent runs, `ghost project bind` opens it to write the binding, and the opencode plugin's `ghost context` opens it to render a session's context. Most other commands reach it through the same shared startup that already ran migrations on their behalf.
+
+A session *start* can tighten as a side effect, but only on some hosts. Claude Code and Codex go through `ghost hook`, where a genuine new session in a directory that resolves to a project bumps the project's session counter — a write — while a resume, a clear, a compaction and a subagent fire do not. Goose's session start tightens nothing: it cannot consume injected context, so Ghost does not process it. opencode instead spawns `ghost context` at start, which has none of those exclusions. Separately, the first session start after a Claude Code *plugin* install imports your memory files, which is a read-write open whatever the session's shape.
+
+A session *stop* can tighten indirectly, on any host that has one: when lifecycle reflection is configured, the stop hook spawns `ghost lifecycle`, which runs in its own process with its own open.
+
+On Windows the pass is skipped entirely: access there is carried by an ACL inherited from the parent directory, not by the mode bits `chmod` maps onto read-only, so tightening a number would not change who can read the database.
+
 ## Minimal example
 
 ```yaml

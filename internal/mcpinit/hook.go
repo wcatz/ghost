@@ -62,13 +62,20 @@ func rwDSN(dbPath string) string {
 // write: its own short-lived read-write connection (rwDSN — URI-escaped like
 // roDSN, busy_timeout matching Store's so a live MCP server's own write can't
 // make this fail under ordinary contention), guarded by an existence check so
-// a missing database is never created. Still best-effort: on any failure
+// a missing database is never created. That guard is also why the permission
+// pass runs after the stat and not before it: a database that is not there must
+// stay uncreated, mode tightening included. Still best-effort: on any failure
 // (contention that outlasts even 5s, permissions) the stale stored count is
 // shown instead.
 func bumpSessionCount(dbPath, projectID string) int {
 	if _, err := os.Stat(dbPath); err != nil {
 		return 0
 	}
+	// The session hook is often the only Ghost process to touch a database
+	// between two MCP sessions, so a mode left loose by an older build is still
+	// loose when this write lands unless the pass runs here too. It is
+	// best-effort and cannot fail this function, exactly like the write below.
+	memory.TightenPermissions(dbPath)
 	db, err := sql.Open("sqlite", rwDSN(dbPath))
 	if err != nil {
 		return 0
@@ -87,6 +94,16 @@ func bumpSessionCount(dbPath, projectID string) int {
 	if err != nil {
 		return 0
 	}
+	// Again, and this is not redundant. The pass above ran before this
+	// connection existed, so it could only see a database left over from
+	// before. A clean close deletes the -wal and -shm files, so on this
+	// connection SQLite creates both from scratch, at whatever mode it gives a
+	// new file — and the counter just written into ghost.db is in them until
+	// the deferred Close checkpoints them away. With a live MCP server holding
+	// the same database, those files outlive this function, so they have to be
+	// tightened while it still can. Cheap when they do not exist: an Lstat
+	// each, and a no-op.
+	memory.TightenPermissions(dbPath)
 	return n
 }
 
