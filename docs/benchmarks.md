@@ -220,6 +220,8 @@ The recorded run used the OpenCode Go endpoint; provider pricing and usage limit
 
 Results (2026-08-20, DeepSeek v4 Pro as both generator and judge, **500 questions** including 30 abstention, `topk_context=5`):
 
+The hybrid leg's retrieval comes from the same `bench/longmemeval` hybrid path as Phase 1, so it was measured in the pre-task-prefix vector space; the hybrid retrieval numbers here are re-baseline pending alongside Phase 1's (`fts-only` is unaffected — it never embeds).
+
 ```text
 condition   blended(500)  non-abstention(470)  abstention(30)
 hybrid      96.2%         96.8%                86.7%
@@ -293,6 +295,8 @@ Hit@k is a question-level hit rate — 1 when any gold `dia_id` lands in the top
 |---|---|---|---|---|---|---|
 | FTS | 0.265 | 0.484 | 0.581 | 0.362 | 0.384 | 0.823 |
 | Hybrid | 0.380 | 0.653 | 0.758 | 0.497 | 0.522 | 0.886 |
+
+This run (2026-08-21) predates `bench/locomo` adopting the `search_document: `/`search_query: ` task prefixes, so the Hybrid row is measured in the pre-prefix vector space and is re-baseline pending like Phase 1's hybrid numbers (the FTS row is unaffected — it never embeds).
 
 Per category (hybrid): temporal Hit@5 0.719 / open-domain 0.668 / single-hop 0.598 / multi-hop 0.449. Multi-hop is the known hard tail.
 
