@@ -357,3 +357,66 @@ func TestScanners_CountGlobalSaveUnderOpencodeNaming(t *testing.T) {
 		t.Errorf("V2 opencode native global save = %+v, %v; want 1 save", got, err)
 	}
 }
+
+// padLine inserts a large "pad" field into a JSON object line, so the line is
+// valid JSON of roughly n bytes that still carries the original content.
+func padLine(line string, n int) string {
+	return `{"pad":"` + strings.Repeat("x", n) + `",` + line[1:]
+}
+
+// TestScanOpencodeV2Messages_HugeLine: an agentic assistant message carries
+// every tool call and output of the turn on one line, so real transcripts pass
+// the old 4 MiB line cap (#632). The save in such a line must still count.
+func TestScanOpencodeV2Messages_HugeLine(t *testing.T) {
+	huge := padLine(oc2LineCodeModeSave, 5<<20)
+	got, err := ScanOpencodeV2Messages(strings.NewReader(oc2LineShell + "\n" + huge + "\n" + oc2LineText + "\n"))
+	if err != nil {
+		t.Fatalf("ScanOpencodeV2Messages on a 5 MiB line: %v", err)
+	}
+	if got.ToolCalls != 2 || got.GhostSaves != 1 {
+		t.Errorf("ScanOpencodeV2Messages = %+v, want toolCalls=2 saves=1", got)
+	}
+}
+
+// TestStreamJSONL_LineCeiling: a line past the memory ceiling aborts the scan
+// with an error (the caller fails open) instead of being silently skipped,
+// which could hide a save and nudge wrongly.
+func TestStreamJSONL_LineCeiling(t *testing.T) {
+	old := maxTranscriptLine
+	maxTranscriptLine = 1 << 10
+	t.Cleanup(func() { maxTranscriptLine = old })
+
+	var visited int
+	err := streamJSONL(strings.NewReader("{}\n"+padLine("{}", 2<<10)+"\n{}\n"), func([]byte) { visited++ })
+	if err == nil {
+		t.Fatal("expected an error for a line past the ceiling")
+	}
+	if visited != 1 {
+		t.Errorf("visited %d lines before the over-long one, want 1", visited)
+	}
+}
+
+// TestStreamJSONL_LineEndings: CRLF and a final line with no newline behave as
+// bufio.ScanLines did.
+func TestStreamJSONL_LineEndings(t *testing.T) {
+	var lines []string
+	if err := streamJSONL(strings.NewReader("a\r\nb\nc"), func(l []byte) { lines = append(lines, string(l)) }); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(lines, "|") != "a|b|c" {
+		t.Errorf("lines = %q, want a|b|c", lines)
+	}
+}
+
+// TestStreamJSONL_UnterminatedLineBeforeReadError: a line the read error cut
+// off is not visited even when its bytes so far parse as JSON — the reader
+// never confirmed it ended there.
+func TestStreamJSONL_UnterminatedLineBeforeReadError(t *testing.T) {
+	res, err := ScanClaudeJSONL(&errReader{data: []byte(lineToolBash + "\n" + lineGhostSave)})
+	if err == nil {
+		t.Fatal("expected the read error")
+	}
+	if res.GhostSaves != 0 {
+		t.Errorf("GhostSaves = %d, want 0 (the unterminated line before the error must not count)", res.GhostSaves)
+	}
+}
