@@ -10,10 +10,12 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 | `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 547 memories |
 | LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions (its hybrid retrieval leg is pre-task-prefix too — see Phase 4) |
 | Staleness suite | Fresh-fact ranking without breaking older-but-correct facts | Fresh-wins **1.000** while the recency-trap case stays **0.929** |
+| Maintenance-state suite | Ranking over a corpus with resolved, shared and superseded rows | Hybrid live-wins **0.810** on 21 questions; the graded table cannot see this class of change at all |
+| No-answer queries | What search returns when nothing in the corpus answers the query | Mean top cosine **0.522** vs **0.715** answerable; 62/220 answerable queries sit below the no-answer maximum |
 
-These rows are not one leaderboard. Retrieval metrics, end-to-end answer accuracy, and a staleness fixture answer different questions. Competitor scores also use different generators and judges, so cross-system comparisons are directional unless the evaluation protocol is identical.
+These rows are not one leaderboard. Retrieval metrics, end-to-end answer accuracy, a staleness fixture, a maintenance-state fixture and a false-positive count answer different questions. Competitor scores also use different generators and judges, so cross-system comparisons are directional unless the evaluation protocol is identical.
 
-**Status:** LongMemEval-S retrieval, `ghost bench`, and the documented end-to-end run have shipped. The staleness suite is report-only in CI. The official GPT-4o leaderboard-comparable run has not been executed.
+**Status:** LongMemEval-S retrieval, `ghost bench`, and the documented end-to-end run have shipped. The staleness, maintenance-state and no-answer suites are report-only in CI. The official GPT-4o leaderboard-comparable run has not been executed.
 
 > Sections explicitly labeled **Historical record** document past experiments and their original implementation details. They are retained for reproducibility context, not as a description of current production routing. For current behavior, start with the [documentation index](README.md).
 
@@ -40,7 +42,7 @@ hybrid      0.532   0.930   0.973   0.901   0.903     one-time local embedding ~
 
 - **Hybrid session Recall@5 is 93.0%, Recall@10 97.3%** — in the band of the best-reported hybrid retrieval results on -S (~95% R@5 published for hybrid BM25+vector on the original variant) and far above the paper's flat-index baseline (R@5 ≈ 0.64 on -M).
 - **The lift lands exactly where the architecture predicts.** FTS alone nearly solves keyword-friendly classes (`single-session-user` R@10 1.000) but fails vocabulary-mismatch classes; embeddings fix precisely those: `single-session-assistant` R@10 **0.607 → 1.000**, `temporal-reasoning` 0.767 → 0.938.
-- **Honest nuance: on this chat-style benchmark, vector-only ties hybrid** (vector edges R@1/MRR/NDCG, hybrid edges deep recall R@5/R@10). On the current v2 `ghost bench` dataset, hybrid beats vector (NDCG 0.818 vs 0.801) — exact identifiers (ports, versions, hostnames) need the keyword leg. Fusion is the robustness play across both data shapes, which is exactly why a memory system for coding agents ships it.
+- **Honest nuance: on this chat-style benchmark, vector-only ties hybrid** (vector edges R@1/MRR/NDCG, hybrid edges deep recall R@5/R@10). On the current v2 `ghost bench` dataset, hybrid beats vector (NDCG 0.814 vs 0.795) — exact identifiers (ports, versions, hostnames) need the keyword leg. Fusion is the robustness play across both data shapes, which is exactly why a memory system for coding agents ships it.
 - **Remaining headroom is at R@1** (0.532 overall; `multi-session` 0.371, `temporal-reasoning` 0.379) — R@10 is close to saturated, so the next win is ranking, not recall.
 - Reproduce: `go run ./bench/longmemeval --data <longmemeval_s_cleaned.json> --condition fts|vector|hybrid --embed-cache <cache.jsonl>`. The append-only content-hash cache makes reruns and interruptions cheap. The hash is taken over the **prefixed** input (`search_document: ` / `search_query: `, the same two the production client applies), so since the bench harnesses started applying those prefixes, cache entries written by older builds hash differently and are never hit again — an old cache file is inert, not wrong, and the first prefixed run re-embeds the corpus once.
 - **CI gating:** only the **fts** floor (`R@5 ≥ 0.74`, `NDCG@10 ≥ 0.72`) is enforced automatically on PRs — it needs no Ollama and finishes fast. The **hybrid** floor (`R@5 ≥ 0.91`, `NDCG@10 ≥ 0.89`) is run **manually** (`workflow_dispatch`) or locally, not on a schedule: the cold embedding pass is CPU-bound (the ~12h above), too slow for any CI cap. Because `nomic-embed-text:v1.5` is deterministic, a cold run computes the same vectors as a warm one, so the manual gate is justified by the warm local numbers here without CI re-deriving them — **but those numbers were measured before the harness adopted the task prefixes, and that space has since changed, so until the hybrid run below is re-baselined the manual hybrid gate is a floor-check, not a valid regression signal**: it can tell you a prefixed run is below a bar, not that this change made it worse (see the re-baseline note below). **Re-baseline pending:** the results table, the per-class claims above and the committed per-question logs predate the harness adopting the `search_document: `/`search_query: ` prefixes (the vector space the published numbers were measured in can no longer be reproduced by this harness), so a prefixed hybrid run measures a different space than the one that set these floors — re-run it to re-baseline the hybrid numbers, then restore the gate's regression meaning.
@@ -58,53 +60,16 @@ Current numbers (v2 dataset: 547 memories spanning all 8 categories, 220 graded 
 ```
 condition          R@1     R@5    R@10   MRR@10  NDCG@10
 fts-only         0.467   0.626   0.697   0.836   0.749
-vector-only      0.506   0.694   0.764   0.885   0.801
-hybrid           0.520   0.712   0.763   0.902   0.818
+vector-only      0.484   0.708   0.773   0.872   0.795
+hybrid           0.507   0.697   0.777   0.893   0.814
 ```
-
-Every row above was measured on this build from the committed dataset and
-fixture, and reproduces exactly with `go run ./cmd/ghost bench` (or
-`go test ./internal/bench -run TestBenchDatasetReport -v`). Two things moved
-when the fixture was regenerated, and they need separating, because only one of
-them is the fixture's doing:
-
-- **The `vector-only` and `hybrid` rows come from the committed
-  `embeddings.json`**, which is produced by `nomic-embed-text:v1.5` **with its
-  task prefixes** — `search_document: ` on each memory, `search_query: ` on each
-  query, the same two the production client applies. Prefix-free embedding is
-  the mistake that fixture used to carry. Measured against the same build with
-  the pre-regeneration fixture, the prefixes moved hybrid NDCG@10
-  0.814 → 0.818 and R@5 0.697 → 0.712, and vector-only NDCG@10 0.795 → 0.801
-  with R@1 0.484 → 0.506. Vector-only R@5 gives back 0.014 (0.708 → 0.694)
-  while its top-of-list metrics all improve: the prefixes make the two halves
-  of the space more separable, which sharpens the head of the pure vector
-  ranking at some cost to its deep tail. Hybrid — the shipped path — improves
-  R@1, R@5, MRR@10 and NDCG@10, and gives back 0.014 on R@10
-  (0.777 → 0.763): the sharper vector head takes window slots the deep tail
-  used to hold, and fusion does not fully replace them. The two gated metrics,
-  R@5 and NDCG@10, both improve.
-- **The `fts-only` row moved by 0.001–0.008 and had nothing to do with the
-  fixture** — it never reads a vector. It is in this diff because the table it
-  replaces had drifted from the committed dataset: it published
-  `fts-only 0.469 0.623 0.689 0.837 0.748` where the committed `memories.jsonl`
-  and `queries.jsonl` produce `0.467 0.626 0.697 0.836 0.749` (measured on
-  `origin/main` with the old fixture, so the drift predates the regeneration).
-  The vector rows of that published table were stale for the same reason, which
-  is why the "before" numbers quoted above are a re-measurement rather than the
-  published ones: a delta against a table no build produces would be meaningless.
-
-To regenerate the fixture after a dataset change, embed `memories.jsonl` and
-`queries.jsonl` through `internal/embedding`'s client — `EmbedDocument` for the
-memory keys and `EmbedQuery` for the query names, at the configured
-`embedding.dimensions` — and write the result as a single JSON object of
-key → vector, keys sorted. Going through the client is what keeps the fixture in
-the same space as production, prefixes and all; a fixture built by hand from raw
-`/api/embed` calls drifts the moment either side changes.
 
 Two findings, both honest:
 
-- **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.818) beats both single legs (FTS 0.749, vector 0.801) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI. Absolute numbers are lower than the v1 starter because v2 deliberately adds paraphrase queries where lexical overlap is weak (the FTS leg's R@1 falls to 0.467; vector and hybrid carry those).
+- **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.814) beats both single legs (FTS 0.749, vector 0.795) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI. Absolute numbers are lower than the v1 starter because v2 deliberately adds paraphrase queries where lexical overlap is weak (the FTS leg's R@1 falls to 0.467; vector and hybrid carry those).
 - **The graph-expansion bonus was evaluated and removed.** An additive link-graph bonus (former 0.15 default) lifted semantically-adjacent neighbors above exact matches, and a public LongMemEval-S kill experiment showed its recoveries were a strict subset of a deeper vector-k's, with no headroom at production depth. The former `GraphWeight` setting and the bonus are now removed entirely (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`). The link graph is retained for the Obsidian mirror and `supersedes` ranking.
+
+**What this table cannot see.** The v2 corpus is the *graded retrieval* dataset, and it is deliberately clean: every memory is created through `store.Create` in one batch, so all 547 share a `created_at` and the decay factor is identical across every candidate — inert, and pinned by `TestDecayDoesNotPerturbGradedBench`. It also holds no resolved row, no `_global` row and no `supersedes` edge. A ranking change that acts on any of that measures exactly 0.000 on this table, which is what happened when the resolved/`_global` demotion shipped. That is a property of the corpus, not a bug in the harness, so the coverage lives elsewhere: the [maintenance-state suite](#phase-3b--maintenance-state-suite-report-only) and the [no-answer queries](#no-answer-queries-the-abstention-baseline-report-only).
 
 The v2 dataset overshoots the original ~150/~40 growth target (547/220) to give distractor density room for paraphrase grading. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie.
 
@@ -112,7 +77,7 @@ The v2 dataset overshoots the original ~150/~40 growth target (547/220) to give 
 
 The RRF fusion is parameterized (`memory.SearchParams`), and `ghost bench --sweep` grid-searches the vector-leg weight (FTS = complement) — 6 combinations over the same dataset, one prepared store. Findings on the v2 dataset (full table: run `go run ./cmd/ghost bench --sweep`):
 
-- **Leg weights remain robust, and the default still wins.** On 220 queries, vec 0.70 (shipped default) tops the grid at NDCG 0.818, level with vec 0.80; 0.60/0.90 are within 0.004; only vec 0.30 degrades (0.790). The earlier v1 sweep's "0.3–0.7 flat" band does not fully carry over — the paraphrase-heavy queries reward a stronger vector leg — but there is still no evidence to move off 70/30.
+- **Leg weights remain robust, and the default still wins.** On 220 queries, vec 0.70 (shipped default) tops the grid at NDCG 0.814; 0.60 and 0.80 are within 0.001 and 0.90 within 0.004; only vec 0.30 degrades (0.784). The earlier v1 sweep's "0.3–0.7 flat" band does not fully carry over — the paraphrase-heavy queries reward a stronger vector leg — but there is still no evidence to move off 70/30.
 - **Outcome: the 70/30 leg weighting ships unchanged, and the graph bonus was removed.** With the leg weights robust across the upper half of the grid, there is no evidence to change the shipped 70/30 split. The graph-expansion bonus was removed rather than kept disabled (see the spec linked above); the link graph is still built for the Obsidian mirror and `supersedes`.
 
 ## Phase 3 — staleness suite (the flagship)
@@ -166,11 +131,59 @@ The trap is untouched in both cases: under decay its distractors are `fact` (nev
 
 ```text
                   graded hybrid NDCG@10   staleness fresh-found/wins   trap correct-wins
-reselect=false    0.818                   1.000 / 1.000                0.929
-reselect=true     0.818                   0.938 / 0.938                0.929
+reselect=false    0.814                   1.000 / 1.000                0.929
+reselect=true     0.812                   0.938 / 0.938                0.929
 ```
 
-**Verdict: not defaultable.** The wider base window **regresses staleness** — `default_branch` (both probes) and `vpn_solution` (state probe) lose the fresh version entirely — while graded and trap stay flat. Ship gate requires staleness not to regress; the flag stays off by default and is available for future experiments behind `SearchParams.DecayReselect`. Reorder-only membership (relevance owns the cut) remains the shipped behavior.
+**Verdict: not defaultable.** The wider base window **regresses staleness** — `default_branch` (both probes) and `vpn_solution` (state probe) lose the fresh version entirely — while graded and trap stay flat. Ship gate requires staleness not to regress; the flag stays off by default and is available for future experiments behind `SearchParams.DecayReselect`. Reorder-only membership (relevance owns the cut) remains the shipped behavior. (Re-measured on the 220-query v2 corpus; the earlier run on 219 queries read 0.817/0.817 for the graded column, so the graded leg was never the deciding one.)
+
+## Phase 3b — maintenance-state suite (report-only)
+
+The graded table above cannot see the state a real store accumulates, because its corpus has none of it. This suite is that corpus: a small graded dataset (`internal/bench/testdata/maintenance_{memories,queries}.jsonl` plus a committed `nomic-embed-text:v1.5` vector fixture, so it runs in CI with no Ollama) whose memories carry a `resolved_at` verdict, live in `_global` while being searched from the project, or sit behind a `supersedes` edge — and whose `created_at` spans 10 to 950 days across decaying and never-decaying categories, so the decay factor has something to separate. Resolved rows are stamped through the production `SetResolved`, which refuses `convention`/`preference`, so the corpus can only describe a state a store could actually hold.
+
+21 graded questions. The answer is the live project memory; the distractors are the copies that state leaves behind — a resolved restatement, a shared `_global` copy, a superseded version. Three questions invert it: the answer *is* the shared `_global` row, which is how the suite shows whether demoting shared rows makes shared knowledge unfindable. **`importance` is not correlated with role** (a stale copy is sometimes the most important-looking row in the store), and `TestMaintenanceFixtureCarriesState` enforces that at least ten live-probe questions have a distractor at least as important as their answer — the anti-construction guard the recency-trap fixture lacks.
+
+Run it with `GHOST_TEST_SOURCE=none go test ./internal/bench/ -run TestMaintenanceStateReport -v` (shipped defaults):
+
+```text
+condition         n     R@5  NDCG@10  live-wins answer-found
+fts-only         21   0.929    0.883      0.762        1.000
+vector-only      21   0.952    0.831      0.571        1.000
+hybrid           21   0.905    0.617      0.810        0.905
+hybrid: shared _global answers found 1/3, live-wins 0/3
+```
+
+The two single-leg rows are the raw legs, exactly as in the Phase 2 table. That is not the same as production's keyword-only fallback (Ollama down), which still goes through fusion and therefore *does* get the status demotion and decay — it ranks like the hybrid row, not like the fts-only row. Only the hybrid row is the shipped ranking.
+
+**Report-only, and that is a decision, not an omission.** No metric floor is asserted: the suite exists to move when ranking changes, and a floor would freeze today's numbers into a gate on the next fix. What is asserted is that the suite can see at all — the fixture carries resolved, `_global` (including a decaying-category one) and superseded state, and with decay off the `supersedes` edges demonstrably raise live-wins (`TestMaintenanceSupersedeEdgesMoveLiveWins`; 0.524 → 0.857). Delete the edges and that test fails; that is the mutation check.
+
+Three things it says that the graded table cannot:
+
+- **It is the only in-repo measurement of the resolved/`_global` demotion.** On the commit before #634, hybrid live-wins was 0.476 with R@5 0.476; with the demotion shipped it is 0.810 and 0.905. The 220-query table read 0.814 on both — the 0.000 delta that made the change look inert, and the reason this suite exists.
+- **The demotion costs findability, and only this suite can see it.** `answer-found` is 0.905, and only **1 of 3** shared-row answers is still retrieved: halving a shared row's fused score puts it below the deepest live candidate, and the factor is applied before the window cut, so two shared answers are *evicted* rather than sunk. A demotion that sinks a row is a reorder; one that evicts it is a deletion, and a user whose only record of a preference is the shared row stops retrieving it. Whether the fix is a rescue lane for shared rows or a demotion that reorders after the cut is a ranking decision (#580) — recorded here so it inherits the number instead of re-deriving it.
+- **Category-exempt decay and resolve state pull against each other, and most of that pull was the missing demotion.** Shipped: live-wins 0.810 (NDCG 0.617). With decay off: 0.857 (NDCG 0.897) — a 0.047 live-wins gap, down from 0.429 before #634. The mechanism is visible question by question: a resolved `fact` never decays (factor 1.0) while a live `dependency` copy decays (0.33–0.75 at 10–80 days). Neither the staleness suite nor the recency-trap suite can see this, because in both the correct answer sits in a never-decay category — which is exactly the "old-but-correct memory in a decaying category" case the audit asked for. Not asserted, on purpose: it is a residual finding for the ranking work, and the day it is fixed this suite should show it.
+
+## No-answer queries: the abstention baseline (report-only)
+
+Recall cannot see a leak. A wrong memory returned counts as a hit for whatever it displaced, so a system can score well while feeding an agent plausible garbage — which is what [#537's negative retrieval fixtures](https://github.com/wcatz/ghost/pull/537) pin at the unit level (a named memory must not surface, each with a reason). What they cannot do is measure a query nothing answers, because recall has no denominator and `runCondition` skips such queries entirely.
+
+`testdata/negative_queries.jsonl` adds 24 of them to the graded corpus, with `rel` empty by construction, in two flavors: `off_domain` (no vocabulary overlap with the corpus — the floor) and `near_miss` (corpus vocabulary, unrecorded answer: "who is on call this weekend", "how do i restore a dropped postgres table by hand"). `ghost bench` now prints them after the main table:
+
+```text
+no-answer queries (n=24, nothing in the corpus answers these; report-only, no gate)
+  results returned per query   10.0 (window 10, no similarity floor configured)
+  mean top cosine             0.522  vs 0.715 for the 220 answerable queries
+  floor refusing all of them   0.677 (the no-answer maximum) costs 62/220 answerable queries
+
+  floor     results/query   queries w/ hit
+  0.30               8.46         24/24
+  0.40               7.83         23/24
+  0.50               3.46         15/24
+```
+
+The score is the vector leg's cosine, the only calibrated number in the pipeline: an RRF score is a function of a row's rank rather than of its match, and the keyword-only fallback's synthesized `1/(K+rank+1)` is a position, not a confidence. The floor rows are a sweep, not a proposal — `search.min_similarity` ships 0, so there is no configured floor to inherit, and the band is where one would have to live.
+
+Read the third line as the actual baseline for the abstention work: the two distributions overlap. A floor of 0.677 would refuse all 24 no-answer queries and would also refuse 62 of the 220 answerable ones, so a threshold alone cannot abstain — the near-miss flavor is what makes the overlap visible, and it is why the answer is likely to be a calibrated decision rather than a constant.
 
 ## Phase 4 — end-to-end LongMemEval-S (retrieve → generate → judge) — SHIPPED (DeepSeek v4 Pro)
 

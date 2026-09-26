@@ -1,0 +1,39 @@
+# No-answer queries: nothing in memories.jsonl answers these, so every result the
+# ranked path returns for them is a false positive. rel is empty BY CONSTRUCTION —
+# that is what marks a query negative, and it is why the graded metrics skip them
+# (a query with no relevant item has no defined recall) while the false-positive
+# report measures what search returns anyway. This is the baseline the abstention
+# work needs: how confident does Ghost look when it has nothing?
+#
+# Two flavours, both needed. The `off_domain` ones share no vocabulary with the
+# corpus, so they measure the floor. The `near_miss` ones reuse corpus vocabulary
+# (unit tests, ingress, restore, on-call, disk usage) while asking about
+# something the corpus never recorded — those are where a score-based abstain
+# rule has to earn its keep, and they are the reason this file exists.
+# Vectors are in negative_embeddings.json under each query's name; regenerate
+# with Ollama POST /api/embed (nomic-embed-text:v1.5, 768 dims) when this file
+# changes. See docs/benchmarks.md ("No-answer queries").
+{"name":"n_off_wifi","flavor":"off_domain","text":"what is the office wifi password","rel":{}}
+{"name":"n_off_dentist","flavor":"off_domain","text":"when is my dentist appointment","rel":{}}
+{"name":"n_off_lisbon","flavor":"off_domain","text":"what is the weather in lisbon tomorrow","rel":{}}
+{"name":"n_off_sourdough","flavor":"off_domain","text":"how do i bake sourdough bread at home","rel":{}}
+{"name":"n_off_capital","flavor":"off_domain","text":"what is the capital of australia","rel":{}}
+{"name":"n_off_guitar","flavor":"off_domain","text":"teach me to play the guitar","rel":{}}
+{"name":"n_off_marathon","flavor":"off_domain","text":"how do i train for a marathon","rel":{}}
+{"name":"n_off_rent","flavor":"off_domain","text":"how much is my monthly rent","rel":{}}
+{"name":"n_off_pizza","flavor":"off_domain","text":"what is the best pizza in naples","rel":{}}
+{"name":"n_off_guitar2","flavor":"off_domain","text":"recommend a good jazz album","rel":{}}
+{"name":"n_off_bitcoin","flavor":"off_domain","text":"what is the price of bitcoin right now","rel":{}}
+{"name":"n_off_christmas","flavor":"off_domain","text":"how many days until christmas","rel":{}}
+{"name":"n_nm_rust","flavor":"near_miss","text":"how do i write unit tests in rust","rel":{}}
+{"name":"n_nm_ingress","flavor":"near_miss","text":"which ingress controller should i pick for a new cluster","rel":{}}
+{"name":"n_nm_restore","flavor":"near_miss","text":"how do i restore a dropped postgres table by hand","rel":{}}
+{"name":"n_nm_oncall","flavor":"near_miss","text":"who is on call this weekend","rel":{}}
+{"name":"n_nm_disk","flavor":"near_miss","text":"how much disk space is left on the relay host","rel":{}}
+{"name":"n_nm_sprint","flavor":"near_miss","text":"what is on the todo list for next sprint","rel":{}}
+{"name":"n_nm_router","flavor":"near_miss","text":"how do i set up a home wifi router","rel":{}}
+{"name":"n_nm_btc","flavor":"near_miss","text":"how do i cash out bitcoin to a bank account","rel":{}}
+{"name":"n_nm_aws","flavor":"near_miss","text":"how do i set up an aws lambda with terraform","rel":{}}
+{"name":"n_nm_rds","flavor":"near_miss","text":"which rds instance size should i use for postgres","rel":{}}
+{"name":"n_nm_recipe","flavor":"near_miss","text":"what is a good recipe for chicken tikka masala","rel":{}}
+{"name":"n_nm_visa","flavor":"near_miss","text":"how long does a schengen visa take to process","rel":{}}
