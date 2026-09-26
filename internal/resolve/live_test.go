@@ -34,6 +34,14 @@ func liveTestSource() string {
 // open task phrased like a changelog (case 8). Those are the cases a
 // KEEP-bias model must NOT resolve — a false RESOLVED there buries a live
 // memory — and they are the ones this measurement exists to watch.
+//
+// The last three cases are verbatim from issue #640, where a judge found about
+// one resolve in three burying durable knowledge: a "NEVER …" rule, a still-true
+// rule written as a fix ("Fixed (PR #240): …"), and an open marker. In the pass
+// the deterministic veto (veto.go) settles the imperative and open-marker cases
+// before any call; they stay in this labeled set because these tests drive the
+// classifier directly, so they measure the prompt on the notes the veto cannot
+// reach.
 var liveResolveCases = []struct {
 	content string
 	want    Verdict
@@ -53,6 +61,13 @@ var liveResolveCases = []struct {
 	{"Split resolve classification into batches of 8 notes per harness call with a KEEP-biased rubric.", VerdictKeep},
 	{"Always run go vet ./... before committing.", VerdictKeep},
 	{"Open task: measure resolve KEEP bias against a labeled set before validating the resolve model pin.", VerdictKeep},
+
+	// Issue #640's real wrong resolves: a standing rule, a fix narrative that
+	// still states a rule, and an open marker. A RESOLVED here drops a memory
+	// that buries a safety lesson, so they are the sharpest cases in the set.
+	{"NEVER run `dingo database restore` with source and target on the same spindle.", VerdictKeep},
+	{"Fixed (PR #240): the CI job echoed the pull-request token into its log output.", VerdictKeep},
+	{"STILL STALE: the mithril-sync runbook points at last month's compose image.", VerdictKeep},
 }
 
 // TestResolutionClassifierLive validates the actual prompt against the labeled
@@ -164,12 +179,12 @@ func TestResolutionClassifierLiveBatch(t *testing.T) {
 	kfac := float64(keepFalsePos) / float64(keepLabeled)
 	t.Logf("batched resolve accuracy: %d/%d = %.2f in %d call(s); KEEP-side false-RESOLVED %d/%d (%.2f)",
 		correct, len(liveResolveCases), acc, cls.Calls(), keepFalsePos, keepLabeled, kfac)
-	// The batched path must not have silently fallen back: 10 notes at
-	// batchSize 3 is 3 batched calls + 1 single-note tail. More calls means
+	// The batched path must not have silently fallen back: 13 notes at
+	// batchSize 3 is 4 batched calls + 1 single-note tail. More calls means
 	// the numbered prompt/parser did not work and accuracy was measured on
 	// the fallback path instead.
-	if cls.Calls() != 4 {
-		t.Errorf("batched path fell back: %d calls for 10 notes at batchSize 3, want 4", cls.Calls())
+	if cls.Calls() != 5 {
+		t.Errorf("batched path fell back: %d calls for %d notes at batchSize 3, want 5", cls.Calls(), len(liveResolveCases))
 	}
 	if acc < 0.75 {
 		t.Errorf("batched resolution accuracy %.2f below 0.75", acc)

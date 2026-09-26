@@ -66,6 +66,9 @@ type fakeStore struct {
 	kept              map[string]string   // pre-seeded resolve KEEP cache
 	markedKept        []map[string]string // hashes passed to MarkResolveKept, one per call
 	markErr           error               // when set, returned by MarkResolveKept
+	alreadyResolved   []memory.Memory     // ResolvedCandidates pool (reassess)
+	cleared           []string            // ids passed to ClearResolved
+	clearErr          error               // when set, returned by ClearResolved
 }
 
 func (s *fakeStore) ResolveCandidates(_ context.Context, _ string) ([]memory.Memory, error) {
@@ -88,6 +91,16 @@ func (s *fakeStore) ResolveKeptHashes(_ context.Context, _ string) (map[string]s
 		out[id] = hash
 	}
 	return out, nil
+}
+func (s *fakeStore) ResolvedCandidates(_ context.Context, _ string) ([]memory.Memory, error) {
+	return s.alreadyResolved, nil
+}
+func (s *fakeStore) ClearResolved(_ context.Context, _ string, ids []string) (int, error) {
+	if s.clearErr != nil {
+		return 0, s.clearErr
+	}
+	s.cleared = append(s.cleared, ids...)
+	return len(ids), nil
 }
 func (s *fakeStore) MarkResolveKept(_ context.Context, _ string, hashes map[string]string) error {
 	if s.markErr != nil {
@@ -354,10 +367,35 @@ func TestRunSkipsCachedKeepVerdicts(t *testing.T) {
 
 func TestContentHashVersionsExplicitKeepCache(t *testing.T) {
 	const content = "kill experiment finding: 7.3% cross-session links, removed"
-	sum := sha256.Sum256([]byte("v2\x00" + content))
+	sum := sha256.Sum256([]byte(keepCacheHashVersion + "\x00" + content))
 	want := hex.EncodeToString(sum[:])
 	if got := ContentHash(content); got != want {
-		t.Errorf("ContentHash(%q) = %q, want v2 hash %q", content, got, want)
+		t.Errorf("ContentHash(%q) = %q, want %q", content, got, want)
+	}
+}
+
+// TestRunReasksV2CachedKeepVerdicts: the cache key is versioned, and issue #640
+// changed what a KEEP verdict means (a bare RESOLVED is now a KEEP, imperatives
+// and open markers veto before the call). A row cached under the old prefix was
+// judged by the old rules, so it must be re-asked rather than trusted.
+func TestRunReasksV2CachedKeepVerdicts(t *testing.T) {
+	content := "kill experiment finding: 7.3% cross-session links, removed"
+	v2 := sha256.Sum256([]byte("v2\x00" + content))
+	store := &fakeStore{
+		candidates: []memory.Memory{{ID: "kept", Content: content}},
+		kept:       map[string]string{"kept": hex.EncodeToString(v2[:])},
+	}
+	cls := &fakeClassifier{drop: map[string]bool{}}
+
+	res, _, err := Run(context.Background(), store, cls, "proj", false, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if cls.calls != 1 {
+		t.Errorf("classifier calls = %d, want 1 — a v2 cache entry must be re-asked", cls.calls)
+	}
+	if res.Skipped != 0 {
+		t.Errorf("res.Skipped = %d, want 0 for a stale-prefix cache entry", res.Skipped)
 	}
 }
 

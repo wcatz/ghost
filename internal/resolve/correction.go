@@ -107,18 +107,48 @@ func isOlder(a, b memory.Memory) bool {
 // correction memory itself is never demoted. Deterministic and free — no LLM
 // call — because the correction's text ("already fixed on main", "no PR is
 // needed from us") is itself the resolution verdict.
+//
+// The frequency pool and the correction pool are both `loaded`, which is what
+// Run passes. The repair pass needs them chosen separately and calls
+// correctionPairTargetsFrom directly.
 func correctionPairTargets(loaded, cands []memory.Memory) []memory.Memory {
+	return correctionPairTargetsFrom(loaded, cands, loaded)
+}
+
+// correctionPairTargetsFrom is correctionPairTargets with the correction pool
+// separable from the frequency pool. `loaded` counts subject-token document
+// frequency — Run's pool, so the rare-token set is identical — while `cands` may
+// be rows outside it (the repair pass passes the RESOLVED pool, which
+// ResolveCandidates never returns), and `corrections` is where a demoting
+// correction is looked for. Keeping those three apart is what lets the repair
+// pass mirror Run exactly instead of approximately: a correction only asserts
+// anything while it is in the pool Run searches, i.e. while it is unresolved.
+func correctionPairTargetsFrom(loaded, cands, corrections []memory.Memory) []memory.Memory {
 	if len(cands) == 0 {
 		return nil
 	}
 
-	// Rare terms per eligible memory: subject tokens with document frequency
-	// <= correctionRareDF across the loaded pool.
-	termSets := make(map[string]map[string]bool, len(loaded))
+	// Rare terms per memory: subject tokens with document frequency
+	// <= correctionRareDF across the frequency pool. Terms are also collected
+	// for cands and for corrections outside that pool, because both are
+	// compared against each other; only `loaded` raises a token's frequency, so
+	// Run's rare-token set is unchanged.
+	termSets := make(map[string]map[string]bool, len(loaded)+len(cands)+len(corrections))
+	for _, m := range cands {
+		termSets[m.ID] = subjectTermSet(m.Content)
+	}
+	for _, m := range corrections {
+		if _, ok := termSets[m.ID]; !ok {
+			termSets[m.ID] = subjectTermSet(m.Content)
+		}
+	}
 	df := make(map[string]int)
 	for _, m := range loaded {
-		terms := subjectTermSet(m.Content)
-		termSets[m.ID] = terms
+		terms, ok := termSets[m.ID]
+		if !ok {
+			terms = subjectTermSet(m.Content)
+			termSets[m.ID] = terms
+		}
 		for t := range terms {
 			df[t]++
 		}
@@ -139,19 +169,21 @@ func correctionPairTargets(loaded, cands []memory.Memory) []memory.Memory {
 		candRare[m.ID] = rareFor(m.ID)
 	}
 
-	var corrections []memory.Memory
-	for _, m := range loaded {
+	// Only an explicitly correction-marked memory demotes; the pool it came
+	// from is otherwise irrelevant to the decision.
+	var correctionMems []memory.Memory
+	for _, m := range corrections {
 		if isCorrection(m.Content) {
-			corrections = append(corrections, m)
+			correctionMems = append(correctionMems, m)
 		}
 	}
-	if len(corrections) == 0 {
+	if len(correctionMems) == 0 {
 		return nil
 	}
 
 	demoted := make(map[string]bool)
 	var out []memory.Memory
-	for _, c := range corrections {
+	for _, c := range correctionMems {
 		cRare := rareFor(c.ID)
 		for _, m := range cands {
 			if m.ID == c.ID || demoted[m.ID] {

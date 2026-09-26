@@ -4093,6 +4093,170 @@ func TestSetResolvedRechecksEligibilityAtWriteTime(t *testing.T) {
 	}
 }
 
+// TestResolvedCandidatesAndClearResolved covers the reassess repair path
+// (issue #640): ResolvedCandidates returns exactly the rows resolve stamped,
+// in ResolveCandidates' eligibility shape with the resolved_at predicate
+// inverted, and ClearResolved returns a memory to ranked injection without
+// touching anything else.
+func TestResolvedCandidatesAndClearResolved(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	resolved, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "NEVER run restore with one spindle", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create resolved: %v", err)
+	}
+	active, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "kill experiment returned NO-GO", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create active: %v", err)
+	}
+	// Stamped, then pinned: a pin is a user override, so reassess leaves it.
+	pinned, err := s.Create(ctx, testProject, Memory{
+		Category: "gotcha", Content: "the plugin env vars override --data-dir", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create pinned: %v", err)
+	}
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "convention", Content: "never push to main", Source: "manual", Importance: 0.9,
+	}); err != nil {
+		t.Fatalf("create convention: %v", err)
+	}
+	if _, err := s.SetResolved(ctx, []string{resolved, pinned}); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+	if err := s.TogglePin(ctx, pinned, true); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+
+	got, err := s.ResolvedCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolvedCandidates: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != resolved {
+		t.Fatalf("resolved candidates = %v, want exactly [%s]", got, resolved)
+	}
+	if got[0].ResolvedAt == nil {
+		t.Error("ResolvedCandidates must return the stamped resolved_at, or the caller cannot tell what it is undoing")
+	}
+
+	// Clearing is project-scoped and only touches already-resolved rows.
+	n, err := s.ClearResolved(ctx, testProject, []string{resolved, active, pinned})
+	if err != nil {
+		t.Fatalf("ClearResolved: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("ClearResolved returned %d, want 1 (only the stamped, unpinned row)", n)
+	}
+	cands, err := s.ResolveCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolveCandidates: %v", err)
+	}
+	found := false
+	for _, c := range cands {
+		if c.ID == resolved {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("a cleared memory must be a resolve candidate again")
+	}
+	if empty, err := s.ClearResolved(ctx, testProject, nil); err != nil || empty != 0 {
+		t.Errorf("ClearResolved(nil) = (%d, %v), want a no-op", empty, err)
+	}
+}
+
+// TestClearResolvedIsAtomic: every batch runs in one transaction, so a caller
+// that treats an error as "nothing was repaired" can trust it. A mid-loop
+// failure that left earlier batches cleared would report a half-repair as a
+// failure (review finding on PR #643).
+func TestClearResolvedIsAtomic(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	ids := make([]string, 0, setResolvedBatchSize+5)
+	// The first batch carries ordinary content; only the five rows past
+	// setResolvedBatchSize get a marker, so a trigger can fail exactly the
+	// second batch after the first one's statements have already run.
+	for i := 0; i < setResolvedBatchSize+5; i++ {
+		content := fmt.Sprintf("kill experiment note %d concluded", i)
+		if i >= setResolvedBatchSize {
+			content = fmt.Sprintf("kill experiment reassess tail %d concluded", i)
+		}
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "gotcha", Content: content, Source: "manual", Importance: 0.5,
+		})
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+	if _, err := s.SetResolved(ctx, ids); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+
+	// Fail on a row of the SECOND batch only, so the first batch's statements
+	// have already run when the abort fires and only a rollback can undo them.
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_second_batch
+		BEFORE UPDATE ON memories WHEN NEW.resolved_at IS NULL AND OLD.content LIKE '%reassess tail%'
+		BEGIN SELECT RAISE(ABORT, 'clear refused'); END;`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	if _, err := s.ClearResolved(ctx, testProject, ids); err == nil {
+		t.Fatal("ClearResolved: want the trigger abort propagated, got nil")
+	}
+
+	// Nothing may be cleared: the first batch rolled back with the rest.
+	got, err := s.ResolvedCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolvedCandidates: %v", err)
+	}
+	if len(got) != len(ids) {
+		t.Errorf("resolved rows after a failed clear = %d, want %d — the repair must be all or nothing",
+			len(got), len(ids))
+	}
+}
+
+// TestClearResolvedIsProjectScoped: the WHERE clause binds project_id, so a
+// stale or wrong-project caller cannot return another project's rows to ranked
+// injection.
+func TestClearResolvedIsProjectScoped(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "other-id", "/tmp/other", "other"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := s.Create(ctx, "other-id", Memory{
+		Category: "gotcha", Content: "kill experiment returned NO-GO", Source: "manual", Importance: 0.6,
+	})
+	if err != nil {
+		t.Fatalf("create in other project: %v", err)
+	}
+	if _, err := s.SetResolved(ctx, []string{id}); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+
+	n, err := s.ClearResolved(ctx, testProject, []string{id})
+	if err != nil {
+		t.Fatalf("ClearResolved: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("ClearResolved returned %d, want 0 — another project's row must not be cleared", n)
+	}
+	got, err := s.ResolvedCandidates(ctx, "other-id")
+	if err != nil {
+		t.Fatalf("ResolvedCandidates: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("other project resolved candidates = %d, want 1 (still resolved)", len(got))
+	}
+}
+
 // TestStoreResolveKeptHashesRoundTrip: MarkResolveKept records id -> content
 // hash and ResolveKeptHashes reads them back keyed by ID; rows never marked
 // are absent, and an empty mark call is a no-op.

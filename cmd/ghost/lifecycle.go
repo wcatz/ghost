@@ -1161,29 +1161,33 @@ func runSupersede() {
 // is a name, not a flag (a second project in any mixture keeps the historical
 // "expected exactly one project" error); value flags in both "--flag value"
 // and "--flag=value" forms; any other flag an unknown-flag error — which the
-// caller prints and exits on. A valueless --project is an error. Extracted
+// caller prints and exits on. A valueless --project is an error. --reassess
+// selects the repair pass over already-resolved memories (issue #640); it
+// combines with --apply exactly like it does on the ordinary pass. Extracted
 // from runResolve so the argv contract is unit-testable without os.Exit.
-func parseResolveArgs(args []string) (project, source string, apply bool, err error) {
+func parseResolveArgs(args []string) (project, source string, apply, reassess bool, err error) {
 	for i := 0; i < len(args); i++ {
 		switch {
 		case args[i] == "--apply":
 			apply = true
+		case args[i] == "--reassess":
+			reassess = true
 		case args[i] == "--project":
 			if i+1 >= len(args) {
-				return "", "", false, errors.New("--project requires a value")
+				return "", "", false, false, errors.New("--project requires a value")
 			}
 			if project != "" {
-				return "", "", false, errors.New("expected exactly one project")
+				return "", "", false, false, errors.New("expected exactly one project")
 			}
 			project = args[i+1]
 			i++
 		case strings.HasPrefix(args[i], "--project="):
 			v := strings.TrimPrefix(args[i], "--project=")
 			if v == "" {
-				return "", "", false, errors.New("--project requires a value")
+				return "", "", false, false, errors.New("--project requires a value")
 			}
 			if project != "" {
-				return "", "", false, errors.New("expected exactly one project")
+				return "", "", false, false, errors.New("expected exactly one project")
 			}
 			project = v
 		case args[i] == "--source" && i+1 < len(args):
@@ -1193,14 +1197,14 @@ func parseResolveArgs(args []string) (project, source string, apply bool, err er
 			source = strings.TrimPrefix(args[i], "--source=")
 		case !strings.HasPrefix(args[i], "-"):
 			if project != "" {
-				return "", "", false, errors.New("expected exactly one project")
+				return "", "", false, false, errors.New("expected exactly one project")
 			}
 			project = args[i]
 		default:
-			return "", "", false, fmt.Errorf("unknown flag %q", args[i])
+			return "", "", false, false, fmt.Errorf("unknown flag %q", args[i])
 		}
 	}
-	return project, source, apply, nil
+	return project, source, apply, reassess, nil
 }
 
 // resolveUsage is the help for `ghost resolve`: stderr when the project comes
@@ -1210,6 +1214,9 @@ const resolveUsage = `Usage: ghost resolve <project> [flags]
 
 Flags:
   --apply         Stamp resolved_at on confirmed memories (default is dry-run/preview)
+  --reassess      Re-judge memories that are ALREADY resolved and, with --apply,
+                  clear resolved_at on the ones that now come back KEEP. This is
+                  how a wrong resolution is repaired.
   --source string CLI harness to classify through: claude-code, opencode,
                   codex, or goose. Defaults to the calling harness (detected
                   from the environment and process ancestry); an undetectable
@@ -1224,8 +1231,9 @@ process ancestry — an undetectable caller is an error, never a fallback to a
 different harness). The harness owns its authentication and billing.
 `
 
-// resolveSummaryLine renders the one-line resolve result, including UNKNOWN
-// verdicts that remain eligible for a later pass.
+// resolveSummaryLine renders the one-line resolve result, including the
+// deterministic KEEP vetoes and the UNKNOWN verdicts that remain eligible for a
+// later pass.
 func resolveSummaryLine(projectName string, res resolve.Result, apply bool, confirmed int, calls int) string {
 	verb := "would resolve"
 	count := confirmed
@@ -1233,24 +1241,44 @@ func resolveSummaryLine(projectName string, res resolve.Result, apply bool, conf
 		verb = "resolved"
 		count = res.Resolved
 	}
-	return fmt.Sprintf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP cached, %d UNKNOWN, %s %d (%d classify call(s))\n",
+	return fmt.Sprintf("%s: %d loaded, %d after prefilter, %d confirmed evidence, %d KEEP vetoed, %d KEEP cached, %d UNKNOWN, %s %d (%d classify call(s))\n",
 		projectName, res.Loaded, res.Candidates, res.Confirmed+res.Superseded+res.Corrected,
-		res.Skipped, res.Unknown, verb, count, calls)
+		res.Vetoed, res.Skipped, res.Unknown, verb, count, calls)
+}
+
+// reassessSummaryLine renders the one-line --reassess result. The counts are
+// per outcome, "still asserted" being the rows Run would re-stamp for free (a
+// live supersedes edge or a correction pairing) and therefore refuses to clear.
+// The verb reports what --apply would clear, or what it cleared — reKept counts
+// the rows judged, Cleared the rows actually written — so a repair is never
+// reported as larger than it was.
+func reassessSummaryLine(projectName string, res resolve.ReassessResult, apply bool, reKept int, calls int) string {
+	verb := "would clear resolved_at for"
+	count := reKept
+	if apply {
+		verb = "cleared resolved_at for"
+		count = res.Cleared
+	}
+	return fmt.Sprintf("%s: %d already resolved, %d KEEP vetoed, %d KEEP cached, %d still RESOLVED, %d still asserted by a link or correction, %d UNKNOWN, %s %d (%d classify call(s))\n",
+		projectName, res.Loaded, res.Vetoed, res.Cached, res.StillResolved, res.Demoted, res.Unknown, verb, count, calls)
 }
 
 // runResolve is the CLI entry for `ghost resolve`. It marks resolved-evidence
 // memories (concluded work: findings, changelog notes, PR locators) so they
 // drop out of session-start injection while staying searchable. Cheap local
-// keyword prefilter proposes candidates; the hosting CLI harness adjudicates
-// them in batches with a crisp conclusion-vs-evidence question biased to KEEP,
-// and explicit KEEP verdicts are cached by content hash so a converged project
-// makes no calls; UNKNOWN replies remain eligible for a later pass. Dry-run by
-// default; --apply writes resolved_at and the cache.
+// keyword prefilter proposes candidates; a deterministic KEEP veto settles the
+// ones that state a standing rule or an open problem for free; the hosting CLI
+// harness adjudicates the rest in batches with a fresh-session question biased
+// to KEEP, and a RESOLVED must name what closed the note. Explicit KEEP
+// verdicts are cached by content hash so a converged project makes no calls;
+// UNKNOWN replies remain eligible for a later pass. Dry-run by default; --apply
+// writes resolved_at and the cache.
 // Re-runnable and reversible: any later Upsert/UpdateMemory of a memory clears
-// its resolved_at. The stop hook spawns `ghost lifecycle` detached
+// its resolved_at, and `ghost resolve --reassess` re-judges the rows this pass
+// already stamped. The stop hook spawns `ghost lifecycle` detached
 // (internal/mcpinit/stophook.go); its resolve phase runs this with --apply.
 func runResolve() {
-	projectName, source, apply, parseErr := parseResolveArgs(os.Args[2:])
+	projectName, source, apply, reassess, parseErr := parseResolveArgs(os.Args[2:])
 	if parseErr != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", parseErr)
 		os.Exit(1)
@@ -1279,17 +1307,34 @@ func runResolve() {
 	}
 	cls := resolve.NewResolutionClassifier(provider)
 	cls.SetLogger(logger)
-	res, confirmed, err := resolve.Run(ctx, store, cls, projectID, apply, logger)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
 
 	short := func(id string) string {
 		if len(id) > 8 {
 			return id[:8]
 		}
 		return id
+	}
+
+	if reassess {
+		res, reKept, err := resolve.Reassess(ctx, store, cls, projectID, apply, logger)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Print(reassessSummaryLine(projectName, res, apply, len(reKept), cls.Calls()))
+		for _, m := range reKept {
+			fmt.Printf("  %s  [%s]  %s\n", short(m.ID), m.Category, firstLine(m.Content, 70))
+		}
+		if !apply && len(reKept) > 0 {
+			fmt.Println("\nRe-run with --apply to return these to session injection.")
+		}
+		return
+	}
+
+	res, confirmed, err := resolve.Run(ctx, store, cls, projectID, apply, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 	fmt.Print(resolveSummaryLine(projectName, res, apply, len(confirmed), cls.Calls()))
 	if res.Superseded > 0 || res.Corrected > 0 {
