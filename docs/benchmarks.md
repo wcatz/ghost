@@ -191,6 +191,8 @@ condition         n     R@5  NDCG@10  live-wins answer-found
 fts-only         21   0.929    0.883      0.762        1.000
 vector-only      21   0.976    0.833      0.571        1.000
 hybrid           21   0.905    0.583      0.810        0.905
+fts-only: shared _global answers found 3/3, live-wins 3/3
+vector-only: shared _global answers found 3/3, live-wins 2/3
 hybrid: shared _global answers found 1/3, live-wins 0/3
 
 hybrid: 2 question(s) where a resolved/_global/superseded copy outranked the answer:
@@ -202,6 +204,8 @@ hybrid: 2 question(s) whose answer was not retrieved at all (evicted or never ma
 ```
 
 The two single-leg rows are the raw legs, exactly as in the Phase 2 table. That is not the same as production's keyword-only fallback (Ollama down), which still goes through fusion and therefore *does* get the status demotion and decay — it ranks like the hybrid row, not like the fts-only row. Only the hybrid row is the shipped ranking. The two lost-question lists are kept apart because they are different failures: an answer that was never returned is not something a copy outranked.
+
+The three `shared _global answers` lines are the suite's only view of whether a single leg can find a shared row at all, and they are the clearest statement of what the demotion cost: fts-only still returns 3 of 3 shared answers and vector-only 3 of 3, while the fused hybrid path returns **1 of 3**. Fusion is what loses them, not either leg.
 
 **Report-only, and that is a decision, not an omission.** No metric floor is asserted: the suite exists to move when ranking changes, and a floor would freeze today's numbers into a gate on the next fix — including a gate against the fix for the finding below. What is asserted is that the suite can see at all — the fixture carries resolved, `_global` (including a decaying-category one) and superseded state, and with decay off the `supersedes` edges demonstrably raise live-wins (`TestMaintenanceSupersedeEdgesMoveLiveWins`; 0.524 → 0.857). Delete the edges and that test fails; that is the mutation check.
 
@@ -246,6 +250,8 @@ Two conventions, stated because both change what the numbers mean:
 - **"Above a floor" means strictly above**, which is the rule production itself applies (`memory.filterVectorFloor` keeps a candidate when `score > floor`). So a floor set at the no-answer maximum already refuses the answerable queries whose best score ties it, which is why that count includes ties.
 
 The floor rows are a sweep, not a proposal — `search.min_similarity` ships 0, so there is no configured floor to inherit, and the band is where one would have to live. They are also a stricter reading than the shipped flag, which applies a floor to the vector leg *before* fusion and therefore never touches a keyword-only result: the rows answer "how strong are the results a caller actually receives", not "what would the flag do". The flavors are reported apart because a pooled mean would let the easy half carry the hard one: a near-miss that reuses corpus vocabulary scores 0.623 against the off-domain floor's 0.545, and it is the 0.623 any abstain rule has to clear.
+
+**What this suite asserts, and what it does not.** Nothing here gates the ranking. The enforced claims are about the *fixture and the report plumbing*: both flavors are present and their counts survive into the report, the searches returned something (otherwise the mean is a vacuous 0), one row per configured floor exists, the counts add up, and the maximum is not below the mean drawn from it. The near-miss flavor must not score *below* the off-domain one — that is a statement about the fixture being labelled correctly, not about the ranking. Notably **absent**: any assertion that the two distributions are separated. That is a claim about today's ranking, and the plausible abstention fix this baseline exists for — returning fewer, more similar rows for a query nothing answers — would move the no-answer mean up and trip a test whose job is to watch that fix land. The separation is reported, not asserted.
 
 Read the third line as the actual baseline for the abstention work: **the two distributions overlap.** A floor of 0.697 would refuse all 24 no-answer queries and would also refuse 52 of the 220 answerable ones, so a threshold alone cannot abstain — the near-miss flavor is what makes the overlap visible, and it is why the answer is likely to be a calibrated decision rather than a constant.
 

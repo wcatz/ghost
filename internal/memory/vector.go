@@ -77,10 +77,16 @@ func (s *Store) DeleteEmbedding(ctx context.Context, memoryID string) error {
 }
 
 // EmbeddingCosines returns the cosine similarity between queryVec and the stored
-// embedding of each requested memory, keyed by memory ID. An ID with no stored
-// vector, or with one whose dimensions do not match queryVec, is simply absent
-// from the result: there is no score to report for it, and inventing a zero would
-// read as a measured non-match rather than a missing one.
+// embedding of each requested memory, keyed by memory ID. An ID is simply absent
+// from the result when there is no score to report for it: no stored vector, a
+// width that does not match queryVec, or a row whose recorded identity belongs to
+// another vector space (a model, dimension or task-prefix change — see
+// embedding.VectorIdentity). Inventing a zero for any of those would read as a
+// measured non-match rather than a missing one, and a cross-space cosine is not
+// even that: it is an arbitrary number, which is why usableVectorEntries skips
+// those rows for the vector legs and GetEmbedding returns nil for them. Foreign
+// rows are counted and logged here for the same reason — a reconfiguration is
+// exactly when the operator is watching the log.
 //
 // It exists because a search result's score is not always in the vector leg's own
 // output. Fusion admits the top keyword hits on a reserved slot whatever their
@@ -101,10 +107,16 @@ func (s *Store) EmbeddingCosines(ctx context.Context, ids []string, queryVec []f
 		ph[i] = "?"
 		args[i] = id
 	}
+	// Read the identity before taking the lock, for the reason searchVector does:
+	// the reads below run with the read lock held, and a second RLock on a
+	// RWMutex with a writer waiting blocks that writer's readers — including this
+	// one — forever.
+	identity := s.configuredEmbeddingIdentity()
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rows, err := s.queryDB().QueryContext(ctx, fmt.Sprintf(`
-		SELECT memory_id, embedding FROM memory_embeddings
+		SELECT memory_id, embedding, model FROM memory_embeddings
 		WHERE memory_id IN (%s)
 	`, strings.Join(ph, ",")), args...)
 	if err != nil {
@@ -113,20 +125,43 @@ func (s *Store) EmbeddingCosines(ctx context.Context, ids []string, queryVec []f
 	defer rows.Close() //nolint:errcheck
 
 	cosines := make(map[string]float32, len(ids))
+	var foreign, mismatched int
+	foreignModel, mismatchedModel := "", ""
 	for rows.Next() {
-		var id string
+		var id, model string
 		var blob []byte
-		if err := rows.Scan(&id, &blob); err != nil {
+		if err := rows.Scan(&id, &blob, &model); err != nil {
 			return nil, fmt.Errorf("embedding cosines: %w", err)
+		}
+		if identity != "" && model != identity {
+			foreign++
+			if foreignModel == "" {
+				foreignModel = model
+			}
+			continue
 		}
 		vec := bytesToFloat32s(blob)
 		if len(vec) != len(queryVec) {
+			mismatched++
+			if mismatchedModel == "" {
+				mismatchedModel = model
+			}
 			continue
 		}
 		cosines[id] = cosineSimilarity(queryVec, vec)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("embedding cosines: %w", err)
+	}
+	if s.logger != nil {
+		if foreign > 0 {
+			s.logger.Warn("embedding cosine lookup skipped rows from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded",
+				"skipped", foreign, "scored", len(cosines), "configured_identity", identity, "stored_identity", foreignModel)
+		}
+		if mismatched > 0 {
+			s.logger.Warn("embedding cosine lookup skipped vectors whose width differs from the query — the embedding model likely changed; re-embed to restore comparable scores",
+				"skipped", mismatched, "scored", len(cosines), "query_dims", len(queryVec), "stored_identity", mismatchedModel)
+		}
 	}
 	return cosines, nil
 }

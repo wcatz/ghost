@@ -208,3 +208,64 @@ func TestExplainSearchStillFindsForeignMemoryByKeyword(t *testing.T) {
 	}
 	t.Fatalf("explain did not return the memory %s at all for a keyword that matches it", stale)
 }
+
+// TestEmbeddingCosinesExcludesOtherIdentity: EmbeddingCosines is how a caller
+// scores a result the vector leg never returned a score for — a keyword-reserved
+// row whose cosine put it below every fetched vector list. Scoring a row from a
+// retired space would return a number that looks like a confidence and means
+// nothing, which is the whole hazard GetEmbedding refuses to take. Same dimensions
+// as the query on purpose, so the width check cannot be what drops it.
+func TestEmbeddingCosinesExcludesOtherIdentity(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	store.SetEmbeddingIdentity(identityCurrent)
+
+	current, stale := seedIdentityRows(t, store, ctx)
+
+	cosines, err := store.EmbeddingCosines(ctx, []string{current, stale}, []float32{1, 0, 0})
+	if err != nil {
+		t.Fatalf("EmbeddingCosines: %v", err)
+	}
+	if got, ok := cosines[current]; !ok || got < 0.99 {
+		t.Errorf("cosine for the current-identity row = %v (present=%v), want ~1", got, ok)
+	}
+	if got, ok := cosines[stale]; ok {
+		t.Errorf("cosine for the foreign-identity row = %v, want absent: a vector from another space is not comparable with a query in this one", got)
+	}
+}
+
+// TestEmbeddingCosinesIdentityUnsetScoresEveryRow: with no identity configured
+// the lookup behaves as before — the bench harness and tests run on such a store,
+// and a store nobody configured an embedding model for has no spaces to confuse.
+func TestEmbeddingCosinesIdentityUnsetScoresEveryRow(t *testing.T) {
+	store, ctx := setupTestStore(t)
+
+	_, stale := seedIdentityRows(t, store, ctx)
+
+	cosines, err := store.EmbeddingCosines(ctx, []string{stale}, []float32{1, 0, 0})
+	if err != nil {
+		t.Fatalf("EmbeddingCosines: %v", err)
+	}
+	if got, ok := cosines[stale]; !ok || got < 0.99 {
+		t.Errorf("cosine with no configured identity = %v (present=%v), want ~1", got, ok)
+	}
+}
+
+// TestEmbeddingCosinesSkipsWrongWidth: a row whose stored width differs from the
+// query's was written by a model that does not produce queryVec, so it has no
+// comparable score either — absent, not zero.
+func TestEmbeddingCosinesSkipsWrongWidth(t *testing.T) {
+	store, ctx := setupTestStore(t)
+
+	id := createTestMemory(t, store, ctx, "vector from a wider model")
+	if err := store.StoreEmbedding(ctx, id, []float32{1, 0, 0, 0}, identityCurrent); err != nil {
+		t.Fatalf("StoreEmbedding: %v", err)
+	}
+
+	cosines, err := store.EmbeddingCosines(ctx, []string{id}, []float32{1, 0, 0})
+	if err != nil {
+		t.Fatalf("EmbeddingCosines: %v", err)
+	}
+	if got, ok := cosines[id]; ok {
+		t.Errorf("cosine for a wrong-width row = %v, want absent", got)
+	}
+}

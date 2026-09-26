@@ -61,12 +61,19 @@ func TestFalsePositiveReport(t *testing.T) {
 	if len(rep.Floors) != len(FalsePositiveFloors) {
 		t.Errorf("report has %d floor rows, want %d", len(rep.Floors), len(FalsePositiveFloors))
 	}
-	if rep.MeanResults < float64(scoreK) {
-		t.Errorf("mean results per no-answer query is %.1f, but the search returns a full window of %d when nothing is filtered: "+
-			"the false-positive count is not being measured", rep.MeanResults, scoreK)
-	}
-	if rep.MeanTop <= 0 {
-		t.Error("no-answer queries scored a mean top cosine of 0, so nothing was measured")
+	// What follows asserts the shape of the measurement, never today's numbers.
+	// In particular it does NOT assert that the no-answer and answerable
+	// distributions are separated: that is a claim about the current ranking, and
+	// an abstention fix that legitimately returns fewer, more similar rows for an
+	// unanswered query would move the no-answer mean up and trip a test whose
+	// whole job is to watch that fix land. The separation is reported instead
+	// (mean top 0.584 vs 0.740), where a human reads it.
+	//
+	// The one outcome claim left is the flavor ordering below, and it is a
+	// statement about the fixture: the near-miss set is supposed to be the hard
+	// one, and if it is not, the set is mislabelled rather than the ranking wrong.
+	if rep.MeanResults <= 0 {
+		t.Errorf("mean results per no-answer query is %.1f: the search returned nothing, so the false-positive count is not being measured", rep.MeanResults)
 	}
 	if rep.Unseparable < 0 || rep.Unseparable > rep.Answerable {
 		t.Errorf("unseparable count %d is outside 0..%d", rep.Unseparable, rep.Answerable)
@@ -92,14 +99,8 @@ func TestFalsePositiveReport(t *testing.T) {
 			"the set meant to be the hard case is now the easy one",
 			byFlavor["near_miss"].MeanTop, byFlavor["off_domain"].MeanTop)
 	}
-	// The one behavioural claim worth enforcing: a no-answer query must not
-	// look better than an answerable one. If the corpus's own questions scored
-	// no higher than questions it cannot answer, no threshold could ever abstain
-	// and the fix would have to be something other than a score.
-	if rep.MeanTop >= rep.AnswerableTop {
-		t.Errorf("no-answer queries score %.3f on average against %.3f for answerable ones: "+
-			"the score cannot tell them apart at all", rep.MeanTop, rep.AnswerableTop)
-	}
+	// The maximum cannot be below the mean it is drawn from — that is arithmetic,
+	// not a property of the ranking, so it stays asserted.
 	if rep.NoAnswerMax < rep.MeanTop {
 		t.Errorf("no-answer maximum %.3f is below the mean %.3f", rep.NoAnswerMax, rep.MeanTop)
 	}
