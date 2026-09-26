@@ -11,7 +11,9 @@ import (
 // multiplicative demotion applied inside the fusion seam, before the window
 // cut, so a comparable live project memory both outranks them and takes the
 // slot a raw-score cut would have given them. Nothing is filtered: a demoted
-// row still wins when it is the best thing that matched.
+// row is still returned, and still wins when no live row comes within the
+// factor of it — the only-match case is pinned by
+// TestResolvedMemoryStaysSearchable.
 //
 // Every case below gives the demoted row the *better* raw standing (identical
 // wording, higher importance, so FTS lists it first), which makes the expected
