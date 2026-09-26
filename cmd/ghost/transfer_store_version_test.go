@@ -75,10 +75,9 @@ func TestOpenReadOnlyTransferStoreRefusesAnUnmigratedDatabase(t *testing.T) {
 	}
 }
 
-// TestOpenReadOnlyTransferStoreAcceptsACurrentDatabase: the version check must
-// not refuse a store this Ghost would have created, and must not refuse one a
-// little behind either if the columns the readers need are present — the
-// version is a floor, not a gate on equality.
+// TestOpenReadOnlyTransferStoreAcceptsACurrentDatabase: the check must not
+// refuse a store at exactly the version this Ghost writes, which is the one
+// case where refusing would be wrong.
 func TestOpenReadOnlyTransferStoreAcceptsACurrentDatabase(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dir)
@@ -106,6 +105,76 @@ func TestOpenReadOnlyTransferStoreAcceptsACurrentDatabase(t *testing.T) {
 	}
 }
 
+// TestReadOnlyTransferStoreIsStrictAboutTheSchemaVersionNotAFloor pins the
+// deliberate strictness of requireMigratedSchema.
+//
+// A floor would be defensible on the numbers: the only columns the transfer
+// readers select that were added after v10 are projects.repo_remote (v11) and
+// memories.scope (v12); v13 through v16 touch memory_snapshots, the memories
+// CHECK list and a repo_remote index, and the task and decision readers select
+// only base columns. So a v12-v15 store is fully queryable, `ghost export` on one
+// worked before this PR, and a floor would keep it working.
+//
+// Strict equality is chosen anyway, and the reason is maintenance, not
+// conservatism. A floor hardcodes an assumption about which columns exist at
+// which version, nothing enforces that assumption, and the day a reader selects a
+// column added in v17 the floor would let a v12 store through and reproduce
+// exactly the "no such column" error this check exists to replace — silently,
+// because nothing in the test suite would be asserting about v12. Strict
+// equality is self-maintaining: the store is refused unless it provably has
+// every column this build's readers select.
+//
+// The cost is stated rather than hidden: a v12-v15 user must run one read-write
+// open (`ghost mcp init`, or any session) before `ghost export` or a dry-run
+// import will work on their store, where before this PR it did. `ghost backup`
+// has no version check and is the escape hatch — it reads no columns, so it works
+// on any store it can open. The error names the remedy, so the user is not left
+// guessing which command they need.
+//
+// This test is the one that makes the choice visible: it builds a store at v15
+// whose every column is present, so the *only* reason to refuse it is the
+// version, and it would pass under a floor. If someone later decides a floor is
+// right, this fails and the decision gets made on purpose rather than by drift.
+func TestReadOnlyTransferStoreIsStrictAboutTheSchemaVersionNotAFloor(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "ghost.db")
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	// v15 on a v16 schema: every column the readers select exists, so the only
+	// thing wrong with this store is the number in user_version.
+	if _, err := db.Exec(`PRAGMA user_version = 15`); err != nil {
+		t.Fatalf("set user_version: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Prove the premise: the store really is queryable, so a floor would let it
+	// through and this refusal really is about the version.
+	probe, _, _, err := openReadOnlyTransferStoreUnchecked(dir)
+	if err != nil {
+		t.Fatalf("the premise does not hold — the store could not be opened at all: %v", err)
+	}
+	if _, err := probe.ListProjects(context.Background()); err != nil {
+		probe.Close() //nolint:errcheck
+		t.Fatalf("the premise does not hold — a v15 store is not queryable, so a floor would be no safer than equality: %v", err)
+	}
+	probe.Close() //nolint:errcheck
+
+	_, err = openReadOnlyTransferStore(dir)
+	if err == nil {
+		t.Fatal("a v15 store was accepted; the check is a floor, not strict equality — if that is intended, this test is the thing to delete deliberately")
+	}
+	if !strings.Contains(err.Error(), "v15") {
+		t.Errorf("error = %v, want it to name the version the store is at", err)
+	}
+	if !strings.Contains(err.Error(), "migrate it") {
+		t.Errorf("error = %v, want it to give the read-write-open remedy", err)
+	}
+}
+
 // TestReadOnlyTransferStoreStillRefusesAWrongVersionDirection: a database from a
 // NEWER Ghost is a different condition and must not be described as "migrate
 // it" — migrating backwards is not what the user should do, and OpenDB already
@@ -129,7 +198,20 @@ func TestReadOnlyTransferStoreStillRefusesAWrongVersionDirection(t *testing.T) {
 		t.Fatal("a read-only transfer store opened a database from a newer Ghost")
 	}
 	if !strings.Contains(err.Error(), "newer") {
-		t.Errorf("error = %v, want it to say the store is from a newer Ghost rather than ask to migrate", err)
+		t.Errorf("error = %v, want it to say the store is from a newer Ghost", err)
+	}
+	// Asserted on the ABSENCE of the remedy, not just on the word "newer": the
+	// sentence already contains "newer" in "which is newer than this Ghost", so a
+	// positive match on it passes whether or not the wrong advice is still there.
+	// The remedy is the thing being tested — migrating backwards is not the fix
+	// for a user whose store is ahead, and OpenDB refuses that case for them.
+	for _, wrong := range []string{"migrate", "start a session", "ghost mcp init"} {
+		if strings.Contains(err.Error(), wrong) {
+			t.Errorf("error = %v, must not offer %q for a store from a newer Ghost", err, wrong)
+		}
+	}
+	if !strings.Contains(err.Error(), "upgrade Ghost") {
+		t.Errorf("error = %v, want it to point at upgrading Ghost", err)
 	}
 }
 

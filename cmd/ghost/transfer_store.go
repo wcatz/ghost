@@ -34,20 +34,37 @@ func dataDirPath() (string, error) {
 // why the missing-database case is named here rather than left as a stat error:
 // the actionable next step is to start a session.
 func openReadOnlyTransferStore(dataDir string) (*memory.Store, error) {
+	store, db, dbPath, err := openReadOnlyTransferStoreUnchecked(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireMigratedSchema(db, dbPath); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+// openReadOnlyTransferStoreUnchecked opens the store without the version check.
+//
+// It is split out so the check has a test at all. The interesting property of
+// requireMigratedSchema is that it refuses stores that would query perfectly
+// well — that is the deliberate strictness documented on it — and a test cannot
+// establish that by calling the checked opener, because every store it accepts is
+// trivially fine. So the test opens a store stamped behind, proves it is
+// queryable anyway, and then shows the checked opener refuses it. The version
+// check is the only thing under test; nothing else uses this seam.
+func openReadOnlyTransferStoreUnchecked(dataDir string) (*memory.Store, *sql.DB, string, error) {
 	dbPath := filepath.Join(dataDir, "ghost.db")
 	db, err := memory.OpenDBReadOnly(dbPath)
 	if err != nil {
 		if errors.Is(err, memory.ErrNoDatabase) || os.IsNotExist(err) {
-			return nil, fmt.Errorf("no database at %s — start a session, or run ghost mcp init, first", dbPath)
+			return nil, nil, dbPath, fmt.Errorf("no database at %s — start a session, or run ghost mcp init, first", dbPath)
 		}
-		return nil, fmt.Errorf("open %s: %w", dbPath, err)
-	}
-	if err := requireMigratedSchema(db, dbPath); err != nil {
-		_ = db.Close()
-		return nil, err
+		return nil, nil, dbPath, fmt.Errorf("open %s: %w", dbPath, err)
 	}
 	// A nil logger is honoured as silence: this store only reads.
-	return memory.NewStore(db, nil), nil
+	return memory.NewStore(db, nil), db, dbPath, nil
 }
 
 // requireMigratedSchema refuses a store whose schema is behind the columns the
@@ -70,6 +87,27 @@ func openReadOnlyTransferStore(dataDir string) (*memory.Store, error) {
 // init`. A store from a NEWER Ghost is reported separately and does not get that
 // sentence — OpenDB already refuses it, and "migrate" is not what that user
 // should do.
+//
+// Strict on both sides — equal and only equal passes. A floor is defensible on
+// the numbers (the only post-v10 columns these readers select are
+// projects.repo_remote at v11 and memories.scope at v12, so a v12-v15 store is
+// queryable and a floor would keep `ghost export` working on one) and is not
+// chosen anyway, because a floor hardcodes an assumption about which columns
+// exist at which version, nothing enforces that assumption, and the day a reader
+// selects a column added in v17 the floor would let a v12 store through and
+// reproduce the very "no such column" error this check exists to replace — with
+// nothing in the suite asserting about v12 to notice. Equality is
+// self-maintaining: the store is refused unless it provably has every column this
+// build selects.
+//
+// The cost is stated rather than hidden. A v12-v15 user must run one read-write
+// open — `ghost mcp init`, or any session — before `ghost export` or a dry-run
+// import will work on their store, where before this PR it did. `ghost backup`
+// carries no version check and is the escape hatch: it reads no columns, so it
+// works on any store it can open. The error names the remedy, so the user is not
+// left guessing which command they need.
+// TestReadOnlyTransferStoreIsStrictAboutTheSchemaVersionNotAFloor pins this and is
+// the thing to delete if the decision is ever reversed on purpose.
 func requireMigratedSchema(db *sql.DB, dbPath string) error {
 	version, err := memory.DBUserVersion(db)
 	if err != nil {

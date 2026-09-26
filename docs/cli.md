@@ -309,13 +309,16 @@ A memory record carries every column of the row that describes the memory: categ
 
 Two exports of an unchanged database are **byte-identical**: projects come first, then memories, tasks and decisions, each in id order, and the header carries no timestamp. An artifact can therefore be diffed against the previous one, and a diff shows only what changed in the store.
 
-Three things are deliberately **not** exported:
+These things are deliberately **not** exported:
 
 | Excluded | Why |
 |---|---|
 | `memory_embeddings` | The vector is derived from the content by a local model, not stored knowledge. The embedding worker rebuilds it for every imported memory. |
 | `memory_links` | A link only means something between two memories that are both present, so importing edges ahead of their endpoints would fail the foreign key or fabricate relationships. The linking worker recomputes related edges after an import. |
 | `resolve_kept_hash` | A cache of the resolve classifier's verdicts keyed by content hash. Ghost recomputes it. |
+| Ghost's own `_global` `builtin` seeds | The shipped rules this Ghost carries. Each is written under a per-install random id, so your copy and the destination's could never be recognised as the same row and the import would add a second one beside it — and nothing would ever remove it. The destination writes them itself, by content, on every open, so the restored store ends up with one copy, written by Ghost. A memory of your own filed under `_global` is **not** one of these: it is the only copy of itself, and it exports. |
+
+That last row is why an export's memory count can be one lower than the row count `ghost backup` prints for the same store: the seed is in the database copy and deliberately not in the artifact.
 
 ### `ghost import`
 
@@ -344,6 +347,8 @@ A dry run is not a separate code path: every record goes through the same valida
   ```
 
   A store from a **newer** Ghost gets a different message — upgrade Ghost — because migrating backwards is not the fix. Both are checked by reading `PRAGMA user_version` on the read-only connection, so the check never writes.
+
+  The check is strict: the store must be at exactly this Ghost's schema version, not merely at or above some floor. The only columns `export` and a dry run select that postdate v10 are `projects.repo_remote` (v11) and `memories.scope` (v12), so a v12–v15 store would in fact query fine — but a floor would hardcode which columns exist at which version, and the day a reader selects a newer column it would quietly admit a store that fails with a missing-column error again. So a v12–v15 store is asked to run one read-write open first, which is `ghost mcp init` or any session. `ghost backup` has no such check and always works on a store it can open, so the raw database copy is never gated on this.
 
 ### Imported provenance
 
