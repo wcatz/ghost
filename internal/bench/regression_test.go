@@ -29,7 +29,7 @@ func TestBenchRegressionFloors(t *testing.T) {
 		cond           string
 		ndcg, recall10 float64
 	}{
-		// Observed on the v2 dataset (547 memories / 219 paraphrase-heavy
+		// Observed on the v2 dataset (547 memories / 220 paraphrase-heavy
 		// graded queries): fts 0.748/0.689, vector 0.799/0.777,
 		// hybrid 0.817/0.777. Floors sit just below those.
 		{CondFTS, 0.73, 0.67},
