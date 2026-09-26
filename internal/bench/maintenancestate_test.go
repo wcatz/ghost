@@ -68,15 +68,12 @@ func TestMaintenanceStateReport(t *testing.T) {
 			t.Errorf("%s: %d outcomes, want %d", r.Condition, len(r.Outcomes), len(qs))
 		}
 	}
-	report := FormatMaintenance(results)
-	if !strings.Contains(report, "live-wins") || !strings.Contains(report, "shared _global answers") {
-		t.Errorf("report is missing its columns:\n%s", report)
-	}
 	// Nothing here asserts a metric, a floor, or even that a particular question
 	// was lost: this suite is report-only, and a guard of the form "at least one
 	// question must be outranked" would fail the moment a ranking change makes
 	// every question win. What the report must get right is checked against
 	// synthetic outcomes in TestFormatMaintenanceSeparatesLostQuestions.
+	report := FormatMaintenance(results)
 	if !strings.Contains(report, "live-wins") || !strings.Contains(report, "shared _global answers") {
 		t.Errorf("report is missing its columns:\n%s", report)
 	}
@@ -132,20 +129,81 @@ func TestFormatMaintenanceSeparatesLostQuestions(t *testing.T) {
 	if _, ev := lostSections(t, onlyEvicted, false, true); !strings.Contains(ev, "q_evicted") {
 		t.Errorf("the not-retrieved list is missing its only entry:\n%s", onlyEvicted)
 	}
+
+	// Three conditions, so a section is provably scoped to its own. Two leaks to
+	// catch, and they run in different directions: fts-only loses q_evicted to a
+	// copy while hybrid never retrieves it at all, so hybrid's outranked list
+	// must not claim it; and vector-only renders *after* hybrid and loses
+	// q_third, so hybrid's lists must not swallow a name that is only its
+	// neighbour's. A helper that sliced to the end of the report would fail the
+	// second and pass the first, which is why both directions are here.
+	threeConditions := FormatMaintenance([]MaintenanceResult{
+		{Condition: CondFTS, Queries: 2, Outcomes: []MaintenanceOutcome{
+			{Query: "q_outranked", Found: true, LiveWins: false},
+			{Query: "q_evicted", Found: true, LiveWins: false},
+		}},
+		{Condition: CondHybrid, Queries: 2, Outcomes: both[:2]},
+		{Condition: CondVector, Queries: 1, Outcomes: []MaintenanceOutcome{
+			{Query: "q_third", Found: true, LiveWins: false},
+		}},
+	})
+	ftsOutranked, _ := lostSections(t, maintenanceChunk(t, threeConditions, CondFTS), true, false)
+	if !strings.Contains(ftsOutranked, "q_evicted") {
+		t.Errorf("the fts-only outranked list does not name the question it lost to a copy:\n%s", threeConditions)
+	}
+	hybridChunk := maintenanceChunk(t, threeConditions, CondHybrid)
+	hybridOutranked, hybridNotFound := lostSections(t, hybridChunk, true, true)
+	if strings.Contains(hybridOutranked, "q_evicted") {
+		t.Errorf("q_evicted is in the hybrid outranked list although hybrid never retrieved it:\n%s", hybridChunk)
+	}
+	if !strings.Contains(hybridNotFound, "q_evicted") {
+		t.Errorf("q_evicted is not in the hybrid not-retrieved list:\n%s", hybridChunk)
+	}
+	if strings.Contains(hybridOutranked+hybridNotFound, "q_third") {
+		t.Errorf("the hybrid sections name q_third, which only vector-only lost — the chunk is not bounded by the next condition:\n%s", threeConditions)
+	}
+	vectorOutranked, _ := lostSections(t, maintenanceChunk(t, threeConditions, CondVector), true, false)
+	if !strings.Contains(vectorOutranked, "q_third") {
+		t.Errorf("the vector-only outranked list does not name the question it lost to a copy:\n%s", threeConditions)
+	}
 }
 
-// lostSections returns the two lost-question lists from a rendered report. Each
-// list is bounded by the headers rather than by a fixed offset, so a section
-// cannot silently absorb another condition's, and a missing header is a failure
-// rather than an empty string that makes every containment check pass.
-func lostSections(t *testing.T, report string, wantOutranked, wantNotFound bool) (outranked, notFound string) {
+// maintenanceChunk returns the part of a rendered report belonging to one
+// condition: from that condition's first "<condition>: " line to the next
+// condition's, or the end. FormatMaintenance renders a lost-question pair per
+// condition, and a question name is only unique within its own condition, so
+// anchoring on the condition name is what keeps one section from answering for
+// another. The anchor includes the colon, which the padded table rows never have.
+func maintenanceChunk(t *testing.T, report, condition string) string {
+	t.Helper()
+	start := strings.Index(report, "\n"+condition+": ")
+	if start < 0 {
+		t.Fatalf("report has no %s section:\n%s", condition, report)
+	}
+	chunk := report[start:]
+	for _, other := range []string{CondFTS, CondVector, CondHybrid} {
+		if other == condition {
+			continue
+		}
+		if i := strings.Index(chunk[1:], "\n"+other+": "); i >= 0 {
+			return chunk[:i+1]
+		}
+	}
+	return chunk
+}
+
+// lostSections returns the two lost-question lists from one condition's chunk of
+// a rendered report. The lists are bounded by their headers and, at the end, by
+// the chunk — never by a fixed offset — and a missing header is a failure rather
+// than an empty string that every containment check would pass.
+func lostSections(t *testing.T, chunk string, wantOutranked, wantNotFound bool) (outranked, notFound string) {
 	t.Helper()
 	section := func(header string, endsAt ...string) string {
-		i := strings.Index(report, header)
+		i := strings.Index(chunk, header)
 		if i < 0 {
 			return ""
 		}
-		rest := report[i+len(header):]
+		rest := chunk[i+len(header):]
 		for _, end := range endsAt {
 			if j := strings.Index(rest, end); j >= 0 {
 				rest = rest[:j]
@@ -156,13 +214,13 @@ func lostSections(t *testing.T, report string, wantOutranked, wantNotFound bool)
 	if wantOutranked {
 		outranked = section(outrankedHeader, notFoundHeader)
 		if outranked == "" {
-			t.Fatalf("report has no outranked section:\n%s", report)
+			t.Fatalf("report has no outranked section:\n%s", chunk)
 		}
 	}
 	if wantNotFound {
 		notFound = section(notFoundHeader)
 		if notFound == "" {
-			t.Fatalf("report has no not-retrieved section:\n%s", report)
+			t.Fatalf("report has no not-retrieved section:\n%s", chunk)
 		}
 	}
 	return outranked, notFound
