@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -201,6 +202,48 @@ func TestOpenLogForAppendRotationIsBestEffort(t *testing.T) {
 	}
 	if fi, err := os.Stat(path + ".1"); err != nil || !fi.IsDir() {
 		t.Errorf("the blocking directory must be left as it was, stat err = %v", err)
+	}
+}
+
+// TestOpenLogForAppendKeepsWorkingWhenTheFreshFileCannotBeCreated: the hard
+// case the rotation exists to prevent is the filesystem filling up, and the
+// moment right after the rename is exactly when the fresh create can hit it.
+// If that turned into an error, a full disk plus a lifecycle.log that had just
+// crossed the cap would stop the spawn sites from logging at all — the pre-rotation
+// behaviour was "the open always works", and rotation must not cost that.
+func TestOpenLogForAppendKeepsWorkingWhenTheFreshFileCannotBeCreated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lifecycle.log")
+	content := seedOversizedLog(t, path, "rotates onto a full disk")
+
+	origCreate := createRotatedLog
+	createRotatedLog = func(string) (*os.File, error) {
+		return nil, errors.New("no space left on device")
+	}
+	t.Cleanup(func() { createRotatedLog = origCreate })
+
+	f, err := openLogForAppend(path)
+	if err != nil {
+		t.Fatalf("the open must still succeed when the fresh file cannot be created: %v", err)
+	}
+	if _, err := f.Write([]byte("still logged\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// The line landed in the rotated copy — the inode the returned descriptor
+	// still names — rather than nowhere.
+	rotated, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("read rotated copy: %v", err)
+	}
+	if string(rotated) != content+"still logged\n" {
+		t.Errorf("rotated copy holds %d bytes, want the rotated content plus the line (%d)", len(rotated), len(content)+len("still logged\n"))
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Errorf("the fresh file was not created (that is the point of this test), Lstat err = %v", err)
 	}
 }
 
