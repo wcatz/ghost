@@ -130,39 +130,52 @@ func TestFormatMaintenanceSeparatesLostQuestions(t *testing.T) {
 		t.Errorf("the not-retrieved list is missing its only entry:\n%s", onlyEvicted)
 	}
 
-	// Three conditions, so a section is provably scoped to its own. Two leaks to
-	// catch, and they run in different directions: fts-only loses q_evicted to a
-	// copy while hybrid never retrieves it at all, so hybrid's outranked list
-	// must not claim it; and vector-only renders *after* hybrid and loses
-	// q_third, so hybrid's lists must not swallow a name that is only its
-	// neighbour's. A helper that sliced to the end of the report would fail the
-	// second and pass the first, which is why both directions are here.
+	// Three conditions, so a section is provably scoped to its own. Every
+	// condition names a question the others do not, and the two leak directions
+	// are covered: fts-only loses q_evicted to a copy while hybrid never
+	// retrieves it, so hybrid's outranked list must not claim it; and each
+	// condition's chunk must not reach past the *next* one in the report — which
+	// is neither the first condition in a fixed list nor the last.
 	//
-	// The Shared counts are non-zero on purpose: FormatMaintenance prints a
-	// shared-row probe line per condition before the lost-question headers, and
-	// that line carries the same "<condition>: " prefix. Without one here, a
-	// helper anchoring on the prefix alone would look correct.
+	// The report's order is deliberately not the {fts, vector, hybrid} order the
+	// helper iterates, and the Shared counts are non-zero on the first two, so
+	// both the shared-probe line and the ordering are exercised. Without a
+	// shared line, a helper anchoring on "<condition>: " alone looks correct.
 	threeConditions := FormatMaintenance([]MaintenanceResult{
 		{Condition: CondFTS, Queries: 2, Shared: SharedProbe{Queries: 1, Found: 1}, Outcomes: []MaintenanceOutcome{
 			{Query: "q_outranked", Found: true, LiveWins: false},
 			{Query: "q_evicted", Found: true, LiveWins: false},
 		}},
-		{Condition: CondHybrid, Queries: 2, Shared: SharedProbe{Queries: 1}, Outcomes: both[:2]},
+		{Condition: CondHybrid, Queries: 2, Shared: SharedProbe{Queries: 1}, Outcomes: []MaintenanceOutcome{
+			{Query: "q_outranked", Found: true, LiveWins: false},
+			{Query: "q_hybrid_only", Probe: probeGlobal, Found: false, LiveWins: false},
+		}},
 		{Condition: CondVector, Queries: 1, Outcomes: []MaintenanceOutcome{
 			{Query: "q_third", Found: true, LiveWins: false},
 		}},
 	})
-	ftsOutranked, _ := lostSections(t, maintenanceChunk(t, threeConditions, CondFTS), true, false)
+	ftsChunk := maintenanceChunk(t, threeConditions, CondFTS)
+	ftsOutranked, _ := lostSections(t, ftsChunk, true, false)
 	if !strings.Contains(ftsOutranked, "q_evicted") {
 		t.Errorf("the fts-only outranked list does not name the question it lost to a copy:\n%s", threeConditions)
 	}
+	for _, neighbour := range []string{"q_hybrid_only", "q_third"} {
+		if strings.Contains(ftsChunk, neighbour) {
+			t.Errorf("the fts-only chunk names %s, which only another condition lost — the chunk is not bounded by the next condition in the report:\n%s", neighbour, ftsChunk)
+		}
+	}
 	hybridChunk := maintenanceChunk(t, threeConditions, CondHybrid)
 	hybridOutranked, hybridNotFound := lostSections(t, hybridChunk, true, true)
-	if strings.Contains(hybridOutranked, "q_evicted") {
-		t.Errorf("q_evicted is in the hybrid outranked list although hybrid never retrieved it:\n%s", hybridChunk)
+	if !strings.Contains(hybridOutranked, "q_outranked") {
+		t.Errorf("the hybrid outranked list does not name the question a copy outranked:\n%s", hybridChunk)
 	}
-	if !strings.Contains(hybridNotFound, "q_evicted") {
-		t.Errorf("q_evicted is not in the hybrid not-retrieved list:\n%s", hybridChunk)
+	for _, foreign := range []string{"q_evicted", "q_hybrid_only", "q_third"} {
+		if strings.Contains(hybridOutranked, foreign) {
+			t.Errorf("%s is in the hybrid outranked list, which belongs to another question set:\n%s", foreign, hybridChunk)
+		}
+	}
+	if !strings.Contains(hybridNotFound, "q_hybrid_only") {
+		t.Errorf("q_hybrid_only is not in the hybrid not-retrieved list:\n%s", hybridChunk)
 	}
 	if strings.Contains(hybridOutranked+hybridNotFound, "q_third") {
 		t.Errorf("the hybrid sections name q_third, which only vector-only lost — the chunk is not bounded by the next condition:\n%s", threeConditions)
@@ -174,12 +187,14 @@ func TestFormatMaintenanceSeparatesLostQuestions(t *testing.T) {
 }
 
 // maintenanceChunk returns the part of a rendered report belonging to one
-// condition: from that condition's first lost-question header to the next
-// condition's, or the end. FormatMaintenance prints two colon-carrying
-// per-condition lines — the shared-row probe line and the lost-question headers —
-// and the probe line comes first, so the anchor has to skip it; see
-// lostSectionAnchor. A question name is only unique within its own condition, so
-// this is also what stops one condition's lists from answering for another's.
+// condition: from that condition's first lost-question header to the NEAREST
+// other condition's, or the end. FormatMaintenance renders conditions in the
+// caller's order, so the end is the smallest offset over the others rather than
+// the first one found in a fixed list — returning on the first hit bounds a chunk
+// by whichever condition happens to come first in that list, which is not
+// necessarily the one that comes next in the report. A question name is only
+// unique within its own condition, so this is what stops one condition's lists
+// from answering for another's.
 func maintenanceChunk(t *testing.T, report, condition string) string {
 	t.Helper()
 	at := lostSectionAnchor(report, condition, 0)
@@ -187,24 +202,32 @@ func maintenanceChunk(t *testing.T, report, condition string) string {
 		t.Fatalf("report has no lost-question section for %s:\n%s", condition, report)
 	}
 	chunk := report[at:]
+	end := -1
 	for _, other := range []string{CondFTS, CondVector, CondHybrid} {
 		if other == condition {
 			continue
 		}
-		if i := lostSectionAnchor(report, other, at); i >= 0 {
-			return report[at:i]
+		if i := lostSectionAnchor(report, other, at); i >= 0 && (end < 0 || i < end) {
+			end = i
 		}
 	}
-	return chunk
+	if end < 0 {
+		return chunk
+	}
+	return report[at:end]
 }
 
 // lostSectionAnchor returns the offset just past "<condition>: " at that
-// condition's first lost-question header at or after from, or -1. The digit is
-// load-bearing: FormatMaintenance prints the shared-row probe line as
-// "<condition>: shared _global answers found ..." before the lost-question
-// headers, so anchoring on the colon alone would start the chunk at the probe
-// line and end it at the next condition's probe line — no lost-question section
-// at all. Anchoring on the count is what skips it.
+// condition's first lost-question header at or after from, or -1.
+//
+// The digit is load-bearing. FormatMaintenance prints a shared-row probe line
+// ("<condition>: shared _global answers found ...") for every condition before
+// any lost-question header, and both shapes carry the same prefix. Anchoring on
+// the prefix alone therefore starts a chunk on the probe line and — since the end
+// bound looks for that same prefix in the *other* conditions — can stop it on an
+// earlier condition's header, before this condition's own lists begin. Requiring
+// the count only the header carries makes every candidate offset a real section
+// start, and the end bound a real section boundary.
 func lostSectionAnchor(report, condition string, from int) int {
 	prefix := "\n" + condition + ": "
 	for i := from; i < len(report); {
