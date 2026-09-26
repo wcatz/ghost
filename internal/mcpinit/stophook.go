@@ -293,7 +293,7 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 		recordSpawnFailure(projectID, cfg, err)
 		return
 	}
-	logFile, err := os.OpenFile(filepath.Join(dataDir, "lifecycle.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	logFile, err := openLogForAppend(filepath.Join(dataDir, "lifecycle.log"))
 	if err != nil {
 		slog.Warn("lifecycle spawn: cannot open log", "error", err)
 		recordSpawnFailure(projectID, cfg, err)
