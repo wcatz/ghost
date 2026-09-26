@@ -187,7 +187,18 @@ func StatusOpencode(w io.Writer) (bool, error) {
 		check(false, "", "lifecycle plugin missing or outdated (run ghost mcp init --client opencode)")
 	}
 
-	// 3. Embedding & linking health — silent embed failures leave vector
+	// 3. MCP server registration — the mcp.ghost entry in opencode's own
+	// config file. The lifecycle plugin also registers ghost at runtime, but
+	// that path is invisible to status: a missing, disabled or wrong-path
+	// entry in the file the user edits is exactly what leaves opencode
+	// running with no ghost tools while everything else here reads green.
+	// Validated against the resolved binary the way StatusCodex validates
+	// config.toml, so a ghost that moved on upgrade reports unhealthy with
+	// the edit that repairs it.
+	mcpOK, mcpFail := opencodeMCPEntryStatus(ghostBin)
+	check(mcpOK, "ghost MCP server registered in opencode config", mcpFail)
+
+	// 4. Embedding & linking health — silent embed failures leave vector
 	// search and memory linking inactive.
 	store := checkStoreHealth(w, check)
 	if store != nil {

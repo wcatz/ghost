@@ -93,6 +93,20 @@ ghost mcp init --client opencode
 
 This installs one lifecycle adapter at `~/.config/opencode/plugins/ghost-opencode.ts`. The adapter registers the MCP server and bridges opencode session-idle events to Ghost's lifecycle contract. The same adapter supports opencode V1 and V2; it does not modify `opencode.json`. Restart opencode after setup.
 
+`ghost mcp status --client opencode` verifies more than the adapter: it reads opencode's own config (`~/.config/opencode/opencode.jsonc` or `opencode.json`, comments and trailing commas included) and checks that `mcp.ghost` is present, enabled, and resolving to the ghost binary on your PATH. The installer never writes that file, so a missing, disabled, or stale entry is yours to add or repair — the failing status line prints the entry to paste:
+
+```jsonc
+{
+  "mcp": {
+    "ghost": {
+      "type": "local",
+      "command": ["/home/you/.local/bin/ghost", "mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
 For optional embeddings:
 
 ```bash

@@ -1,8 +1,10 @@
 package mcpinit
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -173,4 +175,260 @@ func opencodeConfigDir() (string, error) {
 		return "", fmt.Errorf("home dir: %w", err)
 	}
 	return filepath.Join(home, ".config"), nil
+}
+
+// opencodeMCPConfigNames are opencode's own config file names, examined in
+// this order. opencode accepts either spelling of the same schema, so status
+// reports on the first file present on disk rather than assuming one
+// extension: a registration the user edited into the other file must not read
+// as missing.
+var opencodeMCPConfigNames = []string{"opencode.jsonc", "opencode.json"}
+
+// opencodeConfig is the slice of opencode's config schema the registration
+// check reads — only the mcp map. Every other key opencode supports is
+// ignored; a file carrying JSONC comments and trailing commas still parses
+// (see stripJSONC).
+type opencodeConfig struct {
+	MCP map[string]opencodeMCPEntry `json:"mcp"`
+}
+
+// opencodeMCPEntry is one `mcp.<name>` server: the stdio command opencode
+// spawns and the flag turning it on. Both are optional in opencode's schema —
+// an entry may carry only `enabled`, the shorthand for disabling a server —
+// so the status checks below classify a zero entry rather than reject it.
+type opencodeMCPEntry struct {
+	Type    string   `json:"type"`
+	Command []string `json:"command"`
+	Enabled *bool    `json:"enabled"`
+}
+
+// opencodeMCPEntryStatus validates the mcp.ghost registration in opencode's
+// own config file against the resolved ghost binary, mirroring
+// codexMCPEntryStatus: an empty message means the entry is current, and the
+// returned message explains the failure for the status check line. The entry
+// must exist, be enabled, and resolve to the ghost binary this run found —
+// the three ways opencode ends up running without ghost's tools while the
+// lifecycle plugin sits installed and green.
+func opencodeMCPEntryStatus(ghostBin string) (bool, string) {
+	dir, err := opencodeConfigDir()
+	if err != nil {
+		return false, err.Error()
+	}
+	base := filepath.Join(dir, "opencode")
+	var path string
+	for _, name := range opencodeMCPConfigNames {
+		candidate := filepath.Join(base, name)
+		if _, err := os.Stat(candidate); err == nil {
+			path = candidate
+			break
+		}
+	}
+	if path == "" {
+		return false, fmt.Sprintf("no opencode config file — add %s to %s",
+			opencodeMCPEntryHint(ghostBin), filepath.Join(base, opencodeMCPConfigNames[0]))
+	}
+	return opencodeMCPEntryInFile(path, ghostBin)
+}
+
+// opencodeMCPEntryInFile validates the mcp.ghost entry in one opencode config
+// file. Every failure names the file and carries the exact edit that
+// repairs it, because `ghost mcp init --client opencode` deliberately never
+// writes this file (see installOpencodePlugin): the repair is a config edit,
+// and the line is where the user learns what to write.
+func opencodeMCPEntryInFile(path, ghostBin string) (bool, string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Sprintf("cannot read %s: %v", path, err)
+	}
+	cfg, err := parseOpencodeConfig(data)
+	if err != nil {
+		return false, fmt.Sprintf("cannot parse %s as opencode config: %v", path, err)
+	}
+	entry, ok := cfg.MCP["ghost"]
+	if !ok {
+		return false, fmt.Sprintf("ghost MCP server missing from %s — add %s", path, opencodeMCPEntryHint(ghostBin))
+	}
+	if entry.Enabled != nil && !*entry.Enabled {
+		return false, fmt.Sprintf("ghost MCP server disabled in %s — set mcp.ghost.enabled to true", path)
+	}
+	if len(entry.Command) < 2 || entry.Command[1] != "mcp" {
+		return false, fmt.Sprintf("ghost MCP server command in %s must be %s", path, opencodeMCPCommandHint(ghostBin))
+	}
+	resolved, err := exec.LookPath(entry.Command[0])
+	if err != nil {
+		return false, fmt.Sprintf("ghost MCP server command %q in %s is not an executable file (%v)",
+			entry.Command[0], path, err)
+	}
+	if !opencodeMCPCommandIsGhost(resolved, ghostBin) {
+		return false, fmt.Sprintf("ghost MCP server command %q in %s is not the ghost binary — update mcp.ghost.command to %s",
+			entry.Command[0], path, opencodeMCPCommandHint(ghostBin))
+	}
+	return true, ""
+}
+
+// opencodeMCPEntryHint renders the whole registration to paste into the
+// config file when mcp.ghost is absent.
+func opencodeMCPEntryHint(ghostBin string) string {
+	return fmt.Sprintf(`"mcp": {"ghost": {"type": "local", "command": %s, "enabled": true}}`,
+		opencodeMCPCommandHint(ghostBin))
+}
+
+// opencodeMCPCommandHint renders the command array an mcp.ghost entry must
+// carry. With no resolved binary it falls back to the bare name: the run has
+// already failed the ghost-binary check, and a hint must still be something
+// the user can paste.
+func opencodeMCPCommandHint(ghostBin string) string {
+	bin := ghostBin
+	if bin == "" {
+		bin = "ghost"
+	}
+	return fmt.Sprintf("[%q, \"mcp\"]", bin)
+}
+
+// opencodeMCPCommandIsGhost reports whether the configured command resolves
+// to the ghost binary this run resolved. Identity is the file itself, not
+// its spelling, so a symlink onto the resolved binary is the same
+// registration rather than a different one. When ghost is not on PATH at all
+// there is no reference to compare against, so the command is accepted by
+// name — the ghost-binary check has already failed that run, and a config
+// entry opencode can still spawn is not a second thing to report against it.
+func opencodeMCPCommandIsGhost(resolved, ghostBin string) bool {
+	if ghostBin == "" {
+		base := filepath.Base(resolved)
+		return strings.EqualFold(strings.TrimSuffix(base, filepath.Ext(base)), "ghost")
+	}
+	want, err := os.Stat(ghostBin)
+	if err != nil {
+		return false
+	}
+	got, err := os.Stat(resolved)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(got, want)
+}
+
+// parseOpencodeConfig reads one opencode config file into the slice of the
+// schema the registration check needs. opencode's own schema sets
+// allowComments and allowTrailingCommas, so a file valid for opencode must
+// not read as unparseable here.
+func parseOpencodeConfig(data []byte) (opencodeConfig, error) {
+	var cfg opencodeConfig
+	if err := json.Unmarshal(stripJSONC(data), &cfg); err != nil {
+		return opencodeConfig{}, err
+	}
+	return cfg, nil
+}
+
+// stripJSONC reduces opencode's JSONC to the plain JSON encoding/json
+// accepts: comments and trailing commas removed, string literals untouched —
+// a "//" or a comma inside a string is content, not structure.
+func stripJSONC(src []byte) []byte {
+	return stripTrailingCommas(stripJSONCComments(src))
+}
+
+// jsoncBlockEnd terminates a /* */ comment; a package-level value keeps the
+// scan from rebuilding it for every comment.
+var jsoncBlockEnd = []byte("*/")
+
+// appendJSONNewlines copies only the line breaks of seg. A removed block
+// comment must not shift the line number a later parse error reports, so its
+// newlines survive even though its text does not.
+func appendJSONNewlines(out, seg []byte) []byte {
+	for _, b := range seg {
+		if b == '\n' {
+			out = append(out, '\n')
+		}
+	}
+	return out
+}
+
+// stripJSONCComments drops line and block comments outside string literals,
+// keeping the newlines a block comment spans so a later parse error still
+// points at the right line. An unterminated block comment swallows the rest
+// of the file, which is what a JSON parser would report anyway.
+func stripJSONCComments(src []byte) []byte {
+	out := make([]byte, 0, len(src))
+	inString, escaped := false, false
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		switch {
+		case inString:
+			out = append(out, c)
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+		case c == '"':
+			inString = true
+			out = append(out, c)
+		case c == '/' && i+1 < len(src) && src[i+1] == '/':
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			if i < len(src) {
+				out = append(out, '\n')
+			}
+		case c == '/' && i+1 < len(src) && src[i+1] == '*':
+			rest := src[i+2:]
+			end := bytes.Index(rest, jsoncBlockEnd)
+			if end < 0 { // unterminated: the rest of the file is comment
+				out = appendJSONNewlines(out, rest)
+				i = len(src)
+				continue
+			}
+			out = appendJSONNewlines(out, rest[:end])
+			i = i + 2 + end + 1 // sit on the closing "/", so the loop's i++ steps past "*/"
+		default:
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// stripTrailingCommas drops a comma whose next significant byte closes the
+// container — the other half of opencode's allowTrailingCommas.
+func stripTrailingCommas(src []byte) []byte {
+	out := make([]byte, 0, len(src))
+	inString, escaped := false, false
+	for i := 0; i < len(src); i++ {
+		c := src[i]
+		if inString {
+			out = append(out, c)
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			out = append(out, c)
+			continue
+		}
+		if c == ',' {
+			j := i + 1
+			for j < len(src) && isJSONSpace(src[j]) {
+				j++
+			}
+			if j < len(src) && (src[j] == '}' || src[j] == ']') {
+				continue // trailing comma: dropped, not copied
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// isJSONSpace reports whether c is whitespace JSON ignores.
+func isJSONSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
