@@ -312,8 +312,9 @@ rather than making every session look eligible, and the command prints a
 empty, clean run. To verify the unit against your real CLI —
 `GHOST_LIVE_TESTS=1 go test ./internal/ai/ -v
 -run TestOpenCodeSessionList_TimestampsAreMilliseconds`; it lists read-only,
-and skips (rather than passes) when your checkout has no sessions to
-inspect. Deletion uses `opencode session delete <id>` with up to three
+resolves the binary the same way this command does (`cli.opencode_binary`,
+else `PATH`), and skips (rather than passes) when your checkout has no
+sessions to inspect. Deletion uses `opencode session delete <id>` with up to three
 attempts per session; a failed delete is reported and counted but never
 stops the rest, and the command exits non-zero when any delete failed. The
 binary comes from `cli.opencode_binary` (`GHOST_CLI_OPENCODE_BINARY`) when

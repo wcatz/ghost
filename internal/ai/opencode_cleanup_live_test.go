@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wcatz/ghost/internal/config"
 )
 
 // liveSessionListLimit bounds how much of the real store one live run reads.
@@ -31,9 +33,9 @@ func TestOpenCodeSessionList_TimestampsAreMilliseconds(t *testing.T) {
 	if !LiveTestsEnabled() {
 		t.Skip("live CLI test reads the real session store; set GHOST_LIVE_TESTS=1 to run")
 	}
-	bin, err := exec.LookPath("opencode")
-	if err != nil {
-		t.Skipf("opencode not on PATH: %v", err)
+	bin := liveOpenCodeBinary(t)
+	if _, err := exec.LookPath(bin); err != nil {
+		t.Skipf("opencode not resolvable at %q (cli.opencode_binary or PATH): %v", bin, err)
 	}
 
 	sessions, err := (openCodeCleanupRunner{binary: bin}).listSessions(context.Background(), liveSessionListLimit)
@@ -65,6 +67,40 @@ func TestOpenCodeSessionList_TimestampsAreMilliseconds(t *testing.T) {
 		t.Skip(reason)
 	}
 	t.Logf("checked %d timestamp(s) across %d session(s) against the plausible window", checked, len(sessions))
+}
+
+// liveOpenCodeBinary resolves the binary the live check runs, the same way
+// `ghost opencode cleanup-sessions` does: cli.opencode_binary (fed by
+// GHOST_CLI_OPENCODE_BINARY), else "opencode" on PATH. Without the override a
+// user whose opencode is reachable only through it — precisely the user the
+// command exists for — would get a skip where the documented check promised a
+// verification. A config that fails to load falls back to PATH with a logged
+// note rather than failing a diagnostic.
+func liveOpenCodeBinary(t *testing.T) string {
+	t.Helper()
+	const fallback = "opencode"
+	cfg, err := config.Load()
+	if err != nil {
+		t.Logf("config.Load: %v — falling back to the PATH lookup of %q", err, fallback)
+		return fallback
+	}
+	if cfg.CLI.OpenCodeBinary != "" {
+		return cfg.CLI.OpenCodeBinary
+	}
+	return fallback
+}
+
+// TestLiveOpenCodeBinaryHonorsTheConfigOverride pins the resolution: the
+// documented verification must find the same binary `ghost opencode
+// cleanup-sessions` runs, or it silently skips for exactly the setup that
+// needs it. Only the override case is asserted absolutely — the PATH fallback
+// would otherwise depend on whatever config file the machine running the test
+// happens to have.
+func TestLiveOpenCodeBinaryHonorsTheConfigOverride(t *testing.T) {
+	t.Setenv("GHOST_CLI_OPENCODE_BINARY", "/opt/bin/opencode")
+	if got := liveOpenCodeBinary(t); got != "/opt/bin/opencode" {
+		t.Errorf("with GHOST_CLI_OPENCODE_BINARY set, got %q, want the configured binary", got)
+	}
 }
 
 // uncheckedSessionsReason returns why a live run inspected no timestamps, or
