@@ -250,6 +250,135 @@ func TestExplainReportsStatusFactor(t *testing.T) {
 	}
 }
 
+// TestKeywordReservationSkipsDemotedRows: the keyword reservation admitted
+// rows by raw FTS rank alone, so a demoted row in the top `limit/5` still
+// took a window slot and evicted a live project row that the demoted pool
+// would have kept. Reservation reads raw rank and demotion writes the fused
+// score, so the two disagreed exactly when a demoted row led the keyword leg.
+// The fix is that a row whose status factor is below 1 is never reserved.
+//
+// limit 5 is the smallest window that reserves anything (limit/5 = 1, and
+// below five the reservation is skipped entirely), the demoted row carries
+// the highest importance so FTS ranks it first, and seven identical rows
+// overflow the five-slot window — which is the only time reservation runs at
+// all (len(pool) > width).
+func TestKeywordReservationSkipsDemotedRows(t *testing.T) {
+	const needle = "temporal workflow replay fails the activity heartbeats"
+
+	for _, tc := range []struct {
+		name   string
+		demote func(t *testing.T, store *Store, ctx context.Context) string
+	}{
+		{
+			name: "_global row",
+			demote: func(t *testing.T, store *Store, ctx context.Context) string {
+				t.Helper()
+				if err := store.EnsureProject(ctx, "_global", "/global", "global"); err != nil {
+					t.Fatalf("EnsureProject(_global): %v", err)
+				}
+				return createStatusMemory(t, store, ctx, "_global", needle, 0.9)
+			},
+		},
+		{
+			name: "resolved row",
+			demote: func(t *testing.T, store *Store, ctx context.Context) string {
+				t.Helper()
+				id := createStatusMemory(t, store, ctx, "test-proj", needle, 0.9)
+				if n, err := store.SetResolved(ctx, []string{id}); err != nil || n != 1 {
+					t.Fatalf("SetResolved = (%d, %v), want (1, nil)", n, err)
+				}
+				return id
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, ctx := setupTestStore(t)
+			demotedID := tc.demote(t, store, ctx)
+
+			// Six live rows behind the demoted one. A plain cut of the
+			// demoted pool returns the five highest-importance live rows;
+			// the sixth (importance 0.3) is the row the buggy reservation
+			// evicts to make room for the demoted rank-1 keyword hit.
+			live := make([]string, 0, 6)
+			for _, importance := range []float32{0.8, 0.7, 0.6, 0.5, 0.4, 0.3} {
+				live = append(live, createStatusMemory(t, store, ctx, "test-proj", needle, importance))
+			}
+
+			// nil query vector: the keyword leg alone drives the window, so
+			// every candidate is keyword-only and eligible for reservation.
+			results, err := store.SearchHybrid(ctx, "test-proj", needle, nil, 5)
+			if err != nil {
+				t.Fatalf("SearchHybrid: %v", err)
+			}
+			pos := positions(results)
+
+			for _, id := range live[:5] {
+				if _, ok := pos[id]; !ok {
+					t.Errorf("live project memory missing from the window of %d: %s — the reserved "+
+						"slot went to a demoted row", len(results), contents(results))
+				}
+			}
+			if got, ok := pos[demotedID]; ok {
+				t.Errorf("demoted row returned at position %d while a live row was evicted: %s — "+
+					"a row whose status factor is below 1 must never be reserved",
+					got, contents(results))
+			}
+		})
+	}
+}
+
+// TestSearchDemotesVectorOnlyRows: the vector leg carries each row's status so
+// a semantic-only match cannot escape the demotion. Every row below shares no
+// keyword with the query, so the FTS leg never retrieves them — the vector
+// branch of fusion (projectID/resolved read from ScoredMemory) is the only
+// thing that can tell a live row from a _global or resolved one here.
+//
+// Both demoted rows are given the better raw standing (closer to the query
+// vector than the live row), the same convention as every other case in this
+// file: without the vector status fields the demoted rows rank first and this
+// test fails.
+func TestSearchDemotesVectorOnlyRows(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	if err := store.EnsureProject(ctx, "_global", "/global", "global"); err != nil {
+		t.Fatalf("EnsureProject(_global): %v", err)
+	}
+
+	const query = "kubernetes readiness probe timeouts"
+	globalID := createStatusMemory(t, store, ctx, "_global", "quokka wallaby numbat exhibit", 0.9)
+	resolvedID := createStatusMemory(t, store, ctx, "test-proj", "zebra okapi tapir enclosure", 0.9)
+	liveID := createStatusMemory(t, store, ctx, "test-proj", "axolotl narwhal manatee habitat", 0.8)
+
+	queryVec := []float32{1, 0}
+	for _, row := range []struct {
+		id  string
+		vec []float32
+	}{
+		{globalID, []float32{1, 0.05}},
+		{resolvedID, []float32{1, 0.1}},
+		{liveID, []float32{1, 0.3}},
+	} {
+		if err := store.StoreEmbedding(ctx, row.id, row.vec, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding(%s): %v", row.id, err)
+		}
+	}
+	if n, err := store.SetResolved(ctx, []string{resolvedID}); err != nil || n != 1 {
+		t.Fatalf("SetResolved = (%d, %v), want (1, nil)", n, err)
+	}
+
+	results, err := store.SearchHybrid(ctx, "test-proj", query, queryVec, 10)
+	if err != nil {
+		t.Fatalf("SearchHybrid: %v", err)
+	}
+	pos := positions(results)
+	requireBothPresent(t, pos, globalID, resolvedID, liveID)
+
+	if pos[liveID] > pos[globalID] || pos[liveID] > pos[resolvedID] {
+		t.Errorf("live row at %d, _global at %d, resolved at %d — a vector-only match outranked "+
+			"the live project row: the vector leg must carry each row's status into fusion (results = %s)",
+			pos[liveID], pos[globalID], pos[resolvedID], contents(results))
+	}
+}
+
 // contents renders result content for failure messages, truncated so a failing
 // assertion stays readable.
 func contents(results []Memory) string {

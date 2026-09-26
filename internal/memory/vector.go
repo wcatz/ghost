@@ -722,7 +722,15 @@ func selectWindow(pool []*hybridCandidate, limit int, p SearchParams) HybridWind
 	// answer rather than a correction to it.
 	//
 	// Admission is the whole of it, and the position stays the fused score's
-	// to decide. Two stronger interventions were built and measured against
+	// to decide. Reserving is gated on status: the reservation reads raw FTS
+	// rank while demotion writes the fused score, so without the gate a
+	// _global or resolved row that led the keyword leg took a slot the
+	// demoted pool would have given a live project row — the demotion had
+	// already been applied to its score, and the reservation undid it. A row
+	// whose status factor is below 1 is therefore never reserved; it can
+	// still enter on its demoted score like any other candidate.
+	//
+	// Two stronger interventions were built and measured against
 	// the built-in dataset before settling here:
 	//
 	//   - Reordering the returned slice so reserved hits lead the window.
@@ -740,6 +748,9 @@ func selectWindow(pool []*hybridCandidate, limit int, p SearchParams) HybridWind
 	// What the issue describes is admission, and admission is what this does.
 	if slots := limit / 5; p.FTSWeight > 0 && slots > 0 && len(pool) > width {
 		isReserved := func(c *hybridCandidate) bool {
+			if statusDemotionFactor(c.resolved, c.projectID, p.ProjectID) < 1 {
+				return false
+			}
 			return c.vec == 0 && c.fts > 0 && c.fts <= slots
 		}
 		admitted := make(map[string]bool, width)
