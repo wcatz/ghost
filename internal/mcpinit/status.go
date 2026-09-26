@@ -12,6 +12,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -370,14 +371,21 @@ func reportConfigFile(w io.Writer) {
 // checkEmbeddingStats reports embedding coverage via the check closure. An
 // empty store is healthy — total == 0 passes with "(store empty)"; only a
 // non-empty store with no embedded memories means vector search and linking
-// are inactive. Shared by Status and StatusOpencode.
+// are inactive. Partial coverage is reported as such rather than as a bare
+// fraction: with an identity configured, the gap is rows waiting to be
+// re-embedded after a model, dimension or task-prefix change, and they are
+// excluded from the vector leg until they are. Shared by Status and
+// StatusOpencode.
 func checkEmbeddingStats(check func(ok bool, pass, fail string), embedded, total int) {
 	if total == 0 {
 		check(true, "embeddings: 0 memories (store empty)", "")
 		return
 	}
-	check(embedded > 0,
-		fmt.Sprintf("embeddings: %d/%d memories", embedded, total),
+	pass := fmt.Sprintf("embeddings: %d/%d memories", embedded, total)
+	if embedded > 0 && embedded < total {
+		pass = fmt.Sprintf("embeddings: %d/%d memories (%d awaiting re-embed)", embedded, total, total-embedded)
+	}
+	check(embedded > 0, pass,
 		fmt.Sprintf("embeddings: %d/%d memories — vector search and linking inactive", embedded, total))
 }
 
@@ -432,6 +440,11 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := memory.NewStore(db, logger)
+	// Same identity the MCP server embeds with, so the coverage line below
+	// counts vectors that can actually be searched. Without it, a store mid
+	// re-embed reports full coverage while the vector leg returns nothing —
+	// which is exactly the state an operator runs `ghost mcp status` to catch.
+	store.SetEmbeddingIdentity(embedding.VectorIdentity(cfg.Embedding.Model, cfg.Embedding.Dimensions))
 	if cfg.Embedding.Enabled {
 		ctx := context.Background()
 		if embedded, total, sErr := store.EmbeddingStats(ctx); sErr == nil {

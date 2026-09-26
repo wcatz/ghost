@@ -102,6 +102,15 @@ type Store struct {
 	// only non-positive cosines dropped); config search.min_similarity
 	// overrides via SetVectorMinSimilarity.
 	vectorMinSimilarity float32
+
+	// embeddingIdentity is the vector space this process embeds into — the
+	// model, its dimensions and its task-prefix setting, as produced by
+	// embedding.VectorIdentity. Vector search only scores a stored vector whose
+	// recorded identity matches it, and the embedding worker re-embeds the ones
+	// that do not. Empty (the default, and the state of the bench harness and
+	// of tests) means no identity is configured: every recorded vector is
+	// searched and only the presence of a row matters.
+	embeddingIdentity string
 }
 
 // SetOnSave registers a callback invoked after each successful memory save.
@@ -135,6 +144,32 @@ func (s *Store) vectorMinSimilarityFloor() float32 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.vectorMinSimilarity
+}
+
+// SetEmbeddingIdentity declares which vector space this process embeds into —
+// the model, its dimensions and its task-prefix setting, as produced by
+// embedding.VectorIdentity. Call after NewStore once config is loaded, with
+// the same string the embedding client stamps into memory_embeddings.model.
+//
+// It is what makes a model change safe: vectors recorded under a different
+// identity are excluded from the vector leg (they are not comparable with a
+// query embedded in the configured space) and reported back to the embedding
+// worker as unembedded, so they are rewritten in place. Until it is called, the
+// store searches whatever vectors exist regardless of which model wrote them —
+// the pre-identity behaviour.
+func (s *Store) SetEmbeddingIdentity(identity string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.embeddingIdentity = identity
+}
+
+// configuredEmbeddingIdentity returns the identity set by
+// SetEmbeddingIdentity under the read lock. It is not called with the lock
+// already held.
+func (s *Store) configuredEmbeddingIdentity() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.embeddingIdentity
 }
 
 // NewStore creates a new memory store from an open database.

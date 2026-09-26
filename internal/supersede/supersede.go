@@ -128,7 +128,11 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 	for _, m := range mems {
 		vec, err := store.GetEmbedding(ctx, m.ID)
 		if err != nil || len(vec) == 0 {
-			continue // no embedding → no similarity candidates
+			continue // no usable embedding → no similarity candidates. A nil
+			// vector with no error is a memory whose vector belongs to another
+			// vector space (see memory.Store.GetEmbedding); comparing it would
+			// propose pairs from a cosine between two spaces, and each confirmed
+			// one costs a classify call and writes a demoting edge.
 		}
 		neighbors, err := store.SearchVector(ctx, projectID, vec, maxNeighbors+1)
 		if err != nil {

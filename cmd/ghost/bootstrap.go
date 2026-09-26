@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -89,6 +90,12 @@ func bootstrap(logWriter io.Writer, logLevel slog.Level, onBadConfig configHandl
 	store := memory.NewStore(db, logger)
 	store.SetDemotionThreshold(cfg.Linking.DemotionThreshold)
 	store.SetVectorMinSimilarity(float32(cfg.Search.MinSimilarity))
+	// Declared unconditionally, not only under cfg.Embedding.Enabled: the
+	// identity only takes effect for the vector leg, which runs only when a
+	// query vector exists — and when embedding is switched back on, this is
+	// what makes the worker retire the vectors of the previous model instead
+	// of leaving them to be compared across spaces.
+	store.SetEmbeddingIdentity(embedding.VectorIdentity(cfg.Embedding.Model, cfg.Embedding.Dimensions))
 
 	if err := store.SeedGlobalMemories(context.Background()); err != nil {
 		logger.Warn("seed global memories", "error", err)

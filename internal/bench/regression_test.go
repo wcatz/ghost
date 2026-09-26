@@ -29,9 +29,11 @@ func TestBenchRegressionFloors(t *testing.T) {
 		cond           string
 		ndcg, recall10 float64
 	}{
-		// Observed on the v2 dataset (547 memories / 219 paraphrase-heavy
-		// graded queries): fts 0.748/0.689, vector 0.799/0.777,
-		// hybrid 0.817/0.777. Floors sit just below those.
+		// Observed on the v2 dataset (547 memories / 220 paraphrase-heavy
+		// graded queries, committed embedding fixture): fts 0.749/0.697,
+		// vector 0.801/0.764, hybrid 0.818/0.763 — the rows
+		// docs/benchmarks.md publishes. Floors sit just below those, the
+		// tightest being hybrid recall@10 with 0.013 of headroom.
 		{CondFTS, 0.73, 0.67},
 		{CondVector, 0.78, 0.75},
 		{CondHybrid, 0.80, 0.75},

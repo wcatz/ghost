@@ -26,7 +26,11 @@ import (
 
 // Embedder generates vector embeddings for text. Optional — when nil, search falls back to FTS only.
 type Embedder interface {
-	Embed(ctx context.Context, text string) ([]float32, error)
+	// EmbedQuery embeds a search query. Only queries are embedded here: the
+	// stored side belongs to the embedding worker, and the two are not
+	// interchangeable for a model that requires a task prefix (nomic-embed-text
+	// prefixes documents and queries differently — see embedding.EmbedDocument).
+	EmbedQuery(ctx context.Context, text string) ([]float32, error)
 }
 
 // embedderDiagnostics is optionally implemented by embedders that can report
@@ -610,7 +614,7 @@ func (s *Server) registerTools() {
 		// Use hybrid search (FTS5 + vector) when embedder is available.
 		var queryVec []float32
 		if s.embedder != nil {
-			if vec, err := s.embedder.Embed(ctx, args.Query); err == nil {
+			if vec, err := s.embedder.EmbedQuery(ctx, args.Query); err == nil {
 				queryVec = vec
 			}
 		}
@@ -1057,7 +1061,7 @@ func (s *Server) registerTools() {
 
 		var queryVec []float32
 		if s.embedder != nil {
-			if vec, err := s.embedder.Embed(ctx, args.Query); err == nil {
+			if vec, err := s.embedder.EmbedQuery(ctx, args.Query); err == nil {
 				queryVec = vec
 			}
 		}
@@ -1519,8 +1523,16 @@ func (s *Server) registerTools() {
 		if s.embedder != nil {
 			if embedded, total, err := s.store.EmbeddingStats(ctx); err == nil {
 				fmt.Fprintf(&sb, "**Embeddings:** enabled — %d/%d memories embedded\n", embedded, total)
-				if embedded == 0 && total > 0 {
+				switch {
+				case total > 0 && embedded == 0:
 					sb.WriteString("  ⚠ no memories are embedded — vector search and memory linking are inactive\n")
+				case embedded < total:
+					// Partial coverage is the state a model, dimension or
+					// task-prefix change leaves behind: those rows are excluded
+					// from the vector leg until the worker rewrites them, so
+					// name the gap rather than leaving a bare fraction to be
+					// interpreted as healthy.
+					fmt.Fprintf(&sb, "  ⚠ %d memories are not in the current vector space yet — awaiting re-embed (check `ghost mcp status`)\n", total-embedded)
 				}
 			} else {
 				sb.WriteString("**Embeddings:** enabled\n")

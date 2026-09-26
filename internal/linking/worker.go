@@ -109,6 +109,17 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			w.logger.Debug("linking: get embedding", "error", err, "memory_id", id)
 			continue
 		}
+		if len(vec) == 0 {
+			// A nil vector means the row's vector belongs to another vector
+			// space than the one this process embeds into (see
+			// Store.GetEmbedding), so there is nothing to compare it with.
+			// Skipping without MarkLinkScanned is deliberate: the memory stays
+			// in the queue and is linked once the embedding worker rewrites its
+			// vector. Marking it scanned here would spend the memory's one scan
+			// slot on a pass that produced no edge.
+			w.logger.Debug("linking: no usable vector yet", "memory_id", id)
+			continue
+		}
 		sourceMemories, err := w.store.GetByIDs(ctx, []string{id})
 		if err != nil {
 			w.logger.Debug("linking: get source scope", "error", err, "memory_id", id)

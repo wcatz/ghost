@@ -257,7 +257,7 @@ The main schema tables are:
 | `projects` | Project names, IDs, and paths |
 | `memories` | Core memory content, category, importance, tags, and state |
 | `memories_fts` | FTS5 virtual table |
-| `memory_embeddings` | Float32 embedding vectors |
+| `memory_embeddings` | Float32 embedding vectors, each stamped with the identity of the space that produced it (model, dimensions, task prefix), so a model change retires the old vectors instead of comparing across spaces |
 | `memory_links` | Related, supersedes, causes, and other graph edges |
 | `tasks` | Cross-session work items |
 | `decisions` | Decisions, rationale, alternatives, and status |
@@ -277,6 +277,32 @@ When embeddings are available, search combines:
 - Targeted demotion when a present memory is superseded by another present memory
 
 Without Ollama, the same API remains available with FTS5-only results. Search membership is not discarded solely because of age; decay changes ordering.
+
+A vector candidate is only scored when its stored vector belongs to the vector
+space this process embeds into. Every embedding records that identity — model,
+dimensions, and whether the model needs a task prefix (`nomic-embed-text` takes
+`search_document: ` on stored text and `search_query: ` on queries, which is why
+both halves have to move together) — as
+`<model>[:<dimensions>][+prefix]` in `memory_embeddings.model`. A row recorded
+under a different identity is a vector from another space, so it is excluded
+from the leg and handed back to the embedding worker as unembedded rather than
+compared with a query it cannot be compared to. `SetEmbeddingIdentity` supplies
+the configured side from `embedding.VectorIdentity`, and the rules that read it
+are four, deliberately separate by caller:
+
+| Rule | Site | Applies to |
+|---|---|---|
+| may this stored vector enter a search? | `usableVectorEntries` | both vector scans (`SearchVector`, `SearchVectorAll`) |
+| may this stored vector act as a *query* vector? | `GetEmbedding` (returns nil) | the link worker and `ghost supersede`, which both search from a stored vector |
+| may this memory be compared at all yet? | `UnscannedEmbeddedMemoryIDs` | the link worker's queue, so a foreign row is neither paired across spaces nor marked scanned |
+| is this memory covered? | `EmbeddingStats` | `ghost mcp status` and `ghost_health`, which must not report full coverage mid-re-embed |
+
+The query-side rules matter because the filter only guards the *rows*: a stale
+vector used as a query would be a cosine between two spaces, and the number it
+produces becomes a `related` edge or a `supersedes` candidate. The derived store
+`ExplainSearch` runs on inherits the identity too, or the trace would report a
+ranking the search did not produce. A retired vector never hides its memory: the
+text stays in the keyword leg until the row is rewritten.
 
 ### Memory lifecycle
 

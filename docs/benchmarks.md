@@ -7,7 +7,7 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 | Evaluation | What it measures | Headline result |
 |---|---|---|
 | LongMemEval-S retrieval | Judge-free retrieval against official evidence labels | Hybrid Recall@5 **93.0%**, Recall@10 **97.3%** on 470 answerable questions |
-| `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.817** on 219 queries and 547 memories |
+| `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 547 memories |
 | LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions |
 | Staleness suite | Fresh-fact ranking without breaking older-but-correct facts | Fresh-wins **1.000** while the recency-trap case stays **0.929** |
 
@@ -40,7 +40,7 @@ hybrid      0.532   0.930   0.973   0.901   0.903     one-time local embedding ~
 
 - **Hybrid session Recall@5 is 93.0%, Recall@10 97.3%** — in the band of the best-reported hybrid retrieval results on -S (~95% R@5 published for hybrid BM25+vector on the original variant) and far above the paper's flat-index baseline (R@5 ≈ 0.64 on -M).
 - **The lift lands exactly where the architecture predicts.** FTS alone nearly solves keyword-friendly classes (`single-session-user` R@10 1.000) but fails vocabulary-mismatch classes; embeddings fix precisely those: `single-session-assistant` R@10 **0.607 → 1.000**, `temporal-reasoning` 0.767 → 0.938.
-- **Honest nuance: on this chat-style benchmark, vector-only ties hybrid** (vector edges R@1/MRR/NDCG, hybrid edges deep recall R@5/R@10). On the current v2 `ghost bench` dataset, hybrid beats vector (NDCG 0.817 vs 0.799) — exact identifiers (ports, versions, hostnames) need the keyword leg. Fusion is the robustness play across both data shapes, which is exactly why a memory system for coding agents ships it.
+- **Honest nuance: on this chat-style benchmark, vector-only ties hybrid** (vector edges R@1/MRR/NDCG, hybrid edges deep recall R@5/R@10). On the current v2 `ghost bench` dataset, hybrid beats vector (NDCG 0.818 vs 0.801) — exact identifiers (ports, versions, hostnames) need the keyword leg. Fusion is the robustness play across both data shapes, which is exactly why a memory system for coding agents ships it.
 - **Remaining headroom is at R@1** (0.532 overall; `multi-session` 0.371, `temporal-reasoning` 0.379) — R@10 is close to saturated, so the next win is ranking, not recall.
 - Reproduce: `go run ./bench/longmemeval --data <longmemeval_s_cleaned.json> --condition fts|vector|hybrid --embed-cache <cache.jsonl>`. The append-only content-hash cache makes reruns and interruptions cheap.
 - **CI gating:** only the **fts** floor (`R@5 ≥ 0.74`, `NDCG@10 ≥ 0.72`) is enforced automatically on PRs — it needs no Ollama and finishes fast. The **hybrid** floor (`R@5 ≥ 0.91`, `NDCG@10 ≥ 0.89`) is run **manually** (`workflow_dispatch`) or locally, not on a schedule: the cold embedding pass is CPU-bound (the ~12h above), too slow for any CI cap. Because `nomic-embed-text:v1.5` is deterministic, a cold run computes the same vectors as a warm one, so those hybrid floors are fully established by the warm local numbers here — CI need not re-derive them.
@@ -53,27 +53,66 @@ Published end-to-end (answer-accuracy) numbers use a GPT-4o judge and a generato
 
 `ghost bench` runs a self-authored graded dataset (in `internal/bench/testdata/`) with a committed real `nomic-embed-text:v1.5` embedding fixture, so CI runs the vector/hybrid conditions with no Ollama. The harness (`internal/bench/`) drives Ghost's production `SearchFTS`/`SearchVector`/`SearchHybrid` over a fresh in-memory store and scores judge-free IR metrics.
 
-Current numbers (v2 dataset: 547 memories spanning all 8 categories, 219 graded queries with heavy paraphrase/vocab-mismatch coverage; retrieval-only, no LLM judge; fully deterministic — reproduce with `go run ./cmd/ghost bench` after rebuild):
+Current numbers (v2 dataset: 547 memories spanning all 8 categories, 220 graded queries with heavy paraphrase/vocab-mismatch coverage; retrieval-only, no LLM judge; fully deterministic — reproduce with `go run ./cmd/ghost bench` after rebuild):
 
 ```
 condition          R@1     R@5    R@10   MRR@10  NDCG@10
-fts-only         0.469   0.623   0.689   0.837   0.748
-vector-only      0.486   0.711   0.777   0.876   0.799
-hybrid           0.514   0.696   0.777   0.899   0.817
+fts-only         0.467   0.626   0.697   0.836   0.749
+vector-only      0.506   0.694   0.764   0.885   0.801
+hybrid           0.520   0.712   0.763   0.902   0.818
 ```
+
+Every row above was measured on this build from the committed dataset and
+fixture, and reproduces exactly with `go run ./cmd/ghost bench` (or
+`go test ./internal/bench -run TestBenchDatasetReport -v`). Two things moved
+when the fixture was regenerated, and they need separating, because only one of
+them is the fixture's doing:
+
+- **The `vector-only` and `hybrid` rows come from the committed
+  `embeddings.json`**, which is produced by `nomic-embed-text:v1.5` **with its
+  task prefixes** — `search_document: ` on each memory, `search_query: ` on each
+  query, the same two the production client applies. Prefix-free embedding is
+  the mistake that fixture used to carry. Measured against the same build with
+  the pre-regeneration fixture, the prefixes moved hybrid NDCG@10
+  0.814 → 0.818 and R@5 0.697 → 0.712, and vector-only NDCG@10 0.795 → 0.801
+  with R@1 0.484 → 0.506. Vector-only R@5 gives back 0.014 (0.708 → 0.694)
+  while its top-of-list metrics all improve: the prefixes make the two halves
+  of the space more separable, which sharpens the head of the pure vector
+  ranking at some cost to its deep tail. Hybrid — the shipped path — improves
+  R@1, R@5, MRR@10 and NDCG@10, and gives back 0.014 on R@10
+  (0.777 → 0.763): the sharper vector head takes window slots the deep tail
+  used to hold, and fusion does not fully replace them. The two gated metrics,
+  R@5 and NDCG@10, both improve.
+- **The `fts-only` row moved by 0.001–0.008 and had nothing to do with the
+  fixture** — it never reads a vector. It is in this diff because the table it
+  replaces had drifted from the committed dataset: it published
+  `fts-only 0.469 0.623 0.689 0.837 0.748` where the committed `memories.jsonl`
+  and `queries.jsonl` produce `0.467 0.626 0.697 0.836 0.749` (measured on
+  `origin/main` with the old fixture, so the drift predates the regeneration).
+  The vector rows of that published table were stale for the same reason, which
+  is why the "before" numbers quoted above are a re-measurement rather than the
+  published ones: a delta against a table no build produces would be meaningless.
+
+To regenerate the fixture after a dataset change, embed `memories.jsonl` and
+`queries.jsonl` through `internal/embedding`'s client — `EmbedDocument` for the
+memory keys and `EmbedQuery` for the query names, at the configured
+`embedding.dimensions` — and write the result as a single JSON object of
+key → vector, keys sorted. Going through the client is what keeps the fixture in
+the same space as production, prefixes and all; a fixture built by hand from raw
+`/api/embed` calls drifts the moment either side changes.
 
 Two findings, both honest:
 
-- **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.817) beats both single legs (FTS 0.748, vector 0.799) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI. Absolute numbers are lower than the v1 starter because v2 deliberately adds paraphrase queries where lexical overlap is weak (the FTS leg's R@1 falls to 0.469; vector and hybrid carry those).
+- **Hybrid fusion earns its keep.** Hybrid NDCG@10 (0.818) beats both single legs (FTS 0.749, vector 0.801) — the 70/30 RRF weighting is a net win on this dataset. `TestBenchRegressionFloors` asserts this relationship so a regression trips CI. Absolute numbers are lower than the v1 starter because v2 deliberately adds paraphrase queries where lexical overlap is weak (the FTS leg's R@1 falls to 0.467; vector and hybrid carry those).
 - **The graph-expansion bonus was evaluated and removed.** An additive link-graph bonus (former 0.15 default) lifted semantically-adjacent neighbors above exact matches, and a public LongMemEval-S kill experiment showed its recoveries were a strict subset of a deeper vector-k's, with no headroom at production depth. The former `GraphWeight` setting and the bonus are now removed entirely (see `docs/superpowers/specs/2026-07-20-graph-expansion-stays-off-design.md`). The link graph is retained for the Obsidian mirror and `supersedes` ranking.
 
-The v2 dataset overshoots the original ~150/~40 growth target (547/219) to give distractor density room for paraphrase grading. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie.
+The v2 dataset overshoots the original ~150/~40 growth target (547/220) to give distractor density room for paraphrase grading. Regression tests assert **metric floors** (a little below observed), not exact rankings, since RRF scores can tie.
 
 ### Parameter sweep (`ghost bench --sweep`)
 
 The RRF fusion is parameterized (`memory.SearchParams`), and `ghost bench --sweep` grid-searches the vector-leg weight (FTS = complement) — 6 combinations over the same dataset, one prepared store. Findings on the v2 dataset (full table: run `go run ./cmd/ghost bench --sweep`):
 
-- **Leg weights remain robust, and the default still wins.** On 219 queries, vec 0.70 (shipped default) tops the grid at NDCG 0.817; 0.60/0.80/0.90 are within 0.002; only vec 0.30 degrades (0.785). The earlier v1 sweep's "0.3–0.7 flat" band does not fully carry over — the paraphrase-heavy queries reward a stronger vector leg — but there is still no evidence to move off 70/30.
+- **Leg weights remain robust, and the default still wins.** On 220 queries, vec 0.70 (shipped default) tops the grid at NDCG 0.818, level with vec 0.80; 0.60/0.90 are within 0.004; only vec 0.30 degrades (0.790). The earlier v1 sweep's "0.3–0.7 flat" band does not fully carry over — the paraphrase-heavy queries reward a stronger vector leg — but there is still no evidence to move off 70/30.
 - **Outcome: the 70/30 leg weighting ships unchanged, and the graph bonus was removed.** With the leg weights robust across the upper half of the grid, there is no evidence to change the shipped 70/30 split. The graph-expansion bonus was removed rather than kept disabled (see the spec linked above); the link graph is still built for the Obsidian mirror and `supersedes`.
 
 ## Phase 3 — staleness suite (the flagship)
@@ -127,8 +166,8 @@ The trap is untouched in both cases: under decay its distractors are `fact` (nev
 
 ```text
                   graded hybrid NDCG@10   staleness fresh-found/wins   trap correct-wins
-reselect=false    0.817                   1.000 / 1.000                0.929
-reselect=true     0.817                   0.938 / 0.938                0.929
+reselect=false    0.818                   1.000 / 1.000                0.929
+reselect=true     0.818                   0.938 / 0.938                0.929
 ```
 
 **Verdict: not defaultable.** The wider base window **regresses staleness** — `default_branch` (both probes) and `vpn_solution` (state probe) lose the fresh version entirely — while graded and trap stay flat. Ship gate requires staleness not to regress; the flag stays off by default and is available for future experiments behind `SearchParams.DecayReselect`. Reorder-only membership (relevance owns the cut) remains the shipped behavior.

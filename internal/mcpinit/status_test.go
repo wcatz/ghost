@@ -542,7 +542,10 @@ func TestCheckEmbeddingStats(t *testing.T) {
 		{0, 0, true, "embeddings: 0 memories (store empty)"},
 		{0, 5, false, "embeddings: 0/5 memories — vector search and linking inactive"},
 		{5, 5, true, "embeddings: 5/5 memories"},
-		{3, 5, true, "embeddings: 3/5 memories"},
+		// Partial coverage is the state a model/dimension/task-prefix change
+		// leaves behind, so the line has to say the gap is pending work rather
+		// than let "3/5" read as three-fifths of the corpus being searchable.
+		{3, 5, true, "embeddings: 3/5 memories (2 awaiting re-embed)"},
 	}
 	for _, c := range cases {
 		var passed bool
