@@ -332,7 +332,18 @@ ghost import ~/backups/one.jsonl --apply --trust-provenance
 | `--apply` | Actually write. Without it the command is a dry run that reports what it would create, skip and reject, and writes nothing. |
 | `--trust-provenance` | Keep each memory's own source and pin state instead of downgrading them. Off by default; pass it when the artifact is **your own** export. |
 
-A dry run is not a separate code path: every record goes through the same validation an apply run would, so the preview describes the run that follows rather than a similar one. It also opens the database **read-only** — `ghost import` without `--apply` cannot migrate a database whose schema is behind, or seed the builtin rows, while reporting "nothing written". The consequence worth knowing: a dry run needs a database to preview into, so on a machine with no Ghost store yet it reports that rather than creating one. Start a session (or run `ghost mcp init`) first, as `ghost export` also requires.
+A dry run is not a separate code path: every record goes through the same validation an apply run would, so the preview describes the run that follows rather than a similar one. It also opens the database **read-only** — `ghost import` without `--apply` cannot migrate a database whose schema is behind, or seed the builtin rows, while reporting "nothing written". Two consequences worth knowing:
+
+- A dry run needs a database to preview **into**, so on a machine with no Ghost store yet it reports that rather than creating one. Start a session (or run `ghost mcp init`) first, as `ghost export` also requires.
+- Because it cannot migrate, a store from an **older** Ghost is refused with a message naming both versions rather than failing on a missing column:
+
+  ```text
+  error: the database at ~/.local/share/ghost/ghost.db is at schema v11 and this Ghost reads v16
+         — start a session, or run ghost mcp init, to migrate it before exporting it or
+         previewing an import into it
+  ```
+
+  A store from a **newer** Ghost gets a different message — upgrade Ghost — because migrating backwards is not the fix. Both are checked by reading `PRAGMA user_version` on the read-only connection, so the check never writes.
 
 ### Imported provenance
 
