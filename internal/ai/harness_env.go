@@ -75,9 +75,11 @@ func harnessEnv(base []string, kind harnessKind) []string {
 		"http_proxy": true, "https_proxy": true, "no_proxy": true, "all_proxy": true,
 		"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "GIT_SSL_CAINFO": true,
 		"NODE_EXTRA_CA_CERTS": true, "REQUESTS_CA_BUNDLE": true, "CURL_CA_BUNDLE": true,
-		// Git/SSH agent variables are intentionally omitted: every harness
-		// invocation has its tool surface disabled, so an agent credential has
-		// no legitimate consumer in the child.
+		// Git/SSH agent variables are intentionally omitted: no harness
+		// invocation executes a tool (the others disable their tool surfaces;
+		// OpenCode V2 advertises its tools but its non-interactive run declines
+		// every call), so an agent credential has no legitimate consumer in the
+		// child — and leaving it out keeps it unreachable should that ever change.
 		// Harness endpoint/model configuration the user may have set. These
 		// name where to talk and what to call it — they are not credentials.
 		"ANTHROPIC_BASE_URL": true, "ANTHROPIC_MODEL": true, "ANTHROPIC_SMALL_FAST_MODEL": true,
