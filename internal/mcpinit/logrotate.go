@@ -42,52 +42,49 @@ var createLog = func(path string) (*os.File, error) {
 // Failures degrade to a plain open wherever they can. A rename that cannot
 // happen (a directory at "<path>.1", a read-only mount, another process)
 // leaves the log exactly where it was and the open proceeds as it did before
-// rotation existed. A rename that lands but leaves the fresh file uncreatable —
-// a disk that just filled up, which is the case rotation exists for — falls
-// back to appending through "<path>.1", the file that now holds the content,
-// so the caller's line still lands instead of being reported as a broken log
-// and dropped: both spawn sites read an open error as "no log", and one of
-// them then declines to spawn at all. That fallback is silent to the caller
-// and is logged here, because while it lasts "<path>" itself does not exist —
-// the next open recreates it empty — so anything tailing the log by name sees
-// nothing until then. The one case that still returns an error is both opens
-// failing; that error names both paths and both causes.
+// rotation existed. When the name cannot be opened at all — the rename landed
+// and the fresh file will not create (a disk that just filled up, the case
+// rotation exists for), or the name was never openable — the rotated copy is
+// used if it is already there: opening an existing file for append allocates
+// nothing, which is why it still works on the disk that refused the fresh
+// create, and it is where the recent lines are. That copy is never created
+// here: a fallback only ever uses one already sitting beside the log, so a
+// path with nothing to fall back to — a directory wearing the name — reports
+// the original error rather than conjuring a stray file.
+//
+// The fallback is silent to the caller, so it is logged here: while it lasts
+// "<path>" does not exist, so anything tailing the log by name sees nothing —
+// the name returns as soon as the filesystem has room to create it again.
+// One line per open, not per append, and only while the condition lasts. The
+// one case that still returns an error is both files failing to open; that
+// error names both paths and both causes.
 //
 // Rotation is decided by Lstat, so a symlink wearing the log's name is
 // appended through and never renamed: renaming it would move the link out from
 // under whoever arranged it, and untangling the target is theirs to do.
 func openLogForAppend(path string) (*os.File, error) {
-	rotated := false
-	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() && fi.Size() >= logRotateCap {
-		if err := os.Rename(path, path+".1"); err == nil {
-			rotated = true
-		}
-	}
-	if !rotated {
-		return createLog(path)
-	}
-	// Prefer the fresh file; if it cannot be created, append through the
-	// rotated copy, which is where the content now lives.
-	f, err := createLog(path)
-	if err == nil {
-		return f, nil
-	}
 	rotatedPath := path + ".1"
-	f2, err2 := createLog(rotatedPath)
-	if err2 == nil {
-		// The only path in this function that degrades without the caller
-		// noticing, so it is surfaced here: path is absent until the next
-		// open recreates it, which means anything tailing it sees nothing
-		// while the lines are landing in the rotated copy. One line, not
-		// one per append — this fires when the filesystem is out of room,
-		// and the spam would be the same condition repeating.
-		slog.Warn("ghost: log at or above the rotation cap could not be recreated, appending through the rotated copy instead",
+	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() && fi.Size() >= logRotateCap {
+		// Rename first, with nothing of this process's own held across it:
+		// Windows refuses to move a file that is open without a delete-sharing
+		// grant, so the open-then-rename order would make the cap a no-op
+		// there. A rename that fails leaves the log where it is, and the open
+		// below proceeds as it did before rotation existed.
+		_ = os.Rename(path, rotatedPath)
+	}
+
+	// Try the log under its own name first — the open every caller did before
+	// rotation existed.
+	if f, err := createLog(path); err == nil {
+		return f, nil
+	} else if fi, lerr := os.Lstat(rotatedPath); lerr != nil || !fi.Mode().IsRegular() {
+		// Nothing rotated to fall back to: report the open that failed.
+		return nil, err
+	} else if f2, err2 := createLog(rotatedPath); err2 == nil {
+		slog.Warn("ghost: log could not be opened under its own name, appending through the rotated copy instead",
 			"path", path, "rotated", rotatedPath, "error", err)
 		return f2, nil
+	} else {
+		return nil, fmt.Errorf("open log %s after rotating it to %s: %w", path, rotatedPath, errors.Join(err, err2))
 	}
-	// Both opens failed, so there is no file to hand back. Name them both:
-	// the fresh path no longer exists (the rename moved it), so its error
-	// alone would describe a file nobody created, and err2 alone would hide
-	// why the first attempt failed.
-	return nil, fmt.Errorf("open log %s after rotating it to %s: %w", path, rotatedPath, errors.Join(err, err2))
 }

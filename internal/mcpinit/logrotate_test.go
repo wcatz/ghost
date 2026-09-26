@@ -3,6 +3,7 @@ package mcpinit
 import (
 	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -246,6 +247,8 @@ func TestOpenLogForAppendKeepsWorkingWhenTheFreshFileCannotBeCreated(t *testing.
 	}
 	t.Cleanup(func() { createLog = origCreate })
 
+	logs := captureLogOutput(t)
+
 	f, err := openLogForAppend(path)
 	if err != nil {
 		t.Fatalf("the open must still succeed when the fresh file cannot be created: %v", err)
@@ -269,6 +272,75 @@ func TestOpenLogForAppendKeepsWorkingWhenTheFreshFileCannotBeCreated(t *testing.
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Errorf("the fresh file was not created (that is the point of this test), Lstat err = %v", err)
 	}
+	// The caller cannot see this fallback, so it has to be logged — naming
+	// both paths, since "<path>" is the one that has gone missing.
+	for _, want := range []string{path, path + ".1"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("the fallback must be logged with both paths, got %q", logs.String())
+		}
+	}
+}
+
+// TestOpenLogForAppendKeepsWorkingWhileTheFilesystemStaysFull: the fallback is
+// not a one-shot. While the disk stays short of room the log has no file under
+// its own name, so EVERY later open hits the same create failure — and each one
+// must still land in the rotated copy, rather than turning a degraded log into
+// an error the spawn sites act on (one of them records a spawn failure and does
+// not spawn at all). This is also the case the docs describe: the name returns
+// only when the filesystem has room to create it again.
+func TestOpenLogForAppendKeepsWorkingWhileTheFilesystemStaysFull(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lifecycle.log")
+	content := seedOversizedLog(t, path, "written before the disk filled")
+
+	origCreate := createLog
+	createLog = func(p string) (*os.File, error) {
+		if p == path {
+			return nil, errors.New("no space left on device")
+		}
+		return origCreate(p)
+	}
+	t.Cleanup(func() { createLog = origCreate })
+
+	logs := captureLogOutput(t)
+
+	for _, line := range []string{"first line while full\n", "second line while full\n"} {
+		f, err := openLogForAppend(path)
+		if err != nil {
+			t.Fatalf("an open while the filesystem is still full must not fail: %v", err)
+		}
+		if _, err := f.Write([]byte(line)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	}
+
+	rotated, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatalf("read rotated copy: %v", err)
+	}
+	if want := content + "first line while full\nsecond line while full\n"; string(rotated) != want {
+		t.Errorf("rotated copy holds %d bytes, want %d — every line written while the disk was full must be there", len(rotated), len(want))
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Errorf("the fresh file cannot be created while the disk is full, Lstat err = %v", err)
+	}
+	if n := strings.Count(logs.String(), "appending through the rotated copy"); n != 2 {
+		t.Errorf("each degraded open must be logged once, got %d lines:\n%s", n, logs.String())
+	}
+}
+
+// captureLogOutput redirects the package-level default logger for the test's
+// duration so the warning the rotation fallback emits is assertable.
+func captureLogOutput(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 // TestOpenLogForAppendNamesBothFailuresWhenNeitherFileOpens: every other
