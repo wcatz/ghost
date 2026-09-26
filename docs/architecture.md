@@ -30,6 +30,8 @@ ghost project delete|merge        Manage project records
 ghost project bind <id> <path>     Record a project checkout so a session in
                                    that directory resolves it
 ghost obsidian export|sync        Mirror the store to Markdown
+ghost opencode cleanup-sessions   One-shot cleanup of lifecycle sessions
+                                   titled exactly "[ghost]"
 ghost context                     Render passive session context
 ghost bench [--sweep]             Run the built-in benchmark
 ghost upgrade                     Update a standalone binary
@@ -49,6 +51,7 @@ internal/ai/                        Source-aware CLI harness adapters
   source_provider.go               Routes to the caller's harness
   cli_client.go                    Claude-compatible CLI adapter
   opencode_client.go               OpenCode V1/V2 adapter
+  opencode_cleanup.go              One-shot "[ghost]" session backlog cleanup
   codex_client.go                  Codex adapter
   goose_client.go                  Goose adapter
   scratch.go                       Harness scratch/temp handling

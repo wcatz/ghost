@@ -278,6 +278,59 @@ ghost maintenance clean-scratch --apply    # remove strict-signature matches
 is available (Windows, minimal containers) — refuses to remove anything and
 says so rather than risk deleting an open file.
 
+## OpenCode sessions
+
+### `ghost opencode cleanup-sessions`
+
+One-shot cleanup of the lifecycle sessions OpenCode stored before the child's
+data directory was isolated (#588): it targets sessions whose title is
+**exactly** `[ghost]` and whose most recent activity is older than a grace
+period. Sessions with any other title — including `[ghost] follow-up` or a
+different casing — are never touched. Report-only by default:
+
+```bash
+ghost opencode cleanup-sessions                 # count what would go
+ghost opencode cleanup-sessions --grace 24h     # older than a day instead of 1h
+ghost opencode cleanup-sessions --apply         # delete them
+```
+
+| Flag | Meaning |
+|---|---|
+| `--grace <duration>` | Minimum age before a session is eligible, measured from its most recent activity (`created`/`updated`, whichever is later). Default `1h`; `0` accepts any age. |
+| `--limit <n>` | How many sessions `opencode session list` is asked for. Default `20000` (`0` means that default, unlike `--grace 0`); a list that reaches the limit prints a truncation warning instead of pretending it is complete. |
+| `--apply` | Perform the deletes. Without it nothing is deleted. |
+
+Sessions are read through the real `opencode` binary (`session list --format
+json`), so — like your own `opencode session list` — the run is scoped to the
+current project: run it from the checkout whose sessions you want cleaned. The
+child receives Ghost's harness environment allowlist, whose OpenCode-specific
+entry is `OPENCODE_API_KEY`, so a store override such as `OPENCODE_DB` in your
+shell does not reach it (opt in with `GHOST_PASSTHROUGH_ENV`, which re-exposes
+whatever else you name). Timestamps are read as Unix milliseconds on the CLI's
+word alone, so a timestamp that is missing or outside a plausible window
+(before 2020-01-01, or more than five minutes ahead of the clock) is refused
+instead of being read as "very old": a unit or session-JSON-shape change in
+OpenCode's output fails closed on one session rather than making every session
+look eligible, and the command prints a `warning:` line with the number it
+skipped so the refusal never reads as an empty, clean run. To verify the unit
+against your real CLI — `GHOST_LIVE_TESTS=1 go test ./internal/ai/ -v
+-run TestOpenCodeSessionList_TimestampsAreMilliseconds`; it lists read-only,
+resolves the binary the same way this command does (`cli.opencode_binary`,
+else `PATH`), skips when your checkout has no sessions to inspect, and *fails*
+when sessions are listed but none carries a timestamp — that is the shape
+drift, not an empty checkout. Deletion uses `opencode session delete <id>` with
+up to three attempts per session; a failed delete is reported and counted but
+never stops the rest, and the command exits non-zero when any delete failed.
+The timestamp and truncation warnings do not change that exit status: the run
+did what it was asked, so read the report. The binary comes from `cli.opencode_binary`
+(`GHOST_CLI_OPENCODE_BINARY`) when configured, otherwise from `PATH`.
+
+New lifecycle sessions no longer need this command: since #568 the opencode
+child runs with its data directory inside Ghost's invocation-owned scratch
+tree, so it writes to its own store rather than the user's (see
+[Harness subprocess environment](configuration.md#harness-subprocess-environment)).
+This command exists for the backlog that predates that isolation.
+
 ## Maintenance and installation
 
 ### `ghost upgrade`
