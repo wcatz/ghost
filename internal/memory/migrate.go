@@ -14,6 +14,29 @@ import (
 // CHECK values, foreign keys, dropped tables).
 const schemaVersion = 16
 
+// SchemaVersion returns the schema version this build of Ghost expects, which is
+// the value a fully migrated database carries in PRAGMA user_version.
+//
+// It is exported for the callers that open a store read-only and so cannot make
+// it current: they need to know the floor the columns they select are at, and
+// they cannot discover it without asking. See DBUserVersion for the other half.
+func SchemaVersion() int { return schemaVersion }
+
+// DBUserVersion reads PRAGMA user_version off an open database, which is the
+// schema version a store is actually at.
+//
+// It is a plain read, so it works on the read-only connection a preview or an
+// export holds, and it deliberately does not migrate: the caller opening
+// read-only has already decided not to write, and a version check that repaired
+// the store would be the read doing the write.
+func DBUserVersion(db *sql.DB) (int, error) {
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+	return v, nil
+}
+
 // migrations[i] upgrades a database from user_version i to i+1. Each step is
 // frozen in time — it must keep working against the schema as it existed when
 // the step was written, so it carries its own DDL copies rather than reusing

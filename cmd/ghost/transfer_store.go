@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -41,8 +42,48 @@ func openReadOnlyTransferStore(dataDir string) (*memory.Store, error) {
 		}
 		return nil, fmt.Errorf("open %s: %w", dbPath, err)
 	}
+	if err := requireMigratedSchema(db, dbPath); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	// A nil logger is honoured as silence: this store only reads.
 	return memory.NewStore(db, nil), nil
+}
+
+// requireMigratedSchema refuses a store whose schema is behind the columns the
+// transfer readers select, or ahead of this Ghost.
+//
+// The check exists because "read-only" is what makes this hard to get right. No
+// migration runs on this path — deliberately, it is the read-only path — so a
+// database from an older Ghost is missing projects.repo_remote (v11) and
+// memories.scope (v12), and the first query fails with SQLite's own "no such
+// column: repo_remote". That names a column, which reads as a Ghost bug rather
+// than as "this store is older than this Ghost", and it lands on exactly the
+// machine the docs tell a user to prepare: a fresh install, or a binary upgraded
+// but never yet opened against its own database. Meanwhile `ghost import
+// --apply`, which opens read-write, migrates and works, and `ghost backup` works
+// too, because VACUUM INTO reads no columns — so a user comparing the three sees
+// the "safe copy" succeed and the export fail for no stated reason.
+//
+// The remedy sentence is the one the missing-database case already uses, because
+// it is the same remedy: a read-write open, which is a session or `ghost mcp
+// init`. A store from a NEWER Ghost is reported separately and does not get that
+// sentence — OpenDB already refuses it, and "migrate" is not what that user
+// should do.
+func requireMigratedSchema(db *sql.DB, dbPath string) error {
+	version, err := memory.DBUserVersion(db)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", dbPath, err)
+	}
+	switch {
+	case version < memory.SchemaVersion():
+		return fmt.Errorf("the database at %s is at schema v%d and this Ghost reads v%d — start a session, or run ghost mcp init, to migrate it before exporting it or previewing an import into it",
+			dbPath, version, memory.SchemaVersion())
+	case version > memory.SchemaVersion():
+		return fmt.Errorf("the database at %s is at schema v%d, which is newer than this Ghost (v%d) — upgrade Ghost, or point at a different store",
+			dbPath, version, memory.SchemaVersion())
+	}
+	return nil
 }
 
 // openImportStore opens the database for an import run whose apply flag is
