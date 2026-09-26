@@ -17,11 +17,10 @@ import (
 // implementation that can hand back no vector, and records whether the worker
 // spent the memory's one scan slot on the attempt.
 type nilVectorStore struct {
-	searched  atomic.Int32
-	marked    atomic.Int32
-	created   atomic.Int32
-	memoryID  string
-	scopedHit bool
+	searched atomic.Int32
+	marked   atomic.Int32
+	created  atomic.Int32
+	memoryID string
 }
 
 func (s *nilVectorStore) ListProjects(context.Context) ([]memory.Project, error) {
