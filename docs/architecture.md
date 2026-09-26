@@ -164,6 +164,23 @@ Fusion is Reciprocal Rank Fusion, weighted 0.3 FTS / 0.7 vector with k=60.
 A memory retrieved by both legs accumulates both contributions, so a two-leg
 match always outranks a single-leg one.
 
+Before that fused score is sorted and cut, `demoteStatus`
+(`internal/memory/demotion.go`) multiplies it by a status factor: a resolved
+row, and a `_global` row when a specific project is being searched, score
+`× 0.5`. The factor runs inside `fuseCandidatePool`, so it decides membership
+too — a live project memory a raw-score cut would have lost to a demoted row
+takes that slot. It only ever scales, so the demotion itself never excludes a
+row: whether a demoted row comes back is the window's ordinary question of
+rank, not a filter. Before decay reorders the surviving window, a demoted row
+still leads whenever no undemoted row comes within the factor of it;
+otherwise a comparable live row takes its place. That is what keeps resolved
+memories and shared rules findable while stopping them from leading every
+result. A cross-project
+search leaves `_global` undemoted (there is no project whose own memories it
+could be padding), and explain mode reports the factor per row
+as `status_factor`, computed by the same `statusDemotionFactor` the ranking
+used.
+
 Window selection reserves real estate for the keyword leg. A plain cut on the
 fused score could not admit a keyword-only hit at all: the keyword leg's rank-1
 row scores 0.3/61 ≈ 0.0049, while the vector leg's 20th row — still well

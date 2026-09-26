@@ -92,6 +92,60 @@ func DemotionPenalties(ctx context.Context, db sqlQueryer, ids []string, pinned 
 	return penalty, nil
 }
 
+// Status demotion: multiplicative factors on a candidate's fused score, as
+// opposed to the window-scoped penalty counts below. Both are demotion, and
+// both live here so the ranking seam (fuseCandidatePool) and explain mode
+// (ExplainSearchScoped) read the same constants through one function.
+const (
+	// resolvedDemotionFactor halves a resolved row: the resolve verdict means
+	// "stop surfacing this first", not "forget it", so it must lose to a
+	// comparable live memory and still win when nothing better matched.
+	resolvedDemotionFactor = 0.5
+	// globalDemotionFactor halves a _global row in a project-scoped search:
+	// shared rows enter every project's legs, so without this they pad a
+	// project's results ahead of the project's own memories.
+	globalDemotionFactor = 0.5
+)
+
+// statusDemotionFactor is the single decision on how far a candidate sinks for
+// its status rather than its match: a resolved row, or a _global row when a
+// specific project is being searched. Ranking applies it to the fused score
+// inside fuseCandidatePool — before the cut, so it decides membership as well
+// as order — and explain mode reports the same number per row, so the factor
+// shown is the factor that ranked.
+//
+// It never drops a row: every branch only scales a score, which is what keeps
+// resolved memories searchable and keeps _global rows findable from a project.
+// Whether a scaled row comes back is the window cut's ordinary rank question,
+// not an exclusion rule.
+func statusDemotionFactor(resolved bool, rowProjectID, searchProjectID string) float64 {
+	factor := 1.0
+	if resolved {
+		factor *= resolvedDemotionFactor
+	}
+	// Empty means a cross-project search: there is no project whose own
+	// memories a shared row could be padding, so nothing to demote. Searching
+	// _global itself has the same symmetry — a project must not demote its
+	// own rows.
+	if rowProjectID == "_global" && searchProjectID != "" && searchProjectID != "_global" {
+		factor *= globalDemotionFactor
+	}
+	return factor
+}
+
+// demoteStatus scales every fused candidate's score by statusDemotionFactor.
+// fuseCandidatePool calls it just before its own sort, so the demoted score is
+// what the window cut, the score map, decayRank's base and explain's reported
+// rank all read — one multiplication point rather than a second ranking path.
+func demoteStatus(pool []*hybridCandidate, p SearchParams) {
+	for _, c := range pool {
+		factor := statusDemotionFactor(c.resolved, c.projectID, p.ProjectID)
+		if factor != 1.0 {
+			c.score *= factor
+		}
+	}
+}
+
 // StableDemote reorders items ascending by penalty (ties keep existing
 // relative order), mirroring demoteSuperseded's sort.SliceStable pattern
 // (internal/memory/vector.go) generically over any item shape that can name

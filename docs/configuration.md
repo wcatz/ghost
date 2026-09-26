@@ -169,6 +169,13 @@ search:
 
 FTS candidates are not subject to this floor. Raise it only after testing against your corpus with `ghost bench`; a higher value can remove weak semantic matches, while `0.0` preserves the historical behavior of dropping only non-positive cosine scores.
 
+Two more ranking signals are fixed rather than configurable, because they describe the rows being ranked instead of a preference:
+
+- A resolved memory's fused score is multiplied by `0.5`.
+- A `_global` memory's fused score is multiplied by `0.5` when a specific project is searched (never in `ghost_search_all`).
+
+Both apply before the result window is chosen, so they affect which memories are returned as well as their order, and neither ever filters a memory out. `ghost_memory_search` with `explain: true` reports them per row as `status_factor`.
+
 ## Session injection
 
 The SessionStart hook injects a bounded context digest. The default category bias reserves slots for high-signal behavioral notes:
