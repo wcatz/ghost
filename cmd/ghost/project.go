@@ -387,7 +387,7 @@ func openDiagnosticStore() *memory.Store {
 	if err != nil {
 		return nil
 	}
-	db, err := memory.OpenDBReadOnly(filepath.Join(dataDir, "ghost.db"))
+	db, err := memory.OpenReadDB(filepath.Join(dataDir, "ghost.db"))
 	if err != nil {
 		return nil
 	}

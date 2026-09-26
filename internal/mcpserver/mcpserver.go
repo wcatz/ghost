@@ -13,9 +13,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/ai"
+	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
@@ -171,6 +173,17 @@ func provenanceFor(req *mcp.CallToolRequest) memory.Provenance {
 		return memory.Provenance{Agent: agent}
 	}
 	return memory.Provenance{Agent: detectCallingSource()}
+}
+
+// assembleCapableStore narrows provider.MemoryStore's concrete backing store to
+// the one method the context assembler needs. Candidates is not part of
+// provider.MemoryStore — the interface is a capability surface for the tools
+// Ghost exposes, and the retriever contract is a storage detail — so s.store is
+// type-asserted to this interface at call time; *memory.Store satisfies it. A
+// provider that cannot retrieve candidates gets a structured error rather than
+// a silently unfiltered answer.
+type assembleCapableStore interface {
+	Candidates(ctx context.Context, req memory.CandidateRequest) (*memory.CandidateSet, error)
 }
 
 // resolveCapableStore narrows provider.MemoryStore's concrete backing store to
@@ -598,7 +611,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_search",
 		Title:       "Search Memories",
-		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category is applied after a limit*3 fetch and may be incomplete in a sparse index; use ghost_memories_list for exhaustive category browsing. Scope is applied while the result window is selected, so eligible rows can replace conflicting candidates, but retrieval remains windowed and filtered results may still be incomplete. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
+		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category and scope are both applied to a widened candidate set before the result window is closed, so a row that matches the filters can take a slot even when it ranked below the window; retrieval is still windowed, so a filtered result may be incomplete \u2014 use ghost_memories_list for exhaustive category browsing. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -633,25 +646,17 @@ func (s *Server) registerTools() {
 			return nil, nil, err
 		}
 
-		searchLimit := args.Limit
-		// Category remains a post-filter, so its fetch has to leave room for
-		// non-matching rows. Scope does not: SearchHybridScoped applies it
-		// inside window selection, where eligible rows can backfill the window.
-		if args.Category != "" {
-			searchLimit = args.Limit * 3
-			if searchLimit > 100 {
-				searchLimit = 100
-			}
-		}
 		// explain returns the store's ranking diagnosis instead of the
-		// formatted list.
+		// formatted list. It reports the pre-category window: the explain
+		// projection of the assembler's trace replaces this branch once the
+		// stages carry it.
 		if args.Explain {
-			ex, xErr := s.store.ExplainSearchScoped(ctx, args.ProjectID, args.Query, queryVec, searchLimit, scopeFilter)
+			ex, xErr := s.store.ExplainSearchScoped(ctx, args.ProjectID, args.Query, queryVec, args.Limit, scopeFilter)
 			if xErr != nil {
 				return nil, nil, fmt.Errorf("explain failed: %w", xErr)
 			}
 			if args.Category != "" {
-				ex.Notes = append(ex.Notes, "a category filter is applied after the search by this tool; rows below are pre-filter")
+				ex.Notes = append(ex.Notes, "a category filter is applied inside the result window rather than after it; rows below are pre-filter")
 			}
 			payload, mErr := json.MarshalIndent(ex, "", "  ")
 			if mErr != nil {
@@ -661,38 +666,45 @@ func (s *Server) registerTools() {
 				Content: []mcp.Content{&mcp.TextContent{Text: string(payload)}},
 			}, nil, nil
 		}
-		// Scope goes down into search selection, not around the finished
-		// window. Ineligible candidates are dropped before the cut, so the
-		// window is filled from the rows beyond it.
-		memories, err := s.store.SearchHybridScoped(ctx, args.ProjectID, args.Query, queryVec, searchLimit, scopeFilter)
+		// The formatted path goes through the context assembler, which owns
+		// retrieval, scope, category and the window. Both filters are applied
+		// to the widened candidate set before the window closes, so a matching
+		// row ranked below the window takes a slot instead of the tool
+		// reporting absence while the memory exists (#573). Retrieval itself
+		// is unchanged: the assembler asks the store for the same legs,
+		// parameters and configured vector floor this path used.
+		candidates, ok := s.store.(assembleCapableStore)
+		if !ok {
+			return nil, nil, fmt.Errorf("ghost_memory_search: store does not support candidate retrieval")
+		}
+		result, err := assemble.Run(ctx, candidates, assemble.Request{
+			ProjectID: args.ProjectID,
+			Query:     args.Query,
+			QueryVec:  queryVec,
+			Scope:     scopeFilter,
+			Category:  args.Category,
+			Source:    assemble.SourceSearch,
+			Budget:    assemble.Budget{MaxItems: args.Limit},
+			Condition: assemble.CondHybrid,
+			Now:       time.Now().UTC(),
+		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("search failed: %w", err)
 		}
-
-		// Category remains the one tool-level post-filter.
-		if args.Category != "" {
-			filtered := memories[:0]
-			for _, m := range memories {
-				if m.Category == args.Category {
-					filtered = append(filtered, m)
-				}
-			}
-			memories = filtered
-		}
-
-		// Apply the requested limit once, after category filtering. Scope has
-		// already backfilled the selected window and must not be reintroduced
-		// here as a post-filter.
-		if len(memories) > args.Limit {
-			memories = memories[:args.Limit]
+		// The shared item renderer, one line per admitted memory. Search keeps
+		// its own framing: this surface's answer is the listing plus, when a
+		// filter left it short, the caveat below.
+		var listing strings.Builder
+		for _, item := range result.Items {
+			listing.WriteString(item.Line())
+			listing.WriteString("\n")
 		}
 		// A filtered result shorter than the requested limit may reflect a
-		// finite candidate window rather than the whole store. This conservative
-		// check runs after category filtering so a scope-filled pre-category
-		// window cannot hide a category shortfall.
-		maybeIncomplete := (args.Category != "" || len(scopeFilter) > 0) && len(memories) < args.Limit
+		// finite candidate window rather than the whole store. The assembler
+		// has already applied both filters, so this reads the admitted count.
+		maybeIncomplete := (args.Category != "" || len(scopeFilter) > 0) && len(result.Items) < args.Limit
 
-		if len(memories) == 0 {
+		if len(result.Items) == 0 {
 			// A filtered zero result describes the searched candidate window,
 			// not the whole store. Keep that caveat on the empty answer too.
 			text := "No matching memories found."
@@ -704,7 +716,7 @@ func (s *Server) registerTools() {
 			}, nil, nil
 		}
 
-		text := formatMemories(memories)
+		text := listing.String()
 		if maybeIncomplete {
 			if caveat := filterCaveat(args.Category, scopeFilter); caveat != "" {
 				text += "\n\n" + caveat
@@ -2266,9 +2278,9 @@ func sourceLabel(source string) string {
 }
 
 // filterCaveat names the filters that can make a windowed result short and
-// gives the caller a filter-appropriate next step. Scope is selected before the
-// final cut, but its candidate pool is still finite; category remains a
-// post-filter over a deliberately wider fetch.
+// gives the caller a filter-appropriate next step. Both filters are applied
+// before the final cut now, but the candidate pool they select from is still
+// finite, so further matches may exist beyond it.
 func filterCaveat(category string, scope map[string]string) string {
 	var filters []string
 	if category != "" {

@@ -56,7 +56,7 @@ func openReadOnlyTransferStore(dataDir string) (*memory.Store, error) {
 // check is the only thing under test; nothing else uses this seam.
 func openReadOnlyTransferStoreUnchecked(dataDir string) (*memory.Store, *sql.DB, string, error) {
 	dbPath := filepath.Join(dataDir, "ghost.db")
-	db, err := memory.OpenDBReadOnly(dbPath)
+	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
 		if errors.Is(err, memory.ErrNoDatabase) || os.IsNotExist(err) {
 			return nil, nil, dbPath, fmt.Errorf("no database at %s — start a session, or run ghost mcp init, first", dbPath)

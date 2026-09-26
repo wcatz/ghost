@@ -10,7 +10,7 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// TestOpenReadOnlyTransferStoreRefusesAnUnmigratedDatabase: OpenDBReadOnly runs
+// TestOpenReadOnlyTransferStoreRefusesAnUnmigratedDatabase: OpenReadDB runs
 // no migrations, and a read-only transfer store used to read no PRAGMA
 // user_version, so a database behind the current version failed on its very
 // first query with a raw SQLite message naming a column the schema did not have

@@ -298,12 +298,18 @@ so an out-of-scope row cannot consume a result slot and force the tool to report
 absence for an eligible row that was retrieved but not selected. The hydration
 backfill after the cut draws from that same narrowed pool, so a row that
 disappears between the leg queries and hydration is replaced by the next
-strongest *in-scope* candidate rather than shortening the result. Category is a
-separate tool-level post-filter and therefore uses a wider store fetch. Explain
+strongest *in-scope* candidate rather than shortening the result. Explain
 mode calls the same scoped selection entry point, so its included rows and
 scope-exclusion reasons describe the store result rather than an unscoped
 ranking. Ordering is deterministic (ties broken by ID), because the demotion
 penalties applied downstream depend on order.
+
+The formatted `ghost_memory_search` path does not call that entry point
+directly. It goes through `assemble.Run` (see [Context assembly](#context-assembly-target-design)),
+which asks `Store.Candidates` for the same legs, parameters and configured
+vector floor, and then applies the caller's category filter to the widened
+candidate set before the window closes. Retrieval is unchanged; what moved is
+which set the filter sees.
 
 The main schema tables are:
 
@@ -389,22 +395,76 @@ A memory is described along four independent axes. The axes are orthogonal: a ro
 | Axis | Question it answers | Storage today | Status |
 |---|---|---|---|
 | **Lifecycle** | Is this memory still current, and what replaced it? | `memories.resolved_at`, `memories.pinned`, the relation CHECK in `internal/memory/schema.go` (`duplicate`, `contradicts`, `supersedes`, `elaborates`, `causes`), `memory_snapshots`, `audit_log` | Partial — no retention/ownership tiers ([#587](https://github.com/wcatz/ghost/issues/587)) and no documented transition model ([#579](https://github.com/wcatz/ghost/issues/579)) |
-| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Partial — snapshot replacement and restore preserve these fields, but normal reads and ranking do not expose or consult them ([#575](https://github.com/wcatz/ghost/issues/575)); wiring them into retrieval is part of the assembler ([#581](https://github.com/wcatz/ghost/issues/581)) |
+| **Validity** | Is this memory true *now*, and when was it last checked? | `memories.valid_from`, `valid_until`, `verified_at` | Partial — the columns are read into `memory.Memory` and stage 2 of the assembler evaluates them against the request clock, so a row with a closed window is withheld rather than ranked ([#581](https://github.com/wcatz/ghost/issues/581)). No MCP writer exists yet (PR 3), so a store nobody has restored or imported reads every row as unset and the evaluation is corpus-neutral; `Store.Restore` and `Store.ImportMemory` both carry the triple, which is where a non-NULL window first comes from ([#575](https://github.com/wcatz/ghost/issues/575)) |
 | **Relationships** | What does this memory connect to, contradict, or replace? | `memory_links` (directed), near-duplicate links created by `Upsert`, scope-conflict exemption ([#563](https://github.com/wcatz/ghost/pull/563)) | Every writer refuses a scope-conflicting pair and every reader ignores one already stored ([#563](https://github.com/wcatz/ghost/pull/563), [#574](https://github.com/wcatz/ghost/issues/574)). Writers: `Upsert`'s two `duplicate` dedup probes (at save time), the linker's `related` edges, and `ghost supersede`'s `supersedes`/`causes` candidates. Readers: `DemotionPenalties` and `SupersedePenalties` (ranking), `ghost resolve`'s supersedes piggyback and the repair pass's matching floor (which would otherwise stamp `resolved_at` on the older endpoint), and the two fold-target liveness checks that decide whether a row may be folded into (which would otherwise turn every re-save of that row into a duplicate) |
 | **Confidence** | How much should a caller trust this, and why is it here? | `memories.confidence` plus write-time provenance columns `agent`, `session_id`, `source_ref` | Inert — written on some paths, never read by ranking ([#575](https://github.com/wcatz/ghost/issues/575)); history is missing entirely ([#578](https://github.com/wcatz/ghost/issues/578)) |
 
 Axis interaction rules:
-
 - **Supersede wins over time.** A memory that has a live replacement is demoted regardless of a later `verified_at` or higher confidence on the old row.
 - **Resolved leaves injection, not the database.** `resolved_at` removes a row from ranked session injection ([#559](https://github.com/wcatz/ghost/issues/559)) but keeps it searchable and auditable.
-- **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled block; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)).
+- **Contradiction is symmetric, duplicate is directional.** A `contradicts` pair must never appear together in one assembled block; a `duplicate` edge points at the row that survives, and folding must not cross a scope conflict ([#574](https://github.com/wcatz/ghost/issues/574)). Not yet enforced: stage 5 of the assembler *records* a co-occurring `contradicts` pair and leaves both rows in place, because the existing contract requires a contradicted row to survive while a duplicate restatement sinks. Separating the pair needs its own contract change ([#581](https://github.com/wcatz/ghost/issues/581)).
 - **A scope conflict blocks the relation, and is not repaired by deleting it.** Two memories naming `environment=production` and `environment=development` are two claims about two places, so no relation may be proposed or created between them — not `duplicate` (at save time), not `related` (at link time), not `supersedes` (at supersede time), because each of those writers is the only one that can see both scopes at the moment it decides. An edge that already exists stays in the graph and is exempt at read time instead: every reader ignores it, and none deletes a row to reach that verdict. The exemption is stated where the decision is made, which is not the same place everywhere. The two cosine writers narrow *inside* the candidate query (`SearchVectorScoped`), so a neighbour budget counts only rows a memory may relate to. `Upsert`'s two dedup probes compare the incoming scope to each candidate *after* their `LIMIT 15`, so a save whose fifteen best FTS matches all name another environment finds no compatible candidate even when one exists at rank 16 — a known asymmetry, not a designed one. The two statements that read a `supersedes` edge to decide whether a row is still foldable cannot filter afterwards at all, because the same `LIMIT` chooses the candidates, so they carry a second, SQL statement of the rule (`scopesConflictSQL`, held to the Go one by a test that runs both over the same table).
 - **Scope and project membership are not axes.** They are access predicates applied before scoring ([#577](https://github.com/wcatz/ghost/issues/577)); a memory that fails them is out of scope regardless of its other axes.
 - **Provenance is history, not a weight.** `agent`/`session_id`/`source_ref` describe who wrote a row; append-only history of those changes is [#578](https://github.com/wcatz/ghost/issues/578).
 
 ## Context assembly (target design)
 
-> **Target design, not current behavior.** Today there is no assembler: `ghost_memory_search` (`internal/mcpserver`) and the session-start injector (`internal/mcpinit`) each run their own ad-hoc retrieve → filter → rank → trim sequence, which is why the two surfaces disagree about scope ([#577](https://github.com/wcatz/ghost/issues/577)). The injector ignores `memories.scope` altogether — `loadSessionContext` never selects the column, so a session-start block can carry rows that conflict with the caller's scope. The formatted `ghost_memory_search` path does honour it, and does so inside hybrid window selection before the cut ([#573](https://github.com/wcatz/ghost/issues/573)), which leaves category as its only post-filter, and its `explain: true` branch explains that same scoped ranking ([#571](https://github.com/wcatz/ghost/issues/571)). The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581).
+> **Partly built.** The seam exists (`internal/assemble`, `assemble.Run`, and
+> `Store.Candidates` behind it), and the formatted `ghost_memory_search` path
+> runs on it with both filters applied before the window closes. What does not
+> exist yet: the session-start injector still runs its own ad-hoc pipeline
+> ([#577](https://github.com/wcatz/ghost/issues/577)), the conflict, dedup,
+> diversity and budget stages are pass-throughs, abstention is not derived
+> ([#580](https://github.com/wcatz/ghost/issues/580)), and `explain: true` still
+> calls the store's own diagnosis rather than projecting the assembler's trace
+> ([#583](https://github.com/wcatz/ghost/issues/583), [#571](https://github.com/wcatz/ghost/issues/571)). The plan to converge the surfaces is [#581](https://github.com/wcatz/ghost/issues/581), staged in
+> [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md).
+
+What exists now:
+
+- **`internal/assemble`** owns selection, validity, predicates, provenance, the
+  stage list, budget closure, the outcome and the shared item renderer. It
+  depends on one method, `Candidates(context.Context, memory.CandidateRequest)`,
+  never on `*sql.DB`. `internal/memory` never imports it; the retriever DTOs
+  live in `internal/memory` because a method on `*memory.Store` cannot name a
+  type from a package that imports it.
+- **`Store.Candidates`** returns a *widened, untrimmed* set: the window selected
+  exactly as production search selects it (fusion, status demotion, the keyword
+  reservation, hydration with its deleted-row backfill, decay over the window,
+  then the supersede and near-duplicate demotions), followed by the rows that
+  window cut, in the same decay order. With no predicate, closing the set to the
+  window reproduces the production search row for row; with a predicate, rows
+  beyond the window are reachable. Re-deriving the window's decisions from the
+  wider pool would drop the reservation and widen the demotions, so it is not
+  done.
+- **One snapshot per retrieval.** Legs, hydration, the edge load and the penalty
+  lookups run in one read transaction on an injected read-only handle
+  (`memory.OpenReadDB` + `memory.NewStoreWithRead`), whose DSN has no
+  `_txlock`, so the transaction is a plain deferred read and does not take the
+  write lock the primary handle's `BEGIN IMMEDIATE` would. A store with no read
+  handle falls back to the primary connection and logs that cost once.
+  `OpenReadDB` refuses `:memory:`; in-memory and bench stores run the snapshot on
+  the handle they already hold, which has no concurrent writer.
+- **Stage 3 is where category and scope verdicts live**, and both run over the
+  widened set. That is [#573](https://github.com/wcatz/ghost/issues/573)'s
+  mechanism closed: a post-filter over a closed window can only remove from the
+  answer, so a matching row the window cut was invisible and the tool reported
+  absence while the memory existed. Project membership stays in SQL and is
+  recorded as a per-row verdict, never applied as a second drop.
+- **The four validity columns are readable.** `Memory` now carries
+  `valid_from`, `valid_until` and `verified_at` as `*string`, bound on every
+  retrieval scan, and stage 2 interprets them against the request clock
+  (`valid`, `future`, `expired`, `unverified`, `unset`; an unreadable value is
+  reported as `validity_unparseable` rather than read as valid). Nothing writes
+  them yet, so every existing row reads nil and stage 2 is corpus-neutral; the
+  writer contract is the next change.
+- **The trace is recorded unconditionally**, with per-stage counts, dropped ids
+  and per-row decisions. `explain: true` does not read it yet.
+
+What the remaining stages will add, in pipeline order: conflict recording and
+dedup reordering (stage 5-6, where `contradicts` is recorded and not acted on),
+diversity (7, off by default), the budget byte caps and the `response_fit`
+post-pass (8), and abstention as an outcome (3, [#580](https://github.com/wcatz/ghost/issues/580)).
 
 Both consumers should call one assembler with an explicit budget, so every surface applies the same predicates in the same order and every stage is testable in isolation:
 
@@ -446,6 +506,7 @@ The guarantees rest on these settings:
 | `busy_timeout(1000)` | `mcpinit.roDSN`, CLI read paths | Read-only connections are not exposed to write-lock contention under WAL, so a short timeout is enough to catch real problems without hanging a hook. |
 | `SetMaxOpenConns(1)` | `memory.OpenDB` | Pins each handle to one connection so `PRAGMA data_version` polls compare against a stable baseline. `obsidian sync` uses that counter to detect commits from other processes; an unpinned pool would compare connection-local counters instead of points in database history. |
 | `foreign_keys(ON)` | `memory.OpenDB` | Enforces the `memories.project_id` and `memory_links` foreign keys, so a write cannot insert a memory for a project that does not exist or leave a link pointing at a row that is gone. A connection without it accepts both, and the row-level damage is invisible until a later read cascades or a project listing disagrees with the memories attributed to it. |
+| no `_txlock` | `memory.OpenReadDB` | The read-only handle exists so a snapshot read can be a plain deferred `BEGIN`. On the primary handle every `BeginTx` is `BEGIN IMMEDIATE`, so a read transaction there would hold the write lock for its whole lifetime — long enough to block every concurrent writer in the machine. |
 | `_txlock=immediate` | `memory.OpenDB` | `BeginTx` issues `BEGIN IMMEDIATE`, taking the write lock at transaction start. A deferred transaction that reads first and writes later holds a WAL read snapshot, and the read-to-write upgrade fails with `SQLITE_BUSY_SNAPSHOT` if another process committed in between — an error `busy_timeout` does not retry. Without this, a read-then-write transaction such as `UpdateMemory` fails outright under concurrent handles instead of waiting. |
 
 A read-only connection deliberately sets no `journal_mode`: setting it writes the database header, which a read-only connection cannot do.

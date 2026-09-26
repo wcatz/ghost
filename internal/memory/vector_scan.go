@@ -158,6 +158,14 @@ type vectorRows struct {
 	// any, which moves a loop-local to the heap — six allocations for every row
 	// of the corpus, which is a sixth of the whole per-query cost.
 	dest vectorScanDest
+	// facts is what this scan could not use: rows it skipped for a recorded
+	// identity from another vector space, and rows whose width does not match the
+	// query. It lives on the snapshot rather than in a return value because the
+	// snapshot is already the thing every vector leg borrows, and a caller that
+	// wants the facts (a leg deciding whether its silence means "nothing matched"
+	// or "rows were skipped") reads them from the one scan rather than paying
+	// for a second pass over the embeddings.
+	facts vectorLegFacts
 }
 
 // vectorScanDest holds one row as the driver delivered it. The values are only
@@ -174,6 +182,9 @@ func (v *vectorRows) reset() {
 	v.embeds = v.embeds[:0]
 	v.rows = v.rows[:0]
 	v.cands = v.cands[:0]
+	// The counts belong to the scan that set them, and the snapshot is pooled
+	// across queries, so a stale one would be read as this query's.
+	v.facts = vectorLegFacts{}
 }
 
 func (v *vectorRows) column(buf []byte, sp vecSpan) []byte { return buf[sp.off : sp.off+sp.n] }
@@ -242,6 +253,7 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 	first := true
 
 	for rows.Next() {
+		v.facts.scanned++
 		// RawBytes, not string/[]byte destinations. database/sql clones a
 		// string or []byte column into a fresh allocation for every row, which
 		// is one throwaway per column of every memory in the corpus; a
@@ -299,14 +311,18 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	v.facts.mismatched, v.facts.mismatchedModel = mismatched, mismatchedModel
 	if s.logger != nil && len(foreign) > 0 {
 		// Sorted so a log is deterministic whichever row order the planner
-		// happened to yield.
+		// happened to yield, and so the fact's single foreignModel names a
+		// stable identity.
 		models := make([]string, 0, len(foreign))
 		for m := range foreign {
 			models = append(models, m)
+			v.facts.foreign += foreign[m]
 		}
 		sort.Strings(models)
+		v.facts.foreignModel = models[0]
 		for _, m := range models {
 			if s.warnForeignOnce(m) {
 				s.logger.Warn("vector search skipped embeddings from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded (reported once per retired identity)",

@@ -74,6 +74,21 @@ type Memory struct {
 	// column is NULL for anything written before schema v12, since inventing
 	// a scope for existing memories would claim where they apply.
 	Scope map[string]string `json:"scope,omitempty"`
+
+	// Validity: when this memory was true, and when someone last checked.
+	//
+	// All three are pointers because nil is the honest reading of a NULL
+	// column — no claim was made — while an empty string would look like a
+	// claim about the empty moment. Nothing writes them yet (the writer
+	// contract is the follow-up change), so every row in an existing store
+	// reads nil; the fields are on the type because the schema already stores
+	// them and the retrieval path has to carry them to the assembler that
+	// evaluates them. SQLite holds them as unconstrained text, so the values
+	// are the stored strings, not parsed times: interpreting them belongs to
+	// the caller, which is the only layer that knows the request clock.
+	ValidFrom  *string `json:"valid_from,omitempty"`
+	ValidUntil *string `json:"valid_until,omitempty"`
+	VerifiedAt *string `json:"verified_at,omitempty"`
 }
 
 // Project represents a registered project.
@@ -85,20 +100,32 @@ type Project struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
-// sqlQueryer is the read surface shared by *sql.DB and *sql.Tx. Search
-// explanations use it to keep their production result and diagnostic reads on
-// one SQLite snapshot.
-type sqlQueryer interface {
+// Queryer is the read surface shared by *sql.DB and *sql.Tx. Search
+// explanations and candidate retrieval use it to keep their production result
+// and diagnostic reads on one SQLite snapshot: a method that takes a *sql.DB
+// cannot be redirected onto a transaction, and a transaction that issued its
+// reads through the pool would wait for a second connection the single-
+// connection store does not have.
+type Queryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 // Store manages the SQLite memory database.
 type Store struct {
 	db *sql.DB
-	// snapshot is set only on the short-lived Store used by ExplainSearch. It
-	// redirects read-only search helpers to the transaction's consistent view.
-	snapshot *sql.Tx
+	// snapshot is set only on the short-lived Store a snapshot read builds for
+	// itself. It redirects read-only search helpers to the transaction's
+	// consistent view.
+	snapshot Queryer
+	// readDB is the read-only handle a production store is given so
+	// Candidates can take its snapshot transaction without taking the write
+	// lock the primary handle's BEGIN IMMEDIATE would. nil means "use db",
+	// which is correct for in-memory and bench stores (no concurrent writer)
+	// and logged for a file-backed one.
+	readDB   *sql.DB
 	mu       sync.RWMutex
+	warnOnce sync.Once
 	logger   *slog.Logger
 	onSave   func(projectID string) // optional callback after memory create/upsert
 
@@ -228,7 +255,49 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 	return s
 }
 
-func (s *Store) queryDB() sqlQueryer {
+// NewStoreWithRead is NewStore with a read-only handle for snapshot reads.
+//
+// The production DSN issues BEGIN IMMEDIATE, so a transaction on the primary
+// handle takes the write lock for its whole lifetime. Candidates needs a
+// transaction (legs, hydration, edges and penalty lookups on one snapshot), and
+// holding the write lock across a full retrieval would block every concurrent
+// writer in the machine — the reflection, embedding and linking workers, and
+// any save arriving on the live MCP server. The read handle's DSN has no
+// _txlock, so the same transaction is a plain deferred read: WAL readers do not
+// wait on a writer, which is the whole point of running the store in WAL.
+func NewStoreWithRead(db, readDB *sql.DB, logger *slog.Logger) *Store {
+	s := NewStore(db, logger)
+	s.readDB = readDB
+	return s
+}
+
+// readHandle is the handle snapshot reads run on: the injected read-only
+// connection when there is one, otherwise the primary handle.
+func (s *Store) readHandle() *sql.DB {
+	if s.readDB != nil {
+		return s.readDB
+	}
+	return s.db
+}
+
+// warnNoReadHandle records the cost of running a snapshot read on the primary
+// handle, once per store. The primary DSN issues BEGIN IMMEDIATE, so a
+// transaction there takes the write lock for its whole lifetime; a store
+// without a read handle is the in-memory, bench and test case, where there is
+// no second process and no writer to block, and a file-backed production store
+// that was wired up wrongly.
+func (s *Store) warnNoReadHandle() {
+	if s.db == nil {
+		return
+	}
+	s.warnOnce.Do(func() {
+		s.logger.Warn("store has no read-only handle: candidate retrieval takes its snapshot on the primary connection, whose DSN issues BEGIN IMMEDIATE, so the transaction holds the write lock; build the store with NewStoreWithRead and memory.OpenReadDB for a file-backed database")
+	})
+}
+
+// queryDB is the read surface the search seams use: the snapshot transaction
+// when one is in force, otherwise the store's own handle.
+func (s *Store) queryDB() Queryer {
 	if s.snapshot != nil {
 		return s.snapshot
 	}
@@ -2771,7 +2840,7 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope
+		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
 		FROM memories
 		WHERE (project_id = ? OR project_id = '_global')
 		  AND resolved_at IS NULL
@@ -2829,7 +2898,7 @@ func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit in
 	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT m.id, m.project_id, m.category, m.content, m.importance, m.access_count,
 		       m.last_accessed, m.source, m.tags, m.pinned, m.resolved_at, m.created_at, m.updated_at,
-		       m.agent, m.session_id, m.source_ref, m.confidence, m.scope
+		       m.agent, m.session_id, m.source_ref, m.confidence, m.scope, m.valid_from, m.valid_until, m.verified_at
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE (m.project_id = ? OR m.project_id = '_global')
@@ -2852,7 +2921,7 @@ func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Me
 	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT m.id, m.project_id, m.category, m.content, m.importance, m.access_count,
 		       m.last_accessed, m.source, m.tags, m.pinned, m.resolved_at, m.created_at, m.updated_at,
-		       m.agent, m.session_id, m.source_ref, m.confidence, m.scope
+		       m.agent, m.session_id, m.source_ref, m.confidence, m.scope, m.valid_from, m.valid_until, m.verified_at
 		FROM memories m
 		JOIN memories_fts f ON f.rowid = m.rowid
 		WHERE memories_fts MATCH ?
@@ -2874,7 +2943,7 @@ func (s *Store) GetByCategory(ctx context.Context, projectID, category string, l
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope
+		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
 		FROM memories
 		WHERE (project_id = ? OR project_id = '_global') AND category = ?
 		ORDER BY importance DESC, created_at DESC
@@ -2895,7 +2964,7 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope
+		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
 		FROM memories
 		WHERE project_id = ?
 		ORDER BY importance DESC, created_at DESC
@@ -2947,7 +3016,7 @@ func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memo
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope
+		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
 		FROM memories
 		WHERE project_id = ?
 		  AND resolved_at IS NULL
@@ -2977,7 +3046,7 @@ func (s *Store) ResolvedCandidates(ctx context.Context, projectID string) ([]Mem
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, category, content, importance, access_count,
 		       last_accessed, source, tags, pinned, resolved_at, created_at, updated_at,
-		       agent, session_id, source_ref, confidence, scope
+		       agent, session_id, source_ref, confidence, scope, valid_from, valid_until, verified_at
 		FROM memories
 		WHERE project_id = ?
 		  AND resolved_at IS NOT NULL
@@ -4023,12 +4092,14 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 		var agent, sessionID, sourceRef sql.NullString
 		var confidence sql.NullFloat64
 		var scopeRaw sql.NullString
+		var validFrom, validUntil, verifiedAt sql.NullString
 
 		if err := rows.Scan(
 			&m.ID, &m.ProjectID, &m.Category, &m.Content, &m.Importance,
 			&m.AccessCount, &lastAccessed, &m.Source, &tagsJSON,
 			&pinned, &resolvedAt, &m.CreatedAt, &m.UpdatedAt,
 			&agent, &sessionID, &sourceRef, &confidence, &scopeRaw,
+			&validFrom, &validUntil, &verifiedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan memory: %w", err)
 		}
@@ -4059,6 +4130,19 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 			m.Confidence = &confidence.Float64
 		}
 		m.Scope = parseScope(scopeRaw)
+		// Validity columns are read the way they are stored: SQLite holds them
+		// as unconstrained text, and deciding what a value means needs the
+		// request clock, which lives above this layer. NULL stays nil so "no
+		// claim" cannot be confused with a claim about the empty string.
+		if validFrom.Valid {
+			m.ValidFrom = &validFrom.String
+		}
+		if validUntil.Valid {
+			m.ValidUntil = &validUntil.String
+		}
+		if verifiedAt.Valid {
+			m.VerifiedAt = &verifiedAt.String
+		}
 
 		if err := json.Unmarshal([]byte(tagsJSON), &m.Tags); err != nil {
 			m.Tags = []string{}

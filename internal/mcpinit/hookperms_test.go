@@ -119,9 +119,9 @@ func TestBumpSessionCountTightensPermissions(t *testing.T) {
 func TestBumpSessionCountTightensWALAndSHM(t *testing.T) {
 	_, dbPath := looseDataDir(t)
 
-	holder, err := memory.OpenDBReadOnly(dbPath)
+	holder, err := memory.OpenReadDB(dbPath)
 	if err != nil {
-		t.Fatalf("OpenDBReadOnly: %v", err)
+		t.Fatalf("OpenReadDB: %v", err)
 	}
 	defer func() { _ = holder.Close() }()
 	// sql.Open is lazy, so force the connection.
