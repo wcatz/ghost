@@ -356,7 +356,7 @@ Rules the import follows:
   error: project laptop-1 cannot be imported: this Ghost already records /src/thing as project ghost — import into that project, or merge it with `ghost project merge`
   ```
 
-- **A record with no `created_at` or no `importance` takes the column's own default**, not a bound zero. A stored empty string makes `julianday('')` NULL, which makes the whole time-decay expression NULL and sorts the memory out of every ranked read — present in the store, invisible to recall. An artifact this build writes always states both fields, so this only matters for a hand-edited record.
+- **A record with no `created_at` or no `importance` takes the column's own default**, not a bound zero. A stored empty string makes `julianday('')` NULL, which makes the whole time-decay expression NULL and sorts the memory out of every ranked read — present in the store, invisible to recall. A *stated* `importance: 0` is kept as 0: a memory saved without an importance is stored as 0, exported as `"importance":0`, and re-importing it must not promote it to the 0.5 default.
 
 Import does not run Upsert's near-duplicate probe. A restore is putting back what was there, not adding knowledge, and folding two rows of the artifact into one would silently drop a memory the user chose to keep.
 

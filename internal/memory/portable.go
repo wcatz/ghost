@@ -47,11 +47,18 @@ type PortableProject struct {
 // restoring a memory with a fresh created_at would age it out of injection
 // immediately, and restoring it unpinned would silently drop a user's pin.
 type PortableMemory struct {
-	ID           string            `json:"id"`
-	ProjectID    string            `json:"project_id"`
-	Category     string            `json:"category"`
-	Content      string            `json:"content"`
-	Importance   float64           `json:"importance"`
+	ID        string `json:"id"`
+	ProjectID string `json:"project_id"`
+	Category  string `json:"category"`
+	Content   string `json:"content"`
+	// Importance is a pointer because 0 is a real rating and an absent field is
+	// not: `Store.Create` binds a Memory's importance with no default, so a
+	// memory saved without one is stored as 0 and exported as `"importance":0`.
+	// A plain float64 cannot tell that from a record that states nothing, and
+	// folding the two together would promote a 0 to the column's default on every
+	// re-import — a silent rewrite of exactly the kind the artifact exists to
+	// avoid. nil therefore takes the column default, and only nil.
+	Importance   *float64          `json:"importance,omitempty"`
 	AccessCount  int               `json:"access_count"`
 	LastAccessed *string           `json:"last_accessed,omitempty"`
 	Source       string            `json:"source"`
@@ -184,13 +191,21 @@ func (s *Store) PortableMemories(ctx context.Context, projectIDs []string) ([]Po
 // raw `git@host:owner/repo.git` has to collide with the canonical spelling of
 // the same repository rather than slip past it.
 func (s *Store) projectCollision(ctx context.Context, p PortableProject) error {
-	var byPath, byRemote string
+	remote := NormalizeRepoRemote(p.RepoRemote)
+	// `repo_remote <> ''` is what keeps an absent — or unrecognizable, since
+	// NormalizeRepoRemote answers "" for a bare host or a filesystem path — from
+	// matching every project that has no repository. `EnsureProject` binds "" for
+	// one, and the rest of the store already reads NULL and '' as the same "no
+	// remote" (the partial UNIQUE index excludes them for exactly this reason).
+	// Without the guard an ordinary import of a remote-less project would be
+	// refused, naming an unrelated project and an empty repository.
+	var byPath, foundRemote string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT
 			coalesce((SELECT id FROM projects WHERE path = ? AND id != ? LIMIT 1), ''),
 			coalesce((SELECT id FROM projects
-			          WHERE repo_remote = ? AND id != ? LIMIT 1), '')
-	`, p.Path, p.ID, NormalizeRepoRemote(p.RepoRemote), p.ID).Scan(&byPath, &byRemote)
+			          WHERE repo_remote = ? AND repo_remote <> '' AND id != ? LIMIT 1), '')
+	`, p.Path, p.ID, remote, p.ID).Scan(&byPath, &foundRemote)
 	if err != nil {
 		return fmt.Errorf("import project %s: %w", p.ID, err)
 	}
@@ -198,9 +213,9 @@ func (s *Store) projectCollision(ctx context.Context, p PortableProject) error {
 	case byPath != "":
 		return fmt.Errorf("project %s cannot be imported: this Ghost already records %s as project %s — import into that project, or merge it with `ghost project merge`",
 			p.ID, p.Path, byPath)
-	case byRemote != "":
+	case foundRemote != "":
 		return fmt.Errorf("project %s cannot be imported: this Ghost already records repository %s as project %s — import into that project, or merge it with `ghost project merge`",
-			p.ID, NormalizeRepoRemote(p.RepoRemote), byRemote)
+			p.ID, remote, foundRemote)
 	}
 	return nil
 }
@@ -278,14 +293,19 @@ func scanPortableMemory(sc rowScanner) (PortableMemory, error) {
 	var tagsJSON, scopeJSON sql.NullString
 	var agent, sessionID, sourceRef sql.NullString
 	var confidence sql.NullFloat64
+	// The column is NOT NULL, so the scan target is a plain float64 and the
+	// pointer is filled in afterwards: what nil means here is "this build could
+	// not record one", which the column never allows.
+	var importance float64
 	if err := sc.Scan(
-		&m.ID, &m.ProjectID, &m.Category, &m.Content, &m.Importance, &m.AccessCount,
+		&m.ID, &m.ProjectID, &m.Category, &m.Content, &importance, &m.AccessCount,
 		&m.LastAccessed, &m.Source, &tagsJSON, &m.Pinned, &m.CreatedAt, &m.UpdatedAt,
 		&m.ResolvedAt, &m.ValidFrom, &m.ValidUntil, &m.VerifiedAt,
 		&agent, &sessionID, &sourceRef, &confidence, &scopeJSON,
 	); err != nil {
 		return PortableMemory{}, err
 	}
+	m.Importance = &importance
 	if tagsJSON.Valid {
 		_ = json.Unmarshal([]byte(tagsJSON.String), &m.Tags)
 	}
@@ -427,10 +447,12 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, apply bool) 
 
 	content, cut := ClampContent(m.Content)
 	// A stated importance is clamped to [0,1], the same bound a normal save
-	// applies. An unstated one is passed as NULL for the SQL to default.
-	importance := any(nil)
-	if m.Importance != 0 {
-		clamped := m.Importance
+	// applies. An unstated one is passed as NULL for the COALESCE to default, and
+	// a stated 0 stays 0 — see the field's comment for why the two must not be
+	// folded together.
+	var importance any
+	if m.Importance != nil {
+		clamped := *m.Importance
 		if clamped < 0 {
 			clamped = 0
 		}

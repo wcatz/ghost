@@ -107,7 +107,7 @@ func TestPortableMemoriesCarryEveryExportedColumn(t *testing.T) {
 	if m.ID != "m1" || m.ProjectID != "p1" || m.Category != "gotcha" || m.Content != "full row" {
 		t.Errorf("identity fields = %+v", m)
 	}
-	if m.Importance != 0.25 || m.AccessCount != 7 || !m.Pinned {
+	if m.Importance == nil || *m.Importance != 0.25 || m.AccessCount != 7 || !m.Pinned {
 		t.Errorf("axes = importance %v access %d pinned %v", m.Importance, m.AccessCount, m.Pinned)
 	}
 	if m.LastAccessed == nil || *m.LastAccessed != "2026-01-02 03:04:05" {
@@ -458,6 +458,108 @@ func TestImportMemoryDefaultsAbsentTimestampsAndImportance(t *testing.T) {
 	}
 }
 
+// TestImportMemoryDistinguishesAStatedZeroImportanceFromAnAbsentOne: a memory
+// saved without an importance is stored as 0 — `Store.Create` binds the field
+// with no default — and exported as `"importance":0`. Re-importing that must
+// store 0 again, not the column's 0.5: promoting it is a silent rewrite of the
+// artifact's own content, which is the one thing the format promises not to do.
+// Only a record that states no importance at all takes the default.
+func TestImportMemoryDistinguishesAStatedZeroImportanceFromAnAbsentOne(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	// A row written the way Create writes one when the caller states nothing: 0.
+	if _, err := store.Create(ctx, "p1", Memory{Category: "fact", Content: "saved without an importance", Source: "mcp"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	exported, err := store.PortableMemories(ctx, nil)
+	if err != nil {
+		t.Fatalf("PortableMemories: %v", err)
+	}
+	if len(exported) != 1 || exported[0].Importance == nil {
+		t.Fatalf("export = %+v, want one memory with a stated importance", exported)
+	}
+	if *exported[0].Importance != 0 {
+		t.Fatalf("exported importance = %v, want the stored 0", *exported[0].Importance)
+	}
+	// The artifact carries it, so the round trip must preserve it.
+	dst := portableTestStore(t)
+	if _, err := dst.ImportProject(ctx, PortableProject{ID: "p1", Path: "/src/p1", Name: "p1"}, true); err != nil {
+		t.Fatalf("ImportProject: %v", err)
+	}
+	if _, _, err := dst.ImportMemory(ctx, exported[0], true); err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+	var got float64
+	if err := dst.db.QueryRowContext(ctx, `SELECT importance FROM memories WHERE id = ?`, exported[0].ID).Scan(&got); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("imported importance = %v, want the 0 the artifact stated", got)
+	}
+
+	// A record that states none is a different case, and takes the default.
+	if _, _, err := dst.ImportMemory(ctx, PortableMemory{
+		ID: "m-absent", ProjectID: "p1", Category: "fact", Content: "x", Source: "mcp",
+	}, true); err != nil {
+		t.Fatalf("ImportMemory(absent): %v", err)
+	}
+	if err := dst.db.QueryRowContext(ctx, `SELECT importance FROM memories WHERE id = 'm-absent'`).Scan(&got); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got != 0.5 {
+		t.Errorf("imported importance = %v for a record that stated none, want the column default 0.5", got)
+	}
+}
+
+// TestImportProjectAcceptsARemoteLessProjectBesideOtherRemoteLessProjects: a
+// project with no repository is the ordinary shape — every project created by an
+// MCP save records an empty remote — so importing one must not be read as a
+// collision with every other project that has no repository either. The store
+// treats NULL and ” as the same "no remote" and its partial UNIQUE index
+// deliberately excludes them, so a check that compared against ” would refuse an
+// ordinary import and name an unrelated project and an empty repository.
+func TestImportProjectAcceptsARemoteLessProjectBesideOtherRemoteLessProjects(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	for _, id := range []string{"a", "b", "c"} {
+		if err := store.EnsureProject(ctx, id, "/src/"+id, id); err != nil {
+			t.Fatalf("EnsureProject(%s): %v", id, err)
+		}
+	}
+	created, err := store.ImportProject(ctx, PortableProject{
+		ID: "d", Path: "/src/d", Name: "d", RepoRemote: "",
+	}, true)
+	if err != nil {
+		t.Fatalf("ImportProject of a remote-less project: %v", err)
+	}
+	if !created {
+		t.Error("a remote-less project was not created")
+	}
+	projects, err := store.PortableProjects(ctx)
+	if err != nil {
+		t.Fatalf("PortableProjects: %v", err)
+	}
+	if len(projects) != 4 {
+		t.Errorf("store holds %d projects, want the 3 seeded plus the imported one", len(projects))
+	}
+
+	// The same shape spelled as an unrecognizable remote — a bare host, a
+	// filesystem path — normalizes to "" and must be treated as no remote rather
+	// than as a repository named "".
+	created, err = store.ImportProject(ctx, PortableProject{
+		ID: "e", Path: "/src/e", Name: "e", RepoRemote: "not a remote",
+	}, true)
+	if err != nil {
+		t.Fatalf("ImportProject with an unrecognizable remote: %v", err)
+	}
+	if !created {
+		t.Error("a project whose remote does not normalize was not created")
+	}
+}
+
 // TestImportMemoryClampsImportance: a normal save clamps importance to [0,1]
 // before the write. An import that skipped that would be the only way an
 // importance outside the range reaches the database.
@@ -470,10 +572,11 @@ func TestImportMemoryClampsImportance(t *testing.T) {
 	for _, tc := range []struct {
 		in   float64
 		want float64
-	}{{in: 4.2, want: 1}, {in: -3, want: 0}} {
+	}{{in: 4.2, want: 1}, {in: -3, want: 0}, {in: 0, want: 0}} {
+		in := tc.in
 		rec := PortableMemory{
 			ID: "m-" + string(rune('a'+int(tc.in))), ProjectID: "p1", Category: "fact",
-			Content: "x", Source: "mcp", Importance: tc.in,
+			Content: "x", Source: "mcp", Importance: &in,
 		}
 		if _, _, err := store.ImportMemory(ctx, rec, true); err != nil {
 			t.Fatalf("ImportMemory(%v): %v", tc.in, err)
