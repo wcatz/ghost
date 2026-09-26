@@ -1247,9 +1247,11 @@ func resolveSummaryLine(projectName string, res resolve.Result, apply bool, conf
 }
 
 // reassessSummaryLine renders the one-line --reassess result. The counts are
-// per outcome, and the verb reports what --apply would clear (or did clear, as
-// reKept reports the rows judged and Cleared the rows actually written) so a
-// repair is never reported as larger than it was.
+// per outcome, "still asserted" being the rows Run would re-stamp for free (a
+// live supersedes edge or a correction pairing) and therefore refuses to clear.
+// The verb reports what --apply would clear, or what it cleared — reKept counts
+// the rows judged, Cleared the rows actually written — so a repair is never
+// reported as larger than it was.
 func reassessSummaryLine(projectName string, res resolve.ReassessResult, apply bool, reKept int, calls int) string {
 	verb := "would clear resolved_at for"
 	count := reKept
@@ -1257,8 +1259,8 @@ func reassessSummaryLine(projectName string, res resolve.ReassessResult, apply b
 		verb = "cleared resolved_at for"
 		count = res.Cleared
 	}
-	return fmt.Sprintf("%s: %d already resolved, %d KEEP vetoed, %d KEEP cached, %d still RESOLVED, %d UNKNOWN, %s %d (%d classify call(s))\n",
-		projectName, res.Loaded, res.Vetoed, res.Cached, res.StillResolved, res.Unknown, verb, count, calls)
+	return fmt.Sprintf("%s: %d already resolved, %d KEEP vetoed, %d KEEP cached, %d still RESOLVED, %d still asserted by a link or correction, %d UNKNOWN, %s %d (%d classify call(s))\n",
+		projectName, res.Loaded, res.Vetoed, res.Cached, res.StillResolved, res.Demoted, res.Unknown, verb, count, calls)
 }
 
 // runResolve is the CLI entry for `ghost resolve`. It marks resolved-evidence

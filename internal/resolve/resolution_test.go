@@ -83,6 +83,19 @@ func TestIsResolvedRequiresClosedByReason(t *testing.T) {
 		"RESOLVED | closed-by:   ",
 		"RESOLVED | closed by: the feature was dropped",
 		"RESOLVED because the thread concluded",
+		// A denial phrase is not a reason: the word after a bare mention of the
+		// key must never be read as one, or the KEEP-biased contract leaks
+		// through the exact shape it was written to close (review finding on
+		// PR #643).
+		"RESOLVED — no closed-by available",
+		"RESOLVED | no closed-by reason",
+		"RESOLVED | without closed-by detail",
+		// A placeholder names nothing either.
+		"RESOLVED | closed-by: none",
+		"RESOLVED | closed-by: n/a",
+		"RESOLVED | closed-by: TBD",
+		"RESOLVED | closed-by: unknown",
+		"RESOLVED | closed-by:\nnone",
 	} {
 		fp := &fakeProvider{resp: resp}
 		got, err := NewResolutionClassifier(fp).IsResolved(context.Background(), "content")
@@ -104,7 +117,11 @@ func TestIsResolvedAcceptsClosedByShapes(t *testing.T) {
 		"RESOLVED | CLOSED-BY: PR #240 closed the tracking issue",
 		"RESOLVED closed-by: PR #240 closed the tracking issue",
 		"  RESOLVED | Closed-By: the experiment was superseded  ",
+		// The value may land in the next field rather than on the key's field.
+		// That fallback exists for the model breaking the line after the colon,
+		// and only for that.
 		"RESOLVED | closed-by:\nthe runbook was replaced by the lifecycle spec",
+		"RESOLVED | **closed-by:** the runbook was replaced by the lifecycle spec",
 	} {
 		fp := &fakeProvider{resp: resp}
 		got, err := NewResolutionClassifier(fp).IsResolved(context.Background(), "content")

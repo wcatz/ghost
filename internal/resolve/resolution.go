@@ -119,13 +119,25 @@ func (h *ResolutionClassifier) IsResolved(ctx context.Context, content string) (
 }
 
 // closedByKey is the field a RESOLVED verdict must carry, and closedByTrim is
-// the punctuation stripped from a field before it is compared or read as a
-// value: harnesses decorate fields freely ("closed-by: X", "**closed-by:** X",
+// the punctuation stripped from a field before it is read as a value:
+// harnesses decorate fields freely ("closed-by: X", "**closed-by:** X",
 // "1 | closed-by: X"), and none of that decoration changes the contract.
+// closedByEdge is the same set without the colon, for the fields whose colon
+// decides whether they are the required field at all.
 const (
 	closedByKey  = "closed-by"
 	closedByTrim = ".,!?\"'`*;:|—–-"
+	closedByEdge = ".,!?\"'`*;|—–-"
 )
+
+// closedByPlaceholder are values that name nothing. A model that writes
+// "closed-by: none" is saying it cannot point at what closed the note, which is
+// the case #640 is about, so the verdict falls back to KEEP rather than
+// resolving on the strength of a placeholder.
+var closedByPlaceholder = map[string]bool{
+	"none": true, "n/a": true, "tbd": true, "unknown": true,
+	"unspecified": true, "nothing": true, "nil": true, "-": true, "?": true,
+}
 
 // parseVerdict is the strict first-field parser shared by single-note replies
 // and the remainder of numbered batch lines. Only the first meaningful field
@@ -168,26 +180,32 @@ func parseVerdict(result string) Verdict {
 
 // closedByVerdict decides the RESOLVED branch: RESOLVED only when the fields
 // after the verdict name a reason. The value may sit on the key's own field
-// ("closed-by: the runbook was replaced") or in the following field when the
-// model broke the line after the colon; a bare "closed-by:", a "closed-by" with
-// nothing after it, and a missing key are all KEEP. The reason itself is not
-// judged — the pass only needs to know the model could point at something.
+// ("closed-by: the runbook was replaced") or, when the model broke the line
+// right after the colon, in the following field.
+//
+// Only the colon form may take that fallback, because the colon is what
+// separates the required field from a bare mention of the key: in "RESOLVED —
+// no closed-by available" the word after the key is not a reason, and reading
+// it as one is exactly the false RESOLVED this contract exists to prevent. A
+// placeholder value names nothing, so it is a KEEP too. The reason's own wording
+// is never judged — the pass only needs to know the model could point at
+// something.
 func closedByVerdict(rest []string) Verdict {
 	for i, f := range rest {
-		field := strings.Trim(f, closedByTrim)
+		field := strings.ToLower(strings.Trim(f, closedByEdge))
 		var value string
 		switch {
-		case field == closedByKey:
-			// No value on this field; a following field supplies it.
+		case field == closedByKey+":":
+			// The value is on the next field, or the reason is missing.
+			if i+1 < len(rest) {
+				value = strings.Trim(rest[i+1], closedByTrim)
+			}
 		case strings.HasPrefix(field, closedByKey+":"):
 			value = strings.Trim(strings.TrimPrefix(field, closedByKey+":"), closedByTrim)
 		default:
 			continue
 		}
-		if value == "" && i+1 < len(rest) {
-			value = strings.Trim(rest[i+1], closedByTrim)
-		}
-		if value != "" {
+		if value != "" && !closedByPlaceholder[value] {
 			return VerdictResolved
 		}
 		return VerdictKeep

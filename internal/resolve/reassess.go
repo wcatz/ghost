@@ -19,6 +19,12 @@
 // repair auditable: every already-resolved memory in the project is re-judged
 // under the same rules, so the report has no silent gap.
 //
+// It does honour Run's two free deterministic demotions, as a floor rather than
+// as part of the repair. Both fire before the veto and before the KEEP cache, so
+// a row they assert is re-stamped by the very next ordinary pass; clearing it
+// would print "cleared resolved_at for N" and change nothing. Such rows are
+// counted as Demoted and left alone, and the operator sees them in the summary.
+//
 // The KEEP cache is honoured, for the same convergence reason the ordinary pass
 // honours it: content that already carries a current-version KEEP hash was
 // judged KEEP by these rules, so it is cleared without paying for the call again.
@@ -33,10 +39,13 @@ import (
 )
 
 // reassessStore is the subset of *memory.Store the repair pass needs; narrowed
-// for testability. It is deliberately disjoint from resolveStore: reassess
-// stamps nothing, so it neither reads candidates nor writes a resolution.
+// for testability. It never writes a resolution, but it does read the
+// *unresolved* pool and the supersedes links, because a row Run would re-stamp
+// for free is not a repair candidate (see the package comment).
 type reassessStore interface {
 	ResolvedCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
+	ResolveCandidates(ctx context.Context, projectID string) ([]memory.Memory, error)
+	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	ClearResolved(ctx context.Context, projectID string, ids []string) (int, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
@@ -47,6 +56,7 @@ type reassessStore interface {
 // "still resolved" and "back in the ranked surface".
 type ReassessResult struct {
 	Loaded        int // already-resolved eligible memories the pass considered
+	Demoted       int // already-resolved rows Run's free demotions still assert; left alone
 	Vetoed        int // settled KEEP by the deterministic veto, no classifier call
 	Cached        int // skipped: the content already carries a KEEP hash
 	ReKept        int // came back KEEP, so resolved_at is now wrong (veto + classifier)
@@ -80,6 +90,14 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		return res, nil, fmt.Errorf("load resolve kept hashes: %w", err)
 	}
 
+	// Run's two free demotions, as a floor. Both are computed before the veto
+	// and before the KEEP cache in Run, so a row either one covers comes back
+	// stamped on the next ordinary pass; the repair pass must not claim it.
+	asserted, err := assertedByDemotions(ctx, store, projectID, loaded)
+	if err != nil {
+		return res, nil, err
+	}
+
 	// Settle the free decisions first: the veto and the KEEP cache both answer
 	// KEEP without a harness call. reKeptIDs collects every KEEP outcome, and
 	// the returned list is built from it in the store's own order below, so a
@@ -88,6 +106,10 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	var pending []memory.Memory
 	var pendingContents []string
 	for _, m := range loaded {
+		if asserted[m.ID] {
+			res.Demoted++
+			continue
+		}
 		if reason, vetoed := VetoKeep(m.Content); vetoed {
 			res.Vetoed++
 			reKeptIDs[m.ID] = true
@@ -140,7 +162,8 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	if logger != nil {
 		logger.Info("reassess classified",
 			"loaded", res.Loaded, "rekept", len(reKept), "vetoed", res.Vetoed,
-			"cached", res.Cached, "still_resolved", res.StillResolved, "unknown", res.Unknown)
+			"cached", res.Cached, "asserted", res.Demoted,
+			"still_resolved", res.StillResolved, "unknown", res.Unknown)
 	}
 
 	if apply && len(reKept) > 0 {
@@ -167,4 +190,55 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		}
 	}
 	return res, reKept, nil
+}
+
+// assertedByDemotions returns the IDs among the already-resolved pool that Run
+// would stamp again for free on its next pass, so the repair pass leaves them
+// alone. It mirrors the two mechanisms in Run, in the same order they matter:
+//
+//   - the supersedes-edge piggyback: the older endpoint of a live
+//     'supersedes'/'llm' link, which is the only demotion that needs no other
+//     row to be present;
+//   - correction pairing: an older row a NEWER correction in either pool shares
+//     rare subject tokens with. The correction itself usually still lives — a
+//     correction is a terminal conclusion and stays KEEP — so the unresolved
+//     pool has to be read for the pairing to be visible here at all.
+//
+// The rare-token document frequency is counted over both pools together rather
+// than over the unresolved pool alone as Run does, because both are already
+// loaded. That widens the DF, so it can only *narrow* the pairing set: a row
+// this skips is a row that is left resolved. Leaving durable knowledge resolved
+// is the status quo and the safe direction to err in; clearing a row the next
+// pass re-stamps is the failure this function exists to prevent.
+func assertedByDemotions(ctx context.Context, store reassessStore, projectID string, resolved []memory.Memory) (map[string]bool, error) {
+	asserted := make(map[string]bool, len(resolved))
+	if len(resolved) == 0 {
+		return asserted, nil
+	}
+	resolvedIDs := make(map[string]bool, len(resolved))
+	for _, m := range resolved {
+		resolvedIDs[m.ID] = true
+	}
+
+	links, err := store.LinksByRelationSource(ctx, projectID, "supersedes", "llm")
+	if err != nil {
+		return nil, fmt.Errorf("load supersedes links: %w", err)
+	}
+	for _, l := range links {
+		if resolvedIDs[l.TargetID] {
+			asserted[l.TargetID] = true
+		}
+	}
+
+	unresolved, err := store.ResolveCandidates(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("load unresolved candidates: %w", err)
+	}
+	union := make([]memory.Memory, 0, len(resolved)+len(unresolved))
+	union = append(union, resolved...)
+	union = append(union, unresolved...)
+	for _, m := range correctionPairTargets(union, resolved) {
+		asserted[m.ID] = true
+	}
+	return asserted, nil
 }

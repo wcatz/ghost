@@ -129,6 +129,8 @@ ghost resolve myproject --reassess --apply   # clear resolved_at on those rows
 
 It is how a wrong resolution gets undone — the ordinary pass never looks at a row that already carries `resolved_at`, so a rule it buried was invisible to every later pass. The repair pass skips the keyword prefilter on purpose: the pool is already the small resolved subset, and a wrongly resolved note is usually hidden by the *absence* of a resolution keyword or by a narrative that reads like a fix. With `--apply` it clears `resolved_at` so the notes return to ranked session-start injection, and records the classifier's KEEP verdicts in the content-hash cache so the ordinary pass does not ask about them again. A classify or clear failure is fatal and repairs nothing; an UNKNOWN verdict leaves `resolved_at` alone and is offered again. The stop hook's lifecycle phase never passes `--reassess`: it is an operator command.
 
+Rows that the ordinary pass would re-stamp for free are left alone and reported as **still asserted by a link or correction**: the older endpoint of a live `supersedes` link, and a row an unresolved correction still pairs with. Clearing those would print a repair that the next ordinary pass immediately undoes.
+
 ### `ghost supersede <project>`
 
 Proposes and classifies directed replacement relationships:

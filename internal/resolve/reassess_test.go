@@ -209,6 +209,53 @@ func TestReassessClassifierErrorIsFatal(t *testing.T) {
 	}
 }
 
+// TestReassessSkipsDeterministicallyAssertedRows: a row Run would immediately
+// re-stamp for free — the older endpoint of a live 'supersedes'/'llm' link, or a
+// row an unresolved correction still pairs with — is not a repair candidate.
+// Clearing it would print "cleared resolved_at for 1" and have the next
+// ordinary pass re-stamp it, so the operator is told a repair that did not
+// happen. Such rows are reported as asserted instead (review finding on #643).
+func TestReassessSkipsDeterministicallyAssertedRows(t *testing.T) {
+	superseded := memory.Memory{ID: "superseded", Category: "gotcha", UpdatedAt: "2026-09-01 00:00:00",
+		Content: "Cost estimate from May: $148/mo projected; actuals have since replaced it."}
+	newer := memory.Memory{ID: "newer", Category: "gotcha", UpdatedAt: "2026-09-02 00:00:00",
+		Content: "superseded the May cost estimate; the actuals document it now"}
+	paired := memory.Memory{ID: "paired", Category: "gotcha", UpdatedAt: "2026-09-19 20:00:00",
+		Content: "root cause: ledgerstate/imported_reward_inputs.go never sets CalculationVersion on imported reward_snapshot rows; unusable (closed)"}
+	correction := memory.Memory{ID: "correction", Category: "gotcha", UpdatedAt: "2026-09-19 21:00:00",
+		Content: "CORRECTION/RESOLUTION to the imported reward_snapshot P0: the bug IS ALREADY FIXED ON MAIN. Commit d646e680 adds CalculationVersion to ledgerstate/imported_reward_inputs.go. NO PR IS NEEDED FROM US."}
+	vetoed := memory.Memory{ID: "vetoed", Category: "gotcha",
+		Content: "NEVER run `dingo database restore` with source and target on the same spindle"}
+	store := &fakeStore{
+		alreadyResolved: []memory.Memory{superseded, paired, vetoed},
+		// The correction is still live, so it is not in the resolved pool:
+		// Run finds it through the unresolved pool, and so must the repair pass.
+		candidates: []memory.Memory{newer, correction},
+		links: []memory.Link{{
+			SourceID: "newer", TargetID: "superseded", Relation: "supersedes", Source: "llm",
+		}},
+	}
+	// The classifier would KEEP both asserted rows; the pass must not ask.
+	cls := &fakeClassifier{drop: map[string]bool{}}
+
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Reassess: %v", err)
+	}
+	if res.Demoted != 2 {
+		t.Errorf("res.Demoted = %d, want 2 (supersedes edge + correction pairing)", res.Demoted)
+	}
+	if len(reKept) != 1 || reKept[0].ID != "vetoed" {
+		t.Fatalf("reKept = %v, want only the vetoed note", reKept)
+	}
+	if len(store.cleared) != 1 || store.cleared[0] != "vetoed" {
+		t.Errorf("cleared = %v, want [vetoed]", store.cleared)
+	}
+	if cls.calls != 0 {
+		t.Errorf("classifier calls = %d, want 0 (every row is settled for free)", cls.calls)
+	}
+}
+
 // TestReassessEmptyPool: a project with no resolved rows is a no-op that makes
 // no harness call.
 func TestReassessEmptyPool(t *testing.T) {

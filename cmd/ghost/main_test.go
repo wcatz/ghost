@@ -1173,13 +1173,13 @@ func TestResolveSummaryLineReportsVetoes(t *testing.T) {
 // TestReassessSummaryLine: the reassess pass reports what it found per outcome
 // and what --apply would clear, in both the dry-run and apply verb forms.
 func TestReassessSummaryLine(t *testing.T) {
-	res := resolve.ReassessResult{Loaded: 40, Vetoed: 6, Cached: 1, ReKept: 9, StillResolved: 24, Unknown: 0, Cleared: 9}
-	wantDry := "proj: 40 already resolved, 6 KEEP vetoed, 1 KEEP cached, 24 still RESOLVED, 0 UNKNOWN, would clear resolved_at for 9 (2 classify call(s))\n"
+	res := resolve.ReassessResult{Loaded: 40, Vetoed: 6, Cached: 1, ReKept: 9, StillResolved: 22, Demoted: 2, Unknown: 0, Cleared: 9}
+	wantDry := "proj: 40 already resolved, 6 KEEP vetoed, 1 KEEP cached, 22 still RESOLVED, 2 still asserted by a link or correction, 0 UNKNOWN, would clear resolved_at for 9 (2 classify call(s))\n"
 	if got := reassessSummaryLine("proj", res, false, 9, 2); got != wantDry {
 		t.Errorf("reassessSummaryLine() dry = %q, want %q", got, wantDry)
 	}
 	res.Cleared = 8 // a concurrent clear can stamp fewer rows than were judged
-	wantApply := "proj: 40 already resolved, 6 KEEP vetoed, 1 KEEP cached, 24 still RESOLVED, 0 UNKNOWN, cleared resolved_at for 8 (2 classify call(s))\n"
+	wantApply := "proj: 40 already resolved, 6 KEEP vetoed, 1 KEEP cached, 22 still RESOLVED, 2 still asserted by a link or correction, 0 UNKNOWN, cleared resolved_at for 8 (2 classify call(s))\n"
 	if got := reassessSummaryLine("proj", res, true, 9, 2); got != wantApply {
 		t.Errorf("reassessSummaryLine() apply = %q, want %q", got, wantApply)
 	}
