@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -93,13 +94,39 @@ func liveOpenCodeBinary(t *testing.T) string {
 // TestLiveOpenCodeBinaryHonorsTheConfigOverride pins the resolution: the
 // documented verification must find the same binary `ghost opencode
 // cleanup-sessions` runs, or it silently skips for exactly the setup that
-// needs it. Only the override case is asserted absolutely — the PATH fallback
-// would otherwise depend on whatever config file the machine running the test
-// happens to have.
+// needs it. The host is isolated first, so the assertion is a function of
+// what this test sets rather than of the machine running it — without that,
+// a config file that fails to parse or an ambient GHOST_* value would send
+// the helper down its fallback branch and fail an unrelated `go test ./...`.
 func TestLiveOpenCodeBinaryHonorsTheConfigOverride(t *testing.T) {
+	isolateHostConfig(t)
 	t.Setenv("GHOST_CLI_OPENCODE_BINARY", "/opt/bin/opencode")
 	if got := liveOpenCodeBinary(t); got != "/opt/bin/opencode" {
 		t.Errorf("with GHOST_CLI_OPENCODE_BINARY set, got %q, want the configured binary", got)
+	}
+}
+
+// isolateHostConfig points HOME and XDG_CONFIG_HOME at a temp dir and clears
+// every ambient GHOST_* variable, so the config.Load inside a test sees only
+// the compiled defaults plus what the test sets. This is the equivalent of
+// internal/config's isolateConfig — a test helper of that package, unreachable
+// from here — including its one documented gap: the system-wide
+// /etc/ghost/config.yaml layer takes its path from a constant with no
+// override, so no test can point it elsewhere.
+func isolateHostConfig(t *testing.T) {
+	t.Helper()
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	for _, kv := range os.Environ() {
+		name, _, ok := strings.Cut(kv, "=")
+		if !ok || !strings.HasPrefix(name, "GHOST_") {
+			continue
+		}
+		t.Setenv(name, os.Getenv(name)) // records the original for cleanup
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unset %s: %v", name, err)
+		}
 	}
 }
 
