@@ -18,10 +18,11 @@ name: longmemeval
 # warm one => identical R@5/NDCG, so a warm LOCAL run is what justifies the
 # hybrid floors below — but see the caveat: that run predates the harness
 # adopting the search_document:/search_query: task prefixes, so the floors
-# have not been re-derived for the prefixed space and no dispatch today can
-# establish them, only floor-check them (see the CI-gating note in
-# docs/benchmarks.md). Run hybrid via workflow_dispatch (or locally) when you
-# actually want the numbers.
+# have not been re-derived for the prefixed space. A dispatch today
+# floor-checks them instead of validating them (they came from a different
+# vector space); re-derive them from a prefixed run to get a real gate back
+# (see the CI-gating note in docs/benchmarks.md). Run hybrid via
+# workflow_dispatch (or locally) when you actually want the numbers.
 on:
   workflow_dispatch:
     inputs:

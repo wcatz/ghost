@@ -6,9 +6,9 @@ Ghost publishes benchmark results together with the harness, inputs, and limitat
 
 | Evaluation | What it measures | Headline result |
 |---|---|---|
-| LongMemEval-S retrieval | Judge-free retrieval against official evidence labels | Hybrid Recall@5 **93.0%**, Recall@10 **97.3%** on 470 answerable questions |
+| LongMemEval-S retrieval | Judge-free retrieval against official evidence labels | Hybrid Recall@5 **93.0%**, Recall@10 **97.3%** on 470 answerable questions (measured pre-task-prefix — re-baseline pending, see Phase 1) |
 | `ghost bench` | Deterministic in-repo retrieval regression suite | Hybrid NDCG@10 **0.818** on 220 queries and 547 memories |
-| LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions |
+| LongMemEval-S end-to-end | Retrieve → generate → judge with DeepSeek v4 Pro | **96.2%** blended accuracy across 500 questions (its hybrid retrieval leg is pre-task-prefix too — see Phase 4) |
 | Staleness suite | Fresh-fact ranking without breaking older-but-correct facts | Fresh-wins **1.000** while the recency-trap case stays **0.929** |
 
 These rows are not one leaderboard. Retrieval metrics, end-to-end answer accuracy, and a staleness fixture answer different questions. Competitor scores also use different generators and judges, so cross-system comparisons are directional unless the evaluation protocol is identical.
@@ -245,12 +245,14 @@ Not leaderboard-comparable (DeepSeek v4 Pro, not GPT-4o), but the retrieval → 
 
 | System | Score | Generator | Source |
 |--------|-------|-----------|--------|
-| **Ghost (hybrid)** | **96.2%** | DeepSeek V4 Pro | This repo |
+| **Ghost (hybrid)** | **96.2%** | DeepSeek V4 Pro | This repo — retrieval leg pre-task-prefix, re-baseline pending (see Phase 4)¹ |
 | Mem0 | 94.4% | Not specified | [mem0.ai/research](https://mem0.ai/research) — "managed platform, proprietary optimizations not in OSS SDK" |
 | Hindsight | 91.4% | Gemini-3 Pro | [arxiv 2512.12818](https://arxiv.org/abs/2512.12818), [benchmarks](https://benchmarks.hindsight.vectorize.io/) — independently validated by Virginia Tech + Washington Post |
 | Supermemory | 85.2% | Gemini-3 | [supermemory.ai/research](https://supermemory.ai/research/longmembench/) — self-reported |
 
 **Read carefully:** These numbers are **not directly comparable** across rows. Each uses a different generator model and (in Ghost's case) a different judge. Within the same generator+judge pair, differences are meaningful — across pairs, they're directional only. Ghost's self-judged score carries the same caveat as every other system that judges its own output.
+
+¹ Ghost's row additionally rests on retrieval measured before `bench/longmemeval` adopted the task prefixes, so the gap to the rows below it is not a like-for-like current measurement of Ghost's retrieval — re-baseline pending (see Phase 4).
 
 ### Cost
 
