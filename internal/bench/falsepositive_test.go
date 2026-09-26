@@ -6,25 +6,15 @@ import (
 	"testing"
 )
 
-// loadNegativeFixture loads the committed no-answer queries.
-func loadNegativeFixture(t *testing.T) []NegativeQuery {
-	t.Helper()
-	negs, err := loadFile("testdata/negative_queries.jsonl", LoadNegatives)
-	if err != nil {
-		t.Fatalf("load no-answer queries: %v", err)
-	}
-	return negs
-}
-
 // TestFalsePositiveReport runs the no-answer set through the production search
 // path and logs the baseline. Report-only, for the same reason the maintenance
 // suite is: the numbers are the starting point the abstention work (#580) moves,
 // and a floor here would be a gate on that work rather than on this change.
 //
 // What IS enforced is that the set can measure something at all — every flavor
-// present, every query embedded, and results actually returned for queries
-// nothing answers. A suite where search returned nothing for any of them would
-// report a beautiful 0.000 and mean nothing.
+// present, results actually returned for queries nothing answers, and the two
+// distributions separated. A suite where search returned nothing for any of them
+// would report a beautiful 0.000 and mean nothing.
 func TestFalsePositiveReport(t *testing.T) {
 	ds, vecs, err := BuiltinDataset()
 	if err != nil {
