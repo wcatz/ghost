@@ -125,7 +125,8 @@ func TouchLifecycleStart(project string) error {
 }
 
 // logLifecycleCooldownSkip records the one line a skipped spawn leaves behind,
-// appended to the existing lifecycle.log. The content is diagnostic only — the
+// appended to lifecycle.log — rotated first if that log has already reached the
+// rotation cap, like every other open of it. The content is diagnostic only — the
 // decision is the mtime — so the line names the project and both durations and
 // nothing else has to read it.
 //
@@ -134,7 +135,7 @@ func TouchLifecycleStart(project string) error {
 // best-effort for the same reason — a log that cannot be opened is not a reason
 // to change what the hook does.
 func logLifecycleCooldownSkip(dataDir, projectID string, since, minInterval time.Duration) {
-	f, err := os.OpenFile(filepath.Join(dataDir, "lifecycle.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := openLogForAppend(filepath.Join(dataDir, "lifecycle.log"))
 	if err != nil {
 		return
 	}

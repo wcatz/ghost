@@ -56,7 +56,7 @@ func ensureObsidianSyncRunning() {
 		slog.Warn("obsidian sync spawn: cannot locate the ghost binary", "error", err)
 		return
 	}
-	logFile, err := os.OpenFile(filepath.Join(dataDir, "obsidian-sync.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	logFile, err := openLogForAppend(filepath.Join(dataDir, "obsidian-sync.log"))
 	if err != nil {
 		slog.Warn("obsidian sync spawn: cannot open log", "error", err)
 		return
