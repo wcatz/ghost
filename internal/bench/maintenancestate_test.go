@@ -330,20 +330,54 @@ func TestLoadMaintenanceMemoriesRejectsUnusableRows(t *testing.T) {
 // TestSeedMaintenanceRejectsBrokenState covers the two state mistakes a fixture
 // edit can make that no metric would reveal: a supersedes edge pointing at a key
 // that does not exist, and a resolved row in a category SetResolved exempts.
+//
+// Each case asserts the error text, not just that there is one. seedMaintenance
+// rejects a memory with no fixture vector before either guard, so an
+// err != nil assertion alone would pass on the wrong rejection — and would keep
+// passing if the guard it names were deleted.
 func TestSeedMaintenanceRejectsBrokenState(t *testing.T) {
-	_, _, vecs := loadMaintenanceFixture(t)
-
-	store, db := newSeedingStore(t)
-	dangling := []MaintenanceMemory{
-		{Key: "a", Category: "fact", Content: "live", AgeDays: 5, Supersedes: []string{"missing"}},
-	}
-	if _, err := seedMaintenance(context.Background(), store, db, dangling, nil, vecs); err == nil {
-		t.Error("a supersedes edge to an unknown key was accepted")
+	_, _, fixture := loadMaintenanceFixture(t)
+	// A vector the synthetic rows borrow, so the seed loop runs to completion.
+	donor, ok := fixture["ms_pg_live"]
+	if !ok {
+		t.Fatal("committed fixture has no ms_pg_live vector to borrow")
 	}
 
-	store2, db2 := newSeedingStore(t)
-	exempt := []MaintenanceMemory{{Key: "c", Category: "convention", Content: "shared", Resolved: true}}
-	if _, err := seedMaintenance(context.Background(), store2, db2, exempt, nil, vecs); err == nil {
-		t.Error("a resolved convention was accepted, but SetResolved exempts that category")
+	cases := []struct {
+		name string
+		mems []MaintenanceMemory
+		want string
+	}{
+		{
+			name: "supersedes edge to a key that does not exist",
+			mems: []MaintenanceMemory{
+				{Key: "a", Category: "fact", Content: "live", AgeDays: 5, Supersedes: []string{"missing"}},
+			},
+			want: `supersedes unknown key "missing"`,
+		},
+		{
+			name: "resolved row in a category SetResolved exempts",
+			mems: []MaintenanceMemory{
+				{Key: "c", Category: "convention", Content: "shared", Resolved: true},
+			},
+			want: "exempt category",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store, db := newSeedingStore(t)
+			vecs := Vectors{}
+			for _, m := range c.mems {
+				vecs[m.Key] = donor
+			}
+			_, err := seedMaintenance(context.Background(), store, db, c.mems, nil, vecs)
+			if err == nil {
+				t.Fatal("seedMaintenance accepted it")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error %q does not mention %q — either the guard is not being reached, "+
+					"or something else rejected the fixture first", err, c.want)
+			}
+		})
 	}
 }
