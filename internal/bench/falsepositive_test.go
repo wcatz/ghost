@@ -77,6 +77,27 @@ func TestFalsePositiveReport(t *testing.T) {
 	if rep.Unseparable < 0 || rep.Unseparable > rep.Answerable {
 		t.Errorf("unseparable count %d is outside 0..%d", rep.Unseparable, rep.Answerable)
 	}
+	// Every flavor must survive into the report with its own count: a pooled
+	// mean would let the easy flavor flatter the hard one, which is the only
+	// reason the two are kept apart.
+	if len(rep.Flavors) != len(flavors) {
+		t.Errorf("report has %d flavor rows, want %d", len(rep.Flavors), len(flavors))
+	}
+	byFlavor := map[string]FlavorStat{}
+	for _, f := range rep.Flavors {
+		if f.Queries != flavors[f.Flavor] {
+			t.Errorf("flavor %s: report counts %d queries, fixture has %d", f.Flavor, f.Queries, flavors[f.Flavor])
+		}
+		byFlavor[f.Flavor] = f
+	}
+	// The near-miss set is the one an abstain rule has to survive. If a fixture
+	// edit made it easier than the off-domain floor, the report would be
+	// reporting the easy case and calling it the hard one.
+	if byFlavor["near_miss"].MeanTop < byFlavor["off_domain"].MeanTop {
+		t.Errorf("near-miss queries score %.3f on average against %.3f for off-domain ones: "+
+			"the set meant to be the hard case is now the easy one",
+			byFlavor["near_miss"].MeanTop, byFlavor["off_domain"].MeanTop)
+	}
 	// The one behavioural claim worth enforcing: a no-answer query must not
 	// look better than an answerable one. If the corpus's own questions scored
 	// no higher than questions it cannot answer, no threshold could ever abstain

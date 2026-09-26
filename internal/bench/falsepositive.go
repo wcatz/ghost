@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -98,6 +99,17 @@ type FloorCount struct {
 	Queries int
 }
 
+// FlavorStat is one flavor of no-answer query, kept apart because the two are
+// not interchangeable: the off-domain set is the floor, and the near-miss set is
+// the case an abstain rule actually has to survive. Reporting only their pooled
+// mean would let the easy flavor flatter the hard one.
+type FlavorStat struct {
+	Flavor      string
+	Queries     int
+	MeanResults float64
+	MeanTop     float64
+}
+
 // FalsePositiveReport is the abstention baseline: what the production search path
 // returns for queries nothing in the corpus answers, and how that compares with
 // what it returns for queries something does answer.
@@ -119,7 +131,9 @@ type FalsePositiveReport struct {
 	// the means separate cleanly while the two distributions still overlap.
 	NoAnswerMax float64
 	Unseparable int
-	Floors      []FloorCount
+	// Flavors splits the set by how each query was built, sorted by name.
+	Flavors []FlavorStat
+	Floors  []FloorCount
 }
 
 // FalsePositives runs the production search for every no-answer query and, for
@@ -134,6 +148,7 @@ func FalsePositives(ctx context.Context, store *memory.Store, noAnswer, answerab
 
 	var sumResults, sumTop float64
 	answerableTops := make([]float64, 0, len(answerable))
+	byFlavor := map[string]*FlavorStat{}
 	for _, q := range noAnswer {
 		scored, err := store.SearchVector(ctx, q.ProjectID, q.Vector, scoreK*2)
 		if err != nil {
@@ -156,6 +171,14 @@ func FalsePositives(ctx context.Context, store *memory.Store, noAnswer, answerab
 		if float64(top) > rep.NoAnswerMax {
 			rep.NoAnswerMax = float64(top)
 		}
+		stat := byFlavor[q.Flavor]
+		if stat == nil {
+			stat = &FlavorStat{Flavor: q.Flavor}
+			byFlavor[q.Flavor] = stat
+		}
+		stat.Queries++
+		stat.MeanResults += float64(len(results))
+		stat.MeanTop += float64(top)
 		for _, floor := range FalsePositiveFloors {
 			above := 0
 			for _, m := range results {
@@ -173,6 +196,7 @@ func FalsePositives(ctx context.Context, store *memory.Store, noAnswer, answerab
 	n := float64(len(noAnswer))
 	rep.MeanResults = sumResults / n
 	rep.MeanTop = sumTop / n
+	rep.Flavors = flavorStats(byFlavor)
 
 	for _, q := range answerable {
 		scored, err := store.SearchVector(ctx, q.ProjectID, q.Vector, 1)
@@ -195,6 +219,21 @@ func FalsePositives(ctx context.Context, store *memory.Store, noAnswer, answerab
 		}
 	}
 	return rep, nil
+}
+
+// flavorStats converts the per-flavor accumulators into their reported means,
+// sorted by flavor name so the table order does not depend on map iteration.
+func flavorStats(byFlavor map[string]*FlavorStat) []FlavorStat {
+	out := make([]FlavorStat, 0, len(byFlavor))
+	for _, s := range byFlavor {
+		if s.Queries > 0 {
+			s.MeanResults /= float64(s.Queries)
+			s.MeanTop /= float64(s.Queries)
+		}
+		out = append(out, *s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Flavor < out[j].Flavor })
+	return out
 }
 
 // floorRow returns the accumulator for one floor, appending it on first sight so
@@ -221,6 +260,12 @@ func FormatFalsePositives(rep FalsePositiveReport) string {
 		rep.MeanTop, rep.AnswerableTop, rep.Answerable)
 	fmt.Fprintf(&b, "  floor refusing all of them   %.3f (the no-answer maximum) costs %d/%d answerable queries\n",
 		rep.NoAnswerMax, rep.Unseparable, rep.Answerable)
+	if len(rep.Flavors) > 0 {
+		fmt.Fprintf(&b, "\n  %-12s %4s %16s %12s\n", "flavor", "n", "results/query", "mean top")
+		for _, f := range rep.Flavors {
+			fmt.Fprintf(&b, "  %-12s %4d %16.1f %12.3f\n", f.Flavor, f.Queries, f.MeanResults, f.MeanTop)
+		}
+	}
 	fmt.Fprintf(&b, "\n  %-8s %14s %16s\n", "floor", "results/query", "queries w/ hit")
 	for _, f := range rep.Floors {
 		fmt.Fprintf(&b, "  %-8.2f %14.2f %10d/%-5d\n", f.Floor, f.Results/float64(rep.Queries), f.Queries, rep.Queries)

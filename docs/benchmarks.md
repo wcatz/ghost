@@ -175,13 +175,17 @@ no-answer queries (n=24, nothing in the corpus answers these; report-only, no ga
   mean top cosine             0.522  vs 0.715 for the 220 answerable queries
   floor refusing all of them   0.677 (the no-answer maximum) costs 62/220 answerable queries
 
+  flavor          n    results/query     mean top
+  near_miss      12             10.0        0.571
+  off_domain     12             10.0        0.473
+
   floor     results/query   queries w/ hit
   0.30               8.46         24/24
   0.40               7.83         23/24
   0.50               3.46         15/24
 ```
 
-The score is the vector leg's cosine, the only calibrated number in the pipeline: an RRF score is a function of a row's rank rather than of its match, and the keyword-only fallback's synthesized `1/(K+rank+1)` is a position, not a confidence. The floor rows are a sweep, not a proposal — `search.min_similarity` ships 0, so there is no configured floor to inherit, and the band is where one would have to live.
+The score is the vector leg's cosine, the only calibrated number in the pipeline: an RRF score is a function of a row's rank rather than of its match, and the keyword-only fallback's synthesized `1/(K+rank+1)` is a position, not a confidence. The floor rows are a sweep, not a proposal — `search.min_similarity` ships 0, so there is no configured floor to inherit, and the band is where one would have to live. The flavors are reported apart because a pooled mean would let the easy half carry the hard one: a near-miss that reuses corpus vocabulary scores 0.571 against the off-domain floor's 0.473, and it is the 0.571 any abstain rule has to clear.
 
 Read the third line as the actual baseline for the abstention work: the two distributions overlap. A floor of 0.677 would refuse all 24 no-answer queries and would also refuse 62 of the 220 answerable ones, so a threshold alone cannot abstain — the near-miss flavor is what makes the overlap visible, and it is why the answer is likely to be a calibrated decision rather than a constant.
 
