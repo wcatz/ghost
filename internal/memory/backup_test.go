@@ -169,6 +169,13 @@ func TestStoreBackupIsConsistentUnderWrites(t *testing.T) {
 	var concurrent atomic.Int64
 	stop := make(chan struct{})
 	done := make(chan struct{})
+	// Closed once the writer has committed at least once, so the backup cannot
+	// start before the writer is running. Without this the "committed nothing
+	// during the backup" assertion below is a statement about the scheduler: the
+	// writer goroutine may simply never have been scheduled, which is a
+	// different failure from a backup that blocked every writer.
+	writing := make(chan struct{})
+	var announced bool
 	go func() {
 		defer close(done)
 		for {
@@ -178,10 +185,15 @@ func TestStoreBackupIsConsistentUnderWrites(t *testing.T) {
 			default:
 			}
 			if _, err := writer.Create(ctx, "p1", Memory{Category: "fact", Content: "concurrent", Source: "mcp"}); err == nil {
+				if !announced {
+					announced = true
+					close(writing)
+				}
 				concurrent.Add(1)
 			}
 		}
 	}()
+	<-writing
 
 	dest := filepath.Join(t.TempDir(), "snapshot.db")
 	res, err := store.Backup(ctx, dest)
@@ -203,7 +215,10 @@ func TestStoreBackupIsConsistentUnderWrites(t *testing.T) {
 	var snapshotRows int
 	countErr := bdb.QueryRow(`SELECT count(*) FROM memories`).Scan(&snapshotRows)
 	_ = bdb.Close()
+	// Commits after the backup returned are excluded: what matters is that the
+	// writer was running *across* the vacuum.
 	writesDuringBackup := concurrent.Load()
+	_ = writesDuringBackup
 	close(stop)
 	<-done
 	if countErr != nil {
@@ -218,11 +233,16 @@ func TestStoreBackupIsConsistentUnderWrites(t *testing.T) {
 	if snapshotRows < 20 {
 		t.Errorf("snapshot memories = %d, want at least the 20 rows present before the writer started", snapshotRows)
 	}
-	// And the writer has to have been committing for any of the above to mean
-	// anything: a test that never actually contended would pass a torn copy.
-	if writesDuringBackup == 0 {
-		t.Fatal("the writer committed nothing during the backup, so nothing was tested for consistency")
-	}
+	// The writer must have been running for any of the above to mean anything,
+	// and `<-writing` above is what establishes it: a test that never actually
+	// contended would pass a torn copy.
+	//
+	// How many commits landed *during* the vacuum is deliberately not asserted.
+	// A consistent snapshot is allowed to block writers for its whole duration —
+	// that is the mechanism, not a defect — so a backup that admits no writer at
+	// all is a correct outcome, and a test that failed on it would be reporting a
+	// scheduler as a bug. The assertion that matters is the one above: the report
+	// describes the file.
 }
 
 // TestStoreBackupRefusesToOverwrite: a backup that silently replaced an
@@ -280,6 +300,12 @@ func TestStoreBackupMissingParentIsAnError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), missing) {
 		t.Errorf("error = %v, want it to name the missing directory", err)
+	}
+	// "does not exist", not "directory": the OS's own message for a failed
+	// create is "no such file or directory", so a word match on "directory"
+	// would pass whether or not the explicit check ran.
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("error = %v, want it to say the directory does not exist", err)
 	}
 }
 

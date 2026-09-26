@@ -122,34 +122,101 @@ func CountRows(ctx context.Context, db *sql.DB) (BackupCounts, error) {
 }
 
 // vacuumInto is the one implementation of "copy this database to that path":
-// VACUUM INTO, a refusal to replace an existing file, and the permission pass
-// that narrows the copy to the width of the database it came from.
+// create the destination at 0600 before SQLite writes a byte of it, VACUUM INTO
+// it, and run the permission pass afterwards.
 //
-// VACUUM INTO names no mode for the file it creates, so the copy lands at
-// whatever SQLite's default is minus the umask — a full copy of the memory
-// database at a width wider than the live one. It is only shielded by the 0700
-// data directory, and a --out destination outside it has no such shield, so the
-// copy is tightened here rather than left to a pass that walks only the three
-// live files. TightenPermissions never widens a mode, so a destination the user
-// had already made narrower keeps its own.
+// The pre-creation is the whole point of this function and it exists for two
+// reasons that a create-then-chmod cannot serve.
+//
+// The width. VACUUM INTO names no mode for the file it creates, so the copy
+// lands at SQLite's default minus the umask — measured at 0644 with a umask of
+// 000. It is only shielded by the 0700 data directory, and a --out destination
+// outside it has no such shield, so chmod'ing afterwards leaves a window in which
+// a full copy of the memory database is group- and world-readable. Creating the
+// file at 0600 first means it is never born wider. SQLite accepts an existing
+// EMPTY file as a VACUUM INTO destination and keeps its mode (verified against
+// v1.x through modernc.org/sqlite); it refuses a non-empty one, which is what
+// makes the emptiness this function guarantees into the thing SQLite checks.
+//
+// The reservation. O_EXCL is the atomic "this path is mine" test, so it replaces
+// a stat-then-create pair: there is no window between "I looked and it was
+// absent" and "I created it" for another writer, or a symlink swap, to slip into.
+// It also refuses a dangling symlink at the path, which a stat-based check reads
+// as absent and which the write would otherwise go through to its target.
+//
+// A vacuum that fails releases the reservation, so a retry is not blocked by
+// this run's own empty leftover. A process killed between the create and the
+// vacuum does leave one, and the next run reports it as an existing file — the
+// empty file is 0600 and contains nothing, so deleting it is safe.
 func vacuumInto(ctx context.Context, db *sql.DB, dest string) error {
-	if _, err := os.Lstat(dest); err == nil {
-		return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
-	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("check backup path %s: %w", dest, err)
+	if err := reserveBackupPath(dest); err != nil {
+		return err
 	}
-	// A --out destination is usually typed by hand, and a missing parent
-	// directory is the likely mistake. SQLite reports it as "unable to open
-	// database file", which reads as a problem with the database rather than
-	// with the path, so the directory is checked here and named.
+	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, dest); err != nil {
+		_ = os.Remove(dest)
+		return fmt.Errorf("vacuum into %s: %w", dest, err)
+	}
+	// Second line, not the only one. The reservation above is what closes the
+	// window — the file is never born wider — so on a filesystem that honours the
+	// open mode this call has nothing left to do, and a mutation that removes it
+	// survives the test suite. It is kept because the open mode is advisory:
+	// setgid directories, ACLs and some network and FUSE mounts can leave a file
+	// wider than the mode asked for, and this is a full copy of the memory
+	// database. Two cheap checks, neither load-bearing alone.
+	TightenPermissions(dest)
+	return nil
+}
+
+// reserveBackupPath creates dest as an empty 0600 regular file and closes it, so
+// the copy is never born wider than the database it came from and the path is
+// claimed atomically.
+//
+// It is its own function because these are the two properties no caller can check
+// after the fact: once a backup has finished, a create-then-chmod and a
+// create-at-0600 are indistinguishable — TightenPermissions ends up at the same
+// mode either way — and the window in between is the whole reason this exists.
+//
+// The handle is closed before returning. SQLite opens the path itself for the
+// vacuum, and holding a descriptor across it would be a second writer on a file
+// this is only reserving.
+func reserveBackupPath(dest string) error {
+	// The parent directory first. A --out destination is usually typed by hand,
+	// and a missing directory is the likely mistake; SQLite reports it as "unable
+	// to open database file", which reads as a problem with the database rather
+	// than with the path the user just typed. It is here rather than in
+	// vacuumInto because this is where a destination is validated.
 	if dir := filepath.Dir(dest); dir != "" {
 		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 			return fmt.Errorf("backup directory %s does not exist — create it, or pass a path inside one that does", dir)
 		}
 	}
-	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, dest); err != nil {
-		return fmt.Errorf("vacuum into %s: %w", dest, err)
+
+	// Classified before the create, so the refusal says which of the two cases it
+	// is: O_EXCL reports both as EEXIST, but "that file is already there" and
+	// "that path is a symlink and I will not write through it" are different
+	// things to be told. The create below is what enforces both — this
+	// classifies, it does not decide.
+	if info, err := os.Lstat(dest); err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing to write to %s, which is not a regular file", dest)
+		}
+		return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check backup path %s: %w", dest, err)
 	}
-	TightenPermissions(dest)
+
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			// The window between the Lstat above and this create. O_EXCL is what
+			// closes it, and this is only the report of who won.
+			return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
+		}
+		return fmt.Errorf("create backup %s: %w", dest, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(dest)
+		return fmt.Errorf("create backup %s: %w", dest, err)
+	}
 	return nil
 }
