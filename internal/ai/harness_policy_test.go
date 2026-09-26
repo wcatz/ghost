@@ -81,11 +81,14 @@ func TestConfigureOpenCodeIsolationWritesDenyConfig(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("isolated config is not JSON: %v", err)
 	}
-	if config.Permission["*"] != "deny" || config.Permission["mcp_*"] != "deny" {
-		t.Errorf("permission rules = %v, want wildcard and MCP deny", config.Permission)
+	// Every tool is "ask": a non-interactive `opencode run` declines each call.
+	// A deny rule or a disabled tool strips tools from the request, and
+	// OpenCode's free tier answers such a request with 403 provider.auth.
+	if len(config.Permission) != 1 || config.Permission["*"] != "ask" {
+		t.Errorf("permission rules = %v, want only {\"*\": \"ask\"}", config.Permission)
 	}
-	if config.Tools["bash"] || config.Tools["edit"] || config.Tools["write"] {
-		t.Errorf("dangerous tools are enabled: %v", config.Tools)
+	if len(config.Tools) != 0 {
+		t.Errorf("tool map = %v, want none (a disabled tool trips the free-tier check)", config.Tools)
 	}
 	if len(config.MCP) != 0 || len(config.Plugin) != 0 {
 		t.Errorf("MCP/plugins survived isolation: mcp=%v plugin=%v", config.MCP, config.Plugin)
@@ -322,9 +325,13 @@ fi
 case "$HOME" in "$GHOST_SCRATCH_DIR"/*) ;; *) echo "OpenCode home not isolated: $HOME" >&2; exit 1;; esac
 case "$XDG_CONFIG_HOME" in "$GHOST_SCRATCH_DIR"/*) ;; *) echo "OpenCode XDG config not isolated: $XDG_CONFIG_HOME" >&2; exit 1;; esac
 [ -n "$OPENCODE_CONFIG" ] || { echo "OpenCode config path missing" >&2; exit 1; }
-grep -q '"permission"\|"\\*"[[:space:]]*:[[:space:]]*"deny"' "$OPENCODE_CONFIG" || { echo "OpenCode deny config missing" >&2; exit 1; }
+grep -q '"\*"[[:space:]]*:[[:space:]]*"ask"' "$OPENCODE_CONFIG" || { echo "OpenCode ask config missing" >&2; exit 1; }
 args="$*"
 case "$args" in *" --standalone"*) ;; *) echo "missing --standalone" >&2; exit 1;; esac
+# The ask policy is only safe while nothing auto-approves the asks.
+for flag in --auto --dangerously-skip-permissions --yolo; do
+  case " $args " in *" $flag "*) echo "auto-approve flag $flag passed" >&2; exit 1;; esac
+done
 printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}'
 `)
 

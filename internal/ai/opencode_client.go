@@ -185,30 +185,18 @@ func OpencodeMajorVersion(out string) int {
 	return 0
 }
 
-// openCodeNoToolsConfig is written into an invocation-owned config tree. The
-// wildcard permission denies every tool, while the explicit tool map keeps
-// older OpenCode versions from exposing a built-in tool that predates the
-// wildcard rule. An empty MCP map and an empty plugin list make the isolation
-// intent visible in the child config as well as in the command line.
+// openCodeNoToolsConfig is written into an invocation-owned config tree. Every
+// tool is "ask", and a non-interactive `opencode run` declines each ask, so no
+// tool call executes; Ghost never passes an auto-approve flag. The policy
+// cannot be "deny" or a disabled tool map: either strips tools from the
+// request, and OpenCode's free tier answers such a request with 403
+// provider.auth ("free tier can only be used from within OpenCode"), which
+// failed every lifecycle phase. An empty MCP map and an empty plugin list keep
+// the user's servers and plugins out of the child.
 const openCodeNoToolsConfig = `{
   "$schema": "https://opencode.ai/config.json",
   "permission": {
-    "*": "deny",
-    "mcp_*": "deny"
-  },
-  "tools": {
-    "bash": false,
-    "edit": false,
-    "write": false,
-    "read": false,
-    "grep": false,
-    "glob": false,
-    "list": false,
-    "patch": false,
-    "webfetch": false,
-    "task": false,
-    "todowrite": false,
-    "todoread": false
+    "*": "ask"
   },
   "mcp": {},
   "plugin": []
