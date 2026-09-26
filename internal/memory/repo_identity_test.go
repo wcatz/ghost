@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestEnsureProjectWithRepoMergesSameRepositoryAcrossPaths is the whole point
@@ -148,6 +149,109 @@ func TestResolveProjectByRemote(t *testing.T) {
 		if id != "proj" {
 			t.Errorf("ResolveProject(%q) = %q, want %q — the same repository must be reachable by any spelling of its remote", in, id, "proj")
 		}
+	}
+}
+
+// TestResolveExplicitProjectRepoTxRefusesEvidenceAboutAnotherCheckout covers the
+// arm of the nested-checkout guard that no ordinary save reaches: a project
+// re-pointed between the pre-lock evidence read and the transaction that reads
+// it again.
+//
+// The evidence says the project speaks for the repository detected at the
+// checkout it used to record. If the row is then re-pointed at a different
+// checkout that still contains the saving directory — `ghost project bind` on a
+// subdirectory of it, say — the transaction still routes the save to that
+// project, and binding the remote would put the old checkout's repository on a
+// project that no longer records that checkout. The id is the same row either
+// way, which is why comparing the project alone is not enough.
+//
+// Both halves are driven directly rather than raced for: the evidence through
+// s.savingRepository, the re-point through the public bind, then the transaction
+// with the stale answer in hand. A test that waited for the two to collide would
+// pass without ever reaching the branch.
+func TestResolveExplicitProjectRepoTxRefusesEvidenceAboutAnotherCheckout(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const own = "https://github.com/wcatz/infra.git"
+	// ResolveOrCreateRepoProject normalizes the caller's remote once, before the
+	// evidence read and before the transaction, so both sides of every
+	// comparison here see the normalized spelling rather than the detected URL.
+	canon := NormalizeRepoRemote(own)
+	// The root is canonicalised once, because BindProjectPath records the
+	// physical directory and this test compares what it wrote. t.TempDir() is
+	// spelled /var/folders/... on macOS, which is a symlink to
+	// /private/var/folders/..., so the raw spelling would not match on every
+	// host — and the failure would read as a bind that recorded the wrong
+	// directory, which is the opposite of what this test is about.
+	root, err := canonicalPath(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp root: %v", err)
+	}
+	checkout := filepath.Join(root, "git", "infra")
+	saving := filepath.Join(checkout, "src", "api")
+	repointed := filepath.Join(checkout, "src")
+	for _, dir := range []string{checkout, saving, repointed} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+	if err := s.EnsureProject(ctx, checkout, checkout, "infra"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	SetDetectRemote(func(string) string { return own })
+	t.Cleanup(func() { SetDetectRemote(nil) })
+
+	// What a save from the subdirectory collects while the project still
+	// records the checkout root.
+	evidence := s.savingRepository(ctx, saving, canon)
+	if evidence.projectID != checkout || evidence.recordedPath != checkout {
+		t.Fatalf("evidence = %+v, want it to describe %q at %q", evidence, checkout, checkout)
+	}
+	if !evidence.speaksForProject {
+		t.Fatalf("evidence says the subdirectory does not speak for the project: %+v", evidence)
+	}
+
+	// The same row, re-pointed at a shorter ancestor of the saving directory, so
+	// the transaction's prefix query still answers with this project.
+	binding, err := s.BindProjectPath(ctx, checkout, repointed, "")
+	if err != nil {
+		t.Fatalf("BindProjectPath: %v", err)
+	}
+	if binding.Path != repointed {
+		t.Fatalf("bind recorded path %q, want %q", binding.Path, repointed)
+	}
+
+	s.mu.Lock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		s.mu.Unlock()
+		t.Fatalf("begin tx: %v", err)
+	}
+	id, found, resolveErr := s.resolveExplicitProjectRepoTx(ctx, tx, saving, canon, evidence)
+	// Committed, not rolled back: the assertion is about whether a remote was
+	// written, and a rollback would discard the write under test and pass the
+	// test whatever the guard did.
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	s.mu.Unlock()
+	if resolveErr != nil {
+		t.Fatalf("resolveExplicitProjectRepoTx error = %v, want nil", resolveErr)
+	}
+	if !found || id != checkout {
+		t.Errorf("resolveExplicitProjectRepoTx = (%q, %v), want (%q, true): the re-pointed project still encloses the save", id, found, checkout)
+	}
+
+	// The point: the save is routed, and the project is left unclaimed rather
+	// than given a remote detected at the checkout it no longer records.
+	var got string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, checkout).Scan(&got); err != nil {
+		t.Fatalf("read project repository: %v", err)
+	}
+	if got != "" {
+		t.Errorf("evidence about %q bound %q to a project now recording %q", checkout, got, repointed)
 	}
 }
 
@@ -1117,6 +1221,414 @@ func TestResolveOrCreateRepoProjectRefusesUnresolvableRecordedPath(t *testing.T)
 	}
 	if got != "" {
 		t.Errorf("project with an unresolvable recorded path was bound to %q", got)
+	}
+}
+
+// TestResolveOrCreateRepoProjectNestedRepoKeepsEnclosingProjectUnbound stops a
+// nested checkout from lending its remote to the project that encloses it.
+//
+// The write-side path-prefix step answers a save from ~/git/infra/vendor/lib
+// with the project recorded at ~/git/infra, which is right: the save belongs to
+// the project whose checkout the session is standing in. It was also writing
+// that checkout's identity onto the parent, and a submodule or vendored
+// repository is a different repository by definition — so a save from inside one
+// bound other/lib to ~/git/infra and locked the real checkout out of its own
+// project at every path except exactly its root. The parent is a v9-era row
+// with no remote, so the first nested save is enough.
+//
+// What the enclosing project is asked to absorb is therefore a decision, and
+// only the project's own root may make it. The save still lands in the parent:
+// routing a session is not the same claim as identifying the repository.
+func TestResolveOrCreateRepoProjectNestedRepoKeepsEnclosingProjectUnbound(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// Both directories exist: the comparison is made on resolved paths, so a
+	// nested path that cannot be resolved would make this pass for the wrong
+	// reason.
+	root := t.TempDir()
+	parent := filepath.Join(root, "git", "infra")
+	nested := filepath.Join(parent, "vendor", "lib")
+	for _, dir := range []string{parent, nested} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+	if err := s.EnsureProject(ctx, parent, parent, "infra"); err != nil {
+		t.Fatalf("EnsureProject parent: %v", err)
+	}
+	// The detector answers as git would, per directory: the nested checkout has
+	// its own origin and the enclosing tree has its own. Without this the guard
+	// would be proved by detecting nothing at all rather than by the two
+	// repositories disagreeing, which is the claim under test.
+	SetDetectRemote(func(dir string) string {
+		if strings.HasPrefix(dir, nested) {
+			return "https://github.com/other/lib.git"
+		}
+		return "https://github.com/wcatz/infra.git"
+	})
+	t.Cleanup(func() { SetDetectRemote(nil) })
+
+	canonical, err := s.ResolveOrCreateRepoProject(
+		ctx, nested, "lib", nested, nested, "lib", "https://github.com/other/lib.git",
+	)
+	if err != nil {
+		t.Fatalf("ResolveOrCreateRepoProject from the nested checkout: %v", err)
+	}
+	if canonical != parent {
+		t.Errorf("nested save resolved to %q, want the enclosing project %q", canonical, parent)
+	}
+	var parentRemote string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, parent).Scan(&parentRemote); err != nil {
+		t.Fatalf("read parent project repository: %v", err)
+	}
+	if parentRemote != "" {
+		t.Errorf("a nested checkout bound its remote %q to the enclosing project, want it left unclaimed", parentRemote)
+	}
+
+	// A save from the project's own root is the claim the parent is allowed to
+	// make, and it must still make it — a guard that read "matched by path
+	// prefix" as "refuse" would strand every project with no recorded remote.
+	canonical, err = s.ResolveOrCreateRepoProject(
+		ctx, parent, "infra", parent, parent, "infra", "https://github.com/wcatz/infra.git",
+	)
+	if err != nil {
+		t.Fatalf("ResolveOrCreateRepoProject from the project root: %v", err)
+	}
+	if canonical != parent {
+		t.Errorf("save from the project root resolved to %q, want %q", canonical, parent)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, parent).Scan(&parentRemote); err != nil {
+		t.Fatalf("read bound parent repository: %v", err)
+	}
+	if want := "github.com/wcatz/infra"; parentRemote != want {
+		t.Errorf("project root bound repository %q, want %q", parentRemote, want)
+	}
+}
+
+// TestResolveOrCreateRepoProjectNestedRepoLeavesEnclosingProjectResolvable is
+// what the refusal above buys, stated as the user-visible outcome rather than as
+// a column value: after a save from a nested checkout, a session anywhere in
+// the enclosing checkout still resolves to it.
+//
+// The bug did not merely record a wrong remote. Once the nested checkout's
+// remote sat on the parent, every save and every read from the real checkout
+// reported "belongs to a different repository" except at exactly the root, so
+// the project was reachable from one directory out of all of them.
+func TestResolveOrCreateRepoProjectNestedRepoLeavesEnclosingProjectResolvable(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	parent := filepath.Join(root, "git", "infra")
+	nested := filepath.Join(parent, "vendor", "lib")
+	subdir := filepath.Join(parent, "docs")
+	for _, dir := range []string{parent, nested, subdir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+	if err := s.EnsureProject(ctx, parent, parent, "infra"); err != nil {
+		t.Fatalf("EnsureProject parent: %v", err)
+	}
+
+	// Wired before the saves, not only before the reads below: the guard asks
+	// the same question this detector answers, and a test that wired it late
+	// would be proving the refusal with a detector that is switched off.
+	SetDetectRemote(func(dir string) string {
+		if strings.HasPrefix(dir, nested) {
+			return "https://github.com/other/lib.git"
+		}
+		return "https://github.com/wcatz/infra.git"
+	})
+	t.Cleanup(func() { SetDetectRemote(nil) })
+
+	if _, err := s.ResolveOrCreateRepoProject(
+		ctx, nested, "lib", nested, nested, "lib", "https://github.com/other/lib.git",
+	); err != nil {
+		t.Fatalf("ResolveOrCreateRepoProject from the nested checkout: %v", err)
+	}
+	if _, err := s.ResolveOrCreateRepoProject(
+		ctx, parent, "infra", parent, parent, "infra", "https://github.com/wcatz/infra.git",
+	); err != nil {
+		t.Fatalf("ResolveOrCreateRepoProject from the project root: %v", err)
+	}
+
+	if id, _, err := s.ResolveProject(ctx, subdir); err != nil {
+		t.Fatalf("ResolveProject from a subdirectory: %v", err)
+	} else if id != parent {
+		t.Errorf("ResolveProject(%q) = %q, want the enclosing project %q", subdir, id, parent)
+	}
+
+	// And the nested checkout is not folded into it: its repository is not the
+	// parent's, so a session standing in one is refused rather than answered
+	// with the enclosing project's memories.
+	if id, _, err := s.ResolveProject(ctx, nested); err != nil {
+		t.Fatalf("ResolveProject from the nested checkout: %v", err)
+	} else if id != "" {
+		t.Errorf("ResolveProject(%q) = %q, want a refusal: the nested checkout is another repository", nested, id)
+	}
+}
+
+// TestResolveOrCreateRepoProjectNestedRepoDoesNotMergeEnclosingProject is the
+// other write the path-prefix step could do with a nested checkout's remote, and
+// the more destructive one: when some other project already records that
+// repository, the step merges the matched project into it. A save from a nested
+// checkout therefore used to delete the enclosing project's row and move its
+// memories into the nested repository's project — the same identity theft as the
+// bind, with nothing left behind to notice it by.
+func TestResolveOrCreateRepoProjectNestedRepoDoesNotMergeEnclosingProject(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	root := t.TempDir()
+	parent := filepath.Join(root, "git", "infra")
+	nested := filepath.Join(parent, "vendor", "lib")
+	for _, dir := range []string{parent, nested} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+	if err := s.EnsureProject(ctx, parent, parent, "infra"); err != nil {
+		t.Fatalf("EnsureProject parent: %v", err)
+	}
+	const content = "memory that belongs to the enclosing project"
+	if _, _, _, err := s.Upsert(ctx, parent, "fact", content, "manual", 0.5, nil); err != nil {
+		t.Fatalf("Upsert parent memory: %v", err)
+	}
+	// The nested repository's project already exists, from another checkout of
+	// it — the state in which the prefix step merges instead of binding.
+	const nestedOwner = "github.com/other/lib"
+	if err := s.EnsureProjectWithRepo(ctx, nestedOwner, "", "lib", "https://github.com/other/lib.git"); err != nil {
+		t.Fatalf("EnsureProjectWithRepo nested owner: %v", err)
+	}
+	SetDetectRemote(func(dir string) string {
+		if strings.HasPrefix(dir, nested) {
+			return "https://github.com/other/lib.git"
+		}
+		return "https://github.com/wcatz/infra.git"
+	})
+	t.Cleanup(func() { SetDetectRemote(nil) })
+
+	canonical, err := s.ResolveOrCreateRepoProject(
+		ctx, nested, "lib", nested, nested, "lib", "https://github.com/other/lib.git",
+	)
+	if err != nil {
+		t.Fatalf("ResolveOrCreateRepoProject from the nested checkout: %v", err)
+	}
+	if canonical != parent {
+		t.Errorf("nested save resolved to %q, want the enclosing project %q", canonical, parent)
+	}
+	var rows int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE id = ?`, parent).Scan(&rows); err != nil {
+		t.Fatalf("count parent project: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("enclosing project rows = %d, want 1: a nested save merged it away", rows)
+	}
+	var moved int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memories WHERE project_id = ? AND content = ?`, nestedOwner, content).Scan(&moved); err != nil {
+		t.Fatalf("count moved memories: %v", err)
+	}
+	if moved != 0 {
+		t.Errorf("%d memories of the enclosing project moved into the nested checkout's project", moved)
+	}
+}
+
+// TestResolveOrCreateRepoProjectBindsRemoteFromSubdirectoryOfSameRepository is
+// the other half of the nested-checkout rule, and the half a guard written as
+// "only the project's own root may bind" gets wrong.
+//
+// A session is usually started in a subdirectory rather than at the checkout
+// root, and `git config --get remote.origin.url` walks up, so the remote found
+// there genuinely is the enclosing checkout's own. A v11-era row — a recorded
+// path and no remote, which is what migrateV11 leaves every pre-v11 project as —
+// is identified by that save and by no other, because the remote is only ever
+// written from a save. Refuse it and the project is never identified at all.
+//
+// A second checkout of the same repository is deliberately not in this test: its
+// path is not a prefix match for the first, so the prefix step never sees it, and
+// the unique-name fallback refuses it instead — the trade #610 recorded, where a
+// second checkout keeps its own project rather than inheriting the first one's
+// memories.
+func TestResolveOrCreateRepoProjectBindsRemoteFromSubdirectoryOfSameRepository(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const own = "https://github.com/wcatz/infra.git"
+	root := t.TempDir()
+	parent := filepath.Join(root, "git", "infra")
+	subdir := filepath.Join(parent, "src", "api")
+	for _, dir := range []string{parent, subdir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+	if err := s.EnsureProject(ctx, parent, parent, "infra"); err != nil {
+		t.Fatalf("EnsureProject parent: %v", err)
+	}
+	// One remote for every directory, which is what git reports for a tree that
+	// is a single repository however deep the save came from.
+	SetDetectRemote(func(string) string { return own })
+	t.Cleanup(func() { SetDetectRemote(nil) })
+
+	canonical, err := s.ResolveOrCreateRepoProject(
+		ctx, subdir, "infra", subdir, subdir, subdir, own,
+	)
+	if err != nil {
+		t.Fatalf("ResolveOrCreateRepoProject: %v", err)
+	}
+	if canonical != parent {
+		t.Errorf("save from %q resolved to %q, want the project whose checkout encloses it %q", subdir, canonical, parent)
+	}
+	var got string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(repo_remote, '') FROM projects WHERE id = ?`, parent).Scan(&got); err != nil {
+		t.Fatalf("read bound repository: %v", err)
+	}
+	if want := "github.com/wcatz/infra"; got != want {
+		t.Errorf("project records repository %q after a save from its own repository, want %q", got, want)
+	}
+}
+
+// TestResolveOrCreateRepoProjectDetectsRemoteOnce pins the cost of deciding
+// whether a save may identify a project, because the write side is otherwise
+// the one place that never spawns git: the remote at the saving directory was
+// detected by the caller that passed it in, so the only question left is the one
+// at the project's recorded path.
+//
+// The third case is the one that matters in production, since it is every save
+// after the first: once the project records its repository, the transaction
+// returns before the guard is reached, so the answer is provably unused and must
+// cost nothing. "Provably" is the part under test — the pre-lock read has the
+// row, so it can see that the remote is already recorded and skip the spawn
+// rather than computing an answer nobody will read.
+func TestResolveOrCreateRepoProjectDetectsRemoteOnce(t *testing.T) {
+	const own = "https://github.com/wcatz/infra.git"
+	for _, c := range []struct {
+		name string
+		// bindFirst saves from the project root first, which is what puts the
+		// project in the state every later save meets.
+		bindFirst bool
+		saving    func(parent string) string
+		want      int
+	}{
+		{
+			name:   "a save at the project root",
+			saving: func(parent string) string { return parent },
+			want:   0,
+		},
+		{
+			name:   "a save from a subdirectory",
+			saving: func(parent string) string { return filepath.Join(parent, "src") },
+			want:   1,
+		},
+		{
+			name:      "a save from a subdirectory of a project that records its remote",
+			bindFirst: true,
+			saving:    func(parent string) string { return filepath.Join(parent, "src") },
+			want:      0,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := testStore(t)
+			ctx := context.Background()
+
+			root := t.TempDir()
+			parent := filepath.Join(root, "git", "infra")
+			saving := c.saving(parent)
+			for _, dir := range []string{parent, saving} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("create %s: %v", dir, err)
+				}
+			}
+			if err := s.EnsureProject(ctx, parent, parent, "infra"); err != nil {
+				t.Fatalf("EnsureProject parent: %v", err)
+			}
+			if c.bindFirst {
+				if _, err := s.ResolveOrCreateRepoProject(
+					ctx, parent, "infra", parent, parent, parent, own,
+				); err != nil {
+					t.Fatalf("bind the project from its root: %v", err)
+				}
+			}
+
+			detections := 0
+			SetDetectRemote(func(string) string { detections++; return own })
+			t.Cleanup(func() { SetDetectRemote(nil) })
+
+			if _, err := s.ResolveOrCreateRepoProject(
+				ctx, saving, "infra", saving, saving, saving, own,
+			); err != nil {
+				t.Fatalf("ResolveOrCreateRepoProject: %v", err)
+			}
+			if detections != c.want {
+				t.Errorf("a repository-aware save spawned %d detections, want %d", detections, c.want)
+			}
+		})
+	}
+}
+
+// TestResolveOrCreateRepoProjectDetectsBeforeTakingTheStoreLock pins where that
+// detection happens, because the cost is not only a process spawn: the resolve
+// holds the store-wide mutex and the single write connection for its whole
+// duration, so a git that hangs there stalls every other reader and writer on
+// this Store to answer one save.
+//
+// Holding the mutex and watching for the detection is the only way to say which
+// side of it the work falls on. If the detection moved back inside the lock, the
+// channel below would never close and this fails rather than hangs, because the
+// test releases the mutex on the timeout path.
+func TestResolveOrCreateRepoProjectDetectsBeforeTakingTheStoreLock(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const own = "https://github.com/wcatz/infra.git"
+	root := t.TempDir()
+	parent := filepath.Join(root, "git", "infra")
+	subdir := filepath.Join(parent, "src", "api")
+	for _, dir := range []string{parent, subdir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create %s: %v", dir, err)
+		}
+	}
+	if err := s.EnsureProject(ctx, parent, parent, "infra"); err != nil {
+		t.Fatalf("EnsureProject parent: %v", err)
+	}
+
+	// Buffered, and a non-blocking send: a second detection is a regression this
+	// test is here to catch, and closing an already-closed channel would panic
+	// the whole package binary instead of failing this test.
+	detected := make(chan struct{}, 1)
+	SetDetectRemote(func(string) string {
+		select {
+		case detected <- struct{}{}:
+		default:
+		}
+		return own
+	})
+	t.Cleanup(func() { SetDetectRemote(nil) })
+
+	s.mu.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ResolveOrCreateRepoProject(ctx, subdir, "infra", subdir, subdir, subdir, own)
+		done <- err
+	}()
+
+	select {
+	case <-detected:
+	case <-time.After(5 * time.Second):
+		s.mu.Unlock()
+		t.Fatal("the repository detection ran behind the store mutex")
+	}
+	s.mu.Unlock()
+
+	if err := <-done; err != nil {
+		t.Fatalf("ResolveOrCreateRepoProject: %v", err)
 	}
 }
 
