@@ -545,7 +545,3 @@ func pluralCount(n int, singular, plural string) string {
 	}
 	return fmt.Sprintf("%d %s", n, plural)
 }
-
-// usage returns the help text for a parsed set of options. Help is carried on
-// the options struct as the usage string so the -h path and the parse path share
-// one code path.
