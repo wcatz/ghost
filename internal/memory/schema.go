@@ -4,8 +4,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -434,6 +439,12 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 			_ = db.Close()
 			return nil, fmt.Errorf("pre-migration backup: %w", err)
 		}
+		// The copy landed, so the safety net for THIS upgrade exists and the
+		// older ones can stop accumulating (#542: a directory that has seen a
+		// dozen upgrades held a dozen full copies of the database). Only now,
+		// and only on this path — an open with nothing to migrate writes no
+		// backup and prunes nothing.
+		prunePreMigrateBackups(dbPath)
 		if err := migrate(db, version); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("migrate schema v%d→v%d: %w", version, schemaVersion, err)
@@ -476,4 +487,83 @@ func backupBeforeMigrate(db *sql.DB, dbPath string) error {
 	// either way.
 	TightenPermissions(backup)
 	return nil
+}
+
+// preMigrateBackupKeep is how many pre-migration copies of one database stay in
+// the data directory: the one just written plus the two it supersedes. Each is
+// a full copy of the database, so a set that nothing ever culls grows with
+// every upgrade (#542) while its only reader is the human deciding which
+// upgrade to roll back to — three is more hindsight than that needs.
+const preMigrateBackupKeep = 3
+
+// prunePreMigrateBackups keeps the newest preMigrateBackupKeep regular files
+// named "<db>.pre-migrate-<unix>" beside dbPath and removes the older ones.
+// The prefix is built from the path rather than a constant so a database
+// called anything but ghost.db only ever prunes its own copies.
+//
+// It runs only where a backup was just written, so the copy this open depends
+// on is by construction the newest one and is never the one removed. The match
+// is deliberately narrow: the suffix must be a bare unix timestamp (numeric
+// order, not the lexicographic order a glob would impose), the entry must be a
+// regular file as reported by Lstat — a symlink wearing the name is left as the
+// link it is, never renamed, never followed — and every other file in the
+// directory (hand-made ghost.db.backup-*, ghost.db.pre-<version>-*, the
+// database and its sidecars) is outside the match entirely.
+//
+// Best effort: a directory that cannot be read or a file that cannot be removed
+// is a warning, never an error. Losing a cleanup pass must not stand between a
+// migration and the backup it just wrote.
+func prunePreMigrateBackups(dbPath string) {
+	if dbPath == ":memory:" {
+		// Dir(":memory:") would name the working directory, which holds
+		// nothing of this database's and is not ours to walk.
+		return
+	}
+	dir := filepath.Dir(dbPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		slog.Warn("could not list directory to prune pre-migration backups", "dir", dir, "error", err)
+		return
+	}
+
+	prefix := filepath.Base(dbPath) + ".pre-migrate-"
+	type candidate struct {
+		path  string
+		stamp int64
+	}
+	var found []candidate
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		suffix := name[len(prefix):]
+		stamp, convErr := strconv.ParseInt(suffix, 10, 64)
+		// ParseInt accepts "+7"; FormatInt never produces it, and a negative
+		// stamp is not a timestamp. Both would widen the match past what
+		// backupBeforeMigrate can write.
+		if convErr != nil || stamp < 0 || strconv.FormatInt(stamp, 10) != suffix {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		fi, statErr := os.Lstat(full)
+		if statErr != nil || !fi.Mode().IsRegular() {
+			// Symlink, directory, or a file that vanished between ReadDir
+			// and here: not a backup this function wrote, so not one it may
+			// remove.
+			continue
+		}
+		found = append(found, candidate{path: full, stamp: stamp})
+	}
+	if len(found) <= preMigrateBackupKeep {
+		return
+	}
+	// Newest first by the numeric suffix. Sorting the names as strings would
+	// rank "999" above "1003" and prune the wrong end.
+	sort.Slice(found, func(i, j int) bool { return found[i].stamp > found[j].stamp })
+	for _, c := range found[preMigrateBackupKeep:] {
+		if err := os.Remove(c.path); err != nil {
+			slog.Warn("could not prune old pre-migration backup", "path", c.path, "error", err)
+		}
+	}
 }
