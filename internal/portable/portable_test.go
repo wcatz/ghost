@@ -213,8 +213,12 @@ func TestExportImportDowngradesProvenanceByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PortableMemories: %v", err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("the destination holds %d memories, want all 3 from the artifact", len(got))
+	// Two, not three: the source is seeded, and the artifact does not carry
+	// Ghost's own _global builtin seed — the destination writes that row itself,
+	// by content, on every open, so a copy could only ever be a permanent
+	// duplicate. The manual and the pinned mcp are the two that travel.
+	if len(got) != 2 {
+		t.Fatalf("the destination holds %d memories, want the 2 the artifact carries", len(got))
 	}
 	for _, m := range got {
 		if m.Source != memory.DowngradedSource {
@@ -222,6 +226,12 @@ func TestExportImportDowngradesProvenanceByDefault(t *testing.T) {
 		}
 		if m.Pinned {
 			t.Errorf("memory %q came back pinned", m.Content)
+		}
+		// Asserted here as well as in the store-level test because the artifact
+		// is what travels: a seed row reaching a store is the failure, and the
+		// store-level test asserts the read, not the bytes.
+		if m.ProjectID == "_global" && m.Source == "builtin" {
+			t.Errorf("the artifact carried Ghost's own seed row %q", m.ID)
 		}
 	}
 	// And the per-record report says so, once per memory, because the stored
@@ -263,14 +273,18 @@ func TestExportImportDowngradesProvenanceByDefault(t *testing.T) {
 			pins++
 		}
 	}
-	if sources["manual"] != 1 || sources["builtin"] != 1 || sources["mcp"] != 1 {
-		t.Errorf("trusted sources = %v, want the artifact's own manual/builtin/mcp", sources)
+	if sources["manual"] != 1 || sources["mcp"] != 1 {
+		t.Errorf("trusted sources = %v, want the artifact's own manual and mcp", sources)
 	}
-	// Two, not one: the artifact also carries the builtin _global seed, which
-	// Ghost itself writes pinned. The count is asserted rather than computed so
-	// that a change to what an import preserves shows up here.
-	if pins != 2 {
-		t.Errorf("trusted import pinned %d memories, want 2 (the artifact's own pin plus the builtin seed)", pins)
+	// One, not two: the builtin _global seed is not in the artifact, so the only
+	// pinned row is the one the artifact pinned itself. This is the case the
+	// reviewer's finding was about — a --trust-provenance import must not be able
+	// to add a second pinned builtin copy of Ghost's shipped rule.
+	if sources["builtin"] != 0 {
+		t.Errorf("a trusted import restored %d builtin rows, want none — Ghost re-seeds those by content", sources["builtin"])
+	}
+	if pins != 1 {
+		t.Errorf("trusted import pinned %d memories, want the 1 the artifact pinned", pins)
 	}
 }
 

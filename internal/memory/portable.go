@@ -186,6 +186,27 @@ func (s *Store) PortableMemories(ctx context.Context, projectIDs []string) ([]Po
 		       resolved_at, valid_from, valid_until, verified_at,
 		       agent, session_id, source_ref, confidence, scope
 		FROM memories`
+	// Ghost's own seeds are excluded, and the reason is that no import could ever
+	// reconcile them: SeedGlobalMemories writes each seed under the schema's
+	// default id, hex(randomblob(16)), which is per-install, so the artifact's
+	// copy never equals the destination's own. Every importer dedups by id alone,
+	// so a cross-machine import inserts a second row with byte-identical content
+	// — with --trust-provenance a second pinned builtin copy of Ghost's shipped
+	// rule, surfaced to every session as a rule it already has; by default an
+	// onboarding copy that has silently lost the "this is Ghost's own" label,
+	// which is the exact downgrade the provenance policy exists to prevent.
+	// Nothing repairs it: SeedGlobalMemories skips by content, and no path
+	// deletes memories, so the duplicate is permanent.
+	//
+	// Excluding at the read is the cheap side of the fix. It keeps the import rule
+	// simple (dedup by id) and matches what the destination already does on every
+	// open — it writes exactly these rows by content — so a restored store ends up
+	// with one copy, written by Ghost, not two.
+	//
+	// The exclusion is on the seed (project AND source), not on the project: a
+	// user's own memory filed under _global is the only copy of itself and has no
+	// other way in.
+	const seedExclusion = ` AND NOT (project_id = '_global' AND source = 'builtin')`
 	var args []any
 	if len(projectIDs) > 0 {
 		// One "?" per id and the ids themselves only ever in args: the query
@@ -195,7 +216,9 @@ func (s *Store) PortableMemories(ctx context.Context, projectIDs []string) ([]Po
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
-		query += " WHERE project_id IN (" + strings.Join(placeholders, ",") + ")"
+		query += " WHERE project_id IN (" + strings.Join(placeholders, ",") + ")" + seedExclusion
+	} else {
+		query += " WHERE 1 = 1" + seedExclusion
 	}
 	// Ordered by id for the same byte-reproducibility reason as the projects.
 	query += " ORDER BY id"
