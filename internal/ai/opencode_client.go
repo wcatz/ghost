@@ -94,10 +94,10 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	// which loads the user's real config, Ghost's plugin and MCP server
 	// included, defeating the scrub above. V2 therefore gets --standalone,
 	// so the child runs a private server on the scrubbed config instead.
-	args := []string{"run", "--format", "json", "--pure", "--title", "[ghost]"}
+	args := []string{"run", "--format", "json", "--pure", "--title", ghostSessionTitle}
 	policy := openCodeDenyConfig
 	if c.majorVersion(ctx) >= 2 {
-		args = []string{"run", "--format", "json", "--standalone", "--title", "[ghost]"}
+		args = []string{"run", "--format", "json", "--standalone", "--title", ghostSessionTitle}
 		policy = openCodeAskConfig
 	}
 	model := c.model

@@ -48,17 +48,17 @@ func harnessCommand(ctx context.Context, binary string, args, baseEnv []string, 
 		return cmd, func() {}, false
 	}
 	cmd.Dir = dir.Path()
-	cmd.Env = scratchEnv(env, dir)
+	cmd.Env = scratchEnv(env, dir.Path())
 	return cmd, dir.Release, true
 }
 
 // scratchEnv returns env with every TMPDIR/TMP/TEMP entry removed (any case)
-// and the three variables pinned to d's path, so the child writes its
+// and the three variables pinned to tempDir, so the child writes its
 // temporary files where Ghost can remove them. Inherited entries must be
 // dropped rather than shadowed: os/exec passes the environment through in
 // order and duplicate keys resolve inconsistently across readers and
 // platforms.
-func scratchEnv(env []string, d *scratch.Dir) []string {
+func scratchEnv(env []string, tempDir string) []string {
 	out := make([]string, 0, len(env)+len(tempDirKeys))
 	for _, kv := range env {
 		if isTempDirKey(kv) {
@@ -67,7 +67,7 @@ func scratchEnv(env []string, d *scratch.Dir) []string {
 		out = append(out, kv)
 	}
 	for _, key := range tempDirKeys {
-		out = append(out, key+"="+d.Path())
+		out = append(out, key+"="+tempDir)
 	}
 	return out
 }
