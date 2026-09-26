@@ -267,12 +267,19 @@ func TestStoreBackupRefusesToOverwrite(t *testing.T) {
 }
 
 // TestStoreBackupMissingParentIsAnError: a path whose directory does not exist
-// has to fail loudly rather than leave the user believing a snapshot exists.
+// has to fail loudly rather than leave the user believing a snapshot exists,
+// and the error has to name the directory — SQLite's own "unable to open
+// database file" reads as a problem with the database.
 func TestStoreBackupMissingParentIsAnError(t *testing.T) {
 	store := backupTestStore(t)
-	dest := filepath.Join(t.TempDir(), "no-such-dir", "snapshot.db")
-	if _, err := store.Backup(context.Background(), dest); err == nil {
+	missing := filepath.Join(t.TempDir(), "no-such-dir")
+	dest := filepath.Join(missing, "snapshot.db")
+	_, err := store.Backup(context.Background(), dest)
+	if err == nil {
 		t.Fatal("Backup must fail when the destination directory does not exist")
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("error = %v, want it to name the missing directory", err)
 	}
 }
 

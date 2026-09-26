@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -136,6 +137,15 @@ func vacuumInto(ctx context.Context, db *sql.DB, dest string) error {
 		return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("check backup path %s: %w", dest, err)
+	}
+	// A --out destination is usually typed by hand, and a missing parent
+	// directory is the likely mistake. SQLite reports it as "unable to open
+	// database file", which reads as a problem with the database rather than
+	// with the path, so the directory is checked here and named.
+	if dir := filepath.Dir(dest); dir != "" {
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			return fmt.Errorf("backup directory %s does not exist — create it, or pass a path inside one that does", dir)
+		}
 	}
 	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, dest); err != nil {
 		return fmt.Errorf("vacuum into %s: %w", dest, err)
