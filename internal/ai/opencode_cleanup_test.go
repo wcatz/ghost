@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -243,7 +244,7 @@ func TestCleanupOpenCodeSessions_ImplausibleTimestampsAreReported(t *testing.T) 
 		t.Errorf("Listed=%d Eligible=%d Implausible=%d, want 3/0/2", res.Listed, res.Eligible, res.Implausible)
 	}
 	report := out.String()
-	if !strings.Contains(report, "warning:") || !strings.Contains(report, "timestamp outside") {
+	if !strings.Contains(report, "warning:") || !strings.Contains(report, "out-of-window timestamp") {
 		t.Errorf("report never says the timestamp was refused, so a 0-eligible summary reads as a clean run:\n%s", report)
 	}
 	if !strings.Contains(report, "TestOpenCodeSessionList_TimestampsAreMilliseconds") {
@@ -254,6 +255,133 @@ func TestCleanupOpenCodeSessions_ImplausibleTimestampsAreReported(t *testing.T) 
 	}
 	if got := fakeDeletes(t, dir); len(got) != 0 {
 		t.Errorf("deleted %v, want none — a refused session is never a delete target", got)
+	}
+}
+
+// TestCleanupOpenCodeSessions_MissingTimestampsAreReported: if opencode's
+// session JSON stopped carrying created/updated (a shape change, as opposed
+// to a unit change), every row would read as 0 — older than any cutoff — and
+// a title-only selection would call the whole backlog old on no evidence at
+// all. The missing timestamp is refused exactly like an out-of-window one and
+// counted with it, so the drift shows up as the same visible warning instead
+// of a silent "0 eligible" run.
+func TestCleanupOpenCodeSessions_MissingTimestampsAreReported(t *testing.T) {
+	now := time.Now()
+	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
+		map[string]any{"id": "ses_flat_a", "title": ghostSessionTitle}, // no created/updated at all
+		map[string]any{"id": "ses_flat_b", "title": ghostSessionTitle, "created": 0, "updated": 0},
+		session("ses_own", "my own session", 9*time.Hour, 9*time.Hour, now), // not titled: never counted
+	))
+
+	var out bytes.Buffer
+	res, err := CleanupOpenCodeSessions(context.Background(), "opencode",
+		OpenCodeCleanupOptions{Grace: time.Hour, Now: now}, &out)
+	if err != nil {
+		t.Fatalf("CleanupOpenCodeSessions: %v", err)
+	}
+	if res.Listed != 3 || res.Eligible != 0 || res.Implausible != 2 {
+		t.Errorf("Listed=%d Eligible=%d Implausible=%d, want 3/0/2 — a title-only selection must not treat a missing timestamp as proven age",
+			res.Listed, res.Eligible, res.Implausible)
+	}
+	report := out.String()
+	if !strings.Contains(report, "warning:") || !strings.Contains(report, "out-of-window timestamp") {
+		t.Errorf("report never says the timestamp was refused:\n%s", report)
+	}
+	if got := fakeDeletes(t, dir); len(got) != 0 {
+		t.Errorf("deleted %v, want none — an untimestamped session is never a delete target", got)
+	}
+}
+
+// TestCleanupOpenCodeSessions_TruncatedListWarns pins the other guarded read:
+// --limit bounds what `session list` is asked for, so a list that reaches the
+// bound has to say its count may be short rather than present itself as
+// complete. Without it the same hazard as the timestamp warning returns —
+// "0 eligible" read as "nothing to clean" when the truth is "not all of it was
+// looked at".
+func TestCleanupOpenCodeSessions_TruncatedListWarns(t *testing.T) {
+	now := time.Now()
+	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
+		session("ses_old", ghostSessionTitle, 3*time.Hour, 2*time.Hour, now),
+		session("ses_recent", ghostSessionTitle, 30*time.Minute, 5*time.Minute, now),
+		session("ses_own", "my own session", 9*time.Hour, 8*time.Hour, now),
+	))
+
+	var out bytes.Buffer
+	res, err := CleanupOpenCodeSessions(context.Background(), "opencode",
+		OpenCodeCleanupOptions{Grace: time.Hour, Now: now, Limit: 3}, &out)
+	if err != nil {
+		t.Fatalf("CleanupOpenCodeSessions: %v", err)
+	}
+	if res.Listed != 3 || res.Eligible != 1 || res.Implausible != 0 {
+		t.Errorf("Listed=%d Eligible=%d Implausible=%d, want 3/1/0", res.Listed, res.Eligible, res.Implausible)
+	}
+	report := out.String()
+	if !strings.Contains(report, "warning:") || !strings.Contains(report, "--limit of 3") || !strings.Contains(report, "truncated") {
+		t.Errorf("a list that reached the limit printed no truncation warning:\n%s", report)
+	}
+	calls := fakeCalls(t, dir)
+	if len(calls) != 1 || calls[0] != "session list --format json --max-count 3" {
+		t.Errorf("calls = %v, want the list bounded to the requested --limit", calls)
+	}
+	if got := fakeDeletes(t, dir); len(got) != 0 {
+		t.Errorf("deleted %v, want none", got)
+	}
+}
+
+// TestCleanupOpenCodeSessions_UsesDefaultListLimit: the CLI's own default
+// (100) would silently truncate a real pre-#568 backlog, which is why this
+// command asks for far more when no --limit is given. Pin both the value and
+// the argument that reaches the binary, so a silent change to either shows up
+// here rather than as a quietly short count in the field.
+func TestCleanupOpenCodeSessions_UsesDefaultListLimit(t *testing.T) {
+	if defaultSessionListLimit != 20000 {
+		t.Errorf("defaultSessionListLimit = %d, want 20000 as documented", defaultSessionListLimit)
+	}
+	now := time.Now()
+	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
+		session("ses_old", ghostSessionTitle, 3*time.Hour, 2*time.Hour, now),
+	))
+
+	var out bytes.Buffer
+	if _, err := CleanupOpenCodeSessions(context.Background(), "opencode",
+		OpenCodeCleanupOptions{Grace: time.Hour, Now: now}, &out); err != nil {
+		t.Fatalf("CleanupOpenCodeSessions: %v", err)
+	}
+	calls := fakeCalls(t, dir)
+	want := "session list --format json --max-count " + strconv.Itoa(defaultSessionListLimit)
+	if len(calls) != 1 || calls[0] != want {
+		t.Errorf("calls = %v, want exactly %q", calls, want)
+	}
+}
+
+// TestCleanupOpenCodeSessions_ProgressDuringLongApply: a real --apply is
+// thousands of deletes at one CLI process each, so a long run reports progress
+// instead of sitting silent — silence that reads as a hang and gets the
+// command killed halfway through a backlog it was fine to finish.
+func TestCleanupOpenCodeSessions_ProgressDuringLongApply(t *testing.T) {
+	now := time.Now()
+	total := sessionProgressEvery + 5
+	fixtures := make([]map[string]any, 0, total)
+	for i := 0; i < total; i++ {
+		fixtures = append(fixtures, session(fmt.Sprintf("ses_%02d", i), ghostSessionTitle, 3*time.Hour, 2*time.Hour, now))
+	}
+	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t, fixtures...))
+
+	var out bytes.Buffer
+	res, err := CleanupOpenCodeSessions(context.Background(), "opencode",
+		OpenCodeCleanupOptions{Grace: time.Hour, Now: now, Apply: true}, &out)
+	if err != nil {
+		t.Fatalf("CleanupOpenCodeSessions: %v", err)
+	}
+	if res.Eligible != total || res.Deleted != total || res.Failed != 0 {
+		t.Errorf("Eligible=%d Deleted=%d Failed=%d, want %d/%d/0", res.Eligible, res.Deleted, res.Failed, total, total)
+	}
+	wantProgress := fmt.Sprintf("progress: %d/%d processed", sessionProgressEvery, total)
+	if !strings.Contains(out.String(), wantProgress) {
+		t.Errorf("report has no %q line:\n%s", wantProgress, out.String())
+	}
+	if got := fakeDeletes(t, dir); len(got) != total {
+		t.Errorf("deleted %d session(s), want %d", len(got), total)
 	}
 }
 
@@ -433,7 +561,7 @@ func TestSelectCleanupSessions(t *testing.T) {
 		session         openCodeSession
 		grace           time.Duration
 		want            bool
-		wantImplausible int // refused by plausibleSessionTime, not by the other rules
+		wantImplausible int // refused for a missing or out-of-window timestamp, not by the other rules
 	}{
 		{name: "old ghost session", session: openCodeSession{ID: "ses_a", Title: ghostSessionTitle, Updated: now.Add(-2 * time.Hour).UnixMilli()}, grace: time.Hour, want: true},
 		{name: "exactly at the grace boundary is not older", session: openCodeSession{ID: "ses_b", Title: ghostSessionTitle, Updated: now.Add(-time.Hour).UnixMilli()}, grace: time.Hour, want: false},
@@ -444,7 +572,7 @@ func TestSelectCleanupSessions(t *testing.T) {
 		{name: "different case", session: openCodeSession{ID: "ses_g", Title: "[Ghost]", Updated: now.Add(-9 * time.Hour).UnixMilli()}, grace: time.Hour, want: false},
 		{name: "padded title", session: openCodeSession{ID: "ses_h", Title: " [ghost]", Updated: now.Add(-9 * time.Hour).UnixMilli()}, grace: time.Hour, want: false},
 		{name: "untitled", session: openCodeSession{ID: "ses_i", Updated: now.Add(-9 * time.Hour).UnixMilli()}, grace: time.Hour, want: false},
-		{name: "no known timestamp", session: openCodeSession{ID: "ses_j", Title: ghostSessionTitle}, grace: time.Hour, want: false},
+		{name: "no known timestamp", session: openCodeSession{ID: "ses_j", Title: ghostSessionTitle}, grace: time.Hour, want: false, wantImplausible: 1},
 		{name: "empty id", session: openCodeSession{Title: ghostSessionTitle, Updated: now.Add(-9 * time.Hour).UnixMilli()}, grace: time.Hour, want: false},
 		{name: "flag-shaped id", session: openCodeSession{ID: "--version", Title: ghostSessionTitle, Updated: now.Add(-9 * time.Hour).UnixMilli()}, grace: time.Hour, want: false},
 		{name: "updated later than created counts as recent activity", session: openCodeSession{ID: "ses_k", Title: ghostSessionTitle, Created: now.Add(-9 * time.Hour).UnixMilli(), Updated: now.Add(-time.Minute).UnixMilli()}, grace: time.Hour, want: false},

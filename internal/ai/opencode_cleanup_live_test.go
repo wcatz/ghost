@@ -63,8 +63,13 @@ func TestOpenCodeSessionList_TimestampsAreMilliseconds(t *testing.T) {
 		}
 	}
 	// A pass that inspected nothing proves nothing, and plain `go test`
-	// prints no log line for a passing test — say so out loud instead.
-	if reason := uncheckedSessionsReason(len(sessions), checked); reason != "" {
+	// prints no log line for a passing test — say so out loud, and tell
+	// "nothing to inspect" (a skip) apart from "rows that were there but
+	// unreadable" (a failure: that is the shape drift this check exists for).
+	if reason, fatal := uncheckedSessionsReason(len(sessions), checked); reason != "" {
+		if fatal {
+			t.Fatal(reason)
+		}
 		t.Skip(reason)
 	}
 	t.Logf("checked %d timestamp(s) across %d session(s) against the plausible window", checked, len(sessions))
@@ -130,46 +135,57 @@ func isolateHostConfig(t *testing.T) {
 	}
 }
 
-// uncheckedSessionsReason returns why a live run inspected no timestamps, or
-// "" when it inspected at least one. The live test must not pass vacuously: a
-// listing that came back empty (or full of zeroed rows) would run no
-// assertion at all, and `go test` prints no log line for a passing test, so
-// the reader of a plain `ok github.com/wcatz/ghost/internal/ai` could not
-// tell a verified millisecond assumption from an unchecked one.
-func uncheckedSessionsReason(listed, checked int) string {
+// uncheckedSessionsReason reports why a live run inspected no timestamps, or
+// ("", false) when it inspected at least one. The live test must not pass
+// vacuously: `go test` prints no log line for a passing test, so a run that
+// checked nothing looks exactly like a verified one.
+//
+// The two empty cases are different and the caller treats them differently.
+// An empty listing means this checkout has nothing to inspect — no claim was
+// made, so the run skips. A listing full of timestamp-less rows means the
+// sessions were there and the fields were not: that is the JSON shape (or
+// unit) change this check exists to catch, so it fails. Skipping there would
+// turn the safety net green exactly when it should go red.
+func uncheckedSessionsReason(listed, checked int) (reason string, fatal bool) {
+	if checked > 0 {
+		return "", false
+	}
 	if listed == 0 {
-		return "opencode listed no sessions for this project — the millisecond assumption was NOT checked; re-run from a checkout that has opencode sessions"
+		return "opencode listed no sessions for this project — the millisecond assumption was NOT checked; re-run from a checkout that has opencode sessions", false
 	}
-	if checked == 0 {
-		return fmt.Sprintf("opencode listed %d session(s) but none carried a non-zero timestamp — the millisecond assumption was NOT checked", listed)
-	}
-	return ""
+	return fmt.Sprintf("opencode listed %d session(s) but none carried a created/updated timestamp — opencode's session JSON shape or unit changed, so the millisecond assumption is NOT verified", listed), true
 }
 
-// TestUncheckedSessionsReason pins the non-vacuity guard itself: an empty or
-// zeroed listing must say "NOT checked" rather than let the live test pass on
-// no assertions at all. Unlike the live test above, this runs on every plain
-// `go test` — it needs neither the opt-in gate nor a CLI.
+// TestUncheckedSessionsReason pins the non-vacuity guard itself: an empty
+// listing must say "NOT checked" and skip, while rows that were listed but
+// carried no timestamp must say the same and be fatal — a drift signal that
+// skipped would be indistinguishable from a pass. Unlike the live test above,
+// this runs on every plain `go test`: it needs neither the opt-in gate nor a
+// CLI.
 func TestUncheckedSessionsReason(t *testing.T) {
 	cases := []struct {
-		name     string
-		listed   int
-		checked  int
-		wantSkip bool
+		name      string
+		listed    int
+		checked   int
+		wantSkip  bool
+		wantFatal bool
 	}{
-		{name: "an empty listing checked nothing", listed: 0, checked: 0, wantSkip: true},
-		{name: "rows carrying no timestamp checked nothing", listed: 5, checked: 0, wantSkip: true},
-		{name: "one checked timestamp is enough", listed: 1, checked: 1, wantSkip: false},
-		{name: "both timestamps of every row count", listed: 3, checked: 6, wantSkip: false},
+		{name: "an empty listing is nothing to inspect", listed: 0, checked: 0, wantSkip: true},
+		{name: "listed rows without a timestamp are drift, not a skip", listed: 5, checked: 0, wantFatal: true},
+		{name: "one checked timestamp is enough", listed: 1, checked: 1},
+		{name: "both timestamps of every row count", listed: 3, checked: 6},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reason := uncheckedSessionsReason(tc.listed, tc.checked)
-			if gotSkip := reason != ""; gotSkip != tc.wantSkip {
-				t.Errorf("uncheckedSessionsReason(%d, %d) = %q, want skip=%v", tc.listed, tc.checked, reason, tc.wantSkip)
+			reason, fatal := uncheckedSessionsReason(tc.listed, tc.checked)
+			if gotSkip := reason != "" && !fatal; gotSkip != tc.wantSkip {
+				t.Errorf("uncheckedSessionsReason(%d, %d) = (%q, fatal=%v), want skip=%v", tc.listed, tc.checked, reason, fatal, tc.wantSkip)
 			}
-			if tc.wantSkip && !strings.Contains(reason, "NOT checked") {
-				t.Errorf("reason = %q, want it to say the assumption was NOT checked", reason)
+			if fatal != tc.wantFatal {
+				t.Errorf("uncheckedSessionsReason(%d, %d) fatal = %v, want %v", tc.listed, tc.checked, fatal, tc.wantFatal)
+			}
+			if reason != "" && !strings.Contains(reason, "NOT verified") && !strings.Contains(reason, "NOT checked") {
+				t.Errorf("reason = %q, want it to say the assumption was not verified", reason)
 			}
 		})
 	}

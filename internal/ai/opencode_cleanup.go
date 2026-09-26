@@ -116,7 +116,7 @@ type OpenCodeCleanupOptions struct {
 type OpenCodeCleanupResult struct {
 	Listed      int // sessions `session list` returned
 	Eligible    int // exact-title matches older than the grace period
-	Implausible int // titled sessions refused for a timestamp outside the plausible window
+	Implausible int // titled sessions whose timestamp was missing or outside the plausible window
 	Deleted     int // sessions `session delete` confirmed
 	Failed      int // eligible sessions whose deletion never succeeded
 }
@@ -124,7 +124,8 @@ type OpenCodeCleanupResult struct {
 // openCodeSession is the subset of one `opencode session list --format json`
 // object the cleanup reads. Fields the CLI adds beyond these are ignored, and
 // a row missing one of them fails closed: no title means no match, no
-// timestamp means no provable age.
+// timestamp means no provable age — and because a missing timestamp is the
+// same refusal a unit change produces, it is counted with those.
 type openCodeSession struct {
 	ID      string `json:"id"`
 	Title   string `json:"title"`
@@ -197,12 +198,13 @@ func CleanupOpenCodeSessions(ctx context.Context, binary string, opts OpenCodeCl
 		return res, err
 	}
 	// A refusal the guard fires on must never read as a clean, empty run: if
-	// OpenCode changed its timestamp unit, every titled session is refused
-	// and the summary above would say "0 older than 1h" with exit 0, which a
-	// user reads as "the backlog is gone". Same rule as the truncation
-	// warning below — a bounded or guarded read says so out loud.
+	// OpenCode changed its timestamp unit (or stopped emitting the fields),
+	// every titled session is refused and the summary above would say
+	// "0 older than 1h" with exit 0, which a user reads as "the backlog is
+	// gone". Same rule as the truncation warning below — a bounded or
+	// guarded read says so out loud.
 	if res.Implausible > 0 {
-		if _, err := fmt.Fprintf(out, "warning: %d titled session(s) had a timestamp outside [%s, now+%s] and were skipped — opencode may have changed the timestamp unit; run GHOST_LIVE_TESTS=1 go test ./internal/ai/ -run TestOpenCodeSessionList_TimestampsAreMilliseconds to check before trusting this count\n",
+		if _, err := fmt.Fprintf(out, "warning: %d titled session(s) had a missing or out-of-window timestamp (outside [%s, now+%s]) and were skipped — opencode may have changed the timestamp unit or the session JSON shape; run GHOST_LIVE_TESTS=1 go test ./internal/ai/ -run TestOpenCodeSessionList_TimestampsAreMilliseconds to check before trusting this count\n",
 			res.Implausible, sessionTimestampFloor.Format(time.RFC3339), sessionFutureSkew); err != nil {
 			return res, err
 		}
@@ -270,10 +272,12 @@ func selectCleanupSessions(sessions []openCodeSession, grace time.Duration, now 
 			continue
 		}
 		activity := s.lastActivity()
-		if activity <= 0 {
-			continue // no provable age, so no provable passage of the grace period
-		}
 		at := time.UnixMilli(activity)
+		// A row with no timestamp at all reads as 0, which lands in 1970:
+		// the same refusal as a unit change, counted the same way. Both are
+		// refusals this run must not swallow — a JSON shape that dropped
+		// `created`/`updated` would otherwise refuse every titled session
+		// and still print a clean, empty run.
 		if !plausibleSessionTime(at, now) {
 			implausible++
 			continue
