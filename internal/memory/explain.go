@@ -88,6 +88,7 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	s.mu.RLock()
 	floor := s.vectorMinSimilarity
 	demotionThreshold := s.demotionThreshold
+	identity := s.embeddingIdentity
 	s.mu.RUnlock()
 	p.MinSimilarity = floor
 
@@ -97,12 +98,18 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	// Every knob the trace store reads has to be carried across, or the trace
+	// describes a search this process would not run: without the identity the
+	// vector leg here scores the foreign vectors the real search excluded, and
+	// the per-row ranks it reports describe a result set the caller cannot
+	// reproduce — which is the one thing an explain call promises.
 	traceStore := &Store{
 		db:                  s.db,
 		snapshot:            tx,
 		logger:              s.logger,
 		demotionThreshold:   demotionThreshold,
 		vectorMinSimilarity: floor,
+		embeddingIdentity:   identity,
 	}
 
 	// Membership comes from the same production search the formatted path uses,

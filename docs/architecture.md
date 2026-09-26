@@ -286,10 +286,23 @@ both halves have to move together) — as
 `<model>[:<dimensions>][+prefix]` in `memory_embeddings.model`. A row recorded
 under a different identity is a vector from another space, so it is excluded
 from the leg and handed back to the embedding worker as unembedded rather than
-compared with a query it cannot be compared to. The filter is the same rule on
-both vector scans, in `usableVectorEntries`, and it is the only place that
-decides whether a stored vector is usable; `SetEmbeddingIdentity` supplies the
-configured side from `embedding.VectorIdentity`.
+compared with a query it cannot be compared to. `SetEmbeddingIdentity` supplies
+the configured side from `embedding.VectorIdentity`, and the rules that read it
+are four, deliberately separate by caller:
+
+| Rule | Site | Applies to |
+|---|---|---|
+| may this stored vector enter a search? | `usableVectorEntries` | both vector scans (`SearchVector`, `SearchVectorAll`) |
+| may this stored vector act as a *query* vector? | `GetEmbedding` (returns nil) | the link worker and `ghost supersede`, which both search from a stored vector |
+| may this memory be compared at all yet? | `UnscannedEmbeddedMemoryIDs` | the link worker's queue, so a foreign row is neither paired across spaces nor marked scanned |
+| is this memory covered? | `EmbeddingStats` | `ghost mcp status` and `ghost_health`, which must not report full coverage mid-re-embed |
+
+The query-side rules matter because the filter only guards the *rows*: a stale
+vector used as a query would be a cosine between two spaces, and the number it
+produces becomes a `related` edge or a `supersedes` candidate. The derived store
+`ExplainSearch` runs on inherits the identity too, or the trace would report a
+ranking the search did not produce. A retired vector never hides its memory: the
+text stays in the keyword leg until the row is rewritten.
 
 ### Memory lifecycle
 

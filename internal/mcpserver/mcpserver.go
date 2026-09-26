@@ -1523,8 +1523,16 @@ func (s *Server) registerTools() {
 		if s.embedder != nil {
 			if embedded, total, err := s.store.EmbeddingStats(ctx); err == nil {
 				fmt.Fprintf(&sb, "**Embeddings:** enabled — %d/%d memories embedded\n", embedded, total)
-				if embedded == 0 && total > 0 {
+				switch {
+				case total > 0 && embedded == 0:
 					sb.WriteString("  ⚠ no memories are embedded — vector search and memory linking are inactive\n")
+				case embedded < total:
+					// Partial coverage is the state a model, dimension or
+					// task-prefix change leaves behind: those rows are excluded
+					// from the vector leg until the worker rewrites them, so
+					// name the gap rather than leaving a bare fraction to be
+					// interpreted as healthy.
+					fmt.Fprintf(&sb, "  ⚠ %d memories are not in the current vector space yet — awaiting re-embed (check `ghost mcp status`)\n", total-embedded)
 				}
 			} else {
 				sb.WriteString("**Embeddings:** enabled\n")

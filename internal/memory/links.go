@@ -96,12 +96,19 @@ func (s *Store) MarkLinkScanned(ctx context.Context, memoryID string) error {
 }
 
 // UnscannedEmbeddedMemoryIDs returns memories that have an embedding but have
-// not yet been processed by the linking worker.
+// not yet been processed by the linking worker. A vector from another vector
+// space is not returned: it is a vector this process cannot compare anything
+// with, and including it would both pair it across spaces and spend the
+// memory's one scan slot, so the link would never be built after the row is
+// re-embedded. The identity applied is the store's configured one
+// (SetEmbeddingIdentity) — the linker has no embedding model of its own, so it
+// asks the store what it can compare; with none configured, every row is
+// returned as before.
 func (s *Store) UnscannedEmbeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
+	query := `
 		SELECT m.id
 		FROM memories m
 		JOIN memory_embeddings e ON e.memory_id = m.id
@@ -109,7 +116,22 @@ func (s *Store) UnscannedEmbeddedMemoryIDs(ctx context.Context, projectID string
 		WHERE m.project_id = ? AND ls.memory_id IS NULL
 		ORDER BY m.created_at DESC
 		LIMIT ?
-	`, projectID, limit)
+	`
+	args := []any{projectID, limit}
+	if s.embeddingIdentity != "" {
+		query = `
+		SELECT m.id
+		FROM memories m
+		JOIN memory_embeddings e ON e.memory_id = m.id
+		LEFT JOIN link_scans ls ON ls.memory_id = m.id
+		WHERE m.project_id = ? AND ls.memory_id IS NULL AND e.model = ?
+		ORDER BY m.created_at DESC
+		LIMIT ?
+		`
+		args = []any{projectID, s.embeddingIdentity, limit}
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("unscanned embedded memories: %w", err)
 	}
@@ -127,27 +149,51 @@ func (s *Store) UnscannedEmbeddedMemoryIDs(ctx context.Context, projectID string
 }
 
 // GetEmbedding returns the stored embedding vector for a memory.
+//
+// A row recorded under a different vector identity than the configured one
+// returns (nil, nil): this process has no usable vector for that memory, and
+// handing the blob back would invite a cosine against vectors from another
+// space — an arbitrary number that then becomes a `related` edge, a
+// `supersedes` candidate, or both. A nil vector means "not available yet":
+// the caller must leave the memory for a later pass, which is what it gets
+// once the embedding worker has rewritten it in the configured space.
 func (s *Store) GetEmbedding(ctx context.Context, memoryID string) ([]float32, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var blob []byte
+	var model string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT embedding FROM memory_embeddings WHERE memory_id = ?
-	`, memoryID).Scan(&blob)
+		SELECT embedding, model FROM memory_embeddings WHERE memory_id = ?
+	`, memoryID).Scan(&blob, &model)
 	if err != nil {
 		return nil, fmt.Errorf("get embedding: %w", err)
+	}
+	if identity := s.embeddingIdentity; identity != "" && model != identity {
+		return nil, nil
 	}
 	return bytesToFloat32s(blob), nil
 }
 
 // EmbeddingStats returns how many memories have embeddings versus the total
 // memory count, across all projects. Used by health/status diagnostics.
+//
+// "Has an embedding" means "has one this process can search with": with a
+// vector identity configured, rows recorded under another one are counted as
+// not embedded, because a re-embed is still pending for them and reporting
+// them as covered is what would let `ghost mcp status` print a passing
+// coverage line while the vector leg returns nothing.
 func (s *Store) EmbeddingStats(ctx context.Context) (embedded, total int, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_embeddings`).Scan(&embedded); err != nil {
+	countQuery := `SELECT COUNT(*) FROM memory_embeddings`
+	args := []any{}
+	if s.embeddingIdentity != "" {
+		countQuery = `SELECT COUNT(*) FROM memory_embeddings WHERE model = ?`
+		args = []any{s.embeddingIdentity}
+	}
+	if err = s.db.QueryRowContext(ctx, countQuery, args...).Scan(&embedded); err != nil {
 		return 0, 0, fmt.Errorf("count embeddings: %w", err)
 	}
 	if err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories`).Scan(&total); err != nil {
