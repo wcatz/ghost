@@ -296,15 +296,23 @@ func TestHelp_ValueFlagsSkipTheirValue(t *testing.T) {
 // command (or reporting the unknown flag). The scan reads this package's own
 // sources for case clauses that match a flag-shaped literal (`-x` or `--x`;
 // -h/--help excluded, they are the request itself) and advance the argument
-// index — ++ on any identifier, `+ 1`, `+= 1`, or an `args = args[1:]`
-// reslice, so boolean flags like --apply (which never advance it) stay out
-// and the common refactors to the idiom stay in — and requires both lists to
+// index — `++`, `+ 1` or `+= 1` on an identifier that also appears indexed
+// inside the clause (`args[i]`), or an `args = args[1:]` reslice of that same
+// identifier. Boolean flags like --apply never advance it, and an unrelated
+// counter bump or string trim is not mistaken for parsing (see advancesIndex
+// for why the loose reading would break the contract instead of protecting
+// it), while the common refactors to the idiom stay covered. Both lists must
 // agree, in both directions, so a stale map entry fails too. Detection is a
 // source-shape heuristic: a parser that reaches for its next token any other
 // way has to keep this scan honest by not looking like a parser, or by
 // extending it here in the same commit.
 func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
-	flagTokenRE := regexp.MustCompile(`^--?[a-zA-Z0-9][a-zA-Z0-9-]*$`)
+	// A bare flag token, optionally in the attached `--flag=value` form.
+	// Error messages ("--project requires a value", "--client … (claude,
+	// …)") can never match: the shape admits no whitespace. -h/--help are
+	// excluded separately below — they are the request itself, never a
+	// value flag.
+	flagTokenRE := regexp.MustCompile(`^--?[a-zA-Z0-9][a-zA-Z0-9-]*(=[^ \t\n]*)?$`)
 	neverValue := map[string]bool{"-h": true, "--help": true}
 	fset := token.NewFileSet()
 	found := map[string]bool{}
@@ -333,19 +341,13 @@ func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
 					return true
 				}
 				s, err := strconv.Unquote(lit.Value)
-				if err != nil {
-					return true
-				}
-				// Error messages such as "--project requires a value" share
-				// the prefix but contain spaces; a flag token never does, and
-				// -h / --help are the request itself, never a value flag.
-				if strings.ContainsAny(s, " \t\n") {
+				if err != nil || !flagTokenRE.MatchString(s) {
 					return true
 				}
 				if i := strings.IndexByte(s, '='); i >= 0 {
 					s = s[:i]
 				}
-				if !flagTokenRE.MatchString(s) || neverValue[s] {
+				if neverValue[s] {
 					return true
 				}
 				found[s] = true
@@ -371,37 +373,94 @@ func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
 
 // advancesIndex reports whether cc advances the argument index — the signal
 // that a matched flag consumed the following token instead of being a
-// boolean flag of its own. Every way this package (or a plausible refactor of
-// it) does that counts: `i++`, `i += 1`, `i + 1`, an increment on any loop
-// variable, and `args = args[1:]` style reslicing.
+// boolean flag of its own. The signal is tied to the index variable itself:
+// an increment (`i++`), an `+= 1`, or a `+ 1` only counts when its
+// identifier also appears inside an IndexExpr in the clause (`args[i]`,
+// `os.Args[i]`, `args[i+1]`), and a reslice only counts when it re-slices
+// that same identifier with a literal low bound (`args = args[1:]`). Looser
+// rules would mark unrelated clauses — `counts[m.Category]++`,
+// `s = s[:i]` — as value-flag parsers, and the fix this test then suggests
+// (register the flag) would make wantsHelp skip the token after a BOOLEAN
+// flag, so `-h` behind it would run the command instead of printing usage:
+// the very bug the guard exists to prevent.
 func advancesIndex(cc *ast.CaseClause) bool {
+	indexed := map[string]bool{}
+	ast.Inspect(cc, func(n ast.Node) bool {
+		ix, ok := n.(*ast.IndexExpr)
+		if !ok {
+			return true
+		}
+		collectIdents(ix.X, indexed)
+		collectIdents(ix.Index, indexed)
+		return true
+	})
+
 	advance := false
 	ast.Inspect(cc, func(n ast.Node) bool {
 		if advance {
 			return false
 		}
 		switch x := n.(type) {
-		case *ast.IncDecStmt:
-			if _, ok := x.X.(*ast.Ident); ok {
-				advance = true // i++, idx++, k++
+		case *ast.IncDecStmt: // i++, idx++
+			if id, ok := x.X.(*ast.Ident); ok && indexed[id.Name] {
+				advance = true
 			}
 		case *ast.AssignStmt:
-			if x.Tok == token.ADD_ASSIGN && anyIntOne(x.Rhs) {
-				advance = true // i += 1
-			}
-			for _, rhs := range x.Rhs {
-				if _, ok := rhs.(*ast.SliceExpr); ok {
-					advance = true // args = args[1:]
+			switch {
+			case x.Tok == token.ADD_ASSIGN && anyIntOne(x.Rhs) && anyLhsIndexed(x.Lhs, indexed): // i += 1
+				advance = true
+			default:
+				for i, rhs := range x.Rhs {
+					sl, ok := rhs.(*ast.SliceExpr)
+					if !ok || i >= len(x.Lhs) {
+						continue
+					}
+					lhs, okL := x.Lhs[i].(*ast.Ident)
+					src, okR := sl.X.(*ast.Ident)
+					if okL && okR && lhs.Name == src.Name && indexed[lhs.Name] && isIntOne(sl.Low) {
+						advance = true // args = args[1:]
+					}
 				}
 			}
-		case *ast.BinaryExpr:
-			if x.Op == token.ADD && (isIntOne(x.X) || isIntOne(x.Y)) {
-				advance = true // i + 1
+		case *ast.BinaryExpr: // i + 1
+			if x.Op != token.ADD {
+				break
+			}
+			var other ast.Expr
+			switch {
+			case isIntOne(x.X) && !isIntOne(x.Y):
+				other = x.Y
+			case isIntOne(x.Y):
+				other = x.X
+			default:
+				break
+			}
+			if id, ok := other.(*ast.Ident); ok && indexed[id.Name] {
+				advance = true
 			}
 		}
 		return true
 	})
 	return advance
+}
+
+// collectIdents adds every identifier appearing under n to ids.
+func collectIdents(n ast.Node, ids map[string]bool) {
+	ast.Inspect(n, func(m ast.Node) bool {
+		if id, ok := m.(*ast.Ident); ok {
+			ids[id.Name] = true
+		}
+		return true
+	})
+}
+
+func anyLhsIndexed(lhs []ast.Expr, ids map[string]bool) bool {
+	for _, e := range lhs {
+		if id, ok := e.(*ast.Ident); ok && ids[id.Name] {
+			return true
+		}
+	}
+	return false
 }
 
 func anyIntOne(exprs []ast.Expr) bool {
