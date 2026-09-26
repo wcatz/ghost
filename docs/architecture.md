@@ -169,10 +169,12 @@ Before that fused score is sorted and cut, `demoteStatus`
 row, and a `_global` row when a specific project is being searched, score
 `× 0.5`. The factor runs inside `fuseCandidatePool`, so it decides membership
 too — a live project memory a raw-score cut would have lost to a demoted row
-takes that slot. It only ever scales: a demoted row still wins when it is the
-best match, which is what keeps resolved memories and shared rules findable.
-A cross-project search leaves `_global` undemoted (there is no project whose
-own memories it could be padding), and explain mode reports the factor per row
+takes that slot. It only ever scales, so nothing is excluded by rule: a
+demoted row is still returned, and still ranks first when no undemoted row
+comes within the factor of it. That is what keeps resolved memories and shared
+rules findable while stopping them from leading every result. A cross-project
+search leaves `_global` undemoted (there is no project whose own memories it
+could be padding), and explain mode reports the factor per row
 as `status_factor`, computed by the same `statusDemotionFactor` the ranking
 used.
 
