@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -527,4 +528,236 @@ func TestSave_RoundTrip(t *testing.T) {
 	if _, err := os.Stat(path + ".bak"); err != nil {
 		t.Error("backup file not created")
 	}
+}
+
+// TestSettingsFile_SaveBacksUpOnlyOnce pins that the .bak is the user's
+// pre-ghost file, not ghost's previous output. Rolling the backup forward on
+// every save means a second init destroys the only pristine copy, so a bad
+// merge can no longer be undone.
+func TestSettingsFile_SaveBacksUpOnlyOnce(t *testing.T) {
+	path := tempSettings(t, `{"effortLevel":"high"}`)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings: %v", err)
+	}
+	if err := sf.save(); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	bak, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("first save should back up the original: %v", err)
+	}
+	if string(bak) != string(original) {
+		t.Errorf("first backup = %q, want the original %q", bak, original)
+	}
+
+	// The user edits the file, then a second init merges into it again.
+	edited := `{"autoMemoryEnabled":false,"effortLevel":"low"}`
+	if err := os.WriteFile(path, []byte(edited), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sf2, err := loadSettings(path)
+	if err != nil {
+		t.Fatalf("loadSettings (second): %v", err)
+	}
+	if err := sf2.save(); err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+	bak2, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatalf("read backup after second save: %v", err)
+	}
+	if string(bak2) != string(original) {
+		t.Errorf("second save clobbered the original backup: got %q, want %q", bak2, original)
+	}
+	if string(bak2) == edited {
+		t.Error("backup must not be ghost's own previous output")
+	}
+}
+
+// TestWriteFileAtomic covers the contract the user-owned config writes share:
+// a temp file in the same directory renamed over the target, no leftovers, and
+// an existing file's permissions preserved (a 0600 config.toml must not
+// become world-readable just because ghost rewrote it). The mode a *new* file
+// receives depends on the process umask, so it is pinned separately in
+// settings_unix_test.go.
+func TestWriteFileAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+
+	if err := writeFileAtomic(path, []byte("a = 1\n"), 0644); err != nil {
+		t.Fatalf("writeFileAtomic (create): %v", err)
+	}
+	assertFileContent(t, path, "a = 1\n")
+
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(path, []byte("b = 2\n"), 0644); err != nil {
+		t.Fatalf("writeFileAtomic (replace): %v", err)
+	}
+	assertFileContent(t, path, "b = 2\n")
+	assertFileMode(t, path, 0600)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "config.toml" {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("atomic write left temp files behind: %v", names)
+	}
+}
+
+// TestWriteFileAtomicKeepsSymlink covers a config.toml that is a symlink into a
+// dotfiles repo: the rename must land on the link's target, not replace the
+// link with a regular file (which is what a bare temp+rename does).
+func TestWriteFileAtomicKeepsSymlink(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "dotfiles", "config.toml")
+	link := filepath.Join(root, "config.toml")
+	if err := os.MkdirAll(filepath.Dir(real), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(real, []byte("a = 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if err := writeFileAtomic(link, []byte("b = 2\n"), 0644); err != nil {
+		t.Fatalf("writeFileAtomic through a symlink: %v", err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink was replaced by a regular file; the user lost their dotfiles link")
+	}
+	assertFileContent(t, real, "b = 2\n")
+	assertFileContent(t, link, "b = 2\n")
+}
+
+func assertFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("%s = %q, want %q", filepath.Base(path), got, want)
+	}
+}
+
+// assertFileMode checks POSIX permission bits. Windows has no mode bits (every
+// file reports 0666 whatever was asked for), so there is nothing to assert
+// there; the mode contract is exercised on the Unix runners instead.
+// filePerm returns a file's current permission bits, or 0 on Windows where
+// there are none to read.
+func filePerm(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return 0
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Mode().Perm()
+}
+
+func assertFileMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Errorf("%s mode = %v, want %v", filepath.Base(path), got, want)
+	}
+}
+
+// TestWriteFileAtomicPrivateVersusPreserving pins the two helper flavours: one
+// that keeps whatever mode the target already had, and one that additionally
+// clamps the result so it can never be wider than the mode it was asked for.
+func TestWriteFileAtomicPrivateVersusPreserving(t *testing.T) {
+	dir := t.TempDir()
+
+	// Seed, then read back the mode the umask actually granted, so the
+	// assertion does not depend on the machine's umask.
+	preserved := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(preserved, []byte("a = 1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	before := filePerm(t, preserved)
+	if err := writeFileAtomic(preserved, []byte("b = 2\n"), 0644); err != nil {
+		t.Fatalf("writeFileAtomic: %v", err)
+	}
+	assertFileMode(t, preserved, before)
+
+	clamped := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(clamped, []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomicPrivate(clamped, []byte(`{"a":1}`), 0600); err != nil {
+		t.Fatalf("writeFileAtomicPrivate: %v", err)
+	}
+	assertFileContent(t, clamped, `{"a":1}`)
+	assertFileMode(t, clamped, filePerm(t, clamped)&0600)
+}
+
+// TestCreateTempWithModeNames pins the temp file's properties: a fresh name on
+// every call, so a leftover or pre-planted file in the user's home cannot
+// predict or collide with it, and the requested mode with the umask applied.
+func TestCreateTempWithModeNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits; the umask contract is pinned in settings_unix_test.go")
+	}
+	dir := t.TempDir()
+
+	first, err := createTempWithMode(dir, "config.toml", 0600)
+	if err != nil {
+		t.Fatalf("createTempWithMode (first): %v", err)
+	}
+	second, err := createTempWithMode(dir, "config.toml", 0600)
+	if err != nil {
+		t.Fatalf("createTempWithMode (second): %v", err)
+	}
+	firstName, secondName := first.Name(), second.Name()
+	if firstName == secondName {
+		t.Errorf("two temp files share the name %q", firstName)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The name is derived from the target but carries a random suffix, and it is
+	// hidden so it does not show up in a directory listing the user reads.
+	base := filepath.Base(firstName)
+	if !strings.HasPrefix(base, ".config.toml-") || !strings.HasSuffix(base, ".tmp") {
+		t.Errorf("temp name %q should be a hidden .config.toml-<random>.tmp", base)
+	}
+	suffix := strings.TrimSuffix(strings.TrimPrefix(base, ".config.toml-"), ".tmp")
+	if len(suffix) < 8 {
+		t.Errorf("temp name %q should carry a random suffix of at least 8 hex characters, got %q", base, suffix)
+	}
+	if strings.Trim(suffix, "0123456789abcdef") != "" {
+		t.Errorf("temp name %q should end in hex random bytes, got %q", base, suffix)
+	}
+	assertFileMode(t, firstName, 0600)
 }

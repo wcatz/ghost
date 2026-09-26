@@ -105,7 +105,13 @@ ollama pull nomic-embed-text:v1.5
 ghost mcp init --client codex
 ```
 
-The initializer updates `[mcp_servers.ghost]` in `~/.codex/config.toml` while preserving comments and writes the SessionStart, Stop, and SessionEnd entries in `~/.codex/hooks.json`. Codex requires an explicit trust step the first time:
+The initializer merges `[mcp_servers.ghost]` into `~/.codex/config.toml` textually, so comments and formatting survive: a repair rewrites only the table's own `command` and `args` keys, and leaves sub-tables such as `[mcp_servers.ghost.env]`, any other key, and the rest of the file untouched, adding only the managed comment above the table header and any `command`/`args` key the table is missing. It also writes the SessionStart, Stop, and SessionEnd entries in `~/.codex/hooks.json`.
+
+Any spelling of the table header is recognised and repaired in place, including a trailing comment (`[mcp_servers.ghost] # mine`), quoted key parts (`["mcp_servers"."ghost"]`) and spacing (`[ mcp_servers . ghost ]`).
+
+If the server is registered as a dotted or inline key instead of a table, or behind a header the initializer cannot parse with confidence (`[mcp_servers.ghost.]`, `[[mcp_servers.ghost]]`), the file is left unchanged and a warning names the line: that form cannot be merged textually, and appending a table beside it would be a duplicate definition codex rejects. Rewrite the entry as a plain `[mcp_servers.ghost]` table and re-run.
+
+Codex requires an explicit trust step the first time:
 
 ```text
 /hooks

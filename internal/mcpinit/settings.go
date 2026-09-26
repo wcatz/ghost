@@ -3,7 +3,9 @@
 package mcpinit
 
 import (
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -90,10 +92,10 @@ func (s *settingsFile) save() error {
 		return fmt.Errorf("create dir %s: %w", dir, err)
 	}
 
-	// Backup existing file.
+	// Backup the pre-merge file, once.
 	if data, err := os.ReadFile(s.path); err == nil {
-		if err := os.WriteFile(s.path+".bak", data, 0600); err != nil {
-			return fmt.Errorf("backup %s: %w", s.path+".bak", err)
+		if err := writeBackupOnce(s.path+".bak", data); err != nil {
+			return err
 		}
 	}
 
@@ -103,14 +105,89 @@ func (s *settingsFile) save() error {
 	}
 	out = append(out, '\n')
 
-	// Atomic write: temp file + rename.
-	tmp, err := os.CreateTemp(dir, ".settings-*.json")
+	return writeFileAtomicPrivate(s.path, out, 0600)
+}
+
+// writeBackupOnce captures data at path only when nothing is there yet. The
+// .bak is meant to hold the user's pre-ghost file, so rolling it forward on
+// every save would leave the only pristine copy overwritten by ghost's own
+// previous output: a second init would then destroy the original. O_EXCL
+// makes the check and the create a single step, so two concurrent saves cannot
+// both believe they were first.
+func writeBackupOnce(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		return fmt.Errorf("backup %s: %w", path, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path) // a half-written backup must not survive for O_EXCL to keep
+		return fmt.Errorf("backup %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("backup %s: %w", path, err)
+	}
+	return nil
+}
+
+// writeFileAtomic writes data to path through a temp file in the same
+// directory followed by a rename, so a failed or interrupted write can never
+// leave a half-written user config behind. Every write to a file the user owns
+// (settings.json, codex config.toml) goes through here rather than a bare
+// os.WriteFile. A symlinked config (a dotfiles checkout, say) is resolved
+// first: renaming over the link itself would replace it with a regular file
+// and strand the real config. An existing file keeps its own permissions, so
+// rewriting a 0600 config.toml cannot silently widen it; a new one is created
+// with perm, which the kernel narrows by the caller's umask just as
+// os.WriteFile would.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	return writeFileMode(path, data, perm, false)
+}
+
+// writeFileAtomicPrivate is writeFileAtomic with a ceiling: the result can never
+// be more permissive than perm, whatever mode the target already had. A file
+// that can hold credentials uses this one. settings.json carries hook commands
+// and env, and every save before the atomic-write refactor chmod'd it to 0600,
+// so a user copy left at 0644 by hand or by another tool must not stay readable
+// by group or world once ghost merges into it.
+func writeFileAtomicPrivate(path string, data []byte, perm os.FileMode) error {
+	return writeFileMode(path, data, perm, true)
+}
+
+func writeFileMode(path string, data []byte, perm os.FileMode, private bool) error {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	dir := filepath.Dir(path)
+	// The two cases differ. A new file is created with the requested mode, so
+	// the kernel narrows it by the umask. A replacement is created 0600 and only
+	// afterwards given the target's exact mode: that is the shape the
+	// settings.json write has always had, and it keeps the write independent of
+	// the target's owner-write bit instead of relying on the exemption a
+	// just-created inode gets.
+	createMode, finalMode := perm, perm
+	replace := false
+	if info, err := os.Stat(path); err == nil {
+		finalMode = info.Mode().Perm()
+		createMode = 0600
+		replace = true
+	}
+	if private {
+		// Clamp, never raise: a 0400 file stays 0400.
+		createMode &= perm
+		finalMode &= perm
+	}
+	tmp, err := createTempWithMode(dir, filepath.Base(path), createMode)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
 	tmpPath := tmp.Name()
 
-	if _, err := tmp.Write(out); err != nil {
+	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("write temp file: %w", err)
@@ -119,15 +196,46 @@ func (s *settingsFile) save() error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
-	if err := os.Chmod(tmpPath, 0600); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("chmod temp file: %w", err)
+	// A created file already carries the mode the kernel gave it; only a
+	// replacement needs the target's exact permissions forced onto it.
+	if replace {
+		if err := os.Chmod(tmpPath, finalMode); err != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("chmod temp file: %w", err)
+		}
 	}
-	if err := os.Rename(tmpPath, s.path); err != nil {
+	if err := os.Rename(tmpPath, path); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename temp file: %w", err)
 	}
 	return nil
+}
+
+// createTempWithMode opens a uniquely named new file in dir carrying perm, so
+// the kernel applies the caller's umask to it. os.CreateTemp would fix the mode
+// at 0600 and force a later chmod, which bypasses the umask and would leave a
+// new config.toml world-readable on a host with a restrictive umask. The name
+// carries random bytes so a leftover file, or one planted in the user's home by
+// something else, cannot predict or collide with it; O_EXCL keeps two writers
+// from sharing one.
+func createTempWithMode(dir, base string, perm os.FileMode) (*os.File, error) {
+	var lastErr error
+	for attempt := 0; attempt < 8; attempt++ {
+		var buf [8]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			return nil, err
+		}
+		f, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf(".%s-%x.tmp", base, buf[:5])),
+			os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 // getPermissions extracts the permissions.allow string slice.
