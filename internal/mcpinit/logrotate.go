@@ -10,12 +10,11 @@ import "os"
 // anything a human greps and far short of anything that matters as disk.
 const logRotateCap = 5 << 20
 
-// createRotatedLog opens the fresh file a rotation leaves behind. It is a
-// package variable only so a test can make this one open fail: the real cause
-// is ENOSPC or an inode exhaustion on the very filesystem the rotation exists
-// to protect, which a test cannot stage. Failing here must stay non-fatal —
-// openLogForAppend still hands back a descriptor that writes.
-var createRotatedLog = func(path string) (*os.File, error) {
+// createLog opens a data-dir log for append. It is a package variable so a test
+// can make the post-rotation create fail — the real cause is ENOSPC or an inode
+// exhaustion on the very filesystem the rotation exists to protect, which a
+// test cannot stage.
+var createLog = func(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 }
 
@@ -25,47 +24,45 @@ var createRotatedLog = func(path string) (*os.File, error) {
 // exactly one rotated copy rather than a chain of them.
 //
 // It is the one way Ghost opens the logs it appends to (lifecycle.log and
-// obsidian-sync.log today, and any phase log a future build writes), so the
-// cap applies wherever a log is written rather than to whichever call site
+// obsidian-sync.log today, and any phase log a future build writes), so the cap
+// applies wherever a log is written rather than to whichever call site
 // remembered it.
 //
-// Order matters: the file is opened first, exactly as it was before rotation
-// existed, and only then rotated, while that descriptor is still in hand.
-// Rotation therefore cannot make an open fail. The descriptor handed to the
-// caller keeps pointing at the same inode after the rename, so every step
-// that can go wrong — the rename itself, or creating the fresh file afterwards
-// on a filesystem that just filled up — degrades to appending through the
-// rotated copy, which is where the caller's line belongs anyway, rather than
-// to an error the spawn sites would read as "the log is broken" and drop the
-// spawned process's stdout for.
+// Rotation happens BEFORE the file is opened, never while a descriptor of this
+// process's own is held across the rename: Windows refuses to move a file that
+// is open without a delete-sharing grant, so the rename would fail there every
+// time and the cap would be a Linux-only feature.
+//
+// Every failure degrades to a plain open rather than to an error. A rename that
+// cannot happen (a directory at "<path>.1", a read-only mount, another
+// process) leaves the log exactly where it was and the open proceeds as it did
+// before rotation existed. A rename that lands but leaves the fresh file
+// uncreatable — a disk that just filled up, which is the case rotation exists
+// for — falls back to appending through "<path>.1", the file that now holds the
+// content, so the caller's line still lands instead of being reported as a
+// broken log and dropped: both spawn sites read an open error as "no log",
+// and one of them then declines to spawn at all.
 //
 // Rotation is decided by Lstat, so a symlink wearing the log's name is
 // appended through and never renamed: renaming it would move the link out from
 // under whoever arranged it, and untangling the target is theirs to do.
 func openLogForAppend(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
+	rotated := false
+	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() && fi.Size() >= logRotateCap {
+		if err := os.Rename(path, path+".1"); err == nil {
+			rotated = true
+		}
 	}
-	fi, lerr := os.Lstat(path)
-	if lerr != nil || !fi.Mode().IsRegular() || fi.Size() < logRotateCap {
-		// Missing (just created), under the cap, gone again, or a symlink:
-		// nothing to rotate.
-		return f, nil
+	if rotated {
+		// Prefer the fresh file; if it cannot be created, append through the
+		// rotated copy, which is where the content now lives.
+		if f, err := createLog(path); err == nil {
+			return f, nil
+		} else if f2, err2 := createLog(path + ".1"); err2 == nil {
+			return f2, nil
+		} else {
+			return nil, err
+		}
 	}
-	if err := os.Rename(path, path+".1"); err != nil {
-		// A directory at "<path>.1", a read-only mount, another process.
-		// Keep appending where the log already is; the open still succeeded.
-		return f, nil
-	}
-	nf, err := createRotatedLog(path)
-	if err != nil {
-		// The rename landed but the fresh file could not be created. f still
-		// names the rotated copy, so the caller writes there instead of
-		// losing its line; the next open starts a fresh generation beside it
-		// from a file it creates itself, size 0, so nothing here retries.
-		return f, nil
-	}
-	_ = f.Close()
-	return nf, nil
+	return createLog(path)
 }

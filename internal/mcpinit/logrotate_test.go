@@ -55,8 +55,11 @@ func TestOpenLogForAppendRotatesAtCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
+	// Reported by length and head, never by dumping the file: a failure here
+	// prints five megabytes of padding into a CI log, which is its own way to
+	// lose the evidence.
 	if string(got) != "fresh line\n" {
-		t.Errorf("after rotation the log holds %q, want only the line written to the fresh file", got)
+		t.Errorf("after rotation the log holds %d bytes starting %q, want only the line written to the fresh file", len(got), head(got, 40))
 	}
 	rotated, err := os.ReadFile(path + ".1")
 	if err != nil {
@@ -167,8 +170,26 @@ func TestOpenLogForAppendSkipsSymlink(t *testing.T) {
 		t.Errorf("rotating a symlink would rename the link itself; .1 exists, Lstat err = %v", err)
 	}
 	if b, err := os.ReadFile(target); err != nil || !strings.HasSuffix(string(b), "appended\n") {
-		t.Errorf("the target must still receive the append, got %q (err %v)", b, err)
+		t.Errorf("the target must still receive the append, got %d bytes starting %q (err %v)", len(b), head(b, 40), err)
 	}
+}
+
+// head reports the first n bytes of b as a quoted string: enough to tell what
+// a log holds without printing all of it, which matters because these logs are
+// sized in megabytes.
+func head(b []byte, n int) string {
+	if len(b) > n {
+		b = b[:n]
+	}
+	return string(b)
+}
+
+// tail is head from the other end, for assertions on what a file ends with.
+func tail(b []byte, n int) string {
+	if len(b) > n {
+		b = b[len(b)-n:]
+	}
+	return string(b)
 }
 
 // TestOpenLogForAppendRotationIsBestEffort: the rename can fail — a directory
@@ -198,7 +219,7 @@ func TestOpenLogForAppendRotationIsBestEffort(t *testing.T) {
 		t.Fatalf("read log: %v", err)
 	}
 	if !strings.HasSuffix(string(b), "still logged\n") {
-		t.Errorf("append was lost when rotation failed; log ends %q", b)
+		t.Errorf("append was lost when rotation failed; log holds %d bytes ending %q", len(b), tail(b, 40))
 	}
 	if fi, err := os.Stat(path + ".1"); err != nil || !fi.IsDir() {
 		t.Errorf("the blocking directory must be left as it was, stat err = %v", err)
@@ -216,11 +237,14 @@ func TestOpenLogForAppendKeepsWorkingWhenTheFreshFileCannotBeCreated(t *testing.
 	path := filepath.Join(dir, "lifecycle.log")
 	content := seedOversizedLog(t, path, "rotates onto a full disk")
 
-	origCreate := createRotatedLog
-	createRotatedLog = func(string) (*os.File, error) {
-		return nil, errors.New("no space left on device")
+	origCreate := createLog
+	createLog = func(p string) (*os.File, error) {
+		if p == path {
+			return nil, errors.New("no space left on device")
+		}
+		return origCreate(p)
 	}
-	t.Cleanup(func() { createRotatedLog = origCreate })
+	t.Cleanup(func() { createLog = origCreate })
 
 	f, err := openLogForAppend(path)
 	if err != nil {
