@@ -125,7 +125,7 @@ Save → Embed → Link → Search → Consolidate → Decay
 1. **Save:** MCP tools store a memory, task, or decision in SQLite.
 2. **Embed:** an optional local Ollama worker creates vectors asynchronously.
 3. **Link:** an optional background worker links semantically related memories.
-4. **Search:** FTS5 and vectors are fused with Reciprocal Rank Fusion when embeddings are available.
+4. **Search:** FTS5 and vectors are fused with Reciprocal Rank Fusion when embeddings are available. Resolved memories and `_global` rows rank below comparable live project memories but stay searchable.
 5. **Consolidate:** `ghost reflect` can merge duplicates and prune noise, with snapshots and dry-run protection.
 6. **Decay:** category-aware scoring keeps stable conventions and preferences from fading while fresh operational facts can outrank stale ones.
 
