@@ -137,12 +137,17 @@ func TestFormatMaintenanceSeparatesLostQuestions(t *testing.T) {
 	// q_third, so hybrid's lists must not swallow a name that is only its
 	// neighbour's. A helper that sliced to the end of the report would fail the
 	// second and pass the first, which is why both directions are here.
+	//
+	// The Shared counts are non-zero on purpose: FormatMaintenance prints a
+	// shared-row probe line per condition before the lost-question headers, and
+	// that line carries the same "<condition>: " prefix. Without one here, a
+	// helper anchoring on the prefix alone would look correct.
 	threeConditions := FormatMaintenance([]MaintenanceResult{
-		{Condition: CondFTS, Queries: 2, Outcomes: []MaintenanceOutcome{
+		{Condition: CondFTS, Queries: 2, Shared: SharedProbe{Queries: 1, Found: 1}, Outcomes: []MaintenanceOutcome{
 			{Query: "q_outranked", Found: true, LiveWins: false},
 			{Query: "q_evicted", Found: true, LiveWins: false},
 		}},
-		{Condition: CondHybrid, Queries: 2, Outcomes: both[:2]},
+		{Condition: CondHybrid, Queries: 2, Shared: SharedProbe{Queries: 1}, Outcomes: both[:2]},
 		{Condition: CondVector, Queries: 1, Outcomes: []MaintenanceOutcome{
 			{Query: "q_third", Found: true, LiveWins: false},
 		}},
@@ -169,27 +174,51 @@ func TestFormatMaintenanceSeparatesLostQuestions(t *testing.T) {
 }
 
 // maintenanceChunk returns the part of a rendered report belonging to one
-// condition: from that condition's first "<condition>: " line to the next
-// condition's, or the end. FormatMaintenance renders a lost-question pair per
-// condition, and a question name is only unique within its own condition, so
-// anchoring on the condition name is what keeps one section from answering for
-// another. The anchor includes the colon, which the padded table rows never have.
+// condition: from that condition's first lost-question header to the next
+// condition's, or the end. FormatMaintenance prints two colon-carrying
+// per-condition lines — the shared-row probe line and the lost-question headers —
+// and the probe line comes first, so the anchor has to skip it; see
+// lostSectionAnchor. A question name is only unique within its own condition, so
+// this is also what stops one condition's lists from answering for another's.
 func maintenanceChunk(t *testing.T, report, condition string) string {
 	t.Helper()
-	start := strings.Index(report, "\n"+condition+": ")
-	if start < 0 {
-		t.Fatalf("report has no %s section:\n%s", condition, report)
+	at := lostSectionAnchor(report, condition, 0)
+	if at < 0 {
+		t.Fatalf("report has no lost-question section for %s:\n%s", condition, report)
 	}
-	chunk := report[start:]
+	chunk := report[at:]
 	for _, other := range []string{CondFTS, CondVector, CondHybrid} {
 		if other == condition {
 			continue
 		}
-		if i := strings.Index(chunk[1:], "\n"+other+": "); i >= 0 {
-			return chunk[:i+1]
+		if i := lostSectionAnchor(report, other, at); i >= 0 {
+			return report[at:i]
 		}
 	}
 	return chunk
+}
+
+// lostSectionAnchor returns the offset just past "<condition>: " at that
+// condition's first lost-question header at or after from, or -1. The digit is
+// load-bearing: FormatMaintenance prints the shared-row probe line as
+// "<condition>: shared _global answers found ..." before the lost-question
+// headers, so anchoring on the colon alone would start the chunk at the probe
+// line and end it at the next condition's probe line — no lost-question section
+// at all. Anchoring on the count is what skips it.
+func lostSectionAnchor(report, condition string, from int) int {
+	prefix := "\n" + condition + ": "
+	for i := from; i < len(report); {
+		j := strings.Index(report[i:], prefix)
+		if j < 0 {
+			return -1
+		}
+		at := i + j + len(prefix)
+		if at < len(report) && report[at] >= '0' && report[at] <= '9' {
+			return at
+		}
+		i = at
+	}
+	return -1
 }
 
 // lostSections returns the two lost-question lists from one condition's chunk of
