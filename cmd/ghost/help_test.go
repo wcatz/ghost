@@ -1,11 +1,16 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -259,4 +264,134 @@ func TestHelp_ProjectBindStaysByteIdentical(t *testing.T) {
 	if stderr != "" {
 		t.Errorf("stderr = %q, want nothing", stderr)
 	}
+}
+
+// TestHelp_ValueFlagsSkipTheirValue checks the map from the consumer's side:
+// for every registered value flag, `-h`/`--help` in the value position is a
+// VALUE (no help request), while a help request after a real value still
+// reads as help — the skip must narrow the scan, not blind it.
+func TestHelp_ValueFlagsSkipTheirValue(t *testing.T) {
+	if len(helpValueFlags) == 0 {
+		t.Fatal("helpValueFlags is empty; the value-flag table is missing")
+	}
+	for flag := range helpValueFlags {
+		t.Run(flag, func(t *testing.T) {
+			for _, help := range []string{"-h", "--help"} {
+				if wantsHelp([]string{flag, help}) {
+					t.Errorf("wantsHelp(%v) = true, want false: %s in value position is a value, not help", []string{flag, help}, flag)
+				}
+				if !wantsHelp([]string{flag, "value", help}) {
+					t.Errorf("wantsHelp(%v) = false, want true: %s's value then help is still a help request", []string{flag, "value", help}, flag)
+				}
+			}
+		})
+	}
+}
+
+// TestHelp_ValueFlagsCoverEveryParser enforces the other half of the
+// helpValueFlags contract, which the comment can only ask for: the map is a
+// hand-maintained mirror of every flag that consumes the next token, and a
+// value flag added to a parser without registering it would make
+// `ghost <cmd> --newflag -h` print usage and exit 0 instead of running the
+// command (or reporting the unknown flag). The scan reads this package's own
+// sources for case clauses that match a "--flag" literal and advance the
+// index (i+1 or i++) — how every value flag in cmd/ghost is parsed, while
+// boolean flags like --apply never advance it — and requires both lists to
+// agree, in both directions, so a stale map entry fails too.
+func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
+	const prefix = "--"
+	flagTokenRE := regexp.MustCompile(`^--[a-z0-9][a-z0-9-]*$`)
+	fset := token.NewFileSet()
+	found := map[string]bool{}
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			cc, ok := n.(*ast.CaseClause)
+			if !ok || !advancesIndex(cc) {
+				return true
+			}
+			ast.Inspect(cc, func(m ast.Node) bool {
+				lit, ok := m.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					return true
+				}
+				s, err := strconv.Unquote(lit.Value)
+				if err != nil || !strings.HasPrefix(s, prefix) || s == "--help" {
+					return true
+				}
+				if i := strings.IndexByte(s, '='); i >= 0 {
+					s = s[:i]
+				}
+				// Error messages such as "--project requires a value" share
+				// the prefix; only a bare flag token is one of ours.
+				if !flagTokenRE.MatchString(s) {
+					return true
+				}
+				found[s] = true
+				return true
+			})
+			return true
+		})
+	}
+
+	for flag := range found {
+		if !helpValueFlags[flag] {
+			t.Errorf("%s consumes the next argument in a parser but is missing from helpValueFlags: "+
+				"`ghost <cmd> %s -h` would print usage instead of running the command", flag, flag)
+		}
+	}
+	for flag := range helpValueFlags {
+		if !found[flag] {
+			t.Errorf("helpValueFlags lists %s, but no case clause in cmd/ghost parses it as a value flag: "+
+				"stale entry, or the parsers changed shape and this scan no longer sees them", flag)
+		}
+	}
+}
+
+// advancesIndex reports whether cc advances the argument index — the signal
+// that a matched flag consumed the following token instead of being a
+// boolean flag of its own.
+func advancesIndex(cc *ast.CaseClause) bool {
+	advance := false
+	walk := func(n ast.Node) bool {
+		if advance {
+			return false
+		}
+		switch x := n.(type) {
+		case *ast.BinaryExpr:
+			if x.Op == token.ADD {
+				if lit, ok := x.Y.(*ast.BasicLit); ok && lit.Kind == token.INT && lit.Value == "1" {
+					advance = true
+					return false
+				}
+			}
+		case *ast.IncDecStmt:
+			if isIndex(x.X) {
+				advance = true
+				return false
+			}
+		}
+		return true
+	}
+	ast.Inspect(cc, walk)
+	return advance
+}
+
+// isIndex reports whether n is a bare i identifier (the loop variable every
+// parser in this package increments).
+func isIndex(n ast.Node) bool {
+	id, ok := n.(*ast.Ident)
+	return ok && id.Name == "i"
 }

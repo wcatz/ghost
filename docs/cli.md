@@ -2,7 +2,7 @@
 
 The `ghost` binary is both the MCP server and the maintenance CLI. Run `ghost help` for the built-in top-level summary.
 
-Every subcommand accepts `-h` or `--help`: it prints that command's usage on stdout and exits `0`, before anything with a side effect runs — no configuration load, no database open, no file written, no harness spawned.
+Every subcommand accepts `-h` or `--help`: it prints that command's usage on stdout and exits `0`, before anything with a side effect runs — no configuration load, no database open, no file written, no harness spawned. The top-level summary (`ghost help`, `ghost --help`) is unchanged by this and still prints to stderr.
 
 ## MCP server
 

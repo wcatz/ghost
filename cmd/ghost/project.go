@@ -489,6 +489,13 @@ func runProjectBind() {
 		// Reported rather than discarded: `-h` is a user who asked a question,
 		// and help text that silently failed to print is indistinguishable from
 		// a command that took no arguments.
+		//
+		// Unreachable through the CLI since handleHelp became the one gate
+		// (#630): runCLI answers `project bind … -h|--help` before dispatch
+		// gets here, and `project bind` has no value flag for the scan to
+		// skip. Kept because parseProjectBindArgs still returns the flag and
+		// both printers emit the same projectBindUsage const, so there is no
+		// second text to drift.
 		if _, err := fmt.Fprint(os.Stdout, projectBindUsage); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: cannot print usage: %v\n", err)
 		}
