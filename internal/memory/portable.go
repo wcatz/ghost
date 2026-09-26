@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // PortableProject is a project as the export/import artifact carries it.
@@ -144,12 +145,14 @@ func (s *Store) PortableMemories(ctx context.Context, projectIDs []string) ([]Po
 		FROM memories`
 	var args []any
 	if len(projectIDs) > 0 {
+		// One "?" per id and the ids themselves only ever in args: the query
+		// text is assembled from placeholders alone, never from a value.
 		placeholders := make([]string, len(projectIDs))
 		for i, id := range projectIDs {
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
-		query += " WHERE project_id IN (" + joinComma(placeholders) + ")"
+		query += " WHERE project_id IN (" + strings.Join(placeholders, ",") + ")"
 	}
 	// Ordered by id for the same byte-reproducibility reason as the projects.
 	query += " ORDER BY id"
@@ -169,20 +172,6 @@ func (s *Store) PortableMemories(ctx context.Context, projectIDs []string) ([]Po
 		out = append(out, m)
 	}
 	return out, rows.Err()
-}
-
-// joinComma joins already-placed SQL placeholders. It cannot interpolate a
-// value, so it is not a query-building hazard: the caller only ever passes one
-// "?" per id.
-func joinComma(parts []string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += ","
-		}
-		out += p
-	}
-	return out
 }
 
 // requireProject reports whether projectID exists, naming the record and the

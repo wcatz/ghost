@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -182,7 +183,7 @@ func readRecords(r io.Reader) ([]parsedRecord, error) {
 // carrying a record this build cannot use. The two are reported differently
 // because the second is fixable in the file and the first means the user picked
 // the wrong file.
-var errNoHeader = fmt.Errorf("not a ghost artifact (no schema-version header)")
+var errNoHeader = errors.New("not a ghost artifact (no schema-version header)")
 
 // checkSchemaVersion refuses any version this build does not read, in either
 // direction. A newer artifact's fields mean whatever this build guesses; an
