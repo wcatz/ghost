@@ -413,6 +413,51 @@ func TestImportMemoryRejectsInvalidRecords(t *testing.T) {
 	}
 }
 
+// TestImportMemoryDefaultsAbsentTimestampsAndImportance: a hand-edited record
+// that leaves out created_at must not be stored with the empty string. The
+// column is `NOT NULL DEFAULT (datetime('now'))`, but a value bound for a column
+// never lets its default apply — and julianday(”) is NULL, so the whole
+// time-decay expression is NULL and the memory sorts last out of every ranked
+// read. It would look perfectly present in the store and be invisible to recall,
+// which is the worst shape a bad import can take. Same for importance: an absent
+// field takes the column's 0.5 rather than a bound 0.0, which would read as
+// "worth nothing" where the record said nothing at all.
+func TestImportMemoryDefaultsAbsentTimestampsAndImportance(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if _, _, err := store.ImportMemory(ctx, PortableMemory{
+		ID: "m1", ProjectID: "p1", Category: "fact", Content: "x", Source: "mcp",
+	}, true); err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+	var created, updated string
+	var importance float64
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT created_at, updated_at, importance FROM memories WHERE id = 'm1'`).
+		Scan(&created, &updated, &importance); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if created == "" || updated == "" {
+		t.Errorf("timestamps = %q / %q, want the column's now() default rather than an empty string", created, updated)
+	}
+	// The stored timestamp has to be a real one the decay expression can
+	// compute on, not merely a non-empty string.
+	var decidable int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT CASE WHEN julianday(?) IS NOT NULL THEN 1 ELSE 0 END`, created).Scan(&decidable); err != nil {
+		t.Fatalf("decay probe: %v", err)
+	}
+	if decidable != 1 {
+		t.Errorf("created_at %q makes julianday() NULL, so the row sorts last in every ranked read", created)
+	}
+	if importance != 0.5 {
+		t.Errorf("importance = %v, want the column default 0.5 for a record that stated none", importance)
+	}
+}
+
 // TestImportMemoryClampsImportance: a normal save clamps importance to [0,1]
 // before the write. An import that skipped that would be the only way an
 // importance outside the range reaches the database.
@@ -577,6 +622,111 @@ func TestImportTaskAndDecisionRoundTrip(t *testing.T) {
 	}
 }
 
+// TestImportProjectReportsACheckoutOrRemoteCollision: projects.path is UNIQUE
+// and repo_remote carries a partial UNIQUE index, so an artifact naming a
+// checkout or a repository this store already records cannot be inserted. The
+// id check alone does not see it — project ids are per-install, so a
+// cross-machine import collides here routinely — and the INSERT's bare
+// "UNIQUE constraint failed" is the worst possible diagnosis for the expected
+// case. Both modes must name the project it collides with, so a dry run cannot
+// promise a create the write would refuse.
+func TestImportProjectReportsACheckoutOrRemoteCollision(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		local PortableProject
+		in    PortableProject
+	}{
+		{
+			name:  "same path",
+			local: PortableProject{ID: "local", Path: "/src/thing", Name: "thing"},
+			in:    PortableProject{ID: "other", Path: "/src/thing", Name: "thing"},
+		},
+		{
+			name:  "same repository, different path",
+			local: PortableProject{ID: "local", Path: "/src/thing", Name: "thing", RepoRemote: "github.com/wcatz/thing"},
+			in:    PortableProject{ID: "other", Path: "/src/elsewhere", Name: "thing", RepoRemote: "git@github.com:wcatz/thing.git"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, apply := range []bool{false, true} {
+				store := portableTestStore(t)
+				ctx := context.Background()
+				if _, err := store.ImportProject(ctx, tc.local, true); err != nil {
+					t.Fatalf("seed the local project: %v", err)
+				}
+				_, err := store.ImportProject(ctx, tc.in, apply)
+				if err == nil {
+					t.Fatalf("apply=%v: ImportProject promised a project another already records", apply)
+				}
+				if !strings.Contains(err.Error(), "local") {
+					t.Errorf("apply=%v: error = %v, want it to name the colliding project", apply, err)
+				}
+				projects, lErr := store.PortableProjects(ctx)
+				if lErr != nil {
+					t.Fatalf("PortableProjects: %v", lErr)
+				}
+				if len(projects) != 1 {
+					t.Errorf("apply=%v: a refused project still left %d rows", apply, len(projects))
+				}
+			}
+		})
+	}
+}
+
+// TestProjectForCheckoutMatchesTheRecordedIdentity: the lookup the importer uses
+// to attach an artifact's records to the project this store already has. A
+// recorded path is the stronger claim — it is the directory a session in it
+// resolves to — so it is consulted first, and the remote is compared in
+// normalized form because that is the form stored. `_global` is never returned:
+// it holds every project's memories rather than one checkout, so adopting it
+// would put a project's records in the global scope.
+func TestProjectForCheckoutMatchesTheRecordedIdentity(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProjectWithRepo(ctx, "byremote", "/src/a", "a", "git@github.com:wcatz/thing.git"); err != nil {
+		t.Fatalf("EnsureProjectWithRepo: %v", err)
+	}
+	if err := store.EnsureProjectWithRepo(ctx, "bypath", "/src/b", "b", "github.com:wcatz/other"); err != nil {
+		t.Fatalf("EnsureProjectWithRepo: %v", err)
+	}
+	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject(_global): %v", err)
+	}
+
+	// The remote is matched in normalized form, so two spellings of one
+	// repository are one answer.
+	got, name, err := store.ProjectForCheckout(ctx, "", "https://github.com/wcatz/thing")
+	if err != nil {
+		t.Fatalf("ProjectForCheckout(remote): %v", err)
+	}
+	if got != "byremote" || name != "a" {
+		t.Errorf("remote lookup = (%q, %q), want the project recording that repository", got, name)
+	}
+	// The path wins over the remote when both could match something: a session in
+	// that directory resolves to the project that records it.
+	got, _, err = store.ProjectForCheckout(ctx, "/src/b", "github.com/wcatz/thing")
+	if err != nil {
+		t.Fatalf("ProjectForCheckout(path): %v", err)
+	}
+	if got != "bypath" {
+		t.Errorf("path lookup = %q, want the project recording that directory", got)
+	}
+	// Nothing recorded is a miss, not an error.
+	got, _, err = store.ProjectForCheckout(ctx, "/nowhere", "github.com:wcatz/nowhere")
+	if err != nil || got != "" {
+		t.Errorf("unknown checkout = (%q, %v), want a miss", got, err)
+	}
+	// `_global` records the literal path "_global" and no remote, so a lookup for
+	// it must not come back as the global project to attach to.
+	got, _, err = store.ProjectForCheckout(ctx, "_global", "")
+	if err != nil {
+		t.Fatalf("ProjectForCheckout(_global path): %v", err)
+	}
+	if got == "_global" {
+		t.Error("_global must never be returned as a project to attach records to")
+	}
+}
+
 // TestImportTaskAndDecisionRejectInvalidState: status and priority are CHECK
 // constraints, so a hand-edited artifact carrying values this build does not
 // accept has to be refused with Ghost's own message. Asserting for the field
@@ -615,6 +765,24 @@ func TestImportTaskAndDecisionRejectInvalidState(t *testing.T) {
 		ID: "d1", ProjectID: "p1", Title: "t", Decision: "d", Rationale: "r", Status: "maybe",
 	}, false); err == nil {
 		t.Error("a dry run accepted a decision with a bad status")
+	}
+	// A task naming a project this store does not hold is refused by name rather
+	// than surfacing as a foreign-key failure from the INSERT. Only the apply
+	// path checks it: a dry run cannot know what the same run will have created,
+	// which is the caller's question (see ImportMemory's comment on apply=false).
+	if _, err := store.ImportTask(ctx, Task{
+		ID: "t9", ProjectID: "absent", Title: "x", Status: "pending", Priority: 2,
+	}, true); err == nil {
+		t.Error("ImportTask accepted a task naming an absent project")
+	} else if !strings.Contains(err.Error(), "absent") {
+		t.Errorf("error = %v, want it to name the missing project", err)
+	}
+	if _, err := store.ImportDecision(ctx, Decision{
+		ID: "d9", ProjectID: "absent", Title: "t", Decision: "d", Rationale: "r", Status: "active",
+	}, true); err == nil {
+		t.Error("ImportDecision accepted a decision naming an absent project")
+	} else if !strings.Contains(err.Error(), "absent") {
+		t.Errorf("error = %v, want it to name the missing project", err)
 	}
 	var n int
 	if err := store.db.QueryRowContext(ctx,

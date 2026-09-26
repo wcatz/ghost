@@ -9,9 +9,10 @@
 //
 // The format is JSON Lines: one self-describing JSON object per line, opened by
 // a header line carrying the schema version. A line-oriented format survives a
-// truncated file — a reader gets every record before the damage and an error
-// naming the line where it starts — which a single JSON document cannot, and it
-// lets a user grep the artifact for one memory without a JSON tool.
+// damaged file — a line that will not parse is rejected on its own, by line
+// number, and the records around it still import — which a single JSON document
+// cannot, and it lets a user grep the artifact for one memory without a JSON
+// tool.
 package portable
 
 import (
@@ -94,10 +95,10 @@ func headerLine() []byte {
 // rejected record in a file that is otherwise fine. Within each kind the order
 // is the store's id order, which is what makes the output byte-reproducible.
 //
-// The export does not write embeddings, and does not write a partial file
-// behind a failure it can foresee: the header is written first, so a store that
-// errors halfway leaves a file an import will reject for being truncated rather
-// than one that looks complete.
+// The export does not write embeddings, and does not leave a partial file behind
+// a failure it can foresee: the caller removes the file when Export returns an
+// error, so a failed run leaves nothing rather than a half-written artifact that
+// looks complete.
 func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter string) (Stats, error) {
 	projects, err := s.PortableProjects(ctx)
 	if err != nil {

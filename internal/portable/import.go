@@ -89,10 +89,19 @@ func (r *ImportReport) count(m map[string]int, kind string) {
 // for a complete one.
 //
 // A file that is not a readable artifact at all — no header, an unknown schema
-// version, malformed JSON, an unknown record type — is refused before any
-// record is written. Those are not per-record problems: a missing header means
-// nobody checked the version, and applying the rest of a file whose format is
-// unknown would be importing data whose meaning this build is guessing at.
+// version, a second header, an unknown record type, a record with no payload —
+// is refused before any record is written. Those are not per-record problems: a
+// missing header means nobody checked the version, and applying the rest of a
+// file whose format is unknown would be importing data whose meaning this build
+// is guessing at.
+//
+// A line that is not JSON is a different thing, and is treated as one. A file
+// can hold an unparseable line because it was truncated, merged badly, or
+// hand-edited, and the records around it are still good — so the line is
+// rejected on its own, counted, and named by line number, and the rest of the
+// file imports. That is what the line-oriented format buys: the readable prefix
+// of a damaged artifact is still worth having, and the rejected line is reported
+// rather than swallowed.
 func Import(ctx context.Context, s *memory.Store, r io.Reader, apply bool, onRecord func(RecordResult)) (ImportReport, error) {
 	report := ImportReport{
 		Applied: apply,
@@ -100,7 +109,7 @@ func Import(ctx context.Context, s *memory.Store, r io.Reader, apply bool, onRec
 		Skipped: map[string]int{},
 	}
 
-	recs, err := readRecords(r)
+	recs, unreadable, err := readRecords(r)
 	if err != nil {
 		return report, err
 	}
@@ -113,15 +122,38 @@ func Import(ctx context.Context, s *memory.Store, r io.Reader, apply bool, onRec
 	if err != nil {
 		return report, err
 	}
+	// The unreadable lines are reported first, before any record is applied, so
+	// the reader sees every one of them at the top rather than after the run
+	// that skipped them.
+	for _, bad := range unreadable {
+		report.Rejected++
+		report.Errors = append(report.Errors, bad.err)
+		if onRecord != nil {
+			onRecord(bad.result)
+		}
+	}
 	for _, step := range plan {
 		step.run(ctx, s, apply, &report, onRecord)
 	}
 	return report, nil
 }
 
-// readRecords parses an artifact into its records, refusing anything that is not
-// a readable one.
-func readRecords(r io.Reader) ([]parsedRecord, error) {
+// unreadable is one line the parser could not turn into a record.
+type unreadable struct {
+	line   int
+	result RecordResult
+	err    error
+}
+
+// readRecords parses an artifact into its records, refusing a file that is not a
+// readable one and collecting the individual lines it could not parse.
+//
+// The two outcomes are deliberately different. A file-level problem — no header,
+// an unknown schema version — is returned as an error that stops the run before
+// anything is written. A line that is not JSON is collected and returned
+// alongside the records: the rest of the file is still readable, and Import
+// reports the line and carries on.
+func readRecords(r io.Reader) ([]parsedRecord, []unreadable, error) {
 	scanner := bufio.NewScanner(r)
 	// A memory is capped at MaxContentLen bytes, so a line can be larger than
 	// bufio's 64 KiB default. The cap here is 1 MiB per line: a single record
@@ -132,6 +164,7 @@ func readRecords(r io.Reader) ([]parsedRecord, error) {
 
 	var (
 		recs    []parsedRecord
+		unread  []unreadable
 		header  bool
 		lineNum int
 	)
@@ -147,36 +180,54 @@ func readRecords(r io.Reader) ([]parsedRecord, error) {
 		}
 		var rec record
 		if err := json.Unmarshal(line, &rec); err != nil {
-			return nil, fmt.Errorf("line %d: not a valid ghost artifact record: %w", lineNum, err)
+			// Not JSON. The line is rejected on its own and the rest of the file
+			// carries on, which is the whole reason the format is line-oriented:
+			// a truncated or hand-mangled artifact still yields every record
+			// before and after the damage. Before the header it is a different
+			// matter — there is no version to trust, so nothing is imported.
+			if !header {
+				return nil, nil, fmt.Errorf("line %d: %w, and the line is not a record: %v", lineNum, errNoHeader, err)
+			}
+			unread = append(unread, unreadable{
+				line: lineNum,
+				result: RecordResult{
+					Line:   lineNum,
+					Action: ActionReject,
+					Detail: "unreadable line",
+					Error:  err,
+				},
+				err: fmt.Errorf("line %d: not a valid ghost artifact record: %w", lineNum, err),
+			})
+			continue
 		}
 		if !header {
 			if rec.Type != TypeHeader {
-				return nil, fmt.Errorf("line %d: %w — the first line must be %q, so the schema version is checked before any record is read", lineNum, errNoHeader, TypeHeader)
+				return nil, nil, fmt.Errorf("line %d: %w — the first line must be %q, so the schema version is checked before any record is read", lineNum, errNoHeader, TypeHeader)
 			}
 			if err := checkSchemaVersion(rec.SchemaVersion); err != nil {
-				return nil, fmt.Errorf("line %d: %w", lineNum, err)
+				return nil, nil, fmt.Errorf("line %d: %w", lineNum, err)
 			}
 			header = true
 			continue
 		}
 		if rec.Type == TypeHeader {
-			return nil, fmt.Errorf("line %d: a second %q line — an artifact has exactly one header", lineNum, TypeHeader)
+			return nil, nil, fmt.Errorf("line %d: a second %q line — an artifact has exactly one header", lineNum, TypeHeader)
 		}
 		recs = append(recs, parsedRecord{rec: rec, line: lineNum})
 	}
 	if err := scanner.Err(); err != nil {
 		if err == bufio.ErrTooLong {
-			return nil, fmt.Errorf("a line exceeds the %d-byte limit — this does not look like a ghost artifact", maxLine)
+			return nil, nil, fmt.Errorf("a line exceeds the %d-byte limit — this does not look like a ghost artifact", maxLine)
 		}
-		return nil, fmt.Errorf("read artifact: %w", err)
+		return nil, nil, fmt.Errorf("read artifact: %w", err)
 	}
 	if !header {
 		if lineNum == 0 {
-			return nil, fmt.Errorf("%w — there is nothing to import", errNoHeader)
+			return nil, nil, fmt.Errorf("%w — there is nothing to import", errNoHeader)
 		}
-		return nil, fmt.Errorf("%w — the first line must be %q", errNoHeader, TypeHeader)
+		return nil, nil, fmt.Errorf("%w — the first line must be %q", errNoHeader, TypeHeader)
 	}
-	return recs, nil
+	return recs, unread, nil
 }
 
 // errNoHeader marks a file that is not an artifact at all, as opposed to one
@@ -294,15 +345,50 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context) ([]s
 	if err != nil {
 		return nil, err
 	}
-	child := func(projectID string) *projectCheck {
-		return &projectCheck{projectID: projectID, available: func(id string) bool { return known[id] }}
+	// Which project id each of the artifact's projects will live under here. An
+	// id the store already holds maps to itself; one that only collides on
+	// checkout or repository maps to the project that holds it; one that is
+	// genuinely new maps to itself and is created.
+	local, err := resolveProjectMapping(ctx, s, projects)
+	if err != nil {
+		return nil, err
+	}
+	// A child record's project is looked up through the mapping, so a record that
+	// follows its project onto a project this store already had still finds it.
+	// An id with no mapping is one the artifact does not carry a project record
+	// for, and is passed through so the check below rejects it by name.
+	under := func(projectID string) string {
+		if mapped, ok := local[projectID]; ok {
+			return mapped
+		}
+		return projectID
+	}
+	checkFor := func(projectID string) *projectCheck {
+		return &projectCheck{projectID: under(projectID), available: func(id string) bool { return known[id] }}
 	}
 
 	var steps []step
 	for _, p := range projects {
 		project := p.rec.Project
-		steps = append(steps, step{rec: p, kind: TypeProject, detail: project.Name,
+		adopted := local[project.ID]
+		detail := project.Name
+		if adopted != project.ID {
+			// The artifact's project id is unknown here, but the checkout or the
+			// repository is not: this store already has that project, and its id
+			// is the one the records have to land under. Saying so in the report
+			// line is the difference between "already imported" and "attached to
+			// the project you already had".
+			detail = fmt.Sprintf("%s → %s (this store already records that checkout or repository)",
+				project.Name, adopted)
+		}
+		adoptedElsewhere := adopted != project.ID
+		steps = append(steps, step{rec: p, kind: TypeProject, detail: detail,
 			runFunc: func(ctx context.Context, s *memory.Store, apply bool) (Action, bool, error) {
+				if adoptedElsewhere {
+					// Nothing to write, and nothing that could be: the id belongs
+					// to a project this store already has.
+					return ActionSkip, false, nil
+				}
 				created, err := s.ImportProject(ctx, *project, apply)
 				if err != nil {
 					return ActionReject, false, err
@@ -316,8 +402,8 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context) ([]s
 	}
 	for _, p := range memories {
 		m := p.rec.Memory
-		detail := contentPrefix(m.Content)
-		steps = append(steps, step{rec: p, kind: TypeMemory, detail: detail, check: child(m.ProjectID),
+		m.ProjectID = under(m.ProjectID)
+		steps = append(steps, step{rec: p, kind: TypeMemory, detail: contentPrefix(m.Content), check: checkFor(m.ProjectID),
 			runFunc: func(ctx context.Context, s *memory.Store, apply bool) (Action, bool, error) {
 				created, clamped, err := s.ImportMemory(ctx, *m, apply)
 				if err != nil {
@@ -328,7 +414,8 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context) ([]s
 	}
 	for _, p := range orderTasks(tasks) {
 		t := p.rec.Task
-		steps = append(steps, step{rec: p, kind: TypeTask, detail: t.Title, check: child(t.ProjectID),
+		t.ProjectID = under(t.ProjectID)
+		steps = append(steps, step{rec: p, kind: TypeTask, detail: t.Title, check: checkFor(t.ProjectID),
 			runFunc: func(ctx context.Context, s *memory.Store, apply bool) (Action, bool, error) {
 				created, err := s.ImportTask(ctx, *t, apply)
 				if err != nil {
@@ -339,7 +426,8 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context) ([]s
 	}
 	for _, p := range orderDecisions(decisions) {
 		d := p.rec.Decision
-		steps = append(steps, step{rec: p, kind: TypeDecision, detail: d.Title, check: child(d.ProjectID),
+		d.ProjectID = under(d.ProjectID)
+		steps = append(steps, step{rec: p, kind: TypeDecision, detail: d.Title, check: checkFor(d.ProjectID),
 			runFunc: func(ctx context.Context, s *memory.Store, apply bool) (Action, bool, error) {
 				created, err := s.ImportDecision(ctx, *d, apply)
 				if err != nil {
@@ -349,6 +437,59 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context) ([]s
 			}})
 	}
 	return steps, nil
+}
+
+// resolveProjectMapping decides, for every project record in the artifact, which
+// project id its records will live under in this store.
+//
+// The problem it solves is the ordinary one: project ids are per-install, so an
+// artifact exported on a laptop names a project the destination has never seen,
+// while the destination very often has its own project for the same checkout or
+// the same repository. Inserting the artifact's project would collide on
+// `projects.path` or on the partial UNIQUE index over `repo_remote` — and because
+// the children name the artifact's id, a single collision would take every
+// memory, task and decision with it. So the id is mapped onto the project that
+// already holds the checkout, and the import attaches rather than fails.
+//
+// The mapping is decided before any record runs, which is what lets a dry run
+// and an apply run agree: both read the same map, and the dry run's "skip" for
+// an adopted project is exactly what the apply run does.
+func resolveProjectMapping(ctx context.Context, s *memory.Store, projects []parsedRecord) (map[string]string, error) {
+	mapping := make(map[string]string, len(projects))
+	live, err := s.PortableProjects(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read projects for import: %w", err)
+	}
+	byID := make(map[string]bool, len(live))
+	for _, p := range live {
+		byID[p.ID] = true
+	}
+	for _, rec := range projects {
+		p := *rec.rec.Project
+		// The very same project, or nothing that collides: keep the artifact's
+		// own id.
+		if byID[p.ID] {
+			mapping[p.ID] = p.ID
+			continue
+		}
+		// `_global` needs no special case: ProjectForCheckout never returns it
+		// (it holds every project's memories, not one checkout), so a lookup can
+		// only turn up some other project that happens to record the same
+		// checkout — and the store's own collision check then refuses the
+		// artifact's project by name rather than letting the records attach
+		// somewhere they do not belong. That is the safe outcome, and it needs no
+		// branch here to reach it.
+		found, _, err := s.ProjectForCheckout(ctx, p.Path, p.RepoRemote)
+		if err != nil {
+			return nil, err
+		}
+		if found != "" {
+			mapping[p.ID] = found
+			continue
+		}
+		mapping[p.ID] = p.ID
+	}
+	return mapping, nil
 }
 
 // projectCheck is the plan-level guard on a child record's project: the record

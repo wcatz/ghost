@@ -368,9 +368,9 @@ func TestImportRejectsAMalformedOrMisorderedArtifact(t *testing.T) {
 			want: "header",
 		},
 		{
-			name: "malformed json",
-			body: `{"type":"header","schema_version":1}` + "\n" + "{not json\n",
-			want: "line 2",
+			name: "unparseable first line",
+			body: "{not json\n" + `{"type":"header","schema_version":1}` + "\n",
+			want: "line 1",
 		},
 		{
 			name: "unknown record type",
@@ -402,6 +402,61 @@ func TestImportRejectsAMalformedOrMisorderedArtifact(t *testing.T) {
 				t.Errorf("a refused file still wrote %d projects", len(projects))
 			}
 		})
+	}
+}
+
+// TestImportAppliesTheRecordsAroundAnUnreadableLine: the resilience the
+// line-oriented format is chosen for. A line that is not JSON is rejected on its
+// own and the rest of the file still imports — which is what makes a truncated
+// artifact worth keeping, and what makes the package's claim true rather than
+// aspirational. The rejections are counted and named, so a partial import is
+// never silent.
+func TestImportAppliesTheRecordsAroundAnUnreadableLine(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	// A good project, a good memory, the truncated middle of a record, then
+	// another good memory.
+	body := `{"type":"header","schema_version":1}` + "\n" +
+		`{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one"}}` + "\n" +
+		`{"type":"memory","memory":{"id":"before","project_id":"p1","category":"fact","content":"kept","source":"mcp"}}` + "\n" +
+		`{"type":"memory","memory":{"id":"cut","project_id":"p1","cat` + "\n" +
+		`{"type":"memory","memory":{"id":"after","project_id":"p1","category":"fact","content":"also kept","source":"mcp"}}` + "\n"
+
+	var seen []RecordResult
+	report, err := Import(ctx, store, strings.NewReader(body), true, func(r RecordResult) { seen = append(seen, r) })
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	if report.Rejected != 1 {
+		t.Errorf("rejected %d records, want just the unreadable line: %v", report.Rejected, report.Errors)
+	}
+	if len(report.Errors) != 1 || !strings.Contains(report.Errors[0].Error(), "line 4") {
+		t.Errorf("errors = %v, want the unreadable line named as line 4", report.Errors)
+	}
+	if report.Created["project"] != 1 || report.Created["memory"] != 2 {
+		t.Errorf("created = %v, want the project and both readable memories", report.Created)
+	}
+	// Both sides of the damage landed, which is the whole point.
+	memories, err := store.PortableMemories(ctx, nil)
+	if err != nil {
+		t.Fatalf("PortableMemories: %v", err)
+	}
+	if len(memories) != 2 {
+		t.Fatalf("the store holds %d memories, want the two readable ones", len(memories))
+	}
+	// The unreadable line is reported to the caller as a rejected record, with
+	// its line number, so the per-record report is not quietly short a line.
+	var rejected *RecordResult
+	for i := range seen {
+		if seen[i].Action == ActionReject {
+			rejected = &seen[i]
+		}
+	}
+	if rejected == nil {
+		t.Fatal("the unreadable line was not reported as a rejected record")
+	}
+	if rejected.Line != 4 {
+		t.Errorf("the rejected record reported line %d, want 4", rejected.Line)
 	}
 }
 
@@ -671,7 +726,143 @@ func TestExportOrdersRecordsProjectsFirstThenByID(t *testing.T) {
 	}
 }
 
+// TestImportAttachesToTheProjectThisStoreAlreadyHas: the ordinary case for
+// moving memories between machines. Project ids are per-install, so an artifact
+// names a project the destination has never seen — while the destination very
+// often has its own project for the same repository, at a different path. Both
+// `projects.path` and `repo_remote` are UNIQUE, so inserting the artifact's
+// project would collide; and because every child names the artifact's id, one
+// collision would take the whole file with it. The records have to land in the
+// project that is already there.
+func TestImportAttachesToTheProjectThisStoreAlreadyHas(t *testing.T) {
+	// Exported from "the laptop": one project under a remote, two memories, a task.
+	artifact := `{"type":"header","schema_version":1}` + "\n" +
+		`{"type":"project","project":{"id":"laptop-1","path":"/Users/w/git/thing","name":"thing","repo_remote":"git@github.com:wcatz/thing.git"}}` + "\n" +
+		`{"type":"memory","memory":{"id":"a","project_id":"laptop-1","category":"gotcha","content":"one","source":"mcp"}}` + "\n" +
+		`{"type":"memory","memory":{"id":"b","project_id":"laptop-1","category":"gotcha","content":"two","source":"mcp"}}` + "\n" +
+		`{"type":"task","task":{"id":"t","project_id":"laptop-1","title":"ship","status":"pending","priority":2}}` + "\n"
+
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, s *memory.Store)
+	}{
+		{
+			name: "same repository, different checkout path",
+			setup: func(t *testing.T, s *memory.Store) {
+				if err := s.EnsureProjectWithRepo(context.Background(),
+					"desktop-9", "/home/w/src/thing", "thing",
+					"https://github.com/wcatz/thing"); err != nil {
+					t.Fatalf("EnsureProjectWithRepo: %v", err)
+				}
+			},
+		},
+		{
+			name: "same checkout path, no remote recorded",
+			setup: func(t *testing.T, s *memory.Store) {
+				if err := s.EnsureProject(context.Background(),
+					"desktop-9", "/Users/w/git/thing", "thing"); err != nil {
+					t.Fatalf("EnsureProject: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dst := newTestStore(t)
+			tc.setup(t, dst)
+
+			// A dry run first: it must not promise a project the write cannot make.
+			dry, err := Import(ctx, dst, strings.NewReader(artifact), false, nil)
+			if err != nil {
+				t.Fatalf("dry run: %v", err)
+			}
+			if dry.Rejected != 0 {
+				t.Fatalf("dry run rejected %d records: %v", dry.Rejected, dry.Errors)
+			}
+			if dry.Created["project"] != 0 {
+				t.Errorf("dry run would create a project, but this store already has that checkout or repository")
+			}
+			if dry.Created["memory"] != 2 || dry.Created["task"] != 1 {
+				t.Errorf("dry run would create %v, want the two memories and the task to land", dry.Created)
+			}
+			projects, err := dst.PortableProjects(ctx)
+			if err != nil {
+				t.Fatalf("PortableProjects: %v", err)
+			}
+			if len(projects) != 1 {
+				t.Fatalf("a dry run left %d projects, want 1", len(projects))
+			}
+
+			report, err := Import(ctx, dst, strings.NewReader(artifact), true, nil)
+			if err != nil {
+				t.Fatalf("apply: %v", err)
+			}
+			if report.Rejected != 0 {
+				t.Fatalf("apply rejected %d records: %v", report.Rejected, report.Errors)
+			}
+			projects, err = dst.PortableProjects(ctx)
+			if err != nil {
+				t.Fatalf("PortableProjects: %v", err)
+			}
+			// The artifact's project was not created — that would collide — and
+			// the local one was not disturbed.
+			if len(projects) != 1 {
+				t.Fatalf("apply left %d projects: %+v", len(projects), projects)
+			}
+			if projects[0].ID != "desktop-9" {
+				t.Errorf("project = %+v, want the one this store already had", projects[0])
+			}
+			// The children follow the mapping, so they land in the local project.
+			memories, err := dst.PortableMemories(ctx, []string{"desktop-9"})
+			if err != nil {
+				t.Fatalf("PortableMemories: %v", err)
+			}
+			if len(memories) != 2 {
+				t.Fatalf("the project holds %d memories, want the two from the artifact", len(memories))
+			}
+			tasks, err := dst.ListTasks(ctx, "desktop-9", "", 100)
+			if err != nil {
+				t.Fatalf("ListTasks: %v", err)
+			}
+			if len(tasks) != 1 {
+				t.Errorf("the project holds %d tasks, want the one from the artifact", len(tasks))
+			}
+		})
+	}
+}
+
+// TestImportRejectsAProjectItCannotPlace: a project whose id is free but whose
+// checkout or repository another project records anyway must arrive as a
+// sentence naming the collision, in the dry run as well as the apply, never as a
+// bare "UNIQUE constraint failed" from the INSERT. The mapping covers the
+// ordinary case; this is the residual a concurrent writer could cause between the
+// plan and the write.
+func TestImportRejectsAProjectItCannotPlace(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProjectWithRepo(ctx, "local", "/src/thing", "thing", "github.com/wcatz/thing"); err != nil {
+		t.Fatalf("EnsureProjectWithRepo: %v", err)
+	}
+	_, err := store.ImportProject(ctx, memory.PortableProject{
+		ID: "other", Path: "/src/elsewhere", Name: "thing", RepoRemote: "github.com/wcatz/thing",
+	}, false)
+	if err == nil {
+		t.Fatal("a dry run promised a project whose repository another project records")
+	}
+	if !strings.Contains(err.Error(), "local") {
+		t.Errorf("error = %v, want it to name the project it collides with", err)
+	}
+	projects, lErr := store.PortableProjects(ctx)
+	if lErr != nil {
+		t.Fatalf("PortableProjects: %v", lErr)
+	}
+	if len(projects) != 1 {
+		t.Errorf("a refused project still left %d rows", len(projects))
+	}
+}
+
 // TestDryRunClassifiesExactlyWhatApplyWould: a dry run is only worth reading if
+
 // it describes the run that follows. Every record must come out with the same
 // action in both modes — including a memory whose project the same run has not
 // created yet, which is the case a naive preview gets wrong by rejecting

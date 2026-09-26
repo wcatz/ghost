@@ -342,6 +342,21 @@ Rules the import follows:
 - **Imported memory content goes through the same length cap and the same validation as a normal save** — category, source and importance are checked against the schema's own value sets, and over-long content is cut at `MaxContentLen` with the same explicit marker. An artifact from another machine is another way to reach the memories table, and must not be a way around its rules.
 - **Projects are created when missing**, and records are applied projects first, then memories, tasks and decisions, so a file whose records were reordered by an editor still imports. A `blocked_by` or `superseded_by` pointer is only honoured when the record it names is in the same artifact and is applied first; a pointer to a record the artifact does not contain, or one inside a cycle, is dropped.
 - **A record that cannot be imported is rejected and the run continues**, so one hand-edited line does not abandon the rest of a large artifact. Rejections are counted and the command exits non-zero, so a partial import is never reported as a complete one.
+- **A line that will not parse is rejected on its own.** A truncated, badly merged or hand-edited artifact still imports every record around the damage, and the bad line is reported with its line number. This is what the line-per-record shape buys: a file-level refusal is reserved for the problems that are not one line's — a missing or unreadable schema version, a second header, an unknown record type — where applying part of the file would mean importing data whose meaning is a guess.
+- **A project this store already has is adopted, not duplicated.** Project ids are per-install, so an artifact from another machine names a project the destination has never seen while the destination very often has its own project for the same checkout or the same repository. Both `path` and `repo_remote` are unique, so inserting the artifact's project would collide — and because every memory, task and decision names the artifact's project id, one collision would take the whole file with it. Instead the records are attached to the project that is already there, and the report line says so:
+
+  ```text
+    skip    project:  line 2  "thing → ghost (this store already records that checkout or repository)"
+    create  memory:   line 3  "the WAL holds a transaction…" (3A6B…)
+  ```
+
+  A collision that survives that — another writer claiming the same directory between the plan and the write — is refused by name, in the dry run as well as the apply:
+
+  ```text
+  error: project laptop-1 cannot be imported: this Ghost already records /src/thing as project ghost — import into that project, or merge it with `ghost project merge`
+  ```
+
+- **A record with no `created_at` or no `importance` takes the column's own default**, not a bound zero. A stored empty string makes `julianday('')` NULL, which makes the whole time-decay expression NULL and sorts the memory out of every ranked read — present in the store, invisible to recall. An artifact this build writes always states both fields, so this only matters for a hand-edited record.
 
 Import does not run Upsert's near-duplicate probe. A restore is putting back what was there, not adding knowledge, and folding two rows of the artifact into one would silently drop a memory the user chose to keep.
 

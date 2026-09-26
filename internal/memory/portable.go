@@ -174,6 +174,77 @@ func (s *Store) PortableMemories(ctx context.Context, projectIDs []string) ([]Po
 	return out, rows.Err()
 }
 
+// projectCollision reports whether a *different* project already records p's
+// path or its repository remote, and says which.
+//
+// `projects.path` is UNIQUE and `projects.repo_remote` carries a partial UNIQUE
+// index created on every open, so a project cannot be inserted beside another
+// with the same checkout or the same repository. The remote is compared in
+// normalized form because that is the form stored, and an artifact carrying a
+// raw `git@host:owner/repo.git` has to collide with the canonical spelling of
+// the same repository rather than slip past it.
+func (s *Store) projectCollision(ctx context.Context, p PortableProject) error {
+	var byPath, byRemote string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+			coalesce((SELECT id FROM projects WHERE path = ? AND id != ? LIMIT 1), ''),
+			coalesce((SELECT id FROM projects
+			          WHERE repo_remote = ? AND id != ? LIMIT 1), '')
+	`, p.Path, p.ID, NormalizeRepoRemote(p.RepoRemote), p.ID).Scan(&byPath, &byRemote)
+	if err != nil {
+		return fmt.Errorf("import project %s: %w", p.ID, err)
+	}
+	switch {
+	case byPath != "":
+		return fmt.Errorf("project %s cannot be imported: this Ghost already records %s as project %s — import into that project, or merge it with `ghost project merge`",
+			p.ID, p.Path, byPath)
+	case byRemote != "":
+		return fmt.Errorf("project %s cannot be imported: this Ghost already records repository %s as project %s — import into that project, or merge it with `ghost project merge`",
+			p.ID, NormalizeRepoRemote(p.RepoRemote), byRemote)
+	}
+	return nil
+}
+
+// ProjectForCheckout reports the id of a project that already records path or
+// repoRemote, or "" when the store holds neither.
+//
+// It is what lets an artifact from another machine attach its records to the
+// project this store already has for the same repository, instead of failing on
+// the uniqueness constraint that the two would otherwise collide on. The remote
+// is matched in normalized form, so two spellings of one repository are one
+// answer, and a project with no remote at all is never matched on one.
+func (s *Store) ProjectForCheckout(ctx context.Context, path, repoRemote string) (id, name string, err error) {
+	remote := NormalizeRepoRemote(repoRemote)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Path first, then remote: a recorded path is the stronger claim of the two —
+	// it is the directory a session in it resolves to, while a remote only says
+	// the two checkouts share a repository.
+	if path != "" {
+		err = s.db.QueryRowContext(ctx,
+			`SELECT id, name FROM projects WHERE path = ? AND id != '_global' LIMIT 1`, path).Scan(&id, &name)
+		if err == nil {
+			return id, name, nil
+		}
+		if err != sql.ErrNoRows {
+			return "", "", fmt.Errorf("lookup project by path %s: %w", path, err)
+		}
+		id, name = "", ""
+	}
+	if remote != "" {
+		err = s.db.QueryRowContext(ctx,
+			`SELECT id, name FROM projects WHERE repo_remote = ? AND id != '_global' LIMIT 1`, remote).Scan(&id, &name)
+		if err == nil {
+			return id, name, nil
+		}
+		if err != sql.ErrNoRows {
+			return "", "", fmt.Errorf("lookup project by remote %s: %w", remote, err)
+		}
+	}
+	return "", "", nil
+}
+
 // requireProject reports whether projectID exists, naming the record and the
 // project when it does not. It is the check the three record importers make
 // immediately before their write, so a record naming a project this store does
@@ -189,27 +260,6 @@ func requireProject(ctx context.Context, db *sql.DB, kind, id, projectID string)
 		return fmt.Errorf("%s %s: lookup project %q: %w", kind, id, projectID, err)
 	}
 	return nil
-}
-
-// ProjectExists reports whether a project id is present in the store.
-//
-// The portable importer needs it to classify a record whose project the same run
-// has not created yet: a dry run creates nothing, so the store's own check would
-// reject every record under a project the artifact is about to create, and the
-// preview would describe a run that cannot happen.
-func (s *Store) ProjectExists(ctx context.Context, projectID string) (bool, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var present int
-	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE id = ?`, projectID).Scan(&present)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("lookup project %s: %w", projectID, err)
-	}
-	return true, nil
 }
 
 // rowScanner is the one method scanPortableMemory needs, satisfied by both
@@ -286,6 +336,22 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	} else {
 		return false, nil
 	}
+	// The two UNIQUE constraints projects carries are checked here, in both
+	// modes, and reported by name. A bare "UNIQUE constraint failed" from the
+	// INSERT is the worst possible diagnosis for the common case: project ids are
+	// per-install, so an artifact exported on one machine lands on another that
+	// already knows the same checkout or the same repository, and the collision
+	// is the expected outcome rather than a mistake in the file.
+	//
+	// The remedy is not in this method's gift: adopting the colliding project is
+	// a policy decision about where the records should go, so the caller makes it
+	// (the portable importer resolves it before ever asking here). What this
+	// guarantees is that a collision which survives that decision arrives as a
+	// sentence naming the project it collides with, in the dry run as well as the
+	// apply — so the preview cannot promise a create the write would refuse.
+	if err := s.projectCollision(ctx, p); err != nil {
+		return false, err
+	}
 	if !apply {
 		return true, nil
 	}
@@ -360,12 +426,18 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, apply bool) 
 	}
 
 	content, cut := ClampContent(m.Content)
-	importance := m.Importance
-	if importance < 0 {
-		importance = 0
-	}
-	if importance > 1 {
-		importance = 1
+	// A stated importance is clamped to [0,1], the same bound a normal save
+	// applies. An unstated one is passed as NULL for the SQL to default.
+	importance := any(nil)
+	if m.Importance != 0 {
+		clamped := m.Importance
+		if clamped < 0 {
+			clamped = 0
+		}
+		if clamped > 1 {
+			clamped = 1
+		}
+		importance = clamped
 	}
 
 	s.mu.Lock()
@@ -391,15 +463,27 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, apply bool) 
 	}
 
 	tags, _ := json.Marshal(m.Tags)
+	// The timestamp and importance fallbacks live in the SQL, not in Go, for the
+	// reason a bound parameter defeats them: created_at is
+	// `NOT NULL DEFAULT (datetime('now'))` and importance defaults to 0.5, but
+	// a value bound for a column never lets its default apply. Passing "" would
+	// store the empty string, and julianday('') is NULL, so the whole decay
+	// expression is NULL and the memory sorts last out of every ranked read —
+	// invisible to recall while looking perfectly present in the store. So the
+	// COALESCE is here, as it already is in the three sibling importers, and a
+	// record that omits either field takes the column's own default.
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO memories (id, project_id, category, content, importance, access_count,
 			last_accessed, source, tags, pinned, created_at, updated_at, resolved_at,
 			valid_from, valid_until, verified_at, agent, session_id, source_ref,
 			confidence, scope)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, COALESCE(?, 0.5), ?, ?, ?, ?, ?,
+		        COALESCE(NULLIF(?, ''), datetime('now')),
+		        COALESCE(NULLIF(?, ''), datetime('now')), ?,
+		        ?, ?, ?, ?, ?, ?, ?, ?)
 	`, m.ID, m.ProjectID, m.Category, content, importance, m.AccessCount,
 		m.LastAccessed, m.Source, string(tags), m.Pinned,
-		createdOrNow(m.CreatedAt), createdOrNow(m.UpdatedAt), m.ResolvedAt,
+		m.CreatedAt, m.UpdatedAt, m.ResolvedAt,
 		m.ValidFrom, m.ValidUntil, m.VerifiedAt,
 		nullIfEmpty(m.Agent), nullIfEmpty(m.SessionID), nullIfEmpty(m.SourceRef),
 		m.Confidence, scopeJSON(m.Scope))
@@ -414,17 +498,6 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, apply bool) 
 		s.onSave(m.ProjectID)
 	}
 	return true, cut, nil
-}
-
-// createdOrNow returns ts, or an empty string when the artifact carried none.
-// Combined with the column's datetime('now') default, a record without a
-// timestamp is dated now rather than stored as the empty string — which would
-// then sort before every real memory and read as older than the store itself.
-func createdOrNow(ts string) string {
-	if ts == "" {
-		return ""
-	}
-	return ts
 }
 
 // ImportTask inserts a task under the artifact's id, reporting created=false
