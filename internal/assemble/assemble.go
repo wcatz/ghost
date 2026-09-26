@@ -131,12 +131,14 @@ type Retriever interface {
 // search retrieves and returns exactly what it always did.
 const categoryFetchWiden = 3
 
-// maxRetrievalWindow bounds the widened window. The tool clamped its category
-// fetch at 100 rows, and the ceiling is kept deliberately: reachability past the
-// window comes from the retriever's discarded tail, so a deeper window buys rows
-// that are hydrated, edge-loaded and then trimmed away. The cost is real —
-// three times the hydration, and three times the edge queries, on a live tool
-// surface — while the answer is unchanged.
+// maxRetrievalWindow bounds how far the category widening may go. The tool
+// clamped its category fetch at 100 rows, and the ceiling is kept deliberately:
+// reachability past the window comes from the retriever's discarded tail, so a
+// deeper window buys rows that are hydrated, edge-loaded and then trimmed away.
+// The cost is real — three times the hydration, and three times the edge
+// queries, on a live tool surface — while the answer is unchanged. It bounds
+// the widening only: a caller whose own budget exceeds it still gets a window
+// that can fill that budget.
 const maxRetrievalWindow = 100
 
 // legDepthFactor is how deep each leg fetches relative to the window. Two is
@@ -233,12 +235,13 @@ func retrievalWindow(req Request) int {
 		return 0
 	}
 	if req.Category != "" {
-		if widened := total * categoryFetchWiden; widened > total {
+		widened := total * categoryFetchWiden
+		if widened > maxRetrievalWindow {
+			widened = maxRetrievalWindow
+		}
+		if widened > total {
 			total = widened
 		}
-	}
-	if total > maxRetrievalWindow {
-		total = maxRetrievalWindow
 	}
 	return total
 }

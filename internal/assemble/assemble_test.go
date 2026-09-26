@@ -199,6 +199,44 @@ func TestNoCategoryPredicateKeepsRequestedWindow(t *testing.T) {
 	}
 }
 
+// TestWideningIsBoundedButTheBudgetIsNot: the category widening is capped so a
+// large limit cannot buy a disproportionately deep fetch, and the cap applies to
+// the widening alone. A caller whose own budget exceeds the cap still gets a
+// window that can fill that budget — the next consumer of this seam (session
+// start) will ask for more than 100, and a window smaller than its budget would
+// silently under-fill every block.
+func TestWideningIsBoundedButTheBudgetIsNot(t *testing.T) {
+	tests := []struct {
+		name     string
+		budget   int
+		category string
+		want     int
+	}{
+		{"category widens within the cap", 10, "gotcha", 30},
+		{"category widening is capped", 100, "gotcha", 100},
+		{"a budget above the cap is not narrowed", 250, "", 250},
+		{"a budget above the cap is not narrowed by a category either", 250, "gotcha", 250},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &fakeRetriever{set: setOf(candidate("A1", "proj", "fact", "one", 0.9))}
+			req := baseRequest()
+			req.Budget = Budget{MaxItems: tc.budget}
+			req.Category = tc.category
+
+			run(t, r, req)
+
+			if r.req.Fetch.Limit != tc.want {
+				t.Errorf("retrieval window = %d, want %d", r.req.Fetch.Limit, tc.want)
+			}
+			if r.req.Fetch.Limit < req.Budget.MaxItems {
+				t.Errorf("retrieval window %d is smaller than the budget %d: the closure could never be filled",
+					r.req.Fetch.Limit, req.Budget.MaxItems)
+			}
+		})
+	}
+}
+
 func TestRunRejectsInvalidRequests(t *testing.T) {
 	tests := []struct {
 		name string

@@ -52,8 +52,11 @@ type Signals struct {
 	ValidityPenalty        float64
 	Confidence             *float64
 	ConfidenceContribution float64
-	// ProvenanceWeight is the multiplier stage 4 applied, as text so the trace
+	// ProvenanceWeight is the weight stage 4 recorded, as text so the trace
 	// shows "1.0" rather than a float that could be mistaken for a tuned value.
+	// It is inert in v1: no score is multiplied by it, and both contributions
+	// below are zero. A measured multiplier changes this field's value and the
+	// two assignments that compute the contributions together.
 	ProvenanceWeight       string
 	ProvenanceContribution float64
 }
