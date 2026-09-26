@@ -294,13 +294,18 @@ func TestHelp_ValueFlagsSkipTheirValue(t *testing.T) {
 // value flag added to a parser without registering it would make
 // `ghost <cmd> --newflag -h` print usage and exit 0 instead of running the
 // command (or reporting the unknown flag). The scan reads this package's own
-// sources for case clauses that match a "--flag" literal and advance the
-// index (i+1 or i++) — how every value flag in cmd/ghost is parsed, while
-// boolean flags like --apply never advance it — and requires both lists to
-// agree, in both directions, so a stale map entry fails too.
+// sources for case clauses that match a flag-shaped literal (`-x` or `--x`;
+// -h/--help excluded, they are the request itself) and advance the argument
+// index — ++ on any identifier, `+ 1`, `+= 1`, or an `args = args[1:]`
+// reslice, so boolean flags like --apply (which never advance it) stay out
+// and the common refactors to the idiom stay in — and requires both lists to
+// agree, in both directions, so a stale map entry fails too. Detection is a
+// source-shape heuristic: a parser that reaches for its next token any other
+// way has to keep this scan honest by not looking like a parser, or by
+// extending it here in the same commit.
 func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
-	const prefix = "--"
-	flagTokenRE := regexp.MustCompile(`^--[a-z0-9][a-z0-9-]*$`)
+	flagTokenRE := regexp.MustCompile(`^--?[a-zA-Z0-9][a-zA-Z0-9-]*$`)
+	neverValue := map[string]bool{"-h": true, "--help": true}
 	fset := token.NewFileSet()
 	found := map[string]bool{}
 
@@ -328,15 +333,19 @@ func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
 					return true
 				}
 				s, err := strconv.Unquote(lit.Value)
-				if err != nil || !strings.HasPrefix(s, prefix) || s == "--help" {
+				if err != nil {
+					return true
+				}
+				// Error messages such as "--project requires a value" share
+				// the prefix but contain spaces; a flag token never does, and
+				// -h / --help are the request itself, never a value flag.
+				if strings.ContainsAny(s, " \t\n") {
 					return true
 				}
 				if i := strings.IndexByte(s, '='); i >= 0 {
 					s = s[:i]
 				}
-				// Error messages such as "--project requires a value" share
-				// the prefix; only a bare flag token is one of ours.
-				if !flagTokenRE.MatchString(s) {
+				if !flagTokenRE.MatchString(s) || neverValue[s] {
 					return true
 				}
 				found[s] = true
@@ -362,36 +371,49 @@ func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
 
 // advancesIndex reports whether cc advances the argument index — the signal
 // that a matched flag consumed the following token instead of being a
-// boolean flag of its own.
+// boolean flag of its own. Every way this package (or a plausible refactor of
+// it) does that counts: `i++`, `i += 1`, `i + 1`, an increment on any loop
+// variable, and `args = args[1:]` style reslicing.
 func advancesIndex(cc *ast.CaseClause) bool {
 	advance := false
-	walk := func(n ast.Node) bool {
+	ast.Inspect(cc, func(n ast.Node) bool {
 		if advance {
 			return false
 		}
 		switch x := n.(type) {
-		case *ast.BinaryExpr:
-			if x.Op == token.ADD {
-				if lit, ok := x.Y.(*ast.BasicLit); ok && lit.Kind == token.INT && lit.Value == "1" {
-					advance = true
-					return false
+		case *ast.IncDecStmt:
+			if _, ok := x.X.(*ast.Ident); ok {
+				advance = true // i++, idx++, k++
+			}
+		case *ast.AssignStmt:
+			if x.Tok == token.ADD_ASSIGN && anyIntOne(x.Rhs) {
+				advance = true // i += 1
+			}
+			for _, rhs := range x.Rhs {
+				if _, ok := rhs.(*ast.SliceExpr); ok {
+					advance = true // args = args[1:]
 				}
 			}
-		case *ast.IncDecStmt:
-			if isIndex(x.X) {
-				advance = true
-				return false
+		case *ast.BinaryExpr:
+			if x.Op == token.ADD && (isIntOne(x.X) || isIntOne(x.Y)) {
+				advance = true // i + 1
 			}
 		}
 		return true
-	}
-	ast.Inspect(cc, walk)
+	})
 	return advance
 }
 
-// isIndex reports whether n is a bare i identifier (the loop variable every
-// parser in this package increments).
-func isIndex(n ast.Node) bool {
-	id, ok := n.(*ast.Ident)
-	return ok && id.Name == "i"
+func anyIntOne(exprs []ast.Expr) bool {
+	for _, e := range exprs {
+		if isIntOne(e) {
+			return true
+		}
+	}
+	return false
+}
+
+func isIntOne(n ast.Node) bool {
+	lit, ok := n.(*ast.BasicLit)
+	return ok && lit.Kind == token.INT && lit.Value == "1"
 }
