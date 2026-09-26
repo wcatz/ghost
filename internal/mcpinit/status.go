@@ -179,24 +179,39 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	// corrupted or hand-mangled file must not read healthy, and `ghost mcp
 	// init --client opencode` repairs any drift in place.
 	pluginPath, perr := opencodePluginPath()
+	pluginOK := false
 	if perr != nil {
 		check(false, "", fmt.Sprintf("lifecycle plugin: %v", perr))
 	} else if data, rerr := os.ReadFile(pluginPath); rerr == nil && string(data) == renderOpencodeGhostPlugin(findBinary("ghost")) {
+		pluginOK = true
 		check(true, fmt.Sprintf("lifecycle plugin installed: %s", pluginPath), "")
 	} else {
 		check(false, "", "lifecycle plugin missing or outdated (run ghost mcp init --client opencode)")
 	}
 
-	// 3. MCP server registration — the mcp.ghost entry in opencode's own
-	// config file. The lifecycle plugin also registers ghost at runtime, but
-	// that path is invisible to status: a missing, disabled or wrong-path
-	// entry in the file the user edits is exactly what leaves opencode
-	// running with no ghost tools while everything else here reads green.
-	// Validated against the resolved binary the way StatusCodex validates
-	// config.toml, so a ghost that moved on upgrade reports unhealthy with
-	// the edit that repairs it.
+	// 3. MCP server registration — the mcp.ghost entry across the config
+	// layers opencode reads (opencode.json(c), $OPENCODE_CONFIG, inline
+	// $OPENCODE_CONFIG_CONTENT). Health weight follows check 2: the current
+	// plugin registers ghost at startup (config hook in V1,
+	// ctx.mcp.transform in V2) and overrides whatever the file says, so with
+	// the plugin in place a broken or absent entry is inert — reported as
+	// the fallback it is, never failed, or every documented plugin-only
+	// install (init writes no config file) would exit red on a working
+	// integration. When the plugin is missing the file is the only
+	// registration surface, and a missing, disabled or wrong-path entry
+	// fails the run with the edit that repairs it — validated against the
+	// resolved binary the way StatusCodex validates config.toml.
 	mcpOK, mcpFail := opencodeMCPEntryStatus(ghostBin)
-	check(mcpOK, "ghost MCP server registered in opencode config", mcpFail)
+	mcpFailed := false
+	switch {
+	case mcpOK:
+		check(true, "ghost MCP server registered in opencode config", "")
+	case pluginOK:
+		_, _ = fmt.Fprintf(w, "  - %s (the lifecycle plugin registers ghost at startup; the file entry is only the fallback)\n", mcpFail)
+	default:
+		mcpFailed = true
+		check(false, "", mcpFail)
+	}
 
 	// 4. Embedding & linking health — silent embed failures leave vector
 	// search and memory linking inactive.
@@ -210,6 +225,9 @@ func StatusOpencode(w io.Writer) (bool, error) {
 		_, _ = fmt.Fprintln(w, "All checks passed.")
 	} else {
 		_, _ = fmt.Fprintln(w, "Run `ghost mcp init --client opencode` to fix issues.")
+		if mcpFailed {
+			_, _ = fmt.Fprintln(w, "The mcp.ghost entry shown above is a config edit — apply it to opencode's config file (`ghost mcp init` never writes that file).")
+		}
 	}
 	return healthy, nil
 }

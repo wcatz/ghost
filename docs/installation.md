@@ -93,7 +93,9 @@ ghost mcp init --client opencode
 
 This installs one lifecycle adapter at `~/.config/opencode/plugins/ghost-opencode.ts`. The adapter registers the MCP server and bridges opencode session-idle events to Ghost's lifecycle contract. The same adapter supports opencode V1 and V2; it does not modify `opencode.json`. Restart opencode after setup.
 
-`ghost mcp status --client opencode` verifies more than the adapter: it reads opencode's own config (`~/.config/opencode/opencode.jsonc` or `opencode.json`, comments and trailing commas included) and checks that `mcp.ghost` is present, enabled, and resolving to the ghost binary on your PATH. The installer never writes that file, so a missing, disabled, or stale entry is yours to add or repair — the failing status line prints the entry to paste:
+`ghost mcp status --client opencode` verifies more than the adapter: it reads opencode's own config and checks that `mcp.ghost` is present, enabled, and resolving to the ghost binary on your PATH. The config sources are merged the way opencode merges them — `~/.config/opencode/opencode.jsonc` (or `opencode.json`, comments and trailing commas included), then the file named by `$OPENCODE_CONFIG`, then inline `$OPENCODE_CONFIG_CONTENT` — with later sources overriding earlier ones key by key.
+
+The lifecycle adapter registers `mcp.ghost` at startup, so the file entry is the fallback for installs where the plugin is not loaded. A missing, disabled, or stale entry is therefore reported as a warning while the plugin is current, and the adapter keeps the server registered either way. It becomes an error only when the plugin is missing too — that is the install where the file entry is the only thing that could register ghost — and the failing status line prints the entry to paste. The installer never writes that file in either case:
 
 ```jsonc
 {

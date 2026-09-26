@@ -202,52 +202,125 @@ type opencodeMCPEntry struct {
 	Enabled *bool    `json:"enabled"`
 }
 
-// opencodeMCPEntryStatus validates the mcp.ghost registration in opencode's
-// own config file against the resolved ghost binary, mirroring
-// codexMCPEntryStatus: an empty message means the entry is current, and the
-// returned message explains the failure for the status check line. The entry
-// must exist, be enabled, and resolve to the ghost binary this run found —
-// the three ways opencode ends up running without ghost's tools while the
-// lifecycle plugin sits installed and green.
-func opencodeMCPEntryStatus(ghostBin string) (bool, string) {
+// opencodeMCPConfigSource is one layer of opencode's configuration: a file
+// opencode reads, or inline content supplied through the environment.
+type opencodeMCPConfigSource struct {
+	label string // how a failure names it — its path, or $OPENCODE_CONFIG_CONTENT
+	path  string // file to read; empty when data already holds the content
+	data  []byte // inline content from $OPENCODE_CONFIG_CONTENT; nil for files
+}
+
+// opencodeConfigSources returns the config layers the registration check
+// must judge, lowest precedence first, plus the file a missing entry should
+// be added to. opencode merges these layers rather than replacing them
+// (config docs: "Configuration files are merged together, not replaced") in
+// the order the docs give: the global file under the config dir, the custom
+// path in $OPENCODE_CONFIG, and finally inline $OPENCODE_CONFIG_CONTENT. A
+// layer that doesn't mention mcp.ghost must not hide the one below it, so
+// every existing layer is read rather than only the first.
+func opencodeConfigSources() ([]opencodeMCPConfigSource, string, error) {
 	dir, err := opencodeConfigDir()
 	if err != nil {
-		return false, err.Error()
+		return nil, "", err
 	}
 	base := filepath.Join(dir, "opencode")
-	var path string
+	primary := ""
+	var sources []opencodeMCPConfigSource
 	for _, name := range opencodeMCPConfigNames {
 		candidate := filepath.Join(base, name)
 		if _, err := os.Stat(candidate); err == nil {
-			path = candidate
+			sources = append(sources, opencodeMCPConfigSource{label: candidate, path: candidate})
+			primary = candidate
 			break
 		}
 	}
-	if path == "" {
-		return false, fmt.Sprintf("no opencode config file — add %s to %s",
-			opencodeMCPEntryHint(ghostBin), filepath.Join(base, opencodeMCPConfigNames[0]))
+	if custom := os.Getenv("OPENCODE_CONFIG"); custom != "" {
+		if _, err := os.Stat(custom); err == nil || !os.IsNotExist(err) {
+			sources = append(sources, opencodeMCPConfigSource{label: custom, path: custom})
+			if primary == "" {
+				primary = custom
+			}
+		}
 	}
-	return opencodeMCPEntryInFile(path, ghostBin)
+	if content := os.Getenv("OPENCODE_CONFIG_CONTENT"); content != "" {
+		sources = append(sources, opencodeMCPConfigSource{label: "$OPENCODE_CONFIG_CONTENT", data: []byte(content)})
+	}
+	if primary == "" {
+		// Nothing exists on disk: name the custom path when the user
+		// declared one, else the default file opencode reads.
+		if custom := os.Getenv("OPENCODE_CONFIG"); custom != "" {
+			primary = custom
+		} else {
+			primary = filepath.Join(base, opencodeMCPConfigNames[0])
+		}
+	}
+	return sources, primary, nil
 }
 
-// opencodeMCPEntryInFile validates the mcp.ghost entry in one opencode config
-// file. Every failure names the file and carries the exact edit that
-// repairs it, because `ghost mcp init --client opencode` deliberately never
-// writes this file (see installOpencodePlugin): the repair is a config edit,
-// and the line is where the user learns what to write.
-func opencodeMCPEntryInFile(path, ghostBin string) (bool, string) {
-	data, err := os.ReadFile(path)
+// opencodeMCPEntryStatus validates the effective mcp.ghost registration —
+// merged across every config layer opencode reads (see
+// opencodeConfigSources) — against the resolved ghost binary, mirroring
+// codexMCPEntryStatus: an empty message means the entry is current, and the
+// returned message explains the failure for the status check line. The
+// entry must exist, be enabled, and resolve to the ghost binary this run
+// found — the ways opencode ends up running without ghost's tools while the
+// lifecycle plugin sits installed and green.
+func opencodeMCPEntryStatus(ghostBin string) (bool, string) {
+	sources, primary, err := opencodeConfigSources()
 	if err != nil {
-		return false, fmt.Sprintf("cannot read %s: %v", path, err)
+		return false, err.Error()
 	}
-	cfg, err := parseOpencodeConfig(data)
-	if err != nil {
-		return false, fmt.Sprintf("cannot parse %s as opencode config: %v", path, err)
+	if len(sources) == 0 {
+		return false, fmt.Sprintf("no opencode config file — add %s to %s",
+			opencodeMCPEntryHint(ghostBin), primary)
 	}
-	entry, ok := cfg.MCP["ghost"]
-	if !ok {
-		return false, fmt.Sprintf("ghost MCP server missing from %s — add %s", path, opencodeMCPEntryHint(ghostBin))
+	var merged opencodeMCPEntry
+	found := false
+	from := primary
+	for _, src := range sources {
+		data := src.data
+		if data == nil {
+			var readErr error
+			if data, readErr = os.ReadFile(src.path); readErr != nil {
+				return false, fmt.Sprintf("cannot read %s: %v", src.label, readErr)
+			}
+		}
+		cfg, err := parseOpencodeConfig(data)
+		if err != nil {
+			return false, fmt.Sprintf("cannot parse %s as opencode config: %v", src.label, err)
+		}
+		entry, ok := cfg.MCP["ghost"]
+		if !ok {
+			continue // this layer doesn't mention ghost — lower layers still apply
+		}
+		// Overlay only the keys this layer sets: opencode merges configs, so
+		// a higher layer overriding `enabled` must not erase the command the
+		// layer below registered.
+		if entry.Type != "" {
+			merged.Type = entry.Type
+		}
+		if len(entry.Command) > 0 {
+			merged.Command = entry.Command
+		}
+		if entry.Enabled != nil {
+			merged.Enabled = entry.Enabled
+		}
+		found = true
+		from = src.label
 	}
+	if !found {
+		return false, fmt.Sprintf("ghost MCP server missing from %s — add %s", primary, opencodeMCPEntryHint(ghostBin))
+	}
+	return opencodeMCPEntryVerdict(merged, from, ghostBin)
+}
+
+// opencodeMCPEntryVerdict classifies the merged mcp.ghost entry. path is the
+// config layer the entry came from, named in every message: each failure
+// carries the exact edit that repairs it, because
+// `ghost mcp init --client opencode` deliberately never writes opencode's
+// config (see RunOpencode) — the repair is a config edit, and this line is
+// where the user learns what to write.
+func opencodeMCPEntryVerdict(entry opencodeMCPEntry, path, ghostBin string) (bool, string) {
 	if entry.Enabled != nil && !*entry.Enabled {
 		return false, fmt.Sprintf("ghost MCP server disabled in %s — set mcp.ghost.enabled to true", path)
 	}
