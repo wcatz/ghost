@@ -114,8 +114,10 @@ const (
 // as order — and explain mode reports the same number per row, so the factor
 // shown is the factor that ranked.
 //
-// It never filters. Every branch only scales, which is what keeps resolved
-// memories searchable and keeps _global rows findable from a project.
+// It never drops a row: every branch only scales a score, which is what keeps
+// resolved memories searchable and keeps _global rows findable from a project.
+// Whether a scaled row comes back is the window cut's ordinary rank question,
+// not an exclusion rule.
 func statusDemotionFactor(resolved bool, rowProjectID, searchProjectID string) float64 {
 	factor := 1.0
 	if resolved {

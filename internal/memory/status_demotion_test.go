@@ -10,10 +10,11 @@ import (
 // `_global` rows equally with live project memories. The fix is a
 // multiplicative demotion applied inside the fusion seam, before the window
 // cut, so a comparable live project memory both outranks them and takes the
-// slot a raw-score cut would have given them. Nothing is filtered: a demoted
-// row is still returned, and still wins when no live row comes within the
-// factor of it — the only-match case is pinned by
-// TestResolvedMemoryStaysSearchable.
+// slot a raw-score cut would have given them. Nothing here filters by rule —
+// the demotion only scales a score — so a demoted row's fate is the window's
+// ordinary rank question: TestResolvedMemoryStaysSearchable pins the case
+// where it is the only match and must come back, TestStatusDemotionOwnsTheWindowCut
+// the case where a comparable live row takes its slot instead.
 //
 // Every case below gives the demoted row the *better* raw standing (identical
 // wording, higher importance, so FTS lists it first), which makes the expected
