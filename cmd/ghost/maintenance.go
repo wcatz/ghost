@@ -60,6 +60,13 @@ func printMaintenanceStatus(w io.Writer, v maintenanceStatusView) error {
 	return nil
 }
 
+// maintenanceUsage is the help for `ghost maintenance`: stderr for an
+// unrecognised subcommand (a usage error, exit 1), stdout for -h/--help (see
+// handleHelp). One text for both, so the two can never drift.
+const maintenanceUsage = `Usage: ghost maintenance status
+       ghost maintenance clean-scratch [--apply]
+`
+
 // runMaintenanceStatus implements `ghost maintenance status`: live scratch
 // usage + the most recent hygiene runs. Best-effort on the scratch side (an
 // unusable root is reported in the header, not fatal); the database decides

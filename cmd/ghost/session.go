@@ -8,6 +8,16 @@ import (
 	"github.com/wcatz/ghost/internal/mcpinit"
 )
 
+// contextUsage is the help for `ghost context`: stdout for -h/--help (see
+// handleHelp), so a help request never runs the SessionStart side effects the
+// context block mirrors (Obsidian sync, session-count bump).
+const contextUsage = `Usage: ghost context [--cwd <dir>]
+
+Prints the passive session-start context block for a directory. This is what
+the opencode adapter injects as instructions, because opencode does not
+consume a stdout hook response.
+`
+
 // runContext prints the passive session-start context block for a directory,
 // backing opencode's plugin-injected instructions. It mirrors the SessionStart
 // hook's startup side effects (Obsidian sync when configured, session-count
@@ -28,6 +38,17 @@ func runContext() {
 	}
 	fmt.Println(mcpinit.RenderSessionContext(cwd))
 }
+
+// hookUsage is the help for `ghost hook`: stdout for -h/--help (see
+// handleHelp) — before the fail-open path below, which answers an
+// unrecognized invocation rather than a question.
+const hookUsage = `Usage: ghost hook <event> --source <host>
+
+Lifecycle hook for MCP clients: events session-start, stop, session-end;
+sources claude-code, opencode, codex, goose. Normally called by a client
+adapter, not by hand. A missing or unknown source fails open with one
+diagnostic line and exit status 0 — re-run ghost mcp init to repair wiring.
+`
 
 // runHook dispatches host lifecycle events per the contract-v1 spec:
 //

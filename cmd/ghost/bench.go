@@ -11,6 +11,17 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
+// benchUsage is the help for `ghost bench`: stderr after an unknown flag (a
+// usage error, exit 1), stdout for -h/--help (see handleHelp). One text for
+// both, so the two can never drift.
+const benchUsage = `Usage: ghost bench [--sweep]
+
+Runs the built-in retrieval-quality benchmark (judge-free, deterministic, no
+network) over the embedded dataset and prints the metric table. --sweep
+grid-searches the fusion parameters and prints the ranked table instead. See
+docs/benchmarks.md.
+`
+
 // runBench implements `ghost bench` — runs the built-in retrieval-quality
 // benchmark (four ablations over the embedded dataset) and prints the metric
 // table. With --sweep it instead grid-searches the fusion parameters and
@@ -23,7 +34,7 @@ func runBench() {
 		case "--sweep":
 			sweep = true
 		default:
-			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n\nUsage: ghost bench [--sweep]\n", arg)
+			fmt.Fprintf(os.Stderr, "error: unknown flag %q\n\n%s", arg, benchUsage)
 			os.Exit(1)
 		}
 	}

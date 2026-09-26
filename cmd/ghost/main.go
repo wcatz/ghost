@@ -11,104 +11,129 @@ import (
 var version = "dev"
 
 func main() {
+	os.Exit(runCLI(os.Args[1:], dispatchCommand))
+}
+
+// runCLI answers -h/--help for argv before consulting the command dispatch,
+// then defers to it, and returns the process exit code. Help first is the
+// #630 contract: a help request that reached the dispatch would be the side
+// effect it exists to prevent. The dispatch is a parameter so a test can
+// assert it is never consulted. Commands keep reading os.Args themselves —
+// argv is the same slice, minus the program name.
+func runCLI(argv []string, dispatch func([]string) int) int {
+	if handleHelp(argv) {
+		return 0
+	}
+	return dispatch(argv)
+}
+
+// dispatchCommand routes one invocation to its subcommand and returns the
+// exit code. Subcommands that exit on their own (every failure path) never
+// return here; the fall-through codes below match that behaviour.
+func dispatchCommand(argv []string) int {
 	// Repository identity needs git, which internal/memory deliberately never
 	// invokes — the capability is injected so the store stays a pure storage
 	// layer, tests can pin it, and a store built without one resolves exactly
-	// as it did before. Wired once here because main dispatches the MCP
+	// as it did before. Wired once here because dispatch covers the MCP
 	// server, the lifecycle hooks and every CLI subcommand, so a single line
 	// covers the whole binary.
 	memory.SetDetectRemote(repo.DetectRemote)
 
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	if len(argv) > 0 {
+		switch argv[0] {
 		case "-v", "--version", "version":
 			fmt.Printf("ghost %s\n", version)
-			return
+			return 0
 		case "help", "--help", "-h":
 			printUsage()
-			return
+			return 0
 		case "mcp":
-			if len(os.Args) > 2 {
-				switch os.Args[2] {
+			if len(argv) > 1 {
+				switch argv[1] {
 				case "init":
 					runMCPInit()
-					return
+					return 0
 				case "status":
 					runMCPStatus()
-					return
+					return 0
 				}
 			}
 			runMCP()
-			return
+			return 0
 		case "hook":
 			runHook()
-			return
+			return 0
 		case "reflect":
 			runReflect()
-			return
+			return 0
 		case "supersede":
 			runSupersede()
-			return
+			return 0
 		case "resolve":
 			runResolve()
-			return
+			return 0
 		case "lifecycle":
 			runLifecycle()
-			return
+			return 0
 		case "project":
-			if len(os.Args) > 2 && os.Args[2] == "delete" {
+			if len(argv) > 1 && argv[1] == "delete" {
 				runProjectDelete()
-				return
+				return 0
 			}
-			if len(os.Args) > 2 && os.Args[2] == "merge" {
+			if len(argv) > 1 && argv[1] == "merge" {
 				runProjectMerge()
-				return
+				return 0
 			}
-			if len(os.Args) > 2 && os.Args[2] == "bind" {
+			if len(argv) > 1 && argv[1] == "bind" {
 				runProjectBind()
-				return
+				return 0
 			}
-			fmt.Fprintln(os.Stderr, "Usage: ghost project delete <name-or-id> [--apply]")
-			fmt.Fprintln(os.Stderr, "       ghost project merge <old-name-or-id> <new-name-or-id>")
-			fmt.Fprintln(os.Stderr, "       ghost project bind <project-id> <checkout-directory>")
-			os.Exit(1)
+			fmt.Fprint(os.Stderr, projectUsage)
+			return 1
 		case "upgrade":
 			runUpgrade()
-			return
+			return 0
 		case "obsidian":
 			runObsidian()
-			return
+			return 0
 		case "opencode":
 			if len(os.Args) > 2 && os.Args[2] == "cleanup-sessions" {
 				runOpenCodeCleanupSessions(os.Args[3:])
-				return
+				return 0
 			}
 			fmt.Fprintln(os.Stderr, "Usage: "+usageCleanupSessions)
-			os.Exit(1)
+			return 1
 		case "bench":
 			runBench()
-			return
+			return 0
 		case "context":
 			runContext()
-			return
+			return 0
 		case "maintenance":
-			if len(os.Args) > 2 {
-				switch os.Args[2] {
+			if len(argv) > 1 {
+				switch argv[1] {
 				case "status":
 					runMaintenanceStatus()
-					return
+					return 0
 				case "clean-scratch":
-					runMaintenanceCleanScratch(os.Args[3:])
-					return
+					runMaintenanceCleanScratch(argv[2:])
+					return 0
 				}
 			}
-			fmt.Fprintln(os.Stderr, "Usage: ghost maintenance status")
-			fmt.Fprintln(os.Stderr, "       ghost maintenance clean-scratch [--apply]")
-			os.Exit(1)
+			fmt.Fprint(os.Stderr, maintenanceUsage)
+			return 1
 		}
 	}
 	printUsage()
+	return 0
 }
+
+// versionUsage is `ghost version`'s help. It goes to stdout for -h/--help
+// like every other subcommand's usage (see handleHelp).
+const versionUsage = `Usage: ghost version
+
+Prints the binary version.
+`
 
 // printUsage displays the top-level help.
 func printUsage() {

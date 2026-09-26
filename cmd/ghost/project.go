@@ -119,6 +119,26 @@ func runProjectDeleteCore(ctx context.Context, store *memory.Store, out io.Write
 	return nil
 }
 
+// projectUsage is the help for `ghost project` with no recognised
+// subcommand. It goes to stderr for that usage error and to stdout for
+// -h/--help (see handleHelp) — one text for both.
+const projectUsage = `Usage: ghost project delete <name-or-id> [--apply]
+       ghost project merge <old-name-or-id> <new-name-or-id>
+       ghost project bind <project-id> <checkout-directory>
+`
+
+// projectDeleteUsage is the help for `ghost project delete`: stderr for the
+// missing-project usage error, stdout for -h/--help.
+const projectDeleteUsage = `Usage: ghost project delete <name-or-id> [flags]
+
+Flags:
+  --apply   Actually delete (default is dry-run/preview)
+
+Permanently removes a project: memories, tags, embeddings, links, tasks,
+decisions, learned context, reflection snapshots, and cost/audit history.
+Irreversible. Refuses to delete _global.
+`
+
 // runProjectDelete implements `ghost project delete <name-or-id> [--apply]`.
 // Always prints the dry-run summary first. Without --apply it stops there.
 // With --apply, it re-prints the summary and requires re-typing the
@@ -143,14 +163,7 @@ func runProjectDelete() {
 		}
 	}
 	if projectName == "" {
-		fmt.Fprintln(os.Stderr, `Usage: ghost project delete <name-or-id> [flags]
-
-Flags:
-  --apply   Actually delete (default is dry-run/preview)
-
-Permanently removes a project: memories, tags, embeddings, links, tasks,
-decisions, learned context, reflection snapshots, and cost/audit history.
-Irreversible. Refuses to delete _global.`)
+		fmt.Fprint(os.Stderr, projectDeleteUsage)
 		os.Exit(1)
 	}
 
@@ -476,6 +489,13 @@ func runProjectBind() {
 		// Reported rather than discarded: `-h` is a user who asked a question,
 		// and help text that silently failed to print is indistinguishable from
 		// a command that took no arguments.
+		//
+		// Unreachable through the CLI since handleHelp became the one gate
+		// (#630): runCLI answers `project bind … -h|--help` before dispatch
+		// gets here, and `project bind` has no value flag for the scan to
+		// skip. Kept because parseProjectBindArgs still returns the flag and
+		// both printers emit the same projectBindUsage const, so there is no
+		// second text to drift.
 		if _, err := fmt.Fprint(os.Stdout, projectBindUsage); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: cannot print usage: %v\n", err)
 		}
@@ -504,6 +524,11 @@ func runProjectBind() {
 	}
 }
 
+// projectMergeUsage is the help for `ghost project merge`: stderr for the
+// wrong-argument usage error, stdout for -h/--help.
+const projectMergeUsage = `Usage: ghost project merge <old-name-or-id> <new-name-or-id>
+`
+
 // runProjectMerge implements `ghost project merge <old> <new>`.
 func runProjectMerge() {
 	args := os.Args[3:]
@@ -516,7 +541,7 @@ func runProjectMerge() {
 		positional = append(positional, a)
 	}
 	if len(positional) != 2 {
-		fmt.Fprintln(os.Stderr, "Usage: ghost project merge <old-name-or-id> <new-name-or-id>")
+		fmt.Fprint(os.Stderr, projectMergeUsage)
 		os.Exit(1)
 	}
 

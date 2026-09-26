@@ -7,7 +7,7 @@
 - MCP server via modelcontextprotocol/go-sdk (stdio transport)
 
 ## Architecture
-- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, resolve, supersede, project, obsidian, bench, upgrade, version, context
+- `cmd/ghost/main.go` — CLI entrypoint; subcommands: mcp, hook, reflect, resolve, supersede, project, obsidian, bench, upgrade, version, context. `runCLI` answers `-h`/`--help` (`cmd/ghost/help.go`, one usage table) before the dispatch, so a help request has no side effect
 - `internal/ai/` — CLI-harness providers (`CLIClient`/`OpenCodeClient`/`SourceProvider`) used by reflection + resolve + supersede — no Anthropic HTTP API client
 - `internal/memory/` — SQLite CRUD, FTS5 search, vector search, time-decay scoring
 - `internal/mcpserver/` — MCP server: 20 tools + 4 resources + 2 prompts (`recall_project`, `record_decision`)

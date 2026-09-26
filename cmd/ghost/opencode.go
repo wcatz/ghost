@@ -16,6 +16,12 @@ import (
 // any argument the parser rejects.
 const usageCleanupSessions = "ghost opencode cleanup-sessions [--grace <duration>] [--limit <n>] [--apply]"
 
+// opencodeUsage is usageCleanupSessions as handleHelp prints it on -h/--help
+// (#630): the same text the dispatch's usage error prints through Fprintln,
+// with the "Usage: " prefix and trailing newline that adds there. Derived, so
+// the two can never disagree.
+const opencodeUsage = "Usage: " + usageCleanupSessions + "\n"
+
 // parseCleanupSessionsArgs parses `ghost opencode cleanup-sessions` flags.
 // Only --apply, --grace and --limit are recognized, and anything else is an
 // error rather than being ignored: a silently misparsed flag here could turn

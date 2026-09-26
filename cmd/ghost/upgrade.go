@@ -59,6 +59,16 @@ func downgradeMessage(running, latest string) string {
 		latest, running, running)
 }
 
+// upgradeUsage is the help for `ghost upgrade`: stdout for -h/--help (see
+// handleHelp), so a help request never checks GitHub Releases, downloads an
+// archive or replaces the running binary.
+const upgradeUsage = `Usage: ghost upgrade
+
+Checks GitHub Releases and replaces this binary after verifying the archive
+against the published checksum manifest. A plugin-managed binary refuses this
+path: update it with /plugin update in Claude Code instead.
+`
+
 // runUpgrade downloads and installs the latest ghost release.
 func runUpgrade() {
 	// A plugin-managed binary is replaced by the plugin manager, not by us:

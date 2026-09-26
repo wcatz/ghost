@@ -18,6 +18,16 @@ import (
 	"github.com/wcatz/ghost/internal/mcpserver"
 )
 
+// mcpUsage is the help for the bare `ghost mcp` server command: stdout for
+// -h/--help (see handleHelp), so a help request never opens the store the
+// server would bootstrap.
+const mcpUsage = `Usage: ghost mcp
+
+Starts the MCP server on stdio. MCP clients (Claude Code, opencode, codex,
+goose) spawn this themselves; it is not meant to be run by hand. Configure a
+client with ghost mcp init.
+`
+
 // runMCP starts ghost as an MCP server on stdio.
 func runMCP() {
 	if isTerminal() {
@@ -148,6 +158,18 @@ func runAllClients(stdout, stderr io.Writer, dryRun bool, targets []clientTarget
 	return failed
 }
 
+// mcpInitUsage is the help for `ghost mcp init`: stdout for -h/--help (see
+// handleHelp), so a help request never runs an installer — the bug #630
+// reported was exactly this command installing for every detected client
+// instead of printing help.
+const mcpInitUsage = `Usage: ghost mcp init [--client claude|opencode|codex|goose|all] [--dry-run]
+
+Configures supported MCP clients to use Ghost as their memory system.
+Without --client, every supported client found on PATH is configured;
+--client all configures every supported client unconditionally. --dry-run
+prints the changes without writing them. Idempotent and safe to re-run.
+`
+
 // runMCPInit configures an MCP client to use Ghost as its memory system.
 // When --client is omitted, detects which clients are on PATH and installs
 // for all of them (or just the one found). --client all installs into every
@@ -245,6 +267,16 @@ func mcpInitTargetByName(name string) (clientTarget, bool) {
 	}
 	return clientTarget{}, false
 }
+
+// mcpStatusUsage is the help for `ghost mcp status`: stdout for -h/--help
+// (see handleHelp), so a help request never runs a status check.
+const mcpStatusUsage = `Usage: ghost mcp status [--client claude|opencode|codex|goose]
+
+Checks one client's Ghost integration: client registration, lifecycle wiring,
+the database, Ollama reachability, and embedding/link coverage where
+applicable. Without --client it targets Claude Code. The database is only
+read: a status run never creates the store it reports on.
+`
 
 // runMCPStatus checks the health of the Ghost ↔ MCP client integration.
 // Defaults to Claude Code; --client opencode reports opencode-specific checks.
