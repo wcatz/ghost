@@ -2712,6 +2712,83 @@ func (s *Store) CurrentTimestamp(ctx context.Context) (string, error) {
 	return ts, nil
 }
 
+// replaceCandidate is a stored row ReplaceNonManual may delete, or an emitted
+// memory may reuse in place: the identity it would reuse, plus the stored text
+// and category the reuse decision is made from.
+type replaceCandidate struct {
+	id       string
+	content  string
+	category string
+}
+
+// reusePreservesAge reports whether a reused row is unchanged by this replace
+// — the consolidator re-emitted the stored text byte-identically, in the same
+// category — and must therefore keep its created_at, source and provenance
+// instead of being stamped as newly consolidated (#623).
+//
+// Reuse is matched on content alone, so an identical sentence re-emitted under
+// a different category also lands here. That is a rewrite, and must keep
+// #279's behaviour: category is one of the two things DecayRankingSQL decays
+// on, so a recategorized row is not the same knowledge with a new age. Only
+// the fields reflection actually restated move in the unchanged case — a
+// reweight, retag or scope narrowing is still applied.
+//
+// The bug this guards: RetainGuardedDrops (#549, every category since #619)
+// hands back a memory the consolidator omitted as stale, byte-identically, and
+// the reuse UPDATE then re-stamped it created_at = datetime('now') and
+// source = 'reflection'. Omitting a memory therefore made it rank fresher than
+// folding it would have — its 30/45-day decay restarted on every applied
+// reflect, so an architecture/decision/pattern memory the model kept dropping
+// never aged out, and its original mcp provenance was overwritten.
+//
+// Note that emitted.Source plays no part: the one caller does set it
+// (cmd/ghost's reflectMemoriesToMemory hardcodes 'reflection'), but this
+// function never reads it, and neither does the insert or the rewrite path
+// below — both hardcode 'reflection' in SQL. The stored source therefore
+// survives an unchanged re-emission only because that branch stopped assigning
+// it, which is also why a future reader of Memory.Source must not assume it
+// decides this.
+func reusePreservesAge(stored replaceCandidate, emitted Memory) bool {
+	return stored.content == emitted.Content && stored.category == emitted.Category
+}
+
+// takeReusableRow removes and returns the row an emitted memory should reuse
+// from the same-content candidates left for it, along with the rest. A project
+// legitimately holds one text under several categories — Upsert keeps the
+// incoming category on a linked copy so nothing the caller saved is lost — so
+// the content-only bucket is not a single row, and claiming the wrong one
+// makes reusePreservesAge report a category change: the memory that IS the same
+// knowledge would be deleted, its other-category twin recategorized onto it, and
+// both re-stamped. Preferring the category the consolidator actually emitted
+// keeps the retention case a retention.
+//
+// Falls back to the first candidate when no category matches, so a genuine
+// recategorization still updates its row in place — the behaviour the
+// content-only match had, and the one the rewrite branch's "must still be
+// applied in place" case depends on. Without the fallback the recategorized
+// row would be left in the bucket, deleted with the rest of the unmatched
+// candidates, and the emission inserted under a fresh id: the row identity
+// gone and, because memory_embeddings and memory_links are ON DELETE CASCADE,
+// its embedding and link graph with it (#452), plus a reset created_at. So the
+// failure mode this guards is a lost row, not a redundant one. In the fallback
+// case the caller takes the rewrite branch, exactly as it did previously.
+//
+// Returns false for an empty bucket, so a future caller cannot index an empty
+// slice here. Callers pass candidates already ordered oldest first (see the
+// candidate query), so the fallback keeps the oldest age and stays
+// deterministic.
+func takeReusableRow(matches []replaceCandidate, emitted Memory) (replaceCandidate, []replaceCandidate, bool) {
+	if len(matches) == 0 {
+		return replaceCandidate{}, nil, false
+	}
+	for i, c := range matches {
+		if c.category == emitted.Category {
+			return c, append(matches[:i:i], matches[i+1:]...), true
+		}
+	}
+	return matches[0], matches[1:], true
+}
+
 // ReplaceNonManual atomically replaces all non-manual memories for a project.
 // Manual-sourced memories are preserved. Refuses to replace with an empty set.
 //
@@ -2780,21 +2857,26 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// DELETE CASCADE), so identical content used to mean a re-embedded memory
 	// and a lost link graph on every reflection. Rows saved concurrently with
 	// the consolidation round trip are kept in place for the same reason.
+	// ORDER BY pins the order takeReusableRow consumes, so which same-content
+	// row a reuse claims is a decision and not whatever order the planner
+	// happens to return (this predicate is served by idx_memories_project_cat
+	// or idx_memories_project_source). created_at ascending means a duplicate
+	// keeps the age of the oldest copy — the one the age belongs to — and id
+	// breaks same-second ties deterministically. Before #623 the order was
+	// irrelevant, because every reused row was re-stamped created_at = now
+	// anyway; now it decides the age that survives.
 	rows, err := tx.QueryContext(ctx, `
-		SELECT id, content FROM memories
+		SELECT id, content, category FROM memories
 		WHERE project_id = ? AND source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
+		ORDER BY created_at, id
 	`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list replaceable memories: %w", err)
 	}
-	type replaceCandidate struct {
-		id      string
-		content string
-	}
 	var candidates []replaceCandidate
 	for rows.Next() {
 		var c replaceCandidate
-		if err := rows.Scan(&c.id, &c.content); err != nil {
+		if err := rows.Scan(&c.id, &c.content, &c.category); err != nil {
 			rows.Close() //nolint:errcheck
 			return nil, fmt.Errorf("scan replaceable memory: %w", err)
 		}
@@ -2842,31 +2924,35 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		preserved = append(preserved, id)
 	}
 
-	// Content -> reusable row IDs. Concurrent rows are excluded: they are kept
-	// as they are, never claimed by an emitted memory.
-	reusable := make(map[string][]string)
+	// Content -> reusable rows. Concurrent rows are excluded: they are kept
+	// as they are, never claimed by an emitted memory. The whole stored row
+	// travels, not just its ID, because whether a reuse counts as a rewrite
+	// also needs the stored category (reusePreservesAge below).
+	reusable := make(map[string][]replaceCandidate)
 	for _, c := range candidates {
 		if concurrent[c.id] {
 			continue
 		}
-		reusable[c.content] = append(reusable[c.content], c.id)
+		reusable[c.content] = append(reusable[c.content], c)
 	}
-	reuseFor := make(map[int]string, len(memories))
+	reuseFor := make(map[int]replaceCandidate, len(memories))
 	for i, m := range memories {
 		// Matching is exact, not trimmed: reuse preserves the existing
 		// embedding, so it is only valid when the stored text is byte-identical
 		// to what the consolidator emitted. A whitespace-only difference takes
 		// the insert path instead, which leaves the memory to be re-embedded
 		// rather than keeping a vector that no longer describes its content.
-		if ids := reusable[m.Content]; len(ids) > 0 {
-			reuseFor[i] = ids[0]
-			reusable[m.Content] = ids[1:]
+		if chosen, rest, ok := takeReusableRow(reusable[m.Content], m); ok {
+			reuseFor[i] = chosen
+			reusable[m.Content] = rest
 		}
 	}
 
 	var deleteIDs []string
-	for _, ids := range reusable {
-		deleteIDs = append(deleteIDs, ids...)
+	for _, unmatched := range reusable {
+		for _, c := range unmatched {
+			deleteIDs = append(deleteIDs, c.id)
+		}
 	}
 	if len(deleteIDs) > 0 {
 		stmt, err := tx.PrepareContext(ctx, `DELETE FROM memories WHERE id = ?`)
@@ -2885,7 +2971,8 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	reused := 0
 	for i, m := range memories {
 		tags, _ := json.Marshal(m.Tags)
-		if id := reuseFor[i]; id != "" {
+		if stored, reusedRow := reuseFor[i]; reusedRow {
+			id := stored.id
 			// created_at is reset deliberately: consolidated knowledge counts
 			// as refreshed (issue #279). The row identity — and with it its
 			// embeddings, links, and access stats — survives.
@@ -2901,7 +2988,21 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			// clear-the-scope operation anywhere in the API, so nothing can
 			// express "deliberately unscoped" and the ambiguity is not
 			// hiding a real case.
-			if _, err := tx.ExecContext(ctx, `
+			// One exception (issue #623): reusePreservesAge, below.
+			if reusePreservesAge(stored, m) {
+				// Unchanged re-emission, not a rewrite: the row keeps its
+				// created_at and its source, and only the fields reflection
+				// actually restated move. See reusePreservesAge.
+				if _, err := tx.ExecContext(ctx, `
+					UPDATE memories
+					SET category = ?, content = ?, importance = ?, tags = ?,
+					    scope = COALESCE(?, scope),
+					    updated_at = datetime('now')
+					WHERE id = ?
+				`, m.Category, m.Content, m.Importance, string(tags), scopeJSON(m.Scope), id); err != nil {
+					return nil, fmt.Errorf("update retained memory: %w", err)
+				}
+			} else if _, err := tx.ExecContext(ctx, `
 				UPDATE memories
 				SET category = ?, content = ?, importance = ?, source = 'reflection', tags = ?,
 				    scope = COALESCE(?, scope),
