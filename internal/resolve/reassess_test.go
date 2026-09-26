@@ -256,6 +256,36 @@ func TestReassessSkipsDeterministicallyAssertedRows(t *testing.T) {
 	}
 }
 
+// TestReassessCorrectionMustBeUnresolved: Run draws its corrections from the
+// unresolved pool (correctionPairTargets(loaded, cands), where loaded is
+// ResolveCandidates), so a correction that is itself resolved no longer pairs
+// anything and the older row is repairable again. The floor must use the same
+// pool, or it protects a row the next pass will not re-stamp and reports it
+// under the wrong label (review finding on #643).
+func TestReassessCorrectionMustBeUnresolved(t *testing.T) {
+	paired := memory.Memory{ID: "paired", Category: "gotcha", UpdatedAt: "2026-09-19 20:00:00",
+		Content: "root cause: ledgerstate/imported_reward_inputs.go never sets CalculationVersion on imported reward_snapshot rows; unusable (closed)"}
+	// The correction is itself resolved, so Run will never see it again.
+	correction := memory.Memory{ID: "correction", Category: "gotcha", UpdatedAt: "2026-09-19 21:00:00",
+		Content: "CORRECTION/RESOLUTION to the imported reward_snapshot P0: the bug IS ALREADY FIXED ON MAIN. Commit d646e680 adds CalculationVersion to ledgerstate/imported_reward_inputs.go. NO PR IS NEEDED FROM US."}
+	store := &fakeStore{alreadyResolved: []memory.Memory{paired, correction}}
+	cls := &fakeClassifier{drop: map[string]bool{}}
+
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Reassess: %v", err)
+	}
+	if res.Demoted != 0 {
+		t.Errorf("res.Demoted = %d, want 0 — a resolved correction asserts nothing", res.Demoted)
+	}
+	if len(reKept) != 2 {
+		t.Errorf("reKept = %v, want both rows repairable", reKept)
+	}
+	if len(store.cleared) != 2 {
+		t.Errorf("cleared = %v, want both rows", store.cleared)
+	}
+}
+
 // TestReassessEmptyPool: a project with no resolved rows is a no-op that makes
 // no harness call.
 func TestReassessEmptyPool(t *testing.T) {

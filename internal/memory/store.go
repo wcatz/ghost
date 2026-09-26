@@ -2624,6 +2624,12 @@ func (s *Store) ResolvedCandidates(ctx context.Context, projectID string) ([]Mem
 // Returns the count actually cleared, which callers should report instead of
 // len(ids). A no-op on an empty slice.
 //
+// All batches run in ONE transaction, unlike SetResolved's independent ones: a
+// repair is reported as a single outcome, and a caller that treats an error as
+// "nothing happened" must be able to trust that. Half a repair reported as a
+// failure is the same class of harm as a false repair, so the rollback is the
+// behaviour, not a nicety.
+//
 // updated_at is deliberately untouched: nothing about the memory's content or
 // authorship changed, only resolve's verdict about it, and bumping freshness
 // would perturb the reflect signature and decay ranking for every repaired note.
@@ -2633,6 +2639,12 @@ func (s *Store) ClearResolved(ctx context.Context, projectID string, ids []strin
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin clear resolved: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 
 	total := 0
 	for len(ids) > 0 {
@@ -2654,15 +2666,18 @@ func (s *Store) ClearResolved(ctx context.Context, projectID string, ids []strin
 		        AND project_id = ?
 		        AND resolved_at IS NOT NULL
 		        AND pinned = 0`
-		result, err := s.db.ExecContext(ctx, q, args...)
+		result, err := tx.ExecContext(ctx, q, args...)
 		if err != nil {
-			return total, fmt.Errorf("clear resolved: %w", err)
+			return 0, fmt.Errorf("clear resolved: %w", err)
 		}
 		n, err := result.RowsAffected()
 		if err != nil {
-			return total, fmt.Errorf("clear resolved rows affected: %w", err)
+			return 0, fmt.Errorf("clear resolved rows affected: %w", err)
 		}
 		total += int(n)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit clear resolved: %w", err)
 	}
 	return total, nil
 }

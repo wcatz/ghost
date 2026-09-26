@@ -96,6 +96,11 @@ func TestIsResolvedRequiresClosedByReason(t *testing.T) {
 		"RESOLVED | closed-by: TBD",
 		"RESOLVED | closed-by: unknown",
 		"RESOLVED | closed-by:\nnone",
+		// The prompt's own template, echoed back verbatim: a routine failure
+		// mode of a format-constrained reply, and it names nothing.
+		"RESOLVED | closed-by: <the fact that made note 1 obsolete>",
+		"RESOLVED | closed-by: <what made this note obsolete>",
+		"RESOLVED | closed-by: <reason>",
 	} {
 		fp := &fakeProvider{resp: resp}
 		got, err := NewResolutionClassifier(fp).IsResolved(context.Background(), "content")

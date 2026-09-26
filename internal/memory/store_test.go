@@ -4170,6 +4170,58 @@ func TestResolvedCandidatesAndClearResolved(t *testing.T) {
 	}
 }
 
+// TestClearResolvedIsAtomic: every batch runs in one transaction, so a caller
+// that treats an error as "nothing was repaired" can trust it. A mid-loop
+// failure that left earlier batches cleared would report a half-repair as a
+// failure (review finding on PR #643).
+func TestClearResolvedIsAtomic(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	ids := make([]string, 0, setResolvedBatchSize+5)
+	// The first batch carries ordinary content; only the five rows past
+	// setResolvedBatchSize get a marker, so a trigger can fail exactly the
+	// second batch after the first one's statements have already run.
+	for i := 0; i < setResolvedBatchSize+5; i++ {
+		content := fmt.Sprintf("kill experiment note %d concluded", i)
+		if i >= setResolvedBatchSize {
+			content = fmt.Sprintf("kill experiment reassess tail %d concluded", i)
+		}
+		id, err := s.Create(ctx, testProject, Memory{
+			Category: "gotcha", Content: content, Source: "manual", Importance: 0.5,
+		})
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+	if _, err := s.SetResolved(ctx, ids); err != nil {
+		t.Fatalf("SetResolved: %v", err)
+	}
+
+	// Fail on a row of the SECOND batch only, so the first batch's statements
+	// have already run when the abort fires and only a rollback can undo them.
+	if _, err := s.db.ExecContext(ctx, `CREATE TRIGGER fail_second_batch
+		BEFORE UPDATE ON memories WHEN NEW.resolved_at IS NULL AND OLD.content LIKE '%reassess tail%'
+		BEGIN SELECT RAISE(ABORT, 'clear refused'); END;`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+
+	if _, err := s.ClearResolved(ctx, testProject, ids); err == nil {
+		t.Fatal("ClearResolved: want the trigger abort propagated, got nil")
+	}
+
+	// Nothing may be cleared: the first batch rolled back with the rest.
+	got, err := s.ResolvedCandidates(ctx, testProject)
+	if err != nil {
+		t.Fatalf("ResolvedCandidates: %v", err)
+	}
+	if len(got) != len(ids) {
+		t.Errorf("resolved rows after a failed clear = %d, want %d — the repair must be all or nothing",
+			len(got), len(ids))
+	}
+}
+
 // TestClearResolvedIsProjectScoped: the WHERE clause binds project_id, so a
 // stale or wrong-project caller cannot return another project's rows to ranked
 // injection.

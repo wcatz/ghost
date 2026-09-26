@@ -178,6 +178,15 @@ func parseVerdict(result string) Verdict {
 	return VerdictUnknown
 }
 
+// closedByReasonless reports whether a closed-by value is really a reason: a
+// placeholder word, or the angle-bracketed template the prompt itself prints —
+// a harness that echoes the format back verbatim is a routine failure mode of
+// format-constrained replies, and "<the fact that made note N obsolete>" names
+// nothing at all.
+func closedByReasonless(value string) bool {
+	return closedByPlaceholder[value] || strings.HasPrefix(value, "<")
+}
+
 // closedByVerdict decides the RESOLVED branch: RESOLVED only when the fields
 // after the verdict name a reason. The value may sit on the key's own field
 // ("closed-by: the runbook was replaced") or, when the model broke the line
@@ -205,7 +214,7 @@ func closedByVerdict(rest []string) Verdict {
 		default:
 			continue
 		}
-		if value != "" && !closedByPlaceholder[value] {
+		if value != "" && !closedByReasonless(value) {
 			return VerdictResolved
 		}
 		return VerdictKeep

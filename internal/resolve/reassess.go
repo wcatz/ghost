@@ -199,17 +199,13 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 //   - the supersedes-edge piggyback: the older endpoint of a live
 //     'supersedes'/'llm' link, which is the only demotion that needs no other
 //     row to be present;
-//   - correction pairing: an older row a NEWER correction in either pool shares
-//     rare subject tokens with. The correction itself usually still lives — a
-//     correction is a terminal conclusion and stays KEEP — so the unresolved
-//     pool has to be read for the pairing to be visible here at all.
-//
-// The rare-token document frequency is counted over both pools together rather
-// than over the unresolved pool alone as Run does, because both are already
-// loaded. That widens the DF, so it can only *narrow* the pairing set: a row
-// this skips is a row that is left resolved. Leaving durable knowledge resolved
-// is the status quo and the safe direction to err in; clearing a row the next
-// pass re-stamps is the failure this function exists to prevent.
+//   - correction pairing: an older row a NEWER correction shares rare subject
+//     tokens with. The correction itself usually still lives — a correction is
+//     a terminal conclusion and stays KEEP — so the unresolved pool has to be
+//     read for the pairing to be visible here at all, and it is the only pool
+//     searched for corrections, exactly as in Run. A correction that is itself
+//     resolved asserts nothing, because the next ordinary pass will not see it
+//     either.
 func assertedByDemotions(ctx context.Context, store reassessStore, projectID string, resolved []memory.Memory) (map[string]bool, error) {
 	asserted := make(map[string]bool, len(resolved))
 	if len(resolved) == 0 {
@@ -234,10 +230,14 @@ func assertedByDemotions(ctx context.Context, store reassessStore, projectID str
 	if err != nil {
 		return nil, fmt.Errorf("load unresolved candidates: %w", err)
 	}
-	union := make([]memory.Memory, 0, len(resolved)+len(unresolved))
-	union = append(union, resolved...)
-	union = append(union, unresolved...)
-	for _, m := range correctionPairTargets(union, resolved) {
+	// The unresolved pool fills both of the roles it fills in Run: it is where
+	// the frequencies are counted and where a demoting correction is looked
+	// for. So a correction that is itself already resolved — invisible to the
+	// next ordinary pass — asserts nothing here either, and a row it used to
+	// demote becomes repairable again instead of being reported under the
+	// wrong label. Only the candidate set differs, because the rows to protect
+	// are exactly the ones ResolveCandidates cannot return.
+	for _, m := range correctionPairTargetsFrom(unresolved, resolved, unresolved) {
 		asserted[m.ID] = true
 	}
 	return asserted, nil
