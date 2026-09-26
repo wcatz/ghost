@@ -19,6 +19,7 @@ func TestVetoKeepIssueExamples(t *testing.T) {
 		{"never rule", "NEVER run `dingo database restore` with source and target on the same spindle"},
 		{"do not rule", "Do NOT manually run `dingo-fix serve`; the mithril-sync runbook owns the process"},
 		{"don't rule", "don't restart mithril-sync by hand during a reorg"},
+		{"don't typographic rule", "don\u2019t restart mithril-sync by hand during a reorg"},
 		{"must rule", "`DINGO_PLUGINS_STORAGE_*_DATA_DIR` must be unset, the env vars silently override `--data-dir`"},
 		{"always rule", "always archive the HDD safety-backup set before an unsupervised re-bootstrap"},
 		{"required rule", "a rebase onto origin/main is required before the final push"},
@@ -89,7 +90,7 @@ func TestVetoKeepPatternList(t *testing.T) {
 	want := map[string]string{
 		"never":         "never run restore on one spindle",
 		"do not":        "do not restart mithril-sync by hand",
-		"don't":         "don't restart mithril-sync by hand",
+		"don't":         "don\u2019t restart mithril-sync by hand",
 		"must":          "the env var must be unset",
 		"always":        "always archive the backup set first",
 		"required":      "a rebase is required before the push",

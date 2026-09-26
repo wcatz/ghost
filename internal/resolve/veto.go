@@ -34,7 +34,9 @@ var (
 	keepVetoImperatives = []vetoPattern{
 		{"never", regexp.MustCompile(`(?i)\bnever\b`)},
 		{"do not", regexp.MustCompile(`(?i)\bdo not\b`)},
-		{"don't", regexp.MustCompile(`(?i)\bdon't\b`)},
+		// Both apostrophe forms: note text is LLM- and editor-written, and the
+		// typographic U+2019 is at least as common as the ASCII one.
+		{"don't", regexp.MustCompile(`(?i)\bdo(?:n[’'])t\b`)},
 		{"must", regexp.MustCompile(`(?i)\bmust\b`)},
 		{"always", regexp.MustCompile(`(?i)\balways\b`)},
 		{"required", regexp.MustCompile(`(?i)\brequired\b`)},
