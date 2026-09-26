@@ -95,10 +95,6 @@ const (
 // thing under test, which is how the two failure modes got conflated in the
 // first place.
 func TestFormatMaintenanceSeparatesLostQuestions(t *testing.T) {
-	// The three-condition case below reuses none of these names: with one
-	// condition there is no neighbour to confuse them with, but with three the
-	// names have to be disjoint or a leaked entry is indistinguishable from the
-	// condition's own.
 	both := []MaintenanceOutcome{
 		{Query: "q_outranked", Probe: probeLive, Found: true, LiveWins: false},
 		{Query: "q_evicted", Probe: probeGlobal, Found: false, LiveWins: false},
@@ -140,7 +136,9 @@ func TestFormatMaintenanceSeparatesLostQuestions(t *testing.T) {
 	// and each condition's chunk must not reach past the *next* one in the report
 	// — which is neither the first condition in a fixed list nor the last.
 	// Disjoint names are what make a leak visible: a shared name would let a
-	// chunk answer with its neighbour's entry and still pass.
+	// chunk answer with its neighbour's entry and still pass. The one-condition
+	// case above needs none of that — with a single condition there is no
+	// neighbour to be confused with.
 	//
 	// The report's order is deliberately not the {fts, vector, hybrid} order the
 	// helper iterates, and the Shared counts are non-zero on the first two, so
@@ -228,12 +226,12 @@ func maintenanceChunk(t *testing.T, report, condition string) string {
 // The digit is load-bearing. FormatMaintenance prints a shared-row probe line
 // ("<condition>: shared _global answers found ...") for every condition that has
 // shared-probe questions, all of them before any lost-question header, and both
-// shapes carry the same prefix. Anchoring on
-// the prefix alone therefore starts a chunk on the probe line and — since the end
-// bound looks for that same prefix in the *other* conditions — can stop it on an
-// earlier condition's header, before this condition's own lists begin. Requiring
-// the count only the header carries makes every candidate offset a real section
-// start, and the end bound a real section boundary.
+// shapes carry the same prefix.
+// Anchoring on the prefix alone therefore starts a chunk on the probe line and —
+// since the end bound looks for that same prefix in the *other* conditions — can
+// stop it on an earlier condition's header, before this condition's own lists
+// begin. Requiring the count only the header carries makes every candidate offset
+// a real section start, and the end bound a real section boundary.
 func lostSectionAnchor(report, condition string, from int) int {
 	prefix := "\n" + condition + ": "
 	for i := from; i < len(report); {
