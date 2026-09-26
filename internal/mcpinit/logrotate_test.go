@@ -271,6 +271,40 @@ func TestOpenLogForAppendKeepsWorkingWhenTheFreshFileCannotBeCreated(t *testing.
 	}
 }
 
+// TestOpenLogForAppendNamesBothFailuresWhenNeitherFileOpens: every other
+// failure degrades to a working append; this is the one that does not, so it
+// is the one that has to explain itself. The fresh path no longer exists — the
+// rename moved it — so an error naming only that would describe a file nobody
+// created, and one naming only the copy would hide why the first attempt
+// failed.
+func TestOpenLogForAppendNamesBothFailuresWhenNeitherFileOpens(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lifecycle.log")
+	seedOversizedLog(t, path, "no room for anything")
+
+	origCreate := createLog
+	createLog = func(string) (*os.File, error) {
+		return nil, errors.New("no space left on device")
+	}
+	t.Cleanup(func() { createLog = origCreate })
+
+	f, err := openLogForAppend(path)
+	if err == nil {
+		if f != nil {
+			_ = f.Close()
+		}
+		t.Fatal("expected an error when neither the fresh file nor the rotated copy can be opened")
+	}
+	if f != nil {
+		t.Errorf("got a descriptor (%v) alongside an error", f)
+	}
+	for _, want := range []string{path, path + ".1", "no space left on device"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q must name %q", err, want)
+		}
+	}
+}
+
 // TestLogLifecycleCooldownSkipRotatesOversizedLog: the wiring, not just the
 // helper. The skip line goes through the same open as every other lifecycle
 // line, so a lifecycle.log that has grown past the cap is rotated before that

@@ -1,6 +1,11 @@
 package mcpinit
 
-import "os"
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+)
 
 // logRotateCap is the size at which a data-dir log handed to openLogForAppend
 // is rotated instead of merely appended to. It is a ceiling on a file nothing
@@ -10,8 +15,9 @@ import "os"
 // anything a human greps and far short of anything that matters as disk.
 const logRotateCap = 5 << 20
 
-// createLog opens a data-dir log for append. It is a package variable so a test
-// can make the post-rotation create fail — the real cause is ENOSPC or an inode
+// createLog opens a data-dir log for append; after a rotation it opens both
+// candidates, the fresh file and the rotated copy. It is a package variable so
+// a test can make an open fail — the real cause is ENOSPC or an inode
 // exhaustion on the very filesystem the rotation exists to protect, which a
 // test cannot stage.
 var createLog = func(path string) (*os.File, error) {
@@ -33,15 +39,19 @@ var createLog = func(path string) (*os.File, error) {
 // is open without a delete-sharing grant, so the rename would fail there every
 // time and the cap would be a Linux-only feature.
 //
-// Every failure degrades to a plain open rather than to an error. A rename that
-// cannot happen (a directory at "<path>.1", a read-only mount, another
-// process) leaves the log exactly where it was and the open proceeds as it did
-// before rotation existed. A rename that lands but leaves the fresh file
-// uncreatable — a disk that just filled up, which is the case rotation exists
-// for — falls back to appending through "<path>.1", the file that now holds the
-// content, so the caller's line still lands instead of being reported as a
-// broken log and dropped: both spawn sites read an open error as "no log",
-// and one of them then declines to spawn at all.
+// Failures degrade to a plain open wherever they can. A rename that cannot
+// happen (a directory at "<path>.1", a read-only mount, another process)
+// leaves the log exactly where it was and the open proceeds as it did before
+// rotation existed. A rename that lands but leaves the fresh file uncreatable —
+// a disk that just filled up, which is the case rotation exists for — falls
+// back to appending through "<path>.1", the file that now holds the content,
+// so the caller's line still lands instead of being reported as a broken log
+// and dropped: both spawn sites read an open error as "no log", and one of
+// them then declines to spawn at all. That fallback is silent to the caller
+// and is logged here, because while it lasts "<path>" itself does not exist —
+// the next open recreates it empty — so anything tailing the log by name sees
+// nothing until then. The one case that still returns an error is both opens
+// failing; that error names both paths and both causes.
 //
 // Rotation is decided by Lstat, so a symlink wearing the log's name is
 // appended through and never renamed: renaming it would move the link out from
@@ -53,16 +63,31 @@ func openLogForAppend(path string) (*os.File, error) {
 			rotated = true
 		}
 	}
-	if rotated {
-		// Prefer the fresh file; if it cannot be created, append through the
-		// rotated copy, which is where the content now lives.
-		if f, err := createLog(path); err == nil {
-			return f, nil
-		} else if f2, err2 := createLog(path + ".1"); err2 == nil {
-			return f2, nil
-		} else {
-			return nil, err
-		}
+	if !rotated {
+		return createLog(path)
 	}
-	return createLog(path)
+	// Prefer the fresh file; if it cannot be created, append through the
+	// rotated copy, which is where the content now lives.
+	f, err := createLog(path)
+	if err == nil {
+		return f, nil
+	}
+	rotatedPath := path + ".1"
+	f2, err2 := createLog(rotatedPath)
+	if err2 == nil {
+		// The only path in this function that degrades without the caller
+		// noticing, so it is surfaced here: path is absent until the next
+		// open recreates it, which means anything tailing it sees nothing
+		// while the lines are landing in the rotated copy. One line, not
+		// one per append — this fires when the filesystem is out of room,
+		// and the spam would be the same condition repeating.
+		slog.Warn("ghost: log at or above the rotation cap could not be recreated, appending through the rotated copy instead",
+			"path", path, "rotated", rotatedPath, "error", err)
+		return f2, nil
+	}
+	// Both opens failed, so there is no file to hand back. Name them both:
+	// the fresh path no longer exists (the rename moved it), so its error
+	// alone would describe a file nobody created, and err2 alone would hide
+	// why the first attempt failed.
+	return nil, fmt.Errorf("open log %s after rotating it to %s: %w", path, rotatedPath, errors.Join(err, err2))
 }
