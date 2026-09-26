@@ -271,7 +271,12 @@ backed up ~/.local/share/ghost/ghost.db.backup-20260926T153207Z (204800 bytes)
   decisions:    1
 ```
 
-The snapshot is created at `0600` — a full copy of the memory database is no wider than the database itself — and an existing path is never replaced, because the file already there is the previous backup.
+The file is created at `0600` **before** a byte of the snapshot is written to it, and the path is claimed with `O_EXCL`. Two things follow, both of which matter for an `--out` outside the `0700` data directory:
+
+- **No window.** `VACUUM INTO` names no mode for the file it creates, so a copy it creates lands at SQLite's default minus the umask — `0644` under a permissive umask. Creating the file first means a full copy of the memory database is never group- or world-readable, not even briefly. SQLite accepts an existing *empty* file as a `VACUUM INTO` destination and keeps its mode; it refuses a non-empty one, which is what makes the emptiness the reservation guarantees into the thing SQLite checks.
+- **No overwrite, and no symlink.** `O_EXCL` is the atomic claim, so there is no gap between "I looked and it was absent" and "I created it" for another writer or a symlink swap to slip into, and a dangling symlink at the destination is refused rather than written *through* to whatever it points at.
+
+A vacuum that fails removes its own reservation, so a retry is not blocked by an empty leftover this run created.
 
 To restore: stop Ghost, remove `ghost.db`, `ghost.db-wal` and `ghost.db-shm` from the data directory, move the snapshot in as `ghost.db`, and start Ghost again. Ghost migrates the restored file on the next open, taking a pre-migration copy first.
 
@@ -319,13 +324,37 @@ Loads an artifact written by `ghost export`:
 ```bash
 ghost import ~/backups/one.jsonl
 ghost import ~/backups/one.jsonl --apply
+ghost import ~/backups/one.jsonl --apply --trust-provenance
 ```
 
 | Flag | Meaning |
 |---|---|
 | `--apply` | Actually write. Without it the command is a dry run that reports what it would create, skip and reject, and writes nothing. |
+| `--trust-provenance` | Keep each memory's own source and pin state instead of downgrading them. Off by default; pass it when the artifact is **your own** export. |
 
-A dry run is not a separate code path: every record goes through the same validation an apply run would, so the preview describes the run that follows rather than a similar one.
+A dry run is not a separate code path: every record goes through the same validation an apply run would, so the preview describes the run that follows rather than a similar one. It also opens the database **read-only** — `ghost import` without `--apply` cannot migrate a database whose schema is behind, or seed the builtin rows, while reporting "nothing written". The consequence worth knowing: a dry run needs a database to preview into, so on a machine with no Ghost store yet it reports that rather than creating one. Start a session (or run `ghost mcp init`) first, as `ghost export` also requires.
+
+### Imported provenance
+
+By default an imported memory is stamped `source = "onboarding"` and unpinned, whatever the artifact says:
+
+```text
+  create  memory:   line 3  "carried across machines" (a1) (provenance downgraded to onboarding, unpinned)
+imported 1 memory from ~/backups/one.jsonl
+  provenance downgraded to onboarding and unpinned — pass --trust-provenance to keep the artifact's own
+```
+
+The reason is that an artifact is a file that arrived from somewhere, and on its own authority it would otherwise be able to plant rows that read as yours or as Ghost's:
+
+| The artifact claims | What the store would then treat it as |
+|---|---|
+| `source: "manual"` | the user's own words — excluded from consolidation by name |
+| `source: "builtin"` | a rule Ghost ships — excluded from consolidation by name, and presented as Ghost's own |
+| `pinned: 1` | exempt from consolidation whatever its source |
+
+`onboarding` is the source `internal/claudeimport` already uses for memories brought in from outside Ghost at first contact, and it is in the database's `CHECK` already, so downgrading needs no migration. A downgraded memory stays ordinary: consolidatable, and honest about where it came from.
+
+**Importing your own export? Pass `--trust-provenance`.** The rows come back with their own source and pin, which is what a restore wants. The asymmetry is deliberate: the cost of the default being wrong is planted provenance, and the cost of the flag being wrong is passing it once.
 
 ```text
   skip    project:  line 2  "one" (p1)

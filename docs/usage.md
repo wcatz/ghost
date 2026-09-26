@@ -189,7 +189,11 @@ For a copy you can read, diff and keep in version control, or to move memories t
 ```bash
 ghost export --out ghost-export.jsonl   # JSONL, one record per line
 ghost import ghost-export.jsonl         # dry run: reports what it would do
+ghost import ghost-export.jsonl --apply --trust-provenance
+                                      # restoring your own export
 ```
+
+The dry run writes nothing and opens the database read-only, so it cannot migrate or seed the store either. Without `--trust-provenance` the imported memories are stamped `source = "onboarding"` and unpinned whatever the artifact claims, so a file from somewhere else cannot plant rows that read as your own words or as Ghost's shipped rules — pass the flag when the artifact is your own export.
 
 Both commands, and the restore procedure, are documented in the [CLI reference](cli.md#backup-export-and-import).
 
