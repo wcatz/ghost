@@ -86,7 +86,87 @@ func NegativeQueries(ds Dataset, vecs Vectors) ([]Query, error) {
 // is no configured floor to inherit — search.min_similarity ships 0, dropping
 // only non-positive cosines — so the report sweeps the band a floor would have to
 // live in instead of asserting one.
+//
+// "Above a floor" means strictly above, which is the rule production itself
+// applies: memory.filterVectorFloor keeps a candidate when score > floor and
+// drops the rest, so a result sitting exactly on a floor would be refused by it.
+// Every count in the report follows that one convention, which is also what makes
+// NoAnswerMax/Unseparable coherent: a floor set at the no-answer maximum already
+// refuses that query, and therefore already refuses any answerable query whose
+// best score ties it.
 var FalsePositiveFloors = []float32{0.3, 0.4, 0.5}
+
+// resultCosines returns the cosine similarity between queryVec and each of ids,
+// keyed by ID.
+//
+// The scores come from each row's own stored vector rather than from a vector-leg
+// list, because a hybrid result can arrive on the keyword leg alone: the keyword
+// reservation guarantees the top keyword hits a place in the window while their
+// cosines put them below any fetched vector list. Reading those scores out of a
+// truncated list yields zero, and a result scored zero counts below every floor —
+// so a short list undercounts precisely the rows that came from the leg with no
+// score of its own, and the top result of a keyword-led window is one of them.
+//
+// A row absent from the result has no embedding, or one whose dimensions do not
+// match the query's, and is reported here as 0: below every floor this report
+// counts, which is the right answer for a row with no comparable vector.
+func resultCosines(ctx context.Context, store *memory.Store, queryVec []float32, ids []string) (map[string]float32, error) {
+	scored, err := store.EmbeddingCosines(ctx, ids, queryVec)
+	if err != nil {
+		return nil, err
+	}
+	cosines := make(map[string]float32, len(ids))
+	for _, id := range ids {
+		cosines[id] = scored[id] // absent reads as 0; see above
+	}
+	return cosines, nil
+}
+
+// countAboveFloor counts the results whose cosine is strictly above floor. It is
+// a function rather than a loop so the boundary rule has a test of its own: real
+// cosines essentially never land exactly on a floor, so the rule cannot be pinned
+// through the corpus, only stated (see FalsePositiveFloors) and asserted here.
+func countAboveFloor(cosines map[string]float32, results []memory.Memory, floor float32) int {
+	above := 0
+	for _, m := range results {
+		if cosines[m.ID] > floor {
+			above++
+		}
+	}
+	return above
+}
+
+// scoredWindow runs the production search for one query and scores every row it
+// returns with that row's true cosine, together with the best of them.
+//
+// Scoring the returned window rather than the vector leg's own top-k is what
+// makes the two halves of the report comparable: "the score of the best thing
+// this query would show you" is one definition, and both the no-answer set and
+// the answerable contrast have to measure it the same way or the gap between
+// them means nothing. The two can genuinely differ — the keyword reservation
+// admits a row the vector leg ranked far down, and that row is what the caller is
+// shown.
+func scoredWindow(ctx context.Context, store *memory.Store, q Query) ([]memory.Memory, map[string]float32, float32, error) {
+	results, err := store.SearchHybrid(ctx, q.ProjectID, q.Text, q.Vector, scoreK)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	ids := make([]string, len(results))
+	for i, m := range results {
+		ids[i] = m.ID
+	}
+	cosines, err := resultCosines(ctx, store, q.Vector, ids)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	var top float32
+	for _, c := range cosines {
+		if c > top {
+			top = c
+		}
+	}
+	return results, cosines, top, nil
+}
 
 // FloorCount is what one candidate floor would mean for the no-answer set.
 type FloorCount struct {
@@ -119,16 +199,18 @@ type FalsePositiveReport struct {
 	// MeanResults is the mean number of results returned per no-answer query
 	// (at scoreK, with no floor configured — today always a full window).
 	MeanResults float64
-	// MeanTop is the mean best cosine over no-answer queries, and
+	// MeanTop is the mean best returned cosine over no-answer queries, and
 	// AnswerableTop the same over answerable ones. The gap between them is the
 	// headroom a score threshold has to work with.
 	MeanTop       float64
 	AnswerableTop float64
-	// NoAnswerMax is the highest top cosine any no-answer query produced, so it
-	// is the floor that would refuse every one of them. Unseparable is what
+	// NoAnswerMax is the highest returned cosine any no-answer query produced, so
+	// it is the floor that would refuse every one of them. Unseparable is what
 	// that floor costs: the answerable queries scoring at or below it, which a
-	// threshold that high would refuse as well. A mean alone would hide this —
-	// the means separate cleanly while the two distributions still overlap.
+	// floor that high refuses as well — a tie included, because the production
+	// floor keeps a candidate only when its score is strictly above it. A mean
+	// alone would hide this: the means separate cleanly while the two
+	// distributions still overlap.
 	NoAnswerMax float64
 	Unseparable int
 	// Flavors splits the set by how each query was built, sorted by name.
@@ -137,9 +219,16 @@ type FalsePositiveReport struct {
 }
 
 // FalsePositives runs the production search for every no-answer query and, for
-// contrast, reads the best cosine of every answerable query. Results are
-// attributed a score by looking them up in the vector leg, which is the leg
-// that has one.
+// contrast, does the same for every answerable one. Each returned row is scored
+// with its own true cosine (see resultCosines), so a row that reached the window
+// on the keyword leg alone is measured rather than assumed to be a non-match.
+//
+// One caveat worth stating, because it is the difference between this report and
+// the shipped flag: production applies a configured floor to the vector leg
+// *before* fusion, so a keyword-only result is exempt from it entirely. The
+// "results above a floor" rows here score every returned row against the floor
+// anyway, which is a stricter diagnostic reading — it answers "how strong are the
+// results a caller actually receives", not "what would the flag do".
 func FalsePositives(ctx context.Context, store *memory.Store, noAnswer, answerable []Query) (FalsePositiveReport, error) {
 	rep := FalsePositiveReport{Queries: len(noAnswer), Answerable: len(answerable)}
 	if len(noAnswer) == 0 {
@@ -150,21 +239,9 @@ func FalsePositives(ctx context.Context, store *memory.Store, noAnswer, answerab
 	answerableTops := make([]float64, 0, len(answerable))
 	byFlavor := map[string]*FlavorStat{}
 	for _, q := range noAnswer {
-		scored, err := store.SearchVector(ctx, q.ProjectID, q.Vector, scoreK*2)
+		results, cosines, top, err := scoredWindow(ctx, store, q)
 		if err != nil {
-			return FalsePositiveReport{}, fmt.Errorf("no-answer query %q: vector leg: %w", q.Name, err)
-		}
-		cosine := make(map[string]float32, len(scored))
-		var top float32
-		for _, s := range scored {
-			cosine[s.MemoryID] = s.Score
-			if s.Score > top {
-				top = s.Score
-			}
-		}
-		results, err := store.SearchHybrid(ctx, q.ProjectID, q.Text, q.Vector, scoreK)
-		if err != nil {
-			return FalsePositiveReport{}, fmt.Errorf("no-answer query %q: hybrid search: %w", q.Name, err)
+			return FalsePositiveReport{}, fmt.Errorf("no-answer query %q: %w", q.Name, err)
 		}
 		sumResults += float64(len(results))
 		sumTop += float64(top)
@@ -180,12 +257,7 @@ func FalsePositives(ctx context.Context, store *memory.Store, noAnswer, answerab
 		stat.MeanResults += float64(len(results))
 		stat.MeanTop += float64(top)
 		for _, floor := range FalsePositiveFloors {
-			above := 0
-			for _, m := range results {
-				if cosine[m.ID] >= floor {
-					above++
-				}
-			}
+			above := countAboveFloor(cosines, results, floor)
 			row := floorRow(&rep.Floors, floor)
 			row.Results += float64(above)
 			if above > 0 {
@@ -198,17 +270,16 @@ func FalsePositives(ctx context.Context, store *memory.Store, noAnswer, answerab
 	rep.MeanTop = sumTop / n
 	rep.Flavors = flavorStats(byFlavor)
 
+	// The answerable contrast measures the same thing the no-answer set does —
+	// the best cosine among the rows production would return — so the two
+	// distributions differ only in whether the corpus has an answer.
 	for _, q := range answerable {
-		scored, err := store.SearchVector(ctx, q.ProjectID, q.Vector, 1)
+		_, _, top, err := scoredWindow(ctx, store, q)
 		if err != nil {
-			return FalsePositiveReport{}, fmt.Errorf("answerable query %q: vector leg: %w", q.Name, err)
+			return FalsePositiveReport{}, fmt.Errorf("answerable query %q: %w", q.Name, err)
 		}
-		top := 0.0
-		if len(scored) > 0 {
-			top = float64(scored[0].Score)
-		}
-		answerableTops = append(answerableTops, top)
-		rep.AnswerableTop += top
+		answerableTops = append(answerableTops, float64(top))
+		rep.AnswerableTop += float64(top)
 	}
 	if len(answerable) > 0 {
 		rep.AnswerableTop /= float64(len(answerable))

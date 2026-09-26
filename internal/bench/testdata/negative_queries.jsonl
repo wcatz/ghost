@@ -10,9 +10,11 @@
 # (unit tests, ingress, restore, on-call, disk usage) while asking about
 # something the corpus never recorded — those are where a score-based abstain
 # rule has to earn its keep, and they are the reason this file exists.
-# Vectors are in negative_embeddings.json under each query's name; regenerate
-# with Ollama POST /api/embed (nomic-embed-text:v1.5, 768 dims) when this file
-# changes. See docs/benchmarks.md ("No-answer queries").
+# Vectors are in negative_embeddings.json under each query's name, embedded with
+# the query task prefix the production client applies since #642 (EmbedQuery,
+# "search_query: ", nomic-embed-text:v1.5 at 768 dims) so they are comparable
+# with the graded fixture's query vectors. See docs/benchmarks.md ("No-answer
+# queries").
 {"name":"n_off_wifi","flavor":"off_domain","text":"what is the office wifi password","rel":{}}
 {"name":"n_off_dentist","flavor":"off_domain","text":"when is my dentist appointment","rel":{}}
 {"name":"n_off_lisbon","flavor":"off_domain","text":"what is the weather in lisbon tomorrow","rel":{}}

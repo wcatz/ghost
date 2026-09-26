@@ -9,8 +9,12 @@
 # actually stamp — convention and preference are exempt, so a store cannot hold
 # a resolved convention.
 # maintenance_queries.jsonl grades against this file; maintenance_embeddings.json
-# holds the vectors, regenerated via Ollama POST /api/embed (nomic-embed-text:v1.5,
-# 768 dims) when this file changes. See docs/benchmarks.md ("Maintenance state").
+# holds the vectors, regenerated when this file changes. They are embedded the
+# way the production client does since #642: EmbedDocument ("search_document: ")
+# for a memory, EmbedQuery ("search_query: ") for a question, both at
+# nomic-embed-text:v1.5 / 768 dims. So this suite is measured in the same
+# vector space as memories.jsonl's embeddings.json and as a live store.
+# See docs/benchmarks.md ("Phase 3b").
 {"key":"ms_pg_live","category":"dependency","content":"Production runs PostgreSQL 16 on db-primary after the February upgrade.","importance":0.8,"age_days":40,"supersedes":["ms_pg_old"]}
 {"key":"ms_pg_old","category":"dependency","content":"Production runs PostgreSQL 14 on db-primary.","importance":0.8,"age_days":430}
 {"key":"ms_pg_global","project":"_global","category":"convention","content":"Databases in this fleet run PostgreSQL 14.","importance":0.7,"age_days":520}

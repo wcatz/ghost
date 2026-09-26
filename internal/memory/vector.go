@@ -76,6 +76,61 @@ func (s *Store) DeleteEmbedding(ctx context.Context, memoryID string) error {
 	return err
 }
 
+// EmbeddingCosines returns the cosine similarity between queryVec and the stored
+// embedding of each requested memory, keyed by memory ID. An ID with no stored
+// vector, or with one whose dimensions do not match queryVec, is simply absent
+// from the result: there is no score to report for it, and inventing a zero would
+// read as a measured non-match rather than a missing one.
+//
+// It exists because a search result's score is not always in the vector leg's own
+// output. Fusion admits the top keyword hits on a reserved slot whatever their
+// cosine, so a result can be in the window while sitting below every fetched
+// vector list — and a caller that wants to know how strongly a result matched
+// (a score-gated abstention rule, the bench harness's false-positive report) has
+// to read the row's own vector rather than infer a score from a list the row was
+// never in. This is the same cosine the vector leg computes, over exactly the
+// rows asked for, so it costs a window's worth of reads instead of a second scan
+// of the project.
+func (s *Store) EmbeddingCosines(ctx context.Context, ids []string, queryVec []float32) (map[string]float32, error) {
+	if len(ids) == 0 || len(queryVec) == 0 {
+		return nil, nil
+	}
+	ph := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		ph[i] = "?"
+		args[i] = id
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.queryDB().QueryContext(ctx, fmt.Sprintf(`
+		SELECT memory_id, embedding FROM memory_embeddings
+		WHERE memory_id IN (%s)
+	`, strings.Join(ph, ",")), args...)
+	if err != nil {
+		return nil, fmt.Errorf("embedding cosines: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	cosines := make(map[string]float32, len(ids))
+	for rows.Next() {
+		var id string
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			return nil, fmt.Errorf("embedding cosines: %w", err)
+		}
+		vec := bytesToFloat32s(blob)
+		if len(vec) != len(queryVec) {
+			continue
+		}
+		cosines[id] = cosineSimilarity(queryVec, vec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("embedding cosines: %w", err)
+	}
+	return cosines, nil
+}
+
 // UnembeddedMemoryIDs returns memory IDs that still need an embedding produced
 // by identity: rows with no vector at all, and rows whose vector was stamped
 // with a different identity — a model, dimension or task-prefix change (see
