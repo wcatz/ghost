@@ -62,7 +62,8 @@ func openLogForAppend(path string) (*os.File, error) {
 	if err != nil {
 		// The rename landed but the fresh file could not be created. f still
 		// names the rotated copy, so the caller writes there instead of
-		// losing its line — and the next open will try the rotation again.
+		// losing its line; the next open starts a fresh generation beside it
+		// from a file it creates itself, size 0, so nothing here retries.
 		return f, nil
 	}
 	_ = f.Close()
