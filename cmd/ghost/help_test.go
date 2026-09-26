@@ -297,8 +297,8 @@ func TestHelp_ValueFlagsSkipTheirValue(t *testing.T) {
 // sources for case clauses that match a flag-shaped literal (`-x` or `--x`;
 // -h/--help excluded, they are the request itself) and advance the argument
 // index — `++`, `+ 1` or `+= 1` on an identifier that also appears indexed
-// inside the clause (`args[i]`), or an `args = args[1:]` reslice of that same
-// identifier. Boolean flags like --apply never advance it, and an unrelated
+// inside the clause or its switch tag (`args[i]`), or an `args = args[1:]`
+// reslice of that same identifier. Boolean flags like --apply never advance it, and an unrelated
 // counter bump or string trim is not mistaken for parsing (see advancesIndex
 // for why the loose reading would break the contract instead of protecting
 // it), while the common refactors to the idiom stay covered. Both lists must
@@ -330,9 +330,36 @@ func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
+		// A switch tag lives outside every CaseClause, so seed each clause
+		// with the index expressions of its enclosing switch's tag:
+		// `switch args[i] { case "--x": i++ }` has no IndexExpr in the
+		// clause at all, and a parser written that way would otherwise be
+		// invisible to the scan — the silent direction of this guard.
+		tagIndexed := map[*ast.CaseClause]map[string]bool{}
+		ast.Inspect(f, func(n ast.Node) bool {
+			sw, ok := n.(*ast.SwitchStmt)
+			if !ok || sw.Tag == nil {
+				return true
+			}
+			tag := indexExprIdents(sw.Tag)
+			for _, stmt := range sw.Body.List {
+				if cc, ok := stmt.(*ast.CaseClause); ok {
+					tagIndexed[cc] = tag
+				}
+			}
+			return true
+		})
+
 		ast.Inspect(f, func(n ast.Node) bool {
 			cc, ok := n.(*ast.CaseClause)
-			if !ok || !advancesIndex(cc) {
+			if !ok {
+				return true
+			}
+			indexed := indexExprIdents(cc)
+			for name, v := range tagIndexed[cc] {
+				indexed[name] = v
+			}
+			if !advancesIndex(indexed, cc) {
 				return true
 			}
 			ast.Inspect(cc, func(m ast.Node) bool {
@@ -375,26 +402,15 @@ func TestHelp_ValueFlagsCoverEveryParser(t *testing.T) {
 // that a matched flag consumed the following token instead of being a
 // boolean flag of its own. The signal is tied to the index variable itself:
 // an increment (`i++`), an `+= 1`, or a `+ 1` only counts when its
-// identifier also appears inside an IndexExpr in the clause (`args[i]`,
-// `os.Args[i]`, `args[i+1]`), and a reslice only counts when it re-slices
-// that same identifier with a literal low bound (`args = args[1:]`). Looser
-// rules would mark unrelated clauses — `counts[m.Category]++`,
-// `s = s[:i]` — as value-flag parsers, and the fix this test then suggests
-// (register the flag) would make wantsHelp skip the token after a BOOLEAN
-// flag, so `-h` behind it would run the command instead of printing usage:
-// the very bug the guard exists to prevent.
-func advancesIndex(cc *ast.CaseClause) bool {
-	indexed := map[string]bool{}
-	ast.Inspect(cc, func(n ast.Node) bool {
-		ix, ok := n.(*ast.IndexExpr)
-		if !ok {
-			return true
-		}
-		collectIdents(ix.X, indexed)
-		collectIdents(ix.Index, indexed)
-		return true
-	})
-
+// identifier is in indexed — the identifiers appearing inside IndexExprs in
+// the clause or its switch tag (`args[i]`, `os.Args[i]`, `args[i+1]`) — and
+// a reslice only counts when it re-slices one of them with a literal low
+// bound (`args = args[1:]`). Looser rules would mark unrelated clauses —
+// `counts[m.Category]++`, `s = s[:i]` — as value-flag parsers, and the fix
+// this test then suggests (register the flag) would make wantsHelp skip the
+// token after a BOOLEAN flag, so `-h` behind it would run the command
+// instead of printing usage: the very bug the guard exists to prevent.
+func advancesIndex(indexed map[string]bool, cc *ast.CaseClause) bool {
 	advance := false
 	ast.Inspect(cc, func(n ast.Node) bool {
 		if advance {
@@ -442,6 +458,23 @@ func advancesIndex(cc *ast.CaseClause) bool {
 		return true
 	})
 	return advance
+}
+
+// indexExprIdents returns every identifier appearing inside an IndexExpr
+// under n — the identifiers that actually index something, i.e. the loop
+// variables a parser advances.
+func indexExprIdents(n ast.Node) map[string]bool {
+	ids := map[string]bool{}
+	ast.Inspect(n, func(m ast.Node) bool {
+		ix, ok := m.(*ast.IndexExpr)
+		if !ok {
+			return true
+		}
+		collectIdents(ix.X, ids)
+		collectIdents(ix.Index, ids)
+		return true
+	})
+	return ids
 }
 
 // collectIdents adds every identifier appearing under n to ids.
