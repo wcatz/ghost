@@ -266,9 +266,11 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	}
 
 	window := selectWindow(pool, req.Fetch.Limit, p)
-	// The same seam fuseAndRank calls, at the same boundary: the legs have
-	// released their reads and the hydration is about to be issued, which is
-	// where a delete can land.
+	// The same seam fuseAndRank calls, so a test can fail the hydration read at
+	// the same boundary: a read failure has to surface as an error, not as an
+	// empty window. (It cannot model a delete here the way it does there — this
+	// path reads inside one snapshot, so a concurrent delete is simply not
+	// observable.)
 	beforeHybridHydrate(window.IDs)
 	hydrated, err := hydrateWindow(ctx, cand, window, pool)
 	if err != nil {
