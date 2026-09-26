@@ -279,7 +279,13 @@ func (s *Store) warnForeignOnce(storedIdentity string) bool {
 // because the identity check above it takes those rows first.
 func (s *Store) usableVectorEntries(rows *sql.Rows, queryVec []float32, identity string) ([]vecEntry, error) {
 	var entries []vecEntry
-	foreign, foreignModel := 0, ""
+	// foreign counts skipped rows per stored identity rather than as one
+	// total: retirements OVERLAP (the model changes again before the first
+	// re-embed finishes), and a single total reported against whichever
+	// identity the planner yielded first would absorb the newer retirement —
+	// both would be folded into one line naming only the older one, which is
+	// exactly the diagnosis the operator needs at that moment.
+	foreign := make(map[string]int)
 	mismatched, mismatchedModel := 0, ""
 	for rows.Next() {
 		var id, model, rowProject string
@@ -289,10 +295,7 @@ func (s *Store) usableVectorEntries(rows *sql.Rows, queryVec []float32, identity
 			return nil, err
 		}
 		if identity != "" && model != identity {
-			foreign++
-			if foreignModel == "" {
-				foreignModel = model
-			}
+			foreign[model]++
 			continue
 		}
 		vec := bytesToFloat32s(blob)
@@ -311,15 +314,24 @@ func (s *Store) usableVectorEntries(rows *sql.Rows, queryVec []float32, identity
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if s.logger != nil {
-		if foreign > 0 && s.warnForeignOnce(foreignModel) {
-			s.logger.Warn("vector search skipped embeddings from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded (reported once per retired identity)",
-				"skipped", foreign, "usable", len(entries), "configured_identity", identity, "stored_identity", foreignModel)
+	if s.logger != nil && len(foreign) > 0 {
+		// Sorted so a log is deterministic whichever row order the planner
+		// happened to yield.
+		models := make([]string, 0, len(foreign))
+		for m := range foreign {
+			models = append(models, m)
 		}
-		if mismatched > 0 {
-			s.logger.Warn("vector search skipped embeddings whose dimension does not match the query — the embedding model likely changed; re-embed to restore vector recall",
-				"skipped", mismatched, "usable", len(entries), "query_dims", len(queryVec), "stored_model", mismatchedModel)
+		sort.Strings(models)
+		for _, m := range models {
+			if s.warnForeignOnce(m) {
+				s.logger.Warn("vector search skipped embeddings from another vector space — the configured embedding model changed and those rows are waiting to be re-embedded (reported once per retired identity)",
+					"skipped", foreign[m], "usable", len(entries), "configured_identity", identity, "stored_identity", m)
+			}
 		}
+	}
+	if s.logger != nil && mismatched > 0 {
+		s.logger.Warn("vector search skipped embeddings whose dimension does not match the query — the embedding model likely changed; re-embed to restore vector recall",
+			"skipped", mismatched, "usable", len(entries), "query_dims", len(queryVec), "stored_model", mismatchedModel)
 	}
 	return entries, nil
 }

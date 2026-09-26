@@ -18,6 +18,10 @@ name: longmemeval
 # warm one => identical R@5/NDCG. That means the hybrid floors below are fully
 # validated by a warm LOCAL run; no CI run is needed to establish them. Run
 # hybrid via workflow_dispatch (or locally) when you actually want the numbers.
+# Caveat (see the CI-gating note in docs/benchmarks.md): that validating local
+# run predates the harness adopting the search_document:/search_query: task
+# prefixes, so the floors have not been re-derived for the prefixed space — a
+# dispatch today floor-checks rather than regression-checks until re-baselined.
 on:
   workflow_dispatch:
     inputs:
@@ -173,6 +177,12 @@ jobs:
         # since nomic embeddings are deterministic, a cold run yields the same
         # vectors and thus the same metrics, so this manual job is only needed
         # when you want to re-confirm the numbers, not to establish them.
+        # RE-BASELINE PENDING: those numbers predate the harness adopting the
+        # search_document:/search_query: prefixes (see the CI-gating note in
+        # docs/benchmarks.md), so a run here measures a different vector space
+        # than the one that set the floors — until the floors are re-derived
+        # from a prefixed run, treat a pass as a floor-check, not as proof
+        # there was no regression.
         # First run on a cold embed-cache embeds the whole dataset on CPU and
         # is slow (hence the generous timeout above); once actions/cache has a
         # warm entry under the longmemeval-embed-cache-v1- prefix, subsequent
