@@ -93,7 +93,13 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	// Run's two free demotions, as a floor. Both are computed before the veto
 	// and before the KEEP cache in Run, so a row either one covers comes back
 	// stamped on the next ordinary pass; the repair pass must not claim it.
-	asserted, err := assertedByDemotions(ctx, store, projectID, loaded)
+	// The pairing needs a second look once the re-KEEP set is known, because a
+	// correction in that set is leaving the resolved pool (see holdBack).
+	unresolved, err := store.ResolveCandidates(ctx, projectID)
+	if err != nil {
+		return res, nil, fmt.Errorf("load unresolved candidates: %w", err)
+	}
+	asserted, err := assertedByDemotions(ctx, store, projectID, loaded, unresolved)
 	if err != nil {
 		return res, nil, err
 	}
@@ -128,6 +134,9 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	}
 
 	// newKept collects the classifier's KEEP verdicts; written only on apply.
+	// A row holdBack removes is deleted from it below: it is not being
+	// repaired, and a KEEP hash on a row Run will re-stamp anyway is state
+	// that reads as a decision resolve never made.
 	newKept := make(map[string]string)
 	if len(pendingContents) > 0 {
 		verdicts, err := cls.IsResolvedBatch(ctx, pendingContents)
@@ -156,6 +165,19 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	for _, m := range loaded {
 		if reKeptIDs[m.ID] {
 			reKept = append(reKept, m)
+		}
+	}
+	kept := reKept
+	reKept, res.Demoted = holdBack(kept, unresolved, res.Demoted)
+	if len(reKept) != len(kept) {
+		inReKept := make(map[string]bool, len(reKept))
+		for _, m := range reKept {
+			inReKept[m.ID] = true
+		}
+		for _, m := range kept {
+			if !inReKept[m.ID] {
+				delete(newKept, m.ID)
+			}
 		}
 	}
 	res.ReKept = len(reKept)
@@ -192,6 +214,57 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	return res, reKept, nil
 }
 
+// holdBack removes from the repair set any row a correction that is itself being
+// repaired would re-demote. Both rows are resolved right now, so the up-front
+// floor sees no pairing; but clearing the correction puts it back in
+// ResolveCandidates, and mechanism 2 then re-stamps the older row on the very
+// next ordinary pass — ahead of the veto and the KEEP cache, neither of which
+// can save it. The repair would be undone by the pass that follows it, so the
+// row is held back and reported as asserted instead.
+//
+// Corrections are drawn from the unresolved pool plus the re-KEEP rows that are
+// correction-marked, and the drop repeats until it finds nothing new. Dropping is
+// one-way: a row removed because a correction asserted it is never re-added, so
+// a correction that is itself held back cannot free its row again. That errs
+// toward leaving durable knowledge resolved, which is the status quo and the
+// visible, safe direction, rather than toward a repair the next pass undoes.
+func holdBack(reKept, unresolved []memory.Memory, already int) ([]memory.Memory, int) {
+	corrections := unresolved
+	for _, m := range reKept {
+		if isCorrection(m.Content) {
+			corrections = append(corrections, m)
+		}
+	}
+	held := 0
+	for {
+		dropped := make(map[string]bool)
+		for _, m := range correctionPairTargetsFrom(unresolved, reKept, corrections) {
+			if !dropped[m.ID] {
+				dropped[m.ID] = true
+				held++
+			}
+		}
+		if len(dropped) == 0 {
+			return reKept, already + held
+		}
+		// Rebuild both lists: the correction pool can only shrink here, since a
+		// dropped correction-marked row leaves the repair set with it.
+		var next []memory.Memory
+		for _, m := range reKept {
+			if !dropped[m.ID] {
+				next = append(next, m)
+			}
+		}
+		reKept = next
+		corrections = unresolved
+		for _, m := range reKept {
+			if isCorrection(m.Content) {
+				corrections = append(corrections, m)
+			}
+		}
+	}
+}
+
 // assertedByDemotions returns the IDs among the already-resolved pool that Run
 // would stamp again for free on its next pass, so the repair pass leaves them
 // alone. It mirrors the two mechanisms in Run, in the same order they matter:
@@ -206,7 +279,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 //     searched for corrections, exactly as in Run. A correction that is itself
 //     resolved asserts nothing, because the next ordinary pass will not see it
 //     either.
-func assertedByDemotions(ctx context.Context, store reassessStore, projectID string, resolved []memory.Memory) (map[string]bool, error) {
+func assertedByDemotions(ctx context.Context, store reassessStore, projectID string, resolved, unresolved []memory.Memory) (map[string]bool, error) {
 	asserted := make(map[string]bool, len(resolved))
 	if len(resolved) == 0 {
 		return asserted, nil
@@ -226,10 +299,6 @@ func assertedByDemotions(ctx context.Context, store reassessStore, projectID str
 		}
 	}
 
-	unresolved, err := store.ResolveCandidates(ctx, projectID)
-	if err != nil {
-		return nil, fmt.Errorf("load unresolved candidates: %w", err)
-	}
 	// The unresolved pool fills both of the roles it fills in Run: it is where
 	// the frequencies are counted and where a demoting correction is looked
 	// for. So a correction that is itself already resolved — invisible to the

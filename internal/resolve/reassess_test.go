@@ -258,10 +258,15 @@ func TestReassessSkipsDeterministicallyAssertedRows(t *testing.T) {
 
 // TestReassessCorrectionMustBeUnresolved: Run draws its corrections from the
 // unresolved pool (correctionPairTargets(loaded, cands), where loaded is
-// ResolveCandidates), so a correction that is itself resolved no longer pairs
-// anything and the older row is repairable again. The floor must use the same
-// pool, or it protects a row the next pass will not re-stamp and reports it
-// under the wrong label (review finding on #643).
+// ResolveCandidates), so a correction that is itself resolved pairs nothing and
+// the older row is repairable again. The floor must use the same pool, or it
+// protects a row the next pass will not re-stamp and reports it under the wrong
+// label (review finding on #643).
+//
+// The correction is judged RESOLVED here — it is the "already fixed on main, no
+// PR needed" note resolve should have stamped anyway — so it stays resolved and
+// asserts nothing. The companion case, where the correction is itself repaired
+// and therefore leaves the pool, is TestReassessHoldsBackRowWhoseCorrectionIsRepaired.
 func TestReassessCorrectionMustBeUnresolved(t *testing.T) {
 	paired := memory.Memory{ID: "paired", Category: "gotcha", UpdatedAt: "2026-09-19 20:00:00",
 		Content: "root cause: ledgerstate/imported_reward_inputs.go never sets CalculationVersion on imported reward_snapshot rows; unusable (closed)"}
@@ -269,20 +274,70 @@ func TestReassessCorrectionMustBeUnresolved(t *testing.T) {
 	correction := memory.Memory{ID: "correction", Category: "gotcha", UpdatedAt: "2026-09-19 21:00:00",
 		Content: "CORRECTION/RESOLUTION to the imported reward_snapshot P0: the bug IS ALREADY FIXED ON MAIN. Commit d646e680 adds CalculationVersion to ledgerstate/imported_reward_inputs.go. NO PR IS NEEDED FROM US."}
 	store := &fakeStore{alreadyResolved: []memory.Memory{paired, correction}}
-	cls := &fakeClassifier{drop: map[string]bool{}}
+	cls := &fakeClassifier{drop: map[string]bool{correction.Content: true}}
 
 	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, nil)
 	if err != nil {
 		t.Fatalf("Reassess: %v", err)
 	}
 	if res.Demoted != 0 {
-		t.Errorf("res.Demoted = %d, want 0 — a resolved correction asserts nothing", res.Demoted)
+		t.Errorf("res.Demoted = %d, want 0 — a correction that stays resolved asserts nothing", res.Demoted)
 	}
-	if len(reKept) != 2 {
-		t.Errorf("reKept = %v, want both rows repairable", reKept)
+	if len(reKept) != 1 || reKept[0].ID != "paired" {
+		t.Errorf("reKept = %v, want [paired] to be repairable", reKept)
 	}
-	if len(store.cleared) != 2 {
-		t.Errorf("cleared = %v, want both rows", store.cleared)
+	if len(store.cleared) != 1 || store.cleared[0] != "paired" {
+		t.Errorf("cleared = %v, want [paired]", store.cleared)
+	}
+}
+
+// TestReassessHoldsBackRowWhoseCorrectionIsRepaired: a correction that is itself
+// repaired in the same run resurrects the pairing it used to assert. Both rows
+// leave the resolved pool, so the next ordinary pass finds the correction in
+// ResolveCandidates and re-stamps the older row — the repair would be undone by
+// the pass that follows it. So the older row is held back and reported as
+// asserted, even though nothing asserts it yet (review finding on #643).
+func TestReassessHoldsBackRowWhoseCorrectionIsRepaired(t *testing.T) {
+	paired := memory.Memory{ID: "paired", Category: "gotcha", UpdatedAt: "2026-09-19 20:00:00",
+		Content: "root cause: ledgerstate/imported_reward_inputs.go never sets CalculationVersion on imported reward_snapshot rows; unusable (closed)"}
+	correction := memory.Memory{ID: "correction", Category: "gotcha", UpdatedAt: "2026-09-19 21:00:00",
+		Content: "CORRECTION/RESOLUTION to the imported reward_snapshot P0: the bug IS ALREADY FIXED ON MAIN. Commit d646e680 adds CalculationVersion to ledgerstate/imported_reward_inputs.go. NO PR IS NEEDED FROM US."}
+	other := memory.Memory{ID: "other", Category: "gotcha",
+		Content: "Cost estimate from May: $148/mo projected; actuals have since replaced it."}
+	store := &fakeStore{alreadyResolved: []memory.Memory{paired, correction, other}}
+	// The classifier KEEPs all three: the correction is repairable, and so is
+	// the cost estimate, which no correction touches.
+	cls := &fakeClassifier{drop: map[string]bool{}}
+
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Reassess: %v", err)
+	}
+	if res.Demoted != 1 {
+		t.Errorf("res.Demoted = %d, want 1 (the row a repaired correction would re-demote)", res.Demoted)
+	}
+	got := map[string]bool{}
+	for _, m := range reKept {
+		got[m.ID] = true
+	}
+	if got["paired"] {
+		t.Error("paired must be held back: clearing the correction re-asserts the pairing")
+	}
+	if !got["correction"] || !got["other"] {
+		t.Errorf("reKept = %v, want the correction and the cost estimate", reKept)
+	}
+	if len(store.cleared) != 2 || store.cleared[0] != "paired" || store.cleared[1] != "correction" {
+		// Only the ids cleared matter; assert the set, not the order.
+		cleared := map[string]bool{}
+		for _, id := range store.cleared {
+			cleared[id] = true
+		}
+		if len(cleared) != 2 || !cleared["correction"] || !cleared["other"] {
+			t.Errorf("cleared = %v, want [correction other]", store.cleared)
+		}
+	}
+	if _, ok := store.kept["paired"]; ok {
+		t.Error("a held-back row must not get a KEEP cache entry it cannot act on")
 	}
 }
 
