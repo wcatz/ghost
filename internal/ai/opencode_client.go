@@ -468,8 +468,10 @@ const openCodeNoToolsPreamble = "You have no tools in this session. Do not call 
 // run auto-rejects the ask, emits an "aborted" error ("Session interrupted:
 // shutdown") and a declined tool call, and exits 1. The text written before
 // that is the model's answer. It is kept only when the stream shows exactly
-// that failure and holds some text; the callers' strict parsers still reject a
-// truncated or partial answer. Non-JSON lines (opencode prints the
+// that failure and holds some text. Reflect (JSON) and resolve (exact verdict
+// count) reject a partial answer; supersede applies only the verdicts it could
+// parse and leaves the rest unclassified, so every applied verdict is one the
+// model actually gave. Non-JSON lines (opencode prints the
 // auto-reject notice as plain text) are skipped here.
 func salvageDeclinedToolRun(raw string) (string, bool) {
 	var sb strings.Builder
