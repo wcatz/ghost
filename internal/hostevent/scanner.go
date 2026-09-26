@@ -2,7 +2,9 @@ package hostevent
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 )
@@ -99,17 +101,49 @@ func isGhostSaveTool(name string) bool {
 	return false
 }
 
+// maxTranscriptLine bounds the memory one transcript line may take. A var so
+// tests can lower it.
+var maxTranscriptLine = 64 << 20
+
+// errTranscriptLineTooLong reports a line past maxTranscriptLine.
+var errTranscriptLineTooLong = errors.New("transcript line exceeds the memory ceiling")
+
 // streamJSONL visits each line of a newline-delimited JSON transcript and
-// returns the terminal scanner error, if any (I/O read failure, or the line
-// buffer limit being exceeded). The buffer matches the historical stop-hook
-// scanner: transcript lines carry full tool results and can be huge.
+// returns the terminal read error, if any (an I/O failure, or a line past
+// maxTranscriptLine). Lines carry full tool results: an opencode message holds
+// every tool call and output of an agentic turn, so real lines pass the old
+// 4 MiB bufio.Scanner cap and aborted the scan (#632). The ceiling only bounds
+// memory. The visited slice is valid until the next line is read; a trailing
+// "\r" is dropped and a final line without a newline is visited, as with
+// bufio.ScanLines. A partial line cut off by a read error is not visited.
 func streamJSONL(r io.Reader, visit func(line []byte)) error {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for sc.Scan() {
-		visit(sc.Bytes())
+	br := bufio.NewReaderSize(r, 64*1024)
+	var line []byte
+	for {
+		line = line[:0]
+		for {
+			chunk, err := br.ReadSlice('\n')
+			line = append(line, chunk...)
+			if len(line) > maxTranscriptLine {
+				return errTranscriptLineTooLong
+			}
+			if err == bufio.ErrBufferFull {
+				continue
+			}
+			if err == io.EOF {
+				if len(line) > 0 {
+					visit(bytes.TrimSuffix(line, []byte("\r")))
+				}
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			break
+		}
+		line = bytes.TrimSuffix(line, []byte("\n"))
+		visit(bytes.TrimSuffix(line, []byte("\r")))
 	}
-	return sc.Err()
 }
 
 // ScanClaudeJSONL streams a Claude Code transcript and counts assistant
