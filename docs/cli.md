@@ -303,8 +303,8 @@ ghost opencode cleanup-sessions --apply         # delete them
 Sessions are read through the real `opencode` binary (`session list --format
 json`), so — like your own `opencode session list` — the run is scoped to the
 current project: run it from the checkout whose sessions you want cleaned. The
-child receives Ghost's harness environment allowlist, which for OpenCode is
-`OPENCODE_API_KEY` alone, so a store override such as `OPENCODE_DB` in your
+child receives Ghost's harness environment allowlist, whose OpenCode-specific
+entry is `OPENCODE_API_KEY`, so a store override such as `OPENCODE_DB` in your
 shell does not reach it (opt in with `GHOST_PASSTHROUGH_ENV`, which re-exposes
 whatever else you name). Timestamps are read as Unix milliseconds on the CLI's
 word alone, so a timestamp that is missing or outside a plausible window
@@ -321,8 +321,8 @@ when sessions are listed but none carries a timestamp — that is the shape
 drift, not an empty checkout. Deletion uses `opencode session delete <id>` with
 up to three attempts per session; a failed delete is reported and counted but
 never stops the rest, and the command exits non-zero when any delete failed.
-The warnings above do not change that exit status: the run did what it was
-asked, so read the report. The binary comes from `cli.opencode_binary`
+The timestamp and truncation warnings do not change that exit status: the run
+did what it was asked, so read the report. The binary comes from `cli.opencode_binary`
 (`GHOST_CLI_OPENCODE_BINARY`) when configured, otherwise from `PATH`.
 
 New lifecycle sessions no longer need this command: since #568 the opencode
