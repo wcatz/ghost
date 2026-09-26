@@ -69,6 +69,8 @@ Search uses SQLite FTS5 by default. When local embeddings are available, Ghost c
 
 Ranking is category-aware. Preferences, conventions, and facts do not decay. Architecture and patterns use a longer decay scale; decisions, gotchas, and dependencies use a shorter one. Pinned memories are always treated as stable. Decay changes ordering, not whether a memory can be found.
 
+Ranking is also status-aware. A resolved memory, and a `_global` row when you search a specific project, are multiplied by a fixed factor below 1 before the result window is chosen, so a comparable live project memory outranks them. Like decay, this changes ordering rather than availability: neither is filtered out, and a demoted memory is still the answer when nothing better matches. Cross-project search does not demote `_global` rows. `explain: true` reports the factor per row as `status_factor`.
+
 ## Tasks
 
 Tasks are work items that should survive across sessions. They have a title, optional description, priority, and one of these statuses:

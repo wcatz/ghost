@@ -89,6 +89,11 @@ type vecEntry struct {
 	memoryID  string
 	embedding []float32
 	scope     map[string]string
+	// projectID and resolved travel with the row for status demotion inside
+	// fusion — the scan already joins memories, so carrying them costs no
+	// extra read.
+	projectID string
+	resolved  bool
 }
 
 // SearchVector performs brute-force cosine similarity search against stored embeddings.
@@ -117,7 +122,7 @@ func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []f
 	defer s.mu.RUnlock()
 
 	rows, err := s.queryDB().QueryContext(ctx, `
-		SELECT e.memory_id, e.embedding, e.model, m.scope
+		SELECT e.memory_id, e.embedding, e.model, m.scope, m.project_id, m.resolved_at
 		FROM memory_embeddings e
 		JOIN memories m ON m.id = e.memory_id
 		WHERE m.project_id = ? OR m.project_id = '_global'
@@ -134,15 +139,18 @@ func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []f
 	// found nothing" with no explanation.
 	mismatched, mismatchedModel := 0, ""
 	for rows.Next() {
-		var id, model string
+		var id, model, rowProject string
 		var blob []byte
-		var scopeCol sql.NullString
-		if err := rows.Scan(&id, &blob, &model, &scopeCol); err != nil {
+		var scopeCol, resolvedCol sql.NullString
+		if err := rows.Scan(&id, &blob, &model, &scopeCol, &rowProject, &resolvedCol); err != nil {
 			return nil, err
 		}
 		vec := bytesToFloat32s(blob)
 		if len(vec) == len(queryVec) {
-			entries = append(entries, vecEntry{memoryID: id, embedding: vec, scope: parseScope(scopeCol)})
+			entries = append(entries, vecEntry{
+				memoryID: id, embedding: vec, scope: parseScope(scopeCol),
+				projectID: rowProject, resolved: resolvedCol.Valid && resolvedCol.String != "",
+			})
 			continue
 		}
 		mismatched++
@@ -165,7 +173,10 @@ func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []f
 	scored := make([]ScoredMemory, 0, len(entries))
 	for _, e := range entries {
 		if sim := cosineSimilarity(queryVec, e.embedding); sim > minVectorSimilarity {
-			scored = append(scored, ScoredMemory{MemoryID: e.memoryID, Score: sim, Scope: e.scope})
+			scored = append(scored, ScoredMemory{
+				MemoryID: e.memoryID, Score: sim, Scope: e.scope,
+				ProjectID: e.projectID, Resolved: e.resolved,
+			})
 		}
 	}
 
@@ -204,12 +215,23 @@ type ScoredMemory struct {
 	// Scope lets fusion and window selection apply the memory's own scope
 	// without a second lookup.
 	Scope map[string]string
+	// ProjectID and Resolved carry the row's search status for the same
+	// reason: the vector scan already joins memories, so status demotion can
+	// run inside fusion without a second read per candidate. Both legs must
+	// supply them, or a semantic-only match would escape the demotion.
+	ProjectID string
+	Resolved  bool
 }
 
 // SearchParams parameterizes hybrid-search fusion. The zero value disables
-// every signal — use DefaultSearchParams for production behavior. The bench
-// harness (ghost bench --sweep) grid-searches these knobs against the graded
+// every optional signal — use DefaultSearchParams for production behavior. The
+// bench harness (ghost bench --sweep) grid-searches these knobs against the graded
 // dataset; defaults should only change on the strength of those numbers.
+//
+// Status demotion is deliberately not one of those knobs: a resolved row's
+// factor and a project-scoped _global row's factor are properties of the rows
+// being ranked, not tunables (see statusDemotionFactor), so they apply under
+// any params.
 type SearchParams struct {
 	FTSWeight float64 // RRF weight of the full-text leg
 	VecWeight float64 // RRF weight of the vector leg
@@ -249,6 +271,13 @@ type SearchParams struct {
 	// backfill rows excluded by scope. It follows ScopeMatches semantics: a
 	// row that does not mention a requested key remains eligible.
 	Scope map[string]string
+	// ProjectID is the project the search is scoped to; it decides whether a
+	// _global row is status-demoted (see statusDemotionFactor). It is not a
+	// caller-supplied knob: searchHybridLegs stamps it from the projectID it
+	// is searching, so the factor can never disagree with the legs' own
+	// scoping. Empty means a cross-project search, where nothing is demoted
+	// for being global.
+	ProjectID string
 }
 
 // DefaultSearchParams returns the production fusion parameters.
@@ -570,6 +599,8 @@ func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchP
 		candidate := get(memory.ID)
 		candidate.fts = rank + 1
 		candidate.scope = memory.Scope
+		candidate.projectID = memory.ProjectID
+		candidate.resolved = memory.ResolvedAt != nil
 		candidate.score += p.FTSWeight / float64(p.RRFK+rank+1)
 	}
 	for rank, scored := range vecResults {
@@ -581,6 +612,14 @@ func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchP
 		if candidate.scope == nil {
 			candidate.scope = scored.Scope
 		}
+		// Status follows the same rule — except that resolved only ever turns
+		// on, so a row both legs saw is demoted even if one leg's snapshot
+		// predates the stamp. A vector-only candidate gets its status here,
+		// which is the whole reason the vector leg carries it.
+		if candidate.projectID == "" {
+			candidate.projectID = scored.ProjectID
+		}
+		candidate.resolved = candidate.resolved || scored.Resolved
 		candidate.score += p.VecWeight / float64(p.RRFK+rank+1)
 	}
 
@@ -588,6 +627,13 @@ func fuseCandidatePool(ftsResults []Memory, vecResults []ScoredMemory, p SearchP
 	for _, candidate := range byID {
 		pool = append(pool, candidate)
 	}
+	// Status demotion runs here — on the fused score, before the sort and
+	// therefore before the cut — because it has to own membership too: a live
+	// project memory that only a demoted row was keeping out of the window
+	// must be able to take that slot. Applied later it would reorder rows
+	// that were already selected and change nothing about who got in.
+	demoteStatus(pool, p)
+
 	// Deterministic order: map iteration is randomized, and an unstable sort
 	// over tied scores made result order — and the demotion penalties that
 	// depend on it — vary between runs of the same query.
@@ -639,6 +685,11 @@ func scopeEligiblePool(pool []*hybridCandidate, p SearchParams) []*hybridCandida
 // stead. It does not invert the ranking — a memory matching both legs
 // accumulates both weighted contributions and still outranks a keyword-only
 // row, because the reservation only guarantees admission, never a position.
+//
+// The scores being cut here are already status-demoted: fusion multiplies a
+// resolved row's and a project-scoped _global row's contribution by
+// statusDemotionFactor before this seam runs, so admission is decided on the
+// demoted score too.
 //
 // The returned width is `limit`, except under DecayReselect, where decay
 // narrows the set afterwards and therefore still needs the wider pool it has
@@ -731,13 +782,16 @@ func selectWindow(pool []*hybridCandidate, limit int, p SearchParams) HybridWind
 // and the score those ranks produced. fts or vec is 0 when that leg did not
 // retrieve it, which is what distinguishes a two-leg hit from a keyword-only
 // one. scope is the row's own scope, carried by whichever leg retrieved it, so
-// selection can narrow the pool without a second lookup.
+// selection can narrow the pool without a second lookup; projectID and
+// resolved are carried the same way for status demotion.
 type hybridCandidate struct {
-	id    string
-	fts   int
-	vec   int
-	score float64
-	scope map[string]string
+	id        string
+	fts       int
+	vec       int
+	score     float64
+	scope     map[string]string
+	projectID string
+	resolved  bool
 }
 
 // hybridWindowOf materialises the selected candidates, keeping the fused score
@@ -792,6 +846,12 @@ type hybridLegs struct {
 // every statement inside that transaction is time a concurrent save, touch or
 // background write cannot have the connection at all.
 func (s *Store) searchHybridLegs(ctx context.Context, projectID, query string, queryVec []float32, limit int, p SearchParams) ([]Memory, hybridLegs, error) {
+	// The search's own project is what makes a _global row a candidate for
+	// status demotion, so it is stamped here, once, for every exit below —
+	// including the FTS-only fallbacks and explain, which reaches this
+	// function too.
+	p.ProjectID = projectID
+
 	// FTS results.
 	ftsResults, err := s.SearchFTS(ctx, projectID, query, limit*2)
 	if err != nil {
@@ -868,7 +928,7 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	defer s.mu.RUnlock()
 
 	rows, err := s.queryDB().QueryContext(ctx, `
-		SELECT e.memory_id, e.embedding, e.model, m.scope
+		SELECT e.memory_id, e.embedding, e.model, m.scope, m.project_id, m.resolved_at
 		FROM memory_embeddings e
 		JOIN memories m ON m.id = e.memory_id
 	`)
@@ -884,15 +944,18 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	// found nothing" with no explanation.
 	mismatched, mismatchedModel := 0, ""
 	for rows.Next() {
-		var id, model string
+		var id, model, rowProject string
 		var blob []byte
-		var scopeCol sql.NullString
-		if err := rows.Scan(&id, &blob, &model, &scopeCol); err != nil {
+		var scopeCol, resolvedCol sql.NullString
+		if err := rows.Scan(&id, &blob, &model, &scopeCol, &rowProject, &resolvedCol); err != nil {
 			return nil, err
 		}
 		vec := bytesToFloat32s(blob)
 		if len(vec) == len(queryVec) {
-			entries = append(entries, vecEntry{memoryID: id, embedding: vec, scope: parseScope(scopeCol)})
+			entries = append(entries, vecEntry{
+				memoryID: id, embedding: vec, scope: parseScope(scopeCol),
+				projectID: rowProject, resolved: resolvedCol.Valid && resolvedCol.String != "",
+			})
 			continue
 		}
 		mismatched++
@@ -911,7 +974,10 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 	scored := make([]ScoredMemory, 0, len(entries))
 	for _, e := range entries {
 		if sim := cosineSimilarity(queryVec, e.embedding); sim > minVectorSimilarity {
-			scored = append(scored, ScoredMemory{MemoryID: e.memoryID, Score: sim, Scope: e.scope})
+			scored = append(scored, ScoredMemory{
+				MemoryID: e.memoryID, Score: sim, Scope: e.scope,
+				ProjectID: e.projectID, Resolved: e.resolved,
+			})
 		}
 	}
 	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
@@ -923,6 +989,10 @@ func (s *Store) SearchVectorAll(ctx context.Context, queryVec []float32, limit i
 
 // SearchHybridAll combines FTS5 and vector search across ALL projects using RRF.
 // Falls back to FTS-only when queryVec is nil.
+//
+// p.ProjectID stays empty by design: a cross-project search has no project
+// whose own memories a _global row could be padding, so status demotion
+// applies to resolved rows here but never to global ones.
 func (s *Store) SearchHybridAll(ctx context.Context, query string, queryVec []float32, limit int) ([]Memory, error) {
 	p := DefaultSearchParams()
 	p.MinSimilarity = s.vectorMinSimilarityFloor()

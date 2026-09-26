@@ -24,6 +24,7 @@ type ExplainRow struct {
 	VectorRank           int     `json:"vector_rank"`            // -1 when the vector leg had no match
 	VectorScore          float64 `json:"vector_score"`           // cosine; -1 when absent
 	RRFScore             float64 `json:"rrf_score"`              // base before decay: 1/(K+rank+1) when no vector leg fused, the weighted sum otherwise
+	StatusFactor         float64 `json:"status_factor"`          // multiplicative resolved/_global demotion applied to rrf_score before the cut; 1.0 when neither applies
 	DecayFactor          float64 `json:"decay_factor"`           // category/age multiplier applied to the base
 	AgeDays              float64 `json:"age_days"`               //
 	SupersedePenalty     int     `json:"supersede_penalty"`      // window-scoped as demoteResults applies it; 0 for rows outside the window
@@ -63,6 +64,9 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	p := DefaultSearchParams()
 	p.MinSimilarity = s.vectorMinSimilarityFloor()
 	p.Scope = scope
+	// The same stamp searchHybridLegs applies for membership, so the factor
+	// reported below is the one the search used rather than a re-derivation.
+	p.ProjectID = projectID
 
 	ex := SearchExplain{
 		ProjectID:       projectID,
@@ -203,6 +207,7 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 	}
 
 	now := time.Now().UTC()
+	statusDemoted := false
 	for _, id := range ids {
 		m, ok := byID[id]
 		if !ok {
@@ -218,6 +223,12 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 			AgeDays:              ageDays(m.CreatedAt, now),
 		}
 		row.DecayFactor = DecayFactor(m.Category, m.Pinned, row.AgeDays)
+		// The factor the search itself applied — same function, same inputs,
+		// so an explanation cannot report a demotion that did not rank the
+		// results. rrf_score stays the pre-status base (like decay_factor, it
+		// is reported as its own multiplier rather than folded into the score).
+		row.StatusFactor = statusDemotionFactor(m.ResolvedAt != nil, m.ProjectID, p.ProjectID)
+		statusDemoted = statusDemoted || row.StatusFactor != 1.0
 
 		if r, hit := ftsRank[id]; hit {
 			row.FTSRank = r
@@ -262,6 +273,9 @@ func (s *Store) ExplainSearchScoped(ctx context.Context, projectID, query string
 			row.Reason = fmt.Sprintf("outside the result window: only the top %d are returned", limit)
 		}
 		ex.Rows = append(ex.Rows, row)
+	}
+	if statusDemoted {
+		ex.Notes = append(ex.Notes, "status_factor is applied to the fused score inside window selection, before the cut: multiply rrf_score by status_factor for the score the window actually ranked on (decay_factor then multiplies that)")
 	}
 	return ex, nil
 }
