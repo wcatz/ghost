@@ -166,6 +166,33 @@ func TestCandidatesKeepsTheNegativeRetrievalContract(t *testing.T) {
 	}
 }
 
+// TestCandidatesReportsAHydrationFailure: a read that fails is an error, not an
+// empty window. The tail is hydrated by a second, independent read, so a
+// transient failure on the window read that the tail read survives would
+// otherwise yield a candidate set missing the whole selected window — and
+// "no matching memories" for a store that plainly has matches.
+func TestCandidatesReportsAHydrationFailure(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	for i := range 4 {
+		makeMemory(t, s, "hydratable keyword row "+string(rune('a'+i)))
+	}
+	// The legs have already run when the seam fires, so failing the context
+	// there fails exactly the hydration read — which is the read whose silent
+	// failure this test is about.
+	failCtx, cancel := context.WithCancel(ctx)
+	beforeHybridHydrateFn.Store(func([]string) { cancel() })
+	defer beforeHybridHydrateFn.Store(func([]string) {})
+
+	_, err := s.Candidates(failCtx, candidateRequest("hydratable keyword row", 3, time.Now().UTC()))
+	if err == nil {
+		t.Fatal("Candidates hid a failed read behind an empty result")
+	}
+	if !strings.Contains(err.Error(), "hydrate window") {
+		t.Errorf("error = %q, want it to name the hydration step", err)
+	}
+}
+
 // TestCandidatesReturnsUntrimmedWidenedSet: stages 2-8 need rows the window
 // would have cut, or a predicate can only ever remove from the answer.
 func TestCandidatesReturnsUntrimmedWidenedSet(t *testing.T) {

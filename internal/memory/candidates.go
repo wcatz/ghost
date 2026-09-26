@@ -266,10 +266,15 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	}
 
 	window := selectWindow(pool, req.Fetch.Limit, p)
-	// The tail is the pool the window cut, capped at the window width: no
-	// closure the caller can express admits more rows than the window it was
-	// given, so a longer tail could never reach the answer.
-	selected := selectHydratedWindow(hydrateWindow(ctx, cand, window, pool), window, poolIDsOf(pool))
+	// The same seam fuseAndRank calls, at the same boundary: the legs have
+	// released their reads and the hydration is about to be issued, which is
+	// where a delete can land.
+	beforeHybridHydrate(window.IDs)
+	hydrated, err := hydrateWindow(ctx, cand, window, pool)
+	if err != nil {
+		return nil, err
+	}
+	selected := selectHydratedWindow(hydrated, window, poolIDsOf(pool))
 	selected = decayRank(selected, scores, p, req.Fetch.Limit, req.Now)
 	selected = cand.demoteResults(ctx, selected, p)
 
@@ -480,24 +485,30 @@ func poolIDsOf(pool []*hybridCandidate) []string {
 // search performs, in the same order, for the same reason: the leg results are
 // an earlier snapshot, and a row deleted since then has to disappear rather than
 // be emitted from stale leg data.
-func hydrateWindow(ctx context.Context, s *Store, window HybridWindow, pool []*hybridCandidate) []Memory {
+//
+// A read failure is returned, not degraded into a short window. The tail is
+// hydrated by a second, independent read, so a transient failure on this one
+// that the other survives would otherwise produce a candidate set missing the
+// entire selected window — the strongest rows gone, the answer built from the
+// tail alone, and "no matching memories" reported for a store that plainly has
+// matches. A retrieval failure and an empty result must not look alike.
+func hydrateWindow(ctx context.Context, s *Store, window HybridWindow, pool []*hybridCandidate) ([]Memory, error) {
 	if len(window.IDs) == 0 {
-		return nil
+		return nil, nil
 	}
 	hydrated, err := s.GetByIDs(ctx, window.IDs)
 	if err != nil {
-		// A hydration failure is not a silent short window.
-		return nil
+		return nil, fmt.Errorf("candidates: hydrate window: %w", err)
 	}
 	if len(hydrated) == len(window.IDs) {
-		return selectHydratedWindow(hydrated, window, nil)
+		return selectHydratedWindow(hydrated, window, nil), nil
 	}
 	poolIDs := poolIDsOf(pool)
 	backfill, err := s.GetByIDs(ctx, poolIDs)
 	if err != nil {
-		return selectHydratedWindow(hydrated, window, nil)
+		return nil, fmt.Errorf("candidates: hydrate window backfill: %w", err)
 	}
-	return selectHydratedWindow(backfill, window, poolIDs)
+	return selectHydratedWindow(backfill, window, poolIDs), nil
 }
 
 // hydrateTail returns the rows the window cut, in the same decay order the

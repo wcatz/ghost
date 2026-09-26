@@ -611,7 +611,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_search",
 		Title:       "Search Memories",
-		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category and scope are both applied before the result window is closed — over a candidate set fetched wider than the limit whenever a category is given — so a row that matches the filters can take a slot even when it ranked below the window; retrieval is still windowed, so a filtered result may be incomplete \u2014 use ghost_memories_list for exhaustive category browsing. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
+		Description: "Search Ghost's memory for project facts, patterns, decisions, and gotchas. Use before making decisions, when encountering unfamiliar components, or when the user references prior work. Supports FTS5 queries (e.g. 'helm deploy', 'sqlite*'; terms are OR'd) — no boolean operators. Category and scope are both applied before the result window is closed, over a candidate set fetched up to three times the limit (and never more than 100 rows) when a category is given, so a row that matches the filters can take a slot even when it ranked below the window; retrieval is still windowed, so a filtered result may be incomplete \u2014 use ghost_memories_list for exhaustive category browsing. Resolved memories and `_global` rows are demoted rather than excluded from retrieval: in a project search they rank below the project's live memories and are returned whenever they rank within the window. Example: project_id='ghost', query='approval flow', scope={'environment':'production'}.",
 		Annotations: &mcp.ToolAnnotations{
 			ReadOnlyHint:  true,
 			OpenWorldHint: boolPtr(false),
@@ -656,7 +656,7 @@ func (s *Server) registerTools() {
 				return nil, nil, fmt.Errorf("explain failed: %w", xErr)
 			}
 			if args.Category != "" {
-				ex.Notes = append(ex.Notes, "a category filter is not evaluated here: the rows below are the unfiltered window of the requested limit, while the formatted path for the same request applies the filter inside its retrieval window — which is wider than this one whenever a category is given — so an included row here may not be in that answer")
+				ex.Notes = append(ex.Notes, "a category filter is not evaluated here: the rows below are the unfiltered window of the requested limit, while the formatted path for the same request applies the filter inside a retrieval window of up to three times that limit (max 100 rows), so an included row here may not be in that answer")
 			}
 			payload, mErr := json.MarshalIndent(ex, "", "  ")
 			if mErr != nil {
