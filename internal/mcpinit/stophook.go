@@ -279,8 +279,8 @@ func spawnLifecycleIfConfigured(cwd, source string) {
 	}
 	// Cooldown (#541): the hook fires after every turn, so without this a chatty
 	// session paid for a full chain per turn. Read here, after the already-running
-	// guard (which is the stronger, liveness-based one) and before the log file
-	// is opened, so a skip leaves no artifact on the stop path.
+	// guard (which is the stronger, liveness-based one) and before the spawn log
+	// is opened; a skip leaves one line in lifecycle.log.
 	minInterval := cfg.Lifecycle.MinIntervalDuration()
 	if skip, since := lifecycleCooldownActive(dataDir, projectID, minInterval, time.Now()); skip {
 		logLifecycleCooldownSkip(dataDir, projectID, since, minInterval)

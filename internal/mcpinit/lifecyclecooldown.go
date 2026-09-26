@@ -48,9 +48,11 @@ func lifecycleLastStartFile(projectID string) string {
 //   - a missing, unreadable or unstamped path means the first run (or one whose
 //     write failed) — a cooldown that could silently stop maintenance is the
 //     worse failure, so bookkeeping problems fail open;
-//   - a stamp dated in the FUTURE (clock change, a file copied between hosts) is
-//     not evidence that the window expired, so it reads as inside the window.
-//     The alternative — spawning on every turn again — is what this exists to fix.
+//   - a stamp dated slightly in the FUTURE (clock skew) is not evidence that the
+//     window expired, so it reads as inside the window — spawning on every turn
+//     again is what this exists to fix. A stamp more than one window ahead reads
+//     as stale, so a clock that was far ahead cannot hold consolidation off until
+//     wall time catches up.
 func lifecycleCooldownActive(dataDir, projectID string, minInterval time.Duration, now time.Time) (skip bool, since time.Duration) {
 	if minInterval <= 0 || dataDir == "" || projectID == "" {
 		return false, 0
@@ -66,7 +68,7 @@ func lifecycleCooldownActive(dataDir, projectID string, minInterval time.Duratio
 		return false, 0
 	}
 	since = now.Sub(st.ModTime())
-	return since < minInterval, since
+	return since < minInterval && since > -minInterval, since
 }
 
 // TouchLifecycleStart records that a lifecycle run for project has just STARTED.

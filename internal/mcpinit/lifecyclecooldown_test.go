@@ -131,21 +131,34 @@ func TestLifecycleCooldown_EmptyIdentitiesRun(t *testing.T) {
 	}
 }
 
-// TestLifecycleCooldown_FutureStampSkips: a stamp in the future (clock change,
-// a file copied in) is not evidence that the cooldown expired, so it is treated
-// as inside the window. The failure mode of the other choice — spawning on every
-// turn again — is the one this whole change exists to remove.
+// TestLifecycleCooldown_FutureStampSkips: a stamp slightly in the future (small
+// clock skew) is not evidence that the cooldown expired, so it is treated as
+// inside the window rather than spawning on every turn again.
 func TestLifecycleCooldown_FutureStampSkips(t *testing.T) {
+	dataDir := t.TempDir()
+	now := time.Now()
+	writeStamp(t, dataDir, "p1", now, -10*time.Minute)
+
+	skip, since := lifecycleCooldownActive(dataDir, "p1", 30*time.Minute, now)
+	if !skip {
+		t.Error("a stamp slightly in the future must be inside the window")
+	}
+	if since >= 0 {
+		t.Errorf("since = %s, want the negative age of a future stamp", since)
+	}
+}
+
+// TestLifecycleCooldown_FarFutureStampRuns: a stamp more than one window ahead
+// (a clock that was far ahead when it was written, a VM restore) would
+// otherwise hold consolidation off until wall time caught up — days, or a year.
+// It reads as stale instead.
+func TestLifecycleCooldown_FarFutureStampRuns(t *testing.T) {
 	dataDir := t.TempDir()
 	now := time.Now()
 	writeStamp(t, dataDir, "p1", now, -time.Hour)
 
-	skip, since := lifecycleCooldownActive(dataDir, "p1", 30*time.Minute, now)
-	if !skip {
-		t.Error("a stamp dated in the future must be inside the window")
-	}
-	if since >= 0 {
-		t.Errorf("since = %s, want the negative age of a future stamp", since)
+	if skip, _ := lifecycleCooldownActive(dataDir, "p1", 30*time.Minute, now); skip {
+		t.Error("a stamp more than one window in the future must not block the run")
 	}
 }
 

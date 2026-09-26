@@ -194,7 +194,7 @@ lifecycle:
 - The window is measured from when the last run **started**, not when it finished, so a long run cannot push the next one further away.
 - The stamp is a per-project file in the data directory, `lifecycle-<project>.last`, beside the `lifecycle-<project>.pid` lock the two guards share. Its mtime is the record; the file's contents are diagnostic.
 - The Stop hook only ever reads it. The detached `ghost lifecycle` process writes it, when the run it actually starts begins — so a spawn that never started, or one turned away because a run was already in progress, does not burn the window.
-- Every unknown reads as "run": no stamp, an unreadable one, or a value that is not a regular file all mean the chain proceeds. A cooldown that could silently stop maintenance is the worse failure.
+- Every unknown reads as "run": no stamp, an unreadable one, or a value that is not a regular file all mean the chain proceeds. A stamp dated slightly in the future (clock skew) counts as inside the window; one more than a full window ahead counts as stale and the chain proceeds. A cooldown that could silently stop maintenance is the worse failure.
 - A value that is not a duration (`min_interval: soon`) is reported by name and falls back to the default, not to `0` — guessing `0` would switch off the guard you asked for.
 - A skip leaves one line in `lifecycle.log` in the data directory. Nothing is printed to the host's stderr, which belongs to the editor and would otherwise get a line per turn.
 
