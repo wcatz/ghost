@@ -108,7 +108,7 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 		model = DefaultOpenCodeModel
 	}
 	args = append(args, "-m", model)
-	args = append(args, prompt)
+	args = append(args, openCodeNoToolsPreamble+prompt)
 	cmd, cleanup, err := c.subprocessEnv(ctx, args, policy)
 	if err != nil {
 		return "", err
@@ -118,6 +118,9 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (string, error)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if text, ok := salvageDeclinedToolRun(stdout.String()); ok {
+			return text, nil
+		}
 		// stderr alone was empty for every one of the 357 failures in
 		// lifecycle.log: opencode reports errors on its JSON stream, not the
 		// console (issue #540).
@@ -452,6 +455,60 @@ type opencodeEvent struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"part"`
+}
+
+// openCodeNoToolsPreamble opens every opencode prompt. V2's child advertises
+// its tools (the free tier rejects a request without them, see
+// openCodeAskConfig), and a model that reaches for one gets the call declined
+// and its session shut down, so the model is told up front that it has none.
+const openCodeNoToolsPreamble = "You have no tools in this session. Do not call any tool; answer directly in plain text. "
+
+// salvageDeclinedToolRun recovers the answer from an opencode run that failed
+// only because the model asked for a tool after answering: V2's non-interactive
+// run auto-rejects the ask, emits an "aborted" error ("Session interrupted:
+// shutdown") and a declined tool call, and exits 1. The text written before
+// that is the model's answer. It is kept only when the stream shows exactly
+// that failure and holds some text. Reflect (JSON) and resolve (exact verdict
+// count) reject a partial answer; supersede applies only the verdicts it could
+// parse and leaves the rest unclassified, so every applied verdict is one the
+// model actually gave. Non-JSON lines (opencode prints the
+// auto-reject notice as plain text) are skipped here.
+func salvageDeclinedToolRun(raw string) (string, bool) {
+	var sb strings.Builder
+	aborted, declined := false, false
+	for _, line := range strings.Split(raw, "\n") {
+		var ev struct {
+			Type  string `json:"type"`
+			Error struct {
+				Type string `json:"type"`
+			} `json:"error"`
+			Part struct {
+				Type  string `json:"type"`
+				Text  string `json:"text"`
+				State struct {
+					Status string `json:"status"`
+					Error  string `json:"error"`
+				} `json:"state"`
+			} `json:"part"`
+		}
+		if json.Unmarshal([]byte(line), &ev) != nil {
+			continue
+		}
+		switch {
+		case ev.Type == "text" && ev.Part.Type == "text":
+			sb.WriteString(ev.Part.Text)
+		case ev.Type == "error" && ev.Error.Type == "aborted":
+			aborted = true
+		case ev.Part.Type == "tool" && ev.Part.State.Status == "error" && strings.Contains(ev.Part.State.Error, "declined"):
+			declined = true
+		case ev.Type == "error":
+			return "", false // any other error is a real failure
+		}
+	}
+	if !aborted || !declined || strings.TrimSpace(sb.String()) == "" {
+		return "", false
+	}
+	return sb.String(), true
 }
 
 // parseOpenCodeOutput concatenates the text events from an opencode JSON-lines

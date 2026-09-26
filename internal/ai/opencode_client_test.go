@@ -518,3 +518,55 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`
 		t.Fatalf("after upgrade: args=%q err=%v, want V2 --standalone", text, err)
 	}
 }
+
+// declinedStream is opencode v2's stream when the model answers and then asks
+// for a tool: the non-interactive run auto-rejects the ask and shuts the
+// session down, exiting 1 (captured from opencode v2.0.15).
+const declinedStream = `printf '%s\n' '{"type":"step_start","part":{"type":"step-start"}}' '{"type":"text","part":{"type":"text","text":"ANSWER: 42"}}' '{"type":"error","error":{"type":"aborted","message":"Session interrupted: shutdown"}}' '{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"error","error":"The user declined this tool call"}}}'; echo 'permission requested: external_directory (/etc/*); auto-rejecting' >&2; exit 1`
+
+func TestOpenCodeClient_Run_SalvagesAnswerBeforeDeclinedTool(t *testing.T) {
+	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, declinedStream)}
+	text, _, err := c.Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("Reflect: %v (an answer written before a declined tool call must be kept)", err)
+	}
+	if text != "ANSWER: 42" {
+		t.Errorf("text = %q, want %q", text, "ANSWER: 42")
+	}
+}
+
+func TestOpenCodeClient_Run_DeclinedToolWithoutAnswerFails(t *testing.T) {
+	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"error","error":{"type":"aborted","message":"Session interrupted: shutdown"}}' '{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"error","error":"The user declined this tool call"}}}'; exit 1`)}
+	if _, _, err := c.Reflect(context.Background(), "prompt"); err == nil {
+		t.Fatal("a declined run with no answer text must fail")
+	}
+}
+
+func TestOpenCodeClient_Run_OtherFailureWithTextStillFails(t *testing.T) {
+	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"partial"}}' '{"type":"error","error":{"type":"provider.auth","message":"free tier"}}'; exit 1`)}
+	if _, _, err := c.Reflect(context.Background(), "prompt"); err == nil {
+		t.Fatal("a failure other than a declined tool call must not be salvaged")
+	}
+}
+
+func TestOpenCodeClient_Run_PromptSaysNoTools(t *testing.T) {
+	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, `for last; do :; done
+case "$last" in *"Do not call any tool"*) printf '%s\n' '{"type":"text","part":{"type":"text","text":"OK"}}';; *) echo "prompt lacks the no-tools instruction" >&2; exit 1;; esac`)}
+	if _, _, err := c.Reflect(context.Background(), "the task"); err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+}
+
+func TestOpenCodeClient_Run_AbortWithoutDeclinedToolFails(t *testing.T) {
+	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"half an answ"}}' '{"type":"error","error":{"type":"aborted","message":"Session interrupted: shutdown"}}'; exit 1`)}
+	if _, _, err := c.Reflect(context.Background(), "prompt"); err == nil {
+		t.Fatal("an aborted run with no declined tool call (shutdown, timeout) must not be salvaged")
+	}
+}
+
+func TestOpenCodeClient_Run_DeclinedToolWithoutAbortFails(t *testing.T) {
+	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"ANSWER: 42"}}' '{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"error","error":"The user declined this tool call"}}}'; exit 1`)}
+	if _, _, err := c.Reflect(context.Background(), "prompt"); err == nil {
+		t.Fatal("exit 1 with a declined tool but no session abort is an unknown failure and must not be salvaged")
+	}
+}
