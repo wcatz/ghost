@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 )
 
 // preMigrateName builds the only shape prune is allowed to consider: the
@@ -31,7 +34,7 @@ func TestPrunePreMigrateBackupsKeepsNewestThree(t *testing.T) {
 		}
 	}
 
-	prunePreMigrateBackups(dbPath)
+	prunePreMigrateBackups(dbPath, "")
 
 	for _, s := range []string{"1001", "1002", "1003"} {
 		if _, err := os.Lstat(filepath.Join(dir, preMigrateName(dbPath, s))); err != nil {
@@ -99,7 +102,7 @@ func TestPrunePreMigrateBackupsIgnoresEverythingElse(t *testing.T) {
 		}
 	}
 
-	prunePreMigrateBackups(dbPath)
+	prunePreMigrateBackups(dbPath, "")
 
 	for _, name := range append(untouched, dirName, linkName, newestLink) {
 		if _, err := os.Lstat(filepath.Join(dir, name)); err != nil {
@@ -222,3 +225,62 @@ func TestOpenDBMigrationPrunesOldBackups(t *testing.T) {
 // this migration just wrote, so preMigrateBackupKeep-1 of the seeded copies
 // remain.
 func wantKeptSeeded(keep int) int { return keep - 1 }
+
+// TestOpenDBMigrationKeepsTheFreshBackupWhenOthersAreFutureStamped: the
+// ordering is by stamp, so a stamp that is AHEAD of this machine's clock — a
+// data directory restored from a machine whose clock ran ahead, a corrected
+// clock, a file somebody renamed — would rank every seeded file above the copy
+// this migration is about to write. An implementation that decides "the newest
+// is the one to keep" from the timestamp alone prunes the fresh backup: the
+// only file with a way back from a destructive migration step, removed before
+// the migration runs.
+func TestOpenDBMigrationKeepsTheFreshBackupWhenOthersAreFutureStamped(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "ghost.db")
+
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion-1)); err != nil {
+		t.Fatalf("stamp user_version: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	future := time.Now().Unix() + 1000
+	seeded := make(map[string]bool, 3)
+	for i := int64(0); i < 3; i++ {
+		s := strconv.FormatInt(future+i, 10)
+		seeded[s] = true
+		if err := os.WriteFile(filepath.Join(dir, preMigrateName(dbPath, s)), []byte("from the future"), 0o600); err != nil {
+			t.Fatalf("seed backup %s: %v", s, err)
+		}
+	}
+
+	migrated, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB (migrating): %v", err)
+	}
+	defer func() { _ = migrated.Close() }()
+
+	backups, err := filepath.Glob(dbPath + ".pre-migrate-*")
+	if err != nil {
+		t.Fatalf("glob backups: %v", err)
+	}
+	if len(backups) != preMigrateBackupKeep {
+		t.Errorf("the directory holds %d pre-migration backups (%v), want %d", len(backups), backups, preMigrateBackupKeep)
+	}
+
+	prefix := filepath.Base(dbPath) + ".pre-migrate-"
+	freshSeen := false
+	for _, b := range backups {
+		if !seeded[strings.TrimPrefix(filepath.Base(b), prefix)] {
+			freshSeen = true
+		}
+	}
+	if !freshSeen {
+		t.Error("the backup this migration just wrote was pruned: the three future-stamped files outranked it, and a failed migration now has no way back")
+	}
+}

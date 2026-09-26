@@ -98,7 +98,7 @@ func TestBackupBeforeMigrate(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO projects (id, name, path) VALUES ('p', 'p', '/p')`); err != nil {
 		t.Fatalf("insert project: %v", err)
 	}
-	if err := backupBeforeMigrate(db, dbPath); err != nil {
+	if _, err := backupBeforeMigrate(db, dbPath); err != nil {
 		t.Fatalf("backupBeforeMigrate: %v", err)
 	}
 
