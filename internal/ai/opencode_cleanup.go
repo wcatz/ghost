@@ -67,7 +67,26 @@ const (
 	// progress lines during a long --apply run (thousands of deletions at
 	// one CLI process each take a while, and silence looks like a hang).
 	sessionProgressEvery = 50
+
+	// sessionFutureSkew is how far ahead of now a session timestamp may sit
+	// and still be believed: a small allowance for clock skew between the
+	// machine writing the store and the one reading it. Beyond it the value
+	// is a unit problem (Unix nanoseconds land far in the future) or a clock
+	// problem, and neither justifies a delete.
+	sessionFutureSkew = 5 * time.Minute
 )
+
+// sessionTimestampFloor is the earliest instant a session timestamp may name
+// and still be believed: 2020-01-01T00:00:00Z, well before any session this
+// command targets (the backlog starts in 2026) and well after every unit a
+// wrong reading can produce. Timestamps are read as Unix milliseconds on the
+// CLI's word alone — nothing else in the payload states the unit — so a value
+// in seconds would still be positive, map into 1970, and be older than every
+// cutoff: every titled session, including one written seconds ago, would look
+// eligible and --apply would delete the lot. An instant this far in the past
+// is a unit problem, not an old session, so it is refused rather than acted
+// on. time.Date is not a constant, hence var; nothing assigns to it.
+var sessionTimestampFloor = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // OpenCodeCleanupOptions configures one cleanup run.
 type OpenCodeCleanupOptions struct {
@@ -215,7 +234,8 @@ func CleanupOpenCodeSessions(ctx context.Context, binary string, opts OpenCodeCl
 // is a refusal rather than a preference: the title must be exactly
 // ghostSessionTitle, the id must be usable as a plain argument, the session
 // must carry a timestamp that proves it is strictly older than the grace
-// period, and nothing else about a session can widen the selection.
+// period and that is itself an instant worth believing, and nothing else
+// about a session can widen the selection.
 func selectCleanupSessions(sessions []openCodeSession, grace time.Duration, now time.Time) []openCodeSession {
 	cutoff := now.Add(-grace)
 	out := make([]openCodeSession, 0, len(sessions))
@@ -233,11 +253,32 @@ func selectCleanupSessions(sessions []openCodeSession, grace time.Duration, now 
 		if activity <= 0 {
 			continue // no provable age, so no provable passage of the grace period
 		}
-		if time.UnixMilli(activity).Before(cutoff) {
+		at := time.UnixMilli(activity)
+		if !plausibleSessionTime(at, now) {
+			continue
+		}
+		if at.Before(cutoff) {
 			out = append(out, s)
 		}
 	}
 	return out
+}
+
+// plausibleSessionTime reports whether at, a timestamp read as Unix
+// milliseconds, is an instant this command can believe: no earlier than
+// sessionTimestampFloor and no later than now plus sessionFutureSkew.
+//
+// The cutoff already excludes anything at or after now (grace is never
+// negative), so today the future half only restates that invariant — it is
+// spelled out anyway because the floor is worthless on its own: the unit
+// assumption behind both bounds is the same one, and a change to how the
+// cutoff is derived must not silently reopen it. Failing closed here costs a
+// skipped session; believing the wrong unit costs every one of them.
+func plausibleSessionTime(at, now time.Time) bool {
+	if at.Before(sessionTimestampFloor) {
+		return false
+	}
+	return !at.After(now.Add(sessionFutureSkew))
 }
 
 // openCodeCleanupRunner spawns the cleanup's opencode children: one resolved

@@ -303,11 +303,17 @@ ghost opencode cleanup-sessions --apply         # delete them
 Sessions are read through the real `opencode` binary (`session list --format
 json`), so — exactly as with your own `opencode session list` — the run is
 scoped to the current project: run it from the checkout whose sessions you
-want cleaned. Deletion uses `opencode session delete <id>` with up to three
-attempts per session; a failed delete is reported and counted but never stops
-the rest, and the command exits non-zero when any delete failed. The binary
-comes from `cli.opencode_binary` (`GHOST_CLI_OPENCODE_BINARY`) when
-configured, otherwise from `PATH`.
+want cleaned. Timestamps are read as Unix milliseconds on the CLI's word
+alone, so an instant outside a plausible window (before 2020-01-01, or more
+than five minutes ahead of the clock) is refused instead of being read as
+"very old": a unit change in OpenCode's output fails closed on one session
+rather than making every session look eligible. `GHOST_LIVE_TESTS=1 go test
+./internal/ai/ -run TestOpenCodeSessionList_TimestampsAreMilliseconds` checks
+that assumption against the real CLI. Deletion uses `opencode session delete
+<id>` with up to three attempts per session; a failed delete is reported and
+counted but never stops the rest, and the command exits non-zero when any
+delete failed. The binary comes from `cli.opencode_binary`
+(`GHOST_CLI_OPENCODE_BINARY`) when configured, otherwise from `PATH`.
 
 New lifecycle sessions no longer need this command: since #568 the opencode
 child runs with its data directory inside Ghost's invocation-owned scratch

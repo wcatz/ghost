@@ -402,6 +402,9 @@ func TestSelectCleanupSessions(t *testing.T) {
 		{name: "empty id", session: openCodeSession{Title: ghostSessionTitle, Updated: now.Add(-9 * time.Hour).UnixMilli()}, grace: time.Hour, want: false},
 		{name: "flag-shaped id", session: openCodeSession{ID: "--version", Title: ghostSessionTitle, Updated: now.Add(-9 * time.Hour).UnixMilli()}, grace: time.Hour, want: false},
 		{name: "updated later than created counts as recent activity", session: openCodeSession{ID: "ses_k", Title: ghostSessionTitle, Created: now.Add(-9 * time.Hour).UnixMilli(), Updated: now.Add(-time.Minute).UnixMilli()}, grace: time.Hour, want: false},
+		{name: "a seconds-unit timestamp lands in 1970 and is refused", session: openCodeSession{ID: "ses_l", Title: ghostSessionTitle, Updated: now.Add(-2 * time.Hour).Unix()}, grace: time.Hour, want: false},
+		{name: "a nanosecond-unit timestamp lands far in the future and is refused", session: openCodeSession{ID: "ses_m", Title: ghostSessionTitle, Updated: now.Add(-2 * time.Hour).UnixNano()}, grace: time.Hour, want: false},
+		{name: "a timestamp before the floor epoch is refused", session: openCodeSession{ID: "ses_n", Title: ghostSessionTitle, Updated: sessionTimestampFloor.Add(-time.Millisecond).UnixMilli()}, grace: 0, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -411,6 +414,36 @@ func TestSelectCleanupSessions(t *testing.T) {
 			}
 			if !tc.want && len(got) != 0 {
 				t.Errorf("selected %v, want refused", got)
+			}
+		})
+	}
+}
+
+// TestPlausibleSessionTime pins the bounds that keep a wrong timestamp unit
+// from turning --apply into a mass delete (#588): the value is read as Unix
+// milliseconds on the CLI's word alone, so anything outside a sane window is
+// refused instead of being read as "very old".
+func TestPlausibleSessionTime(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0) // 2027-01-15, after the floor
+	cases := []struct {
+		name string
+		at   time.Time
+		want bool
+	}{
+		{name: "a session from a day ago", at: now.Add(-24 * time.Hour), want: true},
+		{name: "exactly the floor epoch", at: sessionTimestampFloor, want: true},
+		{name: "one tick before the floor epoch", at: sessionTimestampFloor.Add(-time.Millisecond), want: false},
+		{name: "the absent-timestamp sentinel", at: time.UnixMilli(0), want: false},
+		{name: "a 1970 instant, which a seconds-unit value produces", at: time.UnixMilli(1_799_992_800), want: false},
+		{name: "now itself", at: now, want: true},
+		{name: "exactly the future skew allowance", at: now.Add(sessionFutureSkew), want: true},
+		{name: "one tick past the future skew allowance", at: now.Add(sessionFutureSkew + time.Millisecond), want: false},
+		{name: "a nanosecond-unit value, which lands millennia out", at: time.UnixMilli(now.Add(-time.Hour).UnixNano()), want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := plausibleSessionTime(tc.at, now); got != tc.want {
+				t.Errorf("plausibleSessionTime(%v, %v) = %v, want %v", tc.at, now, got, tc.want)
 			}
 		})
 	}
