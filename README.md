@@ -145,7 +145,19 @@ $XDG_DATA_HOME/ghost/ghost.db
 ~/.local/share/ghost/ghost.db
 ```
 
-It is a plain SQLite file. You can inspect, back up, move, or delete it without a GhostMem-specific export format.
+It is a plain SQLite file. You can inspect, back up, move, or delete it without a GhostMem-specific export format — and for the supported ways to do each of those:
+
+```bash
+ghost backup                                  # consistent snapshot of the live database
+ghost backup --out ~/backups/ghost.db.snap    # safe while a session is running
+
+ghost export --out ghost-export.jsonl          # readable, diffable JSONL
+ghost import ghost-export.jsonl                # dry run; --apply to write
+```
+
+`ghost backup` uses SQLite's online `VACUUM INTO`, so it takes a consistent snapshot of a WAL database that a live MCP server is writing to — copying `ghost.db` by hand can capture a torn state or lose whatever its `-wal` file held. It refuses to replace an existing file and prints the row count of each table it copied, so a restore can be checked.
+
+`ghost export` writes one JSON object per line — projects, memories, tasks and decisions, every column of each, with a schema-version header — and two exports of an unchanged database are byte-identical, so the file can be diffed. `ghost import` is dry-run by default, never overwrites a record whose id already exists, and holds imported content to the same length cap and validation as a normal save. See [the CLI reference](docs/cli.md#backup-export-and-import) for the format and the restore procedure.
 
 ### What can leave the machine
 

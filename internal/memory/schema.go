@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -477,26 +478,27 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 // rather than proceeding without a fallback — the caller decides whether an
 // un-migratable database is acceptable, and the only alternative is an
 // unrecoverable destructive migration.
+//
+// The copy itself is vacuumInto, the same VACUUM INTO that backs `ghost backup`:
+// one implementation of "put a restorable copy of this database over there", so
+// the refusal to replace an existing file, the mode the copy is created at, and
+// the permission pass cannot drift apart between the two callers. The path comes
+// back from here because the caller has to name this specific file as the one
+// prunePreMigrateBackups must not remove.
 func backupBeforeMigrate(db *sql.DB, dbPath string) (string, error) {
 	if dbPath == ":memory:" {
 		return "", nil
 	}
 	backup := fmt.Sprintf("%s.pre-migrate-%d", dbPath, time.Now().Unix())
-	if _, err := os.Stat(backup); err == nil {
-		return "", fmt.Errorf("backup path already exists: %s", backup)
+	// vacuumInto creates the copy at 0600 before SQLite writes a byte of it, and
+	// tightens it afterwards — the same pass the open path runs on the live
+	// files, whose comment explains why a copy needs it at all: a full copy of the
+	// memory database is shielded only by the 0700 data directory, and a database
+	// opened outside it (eval, bench) has no such shield. A chmod failure is
+	// reported, not fatal: the migration's safety net exists either way.
+	if err := vacuumInto(context.Background(), db, backup); err != nil {
+		return "", err
 	}
-	if _, err := db.Exec(`VACUUM INTO ?`, backup); err != nil {
-		return "", fmt.Errorf("vacuum into %s: %w", backup, err)
-	}
-	// VACUUM INTO names no mode for the file it creates, so the copy lands at
-	// whatever SQLite's default is minus the umask — a full copy of the memory
-	// database, at the same width this open is in the middle of removing. It is
-	// only shielded by the 0700 data directory, and a database opened outside
-	// that directory (eval, bench) has no such shield, so tighten the copy here
-	// rather than leave it to a pass that walks only the three live files. A
-	// chmod failure is reported, not fatal: the migration's safety net exists
-	// either way.
-	TightenPermissions(backup)
 	return backup, nil
 }
 

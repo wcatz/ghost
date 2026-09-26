@@ -1,0 +1,627 @@
+package memory
+
+import (
+	"context"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+// portableTestStore opens a store over a temp-dir database, with the logger
+// silenced so a failing case does not bury its own message.
+func portableTestStore(t *testing.T) *Store {
+	t.Helper()
+	db, err := OpenDB(filepath.Join(t.TempDir(), "ghost.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return NewStore(db, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
+}
+
+// TestPortableProjectsCarryRepoRemote: a project exported for another machine
+// has to carry its repository remote. ListProjects cannot be used for this —
+// it has no repo_remote column — which is why a project read for the portable
+// form is its own query.
+func TestPortableProjectsCarryRepoRemote(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	// The names deliberately do not sort the way the ids do: an ordering
+	// assertion only pins "by id" if the two orders disagree, and "zebra"/"alpha"
+	// against "p1"/"p2" is the cheapest way to make them.
+	if err := store.EnsureProjectWithRepo(ctx, "p1", "/src/p1", "zebra", "git@github.com:wcatz/one.git"); err != nil {
+		t.Fatalf("EnsureProjectWithRepo: %v", err)
+	}
+	if err := store.EnsureProject(ctx, "p2", "/src/p2", "alpha"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	got, err := store.PortableProjects(ctx)
+	if err != nil {
+		t.Fatalf("PortableProjects: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d projects, want 2", len(got))
+	}
+	// Ordered by id, so an export of an unchanged database is byte-identical.
+	if got[0].ID != "p1" || got[1].ID != "p2" {
+		t.Errorf("projects are not ordered by id: %q, %q (names %q, %q)",
+			got[0].ID, got[1].ID, got[0].Name, got[1].Name)
+	}
+	if got[0].RepoRemote != "github.com/wcatz/one" {
+		t.Errorf("p1 RepoRemote = %q, want the recorded remote", got[0].RepoRemote)
+	}
+	if got[0].Name != "zebra" || got[0].Path != "/src/p1" {
+		t.Errorf("p1 = %+v, want the recorded name and path", got[0])
+	}
+	if got[1].RepoRemote != "" {
+		t.Errorf("p2 RepoRemote = %q, want empty for a project with no repository", got[1].RepoRemote)
+	}
+	if got[0].CreatedAt == "" || got[0].UpdatedAt == "" {
+		t.Errorf("p1 timestamps = %q/%q, want both recorded", got[0].CreatedAt, got[0].UpdatedAt)
+	}
+}
+
+// TestPortableMemoriesCarryEveryExportedColumn: the portable read exists
+// because the ordinary list readers drop columns a restore needs — the
+// validity triple, and the repository remote on the project. This pins the
+// whole portable shape, including the two nullable provenance shapes (an
+// absent value and a real zero).
+func TestPortableMemoriesCarryEveryExportedColumn(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if err := store.EnsureProject(ctx, "p2", "/src/p2", "p2"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	_, err := store.db.ExecContext(ctx, `
+		INSERT INTO memories (id, project_id, category, content, importance, access_count,
+			last_accessed, source, tags, pinned, created_at, updated_at, resolved_at,
+			valid_from, valid_until, verified_at, agent, session_id, source_ref,
+			confidence, scope)
+		VALUES ('m1', 'p1', 'gotcha', 'full row', 0.25, 7, '2026-01-02 03:04:05',
+			'mcp', '["a","b"]', 1, '2026-01-01 00:00:00', '2026-01-03 00:00:00',
+			'2026-01-04 00:00:00', '2026-02-01', '2026-03-01', '2026-01-05',
+			'opencode', 'sess-1', 'ref-1', 0.0, '{"environment":"production"}')
+	`)
+	if err != nil {
+		t.Fatalf("seed full row: %v", err)
+	}
+	if _, err := store.Create(ctx, "p2", Memory{Category: "fact", Content: "other project", Source: "mcp"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := store.PortableMemories(ctx, []string{"p1"})
+	if err != nil {
+		t.Fatalf("PortableMemories: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d memories for p1, want 1 — the filter must exclude other projects", len(got))
+	}
+	m := got[0]
+	if m.ID != "m1" || m.ProjectID != "p1" || m.Category != "gotcha" || m.Content != "full row" {
+		t.Errorf("identity fields = %+v", m)
+	}
+	if m.Importance != 0.25 || m.AccessCount != 7 || !m.Pinned {
+		t.Errorf("axes = importance %v access %d pinned %v", m.Importance, m.AccessCount, m.Pinned)
+	}
+	if m.LastAccessed == nil || *m.LastAccessed != "2026-01-02 03:04:05" {
+		t.Errorf("LastAccessed = %v", m.LastAccessed)
+	}
+	if m.CreatedAt != "2026-01-01 00:00:00" || m.UpdatedAt != "2026-01-03 00:00:00" {
+		t.Errorf("timestamps = %q / %q", m.CreatedAt, m.UpdatedAt)
+	}
+	if m.ResolvedAt == nil || *m.ResolvedAt != "2026-01-04 00:00:00" {
+		t.Errorf("ResolvedAt = %v", m.ResolvedAt)
+	}
+	if m.ValidFrom == nil || *m.ValidFrom != "2026-02-01" || m.ValidUntil == nil || *m.ValidUntil != "2026-03-01" || m.VerifiedAt == nil || *m.VerifiedAt != "2026-01-05" {
+		t.Errorf("validity triple = %v / %v / %v", m.ValidFrom, m.ValidUntil, m.VerifiedAt)
+	}
+	if m.Agent != "opencode" || m.SessionID != "sess-1" || m.SourceRef != "ref-1" {
+		t.Errorf("provenance = %q / %q / %q", m.Agent, m.SessionID, m.SourceRef)
+	}
+	// A real 0.0 rating is not the same as no rating: nil means "Ghost never
+	// learned one", and the portable form has to keep that distinction.
+	if m.Confidence == nil || *m.Confidence != 0.0 {
+		t.Errorf("Confidence = %v, want a pointer to 0.0", m.Confidence)
+	}
+	if len(m.Tags) != 2 || m.Tags[0] != "a" || m.Tags[1] != "b" {
+		t.Errorf("Tags = %v", m.Tags)
+	}
+	if len(m.Scope) != 1 || m.Scope["environment"] != "production" {
+		t.Errorf("Scope = %v", m.Scope)
+	}
+
+	// No project filter at all means every project, in id order.
+	all, err := store.PortableMemories(ctx, nil)
+	if err != nil {
+		t.Fatalf("PortableMemories(nil): %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("PortableMemories(nil) returned %d, want every project", len(all))
+	}
+
+	// A row with no validity, no provenance and no scope reads as absent
+	// rather than as a zero value.
+	plain, err := store.PortableMemories(ctx, []string{"p2"})
+	if err != nil {
+		t.Fatalf("PortableMemories(p2): %v", err)
+	}
+	if len(plain) != 1 {
+		t.Fatalf("got %d memories for p2, want 1", len(plain))
+	}
+	if plain[0].ValidFrom != nil || plain[0].VerifiedAt != nil || plain[0].Confidence != nil || plain[0].Scope != nil {
+		t.Errorf("plain row reported present values: %+v", plain[0])
+	}
+	if plain[0].ResolvedAt != nil {
+		t.Errorf("live row ResolvedAt = %v, want nil", plain[0].ResolvedAt)
+	}
+}
+
+// TestImportMemoryRoundTripsEveryColumn: an exported row re-inserted under its
+// own id must come back identical, in every column the portable form claims to
+// carry. A restore that silently reset created_at, pinned or scope would age
+// memories, unpin them, and drop where they apply.
+func TestImportMemoryRoundTripsEveryColumn(t *testing.T) {
+	src := portableTestStore(t)
+	ctx := context.Background()
+	if err := src.EnsureProjectWithRepo(ctx, "p1", "/src/p1", "one", "git@github.com:wcatz/one.git"); err != nil {
+		t.Fatalf("EnsureProjectWithRepo: %v", err)
+	}
+	if _, err := src.db.ExecContext(ctx, `
+		INSERT INTO memories (id, project_id, category, content, importance, access_count,
+			last_accessed, source, tags, pinned, created_at, updated_at, resolved_at,
+			valid_from, valid_until, verified_at, agent, session_id, source_ref,
+			confidence, scope)
+		VALUES ('m1', 'p1', 'gotcha', 'full row', 0.25, 7, '2026-01-02 03:04:05',
+			'mcp', '["a","b"]', 1, '2026-01-01 00:00:00', '2026-01-03 00:00:00',
+			'2026-01-04 00:00:00', '2026-02-01', '2026-03-01', '2026-01-05',
+			'opencode', 'sess-1', 'ref-1', 0.0, '{"environment":"production"}')
+	`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	projects, err := src.PortableProjects(ctx)
+	if err != nil {
+		t.Fatalf("PortableProjects: %v", err)
+	}
+	memories, err := src.PortableMemories(ctx, nil)
+	if err != nil {
+		t.Fatalf("PortableMemories: %v", err)
+	}
+
+	dst := portableTestStore(t)
+	if created, err := dst.ImportProject(ctx, projects[0], true); err != nil || !created {
+		t.Fatalf("ImportProject = %v, %v; want created", created, err)
+	}
+	created, clamped, err := dst.ImportMemory(ctx, memories[0], true)
+	if err != nil || !created || clamped {
+		t.Fatalf("ImportMemory = %v, %v, %v; want created, unclamped", created, clamped, err)
+	}
+
+	got, err := dst.PortableMemories(ctx, nil)
+	if err != nil {
+		t.Fatalf("PortableMemories on destination: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("destination holds %d memories, want 1", len(got))
+	}
+	if !reflect.DeepEqual(got[0], memories[0]) {
+		t.Errorf("round trip changed the row:\n got %+v\nwant %+v", got[0], memories[0])
+	}
+	// The identity is the exported one, not a fresh hex id — a second import
+	// of the same artifact has to be recognised as already present.
+	if got[0].ID != "m1" {
+		t.Errorf("round trip id = %q, want the exported m1", got[0].ID)
+	}
+}
+
+// TestImportSkipsAnExistingIDAndNeverOverwrites: re-importing an artifact into
+// a store that already has the row must leave it exactly as it was. An import
+// that overwrote would be the worst possible failure for a restore, because
+// the thing being restored is the older copy.
+func TestImportSkipsAnExistingIDAndNeverOverwrites(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if _, err := store.Create(ctx, "p1", Memory{Category: "fact", Content: "newer local text", Source: "manual"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE memories SET id = 'm1' WHERE content = 'newer local text'`); err != nil {
+		t.Fatalf("force id: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE memories SET content = 'local wins', pinned = 1 WHERE id = 'm1'`); err != nil {
+		t.Fatalf("mark local: %v", err)
+	}
+
+	incoming := PortableMemory{
+		ID:        "m1",
+		ProjectID: "p1",
+		Category:  "gotcha",
+		Content:   "text from the artifact",
+		Source:    "mcp",
+		CreatedAt: "2026-01-01 00:00:00",
+		UpdatedAt: "2026-01-01 00:00:00",
+	}
+	created, _, err := store.ImportMemory(ctx, incoming, true)
+	if err != nil {
+		t.Fatalf("ImportMemory: %v", err)
+	}
+	if created {
+		t.Error("ImportMemory reported creating a row whose id already exists")
+	}
+	got, err := store.PortableMemories(ctx, nil)
+	if err != nil {
+		t.Fatalf("PortableMemories: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d memories, want the single pre-existing row", len(got))
+	}
+	if got[0].Content != "local wins" || !got[0].Pinned {
+		t.Errorf("existing row was overwritten: %+v", got[0])
+	}
+}
+
+// TestImportDryRunWritesNothing: the default import is a preview, so it must
+// validate and classify every record while leaving the store byte-for-byte as
+// it found it.
+func TestImportDryRunWritesNothing(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	m := PortableMemory{
+		ID: "m9", ProjectID: "p1", Category: "gotcha", Content: "would be written",
+		Source: "mcp", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00",
+	}
+	created, _, err := store.ImportMemory(ctx, m, false)
+	if err != nil {
+		t.Fatalf("ImportMemory(dry run): %v", err)
+	}
+	if !created {
+		t.Error("a dry run must report what it would create")
+	}
+	var n int
+	if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM memories WHERE id = 'm9'`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("dry run wrote %d rows", n)
+	}
+}
+
+// TestImportMemoryClampsOversizedContent: imported content goes through the
+// same cap as a normal save. An artifact from another machine can hold a longer
+// string than this build accepts, and importing it unclamped would write a row
+// the rest of Ghost refuses to produce.
+func TestImportMemoryClampsOversizedContent(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	long := strings.Repeat("x", MaxContentLen+500)
+	created, clamped, err := store.ImportMemory(ctx, PortableMemory{
+		ID: "m1", ProjectID: "p1", Category: "gotcha", Content: long, Source: "mcp",
+		CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00",
+	}, true)
+	if err != nil || !created || !clamped {
+		t.Fatalf("ImportMemory = %v, %v, %v; want created and clamped", created, clamped, err)
+	}
+	var content string
+	if err := store.db.QueryRowContext(ctx, `SELECT content FROM memories WHERE id = 'm1'`).Scan(&content); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if want := strings.Repeat("x", MaxContentLen) + TruncationMarker(); content != want {
+		t.Errorf("stored content was not clamped to the shared cap:\n got %d bytes ending %q\nwant %d bytes ending %q",
+			len(content), content[len(content)-40:], len(want), want[len(want)-40:])
+	}
+}
+
+// TestImportMemoryRejectsInvalidRecords: a hand-edited or truncated artifact
+// must be refused per record, with a message naming the field and the values
+// that would have been accepted, and must not write a row the schema CHECK or
+// the foreign key would have rejected halfway.
+//
+// The assertion looks for the import's own wording rather than the field name
+// alone. The schema's CHECK constraint would reject these rows too, and
+// modernc's message for that quotes the CHECK expression — which contains the
+// word "category", so a field-name assertion would pass on the wrong rejection
+// and would leave the Go validation untested. "must be one of" appears only in
+// the message Ghost builds.
+func TestImportMemoryRejectsInvalidRecords(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	cases := []struct {
+		name string
+		rec  PortableMemory
+		want string
+	}{
+		{
+			name: "unknown category",
+			rec: PortableMemory{
+				ID: "m1", ProjectID: "p1", Category: "not-a-category", Content: "x", Source: "mcp",
+			},
+			want: "must be one of",
+		},
+		{
+			name: "unknown source",
+			rec: PortableMemory{
+				ID: "m1", ProjectID: "p1", Category: "fact", Content: "x", Source: "telepathy",
+			},
+			want: "must be one of",
+		},
+		{
+			name: "unknown project",
+			rec: PortableMemory{
+				ID: "m1", ProjectID: "nope", Category: "fact", Content: "x", Source: "mcp",
+			},
+			want: "project",
+		},
+		{
+			name: "empty id",
+			rec: PortableMemory{
+				ProjectID: "p1", Category: "fact", Content: "x", Source: "mcp",
+			},
+			want: "id",
+		},
+		{
+			name: "empty content",
+			rec: PortableMemory{
+				ID: "m1", ProjectID: "p1", Category: "fact", Source: "mcp",
+			},
+			want: "content",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := store.ImportMemory(ctx, tc.rec, true); err == nil {
+				t.Fatalf("ImportMemory must reject %s", tc.name)
+			} else if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error must say %q, got %v", tc.want, err)
+			}
+			// A dry run has to reach the same verdict: a preview that reported
+			// "would create" for a row the write would reject is a preview the
+			// user cannot act on. The missing-project case is the one exception
+			// and is covered by the portable package, which is the caller that
+			// knows what the same run will have created — see ImportMemory's
+			// comment on apply=false.
+			if tc.want != "project" {
+				created, _, err := store.ImportMemory(ctx, tc.rec, false)
+				if err == nil {
+					t.Errorf("a dry run accepted %s (created=%v)", tc.name, created)
+				}
+			}
+			var n int
+			if err := store.db.QueryRowContext(ctx, `SELECT count(*) FROM memories`).Scan(&n); err != nil {
+				t.Fatalf("count: %v", err)
+			}
+			if n != 0 {
+				t.Errorf("a rejected record wrote %d rows", n)
+			}
+		})
+	}
+}
+
+// TestImportMemoryClampsImportance: a normal save clamps importance to [0,1]
+// before the write. An import that skipped that would be the only way an
+// importance outside the range reaches the database.
+func TestImportMemoryClampsImportance(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	for _, tc := range []struct {
+		in   float64
+		want float64
+	}{{in: 4.2, want: 1}, {in: -3, want: 0}} {
+		rec := PortableMemory{
+			ID: "m-" + string(rune('a'+int(tc.in))), ProjectID: "p1", Category: "fact",
+			Content: "x", Source: "mcp", Importance: tc.in,
+		}
+		if _, _, err := store.ImportMemory(ctx, rec, true); err != nil {
+			t.Fatalf("ImportMemory(%v): %v", tc.in, err)
+		}
+		var got float64
+		if err := store.db.QueryRowContext(ctx, `SELECT importance FROM memories WHERE id = ?`, rec.ID).Scan(&got); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if got != tc.want {
+			t.Errorf("imported importance %v stored as %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestImportProjectSkipsExistingAndNeverRebinds: importing a project whose id
+// already exists must not move it. A recorded path is a project's identity for
+// every other command, and rewriting it from a stale artifact would re-point a
+// project at a checkout that is no longer its own.
+func TestImportProjectSkipsExistingAndNeverRebinds(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProjectWithRepo(ctx, "p1", "/src/local", "local name", "git@github.com:wcatz/local.git"); err != nil {
+		t.Fatalf("EnsureProjectWithRepo: %v", err)
+	}
+	created, err := store.ImportProject(ctx, PortableProject{
+		ID: "p1", Path: "/src/from-artifact", Name: "artifact name", RepoRemote: "git@github.com:wcatz/artifact.git",
+	}, true)
+	if err != nil {
+		t.Fatalf("ImportProject: %v", err)
+	}
+	if created {
+		t.Error("ImportProject reported creating a project whose id already exists")
+	}
+	got, err := store.PortableProjects(ctx)
+	if err != nil {
+		t.Fatalf("PortableProjects: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d projects, want 1", len(got))
+	}
+	if got[0].Path != "/src/local" || got[0].Name != "local name" || got[0].RepoRemote != "github.com/wcatz/local" {
+		t.Errorf("existing project was rebound: %+v", got[0])
+	}
+
+	// A project the store has never seen is created, remote and all.
+	created, err = store.ImportProject(ctx, PortableProject{
+		ID: "p2", Path: "/src/p2", Name: "two", RepoRemote: "git@github.com:wcatz/two.git",
+	}, true)
+	if err != nil || !created {
+		t.Fatalf("ImportProject(new) = %v, %v; want created", created, err)
+	}
+	all, err := store.PortableProjects(ctx)
+	if err != nil {
+		t.Fatalf("PortableProjects: %v", err)
+	}
+	if len(all) != 2 || all[1].ID != "p2" || all[1].RepoRemote != "github.com/wcatz/two" {
+		t.Errorf("imported project = %+v", all)
+	}
+}
+
+// findDecision reads one decision back by id, the only decision read the store
+// offers being a per-project list.
+func findDecision(t *testing.T, s *Store, id string) Decision {
+	t.Helper()
+	list, err := s.ListDecisions(context.Background(), "p1", "", 100)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	for _, d := range list {
+		if d.ID == id {
+			return d
+		}
+	}
+	t.Fatalf("decision %s not found in %+v", id, list)
+	return Decision{}
+}
+
+// TestImportTaskAndDecisionRoundTrip: tasks and decisions carry state the
+// ordinary writers cannot set — a done task's completed_at, a superseded
+// decision's status — so their import has to preserve it under the same id.
+func TestImportTaskAndDecisionRoundTrip(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	task := Task{
+		ID: "t1", ProjectID: "p1", Title: "ship it", Description: "desc", Status: "done",
+		Priority: 4, Branch: "feat/x", PRNumber: 42, Notes: "done",
+		CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-02 00:00:00",
+		CompletedAt: "2026-01-02 00:00:00",
+	}
+	created, err := store.ImportTask(ctx, task, true)
+	if err != nil || !created {
+		t.Fatalf("ImportTask = %v, %v; want created", created, err)
+	}
+	gotTask, err := store.GetTask(ctx, "t1")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if gotTask.Status != "done" || gotTask.Priority != 4 || gotTask.Branch != "feat/x" || gotTask.PRNumber != 42 || gotTask.CompletedAt != "2026-01-02 00:00:00" {
+		t.Errorf("imported task = %+v", gotTask)
+	}
+
+	// The superseding decision is written first: superseded_by is a
+	// self-reference, and the store refuses a pointer to a decision that is not
+	// present rather than failing the INSERT with SQLite's own wording.
+	dec := Decision{
+		ID: "d2", ProjectID: "p1", Title: "newer", Decision: "d2", Rationale: "why2",
+		Status: "active", CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-01 00:00:00",
+	}
+	created, err = store.ImportDecision(ctx, dec, true)
+	if err != nil || !created {
+		t.Fatalf("ImportDecision(d2) = %v, %v; want created", created, err)
+	}
+	dec = Decision{
+		ID: "d1", ProjectID: "p1", Title: "t", Decision: "d", Alternatives: []string{"a", "b"},
+		Rationale: "why", Status: "superseded", SupersededBy: "d2", Tags: []string{"x"},
+		CreatedAt: "2026-01-01 00:00:00", UpdatedAt: "2026-01-02 00:00:00",
+	}
+	created, err = store.ImportDecision(ctx, dec, true)
+	if err != nil || !created {
+		t.Fatalf("ImportDecision = %v, %v; want created", created, err)
+	}
+	// A pointer to a decision the store does not hold names the field rather
+	// than surfacing a foreign-key failure.
+	if _, err := store.ImportDecision(ctx, Decision{
+		ID: "d3", ProjectID: "p1", Title: "t", Decision: "d", Rationale: "r",
+		Status: "superseded", SupersededBy: "absent",
+	}, true); err == nil || !strings.Contains(err.Error(), "superseded_by") {
+		t.Errorf("ImportDecision with a dangling superseded_by = %v, want an error naming the field", err)
+	}
+	gotDec := findDecision(t, store, "d1")
+	if gotDec.Status != "superseded" || gotDec.SupersededBy != "d2" || len(gotDec.Alternatives) != 2 || len(gotDec.Tags) != 1 {
+		t.Errorf("imported decision = %+v", gotDec)
+	}
+
+	// Re-importing reports a skip and changes nothing.
+	created, err = store.ImportTask(ctx, task, true)
+	if err != nil || created {
+		t.Errorf("ImportTask of an existing id = %v, %v; want skipped", created, err)
+	}
+	created, err = store.ImportDecision(ctx, dec, true)
+	if err != nil || created {
+		t.Errorf("ImportDecision of an existing id = %v, %v; want skipped", created, err)
+	}
+}
+
+// TestImportTaskAndDecisionRejectInvalidState: status and priority are CHECK
+// constraints, so a hand-edited artifact carrying values this build does not
+// accept has to be refused with Ghost's own message. Asserting for the field
+// name alone would pass on the schema's rejection — modernc quotes the CHECK
+// expression, which contains the field name — and would leave the Go validation
+// untested, so the wording that only Ghost produces is what is asserted.
+func TestImportTaskAndDecisionRejectInvalidState(t *testing.T) {
+	store := portableTestStore(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	if _, err := store.ImportTask(ctx, Task{
+		ID: "t1", ProjectID: "p1", Title: "x", Status: "sideways", Priority: 2,
+	}, true); err == nil || !strings.Contains(err.Error(), "must be one of") {
+		t.Errorf("ImportTask with a bad status = %v, want an error listing the accepted values", err)
+	}
+	if _, err := store.ImportTask(ctx, Task{
+		ID: "t1", ProjectID: "p1", Title: "x", Status: "pending", Priority: 99,
+	}, true); err == nil || !strings.Contains(err.Error(), "must be between") {
+		t.Errorf("ImportTask with a bad priority = %v, want an error naming the range", err)
+	}
+	if _, err := store.ImportDecision(ctx, Decision{
+		ID: "d1", ProjectID: "p1", Title: "t", Decision: "d", Rationale: "r", Status: "maybe",
+	}, true); err == nil || !strings.Contains(err.Error(), "must be one of") {
+		t.Errorf("ImportDecision with a bad status = %v, want an error listing the accepted values", err)
+	}
+	// A dry run refuses them too, so the preview cannot promise a write that
+	// would fail.
+	if _, err := store.ImportTask(ctx, Task{
+		ID: "t1", ProjectID: "p1", Title: "x", Status: "sideways", Priority: 2,
+	}, false); err == nil {
+		t.Error("a dry run accepted a task with a bad status")
+	}
+	if _, err := store.ImportDecision(ctx, Decision{
+		ID: "d1", ProjectID: "p1", Title: "t", Decision: "d", Rationale: "r", Status: "maybe",
+	}, false); err == nil {
+		t.Error("a dry run accepted a decision with a bad status")
+	}
+	var n int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT (SELECT count(*) FROM tasks) + (SELECT count(*) FROM decisions)`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("a rejected record wrote %d rows", n)
+	}
+}

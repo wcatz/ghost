@@ -241,6 +241,110 @@ ghost obsidian sync --interval 30s
 
 The sync opens the database read-only and is safe alongside a live MCP server. Press `Ctrl-C` to stop it.
 
+## Backup, export and import
+
+The memory database is a plain SQLite file, and these three commands are the supported way to move it around. `backup` and `export` answer different questions — a **backup** is a restorable copy of the database; an **export** is an inspectable artifact you can read, edit and diff — and neither is built on the other.
+
+### `ghost backup`
+
+Writes a consistent snapshot of the live database, safe to run while the MCP server is using it:
+
+```bash
+ghost backup
+ghost backup --out ~/backups/ghost.db.snapshot
+```
+
+| Flag | Meaning |
+|---|---|
+| `--out <path>` | Where to write the snapshot. Defaults to a timestamped file beside the database in the data directory. The path must not already exist. |
+
+The snapshot is taken with SQLite's `VACUUM INTO`, which reads one consistent snapshot of a live WAL database. Copying the file by hand cannot: copying `ghost.db` without its `-wal` loses whatever the write-ahead log held, and copying both while a write lands can capture a torn state. The write lock is held for the length of the vacuum and no longer.
+
+The command prints the path, the file size, and the row count of each table it counted, so a restore can be checked against what the file actually contains:
+
+```text
+backed up ~/.local/share/ghost/ghost.db.backup-20260926T153207Z (204800 bytes)
+  projects:     1
+  memories:     4
+  memory_links: 1
+  tasks:        1
+  decisions:    1
+```
+
+The snapshot is created at `0600` — a full copy of the memory database is no wider than the database itself — and an existing path is never replaced, because the file already there is the previous backup.
+
+To restore: stop Ghost, remove `ghost.db`, `ghost.db-wal` and `ghost.db-shm` from the data directory, move the snapshot in as `ghost.db`, and start Ghost again. Ghost migrates the restored file on the next open, taking a pre-migration copy first.
+
+### `ghost export`
+
+Writes memories, tasks, decisions and projects as JSON Lines:
+
+```bash
+ghost export
+ghost export --project myproject --out ~/backups/myproject.jsonl
+ghost export --out - | head -3
+```
+
+| Flag | Meaning |
+|---|---|
+| `--project <name>` | Export one project, matched by name or id **exactly**. No path-prefix or basename fallback: a filter is a choice about what to copy, and one that resolved like project resolution could select a different project on another machine than the one named here. A filter that matches nothing is an error. |
+| `--out <path>` | Where to write it. Defaults to a timestamped `.jsonl` beside the database. `-` writes to standard output, with the summary on stderr so the stream stays pipeable. |
+
+The file is JSON Lines: one self-describing object per line, opened by a header line carrying the schema version.
+
+```json
+{"type":"header","schema_version":1}
+{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one","repo_remote":"github.com/wcatz/one","created_at":"…","updated_at":"…"}}
+{"type":"memory","memory":{"id":"…","project_id":"p1","category":"gotcha","content":"…","importance":0.5,"source":"manual","pinned":false,"created_at":"…","scope":{"environment":"production"}}}
+{"type":"task","task":{"id":"…","project_id":"p1","title":"…","status":"pending","priority":2}}
+{"type":"decision","decision":{"id":"…","project_id":"p1","title":"…","decision":"…","rationale":"…","status":"active"}}
+```
+
+A memory record carries every column of the row that describes the memory: category, importance, access count, pin state, source, tags, created/updated timestamps, `resolved_at`, the validity triple (`valid_from`, `valid_until`, `verified_at`), the provenance fields (`agent`, `session_id`, `source_ref`, `confidence`) and `scope`. A project record carries its id, path, name, repository remote and timestamps.
+
+Two exports of an unchanged database are **byte-identical**: projects come first, then memories, tasks and decisions, each in id order, and the header carries no timestamp. An artifact can therefore be diffed against the previous one, and a diff shows only what changed in the store.
+
+Three things are deliberately **not** exported:
+
+| Excluded | Why |
+|---|---|
+| `memory_embeddings` | The vector is derived from the content by a local model, not stored knowledge. The embedding worker rebuilds it for every imported memory. |
+| `memory_links` | A link only means something between two memories that are both present, so importing edges ahead of their endpoints would fail the foreign key or fabricate relationships. The linking worker recomputes related edges after an import. |
+| `resolve_kept_hash` | A cache of the resolve classifier's verdicts keyed by content hash. Ghost recomputes it. |
+
+### `ghost import`
+
+Loads an artifact written by `ghost export`:
+
+```bash
+ghost import ~/backups/one.jsonl
+ghost import ~/backups/one.jsonl --apply
+```
+
+| Flag | Meaning |
+|---|---|
+| `--apply` | Actually write. Without it the command is a dry run that reports what it would create, skip and reject, and writes nothing. |
+
+A dry run is not a separate code path: every record goes through the same validation an apply run would, so the preview describes the run that follows rather than a similar one.
+
+```text
+  skip    project:  line 2  "one" (p1)
+  create  memory:   line 3  "the WAL holds a transaction…" (3A6B…)
+would import 1 project, 1 memory from ~/backups/one.jsonl
+
+nothing written — pass --apply to import
+```
+
+Rules the import follows:
+
+- **A record whose id already exists is skipped, never overwritten.** The artifact is the older of the two copies by construction, so overwriting would restore stale data over live data. This also makes re-running an import always safe, which is how you repair a run that rejected a record.
+- **A file whose schema version this build does not read is refused outright**, in either direction. Reading a newer one would insert records whose fields this build interprets by guesswork.
+- **Imported memory content goes through the same length cap and the same validation as a normal save** — category, source and importance are checked against the schema's own value sets, and over-long content is cut at `MaxContentLen` with the same explicit marker. An artifact from another machine is another way to reach the memories table, and must not be a way around its rules.
+- **Projects are created when missing**, and records are applied projects first, then memories, tasks and decisions, so a file whose records were reordered by an editor still imports. A `blocked_by` or `superseded_by` pointer is only honoured when the record it names is in the same artifact and is applied first; a pointer to a record the artifact does not contain, or one inside a cycle, is dropped.
+- **A record that cannot be imported is rejected and the run continues**, so one hand-edited line does not abandon the rest of a large artifact. Rejections are counted and the command exits non-zero, so a partial import is never reported as a complete one.
+
+Import does not run Upsert's near-duplicate probe. A restore is putting back what was there, not adding knowledge, and folding two rows of the artifact into one would silently drop a memory the user chose to keep.
+
 ## Context and benchmarks
 
 ### `ghost context`

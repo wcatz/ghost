@@ -32,6 +32,9 @@ ghost project bind <id> <path>     Record a project checkout so a session in
 ghost obsidian export|sync        Mirror the store to Markdown
 ghost opencode cleanup-sessions   One-shot cleanup of lifecycle sessions
                                    titled exactly "[ghost]"
+ghost backup                      Snapshot the live database (VACUUM INTO)
+ghost export                      Write the store as a portable JSONL artifact
+ghost import <file> [--apply]     Load a JSONL artifact (dry-run by default)
 ghost context                     Render passive session context
 ghost bench [--sweep]             Run the built-in benchmark
 ghost upgrade                     Update a standalone binary
@@ -66,6 +69,8 @@ internal/mcpinit/                   Client installers, status checks, hooks
 internal/mcpserver/                 MCP server, tools, resources, prompts
 internal/memory/                    SQLite store, FTS5, vectors, links, schema
 internal/obsidian/                  One-way Markdown vault exporter/sync
+internal/portable/                  Portable JSONL artifact: read (export) and
+                                    write (import) of the portable record format
 internal/procstat/                  Cross-platform process liveness/start time
 internal/provider/                  MemoryStore and LLMProvider interfaces
 internal/reflection/                Tiered memory consolidation
@@ -385,6 +390,24 @@ A read-only connection deliberately sets no `journal_mode`: setting it writes th
 
 `TestConcurrentProcessesMixedReadWrite` opens several handles against one file and runs two phases against each other: concurrent inserts with FTS readers, then concurrent content rewrites with FTS readers. It asserts no `SQLITE_BUSY` failures, no dropped writes, and no row returned by a search whose stored content does not contain the searched terms. The rewrite phase exists because `memories_au`, the trigger keeping the index in step with content, fires only `WHEN old.content != new.content` — inserts alone never exercise it. `TestOpenDBPinsPoolToSingleConnection` pins the pool setting directly. Both are contract guards: they pass while the contract holds and fail if a setting that provides it is removed.
 
+## Backup and portable transfer
+
+Two independent mechanisms move the store out of a machine, and they answer different questions.
+
+**A backup is a restorable copy of the database.** `memory.Store.Backup` (`internal/memory/backup.go`) writes one with SQLite's `VACUUM INTO`, which reads a single snapshot of the source and builds the destination from it. That is what makes it correct against a live WAL database, where copying files cannot be: a writer committing during the copy is reflected in the result whole or not at all, where a `cp` of `ghost.db` alone loses whatever the `-wal` held and a `cp` of the pair can capture a torn page. It is also why no extra transaction wraps it — the write lock is held for the length of the vacuum and nothing longer, so a running MCP server keeps serving.
+
+`memory.vacuumInto` is the single implementation of "put a restorable copy of this database over there", and both callers use it: the pre-migration copy `OpenDB` takes before any migration step, and `ghost backup`. One implementation means the refusal to replace an existing file and the `TightenPermissions` pass cannot drift apart between the two — the pre-migration copy is the same width as the database it came from, and so is a `--out` destination outside the data directory, which has no 0700 parent to shield it.
+
+`BackupResult.Counts` is counted by opening the *written* file read-only, never the live one. The counts a restore is checked against have to describe the file that was written: a writer that committed after the vacuum would otherwise make the printed numbers and the snapshot's contents disagree, and the reader has no way to tell which is right.
+
+**An export is an inspectable artifact.** `internal/portable` writes the store as JSON Lines — one self-describing object per line behind a schema-version header — and reads one back. It is a wire format with its own version, independent of `schemaVersion`: an artifact is a file that outlives the ghost that wrote it, so its meaning is the shape of the records, not the tables behind them. Ordering is fixed (projects, then memories, tasks and decisions, each by id) and the header carries no timestamp, so two exports of an unchanged store are byte-identical and a diff of two artifacts shows only what changed in the store. The line-oriented shape is also why a truncated file is survivable: a reader gets every record before the damage and an error naming the line where it starts.
+
+The reads and writes are separate store methods rather than reuse, and each for a stated reason. `PortableProjects` exists because `ListProjects` has no `repo_remote` column — the field that makes two checkouts of one repository one project, and that another machine needs to resolve a project from its own directory. `PortableMemories` exists because the ordinary list readers drop the validity triple, and restoring a memory with a fresh `created_at` would age it out of injection immediately. The `Import*` methods exist because no existing writer can preserve an imported id, an imported `created_at` or an imported pin: `Create` generates its own id and `Upsert` is deliberately a dedup probe, which is the wrong operation for a restore. Each takes an `apply` flag, so a dry run runs the same validation as the run it previews rather than a second code path that can disagree with it.
+
+Three things are deliberately outside the artifact — `memory_embeddings`, `memory_links` and `memories.resolve_kept_hash` — because all three are derived rather than stored knowledge: the embedding and linking workers rebuild the first two, and the resolve pass recomputes the third. Shipping them would mean shipping a model's output as if it were the memory, importing edges ahead of their endpoints, and marking a memory the classifier has never seen as reviewed.
+
+Import never overwrites a record whose id already exists, and that is the property the rest of its behaviour rests on. The artifact is the older of the two copies by construction, so an overwrite would restore stale data over live data — and making re-running a no-op is what lets a rejected record be repaired by fixing the file and running the import again. A record that cannot be imported is rejected individually and the run continues, because one hand-edited line must not abandon ten thousand good ones; the rejections are counted and the command exits non-zero, so a partial import is never reported as a complete one.
+
 ## Configuration and filesystem layout
 
 `internal/config` loads compiled defaults, `/etc/ghost/config.yaml`, the user config file, and `GHOST_*` environment variables. Commands apply supported flag overrides after loading. The data directory is resolved from `XDG_DATA_HOME` or the user's home directory and contains `ghost.db`.
@@ -396,7 +419,6 @@ There are exactly **two** read-write *open functions* in the tree, and both call
 Every other open is read-only and deliberately stays that way: a diagnostic must be able to report on a database it cannot modify, and a read-only connection cannot create one. That is `OpenDBReadOnly` (`cmd/ghost/project.go`'s `openDiagnosticStore`), the package-local `roDSN` paths in `internal/mcpinit` (`stophook.go`, `lifecyclelock.go`, `lifecyclemarker.go`, `hook.go`), and `obsidian.go`. `eval/cycle` is mixed: its `state.go` and `inject.go` open read-write through `OpenDB` and write, while `inject.go` also has one `mode=ro` read — so an eval run tightens the three files in its scratch tree and not the directory holding them, since `isDataDir` does not match a scratch path.
 
 "Read-only" is a property of the open, not of the command, and a read-write open tightens wherever it is called. `cmd/ghost`'s shared `bootstrap()` is the usual route, and it already ran migrations and stamped `user_version` before any command-specific work, so most commands tighten simply by starting up. Three paths open read-write without it, and each was already writing or migrating for its own reasons: `mcpinit.checkStoreHealth` (behind `ghost mcp status`, which must not bootstrap — a status check that created the database would turn the next run's "no Ghost database" line into a healthy one), `runMaintenanceStatus`, and three paths under `ghost hook` / `ghost context`:
-
 - `mcpinit.importMemories`, reached by `finalizePlugin` before any of the session-start gates when a Claude Code plugin install is finalizing for the first time. It opens read-write to import memory files, so that one fire tightens regardless of source or whether it is a subagent.
 - `runSessionStart`, which returns early for a subagent, a `resume` and a `compact`, and gates the bump on `projectID != ""` and on the source being empty or `startup` — so a `clear` does not bump either.
 - `RenderSessionContext`, which opencode's plugin reaches by spawning `ghost context` at start, because opencode has no context-injection surface of its own — it returns before `runSessionStart` on the `InjectContext` gate, and its plugin spawns the context render instead. It has no source or subagent gate at all, and is gated only on `projectID != ""`.
