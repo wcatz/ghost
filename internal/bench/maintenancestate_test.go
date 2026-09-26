@@ -72,6 +72,39 @@ func TestMaintenanceStateReport(t *testing.T) {
 	if !strings.Contains(report, "live-wins") || !strings.Contains(report, "shared _global answers") {
 		t.Errorf("report is missing its columns:\n%s", report)
 	}
+	// The two loss modes must not be reported as one. A not-found answer has
+	// nothing to be outranked by, and under the shipped defaults the suite has
+	// both kinds (the shared-row answers are evicted, the rest are outranked), so
+	// a report that merged them would be asserting something false about a
+	// question it never retrieved.
+	hybrid := hybridResult(results)
+	if hybrid == nil {
+		t.Fatal("no hybrid result")
+	}
+	var outranked, notFound []string
+	for _, o := range hybrid.Outcomes {
+		switch {
+		case !o.Found:
+			notFound = append(notFound, o.Query)
+		case !o.LiveWins:
+			outranked = append(outranked, o.Query)
+		}
+	}
+	if len(outranked) == 0 {
+		t.Error("expected at least one question a copy outranks, so the outranked list is exercised")
+	}
+	if len(notFound) == 0 {
+		t.Error("expected at least one question whose answer is not retrieved, so the not-found list is exercised")
+	}
+	block := report[strings.Index(report, "\n"+CondHybrid+": "):]
+	if i := strings.Index(block, "whose answer was not retrieved"); i > 0 {
+		block = block[:i]
+	}
+	for _, name := range notFound {
+		if strings.Contains(block, name) {
+			t.Errorf("%s: its answer was not retrieved, so it is listed as outranked by a copy:\n%s", name, block)
+		}
+	}
 	t.Logf("maintenance-state suite (report-only, DefaultSearchParams):\n%s", report)
 }
 

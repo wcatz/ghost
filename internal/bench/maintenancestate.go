@@ -432,8 +432,10 @@ func b2i(b bool) int {
 }
 
 // FormatMaintenance renders the suite as a table, the shared-row probe line, and
-// the questions each condition lost — so the report says which copy search
-// promoted over the live memory rather than only that a number moved.
+// the questions each condition lost — split into "a copy outranked the answer"
+// and "the answer was not retrieved at all", because those are different
+// failures. So the report says which copy search promoted over the live memory,
+// and which answers vanished, rather than only that a number moved.
 func FormatMaintenance(results []MaintenanceResult) string {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "%-14s %4s %7s %8s %10s %12s\n", "condition", "n", "R@5", "NDCG@10", "live-wins", "answer-found")
@@ -449,18 +451,35 @@ func FormatMaintenance(results []MaintenanceResult) string {
 			r.Condition, r.Shared.Found, r.Shared.Queries, r.Shared.LiveWins, r.Shared.Queries)
 	}
 	for _, r := range results {
-		var lost []string
+		// The two ways to lose a question are different failures and get
+		// different headings. judgeProbe reports wins=false for an answer that
+		// is absent from the window as well as for one that is present and
+		// outranked, so listing every !LiveWins under "outranked" would claim a
+		// copy beat an answer that was never returned — and for a question with
+		// no named distractors (the shared-row probes) that claim is provably
+		// backwards, since LiveWins is then just Found. A demotion that sinks a
+		// row is a reorder; one that evicts it is a deletion, and the report is
+		// where that difference becomes visible.
+		var outranked, notFound []string
 		for _, o := range r.Outcomes {
-			if !o.LiveWins {
-				lost = append(lost, o.Query)
+			switch {
+			case !o.Found:
+				notFound = append(notFound, o.Query)
+			case !o.LiveWins:
+				outranked = append(outranked, o.Query)
 			}
 		}
-		if len(lost) == 0 {
-			continue
+		if len(outranked) > 0 {
+			fmt.Fprintf(&b, "\n%s: %d question(s) where a resolved/_global/superseded copy outranked the answer:\n", r.Condition, len(outranked))
+			for _, n := range outranked {
+				fmt.Fprintf(&b, "  %s\n", n)
+			}
 		}
-		fmt.Fprintf(&b, "\n%s: %d question(s) where a resolved/_global/superseded copy outranked the answer:\n", r.Condition, len(lost))
-		for _, n := range lost {
-			fmt.Fprintf(&b, "  %s\n", n)
+		if len(notFound) > 0 {
+			fmt.Fprintf(&b, "\n%s: %d question(s) whose answer was not retrieved at all (evicted or never matched):\n", r.Condition, len(notFound))
+			for _, n := range notFound {
+				fmt.Fprintf(&b, "  %s\n", n)
+			}
 		}
 	}
 	return b.String()
