@@ -238,7 +238,11 @@ func holdBack(reKept, unresolved []memory.Memory, already int) ([]memory.Memory,
 	held := 0
 	for {
 		dropped := make(map[string]bool)
-		for _, m := range correctionPairTargetsFrom(unresolved, reKept, corrections) {
+		// The candidate pool is the keyword-prefiltered subset, because that is
+		// what Run pairs: a row with no resolution keyword is never a pairing
+		// target there, so holding it back here would be a permanent,
+		// mislabelled hold that no later pass could undo.
+		for _, m := range correctionPairTargetsFrom(unresolved, Prefilter(reKept), corrections) {
 			if !dropped[m.ID] {
 				dropped[m.ID] = true
 				held++
@@ -306,7 +310,10 @@ func assertedByDemotions(ctx context.Context, store reassessStore, projectID str
 	// demote becomes repairable again instead of being reported under the
 	// wrong label. Only the candidate set differs, because the rows to protect
 	// are exactly the ones ResolveCandidates cannot return.
-	for _, m := range correctionPairTargetsFrom(unresolved, resolved, unresolved) {
+	// Prefilter, for the same reason as in holdBack: Run pairs only the
+	// keyword-passing subset, so only those rows can be re-stamped by the next
+	// ordinary pass and only those may be held back here.
+	for _, m := range correctionPairTargetsFrom(unresolved, Prefilter(resolved), unresolved) {
 		asserted[m.ID] = true
 	}
 	return asserted, nil

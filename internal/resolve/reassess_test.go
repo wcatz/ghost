@@ -341,6 +341,40 @@ func TestReassessHoldsBackRowWhoseCorrectionIsRepaired(t *testing.T) {
 	}
 }
 
+// TestReassessHoldsBackOnlyPrefilterPassingRows: Run's mechanism 2 iterates
+// correctionPairTargets(loaded, cands) where cands is the keyword-prefiltered
+// subset, so a row with no resolution keyword is never a pairing target however
+// much a correction shares with it. Holding such a row back would be permanent
+// and mislabelled — nothing asserts it, yet every later --reassess run would
+// report it as asserted again, so no pass could ever repair it (review finding
+// on #643).
+func TestReassessHoldsBackOnlyPrefilterPassingRows(t *testing.T) {
+	// No resolveKeywords entry, so the ordinary pass never considers it — the
+	// same fixture TestRunCorrectionPairingSkipsLiveGotcha uses.
+	live := memory.Memory{ID: "live", Category: "gotcha", UpdatedAt: "2026-09-01 00:00:00",
+		Content: "re-bootstrap gotcha: ledgerstate/imported_reward_inputs.go mithril CalculationVersion never set on imported reward_snapshot rows — dingo-core-mithril-sync restarts"}
+	correction := memory.Memory{ID: "correction", Category: "gotcha", UpdatedAt: "2026-09-19 00:00:00",
+		Content: "CORRECTION/RESOLUTION to the imported reward_snapshot P0: the bug IS ALREADY FIXED ON MAIN. Commit d646e680 adds CalculationVersion to ledgerstate/imported_reward_inputs.go. NO PR IS NEEDED FROM US."}
+	store := &fakeStore{alreadyResolved: []memory.Memory{live, correction}}
+	// Both come back KEEP for free: the rule is vetoed ("never"), the
+	// correction is not.
+	cls := &fakeClassifier{}
+
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Reassess: %v", err)
+	}
+	if res.Demoted != 0 {
+		t.Errorf("res.Demoted = %d, want 0 — a keyword-free row is never a pairing target", res.Demoted)
+	}
+	if len(reKept) != 2 {
+		t.Errorf("reKept = %v, want both rows repairable", reKept)
+	}
+	if len(store.cleared) != 2 {
+		t.Errorf("cleared = %v, want both rows", store.cleared)
+	}
+}
+
 // TestReassessEmptyPool: a project with no resolved rows is a no-op that makes
 // no harness call.
 func TestReassessEmptyPool(t *testing.T) {

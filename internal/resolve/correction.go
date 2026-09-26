@@ -129,12 +129,18 @@ func correctionPairTargetsFrom(loaded, cands, corrections []memory.Memory) []mem
 	}
 
 	// Rare terms per memory: subject tokens with document frequency
-	// <= correctionRareDF across the frequency pool. Terms are collected for
-	// cands too, so a candidate outside that pool still has a term set to
-	// compare; its own tokens do not raise anyone else's frequency.
-	termSets := make(map[string]map[string]bool, len(loaded)+len(cands))
+	// <= correctionRareDF across the frequency pool. Terms are also collected
+	// for cands and for corrections outside that pool, because both are
+	// compared against each other; only `loaded` raises a token's frequency, so
+	// Run's rare-token set is unchanged.
+	termSets := make(map[string]map[string]bool, len(loaded)+len(cands)+len(corrections))
 	for _, m := range cands {
 		termSets[m.ID] = subjectTermSet(m.Content)
+	}
+	for _, m := range corrections {
+		if _, ok := termSets[m.ID]; !ok {
+			termSets[m.ID] = subjectTermSet(m.Content)
+		}
 	}
 	df := make(map[string]int)
 	for _, m := range loaded {

@@ -131,6 +131,8 @@ It is how a wrong resolution gets undone — the ordinary pass never looks at a 
 
 Rows that the ordinary pass would re-stamp for free are left alone and reported as **still asserted by a link or correction**: the older endpoint of a live `supersedes` link, a row an unresolved correction still pairs with, and a row whose own correction is being repaired in the same run (clearing that correction would put it back in the pool and re-assert the pairing on the next pass). Clearing any of those would print a repair that the next ordinary pass immediately undoes.
 
+Only rows the ordinary pass would actually consider are held back: its pairing mechanism pairs the keyword-prefiltered subset, so a durable rule with no resolution keyword is repaired even when a correction being cleared in the same run shares its subject tokens. A hold is not a soft warning — it is reported as asserted on every later run, so the filter keeps the pass from parking a row nothing asserts.
+
 ### `ghost supersede <project>`
 
 Proposes and classifies directed replacement relationships:
