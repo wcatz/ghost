@@ -118,10 +118,15 @@ const (
 // as order — and explain mode reports the same number per row, so the factor
 // shown is the factor that ranked.
 //
-// It never drops a row: every branch only scales a score, which is what keeps
-// resolved memories searchable and keeps _global rows findable from a project.
-// Whether a scaled row comes back is the window cut's ordinary rank question,
-// not an exclusion rule.
+// It never removes a row from the candidate pool: every branch only scales a
+// score, which is what keeps resolved memories searchable and keeps _global
+// rows findable from a project. One admission rule downstream is status-aware
+// as well — selectWindow's keyword reservation declines rows whose factor is
+// below 1, because reservation reads raw FTS rank and would otherwise hand a
+// demoted row back the window slot the factor just took from it — so a
+// demoted keyword-only hit makes the window cut on its demoted score rather
+// than on the reservation, and comes back when it clears that cut or the
+// window has room. Nothing here drops a row by status rule.
 func statusDemotionFactor(resolved bool, rowProjectID, searchProjectID string) float64 {
 	factor := 1.0
 	if resolved {

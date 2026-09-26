@@ -722,13 +722,21 @@ func selectWindow(pool []*hybridCandidate, limit int, p SearchParams) HybridWind
 	// answer rather than a correction to it.
 	//
 	// Admission is the whole of it, and the position stays the fused score's
-	// to decide. Reserving is gated on status: the reservation reads raw FTS
-	// rank while demotion writes the fused score, so without the gate a
-	// _global or resolved row that led the keyword leg took a slot the
-	// demoted pool would have given a live project row — the demotion had
-	// already been applied to its score, and the reservation undid it. A row
-	// whose status factor is below 1 is therefore never reserved; it can
-	// still enter on its demoted score like any other candidate.
+	// to decide. Reserving is also gated on status: the reservation reads raw
+	// FTS rank while demotion writes the fused score, so without the gate a
+	// _global or resolved row that led the keyword leg took a window slot
+	// back from the live project row the demoted score had given it — the
+	// factor owns membership, and the reservation would have overridden that
+	// membership decision while leaving the halved scores untouched (the
+	// slice is re-sorted by score right after the loop, so a reserved demoted
+	// row sat at the bottom of the window, not in front of anything). A row
+	// whose status factor is below 1 is therefore never reserved: it competes
+	// for the window on its demoted score alone. The consequence is the
+	// deliberate trade of the fix, documented in docs/architecture.md: where
+	// the #543 repair rescues an undemoted keyword-only hit from the score
+	// cut the weights cause, a demoted one is not rescued — it comes back
+	// when it makes that cut or the window has room, and drops out of a full
+	// window of rows that outscore it.
 	//
 	// Two stronger interventions were built and measured against
 	// the built-in dataset before settling here:
