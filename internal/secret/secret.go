@@ -178,9 +178,17 @@ var rules = []rule{
 		name:  "pem-private-key",
 		label: "PEM private key block",
 		re: regexp.MustCompile(
-			`(?m)^-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[ \t]*\r?\n` +
-				`(?:[A-Za-z0-9+/=]{16,}[ \t]*\r?\n)+` +
-				`-----END [A-Z0-9 ]*PRIVATE KEY-----[ \t]*$`),
+			// A real block. Three ordinary ways of pasting one, all accepted:
+			// indented inside a YAML block scalar or a code fence, with CRLF line
+			// endings, and with its newlines escaped the way kubectl and
+			// Terraform render one in JSON.
+			`(?m)^[ \t]*-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[ \t]*\r?\n` +
+				`(?:[ \t]*[A-Za-z0-9+/=]{16,}[ \t]*\r?\n)+` +
+				`[ \t]*-----END [A-Z0-9 ]*PRIVATE KEY-----[ \t\r]*$` +
+				`|` +
+				`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----\\n` +
+				`(?:[A-Za-z0-9+/=]{16,}\\n)+` +
+				`-----END [A-Z0-9 ]*PRIVATE KEY-----`),
 	},
 	{
 		name:  "putty-private-key",
@@ -208,9 +216,20 @@ var rules = []rule{
 		// already reads. So this matches the filename instead: a line naming a
 		// .skey file and carrying a key-sized hex run is a key paste, and a
 		// public Plutus script never names a .skey file.
+		//
+		// The second form is how a labelled key with neither filename nor "type"
+		// is caught, and it works because the two are distinguishable on the wire
+		// rather than by convention: both are a CBOR byte string, so both begin
+		// with 0x58 or 0x59 followed by the length. A Cardano secret key is 32 or
+		// 64 bytes, which is a one-byte length and therefore `5820`/`5840`; a
+		// Plutus script is far larger, so its length needs two bytes and its tag
+		// is `59`. The limitation is the obvious one: a key exported under a
+		// non-standard CBOR wrapper is not recognised.
 		name:  "cardano-cbor-hex",
 		label: "Cardano CBOR-encoded key (cborHex beside a .skey file)",
-		re:    regexp.MustCompile(`(?i)\.skey\b[^\n]*\b[0-9a-f]{64,}`),
+		re: regexp.MustCompile(
+			`(?i)\.skey\b[^\n]*\b[0-9a-f]{64,}` +
+				`|cborhex"?\s*[:=]\s*"?58(?:20|40)[0-9a-f]{8,}`),
 	},
 	{
 		name:  "authorization-bearer",
@@ -267,22 +286,32 @@ func looksLikeURLCredential(password string) bool {
 // matched run has to be inspected before it counts.
 var longHexRe = regexp.MustCompile(`\b[0-9a-fA-F]{` + strconv.Itoa(longHexFloor) + `,}\b`)
 
-// cardanoCborHexLabel matches a value labelled as a Cardano CBOR field.
-var cardanoCborHexLabel = regexp.MustCompile(`(?i)"?cborhex"?\s*[:=]`)
+// cardanoCborHexPrefixRe is the cborHex label anchored directly against the run
+// it introduces, so the exemption below can be scoped to that one run. A
+// text-wide label match would disable the long-hex rule for every run in the
+// save, which is how a memory mentioning a script's cborHex and carrying an
+// unrelated key paste would store the key.
+var cardanoCborHexPrefixRe = regexp.MustCompile(`(?i)cborhex"?\s*[:=]\s*"?[0-9a-f]*$`)
 
-// inLabelledCardanoField reports whether text labels a long hex value as a
-// Cardano CBOR field, in which case the hex is a described value rather than an
-// unlabelled paste and its length is not enough to call it key material.
+// cardanoCborHexPrefixWindow is how far back from a run the label is looked for.
+// Comfortably longer than `cborHex": "` with whitespace.
+const cardanoCborHexPrefixWindow = 64
+
+// isLabelledCardanoValue reports whether the hex run starting at start is the
+// value of a Cardano cborHex field.
 //
-// A public Plutus script is what forces this. Its cborHex runs 200 to 1000
-// characters — well past longHexFloor — uses the same alphabet as a signing key,
-// and is quoted in ordinary memories about a validator, a fee, a datum or a
+// A public Plutus script is what forces the exemption. Its cborHex runs 200 to
+// 1000 characters — well past longHexFloor — uses the same alphabet as a signing
+// key, and is quoted in ordinary memories about a validator, a fee, a datum or a
 // redeemer. A Cardano project cannot be operated without recording its scripts,
-// so refusing one refuses the knowledge. What separates a script from a key is
-// the envelope, and cardano-cbor-hex is the rule that reads it, so a labelled
-// cborHex is left to that rule and this one stands down.
-func inLabelledCardanoField(text string) bool {
-	return cardanoCborHexLabel.MatchString(text)
+// so refusing one refuses the knowledge. A *key* in the same field is not missed,
+// because cardano-cbor-hex reads the CBOR tag — see its comment.
+func isLabelledCardanoValue(text string, start int) bool {
+	from := start - cardanoCborHexPrefixWindow
+	if from < 0 {
+		from = 0
+	}
+	return cardanoCborHexPrefixRe.MatchString(text[from:start])
 }
 
 // looksLikeKeyMaterial reports whether a long hex run is worth refusing.
@@ -323,9 +352,10 @@ func looksLikeKeyMaterial(run string) bool {
 // and judged, and the value is judged separately, and BOTH have to hold.
 //
 // shellVarPrefix captures a `$` immediately before the key. A key that carries
-// one is a shell or PowerShell *variable* — `$domainAdminPassword =
-// ConvertTo-SecureString …` — which is an assignment of a derived value to a
-// local, not a secret in a config. From the same third-party corpus.
+// one is a shell or PowerShell *variable*. The `$` alone is not enough to skip
+// the candidate — `$db_password = "K3q9Xm2pL7wRt4ZbAvN1"` is a leaked literal
+// assigned to a variable and is the dangerous case — so the skip also requires
+// valueIsCommand. From the same third-party corpus.
 //
 // The value class excludes whitespace, quotes, commas and semicolons, so a
 // quoted scalar matches without its quotes and an English phrase after the colon
@@ -524,6 +554,30 @@ func looksLikeCredentialMaterial(key, value string) bool {
 		(len(value) >= longValueFloor && entropy >= minEntropyLoose)
 }
 
+// shellFlagRe is a `-Word` token, which is what a shell command's flags look
+// like. Anywhere in the rest of the line, not only immediately after the value:
+// `$x = ConvertTo-SecureString "{1}" -AsPlainText -Force` puts a quoted argument
+// in between. That is safe because this only runs when the key is already
+// `$`-prefixed, so the line is shell context and a `-Word` in it is a flag.
+var shellFlagRe = regexp.MustCompile(`(?:^|\s)-[A-Za-z]`)
+
+// valueIsCommand reports whether an assignment to a shell variable is really a
+// command invocation — a flag appears later on the same line.
+//
+// Both corpus cases are this shape:
+// `$domainAdminPassword = ConvertTo-SecureString "{1}" -AsPlainText -Force` and
+// `$securePassword = ConvertTo-SecureString -String $domainPassword …`. What
+// they share is not the variable but the command: a value with a `-Flag` after
+// it is an argument list, and a leaked literal assigned to a variable has
+// nothing after it.
+func valueIsCommand(text string, valueEnd int) bool {
+	rest := text[valueEnd:]
+	if i := strings.IndexAny(rest, "\n\r"); i >= 0 {
+		rest = rest[:i]
+	}
+	return shellFlagRe.MatchString(rest)
+}
+
 // namesItsOwnKey reports whether a value contains the name of the field it is
 // assigned to, which means the value is a reference to that field rather than
 // something stored in it.
@@ -531,8 +585,8 @@ func looksLikeCredentialMaterial(key, value string) bool {
 // The comparison is on the alphanumerics alone, so `accessToken` and
 // `req.body.accessToken` match, and so would `api-key` and `MY_API_KEY`. A
 // credential is not a superset of its own field name; a property being threaded
-// through a handler always is. From the same third-party corpus.
-func namesItsOwnKey(key, value string) bool {
+// through a handler always ends in it. From the same third-party corpus.
+func namesItsOwnKey(key, value string) bool { //nolint:revive // the value is the subject here
 	strip := func(s string) string {
 		var b strings.Builder
 		for _, r := range strings.ToLower(s) {
@@ -543,21 +597,30 @@ func namesItsOwnKey(key, value string) bool {
 		return b.String()
 	}
 	needle, hay := strip(key), strip(value)
-	return needle != "" && strings.Contains(hay, needle)
+	// The name has to be the END of the value, not merely inside it. A handler
+	// threading a property puts it last — `req.body.accessToken`, `ctx.token` —
+	// and a chosen password that happens to repeat the field name
+	// (`MyOwnPassword12345678`) does not, which is the distinction that keeps a
+	// real secret from being exempted by this gate.
+	return needle != "" && strings.HasSuffix(hay, needle)
 }
 
 // hasWordSegment reports whether value names something: a separator-delimited
 // run of wordSegmentFloor or more letters that is entirely one case.
 //
-// One case, and letters only, and both matter. Base64 of random bytes produces
-// mixed-case runs routinely — `wJalrXUtnFEMI` is thirteen letters with no digit
-// and is still key material — so a mixed-case run is not a word and a
-// single-case one is. Letters only matters because of the value this test must
-// not swallow: a lower-case hex key (`deadbeefcafebabe0123456789abcdef…`) is
-// letters and digits in one run, and reading it as a word because every letter
-// happens to be lower-case would be a false negative on the commonest secret
-// shape there is.
+// Three exclusions, and each was a real false negative. An entirely-hex value
+// is never a name (see isHex). A mixed-case run is not a word: base64 of random
+// bytes produces those routinely, and `wJalrXUtnFEMI` is thirteen letters with
+// no digit. And the run is measured on letters, so a segment that exists only
+// because digits split a longer token is not a word either.
 func hasWordSegment(value string) bool {
+	// Hex is the alphabet of digests and keys, not of names. Without this the
+	// letter runs inside a hex value are judged on their own — a 32-character
+	// hex key splits into a 16-letter lowercase "word" and reads as a name,
+	// which is a false negative on the commonest secret shape there is.
+	if isHex(value) {
+		return false
+	}
 	for _, segment := range strings.FieldsFunc(value, func(r rune) bool {
 		return !isLetter(r)
 	}) {
@@ -639,6 +702,22 @@ func entropyPerChar(value string) float64 {
 	return entropy
 }
 
+// isHex reports whether every character of s is a hex digit. Hex is the
+// alphabet of digests and keys, not of names — see hasWordSegment.
+func isHex(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func isLower(r rune) bool  { return r >= 'a' && r <= 'z' }
 func isUpper(r rune) bool  { return r >= 'A' && r <= 'Z' }
 func isDigit(r rune) bool  { return r >= '0' && r <= '9' }
@@ -669,8 +748,8 @@ func Detect(text string) (Finding, bool) {
 			return Finding{Rule: r.name, Label: r.label}, true
 		}
 	}
-	for _, run := range longHexRe.FindAllString(text, -1) {
-		if looksLikeKeyMaterial(run) && !inLabelledCardanoField(text) {
+	for _, loc := range longHexRe.FindAllStringIndex(text, -1) {
+		if looksLikeKeyMaterial(text[loc[0]:loc[1]]) && !isLabelledCardanoValue(text, loc[0]) {
 			return Finding{Rule: longHexRule, Label: longHexLabel}, true
 		}
 	}
@@ -679,11 +758,16 @@ func Detect(text string) (Finding, bool) {
 			return Finding{Rule: urlCredentialsRule, Label: urlCredentialsLabel}, true
 		}
 	}
-	for _, m := range assignmentRe.FindAllStringSubmatch(text, -1) {
-		if m[assignmentShellVar] != "" {
+	// SubmatchIndex rather than Submatch: the shell-variable test has to know
+	// where the value ENDS, not how long it is, to see what follows it.
+	for _, m := range assignmentRe.FindAllStringSubmatchIndex(text, -1) {
+		key := text[m[2*assignmentKey]:m[2*assignmentKey+1]]
+		value := text[m[2*assignmentValue]:m[2*assignmentValue+1]]
+		if text[m[2*assignmentShellVar]:m[2*assignmentShellVar+1]] != "" &&
+			valueIsCommand(text, m[2*assignmentValue+1]) {
 			continue
 		}
-		if keyNamesSecret(m[assignmentKey]) && looksLikeCredentialMaterial(m[assignmentKey], m[assignmentValue]) {
+		if keyNamesSecret(key) && looksLikeCredentialMaterial(key, value) {
 			return Finding{Rule: assignedSecretRule, Label: assignedSecretLabel}, true
 		}
 	}

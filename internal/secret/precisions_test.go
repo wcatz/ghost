@@ -325,6 +325,9 @@ func TestKeyAndValueGatesAreIndependentlyLoadBearing(t *testing.T) {
 // plutus.json carries, starting at the `59` byte-string tag. It is long enough
 // and hex enough to be a key's cborHex, which is the whole point: a script and a
 // signing key are the same shape, and only the envelope around them differs.
+// plutusScriptEnvelope is a public Plutus script the way plutus.json writes it.
+const plutusScriptEnvelope = `{"type":"PlutusScriptV1","cborHex":"59` + plutusScriptHex + `"}`
+
 const plutusScriptHex = "59" +
 	"014301323589010029800" +
 	"450141323355454501000002590101291323355450142" +

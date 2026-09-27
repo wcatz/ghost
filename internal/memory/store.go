@@ -2359,11 +2359,21 @@ func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 // has to ingest them, because the measurement is about retrieval over the
 // corpus as published.
 //
-// That is why this is a named function rather than a flag. The guard exists
-// because stored text is embedded, replayed into every later session's context,
-// mirrored to the Obsidian vault and quoted into the next reflect prompt — a
-// corpus row in a scratch database that is deleted when the run ends has none
-// of those exposures. Nothing in a normal session may reach this: it is not on
+// That is why this is a named function rather than a flag. The claim justifying
+// it is deliberately the narrow one, stated exactly: the row lands in a scratch
+// database that dies with the run, and it is never injected into a session's
+// context, never mirrored to the Obsidian vault, and never quoted into a
+// reflect, resolve or supersede prompt. Those are the exposures the guard
+// exists for.
+//
+// "Never embedded" is NOT part of the claim. The two seeders that run a
+// non-fts condition embed every turn they ingest and send it to Ollama. The
+// narrow claim is the one that holds, and it is the one quoted, because the
+// wide one is what a future author would cite to widen this carve-out to a
+// bench run against a real store — where the vault and reflect exposures are
+// real.
+//
+// Nothing in a normal session may reach this: it is not on
 // provider.MemoryStore, it is not in the MCP surface, and its only callers are
 // the three dataset seeders under bench/.
 //

@@ -28,6 +28,24 @@ func TestDetectRejectsCredentialValues(t *testing.T) {
 		label string
 	}{
 		{
+			// The self-naming gate must be about the TAIL of the value. A chosen
+			// password that repeats the field name is an ordinary paste, and
+			// exempting it would store a real secret.
+			name:  "password that repeats its own field name",
+			text:  "password: MyOwnPassword12345678",
+			rule:  "assigned-secret",
+			label: "assigned credential value",
+		},
+		{
+			// A labelled Plutus script and an unrelated key paste in the same
+			// memory. The cborHex exemption is scoped to the run the label
+			// introduces, so the second run is still caught.
+			name:  "plutus script label beside a separate key paste",
+			text:  plutusScriptEnvelope + "\n" + "and the cold key was 5820010df2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f",
+			rule:  "long-hex",
+			label: "long hex blob",
+		},
+		{
 			name:  "age encryption identity",
 			text:  "age key: AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ",
 			rule:  "age-identity",
@@ -71,6 +89,56 @@ func TestDetectRejectsCredentialValues(t *testing.T) {
 			text:  "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
 			rule:  "aws-access-key-id",
 			label: "AWS access key ID",
+		},
+		{
+			// A labelled key with neither a .skey filename nor a "type" field.
+			// This is the shape the cborHex label used to exempt wholesale, and
+			// what catches it is the CBOR tag rather than the envelope: a key is
+			// a byte string of 32 or 64 bytes, which is 5820/5840, while a
+			// script's length needs two bytes and its tag is 59.
+			name:  "cardano cold signing key in a bare cborHex field",
+			text:  `the cold key cborHex: 5820010df2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f`,
+			rule:  "cardano-cbor-hex",
+			label: "Cardano CBOR-encoded key",
+		},
+		{
+			// Three ordinary ways a key is pasted. Indentation is how it lands
+			// inside a YAML block scalar or an indented code fence; CRLF is how
+			// it comes out of a Windows editor; escaped newlines are how kubectl
+			// and Terraform render a Secret.
+			name:  "indented pem block inside a yaml block scalar",
+			text:  "  -----BEGIN RSA PRIVATE KEY-----\n  MIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Pyy\n  -----END RSA PRIVATE KEY-----",
+			rule:  "pem-private-key",
+			label: "PEM private key block",
+		},
+		{
+			name:  "pem block with crlf line endings",
+			text:  "-----BEGIN RSA PRIVATE KEY-----\r\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Pyy\r\n-----END RSA PRIVATE KEY-----\r\n",
+			rule:  "pem-private-key",
+			label: "PEM private key block",
+		},
+		{
+			name:  "pem block with escaped newlines from a json secret",
+			text:  `{"data":{"tls.key":"-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Pyy\n-----END RSA PRIVATE KEY-----"}}`,
+			rule:  "pem-private-key",
+			label: "PEM private key block",
+		},
+		{
+			// A hex credential under a credential-named key. The word test splits
+			// on digits, so without the entirely-hex exclusion this reads as a
+			// 16-letter lowercase "word" and is stored.
+			name:  "hex api key under a credential-named key",
+			text:  "api_key: deadbeefcafebabe0123456789abcdef",
+			rule:  "assigned-secret",
+			label: "assigned credential value",
+		},
+		{
+			// A literal assigned to a shell variable. The $ on the key is not a
+			// reason to skip: only a value with a flag after it is a command.
+			name:  "literal secret assigned to a shell variable",
+			text:  `$db_password = "K3q9Xm2pL7wRt4ZbAvN1"`,
+			rule:  "assigned-secret",
+			label: "assigned credential value",
 		},
 		{
 			// Split at the prefix: a contiguous Slack token literal is rejected
