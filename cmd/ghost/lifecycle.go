@@ -902,9 +902,26 @@ func runReflect() {
 		fmt.Fprintf(os.Stderr, "warning: %d consolidation memory content(s) exceeded the %d-byte cap and were truncated with an explicit marker\n", cuts, memory.MaxContentLen)
 	}
 
+	// What the response CLAIMED it disposed of. Nothing acts on these claims — an
+	// unattended reflect never deletes a memory on the model's say-so alone
+	// (#549) — so this is the only place a person deciding whether to pass
+	// --apply can see that the model tried to drop something. What becomes of each
+	// claim is NOT predicted here: the guarded-drop report above already prints
+	// the outcome, and a second opinion about it would be a second implementation
+	// of the guard's decision waiting to disagree with the first. Read the two
+	// together — this says what was claimed, that says what was retained or
+	// deleted.
+	for _, r := range result.Replacements {
+		if r.Text == "" {
+			fmt.Println("  Disposed of (model's claim): (no replacement text recorded)")
+			continue
+		}
+		fmt.Printf("  Disposed of (model's claim): replaced by %s\n", truncateForDisplay(r.Text, 80))
+	}
+
 	// The >50% reduction warning. On the unattended lifecycle path this is the
 	// only report of a hard compression, and it goes to the stderr of a process
-	// nobody reads while the exit status stays 0 — so the count it prints has to
+	// nobody reads while the exit status still 0 — so the count it prints has to
 	// be the one that decides whether a memory survived. A dry run reports the
 	// compression it would apply, which is the more useful of the two.
 	reportReductionWarning(os.Stderr, live, projectMems, globalMems, parsed.promoteGlobals)

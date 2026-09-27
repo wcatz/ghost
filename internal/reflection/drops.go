@@ -82,23 +82,6 @@ const dropContainmentThreshold = 0.45
 // `obsolete` drop, a rewrite, a supersession, and every input of the offline
 // SQLite tier, which names no ids — is measured against a single output.
 //
-// What the guard no longer has to do is the biggest part. An input the response
-// never named is emitted verbatim by executeOps (#639), so there is nothing to
-// rescue: before that, an unnamed memory was emitted by nobody and survived only
-// if this guard FAILED to recognise a survivor, which made a false positive in
-// the "absorbed" direction a silent deletion with no warning and no
-// --allow-drops. An id the model never mentioned needs no inference at all.
-//
-// Which output set an input is compared against is the remaining choice. A MERGED
-// source (result.Merges) is measured against the text of ITS OWN merge, since
-// that is the only witness that can say whether the merge carried it: a merge
-// source is consumed by its merge, so its own text is never in the result, and
-// the parser rejects an id claimed twice, so a sibling cannot be there either.
-// It is measured against nothing at all when the merge is not in the result, and
-// falls back to the strict per-output test. Everything else is measured against a
-// single output. The SQLite fallback names no ids, so every one of its inputs is
-// measured the strict way.
-//
 // Uses the package's tokenize (numeric-retaining, stopword-filtered) so merged
 // rewrites that preserve substance — including ports and versions — are
 // recognized as survivors and are not re-added alongside the merge.

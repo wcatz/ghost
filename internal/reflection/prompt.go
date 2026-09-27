@@ -68,9 +68,12 @@ type Merge struct {
 // does not read it and no longer exempts anything on it: an unattended reflect
 // never deletes a memory on the model's say-so alone, because a stale row that
 // is kept is repairable by resolve and supersede while a deleted row is not (see
-// AuditGuardedDrops). It is kept because it is the only place the response's own
-// account of a disposal is visible to a reader of the result — the dry run and
-// the tests both want to see what was claimed, not what survived.
+// AuditGuardedDrops). Its reader is `ghost reflect`'s own report, which prints each
+// claim under "Disposed of (model's claim)" so a person deciding whether to pass
+// --apply can see that the model tried to drop something — the guarded-drop report
+// beside it says what was actually retained or deleted. Without that reader the
+// field would be write-only, and the honest move would be to delete it rather
+// than keep a claim nothing looks at.
 type Replacement struct {
 	ID   string
 	Text string
