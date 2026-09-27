@@ -346,6 +346,9 @@ func TestGooseChildCannotDiscoverGhostsOwnPlugin(t *testing.T) {
 
 	bin := fakeHarnessPolicyBinary(t, "goose", `
 [ -e "$HOME/.agents/plugins/ghost/mcp.json" ] && { echo "goose child discovered Ghost's own MCP plugin" >&2; exit 1; }
+# HOME itself must be confined, not merely happen to miss the plugin path: an
+# unset or wrong HOME would also pass the test above.
+case "$HOME" in "$GHOST_SCRATCH_DIR"/*) ;; *) echo "goose home not isolated: $HOME" >&2; exit 1;; esac
 [ -r "$XDG_CONFIG_HOME/goose/config.yaml" ] || { echo "goose child lost the config it authenticates from" >&2; exit 1; }
 printf '%s' 'KEEP'
 `)
@@ -357,6 +360,84 @@ printf '%s' 'KEEP'
 	if text != "KEEP" {
 		t.Fatalf("stdout = %q", text)
 	}
+}
+
+// TestConfigureGooseIsolationFailsClosed: the two states in which the security
+// boundary cannot be established must not report success. A child that runs
+// with the real HOME finds Ghost's own MCP plugin again, so "isolation
+// skipped" is not a safe degradation — it is the vulnerability. Both cases
+// return an error, which fails the call rather than the boundary.
+func TestConfigureGooseIsolationFailsClosed(t *testing.T) {
+	home := t.TempDir()
+	config := filepath.Join(home, ".config", "goose")
+	if err := os.MkdirAll(config, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(config, "config.yaml"), []byte("provider: openai\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("no scratch directory", func(t *testing.T) {
+		cmd := &exec.Cmd{Env: []string{"HOME=" + home}}
+		if err := configureGooseIsolation(cmd); err == nil {
+			t.Fatal("isolation reported success with no directory to confine the child to")
+		}
+	})
+
+	t.Run("no home and no config root", func(t *testing.T) {
+		cmd := &exec.Cmd{Dir: t.TempDir(), Env: []string{"PATH=/usr/bin"}}
+		if err := configureGooseIsolation(cmd); err == nil {
+			t.Fatal("isolation reported success with nothing to confine")
+		}
+	})
+
+	// The positive case, so the table cannot pass by always erroring. No
+	// XDG_CONFIG_HOME here, so this exercises the home-relative fallback that
+	// goose uses when the variable is unset — the branch where the config link
+	// has to be created, and where pointing HOME straight at the config
+	// directory would silently miss.
+	t.Run("resolves and confines", func(t *testing.T) {
+		dir := t.TempDir()
+		cmd := &exec.Cmd{Dir: dir, Env: []string{"HOME=" + home}}
+		if err := configureGooseIsolation(cmd); err != nil {
+			t.Fatalf("configureGooseIsolation: %v", err)
+		}
+		got := envValue(cmd.Env, "HOME")
+		if got != filepath.Join(dir, "goose-home") {
+			t.Fatalf("HOME = %q, want the isolated home", got)
+		}
+		// Resolved the way goose resolves it, not the way the code built it.
+		data, err := os.ReadFile(filepath.Join(got, ".config", "goose", "config.yaml"))
+		if err != nil {
+			t.Fatalf("isolated home does not reach the real config: %v", err)
+		}
+		if string(data) != "provider: openai\n" {
+			t.Fatalf("config through the isolated home = %q", data)
+		}
+		// And the plugin root really is gone, rather than merely unpopulated
+		// by accident of this fixture.
+		if _, err := os.Stat(filepath.Join(got, ".agents")); !os.IsNotExist(err) {
+			t.Errorf("isolated home exposes an .agents directory: %v", err)
+		}
+	})
+
+	// With XDG_CONFIG_HOME set the child reads an absolute path and HOME plays
+	// no part, so no link may be invented — exporting a synthesized value here
+	// is exactly the macOS/Windows misdirection this design avoids.
+	t.Run("explicit config root is left alone", func(t *testing.T) {
+		dir := t.TempDir()
+		env := []string{"HOME=" + home, "XDG_CONFIG_HOME=" + filepath.Join(home, ".config")}
+		cmd := &exec.Cmd{Dir: dir, Env: env}
+		if err := configureGooseIsolation(cmd); err != nil {
+			t.Fatalf("configureGooseIsolation: %v", err)
+		}
+		if got := envValue(cmd.Env, "XDG_CONFIG_HOME"); got != filepath.Join(home, ".config") {
+			t.Fatalf("XDG_CONFIG_HOME = %q, want the parent's value", got)
+		}
+		if got := envValue(cmd.Env, "HOME"); got != filepath.Join(dir, "goose-home") {
+			t.Fatalf("HOME = %q, want the isolated home", got)
+		}
+	})
 }
 
 func TestOpenCodeClientUsesNoToolPolicy(t *testing.T) {

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,9 +47,8 @@ func (c *GooseClient) run(ctx context.Context, prompt string) (string, error) {
 	// instructions-from-stdin form, and it lands in the same place a text
 	// argument does — both become the run's input contents.
 	args = append(args, "-i", "-")
-	cmd, release, _ := harnessCommand(ctx, c.binary, args, os.Environ(), harnessGoose)
-	if err := configureGooseIsolation(cmd); err != nil {
-		release()
+	cmd, release, err := c.subprocessEnv(ctx, args)
+	if err != nil {
 		return "", err
 	}
 	defer release()
@@ -64,68 +62,144 @@ func (c *GooseClient) run(ctx context.Context, prompt string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// subprocessEnv builds the goose child command and confines it, returning the
+// command and a release that is always safe to call. It routes through
+// harnessCommand, so the environment allowlist, the working directory and the
+// temp variables follow the same policy as the other three clients, and then
+// applies the plugin isolation below.
+//
+// When the scratch root is unusable harnessCommand leaves the working directory
+// empty, and the isolation needs a directory to put the child's home in. The
+// fallback is a private MkdirTemp tree, mirroring
+// OpenCodeClient.subprocessEnv: a broken data dir must not quietly restore
+// Ghost's own plugin inside every harness call, so the child either runs
+// isolated or the call fails.
+func (c *GooseClient) subprocessEnv(ctx context.Context, args []string) (*exec.Cmd, func(), error) {
+	cmd, release, ok := harnessCommand(ctx, c.binary, args, os.Environ(), harnessGoose)
+	if ok {
+		if err := configureGooseIsolation(cmd); err != nil {
+			release()
+			return nil, nil, err
+		}
+		return cmd, release, nil
+	}
+
+	dir, err := os.MkdirTemp("", "ghost-goose-")
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	cmd.Dir = dir
+	cmd.Env = scratchEnv(cmd.Env, dir)
+	if err := configureGooseIsolation(cmd); err != nil {
+		_ = os.RemoveAll(dir)
+		release()
+		return nil, nil, err
+	}
+	return cmd, func() { _ = os.RemoveAll(dir) }, nil
+}
+
 // configureGooseIsolation gives the goose child a home that cannot contain a
-// discoverable plugin package, while leaving the config it authenticates from
-// where goose looks for it.
+// discoverable plugin package, and keeps it pointed at the configuration it
+// authenticates from.
 //
 // goose discovers user-scope Agent Plugins under $HOME/.agents/plugins/, and
 // that path is home-relative BY SPECIFICATION rather than XDG-relative, so
 // overriding XDG_CONFIG_HOME does not move it. `ghost mcp init --client goose`
 // installs a package there whose mcp.json registers the Ghost stdio MCP server
 // and whose hooks/hooks.json run `ghost hook <event> --source goose` through a
-// shell. The child needs the real HOME to read ~/.config/goose and authenticate,
-// so on its own it also finds that package and starts Ghost's own server from
+// shell. The child needs a home to read its configuration and authenticate, so
+// on its own it also found that package and started Ghost's own server from
 // inside a reflect/resolve/supersede call — the recursion this closes. The
-// prompt those calls carry is memory text, which routinely contains third-party
-// content, so a second Ghost process on the other end of it is not a
-// formality. --no-profile does not cover it: that governs the configured
+// prompt those calls carry is memory text, which routinely contains
+// third-party content, so a second Ghost process on the other end of it is not
+// a formality. --no-profile does not cover this: it governs the configured
 // profile, not plugin discovery, and goose documents no variable that disables
 // discovery.
 //
-// The child still reaches its configuration, which is what HOME is kept for:
-// goose reads config.yaml, secrets.yaml and settings.json from
-// $XDG_CONFIG_HOME/goose when it is set and from $HOME/.config/goose otherwise.
-// Pinning XDG_CONFIG_HOME to the resolved parent value first means the
-// home-relative fallback resolves to the same directory it did before, so
-// authentication is unchanged and only the plugin root moves.
+// The isolated home is a real directory holding ONE symlink, to the config
+// directory, at the path goose resolves it from. goose's config root differs by
+// platform and by build — $XDG_CONFIG_HOME/goose, $HOME/.config/goose,
+// ~/Library/Application Support on macOS, %APPDATA% on Windows — and this code
+// cannot know which one a given goose and user pair uses. Inventing a value
+// instead, synthesizing $HOME/.config and exporting it as XDG_CONFIG_HOME, is
+// only correct on the platform whose convention it guesses; on the others it
+// redirects a working authenticated call to a config root that user's goose was
+// never configured from. Linking the directory where the parent already had it
+// leaves the child's own resolution untouched — wherever it looked before, it
+// finds the same bytes — and moves nothing else, because .agents/ is the only
+// other thing under HOME that goose reads for this purpose.
 //
-// This mirrors configureOpenCodeIsolation, which exists for the same reason on
-// the opencode side: isolating the config tree is deliberately stronger than
-// trusting one variable, because harness versions differ in which root they
-// consult.
+// The link goes at $HOME/.config, not at $HOME itself: goose's fallback spells
+// the path as $HOME/.config/goose, so a home that IS the config directory would
+// make that resolve to <config>/.config/goose and miss.
+//
+// The Windows home variables are cleared rather than repointed, because
+// HOMEDRIVE is a drive letter and cannot be joined onto a scratch path.
+// USERPROFILE is the variable that identifies the home there, and it is set,
+// so clearing the pair removes the alternate route back to the real one.
 func configureGooseIsolation(cmd *exec.Cmd) error {
-	env := cmd.Env
-	configHome := harnessEnvValue(env, "XDG_CONFIG_HOME")
-	if configHome == "" {
-		for _, homeKey := range []string{"HOME", "USERPROFILE"} {
-			if home := harnessEnvValue(env, homeKey); home != "" {
-				configHome = filepath.Join(home, ".config")
-				break
-			}
-		}
+	if cmd.Dir == "" {
+		return fmt.Errorf("goose scratch directory is empty")
 	}
-	if configHome == "" {
-		// No home to relocate the plugin root out of, and none to lose: the
-		// child can reach nothing under it that this process did not already
-		// hand over. Say so rather than failing a call that can still run.
-		slog.Warn("goose child has no home directory; plugin discovery is not confined",
-			"harness", harnessGoose)
-		return nil
+	env := cmd.Env
+
+	// Resolved before HOME is replaced, so the link is created where the child
+	// will look for it.
+	configDir := gooseConfigDir(env)
+	if configDir == "" {
+		return fmt.Errorf("goose child has no home or config root; refusing to run with plugin discovery unconfined")
 	}
 
-	env = setHarnessEnvValue(env, "XDG_CONFIG_HOME", configHome)
-	if cmd.Dir != "" {
-		// The scratch directory, which harnessCommand already confines the
-		// working directory to, dies with the invocation. An empty one means
-		// the scratch root is unusable — harnessCommand has already warned, and
-		// leaving HOME alone is the safe half of the degradation.
-		home := filepath.Join(cmd.Dir, "goose-home")
-		if err := os.MkdirAll(home, 0o700); err != nil {
-			return fmt.Errorf("goose isolated home %s: %w", home, err)
-		}
-		env = setHarnessEnvValue(env, "HOME", home)
-		env = setHarnessEnvValue(env, "USERPROFILE", home)
+	home := filepath.Join(cmd.Dir, "goose-home")
+	if err := linkGooseConfig(home, env, configDir); err != nil {
+		return err
 	}
+
+	env = setHarnessEnvValue(env, "HOME", home)
+	env = setHarnessEnvValue(env, "USERPROFILE", home)
+	env = setHarnessEnvValue(env, "HOMEDRIVE", "")
+	env = setHarnessEnvValue(env, "HOMEPATH", "")
 	cmd.Env = env
 	return nil
+}
+
+// linkGooseConfig makes the isolated home resolve to configDir by the same rule
+// the parent used: through XDG_CONFIG_HOME when it is set, and through the
+// home-relative .config/goose when it is not. It never invents a variable —
+// the whole point is that the child's own, possibly platform-specific,
+// resolution still lands in the right place.
+func linkGooseConfig(home string, env []string, configDir string) error {
+	if configHome := harnessEnvValue(env, "XDG_CONFIG_HOME"); configHome != "" {
+		// Already an absolute path the child reads directly; HOME plays no part.
+		return nil
+	}
+	configHome := filepath.Join(home, ".config")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		return fmt.Errorf("goose isolated config home %s: %w", configHome, err)
+	}
+	link := filepath.Join(configHome, "goose")
+	if err := os.Symlink(configDir, link); err != nil && !os.IsExist(err) {
+		return fmt.Errorf("goose isolated config %s: %w", link, err)
+	}
+	return nil
+}
+
+// gooseConfigDir returns the directory holding the user's goose configuration
+// — the one thing the isolated home must still reach — or "" when the parent
+// named neither a config root nor a home. XDG_CONFIG_HOME wins when present,
+// because that is the variable goose consults first; otherwise the
+// home-relative .config is used, which is the documented Linux and macOS
+// location. The Windows root (%APPDATA%) is deliberately not restated here:
+// the child inherits APPDATA through the allowlist and resolves it itself.
+func gooseConfigDir(env []string) string {
+	if configHome := harnessEnvValue(env, "XDG_CONFIG_HOME"); configHome != "" {
+		return filepath.Join(configHome, "goose")
+	}
+	for _, homeKey := range []string{"HOME", "USERPROFILE"} {
+		if home := harnessEnvValue(env, homeKey); home != "" {
+			return filepath.Join(home, ".config", "goose")
+		}
+	}
+	return ""
 }
