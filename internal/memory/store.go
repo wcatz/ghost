@@ -2412,10 +2412,13 @@ type UpsertOptions struct {
 // not: a development row never replaced a production one. Reading such an edge
 // as a verdict blocks every fold of that row — so each re-save of the exact text
 // inserts a second copy instead of folding, and a fact that should occupy one
-// row fills the store with restatements. The exemption is asked inside the
-// statement because the probe that chose the row is this statement's sibling and
-// both are decided under the same LIMIT (see scopesConflictSQL). The edge is not
-// deleted; it is merely not a reason to refuse a fold.
+// row fills the store with restatements. The exemption is asked in the same
+// statement that reads the row, so the answer arrives with the row instead of in
+// a second read that could disagree with it: it is a property of the edge this
+// statement already reads, not of the row. (Unlike Upsert's two dedup probes,
+// there is no candidate window here to protect — this statement names one row by
+// id — and a Go-side check would have been possible; see scopesConflictSQL.) The
+// edge is not deleted; it is merely not a reason to refuse a fold.
 func foldTargetStillLive(ctx context.Context, tx *sql.Tx, projectID, id string) (bool, error) {
 	if id == "" {
 		return false, nil
