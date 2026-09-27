@@ -160,12 +160,20 @@ The cooldown exists because the hook fires once per turn, so a chain per turn is
 
 Both vector legs are brute force over the project's embeddings, and they run as
 two phases in `internal/memory/vector_scan.go`. `snapshotVectors` copies every
-candidate row out of SQLite and returns; `vectorRows.search` then scores the
-copy. The split is what the phase boundary is for: the copy is the only part
-that needs the store's read lock and its single connection, and the cosine pass
-— O(corpus × dims) of float arithmetic — needs neither, so a search no longer
-blocks writers for the length of the corpus. It matters most for `ghost
-supersede`, which runs one search per memory.
+candidate row out of SQLite under the store's read lock and its single
+connection, and returns; `vectorRows.search` then scores the copy with both
+released. The copy is the only part that needs either — the cosine pass is
+O(corpus × dims) of float arithmetic over rows the store has already handed over,
+so holding a read lock across it blocked a writer on the store for the length of
+the whole corpus. It matters most for `ghost supersede`, which runs one search
+per memory.
+
+A writer is still kept out for the duration of the copy, and releasing the mutex
+is not what fixes that: `OpenDB` pins the pool at one connection, so a write
+cannot start while a query is streaming whether or not a mutex says so. The
+connection, not the lock, is what a corpus scan contends on — which is why the
+next change here is a cache that stops asking SQLite for the bytes, not finer
+lock work.
 
 The copy keeps the bytes as the database handed them over rather than decoding
 them, and the score loop reads the little-endian `float32`s back out of the
@@ -179,9 +187,13 @@ with it, so the substring test can save a parse but never decides membership.
 Ranking holds a bounded window rather than the corpus: candidates are offered to
 a min-heap whose root is the worst row held, so a row that cannot win a slot
 costs one comparison, and the order is imposed once at the end over at most
-`limit` rows. The order is total — cosine descending, ties broken by scan
-position — so the answer is a function of the stored data and not of the order
-the query planner happened to return the rows in.
+`limit` rows. The order is total — cosine descending, exact ties broken by scan
+position — so the answer is a function of the stored data *and* of the order the
+scan yielded it in, rather than of the heap's internals. That is not independence
+from the scan order and does not claim to be: the query has no `ORDER BY`, so a
+`VACUUM` or an index rebuild can reorder a tie. What it does buy is that two
+searches over the same rows in the same order return the same rows, which the
+unstable `sort.Slice` it replaces did not promise either.
 
 The scratch is recycled through a `sync.Pool` on the store, so a steady-state
 search refills buffers it grew last time; an oversized embedding buffer is

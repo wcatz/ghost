@@ -28,15 +28,31 @@ const vectorScanColumns = `
 	FROM memory_embeddings e
 	JOIN memories m ON m.id = e.memory_id`
 
-// duringVectorScoreFn is a test seam inside a search's scoring pass — the window
-// between the candidate rows being copied out of SQLite and the answer being
-// ranked. Production leaves it a no-op. A test parks there to find out what the
-// search is and is not holding while it scores, which is the property #556 is
-// about and the only way to assert it without measuring a duration.
-var duringVectorScoreFn atomic.Value // func()
+// duringVectorCopyFn and duringVectorScoreFn are test seams inside a vector
+// search, one in each of its two phases. Production leaves both no-ops. A test
+// parks in one of them to find out what the search is and is not holding at that
+// point, which is the property #556 is about and the only way to assert it
+// without measuring a duration.
+//
+// They have to be two seams rather than one. A search reads the store's
+// configured embedding identity under a read lock before either phase begins, so
+// with a single seam there is no way to tell "the copy holds the read lock" from
+// "the search has not got past the identity read yet" — a test that parked in
+// the one seam and found a writer blocked could not say which of the two it had
+// caught.
+var (
+	duringVectorCopyFn  atomic.Value // func()
+	duringVectorScoreFn atomic.Value // func()
+)
 
 func init() {
+	duringVectorCopyFn.Store(func() {})
 	duringVectorScoreFn.Store(func() {})
+}
+
+func duringVectorCopy() {
+	fn, _ := duringVectorCopyFn.Load().(func())
+	fn()
 }
 
 func duringVectorScore() {
@@ -71,10 +87,14 @@ type vecCandidate struct {
 //
 // The tiebreak is what makes the bounded top-k a total order. Without one, two
 // rows with equal float32 cosines have no order between them, and a bounded
-// heap hands back whichever of them happened to reach the cut last — an answer
-// that could change because the query planner returned the rows in another
-// order. Ordering by (score, scan position) makes the returned rows a function
-// of the stored data alone.
+// heap hands back whichever of them happened to reach the cut last, so the
+// answer would depend on the heap's internals rather than on the scan. Ordering
+// by (score, scan position) makes the returned rows a function of the stored
+// data AND the order the scan yielded it in. That is a weaker guarantee than
+// independence from the scan order, and deliberately so: the query has no ORDER
+// BY, so a VACUUM or an index rebuild can reorder a tie. What it does buy is
+// that two searches over the same rows in the same order return the same rows,
+// which the old unstable sort.Slice did not promise either.
 func (c vecCandidate) betterThan(o vecCandidate) bool {
 	return compareCandidates(c, o) < 0
 }
@@ -164,13 +184,19 @@ func (v *vectorRows) embed(sp vecSpan) []byte { return v.embeds[sp.off : sp.off+
 // store's read lock and its single connection released, so the caller can score
 // them without either.
 //
-// The read lock and the connection are only held for the copy, and the copy is
-// only held for the copy: reading the rows is what needs them, and the cosine
-// pass over them does not. query is the caller's own SQL (the project-scoped
-// leg and the cross-project leg differ only in their WHERE clause) and is run
-// against queryDB, so ExplainSearch's trace store still reads its snapshot
-// transaction.
+// Both are held for the copy only, because the copy is the only part that needs
+// them: the cosine pass over the rows it produced does not read the database
+// again. The connection is the binding constraint either way — OpenDB pins the
+// pool at one, so a write cannot proceed while a query is streaming regardless
+// of the mutex — but the lock still says what the statement is, and every other
+// reader in this package takes it. query is the caller's own SQL (the
+// project-scoped leg and the cross-project leg differ only in their WHERE
+// clause) and is run against queryDB, so ExplainSearch's trace store still
+// reads its snapshot transaction.
 func (s *Store) snapshotVectors(ctx context.Context, query string, args []any, queryVec []float32, identity string, v *vectorRows) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	rows, err := s.queryDB().QueryContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("load embeddings: %w", err)
@@ -213,6 +239,7 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 		identityBytes = []byte(identity)
 	}
 	mismatched, mismatchedModel := 0, ""
+	first := true
 
 	for rows.Next() {
 		// RawBytes, not string/[]byte destinations. database/sql clones a
@@ -260,6 +287,14 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 		v.projects = append(v.projects, d.project...)
 		v.embeds = append(v.embeds, d.embed...)
 		v.rows = append(v.rows, row)
+
+		// Once per scan, after the first row is in the snapshot, so the seam is
+		// reached with the copy demonstrably in progress rather than about to
+		// start.
+		if first {
+			first = false
+			duringVectorCopy()
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -319,8 +354,17 @@ func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]stri
 		// RRF awards weight by rank alone, so a meaningless rank-1 candidate
 		// would otherwise claim the full vector weight and enter the fused
 		// window.
+		//
+		// `!(sim > floor)` rather than `sim <= floor`, which is the form the old
+		// search used and which also drops a NaN: every comparison against NaN
+		// is false, so the negated form would let a NaN cosine into a window
+		// whose comparator cannot rank it, and from there into RRF, which weighs
+		// a candidate by its rank alone. A stored embedding cannot be NaN today
+		// (they arrive as JSON numbers, and float64 accumulation over 768
+		// float32s cannot overflow), but the old shape was right and this one
+		// would quietly stop being right the day either stops holding.
 		sim := cosineFromBytes(queryVec, v.embed(sp.embed))
-		if sim <= minVectorSimilarity {
+		if !(sim > minVectorSimilarity) {
 			continue
 		}
 		if len(probe.want) > 0 && !probe.eligible(v.column(v.scopes, sp.scope)) {

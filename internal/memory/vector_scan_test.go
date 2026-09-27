@@ -259,26 +259,31 @@ func TestSearchVectorAllRankingMatchesTheCollectAndSortBaseline(t *testing.T) {
 
 // --- the store lock ---
 
-// setDuringVectorScore installs the scoring-pass seam for one test. The
-// production value is a no-op; nothing outside a test sets it.
-func setDuringVectorScore(fn func()) {
-	if fn == nil {
-		fn = func() {}
+// setDuringVectorSeams installs the copy and scoring-pass seams for one test.
+// The production values are no-ops; nothing outside a test sets them.
+func setDuringVectorSeams(copyFn, scoreFn func()) {
+	if copyFn == nil {
+		copyFn = func() {}
 	}
-	duringVectorScoreFn.Store(fn)
+	if scoreFn == nil {
+		scoreFn = func() {}
+	}
+	duringVectorCopyFn.Store(copyFn)
+	duringVectorScoreFn.Store(scoreFn)
 }
 
 // TestVectorSearchScoresWithTheStoreLockReleased is the property #556 is about.
 // A vector search copies its candidate rows out of SQLite under the store's read
-// lock, and that read lock is what blocks every writer on the store — including
-// the single connection, since OpenDB caps the pool at one. The cosine pass that
-// follows is the O(corpus × dims) half of the search and needs neither, so it
-// must not be holding them.
+// lock, and that read lock is what a writer on the store waits for. The cosine
+// pass that follows is the O(corpus × dims) half of the search and needs neither
+// the lock nor the connection, so it must not be holding them.
 //
 // The test parks the search inside its scoring pass and asserts a writer
 // completes. A search that still held the read lock across the pass would park
 // the writer until the pass finished, and the pass is waiting for the test —
 // which is exactly the stall the timeout below reports.
+//
+// The other half of the property is TestVectorSearchCopiesTheCorpusUnderTheStoreReadLock.
 func TestVectorSearchScoresWithTheStoreLockReleased(t *testing.T) {
 	store, ctx := setupTestStore(t)
 	// A corpus big enough that the scoring pass is a real wait rather than a
@@ -309,11 +314,11 @@ func TestVectorSearchScoresWithTheStoreLockReleased(t *testing.T) {
 			close(release)
 		}
 	}
-	setDuringVectorScore(func() {
+	setDuringVectorSeams(nil, func() {
 		close(entered)
 		<-release
 	})
-	t.Cleanup(func() { setDuringVectorScore(nil) })
+	t.Cleanup(func() { setDuringVectorSeams(nil, nil) })
 
 	searched := make(chan error, 1)
 	go func() {
@@ -352,7 +357,7 @@ func TestVectorSearchScoresWithTheStoreLockReleased(t *testing.T) {
 }
 
 // TestVectorSearchReadsIdentityBeforeTakingTheLock: a search reads the store's
-// configured embedding identity before it takes the read lock, because the scan
+// configured embedding identity before it takes the read lock, because the copy
 // that follows runs with the read lock held and a second RLock on an RWMutex
 // that already has a writer waiting blocks that writer's readers — including
 // the second one — forever. The deadlock needs a waiting writer to be visible,
@@ -480,20 +485,24 @@ func TestVectorSearchScoresWithoutAllocatingTheCorpus(t *testing.T) {
 }
 
 // TestVectorSearchTopKTieBreakIsScanOrder: the bounded heap needs a total order,
-// and with two rows at the same float32 cosine the only stable one is the order
-// the scan yielded them in. Without it the answer would depend on which row
-// happened to reach the cut last, and a planner that reorders the scan would
-// change the ranking for the same data.
+// and for rows at exactly the same float32 cosine the only stable one is the
+// order the scan yielded them in. Without it the answer would depend on which
+// row happened to reach the cut last rather than on the scan at all.
+//
+// The rows are alternated {1,0} and {2,0} against a {1,0} query, so every
+// cosine is exactly 1.0 while no two rows are byte-identical — a tie produced by
+// different data, not by a duplicated vector, and one a different magnitude
+// could not be accused of producing by accident. The last case gives the
+// eviction path a strictly better candidate that arrives late, which is the
+// comparison `offer` actually makes.
 func TestVectorSearchTopKTieBreakIsScanOrder(t *testing.T) {
 	query := []float32{1, 0}
-	build := func() *vectorRows {
+	build := func(vecs ...[]float32) *vectorRows {
+		t.Helper()
 		v := &vectorRows{}
-		for i := range 6 {
-			// Every row is a different memory at the same angle to the query, so
-			// every cosine is exactly 1 and the tiebreak is the only thing
-			// ordering them.
+		for i, vec := range vecs {
 			id := fmt.Sprintf("tie-%d", i)
-			blob := float32sToBytes([]float32{1, float32(i)})
+			blob := float32sToBytes(vec)
 			row := vectorRowSpan{
 				id:      vecSpan{len(v.ids), len(id)},
 				project: vecSpan{len(v.projects), len("test-proj")},
@@ -506,9 +515,18 @@ func TestVectorSearchTopKTieBreakIsScanOrder(t *testing.T) {
 		}
 		return v
 	}
+	// Every score is 1.0: assert it rather than trust the construction, because a
+	// test that claims to exercise a tie and quietly has none is worse than no
+	// test at all.
+	ties := [][]float32{{1, 0}, {2, 0}, {1, 0}, {2, 0}, {1, 0}, {2, 0}}
+	for i, vec := range ties {
+		if sim := cosineFromBytes(query, float32sToBytes(vec)); sim != 1 {
+			t.Fatalf("fixture row %d scores %v, want exactly 1 — the test needs real ties", i, sim)
+		}
+	}
 
 	for _, limit := range []int{1, 3, 6} {
-		got := build().search(query, limit, nil)
+		got := build(ties...).search(query, limit, nil)
 		if len(got) != limit {
 			t.Fatalf("limit %d returned %d candidates, want %d", limit, len(got), limit)
 		}
@@ -518,6 +536,153 @@ func TestVectorSearchTopKTieBreakIsScanOrder(t *testing.T) {
 			}
 		}
 	}
+
+	// A better candidate arriving after the window is full must displace the
+	// worst row held, and the row it displaces is the last of the tied scan
+	// order rather than a score picked out of a heap. Nothing scores above 1, so
+	// the tied rows here sit at 1/sqrt(2) and the late arrival is the query
+	// itself.
+	late := [][]float32{{1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 1}, {1, 0}}
+	got := build(late...).search(query, 6, nil)
+	if len(got) != 6 {
+		t.Fatalf("eviction case returned %d candidates, want 6", len(got))
+	}
+	if got[0].MemoryID != "tie-6" {
+		t.Errorf("a strictly better candidate arriving last ranked %d, want rank 0 (id tie-6); got %v",
+			rankOf(got, "tie-6"), idsOf(got))
+	}
+	if rankOf(got, "tie-5") != -1 {
+		t.Errorf("tie-5 survived a better candidate arriving after it; the window kept %v, want tie-5 evicted as the worst of the tied scan order", idsOf(got))
+	}
+	if last := got[5].MemoryID; last != "tie-4" {
+		t.Errorf("rank 5 is %s, want tie-4 (the survivors keep their tied scan order)", last)
+	}
+}
+
+// TestVectorSearchCopiesTheCorpusUnderTheStoreReadLock is the other half of
+// TestVectorSearchScoresWithTheStoreLockReleased, and the two together are what
+// "the copy takes the read lock, the scoring pass does not" means. It parks the
+// search mid-copy and asserts a writer is still waiting; a copy that dropped the
+// lock would let the writer straight through. Parking mid-copy rather than
+// merely starting a search is the point: a search reads the store's identity
+// under a read lock before either phase, so a writer blocked at the start of a
+// search proves nothing about the copy.
+func TestVectorSearchCopiesTheCorpusUnderTheStoreReadLock(t *testing.T) {
+	store, ctx, _ := rankingCorpus(t)
+
+	// Park the search once its first row is in the snapshot, so it is mid-copy
+	// and not merely about to start one. Only then can the test tell which lock
+	// the copy is running under.
+	copying := make(chan struct{})
+	release := make(chan struct{})
+	var released bool
+	unpark := func() {
+		if !released {
+			released = true
+			close(release)
+		}
+	}
+	setDuringVectorSeams(func() {
+		close(copying)
+		<-release
+	}, nil)
+	t.Cleanup(func() { setDuringVectorSeams(nil, nil) })
+
+	searched := make(chan error, 1)
+	go func() {
+		_, err := store.SearchVector(ctx, "test-proj", []float32{1, 0.4, 0, 0}, 10)
+		searched <- err
+	}()
+
+	select {
+	case <-copying:
+	case err := <-searched:
+		unpark()
+		t.Fatalf("the search finished (%v) without ever copying a row, so the copy seam proved nothing", err)
+	case <-time.After(30 * time.Second):
+		unpark()
+		t.Fatal("a vector search never reached its copy pass within 30s")
+	}
+
+	wrote := make(chan struct{})
+	go func() {
+		store.SetVectorMinSimilarity(0.25) // takes the store's write lock
+		close(wrote)
+	}()
+	select {
+	case <-wrote:
+		unpark()
+		t.Fatal("a writer took the store's write lock while a vector search was copying the corpus: " +
+			"the copy has to hold the read lock, like every other reader in the package")
+	case <-time.After(2 * time.Second):
+		// Expected: the copy holds the read lock, so the writer waits.
+	}
+	unpark()
+
+	select {
+	case err := <-searched:
+		if err != nil {
+			t.Fatalf("SearchVector: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the search did not complete after the copy was released")
+	}
+	select {
+	case <-wrote:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the writer never completed after the search finished copying")
+	}
+}
+
+// TestVectorSearchDropsNaNScores: a NaN cosine compares false against
+// everything, so the window's comparator cannot rank it and it would be handed
+// back as a candidate and then weighted by rank alone in RRF. The old search
+// dropped it because it filtered with `sim > floor`; the filter has to keep that
+// shape, and this is the test that says so. Unreachable from a stored embedding
+// today, which is exactly why it needs a test rather than a comment.
+func TestVectorSearchDropsNaNScores(t *testing.T) {
+	query := []float32{1, 0}
+	v := &vectorRows{}
+	add := func(id string, vec []float32) {
+		t.Helper()
+		blob := float32sToBytes(vec)
+		row := vectorRowSpan{
+			id:      vecSpan{len(v.ids), len(id)},
+			project: vecSpan{0, 0},
+			embed:   vecSpan{len(v.embeds), len(blob)},
+		}
+		v.ids = append(v.ids, id...)
+		v.embeds = append(v.embeds, blob...)
+		v.rows = append(v.rows, row)
+	}
+	add("nan-row", []float32{float32(math.NaN()), 0})
+	add("real-row", []float32{1, 0})
+
+	if sim := cosineFromBytes(query, float32sToBytes([]float32{float32(math.NaN()), 0})); !math.IsNaN(float64(sim)) {
+		t.Fatalf("the fixture does not produce a NaN cosine (got %v), so the test proves nothing", sim)
+	}
+
+	got := v.search(query, 10, nil)
+	if len(got) != 1 || got[0].MemoryID != "real-row" {
+		t.Fatalf("got %v, want only real-row: a NaN cosine must not enter the window", idsOf(got))
+	}
+}
+
+func rankOf(got []ScoredMemory, id string) int {
+	for i, sm := range got {
+		if sm.MemoryID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func idsOf(got []ScoredMemory) []string {
+	out := make([]string, len(got))
+	for i, sm := range got {
+		out[i] = sm.MemoryID
+	}
+	return out
 }
 
 // TestVectorSearchRejectsNonPositiveLimit: the cut it replaces sliced to a

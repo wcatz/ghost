@@ -112,7 +112,7 @@ type Store struct {
 	// searched and only the presence of a row matters.
 	embeddingIdentity string
 
-	// foreignWarned gates the warning usableVectorEntries logs when a search
+	// foreignWarned gates the warning loadVectorRows logs when a search
 	// skips vectors recorded under a retired identity: it records which
 	// retired identities have already been reported, so each is logged once
 	// per process rather than once per search — a re-embed lasts many queries,

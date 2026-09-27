@@ -161,7 +161,7 @@ func (s *Store) SearchVectorScoped(ctx context.Context, projectID string, queryV
 }
 
 func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]ScoredMemory, error) {
-	// Read the identity before taking the lock: the helper below runs with the
+	// Read the identity before taking the lock: the copy below runs with the
 	// read lock held, and a second RLock on a RWMutex that has a writer waiting
 	// blocks that writer's readers — including this one, forever.
 	identity := s.configuredEmbeddingIdentity()
@@ -170,11 +170,15 @@ func (s *Store) searchVector(ctx context.Context, projectID string, queryVec []f
 	defer s.returnVectorRows(rows)
 
 	// Everything the cosine pass needs is copied out of SQLite here, under the
-	// read lock and the store's single connection, and the corpus scan is the
-	// only part that needs either of them. Scoring then runs with both released
-	// — which is the point: the cosine pass is O(corpus × dims) of float
-	// arithmetic, and holding a read lock across it blocked every writer on the
-	// store for the length of the whole corpus.
+	// store's read lock and its single connection, and the copy is the only part
+	// that needs either of them. Scoring then runs with both released: the
+	// cosine pass is O(corpus × dims) of float arithmetic, and holding a read
+	// lock across it blocked every writer on the store for the length of the
+	// whole corpus. The copy itself still holds the lock, because it is a read
+	// and every other reader in this package takes it — and because the
+	// connection is taken for its duration either way (OpenDB pins the pool at
+	// one), so releasing the mutex without releasing the connection would not
+	// have let a writer through.
 	if err := s.snapshotVectors(ctx, vectorScanColumns+`
 		WHERE m.project_id = ? OR m.project_id = '_global'
 	`, []any{projectID}, queryVec, identity, rows); err != nil {
