@@ -13,13 +13,15 @@ const scoreK = 10
 
 // Query is one benchmark question: its text, an optional precomputed embedding
 // (required for the vector and hybrid conditions), the project to search, and
-// the graded relevance of memory IDs.
+// the graded relevance of memory IDs. Flavor is set only for no-answer queries
+// (see falsepositive.go) and is empty for a graded one.
 type Query struct {
 	Name      string
 	ProjectID string
 	Text      string
 	Vector    []float32
 	Rel       Relevance
+	Flavor    string
 }
 
 // Result holds aggregate metrics for one search condition over a query set.

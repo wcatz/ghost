@@ -1,0 +1,85 @@
+# Maintenance-state fixture: what a store looks like AFTER a few months of use.
+# Same JSONL shape as memories.jsonl, plus the state the graded dataset never
+# carries: age_days (backdates created_at, so decay is observable), resolved
+# (a resolve verdict), project ("_global" for a shared row searched from the
+# project), and supersedes (keys this memory REPLACES, so demotion has real
+# edges — the newer memory lists the older one). `importance` is NOT correlated
+# with role: a stale copy is sometimes the most important-looking memory in the
+# store, which is the point. A resolved row's category is one SetResolved will
+# actually stamp — convention and preference are exempt, so a store cannot hold
+# a resolved convention.
+# maintenance_queries.jsonl grades against this file; maintenance_embeddings.json
+# holds the vectors, regenerated when this file changes. They are embedded the
+# way the production client does since #642: EmbedDocument ("search_document: ")
+# for a memory, EmbedQuery ("search_query: ") for a question, both at
+# nomic-embed-text:v1.5 / 768 dims. So this suite is measured in the same
+# vector space as memories.jsonl's embeddings.json and as a live store.
+# See docs/benchmarks.md ("Phase 3b").
+{"key":"ms_pg_live","category":"dependency","content":"Production runs PostgreSQL 16 on db-primary after the February upgrade.","importance":0.8,"age_days":40,"supersedes":["ms_pg_old"]}
+{"key":"ms_pg_old","category":"dependency","content":"Production runs PostgreSQL 14 on db-primary.","importance":0.8,"age_days":430}
+{"key":"ms_pg_global","project":"_global","category":"convention","content":"Databases in this fleet run PostgreSQL 14.","importance":0.7,"age_days":520}
+{"key":"ms_pg_resolved","category":"fact","content":"Production used PostgreSQL 15 on the retired primary cluster.","importance":0.6,"age_days":90,"resolved":true}
+{"key":"ms_pg_global_dep","project":"_global","category":"dependency","content":"Shared clusters run PostgreSQL 15 for staging.","importance":0.7,"age_days":400}
+{"key":"ms_nodeport_live","category":"fact","content":"The mainnet cardano-node accepts peer connections on TCP port 3001.","importance":0.8,"age_days":30,"supersedes":["ms_nodeport_old"]}
+{"key":"ms_nodeport_old","category":"fact","content":"The mainnet cardano-node accepts peer connections on TCP port 3000.","importance":0.8,"age_days":600}
+{"key":"ms_nodeport_global","project":"_global","category":"convention","content":"Cardano nodes in this fleet accept peer connections on port 6001.","importance":0.7,"age_days":700}
+{"key":"ms_nodeport_resolved","category":"fact","content":"The mainnet node peer port was 3001 before the firewall change.","importance":0.7,"age_days":120,"resolved":true}
+{"key":"ms_kes_live","category":"gotcha","content":"KES keys expire every 62 days on mainnet; rotate the operational certificate before the period lapses.","importance":0.9,"age_days":55,"supersedes":["ms_kes_old"]}
+{"key":"ms_kes_old","category":"gotcha","content":"KES keys expire every 90 days on mainnet.","importance":0.9,"age_days":500}
+{"key":"ms_kes_resolved","category":"gotcha","content":"The 2024 KES rotation backlog was closed out.","importance":0.6,"age_days":200,"resolved":true}
+{"key":"ms_grafana_live","category":"architecture","content":"Grafana is exposed through the Traefik ingress at grafana.example.com.","importance":0.8,"age_days":45}
+{"key":"ms_grafana_global","project":"_global","category":"convention","content":"Grafana is exposed through the Tailscale hostname grafana.internal.","importance":0.8,"age_days":650}
+{"key":"ms_grafana_resolved","category":"architecture","content":"Grafana dashboards were served from the old nginx VM.","importance":0.7,"age_days":300,"resolved":true}
+{"key":"ms_grafana_global_arch","project":"_global","category":"architecture","content":"Dashboards in this fleet are served from the shared Grafana pod.","importance":0.6,"age_days":500}
+{"key":"ms_sops_live","category":"fact","content":"SOPS-encrypted secrets in the infrastructure repo use the age recipient stored in 1Password.","importance":0.7,"age_days":20,"supersedes":["ms_sops_old"]}
+{"key":"ms_sops_old","category":"fact","content":"SOPS-encrypted secrets use the PGP key held in the ops vault.","importance":0.7,"age_days":640}
+{"key":"ms_sops_global","project":"_global","category":"convention","content":"Secrets are never committed in plaintext to any repository.","importance":0.6,"age_days":900}
+{"key":"ms_backup_live","category":"decision","content":"Production database backups run hourly at seven minutes past the hour.","importance":0.8,"age_days":35}
+{"key":"ms_backup_resolved","category":"decision","content":"Nightly-only backups were sufficient until the incident review.","importance":0.7,"age_days":260,"resolved":true}
+{"key":"ms_backup_global","project":"_global","category":"convention","content":"Every production datastore has at least daily backups.","importance":0.6,"age_days":800}
+{"key":"ms_runner_live","category":"dependency","content":"CI jobs run on ubuntu-24.04 GitHub-hosted runners.","importance":0.7,"age_days":15,"supersedes":["ms_runner_old"]}
+{"key":"ms_runner_old","category":"dependency","content":"CI jobs run on ubuntu-22.04 GitHub-hosted runners.","importance":0.7,"age_days":380}
+{"key":"ms_runner_resolved","category":"fact","content":"The self-hosted ARM runners were retired.","importance":0.6,"age_days":330,"resolved":true}
+{"key":"ms_retention_live","category":"dependency","content":"Prometheus retains 30 days of metrics at 1-minute resolution.","importance":0.8,"age_days":60,"supersedes":["ms_retention_old"]}
+{"key":"ms_retention_old","category":"dependency","content":"Prometheus retains 15 days of metrics at 1-minute resolution.","importance":0.8,"age_days":560}
+{"key":"ms_retention_global","project":"_global","category":"convention","content":"Metrics retention is decided per cluster by the observability working group.","importance":0.6,"age_days":750}
+{"key":"ms_redis_live","category":"architecture","content":"The session cache is Redis 7.2 on cache-01 with no persistence.","importance":0.8,"age_days":50,"supersedes":["ms_redis_old"]}
+{"key":"ms_redis_old","category":"architecture","content":"The session cache is Redis 6.2 on cache-01 with AOF persistence.","importance":0.8,"age_days":470}
+{"key":"ms_redis_resolved","category":"architecture","content":"Memcached was dropped as a second cache tier.","importance":0.6,"age_days":280,"resolved":true}
+{"key":"ms_tls_live","category":"dependency","content":"Wildcard certificates are issued by Let's Encrypt and live 90 days.","importance":0.7,"age_days":25}
+{"key":"ms_tls_global","project":"_global","category":"convention","content":"Certificates are never self-signed outside local development.","importance":0.6,"age_days":950}
+{"key":"ms_tls_resolved","category":"gotcha","content":"The internal CA expiry broke the Traefik ACME challenge.","importance":0.7,"age_days":310,"resolved":true}
+{"key":"ms_bastion_live","category":"architecture","content":"Engineers reach every host through the jump bastion jump.example.com.","importance":0.8,"age_days":70,"supersedes":["ms_bastion_old"]}
+{"key":"ms_bastion_old","category":"architecture","content":"Engineers reach every host through the old VPN concentrator.","importance":0.8,"age_days":700}
+{"key":"ms_bastion_resolved","category":"fact","content":"The VPN concentrator credentials were rotated out of band.","importance":0.6,"age_days":240,"resolved":true}
+{"key":"ms_cache_live","category":"decision","content":"The CI cache sweeper prunes build artifacts older than 7 days.","importance":0.7,"age_days":40}
+{"key":"ms_cache_global","project":"_global","category":"convention","content":"CI caches are sized per repository, never shared across forks.","importance":0.6,"age_days":820}
+{"key":"ms_cache_resolved","category":"gotcha","content":"The old artifact bucket hit its 500 GB quota.","importance":0.7,"age_days":190,"resolved":true}
+{"key":"ms_alert_live","category":"architecture","content":"Block producer alerts page the on-call rotation through Telegram.","importance":0.9,"age_days":65,"supersedes":["ms_alert_old"]}
+{"key":"ms_alert_old","category":"architecture","content":"Block producer alerts page the on-call rotation through PagerDuty.","importance":0.9,"age_days":610}
+{"key":"ms_alert_resolved","category":"decision","content":"The email alert digest was retired.","importance":0.6,"age_days":400,"resolved":true}
+{"key":"ms_registry_live","category":"decision","content":"Container images publish to registry.example.com, never to Docker Hub.","importance":0.8,"age_days":30}
+{"key":"ms_registry_resolved","category":"fact","content":"The Docker Hub organisation was renamed after the acquisition.","importance":0.6,"age_days":500,"resolved":true}
+{"key":"ms_registry_global","project":"_global","category":"convention","content":"Every published image carries an SBOM and a signature.","importance":0.6,"age_days":700}
+{"key":"ms_rate_live","category":"pattern","content":"The MCP server rate-limits each session to 50 tool calls per minute.","importance":0.7,"age_days":55}
+{"key":"ms_rate_global","project":"_global","category":"convention","content":"Client-side retries use exponential backoff with jitter.","importance":0.6,"age_days":880}
+{"key":"ms_rate_resolved","category":"gotcha","content":"The old 10-call limit starved the reflection worker.","importance":0.7,"age_days":260,"resolved":true}
+{"key":"ms_python_live","category":"dependency","content":"The tooling virtualenv pins Python 3.12.","importance":0.7,"age_days":10,"supersedes":["ms_python_old"]}
+{"key":"ms_python_old","category":"dependency","content":"The tooling virtualenv pins Python 3.11.","importance":0.7,"age_days":300}
+{"key":"ms_python_resolved","category":"fact","content":"The pyenv shim was removed from the Makefile.","importance":0.6,"age_days":350,"resolved":true}
+{"key":"ms_scratch_live","category":"architecture","content":"Ghost scratch files live under the Ghost data directory, not /tmp.","importance":0.8,"age_days":10}
+{"key":"ms_scratch_global","project":"_global","category":"convention","content":"Temp files from any tool are removed at the end of a session.","importance":0.6,"age_days":600}
+{"key":"ms_scratch_resolved","category":"gotcha","content":"A /tmp spill once filled the system partition.","importance":0.7,"age_days":150,"resolved":true}
+{"key":"ms_dns_live","category":"fact","content":"Internal service records use a 60-second TTL.","importance":0.7,"age_days":80,"supersedes":["ms_dns_old"]}
+{"key":"ms_dns_old","category":"fact","content":"Internal service records use a 300-second TTL.","importance":0.7,"age_days":700}
+{"key":"ms_dns_resolved","category":"gotcha","content":"The old DNS provider dropped the weighted records.","importance":0.6,"age_days":420,"resolved":true}
+# Shared rows that ARE the answer. Demoting _global in a project search must not
+# make shared knowledge unfindable, so these are graded with the global memory as
+# the answer and a project-scoped near-copy as a partial.
+{"key":"ms_commits_global","project":"_global","category":"preference","content":"Wayne prefers Conventional Commits and a DCO sign-off on every commit.","importance":0.9,"age_days":400}
+{"key":"ms_commits_project","category":"fact","content":"The repository's contributing guide requires a DCO sign-off.","importance":0.7,"age_days":200}
+{"key":"ms_verify_global","project":"_global","category":"preference","content":"Every Ghost change needs a PR body that says how it was verified.","importance":0.8,"age_days":300}
+{"key":"ms_verify_project","category":"architecture","content":"Changes under internal/memory need a migration note.","importance":0.6,"age_days":180}
+{"key":"ms_yaml_global","project":"_global","category":"convention","content":"YAML files across this fleet use 2-space indentation.","importance":0.8,"age_days":500}
+{"key":"ms_yaml_project","category":"architecture","content":"Helm values files set the replica counts per environment.","importance":0.6,"age_days":220}
+{"key":"ms_yaml_resolved","category":"fact","content":"YAML files across this fleet used 4-space indentation.","importance":0.7,"age_days":600,"resolved":true}
