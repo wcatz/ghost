@@ -180,7 +180,7 @@ func Run(ctx context.Context, r Retriever, req Request) (Result, error) {
 	for _, name := range []string{"fts", "vector"} {
 		leg := set.Legs[name]
 		if leg.Applicable && leg.Attempted && !leg.Available {
-			p.noteBuf = append(p.noteBuf, formatNote("retrieval_%s leg failed (%s): this search is incomplete, so an empty result does not mean nothing matched", name, leg.Err))
+			p.retrievalFailures = append(p.retrievalFailures, formatNote("retrieval_%s leg failed (%s): this search is incomplete, so an empty result does not mean nothing matched", name, leg.Err))
 		}
 	}
 	for _, st := range stages {

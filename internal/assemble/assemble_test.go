@@ -1270,10 +1270,10 @@ func TestARetrievalFailureSurvivesConflictChatter(t *testing.T) {
 		edges = append(edges, memory.LinkEdge{From: rows[i].ID, To: rows[i+1].ID, Relation: "contradicts", Strength: 1})
 	}
 	set := setOf(rows...)
+	// The store's own rule: a failed lookup returns no edges, so a populated
+	// edge set carries "ok". The err case is a separate shape below.
 	set.Edges = edges
-	// A failed link lookup and a failed keyword leg: both are statements about the
-	// retrieval, and both must outrank the conflict chatter in a bounded list.
-	set.EdgesStatus = memory.EdgeStatus{Status: "err", Err: "candidate edges: database is locked"}
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
 	// The keyword leg failed; the vector leg completed with nothing.
 	set.Legs = map[string]memory.LegStatus{
 		"fts":    {Applicable: true, Attempted: true, Available: false, Err: "search memories: no such table: memories_fts"},
@@ -1284,10 +1284,27 @@ func TestARetrievalFailureSurvivesConflictChatter(t *testing.T) {
 
 	res := run(t, &fakeRetriever{set: set}, req)
 
-	for _, want := range []string{"retrieval_fts leg failed", "the link lookup failed"} {
-		if !hasNote(res.Notes, want) {
-			t.Errorf("%q was squeezed out of the bound by conflict chatter: %v", want, res.Notes)
-		}
+	if !hasNote(res.Notes, "retrieval_fts leg failed") {
+		t.Errorf("the leg-failure note was squeezed out of the bound by conflict chatter: %v", res.Notes)
+	}
+	// First, not merely present. The claim is about the order: bounding drops from
+	// the end, so a sentence that leads is a sentence that survives.
+	if len(res.Notes) == 0 || !hasNote([]string{res.Notes[0]}, "retrieval_fts leg failed") {
+		t.Errorf("the retrieval's own failure does not lead the notes: %v", res.Notes)
+	}
+
+	// And the order is what makes it survive a budget the chatter would fill: a
+	// 300-byte total admits the leg failure and the two fixed stage notes, and
+	// drops every pair behind them. Put the leg failure at the tail and the
+	// budget is spent before it is reached.
+	tight := baseRequest()
+	tight.Budget = Budget{MaxItems: 100, MaxNotesBytes: 300}
+	tightRes := run(t, &fakeRetriever{set: set}, tight)
+	if !hasNote(tightRes.Notes, "retrieval_fts leg failed") {
+		t.Errorf("under a tight note budget the leg failure was dropped while it led the list: %v", tightRes.Notes)
+	}
+	if hasNote(tightRes.Notes, "both remain in the block") {
+		t.Errorf("conflict chatter was kept ahead of the retrieval's own failure: %v", tightRes.Notes)
 	}
 	// The pairs are a bounded summary, not a list: a graph with dozens of
 	// contradicting edges must not be able to crowd out anything else.
@@ -1301,7 +1318,28 @@ func TestARetrievalFailureSurvivesConflictChatter(t *testing.T) {
 		t.Errorf("the answer names %d contradicting pairs, want 1..%d: the summary must be bounded",
 			pairs, maxRenderedConflictPairs)
 	}
-	if !hasNote(res.Notes, "more contradicting pairs are in this block") {
+	if !hasNote(res.Notes, "further contradicting pairs are in this block") {
 		t.Errorf("the pairs beyond the cap are not counted: %v", res.Notes)
+	}
+	// A count, and nothing more: the stage record holds every pair, but no
+	// surface projects it in this version, so pointing an agent at it would
+	// promise something it cannot reach.
+	for _, n := range res.Notes {
+		if hasNote([]string{n}, "the trace lists all of them") {
+			t.Errorf("a note promises a record no caller can read: %q", n)
+		}
+	}
+
+	// A failed lookup is its own shape — no edges with it — and its disclosure
+	// leads the list for the same reason the leg failure does.
+	failedEdges := setOf(rows[0], rows[1])
+	failedEdges.EdgesStatus = memory.EdgeStatus{Status: "err", Err: "candidate edges: database is locked"}
+	failedEdges.Legs = set.Legs
+	failedRes := run(t, &fakeRetriever{set: failedEdges}, req)
+	if !hasNote(failedRes.Notes, "the link lookup failed") {
+		t.Errorf("a failed link lookup is not reported: %v", failedRes.Notes)
+	}
+	if hasNote(failedRes.Notes, "both remain in the block") {
+		t.Errorf("pairs are reported for a lookup that returned none: %v", failedRes.Notes)
 	}
 }

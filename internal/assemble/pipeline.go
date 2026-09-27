@@ -30,11 +30,12 @@ type pipeline struct {
 	// rendered after the window closes, against the rows the answer actually
 	// holds, so "both remain in the block" cannot outlive one of them.
 	contradictPairs [][2]string
-	// edgeFailure is the retrieval's own statement that the link lookup failed.
-	// It is a fact about the retrieval, not about the block, and it leads the
-	// notes ahead of the conflict chatter — a list of pairs must not be able to
-	// squeeze out the one sentence that says the answer is not an absence.
-	edgeFailure string
+	// retrievalFailures are the retrieval's own statements — a leg that errored,
+	// a link lookup that failed. They are facts about the retrieval rather than
+	// about the block, so they lead the notes ahead of the conflict chatter: a
+	// list of pairs must not be able to squeeze out the one sentence that says
+	// the answer is not an absence.
+	retrievalFailures []string
 	// items mirrors rows, materialised once so rendering and the trace read
 	// the same values.
 	items []Item
@@ -224,7 +225,7 @@ func runConflicts(p *pipeline) {
 	// distinguishes "err" from "unavailable": a failed lookup and a store with no
 	// edges are different facts, and collapsing them loses the diagnosis.
 	if p.set.EdgesStatus.Status == "err" {
-		p.edgeFailure = formatNote("edges_unavailable: the link lookup failed (%s), so conflict handling had no edges to read", p.set.EdgesStatus.Err)
+		p.retrievalFailures = append(p.retrievalFailures, formatNote("edges_unavailable: the link lookup failed (%s), so conflict handling had no edges to read", p.set.EdgesStatus.Err))
 	}
 	if len(p.items) > 0 {
 		admitted := make(map[string]bool, len(p.items))
@@ -407,15 +408,22 @@ func (p *pipeline) confidenceOf(id string) *float64 {
 // group leads the one below it because bounding drops from the end, so the
 // sentences that qualify the answer survive pressure and the per-row detail is
 // what gets dropped.
+//
+// What each group reaches today. The breakdown, the retrieval failures and the
+// per-row notes are what the search surface renders on an empty answer. The block
+// statements are gated on an admitted row, and that surface renders no notes at
+// all for a non-empty answer — the listing is the answer, and the machine line
+// that will carry a scored result's notes belongs to the abstention work. So the
+// block group is assembled and bounded here, and a caller projecting
+// Result.Notes for a non-empty result is what will show it; nothing claims
+// otherwise, and the ordering above is what that caller will get.
 func (p *pipeline) notes() []string {
 	all := make([]string, 0, len(p.noteBuf)+len(p.blockNotes)+len(p.contradictPairs)+1)
 	if len(p.rows) == 0 && len(p.dropped) > 0 {
 		all = append(all, formatNote("%d candidate rows were removed and none reached the answer: %s",
 			len(p.dropped), p.removalBreakdown()))
 	}
-	if p.edgeFailure != "" {
-		all = append(all, p.edgeFailure)
-	}
+	all = append(all, p.retrievalFailures...)
 	if len(p.items) > 0 {
 		all = append(all, p.blockNotes...)
 		// Rendered here rather than at stage 5: the pair was recorded when both
@@ -440,7 +448,10 @@ func (p *pipeline) notes() []string {
 			rendered++
 		}
 		if held > 0 {
-			all = append(all, formatNote("%d more contradicting pairs are in this block; the trace lists all of them", held))
+			// A count, not a pointer. The stage record holds every pair, but
+			// nothing projects it to a caller in this version, so promising it
+			// would send an agent looking for something it cannot see.
+			all = append(all, formatNote("%d further contradicting pairs are in this block", held))
 		}
 	}
 	all = append(all, p.noteBuf...)
