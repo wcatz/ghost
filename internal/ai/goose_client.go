@@ -117,37 +117,40 @@ func (c *GooseClient) subprocessEnv(ctx context.Context, args []string) (*exec.C
 // profile, not plugin discovery, and goose documents no variable that disables
 // discovery.
 //
-// The isolated home is a real directory holding ONE symlink, to the config
-// directory, at the path goose resolves it from. goose's config root differs by
-// platform and by build — $XDG_CONFIG_HOME/goose, $HOME/.config/goose,
-// ~/Library/Application Support on macOS, %APPDATA% on Windows — and this code
-// cannot know which one a given goose and user pair uses. Inventing a value
-// instead, synthesizing $HOME/.config and exporting it as XDG_CONFIG_HOME, is
-// only correct on the platform whose convention it guesses; on the others it
-// redirects a working authenticated call to a config root that user's goose was
-// never configured from. Linking the directory where the parent already had it
-// leaves the child's own resolution untouched — wherever it looked before, it
-// finds the same bytes — and moves nothing else, because .agents/ is the only
-// other thing under HOME that goose reads for this purpose.
+// The isolated home is a real directory that carries the configuration with
+// it. goose's config root differs by platform and by build — $XDG_CONFIG_HOME,
+// ~/.config/goose, ~/Library/Application Support/goose on macOS, %APPDATA% on
+// Windows — and this code cannot know which one a given goose and user pair
+// uses. Inventing a value instead, synthesizing $HOME/.config and exporting it
+// as XDG_CONFIG_HOME, is only correct on the platform whose convention it
+// guesses; on the others it redirects a working authenticated call to a config
+// root that user's goose was never configured from. So the home-relative roots
+// are reproduced instead — see gooseHomeConfigRelPaths — and the child resolves
+// whichever one it would have resolved before. Nothing else moves, because
+// .agents/ is the only other thing under HOME that goose reads for this
+// purpose.
 //
-// The link goes at $HOME/.config, not at $HOME itself: goose's fallback spells
-// the path as $HOME/.config/goose, so a home that IS the config directory would
+// The links go at the config paths themselves, not at $HOME: goose spells the
+// fallback as $HOME/.config/goose, so a home that IS the config directory would
 // make that resolve to <config>/.config/goose and miss.
 //
-// The Windows home variables are cleared rather than repointed, because
-// HOMEDRIVE is a drive letter and cannot be joined onto a scratch path.
-// USERPROFILE is the variable that identifies the home there, and it is set,
-// so clearing the pair removes the alternate route back to the real one.
+// %APPDATA% is deliberately not reproduced. It is an absolute path the
+// allowlist already passes through, so a Windows child keeps reaching its
+// config however HOME moves — and the Windows home variables are cleared rather
+// than repointed, because HOMEDRIVE is a drive letter that cannot be joined onto
+// a scratch path. USERPROFILE is the variable that identifies the home there,
+// and it is set, so clearing the pair removes the alternate route back to the
+// real one.
 func configureGooseIsolation(cmd *exec.Cmd) error {
 	if cmd.Dir == "" {
 		return fmt.Errorf("goose scratch directory is empty")
 	}
 	env := cmd.Env
 
-	// Resolved before HOME is replaced, so the link is created where the child
-	// will look for it.
-	configDir := gooseConfigDir(env)
-	if configDir == "" {
+	// Resolved before HOME is replaced, so the links are created where the
+	// child will look for them.
+	homeDir := gooseHomeDir(env)
+	if homeDir == "" {
 		return fmt.Errorf("goose child has no home or config root; refusing to run with plugin discovery unconfined")
 	}
 
@@ -158,7 +161,7 @@ func configureGooseIsolation(cmd *exec.Cmd) error {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return fmt.Errorf("goose isolated home %s: %w", home, err)
 	}
-	if err := linkGooseConfig(home, env, configDir); err != nil {
+	if err := linkGooseConfigDirs(home, env, homeDir); err != nil {
 		return err
 	}
 
@@ -170,42 +173,103 @@ func configureGooseIsolation(cmd *exec.Cmd) error {
 	return nil
 }
 
-// linkGooseConfig makes the isolated home resolve to configDir by the same rule
-// the parent used: through XDG_CONFIG_HOME when it is set, and through the
-// home-relative .config/goose when it is not. It never invents a variable —
-// the whole point is that the child's own, possibly platform-specific,
-// resolution still lands in the right place.
-func linkGooseConfig(home string, env []string, configDir string) error {
-	if configHome := harnessEnvValue(env, "XDG_CONFIG_HOME"); configHome != "" {
-		// Already an absolute path the child reads directly; HOME plays no part.
+// gooseHomeDir returns the real home the child is being moved away from, or ""
+// when the parent named neither a home nor a config root. The latter case is
+// refused rather than isolated: with no home there is no plugin root to move
+// away from, but there is also no way to prove the child cannot find one.
+func gooseHomeDir(env []string) string {
+	for _, key := range []string{"HOME", "USERPROFILE"} {
+		if value := harnessEnvValue(env, key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// gooseHomeConfigRelPaths lists the home-relative locations goose may resolve
+// its configuration from, and therefore the ones the isolated home has to
+// carry. Both are real: goose documents ~/.config/goose for Linux and macOS
+// and ~/Library/Application Support for macOS, and which one a given build and
+// user uses is not something this code can determine. Carrying only the first
+// silently moves the config out from under a macOS child that never set
+// XDG_CONFIG_HOME, which is the default there.
+//
+// %APPDATA% on Windows is absent deliberately: it is an absolute path the
+// allowlist already passes through, so the child keeps reaching its config
+// however HOME moves and nothing has to be reproduced.
+var gooseHomeConfigRelPaths = [][]string{
+	{".config", "goose"},
+	{"Library", "Application Support", "goose"},
+}
+
+// linkGooseConfigDirs carries every home-relative config root into the
+// isolated home, so a child resolves whichever one its own goose uses.
+//
+// A symlink is not assumed: on Windows it needs SeCreateSymbolicLinkPrivilege
+// or Developer Mode, and this path is the NORMAL one there because macOS-style
+// XDG_CONFIG_HOME is rarely set on a Windows host. Failing every goose call on
+// a privileged filesystem operation would be a regression on a supported
+// platform, so where a symlink is refused the directory is copied instead.
+// The copy is made private to the child and dies with the scratch dir.
+func linkGooseConfigDirs(home string, env []string, homeDir string) error {
+	if harnessEnvValue(env, "XDG_CONFIG_HOME") != "" {
+		// An absolute path the child reads directly; HOME plays no part.
 		return nil
 	}
-	configHome := filepath.Join(home, ".config")
-	if err := os.MkdirAll(configHome, 0o700); err != nil {
-		return fmt.Errorf("goose isolated config home %s: %w", configHome, err)
-	}
-	link := filepath.Join(configHome, "goose")
-	if err := os.Symlink(configDir, link); err != nil && !os.IsExist(err) {
-		return fmt.Errorf("goose isolated config %s: %w", link, err)
+	for _, rel := range gooseHomeConfigRelPaths {
+		source := filepath.Join(append([]string{homeDir}, rel...)...)
+		target := filepath.Join(append([]string{home}, rel...)...)
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return fmt.Errorf("goose isolated config %s: %w", filepath.Dir(target), err)
+		}
+		if _, err := os.Lstat(source); err != nil {
+			continue // not this platform's location, or not configured
+		}
+		if err := carryGooseConfigDir(source, target); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// gooseConfigDir returns the directory holding the user's goose configuration
-// — the one thing the isolated home must still reach — or "" when the parent
-// named neither a config root nor a home. XDG_CONFIG_HOME wins when present,
-// because that is the variable goose consults first; otherwise the
-// home-relative .config is used, which is the documented Linux and macOS
-// location. The Windows root (%APPDATA%) is deliberately not restated here:
-// the child inherits APPDATA through the allowlist and resolves it itself.
-func gooseConfigDir(env []string) string {
-	if configHome := harnessEnvValue(env, "XDG_CONFIG_HOME"); configHome != "" {
-		return filepath.Join(configHome, "goose")
+// carryGooseConfigDir makes target resolve to source, by symlink where the
+// platform allows it and by copy where it does not. linkDir is a parameter so
+// the fallback is reachable from a test: a Windows host without Developer Mode
+// cannot create a symlink, and that host is precisely where the copy has to
+// work, so the branch cannot be left to be discovered in production.
+func carryGooseConfigDir(source, target string) error {
+	return carryGooseConfigDirWith(source, target, os.Symlink)
+}
+
+func carryGooseConfigDirWith(source, target string, linkDir func(string, string) error) error {
+	if err := linkDir(source, target); err != nil && !os.IsExist(err) {
+		return copyGooseConfigDir(source, target)
 	}
-	for _, homeKey := range []string{"HOME", "USERPROFILE"} {
-		if home := harnessEnvValue(env, homeKey); home != "" {
-			return filepath.Join(home, ".config", "goose")
+	return nil
+}
+
+// copyGooseConfigDir is the unprivileged fallback for a symlink the platform
+// refuses. Only regular files are copied, and never a symlink's target, so a
+// config directory cannot pull in a tree the child should not read.
+func copyGooseConfigDir(source, target string) error {
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		return fmt.Errorf("goose isolated config %s: %w", target, err)
+	}
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		return fmt.Errorf("goose isolated config %s: %w", target, err)
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(source, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("goose isolated config %s: %w", filepath.Join(target, entry.Name()), err)
+		}
+		if err := os.WriteFile(filepath.Join(target, entry.Name()), data, 0o600); err != nil {
+			return fmt.Errorf("goose isolated config %s: %w", filepath.Join(target, entry.Name()), err)
 		}
 	}
-	return ""
+	return nil
 }

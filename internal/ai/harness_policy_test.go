@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -393,8 +394,8 @@ func TestConfigureGooseIsolationFailsClosed(t *testing.T) {
 
 	// The positive case, so the table cannot pass by always erroring. No
 	// XDG_CONFIG_HOME here, so this exercises the home-relative fallback that
-	// goose uses when the variable is unset — the branch where the config link
-	// has to be created, and where pointing HOME straight at the config
+	// goose uses when the variable is unset — the branch where the config links
+	// have to be created, and where pointing HOME straight at the config
 	// directory would silently miss.
 	t.Run("resolves and confines", func(t *testing.T) {
 		dir := t.TempDir()
@@ -418,6 +419,34 @@ func TestConfigureGooseIsolationFailsClosed(t *testing.T) {
 		// by accident of this fixture.
 		if _, err := os.Stat(filepath.Join(got, ".agents")); !os.IsNotExist(err) {
 			t.Errorf("isolated home exposes an .agents directory: %v", err)
+		}
+	})
+
+	// macOS does not set XDG_CONFIG_HOME, and goose documents both
+	// ~/.config/goose and ~/Library/Application Support/goose there. Carrying
+	// only the first moves the config out from under a child that resolves the
+	// second, which would break a call that worked before this branch.
+	t.Run("carries the macOS config root", func(t *testing.T) {
+		macHome := t.TempDir()
+		macConfig := filepath.Join(macHome, "Library", "Application Support", "goose")
+		if err := os.MkdirAll(macConfig, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(macConfig, "config.yaml"), []byte("model: gpt\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := &exec.Cmd{Dir: t.TempDir(), Env: []string{"HOME=" + macHome}}
+		if err := configureGooseIsolation(cmd); err != nil {
+			t.Fatalf("configureGooseIsolation: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(
+			envValue(cmd.Env, "HOME"), "Library", "Application Support", "goose", "config.yaml"))
+		if err != nil {
+			t.Fatalf("isolated home does not carry the macOS config root: %v", err)
+		}
+		if string(data) != "model: gpt\n" {
+			t.Fatalf("macOS config through the isolated home = %q", data)
 		}
 	})
 
@@ -447,6 +476,48 @@ func TestConfigureGooseIsolationFailsClosed(t *testing.T) {
 			t.Fatalf("isolated home is not a directory: %s", got)
 		}
 	})
+}
+
+// TestCarryGooseConfigDirFallsBackToCopy: a Windows host without Developer Mode
+// cannot create a symlink, and that is the NORMAL path there because
+// XDG_CONFIG_HOME is rarely set. A hard dependency on a privileged filesystem
+// operation would fail every goose call on a supported platform, so a refused
+// symlink has to degrade to a copy — and the copy has to carry the same files.
+func TestCarryGooseConfigDirFallsBackToCopy(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "goose")
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "config.yaml"), []byte("provider: openai\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "secrets.yaml"), []byte("token: x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A subdirectory is not copied: it is not a file, and following it would
+	// let a config directory pull a tree into the child.
+	if err := os.MkdirAll(filepath.Join(source, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(t.TempDir(), "goose")
+	denied := func(string, string) error { return errors.New("symlink privilege not held") }
+	if err := carryGooseConfigDirWith(source, target, denied); err != nil {
+		t.Fatalf("carryGooseConfigDirWith: %v", err)
+	}
+
+	for name, want := range map[string]string{"config.yaml": "provider: openai\n", "secrets.yaml": "token: x\n"} {
+		got, err := os.ReadFile(filepath.Join(target, name))
+		if err != nil {
+			t.Fatalf("copied config missing %s: %v", name, err)
+		}
+		if string(got) != want {
+			t.Errorf("copied %s = %q, want %q", name, got, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(target, "sessions")); !os.IsNotExist(err) {
+		t.Errorf("copy carried a subdirectory: %v", err)
+	}
 }
 
 func TestOpenCodeClientUsesNoToolPolicy(t *testing.T) {
