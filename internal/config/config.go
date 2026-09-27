@@ -330,7 +330,24 @@ func Load() (*Config, error) {
 	if err := k.Unmarshal("", cfg); err != nil {
 		return nil, err
 	}
+	dropEmptyScopeValues(cfg)
 	return cfg, nil
+}
+
+// dropEmptyScopeValues removes, with a warning, every injection.session_scope
+// key whose value is empty. The env form refuses such a pair outright
+// (stringMap); the YAML form decodes it, and an empty value is not a no-op: it
+// is a filter that excludes every row naming that key with any other value, so
+// `environment: ""` would quietly leave a session with an unexplained subset of
+// its store. Dropping the key is the reading closest to what the line most
+// plausibly meant, and the warning says so.
+func dropEmptyScopeValues(cfg *Config) {
+	for key, value := range cfg.Injection.SessionScope {
+		if value == "" {
+			warnf("injection.session_scope.%s: empty value ignored (it would exclude every memory that names %s)", key, key)
+			delete(cfg.Injection.SessionScope, key)
+		}
+	}
 }
 
 // loadEnvLayer applies the GHOST_* environment variables to k: the generic
@@ -845,9 +862,8 @@ func intMap(s string) (interface{}, error) {
 // else here can reject it, and a request key whose value is the empty string is
 // a filter rather than a no-op. It excludes every row that names the key with
 // any other value, so a trailing "=" would quietly leave a session with an
-// unexplained subset of its store. The YAML form states each value in full, so an
-// empty one is visible to whoever wrote it; the comma-separated form is where a
-// typo can hide, and that is the one checked.
+// unexplained subset of its store. The YAML form decodes an empty value rather
+// than failing, so Load drops it with a warning instead (dropEmptyScopeValues).
 func stringMap(s string) (interface{}, error) {
 	pairs, err := commaPairs(s)
 	if err != nil {

@@ -666,6 +666,33 @@ func TestLoad_SessionScopeFromYAML(t *testing.T) {
 	}
 }
 
+// TestLoad_SessionScopeEmptyYAMLValueIsDroppedWithAWarning: an empty value in
+// the YAML form is not a no-op — it would exclude every memory naming the key —
+// so Load drops that key and says so, the way the env form refuses it.
+func TestLoad_SessionScopeEmptyYAMLValueIsDroppedWithAWarning(t *testing.T) {
+	isolateConfig(t)
+	warnings := captureConfigWarnings(t)
+	writeUserConfig(t, strings.Join([]string{
+		"injection:",
+		"  session_scope:",
+		`    environment: ""`,
+		"    component: api",
+		"",
+	}, "\n"))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := cfg.Injection.SessionScope
+	if _, ok := got["environment"]; ok || got["component"] != "api" || len(got) != 1 {
+		t.Errorf("injection.session_scope = %v, want only component:api (the empty environment dropped)", got)
+	}
+	if !strings.Contains(warnings.String(), "injection.session_scope.environment: empty value ignored") {
+		t.Errorf("no warning for the dropped empty value; warnings = %q", warnings.String())
+	}
+}
+
 func TestScratchDefaults(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
