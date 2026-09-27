@@ -636,8 +636,23 @@ func TestWriteFileAtomicKeepsSymlink(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
+	// The rename lands in the target's directory, so that is the directory
+	// whose entry must be flushed; flushing the link's directory would make
+	// the new entry durable nowhere.
+	var flushed []string
+	recordSyncs(t, nil, func(dir string) error {
+		flushed = append(flushed, dir)
+		return nil
+	})
 	if err := writeFileAtomic(link, []byte("b = 2\n"), 0644); err != nil {
 		t.Fatalf("writeFileAtomic through a symlink: %v", err)
+	}
+	wantDir, err := filepath.EvalSymlinks(filepath.Dir(real))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flushed) != 1 || flushed[0] != wantDir {
+		t.Errorf("flushed directories = %q, want exactly the symlink target's directory %q", flushed, wantDir)
 	}
 	info, err := os.Lstat(link)
 	if err != nil {
@@ -772,10 +787,10 @@ var errFlush = errors.New("flush refused by the test")
 // real fsync, and restores them when the test ends. A write holds no lock of its
 // own and these tests are not parallel, so a package var is the seam; nothing
 // else in the package assigns them.
-func recordSyncs(t *testing.T, onTemp func(*os.File) error, onDir func(string) error) (events *[]string) {
+func recordSyncs(t *testing.T, onTemp func(*os.File) error, onDir func(string) error) *[]string {
 	t.Helper()
 	realTemp, realDir := syncTempFile, syncParentDir
-	seen := &[]string{}
+	events := &[]string{}
 	t.Cleanup(func() { syncTempFile, syncParentDir = realTemp, realDir })
 	syncTempFile = func(f *os.File) error {
 		*events = append(*events, "flush temp")
@@ -791,7 +806,7 @@ func recordSyncs(t *testing.T, onTemp func(*os.File) error, onDir func(string) e
 		}
 		return realDir(dir)
 	}
-	return seen
+	return events
 }
 
 // readFileOr returns the content of path, or "<unreadable: err>" — a recorder
