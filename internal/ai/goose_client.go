@@ -215,6 +215,16 @@ var gooseHomeConfigRelPaths = [][]string{
 // platform, so where a symlink is refused the directory is copied instead.
 // The copy is made private to the child and dies with the scratch dir.
 func linkGooseConfigDirs(home string, env []string, homeDir string) error {
+	return linkGooseConfigDirsWith(home, env, homeDir, os.Lstat)
+}
+
+// linkGooseConfigDirsWith takes the probe as a parameter because the
+// ENOENT/ENOTDIR distinction is not reproducible everywhere: Windows reports "a
+// file where a directory belongs" as ERROR_PATH_NOT_FOUND, which Go maps to
+// fs.ErrNotExist, so the very case this must refuse cannot be built on that
+// host. The platform's own answer is honoured — a genuine miss is skipped — and
+// only the classification is injected, so the test can pin it.
+func linkGooseConfigDirsWith(home string, env []string, homeDir string, probe func(string) (os.FileInfo, error)) error {
 	if harnessEnvValue(env, "XDG_CONFIG_HOME") != "" {
 		// An absolute path the child reads directly; HOME plays no part.
 		return nil
@@ -227,7 +237,7 @@ func linkGooseConfigDirs(home string, env []string, homeDir string) error {
 		// file where a directory belongs — means the config is there and
 		// unreadable, and skipping it would hand the child an empty profile
 		// with nothing saying Ghost dropped it.
-		if _, err := os.Lstat(source); err != nil {
+		if _, err := probe(source); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}

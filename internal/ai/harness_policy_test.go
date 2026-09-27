@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -539,32 +541,57 @@ func TestCarryGooseConfigDirFallsBackToCopy(t *testing.T) {
 	}
 }
 
-// TestGooseIsolationRefusesANonDirectoryConfigRoot: only "not there" may be
-// passed over when a candidate config root is probed, because that is how a
-// platform's unused location is recognised. A root that exists but is not a
-// usable directory must fail instead: skipping it would hand the child a home
-// with no configuration and no indication that Ghost dropped it, and the child
-// would then authenticate against goose's defaults while the user saw a
-// provider error pointing nowhere.
+// TestGooseConfigRootProbeClassifiesFailures: only "not there" may be passed
+// over when a candidate config root is probed, because that is how a platform's
+// unused location is recognised. A root that exists but is not usable must
+// fail instead: skipping it would hand the child a home with no configuration
+// and no indication that Ghost dropped it, and the child would then
+// authenticate against goose's defaults while the user saw a provider error
+// pointing nowhere.
 //
-// A mode-000 directory is deliberately not the case here. Lstat needs only the
-// search permission of the PARENT, so an unreadable config directory stats
-// fine, the link is still created, and the child fails against the real path —
-// which names the actual problem instead of hiding it.
-func TestGooseIsolationRefusesANonDirectoryConfigRoot(t *testing.T) {
+// The classification is injected rather than reproduced from the filesystem,
+// because the interesting case is not buildable everywhere: Windows reports "a
+// file where a directory belongs" as ERROR_PATH_NOT_FOUND, which Go maps to
+// fs.ErrNotExist, so on that host this case legitimately classifies as absent.
+// The platform's own answer is honoured either way; what is pinned is that a
+// non-ENOENT failure is never skipped.
+func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
 	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, ".config"), []byte("not a directory\n"), 0o600); err != nil {
+	config := filepath.Join(home, ".config", "goose")
+	if err := os.MkdirAll(config, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(config, "config.yaml"), []byte("provider: openai\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	isolated := t.TempDir()
 
-	cmd := &exec.Cmd{Dir: t.TempDir(), Env: []string{"HOME=" + home}}
-	if err := configureGooseIsolation(cmd); err == nil {
-		t.Fatal("isolation reported success with a config root that is not a directory")
-	}
-	// HOME must not be repointed when the boundary was not established.
-	if got := envValue(cmd.Env, "HOME"); got != home {
-		t.Errorf("HOME = %q, want the untouched value after a refusal", got)
-	}
+	t.Run("absent is skipped", func(t *testing.T) {
+		probe := func(name string) (os.FileInfo, error) {
+			if strings.Contains(name, "Library") {
+				return nil, fs.ErrNotExist
+			}
+			return os.Lstat(name)
+		}
+		if err := linkGooseConfigDirsWith(isolated, []string{"HOME=" + home}, home, probe); err != nil {
+			t.Fatalf("a missing root must be skipped, not refused: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(isolated, ".config", "goose", "config.yaml")); err != nil {
+			t.Fatalf("the present root was not carried: %v", err)
+		}
+	})
+
+	t.Run("unusable is refused", func(t *testing.T) {
+		probe := func(name string) (os.FileInfo, error) {
+			if strings.Contains(name, "Library") {
+				return nil, &fs.PathError{Op: "lstat", Path: name, Err: syscall.ENOTDIR}
+			}
+			return os.Lstat(name)
+		}
+		if err := linkGooseConfigDirsWith(isolated, []string{"HOME=" + home}, home, probe); err == nil {
+			t.Fatal("a root that exists but is unusable was skipped as if absent")
+		}
+	})
 }
 
 func TestOpenCodeClientUsesNoToolPolicy(t *testing.T) {
