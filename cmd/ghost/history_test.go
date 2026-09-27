@@ -456,3 +456,37 @@ func TestPrintHistoryJSONStaysQuietWhenThereIsHistory(t *testing.T) {
 		}
 	}
 }
+
+// TestPrintHistoryJSONRefusesALiveMemoryWithNoHistory: the pre-v17 case. A live
+// memory whose row predates the history table has zero entries, and an empty
+// stream with exit 0 would tell a script the memory has no past — rather than
+// that Ghost was not watching when it was written. The refusal fires on the
+// entry count, not on liveness, and says which of the two misses it is.
+func TestPrintHistoryJSONRefusesALiveMemoryWithNoHistory(t *testing.T) {
+	var buf bytes.Buffer
+	err := printHistory(&buf, historyView{
+		MemoryID: "predates",
+		Live:     &memory.Memory{ID: "predates", Category: "fact"},
+	}, true)
+	if !errors.Is(err, errNothingToReport) {
+		t.Fatalf("printHistory error = %v, want errNothingToReport", err)
+	}
+	var got struct {
+		Error string `json:"error"`
+	}
+	if jsonErr := json.Unmarshal(buf.Bytes(), &got); jsonErr != nil {
+		t.Fatalf("the refusal is not JSON: %v\n%s", jsonErr, buf.String())
+	}
+	if !strings.Contains(got.Error, "predates") {
+		t.Errorf("the refusal does not name the id: %q", got.Error)
+	}
+	// It must NOT claim the memory does not exist — it does, and the sentence is
+	// the difference between "Ghost has nothing on it" and "Ghost was not
+	// watching yet".
+	if strings.Contains(got.Error, "no memory and no history") {
+		t.Errorf("the refusal says there is no memory, but the row is live: %q", got.Error)
+	}
+	if !strings.Contains(got.Error, "schema v17") {
+		t.Errorf("the refusal does not name the reason: %q", got.Error)
+	}
+}

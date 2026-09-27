@@ -361,22 +361,92 @@ func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase st
 	return appendHistoryTx(ctx, tx, memoryID, phase, prov)
 }
 
-// purgeHistoryTx removes every history row for a memory and reports how many went.
-// It is the redaction path: this table keeps the text a memory USED to hold, so
-// deleting a memory that contained a credential leaves the credential here unless
-// the delete asks for this. The delete path runs it in the same transaction as
-// the DELETE, so a memory and its history cannot come apart.
+// purgeHistoryTx erases the text this database recorded about a memory, and
+// reports how many history rows it removed.
 //
-// No tombstone is written first and nothing is left behind: a purge exists
-// precisely to leave nothing, which is also why it is the one delete that appends
-// no history of its own.
+// It is the redaction path, and it reaches further than the history table alone
+// because the history is not the only place the text was kept:
+//
+//   - memory_snapshots. Every applied reflection copies each non-manual memory's
+//     full content into a snapshot, and memory_snapshots.memory_id deliberately
+//     has no foreign key, so deleting the memory row leaves the snapshot — and
+//     `ghost reflect --restore` re-inserts the row from it under the memory's
+//     ORIGINAL id, text and all, with no history to show it came back. A purge
+//     that left that behind would report success on a secret that is one
+//     `ghost reflect --restore` away from being readable again.
+//   - another memory's merge row. A FoldOnly fold records the wording it
+//     discarded in `merged_content` on the TARGET's row, so this memory's text
+//     can sit on a history row that names a different memory. Those cells are
+//     redacted rather than their rows deleted: the event (which memory, when,
+//     which agent) is worth keeping, and the text is what the purge is for.
+//
+// The texts are collected before anything is deleted, because afterwards there
+// is nothing left to search for. The caller runs this in the same transaction as
+// the memory DELETE, so a memory and every copy of it commit or roll back
+// together.
 func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, error) {
-	res, err := tx.ExecContext(ctx, `DELETE FROM memory_provenance WHERE memory_id = ?`, memoryID)
+	texts, err := selectIDs(ctx, tx, `
+		SELECT content FROM memory_provenance WHERE memory_id = ? AND content IS NOT NULL
+		UNION
+		SELECT content FROM memories WHERE id = ?
+		UNION
+		SELECT content FROM memory_snapshots WHERE memory_id = ?`,
+		memoryID, memoryID, memoryID)
+	if err != nil {
+		return 0, fmt.Errorf("collect texts to purge: %w", err)
+	}
+
+	// The snapshot first: it is the copy that can bring the row back, so it is
+	// the one whose survival would make the purge's own report a lie.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM memory_snapshots WHERE memory_id = ?`, memoryID); err != nil {
+		return 0, fmt.Errorf("purge memory snapshots: %w", err)
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM memory_provenance WHERE memory_id = ?`, memoryID)
 	if err != nil {
 		return 0, fmt.Errorf("purge memory history: %w", err)
 	}
-	return res.RowsAffected()
+	removed, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count purged history rows: %w", err)
+	}
+
+	// Another memory's discarded wording, in batches small enough that the
+	// statement's text stays sane: a text is up to MaxContentLen bytes, and a
+	// memory's history is bounded but not by this.
+	const redactionBatch = 25
+	for start := 0; start < len(texts); start += redactionBatch {
+		batch := texts[start:min(start+redactionBatch, len(texts))]
+		placeholders := make([]string, 0, len(batch))
+		args := make([]interface{}, 0, len(batch))
+		for _, text := range batch {
+			if text == "" {
+				continue
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, text)
+		}
+		if len(placeholders) == 0 {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE memory_provenance SET merged_content = ?
+			 WHERE memory_id <> ? AND merged_content IN (`+strings.Join(placeholders, ",")+`)`,
+			append([]interface{}{purgedTextMarker, memoryID}, args...)...,
+		); err != nil {
+			return 0, fmt.Errorf("redact folded-in copies of the text: %w", err)
+		}
+	}
+	return removed, nil
 }
+
+// purgedTextMarker replaces a folded-in text a purge has erased. It is a marker
+// rather than an empty string so a reader can tell "this fold discarded text that
+// has since been purged" from "this fold discarded nothing", which an empty
+// string cannot say.
+const purgedTextMarker = "[purged]"
 
 // PurgeMemoryHistory erases a memory's recorded history without touching the
 // memory row, and reports how many rows it removed.
@@ -389,9 +459,11 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 // also what makes a memory id reusable — `ghost import` refuses an id that still
 // has history, and this is how an operator frees one.
 //
-// It erases history only. A live memory is left exactly as it was, because
-// "erase the history of this memory" and "delete this memory" are different
-// requests and conflating them would destroy knowledge nobody asked to lose.
+// It erases recorded text only. A live memory row is left exactly as it was,
+// because "erase the history of this memory" and "delete this memory" are
+// different requests and conflating them would destroy knowledge nobody asked to
+// lose. What it does reach is every copy of the text the database kept, so
+// nothing is left that a restore or a reader can bring back; see purgeHistoryTx.
 func (s *Store) PurgeMemoryHistory(ctx context.Context, memoryID string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

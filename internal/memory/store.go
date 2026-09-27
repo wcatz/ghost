@@ -3529,8 +3529,10 @@ type DeleteOptions struct {
 	// it — which is what makes the history worth having, and is also how a
 	// credential "removed" by deleting its memory survives in a table with a
 	// longer life than the row. A delete meant to ERASE rather than to retire has
-	// to say so here. See the ghost_memory_delete purge_history argument and
-	// `ghost history purge`.
+	// to say so here. It erases every copy of the text this database holds,
+	// including the reflection snapshot that could restore the row; it cannot
+	// reach a backup taken earlier. See the ghost_memory_delete purge_history
+	// argument and `ghost history purge`.
 	PurgeHistory bool
 }
 
@@ -4271,6 +4273,30 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	//
 	// Updating the row that still exists keeps its identity, its embeddings
 	// and its links; the FTS triggers refresh the index on content change.
+	//
+	// Which rows the UPDATE will actually change is read FIRST, because the
+	// history append below runs after it and needs the set. Restore is explicitly
+	// repeatable — the snapshot is deliberately kept and a second run must leave
+	// the corpus alone — so the id set cannot be re-derived afterwards: by then
+	// every row matches the snapshot, and a row a previous run already restored
+	// looks exactly like one this run restores. The same join with a difference
+	// predicate on the recorded columns is what separates them, and it is decided
+	// before the write so the append still records the restored state.
+	//
+	// Only the recorded columns gate it (content, category, importance, source).
+	// A restore that revives nothing but a row's tags, age or provenance changes
+	// no state the history holds, so it records nothing — the rule every other
+	// writer follows.
+	changedIDs, err := selectIDs(ctx, tx, `
+		SELECT s.memory_id FROM memory_snapshots s
+		JOIN memories m ON m.id = s.memory_id
+		WHERE s.snapshot_id = ? AND s.memory_id = m.id
+		  AND m.pinned = 0 AND m.resolved_at IS NULL
+		  AND (s.content != m.content OR s.category != m.category
+		       OR s.importance != m.importance OR s.source != m.source)`, snapshotID)
+	if err != nil {
+		return 0, fmt.Errorf("find rows this restore changes: %w", err)
+	}
 	updated, err := tx.ExecContext(ctx, `
 		UPDATE memories SET
 		    category = s.category, content = s.content, importance = s.importance,
@@ -4357,28 +4383,25 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (int, err
 	insertedRows.Close() //nolint:errcheck
 	insertedN := int64(len(reinserted))
 
-	// One history row per row this restore put back, in the same transaction:
-	// without them the corpus reads as though the replace never happened, and
-	// the state a restore reverted FROM is unrecoverable from the history. The
-	// in-place restorers are the snapshot's own ids, and the reinserted rows
-	// report theirs above — a pre-v13 snapshot mints a fresh id per restored
-	// row, so the two sets cannot be read from anywhere else.
-	restoredIDs, err := selectIDs(ctx, tx, `
-		SELECT s.memory_id FROM memory_snapshots s
-		JOIN memories m ON m.id = s.memory_id
-		WHERE s.snapshot_id = ? AND s.memory_id IS NOT NULL
-		  AND m.pinned = 0 AND m.resolved_at IS NULL`, snapshotID)
-	if err != nil {
-		return 0, fmt.Errorf("find restored rows: %w", err)
-	}
-	restored := make([]string, 0, len(restoredIDs)+len(reinserted))
-	restored = append(restored, restoredIDs...)
+	// One history row per row this restore actually changed, in the same
+	// transaction: without them the corpus reads as though the replace never
+	// happened, and the state a restore reverted FROM is unrecoverable from the
+	// history. The in-place restorers are the set read before the UPDATE, and the
+	// reinserted rows report theirs above — a pre-v13 snapshot mints a fresh id
+	// per restored row, so that half cannot be known before its statement runs.
+	//
+	// A row an earlier restore already put back is not in the set, so re-running
+	// a restore appends nothing. The event says the row was restored; appending it
+	// again per run would spend one of the per-memory version slots the growth
+	// policy keeps on a row that changed nothing.
+	restored := make([]string, 0, len(changedIDs)+len(reinserted))
+	restored = append(restored, changedIDs...)
 	for _, id := range reinserted {
 		// An id can be in both sets only if the INSERT re-created a row the
 		// UPDATE had just restored, which the mutually exclusive predicates
 		// above make impossible — and a duplicate would append the same event
 		// twice, so it is dropped rather than assumed away.
-		if !slices.Contains(restoredIDs, id) {
+		if !slices.Contains(changedIDs, id) {
 			restored = append(restored, id)
 		}
 	}

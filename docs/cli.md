@@ -469,7 +469,9 @@ not need to be — the last entry's phase says it, and a deleted memory ends in 
 the text a memory **used** to hold, deleting a memory that contained a credential
 leaves that credential in the database and still readable with `ghost history`.
 `purge` erases the text in both directions (the store primitive for the second
-case is `Store.PurgeMemoryHistory`):
+case is `Store.PurgeMemoryHistory`), and it also removes the reflection
+snapshots naming the memory — otherwise `ghost reflect --restore` would bring the
+row back, with its text and no history:
 
 - a memory that is still there is deleted along with its history, in one
   transaction, so neither can survive the other;
@@ -479,8 +481,11 @@ case is `Store.PurgeMemoryHistory`):
   otherwise report the memory as not found and leave the text where it is. The
   memory is not brought back — only the text goes.
 
-The MCP equivalent is `ghost_memory_delete` with `purge_history: true`; use it
-whenever the intent is to erase something rather than to retire a memory. The MCP equivalent is
+The MCP equivalent is `ghost_memory_delete` with `purge_history: true`, in both
+directions — including for a memory that is already deleted, where it purges the
+recorded text without restoring the row; use it whenever the intent is to erase
+something rather than to retire a memory. Neither can reach a backup taken before
+the purge, or another machine's copy of the store. The MCP equivalent is
 `ghost_memory_delete` with `purge_history: true`; use it whenever the intent is to
 erase something rather than to retire a memory.
 

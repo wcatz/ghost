@@ -445,14 +445,26 @@ prints it. Three things follow:
 - **A purge path, in both directions.** `ghost history purge <id>` and
   `ghost_memory_delete`'s `purge_history` argument delete a live row and every
   history row for it in one transaction, so a memory and its history cannot come
-  apart and a purge leaves nothing. A memory that is ALREADY deleted has its
-  history erased on its own (`Store.PurgeMemoryHistory`), which is the case a
-  delete-time purge cannot cover: the tombstone is the feature, so a redaction
-  asked after the delete would otherwise report the memory as not found and leave
-  the text on disk. A plain delete deliberately keeps the history — that is what
-  makes the table worth having — and an id whose history still exists is one
-  `ghost import` refuses to write into, because the artifact's ids are verbatim
-  and the two records would splice under one id.
+  apart. A memory that is ALREADY deleted has its history erased on its own
+  (`Store.PurgeMemoryHistory`, reachable from both entry points), which is the
+  case a delete-time purge cannot cover: the tombstone is the feature, so a
+  redaction asked after the delete would otherwise report the memory as not found
+  and leave the text on disk. A plain delete deliberately keeps the history —
+  that is what makes the table worth having — and an id whose history still exists
+  is one `ghost import` refuses to write into, because the artifact's ids are
+  verbatim and the two records would splice under one id.
+- **A purge reaches every copy this database holds**, not just the history table.
+  `memory_snapshots` is the one that matters: every applied reflection copies each
+  non-manual memory's full content into a snapshot, the column has no foreign key,
+  and `ghost reflect --restore` re-inserts the row from it under the memory's
+  original id — so a purge that left the snapshot behind would report success on a
+  secret one `ghost reflect --restore` away from being readable again, with no
+  history to show it came back. A FoldOnly fold's discarded wording is the other
+  copy: it sits in `merged_content` on the *target's* row, so those cells are
+  redacted rather than their rows deleted (the event is worth keeping; the text is
+  what the purge is for). What a purge still cannot reach is a backup taken before
+  it, or another machine's copy of the store — so the command reports what its
+  transaction covered, not that the text has ceased to exist.
 - **A redaction seam on the way in.** `ghost_history_content` is a SQLite
   function called by the append statement itself, so content is rewritten inside
   the one statement that copies the state out of `memories` rather than in a

@@ -462,7 +462,15 @@ func (s *Store) InvalidateLink(ctx context.Context, sourceID, targetID, relation
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return 0, nil
+		// The error, not a zero count. In the autocommit statement above, "the
+		// invalidation itself already committed" made swallowing this honest;
+		// inside this transaction it has not committed, so returning 0 would fall
+		// through to the deferred rollback, discard the stamp, and tell the
+		// caller the edge is still live — which is what internal/supersede then
+		// branches on, four call sites deep. A driver that cannot report a count
+		// is one this build has not met, and failing the call is the answer that
+		// does not claim something the database may have done.
+		return 0, fmt.Errorf("invalidate link rows: %w", err)
 	}
 	if n > 0 && active {
 		if err := appendHistoryEventsTx(ctx, tx, []historyEvent{{

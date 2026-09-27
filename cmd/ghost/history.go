@@ -108,12 +108,16 @@ source the memory held once that write landed.
   --limit N   Print only the newest N entries (default: all the store keeps)
   --json      One JSON object per entry, for scripting
 
-  purge       Erase the memory AND every recorded version of it. This is the
+  purge       Erase the memory AND every recorded version of it, including any
+              reflection snapshot that could restore the row. This is the
               redaction path: the history deliberately keeps the text a memory
               used to hold, so deleting a memory that contained a credential
               leaves that credential in the database and readable with
-              'ghost history' unless it is purged. The row and its history go
-              in one transaction, so neither can survive the other.
+              'ghost history' unless it is purged. The row, its history and its
+              snapshots go in one transaction, so none can survive the others. A
+              memory that is ALREADY deleted is handled here too: its recorded
+              text is erased on its own, because the tombstone is the feature
+              and a delete cannot reach it.
 
 The history outlives the memory: a deleted memory's last state is still
 readable here unless it was purged.
@@ -359,7 +363,11 @@ func runHistoryPurge(ctx context.Context, s *memory.Store, memoryID string) {
 			os.Exit(1)
 		}
 	}
-	fmt.Println("Purged. No version of this memory's text remains in the database.")
+	// Accurate about what the transaction covers. A reflection snapshot taken
+	// before the purge is gone with it, but nothing here can reach a copy in
+	// another store, a backup taken earlier, or a text quoted into something
+	// that was never Ghost's memory.
+	fmt.Println("Purged. This memory's row, its recorded history and any reflection snapshot naming it are gone.")
 }
 
 // readHistoryView gathers what the printer needs from an open store: the memory
@@ -413,22 +421,35 @@ func printHistoryJSONError(w io.Writer, message string) {
 // printHistory chooses the rendering. --json prints only the entries, so the
 // output is pipeable into jq with no header line to strip.
 //
-// A JSON run that knows nothing about the id is a refusal, not an empty stream.
-// Zero lines with exit 0 is the one answer a script cannot act on: it cannot tell
-// "this memory was never written" from "the growth policy pruned it" from "the
-// query found nothing because the tool is broken", and all three would be the
-// same. So the miss takes the same shape as the no-database case — an error
-// object and a non-zero exit — and the caller turns that into os.Exit(1).
+// A JSON run with nothing to report is a refusal, not an empty stream. Zero
+// lines with exit 0 is the one answer a script cannot act on: it cannot tell
+// "this memory was never written" from "it predates the history table" from
+// "the growth policy pruned it" from "the query found nothing because the tool
+// is broken", and all four would be the same. So the miss takes the same shape as
+// the no-database case — an error object and a non-zero exit — and the caller
+// turns that into os.Exit(1).
 //
 // Liveness is the one distinction the JSON form does not repeat per line, and it
 // does not need to: the last entry's phase says it. A memory that is gone ends
 // in a `delete` row.
 func printHistory(w io.Writer, v historyView, asJSON bool) error {
 	if asJSON {
-		if v.Live == nil && len(v.Entries) == 0 {
-			printHistoryJSONError(w, fmt.Sprintf(
-				"no memory and no history recorded for %s — it was never written, or its history has been pruned",
-				v.MemoryID))
+		// Zero entries is a refusal whatever the liveness says, and the two
+		// misses want different sentences. A LIVE memory with no history is the
+		// pre-v17 case: the row predates the table and nothing this build has
+		// done has written one, so "no memory and no history" would be false and
+		// an empty stream would let a script conclude the memory has no past
+		// rather than that Ghost was not watching when it was written.
+		if len(v.Entries) == 0 {
+			if v.Live != nil {
+				printHistoryJSONError(w, fmt.Sprintf(
+					"no history recorded for %s — nothing has written it since this store reached schema v17",
+					v.MemoryID))
+			} else {
+				printHistoryJSONError(w, fmt.Sprintf(
+					"no memory and no history recorded for %s — it was never written, or its history has been pruned",
+					v.MemoryID))
+			}
 			return errNothingToReport
 		}
 		return printHistoryJSON(w, v.Entries)

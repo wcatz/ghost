@@ -1539,3 +1539,224 @@ func TestImportRefusesAnIDThatStillHasHistory(t *testing.T) {
 		t.Errorf("a history purge deleted a live memory: %v %v", live, err)
 	}
 }
+
+// TestPurgeReachesTheSnapshotThatCouldRestoreTheRow: the copy that makes a
+// purge's own report a lie. Every applied reflection copies each non-manual
+// memory's full content into memory_snapshots, the column has no foreign key, and
+// RestoreSnapshot re-inserts the row from it under the memory's ORIGINAL id — so
+// a purge that left the snapshot behind erases the text from the history and
+// leaves it one `ghost reflect --restore` away from being readable again, with no
+// history to say it came back.
+func TestPurgeReachesTheSnapshotThatCouldRestoreTheRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	const secret = "the deploy key is ghp_SNAPSHOTKEY0123456789ABCDEFGHIJ"
+	id, _, _, err := s.Upsert(ctx, testProject, "gotcha", secret, "reflection", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	// A reflection pass snapshots the corpus before replacing it. The
+	// replacement here is a no-op shape: the emitted text is the same memory, so
+	// the row is reused and the snapshot of the pre-replace text is what stands
+	// between the purge and a restore.
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category:   "gotcha",
+		Content:    secret,
+		Importance: 0.5,
+		Source:     "reflection",
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	var snapshots int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_snapshots WHERE memory_id = ? AND content = ?`, id, secret,
+	).Scan(&snapshots); err != nil {
+		t.Fatalf("count snapshots: %v", err)
+	}
+	if snapshots == 0 {
+		t.Fatal("the reflection pass left no snapshot of this memory; the fixture does not test the case")
+	}
+
+	if err := s.DeleteWithOptions(ctx, id, DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("DeleteWithOptions: %v", err)
+	}
+
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_snapshots WHERE memory_id = ?`, id,
+	).Scan(&snapshots); err != nil {
+		t.Fatalf("count snapshots after purge: %v", err)
+	}
+	if snapshots != 0 {
+		t.Errorf("%d snapshot row(s) survive the purge and could restore the memory", snapshots)
+	}
+	// And nothing anywhere in this database still holds the text.
+	leaked, err := countOccurrences(t, s.db, secret)
+	if err != nil {
+		t.Fatalf("scan for the text: %v", err)
+	}
+	if leaked != 0 {
+		t.Errorf("the purged text survives in %d row(s) of this database", leaked)
+	}
+}
+
+// TestPurgeRedactsAnotherMemoriesFoldedCopy: a FoldOnly fold records the wording
+// it discarded in merged_content on the TARGET's row, so a text can sit on a
+// history row that names a different memory. Deleting that row would throw away
+// the event; leaving the cell would keep the text. The cell is redacted, and the
+// event stays.
+func TestPurgeRedactsAnotherMemoriesFoldedCopy(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// A fact stored twice: first as the stored wording, then as a near-identical
+	// paraphrase a FoldOnly fold throws away. The discarded paraphrase is what the
+	// target's merge row keeps, and the same words are then saved as a memory of
+	// their own — which is how a text ends up on a row naming one memory while a
+	// second memory holds the very same string.
+	const stored = "The staging database is reached over the bastion at port 2222 not 22"
+	const discarded = "the staging database is reached over the bastion at port 2222 not 22"
+	target, _, _, err := s.Upsert(ctx, testProject, "convention", stored, "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if _, _, _, err := s.UpsertWithOptions(ctx, testProject, "convention", discarded, "mcp", 0.7, nil,
+		UpsertOptions{FoldOnly: true}); err != nil {
+		t.Fatalf("UpsertWithOptions (FoldOnly): %v", err)
+	}
+	// Now save the same words for real. The default fold keeps the incoming text
+	// as a linked copy of its own, so this is a second memory whose content is
+	// byte-identical to the wording the merge row recorded.
+	other, _, _, err := s.Upsert(ctx, testProject, "convention", discarded, "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert (the same words again): %v", err)
+	}
+	if other == target {
+		t.Fatal("the second save folded into the first; the fixture needs two memories")
+	}
+
+	// The second save also folded, and that fold records no folded-in text (the
+	// incoming wording became a row of its own), so the row carrying the
+	// discarded wording is not the last one. It is looked up by what it holds.
+	var carried int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_provenance WHERE memory_id = ? AND phase = ? AND merged_content = ?`,
+		target, phaseMerge, discarded,
+	).Scan(&carried); err != nil {
+		t.Fatalf("count merge rows carrying the wording: %v", err)
+	}
+	if carried != 1 {
+		t.Fatalf("%d merge rows carry the discarded wording, want 1 — the fixture does not test the case", carried)
+	}
+
+	// Purge the SECOND memory. The target's merge row is not its own, so it
+	// survives with the event and loses the text.
+	if err := s.DeleteWithOptions(ctx, other, DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("DeleteWithOptions: %v", err)
+	}
+
+	var phase, merged string
+	if err := s.db.QueryRow(
+		`SELECT phase, merged_content FROM memory_provenance
+		 WHERE memory_id = ? AND phase = ?`, target, phaseMerge,
+	).Scan(&phase, &merged); err != nil {
+		t.Fatalf("read a merge row after the purge: %v", err)
+	}
+	if phase != phaseMerge {
+		t.Errorf("the surviving event is %q, want it kept as a merge", phase)
+	}
+	if merged != purgedTextMarker {
+		t.Errorf("a folded-in cell reads %q, want the purge marker — the text is still in the database", merged)
+	}
+	leaked, err := countOccurrences(t, s.db, discarded)
+	if err != nil {
+		t.Fatalf("scan for the text: %v", err)
+	}
+	if leaked != 0 {
+		t.Errorf("the discarded wording survives in %d row(s)", leaked)
+	}
+}
+
+// countOccurrences reports how many rows in any table hold text, across the
+// tables that can hold a memory's text: the row itself, its history, and a
+// snapshot. It is the assertion a redaction needs and a per-table assertion does
+// not give: a purge that empties the history while a snapshot keeps the text has
+// erased nothing an operator can observe.
+func countOccurrences(t *testing.T, db *sql.DB, text string) (int, error) {
+	t.Helper()
+	var total int
+	for _, q := range []struct {
+		table string
+		query string
+	}{
+		{"memories", `SELECT count(*) FROM memories WHERE content = ?`},
+		{"memory_provenance.content", `SELECT count(*) FROM memory_provenance WHERE content = ?`},
+		{"memory_provenance.merged_content", `SELECT count(*) FROM memory_provenance WHERE merged_content = ?`},
+		{"memory_snapshots", `SELECT count(*) FROM memory_snapshots WHERE content = ?`},
+	} {
+		var n int
+		if err := db.QueryRow(q.query, text).Scan(&n); err != nil {
+			return 0, fmt.Errorf("count in %s: %w", q.table, err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// TestRestoreAppendsOnlyForRowsItChanged: restore is repeatable by design — the
+// snapshot is deliberately kept and a second run must leave the corpus alone — so
+// the id set it appends cannot be re-derived after the write. By then every row
+// matches the snapshot, and a row an earlier run restored looks exactly like one
+// this run restores, so a second `ghost reflect --restore` appended a byte-
+// identical `restore` row for every memory. Each repeat spent one of the 50
+// per-memory version slots the growth policy keeps, which is how pushing the
+// rollback button repeatedly pushes the real save/update/reflect versions out.
+func TestRestoreAppendsOnlyForRowsItChanged(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the pre-snapshot wording of a fact",
+		Source: "reflection", Importance: 0.5,
+	}); err != nil {
+		t.Fatalf("create the pre-snapshot row: %v", err)
+	}
+	// The reflection that snapshots and replaces it.
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "the consolidated wording", Importance: 0.6},
+	}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+		t.Fatalf("first restore: %v", err)
+	}
+	restored, err := s.GetAll(ctx, testProject, 10)
+	if err != nil || len(restored) != 1 {
+		t.Fatalf("the first restore left %d rows, want 1: %v %v", len(restored), restored, err)
+	}
+	id := restored[0].ID
+	afterFirst, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	// The reflection's wording differs, so the replace dropped the row and the
+	// restore brought it back under its ORIGINAL id — the reinsert is what makes
+	// that id live again, and its delete row is the state the restore reverted
+	// from.
+	if got := phasesOf(t, afterFirst); !equalStrings(got, []string{"save:", "delete:", "restore:"}) {
+		t.Fatalf("phases = %v, want [save delete restore]", got)
+	}
+
+	// The second run changes nothing, so it records nothing.
+	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
+		t.Fatalf("second restore: %v", err)
+	}
+	afterSecond, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if got := phasesOf(t, afterSecond); !equalStrings(got, []string{"save:", "delete:", "restore:"}) {
+		t.Errorf("phases = %v, want [save delete restore] — a repeat restore appended a row for a row it changed nothing in", got)
+	}
+}
