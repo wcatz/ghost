@@ -166,6 +166,22 @@ func TestPromptTellsTheModelARewriteMayComeBack(t *testing.T) {
 	if !strings.Contains(obsolete, "verbatim re-add. State an obsolete drop") {
 		t.Errorf("the obsolete bullet runs its two spliced clauses together: %q", obsolete)
 	}
+
+	// The second staleTail splice site, in the RULES section — the mirror of the
+	// --allow-drops assertion in the test below. staleTail appears twice in the
+	// retention prompt (this line and the obsolete bullet), and only the obsolete
+	// bullet was checked, so replacing this splice with the other mode's tail or a
+	// hardcoded literal would have left the whole suite green: the prompt would
+	// tell the model a stale memory is re-added in one place and deleted in the
+	// other, and the per-bullet assertions would each pass on the bullet they
+	// were written against.
+	stale := bullet(t, prompt, "- Drop stale situational memories")
+	if !strings.Contains(stale, "since a drop nothing explains is undone by the verbatim re-add.") {
+		t.Errorf("the stale-memories rule does not carry the retention staleTail: %q", stale)
+	}
+	if strings.Contains(stale, "a real deletion") {
+		t.Errorf("the retention prompt's stale-memories rule promises a deletion the apply does not perform: %q", stale)
+	}
 }
 
 // TestPromptDoesNotPromiseAReAddUnderAllowDrops is the mode half, and it exists
