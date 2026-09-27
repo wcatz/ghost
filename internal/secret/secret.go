@@ -33,6 +33,7 @@ import (
 	_ "embed"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -91,6 +92,27 @@ type rule struct {
 	label string
 	re    *regexp.Regexp
 }
+
+// Cost of this table, measured and recorded rather than guessed.
+//
+// A profile of a 4 KB save put essentially all of the time in regexp's own
+// machine — 47% in backtrack, the rest in add and step — at ~2 ms per save, and
+// the table is about twenty backtracking scans of the whole content. A keyword
+// prefilter in front of each rule is the obvious answer and is NOT here, for a
+// reason worth recording: Go's Regexp.LiteralPrefix returns the literal a match
+// must BEGIN with, and it returns empty for a pattern whose first instruction is
+// a word boundary, which every rule here has (\bghp_, \bsk-…). A derived
+// prefilter is therefore useless, and a hand-written one per rule is a silent
+// false negative waiting to happen — wrong in the strict direction and a rule
+// that simply never fires, which in this control is indistinguishable from the
+// rule not existing.
+//
+// The allocation side of the same profile WAS worth fixing and is: see
+// mnemonicCandidates, which was 67% of all allocations.
+//
+// The scale this is sized for: a memory is capped at 8,000 bytes and a 256 KB
+// single line measures in the low hundreds of milliseconds, pinned by
+// TestDetectIsLinearInLineLength.
 
 var rules = []rule{
 	{
@@ -183,11 +205,19 @@ var rules = []rule{
 			// endings, and with its newlines escaped the way kubectl and
 			// Terraform render one in JSON.
 			`(?m)^[ \t]*-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[ \t]*\r?\n` +
+				pemHeaders +
 				`(?:[ \t]*[A-Za-z0-9+/=]{16,}[ \t]*\r?\n)+` +
 				`[ \t]*-----END [A-Z0-9 ]*PRIVATE KEY-----[ \t\r]*$` +
 				`|` +
-				`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----\\n` +
-				`(?:[A-Za-z0-9+/=]{16,}\\n)+` +
+				// Newlines lost, or escaped: a block pasted through a log line, a
+				// shell argument, a single-line YAML scalar or a chat message
+				// arrives with its line structure gone. The base64 body is still
+				// required between the markers, which is what keeps the
+				// documentation sentence out — between its two markers there is
+				// the word "and", not a key.
+				`-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:\n|\\n|[ \t]+)` +
+				pemHeadersLoose +
+				`[A-Za-z0-9+/=]{16,}(?:\n|\\n|[ \t\r\n])+` +
 				`-----END [A-Z0-9 ]*PRIVATE KEY-----`),
 	},
 	{
@@ -206,37 +236,16 @@ var rules = []rule{
 		// those two contains the word.
 		name:  "cardano-key-file",
 		label: "Cardano private key file (operational/scaling/kes/evolving key)",
-		re:    regexp.MustCompile(`(?i)"type"\s*:\s*"[A-Za-z0-9_]*(?:Signing|Private)Key[A-Za-z0-9_]*"|"type"\s*:\s*"(?:KES|Evol|Scaling|VRF|Delegation)Key"`),
-	},
-	{
-		// The other side of the same envelope: a paste that names the file it
-		// came from rather than carrying the JSON type field. cardano-key-file
-		// owns the type field, and without this the cborHex rule would have no
-		// shape of its own — every type name it could read is one that rule
-		// already reads. So this matches the filename instead: a line naming a
-		// .skey file and carrying a key-sized hex run is a key paste, and a
-		// public Plutus script never names a .skey file.
-		//
-		// The second form catches a labelled key with neither filename nor
-		// "type", and it works on the wire rather than by convention: both a key
-		// and a script are a CBOR byte string, so both begin 0x58 or 0x59 followed
-		// by the length, and a script is large enough to need two bytes (tag
-		// `59`). A 64-byte byte string — tag `5840` — is private-only, because no
-		// Cardano public key is 64 bytes, so that is the unambiguous form.
-		//
-		// A 32-byte `5820` is deliberately NOT matched, because that is also the
-		// encoding of every Cardano *public* key: cardano-cli and cardano-node
-		// write exactly `{"type":"KESVerificationKey","cborHex":"5820…"}` for a
-		// block production key, and a block producer has to be able to record
-		// one. So a labelled 32-byte cold signing key is a documented false
-		// negative, and it is the price of not refusing published verification
-		// keys. Unlabelled, it is still caught: 136 hex characters is over
-		// longHexFloor.
-		name:  "cardano-cbor-hex",
-		label: "Cardano CBOR-encoded key (cborHex beside a .skey file)",
+		// The type name alone is not enough. `{"type": "StakePoolSigningKey…
+		// "}` in a runbook is documentation, and documentation about keys is
+		// most of what an operator writes; a block producer's runbook names its
+		// pool signing key type on its own. So a value has to sit on the same
+		// line as the name — which is what the CBOR walk in
+		// cardanoKeyWithContext reads, and why this rule keeps only the
+		// non-CBOR envelopes.
 		re: regexp.MustCompile(
-			`(?i)\.skey\b[^\n]*\b[0-9a-f]{64,}` +
-				`|cborhex"?\s*[:=]\s*"?5840[0-9a-f]{8,}`),
+			`(?i)"type"\s*:\s*"[A-Za-z0-9_]*(?:Signing|Private)Key[A-Za-z0-9_]*"[^\n]*"?(?:cborHex|k,v)?"?\s*[:=]\s*"?[0-9a-f]{64,}` +
+				`|"type"\s*:\s*"(?:KES|Evol|Scaling|VRF|Delegation)Key"[^\n]*"?(?:cborHex|k,v)?"?\s*[:=]\s*"?[0-9a-f]{64,}`),
 	},
 	{
 		name:  "authorization-bearer",
@@ -254,10 +263,16 @@ var rules = []rule{
 // test: the userinfo has to be looked at, because a template carries a
 // password-shaped pair of words and a leak carries a value. Eight characters is
 // a floor, not a test — "PASSWORD" is eight and "changeme" is eight.
-var urlCredentialsRe = regexp.MustCompile(`://[^\s/:@]+:([^\s/@]{8,})@`)
+var urlCredentialsRe = regexp.MustCompile(`://([^\s/:@]+):([^\s/@]{8,})@`)
 
-// urlCredentialIndex is the submatch holding the userinfo password.
-const urlCredentialIndex = 1
+// urlCredentialUser and urlCredentialPassword hold the userinfo user and its
+// password. The user is captured because a default credential is defined
+// relative to it: a password equal to its own user is postgres://postgres:
+// postgres and nothing else.
+const (
+	urlCredentialUser     = 1
+	urlCredentialPassword = 2
+)
 
 // urlPasswordAllCaps matches a userinfo password written in capitals. That is
 // placeholder convention — postgres://USER:PASSWORD@host/db is what a template, a
@@ -277,16 +292,235 @@ var urlCredentialPlaceholders = map[string]bool{
 	"changeme": true, "change_me": true, "redacted": true, "example": true,
 	"your_password": true, "my_password": true, "db_password": true,
 	"the_password": true, "placeholder": true, "xxxxx": true,
+	// A template spelled with the word rather than with a sigil, which the
+	// placeholder test cannot see.
+	"your-password-here": true, "my-secret-here": true, "insert-here": true,
+}
+
+// urlDefaultAccounts are the account names a database ships with. A password
+// that is one of these is a default, not a credential.
+//
+// The list is shorter than it could be on purpose. These are a product's names,
+// and a product that invents one will not be in this table — which is the
+// failure mode that matters, and which the user==password test catches for the
+// cases that matter most.
+var urlDefaultAccounts = map[string]bool{
+	"postgres": true, "mysql": true, "mariadb": true, "root": true,
+	"mongo": true, "admin": true, "sa": true, "oracle": true,
+	"db": true, "guest": true, "default": true, "test": true,
 }
 
 // looksLikeURLCredential reports whether a matched userinfo password is a value
-// rather than a stand-in for one.
-func looksLikeURLCredential(password string) bool {
+// rather than a stand-in for one: a template, a word, a run of capitals, a
+// product's default account, or the account's own name.
+func looksLikeURLCredential(user, password string) bool {
+	// A password written as a TEMPLATE is not a password. ${VAR} is how a
+	// compose file, a Helm value, a Terraform file and a README all spell it, and
+	// <db_password> is the angle-bracket form; both say where the password comes
+	// from, which is the behaviour this control wants to encourage. This is the
+	// same test the assigned-value rule applies, and it is what makes
+	// postgres://app:${POSTGRES_PASSWORD}@db acceptable without a word list
+	// containing every variable name anyone has ever used.
+	if strings.ContainsAny(password, placeholderChars) {
+		return false
+	}
 	if urlPasswordAllCaps.MatchString(password) {
 		return false
 	}
-	return !urlCredentialPlaceholders[strings.ToLower(password)]
+	lower := strings.ToLower(password)
+	if urlCredentialPlaceholders[lower] || urlDefaultAccounts[lower] {
+		return false
+	}
+	// A default credential: an account authenticating as itself, or as the
+	// product's own name. It is the most common DSN in a README and it is not a
+	// secret by any reading — nobody rotates it and nobody is harmed by it.
+	return !strings.EqualFold(user, password)
 }
+
+// cardanoKeyWithContext names a line as being about PRIVATE Cardano key
+// material: a .skey filename, a signing- or private-key type name, or the words
+// "signing key" in prose.
+//
+// It is the gate for the 32-byte tag. A 32-byte CBOR byte string is BOTH a
+// cold/payment/stake signing key and every Cardano verification key, so the
+// bytes alone cannot say which — but a line that names a signing key is not
+// ambiguous, and that is the line the rule is for.
+var cardanoKeyWithContext = regexp.MustCompile(
+	`(?i)\.skey\b|[A-Za-z0-9_]*(?:Signing|Private)Key[A-Za-z0-9_]*|signing[ _-]?key`)
+
+// cardanoVerificationKey names a PUBLISHED Cardano key. Where this appears, a
+// 64-byte value is an extended *verification* key — a 32-byte key plus a 32-byte
+// chain code — and refusing it would refuse a memory about a wallet.
+var cardanoVerificationKey = regexp.MustCompile(`(?i)[A-Za-z0-9_-]*VerificationKey`)
+
+// cardanoKeyMinRun is the shortest hex run the Cardano walk will look at: 68,
+// not 64, and the two characters are the whole difference between a transaction
+// hash and a key. A 32-byte hash is 64 hex characters; a key's cborHex carries a
+// 4-byte CBOR header above its 64 and is 68. "signed with payment.skey,
+// submitted tx <64 hex>" is the memory that makes the floor necessary — and it is
+// one of the most common Cardano memories there is.
+const cardanoKeyMinRun = 68
+
+// cardanoHexRunRe finds a hex run of key size or more.
+var cardanoHexRunRe = regexp.MustCompile(`\b[0-9a-fA-F]{` + strconv.Itoa(cardanoKeyMinRun) + `,}\b`)
+
+// cardanoCBORTag reads the CBOR header of a Cardano value: a byte string (0x58
+// or 0x59) followed by its length.
+type cardanoCBORTag struct {
+	bytes   int  // the decoded length
+	twoByte bool // 0x59: the length is two bytes, so the value is > 255 bytes
+	raw     string
+}
+
+func cardanoTagOf(run string) (cardanoCBORTag, bool) {
+	if len(run) < 4 {
+		return cardanoCBORTag{}, false
+	}
+	head := run[:2]
+	hi, hiOK := hexByte(head[0], head[1])
+	lo, loOK := hexByte(run[2], run[3])
+	if !hiOK || !loOK {
+		return cardanoCBORTag{}, false
+	}
+	switch hi {
+	case 0x58:
+		return cardanoCBORTag{bytes: int(lo), raw: run[:4]}, true
+	case 0x59:
+		// 0x59 is a byte string whose length is TWO bytes, so four hex digits.
+		// High byte first: 59 02 60 is 0x0260 = 608, which is the KES signing
+		// key; 59 01 a1 is 0x01a1 = 417, which is a Plutus script wrapper.
+		if len(run) < 6 {
+			return cardanoCBORTag{}, false
+		}
+		high, ok1 := hexByte(run[2], run[3])
+		low, ok2 := hexByte(run[4], run[5])
+		if !ok1 || !ok2 {
+			return cardanoCBORTag{}, false
+		}
+		return cardanoCBORTag{bytes: high<<8 | low, twoByte: true, raw: run[:6]}, true
+	}
+	return cardanoCBORTag{}, false
+}
+
+func hexByte(a, b byte) (int, bool) {
+	hi, ok1 := hexDigit(a)
+	lo, ok2 := hexDigit(b)
+	if !ok1 || !ok2 {
+		return 0, false
+	}
+	return hi<<4 | lo, true
+}
+
+func hexDigit(c byte) (int, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0'), true
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10, true
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10, true
+	}
+	return 0, false
+}
+
+// cardanoKeyWalk refuses a Cardano key that the byte string cannot be told apart
+// from a published one.
+//
+// The negative corpus for this rule is not prose — it is the key file formats
+// themselves, and they collide by construction:
+//
+//   - 32 bytes (tag 5820) is a cold/payment/stake SIGNING key and also every
+//     VERIFICATION key. cardano-cli writes {"type":"KESVerificationKey",
+//     "cborHex":"5820…"} for a block production key, and a block producer has to
+//     be able to record one. So a 32-byte value is refused only on a line that
+//     also names a signing key.
+//   - 64 bytes (tag 5840) is an EXTENDED key, and the public half of that pair —
+//     StakeExtendedVerificationKeyShelley_ed25519_bip32, and the cc-hot
+//     extended vkeys — is published. So 64 bytes is refused only where NO
+//     verification key is named.
+//   - 128 bytes (tag 5880) and the KES signing key (two-byte length 0x0260) have
+//     no published counterpart, so they are refused on the tag alone.
+//
+// The earlier version of this rule asserted that no Cardano public key is 64
+// bytes, and refused 5840 unconditionally. That was wrong: a 64-byte value is an
+// extended key plus its chain code, and the verification half of that is
+// published. The cost of the mistake was refusing a wallet memory.
+func cardanoKeyWalk(text string, li *lineIndex) (Finding, bool) {
+	for _, loc := range cardanoHexRunRe.FindAllStringIndex(text, -1) {
+		run := text[loc[0]:loc[1]]
+		tag, ok := cardanoTagOf(run)
+		if !ok {
+			continue
+		}
+		line := li.line(loc[0])
+		switch {
+		case tag.twoByte:
+			// A two-byte length is a value over 255 bytes: a Plutus script
+			// wrapper, or the KES signing key. Nothing else in these formats is
+			// that large, and the KES key is private, so the length decides it.
+			if tag.bytes == cardanoKESKeyBytes {
+				return cardanoFinding(), true
+			}
+			// Everything else this size is a public script.
+		case tag.bytes == 128:
+			return cardanoFinding(), true
+		case tag.bytes == 64:
+			// Both halves of an extended key are 64 bytes: the private key plus
+			// its chain code, and the PUBLISHED verification key plus its chain
+			// code. `StakeExtendedVerificationKeyShelley_ed25519_bip32` and the
+			// cc-hot extended vkeys are the second of those, and a wallet
+			// operator records them. The envelope is the only thing that tells
+			// them apart, so where it names a verification key the value is
+			// published and storable.
+			//
+			// This is the correction to the earlier claim in this file that no
+			// Cardano public key is 64 bytes: an extended key is a 32-byte key
+			// plus a 32-byte chain code, so the public half is 64 bytes and
+			// carries the same tag as the private half. Refusing the tag
+			// unconditionally refused a wallet memory.
+			if cardanoVerificationKey.MatchString(text) {
+				continue
+			}
+			return cardanoFinding(), true
+		case tag.bytes == 32:
+			if cardanoKeyWithContext.MatchString(line) {
+				return cardanoFinding(), true
+			}
+		}
+	}
+	return Finding{}, false
+}
+
+// cardanoKESKeyBytes is the KES signing key's CBOR length, 0x0260. It is the one
+// two-byte length in these formats that is a key rather than a script, which is
+// why it is named rather than left inside a tag comparison.
+//
+// It is keyed to the tag that was observed on a real KES skey rather than to a
+// derivation from the key's size, because the 608 bytes that length implies is
+// not a size I can account for from the KES key format itself. That is a
+// deliberate trade: a named observed tag is checkable against a real file, and
+// a plausible-sounding derivation that is wrong is not.
+const cardanoKESKeyBytes = 0x0260
+
+func cardanoFinding() Finding {
+	return Finding{Rule: cardanoCBRule, Label: cardanoCBLabel}
+}
+
+// pemHeaders is the traditional-encryption preamble: `Proc-Type:` and
+// `DEK-Info:` lines and the blank line that ends them, between BEGIN and the
+// base64 body. `ENCRYPTED PRIVATE KEY` is already matched by the marker's own
+// `[A-Z0-9 ]*` — the space is in the class — so the headers were the only thing
+// stopping a real encrypted block.
+const pemHeaders = `(?:(?:Proc-Type|DEK-Info):[^\n]*\r?\n)*\r?\n?`
+
+// pemHeadersLoose is the same preamble for a block whose newlines were lost. A
+// header is a word, a colon and a value, so it cannot be confused with the body
+// it precedes.
+// A header's value runs to the next colon, which is where the next header
+// starts — not to the next space, because `Proc-Type: 4,ENCRYPTED` has a
+// space immediately after its colon and `DEK-Info: AES-128-CBC,…` has one
+// inside it.
+const pemHeadersLoose = `(?:(?:Proc-Type|DEK-Info):[^:\n]*[ \t]+)*`
 
 // longHexRe is checked outside the rules table for the same reason the
 // assignment and URL rules are: matching it is only half the test, because the
@@ -374,6 +608,16 @@ const (
 	assignmentShellVar = 1
 	assignmentKey      = 2
 	assignmentValue    = 3
+	// An ADO-style `Password=K3q9Xm2pL7wRt4Zb;` is 16 characters and is below this
+	// floor, so it is stored. The floor is 20 rather than 16 because three of the
+	// false positives that motivated raising it sat at 16, 17 and 19 — and they are
+	// now refused by hasWordSegment rather than by length, so lowering the floor to
+	// 16 would catch that class without reintroducing them. It is recorded here
+	// rather than changed because the floor is the one number a caller cannot
+	// reason about locally: lowering it to 16 also admits any 16-character
+	// alphanumeric value under a credential-named key, which is a much larger
+	// surface than the one ADO shape. Changing it wants its own measurement.
+	//
 	// assignedSecretFloor is the shortest value worth looking at. It is 20
 	// rather than 16 because every false positive that motivated the raise
 	// landed between 16 and 19: grafana-admin-v2 is 16, wildcard-tls-2024 is 17,
@@ -456,6 +700,13 @@ var descriptorWords = map[string]bool{
 	"existing": true, "source": true, "store": true, "backend": true,
 	"location": true, "prefix": true, "pattern": true, "format": true,
 	"example": true, "placeholder": true, "hint": true,
+	// A field named after a digest of its value holds a digest, not the value.
+	// `token_sha` is the ordinary spelling; `fingerprint` and `checksum` are the
+	// same idea. Storing a digest of a token is the correct thing to do — it is
+	// how a caller says which token it means without holding the token.
+	"sha": true, "sha1": true, "sha256": true, "sha512": true, "md5": true,
+	"digest": true, "checksum": true, "fingerprint": true, "etag": true,
+	"printsha": true,
 }
 
 // keyWords splits a config key into lower-cased words on the separators a key
@@ -541,6 +792,9 @@ func looksLikeCredentialMaterial(key, value string) bool {
 	if strings.ContainsAny(value, placeholderChars) {
 		return false
 	}
+	if isIdentifierPath(value) {
+		return false
+	}
 	if urlValuePrefix.MatchString(value) {
 		return false
 	}
@@ -568,6 +822,79 @@ func looksLikeCredentialMaterial(key, value string) bool {
 // `$`-prefixed, so the line is shell context and a `-Word` in it is a flag.
 var shellFlagRe = regexp.MustCompile(`(?:^|\s)-[A-Za-z]`)
 
+// lineIndex is the set of line ends in a text, computed once per Detect.
+//
+// Two passes need "the rest of this line" — the shell-variable test and the
+// quoted-argument scan — and computing that per match makes the scan quadratic
+// in line length: a line mentioning n `$var=` assignments costs n line-scans of
+// the whole remainder. At 4 KB that is invisible, at 64 KB it is 30 ms, and the
+// size a memory is capped at (8,000 bytes) says nothing about a task note, a
+// decision alternative, or anything reaching ImportMemory, where the detector
+// runs before the clamp.
+//
+// One pass to build the index, then a binary search per match.
+type lineIndex struct {
+	text string
+	ends []int // offset of each line's terminator, and len(text) as the last
+}
+
+// newLineIndex records every line end in text.
+func newLineIndex(text string) *lineIndex {
+	ends := make([]int, 0, 8)
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case '\n':
+			ends = append(ends, i)
+		case '\r':
+			ends = append(ends, i)
+			// A CRLF is one terminator, not two, or every Windows line would
+			// report an empty one between the two halves.
+			if i+1 < len(text) && text[i+1] == '\n' {
+				i++
+			}
+		}
+	}
+	return &lineIndex{text: text, ends: append(ends, len(text))}
+}
+
+// rest returns the remainder of the line containing offset, which is the empty
+// string at the end of the text. O(log lines) rather than O(remaining bytes).
+func (li *lineIndex) rest(offset int) string {
+	if offset < 0 || offset > len(li.text) {
+		return ""
+	}
+	i := sort.SearchInts(li.ends, offset)
+	if i >= len(li.ends) {
+		return ""
+	}
+	return li.text[offset:li.ends[i]]
+}
+
+// line returns the whole line containing offset, for the passes that need the
+// text BEFORE a run as well as after it.
+func (li *lineIndex) line(offset int) string {
+	if offset <= 0 {
+		return li.rest(0)
+	}
+	// The end of the previous line, which is the start of this one.
+	start := 0
+	i := sort.SearchInts(li.ends, offset) - 1
+	if i >= 0 {
+		start = li.ends[i] + 1
+	}
+	return li.text[start:offset2end(li, offset)]
+}
+
+// offset2end is the offset of the terminator of the line containing offset, or
+// the length of the text on the last line.
+func offset2end(li *lineIndex, offset int) int {
+	i := sort.SearchInts(li.ends, offset)
+	if i >= len(li.ends) {
+		return len(li.text)
+	}
+	return li.ends[i]
+}
+
 // valueIsCommand reports whether an assignment to a shell variable is really a
 // command invocation — a flag appears later on the same line.
 //
@@ -577,12 +904,8 @@ var shellFlagRe = regexp.MustCompile(`(?:^|\s)-[A-Za-z]`)
 // they share is not the variable but the command: a value with a `-Flag` after
 // it is an argument list, and a leaked literal assigned to a variable has
 // nothing after it.
-func valueIsCommand(text string, valueEnd int) bool {
-	rest := text[valueEnd:]
-	if i := strings.IndexAny(rest, "\n\r"); i >= 0 {
-		rest = rest[:i]
-	}
-	return shellFlagRe.MatchString(rest)
+func valueIsCommand(li *lineIndex, valueEnd int) bool {
+	return shellFlagRe.MatchString(li.rest(valueEnd))
 }
 
 // commandWordRe splits a candidate command word from a path or an executable:
@@ -644,10 +967,9 @@ var quotedArgRe = regexp.MustCompile(`"([^"\n]{8,})"|'([^'\n]{8,})'`)
 // the value is in the argument. Both corpus cases that this gate exists for pass
 // it, because `{1}` carries placeholderChars and `$domainPassword` is not quoted.
 func detectQuotedArgument(rest string) (Finding, bool) {
-	// Only the same line: a flag on the next line is a different statement.
-	if i := strings.IndexAny(rest, "\n\r"); i >= 0 {
-		rest = rest[:i]
-	}
+	// rest is the remainder of ONE line — the caller slices it with the line
+	// index — so a flag on the next line is a different statement and is not in
+	// scope here.
 	// The caller passes text starting at the END of the value, so a quoted value
 	// leaves its own closing quote first. Left in place it pairs with the next
 	// argument's opening quote and `quotedArgRe` reads
@@ -693,6 +1015,53 @@ func namesItsOwnKey(key, value string) bool { //nolint:revive // the value is th
 	// (`MyOwnPassword12345678`) does not, which is the distinction that keeps a
 	// real secret from being exempted by this gate.
 	return needle != "" && strings.HasSuffix(hay, needle)
+}
+
+// isIdentifierPath reports whether value is a dotted path of identifiers — a
+// reference to something rather than a value.
+//
+// Every credential encoding Ghost knows is free of `.`: hex, base16, base32,
+// base64, base64url and an alphanumeric password are all built from an alphabet
+// that excludes it. So a `.` in a value is either part of a host name, a
+// filename or a path, and where every segment either side of it is a plain
+// identifier, the value is naming a place: `secrets.GITHUB_TOKEN`,
+// `req.body.accessToken`, `opts.OAuthClientSecretFromVault`. The last of those
+// is a case the word test happened to catch and this one is the reason for —
+// "Client" being six letters is a coincidence of that library's naming, not a
+// property that holds across the shape.
+//
+// This is the same judgement the Helm table makes about `existingSecret` and
+// about a digest key, arriving through a third surface: the identifier is not
+// the thing.
+func isIdentifierPath(value string) bool {
+	segments := strings.Split(value, ".")
+	if len(segments) < 2 {
+		return false
+	}
+	for _, segment := range segments {
+		if segment == "" || !isIdentifier(segment) {
+			return false
+		}
+	}
+	return true
+}
+
+// isIdentifier reports whether s is a letter-led run of letters, digits and
+// underscores — what a language calls an identifier, and what a random string
+// almost never is.
+func isIdentifier(s string) bool {
+	for i, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_':
+		case r >= '0' && r <= '9':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // hasWordSegment reports whether value names something: a separator-delimited
@@ -838,13 +1207,17 @@ func Detect(text string) (Finding, bool) {
 			return Finding{Rule: r.name, Label: r.label}, true
 		}
 	}
+	li := newLineIndex(text)
 	for _, loc := range longHexRe.FindAllStringIndex(text, -1) {
 		if looksLikeKeyMaterial(text[loc[0]:loc[1]]) && !isLabelledCardanoValue(text, loc[0]) {
 			return Finding{Rule: longHexRule, Label: longHexLabel}, true
 		}
 	}
+	if f, ok := cardanoKeyWalk(text, li); ok {
+		return f, true
+	}
 	for _, m := range urlCredentialsRe.FindAllStringSubmatch(text, -1) {
-		if looksLikeURLCredential(m[urlCredentialIndex]) {
+		if looksLikeURLCredential(m[urlCredentialUser], m[urlCredentialPassword]) {
 			return Finding{Rule: urlCredentialsRule, Label: urlCredentialsLabel}, true
 		}
 	}
@@ -854,7 +1227,7 @@ func Detect(text string) (Finding, bool) {
 		key := text[m[2*assignmentKey]:m[2*assignmentKey+1]]
 		value := text[m[2*assignmentValue]:m[2*assignmentValue+1]]
 		if text[m[2*assignmentShellVar]:m[2*assignmentShellVar+1]] != "" &&
-			valueIsCommand(text, m[2*assignmentValue+1]) {
+			valueIsCommand(li, m[2*assignmentValue+1]) {
 			// A shell line with a flag after the value, so whatever follows is an
 			// argument list. Two things have to be true at once and neither
 			// replaces the other.
@@ -869,7 +1242,7 @@ func Detect(text string) (Finding, bool) {
 			// SecureString" …` is still assigning a cmdlet — whereas a quoted
 			// literal is a literal however much is flagged after it:
 			// `$db_password = "K3q9Xm2pL7wRt4ZbAvN1" -AsPlainText` is the secret.
-			if f, ok := detectQuotedArgument(text[m[2*assignmentValue+1]:]); ok {
+			if f, ok := detectQuotedArgument(li.rest(m[2*assignmentValue+1])); ok {
 				return f, true
 			}
 			if isCommandWord(value) {
@@ -888,6 +1261,8 @@ func Detect(text string) (Finding, bool) {
 
 const (
 	mnemonicRule        = "bip39-mnemonic"
+	cardanoCBRule       = "cardano-cbor-hex"
+	cardanoCBLabel      = "Cardano CBOR-encoded private key (signing key by CBOR length)"
 	urlCredentialsRule  = "url-inline-credentials"
 	urlCredentialsLabel = "URL with inline credentials"
 	mnemonicWordsLabel  = "24-word BIP-39 recovery mnemonic"
@@ -902,34 +1277,77 @@ const (
 // list is 2048 words, so the chance that 24 consecutive words of English prose
 // are all on it is vanishing, while any run of real mnemonic words is.
 func hasMnemonic(text string) bool {
+	// The shortest word in the BIP-39 English list is three letters, so 24 of
+	// them need at least 72 characters. Most memories are shorter than that and
+	// most of the ones that are not start with prose, so the floor is worth a
+	// check that costs a comparison.
+	if len(text) < mnemonicWords*3 {
+		return false
+	}
 	words := bip39Words()
 	run := 0
-	for _, w := range mnemonicCandidates(text) {
-		if _, ok := words[w]; ok {
-			run++
-			if run == mnemonicWords {
-				return true
-			}
-			continue
+	// Walked rather than collected. Materialising every word of the text was 67%
+	// of Detect's allocations — ~10 KB of []string per 4 KB save, for a test
+	// that almost always stops at the first non-word — so the candidate is
+	// produced one at a time and the slice never exists.
+	mnemonicCandidates(text, func(w string) bool {
+		if _, ok := words[w]; !ok {
+			run = 0
+			return false
 		}
-		run = 0
-	}
-	return false
+		run++
+		return run == mnemonicWords
+	})
+	return run == mnemonicWords
 }
 
-// mnemonicCandidates splits text into the lower-cased words a mnemonic could
-// be written as: whitespace-delimited, and stripped of surrounding punctuation
-// so a memory that lists a mnemonic one per line, or wraps it in quotes or
-// backticks, is read the same way. Anything with a digit or an interior
-// punctuation mark is not a BIP-39 word and breaks the run, which is why
-// "abandon ability able ... actual." terminates rather than extending.
-func mnemonicCandidates(text string) []string {
-	fields := strings.FieldsFunc(text, unicode.IsSpace)
-	out := make([]string, 0, len(fields))
-	for _, f := range fields {
-		out = append(out, strings.ToLower(strings.Trim(f, "\"'`*_.,;:()[]{}<>-–—")))
+// mnemonicCandidates calls yield for each of the lower-cased words a mnemonic
+// could be written as, and stops early when yield returns true: whitespace
+// delimited, and stripped of surrounding punctuation so a memory that lists a
+// mnemonic one per line, or wraps it in quotes or backticks, is read the same
+// way. Anything with a digit or an interior punctuation mark is not a BIP-39 word
+// and breaks the run, which is why "abandon ability able ... actual." terminates
+// rather than extending.
+func mnemonicCandidates(text string, yield func(string) bool) {
+	// Split by scanning rather than with strings.FieldsFunc, which builds the
+	// whole []string before the first element is looked at. That slice was the
+	// single largest allocation on a save path — about 10 KB per 4 KB of
+	// content, for a test that usually stops at the first non-word — so the
+	// fields are handed over one at a time and never collected.
+	//
+	// IndexFunc rather than a hand-rolled space test, so the Unicode definition
+	// stays the one Go uses: the risk in this function is a mnemonic written with
+	// an unusual space, and a narrower test would silently break the rule.
+	rest := text
+	for {
+		skip := strings.IndexFunc(rest, notSpace)
+		if skip < 0 {
+			return // all that is left is separators
+		}
+		rest = rest[skip:]
+		end := strings.IndexFunc(rest, unicode.IsSpace)
+		if end < 0 {
+			yield(mnemonicWord(rest)) // the last field; the loop is over either way
+			return
+		}
+		if yield(mnemonicWord(rest[:end])) {
+			return // the caller has what it came for
+		}
+		rest = rest[end:]
 	}
-	return out
+}
+
+// notSpace is named rather than a closure so passing it to IndexFunc does not
+// allocate one per call.
+func notSpace(r rune) bool { return !unicode.IsSpace(r) }
+
+// mnemonicWord normalises one field: the surrounding punctuation a memory wraps
+// a list item in, and case, which BIP-39 fixes in lower case.
+//
+// strings.ToLower returns its argument unchanged when there is nothing to lower,
+// so the ordinary all-lower word allocates nothing.
+func mnemonicWord(field string) string {
+	return strings.ToLower(strings.Trim(field, "\"'`*_.,;:()[]{}<>-–—"))
 }
 
 // bip39Words parses the embedded English list once, on first use. The file is

@@ -93,6 +93,64 @@ func TestDetectAllowsHelmAndKubernetesCredentialVocabulary(t *testing.T) {
 			was:  "openai-key",
 		},
 
+		// The six below are the vocabulary of the tools an operator runs, from a
+		// second review pass over the same rule. Four of the six are the SAME
+		// mistake as the Helm cases at the top of this table — an identifier
+		// where a value was wanted — arriving through four different surfaces:
+		// a file name, an envelope field, a DSN, and a reference expression.
+		{
+			// A transaction hash beside the file that signed it. A 32-byte hash
+			// is 64 hex characters and a cold key's cborHex is 68, so the two
+			// are told apart by six characters — the width of the CBOR header.
+			// Refusing this refuses the ordinary record of having sent a
+			// transaction, which is one of the most common Cardano memories
+			// there is.
+			name: "tx hash beside the skey that signed it",
+			text: "signed with payment.skey, submitted tx " + cardano32[4:],
+			was:  "cardano-cbor-hex",
+		},
+		{
+			// A DSN assembled from a template. ${VAR} is the shape a compose
+			// file, a Helm value and a README all use for a password, and the
+			// substitution is the point: it says where the password comes from.
+			name: "dsn with a substituted password",
+			text: "postgres://app:${POSTGRES_PASSWORD}@db",
+			was:  "url-inline-credentials",
+		},
+		{
+			// The same, in the angle-bracket form, under a credential-word name.
+			// The word list carries `db_password` for the literal spelling; this
+			// is the template spelling of the same idea.
+			name: "mongodb dsn with an angle-bracket password",
+			text: "mongodb+srv://u:<db_password>@cluster0.example.net/orders",
+			was:  "url-inline-credentials",
+		},
+		{
+			// A default development credential, which is the single most
+			// common DSN in a README and is not a secret by any reading. Two
+			// independent signals: the user and the password are the same
+			// word, and the word is the account's own default name.
+			name: "default dev credential",
+			text: "the dev stack is postgres://postgres:postgres@localhost",
+			was:  "url-inline-credentials",
+		},
+		{
+			// A reference. The key names a secret and the value is a path into
+			// a vault client library — the credential is somewhere else, which
+			// is the behaviour this control wants to encourage.
+			name: "client secret read from a vault helper",
+			text: "ClientSecret: opts.OAuthClientSecretFromVault",
+			was:  "assigned-secret",
+		},
+		{
+			// A hash of a token, not a token. `sha` in the key is what says so:
+			// a value whose field name ends in a digest word is a digest of
+			// something, and storing a digest is the correct thing to do.
+			name: "token digest",
+			text: "token_sha: 9a3b7c1d5e2f40816b2d9c7e4a5f3b0d8c6e1a",
+			was:  "assigned-secret",
+		},
+
 		// The five below are pasted code and pasted documentation, taken from a
 		// public benchmark corpus that the detector is also run over as a check
 		// on itself. That corpus contains real credentials, so it is both a
@@ -328,25 +386,43 @@ func TestKeyAndValueGatesAreIndependentlyLoadBearing(t *testing.T) {
 
 	t.Run("url password", func(t *testing.T) {
 		cases := []struct {
+			user      string
 			password  string
 			value     bool
 			refusedBy string
 		}{
-			// All-caps gate alone: lower-case in the word list? no. So the case
-			// test is what refuses it.
-			{password: "HUNTER2", value: false, refusedBy: "urlPasswordAllCaps"},
-			{password: "K7MDENG", value: false, refusedBy: "urlPasswordAllCaps"},
+			// All-caps gate alone: not in the word list, not a template, not
+			// the user. So the case test is what refuses it.
+			{user: "ghost", password: "HUNTER2", value: false, refusedBy: "urlPasswordAllCaps"},
+			{user: "ghost", password: "K7MDENG", value: false, refusedBy: "urlPasswordAllCaps"},
 			// Word list alone: lower case, so the case test cannot see it.
-			{password: "password", value: false, refusedBy: "urlCredentialPlaceholders"},
-			{password: "changeme", value: false, refusedBy: "urlCredentialPlaceholders"},
-			// Accepted, so neither gate is simply inverted.
-			{password: "hunter2isnotsafe", value: true},
-			{password: "K7mDeng9Xq4Bt2", value: true},
+			{user: "ghost", password: "password", value: false, refusedBy: "urlCredentialPlaceholders"},
+			{user: "ghost", password: "changeme", value: false, refusedBy: "urlCredentialPlaceholders"},
+			// Template gate alone: `${VAR}` carries the sigils, and no entry in
+			// the word list spells it, so only the placeholder test can refuse
+			// it. This is the shape every compose file and README uses.
+			{user: "app", password: "${POSTGRES_PASSWORD}", value: false, refusedBy: "placeholderChars"},
+			{user: "u", password: "<db_password>", value: false, refusedBy: "placeholderChars"},
+			// Default-account gate alone: a word that is neither a template nor
+			// all-caps nor the user's own name.
+			{user: "someapp", password: "postgres", value: false, refusedBy: "urlDefaultAccounts"},
+			// Self-credential gate alone: the password is its own user, which is
+			// the single most common DSN in a README.
+			{user: "postgres", password: "postgres", value: false, refusedBy: "user==password"},
+			{user: "admin", password: "Admin", value: false, refusedBy: "user==password"},
+			// Neither word is in either list, so the only thing that can refuse
+			// this is the password being its own user.
+			{user: "appuser", password: "appuser", value: false, refusedBy: "user==password"},
+			{user: "svc_account", password: "SVC_ACCOUNT", value: false, refusedBy: "user==password"},
+			// Accepted, so none of the four gates is simply inverted.
+			{user: "ghost", password: "hunter2isnotsafe", value: true},
+			{user: "ghost", password: "K7mDeng9Xq4Bt2", value: true},
+			{user: "someapp", password: "hunter2isnotsafe", value: true},
 		}
 		for _, tc := range cases {
-			if got := looksLikeURLCredential(tc.password); got != tc.value {
-				t.Errorf("looksLikeURLCredential(%q) = %v, want %v (refused by %s)",
-					tc.password, got, tc.value, tc.refusedBy)
+			if got := looksLikeURLCredential(tc.user, tc.password); got != tc.value {
+				t.Errorf("looksLikeURLCredential(%q, %q) = %v, want %v (refused by %s)",
+					tc.user, tc.password, got, tc.value, tc.refusedBy)
 			}
 		}
 	})

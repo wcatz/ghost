@@ -55,7 +55,7 @@ func TestDisplayProposalCoversEveryFlaggedShape(t *testing.T) {
 	shapes := []string{
 		"the token is ghp_" + rep("a1B2c3D4e5F6", 3) + "AbCd",
 		"postgres://ghost:hunter2isnotsafe@relay-1.example/ghost",
-		"the cold key cborHex: 5840" + rep("f2429ae1", 4) + "abcd",
+		"the cold key cborHex: 5840" + rep("f2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f", 2),
 		"-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYL\n-----END RSA PRIVATE KEY-----",
 		"password: Zq7Xn4Bt2Lm9Kc5Vr8Wd",
 	}

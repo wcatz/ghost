@@ -31,7 +31,7 @@ func TestPreviewContentNeverEchoesACredential(t *testing.T) {
 		"postgres://ghost:hunter2isnotsafe@relay-1.example/ghost",
 		"password: Zq7Xn4Bt2Lm9Kc5Vr8Wd",
 		"-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Pyy\n-----END RSA PRIVATE KEY-----",
-		"the cold key cborHex: 5840f2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b",
+		"the cold key cborHex: 5840f2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0ff2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f",
 	} {
 		got := previewContent(text)
 		for _, leak := range []string{"a1B2c3D4e5F6", "hunter2isnotsafe", "Zq7Xn4Bt2Lm9", "MIIBOgIB", "f2429ae1"} {

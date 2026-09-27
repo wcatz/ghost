@@ -407,7 +407,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 				project.Name, adopted)
 		}
 		adoptedElsewhere := adopted != project.ID
-		steps = append(steps, step{rec: p, kind: TypeProject, detail: safeDetail(detail, project.ID), opts: opts,
+		steps = append(steps, step{rec: p, kind: TypeProject, detail: safeDetail(detail, detail, project.ID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				if adoptedElsewhere {
 					// Nothing to write, and nothing that could be: the id belongs
@@ -428,7 +428,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 	for _, p := range memories {
 		m := p.rec.Memory
 		m.ProjectID = under(m.ProjectID)
-		steps = append(steps, step{rec: p, kind: TypeMemory, detail: safeDetail(contentPrefix(m.Content), m.ID), check: checkFor(m.ProjectID), opts: opts,
+		steps = append(steps, step{rec: p, kind: TypeMemory, detail: safeDetail(contentPrefix(m.Content), m.Content, m.ID), check: checkFor(m.ProjectID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				created, clamped, downgraded, err := s.ImportMemory(ctx, *m, opts)
 				if err != nil {
@@ -440,7 +440,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 	for _, p := range orderTasks(tasks) {
 		t := p.rec.Task
 		t.ProjectID = under(t.ProjectID)
-		steps = append(steps, step{rec: p, kind: TypeTask, detail: safeDetail(t.Title, t.ID), check: checkFor(t.ProjectID), opts: opts,
+		steps = append(steps, step{rec: p, kind: TypeTask, detail: safeDetail(t.Title, t.Title, t.ID), check: checkFor(t.ProjectID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				created, err := s.ImportTask(ctx, *t, opts.Apply)
 				if err != nil {
@@ -452,7 +452,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 	for _, p := range orderDecisions(decisions) {
 		d := p.rec.Decision
 		d.ProjectID = under(d.ProjectID)
-		steps = append(steps, step{rec: p, kind: TypeDecision, detail: safeDetail(d.Title, d.ID), check: checkFor(d.ProjectID), opts: opts,
+		steps = append(steps, step{rec: p, kind: TypeDecision, detail: safeDetail(d.Title, d.Title, d.ID), check: checkFor(d.ProjectID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				created, err := s.ImportDecision(ctx, *d, opts.Apply)
 				if err != nil {
@@ -635,13 +635,21 @@ func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, o
 // still carry one, and because RecordResult.Detail is a public field with
 // consumers in other packages — the per-record line in `ghost import` is one.
 //
-// The check runs on the label as it would be printed, not on the whole record:
-// a memory whose second line holds a credential has a clean first line, prints a
-// clean prefix, and is refused by the store with the format named. That is the
-// behaviour wanted — the report identifies the line, the error says what to
-// remove from it.
-func safeDetail(label, id string) string {
-	if _, ok := secret.Detect(label); ok {
+// The check runs on the WHOLE of the field the label is cut from, not on the
+// label. A 60-rune prefix is a cut, and a credential is longer than a cut is
+// likely to be: "the deploy token is ghp_Ab12Cd34Ef5…" scans as clean and prints
+// the first half of a live token, on a record that is skipped or rejected for
+// some unrelated reason — a missing task status, an unknown project — so the
+// refusal the guard raised is not even the reason the line is being printed.
+//
+// What is still narrow is the OUTPUT, not the input. A memory whose first line
+// is clean and whose second holds a credential prints a clean prefix, because
+// the report identifies the line and the error says what to remove from it. The
+// difference is that the decision is made on all of the text, so a value the
+// prefix happens to cut is caught, while a value elsewhere in the record does not
+// cost the operator their preview.
+func safeDetail(label, full, id string) string {
+	if _, ok := secret.Detect(full); ok {
 		return id
 	}
 	return label
