@@ -33,15 +33,23 @@ func TestDetectIsLinearInLineLength(t *testing.T) {
 	// does not execute what it bounds cannot fail.
 	//
 	// Each repetition is a complete `$relay_addr = <24 characters>` assignment, so
-	// the candidate list is long and every candidate reaches both per-match
-	// lookups.
+	// the candidate list is long and every candidate reaches valueIsCommand — which
+	// is where the quadratic cost was, and is what this test bounds.
+	//
+	// It does NOT reach detectQuotedArgument, and the comment is precise about
+	// that because the first version of this sentence claimed it did. The quoted
+	// scan sits inside the same `if shellVar && valueIsCommand` as the flag test
+	// (secret.go:1421), so with no flag after the value neither runs — only
+	// valueIsCommand is reached, and it is reached and returns FALSE, which is
+	// what pays the per-match cost. TestDetectDoesNotRescanTheLinePerAssignment is
+	// the test that bounds the quoted scan, and it uses eight times the candidates.
 	//
 	// There is deliberately NO `-Flag` after the value, and that is the second
-	// round of a lesson this test has now taught twice. The flag was there to
+	// round of a lesson this test has now taught three times. The flag was there to
 	// "make each candidate reach the flag test" — and it did, and the test went on
-	// passing with the quadratic code restored, at 4.02x against a 6x bar. A flag
+	// PASSING with the quadratic code restored, at 4.02x against a 6x bar. A flag
 	// makes valueIsCommand return TRUE, the walk returns on the FIRST candidate,
-	// and the per-match cost is never paid at all. Reaching the expensive line is
+	// and the per-match cost is never paid at all. Reaching an expensive line is
 	// not what exercises it; scanning the rest of the line to decide is, and that
 	// happens whether the answer is yes or no. So the flag comes out.
 	shape := "$relay_addr = Kq9Xm2pL7wRt4Zb1XyZaQ3 "
@@ -64,6 +72,29 @@ func TestDetectIsLinearInLineLength(t *testing.T) {
 	// the same conditions within a round, so a GC pause or a stolen timeslice
 	// inflates both and cancels. Seven rounds, median, measured 4.26x with a
 	// 3.62-4.89x spread under -race on this machine.
+	// Confirm the fixture is the shape the paragraph above claims, because a
+	// fixture that quietly stops being that shape turns the ratio into a
+	// measurement of something else while still looking like a pass. Both of
+	// these are the checks that were missing here and cost a round: the candidate
+	// list has to be long, and Detect has to return NO finding on it, or the walk
+	// returns early and the cost is never paid.
+	probe := build(1 << 16)[:1<<16]
+	// Derived from the fixture rather than a literal, so it tracks a change to the
+	// shape instead of going stale: one candidate per repetition, and every
+	// repetition is one complete assignment. The measured count is 1,771 for
+	// 1,488 repetitions, so a floor at three quarters of the repetition count
+	// catches "the fixture stopped producing candidates" without failing on
+	// regex behaviour nobody changed.
+	if want := 3 * (len(probe) / len(shape)) / 4; len(assignmentRe.FindAllStringSubmatchIndex(probe, -1)) < want {
+		t.Fatalf("the fixture produced %d assignment candidates in %d bytes, want at "+
+			"least %d — the test is not exercising the path it is meant to bound",
+			len(assignmentRe.FindAllStringSubmatchIndex(probe, -1)), len(probe), want)
+	}
+	if f, ok := Detect(probe); ok {
+		t.Fatalf("the fixture is flagged by %q, so Detect returns before the walk "+
+			"finishes and the per-match cost is never paid", f.Rule)
+	}
+
 	const rounds = 7
 	Detect(build(1024)) // one-time regex machine setup, outside every measurement
 	smallText, bigText := build(1 << 16)[:1<<16], build(1 << 18)[:1<<18]

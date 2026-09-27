@@ -113,7 +113,7 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 // eyes, substituting a description for the content whenever the content holds a
 // credential.
 //
-// Every print site in `ghost reflect` goes through this, and that is the whole
+// All three print sites in `ghost reflect` go through this, and that is the
 // point. A guarantee made at the write boundary — the drop reports format,
 // category, scope and length, never the content — is not a guarantee about the
 // command's report if the same command prints the value somewhere else: the
@@ -122,6 +122,26 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 // In the autonomous path that stdout is the append-only lifecycle.log, so the
 // value outlives the run. The exposure the store's refusal exists to prevent,
 // reached from the other direction.
+//
+// The scope is `ghost reflect` and the scope is stated because a reader who greps
+// for `.Content` in cmd/ghost finds three more sites, in two other commands, and
+// both are deliberate rather than oversights:
+//
+//   - runResolve's listing (lifecycle.go, two sites) uses firstLine at 70
+//     characters. `ghost resolve` is a separate invocation from `ghost reflect`,
+//     so it is outside the claim above — and its input is the STORED corpus,
+//     which the write-boundary guard already refuses, so there is no value here
+//     for a pre-guard row to have leaked into. That is the argument, and it is
+//     narrower than "resolve cannot print a credential": a database written
+//     before the guard could still hold one, and resolve would print it.
+//   - printHistoryEntry (history.go) prints the stored history content raw, and
+//     that is the one place this substitution is deliberately ABSENT. History
+//     content is redacted at write time instead — the ghost_history_content
+//     filter in internal/memory — because the history is the one surface where a
+//     credential outlives the row it was removed from, so a per-print-site
+//     substitution would be the wrong layer for it. The consequence is that
+//     `ghost history` renders whatever is stored, so the guarantee there is the
+//     filter's and not this function's.
 //
 // The substitution keeps the category and the byte length, so an operator can
 // still find the row and tell how much was withheld — a report that says only

@@ -1102,7 +1102,15 @@ func runReflect() {
 		//
 		// Printed even when nothing failed, because the skipped pre-apply report means
 		// this run would otherwise say nothing at all about how hard it compressed.
-		reportReductionWarning(os.Stderr, live, projectMems, globalMems, true,
+		// The POST-drop sets, like every other report after the apply. The
+		// pre-apply report above passes projectMems/globalMems and is right to:
+		// it runs before applyReflection, so the kept sets do not exist yet. This
+		// one runs after, so a proposal that was dropped for holding a credential
+		// is in neither list — and passing the caller's pre-drop lists counted it
+		// as retained, which is the same miscount this function's own commit set
+		// out to fix everywhere else. A partial drop — one good proposal and one
+		// credential — has to report only what was written.
+		reportReductionWarning(os.Stderr, live, keptProjectMems, keptGlobalMems, true,
 			promotionOutcome{applied: true, kept: len(keptMems)})
 	}
 
