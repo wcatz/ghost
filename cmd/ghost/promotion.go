@@ -297,6 +297,30 @@ func reflectCategoryParts(mems []reflection.ReflectMemory) string {
 	return strings.Join(parts, ", ")
 }
 
+// reflectRepairNote reports the LLM tier's repair turn on the `Result:` line: a
+// run whose first answer the strict ops reader rejected and which succeeded on
+// the re-read says so, and a run that needed no repair says nothing at all.
+//
+// It is on that one line, and only that line, for a counting reason. On the
+// unattended path this stdout IS the append-only lifecycle.log (the stop hook
+// redirects it, see internal/mcpinit/stophook), so printing the token twice —
+// once in the summary and once in a note on the other stream — would double
+// every count the token exists to produce. The `repair: %d` token is the stable
+// grep for "the first answer was malformed and the run survived it"; the
+// denominator is the `Result:` lines in the same log, so a run that repaired and
+// then failed outright is not in it — that run's rejection is on the WARN line
+// the tier writes whether the run goes on to succeed or not.
+//
+// The count is 0 or 1 because the tier allows one extra turn (opRepairTurns); if
+// that bound ever moves, the wording below has to move with it rather than
+// report "once" for a number that is not once.
+func reflectRepairNote(turns int) string {
+	if turns <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("  repair: %d (the first response was rejected and re-read)", turns)
+}
+
 // appliedSummary describes the rows actually written to the project. The
 // caller passes the post-fold project slice, so a global candidate kept
 // project-scoped is counted in both the total and category breakdown.

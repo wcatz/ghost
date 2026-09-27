@@ -59,28 +59,109 @@ func (h *LlmConsolidator) Available(_ context.Context) bool {
 
 func (h *LlmConsolidator) Consolidate(ctx context.Context, input ReflectionInput) (ReflectionResult, error) {
 	prompt := BuildReflectionPrompt(input)
-	responseText, _, err := h.client.Reflect(ctx, prompt)
-	if err != nil {
-		return ReflectionResult{}, err
+	// One repair turn (#689). The strict reader below is right to refuse a
+	// response naming an id this run was never given, and it stays exactly as
+	// strict — what changes is what a refusal costs. The measured shape was a
+	// model mistyping one ULID, one extra hex character, in an otherwise
+	// correct answer: --require-llm exited non-zero and the unattended auto
+	// path fell through to the Jaccard-only tier, so a single character cost
+	// the whole consolidation of the whole corpus, on roughly one run in three
+	// with the free model.
+	//
+	// So the same prompt goes back out once with the reader's own complaint
+	// attached, and the second answer is read under the same rules. That is a
+	// re-read, not a repair of the id: there is no fuzzy matching, no prefix
+	// completion, and no application of the answer just rejected, so a response
+	// the reader would refuse is still refused one turn later. Two rejections
+	// fail the run with the SECOND complaint, which is the one that describes
+	// the answer a reader of the log will see.
+	//
+	// The bound is one call, on one condition: a transport failure is not a
+	// rejected response, so it is never retried here (a harness that died or
+	// was killed still fails the run, as before).
+	for attempt := 0; ; attempt++ {
+		responseText, _, err := h.client.Reflect(ctx, prompt)
+		if err != nil {
+			return ReflectionResult{}, err
+		}
+		// Per-id operations, not a rewritten memory list (#639). An unreadable
+		// operation, an unknown id, or a contradiction between two operations
+		// fails the whole response: applying the readable half of it would
+		// rewrite the corpus as if the model had said something it did not,
+		// and the tiered consolidator has a deterministic tier to fall through
+		// to instead.
+		result, err := readOpResponse(responseText, input, h.log())
+		if err == nil {
+			result.RepairTurns = attempt
+			return result, nil
+		}
+		if attempt == opRepairTurns {
+			return ReflectionResult{}, err
+		}
+		h.log().Warn("reflection response rejected; re-reading it once with the reader's complaint",
+			"tier", h.name, "error", err)
+		prompt = buildRepairPrompt(prompt, err)
 	}
-	// Per-id operations, not a rewritten memory list (#639). An unreadable
-	// operation, an unknown id, or a contradiction between two operations fails
-	// the whole response: applying the readable half of it would rewrite the
-	// corpus as if the model had said something it did not, and the tiered
-	// consolidator has a deterministic tier to fall through to instead.
+}
+
+// opRepairTurns is how many extra harness calls the LLM tier may spend re-reading
+// an answer the strict reader rejected. It is 1 and stays 1: the second answer is
+// read under the same rules, so a model that cannot produce a well-formed
+// operation list has nothing to gain from a third turn, while every extra turn is
+// another billed call on the unattended path. It is named rather than written as a
+// bare 1 so the loop's exit condition reads as the bound it is, and so a test can
+// name the number it is asserting.
+const opRepairTurns = 1
+
+// readOpResponse reads one harness answer strictly: the JSON envelope, the
+// operation grammar, and every id resolved against this run's corpus. The
+// result-level filters run only after all three, so a rejected answer leaves no
+// partial state to unwind and the re-read starts from the same input.
+func readOpResponse(responseText string, input ReflectionInput, logger *slog.Logger) (ReflectionResult, error) {
 	resp, err := parseOpResponse(responseText)
 	if err != nil {
 		return ReflectionResult{}, err
 	}
-	result, err := executeOps(resp, input, h.log())
+	result, err := executeOps(resp, input, logger)
 	if err != nil {
 		return ReflectionResult{}, err
 	}
 	normalizeReflectMemories(&result)
-	dropFabricatedMemories(&result, input, h.log())
-	dropForeignProjectMemories(&result, input, h.log())
+	dropFabricatedMemories(&result, input, logger)
+	dropForeignProjectMemories(&result, input, logger)
 	return result, nil
 }
+
+// buildRepairPrompt appends the reader's complaint to the prompt that produced
+// the answer being rejected, and asks for the whole response once more. The
+// original prompt is the prefix, verbatim, because the model is not being asked
+// a new question — it is being told which of the ids it already had it did not
+// copy, in the terms of its own operation list, so a second answer can be read
+// against the same rules rather than guessed at.
+func buildRepairPrompt(prompt string, readErr error) string {
+	var sb strings.Builder
+	sb.WriteString(prompt)
+	sb.WriteString("\n\nYour previous response was rejected, and NOTHING in it was applied. The reader refused it for this reason:\n\n")
+	// Quoted as data, not as a code block: the complaint quotes the rejected
+	// operation line back, and an operation's replacement text is model-written
+	// prose over stored memory, so «...» keeps that text inside the delimiters
+	// the rest of this prompt puts stored text in (quoteData). The complaint
+	// cannot grow without bound either — the reader clips the line or the
+	// response prefix it quotes (clipOpLine, and the 120-character snippet in
+	// parseOpResponse) — so the repair prompt stays bounded by the same input
+	// corpus the first one was.
+	sb.WriteString(quoteData(readErr.Error()))
+	sb.WriteString("\n\n")
+	sb.WriteString(opRepairAsk)
+	return sb.String()
+}
+
+// opRepairAsk is what the second turn is for: not a correction, a re-read. It
+// says "the whole response again" because a partial answer cannot be read at all
+// under this contract — every id needs an operation, or executeOps carries it
+// through untouched — so an abbreviated second attempt would come back as a
+// consolidation that folds nothing and says it kept everything.
+const opRepairAsk = "Send the COMPLETE response again from the top: one JSON object, an operation for every id exactly as it is printed above, and nothing else. Copy every id character for character — an id that is not in that list, however close it looks, fails the whole response — and where a merge or rewrite text has to carry a path, hash, version, hostname or number, copy that from the source memory too. If there is genuinely nothing to fold, send a `keep <id>` line for every id rather than omitting them. Answer with the JSON object alone: no prose, no commentary, no apology."
 
 // normalizeReflectMemories enforces what an LLM emission is allowed to claim
 // about itself. It runs after the operations have been executed and is
