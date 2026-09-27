@@ -2521,6 +2521,17 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 // outside — and it is NOT clamped the way content is: ClampContent cuts prose and
 // leaves a marker in its place, while a truncated path or URL is a different
 // reference, and a wrong one that looks right is worse than an error.
+//
+// Two writers of the column do not reach the bound, and both are the deliberate
+// byte-exact exclusions this codebase already draws for MaxContentLen and the
+// credential guard: `RestoreSnapshot`, which copies the column in SQL from the
+// snapshot table and would need the check per restored row, and
+// `CreateFromCorpus`, which reaches insertMemory's INSERT directly rather than
+// through Create. `assemble.SourceRefLabel` bounds what a listing PRINTS for
+// exactly those two, since the renderer cannot assume its input came from a
+// writer that enforces the cap. A new statement that writes the column has to
+// call boundedSourceRef — the bound is one call each writer remembers, not
+// something the schema enforces.
 const MaxSourceRefLen = 512
 
 // StoredStampLayout is the layout a writer stores a validity stamp in: SQLite's
@@ -2702,9 +2713,7 @@ func nullIfEmptyPtr(s *string) any {
 }
 
 // boundedSourceRef applies MaxSourceRefLen, refusing rather than truncating, and
-// maps an empty reference to NULL on the way through. Every statement that writes
-// the column reaches it by this, so no writer can be the one that skipped the
-// bound.
+// maps an empty reference to NULL on the way through.
 func boundedSourceRef(s string) (any, error) {
 	if s == "" {
 		return nil, nil

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -208,6 +209,30 @@ func TestSourceRefLabelBoundsWhatItPrints(t *testing.T) {
 	// ending mid-path as though that were the whole reference.
 	if strings.Contains(line, strings.TrimSuffix(huge, "docs/")) {
 		t.Errorf("the line presents the truncated value as a complete reference: %s", line)
+	}
+
+	// The cut must land on a rune. This bound is the one handling values no
+	// writer vouched for, so its input is exactly the untrusted non-ASCII text a
+	// writer would have refused, and a raw byte slice through a multi-byte rune
+	// would put an invalid byte inside the data block.
+	//
+	// The rune has to be one whose width does not divide the bound evenly, or the
+	// cut lands on a boundary by luck and proves nothing: 512 divides by two, so a
+	// string of two-byte characters cuts cleanly and would pass a raw byte slice.
+	// Three-byte characters do not — 512 is 170 of them and two bytes into the 171st.
+	const euro = "\u20ac"
+	multibyte := Item{Category: "fact", ID: "A1B2", Content: "a fact", Importance: 0.5, SourceRef: strings.Repeat(euro, 300)}.Line()
+	if !strings.Contains(multibyte, "reference truncated") {
+		t.Errorf("a 900-byte three-byte-rune reference was not truncated: %s", multibyte)
+	}
+	if !utf8.ValidString(multibyte) {
+		t.Errorf("line is not valid UTF-8 after truncating a multi-byte reference: %q", multibyte)
+	}
+	// And the two-byte case the luck of 512 would have hidden still renders whole
+	// characters, which is the property being asserted above it.
+	twoByte := Item{Category: "fact", ID: "A1B2", Content: "a fact", Importance: 0.5, SourceRef: strings.Repeat("\u00e9", 300)}.Line()
+	if !utf8.ValidString(twoByte) {
+		t.Errorf("line is not valid UTF-8 after truncating a two-byte-rune reference: %q", twoByte)
 	}
 }
 

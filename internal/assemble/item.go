@@ -107,7 +107,9 @@ func AgentLabel(agent string) string {
 // covers what they cannot — a store written before that cap, a snapshot table
 // edited by hand, a row restored from one. It is here rather than only at the
 // writers because the renderer is the one place that cannot assume its input came
-// from a writer that enforces the cap.
+// from a writer that enforces the cap — `RestoreSnapshot`, which writes the
+// column in SQL from the snapshot table, and `CreateFromCorpus`, which reaches
+// insertMemory directly, are the two writers that deliberately do not.
 //
 // The value is truncated, not refused, because at this point the row already holds
 // whatever it holds and refusing to show it would be worse than showing part of it.
@@ -122,7 +124,11 @@ func SourceRefLabel(ref string) string {
 		return ""
 	}
 	if len(ref) > MaxRenderedSourceRefLen {
-		ref = ref[:MaxRenderedSourceRefLen] + "…[reference truncated]"
+		// clampBytes, not a raw slice: this bound is the one handling values no
+		// writer vouched for, so its input is exactly the untrusted non-ASCII text
+		// a writer would have refused, and a cut through a multi-byte rune would
+		// put an invalid byte inside the data block.
+		ref = clampBytes(ref, MaxRenderedSourceRefLen) + "…[reference truncated]"
 	}
 	return " source_ref=" + quoteData(ref)
 }

@@ -196,30 +196,17 @@ type writeFields struct {
 	SourceRef  string
 }
 
-// MaxSourceRefLen is the byte cap on a source reference. A reference is a path, a
-// commit, a URL or a ticket — a few hundred bytes at the outside — and the
-// field is caller-supplied text that the renderer prints on every listing, so an
-// unbounded one is a megabyte echoed into every answer that touches the row.
-// memory.MaxContentLen guards the content path for the same reason; this is the
-// same guard at the size this field is actually used at.
-//
-// A value over the cap is refused rather than truncated. Clamping is right for
-// content, where the tail is prose and a marker in its place is honest; a
-// truncated path or URL is a different reference, and a wrong one that looks
-// right is worse than an error the caller can see.
-const MaxSourceRefLen = 512
-
 // resolveWriteFields validates the validity and provenance tail of one writer's
 // arguments.
 //
-// source_ref is checked for length and otherwise passed through as sent: it is
-// stored text with no shape to impose, and the renderer delimits it the way it
-// delimits content so a value carrying its own delimiter cannot escape the field.
-// It is not run through a value-shape check here, because the store does that:
-// every write path consults secret.Detect over the fields a caller supplies, and
-// source_ref is one of them on all three (#656). The two checks sit where each
-// can be right — the bound is an argument-shape rule, and the shape test needs the
-// detector and the row.
+// source_ref is passed through as sent: it is stored text with no shape to impose,
+// and both guards on it belong to the store, which is the layer the renderer
+// depends on. memory.MaxSourceRefLen refuses an over-long one on every write path
+// — a reference is a path, a commit, a URL or a ticket, and a megabyte of it is
+// echoed into every answer that touches the row — and secret.Detect refuses a
+// credential-shaped one, on the same terms as the content beside it (#656). The
+// tool boundary adds nothing, so there is one cap and one message rather than two
+// that could disagree.
 func resolveWriteFields(args validityArgs) (writeFields, error) {
 	var out writeFields
 	var err error
@@ -228,9 +215,6 @@ func resolveWriteFields(args validityArgs) (writeFields, error) {
 	}
 	if out.Confidence, err = parseConfidence(args.Confidence); err != nil {
 		return writeFields{}, err
-	}
-	if len(args.SourceRef) > MaxSourceRefLen {
-		return writeFields{}, fmt.Errorf("source_ref must be at most %d bytes, got %d — it is a file path, commit or URL, not a document", MaxSourceRefLen, len(args.SourceRef))
 	}
 	out.SourceRef = args.SourceRef
 	return out, nil
