@@ -114,9 +114,10 @@ func date(ts string) string {
 }
 
 // yamlScalar renders s as a single-line YAML scalar. Newlines and tabs are
-// flattened to spaces — the ghost_id-first, one-line-per-key invariant that
-// prune's hasGhostID scan depends on — and the value is double-quoted with
-// escaping whenever plain emission could change the line's YAML meaning. When
+// flattened to spaces — the one-line-per-key rule that hasGhostID's scan depends
+// on — and the value is double-quoted with escaping whenever plain emission could
+// change the line's YAML meaning. The flattening is lossy and always will be, so
+// nothing may be keyed on reading an id back out of a note: see keepSet. When
 // flow is true the value is a flow-sequence item (a tag), so the structural
 // characters , [ ] { } force quoting anywhere in the string, not just at the
 // start. Well-formed values (hex ids, plain project names and tags) take the

@@ -20,9 +20,10 @@ import (
 // seed with ids, names, tags and bodies ghost never generated. So the fixtures
 // here plant the shared corpus in every field the renderers touch and assert
 // three things: the note lands INSIDE the vault and inside the subtree prune
-// manages, the front matter stays one key per line with the real ghost_id first
-// (prune's whole identity check reads that block), and a hostile value is
-// present verbatim as text rather than having become structure.
+// manages, the front matter stays one closed block, one key per line, with the
+// real ghost_id first (the reader's block, not prune's key — prune decides from
+// the filename), and a hostile value is present verbatim as text rather than
+// having become structure.
 //
 // Nothing is stripped. A payload that cannot be found is a payload the user
 // cannot see, and an Obsidian note that silently lost its injection is not a
@@ -43,9 +44,9 @@ var hostileIDs = []struct{ name, id string }{
 	{"empty", ""},
 	// yamlScalar flattens a tab, a newline and a carriage return to a space, so
 	// an id carrying one is written to the front matter as something other than
-	// itself. prune reads the id back out of the note to decide which files it
-	// may delete, so that is a second, independent way a note can be written and
-	// then removed on the same pass.
+	// itself. That was a second, independent way a note could be written and then
+	// removed on the same pass, and it is what moved the keep-set off the id and
+	// onto the filename (see keepSet).
 	{"tab", "tab\tid-xyz"},
 	{"newline", "line\nid-xyz"},
 	{"carriage-return", "cr\rid-xyz"},
@@ -331,9 +332,9 @@ func TestExportKeepsEveryNoteOfACollidingIdSet(t *testing.T) {
 // the note verbatim while the front matter around it stays exactly as parseable
 // as it is for an ordinary note.
 //
-// Two things can go wrong and the fixtures separate them. prune identifies a
-// note by the ghost_id in its front matter, so a body that looks like front
-// matter must not become one — that is TestBodyCannotForgeASecondBlock. And a
+// Two things can go wrong and the fixtures separate them. hasGhostID reads the
+// first closed front-matter block, so a body that looks like front matter must
+// not become one — that is TestBodyCannotForgeASecondFrontmatterBlock. And a
 // front-matter VALUE carrying a newline, a colon, a quote or an invisible
 // character must not change the shape of the line it sits on, which is what this
 // test drives: ghost_id stays the first key, every value stays on its own line,
@@ -353,8 +354,9 @@ func TestHostileContentRendersAsInertStructure(t *testing.T) {
 			}
 			note := renderMemory(m, nil, nil)
 
-			// ghost_id first, and it is the record's own — prune's identity check
-			// reads exactly this line and nothing else.
+			// ghost_id first, and it is the record's own: hasGhostID reports
+			// exactly this line and nothing else, and a note claiming another
+			// record's id is a lie whatever any key is built from.
 			if !strings.HasPrefix(note, "---\nghost_id: "+m.ID+"\n") {
 				t.Errorf("ghost_id is not the first key:\n%s", note)
 			}
@@ -366,7 +368,7 @@ func TestHostileContentRendersAsInertStructure(t *testing.T) {
 				t.Fatalf("write note: %v", err)
 			}
 			if id, ok := hasGhostID(path); !ok || id != m.ID {
-				t.Errorf("hasGhostID = (%q, %v), want (%q, true) — the payload changed the note's identity for prune", id, ok, m.ID)
+				t.Errorf("hasGhostID = (%q, %v), want (%q, true) — the payload changed the id the note claims", id, ok, m.ID)
 			}
 		})
 	}
