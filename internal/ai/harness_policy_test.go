@@ -600,12 +600,18 @@ func TestCarryGooseConfigDirFallsBackToCopy(t *testing.T) {
 	// A dotfiles-managed config is the common case and reports a symlink
 	// dirent type, so reading the dirent type alone would drop it and leave a
 	// directory that reports success and holds nothing goose can use.
+	//
+	// Creating the link can itself be refused — it is the same privilege this
+	// test exists for — so the expectation is built conditionally instead of
+	// skipping. Skipping would abandon the whole copy branch on exactly the
+	// host that needs it, which is where a regression would be invisible.
 	managed := filepath.Join(t.TempDir(), "goose-config.yaml")
 	if err := os.WriteFile(managed, []byte("provider: managed\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(managed, filepath.Join(source, "managed.yaml")); err != nil {
-		t.Skipf("cannot create a symlink here: %v", err)
+	linked := os.Symlink(managed, filepath.Join(source, "managed.yaml")) == nil
+	if !linked {
+		t.Log("this host cannot create a symlink; asserting the two plain files only")
 	}
 
 	target := filepath.Join(t.TempDir(), "goose")
@@ -614,17 +620,20 @@ func TestCarryGooseConfigDirFallsBackToCopy(t *testing.T) {
 		t.Fatalf("carryGooseConfigDirWith: %v", err)
 	}
 
-	for name, want := range map[string]string{
+	want := map[string]string{
 		"config.yaml":  "provider: openai\n",
 		"secrets.yaml": "token: x\n",
-		"managed.yaml": "provider: managed\n", // reached through a symlink
-	} {
+	}
+	if linked {
+		want["managed.yaml"] = "provider: managed\n" // reached through a symlink
+	}
+	for name, contents := range want {
 		got, err := os.ReadFile(filepath.Join(target, name))
 		if err != nil {
 			t.Fatalf("copied config missing %s: %v", name, err)
 		}
-		if string(got) != want {
-			t.Errorf("copied %s = %q, want %q", name, got, want)
+		if string(got) != contents {
+			t.Errorf("copied %s = %q, want %q", name, got, contents)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(target, "sessions")); !os.IsNotExist(err) {
@@ -689,22 +698,17 @@ func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
 		}
 	})
 
-	// The Windows shape: the leaf reports ErrNotExist while a FILE sits where
-	// its parent directory belongs, which is what "~/.config is a file"
-	// produces there. Skipping it would build a home with no configuration, so
-	// the parent probe is what keeps the rule intact on that platform.
-	t.Run("absent leaf behind a non-directory parent is refused", func(t *testing.T) {
+	// A file where the config root's PARENT belongs — "~/.config is a file" —
+	// must fail closed on every platform, so the shape is arranged on the real
+	// filesystem rather than mocked. A mocked leaf plus a real parent probe
+	// would pass on Linux and fail on Windows, where the same shape is reported
+	// as ERROR_PATH_NOT_FOUND and maps to ErrNotExist.
+	t.Run("non-directory parent is refused", func(t *testing.T) {
 		shapedHome := t.TempDir()
-		if err := os.WriteFile(filepath.Join(shapedHome, "Library"), []byte("not a directory\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(shapedHome, ".config"), []byte("not a directory\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		probe := func(name string) (os.FileInfo, error) {
-			if strings.HasSuffix(name, filepath.Join("Library", "Application Support", "goose")) {
-				return nil, fs.ErrNotExist
-			}
-			return os.Lstat(name)
-		}
-		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, probe); err == nil {
+		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, os.Lstat); err == nil {
 			t.Fatal("a config root behind a non-directory parent was skipped as if absent")
 		}
 	})
