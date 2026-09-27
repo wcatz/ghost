@@ -52,13 +52,48 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 	return store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals)
 }
 
+// displayProposal renders a proposal or a guarded drop for the operator's own
+// eyes, substituting a description for the content whenever the content holds a
+// credential.
+//
+// Every print site in `ghost reflect` goes through this, and that is the whole
+// point. A guarantee made at the write boundary — the drop reports format,
+// category, scope and length, never the content — is not a guarantee about the
+// command's report if the same command prints the value somewhere else: the
+// proposal listing and the drop-guard warning both printed 120 truncated
+// characters, and 120 is far more than a GitHub PAT or a Docker Hub token needs.
+// In the autonomous path that stdout is the append-only lifecycle.log, so the
+// value outlives the run. The exposure the store's refusal exists to prevent,
+// reached from the other direction.
+//
+// The substitution keeps the category and the byte length, so an operator can
+// still find the row and tell how much was withheld — a report that says only
+// "redacted" is indistinguishable from a report that lost the proposal.
+func displayProposal(content, category string, limit int) string {
+	finding, ok := secret.Detect(content)
+	if !ok {
+		return truncateForDisplay(content, limit)
+	}
+	return fmt.Sprintf("<withheld: %s, category=%s, bytes=%d>", finding.Label, category, len(content))
+}
+
 // dropCredentialProposals removes the proposals whose content holds a
 // credential, from both lists.
 //
-// Every removal is reported — format, category, scope and length, never the
-// content — because a discard that leaves no trace is indistinguishable from a
-// proposal the model never emitted, and this is the only place a consolidation
-// silently loses a memory it had already decided to write.
+// Every removal is reported, with its format, category, scope and length and
+// never its content, because a discard that leaves no trace is indistinguishable
+// from a proposal the model never emitted.
+//
+// The report also says the thing that is easy to get wrong about it: any STORED
+// memory the proposal was carrying forward goes with it. ReplaceNonManual
+// deletes every replaceable row the emitted set does not account for, and this
+// memory is now not accounted for, so an unattended `ghost reflect --apply`
+// removes the stored row. That is the correct outcome — the row IS the value,
+// and leaving it is the leak — but it is a deletion, so it is named as one
+// rather than described as a proposal that was merely not applied. It is a
+// Ghost-owned removal rather than a model decision, which is why it does not go
+// through --allow-drops: that flag is the operator authorising what the MODEL
+// chose to drop.
 func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory) (keptProject, keptGlobal []reflection.ReflectMemory) {
 	keep := func(in []reflection.ReflectMemory) (out []reflection.ReflectMemory, dropped int) {
 		out = in[:0]
@@ -70,7 +105,8 @@ func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory)
 			}
 			dropped++
 			fmt.Fprintf(os.Stderr,
-				"note: consolidation proposal not applied — it holds a credential value (format=%s category=%s scope=%s bytes=%d)\n",
+				"note: consolidation proposal not applied — it holds a credential value (format=%s category=%s scope=%s bytes=%d);"+
+					" any stored memory it carried forward is REMOVED from the project\n",
 				finding.Label, m.Category, m.Scope, len(m.Content))
 		}
 		return out, dropped

@@ -942,8 +942,7 @@ func runReflect() {
 	if len(projectMems) > 0 {
 		fmt.Printf("  Project-scoped (%d):\n", len(projectMems))
 		for _, m := range projectMems {
-			truncated := truncateForDisplay(m.Content, 120)
-			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, truncated)
+			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, displayProposal(m.Content, m.Category, 120))
 		}
 	}
 	if len(globalMems) > 0 {
@@ -953,8 +952,7 @@ func runReflect() {
 			fmt.Printf("  Cross-project (%d) — kept project-scoped unless --promote-globals:\n", len(globalMems))
 		}
 		for _, m := range globalMems {
-			truncated := truncateForDisplay(m.Content, 120)
-			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, truncated)
+			fmt.Printf("    [%s] (%.1f) %s\n", m.Category, m.Importance, displayProposal(m.Content, m.Category, 120))
 		}
 	}
 	fmt.Println()
@@ -981,7 +979,7 @@ func runReflect() {
 	if len(guardedDrops) > 0 {
 		fmt.Fprintf(os.Stderr, "WARNING: %d memory(ies) had no surviving merge target:\n", len(guardedDrops))
 		for _, d := range guardedDrops {
-			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, truncateForDisplay(d.Content, 100))
+			fmt.Fprintf(os.Stderr, "  [%s] %s\n", d.Category, displayProposal(d.Content, d.Category, 100))
 		}
 		if allowDrops {
 			fmt.Fprintf(os.Stderr, "  --allow-drops set: these %d memories will be DELETED\n", len(guardedDrops))
