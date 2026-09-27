@@ -54,6 +54,13 @@ func seed(t *testing.T) (*memory.Store, *sql.DB) {
 // age (both set to the same value — orient() keys off updated_at).
 func add(t *testing.T, store *memory.Store, db *sql.DB, content string, vec []float32, createdAt string) string {
 	t.Helper()
+	return addStamped(t, store, db, content, vec, createdAt, createdAt)
+}
+
+// addStamped is add with created_at and updated_at set independently, for the
+// #641 fixtures whose newer endpoint (by updated_at) was written earlier.
+func addStamped(t *testing.T, store *memory.Store, db *sql.DB, content string, vec []float32, createdAt, updatedAt string) string {
+	t.Helper()
 	ctx := context.Background()
 	id, err := store.Create(ctx, "p", memory.Memory{Category: "fact", Content: content, Importance: 0.7, Source: "mcp"})
 	if err != nil {
@@ -62,7 +69,7 @@ func add(t *testing.T, store *memory.Store, db *sql.DB, content string, vec []fl
 	if err := store.StoreEmbedding(ctx, id, vec, "test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?`, createdAt, createdAt, id); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE memories SET created_at = ?, updated_at = ? WHERE id = ?`, createdAt, updatedAt, id); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -87,6 +94,12 @@ func TestSelectCandidates(t *testing.T) {
 	c := cands[0]
 	if c.NewerID != newer || c.OlderID != older {
 		t.Errorf("wrong orientation: newer=%s older=%s (want newer=%s older=%s)", c.NewerID, c.OlderID, newer, older)
+	}
+	// The classifier prompt needs created_at, not just the orientation
+	// updated_at picked: a stale note re-saved later is the newer endpoint and
+	// the older creation (#641).
+	if c.NewerCreatedAt != "2026-07-10 00:00:00" || c.OlderCreatedAt != "2026-01-01 00:00:00" {
+		t.Errorf("candidate created_at = (%q, %q), want (2026-07-10 00:00:00, 2026-01-01 00:00:00)", c.NewerCreatedAt, c.OlderCreatedAt)
 	}
 }
 
@@ -832,5 +845,74 @@ func TestRunCacheWriteFailureDoesNotFailThePass(t *testing.T) {
 	}
 	if res.Confirmed != 0 || res.Candidates != 1 {
 		t.Errorf("candidates=%d confirmed=%d, want 1/0", res.Candidates, res.Confirmed)
+	}
+}
+
+// TestResultWouldWriteLinks pins the dry-run hint's promise. A reversed verdict
+// is a refusal, so a result whose only finding is one must not tell the operator
+// that --apply would write links for it (#649 review).
+func TestResultWouldWriteLinks(t *testing.T) {
+	cases := []struct {
+		name string
+		res  Result
+		want bool
+	}{
+		{"nothing found", Result{}, false},
+		{"confirmed pair writes a link", Result{Confirmed: 1}, true},
+		{"caused pair writes a link", Result{CausesCreated: 1}, true},
+		{"reclassified to causes writes a link", Result{Reclassified: 1, CausesCreated: 1}, true},
+		{"only a refused reversal", Result{Reversed: 1, Reclassified: 1, ReclassifiedNoWrite: 1}, false},
+		{"only a NEITHER reclassification, which only drops the link", Result{Reclassified: 1, ReclassifiedNoWrite: 1}, false},
+		{"a fresh refusal, no live link to drop", Result{Reversed: 1}, false},
+		{"one no-write reclassification and one real reclassification", Result{Reclassified: 2, Reversed: 1, ReclassifiedNoWrite: 1}, true},
+		// Only refusals, and the cache is not a graph change either way.
+		{"cache hits and unclassified pairs", Result{Skipped: 3, Unclassified: 2}, false},
+	}
+	for _, c := range cases {
+		if got := c.res.WouldWriteLinks(); got != c.want {
+			t.Errorf("%s: WouldWriteLinks() = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRunCountsNoWriteReclassifications: a verdict that only invalidates — a
+// reversal or a NEITHER — must be distinguishable in the Result from one that
+// re-links the pair, because the CLI's dry-run hint keys on exactly that
+// difference (#649 review). Every verdict that leaves Reclassified without
+// leaving a link to write is a NEITHER or a reversal.
+func TestRunCountsNoWriteReclassifications(t *testing.T) {
+	for _, verdict := range []Relation{RelationReversed, RelationNeither} {
+		t.Run(string(verdict), func(t *testing.T) {
+			store, db := seed(t)
+			ctx := context.Background()
+			newer := add(t, store, db, "kubernetes now on 1.31", []float32{1, 0, 0, 0}, "2026-07-01 00:00:00")
+			older := add(t, store, db, "kubernetes cluster runs 1.27", []float32{0, 1, 0, 0}, "2026-01-01 00:00:00")
+			if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx,
+				`UPDATE memory_links SET created_at = '2020-01-01 00:00:00' WHERE source_id = ? AND target_id = ?`,
+				newer, older,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			cls := &mockClassifier{verdict: func(_, _ string) Relation { return verdict }}
+			res, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default())
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if res.Reclassified != 1 || res.ReclassifiedNoWrite != 1 {
+				t.Fatalf("got reclassified=%d noWrite=%d, want 1/1 for a %s verdict",
+					res.Reclassified, res.ReclassifiedNoWrite, verdict)
+			}
+			if res.Created != 0 || res.CausesCreated != 0 {
+				t.Errorf("a %s reclassification must write nothing, got created=%d causes=%d",
+					verdict, res.Created, res.CausesCreated)
+			}
+			if res.WouldWriteLinks() {
+				t.Errorf("a pass whose only finding is a %s reclassification must not promise a link to write", verdict)
+			}
+		})
 	}
 }

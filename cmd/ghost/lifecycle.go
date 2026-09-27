@@ -1077,7 +1077,10 @@ Flags:
   --project string    Project name; an alternative to the positional form that
                       takes the next argument verbatim, so dash-prefixed names work.
 
-Classifies each candidate as supersedes, causes, or neither. Runs through the
+Classifies each candidate as supersedes, causes, reversed, or neither. A
+reversed verdict — the older note is the current one and the newer note restates
+an obsolete claim — is refused rather than written, because a supersedes link
+only ever points from the newer note to the older one. Runs through the
 configured CLI harness of the calling session (--source overrides; otherwise
 detected from the environment and process ancestry — an undetectable caller is
 an error, never a fallback to a different harness). The harness owns its
@@ -1089,7 +1092,8 @@ authentication and billing.
 // over the project's live memories (cosine-similar candidates, CLI-harness
 // confirmed) and, with --apply, writes them. Dry-run by default. Re-runnable:
 // it self-heals after `ghost reflect` cascade-deletes links. Consumed by
-// search only when SupersedeDemote is set. See docs/benchmarks.md Phase 3.
+// search only when SupersedeDemote is set. A reversed verdict is reported and
+// refused, never written (#641). See docs/benchmarks.md Phase 3.
 func runSupersede() {
 	projectName, source, apply, threshold, parseErr := parseSupersedeArgs(os.Args[2:])
 	if parseErr != nil {
@@ -1141,15 +1145,27 @@ func runSupersede() {
 	if res.Unclassified > 0 {
 		fmt.Printf("  %d pair(s) skipped: unclassifiable verdict (logged; the pass still completed)\n", res.Unclassified)
 	}
+	if res.Reversed > 0 {
+		// Only what holds for every counted pair: a supersedes link is never
+		// written for one, in either mode, and the verdict never reaches the
+		// NEITHER cache. Whether the pair comes back as a candidate, and
+		// whether --apply dropped an existing link, are per-pair.
+		// The drop is stated as what --apply does to the pair, not as what a run
+		// will have done: the apply path skips it for a pair a concurrent pass
+		// already invalidated, and the log carries the per-pair truth.
+		fmt.Printf("  %d pair(s) refused: reversed verdict — the older note is the current one, so no supersedes link is written and the verdict is not cached (re-asked on a later pass); under --apply the pair's supersedes/causes links are dropped\n", res.Reversed)
+	}
 	for _, c := range classified {
 		switch c.Relation {
 		case supersede.RelationSupersedes:
 			fmt.Printf("  %s  supersedes  %s\n", short(c.NewerID), short(c.OlderID))
 		case supersede.RelationCauses:
 			fmt.Printf("  %s  causes  %s\n", short(c.OlderID), short(c.NewerID))
+		case supersede.RelationReversed:
+			fmt.Printf("  %s  reversed, not written: %s supersedes it\n", short(c.NewerID), short(c.OlderID))
 		}
 	}
-	if !apply && (res.Confirmed > 0 || res.CausesCreated > 0 || res.Reclassified > 0) {
+	if !apply && res.WouldWriteLinks() {
 		fmt.Println("\nRe-run with --apply to write these links.")
 	}
 }

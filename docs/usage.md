@@ -126,7 +126,9 @@ ghost supersede myproject
 ghost supersede myproject --apply
 ```
 
-`supersede` proposes semantically similar candidate pairs and asks the selected CLI harness to classify them as `supersedes`, `causes`, or `neither`. Applying the pass writes directed links. Search can then demote a stale memory below the replacement that supersedes it.
+`supersede` proposes semantically similar candidate pairs and asks the selected CLI harness to classify them as `supersedes`, `causes`, `reversed`, or `neither`. Applying the pass writes directed links. Search can then demote a stale memory below the replacement that supersedes it.
+
+A `reversed` verdict — the classifier says the older note holds the current value and the newer one restates an obsolete claim — is reported and refused rather than written, because a `supersedes` link only ever points from the newer note to the older one. Under `--apply` the pair's existing `supersedes` and `causes` links are dropped, and a refused verdict is never cached, so the pair is asked again on the next pass rather than skipped.
 
 All three maintenance operations route through the calling harness when no explicit `--source` is supplied. Ghost fails rather than silently switching to a different harness or billing path. See the [CLI reference](cli.md#memory-maintenance) for all flags.
 

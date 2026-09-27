@@ -320,20 +320,33 @@ func (s *Store) LinksByRelationSource(ctx context.Context, projectID, relation, 
 }
 
 // InvalidateLink soft-invalidates a link (Zep-style: never delete, mark
-// invalid with a timestamp so history is preserved).
-func (s *Store) InvalidateLink(ctx context.Context, sourceID, targetID, relation string) error {
+// invalid with a timestamp so history is preserved). It returns how many links
+// it moved out of the live set, so a caller can report an actual graph change
+// instead of assuming one: the UPDATE is guarded on invalidated_at IS NULL, so a
+// link that was already invalidated — including on an earlier pass — is not
+// re-stamped and does not count. The guard changes nothing about the graph
+// itself (every reader filters invalidated_at IS NULL, so a dead link stays
+// dead either way); what it changes is this count, which is the difference
+// between a real removal and a no-op the caller can now tell apart.
+func (s *Store) InvalidateLink(ctx context.Context, sourceID, targetID, relation string) (int64, error) {
 	if symmetricRelations[relation] && sourceID > targetID {
 		sourceID, targetID = targetID, sourceID
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE memory_links SET invalidated_at = datetime('now')
-		WHERE source_id = ? AND target_id = ? AND relation = ?
+		WHERE source_id = ? AND target_id = ? AND relation = ? AND invalidated_at IS NULL
 	`, sourceID, targetID, relation)
 	if err != nil {
-		return fmt.Errorf("invalidate link: %w", err)
+		return 0, fmt.Errorf("invalidate link: %w", err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		// A driver that cannot report the count is not a reason to fail: the
+		// invalidation itself already committed.
+		return 0, nil
+	}
+	return n, nil
 }

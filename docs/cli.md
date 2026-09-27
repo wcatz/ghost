@@ -151,7 +151,7 @@ ghost supersede myproject --apply
 | `--source <host>` | Classify through `claude-code`, `opencode`, `codex`, or `goose`. |
 | `--project <name>` | Project name instead of the positional form. Takes the next argument verbatim, so dash-prefixed names work. |
 
-Each candidate is classified as `supersedes`, `causes`, or `neither`. The default source is the calling harness. Applying the pass enables targeted demotion during search for genuine replacement pairs.
+Each candidate is classified as `supersedes`, `causes`, `reversed`, or `neither`, with each note's creation timestamp in the prompt. A `supersedes` link only ever points from the newer note to the older one, so a `reversed` verdict — the classifier says the older note holds the current value and the newer one restates an obsolete claim — is reported and refused instead of written; `--apply` also invalidates any `supersedes`/`causes` link the pair already carries. A refused verdict is never recorded in the NEITHER cache, so the pair is not skipped on later passes. The default source is the calling harness. Applying the pass enables targeted demotion during search for genuine replacement pairs.
 
 ## Project operations
 

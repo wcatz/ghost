@@ -8,28 +8,37 @@
 // Design: cosine similarity proposes same-subject candidate pairs (cheap,
 // local), updated_at gives direction (newer/older — SQLite's
 // 'YYYY-MM-DD HH:MM:SS' timestamps compare lexicographically), and an LLM
-// Classifier makes a 3-way SUPERSEDES/CAUSES/NEITHER judgment for each pair —
-// batched up to classifyBatchSize pairs per harness call so a large project's
-// pass does not pay one process spawn and full rubric per pair — since
+// Classifier makes a 4-way SUPERSEDES/CAUSES/NEITHER/REVERSED judgment for each
+// pair — batched up to classifyBatchSize pairs per harness call so a large
+// project's pass does not pay one process spawn and full rubric per pair — since
 // "replaces a stale claim" and "is caused by / follows from" are distinct
 // relations that a binary confirm/reject can't tell apart. SUPERSEDES writes
 // a newer->older 'supersedes' link (source 'llm'); CAUSES writes an
-// older->newer 'causes' link (cause precedes effect); NEITHER writes nothing.
+// older->newer 'causes' link (cause precedes effect); NEITHER writes nothing;
+// REVERSED (the older note is the current one) is refused rather than written.
+// Each note's created_at goes to the prompt too, because updated_at is the wrong
+// ordering exactly when a note was re-saved after the fact it reports (#641):
+// a bare three-way answer cannot decline a direction, and the pass wrote a
+// backwards link that demoted a fix and promoted the stale claim it replaced.
 // Fresh NEITHER verdicts are cached by pair and both endpoints' content hashes
 // (supersede_checked, schema v8): unchanged fresh pairs are skipped on later
 // passes — a cache skip is equivalent to a NEITHER verdict, so a stale
 // 'causes' link is not invalidated on that pass if the endpoints' text reverted
 // to a previously cached version (graph-only staleness; ranking consumes only
 // 'supersedes') — while live-link pairs (reclassify) are still validated each
-// pass. A converged project therefore makes zero classify calls for its fresh
-// candidates, not zero calls overall.
+// pass. A REVERSED verdict is never cached, or the pair would be skipped for the
+// life of its text — so a converged project makes zero classify calls for its
+// fresh candidates EXCEPT reversed ones, which are re-asked on every pass until
+// the verdict changes. That is a deliberate billable repeat per reversed pair,
+// paid so the refusal is never frozen; it is not zero calls overall.
 // Run() also re-classifies existing 'supersedes'/'llm' links whose endpoints
-// have changed since the link was written, invalidating the link (or
-// flipping it to 'causes') when the verdict no longer matches. The pass is
+// have changed since the link was written, invalidating the link (flipping it
+// to 'causes', or dropping it on a reversed verdict) when the verdict no longer
+// matches. The pass is
 // re-runnable and self-heals after reflection's cascade-delete of links, like
 // the cosine linking worker rebuilds 'related' edges — though reclassification
 // of existing links only fires for a pair whose endpoint content actually
-// changed after the link was written; pairs whose link predates this 3-way
+// changed after the link was written; pairs whose link predates this 4-way
 // classifier but whose endpoints haven't changed since are only corrected if
 // they still surface as a fresh candidate (see "Skip-if-unchanged" in
 // docs/superpowers/specs/2026-07-28-supersede-relation-type-fix-design.md).
@@ -51,13 +60,17 @@ import (
 const maxNeighbors = 8
 
 // Candidate is an ordered pair proposed for classification: Newer is the more
-// recent memory that may supersede Older.
+// recent memory that may supersede Older. The CreatedAt values are the notes'
+// own timestamps, which the classifier prompt needs because the updated_at
+// ordering that picked the pair can be misleading (see the Run doc comment).
 type Candidate struct {
-	NewerID      string
-	NewerContent string
-	OlderID      string
-	OlderContent string
-	Similarity   float32
+	NewerID        string
+	NewerContent   string
+	NewerCreatedAt string
+	OlderID        string
+	OlderContent   string
+	OlderCreatedAt string
+	Similarity     float32
 }
 
 // Relation is a classifier verdict on a NEWER/OLDER candidate pair.
@@ -73,11 +86,16 @@ const (
 	// RelationNeither means the pair is not a genuine replacement or citation
 	// relationship — e.g. two independently valid parallel facts.
 	RelationNeither Relation = "neither"
+	// RelationReversed means the same-fact replacement runs the other way: the
+	// OLDER note states the current value and the NEWER one restates a claim
+	// that is already obsolete. Run refuses it (see the Run doc comment).
+	RelationReversed Relation = "reversed"
 )
 
 // Classifier decides the relationship for candidate pairs: a same-fact
 // replacement (SUPERSEDES), a decision citing supporting evidence that stays
-// valid (CAUSES), or neither. It returns one verdict per pair, in the same
+// valid (CAUSES), a replacement that runs against the pair's orientation
+// (REVERSED), or neither. It returns one verdict per pair, in the same
 // order; Relation("") marks a pair whose verdict could not be parsed. The LLM
 // implementation (RelationClassifier) batches pairs across as few harness
 // calls as possible; tests inject a deterministic mock.
@@ -87,11 +105,14 @@ type Classifier interface {
 
 // contentHash is the NEITHER-cache key component, mirroring resolve's
 // ContentHash: the classification question is about the notes' text, so a tag
-// or importance edit must not invalidate a cached verdict. The "v1\x00" prefix
-// versions the key — a future prompt/rubric change that could flip verdicts
-// bumps it to reset every cached verdict in one step.
+// or importance edit must not invalidate a cached verdict. The "v2\x00" prefix
+// versions the key — a prompt/rubric change that could flip verdicts bumps it
+// to reset every cached verdict in one step, the same reset resolve performed
+// when its rubric changed. v2 is the #641 rubric: it added the REVERSED
+// verdict and the created_at signal, so a NEITHER row written under v1 may be
+// judged the other way now and every v1 row has to be re-asked.
 func contentHash(content string) string {
-	sum := sha256.Sum256([]byte("v1\x00" + content))
+	sum := sha256.Sum256([]byte("v2\x00" + content))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -103,7 +124,7 @@ type vectorStore interface {
 	GetEmbedding(ctx context.Context, memoryID string) ([]float32, error)
 	SearchVectorScoped(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]memory.ScoredMemory, error)
 	CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error
-	InvalidateLink(ctx context.Context, sourceID, targetID, relation string) error
+	InvalidateLink(ctx context.Context, sourceID, targetID, relation string) (int64, error)
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	SupersedeChecked(ctx context.Context, projectID string) (map[[2]string]memory.SupersedeCheck, error)
 	MarkSupersedeNeither(ctx context.Context, projectID string, checks map[[2]string]memory.SupersedeCheck) error
@@ -185,8 +206,8 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 			}
 			seen[key] = true
 			cands = append(cands, Candidate{
-				NewerID: newer.ID, NewerContent: newer.Content,
-				OlderID: older.ID, OlderContent: older.Content,
+				NewerID: newer.ID, NewerContent: newer.Content, NewerCreatedAt: newer.CreatedAt,
+				OlderID: older.ID, OlderContent: older.Content, OlderCreatedAt: older.CreatedAt,
 				Similarity: n.Score,
 			})
 		}
@@ -226,6 +247,21 @@ type Result struct {
 	StaleSkipped  int
 	Skipped       int // fresh pairs skipped via the NEITHER cache
 	Unclassified  int // pairs skipped because the classifier answer was unparseable
+	Reversed      int // REVERSED verdicts: refused, never written
+	// ReclassifiedNoWrite counts the reclassify pairs whose --apply effect is
+	// purely destructive: a reversal and a NEITHER both only invalidate the
+	// links they find, so neither re-links the pair.
+	ReclassifiedNoWrite int
+}
+
+// WouldWriteLinks reports whether an --apply pass would put a NEW link in the
+// graph, which is what the CLI's dry-run hint promises. A confirmed pair and a
+// CAUSES pair are written; a reclassify pair is re-linked by a CAUSES verdict
+// and only invalidated by NEITHER or a reversal. Subtracting the no-write
+// reclassifications matters because a pass whose whole effect is deleting a
+// link should not tell the operator that --apply will write links for it.
+func (r Result) WouldWriteLinks() bool {
+	return r.Confirmed > 0 || r.CausesCreated > 0 || r.Reclassified > r.ReclassifiedNoWrite
 }
 
 // endpointsExist reports whether every given memory ID is still live. Used
@@ -259,6 +295,10 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 //     stale 'supersedes' newer->older link for the same pair is invalidated.
 //   - NEITHER: nothing is written; any existing link for the pair (either
 //     relation) is invalidated.
+//   - REVERSED: refused. Nothing is written in either direction, and any
+//     existing 'supersedes' newer->older or 'causes' older->newer link for the
+//     pair is invalidated — the same both-relations sweep NEITHER performs, for
+//     a link that would assert what this verdict just denied.
 //
 // A pair whose existing 'supersedes' link predates neither endpoint's last
 // update is skipped (skip-if-unchanged) — reclassifying it would repeat the
@@ -294,6 +334,20 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 // dead harness, an outage — is fatal so a transport failure cannot look like a
 // successful, empty pass. A link-write error is fatal so a half-written pair is
 // never silently left behind.
+//
+// A REVERSED verdict is refused rather than flipped, and never cached as
+// NEITHER. The pair is oriented by updated_at, which is the wrong ordering
+// exactly when a note was re-saved after the fact it reports: a maintenance
+// benchmark on a real database wrote a 'supersedes' link from a stale bug list
+// onto the fix that had superseded it hours earlier (#641), demoting the fix and
+// promoting the stale claim. Flipping would trust the same unreliable
+// judgment to pick the other direction, and the wrong-direction link is the
+// harm; skipping costs one un-linked pair, which a later pass can still fix.
+// Not caching it matters for the same reason — a NEITHER row would skip the
+// pair for the life of its text, freezing the staleness bug this pass exists to
+// fix. That is why the classifier is also shown each note's created_at: the
+// timestamps are the only signal it has to tell a re-saved stale claim from a
+// genuine later update.
 func Run(ctx context.Context, store vectorStore, cls Classifier, projectID string, threshold float32, apply bool, logger *slog.Logger) (Result, []Classified, error) {
 	fresh, err := SelectCandidates(ctx, store, projectID, threshold)
 	if err != nil {
@@ -347,8 +401,8 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 			continue // skip-if-unchanged: neither endpoint changed since this link was written
 		}
 		all = append(all, Candidate{
-			NewerID: l.SourceID, NewerContent: newerMem.Content,
-			OlderID: l.TargetID, OlderContent: olderMem.Content,
+			NewerID: l.SourceID, NewerContent: newerMem.Content, NewerCreatedAt: newerMem.CreatedAt,
+			OlderID: l.TargetID, OlderContent: olderMem.Content, OlderCreatedAt: olderMem.CreatedAt,
 			Similarity: l.Strength,
 		})
 	}
@@ -469,9 +523,24 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 				res.Confirmed++
 			case RelationCauses:
 				res.CausesCreated++
+			case RelationReversed:
+				res.Reversed++
+				if logger != nil {
+					// Neutral by design: this loop runs before the apply
+					// block and cannot know whether the pair survives the
+					// existence check, so it claims no write. The drop, if
+					// it happens, is logged where it happens.
+					logger.Warn("supersede: refusing a reversed verdict (older note is the current one)",
+						"newer", c.NewerID, "older", c.OlderID)
+				}
 			}
 			if wasReclassify && verdict != RelationSupersedes {
 				res.Reclassified++
+				// A CAUSES verdict re-links the pair; NEITHER and a reversal
+				// only drop what is there.
+				if verdict == RelationNeither || verdict == RelationReversed {
+					res.ReclassifiedNoWrite++
+				}
 			}
 		}
 	}
@@ -509,22 +578,50 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 					return res, nil, fmt.Errorf("create supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
 				res.Created++
-				if err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses)); err != nil {
+				if _, err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses)); err != nil {
 					return res, nil, fmt.Errorf("invalidate causes link %s→%s: %w", c.OlderID, c.NewerID, err)
 				}
 			case RelationCauses:
 				if err := store.CreateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses), c.Similarity, "llm"); err != nil {
 					return res, nil, fmt.Errorf("create causes link %s→%s: %w", c.OlderID, c.NewerID, err)
 				}
-				if err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes)); err != nil {
+				if _, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes)); err != nil {
 					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
 			case RelationNeither:
-				if err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes)); err != nil {
+				if _, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes)); err != nil {
 					return res, nil, fmt.Errorf("invalidate supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
 				}
-				if err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses)); err != nil {
+				if _, err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses)); err != nil {
 					return res, nil, fmt.Errorf("invalidate causes link %s→%s: %w", c.OlderID, c.NewerID, err)
+				}
+			case RelationReversed:
+				// Nothing is written, in either direction: the classifier
+				// says the OLDER note is the current one, so the only link
+				// this pair could carry is the backwards one. Links a
+				// previous verdict left behind are dropped, exactly as a
+				// NEITHER verdict drops both relations — a backwards
+				// 'supersedes' link is the harm #641 found, and a 'causes'
+				// link pointing INTO the obsolete note asserts the opposite
+				// of what this verdict just said. It is also the only way
+				// either link ever leaves the graph.
+				dropped, err := store.InvalidateLink(ctx, c.NewerID, c.OlderID, string(RelationSupersedes))
+				if err != nil {
+					return res, nil, fmt.Errorf("invalidate reversed supersedes link %s→%s: %w", c.NewerID, c.OlderID, err)
+				}
+				causesDropped, err := store.InvalidateLink(ctx, c.OlderID, c.NewerID, string(RelationCauses))
+				if err != nil {
+					return res, nil, fmt.Errorf("invalidate reversed causes link %s→%s: %w", c.OlderID, c.NewerID, err)
+				}
+				// Info, and only when a row really changed: a fresh reversed
+				// candidate usually carries no link, so claiming a drop there
+				// would put a graph mutation in lifecycle.log that never
+				// happened. InvalidateLink's count is what makes the difference
+				// between the two cases observable.
+				if logger != nil && dropped+causesDropped > 0 {
+					logger.Info("supersede: dropped the links of a reversed pair",
+						"newer", c.NewerID, "older", c.OlderID,
+						"links", dropped+causesDropped)
 				}
 			}
 			if logger != nil {
