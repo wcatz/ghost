@@ -585,19 +585,24 @@ func valueIsCommand(text string, valueEnd int) bool {
 	return shellFlagRe.MatchString(rest)
 }
 
-// valueIsQuoted reports whether the captured value was written as a quoted
-// literal — that is, whether the character before the capture is a quote.
-// assignmentRe consumes an optional opening quote, so the capture itself no
-// longer carries it.
-func valueIsQuoted(text string, valueStart int) bool {
-	if valueStart <= 0 {
-		return false
-	}
-	switch text[valueStart-1] {
-	case '"', '\'':
-		return true
-	}
-	return false
+// commandWordRe splits a candidate command word from a path or an executable:
+// two or more segments of letters only, separated by -, . or /.
+var commandWordRe = regexp.MustCompile(`^[A-Za-z]+([-./][A-Za-z]+)+$`)
+
+// isCommandWord reports whether a value names a command rather than a secret.
+//
+// The shape is the vendor's: a cmdlet or executable path is words joined by
+// separators, so `ConvertTo-SecureString`, `Get-SecretValue` and
+// `/usr/bin/openssl` match and a credential does not. `K3q9Xm2pL7wRt4ZbAvN1` has
+// no separator and digits, and `read-secret-from-keyvault` does match — which is
+// correct, because a name like that is a name.
+//
+// This exists because "is the value a literal" cannot be answered by looking for
+// quotes: PowerShell allows `$x = "ConvertTo-SecureString" …`, and refusing that
+// would be a false positive on exactly the corpus line the precision table
+// already pins.
+func isCommandWord(value string) bool {
+	return commandWordRe.MatchString(value)
 }
 
 // quotedArgRe finds a quoted token, which is where a command's secret lives.
@@ -614,6 +619,17 @@ func detectQuotedArgument(rest string) (Finding, bool) {
 	// Only the same line: a flag on the next line is a different statement.
 	if i := strings.IndexAny(rest, "\n\r"); i >= 0 {
 		rest = rest[:i]
+	}
+	// The caller passes text starting at the END of the value, so a quoted value
+	// leaves its own closing quote first. Left in place it pairs with the next
+	// argument's opening quote and `quotedArgRe` reads
+	// `"read-secret" -SecretName "K3q9…"` as one argument named ` -SecretName `
+	// and never sees the credential. Dropping exactly one leading quote is what
+	// the caller means.
+	if strings.HasPrefix(rest, `"`) {
+		rest = rest[1:]
+	} else if strings.HasPrefix(rest, `'`) {
+		rest = rest[1:]
 	}
 	for _, m := range quotedArgRe.FindAllStringSubmatch(rest, -1) {
 		arg := m[1] + m[2]
@@ -810,26 +826,27 @@ func Detect(text string) (Finding, bool) {
 		key := text[m[2*assignmentKey]:m[2*assignmentKey+1]]
 		value := text[m[2*assignmentValue]:m[2*assignmentValue+1]]
 		if text[m[2*assignmentShellVar]:m[2*assignmentShellVar+1]] != "" &&
-			valueIsCommand(text, m[2*assignmentValue+1]) &&
-			!valueIsQuoted(text, m[2*assignmentValue]) {
-			// A command invocation whose value is the command word rather than a
-			// literal: `$domainAdminPassword = ConvertTo-SecureString "{1}" …`.
-			// `ConvertTo-SecureString` is a cmdlet, not a password, so the value
-			// is skipped.
+			valueIsCommand(text, m[2*assignmentValue+1]) {
+			// A shell line with a flag after the value, so whatever follows is an
+			// argument list. Two things have to be true at once and neither
+			// replaces the other.
 			//
-			// The rest of the line still has to be checked, because the secret in
-			// `ConvertTo-SecureString "K3q9…" -AsPlainText` is a quoted ARGUMENT
-			// and nothing else looks there. -AsPlainText is precisely the flag
-			// that says the plaintext argument IS the password.
+			// The ARGUMENTS are always scanned, quoted or not: in
+			// `ConvertTo-SecureString "K3q9…" -AsPlainText` the secret is the
+			// argument and the value is the cmdlet, and -AsPlainText is precisely
+			// the flag that says the plaintext argument IS the password.
 			//
-			// The quoted-value test is what keeps the two apart. A quoted value
-			// (`$db_password = "K3q9…" -AsPlainText`) is a literal however much is
-			// flagged after it, so it falls through to the normal key and value
-			// test below rather than being skipped as a command word.
+			// The VALUE is skipped only when it is command-shaped. A cmdlet or a
+			// path is one whether or not it is quoted — `$x = "ConvertTo-
+			// SecureString" …` is still assigning a cmdlet — whereas a quoted
+			// literal is a literal however much is flagged after it:
+			// `$db_password = "K3q9Xm2pL7wRt4ZbAvN1" -AsPlainText` is the secret.
 			if f, ok := detectQuotedArgument(text[m[2*assignmentValue+1]:]); ok {
 				return f, true
 			}
-			continue
+			if isCommandWord(value) {
+				continue
+			}
 		}
 		if keyNamesSecret(key) && looksLikeCredentialMaterial(key, value) {
 			return Finding{Rule: assignedSecretRule, Label: assignedSecretLabel}, true

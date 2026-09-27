@@ -170,6 +170,20 @@ func TestDetectAllowsHelmAndKubernetesCredentialVocabulary(t *testing.T) {
 			was:  "assigned-secret, placeholder gate only",
 		},
 		{
+			// A quoted cmdlet is still a cmdlet. PowerShell allows it, and
+			// "is the value quoted" cannot tell a quoted command word from a
+			// quoted literal — which is why the skip tests the SHAPE, not the
+			// quoting.
+			name: "quoted powershell cmdlet",
+			text: `$domainAdminPassword = "ConvertTo-SecureString" "{1}" -AsPlainText -Force`,
+			was:  "assigned-secret",
+		},
+		{
+			name: "quoted cmdlet taking another variable",
+			text: `$securePassword = "ConvertTo-SecureString" -String $domainPassword -AsPlainText -Force`,
+			was:  "assigned-secret",
+		},
+		{
 			// A labelled 32-byte CBOR byte string is ALSO every Cardano
 			// verification key, and cardano-cli writes exactly this shape for a
 			// block production key. 68 characters, far under longHexFloor, and

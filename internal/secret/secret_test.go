@@ -133,6 +133,15 @@ func TestDetectRejectsCredentialValues(t *testing.T) {
 			label: "assigned credential value",
 		},
 		{
+			// The command word is quoted, so the value test passes it, and the
+			// secret is the argument. The argument scan has to run on this path
+			// too, or a credential after a quoted cmdlet goes unchecked.
+			name:  "credential argument after a quoted command word",
+			text:  `$api_key = "read-secret-from-keyvault" -SecretName "K3q9Xm2pL7wRt4ZbAvN1" -Version 2`,
+			rule:  "assigned-secret",
+			label: "assigned credential value",
+		},
+		{
 			// The secret is the quoted ARGUMENT, not the value, and -AsPlainText
 			// is the flag that says so. Skipping the candidate because a flag
 			// follows would store this.
