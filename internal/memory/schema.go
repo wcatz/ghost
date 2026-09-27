@@ -286,6 +286,103 @@ CREATE TABLE IF NOT EXISTS link_scans (
     scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Append-only history: one row per mutation of a memory (schema v17, issue
+-- #578). Every writer appends a row in the SAME transaction as the mutation, so
+-- history cannot diverge from state.
+--
+-- Each row is a version: the state the memory HELD once that write landed, not
+-- the state it was about to have. The prior content of any write is therefore
+-- the previous row's content, and a reader who wants "what did Ghost know at
+-- time T" takes the newest row at or before T — a query the live memories table
+-- cannot answer at all, because it keeps only the last value. Recording the
+-- state AFTER the write is also the only shape an insert can have: an inserted
+-- row has no prior state to record.
+--
+-- memory_id carries NO foreign key, deliberately. The one event whose value is
+-- destroyed by the mutation it records is the delete — a hard DELETE takes the
+-- row with it, so a cascading history table would be empty exactly when the
+-- audit is asked for. Nothing reuses a memory id (ids come from
+-- hex(randomblob(16)) and a snapshot restore reinstates the id it recorded) —
+-- with ONE exception this table's own writers guard: a portable import carries
+-- the artifact's id verbatim, so ImportMemory refuses an id that still has
+-- history rather than splicing a deleted memory's record onto new text.
+--
+-- project_id DOES cascade: deleting a project is meant to take the whole corpus
+-- with it. That makes this column load-bearing for every write that moves a
+-- memory BETWEEN projects, which is why both of them have to reassign it here as
+-- well as on memories: a merge and a promotion both KEEP the rows, so a history
+-- row left naming the project the memory just left is taken by that project's
+-- DELETE, leaving a live memory whose recorded past is gone. MergeProject (in
+-- projectMergeStatements, and in the s.mergeProjectTx method the bind-recovery
+-- paths call) and PromoteToGlobal both do this; a new writer that moves a memory
+-- between projects has to as well.
+--
+-- The NAME is a reservation, not a description. This table is a change log: one
+-- row per write, holding the state the memory had once that write landed. The
+-- name memory_provenance is held for a different and later concept -- EVIDENCE
+-- records, several per memory (kind, agent, session_id, source_ref, confidence,
+-- observed_at, verified_at) answering "who or what supports this memory" -- and
+-- this table answers a different question, so it must not take that name. A
+-- schema name is permanent once released, and the two concepts are easy to
+-- confuse in prose while being unrelated in fact.
+CREATE TABLE IF NOT EXISTS memory_history (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    memory_id   TEXT NOT NULL,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Which write path touched the row: save (a new row), update (an edit),
+    -- reflect (a consolidation rewrite, reuse or insert), merge (a near-
+    -- duplicate fold strengthening an existing row), resolve / unresolve
+    -- (resolved_at stamped or cleared), supersede / unsupersede (an active
+    -- supersedes edge now points at this memory, or stopped), restore (a
+    -- snapshot restore), import (a portable artifact), delete (the row is being
+    -- removed). A CHECK rather than a convention: a phase no reader knows is a
+    -- phase that can never be filtered, and a typo must not create a new one
+    -- silently.
+    phase       TEXT NOT NULL
+                CHECK (phase IN (
+                    'save', 'update', 'reflect', 'merge', 'resolve',
+                    'unresolve', 'supersede', 'unsupersede', 'restore',
+                    'import', 'delete', 'baseline'
+                )),
+    -- Who PERFORMED the write, when the write path knows: the save/merge/import
+    -- paths carry a Provenance, the lifecycle passes (reflect, resolve,
+    -- supersede) and Delete do not. NULL means the actor is not known, which is
+    -- not a claim that nobody acted.
+    agent       TEXT,
+    session_id  TEXT,
+    -- The other memory this event is about, when there is one. A delete row
+    -- carries the id that replaced this row, which is the only way to follow one
+    -- memory's history into its successor's after a consolidation's rewrite or
+    -- merge gave the row a new id (#648). A supersede or unsupersede row carries
+    -- the memory whose edge makes the claim — the one that replaced THIS row.
+    -- NULL for a write that concerns one memory alone.
+    related_id  TEXT,
+    -- The incoming near-duplicate text a merge folded in, recorded only when the
+    -- fold did not store it as its own row. The default fold keeps that text as
+    -- a linked copy with its own save row, so this is NULL there; the FoldOnly
+    -- path (a promotion into the global bucket) deliberately drops the wording,
+    -- and without this column the only record of it was the database itself,
+    -- before this table existed.
+    merged_content TEXT,
+    -- The state this memory held once the write landed. nullable because a
+    -- delete row is written from the last live state and an older build could
+    -- leave gaps, not because a memory has no state.
+    content     TEXT,
+    category    TEXT,
+    importance  REAL,
+    resolved_at TEXT,
+    source      TEXT
+);
+-- One index, not two. The per-memory cap ranks by rowid (the implicit index,
+-- free), MemoryHistory filters by memory_id, and an as_of read (#647) is
+-- "the newest row for this memory at or before T" — which is served by this
+-- index too, because memory_id is the leading column. A standalone recorded_at
+-- index would have no reader, and every append would pay for a second b-tree
+-- insert to keep it current: measured at a fifth of the cost of writing the
+-- history row at all, on the write path's critical section.
+CREATE INDEX IF NOT EXISTS idx_history_memory ON memory_history(memory_id, recorded_at);
+
 CREATE TABLE IF NOT EXISTS maintenance_runs (
     id                   TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     kind                 TEXT NOT NULL,

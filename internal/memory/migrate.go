@@ -12,7 +12,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 16
+const schemaVersion = 17
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -59,6 +59,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV14,
 	migrateV15,
 	migrateV16,
+	migrateV17,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -1003,6 +1004,69 @@ FROM memory_snapshots`,
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("%q: %w", s[:min(40, len(s))], err)
+		}
+	}
+	return nil
+}
+
+// migrateV17 adds memory_history, the append-only per-memory change log
+// (schema v17, issue #578). The step creates the table under this name, and the
+// name is part of what it ships: `memory_provenance` is reserved for a different,
+// later concept (evidence records — several per memory, answering "who or what
+// supports this memory"), which this change log is not. v17 has never been
+// released, so the step itself carries the right name rather than renaming the
+// table after the fact.
+//
+// The DDL is CREATE ... IF NOT EXISTS throughout, so a database an operator has
+// already created the table in is stamped without harm — the step has no data to
+// correct, and no backfill is attempted.
+//
+// No backfill is a deliberate omission with a cost, not an oversight. Every
+// pre-v17 memory reaches this version with NO history row, so the first write
+// that touches one records a baseline of the state it read (see
+// recordBaselineHistoryTx) rather than only the state it produced: an edit is the
+// one write that destroys the text, and without the baseline a v16 memory's
+// first edit leaves the old wording unrecoverable. A backfill here would be the
+// other way to close that gap — one INSERT ... SELECT over memories — and was not
+// done because it writes a claim ("this is what it said when v17 arrived") about
+// rows whose real age and authorship nobody recorded, and because it would run on
+// every store with a large corpus during the open that also takes the
+// pre-migration backup.
+func migrateV17(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS memory_history (
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    memory_id   TEXT NOT NULL,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    phase       TEXT NOT NULL
+                CHECK (phase IN (
+                    'save', 'update', 'reflect', 'merge', 'resolve',
+                    'unresolve', 'supersede', 'unsupersede', 'restore',
+                    'import', 'delete', 'baseline'
+                )),
+    agent       TEXT,
+    session_id  TEXT,
+    related_id  TEXT,
+    merged_content TEXT,
+    content     TEXT,
+    category    TEXT,
+    importance  REAL,
+    resolved_at TEXT,
+    source      TEXT
+)`,
+		// One index, and the same one initSQL creates. A standalone
+		// recorded_at index has no reader — the per-memory cap ranks by rowid and
+		// an as_of read filters on memory_id — while every append would pay a
+		// second b-tree insert to keep it current, inside the write transaction.
+		// Creating it here anyway would have left every UPGRADED store with two
+		// while every fresh one had one, which is the sort of difference only a
+		// test comparing the two paths would catch.
+		`CREATE INDEX IF NOT EXISTS idx_history_memory ON memory_history(memory_id, recorded_at)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("%q: %w", stmt[:min(40, len(stmt))], err)
 		}
 	}
 	return nil

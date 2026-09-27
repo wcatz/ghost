@@ -540,6 +540,7 @@ var valueFlagOwners = map[string][]string{
 	"parseObsidianFlags":       {"obsidian"},
 	"parseBackupArgs":          {"backup"},
 	"parseExportArgs":          {"export"},
+	"parseHistoryArgs":         {"history"},
 	"parseCleanupSessionsArgs": {"opencode cleanup-sessions"},
 	"runContext":               {"context"},
 	"runHook":                  {"hook"},

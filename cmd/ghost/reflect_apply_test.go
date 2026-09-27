@@ -56,7 +56,7 @@ func globals(contents ...string) []reflection.ReflectMemory {
 func TestApplyReflectionAlwaysReachesPromotionWithoutProjectMemories(t *testing.T) {
 	f := &fakeReflectionApplier{resultPromoted: 1}
 	preserved, promoted, kept, err := applyReflection(
-		context.Background(), f, "p1", nil, globals("global"), "since", true,
+		context.Background(), f, "p1", nil, globals("global"), "since", true, nil,
 	)
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
@@ -88,7 +88,7 @@ func TestApplyReflectionFoldsGlobalsIntoProjectUnlessAsked(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeReflectionApplier{}
 			_, _, _, err := applyReflection(
-				context.Background(), f, "p1", projectMemories("project"), globals("global"), "since", tc.promote,
+				context.Background(), f, "p1", projectMemories("project"), globals("global"), "since", tc.promote, nil,
 			)
 			if err != nil {
 				t.Fatalf("applyReflection: %v", err)
@@ -103,7 +103,7 @@ func TestApplyReflectionFoldsGlobalsIntoProjectUnlessAsked(t *testing.T) {
 func TestApplyReflectionPropagatesStoreFailure(t *testing.T) {
 	want := errors.New("transaction failed")
 	f := &fakeReflectionApplier{err: want}
-	_, _, _, err := applyReflection(context.Background(), f, "p1", projectMemories("x"), nil, "", true)
+	_, _, _, err := applyReflection(context.Background(), f, "p1", projectMemories("x"), nil, "", true, nil)
 	if !errors.Is(err, want) {
 		t.Fatalf("error = %v, want %v", err, want)
 	}
@@ -123,7 +123,7 @@ func TestApplyReflectionCoversPromotionMatrix(t *testing.T) {
 					if fail {
 						f.err = errors.New("injected apply failure")
 					}
-					_, _, _, err := applyReflection(context.Background(), f, "p1", project, globals("global"), "", promote)
+					_, _, _, err := applyReflection(context.Background(), f, "p1", project, globals("global"), "", promote, nil)
 					if (err != nil) != fail {
 						t.Fatalf("error = %v, want error=%t", err, fail)
 					}
@@ -216,7 +216,7 @@ func TestApplyReflectionKeepsCrossProjectCandidatesWhenPromotionOff(t *testing.T
 	_, promoted, kept, err := applyReflection(ctx, store, "proj",
 		projectMemories("a consolidated project fact"),
 		globals("prefer running the linter before pushing"),
-		"", false)
+		"", false, nil)
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}

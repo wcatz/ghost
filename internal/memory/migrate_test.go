@@ -1357,3 +1357,156 @@ func TestMigrateFreshDBHasMaintenanceRuns(t *testing.T) {
 		t.Fatalf("idx_maintenance_runs_at index missing on fresh db: %v", err)
 	}
 }
+
+// TestMigrateV17AddsMemoryHistory exercises the one-shot upgrade every
+// existing v16 database takes: migrateV17 must create memory_history and
+// both of its indexes, stamp the version, and leave existing rows untouched.
+// The fixture drops what initSQL would create and stamps user_version=16 to
+// simulate a real pre-migration database, and migrate() is called directly —
+// bypassing OpenDB's unconditional initSQL run — so the step's own DDL is what
+// the test proves.
+func TestMigrateV17AddsMemoryHistory(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open v16 db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(initSQL); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	for _, drop := range []string{
+		`DROP INDEX idx_history_memory`,
+		// The recorded_at index this migration does not create, under either name
+		// it has had: no release ever shipped one, but a developer's build
+		// between two commits could have made it, and a stale index would make
+		// the absence assertion below fail for a reason that has nothing to do
+		// with this step. initSQL does not create it either, so leaving it out
+		// of the list would have made this test run against a v16 database that
+		// never had it, and the absence assertion would have passed for the
+		// wrong reason.
+		`DROP INDEX IF EXISTS idx_history_recorded`,
+		`DROP INDEX IF EXISTS idx_provenance_recorded`,
+		`DROP TABLE memory_history`,
+	} {
+		if _, err := db.Exec(drop); err != nil {
+			t.Fatalf("%s: %v", drop, err)
+		}
+	}
+	seed := []string{
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v17-p1', 'p1')`,
+		`INSERT INTO memories (project_id, category, content, source) VALUES ('p1', 'fact', 'a pre-v17 fact', 'mcp')`,
+		`PRAGMA user_version = 16`,
+	}
+	for _, s := range seed {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed v16 db (%s): %v", s, err)
+		}
+	}
+
+	if err := migrate(db, 16); err != nil {
+		t.Fatalf("migrate v16->v17: %v", err)
+	}
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	for _, obj := range []struct{ typ, name string }{
+		{"table", "memory_history"},
+		{"index", "idx_history_memory"},
+	} {
+		var n int
+		if err := db.QueryRow(
+			`SELECT count(*) FROM sqlite_master WHERE type=? AND name=?`, obj.typ, obj.name,
+		).Scan(&n); err != nil || n != 1 {
+			t.Errorf("%s %s after migrateV17: n=%d err=%v, want 1", obj.typ, obj.name, n, err)
+		}
+	}
+
+	// The index list is an absence as much as a presence, and it is asserted on
+	// the MIGRATION path, not only on the fresh-database one. initSQL and
+	// migrateV17 are two copies of the same DDL; when they disagree the fresh
+	// install and the upgraded store get different schemas, and the difference is
+	// invisible to a test that only opens a new database. This one caught exactly
+	// that: the index was removed from initSQL and left in migrateV17.
+	var strayIndexes int
+	if err := db.QueryRow(`
+		SELECT count(*) FROM sqlite_master
+		WHERE type='index' AND tbl_name='memory_history'
+		  AND name NOT LIKE 'sqlite_autoindex%' AND name <> 'idx_history_memory'`,
+	).Scan(&strayIndexes); err != nil {
+		t.Fatalf("count history-table indexes: %v", err)
+	}
+	if strayIndexes != 0 {
+		t.Errorf("migrateV17 left %d index(es) on memory_history that nothing reads; "+
+			"every append pays a b-tree insert for each", strayIndexes)
+	}
+
+	// The migrated table is usable, and its phase vocabulary is the one the
+	// writers send — a migration that delivered a table with a different CHECK
+	// would fail on the first real save, in production, on somebody's data.
+	if _, err := db.Exec(`
+		INSERT INTO memory_history (memory_id, project_id, phase, content, category, importance, source)
+		SELECT id, project_id, 'save', content, category, importance, source FROM memories
+	`); err != nil {
+		t.Fatalf("insert after migrateV17: %v", err)
+	}
+	var phase, content string
+	if err := db.QueryRow(
+		`SELECT phase, content FROM memory_history LIMIT 1`,
+	).Scan(&phase, &content); err != nil {
+		t.Fatalf("select from memory_history: %v", err)
+	}
+	if phase != "save" || content != "a pre-v17 fact" {
+		t.Errorf("row = (%q, %q), want (save, a pre-v17 fact)", phase, content)
+	}
+
+	// The pre-migration memory survived the additive step untouched.
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM memories`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("memories after migration: n=%d err=%v, want 1", n, err)
+	}
+}
+
+// TestMigrateFreshDBHasMemoryHistory: a brand-new database (initSQL path, no
+// migration involved) must have memory_history and its indexes from the start
+// — guards against the table silently dropping out of initSQL while migrateV17
+// still exists to paper over it on upgraded databases.
+func TestMigrateFreshDBHasMemoryHistory(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(`SELECT memory_id, phase, agent, session_id, content, category,
+		importance, resolved_at, source FROM memory_history LIMIT 0`); err != nil {
+		t.Fatalf("memory_history columns missing on fresh db: %v", err)
+	}
+	// One index, deliberately. The per-memory cap ranks by rowid, which the
+	// implicit index serves for free, and an as_of read (#647) filters on
+	// memory_id — so a standalone recorded_at index would have no reader while
+	// every append paid a second b-tree insert to keep it current, on the write
+	// path's critical section. Asserted as an absence: an index added back
+	// "just in case" is a cost this test should have to be edited to accept.
+	for _, name := range []string{"idx_history_memory"} {
+		var idx string
+		if err := db.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='index' AND name=?`, name,
+		).Scan(&idx); err != nil {
+			t.Errorf("%s index missing on fresh db: %v", name, err)
+		}
+	}
+	var stray int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type='index' AND tbl_name='memory_history'
+		 AND name NOT LIKE 'sqlite_autoindex%' AND name <> 'idx_history_memory'`,
+	).Scan(&stray); err != nil {
+		t.Fatalf("count history-table indexes: %v", err)
+	}
+	if stray != 0 {
+		t.Errorf("memory_history carries %d index(es) nothing reads; each is a b-tree insert on every write", stray)
+	}
+}

@@ -98,6 +98,9 @@ func dispatchCommand(argv []string) int {
 		case "export":
 			runExport()
 			return 0
+		case "history":
+			runHistory()
+			return 0
 		case "import":
 			runImport()
 			return 0
@@ -169,6 +172,10 @@ Commands:
   obsidian export [flags]     Mirror memories to an Obsidian vault (one-way)
   obsidian sync [flags]       Keep the vault mirror fresh (polls for DB changes)
   context [--cwd <dir>]       Print the passive session-start context block (for opencode)
+  history <memory-id> [--limit N] [--json]
+                              Print one memory's append-only history: every write,
+                              what it changed, and which phase or agent made it
+                              (survives the memory itself)
   maintenance status          Show live scratch usage and recent hygiene runs
   maintenance clean-scratch   Report pre-scratch-root legacy debris
                               (dry-run by default, --apply to remove strict matches)

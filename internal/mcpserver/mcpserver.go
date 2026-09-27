@@ -262,6 +262,21 @@ type resolveCapableStore interface {
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
 }
 
+// historyCapableStore narrows provider.MemoryStore's concrete backing store to the
+// two methods ghost_memory_delete needs for the redaction half of its job, which
+// provider.MemoryStore does not carry. *memory.Store satisfies it.
+//
+// They are needed because the tool's other half is about a memory that is
+// already gone: a credential removed by deleting its memory is still in the
+// history, and a delete that requires a live row cannot reach it. MemoryHistory
+// supplies the project the tombstone belonged to — which is how ownership is
+// still verified for a row that is no longer there — and PurgeMemoryHistory
+// erases the text without inventing a row to erase.
+type historyCapableStore interface {
+	MemoryHistory(ctx context.Context, memoryID string, limit int) ([]memory.HistoryEntry, error)
+	PurgeMemoryHistory(ctx context.Context, memoryID string) (int64, error)
+}
+
 // shortID truncates an ID to 8 characters for compact preview (used for both
 // memory and task IDs), mirroring cmd/ghost/main.go's local `short` closure.
 func shortID(id string) string {
@@ -656,6 +671,44 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	s.notifyProjectResource(ctx, resolvedProjectID, "context")
 	s.notifyResourceUpdated(ctx, "ghost://memories/global")
 	return fmt.Sprintf("Memory promoted to global scope (id: %s).", memoryID), nil
+}
+
+// purgeDeletedMemoryHistory answers ghost_memory_delete for an id whose row is
+// gone. It refuses when the caller did not ask to purge — a plain delete of
+// something that does not exist is still "not found", because there is
+// nothing to retire and the caller may simply have the wrong id.
+func (s *Server) purgeDeletedMemoryHistory(ctx context.Context, memoryID, requestedProjectID, resolvedProjectID string, purge bool) (*mcp.CallToolResult, any, error) {
+	if !purge {
+		return nil, nil, fmt.Errorf("memory %s not found", memoryID)
+	}
+	hist, ok := s.store.(historyCapableStore)
+	if !ok {
+		return nil, nil, fmt.Errorf("this store cannot reach a deleted memory's history; run 'ghost history purge %s' instead", memoryID)
+	}
+	entries, err := hist.MemoryHistory(ctx, memoryID, 1)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read history: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil, nil, fmt.Errorf("memory %s not found, and no recorded history to purge", memoryID)
+	}
+	// The same ownership check a live row gets, against the project the
+	// tombstone was filed under. One entry is enough to name it.
+	if entries[0].ProjectID != resolvedProjectID {
+		return nil, nil, fmt.Errorf("memory %s does not belong to project %s", memoryID, requestedProjectID)
+	}
+	purged, err := hist.PurgeMemoryHistory(ctx, memoryID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("purge failed: %w", err)
+	}
+	s.notifyProjectResource(ctx, resolvedProjectID, "context")
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
+			"Memory %s was already deleted; purged the %d recorded version(s) of its text. "+
+				"reflection snapshot holding it. The memory itself is not restored, and a copy in a "+
+				"backup taken before this is not something this can reach.",
+			memoryID, purged)}},
+	}, nil, nil
 }
 
 func (s *Server) registerTools() {
@@ -1082,14 +1135,15 @@ func (s *Server) registerTools() {
 
 	// ghost_memory_delete — delete a memory by ID.
 	type deleteArgs struct {
-		ProjectID string `json:"project_id" jsonschema:"Project name the memory belongs to (required for ownership check)"`
-		MemoryID  string `json:"memory_id" jsonschema:"ID of the memory to delete"`
+		ProjectID    string `json:"project_id" jsonschema:"Project name the memory belongs to (required for ownership check)"`
+		MemoryID     string `json:"memory_id" jsonschema:"ID of the memory to delete"`
+		PurgeHistory bool   `json:"purge_history,omitempty" jsonschema:"Also erase this memory's recorded history — use it to REDACT something (a credential, a token, a personal detail), not to retire a memory you merely want gone. The history keeps the text a memory used to hold, so without this a deleted secret survives in the database and is still readable with ghost history."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_delete",
 		Title:       "Delete Memory",
-		Description: "Permanently delete a memory by ID. Requires project_id to verify ownership — you cannot delete memories from other projects. Use only when the user explicitly asks to remove a memory or when a memory is confirmed incorrect. Do not delete outdated memories — Ghost's reflection system handles pruning.",
+		Description: "Permanently delete a memory by ID. Requires project_id to verify ownership — you cannot delete memories from other projects. Use only when the user explicitly asks to remove a memory or when a memory is confirmed incorrect. Do not delete outdated memories — Ghost's reflection system handles pruning. Pass purge_history: true when the memory must be ERASED rather than retired: every recorded version of its text goes with it in the same transaction — along with any reflection snapshot that could restore the row — which is the only way to redact a secret Ghost already stored. It works on a memory that is already deleted too, purging the recorded text without restoring the row.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(true),
 			OpenWorldHint:   boolPtr(false),
@@ -1112,19 +1166,34 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("lookup failed: %w", err)
 		}
 		if len(mems) == 0 {
-			return nil, nil, fmt.Errorf("memory %s not found", args.MemoryID)
+			// A memory that is already deleted is not a failed delete — it is
+			// the second stage of a redaction, and the one a delete cannot
+			// perform. The history kept its text, so the request is still
+			// answerable, and the project it belonged to is still recorded there,
+			// so ownership is still checkable. Without this branch an agent told
+			// to redact a credential gets "not found" and the text stays exactly
+			// where it was.
+			return s.purgeDeletedMemoryHistory(ctx, args.MemoryID, args.ProjectID, resolvedProjectID, args.PurgeHistory)
 		}
 		if mems[0].ProjectID != resolvedProjectID {
 			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, args.ProjectID)
 		}
 
-		if err := s.store.Delete(ctx, args.MemoryID); err != nil {
+		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{
+			PurgeHistory: args.PurgeHistory,
+		}); err != nil {
 			return nil, nil, fmt.Errorf("delete failed: %w", err)
 		}
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
 
+		text := "Memory deleted."
+		if args.PurgeHistory {
+			text = "Memory deleted, and the versions of its text this database recorded are gone. " +
+				"its recorded history, and the reflection snapshot that could have restored the row. " +
+				"A copy in a backup taken before this, or in another machine's store, is not something this can reach."
+		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Memory deleted."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
 	})
 

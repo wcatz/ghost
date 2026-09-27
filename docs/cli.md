@@ -349,14 +349,14 @@ A dry run is not a separate code path: every record goes through the same valida
 - Because it cannot migrate, a store from an **older** Ghost is refused with a message naming both versions rather than failing on a missing column:
 
   ```text
-  error: the database at ~/.local/share/ghost/ghost.db is at schema v11 and this Ghost reads v16
+  error: the database at ~/.local/share/ghost/ghost.db is at schema v11 and this Ghost reads v17
          — start a session, or run ghost mcp init, to migrate it before exporting it or
          previewing an import into it
   ```
 
   A store from a **newer** Ghost gets a different message — upgrade Ghost — because migrating backwards is not the fix. Both are checked by reading `PRAGMA user_version` on the read-only connection, so the check never writes.
 
-  The check is strict: the store must be at exactly this Ghost's schema version, not merely at or above some floor. The only columns `export` and a dry run select that postdate v10 are `projects.repo_remote` (v11) and `memories.scope` (v12), so a v12–v15 store would in fact query fine — but a floor would hardcode which columns exist at which version, and the day a reader selects a newer column it would quietly admit a store that fails with a missing-column error again. So a v12–v15 store is asked to run one read-write open first, which is `ghost mcp init` or any session. `ghost backup` runs no version check of its own, but it is itself a read-write open: it reaches the store through the same path as a session, so it migrates and seeds the store it copies, and a store from a newer Ghost is refused outright. That makes it one way to *pay* this cost — run it once, then the export works — rather than a way around it. It is safe to run against a live MCP server, which is why it uses `VACUUM INTO` at all.
+  The check is strict: the store must be at exactly this Ghost's schema version, not merely at or above some floor. The only columns `export` and a dry run select that postdate v10 are `projects.repo_remote` (v11) and `memories.scope` (v12), so a v12–v16 store would in fact query fine — but a floor would hardcode which columns exist at which version, and the day a reader selects a newer column it would quietly admit a store that fails with a missing-column error again. So a v12–v16 store is asked to run one read-write open first, which is `ghost mcp init` or any session. `ghost backup` runs no version check of its own, but it is itself a read-write open: it reaches the store through the same path as a session, so it migrates and seeds the store it copies, and a store from a newer Ghost is refused outright. That makes it one way to *pay* this cost — run it once, then the export works — rather than a way around it. It is safe to run against a live MCP server, which is why it uses `VACUUM INTO` at all.
 
 ### Imported provenance
 
@@ -425,6 +425,73 @@ ghost context --cwd /path/to/project
 ```
 
 This is primarily used by the opencode adapter, which injects the returned block as instructions because opencode does not consume a stdout hook response.
+
+### `ghost history <memory-id>` / `ghost history purge <memory-id>`
+
+Prints one memory's append-only history: every insert, edit, reflection rewrite,
+duplicate fold, resolve, supersession, restore, import and deletion, oldest
+first.
+
+```bash
+ghost history <memory-id>                    # human-readable changelog
+ghost history <memory-id> --limit 5          # the newest 5 entries
+ghost history <memory-id> --json | jq .phase # one JSON object per entry
+
+ghost history purge <memory-id>              # erase the row AND its history
+```
+
+```bash
+ghost history <memory-id>                    # human-readable changelog
+ghost history <memory-id> --limit 5          # the newest 5 entries
+ghost history <memory-id> --json | jq .phase # one JSON object per entry
+```
+
+Each entry names when it happened, which write path made it (`save`, `update`,
+`reflect`, `merge`, `resolve`, `unresolve`, `supersede`, `unsupersede`, `restore`,
+`import`, `delete`, `baseline`), which agent and session performed it when the
+write path knew — the lifecycle passes do not, and the entry says so rather than
+inventing one — and the content, category, importance, `resolved_at` and source
+the memory held once that write landed.
+
+Two more fields appear when they apply: the memory on the other end of the event
+(`related memory:` — what replaced a deleted row, or whose edge claims this one)
+and the text a duplicate fold brought in and did not keep (`folded-in text:`).
+
+The history outlives the memory: a deleted memory's last state is still readable
+here, and a report that finds neither a row nor a history says so instead of
+printing nothing. In `--json` form that refusal is a one-line `{"error": ...}`
+object and a non-zero exit, never an empty stream a script would read as "no
+history"; the live / no-longer-live distinction is not repeated per line, and does
+not need to be — the last entry's phase says it, and a deleted memory ends in a
+`delete` row.
+
+`purge` is the exception, and it is the redaction path. Because the history keeps
+the text a memory **used** to hold, deleting a memory that contained a credential
+leaves that credential in the database and still readable with `ghost history`.
+`purge` erases the text in both directions (the store primitive for the second
+case is `Store.PurgeMemoryHistory`), and it also removes the reflection
+snapshots naming the memory — otherwise `ghost reflect --restore` would bring the
+row back, with its text and no history:
+
+- a memory that is still there is deleted along with its history, in one
+  transaction, so neither can survive the other;
+- a memory that is **already deleted** has its history erased on its own. That
+  second case is the one a delete-time purge cannot cover: the tombstone is the
+  feature, so "erase that secret" asked an hour after the memory was deleted would
+  otherwise report the memory as not found and leave the text where it is. The
+  memory is not brought back — only the text goes.
+
+The MCP equivalent is `ghost_memory_delete` with `purge_history: true`, in both
+directions — including for a memory that is already deleted, where it purges the
+recorded text without restoring the row; use it whenever the intent is to erase
+something rather than to retire a memory. Neither can reach a backup taken before
+the purge, or another machine's copy of the store. The MCP equivalent is
+`ghost_memory_delete` with `purge_history: true`; use it whenever the intent is to
+erase something rather than to retire a memory.
+
+The command writes no memory, history or project row. It does open the store read-write — the same open `ghost maintenance status` and `ghost backup` use — so a database predating the history table is migrated by the open, and that migration first writes the full pre-migration backup copy it always takes. The strictly read-only opener is not used here because it refuses a store behind the current schema, which is exactly the store someone is most likely to run this against after upgrading.
+
+Entries are kept per the growth policy in [architecture.md](architecture.md#memory-history): the newest 50 versions of one memory, and the newest 20 000 rows in the store.
 
 ### `ghost bench`
 

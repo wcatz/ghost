@@ -132,6 +132,16 @@ A `reversed` verdict — the classifier says the older note holds the current va
 
 All three maintenance operations route through the calling harness when no explicit `--source` is supplied. Ghost fails rather than silently switching to a different harness or billing path. See the [CLI reference](cli.md#memory-maintenance) for all flags.
 
+### Read a memory's history
+
+```bash
+ghost history <memory-id>
+ghost history <memory-id> --limit 5
+ghost history <memory-id> --json
+```
+
+Every write to a memory is appended to its history in the same transaction, so `ghost history` can answer what a memory used to say, which pass or agent changed it, and when — including after the memory itself is gone, which is the case where the recorded text is all that is left. To erase something rather than retire it, use `ghost history purge <memory-id>`: it deletes the row, every recorded version of it and any reflection snapshot that could restore the row, in one transaction — or, if the memory was already deleted, erases the recorded versions on their own. Within this database that is what makes a credential that was "removed" by deleting its memory stop being readable; a backup taken before the purge, or another machine's copy of the store, is not something it can reach. Otherwise the command writes no memory, history or project row; like `ghost maintenance status` it opens the store read-write, so a database predating the history table is migrated by the open.
+
 ## Automatic lifecycle work
 
 The Stop hook can spawn a detached `ghost lifecycle <project>` process after a session. Each enabled phase runs in order:
