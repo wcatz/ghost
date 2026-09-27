@@ -845,6 +845,71 @@ func TestStatusOpencode_OPENCODEConfigEnv(t *testing.T) {
 		}
 	})
 
+	t.Run("a merged failure names the layer that carries the offending key",
+		func(t *testing.T) {
+			cases := map[string]struct {
+				// global is the lower layer; custom the higher one, and only
+				// one of the two carries the key the verdict complains about.
+				global  func(ghostBin string) string
+				custom  func(ghostBin string) string
+				wantMsg string
+			}{
+				"the disabled flag is below, the command is overridden above": {
+					global: func(ghostBin string) string {
+						return fmt.Sprintf(
+							`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": false}}}`, ghostBin)
+					},
+					custom: func(ghostBin string) string {
+						return fmt.Sprintf(`{"mcp": {"ghost": {"command": [%q, "mcp"]}}}`, ghostBin)
+					},
+					wantMsg: "ghost MCP server disabled",
+				},
+				"the stale command is below, only enabled is flipped above": {
+					global: func(ghostBin string) string {
+						return fmt.Sprintf(
+							`{"mcp": {"ghost": {"type": "local", "command": [%q, "mcp"], "enabled": true}}}`,
+							filepath.Join(t.TempDir(), "ghost"))
+					},
+					custom:  func(ghostBin string) string { return `{"mcp": {"ghost": {"enabled": true}}}` },
+					wantMsg: "is not an executable file",
+				},
+			}
+			for name, tc := range cases {
+				t.Run(name, func(t *testing.T) {
+					statusEnv(t)
+					binDir := writeStubGhost(t)
+					t.Setenv("PATH", binDir)
+					ghostBin := stubPath(binDir, "ghost")
+					// The offending key lives in the global file; the custom
+					// file merely mentions the entry. Sending the user to the
+					// wrong file is the one thing these messages must not do,
+					// because the entry there is already correct.
+					global := writeOpencodeMCPConfig(t, "opencode.jsonc", tc.global(ghostBin))
+					custom := filepath.Join(t.TempDir(), "mentions-ghost.jsonc")
+					if err := os.WriteFile(custom, []byte(tc.custom(ghostBin)), 0o644); err != nil {
+						t.Fatalf("write custom config: %v", err)
+					}
+					t.Setenv("OPENCODE_CONFIG", custom)
+
+					var out bytes.Buffer
+					if _, err := StatusOpencode(&out); err != nil {
+						t.Fatalf("StatusOpencode: %v", err)
+					}
+					output := out.String()
+					line := statusLineContaining(output, tc.wantMsg)
+					if !strings.HasPrefix(line, "  ✗ ") {
+						t.Fatalf("expected a failed check line for %q, got %q (full output:\n%s)", tc.wantMsg, line, output)
+					}
+					if !strings.Contains(line, global) {
+						t.Errorf("the failing key is in the global file %q, so the message must name it, got %q", global, line)
+					}
+					if strings.Contains(line, custom) {
+						t.Errorf("the custom layer carries no offending key, so it must not be named: %q", line)
+					}
+				})
+			}
+		})
+
 	t.Run("custom path with an empty command overrides the global entry", func(t *testing.T) {
 		statusEnv(t)
 		binDir := writeStubGhost(t)

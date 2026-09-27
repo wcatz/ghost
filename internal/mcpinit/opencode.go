@@ -309,8 +309,8 @@ func opencodeMCPEntryStatus(ghostBin string) (bool, string, string) {
 			opencodeMCPEntryHint(ghostBin), primary), ""
 	}
 	var merged opencodeMCPEntry
+	var origin opencodeMCPOrigin
 	found := false
-	from := primary
 	for _, src := range sources {
 		data := src.data
 		if data == nil {
@@ -335,48 +335,75 @@ func opencodeMCPEntryStatus(ghostBin string) (bool, string, string) {
 		// absent.
 		if entry.Type != nil {
 			merged.Type = entry.Type
+			origin.Type = src.label
 		}
 		if entry.Command != nil {
 			merged.Command = entry.Command
+			origin.Command = src.label
 		}
 		if entry.Enabled != nil {
 			merged.Enabled = entry.Enabled
+			origin.Enabled = src.label
 		}
 		found = true
-		from = src.label
+		origin.Entry = src.label
 	}
 	if !found {
 		return false, fmt.Sprintf("ghost MCP server missing from %s — add %s", primary, opencodeMCPEntryHint(ghostBin)), ""
 	}
-	ok, msg := opencodeMCPEntryVerdict(merged, from, ghostBin)
+	ok, msg := opencodeMCPEntryVerdict(merged, origin, ghostBin)
 	return ok, msg, ""
 }
 
-// opencodeMCPEntryVerdict classifies the merged mcp.ghost entry. path is the
-// config layer the entry came from, named in every message: each failure
-// carries the exact edit that repairs it, because
+// opencodeMCPOrigin records which config layer last set each key of the
+// merged mcp.ghost entry. A merged verdict has to name the file that carries
+// the offending key, not merely the last layer that mentioned the entry: with
+// a lower layer disabling ghost and a higher one overriding only `command`,
+// the message must point at the file holding `enabled: false`, because that is
+// the file the user has to edit. Entry is the fallback for a key no layer set.
+type opencodeMCPOrigin struct {
+	Entry   string // last layer that mentioned mcp.ghost at all
+	Type    string // layer that set `type`
+	Command string // layer that set `command`
+	Enabled string // layer that set `enabled`
+}
+
+// forKey returns the layer carrying key, falling back to the layer that last
+// mentioned the entry when no layer set that key.
+func (o opencodeMCPOrigin) forKey(key string) string {
+	if key != "" {
+		return key
+	}
+	return o.Entry
+}
+
+// opencodeMCPEntryVerdict classifies the merged mcp.ghost entry. origin names
+// the layer each key came from, so every message points at the file to edit:
+// each failure carries the exact edit that repairs it, because
 // `ghost mcp init --client opencode` deliberately never writes opencode's
 // config (see RunOpencode) — the repair is a config edit, and this line is
 // where the user learns what to write.
-func opencodeMCPEntryVerdict(entry opencodeMCPEntry, path, ghostBin string) (bool, string) {
+func opencodeMCPEntryVerdict(entry opencodeMCPEntry, origin opencodeMCPOrigin, ghostBin string) (bool, string) {
 	if entry.Enabled != nil && !*entry.Enabled {
-		return false, fmt.Sprintf("ghost MCP server disabled in %s — set mcp.ghost.enabled to true", path)
+		return false, fmt.Sprintf("ghost MCP server disabled in %s — set mcp.ghost.enabled to true",
+			origin.forKey(origin.Enabled))
 	}
 	var command []string
 	if entry.Command != nil {
 		command = *entry.Command
 	}
+	commandFile := origin.forKey(origin.Command)
 	if len(command) < 2 || command[1] != "mcp" {
-		return false, fmt.Sprintf("ghost MCP server command in %s must be %s", path, opencodeMCPCommandHint(ghostBin))
+		return false, fmt.Sprintf("ghost MCP server command in %s must be %s", commandFile, opencodeMCPCommandHint(ghostBin))
 	}
 	resolved, err := exec.LookPath(command[0])
 	if err != nil {
 		return false, fmt.Sprintf("ghost MCP server command %q in %s is not an executable file (%v)",
-			command[0], path, err)
+			command[0], commandFile, err)
 	}
 	if !opencodeMCPCommandIsGhost(resolved, ghostBin) {
 		return false, fmt.Sprintf("ghost MCP server command %q in %s is not the ghost binary — update mcp.ghost.command to %s",
-			command[0], path, opencodeMCPCommandHint(ghostBin))
+			command[0], commandFile, opencodeMCPCommandHint(ghostBin))
 	}
 	return true, ""
 }
