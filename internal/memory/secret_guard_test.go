@@ -640,6 +640,8 @@ func TestSecretRefusalCarriesNoStoreWrites(t *testing.T) {
 	}
 }
 
-func strPtr(s string) *string { return &s }
+// strPtr is declared in history_test.go — #664's, byte for byte the same helper,
+// and one definition serves the whole package. It was a second copy here until the
+// rebase onto main, which is the only way a duplicate like this can appear.
 
 func float32Ptr(f float32) *float32 { return &f }

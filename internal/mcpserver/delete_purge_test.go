@@ -20,9 +20,21 @@ import (
 func TestMemoryDeletePurgesAnAlreadyDeletedMemory(t *testing.T) {
 	_, session := newCapSession(t)
 
+	// Plain text, not a credential, and the reason is worth stating: the subject
+	// of this test is the TOMBSTONE FALL-THROUGH — the handler looks the id up in
+	// `memories`, finds a miss, and reaches the history instead — which is the
+	// same mechanism the next test exercises with ordinary content. What used to
+	// make this one a credential test was incidental, and it is no longer
+	// reachable from here at all: `ghost_memory_save` refuses credential-shaped
+	// content, and the pre-#656 state this scenario is really about (a credential
+	// already on disk, in the row AND in its history) can only be constructed from
+	// inside internal/memory, where TestDeleteWithPurgeHistoryLeavesNothing and
+	// TestPurgeReachesTheSnapshotThatCouldRestoreTheRow assert exactly that and
+	// then purge it. Between them the two facts are covered; splitting them here
+	// keeps this test testing the thing it is named for.
 	res := callTool(t, session, "ghost_memory_save", map[string]any{
 		"project_id": "test-project",
-		"content":    "the deploy key is ghp_ALREADYDELETED0123456789ABCDEF",
+		"content":    "the zqxk marker was retired with its history kept",
 		"category":   "gotcha",
 	})
 	if res.IsError {
@@ -63,9 +75,9 @@ func TestMemoryDeletePurgesAnAlreadyDeletedMemory(t *testing.T) {
 	// And there is nothing left to read.
 	hist := callTool(t, session, "ghost_memory_search", map[string]any{
 		"project_id": "test-project",
-		"query":      "ghp_ALREADYDELETED",
+		"query":      "zqxk",
 	})
-	if !hist.IsError && strings.Contains(resultText(hist), "ghp_ALREADYDELETED") {
+	if !hist.IsError && strings.Contains(resultText(hist), "zqxk") {
 		t.Errorf("the purged text is still searchable:\n%s", resultText(hist))
 	}
 }
