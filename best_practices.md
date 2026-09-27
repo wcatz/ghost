@@ -38,8 +38,19 @@
 - Pass only reviewed environment variables; document any new public configuration or escape hatch
 - Never log or commit secrets
 - SOPS-encrypted secrets only — never git restore encrypted files
+- Every store path that writes caller-supplied text calls `memory.rejectSecret` first; the refusal names the field and the credential format and never the value. A filter that changes an input to a later decision belongs AFTER that decision — a credential drop placed before the reflection drop guard's audit turns the drop into a no-op or a silent deletion
+- Credential detection is shape-based (`internal/secret`), never keyword-based: a memory store's ordinary vocabulary is full of the words a keyword heuristic would refuse, so a rule that fires on a word is a bug
+- A credential rule must be tested against the vocabulary of the tools Ghost's users run — Helm keys, k8s manifests, Grafana provisioning, CI workflows. Those record the NAME of a credential (`secretName`, `existingSecret`, `token_url`, `password_changed_at`, `secrets.GITHUB_TOKEN`) and never its value, so a rule that cannot tell a name from a value will refuse all of them
+- A refusal must not print the value it refused. A diagnostic about a credential names the format, the field and the record's id — and that covers the REPORT paths too, not only the error: a report line echoes a record's own words back, so the substitution belongs where the label is built
+- A credential guard's "never print the value" property has to hold at EVERY print site — the report of a refusal is as much an output as the refusal, and a 160-rune log prefix is a copy of the value into an append-only file. Put the check in the one function the sites share
+- A branch that writes nothing must be distinguishable from a branch that wrote nothing new, all the way out to whatever the command records about it. A fingerprint or a "done" marker written on a no-op turn is how work stops being looked at again
+- A number in a report has to come from the value that was actually used, not from the input the caller still holds. A filter that shrinks a list without the caller re-reading it reports the pre-filter length forever
+- A guard's report must be a statement about what HAPPENED, not a prediction. "the stored row was removed" printed before anyone knows whether a write runs is worse than silence: it closes the incident in the operator's head while the value is still in the database
+- A detector is measured against a real third-party corpus, not only against hand-written cases. Pasting code into a chat is credential vocabulary, and a public benchmark dataset contains both the false positives and the genuine leaks
 
 ## Project Invariants
 - The `_global` project is protected: every destructive or reassigning project operation (`DeleteProject`, `MergeProject`, any future op that deletes project rows or moves child records) must refuse `_global` on either side, with the refusal implemented at the store layer so all callers inherit it
 - New callers of existing store/provider APIs inherit that API's guard clauses — when exposing one through a new CLI command or MCP tool, read the full implementation first and preserve its refusals at the deepest layer
+- New store paths that write caller-supplied text inherit the credential guard: call `rejectSecret(field, text)` before any statement, and name the argument the way the caller named it, so the refusal is actionable
+- A store refusal about a credential names the field and the credential format and never the value; a reflection drop additionally names the category and a byte length. In both, the value is what must never appear — the log, the agent's context, and a reflection prompt are all places the secret would end up
 - Error-handling replacements at call sites must cover the same failure modes they replace (an empty-string miss-check is only equivalent to `err != nil` if every error path also returns empty)

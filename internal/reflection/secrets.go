@@ -6,6 +6,14 @@ import "strings"
 // lower-case input contract is shared by both reflection tiers: a global
 // memory is replayed into every project, so neither heuristic classification
 // nor an LLM response may widen a project-local secret into global context.
+//
+// It is a scope decision, not a detection, and it must stay that way. The words
+// it matches on are the vocabulary of any project that handles credentials —
+// "rotate the password quarterly", "the access token is in the runner env" — so
+// refusing a save on it would refuse ordinary knowledge about secrets. What
+// "is this an actual credential value" is a different and much narrower
+// question, answered by internal/secret and enforced at the store layer (see
+// internal/memory/secret_guard.go) and here.
 func looksLikeSecret(lower string) bool {
 	secretPatterns := []string{
 		"api key", "api_key", "apikey", "credential", "password",

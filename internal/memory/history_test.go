@@ -923,11 +923,14 @@ func TestDeleteWithPurgeHistoryLeavesNothing(t *testing.T) {
 	ctx := context.Background()
 
 	secret := "the deploy key is ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	id, _, _, err := s.UpsertWithProvenance(ctx, testProject, "gotcha", secret, "mcp", 0.5, nil,
-		Provenance{Agent: "claude-code", SessionID: "ses_a"})
-	if err != nil {
-		t.Fatalf("UpsertWithProvenance: %v", err)
-	}
+	// preGuardRow, not UpsertWithProvenance: the premise of this test is a
+	// credential that reached the history, and after this PR neither is reachable
+	// through a writer. It is still reachable on any database written before the
+	// guard, which is the population a purge is for. See preGuardRow.
+	id := preGuardRow(t, s, Memory{
+		Category: "gotcha", Content: secret, Source: "mcp", Importance: 0.5,
+		Agent: "claude-code", SessionID: "ses_a",
+	})
 	if err := s.UpdateMemory(ctx, testProject, id, strPtr("the deploy key has been rotated"), nil, nil, nil); err != nil {
 		t.Fatalf("UpdateMemory: %v", err)
 	}
@@ -1552,10 +1555,11 @@ func TestPurgeReachesTheSnapshotThatCouldRestoreTheRow(t *testing.T) {
 	ctx := context.Background()
 
 	const secret = "the deploy key is ghp_SNAPSHOTKEY0123456789ABCDEFGHIJ"
-	id, _, _, err := s.Upsert(ctx, testProject, "gotcha", secret, "reflection", 0.5, nil)
-	if err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
+	// preGuardRow, not Upsert — the same reason as the purge test above: the state
+	// under test is a credential already on disk, which no writer will produce now.
+	id := preGuardRow(t, s, Memory{
+		Category: "gotcha", Content: secret, Source: "reflection", Importance: 0.5,
+	})
 	// A reflection pass snapshots the corpus before replacing it. The
 	// replacement here is a no-op shape: the emitted text is the same memory, so
 	// the row is reused and the snapshot of the pre-replace text is what stands

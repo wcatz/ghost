@@ -398,6 +398,7 @@ Save immediately with ghost_memory_save — do NOT batch or wait:
 - Design choice with alternatives → use ghost_decision_record instead
 
 Do NOT save: ephemeral debug state, info derivable from code/git, content in CLAUDE.md.
+Also do NOT save credential values — an API key, access token, password, private key, seed phrase, or anything a detector recognizes as one. Every save is refused, and what you store is replayed into later sessions and sent to models, so a saved secret is a leaked secret. Save the pointer instead: which service, where the value lives, how to read it, when to rotate it.
 
 ## Cross-Project
 When learning about project B while working in project A, pass project B's name as project_id.
@@ -897,7 +898,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_save",
 		Title:       "Save Memory",
-		Description: "Save a memory about the project. Call proactively — do not wait to be asked. Write concise 1-3 sentence memories (truncated to ~300 chars in session context). Categories: architecture (system design), decision (choices made), pattern (recurring approaches), convention (naming/workflow), gotcha (pitfalls/bugs), dependency (versions/API quirks), preference (user preferences), fact (general knowledge). Importance: 1.0=security/never-do-this, 0.8=architecture/key decisions, 0.6=patterns/conventions, 0.4=minor observations, 0.7=default. Set pin=true for a non-negotiable rule, a security constraint or a core invariant: a later 'ghost reflect' consolidation may merge or rewrite any ordinary memory away, and nothing else protects one. Example: project_id='platform-ops', content='k3s-mini-1 runs Grafana on port 80', category='fact', importance=0.7.",
+		Description: "Save a memory about the project. Call proactively — do not wait to be asked. Write concise 1-3 sentence memories (truncated to ~300 chars in session context). Never save a credential value (API key, access token, password, private key, seed phrase) — Ghost refuses those writes, and stored text is replayed into later sessions and sent to models; save where the value lives instead. Categories: architecture (system design), decision (choices made), pattern (recurring approaches), convention (naming/workflow), gotcha (pitfalls/bugs), dependency (versions/API quirks), preference (user preferences), fact (general knowledge). Importance: 1.0=security/never-do-this, 0.8=architecture/key decisions, 0.6=patterns/conventions, 0.4=minor observations, 0.7=default. Set pin=true for a non-negotiable rule, a security constraint or a core invariant: a later 'ghost reflect' consolidation may merge or rewrite any ordinary memory away, and nothing else protects one. Example: project_id='platform-ops', content='k3s-mini-1 runs Grafana on port 80', category='fact', importance=0.7.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,

@@ -34,6 +34,31 @@ type Decision struct {
 // companionClamped reports that composition cut, letting the MCP handler
 // warn the caller even when neither field itself was truncated.
 func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, rationale string, alternatives, tags []string) (decisionID, memoryID string, companionClamped bool, err error) {
+	// Before the lock and the transaction: a decision writes its text twice
+	// (the decisions row and the companion memory built from the same three
+	// fields), so a refusal that landed after the first INSERT would have to be
+	// undone by the rollback anyway — cheaper and clearer to never start.
+	// alternatives is checked as a list because ghost_decisions_list renders it
+	// back to the agent, which makes an entry as replayable as the rationale.
+	if err := rejectSecretFields(
+		secretField{"title", title},
+		secretField{"decision", decision},
+		secretField{"rationale", rationale},
+	); err != nil {
+		return "", "", false, err
+	}
+	if err := rejectSecretList("alternatives", alternatives); err != nil {
+		return "", "", false, err
+	}
+	// And the tags, which are not a lesser field for being short: a decision's
+	// tag list is marshalled into BOTH the decisions row and the companion memory
+	// row built from the same three fields, and that companion is an ordinary
+	// memory — assembled into every search row and quoted into the next reflect
+	// prompt. So a token pasted as a tag here is exposed on exactly the two paths
+	// the guard above exists for.
+	if err := rejectSecretList("tags", tags); err != nil {
+		return "", "", false, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

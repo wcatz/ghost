@@ -431,6 +431,18 @@ func (s *Store) ImportProject(ctx context.Context, p PortableProject, apply bool
 	if err := s.projectCollision(ctx, p); err != nil {
 		return false, err
 	}
+	// Same window as the other three importers: after the presence check, before
+	// the apply=false return. A project's name and path are caller-supplied text
+	// from the same untrusted artifact, and both are replayed into every later
+	// session's digest and returned by ghost_project_list. repo_remote is not
+	// guarded because NormalizeRepoRemote strips the userinfo, so it cannot carry
+	// a password.
+	if err := rejectSecretFields(
+		secretField{"name", p.Name},
+		secretField{"path", p.Path},
+	); err != nil {
+		return false, fmt.Errorf("project %s: %w", p.ID, err)
+	}
 	if !apply {
 		return true, nil
 	}
@@ -501,6 +513,8 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	if !IsValidCategory(m.Category) {
 		return false, false, false, fmt.Errorf("memory %s: invalid category %q — must be one of: architecture, decision, pattern, convention, gotcha, dependency, preference, fact", m.ID, m.Category)
 	}
+	// Guarded below, after the id-presence check and before the apply=false
+	// early return.
 	if !IsValidSource(m.Source) {
 		return false, false, false, fmt.Errorf("memory %s: invalid source %q — must be one of: reflection, chat, manual, tool, mcp, onboarding, decision_log, builtin", m.ID, m.Source)
 	}
@@ -543,6 +557,31 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	} else {
 		return false, false, false, nil
 	}
+	// After the presence check and before the apply=false early return, which is
+	// the only window where both properties hold. Before the presence check a
+	// record already in the store would be refused, turning the portable
+	// format's "never overwrites an id that already exists, so re-running is
+	// always safe" into a hard failure over a row that is not being written.
+	// After the apply=false return a dry run would classify a record
+	// differently from the apply run it previews — and dry-run/apply parity is
+	// what makes the dry run worth running. An artifact is untrusted input
+	// arriving from a file, which is why it is guarded at all despite the
+	// same idempotence argument applying to Create.
+	if err := rejectSecretFields(
+		secretField{"content", m.Content},
+		secretField{"source_ref", m.SourceRef},
+	); err != nil {
+		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
+	}
+	// The tags too, and before the apply check so a dry run classifies exactly as
+	// the apply run it previews. An artifact's tags column is untrusted input
+	// from a file and was being written raw; the record it lands in is an
+	// ordinary memory, so it is assembled into every search row and quoted into
+	// the next reflect prompt like any other.
+	if err := rejectSecretList("tags", m.Tags); err != nil {
+		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
+	}
+
 	// A free id is not necessarily a NEW id. A memory deleted locally leaves its
 	// recorded history behind (that is what the history is for), and the artifact
 	// carries ids verbatim, so importing into an id that still has history would
@@ -563,6 +602,7 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	} else if err != sql.ErrNoRows {
 		return false, false, false, fmt.Errorf("import memory %s: %w", m.ID, err)
 	}
+
 	if !apply {
 		return true, cut, downgraded, nil
 	}
@@ -659,6 +699,11 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	if t.Priority < 0 || t.Priority > 4 {
 		return false, fmt.Errorf("task %s: invalid priority %d — must be between 0 and 4", t.ID, t.Priority)
 	}
+	// Guarded below, after the id-presence check and before the apply=false
+	// early return — see ImportMemory for why that window is the only one that
+	// keeps both idempotence and dry-run/apply parity. A task's notes are
+	// otherwise unvalidated text that a normal save refuses, and an artifact
+	// carries them.
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -670,6 +715,14 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 		}
 	} else {
 		return false, nil
+	}
+	// Same window as ImportMemory: after the presence check, before apply=false.
+	if err := rejectSecretFields(
+		secretField{"title", t.Title},
+		secretField{"description", t.Description},
+		secretField{"notes", t.Notes},
+	); err != nil {
+		return false, fmt.Errorf("task %s: %w", t.ID, err)
 	}
 	if !apply {
 		return true, nil
@@ -740,6 +793,10 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	if !validDecisionStatuses[d.Status] {
 		return false, fmt.Errorf("decision %s: invalid status %q — must be one of: active, superseded, revisit", d.ID, d.Status)
 	}
+	// Guarded below, after the id-presence check and before the apply=false
+	// early return — see ImportMemory. alternatives is a list because it is
+	// one: ghost_decisions_list renders it back to the agent, so an entry is
+	// as replayable as the rationale.
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -751,6 +808,17 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 		}
 	} else {
 		return false, nil
+	}
+	// Same window as ImportMemory: after the presence check, before apply=false.
+	if err := rejectSecretFields(
+		secretField{"title", d.Title},
+		secretField{"decision", d.Decision},
+		secretField{"rationale", d.Rationale},
+	); err != nil {
+		return false, fmt.Errorf("decision %s: %w", d.ID, err)
+	}
+	if err := rejectSecretList("alternatives", d.Alternatives); err != nil {
+		return false, fmt.Errorf("decision %s: %w", d.ID, err)
 	}
 	if !apply {
 		return true, nil

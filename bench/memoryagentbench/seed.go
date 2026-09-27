@@ -34,7 +34,7 @@ func seedFacts(ctx context.Context, store *memory.Store, db *sql.DB, project str
 	ids := make([]string, len(facts))
 	n := len(facts)
 	for i, fact := range facts {
-		id, err := store.Create(ctx, project, memory.Memory{
+		id, err := store.CreateFromCorpus(ctx, project, memory.Memory{
 			Category: "fact", Content: fact, Importance: 0.7, Source: "mcp",
 		})
 		if err != nil {

@@ -1,6 +1,7 @@
 package claudeimport
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"os"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/adversarial"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/secret"
 )
 
 // Adversarial fixtures for the Claude Code auto-memory import (issue #585).
@@ -346,11 +348,24 @@ func TestImportedMemoriesAreNeverPromotedToGlobal(t *testing.T) {
 // would hide the tampering from the user, which is a worse failure than
 // returning it as data — the MCP-side suite (#538) makes the same call, and
 // quotation into the data block happens on the way out, not on the way in.
+//
+// The credential set is the one exception, and it is an exception rather than a
+// weakening: TestCredentialPayloadsAreRefusedAndNamed says the same corpus must
+// NOT be stored, and says why the refusal is not the silent suppression this
+// test exists to prevent. The reason the two controls do not conflict is that
+// they are about different things. An injection payload is an ATTACK: the harm
+// is a payload escaping its data delimiter and becoming instructions, so it must
+// be stored verbatim where the user can read it. A credential is a LEAK: the
+// harm is the value being embedded, replayed into every later session's context,
+// mirrored to the vault and quoted into a model — so it must not be stored at
+// all. This file's own author already made that distinction a test assertion
+// above: a PRIVATE KEY payload must not reach _global, which is the same reason.
+//
+// Everything here that is not a credential keeps the original assertion, at full
+// strength.
 func TestInjectionPayloadsImportAsInertProjectData(t *testing.T) {
+	payloads := append(adversarial.Injection(), adversarial.UnicodeTrick()...)
 	dir := t.TempDir()
-	payloads := adversarial.Injection()
-	payloads = append(payloads, adversarial.Secrets()...)
-	payloads = append(payloads, adversarial.UnicodeTrick()...)
 	for _, p := range payloads {
 		if err := os.WriteFile(filepath.Join(dir, "note-"+p.Name+".md"),
 			[]byte("Imported from a hostile file, kept as data.\n\n"+p.Text), 0o600); err != nil {
@@ -388,6 +403,97 @@ func TestInjectionPayloadsImportAsInertProjectData(t *testing.T) {
 			continue
 		}
 		adversarial.AssertVerbatim(t, "claudeimport payload "+p.Name, stored, p.Text)
+	}
+}
+
+// TestCredentialPayloadsAreRefusedAndNamed is the other half, and it is a
+// STRONGER assertion than storing them would have been.
+//
+// The invariant is that the guard and the report agree, checked with the
+// detector as the oracle rather than by hardcoding which shapes are refused:
+//
+//   - a payload the detector flags must NOT land in the store, in this project
+//     or any other;
+//   - it must be REPORTED — the import names the file it skipped and why, rather
+//     than passing over it, because a file the importer silently did not import
+//     is indistinguishable from a file that was not there;
+//   - and its value must appear in NEITHER the store nor the log.
+//
+// The third is what keeps this from being the silent suppression the test above
+// exists to prevent, and it is not a formality: a log line is an append-only
+// file nothing prunes, so printing the value there would be the same leak the
+// store guard prevents, reached by the other route.
+//
+// The detector is the oracle rather than a list of four names because the shared
+// corpus deliberately contains a payload the guard does NOT flag — a DSN whose
+// password is below the URL floor — and a test that asserted "all five are
+// refused" would be asserting a fixture count rather than a property.
+func TestCredentialPayloadsAreRefusedAndNamed(t *testing.T) {
+	dir := t.TempDir()
+	payloads := adversarial.Secrets()
+	for _, p := range payloads {
+		if err := os.WriteFile(filepath.Join(dir, "note-"+p.Name+".md"),
+			[]byte("Imported from a hostile file.\n\n"+p.Text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store := storeFor(t, "p-creds")
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	if _, err := importFromDir(context.Background(), store, "p-creds", dir, logger); err != nil {
+		t.Fatalf("importFromDir: %v", err)
+	}
+
+	mems, err := store.GetAll(context.Background(), "p-creds", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refused, storedOnPurpose := 0, 0
+	for _, p := range payloads {
+		_, flagged := secret.Detect(p.Text)
+		landed := false
+		for _, m := range mems {
+			if strings.Contains(m.Content, p.Text) {
+				landed = true
+			}
+		}
+		reported := strings.Contains(logged.String(), "note-"+p.Name+".md")
+
+		switch {
+		case flagged && landed:
+			t.Errorf("%s: the guard flagged this payload and it was stored anyway:\n  %q", p.Name, p.Text)
+		case flagged && !reported:
+			t.Errorf("%s: the guard refused it and the import did not say so — a skipped "+
+				"file the user is not told about is indistinguishable from a file that was not there:\n%s",
+				p.Name, logged.String())
+		case !flagged && !landed:
+			// The guard has no opinion, and something else dropped it. That is
+			// the silent suppression this whole suite exists to prevent, so it
+			// is a failure whichever control caused it.
+			t.Errorf("%s: the guard does not flag this payload, yet it did not import — "+
+				"something suppressed it silently", p.Name)
+		case !flagged && landed:
+			storedOnPurpose++
+		}
+		if flagged {
+			refused++
+		}
+		// The value is in the log whether or not the guard refused it: an
+		// unflagged payload is stored verbatim, and a flagged one is named by
+		// file and format only.
+		if strings.Contains(logged.String(), p.Text) {
+			t.Errorf("%s: the log printed a credential value:\n%s", p.Name, logged.String())
+		}
+	}
+
+	if refused == 0 {
+		t.Error("no payload in the shared credential corpus is flagged, so this test " +
+			"is asserting nothing — the guard and the corpus have drifted apart")
+	}
+	if storedOnPurpose == 0 {
+		t.Error("every payload was flagged, so the guard has stopped discriminating " +
+			"and this corpus no longer covers the shapes it is meant not to refuse")
 	}
 }
 

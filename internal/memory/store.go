@@ -2349,10 +2349,84 @@ func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
+// CreateFromCorpus inserts a memory from a third-party benchmark dataset,
+// without the credential guard Create applies.
+//
+// It exists because a public eval corpus contains real credentials and a
+// benchmark that refuses to load one cannot run. Measured on longmemeval-s
+// (500 records, ~25k conversation turns) at the time this was written: three
+// distinct lines fire, and all three are genuine leaked credentials — a
+// `dckr_pat_` Docker Hub token, a `gho_` GitHub OAuth token, and a 40-character
+// hex SparkPost key. The detector is right about all three; the harness still
+// has to ingest them, because the measurement is about retrieval over the
+// corpus as published.
+//
+// That is why this is a named function rather than a flag. The claim justifying
+// it is deliberately the narrow one, stated exactly: the row lands in a scratch
+// database that dies with the run, and it is never injected into a session's
+// context, never mirrored to the Obsidian vault, and never quoted into a
+// reflect, resolve or supersede prompt. Those are the exposures the guard
+// exists for.
+//
+// "Never embedded" is NOT part of the claim. The two seeders that run a
+// non-fts condition embed every turn they ingest and send it to Ollama. The
+// narrow claim is the one that holds, and it is the one quoted, because the
+// wide one is what a future author would cite to widen this carve-out to a
+// bench run against a real store — where the vault and reflect exposures are
+// real.
+//
+// Nothing in a normal session may reach this: it is not on
+// provider.MemoryStore, it is not in the MCP surface, and its only callers are
+// the three dataset seeders under bench/.
+//
+// It is also the second false positive this round found, in the opposite
+// direction from the first: the earlier claim that guarding Create cost nothing
+// was true only of the corpora in this repository, and a downloaded corpus
+// proved it wrong on the first CI run.
+func (s *Store) CreateFromCorpus(ctx context.Context, projectID string, m Memory) (string, error) {
+	return s.insertMemory(ctx, projectID, m)
+}
+
+// secretTagFields is the guard's view of a memory's tags.
+//
+// Tags are guarded, and the reason is worth keeping in one place because an
+// earlier version of secret_guard.go claimed they were not worth guarding: they
+// are marshalled into the row ghost_memory_search returns, and
+// BuildReflectionPrompt writes them into the prompt sent to a CLI harness — so a
+// token pasted as a tag is embedded, returned and quoted into a model exactly as
+// a token in the body would be. validateTags permits ten tags of 64 characters,
+// which is more than room for every provider token format.
+// secretContentAndTags is the guard's field list for a memory write: the body and
+// every tag, in that order, so the refusal names whichever was contaminated.
+func secretContentAndTags(content string, tags []string) []secretField {
+	out := make([]secretField, 0, len(tags)+1)
+	out = append(out, secretField{"content", content})
+	return append(out, secretTagFields(tags)...)
+}
+
+func secretTagFields(tags []string) []secretField {
+	out := make([]secretField, 0, len(tags))
+	for i, tag := range tags {
+		out = append(out, secretField{fmt.Sprintf("tags[%d]", i), tag})
+	}
+	return out
+}
+
 // Create inserts a new memory and returns its ID. The insert and the history
 // row that records it share one transaction, so a memory cannot exist without
 // its own first entry in its history.
 func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string, error) {
+	if err := rejectSecretFields(secretContentAndTags(m.Content, m.Tags)...); err != nil {
+		return "", err
+	}
+	return s.insertMemory(ctx, projectID, m)
+}
+
+// insertMemory is Create's statement, with the credential guard and nothing
+// else above it. Split out so CreateFromCorpus is the same write rather than a
+// second copy of an INSERT that has to stay in step with the schema — a worse
+// failure mode than a less obvious call graph.
+func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -2595,6 +2669,14 @@ func storeTxFromContext(ctx context.Context) (*sql.Tx, bool) {
 
 // UpsertWithOptions is Upsert plus provenance and/or scope.
 func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts UpsertOptions) (id string, duplicateOf string, score float64, err error) {
+	// Before the lock, the transaction, and the FTS probe: a refused value
+	// must cost nothing and write nothing. When the upsert arrives inside a
+	// caller's transaction this error rolls that caller's work back too, which
+	// is the correct outcome — the secret is not stored, and the caller's
+	// caller is told why.
+	if err := rejectSecretFields(secretContentAndTags(content, tags)...); err != nil {
+		return "", "", 0, err
+	}
 	parentTx, inTx := storeTxFromContext(ctx)
 	if !inTx {
 		s.mu.Lock()
@@ -3674,6 +3756,25 @@ func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOpt
 // where a separate lookup-then-write could target a memory that moved to a
 // different project (e.g. via PromoteToGlobal) between the check and the write.
 func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error {
+	// The incoming content only, never the composed result. A row written
+	// before this guard existed can hold a credential, and a user clearing it
+	// out must still be able to retag, re-categorise, or re-prioritise that row
+	// on the way to deleting it — refusing a metadata-only edit would strand
+	// it with ghost_memory_delete as the only remaining move.
+	if content != nil {
+		if err := rejectSecret("content", *content); err != nil {
+			return err
+		}
+	}
+	// The tags, unconditionally, and that unconditional part is the point: this
+	// method is reachable with tags and nil content, so a content-only guard
+	// skips exactly the call that carries them. validateTags upstream caps the
+	// shape at ten tags of 64 characters and nothing else, and a tag is returned
+	// by search and quoted into the next reflect prompt — so the exposure is the
+	// same one the body has.
+	if err := rejectSecretList("tags", tags); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -4535,7 +4636,21 @@ func (s *Store) GetLearnedContext(ctx context.Context, projectID string) (string
 }
 
 // UpdateLearnedContext updates the learned context and reflection metadata.
+//
+// Both fields are model-written text, and both are injected verbatim into every
+// later session for the project, so they are guarded like any other save.
+// A refusal here is the cheap outcome: the caller is the reflect command,
+// which already treats a failure on this write as a warning and carries on
+// (cmd/ghost/lifecycle.go), so a hallucinated credential costs one unrecorded
+// summary rather than the whole consolidation — the memories it summarised have
+// already been applied by this point.
 func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedContext, summary string) error {
+	if err := rejectSecret("learned_context", learnedContext); err != nil {
+		return err
+	}
+	if err := rejectSecret("reflection_summary", summary); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

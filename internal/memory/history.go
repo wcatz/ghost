@@ -100,21 +100,29 @@ var errHistoryNoMemory = errors.New("no live memory row")
 // be redacted here too, or the redaction leaves a longer-lived copy of the
 // secret than the row it was made to remove.
 //
-// It is the identity function today because internal/secret (#656) — the
-// value-SHAPE detector every Ghost writer consults before it stores
-// caller-supplied text — is not on main yet. Wiring it is one line, and this is
-// that line: a var rather than a direct call so the plumbing is testable before
-// the detector exists, which is what makes #656 a change of behaviour rather than
-// a change of shape.
+// It was the identity function while internal/secret (#656) — the value-SHAPE
+// detector every Ghost writer consults before it stores caller-supplied text — was
+// not on main, with a TODO naming this PR as the thing that would install it. That
+// is done: history_redactor.go installs redactHistoryContent through
+// setHistoryRedactor. The replacement, not a refusal, because refusing would fail
+// the user's own write over something only the history can see.
 //
-// TODO(#656): install secret.Detect through setHistoryRedactor, and store its
-// replacement. The replacement, not a refusal: refusing would fail the user's own
-// write over something only the history can see.
+// The cost is real and was measured rather than assumed, because the comment above
+// this seam is right that crossing into Go per appended row lands on the write
+// path's critical section: secret.Detect on a 2 KB memory is ~1.1 ms and at the
+// 8 KB content cap ~3.6 ms, per row, inside the transaction. A batched append pays
+// it once per id. It is paid on EVERY row whether or not anything is redacted,
+// because the only sound way to know is to look. The obvious optimisation — a
+// keyword pre-check that skips the detector — is the same trap this PR has already
+// documented once: a prefilter with a false negative is a silent leak, and
+// LiteralPrefix returns empty for the \b-initial patterns these rules use, so a
+// hand-written one cannot be made sound by inspection either.
 //
 // It is installed through setHistoryRedactor, never assigned directly, and the
 // append statement asks THAT whether to call the SQL function — a second bool
 // would be a second source of truth, and the wiring below would then have to set
 // both or the filter would silently not apply.
+//
 // filter is nil until a redactor is installed, and the append path's gate is
 // derived from it rather than kept beside it, so the two cannot disagree.
 var historyRedactor struct {

@@ -312,7 +312,7 @@ func openStore(ctx context.Context, project string, sessions []locoSession, cond
 	for _, s := range sessions {
 		for _, t := range s.Turns {
 			content := memoryText(s, t)
-			id, err := store.Create(ctx, project, memory.Memory{
+			id, err := store.CreateFromCorpus(ctx, project, memory.Memory{
 				Category: "fact", Content: content, Importance: 0.7, Source: "mcp",
 			})
 			if err != nil {
