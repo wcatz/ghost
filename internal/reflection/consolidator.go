@@ -74,6 +74,15 @@ func (t *TieredConsolidator) Mechanical() bool { return false }
 // answer (measured: a 172-memory incident log consolidating to ~24, which the
 // old flat 30% floor rejected on every run, so that project never
 // auto-consolidated — see docs/superpowers/reports/2026-09-15-memory-and-publish-audit.md).
+//
+// The floor is PER TIER, so it only bounds a run with nowhere else to go. The
+// `auto` default drops to the exempt mechanical tier (Jaccard dedup cannot
+// truncate or hallucinate); `--require-llm`, which omits it, and the
+// explicitly-selected LLM tiers (NewGatedConsolidator) have exactly one tier and
+// report the rejection as a failed run. Anything the harness declines to name
+// is carried through by the pass-through rather than counted as an output, so a
+// response that is a list of operations — not a rewritten corpus — is measured
+// by how many rows it would change, not by how short it looks.
 const (
 	// gateMinInput is the smallest input the gate applies to at all; below it
 	// the store's empty-set guard is the only protection needed.
@@ -115,6 +124,28 @@ func gateMinOutput(inputCount int) int {
 	}
 	frac := float64(inputCount-gateStrictInputMax) / float64(gateBacklogInputMax-gateStrictInputMax)
 	return gateStrictInputMinOutput + int(math.Round(frac*float64(gateBacklogMinOutput-gateStrictInputMinOutput)))
+}
+
+// NewGatedConsolidator wraps ONE explicitly-selected tier in the tiered
+// consolidator, so the quality gate applies to a selection that named its
+// backend outright.
+//
+// `ghost reflect --tier cli` and `--tier opencode` used to hand the bare
+// LlmConsolidator straight to the apply path, where the gate does not live —
+// so the floor did not exist for those invocations at all and any answer the
+// harness returned was applied, however small. The default `auto` tier has
+// always wrapped its tiers, so the default and the unattended lifecycle path
+// were bounded while the two explicit LLM tiers were not, and eval/cycle
+// measures with `--tier opencode --apply`, meaning the suite graded an ungated
+// consolidator while production ran a gated one (issue #549).
+//
+// One tier and no mechanical fallback is what makes this a bound rather than a
+// rewrite: a result below the floor has nowhere to fall through to, so the run
+// fails — which is the honest reading of "use exactly this tier" when the
+// answer came back truncated. A mechanical tier is still exempt inside the
+// wrapper, so a caller that gates a Jaccard tier keeps today's behaviour.
+func NewGatedConsolidator(c Consolidator, logger *slog.Logger) *TieredConsolidator {
+	return NewTieredConsolidator([]Consolidator{c}, logger)
 }
 
 func (t *TieredConsolidator) Available(ctx context.Context) bool {

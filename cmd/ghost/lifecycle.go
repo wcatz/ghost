@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
@@ -530,6 +531,25 @@ Flags:
                    takes the next argument verbatim, so dash-prefixed names work.
 `
 
+// gatedLLMTier is the consolidator an explicitly-selected LLM backend runs
+// through, and it is a named seam because the decision is not the obvious one:
+// naming the backend outright used to also opt out of the quality gate, because
+// the bare LlmConsolidator is not where the gate lives — that is inside
+// reflection.TieredConsolidator, which the `auto` tier has always used. So the
+// default and the unattended lifecycle path were bounded while
+// `ghost reflect --tier cli --apply` applied a harness answer of any size, and
+// eval/cycle, which measures with `--tier opencode --apply`, was grading an
+// ungated consolidator while production ran a gated one (issue #549).
+//
+// The wrapper adds no fallback tier, so the selection still means "exactly this
+// backend"; it only makes a too-small answer a failed run, which is the honest
+// reading of that request when the answer came back truncated. It is a function
+// rather than an inline call because runReflect exits the process, so the tier
+// switch is not reachable from a test and the behaviour has to be pinned here.
+func gatedLLMTier(c reflection.Consolidator, logger *slog.Logger) reflection.Consolidator {
+	return reflection.NewGatedConsolidator(c, logger)
+}
+
 // runReflect manually triggers memory consolidation for a project.
 // Defaults to dry-run (preview only). Use --apply to save results.
 // Use --restore to undo the last consolidation from snapshot.
@@ -626,7 +646,7 @@ func runReflect() {
 				fmt.Fprintf(os.Stderr, "error: cli tier requires the `%s` binary on PATH (or %s)\n", binary, hint)
 				os.Exit(1)
 			}
-			consolidator = reflection.NewNamedConsolidator(ai.NewCLIClientWithBinary(binary), "cli")
+			consolidator = gatedLLMTier(reflection.NewNamedConsolidator(ai.NewCLIClientWithBinary(binary), "cli"), logger)
 		case "opencode":
 			binary := "opencode"
 			if cfg.CLI.OpenCodeBinary != "" {
@@ -640,7 +660,7 @@ func runReflect() {
 				fmt.Fprintf(os.Stderr, "error: opencode tier requires the `%s` binary on PATH (or %s)\n", binary, hint)
 				os.Exit(1)
 			}
-			consolidator = reflection.NewNamedConsolidator(ai.NewOpenCodeClientWithBinary(binary), "opencode")
+			consolidator = gatedLLMTier(reflection.NewNamedConsolidator(ai.NewOpenCodeClientWithBinary(binary), "opencode"), logger)
 		case "sqlite":
 			if requireLLM {
 				fmt.Fprintln(os.Stderr, "error: --require-llm conflicts with --tier sqlite")
