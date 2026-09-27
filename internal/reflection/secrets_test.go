@@ -82,17 +82,50 @@ func TestDropSecretMemoriesLogsTheFormatNotTheValue(t *testing.T) {
 }
 
 // TestDropSecretMemoriesToleratesNilLogger matches the sibling guards
-// (dropFabricatedMemories, dropForeignProjectMemories), which treat a nil
-// logger as "no sink" rather than panicking — the guard's job is to drop, and a
-// missing log must not become a failed consolidation.
+// (dropFabricatedMemories, dropForeignProjectMemories), which substitute
+// slog.Default() for a nil logger rather than panicking or staying silent: the
+// guard's job is to drop, and a drop that cannot report itself is the one
+// failure mode its rationale names. The default logger is redirected for the
+// duration so the substitution is exercised without the warning landing in the
+// test's own output.
 func TestDropSecretMemoriesToleratesNilLogger(t *testing.T) {
+	var logged bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
 	result := ReflectionResult{Memories: []ReflectMemory{
-		{Category: "fact", Content: "the api key for this service is sk-live-123."},
+		{Category: "fact", Content: "the relay listens on 2222"},
+		{Category: "gotcha", Content: "the token is " + credentialFixture},
 	}}
 	dropSecretMemories(&result, nil)
 
 	if len(result.Memories) != 1 {
-		t.Errorf("got %d memories, want 1: a keyword mention of an api key is not a credential", len(result.Memories))
+		t.Fatalf("got %d memories, want 1: %+v", len(result.Memories), result.Memories)
+	}
+	if !strings.Contains(logged.String(), "GitHub personal access token") {
+		t.Errorf("a nil logger produced no diagnostic, so the drop is unauditable: %q", logged.String())
+	}
+	if strings.Contains(logged.String(), credentialFixture) {
+		t.Errorf("the substituted default logger echoed the credential: %q", logged.String())
+	}
+}
+
+// TestDropSecretMemoriesKeepsProseAboutCredentials is the false-positive guard
+// at the tier, where a false positive costs a memory: a consolidation that
+// correctly observed "rotate the deployment password quarterly" must not lose
+// that observation to a keyword match.
+func TestDropSecretMemoriesKeepsProseAboutCredentials(t *testing.T) {
+	result := ReflectionResult{Memories: []ReflectMemory{
+		{Category: "convention", Content: "Rotate the deployment password every quarter."},
+		{Category: "fact", Content: "The CI access_token lives in the runner env."},
+		{Category: "gotcha", Content: "The tokenizer keeps a 30k vocabulary and drops unknown words."},
+	}}
+	capture := &logCapture{}
+	dropSecretMemories(&result, capture.logger())
+
+	if len(result.Memories) != 3 {
+		t.Errorf("got %d memories, want all 3: %+v", len(result.Memories), result.Memories)
 	}
 }
 

@@ -286,6 +286,119 @@ func TestCompleteTaskRefusesCredentialContent(t *testing.T) {
 	}
 }
 
+// TestPortableImportRefusesCredentialContent covers the write path the first
+// version of this guard left open, and it is the one that should worry anyone
+// least omitted: `ghost import <file> --apply` takes a JSONL artifact that
+// arrived from somewhere, and all three importers wrote it straight through
+// with raw INSERTs — no Upsert, so no guard. A credential planted in an
+// artifact was then embedded, replayed into every later session, mirrored to the
+// vault, and quoted into the next reflect prompt. The least trusted input in
+// the system was the one input with no check.
+//
+// The refusal has to happen BEFORE the apply=false early return, or a dry run
+// would preview an import that the real run then refuses — the property
+// ImportMemory's own doc claims for every other validation it performs.
+func TestPortableImportRefusesCredentialContent(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("memory content", func(t *testing.T) {
+		for _, apply := range []bool{false, true} {
+			store := portableTestStore(t)
+			if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			_, _, _, err := store.ImportMemory(ctx, PortableMemory{
+				ID: "m1", ProjectID: "p1", Category: "fact", Source: "mcp",
+				Content: "the token is " + secretFixture,
+			}, ImportOptions{Apply: apply})
+			if err == nil {
+				t.Fatalf("apply=%v: ImportMemory accepted a credential", apply)
+			}
+			if !errors.Is(err, ErrSecretContent) {
+				t.Errorf("apply=%v: errors.Is(err, ErrSecretContent) = false for %v", apply, err)
+			}
+			if strings.Contains(err.Error(), secretFixture) {
+				t.Errorf("apply=%v: refusal echoes the value: %v", apply, err)
+			}
+			if n := countPortableRows(t, store, "memories"); n != 0 {
+				t.Errorf("apply=%v: imported %d memories, want 0", apply, n)
+			}
+		}
+	})
+
+	t.Run("task notes", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, err := store.ImportTask(ctx, Task{
+			ID: "t1", ProjectID: "p1", Title: "rotation", Description: "quarterly",
+			Status: "done", Notes: "the value was " + secretFixture,
+		}, true)
+		assertRefusal(t, err, "notes")
+		if n := countPortableRows(t, store, "tasks"); n != 0 {
+			t.Errorf("imported %d tasks, want 0", n)
+		}
+	})
+
+	t.Run("decision rationale", func(t *testing.T) {
+		store := portableTestStore(t)
+		if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		_, err := store.ImportDecision(ctx, Decision{
+			ID: "d1", ProjectID: "p1", Title: "rotation", Status: "active",
+			Decision: "rotate quarterly", Rationale: "the value is " + secretFixture,
+		}, true)
+		assertRefusal(t, err, "rationale")
+		if n := countPortableRows(t, store, "decisions"); n != 0 {
+			t.Errorf("imported %d decisions, want 0", n)
+		}
+	})
+}
+
+func countPortableRows(t *testing.T, s *Store, table string) int {
+	t.Helper()
+	// The table name is a test literal from the three above, never input.
+	var n int
+	if err := s.db.QueryRowContext(context.Background(), "SELECT count(*) FROM "+table).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return n
+}
+
+// TestRecordDecisionRefusesCredentialAlternatives closes the narrower gap the
+// first version left in the decision tool itself. `alternatives` is a list of
+// strings rendered by ghost_decisions_list straight back to the agent, so a
+// credential in one entry is stored and replayed exactly like one in the
+// rationale — the field is just a list, and the guard has to walk it.
+func TestRecordDecisionRefusesCredentialAlternatives(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	_, _, _, err := s.RecordDecision(ctx, testProject, "rotation", "rotate quarterly",
+		"operational hygiene", []string{"keep it in the vault", "the old one was " + secretFixture}, nil)
+	if !errors.Is(err, ErrSecretContent) {
+		t.Fatalf("errors.Is(err, ErrSecretContent) = false for %v", err)
+	}
+	// The index, not just the field: with several alternatives, "alternatives"
+	// alone does not say which entry to fix.
+	if !strings.Contains(err.Error(), "alternatives[1]") {
+		t.Errorf("refusal does not name the offending entry: %v", err)
+	}
+	if strings.Contains(err.Error(), secretFixture) {
+		t.Errorf("refusal echoes the value: %v", err)
+	}
+
+	var decisions int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM decisions WHERE project_id = ?`, testProject).Scan(&decisions); err != nil {
+		t.Fatalf("count decisions: %v", err)
+	}
+	if decisions != 0 {
+		t.Errorf("a refused decision stored %d rows, want 0", decisions)
+	}
+}
+
 // TestUpdateLearnedContextRefusesCredentialContent covers the last
 // model-written field the reflection round produces. It is injected verbatim
 // into every later session for the project, and unlike the memories it

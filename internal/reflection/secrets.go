@@ -64,7 +64,16 @@ func looksLikeSecret(lower string) bool {
 // indistinguishable from one the model never emitted. The log names the format
 // and the category and never the content: this line is the last place a
 // credential would go before the log file keeps it forever.
+//
+// A nil logger becomes slog.Default(), the same substitution
+// dropFabricatedMemories and dropForeignProjectMemories make. The reasoning is
+// the guard's own: a drop that reports itself nowhere is a drop nobody can
+// audit, and a call site that cannot log at all is a bug to fix loudly rather
+// than to make silent.
 func dropSecretMemories(result *ReflectionResult, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	kept := result.Memories[:0]
 	for _, m := range result.Memories {
 		finding, ok := secret.Detect(m.Content)
@@ -72,12 +81,10 @@ func dropSecretMemories(result *ReflectionResult, logger *slog.Logger) {
 			kept = append(kept, m)
 			continue
 		}
-		if logger != nil {
-			logger.Warn("reflection memory dropped: content holds a credential value",
-				"format", finding.Label,
-				"category", m.Category,
-				"content_bytes", len(m.Content))
-		}
+		logger.Warn("reflection memory dropped: content holds a credential value",
+			"format", finding.Label,
+			"category", m.Category,
+			"content_bytes", len(m.Content))
 	}
 	result.Memories = kept
 }

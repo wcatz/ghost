@@ -293,6 +293,59 @@ func TestDetectAllowsOrdinaryProse(t *testing.T) {
 	}
 }
 
+// TestDetectExaminesEveryCandidate is the false negative a first-match
+// implementation hides: the two rules whose verdict needs the matched text
+// inspect candidates, and a placeholder-shaped candidate earlier in the save
+// must not shadow a real credential later in the same save. That ordering is
+// not adversarial — "the env var is ${X}, the value we leaked was <key>" is
+// exactly the shape of an incident note.
+func TestDetectExaminesEveryCandidate(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+		rule string
+	}{
+		{
+			name: "real password after a variable reference",
+			text: "password: ${SECRET_MANAGER_DB_PASSWORD} — the leaked one was password: Zq7Xn4Bt2Lm9Kc5Vr8Wd",
+			rule: "assigned-secret",
+		},
+		{
+			name: "real password after a masked placeholder",
+			text: "api_key: ************************ and the real one is api_key=Kq8Zn3Bk6Lm1Vr9Xc4Wd7Hf2",
+			rule: "assigned-secret",
+		},
+		{
+			name: "real token after an angle-bracket placeholder",
+			text: "token: <your-value-here> then token: ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
+			rule: "github-pat",
+		},
+		{
+			name: "real cardano cold key after a filler run",
+			text: strings.Repeat("d", 7000) +
+				" and the key was 5820010df2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f",
+			rule: "long-hex",
+		},
+		{
+			name: "real key after a row of zeroes",
+			text: "padding " + strings.Repeat("0", 400) +
+				" then the cold key 5820010df2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f",
+			rule: "long-hex",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			finding, ok := Detect(tc.text)
+			if !ok {
+				t.Fatalf("Detect found nothing, want rule %q", tc.rule)
+			}
+			if finding.Rule != tc.rule {
+				t.Errorf("Detect rule = %q, want %q", finding.Rule, tc.rule)
+			}
+		})
+	}
+}
+
 // TestFindingNeverEchoesTheValue is what makes a rejection safe to log. The
 // error a rejecting caller returns travels into the saving agent's context, the
 // log file, and (for reflection) a prompt sent to a third-party model, so a

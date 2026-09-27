@@ -504,6 +504,16 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	if !IsValidSource(m.Source) {
 		return false, false, false, fmt.Errorf("memory %s: invalid source %q — must be one of: reflection, chat, manual, tool, mcp, onboarding, decision_log, builtin", m.ID, m.Source)
 	}
+	// Guarded with the other per-field validations, which means before the
+	// apply=false early return below: a dry run has to preview the same
+	// classification the apply run produces, and an artifact is untrusted input
+	// arriving from a file rather than a row already in the store.
+	if err := rejectSecretFields(
+		secretField{"content", m.Content},
+		secretField{"source_ref", m.SourceRef},
+	); err != nil {
+		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
+	}
 
 	content, cut := ClampContent(m.Content)
 	// A stated importance is clamped to [0,1], the same bound a normal save
@@ -659,6 +669,17 @@ func (s *Store) ImportTask(ctx context.Context, t Task, apply bool) (created boo
 	if t.Priority < 0 || t.Priority > 4 {
 		return false, fmt.Errorf("task %s: invalid priority %d — must be between 0 and 4", t.ID, t.Priority)
 	}
+	// Before the apply=false early return below, for the reason ImportMemory
+	// gives: a dry run previews what the apply run does. A task's notes are
+	// otherwise unvalidated text that a normal save refuses, and an artifact
+	// carries them.
+	if err := rejectSecretFields(
+		secretField{"title", t.Title},
+		secretField{"description", t.Description},
+		secretField{"notes", t.Notes},
+	); err != nil {
+		return false, fmt.Errorf("task %s: %w", t.ID, err)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -739,6 +760,20 @@ func (s *Store) ImportDecision(ctx context.Context, d Decision, apply bool) (cre
 	}
 	if !validDecisionStatuses[d.Status] {
 		return false, fmt.Errorf("decision %s: invalid status %q — must be one of: active, superseded, revisit", d.ID, d.Status)
+	}
+	// Before the apply=false early return below, for the reason ImportMemory
+	// gives. alternatives is a list because it is one: ghost_decisions_list
+	// renders it back to the agent, so an entry is as replayable as the
+	// rationale.
+	if err := rejectSecretFields(
+		secretField{"title", d.Title},
+		secretField{"decision", d.Decision},
+		secretField{"rationale", d.Rationale},
+	); err != nil {
+		return false, fmt.Errorf("decision %s: %w", d.ID, err)
+	}
+	if err := rejectSecretList("alternatives", d.Alternatives); err != nil {
+		return false, fmt.Errorf("decision %s: %w", d.ID, err)
 	}
 
 	s.mu.Lock()

@@ -292,8 +292,13 @@ const placeholderChars = "${}<>*"
 // Two rules are checked after the table rather than in it, because matching
 // them is only half the test: longHexRe and assignedSecretRe both need the
 // matched text inspected (looksLikeKeyMaterial, looksAssignedSecret) rather
-// than a boolean. Each is evaluated once, no matter how many candidates the
-// text contains.
+// than a boolean. Both therefore walk EVERY candidate in the text, not the
+// leftmost one. A first-match implementation is a false negative in the exact
+// case this control exists for: a placeholder-shaped candidate earlier in the
+// save — `${DB_PASSWORD}`, `****`, a filler run — shadows a real credential
+// later in the same save, and "the env var is ${X}, the value we leaked was
+// <key>" is not an adversarial ordering, it is what an incident note reads
+// like.
 func Detect(text string) (Finding, bool) {
 	if text == "" {
 		return Finding{}, false
@@ -303,10 +308,12 @@ func Detect(text string) (Finding, bool) {
 			return Finding{Rule: r.name, Label: r.label}, true
 		}
 	}
-	if m := longHexRe.FindString(text); m != "" && looksLikeKeyMaterial(m) {
-		return Finding{Rule: longHexRule, Label: longHexLabel}, true
+	for _, run := range longHexRe.FindAllString(text, -1) {
+		if looksLikeKeyMaterial(run) {
+			return Finding{Rule: longHexRule, Label: longHexLabel}, true
+		}
 	}
-	if m := assignedSecretRe.FindStringSubmatch(text); m != nil {
+	for _, m := range assignedSecretRe.FindAllStringSubmatch(text, -1) {
 		if looksAssignedSecret(m[assignedSecretValue]) {
 			return Finding{Rule: assignedSecretRule, Label: assignedSecretLabel}, true
 		}

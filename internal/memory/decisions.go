@@ -38,14 +38,17 @@ func (s *Store) RecordDecision(ctx context.Context, projectID, title, decision, 
 	// (the decisions row and the companion memory built from the same three
 	// fields), so a refusal that landed after the first INSERT would have to be
 	// undone by the rollback anyway — cheaper and clearer to never start.
-	for _, f := range []struct{ name, text string }{
-		{"title", title},
-		{"decision", decision},
-		{"rationale", rationale},
-	} {
-		if err := rejectSecret(f.name, f.text); err != nil {
-			return "", "", false, err
-		}
+	// alternatives is checked as a list because ghost_decisions_list renders it
+	// back to the agent, which makes an entry as replayable as the rationale.
+	if err := rejectSecretFields(
+		secretField{"title", title},
+		secretField{"decision", decision},
+		secretField{"rationale", rationale},
+	); err != nil {
+		return "", "", false, err
+	}
+	if err := rejectSecretList("alternatives", alternatives); err != nil {
+		return "", "", false, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

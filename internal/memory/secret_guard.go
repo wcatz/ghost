@@ -50,12 +50,46 @@ func rejectSecret(field, text string) error {
 	return &SecretContentError{Field: field, Format: finding.Label}
 }
 
+// secretField is one caller-supplied text to check, named the way the caller
+// named the argument so the refusal says which one to fix.
+type secretField struct{ name, text string }
+
+// rejectSecretFields checks the named fields in order and returns the first
+// refusal. It is the form every multi-field writer uses, so the field in the
+// error is one the caller recognises.
+func rejectSecretFields(fields ...secretField) error {
+	for _, f := range fields {
+		if err := rejectSecret(f.name, f.text); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rejectSecretList checks every entry of a list-valued field and names the
+// offending one by index. decisions.alternatives is the reason this exists: it
+// is rendered back to the agent by ghost_decisions_list, so an entry is stored
+// and replayed exactly like the rationale beside it — the only difference is
+// that it is a list, and "alternatives" alone would not say which entry to fix.
+func rejectSecretList(field string, values []string) error {
+	for i, v := range values {
+		if err := rejectSecret(fmt.Sprintf("%s[%d]", field, i), v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // The guard's reach, and its deliberate limits.
 //
-// Reached: UpsertWithOptions (and so Upsert, UpsertWithProvenance — the save
-// tools, the first-contact import, and reflection's candidate writes),
-// UpdateMemory, RecordDecision, and the three task writers. That is every
-// write of text a caller supplied.
+// Reached: every write of text a caller supplied, whether it arrives through a
+// tool, an import, or a model — UpsertWithOptions (and so Upsert,
+// UpsertWithProvenance, the MCP save tools, the Claude first-contact import,
+// and reflection's candidate writes), UpdateMemory, RecordDecision, the three
+// task writers, UpdateLearnedContext, and the three portable importers. The
+// importers matter more than their position in this list suggests: they write
+// with raw INSERTs rather than through Upsert, and their input is a JSONL
+// artifact that arrived from somewhere.
 //
 // Not reached, on purpose:
 //
@@ -70,7 +104,9 @@ func rejectSecret(field, text string) error {
 //     trying to write; it does not sweep rows a previous version stored. Doing
 //     that is a separate, report-first job — a detection pass over existing
 //     rows has to be able to tell an operator what it found without changing
-//     their memory store under them.
+//     their memory store under them. Note that the portable importers are NOT
+//     in this second category: an artifact is untrusted input arriving now,
+//     not a row that was already here.
 //
 // The consequence of the first limit is stated plainly: a caller that reaches
 // Create directly bypasses the guard. Create is a raw "insert exactly this"
