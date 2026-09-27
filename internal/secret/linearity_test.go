@@ -42,7 +42,13 @@ func TestDetectIsLinearInLineLength(t *testing.T) {
 	// (secret.go:1421), so with no flag after the value neither runs — only
 	// valueIsCommand is reached, and it is reached and returns FALSE, which is
 	// what pays the per-match cost. TestDetectDoesNotRescanTheLinePerAssignment is
-	// the test that bounds the quoted scan, and it uses eight times the candidates.
+	// valueIsCommand is reached, and it is reached returning false, which is what
+	// pays the per-match cost. The quoted scan has its own test,
+	// TestDetectBoundsTheQuotedArgumentScan, with a fixture that has to satisfy
+	// three things at once to reach it — a flag after the value, no quoted
+	// argument that looks like a credential, and a value that isCommandWord
+	// accepts — and a fourth that is easy to miss: a quote character ON THE LINE,
+	// because the scan returns before its regex when the line has none.
 	//
 	// There is deliberately NO `-Flag` after the value, and that is the second
 	// round of a lesson this test has now taught three times. The flag was there to
