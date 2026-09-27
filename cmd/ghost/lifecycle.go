@@ -388,6 +388,50 @@ func reflectRetained(projectMems, globalMems []reflection.ReflectMemory, promote
 // is — which is exactly when a percentage is worth least.
 const reductionWarnMinInput = 6
 
+// reportDisposedClaims prints what the response CLAIMED it disposed of. Nothing
+// acts on these claims — an unattended reflect never deletes a memory on the
+// model's say-so alone (#549) — so this is the only place a person deciding
+// whether to pass --apply can see that the model tried to drop something.
+//
+// It deliberately does NOT say what became of a claim. The guarded-drop report
+// already prints the outcome, and a second opinion about it would be a second
+// implementation of the guard's decision waiting to disagree with the first. Read
+// the two together: this says what was claimed, that says what was kept or
+// deleted.
+//
+// Whether the claimed replacement survived into the result IS stated, because
+// that is a fact about the result rather than an opinion about the guard, and
+// because executeOps records Replacement.Text before the post-filters run:
+// dropForeignProjectMemories deletes a memory naming a project the input corpus
+// never mentioned. Printing a replacement this same run discarded would be the
+// one thing a report meant to inform an --apply decision must not do.
+//
+// It is a function taking a writer rather than an inline loop because runReflect
+// exits the process, so the loop is not reachable from a test.
+func reportDisposedClaims(w io.Writer, result reflection.ReflectionResult) {
+	if len(result.Replacements) == 0 {
+		return
+	}
+	inResult := make(map[string]bool, len(result.Memories))
+	for _, m := range result.Memories {
+		inResult[m.Content] = true
+	}
+	// Discarded on purpose, as everywhere else on this path: a write that fails
+	// cannot be reported through the same failed write, and the report lands on
+	// the stdout of a dry run a person is reading.
+	for _, r := range result.Replacements {
+		switch {
+		case r.Text == "":
+			_, _ = fmt.Fprintln(w, "  Disposed of (model's claim): (no replacement text recorded)")
+		case !inResult[r.Text]:
+			_, _ = fmt.Fprintf(w, "  Disposed of (model's claim): its replacement is NOT in this result — %s\n",
+				truncateForDisplay(r.Text, 80))
+		default:
+			_, _ = fmt.Fprintf(w, "  Disposed of (model's claim): replaced by %s\n", truncateForDisplay(r.Text, 80))
+		}
+	}
+}
+
 // reportReductionWarning prints the >50% reduction warning when a consolidation
 // kept less than half its consolidatable input, and prints nothing otherwise. It
 // says nothing about whether the run applies: the call site is above the
@@ -902,38 +946,9 @@ func runReflect() {
 		fmt.Fprintf(os.Stderr, "warning: %d consolidation memory content(s) exceeded the %d-byte cap and were truncated with an explicit marker\n", cuts, memory.MaxContentLen)
 	}
 
-	// What the response CLAIMED it disposed of. Nothing acts on these claims — an
-	// unattended reflect never deletes a memory on the model's say-so alone
-	// (#549) — so this is the only place a person deciding whether to pass
-	// --apply can see that the model tried to drop something. What becomes of each
-	// claim is NOT predicted here: the guarded-drop report above already prints
-	// the outcome, and a second opinion about it would be a second implementation
-	// of the guard's decision waiting to disagree with the first. Read the two
-	// together — this says what was claimed, that says what was retained or
-	// deleted.
-	//
-	// Whether the claimed replacement is still in the RESULT is a fact about the
-	// result, not an opinion about the guard, so it is safe to state here — and it
-	// has to be: executeOps records the text before the post-filters run, and
-	// dropForeignProjectMemories deletes a memory naming a project the input
-	// corpus never mentioned. Printing a replacement the same run discarded would
-	// be the one thing this report must never do, since it exists so a person can
-	// decide whether to apply.
-	inResult := make(map[string]bool, len(result.Memories))
-	for _, m := range result.Memories {
-		inResult[m.Content] = true
-	}
-	for _, r := range result.Replacements {
-		switch {
-		case r.Text == "":
-			fmt.Println("  Disposed of (model's claim): (no replacement text recorded)")
-		case !inResult[r.Text]:
-			fmt.Printf("  Disposed of (model's claim): its replacement is NOT in this result — %s\n",
-				truncateForDisplay(r.Text, 80))
-		default:
-			fmt.Printf("  Disposed of (model's claim): replaced by %s\n", truncateForDisplay(r.Text, 80))
-		}
-	}
+	// What the response claimed it disposed of, and whether the claimed
+	// replacement survived into the result. See reportDisposedClaims.
+	reportDisposedClaims(os.Stdout, result)
 
 	// The >50% reduction warning. On the unattended lifecycle path this is the
 	// only report of a hard compression, and it goes to the stderr of a process

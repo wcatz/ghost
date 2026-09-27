@@ -249,7 +249,7 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		"undone by that re-add",
 		"a memory you do not name is carried through unchanged",
 		"puts that row back verbatim",
-		"is put back verbatim, so state one only",
+		"State an obsolete drop only when a surviving memory really does replace it",
 	} {
 		if !strings.Contains(retained, want) {
 			t.Errorf("retention prompt missing %q", want)
@@ -278,7 +278,6 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 		// promising a re-add there is telling the grader a consolidation is
 		// cheaper than it is (#549).
 		"the input is DELETED, and yours is the last version of it",
-		"it is a real deletion, so state one only when a survivor really does replace it",
 	} {
 		if !strings.Contains(dropping, want) {
 			t.Errorf("--allow-drops prompt missing %q", want)

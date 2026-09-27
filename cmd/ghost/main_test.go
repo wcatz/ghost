@@ -993,6 +993,58 @@ func TestReportReductionWarningBoundaryIsNotRounded(t *testing.T) {
 	}
 }
 
+// TestReportDisposedClaims pins the three shapes a disposal claim can take, and
+// the middle one is the defect this report exists to prevent: executeOps records
+// Replacement.Text before the post-filters run, and
+// dropForeignProjectMemories deletes a memory naming a project the input corpus
+// never mentioned — so a claim can name a replacement the SAME run threw away.
+// Printing it as "replaced by" would tell a person deciding on --apply that the
+// knowledge went somewhere, when the row is about to be deleted and the
+// replacement is in neither place.
+func TestReportDisposedClaims(t *testing.T) {
+	const kept = "the bastion answers ping on 443"
+	result := reflection.ReflectionResult{
+		Memories: []reflection.ReflectMemory{{Category: "fact", Content: kept}},
+		Replacements: []reflection.Replacement{
+			{ID: "A", Text: kept},               // the replacement survived
+			{ID: "B", Text: "gone from result"}, // a post-filter removed it
+			{ID: "C"},                           // no text recorded at all
+		},
+	}
+
+	var buf bytes.Buffer
+	reportDisposedClaims(&buf, result)
+	got := buf.String()
+
+	for _, want := range []string{
+		"replaced by " + kept,
+		"its replacement is NOT in this result — gone from result",
+		"(no replacement text recorded)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("claim report missing %q; got:\n%s", want, got)
+		}
+	}
+	// The discarded replacement must not also be described as having replaced
+	// anything, which is the specific misreading.
+	if strings.Contains(got, "replaced by gone from result") {
+		t.Errorf("a replacement the run discarded is reported as replacing the row:\n%s", got)
+	}
+}
+
+// TestReportDisposedClaimsSaysNothingWithoutClaims: a round where the model
+// disposed of nothing must not print a header, so the dry run's output is not
+// carrying an empty section.
+func TestReportDisposedClaimsSaysNothingWithoutClaims(t *testing.T) {
+	var buf bytes.Buffer
+	reportDisposedClaims(&buf, reflection.ReflectionResult{
+		Memories: []reflection.ReflectMemory{{Category: "fact", Content: "anything"}},
+	})
+	if buf.Len() != 0 {
+		t.Errorf("no disposals, so nothing should be printed; got:\n%s", buf.String())
+	}
+}
+
 func TestConsolidatableFilters(t *testing.T) {
 	now := "2026-09-21 00:00:00"
 	mems := []memory.Memory{

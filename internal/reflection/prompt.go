@@ -136,30 +136,34 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 	// existing memories to list.
 	foldToKeep := "Dropping is not deletion: a memory you do not name is carried through unchanged, and a memory you do not want is folded into a survivor rather than dropped. What the apply can still add back is what no surviving memory explains — an \"obsolete\" drop nothing replaced, a merge that lost one of its sources, and a rewrite or a supersession whose replacement does not carry the old memory's substance. EVERY category is protected that way — gotcha, dependency, preference, convention, architecture, decision, pattern and fact — as is anything recording operational configuration (ports, hosts, paths, credentials locations). These facts still guide future work even when the surrounding thread is stale."
 	mergeTail := "a loose summary is not recognized as a merge, and the input is kept verbatim beside it"
-	staleTail := "since a drop nothing explains is undone by the verbatim re-add"
+	// The tails carry their own terminal punctuation because they are spliced into
+	// the middle of a bullet, and two of them now meet: without the full stop the
+	// harness is handed two sentences welded into one clause.
+	staleTail := "since a drop nothing explains is undone by the verbatim re-add."
 	// replaceTail is the same warning for the two operations that REPLACE a row
-	// rather than fold it, and obsoleteTail is the same warning for the obsolete
-	// drop. The guard exempts nothing, so a rewrite, a supersession or an obsolete
-	// drop that no output accounts for leaves the row in the corpus verbatim — a
-	// paraphrase duplicate that every later pass has to read. Saying so is what
-	// lets the model write a replacement that carries the substance instead of one
-	// that merely rewords it.
+	// rather than fold it. The guard exempts nothing, so a rewrite or a
+	// supersession that no output accounts for leaves the row in the corpus
+	// verbatim — a paraphrase duplicate that every later pass has to read. Saying
+	// so is what lets the model write a replacement that carries the substance
+	// instead of one that merely rewords it.
 	//
-	// Both are mode-dependent, and not as a formality: --allow-drops skips the
-	// verbatim re-add entirely, so under that flag the same sentence would promise
-	// a re-add the apply never performs. That is the path eval/cycle measures on
-	// (it passes --apply --allow-drops), so a prompt that says "re-added" there is
-	// telling the grader a consolidation is cheaper than it is.
+	// Mode-dependent, and not as a formality: --allow-drops skips the verbatim
+	// re-add entirely, so under that flag the same sentence would promise a save
+	// the run never makes. That is the path eval/cycle measures on (it passes
+	// --apply --allow-drops), so a prompt that says "re-added" there is telling
+	// the grader a consolidation is cheaper than it is.
 	replaceTail := "Your replacement has to CARRY the old memory's substance — the same specifics, restated. If nothing in the result accounts for the old row, the apply puts that row back verbatim beside your replacement, and the two sit there until a later pass demotes the stale one."
-	obsoleteTail := "An obsolete drop with no surviving memory that accounts for it is put back verbatim, so state one only when a survivor really does replace it."
+	// obsoleteTail adds only what staleTail does not already say: the guidance to
+	// prefer a fold. Restating the re-add here would repeat staleTail in the same
+	// clause.
+	obsoleteTail := "State an obsolete drop only when a surviving memory really does replace it."
 	countTail := "A count you reach by dropping is undone by that re-add."
 	omissionCost := "carried through unchanged, so forgetting one costs you the consolidation you had in mind for it and nothing else"
 	if input.AllowDrops {
 		foldToKeep = "This run DELETES every input no surviving memory explains, in EVERY category: gotcha, dependency, preference, convention, architecture, decision, pattern and fact. There is no protected category this run — fold anything you want to keep, and expect an unexplained drop to be the last version of it."
 		mergeTail = "a loose summary is not recognized as a merge, and the input is deleted even though you mentioned it"
-		staleTail = "since a drop nothing explains is a real deletion"
+		staleTail = "since a drop nothing explains is a real deletion."
 		replaceTail = "Your replacement has to CARRY the old memory's substance — the same specifics, restated. If nothing in the result accounts for the old row, the input is DELETED, and yours is the last version of it."
-		obsoleteTail = "An obsolete drop with no surviving memory that accounts for it is a real deletion, so state one only when a survivor really does replace it."
 		countTail = "A count you reach by dropping is a real deletion, not a cleanup."
 		omissionCost = "carried through unchanged, so forgetting one costs you the consolidation you had in mind for it and nothing else"
 	}
