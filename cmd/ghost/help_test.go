@@ -395,6 +395,46 @@ func TestHelpCommandPrintsTheCommandUsage(t *testing.T) {
 		}
 	})
 
+	// A help token is not a mistyped command: `ghost help -h` is the same
+	// question asked twice, and the diagnostic for a name that matched nothing
+	// would be a lie about a token that is a request. `ghost -h <command>` is the
+	// named-command form through the other spelling, and is documented as such.
+	t.Run("a help token in place of a command", func(t *testing.T) {
+		for _, tc := range []struct {
+			argv []string
+			want string // a phrase only the named command's usage prints
+		}{
+			{argv: []string{"help", "-h"}},
+			{argv: []string{"help", "--help"}},
+			{argv: []string{"-h"}},
+			{argv: []string{"--help"}},
+			{argv: []string{"-h", "upgrade"}, want: "ghost upgrade [--allow-downgrade]"},
+			{argv: []string{"--help", "upgrade"}, want: "ghost upgrade [--allow-downgrade]"},
+		} {
+			restoreDetectRemote(t)
+			var code int
+			stdout, stderr := captureStreams(t, func() { code = dispatchCommand(tc.argv) })
+			if code != 0 {
+				t.Errorf("`ghost %s` exit code = %d, want 0", strings.Join(tc.argv, " "), code)
+			}
+			if tc.want != "" {
+				if !strings.Contains(stdout, tc.want) {
+					t.Errorf("`ghost %s` stdout = %q, want the usage of the command it names", strings.Join(tc.argv, " "), stdout)
+				}
+				continue
+			}
+			if stdout != "" {
+				t.Errorf("`ghost %s` stdout = %q, want the top-level summary to stay on stderr as it always was", strings.Join(tc.argv, " "), stdout)
+			}
+			if !strings.Contains(stderr, "ghost <command>") {
+				t.Errorf("`ghost %s` stderr = %q, want the top-level command list", strings.Join(tc.argv, " "), stderr)
+			}
+			if strings.Contains(stderr, "no command") {
+				t.Errorf("`ghost %s` reported a help request as a command that does not exist: %q", strings.Join(tc.argv, " "), strings.SplitN(stderr, "\n", 2)[0])
+			}
+		}
+	})
+
 	t.Run("unknown command", func(t *testing.T) {
 		restoreDetectRemote(t)
 		var code int

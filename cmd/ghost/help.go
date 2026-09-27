@@ -49,23 +49,33 @@ var helpValueFlagsByCommand = map[string]map[string]bool{
 	"supersede":                 {"--project": true, "--source": true, "--threshold": true},
 }
 
+// isHelpToken reports whether arg is one of the two spellings of a help request.
+// One predicate, because the scan and `ghost help` have to agree on what a help
+// request looks like: the second reading "help" as a command name to report as
+// missing, which is a lie about a token the reader typed on purpose.
+func isHelpToken(arg string) bool {
+	return arg == "-h" || arg == "--help"
+}
+
 // wantsHelp reports whether args — one subcommand's own arguments, without the
 // command words — request that command's usage via -h or --help. command is the
 // subcommand path usageFor resolved, and it selects which value flags apply.
 //
-// A bare "--" ends the options: everything after it is an operand, whatever it
-// looks like, so `ghost reflect -- --help` runs reflect rather than printing
-// usage, and the reader can address a project named --help. None of the
-// parsers here implements "--" for itself (some reject it, some ignore it),
-// which is why the scan has to make the rule on their behalf: reading a
-// flag-shaped operand as a help request is a side effect the #630 contract
-// exists to prevent, and it would be a silent one — the command that ran is not
-// the command the reader asked about.
+// A bare "--" ends the options, so a flag-shaped token after it is an operand
+// and not a help request: `ghost reflect -- --help` runs reflect rather than
+// answering a question the reader did not ask. What happens to that operand is
+// the command's own parser's business and is NOT the same as a help request —
+// none of the parsers here implements "--" (some reject it as an unknown flag,
+// some drop it and end up with no project), and a name that looks like a flag is
+// still addressed with the verbatim --project form above. What the scan owes the
+// reader is only that it does not answer for a command: a help request that
+// reached the dispatch was a side effect, and the command that ran would not be
+// the one the reader asked about.
 func wantsHelp(command string, args []string) bool {
 	valueFlags := helpValueFlagsByCommand[command]
 	for i := 0; i < len(args); i++ {
 		switch {
-		case args[i] == "-h" || args[i] == "--help":
+		case isHelpToken(args[i]):
 			return true
 		case args[i] == "--":
 			return false
@@ -142,15 +152,17 @@ func handleHelp(argv []string) bool {
 	return true
 }
 
-// runHelpCommand answers `ghost help [command]`. With a command, it prints that
-// command's own usage — the same text `ghost <command> -h` prints, on stdout,
-// because the reader asked a question and the command is a subcommand's rather
-// than the CLI's. `ghost help` with no command, and any name that is not a
-// registered command path, print the top-level summary on stderr exactly as
-// before; a name that matched nothing is reported on stderr so a typo is
-// visible rather than answered with a list of commands that does not contain it.
-// The exit code stays 0 throughout: a question with no answer is not a mistake
-// in the invocation.
+// runHelpCommand answers `ghost help [command]`, and the same dispatch case
+// answers `ghost -h [command]`. With a command, it prints that command's own
+// usage — the same text `ghost <command> -h` prints, on stdout, because the
+// reader asked a question and the command is a subcommand's rather than the
+// CLI's. `ghost help` with no command, a help token in place of one, and any
+// name that is not a registered command path, all print the top-level summary on
+// stderr exactly as before; a name that matched nothing is reported there first,
+// so a typo is visible rather than answered with a list that does not contain
+// it, while a help token is not reported at all — `ghost help -h` is one
+// question asked twice, not a misspelling. The exit code stays 0 throughout: a
+// question with no answer is not a mistake in the invocation.
 func runHelpCommand(args []string) int {
 	if _, usage, _, ok := usageFor(args); ok {
 		if _, err := fmt.Fprint(os.Stdout, usage); err != nil {
@@ -158,7 +170,7 @@ func runHelpCommand(args []string) int {
 		}
 		return 0
 	}
-	if len(args) > 0 {
+	if len(args) > 0 && !isHelpToken(args[0]) {
 		fmt.Fprintf(os.Stderr, "ghost help: no command %q in this build; showing the command list\n", strings.Join(args, " "))
 	}
 	printUsage()
