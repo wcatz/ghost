@@ -202,6 +202,12 @@ func TestReplaceThroughRelativeSymlinkWritesToRealTarget(t *testing.T) {
 
 // TestReplaceLeavesNoTempFilesBehind guards the failure path cleanup: if the
 // rename fails, the partial temp file must not be left next to the binary.
+//
+// The assertion is about the staged temp files rather than the directory's
+// total contents, because a successful Windows install legitimately leaves the
+// binary it replaced at "<name>.old": that file is the image this process is
+// still running from and cannot be deleted until it exits. install_test.go
+// covers the aside itself.
 func TestReplaceLeavesNoTempFilesBehind(t *testing.T) {
 	dir := t.TempDir()
 	plain := filepath.Join(dir, "ghost")
@@ -217,11 +223,12 @@ func TestReplaceLeavesNoTempFilesBehind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		names := make([]string, 0, len(entries))
-		for _, e := range entries {
-			names = append(names, e.Name())
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".ghost-update-") {
+			t.Errorf("Replace left the staged file %s behind in %s", e.Name(), dir)
 		}
-		t.Errorf("directory holds %d entries after Replace, want 1: %s", len(entries), strings.Join(names, ", "))
+	}
+	if _, err := os.Stat(plain); err != nil {
+		t.Errorf("the updated binary is missing: %v", err)
 	}
 }

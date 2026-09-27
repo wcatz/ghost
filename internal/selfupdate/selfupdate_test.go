@@ -85,15 +85,14 @@ func TestVerifyChecksum(t *testing.T) {
 	})
 }
 
-// useTestClient swaps one of the package's HTTP clients for a client with the
-// given deadline, restoring the production client when the test ends. It lets a
-// test make the deadline shorter than a test can wait, without touching the
-// shipped timeouts.
-func useTestClient(t *testing.T, dst **http.Client, timeout time.Duration) {
+// useTestDeadline shortens one of the package's request deadlines, restoring
+// the production value when the test ends. It lets a test make the deadline
+// shorter than a test can wait, without touching the shipped bounds.
+func useTestDeadline(t *testing.T, dst *time.Duration, timeout time.Duration) {
 	t.Helper()
 	original := *dst
 	t.Cleanup(func() { *dst = original })
-	*dst = &http.Client{Timeout: timeout}
+	*dst = timeout
 }
 
 // writeChunked streams body to w in 32 KiB chunks, stopping early if the client
@@ -110,24 +109,24 @@ func writeChunked(w http.ResponseWriter, body []byte) {
 	}
 }
 
-func TestClientsHaveDeadlines(t *testing.T) {
-	// A client with no Timeout waits on a stalled connection for as long as
+func TestRequestDeadlinesArePositiveAndOrdered(t *testing.T) {
+	// A request with no deadline waits on a stalled connection for as long as
 	// the OS allows, which is how `ghost upgrade` hangs forever on a proxy
 	// that accepts and then goes quiet.
-	if apiClient.Timeout <= 0 {
-		t.Error("apiClient has no deadline: a stalled release API would block ghost upgrade indefinitely")
+	if apiTimeout <= 0 {
+		t.Error("the release lookup has no deadline: a stalled release API would block ghost upgrade indefinitely")
 	}
-	if downloadClient.Timeout <= 0 {
-		t.Error("downloadClient has no deadline: a stalled download would block ghost upgrade indefinitely")
+	if downloadTimeout <= 0 {
+		t.Error("the asset download has no deadline: a stalled download would block ghost upgrade indefinitely")
 	}
-	if downloadClient.Timeout <= apiClient.Timeout {
-		t.Errorf("downloadClient deadline %s must be longer than the API deadline %s: an archive is a transfer, not a metadata lookup",
-			downloadClient.Timeout, apiClient.Timeout)
+	if downloadTimeout <= apiTimeout {
+		t.Errorf("download deadline %s must be longer than the API deadline %s: an archive is a transfer, not a metadata lookup",
+			downloadTimeout, apiTimeout)
 	}
 }
 
 // stallAfter is how long a stalled-server handler waits before answering,
-// unless the test unblocks it first. A client with a deadline returns long
+// unless the test unblocks it first. A request with a deadline returns long
 // before that, so the assertion is about the deadline, not about how fast the
 // machine is.
 const stallAfter = 2 * time.Second
@@ -156,12 +155,12 @@ func TestFetchReleaseTimesOutOnAStalledAPI(t *testing.T) {
 	url, release := stalledServer(t, `{"tag_name":"v0.32.0"}`)
 	defer release()
 
-	useTestClient(t, &apiClient, 20*time.Millisecond)
+	useTestDeadline(t, &apiTimeout, 20*time.Millisecond)
 
-	// An unbounded client would return the JSON after stallAfter with no error
-	// at all, so the error is the whole assertion: no wall-clock threshold to
-	// flake on a loaded runner.
-	_, err := fetchRelease(url)
+	// An unbounded request would return the JSON after stallAfter with no
+	// error at all, so the error is the whole assertion: no wall-clock
+	// threshold to flake on a loaded runner.
+	_, err := fetchRelease(context.Background(), url)
 	if err == nil {
 		t.Fatal("expected a deadline error when the release API does not answer in time")
 	}
@@ -174,11 +173,38 @@ func TestDownloadTimesOutOnAStalledServer(t *testing.T) {
 	url, release := stalledServer(t, "archive bytes")
 	defer release()
 
-	useTestClient(t, &downloadClient, 20*time.Millisecond)
+	useTestDeadline(t, &downloadTimeout, 20*time.Millisecond)
 
-	if _, err := Download(url); err == nil {
+	if _, err := Download(context.Background(), url); err == nil {
 		t.Fatal("expected a deadline error when the asset server does not answer in time")
 	}
+}
+
+// TestRequestsStopWhenTheCallersContextIsCancelled is the other half of the
+// bound: the deadlines above are this package's own, and a caller that knows
+// better — the user pressed Ctrl-C, the machine is going to sleep — has to be
+// able to end a request that is already in flight. Only a context threaded
+// into the request can do that, so this fails if the deadline only ever lived
+// on a client.
+func TestRequestsStopWhenTheCallersContextIsCancelled(t *testing.T) {
+	url, release := stalledServer(t, `{"tag_name":"v0.32.0"}`)
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("release lookup", func(t *testing.T) {
+		if _, err := fetchRelease(ctx, url); err == nil {
+			t.Fatal("expected an error once the caller's context was cancelled")
+		}
+	})
+	t.Run("asset download", func(t *testing.T) {
+		body, err := Download(ctx, url)
+		if err == nil {
+			_ = body.Close() //nolint:errcheck
+			t.Fatal("expected an error once the caller's context was cancelled")
+		}
+	})
 }
 
 func TestReadArchiveRefusesMoreThanItsCap(t *testing.T) {
@@ -219,7 +245,7 @@ func TestDownloadedArchiveOverItsCapIsRefused(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, err := Download(srv.URL)
+	body, err := Download(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
@@ -238,7 +264,7 @@ func TestDownloadedChecksumsOverTheirCapAreRefused(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	body, err := Download(srv.URL)
+	body, err := Download(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
@@ -263,7 +289,7 @@ func TestFetchReleaseRefusesAnOversizedBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := fetchRelease(srv.URL)
+	_, err := fetchRelease(context.Background(), srv.URL)
 	if err == nil {
 		t.Fatal("expected an error when the release metadata exceeds its cap")
 	}
@@ -278,7 +304,7 @@ func TestFetchReleaseRejectsANonOKStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := fetchRelease(srv.URL); err == nil {
+	if _, err := fetchRelease(context.Background(), srv.URL); err == nil {
 		t.Fatal("expected an error for a 404 release API response")
 	}
 }
@@ -292,7 +318,7 @@ func TestFetchReleaseReturnsTheRelease(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rel, err := fetchRelease(srv.URL)
+	rel, err := fetchRelease(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("fetchRelease: %v", err)
 	}
