@@ -273,6 +273,40 @@ func TestAmbiguousNameRefusalNamesAtMostFiveCandidates(t *testing.T) {
 	}
 }
 
+// TestProjectsNamedTxClampsTheLimit pins that the count and the row list cannot
+// disagree. SQLite reads LIMIT 0 as "no rows" and a negative limit as "no
+// limit", so a caller asking for nothing would get a count of one with an
+// empty list, and the single-candidate branch of the decision above indexes the
+// first row on the strength of that count — inside a transaction already
+// holding the store mutex and the write lock.
+func TestProjectsNamedTxClampsTheLimit(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "infra", "", "infra"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	// Rolled back, not committed: this query only reads, and a commit would
+	// write nothing either way.
+	defer tx.Rollback() //nolint:errcheck
+
+	for _, limit := range []int{0, -1} {
+		candidates, matching, err := s.projectsNamedTx(ctx, tx, "infra", limit)
+		if err != nil {
+			t.Fatalf("projectsNamedTx(limit %d): %v", limit, err)
+		}
+		if matching != 1 || len(candidates) != 1 || candidates[0].id != "infra" {
+			t.Errorf("projectsNamedTx(limit %d) = (%d rows, count %d), want the one project that matches", limit, len(candidates), matching)
+		}
+	}
+}
+
 // existingDir creates a real directory under a fresh temporary root and
 // returns its path. Every refusal under test compares directories on disk, so
 // a path that does not resolve would make the case pass for the wrong reason.

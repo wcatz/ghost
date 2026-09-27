@@ -461,10 +461,11 @@ func (r *BindingRefusal) Notice() string {
 }
 
 // maxNamedCandidates bounds how many candidate projects a notice names, and
-// equally how many this decision reads. This text is returned to the agent
-// that made the save and is often still in its context for the rest of the
-// session, and the count of same-named projects is not bounded by anything —
-// it is exactly what a project-merge accident leaves behind.
+// equally how many this decision carries into its log line and that notice.
+// The text is returned to the agent that made the save and is often still in
+// its context for the rest of the session, and the count of same-named
+// projects is not bounded by anything — it is exactly what a project-merge
+// accident leaves behind.
 const maxNamedCandidates = 5
 
 // namedCandidates lists the candidate ids a refusal carries, at most
@@ -999,11 +1000,22 @@ type nameCandidate struct {
 //
 // The count decides the refusal and the rows decide the rest, so both come from
 // one query: COUNT(*) OVER () is evaluated before LIMIT, which is what keeps
-// the two consistent. The read is bounded rather than exhaustive because it
-// runs holding the store mutex and the SQLite write lock, and the number of
-// same-named projects is exactly what a merge accident leaves behind — the
-// caller needs the count and the first few names, not the rest.
+// the two consistent.
+//
+// What the limit bounds is what the caller carries — at most limit rows reach
+// the Go slice, the log line and the notice. It does not bound the work SQLite
+// does under the store mutex and the write lock: the window is computed over
+// every matching row, and projects.name carries no index. The count has to be
+// there either way, and reading the names to go with it costs nothing extra.
+//
+// limit is clamped to at least one because SQLite reads LIMIT 0 as "no rows"
+// and a negative limit as "no limit": either would let the count report a
+// match the row list does not contain, and the single-candidate branch below
+// indexes the first row on the strength of that count.
 func (s *Store) projectsNamedTx(ctx context.Context, tx *sql.Tx, name string, limit int) ([]nameCandidate, int, error) {
+	if limit < 1 {
+		limit = 1
+	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, COALESCE(repo_remote, ''), path, COUNT(*) OVER () AS matching
 		FROM projects
