@@ -1060,18 +1060,23 @@ func TestLegFactsAreNotLeftOverFromAnEarlierSearch(t *testing.T) {
 	}
 }
 
-// TestTheSnapshotStoreRecyclesTheCorpusScratchThroughTheStoresPool: the
-// corpus-sized snapshot is recycled through a store's pool, and the store
-// Candidates builds for one retrieval is a bare literal. Without the real store's
-// pool it allocates a snapshot per query and hands it to a pool that is garbage the
-// moment the retrieval returns — reintroducing on the live search path, at every
-// search, the cost #560's pool exists to avoid.
+// TestTheSnapshotStoreRunsItsVectorLegThroughTheStoresScratch: the corpus-sized
+// snapshot is recycled through a store's scratch, and the store Candidates builds
+// for one retrieval is a bare literal. With no scratch of its own it takes the
+// pre-#560 path and allocates a snapshot per query, handing it to a pool that is
+// garbage the moment the retrieval returns -- reintroducing on the live search path,
+// at every search, the cost the scratch exists to avoid.
 //
-// The assertion counts allocations rather than inspecting the pool, because a
-// sync.Pool's contents are per-processor and dropped at every collection: "the
-// pool is empty" is not a property a test can hold (it passes on one P and fails
-// under parallel execution — the first version of this test did exactly that).
-func TestTheSnapshotStoreRecyclesTheCorpusScratchThroughTheStoresPool(t *testing.T) {
+// The assertion is that the store's own allocation counter moved, which is the one
+// part of this that is guaranteed. Two adjacent properties are NOT, and the first
+// version of this test asserted them and failed in CI for exactly that reason:
+// a sync.Pool's contents are per-processor and are dropped at every collection, so
+// neither "the pool is empty" nor "five further searches allocate nothing" is a
+// property a test can hold -- a collection in the window re-allocates, whichever
+// store is asking. What cannot vary is whether the retrieval went through the real
+// store's scratch at all: a store with no scratch of its own never touches this
+// counter, so a counter that never moves is the defect, deterministically.
+func TestTheSnapshotStoreRunsItsVectorLegThroughTheStoresScratch(t *testing.T) {
 	store, ctx := setupTestStore(t)
 	for i, content := range []string{"vector search corpus row one", "vector search corpus row two"} {
 		id := createTestMemory(t, store, ctx, content)
@@ -1085,22 +1090,25 @@ func TestTheSnapshotStoreRecyclesTheCorpusScratchThroughTheStoresPool(t *testing
 	req.ProjectID = "test-proj"
 	req.QueryVec = []float32{1, 0, 0}
 	req.Condition = CondHybrid
+
+	// Drain first. Create's near-duplicate probes borrow and return a corpus
+	// snapshot, so a pool that still holds one would let the retrieval recycle it
+	// without allocating, and the counter would not move for a reason that has
+	// nothing to do with the seam. Each Get on an empty pool allocates, which is
+	// fine: the baseline is read after this, not before.
+	for range 8 {
+		if v := store.scratch.pool.Get(); v != nil {
+			_ = v
+		}
+	}
+	before := store.scratch.allocationCount()
 	if _, err := store.Candidates(ctx, req); err != nil {
 		t.Fatalf("Candidates: %v", err)
 	}
 
-	// Warm the pool: a second search over the same corpus must not allocate.
-	before := store.scratch.allocationCount()
-	for range 5 {
-		if _, err := store.Candidates(ctx, req); err != nil {
-			t.Fatalf("Candidates: %v", err)
-		}
-	}
-	if after := store.scratch.allocationCount(); after != before {
-		t.Errorf("five further searches allocated %d more corpus snapshots: the snapshot store is "+
-			"not recycling through this store's pool", after-before)
-	}
-	if before == 0 {
-		t.Error("no snapshot was ever allocated, so the counter is not measuring the vector leg")
+	if after := store.scratch.allocationCount(); after <= before {
+		t.Errorf("the store's corpus-scratch allocations did not move (%d -> %d) across a retrieval, "+
+			"so the snapshot store ran its vector leg without this store's scratch: a corpus-sized "+
+			"allocation per query that nothing recycles", before, after)
 	}
 }
