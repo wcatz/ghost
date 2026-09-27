@@ -125,26 +125,39 @@ func ConfidenceLabel(confidence *float64) string {
 	return " confidence " + strconv.FormatFloat(*confidence, 'g', -1, 64)
 }
 
-// stampText renders one validity boundary in the whole-day form when the instant
-// is the boundary that form stands for, and in full otherwise — into
+// stampText renders one validity boundary as a whole day when the instant is the
+// boundary that form stands for, and in full otherwise — into
 // memory.DateStampLayout, the same form a reader accepts.
 //
-// Midnight is the start of a day, and every writer stores a bare start there, so
-// midnight always prints as the date: it is the same instant, so nothing is lost.
+// Which instant the date stands for depends on which boundary this is, and isEnd
+// is what says so:
 //
-// isEnd says which boundary this is, and it matters for the other end of a day. A
-// writer stores a bare window end as 23:59:59 (see internal/mcpserver's
-// parseStampArg endOfDay parameter), so "valid until 2026-10-01" has to print as
-// the 1st — printing 2026-10-01 23:59:59 would be noisier and a different claim
-// from the one the caller wrote. But 23:59:59 as a window's START or as a
-// verification is an instant the caller chose, and printing it as a date would
-// understate the stored instant by a whole day: the line would read as though the
-// claim began at midnight, and re-saving the boundary it showed would move the row
-// a day earlier. So the end-of-day collapse belongs to `valid_until` alone.
+//   - As a window's START or a verification, a date means midnight — which is
+//     where every writer puts a bare one — so midnight prints as the date. It is
+//     the same instant, and 23:59:59 is a time the caller chose, so it prints in
+//     full: collapsing it would read as though the claim began at midnight, and
+//     re-saving the boundary the line showed would move the row a day earlier.
+//   - As a window's END, a date means the last second of that day, because that is
+//     where a writer puts a bare one (see internal/mcpserver's parseStampArg
+//     endOfDay parameter) and because "valid until 2026-10-01" means the 1st. So
+//     23:59:59 prints as the date, and midnight — which the same date form does
+//     NOT stand for on this boundary — prints in full.
+//
+// The last pair is the asymmetry that matters, and it is why both directions are
+// conditional. A midnight `valid_until` is reachable without any of Ghost's tools:
+// memory.StampLayouts accepts a bare date, and a portable artifact, a restored
+// snapshot, a hand edit or a SQLite date() leaves one. Printing it as "until
+// 2026-10-01" would be a claim about the whole day while stage 2 retires the row at
+// midnight of it, and an agent re-saving what it was shown would extend the claim
+// by a day. Printing the instant keeps the line and the filter saying the same
+// thing, which is the only reason to render one from the other.
 func stampText(t *time.Time, isEnd bool) string {
-	midnight := t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0
-	endOfDay := isEnd && t.Hour() == 23 && t.Minute() == 59 && t.Second() == 59
-	if midnight || endOfDay {
+	hour, minute, second := t.Hour(), t.Minute(), t.Second()
+	isBoundary := hour == 0 && minute == 0 && second == 0
+	if isEnd {
+		isBoundary = hour == 23 && minute == 59 && second == 59
+	}
+	if isBoundary {
 		return t.Format(memory.DateStampLayout)
 	}
 	return t.Format(memory.StoredStampLayout)

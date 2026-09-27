@@ -84,11 +84,15 @@ func TestItemLineRendersValidityDatesAndTimes(t *testing.T) {
 			wants: []string{"verified 2026-09-20 23:59:59"},
 		},
 		{
-			// Midnight is the start of a day whichever field it is, so it prints as
-			// the date on all three — the same instant, said more briefly.
-			name:  "midnight as a verification",
-			item:  Item{ValidityState: validityValid, VerifiedAt: stamp("2026-09-20 00:00:00")},
-			wants: []string{"verified 2026-09-20"},
+			// A midnight valid_until is reachable without any of Ghost's tools —
+			// an artifact, a restored snapshot, a hand edit or a date() call can
+			// leave one — and the date form does NOT stand for midnight on this
+			// boundary. Printing "until 2026-10-01" would claim the whole day while
+			// stage 2 retires the row at midnight of it, so the instant prints and
+			// the line and the filter keep saying the same thing.
+			name:  "midnight as the end of a window",
+			item:  Item{ValidityState: validityExpired, ValidUntil: stamp("2026-10-01 00:00:00")},
+			wants: []string{"until 2026-10-01 00:00:00", "expired"},
 		},
 		{
 			name:  "verification with no window",
@@ -164,7 +168,10 @@ func TestItemLineRendersAZeroConfidence(t *testing.T) {
 // not read — and an unreadable value has to render as no claim rather than as a
 // date assembled from whatever parsed.
 func TestValidityLabelRendersStoredStampsAndIgnoresUnreadableOnes(t *testing.T) {
-	from, until, verified := "2026-01-15 00:00:00", "2026-10-01 00:00:00", "2026-09-20 00:00:00"
+	// A window's end is stored as the last second of its day by the writers, so
+	// the fixture is the value they produce — and both entry points must agree
+	// on it.
+	from, until, verified := "2026-01-15 00:00:00", "2026-10-01 23:59:59", "2026-09-20 00:00:00"
 	if got := ValidityLabel(validityValid, &from, &until, &verified); got != " valid from 2026-01-15 until 2026-10-01 verified 2026-09-20" {
 		t.Errorf("ValidityLabel = %q, want the same words Item.Line renders", got)
 	}
@@ -273,7 +280,7 @@ func TestValidityLabelIgnoresUnreadableStampsItCannotInterpret(t *testing.T) {
 // different types, and a divergence here is the one thing that makes the shared
 // field set a claim rather than a fact.
 func TestItemLineAndValidityLabelAgree(t *testing.T) {
-	from, until := "2026-01-15 00:00:00", "2026-10-01 00:00:00"
+	from, until := "2026-01-15 00:00:00", "2026-10-01 23:59:59"
 	item := Item{ValidFrom: stamp(from), ValidUntil: stamp(until), ValidityState: validityUnverified}
 	if got, want := item.Line(), ValidityLabel(validityUnverified, &from, &until, nil); !strings.Contains(got, want) {
 		t.Errorf("Item.Line renders %s, ValidityLabel renders %q: the two entry points disagree", got, want)

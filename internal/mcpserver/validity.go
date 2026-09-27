@@ -66,7 +66,12 @@ var acceptedStampForms = []string{time.RFC3339, memory.DateStampLayout}
 // second-resolution text column can express: the claim stops one second before
 // the day is over rather than a day before it began. A full RFC 3339 stamp is
 // taken at the instant the caller wrote, because there they did say which one,
-// and assemble.stampText prints either day boundary back as a date.
+//
+// Either way the stored value round-trips: assemble.stampText collapses a
+// boundary to a date only when the instant is the one that date form stands for
+// on that boundary — on a window's end that is this 23:59:59, and on a start or a
+// verification it is midnight, so a 23:59:59 the caller chose there prints in
+// full.
 //
 // nil and an empty string are the same request — "no claim" — and become a nil
 // pointer, so a caller that sends "" does not write a claim with no readable
