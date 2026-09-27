@@ -406,14 +406,17 @@ func reportReductionWarning(w io.Writer, live []memory.Memory, projectMems, glob
 	if retained >= len(live)/2 {
 		return
 	}
-	fmt.Fprintf(w, "WARNING: consolidation left %d memories in the project vs %d consolidatable (>50%% reduction)\n",
+	// The results are discarded on purpose, as everywhere else on this path:
+	// a write that fails cannot be reported through the same write, and
+	// BuildReflectionPrompt handles its writer the same way.
+	_, _ = fmt.Fprintf(w, "WARNING: consolidation left %d memories in the project vs %d consolidatable (>50%% reduction)\n",
 		retained, len(live))
 	if len(globalMems) > 0 {
 		note := "kept project-scoped"
 		if promoteGlobals {
 			note = "promoted to _global"
 		}
-		fmt.Fprintf(w, "  (%d memories classified as global — %s; check scope accuracy)\n", len(globalMems), note)
+		_, _ = fmt.Fprintf(w, "  (%d memories classified as global — %s; check scope accuracy)\n", len(globalMems), note)
 	}
 }
 
