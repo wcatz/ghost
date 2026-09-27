@@ -188,7 +188,7 @@ func Snapshot(t testing.TB, root string) Tree {
 		}
 		rel, rerr := filepath.Rel(root, p)
 		if rerr != nil || rel == "." {
-			return nil //nolint:nilerr // "." is root itself, which is not an entry
+			return nil //nolint:nilerr // an unrelatable path is not a fixture failure, and "." is root itself
 		}
 		rel = filepath.ToSlash(rel)
 		out[rel] = ""
@@ -204,9 +204,15 @@ func Snapshot(t testing.TB, root string) Tree {
 		}
 		data, rerr := os.ReadFile(p) // #nosec G304 -- the path came from walking root
 		if rerr != nil {
-			// Recorded rather than skipped, so an unreadable file is a visible
-			// difference instead of a silently absent entry.
-			out[rel] = "<unreadable: " + rerr.Error() + ">"
+			// Recorded rather than skipped, so an entry that BECOMES unreadable
+			// is reported as rewritten rather than as removed. A file unreadable
+			// in both snapshots compares equal, because its content is not
+			// observable from either side — that is a blind spot, not a claim
+			// about the contents, and no fixture should depend on it. The
+			// placeholder carries no path: the map key already names the file,
+			// and a value that varied with how root was spelled would break the
+			// independence Snapshot's keys are there to provide.
+			out[rel] = "<unreadable>"
 			return nil //nolint:nilerr // recorded as unreadable just above
 		}
 		out[rel] = string(data)
@@ -222,6 +228,12 @@ func Snapshot(t testing.TB, root string) Tree {
 // entries with exactly the first one's contents. A surface that documents
 // itself as read-only has to satisfy this against a tree full of hostile
 // filenames.
+//
+// One blind spot, deliberate: a file Snapshot could not read is recorded as the
+// same placeholder on both sides, so a rewrite of a file that is unreadable
+// throughout compares equal. Its content is not observable from either side, so
+// there is nothing truthful to compare — the answer is to make the file readable
+// (a mode bit, a missing directory), not to believe this.
 func (before Tree) AssertUnchanged(t testing.TB, what string, after Tree) {
 	t.Helper()
 	for path, content := range after {
