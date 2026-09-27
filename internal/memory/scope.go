@@ -126,11 +126,12 @@ func ScopesConflict(a, b map[string]string) bool {
 // stored scopes.
 //
 // It is a second statement of one rule, and that is a cost with a purpose. Every
-// statement that needs it chooses its candidates with its own LIMIT — Upsert's
-// two dedup probes and the two fold-target liveness checks — so a scope check
-// applied after the cut would spend the candidate budget on rows the caller may
-// not fold into and miss a compatible one ranked just below (#665). A second
-// statement is the only way to decide inside the cut.
+// statement that needs it chooses its candidates with its own LIMIT — the two of
+// Upsert's dedup probes and foldTargetStillLive, which is one of the two
+// fold-target liveness checks, the other being the cross-category probe's own —
+// so a scope check applied after the cut would spend the candidate budget on rows
+// the caller may not fold into and miss a compatible one ranked just below (#665).
+// A second statement is the only way to decide inside the cut.
 //
 // Two copies of a rule drift, so TestScopesConflictSQLAgreesWithScopesConflict
 // runs both forms over the same table and requires they answer identically,
