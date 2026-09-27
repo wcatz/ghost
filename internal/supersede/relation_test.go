@@ -423,7 +423,7 @@ func TestRelationClassifierLive(t *testing.T) {
 	}
 	cls := NewRelationClassifier(cli)
 
-	correct := 0
+	correct, unparsed := 0, 0
 	for _, c := range liveRelationCases {
 		got, err := cls.Classify(ctx, candidateOf(c))
 		if err != nil {
@@ -433,6 +433,7 @@ func TestRelationClassifierLive(t *testing.T) {
 			// unparseable, so one of those replies must not abort the run. A
 			// transport failure stays fatal: it is not the model's phrasing.
 			if errors.Is(err, errUnparseableVerdict) {
+				unparsed++
 				t.Logf("[UNPARSEABLE] want=%v  %s  reply=%q", c.want, c.name, err)
 				continue
 			}
@@ -446,8 +447,18 @@ func TestRelationClassifierLive(t *testing.T) {
 		}
 		t.Logf("[%s] want=%v got=%v  %s  newer=%q", verdict, c.want, got, c.name, c.newer)
 	}
-	acc := float64(correct) / float64(len(liveRelationCases))
-	t.Logf("relation classifier accuracy on labeled set: %d/%d = %.2f", correct, len(liveRelationCases), acc)
+	// An unparseable answer is neither right nor wrong, so it leaves the
+	// denominator: the figure is accuracy over the cases that produced a
+	// verdict. That makes a run in which EVERY reply was unparseable report
+	// 0/0, which is a vacuous measurement rather than a score — so it fails
+	// instead, and says how many replies it could not read.
+	if correct+unparsed == 0 {
+		t.Fatalf("no labeled case produced a parseable verdict (%d unparseable of %d); the run is vacuous, not a score",
+			unparsed, len(liveRelationCases))
+	}
+	acc := float64(correct) / float64(correct+unparsed)
+	t.Logf("relation classifier accuracy on labeled set: %d/%d = %.2f (%d unparseable, excluded)",
+		correct, correct+unparsed, acc, unparsed)
 	if acc < 0.75 {
 		t.Errorf("classifier accuracy %.2f below 0.75 — prompt may need work", acc)
 	}
