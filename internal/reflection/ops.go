@@ -391,11 +391,18 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 	// loss; an id the model never mentioned needs no inference at all.
 	//
 	// Consequence, deliberate: omission is no longer a deletion path for the LLM
-	// tier. A memory leaves the corpus when its id is named as a merge source,
-	// named for a rewrite, or named in a drop with a reason. --allow-drops keeps
-	// its meaning for what the guard still finds — an explicit drop it cannot
-	// corroborate, a merge that lost substance, and the SQLite tier's absorbed
-	// duplicates.
+	// tier. Naming an id is NECESSARY but not SUFFICIENT: a memory leaves the
+	// corpus when its id is named as a merge source, named for a rewrite, or
+	// named in a drop with a reason AND a surviving output accounts for it — the
+	// drop guard's 45% token containment, with a merge source measured against
+	// its own merge — or --allow-drops accepts the deletion. So this comment's
+	// record of what was named is not a record of what was removed (#549), and a
+	// rewrite whose replacement says nothing of the old row leaves that row in
+	// the corpus verbatim.
+	//
+	// --allow-drops keeps its meaning for what the guard still finds — an
+	// explicit drop it cannot corroborate, a merge that lost substance, and the
+	// SQLite tier's absorbed duplicates.
 	for _, m := range input.ExistingMemories {
 		if claimed[memIDKey(m.ID)] == 0 {
 			result.Memories = append(result.Memories, verbatimMemory(m))

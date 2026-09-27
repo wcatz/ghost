@@ -86,6 +86,46 @@ func TestRewrittenRowIsNotReAddedWhenTheRewriteKeepsTheSubstance(t *testing.T) {
 	}
 }
 
+// TestPromptRendersTheOpsContractAsOneContiguousList: the replaceTail splices
+// ended in an explicit "\n" followed by a raw string whose own first character is
+// a newline, so the rendered prompt got a blank line — one between the rewrite
+// bullet and the drop-obsolete bullet, one between the drop-superseded bullet and
+// the Rules heading. The ops contract is an instruction list, and a blank line
+// splits it into two lists the model reads as separate sections.
+//
+// Neither the per-bullet helper nor the inversion test could see it: the helper
+// cuts at the FIRST newline, which is the one before the blank line, and
+// strings.Contains is indifferent to how many newlines separate two substrings.
+// So this asserts on the JOINED text between consecutive bullets, which is the
+// only place a stray blank line is visible.
+func TestPromptRendersTheOpsContractAsOneContiguousList(t *testing.T) {
+	prompt := BuildReflectionPrompt(ReflectionInput{ProjectName: "ghost", ExistingMemories: []memory.Memory{
+		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "the bastion is reached on port 2222"},
+	}})
+
+	bullets := []string{
+		`- "keep <id>"`,
+		`- "merge <id>,<id>,<id> -> <text>"`,
+		`- "rewrite <id> -> <text>"`,
+		`- "drop <id> reason: obsolete"`,
+		`- "drop <id> reason: superseded by <id>"`,
+	}
+	for i := 1; i < len(bullets); i++ {
+		_, afterPrev, ok := strings.Cut(prompt, bullets[i-1])
+		if !ok {
+			t.Fatalf("the prompt has no %s bullet", bullets[i-1])
+		}
+		at, _, ok := strings.Cut(afterPrev, bullets[i])
+		if !ok {
+			t.Fatalf("the prompt has no %s bullet after %s", bullets[i], bullets[i-1])
+		}
+		if strings.Contains(at, "\n\n") {
+			t.Errorf("a blank line separates %s from %s, splitting the ops contract into two lists; got %q",
+				bullets[i-1], bullets[i], at)
+		}
+	}
+}
+
 // bulletErr is bullet without the t.Fatalf, so a test can assert the refusal
 // instead of merely provoking it. A Fatalf inside a helper fails the test that
 // called it, which leaves "the guard fired" unpinnable — removing the guard would
