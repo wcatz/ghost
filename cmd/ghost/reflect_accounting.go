@@ -140,11 +140,11 @@ func guardClause(guarded int, allowDrops bool, subject string) string {
 	if guarded <= 0 {
 		return ""
 	}
-	plural, verb := "", "have"
-	if guarded > 1 {
-		plural, verb = "s", "have"
-	} else {
-		verb = "has"
+	// "1 row has" and "2 sources have": the verb follows the count, because this
+	// clause is the wording an operator reads on every accepted deletion.
+	plural, verb := "s", "have"
+	if guarded == 1 {
+		plural, verb = "", "has"
 	}
 	if allowDrops {
 		return fmt.Sprintf("; %d %s%s %s no surviving output, and --allow-drops accepts the deletion", guarded, subject, plural, verb)
