@@ -1,7 +1,9 @@
 package assemble
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -347,13 +349,32 @@ func (p *pipeline) confidenceOf(id string) *float64 {
 	return nil
 }
 
-// notes is the bounded diagnostic note list, stage notes first.
+// notes is the bounded diagnostic note list, stage notes first. An empty result
+// also gets the per-stage breakdown, because a closed reason set can name only
+// one cause and a caller who was told "withheld as out of date" while the budget
+// cut the rest needs to see that both happened.
 func (p *pipeline) notes() []string {
 	all := append([]string(nil), p.noteBuf...)
 	if len(p.rows) == 0 && len(p.dropped) > 0 {
-		all = append(all, formatNote("%d candidate rows were removed by the assembler's filters; none reached the answer", len(p.dropped)))
+		all = append(all, formatNote("%d candidate rows were removed and none reached the answer: %s",
+			len(p.dropped), p.removalBreakdown()))
 	}
 	return boundNotes(all, p.req.Budget.MaxNoteBytes, p.req.Budget.MaxNotesBytes)
+}
+
+// removalBreakdown is the per-stage removal count in pipeline order.
+func (p *pipeline) removalBreakdown() string {
+	order := []string{stageValidity, stagePredicates, stageProvenance, stageConflicts, stageDedup, stageDiversity, stageBudget}
+	parts := make([]string, 0, len(order))
+	for _, stage := range order {
+		if n := p.droppedBy[stage]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", stage, n))
+		}
+	}
+	if len(parts) == 0 {
+		return "no stage recorded a removal"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // outcome and reason are Decision 3's rules, restricted to what v1 can decide.
@@ -370,26 +391,59 @@ func (p *pipeline) reason() string {
 		}
 		return "no_candidates"
 	}
-	switch {
-	case p.droppedBy[stageValidity] == len(p.set.Rows):
-		return "all_invalid"
-	case p.req.Category != "" && p.droppedBy[stagePredicates] == len(p.set.Rows):
-		return "all_out_of_category"
-	case len(p.req.Scope) > 0 && p.droppedBy[stagePredicates] == len(p.set.Rows):
-		return "all_out_of_scope"
-	case p.droppedBy[stageBudget] == len(p.set.Rows):
-		return "all_over_budget"
+	// The reason set is closed, so a set emptied by more than one stage can
+	// carry only one label, and the label has to be the cause that accounts for
+	// the rows. Picking the first stage that removed anything would let a single
+	// expired row claim a set that the item budget actually emptied, and the
+	// caller's next move differs: one looks for a date problem, the other raises
+	// the limit. Ties go to the earlier stage, which keeps "the first matching
+	// stage supplies the reason" true for the cases where the stages do not
+	// compete.
+	stage, reason := p.dominantRemoval()
+	if stage == "" {
+		return "no_candidates"
 	}
-	// Rows existed, none survived, and no single stage accounts for all of
-	// them: the filters together emptied the set. The category verdict is named
-	// first because it is the narrower of the two.
-	if p.droppedBy[stagePredicates] > 0 {
-		if p.req.Category != "" {
-			return "all_out_of_category"
+	return reason
+}
+
+// dominantRemoval is the stage responsible for most of the removed rows, and the
+// reason that goes with it. Stage order breaks ties, so the result does not
+// depend on map iteration.
+func (p *pipeline) dominantRemoval() (string, string) {
+	type cause struct {
+		stage, reason string
+		count         int
+	}
+	candidates := []cause{
+		{stage: stageValidity, reason: "all_invalid"},
+		{stage: stagePredicates, reason: p.predicateReason()},
+		{stage: stageDedup, reason: "all_dedup_dropped"},
+		{stage: stageDiversity, reason: "all_diversity_capped"},
+		{stage: stageBudget, reason: "all_over_budget"},
+	}
+	best := cause{}
+	for _, c := range candidates {
+		c.count = p.droppedBy[c.stage]
+		if c.count > best.count {
+			best = c
 		}
+	}
+	if best.reason == "" {
+		return "", ""
+	}
+	return best.stage, best.reason
+}
+
+// predicateReason names the narrower of the two stage-3 verdicts, or "" when
+// neither filter is set.
+func (p *pipeline) predicateReason() string {
+	switch {
+	case p.req.Category != "":
+		return "all_out_of_category"
+	case len(p.req.Scope) > 0:
 		return "all_out_of_scope"
 	}
-	return "all_invalid"
+	return ""
 }
 
 func (p *pipeline) outcome(reason string) Outcome {

@@ -1001,3 +1001,56 @@ func TestTraceRecordsOneFatePerRowPerStage(t *testing.T) {
 		}
 	}
 }
+
+// TestMixedRemovalsReportTheDominantCause: the reason set is closed, so a set
+// emptied by two stages can only carry one label — and the label must be the
+// cause that actually accounts for the rows, not whichever stage the fallback
+// happened to reach. A set where one row is expired and nine are cut by the
+// budget is a budget result; calling it a pure validity withholding tells the
+// caller their query was fine and never names the limit they can raise.
+func TestMixedRemovalsReportTheDominantCause(t *testing.T) {
+	expired := "2020-01-01 00:00:00"
+	rows := make([]memory.Candidate, 0, 10)
+	for i := range 9 {
+		rows = append(rows, candidate(string(rune('a'+i)), "proj", "fact", "live row", 0.5))
+	}
+	rows = append(rows, candidate("z", "proj", "fact", "expired row", 0.9))
+	rows[9].ValidUntil = &expired
+
+	// A one-byte response budget is what makes the mixed case empty: every
+	// survivor is longer than a byte, so the budget removes all nine and the
+	// answer is empty with one row gone to validity and nine to the budget.
+	req := baseRequest()
+	req.Budget = Budget{MaxItems: 10, MaxBytes: 1}
+	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
+
+	if res.Reason != "all_over_budget" {
+		t.Errorf("reason = %q, want all_over_budget: nine of the ten rows were cut by the budget, "+
+			"and a validity label would tell the caller to look for a date problem", res.Reason)
+	}
+	// The breakdown is what makes a single closed reason honest, so the note has
+	// to name both stages rather than just counting the removals.
+	if !hasNote(res.Notes, "budget") || !hasNote(res.Notes, "validity") {
+		t.Errorf("notes %v do not name both stages that removed rows", res.Notes)
+	}
+
+	// A tie goes to the earlier stage, so the label does not depend on map
+	// iteration order: two rows expired and two cut by the budget is a validity
+	// result, and the same corpus reported the other way on a different run would
+	// be a defect in a field a caller acts on.
+	tie := make([]memory.Candidate, 0, 4)
+	for i := range 2 {
+		row := candidate(string(rune('a'+i)), "proj", "fact", "expired tie row", 0.9)
+		row.ValidUntil = &expired
+		tie = append(tie, row)
+	}
+	for i := range 2 {
+		tie = append(tie, candidate(string(rune('c'+i)), "proj", "fact", "live tie row", 0.5))
+	}
+	tieReq := baseRequest()
+	tieReq.Budget = Budget{MaxItems: 10, MaxBytes: 1}
+	if got := run(t, &fakeRetriever{set: setOf(tie...)}, tieReq); got.Reason != "all_invalid" {
+		t.Errorf("tied removals (validity 2, budget 2) reported %q, want all_invalid: "+
+			"a tie resolves to the earlier stage, not to iteration order", got.Reason)
+	}
+}

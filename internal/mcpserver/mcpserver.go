@@ -45,11 +45,18 @@ type embedderDiagnostics interface {
 
 // emptyWhy explains an empty result that is not an absence, and returns "" for a
 // plain no-match — where the leading sentence is true and the caveat covers the
-// window. Every other reason names what happened to the rows, in the words that
-// tell the caller what to do differently: a row withheld as out of date is
-// refreshed, a row cut by a cap is the cap raised. The reasons not listed here
-// belong to stages that do not run in this version, and a version that cannot
-// explain an empty answer says the absence sentence rather than inventing one.
+// window. The reasons it covers are the two whose cause is not already named
+// elsewhere in the answer: a row withheld as out of date, and a row cut by the
+// item budget. The category and scope reasons are not listed because
+// filterCaveat below already names those filters and suggests the next step, and
+// the dedup and diversity reasons belong to stages that do not run in this
+// version — a version that cannot explain an empty answer says the absence
+// sentence rather than inventing one.
+//
+// No sentence here claims every row was removed the same way. A closed reason set
+// carries the dominant cause, and the note appended to the answer carries the
+// per-stage breakdown; "every" would contradict that note whenever two stages
+// shared the work.
 //
 // This text is read by an agent, not by a reviewer of this repository: it names
 // what happened to the rows and what to do about it, and nothing else. Design
@@ -57,12 +64,27 @@ type embedderDiagnostics interface {
 func emptyWhy(result assemble.Result) string {
 	switch result.Reason {
 	case "all_invalid":
-		return "Every matching memory was withheld as out of date: its validity window has closed or has not opened yet. " +
+		return "No memory was returned: the candidates found were withheld as out of date, their validity windows having closed or not yet opened. " +
 			"The query was not wrong — the answer is withheld, not absent."
 	case "all_over_budget":
-		return "Every matching memory was cut by the item budget. Raise the limit to see them."
+		return "No memory was returned: the candidates found were cut by the item budget. Raise the limit to see them."
 	}
 	return ""
+}
+
+// assemblerNotes renders the assembler's bounded diagnostics for an empty answer,
+// as a leading label so the lines below it are not mistaken for more memories.
+func assemblerNotes(result assemble.Result) string {
+	if len(result.Notes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, note := range result.Notes {
+		b.WriteString("\n(Note: ")
+		b.WriteString(note)
+		b.WriteString(")")
+	}
+	return b.String()
 }
 
 // failedLegs names the retrieval legs the assembler recorded as errored, or ""
@@ -772,12 +794,17 @@ func (s *Server) registerTools() {
 		if len(result.Items) == 0 {
 			// "No matching memories found." is an absence claim, and it is only
 			// true when nothing removed a row that was found. The assembler knows
-			// which stage emptied the set, so when a stage did, the answer leads
+			// whether a stage emptied the set, so when one did, the answer leads
 			// with that instead: a row withheld as out of date is a different
 			// instruction to the caller (refresh it) from a row that does not
 			// exist (ask about something else), and leading with the absence
 			// sentence would bury the difference under the line a caller stops
 			// reading at.
+			//
+			// The assembler's notes go with it either way. A closed reason set can
+			// name one cause, and these rows may have been removed by more than
+			// one stage, so the per-stage breakdown is what makes the sentence
+			// above checkable rather than merely plausible.
 			text := "No matching memories found."
 			if why := emptyWhy(result); why != "" {
 				text = why
@@ -785,6 +812,7 @@ func (s *Server) registerTools() {
 			if caveat := filterCaveat(args.Category, scopeFilter); caveat != "" {
 				text += "\n\n" + caveat
 			}
+			text += assemblerNotes(result)
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: text}},
 			}, nil, nil
