@@ -434,8 +434,17 @@ func TestConfigureGooseIsolationFailsClosed(t *testing.T) {
 		if got := envValue(cmd.Env, "XDG_CONFIG_HOME"); got != filepath.Join(home, ".config") {
 			t.Fatalf("XDG_CONFIG_HOME = %q, want the parent's value", got)
 		}
-		if got := envValue(cmd.Env, "HOME"); got != filepath.Join(dir, "goose-home") {
+		got := envValue(cmd.Env, "HOME")
+		if got != filepath.Join(dir, "goose-home") {
 			t.Fatalf("HOME = %q, want the isolated home", got)
+		}
+		// HOME must EXIST, not merely be named: a child with a missing home
+		// fails to start on some platforms, and this branch creates no .config
+		// link, so nothing else would have created the directory.
+		if info, err := os.Stat(got); err != nil {
+			t.Fatalf("isolated home does not exist: %v", err)
+		} else if !info.IsDir() {
+			t.Fatalf("isolated home is not a directory: %s", got)
 		}
 	})
 }

@@ -152,6 +152,12 @@ func configureGooseIsolation(cmd *exec.Cmd) error {
 	}
 
 	home := filepath.Join(cmd.Dir, "goose-home")
+	// Created unconditionally, including the XDG branch below, which adds no
+	// link: HOME is handed to the child either way, and a name that does not
+	// resolve is a home the child cannot use.
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return fmt.Errorf("goose isolated home %s: %w", home, err)
+	}
 	if err := linkGooseConfig(home, env, configDir); err != nil {
 		return err
 	}
