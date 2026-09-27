@@ -38,7 +38,7 @@ const stopReminder = `{"decision":"approve","reason":"Reminder: this session use
 // is absolute: every validation, scan, or I/O failure logs one line to stderr,
 // writes nothing to stdout, and returns — callers exit 0 so the host proceeds.
 func RunHostEvent(eventArg, sourceArg string, stdin io.Reader, stdout io.Writer, stderr io.Writer) {
-	data, err := io.ReadAll(stdin)
+	data, err := hostevent.ReadPayload(stdin)
 	if err != nil {
 		logFailOpen(stderr, "read stdin", err)
 		return

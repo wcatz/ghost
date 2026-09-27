@@ -75,8 +75,8 @@ Embedding backfill bug: ticker only swept seen projects.
 // TestRenderMemoryAlias: notes carry an `aliases` flow list so Obsidian's
 // graph and Quick Switcher show a readable label instead of the id8-suffixed
 // filename. The alias is a single-line preview of the content; the flow form
-// keeps the one-line-per-key invariant prune depends on, and ghost_id stays
-// first.
+// keeps the one-line-per-key invariant hasGhostID's scan depends on, and
+// ghost_id stays first for the reader.
 func TestRenderMemoryAlias(t *testing.T) {
 	m := memory.Memory{
 		ID: "74a37cba00112233", ProjectID: "ghost", Category: "gotcha",
@@ -96,9 +96,11 @@ func TestRenderMemoryAlias(t *testing.T) {
 }
 
 // TestRenderHostileFrontmatter: frontmatter values must occupy exactly one
-// line per key (the ghost_id-first invariant prune depends on) and must not
-// change the YAML shape of their line, whatever the store holds. The note
-// body is not frontmatter and stays verbatim.
+// line per key (the invariant hasGhostID's scan depends on — it reads to the
+// first --- and takes the one ghost_id: line there) and must not change the
+// YAML shape of their line, whatever the store holds. ghost_id comes first as
+// the convention a reader sees. The note body is not frontmatter and stays
+// verbatim.
 func TestRenderHostileFrontmatter(t *testing.T) {
 	m := memory.Memory{
 		ID: "bad0000011223344", ProjectID: "evil: proj\nect", Category: "fact",
@@ -210,7 +212,7 @@ func TestRenderDecision(t *testing.T) {
 		Tags: []string{"storage"}, CreatedAt: "2026-07-01 08:00:00", UpdatedAt: "2026-07-01 08:00:00",
 	}
 	got := renderDecision(d)
-	// ghost_id must be the first frontmatter key — prune's hasGhostID depends on it.
+	// ghost_id first: the convention a reader sees. The scan does not need it.
 	if !strings.HasPrefix(got, "---\nghost_id: dec0000011223344\n") {
 		t.Errorf("renderDecision must open with ghost_id-first frontmatter:\n%s", got)
 	}
@@ -229,7 +231,7 @@ func TestRenderTask(t *testing.T) {
 		CreatedAt: "2026-07-10 10:00:00", UpdatedAt: "2026-07-10 10:00:00",
 	}
 	got := renderTask(tk)
-	// ghost_id must be the first frontmatter key — prune's hasGhostID depends on it.
+	// ghost_id first: the convention a reader sees. The scan does not need it.
 	if !strings.HasPrefix(got, "---\nghost_id: task000011223344\n") {
 		t.Errorf("renderTask must open with ghost_id-first frontmatter:\n%s", got)
 	}

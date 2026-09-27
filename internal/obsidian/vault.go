@@ -82,6 +82,17 @@ func writeIfChanged(path, content string) (bool, error) {
 // the only files prune may touch. Only a closed frontmatter block (between
 // the opening and closing --- lines) counts: a note that merely starts with a
 // --- horizontal rule and mentions ghost_id later in its body is not Ghost's.
+//
+// The value it returns is the id AS THE NOTE RECORDS IT, which is not always the
+// id in the store: yamlScalar flattens a tab, a newline and a carriage return to
+// a space so that every key occupies one line, and that flattening is lossy — an
+// id of "tab<TAB>id", one of "line<NL>id" and one of "tab id" all read back as
+// the same bytes. Quoting is undone here for the same reason it had to be: a
+// quoted value is not the value, and a reader that is not the inverse of the
+// writer returns something no keep-set is keyed by. Nothing may DEPEND on
+// recovering the stored id from a note, which is why prune keys on the canonical
+// filename instead; this function answers "is this Ghost's note, and which id does
+// it say it is", and only the first is a question with a reliable answer.
 func hasGhostID(path string) (string, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -97,10 +108,44 @@ func hasGhostID(path string) (string, bool) {
 			return id, found
 		}
 		if v, ok := strings.CutPrefix(line, "ghost_id: "); ok && !found {
-			id, found = strings.TrimSpace(v), true
+			id, found = unquoteYAMLScalar(strings.TrimSpace(v)), true
 		}
 	}
 	return "", false // frontmatter never closed
+}
+
+// unquoteYAMLScalar reverses the quoting yamlScalar applies, so a value written
+// through it reads back as the value that went in. It undoes exactly the two
+// escapes yamlScalar emits and nothing else — a hand-written note is never
+// reinterpreted through escapes this function does not recognise, which matters
+// because it decides which files prune may DELETE. Only the double-quoted form
+// is recognised, because that is the only one yamlScalar emits; a single-quoted
+// value keeps reading as the text it says and therefore never matches a keep-set
+// key. A quoted value that does not decode is returned unchanged, which leaves
+// it unmatched and therefore untouchable.
+func unquoteYAMLScalar(s string) string {
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return s
+	}
+	inner := s[1 : len(s)-1]
+	var b strings.Builder
+	b.Grow(len(inner))
+	for i := 0; i < len(inner); i++ {
+		if inner[i] != '\\' || i+1 >= len(inner) {
+			b.WriteByte(inner[i])
+			continue
+		}
+		switch inner[i+1] {
+		case '\\', '"':
+			b.WriteByte(inner[i+1])
+			i++
+		default:
+			// Not an escape yamlScalar emits: keep both bytes so the value is
+			// returned as it was written rather than as something else.
+			b.WriteByte(inner[i])
+		}
+	}
+	return b.String()
 }
 
 // hasGhostContent reports whether dir contains any .md file with a ghost_id
@@ -123,14 +168,28 @@ func hasGhostContent(dir string) bool {
 	return found
 }
 
+// keepSet is the set of canonical note basenames this pass wrote — the files
+// that must survive, one per live memory, task and decision.
+//
+// It is a SET OF FILENAMES, not a map from ghost_id to filename, and the reason
+// is that the id cannot be read back out of a note. yamlScalar flattens a tab, a
+// newline and a carriage return to a space so that every front-matter key stays
+// on one line, so the id in a note is not always the id in the store: "tab\tid",
+// "line\nid" and "tab id" all render to the same bytes and read back as one
+// value. Keyed by that value, three distinct notes collided on one key and two of
+// them lost — the note was written and then deleted by the pass that wrote it, on
+// every export, for good. Keyed by the filename, the two questions separate: a
+// basename in the set is one of the notes this pass wrote, and a basename absent
+// from it is stale (a deleted entity, or a content edit that renamed the slug —
+// the old-slug file is stale even though its id is still live).
+type keepSet map[string]struct{}
+
 // prune deletes Ghost-managed .md files under the given vault subtrees whose
-// ghost_id is not in keep, or whose basename is not the canonical one for
-// that ghost_id (a content edit renamed the slug — the old-slug file is
-// stale even though its ID is still live). All three guards from the spec
-// are enforced. Orphaned *.ghost-tmp files (left by a crashed writeIfChanged)
-// are also reclaimed — but only inside the managed subtrees, behind the
-// marker guard.
-func prune(root string, subtrees []string, keep map[string]string, knownFolders []string) error {
+// basename is not one of the canonical names this pass wrote. All three guards
+// from the spec are enforced. Orphaned *.ghost-tmp files (left by a crashed
+// writeIfChanged) are also reclaimed — but only inside the managed subtrees,
+// behind the marker guard.
+func prune(root string, subtrees []string, keep keepSet, knownFolders []string) error {
 	if _, err := os.Stat(filepath.Join(root, markerName)); err != nil {
 		return fmt.Errorf("refusing to prune: %s marker not found in %s", markerName, root)
 	}
@@ -155,8 +214,10 @@ func prune(root string, subtrees []string, keep map[string]string, knownFolders 
 			if !strings.HasSuffix(path, ".md") {
 				return nil
 			}
-			if id, ok := hasGhostID(path); ok {
-				if canonical, kept := keep[id]; !kept || canonical != filepath.Base(path) {
+			// The front matter is what makes the file Ghost's to touch; the name
+			// is what says whether it is the one this pass wrote.
+			if _, ok := hasGhostID(path); ok {
+				if _, kept := keep[filepath.Base(path)]; !kept {
 					return os.Remove(path)
 				}
 			}
