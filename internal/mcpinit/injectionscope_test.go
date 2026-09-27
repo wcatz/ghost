@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -169,6 +170,58 @@ func TestSessionStartOnAStoreBehindTheScopeColumnStillRenders(t *testing.T) {
 	}
 	if strings.Contains(got, "scope{") {
 		t.Errorf("a store below the scope column's version has no scope to label or filter on; got:\n%s", got)
+	}
+}
+
+// TestScopeColumnExprWarnsOncePerDiagnosis covers the one path in the loaders
+// that reports a failure, which is otherwise unreachable: a store the hook can
+// open and read. Two handles stand in for one it cannot — one whose path cannot
+// be opened, one closed under it — and they fail differently, which is the
+// property the gate has to have. A bare once-per-process gate prints the first
+// failure and then says nothing, so a transient one masks the persistent one
+// behind it; keyed on the diagnosis, each is reported once.
+func TestScopeColumnExprWarnsOncePerDiagnosis(t *testing.T) {
+	resetScopeVersionWarned()
+	t.Cleanup(resetScopeVersionWarned)
+
+	unopenable, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "no", "such", "dir", "ghost.db")+"?mode=ro")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	closed, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if err := closed.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	restore := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	for range 2 {
+		for _, db := range []*sql.DB{unopenable, closed} {
+			expr, hasScope := scopeColumnExpr(db)
+			if expr != "NULL AS scope" || hasScope {
+				t.Fatalf("scopeColumnExpr = (%q, %v), want the unscoped fallback", expr, hasScope)
+			}
+		}
+	}
+	os.Stderr = restore
+	if err := w.Close(); err != nil {
+		t.Fatalf("close pipe: %v", err)
+	}
+	var out strings.Builder
+	if _, err := io.Copy(&out, r); err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+
+	got := out.String()
+	if n := strings.Count(got, "could not read the store"); n != 2 {
+		t.Errorf("two diagnoses reported once each = %d lines, want 2; stderr was:\n%s", n, got)
 	}
 }
 

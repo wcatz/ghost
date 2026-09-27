@@ -445,25 +445,52 @@ const scopeColumnFloor = 12
 // caller that swallowed the difference would render a block with no scope on it
 // and no filter behind it, and the user would have no way to tell that from a
 // store that has none.
-//
-// Reported once per process, because both loaders probe and one session start
-// runs both. The same rule config.warnf follows for a reason that applies here: a
-// repeated identical warning trains its reader to skip it, and a hook that prints
-// on every session is the place a line is read least.
-var scopeVersionWarned sync.Once
-
 func scopeColumnExpr(db *sql.DB) (expr string, hasScope bool) {
 	v, err := memory.DBUserVersion(db)
 	if err != nil {
-		scopeVersionWarned.Do(func() {
+		// Keyed on the error, not once per process: both loaders probe, so a bare
+		// once would print the line twice for one failure, and a first TRANSIENT
+		// one — a locked store, an unreadable header — would consume the only
+		// warning the process makes and mask the later persistent one behind it. A
+		// distinct diagnosis is still reported once. The same rule, and the same
+		// reason, as config.warnf and Store.warnForeignOnce.
+		if warnScopeVersionOnce(err) {
 			fmt.Fprintln(os.Stderr, "ghost: could not read the store's schema version:", err)
-		})
+		}
 		return "NULL AS scope", false
 	}
 	if v < scopeColumnFloor {
 		return "NULL AS scope", false
 	}
 	return "scope", true
+}
+
+// scopeVersionWarned is the per-diagnosis record behind warnScopeVersionOnce, a
+// package var because the process is the scope of the warning: the hook is its
+// own short-lived process, and RenderSessionContext can render many blocks in one.
+var scopeVersionWarned = struct {
+	mu     sync.Mutex
+	warned map[string]bool
+}{warned: map[string]bool{}}
+
+// warnScopeVersionOnce reports whether this diagnosis has not been printed yet in
+// this process.
+func warnScopeVersionOnce(err error) bool {
+	scopeVersionWarned.mu.Lock()
+	defer scopeVersionWarned.mu.Unlock()
+	if scopeVersionWarned.warned[err.Error()] {
+		return false
+	}
+	scopeVersionWarned.warned[err.Error()] = true
+	return true
+}
+
+// resetScopeVersionWarned forgets the record, so a test can assert the line
+// without depending on which package test ran before it.
+func resetScopeVersionWarned() {
+	scopeVersionWarned.mu.Lock()
+	defer scopeVersionWarned.mu.Unlock()
+	scopeVersionWarned.warned = map[string]bool{}
 }
 
 // sessionScope is injection.session_scope, handed down by loadGlobals from the
