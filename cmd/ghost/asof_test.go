@@ -22,6 +22,13 @@ func contextAsOfStore(t *testing.T) (dir string) {
 		t.Fatalf("mkdir ghostDir: %v", err)
 	}
 	dir = t.TempDir()
+	// Recorded against the RESOLVED path, because `ghost context` resolves the
+	// directory it is given before matching it against a project's recorded path.
+	// On Windows t.TempDir() returns a short-name path that EvalSymlinks expands,
+	// so an unresolved fixture path matches no project and the block is empty.
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
 
 	db, err := memory.OpenDB(filepath.Join(ghostDir, "ghost.db"))
 	if err != nil {

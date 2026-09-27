@@ -27,6 +27,15 @@ func historicalStore(t *testing.T) (dir, dbPath string) {
 	}
 	dbPath = filepath.Join(ghostDir, "ghost.db")
 	dir = t.TempDir()
+	// The project is recorded against the RESOLVED path because the renderers
+	// resolve the directory they are given before matching it (Store.
+	// ResolveProject compares resolved paths). On Windows t.TempDir() hands back
+	// a short-name path that EvalSymlinks expands, so an unresolved fixture path
+	// matches nothing there and the block comes back empty — on this path as much
+	// as on the historical one, which is what makes it a fixture fault.
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
 
 	db, err := memory.OpenDB(dbPath)
 	if err != nil {
