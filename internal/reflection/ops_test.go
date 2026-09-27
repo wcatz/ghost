@@ -3,6 +3,7 @@ package reflection
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -74,10 +75,10 @@ func TestKeepOpPassesTheMemoryThroughUntouched(t *testing.T) {
 	in := opInput()
 	result := opRun(t, in, `{"learned_context":"ctx","ops":["keep `+opID1+`"]}`)
 
-	if len(result.Memories) != 1 {
-		t.Fatalf("got %d memories, want 1: %+v", len(result.Memories), result.Memories)
+	got, ok := findMemory(result, in.ExistingMemories[0].Content)
+	if !ok {
+		t.Fatalf("the kept row is not in the result: %+v", result.Memories)
 	}
-	got := result.Memories[0]
 	want := in.ExistingMemories[0]
 	if got.Content != want.Content {
 		t.Errorf("content retyped:\n got %q\nwant %q", got.Content, want.Content)
@@ -93,17 +94,45 @@ func TestKeepOpPassesTheMemoryThroughUntouched(t *testing.T) {
 	}
 }
 
-// TestKeepOpDoesNotInventAMemoryTheModelNeverNamed: an input with no operation
-// produces no output of its own. Under the old free-text contract the model
-// restated every memory it saw, so a memory it had nothing to say about came
-// back as a paraphrase with a fresh id — a duplicate beside the row the
-// drop guard then re-added verbatim.
-func TestKeepOpDoesNotInventAMemoryTheModelNeverNamed(t *testing.T) {
-	result := opRun(t, opInput(), `{"learned_context":"ctx","ops":["keep `+opID1+`"]}`)
+// findMemory picks an emitted memory by content, which is the only key a test
+// can state without also pinning the order operations happen to be emitted in.
+func findMemory(result ReflectionResult, content string) (ReflectMemory, bool) {
 	for _, m := range result.Memories {
-		if m.Content == opInput().ExistingMemories[1].Content {
-			t.Fatalf("a memory the model never named was re-emitted: %q", m.Content)
+		if m.Content == content {
+			return m, true
 		}
+	}
+	return ReflectMemory{}, false
+}
+
+// TestNothingInAResultIsARetypedMemory pins the property the pass-through and
+// the keep share: every memory the result contains is either some input's own
+// text or the text of a merge or rewrite that named its ids. Under the retired
+// free-text contract the model restated every memory it saw, so a memory it had
+// nothing to say about came back as a paraphrase with a fresh id — a duplicate
+// beside the row the drop guard then re-added verbatim.
+func TestNothingInAResultIsARetypedMemory(t *testing.T) {
+	in := opInput()
+	in.ExistingMemories[0].Content = "the ledger is reached from the office subnet"
+	in.ExistingMemories = append(in.ExistingMemories,
+		opMem(opID3, "fact", "the bastion answers ping on 443", 0.5))
+
+	// The harness only merged the two memories it had something to say about.
+	// Every other row must come through unchanged.
+	result := opRun(t, in, fmt.Sprintf(
+		`{"ops":["merge %s,%s -> the bastion in region fsn1 answers ping on 443"]}`, opID3, opID1))
+
+	stored := make(map[string]bool)
+	for _, m := range in.ExistingMemories {
+		stored[m.Content] = true
+	}
+	for _, m := range result.Memories {
+		if !stored[m.Content] {
+			t.Errorf("a memory in the result matches no input: %q", m.Content)
+		}
+	}
+	if _, ok := findMemory(result, in.ExistingMemories[0].Content); !ok {
+		t.Errorf("the id left out of the merge was not carried through: %+v", result.Memories)
 	}
 }
 
@@ -142,12 +171,9 @@ func TestRewriteOpKeepsTheSourceMetadata(t *testing.T) {
 	in.ExistingMemories[1].Content = "the metrics endpoint is served by the ingest service"
 	result := opRun(t, in, `{"learned_context":"ctx","ops":["rewrite `+opID2+` -> the metrics endpoint is served by the billing service, not ingest"]}`)
 
-	if len(result.Memories) != 1 {
-		t.Fatalf("got %d memories, want 1: %+v", len(result.Memories), result.Memories)
-	}
-	got := result.Memories[0]
-	if got.Content == in.ExistingMemories[1].Content {
-		t.Error("the correction was not applied")
+	got, ok := findMemory(result, "the metrics endpoint is served by the billing service, not ingest")
+	if !ok {
+		t.Fatalf("the correction was not applied: %+v", result.Memories)
 	}
 	if got.Category != "fact" || got.Importance != 0.5 || strings.Join(got.Tags, ",") != "prod" {
 		t.Errorf("rewrite did not inherit the source row: %+v", got)
@@ -165,25 +191,35 @@ func TestRewriteThatWouldChangeAnIdentifierIsRejected(t *testing.T) {
 	in.ExistingMemories[0].Content = "SSH to the Hetzner bastion uses port 2222"
 	result := opRun(t, in, `{"learned_context":"ctx","ops":["rewrite `+opID1+` -> SSH to the Hetzner bastion uses port 22"]}`)
 
-	if len(result.Memories) != 1 {
-		t.Fatalf("got %d memories, want the original: %+v", len(result.Memories), result.Memories)
+	if _, ok := findMemory(result, "SSH to the Hetzner bastion uses port 22"); ok {
+		t.Errorf("an identifier change was written: %+v", result.Memories)
 	}
-	if result.Memories[0].Content != in.ExistingMemories[0].Content {
-		t.Errorf("an identifier change was written: %q", result.Memories[0].Content)
+	if _, ok := findMemory(result, in.ExistingMemories[0].Content); !ok {
+		t.Errorf("the rejected rewrite lost its source: %+v", result.Memories)
 	}
 }
 
-// TestDropOpEmitsNothingAndStaysUnderTheDropGuard: an obsolete drop removes
-// the model-claimed redundancy, but the token audit still governs whether the
-// row is really deleted — Ghost cannot check the claim, so an obsolete drop
-// that no survivor explains leaves the input to be re-added verbatim.
+// TestDropOpEmitsNothingAndStaysUnderTheDropGuard: an obsolete drop removes the
+// harness-claimed redundancy, but the token audit still governs whether the row
+// is really deleted — Ghost cannot check the claim, so an obsolete drop that no
+// survivor explains leaves the input to be re-added verbatim. The id it names is
+// not passed through either, so the drop is the harness's decision rather than
+// Ghost's.
 func TestDropOpEmitsNothingAndStaysUnderTheDropGuard(t *testing.T) {
-	result := opRun(t, opInput(), `{"learned_context":"ctx","ops":["drop `+opID1+` reason: obsolete"]}`)
-	if len(result.Memories) != 0 {
-		t.Fatalf("a drop emitted %d memories, want 0: %+v", len(result.Memories), result.Memories)
+	in := opInput()
+	result := opRun(t, in, `{"learned_context":"ctx","ops":["drop `+opID1+` reason: obsolete"]}`)
+
+	if _, ok := findMemory(result, in.ExistingMemories[0].Content); ok {
+		t.Errorf("a dropped memory was emitted: %+v", result.Memories)
 	}
 	if len(result.Supersessions) != 0 {
 		t.Errorf("an obsolete drop claimed supersession: %+v", result.Supersessions)
+	}
+	if _, ok := findMemory(result, in.ExistingMemories[1].Content); !ok {
+		t.Errorf("the id the response never mentioned was not carried through: %+v", result.Memories)
+	}
+	if drops := AuditGuardedDrops(in, result); len(drops) != 1 || drops[0].Content != in.ExistingMemories[0].Content {
+		t.Fatalf("want the obsolete-dropped input audited for re-add, got %+v", drops)
 	}
 }
 
@@ -214,14 +250,14 @@ func TestSupersededDropIsNotReAdded(t *testing.T) {
 	}
 }
 
-// TestExecuteOpsRecordsWhichIdsWereAddressed pins the input the drop guard reads
-// to decide which output set an input is scored against. Kept, merged and
-// rewritten ids are addressed; a dropped one is not — an obsolete drop names no
-// successor, so the guard still judges it against a single output, and a
-// supersession is judged by its own witness instead. Nothing else in the package
-// records this, so a result that arrived with an empty list would silently
-// restore the strict comparison for merges the harness did perform.
-func TestExecuteOpsRecordsWhichIdsWereAddressed(t *testing.T) {
+// TestExecuteOpsRecordsWhichIdsWereMergedOrRewritten pins the two id lists the
+// drop guard reads. A merge's sources are scored against the union of the outputs
+// (a merge may spread one source's substance), a rewrite's source is exempt (the
+// op replaced the row), and a dropped id is in neither (the guard still judges it).
+// Nothing else in the package records this, so a result arriving with empty lists
+// would silently restore the strict comparison for merges and re-add every
+// rewritten row beside its replacement.
+func TestExecuteOpsRecordsWhichIdsWereMergedOrRewritten(t *testing.T) {
 	in := opInput()
 	in.ExistingMemories[0].Content = "the ledger is reached from the office subnet"
 	in.ExistingMemories = append(in.ExistingMemories,
@@ -230,17 +266,60 @@ func TestExecuteOpsRecordsWhichIdsWereAddressed(t *testing.T) {
 
 	result := opRun(t, in, `{"learned_context":"ctx","ops":["keep `+opID1+`","drop `+opID2+` reason: obsolete","merge `+opID3+`,`+opID4+` -> the bastion in region fsn1 answers ping on 443"]}`)
 
-	addressed := map[string]bool{}
-	for _, id := range result.AddressedIDs {
-		addressed[memIDKey(id)] = true
+	merged := map[string]bool{}
+	for _, id := range result.MergedIDs {
+		merged[memIDKey(id)] = true
 	}
-	for _, want := range []string{opID1, opID3, opID4} {
-		if !addressed[memIDKey(want)] {
-			t.Errorf("%s was kept or merged but not recorded as addressed: %v", want, result.AddressedIDs)
+	for _, want := range []string{opID3, opID4} {
+		if !merged[memIDKey(want)] {
+			t.Errorf("%s was merged but not recorded: merged=%v", want, result.MergedIDs)
 		}
 	}
-	if addressed[memIDKey(opID2)] {
-		t.Errorf("a dropped id was recorded as addressed: %v", result.AddressedIDs)
+	for _, unwanted := range []string{opID1, opID2} {
+		if merged[memIDKey(unwanted)] {
+			t.Errorf("%s was kept or dropped but recorded as merged: %v", unwanted, result.MergedIDs)
+		}
+	}
+	if len(result.RewrittenIDs) != 0 {
+		t.Errorf("nothing was rewritten, but RewrittenIDs = %v", result.RewrittenIDs)
+	}
+}
+
+// TestRejectedRewriteClaimsNothing pins the other half: when the grounding check
+// refuses a rewrite its source is re-emitted verbatim, so the operation folded
+// nothing and replaced nothing. Recording it as rewritten anyway would exempt the
+// row from the guard on the strength of a change that never happened.
+func TestRejectedRewriteClaimsNothing(t *testing.T) {
+	in := opInput()
+	in.ExistingMemories[0].Content = "SSH to the Hetzner bastion uses port 2222"
+	result := opRun(t, in, `{"learned_context":"ctx","ops":["rewrite `+opID1+` -> SSH to the Hetzner bastion uses port 22"]}`)
+
+	if len(result.Memories) != 2 {
+		t.Fatalf("got %d memories, want the source verbatim plus the other input: %+v",
+			len(result.Memories), result.Memories)
+	}
+	if len(result.RewrittenIDs) != 0 {
+		t.Errorf("a rejected rewrite claimed the row: %v", result.RewrittenIDs)
+	}
+}
+
+// TestRewrittenRowIsNotReAddedBesideItsReplacement is why a rewrite is exempt
+// from the drop guard. The replacement need not resemble the original — that is
+// the point of a rewrite — so a 45% overlap test would put the old text back
+// beside the new one, which is a duplicate rather than a save.
+func TestRewrittenRowIsNotReAddedBesideItsReplacement(t *testing.T) {
+	old := "bastion SSH uses port 2222 with a hardware key"
+	in := ReflectionInput{ExistingMemories: []memory.Memory{
+		{ID: opID1, Category: "gotcha", Content: old},
+		{ID: opID2, Category: "fact", Content: "operator access is now fronted by Cloudflare Access"},
+	}}
+	written, drops := passThroughResult(t, in, fmt.Sprintf(
+		`{"ops":["rewrite %s -> operator access is fronted by Cloudflare Access","keep %s"]}`, opID1, opID2))
+	if written[old] {
+		t.Errorf("the rewritten row was re-added beside its replacement: %v", written)
+	}
+	if len(drops) != 0 {
+		t.Errorf("a rewrite was flagged for re-add: %+v", drops)
 	}
 }
 
@@ -332,8 +411,9 @@ func TestParseOpResponseRejectsUnknownID(t *testing.T) {
 // still means the memory it was shown. This is a spelling of the same id, not a
 // different one, so it must not cost the whole pass.
 func TestParseOpResponseAcceptsCaseInsensitiveID(t *testing.T) {
-	result := opRun(t, opInput(), `{"learned_context":"ctx","ops":["keep `+strings.ToLower(opID1)+`"]}`)
-	if len(result.Memories) != 1 || result.Memories[0].Content != opInput().ExistingMemories[0].Content {
+	in := opInput()
+	result := opRun(t, in, `{"learned_context":"ctx","ops":["keep `+strings.ToLower(opID1)+`"]}`)
+	if _, ok := findMemory(result, in.ExistingMemories[0].Content); !ok {
 		t.Fatalf("lower-cased id did not resolve: %+v", result.Memories)
 	}
 }

@@ -33,13 +33,19 @@ type ReflectionInput struct {
 type ReflectionResult struct {
 	LearnedContext string          `json:"learned_context"`
 	Memories       []ReflectMemory `json:"memories"`
-	// AddressedIDs are the input ids the response kept, merged or rewrote. The
-	// drop guard measures an addressed input against the union of the output
-	// rather than against any single output, because a merge may carry its
-	// substance across more than one survivor; an input the response never named
-	// is still measured against a single output, because there the guard is
-	// asking whether the model absorbed the memory or forgot it (#639).
-	AddressedIDs []string `json:"addressed_ids,omitempty"`
+	// MergedIDs are the input ids a merge folded in. The drop guard scores them
+	// against the union of the output memories rather than against any single
+	// output, because a merge may carry one source's substance across a survivor
+	// plus a sibling; an id outside this set is measured against a single output,
+	// because there the guard is asking whether the response accounted for the
+	// memory at all (#639).
+	MergedIDs []string `json:"merged_ids,omitempty"`
+	// RewrittenIDs are the input ids a rewrite replaced. They are exempt from the
+	// drop guard entirely: a rewrite states that the row's text should now be
+	// something else, so re-adding the old text beside the new one is a duplicate
+	// by construction rather than a save. The grounding check is what stands
+	// between a rewrite and a wrong specific.
+	RewrittenIDs []string `json:"rewritten_ids,omitempty"`
 	// Supersessions are the supersessions the response stated: an input id it
 	// dropped as superseded by another input id, the id it named, and the text
 	// that successor carries into the result. The drop guard honours one only
@@ -117,17 +123,17 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 	// told omission is safe while their corpus loses the memory. Declared out here
 	// because the output rules below are emitted whether or not there are any
 	// existing memories to list.
-	foldToKeep := "Dropping is not deletion: an input you never name is kept verbatim by the apply, so omitting a memory never removes it. An \"obsolete\" drop is treated the same way — Ghost cannot check that claim, so the memory is kept unless this run deletes omissions. EVERY category is protected this way — gotcha, dependency, preference, convention, architecture, decision, pattern and fact — as is anything recording operational configuration (ports, hosts, paths, credentials locations). These facts still guide future work even when the surrounding thread is stale."
+	foldToKeep := "Dropping is not deletion: a memory you do not name is carried through unchanged, and a memory you do not want is folded into a survivor rather than dropped. What the apply can still add back is what no surviving memory explains — an \"obsolete\" drop nothing replaced, or a merge that lost one of its sources. EVERY category is protected that way — gotcha, dependency, preference, convention, architecture, decision, pattern and fact — as is anything recording operational configuration (ports, hosts, paths, credentials locations). These facts still guide future work even when the surrounding thread is stale."
 	mergeTail := "a loose summary is not recognized as a merge, and the input is kept verbatim beside it"
-	staleTail := "since omitting one does not remove it"
-	countTail := "A count you reach by dropping is undone by the verbatim re-add."
-	omissionCost := "kept verbatim beside the operations you did return, so forgetting one means the consolidation you had in mind for it never happens"
+	staleTail := "since a drop nothing explains is undone by the verbatim re-add"
+	countTail := "A count you reach by dropping is undone by that re-add."
+	omissionCost := "carried through unchanged, so forgetting one costs you the consolidation you had in mind for it and nothing else"
 	if input.AllowDrops {
-		foldToKeep = "This run DELETES any input you do not name, in EVERY category: gotcha, dependency, preference, convention, architecture, decision, pattern and fact. There is no protected category this run — fold anything you want to keep."
+		foldToKeep = "This run DELETES every input no surviving memory explains, in EVERY category: gotcha, dependency, preference, convention, architecture, decision, pattern and fact. There is no protected category this run — fold anything you want to keep, and expect an unexplained drop to be the last version of it."
 		mergeTail = "a loose summary is not recognized as a merge, and the input is deleted even though you mentioned it"
-		staleTail = "since omitting one deletes it"
+		staleTail = "since a drop nothing explains is a real deletion"
 		countTail = "A count you reach by dropping is a real deletion, not a cleanup."
-		omissionCost = "DELETED, because this run deletes every id you do not name"
+		omissionCost = "carried through unchanged, so forgetting one costs you the consolidation you had in mind for it and nothing else"
 	}
 
 	// Existing memories for consolidation. The id leads the line because the
@@ -170,12 +176,12 @@ Produce a JSON object with two fields:
 2. "ops": an array of operation strings, one per id listed above. Every id gets exactly one operation, and an id appears in at most one operation:
    - "keep <id>" — this memory is already right and complete. Use it for the memory as it stands and do NOT retype it: a kept memory keeps its id, its age, its links and its embedding, which no rewrite can. Restating a memory you had nothing to change is what made consolidation churn identities.
    - "merge <id>,<id>,<id> -> <text>" — two or more of these memories state one fact. A merge must carry the inputs' substance into the survivor — restate the specifics, do not summarize them away: ` + mergeTail + `. Category, importance and tags are taken from the ids you name, so a merge never silently recategorizes a memory or strips its labels.
-   - "rewrite <id> -> <text>" — correct ONE memory: a wrong number, a wrong name, a wrong host, a claim that is no longer true. Never for a paraphrase, and never to put a memory into new words.
-   - "drop <id> reason: obsolete" — the memory is wrong or no longer true and nothing else in the corpus replaces it. Prefer folding it into a survivor, ` + staleTail + `
+   - "rewrite <id> -> <text>" — replace ONE memory whose CLAIM is wrong: it names the wrong service, the wrong owner, or the wrong state of the world. Never for a paraphrase, and never to put a memory into new words. The replacement must not change a specific: see the identifier rule below, so a rewrite cannot correct a wrong number, host, path or version — "keep" a memory whose specifics you cannot verify, or "drop" it if nothing else in the corpus says it.
+   - "drop <id> reason: obsolete" — the memory is wrong or no longer true and nothing else in the corpus replaces it. Prefer folding it into a survivor, ` + staleTail + ` An obsolete drop with no surviving memory that accounts for it is put back verbatim, so state one only when a survivor really does replace it.
    - "drop <id> reason: superseded by <id>" — another id in this same list already says it better, and you carry that one forward. The target must be an id you keep, merge or rewrite in this response: a supersession pointing at a target you also drop leaves the corpus with nothing.
    Rules:
    - Every id listed above needs an operation. An id you never mention is ` + omissionCost + `
-   - An identifier in merge or rewrite text — a path, hash, version, hostname, port or any number — must appear in one of the ids you are merging or rewriting, copied exactly. A merge or rewrite that introduces an identifier absent from its sources is rejected and the original memories are kept, so a typo is never stored as fact. When you cannot reproduce the specifics exactly, "keep" instead.
+   - An identifier in merge or rewrite text — a path, hash, version, hostname, port or any number — must appear in one of the ids you are merging or rewriting, copied exactly. A merge or rewrite that introduces an identifier absent from its sources is rejected and the original memories are kept, so a typo is never stored as fact. This is why a rewrite cannot fix a wrong number: the corrected value would be an identifier the source does not contain. When you cannot reproduce the specifics exactly, "keep" instead.
    - Keep identity facts (architecture, conventions) — never drop these
    - Drop stale situational memories (old gotchas that were fixed) into the memory that replaces them, ` + staleTail + `
    - Every category is a candidate: architecture, decision, pattern, convention, gotcha, dependency, preference, fact. Aim for a corpus of high-quality memories, not a short one — and get there by FOLDING inputs into survivors, never by omitting them. ` + countTail + `

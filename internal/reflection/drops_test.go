@@ -92,17 +92,17 @@ func TestAuditGuardedDrops_RetainsEveryCategory(t *testing.T) {
 	}
 }
 
-// TestAuditGuardedDrops_AddressedInputIsJudgedAgainstTheOutputUnion: a merge
-// may carry an input's substance across a survivor plus a sibling, and scoring
-// it against any one of them re-adds it verbatim beside the merge that had just
-// absorbed it — the paraphrase-duplicate class #639 measured on every project.
-// An input the response named (kept, merged, rewritten) is therefore measured
-// against the union of the outputs.
+// TestAuditGuardedDrops_MergedInputIsJudgedAgainstTheOutputUnion: a merge may
+// carry an input's substance across a survivor plus a sibling, and scoring it
+// against any one of them re-adds it verbatim beside the merge that had just
+// absorbed it — the paraphrase-duplicate class #639 measured on every project. A
+// merged source (result.MergedIDs) is therefore measured against the union of the
+// outputs.
 //
 // The fixture straddles the threshold on purpose: no single output covers 45% of
-// the SSH note and the two together cover 86% of it, so the only thing the
+// the SSH note and the three together cover 86% of it, so the only thing the
 // assertion turns on is which set the input is scored against.
-func TestAuditGuardedDrops_AddressedInputIsJudgedAgainstTheOutputUnion(t *testing.T) {
+func TestAuditGuardedDrops_MergedInputIsJudgedAgainstTheOutputUnion(t *testing.T) {
 	ssh := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH from the office is firewalled, so use port 2222"}
 	region := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "Production runs in region fsn1"}
 	kept := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3", Category: "fact", Content: "ssh from the office is firewalled for the whole subnet"}
@@ -115,34 +115,27 @@ func TestAuditGuardedDrops_AddressedInputIsJudgedAgainstTheOutputUnion(t *testin
 			{Category: "gotcha", Content: "the bastion is reached on port 2222 from the region fsn1"},
 			{Category: "fact", Content: kept.Content},
 		},
-		AddressedIDs: []string{ssh.ID, region.ID},
+		MergedIDs: []string{ssh.ID, region.ID},
 	}
 
 	strict := result
-	strict.AddressedIDs = nil
+	strict.MergedIDs = nil
 	if drops := AuditGuardedDrops(input, strict); len(drops) != 1 || drops[0].Content != ssh.Content {
 		t.Fatalf("a single-output comparison should have flagged the SSH note, got %+v", drops)
 	}
 	if drops := AuditGuardedDrops(input, result); len(drops) != 0 {
-		t.Fatalf("an addressed input spread across the output union was flagged: %+v", drops)
+		t.Fatalf("a merged source spread across the output union was flagged: %+v", drops)
 	}
 }
 
-// TestAuditGuardedDrops_OmittedInputIsStillJudgedAgainstOneOutput is the other
-// half, and the reason the union is not applied to everything. Under the per-id
-// contract an unnamed id is an expected, explicitly cheap outcome, so this guard
-// is now mostly asking "did the model absorb this memory or forget it" — and a
-// corpus-wide union answers "absorbed" for any memory whose words also occur
-// somewhere else, deleting it with no --allow-drops and no warning. That is the
-// unattended loss #337/#549 exist to prevent, so an input nothing in the
-// response accounted for must be explained by ONE survivor.
-//
-// The fixture straddles the threshold deliberately, and the test states both
-// sides of the rule: no single output covers 45% of the Redis note and the three
-// together cover 50% of it, so the same result flags the note as omitted and
-// would absorb it if the response had addressed it. The region note is covered
-// outright by one survivor, so the only thing under test is the Redis one.
-func TestAuditGuardedDrops_OmittedInputIsStillJudgedAgainstOneOutput(t *testing.T) {
+// TestAuditGuardedDrops_NonMergedInputIsStillJudgedAgainstOneOutput is the other
+// half, and the reason the union is not applied to everything. An explicit drop
+// names its id and emits nothing, so for that row the guard is the only thing
+// standing between the harness's claim and a deletion — and it has to be
+// answered by one survivor. A corpus-wide union would answer "absorbed" for any
+// memory whose words also occur somewhere else, and honour the claim, which is
+// the unattended loss #337/#549 exist to prevent.
+func TestAuditGuardedDrops_NonMergedInputIsStillJudgedAgainstOneOutput(t *testing.T) {
 	redisNote := "Redis maxmemory must stay at 512mb in production or the OOM killer reaps the pod"
 	regionNote := "Cloudflare fronts the production region fsn1"
 	input := ReflectionInput{ExistingMemories: []memory.Memory{
@@ -157,13 +150,15 @@ func TestAuditGuardedDrops_OmittedInputIsStillJudgedAgainstOneOutput(t *testing.
 
 	drops := AuditGuardedDrops(input, result)
 	if len(drops) != 1 || drops[0].Content != redisNote {
-		t.Fatalf("an omitted memory was absorbed by the corpus-wide vocabulary: %+v", drops)
+		t.Fatalf("an explicitly dropped memory was absorbed by the corpus-wide vocabulary: %+v", drops)
 	}
 
-	addressed := result
-	addressed.AddressedIDs = []string{"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"}
-	if drops := AuditGuardedDrops(input, addressed); len(drops) != 0 {
-		t.Fatalf("the same fixture must be absorbed once the response addressed it, else it pins nothing: %+v", drops)
+	// The same fixture must be absorbed once the response merges it in, else it
+	// pins nothing: no single output reaches 45% and the three together reach 50%.
+	merged := result
+	merged.MergedIDs = []string{"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"}
+	if drops := AuditGuardedDrops(input, merged); len(drops) != 0 {
+		t.Fatalf("the same fixture must be absorbed once it was merged, else it pins nothing: %+v", drops)
 	}
 }
 
@@ -210,7 +205,7 @@ func TestAuditGuardedDrops_ForgetsASupersessionWhoseSuccessorIsGone(t *testing.T
 
 	result := ReflectionResult{
 		Memories:      nil, // the successor was removed from the result
-		AddressedIDs:  []string{fixed.ID},
+		MergedIDs:     []string{fixed.ID},
 		Supersessions: []Supersession{{DroppedID: stale.ID, TargetID: fixed.ID, TargetText: fixed.Content}},
 	}
 	drops := AuditGuardedDrops(input, result)

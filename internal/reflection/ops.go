@@ -132,13 +132,14 @@ func parseOpLine(lineNo int, raw string) (memOp, error) {
 
 	switch verb {
 	case "keep":
-		if rest == "" {
+		id, ok := trimIDLabel(rest)
+		if !ok {
 			return memOp{}, fail("keep needs the id of the memory to carry forward")
 		}
-		if strings.ContainsAny(rest, " \t") {
+		if strings.ContainsAny(id, " \t") {
 			return memOp{}, fail("keep takes exactly one id and no text — a kept memory is passed through unchanged, not retyped")
 		}
-		return memOp{kind: opKeep, ids: []string{rest}, line: lineNo}, nil
+		return memOp{kind: opKeep, ids: []string{id}, line: lineNo}, nil
 
 	case "merge", "rewrite":
 		arrow := strings.Index(rest, "->")
@@ -156,8 +157,8 @@ func parseOpLine(lineNo int, raw string) (memOp, error) {
 		parts := strings.Split(idText, ",")
 		ids := make([]string, 0, len(parts))
 		for _, p := range parts {
-			id := strings.TrimSpace(p)
-			if id == "" {
+			id, ok := trimIDLabel(p)
+			if !ok {
 				return memOp{}, fail("%s has an empty id in its id list", verb)
 			}
 			ids = append(ids, id)
@@ -176,11 +177,11 @@ func parseOpLine(lineNo int, raw string) (memOp, error) {
 
 	case "drop":
 		id, reason, _ := strings.Cut(rest, "reason:")
-		id = strings.TrimSpace(id)
-		reason = strings.TrimSpace(reason)
-		if id == "" {
+		id, ok := trimIDLabel(id)
+		if !ok {
 			return memOp{}, fail("drop needs the id of the memory to drop")
 		}
+		reason = strings.TrimSpace(reason)
 		if strings.ContainsAny(id, " \t") {
 			return memOp{}, fail("drop takes exactly one id")
 		}
@@ -191,12 +192,12 @@ func parseOpLine(lineNo int, raw string) (memOp, error) {
 		if lower == "obsolete" {
 			return memOp{kind: opDrop, ids: []string{id}, obsolete: true, line: lineNo}, nil
 		}
-		target, ok := strings.CutPrefix(lower, "superseded by ")
-		if !ok {
+		target, named := strings.CutPrefix(lower, "superseded by ")
+		if !named {
 			return memOp{}, fail("unreadable drop reason %q — use \"obsolete\" or \"superseded by <id>\"", reason)
 		}
-		target = strings.TrimSpace(target)
-		if target == "" || strings.ContainsAny(target, " \t") {
+		target, ok = trimIDLabel(target)
+		if !ok || strings.ContainsAny(target, " \t") {
 			return memOp{}, fail("\"superseded by\" needs the id of the input memory that replaces this one")
 		}
 		return memOp{kind: opDrop, ids: []string{id}, target: strings.ToUpper(target), line: lineNo}, nil
@@ -204,6 +205,19 @@ func parseOpLine(lineNo int, raw string) (memOp, error) {
 	default:
 		return memOp{}, fail("unknown operation %q — use keep, merge, rewrite or drop", verb)
 	}
+}
+
+// trimIDLabel reads one id from an operation, accepting the "id:" label the
+// prompt prints in front of every memory. A model that copies the line it was
+// shown writes "keep id:01AAA", and failing a whole consolidation over a label
+// Ghost printed itself would cost a pass over a cosmetic slip — so the label is
+// stripped here rather than left to fail the parse. Returns false for an empty id.
+func trimIDLabel(s string) (string, bool) {
+	id := strings.TrimSpace(s)
+	if stripped, ok := strings.CutPrefix(strings.ToLower(id), "id:"); ok {
+		id = strings.TrimSpace(stripped)
+	}
+	return id, id != ""
 }
 
 // clipOpLine bounds a rejected line for the diagnostic, by rune so a line of
@@ -306,7 +320,6 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 		case opKeep:
 			m, _ := resolve(op.ids[0])
 			result.Memories = append(result.Memories, verbatimMemory(m))
-			result.AddressedIDs = append(result.AddressedIDs, op.ids[0])
 			emitted[memIDKey(op.ids[0])] = m.Content
 
 		case opMerge, opRewrite:
@@ -329,13 +342,21 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 					result.Memories = append(result.Memories, verbatimMemory(m))
 					emitted[memIDKey(m.ID)] = m.Content
 				}
-			} else {
-				result.Memories = append(result.Memories, mergedMemory(sources, op.text))
-				for _, id := range op.ids {
-					emitted[memIDKey(id)] = op.text
-				}
+				break
 			}
-			result.AddressedIDs = append(result.AddressedIDs, op.ids...)
+			result.Memories = append(result.Memories, mergedMemory(sources, op.text))
+			for _, id := range op.ids {
+				emitted[memIDKey(id)] = op.text
+			}
+			// A rejected operation is no operation: its sources are re-emitted
+			// verbatim, so it folds nothing and replaces nothing, and neither list
+			// may claim otherwise. The grounding check, not the drop guard, is what
+			// keeps a rejected rewrite from replacing a row.
+			if op.kind == opRewrite {
+				result.RewrittenIDs = append(result.RewrittenIDs, op.ids[0])
+			} else {
+				result.MergedIDs = append(result.MergedIDs, op.ids...)
+			}
 
 		case opDrop:
 			dropped = append(dropped, op)
@@ -345,7 +366,8 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 		if op.obsolete {
 			// Nothing to emit and nothing to exempt. An obsolete claim names no
 			// successor, so the drop guard still audits the row and decides
-			// whether the corpus can show it is gone.
+			// whether the corpus can show it is gone — the id was named, so it is
+			// not passed through below, but the guard may still put it back.
 			continue
 		}
 		result.Supersessions = append(result.Supersessions, Supersession{
@@ -353,6 +375,28 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 			TargetID:   op.target,
 			TargetText: emitted[op.target],
 		})
+	}
+
+	// Everything the response never named is carried through as a keep, verbatim
+	// and in input order. This is what makes the prompt's promise true, and it is
+	// structural rather than heuristic: before it, an unnamed memory was emitted
+	// by nobody and survived only if the drop guard FAILED to recognise a
+	// survivor, so an unrelated output sharing 45% of its tokens deleted it with
+	// no warning and no --allow-drops. A token guard can only re-add what it
+	// flags, and a false positive in the "absorbed" direction is silent data
+	// loss; an id the model never mentioned needs no inference at all.
+	//
+	// Consequence, deliberate: omission is no longer a deletion path for the LLM
+	// tier. A memory leaves the corpus when its id is named as a merge source,
+	// named for a rewrite, or named in a drop with a reason. --allow-drops keeps
+	// its meaning for what the guard still finds — an explicit drop it cannot
+	// corroborate, a merge that lost substance, and the SQLite tier's absorbed
+	// duplicates.
+	for _, m := range input.ExistingMemories {
+		if claimed[memIDKey(m.ID)] == 0 {
+			result.Memories = append(result.Memories, verbatimMemory(m))
+			emitted[memIDKey(m.ID)] = m.Content
+		}
 	}
 	return result, nil
 }

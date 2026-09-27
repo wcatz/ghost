@@ -51,20 +51,26 @@ const dropContainmentThreshold = 0.45
 // names no successor at all and always goes under the audit, because Ghost
 // cannot check the claim.
 //
-// The second is which set of outputs an input is compared against. An input the
-// response ADDRESSED — kept, merged or rewritten, per result.AddressedIDs — is
-// measured against the union of every output, because a merge may carry an
-// input's substance across a survivor plus its siblings, and scoring it against
-// any one of them re-adds it verbatim beside the merge that just absorbed it,
-// which is the duplicate class #639 measured across every project. An input the
-// response never named is measured against a SINGLE output, exactly as before.
-// That asymmetry is deliberate and it is the whole reason the union is not
-// applied to everything: under this contract omission is routine (the prompt
-// tells the harness an unnamed id is kept verbatim), and a corpus-wide union
-// turns "this memory's words also occur somewhere else" into a deletion nobody
-// asked for, on no --allow-drops and with no warning — the unattended loss
-// #337/#549 exist to prevent. The SQLite fallback tier addresses no ids, so
-// every one of its inputs is measured the strict way.
+// The second is a rewrite's source, in result.RewrittenIDs. A rewrite states
+// that the row's text should now be something else, so re-adding the old text
+// beside the new one is a duplicate by construction rather than a save — the
+// 45% test asks "is the old memory still in here somewhere", which is the wrong
+// question about a row the response deliberately replaced. A MERGE's sources stay
+// under the audit, because a merge that lost one of them is a merge the model got
+// wrong rather than one it asked for.
+//
+// What the guard no longer has to do is the biggest part. An input the response
+// never named is emitted verbatim by executeOps (#639), so there is nothing to
+// rescue: before that, an unnamed memory was emitted by nobody and survived only
+// if this guard FAILED to recognise a survivor, which made a false positive in
+// the "absorbed" direction a silent deletion with no warning and no
+// --allow-drops. An id the model never mentioned needs no inference at all.
+//
+// Which output set an input is compared against is the remaining choice. A
+// MERGED source (result.MergedIDs) is measured against the union of every output,
+// because a merge may carry its substance across a survivor plus its siblings;
+// everything else is measured against a single output. The SQLite fallback names
+// no ids, so every one of its inputs is measured the strict way.
 //
 // Uses the package's tokenize (numeric-retaining, stopword-filtered) so merged
 // rewrites that preserve substance — including ports and versions — are
@@ -88,22 +94,26 @@ func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []Dropped
 			superseded[memIDKey(s.DroppedID)] = true
 		}
 	}
-	addressed := make(map[string]bool, len(result.AddressedIDs))
-	for _, id := range result.AddressedIDs {
-		addressed[memIDKey(id)] = true
+	rewritten := make(map[string]bool, len(result.RewrittenIDs))
+	for _, id := range result.RewrittenIDs {
+		rewritten[memIDKey(id)] = true
+	}
+	merged := make(map[string]bool, len(result.MergedIDs))
+	for _, id := range result.MergedIDs {
+		merged[memIDKey(id)] = true
 	}
 
 	var drops []DroppedGuarded
 	for _, in := range input.ExistingMemories {
 		key := memIDKey(in.ID)
-		if superseded[key] {
+		if superseded[key] || rewritten[key] {
 			continue
 		}
 		inTokens := tokenize(in.Content)
 		if len(inTokens) == 0 {
 			continue
 		}
-		if addressed[key] {
+		if merged[key] {
 			if hasCloseSurvivor(inTokens, union) {
 				continue
 			}

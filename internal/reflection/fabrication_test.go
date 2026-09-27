@@ -163,6 +163,38 @@ func TestBuildReflectionPrompt_AsksForPerIdOperations(t *testing.T) {
 	}
 }
 
+// TestBuildReflectionPrompt_RewriteCannotChangeASpecific keeps the prompt from
+// asking for something the grounding check always refuses. It used to describe a
+// rewrite as correcting "a wrong number, a wrong name, a wrong host" while the
+// rule two lines below rejected any identifier absent from the source — and the
+// corrected value is by definition absent from it, so every such rewrite was
+// discarded. The prompt now says plainly that a rewrite fixes a claim, never a
+// specific, and why.
+func TestBuildReflectionPrompt_RewriteCannotChangeASpecific(t *testing.T) {
+	prompt := BuildReflectionPrompt(ReflectionInput{
+		ProjectName: "ghost",
+		ExistingMemories: []memory.Memory{
+			{ID: "D20E133860CC4AFE38B485AD5371BA59", Category: "gotcha", Content: "port 2222 not 22"},
+		},
+	})
+	for _, want := range []string{
+		"replace ONE memory whose CLAIM is wrong",
+		"must not change a specific",
+		"a rewrite cannot fix a wrong number",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt missing %q", want)
+		}
+	}
+	for _, unwanted := range []string{
+		"a wrong number, a wrong name, a wrong host",
+	} {
+		if strings.Contains(prompt, unwanted) {
+			t.Errorf("prompt still asks for a rewrite the grounding check rejects: %q", unwanted)
+		}
+	}
+}
+
 // TestBuildReflectionPrompt_ProtectsEveryCategory pins the prompt half of the
 // drop guard. AuditGuardedDrops retained every category from #549, so a prompt
 // still naming only gotcha/dependency/preference/convention would leave the
@@ -194,12 +226,17 @@ func TestBuildReflectionPrompt_ProtectsEveryCategory(t *testing.T) {
 
 // TestBuildReflectionPrompt_AllowDropsInvertsTheContract: the guarantee is
 // two-sided, and stating the wrong side is worse than saying nothing. Under
-// --allow-drops an unreferenced input is DELETED, so the retention sentences
-// would tell the model omission is free exactly where it costs a memory — and
-// eval/cycle runs every reflect with that flag, so the eval harness would
-// measure a lazier consolidator than production uses. Each branch also asserts
-// the OTHER branch's sentence is absent, since a prompt containing both
-// contradicts itself.
+// --allow-drops an input no surviving memory explains is DELETED, so the
+// retention sentences would tell the harness that unexplained output is free
+// exactly where it costs a memory — and eval/cycle runs every reflect with that
+// flag, so the eval harness would measure a lazier consolidator than production
+// uses. Each branch also asserts the OTHER branch's sentence is absent, since a
+// prompt containing both contradicts itself.
+//
+// What the two branches are about changed with the per-id pass-through: an
+// unnamed id is carried through by the tier either way, so --allow-drops is now
+// about the DROPS, not the omissions, and saying otherwise would be a promise the
+// apply cannot keep.
 func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 	memories := []memory.Memory{{ID: "D20E133860CC4AFE38B485AD5371BA59", Category: "gotcha", Content: "port 2222 not 22"}}
 
@@ -209,17 +246,16 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 	for _, want := range []string{
 		"Dropping is not deletion",
 		"kept verbatim",
-		"does not remove it",
-		"undone by the verbatim re-add",
+		"undone by that re-add",
+		"a memory you do not name is carried through unchanged",
 	} {
 		if !strings.Contains(retained, want) {
 			t.Errorf("retention prompt missing %q", want)
 		}
 	}
 	for _, unwanted := range []string{
-		"DELETES any input",
-		"omitting one deletes it",
-		"a real deletion",
+		"DELETES every input",
+		"a drop nothing explains is a real deletion",
 		"There is no protected category",
 	} {
 		if strings.Contains(retained, unwanted) {
@@ -228,9 +264,9 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"DELETES any input",
+		"DELETES every input",
 		"There is no protected category",
-		"omitting one deletes it",
+		"a drop nothing explains is a real deletion",
 		"a real deletion",
 		"the input is deleted even though you mentioned it",
 	} {
@@ -241,8 +277,7 @@ func TestBuildReflectionPrompt_AllowDropsInvertsTheContract(t *testing.T) {
 	for _, unwanted := range []string{
 		"Dropping is not deletion",
 		"EVERY category is protected",
-		"kept verbatim",
-		"undone by the verbatim re-add",
+		"undone by that re-add",
 	} {
 		if strings.Contains(dropping, unwanted) {
 			t.Errorf("--allow-drops prompt still promises retention: %q", unwanted)
