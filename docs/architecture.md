@@ -386,16 +386,20 @@ Three properties are deliberate:
   main's merge reassignment lists (there are two, one per implementation) carry
   the table.
 
-Writes that move none of the recorded columns append nothing: `Touch`
-(`access_count`, `last_accessed`), `TogglePin`, `PromoteToGlobal` and
-`MergeProject` (`project_id`), and the resolve KEEP cache. A row repeating the
-previous state would record that nothing happened, at the cost of one row per
-recall. Appending nothing is not the same as ignoring them, though: a write that
-moves a memory between projects has to move its history rows' `project_id` with
-it, because that column is what the project-delete cascade follows. Both
-`MergeProject` and `PromoteToGlobal` do — otherwise deleting the project a memory
-was promoted out of would take the recorded past of a memory that is still live
-in `_global`. The same rule decides the `supersede` row: `ghost supersede` re-writes a
+A write that changes none of the recorded columns appends no row: one repeating
+the previous state would record that nothing happened, at the cost of a row per
+recall. `Touch` (`access_count`, `last_accessed`), `TogglePin` and the resolve
+KEEP cache are in that class.
+
+"Appends nothing" is not the same as "ignore it", and the one writer that shows
+the difference is `PromoteToGlobal`: it appends no row, but it moves the memory
+between projects, and `project_id` is what the project-delete cascade follows. So
+a move has to carry the history rows' `project_id` with the memory —
+`MergeProject` (in `projectMergeStatements`, and in the `s.mergeProjectTx` method
+the bind-recovery paths call) and `PromoteToGlobal` both do. Without it, deleting
+the project a memory was promoted out of takes the recorded past of a memory that
+is still live in `_global`, and `ghost history <id>` reports that it was never
+written. The same rule decides the `supersede` row: `ghost supersede` re-writes a
 pair whenever an endpoint moved since the edge was written, and re-writing an
 already-active edge changes nothing about the target, so the row is written when
 the edge *becomes* active — an insert, or a re-activation after an invalidation
