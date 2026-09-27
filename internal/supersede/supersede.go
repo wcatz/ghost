@@ -16,10 +16,18 @@
 // a newer->older 'supersedes' link (source 'llm'); CAUSES writes an
 // older->newer 'causes' link (cause precedes effect); NEITHER writes nothing;
 // REVERSED (the older note is the current one) is refused rather than written.
-// Each note's created_at goes to the prompt too, because updated_at is the wrong
-// ordering exactly when a note was re-saved after the fact it reports (#641):
-// a bare three-way answer cannot decline a direction, and the pass wrote a
-// backwards link that demoted a fix and promoted the stale claim it replaced.
+//
+// The pass is KEEP-biased, because the edge is not informational: the ranking
+// guards demote its target and `ghost resolve`'s supersedes piggyback stamps
+// resolved_at on it, so a wrong edge removes a live memory from every later
+// session's context. A SUPERSEDES therefore has to name the older note's claim
+// that no longer holds in a `replaced:` field, and a verdict without one reads
+// NEITHER (#686, 43% measured precision with every wrong edge a pair whose two
+// notes were both still true). Each note's created_at goes to the prompt too,
+// because updated_at is the wrong ordering exactly when a note was re-saved
+// after the fact it reports (#641): a bare three-way answer cannot decline a
+// direction, and the pass wrote a backwards link that demoted a fix and promoted
+// the stale claim it replaced.
 // Fresh NEITHER verdicts are cached by pair and both endpoints' content hashes
 // (supersede_checked, schema v8): unchanged fresh pairs are skipped on later
 // passes — a cache skip is equivalent to a NEITHER verdict, so a stale
@@ -78,7 +86,8 @@ type Relation string
 
 const (
 	// RelationSupersedes means newer states an updated/changed/replaced value
-	// of the SAME fact as older, making older obsolete.
+	// of the SAME fact as older, making older obsolete. A model that cannot name
+	// the claim it replaced does not reach this verdict (see requireReplaced).
 	RelationSupersedes Relation = "supersedes"
 	// RelationCauses means newer (typically a decision or change) was informed
 	// by older as supporting evidence, but older remains independently true.
@@ -105,14 +114,17 @@ type Classifier interface {
 
 // contentHash is the NEITHER-cache key component, mirroring resolve's
 // ContentHash: the classification question is about the notes' text, so a tag
-// or importance edit must not invalidate a cached verdict. The "v2\x00" prefix
+// or importance edit must not invalidate a cached verdict. The "v3\x00" prefix
 // versions the key — a prompt/rubric change that could flip verdicts bumps it
 // to reset every cached verdict in one step, the same reset resolve performed
-// when its rubric changed. v2 is the #641 rubric: it added the REVERSED
-// verdict and the created_at signal, so a NEITHER row written under v1 may be
-// judged the other way now and every v1 row has to be re-asked.
+// when its rubric changed. A cache hit is a permanent skip for the life of that
+// text, so a stored verdict that the current rules would answer differently is
+// not a stale row, it is a rule that can never be applied again to those two
+// notes. v2 was the #641 rubric (REVERSED plus the created_at signal) and v3 is
+// #686's: a SUPERSEDES now has to name the older note's retired claim, and
+// two-true pairs are NEITHER, so every v2 row has to be re-asked.
 func contentHash(content string) string {
-	sum := sha256.Sum256([]byte("v2\x00" + content))
+	sum := sha256.Sum256([]byte("v3\x00" + content))
 	return hex.EncodeToString(sum[:])
 }
 

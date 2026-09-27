@@ -329,7 +329,7 @@ func TestRunAppliesLabeledRealDataVerdicts(t *testing.T) {
 	ctx := context.Background()
 	ids := seedRegressionCases(t, store, db)
 
-	cls := NewRelationClassifier(newLabeledProvider(func(c relationCase) Relation { return c.want }))
+	cls := NewRelationClassifier(newLabeledProvider(func(c relationCase) Relation { return c.want }, replacedClaim))
 	res, classified, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -389,7 +389,7 @@ func TestRunLeavesTheThreePromptOnlyPairsToThePrompt(t *testing.T) {
 	ctx := context.Background()
 	ids := seedRegressionCases(t, store, db)
 
-	cls := NewRelationClassifier(newLabeledProvider(func(c relationCase) Relation { return c.wrong }))
+	cls := NewRelationClassifier(newLabeledProvider(func(c relationCase) Relation { return c.wrong }, replacedClaim))
 	res, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -434,19 +434,37 @@ var batchPairPattern = regexp.MustCompile(`(?s)OLDER [^«\n]*«(.*?)»\nNEWER [^
 // candidates in GetAll's order (importance DESC, created_at DESC), not the
 // fixture table's order, so a fixed "1: …, 2: …, 3: …" reply grades whichever
 // pairs happen to come first — an accidentally green test.
+//
+// A SUPERSEDES line also carries claim(case) in its required `replaced:` field
+// (issue #686), because a verdict that cannot name what the older note claimed
+// is NEITHER — so a fixture graded through this provider has to speak the
+// current output contract or it grades the parser, not the pass.
 type labeledProvider struct {
 	byNewer map[string]Relation
+	claim   func(relationCase) string
 	last    string
 }
 
-// labeledProvider builds a provider that answers each labeled pair with
-// verdict(case), in whatever order the pass emits the pairs.
-func newLabeledProvider(verdict func(relationCase) Relation) *labeledProvider {
-	p := &labeledProvider{byNewer: make(map[string]Relation, len(regressionRelationCases))}
+// newLabeledProvider builds a provider that answers each labeled pair with
+// verdict(case), in whatever order the pass emits the pairs, carrying
+// claim(case) as the `replaced:` value of every SUPERSEDES line.
+func newLabeledProvider(verdict func(relationCase) Relation, claim func(relationCase) string) *labeledProvider {
+	p := &labeledProvider{
+		byNewer: make(map[string]Relation, len(regressionRelationCases)),
+		claim:   claim,
+	}
 	for _, c := range regressionRelationCases {
 		p.byNewer[c.newer] = verdict(c)
 	}
 	return p
+}
+
+// replacedClaim is a fixed, synthetic `replaced:` value standing for "the claim
+// this case's older note made". The parser judges only that a value is present
+// and non-empty, never what it says, so the exact wording carries nothing — and
+// a fixed wording keeps these fixtures free of any real memory text.
+func replacedClaim(relationCase) string {
+	return "the claim the older note made"
 }
 
 // Classify answers one call. An unknown note is a hard error, not a silent
@@ -463,10 +481,25 @@ func (p *labeledProvider) Classify(_ context.Context, _, userContent string) (st
 		if !ok {
 			return "", fmt.Errorf("labeled provider: no verdict for newer note %.60q", m[2])
 		}
-		lines = append(lines, strconv.Itoa(len(lines)+1)+": "+strings.ToUpper(string(rel)))
+		line := strconv.Itoa(len(lines)+1) + ": " + strings.ToUpper(string(rel))
+		if rel == RelationSupersedes {
+			line += " | replaced: " + p.claim(regressionCaseByNewer(m[2]))
+		}
+		lines = append(lines, line)
 	}
 	p.last = strings.Join(lines, "\n")
 	return p.last, nil
+}
+
+// regressionCaseByNewer looks a labeled case up by its newer note's text, the
+// key labeledProvider matches on.
+func regressionCaseByNewer(newer string) relationCase {
+	for _, c := range regressionRelationCases {
+		if c.newer == newer {
+			return c
+		}
+	}
+	return relationCase{}
 }
 
 // promptFor classifies one labeled case and returns the system prompt and the
@@ -508,12 +541,18 @@ func TestClassifierPromptCarriesBothCreatedAt(t *testing.T) {
 // promptFor renders the single-pair contract; the batch contract's "VERDICT is
 // SUPERSEDES, CAUSES, NEITHER, or REVERSED" is asserted in
 // TestRelationClassifierBatchMapsNumberedLines.
+//
+// The single-pair contract prints one answer per line rather than the old
+// "respond with exactly one word: SUPERSEDES, CAUSES, NEITHER, or REVERSED",
+// because a SUPERSEDES answer now carries a `replaced:` claim (#686) — so the
+// assertion is on REVERSED being offered as a bare answer line, which is what
+// "offers the verdict" means for that shape.
 func TestClassifierPromptOffersReversedVerdict(t *testing.T) {
 	system, _ := promptFor(t, regressionCase(t, "reversed"))
 	if !strings.Contains(system, "REVERSED") {
 		t.Errorf("prompt does not offer a REVERSED verdict:\n%s", system)
 	}
-	if !strings.Contains(system, "SUPERSEDES, CAUSES, NEITHER, or REVERSED") {
+	if !strings.Contains(system, "\nREVERSED\n") {
 		t.Errorf("output contract does not list REVERSED alongside the other verdicts:\n%s", system)
 	}
 	if !strings.Contains(system, "never writes a supersedes link backwards") {
@@ -561,9 +600,11 @@ func TestRunReclassifiesPairsCachedUnderTheOldRubric(t *testing.T) {
 	newer := add(t, store, db, c.newer, []float32{1, 0, 0, 0}, c.newerCreated)
 	older := add(t, store, db, c.older, []float32{0.999, 0.001, 0, 0}, c.olderCreated)
 
-	// A row written by a pass running the pre-#641 rubric.
+	// A row written by a pass running the pre-#641 (v2-prefixed) rubric, so the
+	// test does not depend on which older prefix exists: every prefix but the
+	// current one must miss.
 	old := func(content string) string {
-		sum := sha256.Sum256([]byte("v1\x00" + content))
+		sum := sha256.Sum256([]byte("v2\x00" + content))
 		return hex.EncodeToString(sum[:])
 	}
 	if err := store.MarkSupersedeNeither(ctx, "p", map[[2]string]memory.SupersedeCheck{

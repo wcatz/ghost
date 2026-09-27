@@ -3,6 +3,8 @@ package supersede
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
@@ -37,20 +39,22 @@ func TestRelationClassifierParsesResponse(t *testing.T) {
 		resp string
 		want Relation
 	}{
-		{"SUPERSEDES", RelationSupersedes},
-		{"supersedes.", RelationSupersedes},
+		{"SUPERSEDES | replaced: it runs Postgres 14", RelationSupersedes},
+		{"supersedes. | replaced: the port is 22", RelationSupersedes},
 		{"CAUSES", RelationCauses},
 		{"causes", RelationCauses},
 		{"NEITHER", RelationNeither},
 		{"The answer is NEITHER, clearly.", RelationNeither},
-		{"**SUPERSEDES**", RelationSupersedes},
+		{"**SUPERSEDES** | **replaced:** the timeout is 5s", RelationSupersedes},
 		{"**NEITHER**", RelationNeither},
 		// Natural single-word synonyms: the prompt asks for SUPERSEDES, but a
-		// live run answered "CORRECTS" and the whole pass aborted.
-		{"CORRECTS", RelationSupersedes},
-		{"corrected.", RelationSupersedes},
-		{"REPLACES", RelationSupersedes},
-		{"UPDATED", RelationSupersedes},
+		// live run answered "CORRECTS" and the whole pass aborted. A synonym
+		// still has to name what the older note claimed (#686) — see
+		// TestSupersedesVerdictWithoutAReplacedClaimIsNeither.
+		{"CORRECTS | replaced: the count was cumulative", RelationSupersedes},
+		{"corrected. | replaced: the count was cumulative", RelationSupersedes},
+		{"REPLACES | replaced: the flag is --legacy", RelationSupersedes},
+		{"UPDATED | replaced: the pin moved to big-pickle", RelationSupersedes},
 		{"caused", RelationCauses},
 		// Regression: bare stems must not win over a canonical token later in
 		// prose — "correct" would have decided SUPERSEDES here.
@@ -67,6 +71,146 @@ func TestRelationClassifierParsesResponse(t *testing.T) {
 		if got != c.want {
 			t.Errorf("Classify(%q) = %v, want %v", c.resp, got, c.want)
 		}
+	}
+}
+
+// TestSupersedesVerdictRequiresAReplacedClaim is the code half of #686. A
+// supersedes edge is not informational: the ranking guards demote its target
+// and `ghost resolve`'s supersedes piggyback stamps resolved_at on it, so an
+// edge between two notes that are BOTH still true removes a live memory from
+// injection. The measured precision of the pass was 43% and every wrong edge
+// was exactly that pair. The verdict is therefore required to name what the
+// older note claimed that no longer holds, and a verdict that cannot is
+// NEITHER — the same contract resolve's RESOLVED/closed-by: carries, over the
+// same field grammar, so the two passes cannot drift apart.
+//
+// The cost is recall, deliberately: a model that answers SUPERSEDES and cannot
+// point at a retired claim costs one stale note staying ranked, while a model
+// that points at nothing and is believed costs a buried one.
+func TestSupersedesVerdictRequiresAReplacedClaim(t *testing.T) {
+	cases := []struct {
+		name string
+		resp string
+		want Relation
+	}{
+		// A named claim is the only route to SUPERSEDES.
+		{"named claim", "SUPERSEDES | replaced: it runs Postgres 14", RelationSupersedes},
+		{"named claim, no separator", "SUPERSEDES replaced: it runs Postgres 14", RelationSupersedes},
+		{"decorated key", "SUPERSEDES | **replaced:** it runs Postgres 14", RelationSupersedes},
+		{"value on the next line", "SUPERSEDES | replaced:\nit runs Postgres 14", RelationSupersedes},
+		// A missing field names nothing: the model did not say what stopped
+		// being true, so nothing is asserted to have been replaced.
+		{"bare verdict", "SUPERSEDES", RelationNeither},
+		{"verdict with a separator only", "SUPERSEDES |", RelationNeither},
+		{"key with no value", "SUPERSEDES | replaced:", RelationNeither},
+		{"key with a blank value", "SUPERSEDES | replaced:   ", RelationNeither},
+		// Placeholders are the model admitting it cannot point at a claim.
+		{"placeholder none", "SUPERSEDES | replaced: none", RelationNeither},
+		{"placeholder n/a", "SUPERSEDES | replaced: n/a", RelationNeither},
+		{"placeholder TBD", "SUPERSEDES | replaced: TBD", RelationNeither},
+		{"placeholder unknown", "SUPERSEDES | replaced: unknown", RelationNeither},
+		{"placeholder on the next line", "SUPERSEDES | replaced:\nnone", RelationNeither},
+		// The prompt's own template echoed back verbatim names nothing, and
+		// echoing a format is a routine harness failure mode.
+		{"echoed template", "SUPERSEDES | replaced: <the OLDER note's claim that no longer holds>", RelationNeither},
+		// A synonym is no way around the field: it is the same claim of
+		// replacement through a different word.
+		{"synonym without a claim", "CORRECTS", RelationNeither},
+		{"synonym with a placeholder", "REPLACES | replaced: n/a", RelationNeither},
+		// The other three verdicts are untouched: only SUPERSEDES writes an
+		// edge, so only SUPERSEDES needs a reason.
+		{"neither", "NEITHER", RelationNeither},
+		{"causes", "CAUSES", RelationCauses},
+		{"reversed", "REVERSED", RelationReversed},
+	}
+	for _, c := range cases {
+		cls := NewRelationClassifier(&fakeProvider{resp: c.resp})
+		got, err := cls.Classify(context.Background(), Candidate{NewerContent: "n", OlderContent: "o"})
+		if err != nil {
+			t.Fatalf("Classify(%q): unexpected error: %v", c.resp, err)
+		}
+		if got != c.want {
+			t.Errorf("%s: Classify(%q) = %v, want %v", c.name, c.resp, got, c.want)
+		}
+	}
+	// The batched line is the other half of the contract, and it is the one the
+	// pass actually sends: 8 pairs per call. A SUPERSEDES line that omits the
+	// claim must not decide the pair there either.
+	batch := []struct {
+		name string
+		resp string
+		want Relation
+	}{
+		{"named claim", "1: SUPERSEDES | replaced: it was pinned to release 14", RelationSupersedes},
+		{"bare verdict", "1: SUPERSEDES", RelationNeither},
+		{"placeholder", "1: SUPERSEDES | replaced: tbd", RelationNeither},
+		{"reversed keeps its own shape", "1: REVERSED", RelationReversed},
+		{"causes keeps its own shape", "1: CAUSES", RelationCauses},
+	}
+	for _, c := range batch {
+		cls := NewRelationClassifier(&fakeProvider{resp: c.resp})
+		pairs := []Candidate{{NewerContent: "n1", OlderContent: "o1"}, {NewerContent: "n2", OlderContent: "o2"}}
+		got, err := cls.ClassifyBatch(context.Background(), pairs)
+		if err != nil {
+			t.Fatalf("ClassifyBatch(%q): unexpected error: %v", c.resp, err)
+		}
+		if got[0] != c.want {
+			t.Errorf("%s: batched ClassifyBatch(%q) = %v, want %v", c.name, c.resp, got[0], c.want)
+		}
+	}
+}
+
+// TestClassifierPromptAsksTheBothTrueQuestion: the field can only be filled in
+// if the prompt asks the question the field answers. It is asserted on the lines
+// that carry the contract, so a rubric rewrite that drops the question while
+// keeping the output format fails here instead of quietly producing placeholders.
+func TestClassifierPromptAsksTheBothTrueQuestion(t *testing.T) {
+	// promptFor renders the single-pair contract (one pair takes the lone-tail
+	// path), so it is asserted on its own and the chunked prompt is read from the
+	// const the pass actually sends 8 pairs through.
+	system, _ := promptFor(t, regressionCase(t, "parallel-events"))
+	for _, want := range []string{
+		"is the OLDER note's claim false, or no longer applicable",
+		"both still true are NEITHER",
+		"replaced: <the OLDER note's claim that no longer holds>",
+	} {
+		if !strings.Contains(system, want) {
+			t.Errorf("the single-pair prompt does not carry %q:\n%s", want, system)
+		}
+		if !strings.Contains(classifyBatchSystemPrompt, want) {
+			t.Errorf("the batched prompt does not carry %q:\n%s", want, classifyBatchSystemPrompt)
+		}
+	}
+	// The two contracts are one rubric plus two output shapes, so a question that
+	// survives in one survives in the other by construction — pinned here because
+	// that is the only thing keeping the two from drifting.
+	if !strings.Contains(classifySystemPrompt, "is the OLDER note's claim false, or no longer applicable") {
+		t.Errorf("the single-pair prompt lost the question:\n%s", classifySystemPrompt)
+	}
+	if !strings.Contains(classifyBatchSystemPrompt, "is the OLDER note's claim false, or no longer applicable") {
+		t.Errorf("the batched prompt lost the question:\n%s", classifyBatchSystemPrompt)
+	}
+}
+
+// TestSupersedeNEITHERCachePrefixMoved: every NEITHER verdict cached under the
+// old rubric was judged by a rule that could not tell two-true pairs apart, and
+// a cache hit is a permanent skip for the life of that text — so the key's
+// version prefix must move with the rubric, in one step, the way resolve's did.
+func TestSupersedeNEITHERCachePrefixMoved(t *testing.T) {
+	old := func(content string) string {
+		sum := sha256.Sum256([]byte("v2\x00" + content))
+		return hex.EncodeToString(sum[:])
+	}
+	if old("same text") == contentHash("same text") {
+		t.Error("a v2-prefixed NEITHER row still matches the cache key: every verdict cached under the #641 rubric would keep skipping its pair")
+	}
+	// The new prefix is in force and still keyed by content: two different texts
+	// hash apart, and the same text hashes to the same key.
+	if contentHash("a") == contentHash("b") {
+		t.Error("contentHash ignores its input")
+	}
+	if contentHash("a") != contentHash("a") {
+		t.Error("contentHash is not deterministic")
 	}
 }
 
@@ -98,7 +242,7 @@ func TestRelationClassifierPropagatesProviderError(t *testing.T) {
 }
 
 func TestRelationClassifierBatchMapsNumberedLines(t *testing.T) {
-	fp := &fakeProvider{resp: "2: CAUSES\n1: SUPERSEDES\n"}
+	fp := &fakeProvider{resp: "2: CAUSES\n1: SUPERSEDES | replaced: the build was pinned to release 14\n"}
 	cls := NewRelationClassifier(fp)
 	pairs := []Candidate{
 		{NewerContent: "n1", NewerCreatedAt: "2026-09-02 00:00:00", OlderContent: "o1", OlderCreatedAt: "2026-01-01 00:00:00"},
@@ -120,6 +264,9 @@ func TestRelationClassifierBatchMapsNumberedLines(t *testing.T) {
 	if !strings.Contains(fp.lastSystem, "VERDICT is SUPERSEDES, CAUSES, NEITHER, or REVERSED") {
 		t.Errorf("batch output contract does not offer the reversed verdict:\n%s", fp.lastSystem)
 	}
+	if !strings.Contains(fp.lastSystem, "N: SUPERSEDES | replaced:") {
+		t.Errorf("batch output contract does not require a replaced: claim on SUPERSEDES:\n%s", fp.lastSystem)
+	}
 	if !strings.Contains(fp.lastUserContent, "1.\nOLDER 2026-01-01 00:00:00: «o1»\nNEWER 2026-09-02 00:00:00: «n1»") {
 		t.Errorf("batch content not numbered/delimited with created_at as expected:\n%s", fp.lastUserContent)
 	}
@@ -129,7 +276,7 @@ func TestRelationClassifierBatchMapsNumberedLines(t *testing.T) {
 }
 
 func TestRelationClassifierBatchMissingLineIsUnclassified(t *testing.T) {
-	fp := &fakeProvider{resp: "1: SUPERSEDES\n3: NEITHER\n"}
+	fp := &fakeProvider{resp: "1: SUPERSEDES | replaced: a was the only caller\n3: NEITHER\n"}
 	cls := NewRelationClassifier(fp)
 	pairs := []Candidate{
 		{NewerContent: "a", OlderContent: "a"},
@@ -152,7 +299,7 @@ func TestRelationClassifierBatchMissingLineIsUnclassified(t *testing.T) {
 }
 
 func TestRelationClassifierBatchLogsMissingVerdicts(t *testing.T) {
-	fp := &fakeProvider{resp: "1: SUPERSEDES\n"} // verdict for pair 2 missing
+	fp := &fakeProvider{resp: "1: SUPERSEDES | replaced: the flag was --legacy\n"} // verdict for pair 2 missing
 	cls := NewRelationClassifier(fp)
 	var buf bytes.Buffer
 	cls.SetLogger(slog.New(slog.NewTextHandler(&buf, nil)))
@@ -270,7 +417,7 @@ func TestQuoteDataNeutralizesEmbeddedDelimiters(t *testing.T) {
 
 func TestParseBatchRelations(t *testing.T) {
 	// Lines map by number, not position.
-	got := parseBatchRelations("2: CAUSES\n1: SUPERSEDES\n", 2)
+	got := parseBatchRelations("2: CAUSES\n1: SUPERSEDES | replaced: the release pin was 14\n", 2)
 	if got[0] != RelationSupersedes || got[1] != RelationCauses {
 		t.Errorf("out-of-order lines: got %v, want [supersedes causes]", got)
 	}
@@ -322,14 +469,16 @@ func TestParseBatchRelations(t *testing.T) {
 		t.Errorf("duplicate number after a prose preamble must invalidate the reply, got %v", got[0])
 	}
 
-	// A trailing explanation after the verdict still parses.
-	got = parseBatchRelations("1: SUPERSEDES because the port changed", 1)
+	// A trailing explanation after the verdict still parses, but only with a
+	// replaced: claim — a SUPERSEDES that cannot say what the older note
+	// claimed is NEITHER (#686).
+	got = parseBatchRelations("1: SUPERSEDES | replaced: the port was 22, because the port changed", 1)
 	if got[0] != RelationSupersedes {
 		t.Errorf("verdict with trailing explanation: got %v, want supersedes", got[0])
 	}
 
-	// Synonyms still count when the line is just the synonym.
-	got = parseBatchRelations("1: CORRECTS", 1)
+	// Synonyms still count when the line carries the required claim.
+	got = parseBatchRelations("1: CORRECTS | replaced: the count was cumulative", 1)
 	if got[0] != RelationSupersedes {
 		t.Errorf("batch synonym: got %v, want supersedes", got[0])
 	}
@@ -546,13 +695,13 @@ func TestRelationClassifierParsesReversedVerdict(t *testing.T) {
 		// ...but only when it IS the answer. A REVERSED mentioned mid-sentence
 		// is prose, and acting on it deletes a live link (#649 re-review): these
 		// two replies both parse as REVERSED today.
-		{"It might look REVERSED at first, but the newer note updates the older one: SUPERSEDES", RelationSupersedes},
-		{"Not a case of REVERSED ordering. SUPERSEDES", RelationSupersedes},
+		{"It might look REVERSED at first, but the newer note updates the older one: SUPERSEDES | replaced: it was still on 14", RelationSupersedes},
+		{"Not a case of REVERSED ordering. SUPERSEDES | replaced: the harness is gone", RelationSupersedes},
 		// The second field is still a mention, not the answer: leading position
 		// is the whole rule.
-		{"Actually REVERSED — the newer note supersedes the older one", RelationSupersedes},
+		{"Actually REVERSED — the newer note supersedes the older one | replaced: the old pin is retired", RelationSupersedes},
 		// The forward direction, however it is phrased, must stay SUPERSEDES.
-		{"The newer note supersedes the older one.", RelationSupersedes},
+		{"The newer note supersedes the older one. | replaced: the value was 5", RelationSupersedes},
 		// A denial of supersession is prose too, and the guard exists only to
 		// protect SUPERSEDES: a stated NEITHER or CAUSES must survive it even
 		// when the reply names both roles.
@@ -561,11 +710,11 @@ func TestRelationClassifierParsesReversedVerdict(t *testing.T) {
 		// A negated word is skipped, and the next decisive word decides. A
 		// two-field negation window used to refuse these outright, which
 		// re-billed the pair on every pass forever (#649 review).
-		{"There is no doubt: SUPERSEDES", RelationSupersedes},
-		{"There is no CAUSES relationship; the newer note replaces the older - SUPERSEDES", RelationSupersedes},
+		{"There is no doubt: SUPERSEDES | replaced: the count is now per-block", RelationSupersedes},
+		{"There is no CAUSES relationship; the newer note replaces the older - SUPERSEDES | replaced: the flag became --v2", RelationSupersedes},
 		// A forward passive is a forward statement, decided by its stated word.
-		{"SUPERSEDES - the OLDER note's value is replaced, per the NEWER note", RelationSupersedes},
-		{"SUPERSEDES: the old Postgres 14 cluster is replaced by the new one.", RelationSupersedes},
+		{"SUPERSEDES - the OLDER note's value is replaced, per the NEWER note | replaced: the value was 5s", RelationSupersedes},
+		{"SUPERSEDES: the old Postgres 14 cluster is replaced by the new one. | replaced: it ran release 14", RelationSupersedes},
 		{"NEITHER", RelationNeither},
 		{"CAUSES", RelationCauses},
 	}
@@ -602,7 +751,7 @@ func TestRelationClassifierParsesReversedVerdict(t *testing.T) {
 // TestParseBatchRelationsReversed: the batched line carries the same fourth
 // verdict, and a REVERSED first field is not read as prose.
 func TestParseBatchRelationsReversed(t *testing.T) {
-	got := parseBatchRelations("1: REVERSED\n2: SUPERSEDES", 2)
+	got := parseBatchRelations("1: REVERSED\n2: SUPERSEDES | replaced: the release pin was 14", 2)
 	if got[0] != RelationReversed || got[1] != RelationSupersedes {
 		t.Errorf("got %v, want [reversed supersedes]", got)
 	}
