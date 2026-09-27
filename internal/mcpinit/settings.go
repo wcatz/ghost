@@ -270,8 +270,15 @@ func syncDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer d.Close()
-	return d.Sync()
+	// Closed explicitly rather than deferred, so a close that fails is not
+	// dropped on the floor: a handle the kernel could not release is a fact
+	// about the flush, and the sync result is the one that matters when both
+	// did.
+	syncErr := d.Sync()
+	if err := d.Close(); err != nil && syncErr == nil {
+		syncErr = err
+	}
+	return syncErr
 }
 
 // createTempWithMode opens a uniquely named new file in dir carrying perm, so
