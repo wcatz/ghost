@@ -499,14 +499,17 @@ func TestGooseSubprocessEnvFallsBackToTempDirWhenScratchUnavailable(t *testing.T
 
 	realHome := t.TempDir()
 	plantPlugin(t, filepath.Join(realHome, ".agents", "plugins", "ghost"))
-	// Both layouts are populated, because GOOSE_PATH_ROOT is set and takes
-	// precedence: the child reads $ROOT/config, and the home-relative roots are
-	// what a parent without that variable would read.
+	// Only the path-root layout: GOOSE_PATH_ROOT is set, so that is the config
+	// the child reads.
 	plantGooseConfig(t, filepath.Join(realHome, "config"))
-	plantGooseConfig(t, filepath.Join(realHome, ".config", "goose"))
 	t.Setenv("HOME", realHome)
 	t.Setenv("USERPROFILE", realHome)
 	t.Setenv("GOOSE_PATH_ROOT", realHome)
+	// Pinned empty, because an inherited XDG_CONFIG_HOME changes which layout
+	// this asserts: the child would read it instead of $ROOT/config. A test
+	// that passes on a laptop and fails in CI over an ambient variable is not
+	// a test of the fallback.
+	t.Setenv("XDG_CONFIG_HOME", "")
 
 	client := &GooseClient{binary: "goose"}
 	cmd, cleanup, err := client.subprocessEnv(context.Background(), []string{"run", "-q"})
@@ -536,12 +539,15 @@ func TestGooseSubprocessEnvFallsBackToTempDirWhenScratchUnavailable(t *testing.T
 			t.Errorf("%s = %q, want the fallback dir %q", key, got, cmd.Dir)
 		}
 	}
-	// The config the child authenticates from has to have travelled.
-	if _, err := os.Stat(filepath.Join(envValue(cmd.Env, "HOME"), ".config", "goose", "config.yaml")); err != nil {
-		t.Errorf("fallback child lost the home-relative config: %v", err)
-	}
+	// The config the child authenticates from has to have travelled. With
+	// GOOSE_PATH_ROOT set, goose reads $ROOT/config and the home-relative roots
+	// are deliberately not reproduced — path_root() short-circuits before any
+	// home variable — so this asserts the one layout the child will use.
 	if _, err := os.Stat(filepath.Join(envValue(cmd.Env, "GOOSE_PATH_ROOT"), "config", "config.yaml")); err != nil {
 		t.Errorf("fallback child lost the path-root config: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(envValue(cmd.Env, "GOOSE_PATH_ROOT"), "config", "secrets.yaml")); err != nil {
+		t.Errorf("fallback child lost the credentials it authenticates with: %v", err)
 	}
 }
 
