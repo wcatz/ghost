@@ -324,6 +324,16 @@ func TestRunReversedVerdictInvalidatesBackwardsLink(t *testing.T) {
 // batched call with the verdicts the fixed prompt is supposed to produce, and
 // pins the resulting graph: the two status-report pairs supersede, the reversed
 // pair gets nothing, and the two parallel events on one host get nothing.
+//
+// One of them no longer reaches the classifier at all. "status-report-fix"'s
+// older note says the build "never gets past" the missing fix, which reads as a
+// rule to the imperative vocabulary the veto shares with resolve, and its newer
+// note never retires one — so the veto settles it as no-edge, for free, before
+// any call (#686). The cost is a missed staleness link: that older note stays
+// ranked beside its replacement. It is the cheap direction (a duplicate pair
+// visible in search) rather than a buried memory, it is what the issue's rule
+// asks for, and the expectation is pinned BY NAME here so narrowing the veto
+// has to be a deliberate change to this test.
 func TestRunAppliesLabeledRealDataVerdicts(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -334,17 +344,22 @@ func TestRunAppliesLabeledRealDataVerdicts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	vetoed := map[string]bool{"status-report-fix": true}
+	judged := len(regressionRelationCases) - len(vetoed)
 	if res.Candidates != len(regressionRelationCases) {
 		t.Fatalf("Candidates = %d, want %d (one pair per labeled case)", res.Candidates, len(regressionRelationCases))
 	}
+	if res.Vetoed != len(vetoed) {
+		t.Errorf("Vetoed = %d, want %d", res.Vetoed, len(vetoed))
+	}
 	if cls.Calls() != 1 {
-		t.Errorf("classify calls = %d, want 1 batched call for %d pairs", cls.Calls(), len(regressionRelationCases))
+		t.Errorf("classify calls = %d, want 1 batched call for the %d un-vetoed pair(s)", cls.Calls(), judged)
 	}
 	if res.Reversed != 1 {
 		t.Errorf("Reversed = %d, want 1 (%s)", res.Reversed, regressionCase(t, "reversed").name)
 	}
-	if res.Confirmed != 2 {
-		t.Errorf("Confirmed = %d, want 2 (the two status-report pairs)", res.Confirmed)
+	if res.Confirmed != 1 {
+		t.Errorf("Confirmed = %d, want 1 (the status-report pair the veto does not settle)", res.Confirmed)
 	}
 	// Which pair got which verdict, by identity: the per-pair verdicts are the
 	// fixture, so this fails if a reply ever lands on the wrong pair — which a
@@ -355,23 +370,31 @@ func TestRunAppliesLabeledRealDataVerdicts(t *testing.T) {
 	}
 	for i, c := range regressionRelationCases {
 		newer, older := ids[i][0], ids[i][1]
-		if got := gotVerdict[newer]; got != c.want {
-			t.Errorf("%s: verdict = %q, want %q", c.name, got, c.want)
+		want := c.want
+		wantLink := c.want == RelationSupersedes
+		if vetoed[c.key] {
+			want = ""
+			wantLink = false
+			if _, settled := VetoSupersede(Candidate{OlderContent: c.older, NewerContent: c.newer}); !settled {
+				t.Errorf("%s: the fixture claims the veto settles this pair, but VetoSupersede did not", c.name)
+			}
+		}
+		if got := gotVerdict[newer]; got != want {
+			t.Errorf("%s: verdict = %q, want %q", c.name, got, want)
 		}
 		pairs, err := store.SupersedesWithin(ctx, []string{newer, older})
 		if err != nil {
 			t.Fatalf("SupersedesWithin: %v", err)
 		}
-		wantLink := c.want == RelationSupersedes
 		if wantLink && len(pairs) != 1 {
 			t.Errorf("%s: want one supersedes link, got %d", c.name, len(pairs))
 		}
 		if !wantLink && len(pairs) != 0 {
-			t.Errorf("%s (%s): want no link, got %d", c.name, c.want, len(pairs))
+			t.Errorf("%s (%s): want no link, got %d", c.name, want, len(pairs))
 		}
 		links, _ := store.GetLinks(ctx, older)
 		for _, l := range links {
-			if l.Relation == string(RelationCauses) {
+			if l.Relation == string(RelationCauses) && c.wrong == RelationCauses {
 				t.Errorf("%s: a causes link was written: %+v", c.name, l)
 			}
 		}
@@ -384,6 +407,13 @@ func TestRunAppliesLabeledRealDataVerdicts(t *testing.T) {
 // from a correct verdict of the same shape, so the pass writes whatever it is
 // told; the rules that stop those three live in the prompt, pinned by the
 // TestClassifierPromptRefuses* tests below.
+//
+// It is the "status-report-divergence" pair that carries the misused `causes`,
+// not its "status-report-fix" sibling: the latter's older note says the build
+// "never gets past" the missing fix, so the imperative veto settles it before
+// the model is asked anything (see TestRunAppliesLabeledRealDataVerdicts). One
+// misused `causes` out of two labeled status reports is the shape the prompt
+// rule has to catch.
 func TestRunLeavesTheThreePromptOnlyPairsToThePrompt(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -401,24 +431,24 @@ func TestRunLeavesTheThreePromptOnlyPairsToThePrompt(t *testing.T) {
 	// backwards link #641 reported — the exact harm the prompt rules remove by
 	// offering REVERSED. Asserting it here would pin the bug, so the count is
 	// only reported.
-	t.Logf("with the pre-fix verdict set: confirmed=%d created=%d causes=%d reversed=%d (the first case is the backwards link #641 found)",
-		res.Confirmed, res.Created, res.CausesCreated, res.Reversed)
+	t.Logf("with the pre-fix verdict set: confirmed=%d created=%d causes=%d reversed=%d vetoed=%d (the first case is the backwards link #641 found)",
+		res.Confirmed, res.Created, res.CausesCreated, res.Reversed, res.Vetoed)
 
 	// The misused causes link is the one the prompt now forbids, so it must be
 	// the one the pass still writes when the prompt does not forbid it.
-	causesCase := regressionCase(t, "status-report-fix")
-	causes, err := store.GetLinks(ctx, ids[1][1])
+	divergence := regressionCase(t, "status-report-divergence")
+	causes, err := store.GetLinks(ctx, ids[2][1])
 	if err != nil {
 		t.Fatalf("GetLinks: %v", err)
 	}
 	found := false
 	for _, l := range causes {
-		if l.Relation == string(RelationCauses) && l.SourceID == ids[1][1] && l.TargetID == ids[1][0] {
+		if l.Relation == string(RelationCauses) && l.SourceID == ids[2][1] && l.TargetID == ids[2][0] {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("expected the misused causes link for %s to be written when the prompt does not forbid it (see TestClassifierPromptRefusesCausesBetweenStatusReports)", causesCase.name)
+		t.Errorf("expected the misused causes link for %s to be written when the prompt does not forbid it (see TestClassifierPromptRefusesCausesBetweenStatusReports)", divergence.name)
 	}
 }
 

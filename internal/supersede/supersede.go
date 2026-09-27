@@ -260,6 +260,12 @@ type Result struct {
 	Skipped       int // fresh pairs skipped via the NEITHER cache
 	Unclassified  int // pairs skipped because the classifier answer was unparseable
 	Reversed      int // REVERSED verdicts: refused, never written
+	// Vetoed counts pairs the deterministic imperative veto settled as
+	// no-supersedes-edge with no harness call (see VetoSupersede). They are
+	// counted rather than silently dropped, because a run that declines work it
+	// did not do and reports the same totals as one that found nothing to do
+	// reads as "nothing was skipped".
+	Vetoed int
 	// ReclassifiedNoWrite counts the reclassify pairs whose --apply effect is
 	// purely destructive: a reversal and a NEITHER both only invalidate the
 	// links they find, so neither re-links the pair.
@@ -472,6 +478,36 @@ func Run(ctx context.Context, store vectorStore, cls Classifier, projectID strin
 	}
 	all = live
 	res.Candidates = len(all)
+
+	// The deterministic imperative veto, before the cache and before any call
+	// (issue #686). A pair whose OLDER note states a standing rule and whose
+	// NEWER note never names that rule as retired is settled here: no classify
+	// call, no link, and no NEITHER cache row, because the veto is free to
+	// recompute on every pass and a row would only add a stale one to reason
+	// about. Measured over a real store, 43% of the proposed edges were pairs
+	// whose two notes were both still true, and one of them demoted a "must"
+	// rule — which the ranking guards demote and resolve's supersedes piggyback
+	// then stamps resolved_at on, for good.
+	//
+	// It runs after the scope refusal, so the pass's two free "this pair may not
+	// be linked" decisions stand together, and before the cache, so a vetoed
+	// pair is never answered from a verdict the current rules would not have
+	// given. An existing edge such a pair carries is left alone: this is the
+	// creation pass, and Reassess is what withdraws an edge the current rules no
+	// longer support.
+	keep := all[:0]
+	for _, c := range all {
+		if reason, vetoed := VetoSupersede(c); vetoed {
+			res.Vetoed++
+			if logger != nil {
+				logger.Debug("supersede: vetoed pair whose older note states a rule",
+					"newer", c.NewerID, "older", c.OlderID, "reason", reason)
+			}
+			continue
+		}
+		keep = append(keep, c)
+	}
+	all = keep
 	if len(all) == 0 {
 		return res, nil, nil
 	}

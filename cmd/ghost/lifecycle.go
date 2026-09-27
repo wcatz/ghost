@@ -1332,13 +1332,29 @@ an error, never a fallback to a different harness). The harness owns its
 authentication and billing.
 `
 
+// supersedeReport renders the pass's per-outcome report: the one-line summary
+// followed by the deterministic veto's count. A pass that declined work it did
+// not do and printed the same totals as a pass that found nothing to do reads
+// as "nothing was skipped", so the veto is on the report (#686) — and it is
+// printed by the one call below, so the report and the pass cannot drift.
+func supersedeReport(projectName string, res supersede.Result, verb string, calls int) string {
+	out := fmt.Sprintf("%s: %d candidate pairs in %d classify call(s), %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
+		projectName, res.Candidates, calls, res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+	if res.Vetoed == 0 {
+		return out
+	}
+	return out + fmt.Sprintf("  %d pair(s) vetoed: the older note states a rule and the newer note does not name it retired — no classify call, no link, and not cached (re-decided free on a later pass)\n", res.Vetoed)
+}
+
 // runSupersede implements `ghost supersede <project> [--apply]` — the creation
 // half of staleness-aware ranking. It proposes newer→older 'supersedes' links
-// over the project's live memories (cosine-similar candidates, CLI-harness
-// confirmed) and, with --apply, writes them. Dry-run by default. Re-runnable:
-// it self-heals after `ghost reflect` cascade-deletes links. Consumed by
-// search only when SupersedeDemote is set. A reversed verdict is reported and
-// refused, never written (#641). See docs/benchmarks.md Phase 3.
+// over the project's live memories (cosine-similar candidates, a deterministic
+// imperative veto, then CLI-harness confirmation) and, with --apply, writes
+// them. Dry-run by default. Re-runnable: it self-heals after `ghost reflect`
+// cascade-deletes links. Consumed by search only when SupersedeDemote is set. A
+// reversed verdict is reported and refused, never written (#641); a pair whose
+// older note states a rule the newer note never retires is vetoed for free
+// (#686). See docs/benchmarks.md Phase 3.
 func runSupersede() {
 	projectName, source, apply, threshold, parseErr := parseSupersedeArgs(os.Args[2:])
 	if parseErr != nil {
@@ -1385,8 +1401,7 @@ func runSupersede() {
 		}
 		return id
 	}
-	fmt.Printf("%s: %d candidate pairs in %d classify call(s), %d cached, %d supersedes, %d causes, %d reclassified, %s\n",
-		projectName, res.Candidates, cls.Calls(), res.Skipped, res.Confirmed, res.CausesCreated, res.Reclassified, verb)
+	fmt.Print(supersedeReport(projectName, res, verb, cls.Calls()))
 	if res.Unclassified > 0 {
 		fmt.Printf("  %d pair(s) skipped: unclassifiable verdict (logged; the pass still completed)\n", res.Unclassified)
 	}

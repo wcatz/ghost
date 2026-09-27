@@ -22,6 +22,7 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
 	"github.com/wcatz/ghost/internal/resolve"
+	"github.com/wcatz/ghost/internal/supersede"
 )
 
 // testDeleteStore returns a real in-memory Store with one project ("proj",
@@ -1407,6 +1408,34 @@ func TestReassessSummaryLine(t *testing.T) {
 	wantApply := "proj: 40 already resolved, 6 KEEP vetoed, 1 KEEP cached, 22 still RESOLVED, 2 still asserted by a link or correction, 0 UNKNOWN, cleared resolved_at for 8 (2 classify call(s))\n"
 	if got := reassessSummaryLine("proj", res, true, 9, 2); got != wantApply {
 		t.Errorf("reassessSummaryLine() apply = %q, want %q", got, wantApply)
+	}
+}
+
+// TestSupersedeReport: the pass's report carries the deterministic veto's
+// count, and only when the veto settled something. A pass that declined work it
+// did not do and printed the same totals as a pass that found nothing to do
+// reads as "nothing was skipped" (#686).
+func TestSupersedeReport(t *testing.T) {
+	dry := "proj: 4 candidate pairs in 1 classify call(s), 2 cached, 1 supersedes, 0 causes, 0 reclassified, would link\n"
+	if got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1}, "would link", 1); got != dry {
+		t.Errorf("supersedeReport() with nothing vetoed = %q, want %q", got, dry)
+	}
+	got := supersedeReport("proj", supersede.Result{Candidates: 4, Skipped: 2, Confirmed: 1, Vetoed: 3}, "would link", 1)
+	if !strings.HasPrefix(got, dry) {
+		t.Errorf("supersedeReport() = %q, want the summary line first, unchanged", got)
+	}
+	if !strings.Contains(got, "  3 pair(s) vetoed:") {
+		t.Errorf("supersedeReport() = %q, want it to report 3 vetoed pairs", got)
+	}
+	if !strings.Contains(got, "no classify call") || !strings.Contains(got, "not cached") {
+		t.Errorf("supersedeReport() = %q, want it to say what the veto costs and does not cost", got)
+	}
+	// The report is mode-agnostic about the veto: a vetoed pair is never linked,
+	// so there is nothing for --apply to write either. The apply verb is the
+	// only thing that changes.
+	apply := supersedeReport("proj", supersede.Result{Candidates: 1, Vetoed: 1}, "linked", 0)
+	if !strings.HasPrefix(apply, "proj: 1 candidate pairs in 0 classify call(s), 0 cached, 0 supersedes, 0 causes, 0 reclassified, linked\n") {
+		t.Errorf("supersedeReport() apply = %q, want the apply verb and the veto count", apply)
 	}
 }
 
