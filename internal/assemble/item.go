@@ -41,7 +41,7 @@ type Item struct {
 	// label: a renderer that could not see the origin would have to drop the
 	// label, and dropping it is a behaviour change on a live surface. The label
 	// itself comes from memory.OriginClass, never from this field's literal
-	// value.
+	// value, and the compatibility correction is scoped by ProjectID above.
 	Source string
 }
 
@@ -65,8 +65,13 @@ func (i Item) Line() string {
 	if i.ResolvedAt != nil {
 		resolved = " [resolved]"
 	}
+	// The legacy-seed correction is scoped to the global project, because that
+	// is the only row it is about: a project row holding the shipped sentence is
+	// the user's own material, and labelling it builtin would misattribute it and
+	// remove the "no agent recorded" marker that says so. The item carries its
+	// own project id precisely so this renderer does not have to guess.
 	origin := ""
-	if _, label := memory.OriginClass(memory.CanonicalOriginSource(i.Source, i.Content)); label != "" {
+	if _, label := memory.OriginClass(memory.CanonicalOriginSourceForProject(i.ProjectID, i.Source, i.Content)); label != "" {
 		origin = " source=" + label
 	}
 	return "- [" + i.Category + "] `" + i.ID + "` (" +

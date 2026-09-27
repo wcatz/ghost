@@ -898,3 +898,35 @@ func TestStagesDoNotMutateTheRetrievedSet(t *testing.T) {
 		t.Errorf("the retrieved set changed from %v to %v: a stage filtered by compacting in place", before, after)
 	}
 }
+
+// TestOriginLabelIsScopedToTheGlobalProject: the legacy-seed correction is only
+// a correction for the shipped global rule. A project row that happens to hold
+// the same sentence is the user's own material, and labelling it builtin both
+// misattributes it and strips the "no agent recorded" marker that tells a reader
+// the row is theirs. The shared renderer is the surface that gets this wrong if
+// anyone applies the correction by content alone.
+func TestOriginLabelIsScopedToTheGlobalProject(t *testing.T) {
+	seed := "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user."
+
+	// source=manual is the pre-v15 shape: a build that wrote the shipped seed
+	// before the provenance columns existed recorded it as direct user material.
+	globalRow := candidate("G1", "_global", "preference", seed, 0.9)
+	globalRow.Source = "manual"
+	projectRow := candidate("P1", "proj", "preference", seed, 0.9)
+	projectRow.Source = "manual"
+
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+	res := run(t, &fakeRetriever{set: setOf(globalRow, projectRow)}, req)
+
+	lines := map[string]string{}
+	for _, it := range res.Items {
+		lines[it.ID] = it.Line()
+	}
+	if !strings.Contains(lines["G1"], "source=builtin") {
+		t.Errorf("global seed row = %q, want the builtin label: the correction exists for exactly this row", lines["G1"])
+	}
+	if strings.Contains(lines["P1"], "source=builtin") {
+		t.Errorf("project row = %q, want no origin label: a project row carrying the seed text is the user's own material", lines["P1"])
+	}
+}
