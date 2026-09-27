@@ -2,6 +2,7 @@ package reflection
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -82,6 +83,40 @@ func TestRewrittenRowIsNotReAddedWhenTheRewriteKeepsTheSubstance(t *testing.T) {
 	}
 	if len(drops) != 0 {
 		t.Errorf("a rewrite carrying the substance was still flagged: %+v", drops)
+	}
+}
+
+// TestPromptTellsTheModelARewriteMayComeBack is the prompt half of the KEEP rule,
+// and it is a test because the drift is silent: the guard changed and the prompt
+// did not, so on the unattended path the model was told a rewrite or a
+// supersession is final when neither is. Every such operation the corpus cannot
+// account for then becomes a paraphrase duplicate that every later pass reads,
+// which is the cost the rule accepts — accepted, but not intended.
+//
+// The prompt already carried the equivalent warning for a merge (mergeTail) and
+// an obsolete drop (staleTail), so this asserts the two REPLACING operations got
+// the same signal rather than asserting a new idea.
+func TestPromptTellsTheModelARewriteMayComeBack(t *testing.T) {
+	prompt := BuildReflectionPrompt(ReflectionInput{ExistingMemories: []memory.Memory{
+		{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "the bastion is reached on port 2222"},
+	}})
+
+	for _, want := range []string{
+		`"rewrite <id> -> <text>"`,         // the bullet exists at all
+		"CARRY the old memory's substance", // the replacement must explain the row
+		"puts that row back verbatim",      // and what happens when it does not
+		"until a later pass demotes",       // so the model knows it is not permanent either
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt does not tell the model %q about a rewrite that does not account for its row", want)
+		}
+	}
+
+	// The supersession bullet is the one the hole was reached through, so it must
+	// carry the signal too and not only inherit it from the rewrite bullet.
+	sup := prompt[strings.Index(prompt, `"drop <id> reason: superseded by <id>"`):]
+	if !strings.Contains(sup[:strings.Index(sup, "\n")], "puts that row back verbatim") {
+		t.Errorf("the supersession bullet still reads as final; it needs the same warning as a rewrite")
 	}
 }
 
