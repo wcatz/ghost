@@ -12,6 +12,12 @@ import (
 // explains.
 type Trace struct {
 	ProjectID, Query string
+	// AsOf is the instant a historical read was assembled at, in RFC 3339, and
+	// empty for a current read. It is the trace's own record of the binding Run
+	// performed on Now, so a reader of the trace can tell a block that was
+	// assembled against the wall clock from one assembled against a past instant
+	// without having to know that both carry a Now.
+	AsOf string
 	// Limit is the window Run asked the retriever for, not the caller's budget:
 	// the caller's item bound widened for a category predicate, or the documented
 	// ceiling when the budget states no item bound at all. The stage 8 record
@@ -107,7 +113,7 @@ const (
 // newTrace seeds the trace from the request and the candidate set. Recording
 // starts here and is unconditional.
 func newTrace(req Request, set *memory.CandidateSet) *Trace {
-	return &Trace{
+	t := &Trace{
 		ProjectID: req.ProjectID,
 		Query:     req.Query,
 		// The window the retriever is asked for, not the caller's item budget:
@@ -121,6 +127,10 @@ func newTrace(req Request, set *memory.CandidateSet) *Trace {
 		Legs:            set.Legs,
 		Signals:         map[string]Signals{},
 	}
+	if req.AsOf != nil {
+		t.AsOf = req.AsOf.UTC().Format(time.RFC3339)
+	}
+	return t
 }
 
 // record appends one stage's entry, always. In and Out are what the stage saw

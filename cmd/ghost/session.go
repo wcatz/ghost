@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/mcpinit"
 )
@@ -11,12 +12,50 @@ import (
 // contextUsage is the help for `ghost context`: stdout for -h/--help (see
 // handleHelp), so a help request never runs the SessionStart side effects the
 // context block mirrors (Obsidian sync, session-count bump).
-const contextUsage = `Usage: ghost context [--cwd <dir>]
+const contextUsage = `Usage: ghost context [--cwd <dir>] [--as-of <RFC3339>]
 
 Prints the passive session-start context block for a directory. This is what
 the opencode adapter injects as instructions, because opencode does not
 consume a stdout hook response.
+
+--as-of <RFC3339> prints the block as the store stood at that instant instead
+(issue #647): the wording each memory held then, including memories deleted
+since, and without memories that did not exist yet. Tasks, decisions and
+learned context are not versioned, so they are omitted rather than shown as
+they are now, and no session is counted — a past reading is a diagnostic, not
+a session start.
 `
+
+// contextAsOf reads the --as-of instant out of a `ghost context` argument list.
+// The second result is false when the flag was absent, which is a current read
+// and not an error; an unreadable value IS an error, and it is reported here
+// rather than ignored because the alternative is answering a question about a
+// past instant with the present.
+//
+// It is a function so the parser can be tested without running the command: the
+// bad value ends in os.Exit(2), and a test that drove that would have to take the
+// process with it.
+func contextAsOf(args []string) (*time.Time, error) {
+	raw := ""
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--as-of" && i+1 < len(args):
+			raw = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--as-of="):
+			raw = strings.TrimPrefix(args[i], "--as-of=")
+		}
+	}
+	if raw == "" {
+		return nil, nil
+	}
+	instant, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil, fmt.Errorf("--as-of %q is not an RFC 3339 instant (e.g. 2026-09-20T09:00:00Z): %w", raw, err)
+	}
+	utc := instant.UTC()
+	return &utc, nil
+}
 
 // runContext prints the passive session-start context block for a directory,
 // backing opencode's plugin-injected instructions. It mirrors the SessionStart
@@ -25,6 +64,13 @@ consume a stdout hook response.
 // `ghost context` is the opencode-appropriate alternative to the SessionStart
 // hook, which opencode cannot consume (no stdout-injection surface). See
 // RenderSessionContext.
+//
+// --as-of turns it into a historical read, and that path runs none of the side
+// effects above: they exist because this command backs a session start, and a
+// request about the past is not one. The instant is parsed by contextAsOf so an
+// unreadable value is refused at the boundary, with the argument in the message
+// and a non-zero status, rather than rendering the present under a request that
+// asked for a past instant.
 func runContext() {
 	cwd := ""
 	for i := 2; i < len(os.Args); i++ {
@@ -36,7 +82,16 @@ func runContext() {
 			cwd = strings.TrimPrefix(os.Args[i], "--cwd=")
 		}
 	}
-	fmt.Println(mcpinit.RenderSessionContext(cwd))
+	asOf, err := contextAsOf(os.Args[2:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ghost context: %v\n", err)
+		os.Exit(2)
+	}
+	if asOf == nil {
+		fmt.Println(mcpinit.RenderSessionContext(cwd))
+		return
+	}
+	fmt.Println(mcpinit.RenderSessionContextAt(cwd, asOf))
 }
 
 // hookUsage is the help for `ghost hook`: stdout for -h/--help (see

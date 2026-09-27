@@ -38,6 +38,7 @@ ghost backup                      Snapshot the live database (VACUUM INTO)
 ghost export                      Write the store as a portable JSONL artifact
 ghost import <file> [--apply]     Load a JSONL artifact (dry-run by default)
 ghost context                     Render passive session context
+ghost context --as-of <RFC3339>   Render it as the store stood at an instant
 ghost history <memory-id>         Print one memory's append-only history
 ghost history purge <memory-id>   Erase a memory and every recorded version of it
 ghost bench [--sweep]             Run the built-in benchmark
@@ -365,6 +366,10 @@ When embeddings are available, search combines:
 
 Without Ollama, the same API remains available with FTS5-only results. Search membership is not discarded solely because of age; decay changes ordering.
 
+A search may also read a past instant instead of the present (`as_of`); that path
+retrieves from `memory_history` and runs no vector leg. See
+[Historical retrieval](#historical-retrieval-as_of).
+
 ### Memory history
 
 `memory_history` is the append-only CHANGE LOG of how a memory reached its
@@ -610,6 +615,96 @@ assumed:
 
 `Store.MemoryHistory` reads one memory's history oldest first — a changelog, not
 a log tail — and `ghost history <memory-id>` prints it.
+
+### Historical retrieval (`as_of`)
+
+[`#647`](https://github.com/wcatz/ghost/issues/647) adds a read of a project's
+memory set **as it stood at an instant T**. It exists because the live tables can
+only answer "what does Ghost know now": `reflect` replaces rows and
+`ghost_memory_update` overwrites content in place, so a benchmark cannot replay
+what a past session was given. The history table can, because each of its rows is
+a VERSION rather than a diff — the state a memory held once that write landed — so
+the newest row at or before T *is* the state at T. There is no reconstruction step
+anywhere in the read, and no inference: it is a selection.
+
+`Store.MemoriesAsOf(ctx, projectID, T)` returns an `AsOfSet` in **one statement**,
+`internal/memory/asof.go`:
+
+- **The version set.** The newest history row at or before T for every in-scope
+  memory, partitioned with `ROW_NUMBER() OVER (PARTITION BY memory_id ORDER BY
+  recorded_at DESC, rowid DESC)`. `rowid` is the second key because
+  `recorded_at` is second-precision and every write one reflection makes shares a
+  timestamp, so the newest among them would be a tie-break rather than an answer.
+  The driving table is `memory_history`, **not** `memories`: a consolidation's
+  delete takes the row and leaves a tombstone, and a read that started from the
+  live tables would find nothing for a memory the store held for months.
+- **Liveness from the sequence.** A row whose newest version at or before T is a
+  `delete` is dropped (it was already gone), and a memory whose first recorded
+  version is after T is dropped (it did not exist yet). `resolved_at` comes from
+  the version row, so a `resolve` / `unresolve` pair is read as a sequence rather
+  than as a single current value. The supersede **claim** is read separately,
+  from the newest `supersede`/`unsupersede` row at or before T, because a
+  supersede records a claim about a memory rather than a change to it: the
+  target's own state columns are identical whether the claim is live or
+  withdrawn.
+- **The gap, reported.** A live in-scope memory with no recorded version at or
+  before T is **unknown**, not guessed. `migrateV17` backfills nothing, so every
+  memory written before the table existed reads this way until something writes
+  one. It is left out of the set and counted in `AsOfSet.Unknown`, and
+  `AsOfUnknownNote` turns the count into the sentence a surface must show — a
+  shorter set that says nothing about the gap reads as the whole truth.
+- **Which columns are historical.** `content`, `category`, `importance`,
+  `resolved_at`, `source` and `project_id` come from the version row. Tags,
+  scope, pin, age, access count, provenance and the validity triple were never
+  versioned, so they are read from the row as it stands, and a deleted memory has
+  no row at all — those fields are zero for it, which is the honest reading rather
+  than a guess. `valid_from` / `valid_until` are the sharpest case: nothing
+  writes them yet ([#575](https://github.com/wcatz/ghost/issues/575), and the
+  assembler validity work in parallel), so an `as_of` read's validity window is
+  the current one and only the current one. One imprecision is recorded rather
+  than worked around: a promotion **rewrites** the history rows' `project_id` (it
+  has to, or the project-delete cascade takes a memory's past with it), so a
+  pre-promotion instant reports a promoted memory under `_global`.
+
+`as_of` (RFC 3339) is a parameter on `ghost_memory_search` and
+`ghost_project_context`, and `--as-of` on `ghost context`. In the assembler it is
+a **binding, not a filter**: `Run` moves `Now` to it, so a row's age, its validity
+window and the trace that describes the block are all decided against T rather
+than against the wall clock. The store treats `AsOf` as authoritative over
+`Now` for the same reason.
+
+A historical retrieval is **keyword-only**, and says so in the answer, the trace
+and the store's leg status:
+
+| | current | `as_of` |
+|---|---|---|
+| keyword leg | FTS5 over `memories_fts` | term match over the versions' own text — `memories_fts` holds current content only |
+| vector leg | cosine, when an embedding is available | **not applicable** — an embedding is a vector of the text as it is *now*, and the vectors for the versions being chosen between were never computed. `Condition: vector_only` with `as_of` is refused rather than downgraded |
+| ranking | RRF fusion, then decay | matched query terms, then the same decay composite at T — not bm25, so it is not comparable with a current order |
+| link graph | supersede and near-duplicate demotion, `contradicts` edges | **not read** — `memory_links` records when an edge was invalidated, never what the graph looked like at T. The supersede demotion uses the recorded sequence instead, and the edge status is `not_applicable` so the conflict stage makes no claim in either direction |
+| edges status | `ok` / `unavailable` / `err` | adds `not_applicable`: "no edge joins these candidates" is a claim, and a retrieval that made none must not render it |
+
+The term extraction is the **same** one the FTS leg uses (`ftsQueryTerms`, so the
+10-term budget, the identifier ranking and the stopword rule are one rule), and a
+term is matched as the PHRASE FTS5 would make it — `ghost_windows_arm64` is three
+adjacent tokens — with a trailing `*` still meaning a prefix match.
+
+Every surface states the instant and what did not run, in one shared sentence
+(`memory.AsOfSourceNote` plus the assembler's retrieval half) and one shared
+omission note (`memory.AsOfUnversionedNote`, for tasks, decisions and learned
+context, none of which is versioned). They are `Result.Qualifiers` rather than
+`Result.Notes`: a note list is a diagnostic list shown for the empty answer and
+bounded from the end, where the first thing to go is exactly the sentence that
+changes what the answer *means*.
+
+`ghost context --as-of` runs **none** of the startup side effects the current
+path runs. The Obsidian mirror and the session-count bump exist because that
+command backs a session start; a past reading is a diagnostic a person asked for,
+and counting it would move the present's session number to answer a question about
+the past.
+
+Restoring or rolling the store back to a past state is explicitly **not** this —
+that is export/import ([#586](https://github.com/wcatz/ghost/issues/586)).
 
 A vector candidate is only scored when its stored vector belongs to the vector
 space this process embeds into. Every embedding records that identity — model,
@@ -1119,7 +1214,7 @@ Every other open is read-only and deliberately stays that way: a diagnostic must
 "Read-only" is a property of the open, not of the command, and a read-write open tightens wherever it is called. `cmd/ghost`'s shared `bootstrap()` is the usual route, and it already ran migrations and stamped `user_version` before any command-specific work, so most commands tighten simply by starting up. Three paths open read-write without it, and each was already writing or migrating for its own reasons: `mcpinit.checkStoreHealth` (behind `ghost mcp status`, which must not bootstrap — a status check that created the database would turn the next run's "no Ghost database" line into a healthy one), `runMaintenanceStatus`, and three paths under `ghost hook` / `ghost context`:
 - `mcpinit.importMemories`, reached by `finalizePlugin` before any of the session-start gates when a Claude Code plugin install is finalizing for the first time. It opens read-write to import memory files, so that one fire tightens regardless of source or whether it is a subagent.
 - `runSessionStart`, which returns early for a subagent, a `resume` and a `compact`, and gates the bump on `projectID != ""` and on the source being empty or `startup` — so a `clear` does not bump either.
-- `RenderSessionContext`, which opencode's plugin reaches by spawning `ghost context` at start, because opencode has no context-injection surface of its own — it returns before `runSessionStart` on the `InjectContext` gate, and its plugin spawns the context render instead. It has no source or subagent gate at all, and is gated only on `projectID != ""`.
+- `RenderSessionContext`, which opencode's plugin reaches by spawning `ghost context` at start, because opencode has no context-injection surface of its own — it returns before `runSessionStart` on the `InjectContext` gate, and its plugin spawns the context render instead. It has no source or subagent gate at all, and is gated only on `projectID != ""`. Its `as_of` half (`RenderSessionContextAt` with an instant) is not on that list at all: a historical read opens the same read-only handle, runs no Obsidian sync and no counter bump, so it tightens nothing — which is the point, since a question about the past must not touch the present.
 
 So a genuine new session in a directory that resolves to a project tightens; on the `ghost hook` path a resumed, cleared or compacted one does not, while on the opencode path any start does. That is the same gate that keeps the session counter honest. Goose's session start tightens nothing at all, for the same `InjectContext` reason. A session stop can reach a read-write open indirectly when the stop hook spawns `ghost lifecycle` for a reflection pass.
 
