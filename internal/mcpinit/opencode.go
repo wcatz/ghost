@@ -18,7 +18,7 @@ import (
 )
 
 // opencodeGhostPluginTS is the lifecycle adapter installed under
-// <config>/opencode/plugins/. go:embed keeps the TypeScript source verbatim
+// <config-dir>/plugins/. go:embed keeps the TypeScript source verbatim
 // (template literals would fight a Go string constant); the embedded copy is
 // the single source of truth for the plugin.
 //
@@ -41,7 +41,7 @@ func renderOpencodeGhostPlugin(ghostBin string) string {
 // file that both registers the ghost MCP server (via the plugin config hook)
 // and bridges idle events to `ghost hook stop --source opencode`. It never
 // touches Claude Code's settings and never edits opencode's own config file —
-// a single artifact under <config>/opencode/plugins/, so uninstalling is
+// a single artifact under <config-dir>/plugins/, so uninstalling is
 // deleting one file.
 func RunOpencode(w io.Writer, dryRun bool) error {
 	if dryRun {
@@ -94,14 +94,15 @@ func RunOpencode(w io.Writer, dryRun bool) error {
 }
 
 // opencodePluginPath resolves the installed lifecycle plugin file:
-// <config>/opencode/plugins/ghost-opencode.ts (the plural "plugins" dir is
-// what opencode auto-loads).
+// <config-dir>/plugins/ghost-opencode.ts (the plural "plugins" dir is what
+// opencode auto-loads), where <config-dir> is the directory opencode itself
+// resolves — see opencodeConfigDir.
 func opencodePluginPath() (string, error) {
 	dir, err := opencodeConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "opencode", "plugins", "ghost-opencode.ts"), nil
+	return filepath.Join(dir, "plugins", "ghost-opencode.ts"), nil
 }
 
 // installOpencodePlugin writes the lifecycle adapter to opencode's plugin
@@ -165,16 +166,25 @@ func verifyOpencodeRegistration(w io.Writer) {
 	}
 }
 
-// opencodeConfigDir returns $XDG_CONFIG_HOME when set, else ~/.config.
+// opencodeConfigDir returns the directory opencode resolves as its config
+// directory: $OPENCODE_CONFIG_DIR when set, else $XDG_CONFIG_HOME/opencode,
+// else ~/.config/opencode. opencode resolves exactly one — `opencode debug
+// paths` reports config = $OPENCODE_CONFIG_DIR when it is set and
+// <XDG_CONFIG_HOME>/opencode otherwise — so a check that used the XDG path
+// while the environment points elsewhere would judge a file opencode never
+// opens, and an adapter installed there would never load.
 func opencodeConfigDir() (string, error) {
+	if dir := os.Getenv("OPENCODE_CONFIG_DIR"); dir != "" {
+		return dir, nil
+	}
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return xdg, nil
+		return filepath.Join(xdg, "opencode"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("home dir: %w", err)
 	}
-	return filepath.Join(home, ".config"), nil
+	return filepath.Join(home, ".config", "opencode"), nil
 }
 
 // opencodeMCPConfigNames are opencode's own config file names, examined in
@@ -193,13 +203,17 @@ type opencodeConfig struct {
 }
 
 // opencodeMCPEntry is one `mcp.<name>` server: the stdio command opencode
-// spawns and the flag turning it on. Both are optional in opencode's schema —
-// an entry may carry only `enabled`, the shorthand for disabling a server —
-// so the status checks below classify a zero entry rather than reject it.
+// spawns and the flag turning it on. All three are optional in opencode's
+// schema — an entry may carry only `enabled`, the shorthand for disabling a
+// server — so the status checks below classify a zero entry rather than
+// reject it. Every field is a pointer so the layer merge can tell "this
+// layer sets the key" from "this layer leaves it alone": opencode overrides
+// conflicting keys, so a higher layer writing an empty `command` replaces the
+// lower layer's rather than inheriting it.
 type opencodeMCPEntry struct {
-	Type    string   `json:"type"`
-	Command []string `json:"command"`
-	Enabled *bool    `json:"enabled"`
+	Type    *string   `json:"type"`
+	Command *[]string `json:"command"`
+	Enabled *bool     `json:"enabled"`
 }
 
 // opencodeMCPConfigSource is one layer of opencode's configuration: a file
@@ -214,16 +228,18 @@ type opencodeMCPConfigSource struct {
 // must judge, lowest precedence first, plus the file a missing entry should
 // be added to. opencode merges these layers rather than replacing them
 // (config docs: "Configuration files are merged together, not replaced") in
-// the order the docs give: the global file under the config dir, the custom
+// the order the docs give: the file in opencode's resolved config directory
+// ($OPENCODE_CONFIG_DIR when set, else $XDG_CONFIG_HOME/opencode), the custom
 // path in $OPENCODE_CONFIG, and finally inline $OPENCODE_CONFIG_CONTENT. A
 // layer that doesn't mention mcp.ghost must not hide the one below it, so
-// every existing layer is read rather than only the first.
+// every existing layer is read rather than only the first. Per-checkout
+// `opencode.json` and the `.opencode` directory layers are deliberately out
+// of scope: status has no project cwd to resolve them from.
 func opencodeConfigSources() ([]opencodeMCPConfigSource, string, error) {
-	dir, err := opencodeConfigDir()
+	base, err := opencodeConfigDir()
 	if err != nil {
 		return nil, "", err
 	}
-	base := filepath.Join(dir, "opencode")
 	primary := ""
 	var sources []opencodeMCPConfigSource
 	for _, name := range opencodeMCPConfigNames {
@@ -265,14 +281,21 @@ func opencodeConfigSources() ([]opencodeMCPConfigSource, string, error) {
 // entry must exist, be enabled, and resolve to the ghost binary this run
 // found — the ways opencode ends up running without ghost's tools while the
 // lifecycle plugin sits installed and green.
-func opencodeMCPEntryStatus(ghostBin string) (bool, string) {
+//
+// judged is false when no verdict was reached at all: the config directory
+// could not be resolved, or a layer could not be read or parsed. That is a
+// different state from a broken entry — opencode drops a layer it cannot
+// parse (probed on v2.0.15: `opencode debug config` lists no document for
+// it), so the entry in such a layer is inert but unknown here, and the
+// caller must not report it as covered by the plugin's registration.
+func opencodeMCPEntryStatus(ghostBin string) (bool, string, bool) {
 	sources, primary, err := opencodeConfigSources()
 	if err != nil {
-		return false, err.Error()
+		return false, err.Error(), false
 	}
 	if len(sources) == 0 {
 		return false, fmt.Sprintf("no opencode config file — add %s to %s",
-			opencodeMCPEntryHint(ghostBin), primary)
+			opencodeMCPEntryHint(ghostBin), primary), true
 	}
 	var merged opencodeMCPEntry
 	found := false
@@ -282,12 +305,12 @@ func opencodeMCPEntryStatus(ghostBin string) (bool, string) {
 		if data == nil {
 			var readErr error
 			if data, readErr = os.ReadFile(src.path); readErr != nil {
-				return false, fmt.Sprintf("cannot read %s: %v", src.label, readErr)
+				return false, fmt.Sprintf("cannot read %s: %v", src.label, readErr), false
 			}
 		}
 		cfg, err := parseOpencodeConfig(data)
 		if err != nil {
-			return false, fmt.Sprintf("cannot parse %s as opencode config: %v", src.label, err)
+			return false, fmt.Sprintf("cannot parse %s as opencode config: %v", src.label, err), false
 		}
 		entry, ok := cfg.MCP["ghost"]
 		if !ok {
@@ -295,11 +318,14 @@ func opencodeMCPEntryStatus(ghostBin string) (bool, string) {
 		}
 		// Overlay only the keys this layer sets: opencode merges configs, so
 		// a higher layer overriding `enabled` must not erase the command the
-		// layer below registered.
-		if entry.Type != "" {
+		// layer below registered. Presence, not value, decides — a key the
+		// layer does write wins even when its value is empty, because
+		// opencode replaces conflicting keys rather than treating them as
+		// absent.
+		if entry.Type != nil {
 			merged.Type = entry.Type
 		}
-		if len(entry.Command) > 0 {
+		if entry.Command != nil {
 			merged.Command = entry.Command
 		}
 		if entry.Enabled != nil {
@@ -309,9 +335,10 @@ func opencodeMCPEntryStatus(ghostBin string) (bool, string) {
 		from = src.label
 	}
 	if !found {
-		return false, fmt.Sprintf("ghost MCP server missing from %s — add %s", primary, opencodeMCPEntryHint(ghostBin))
+		return false, fmt.Sprintf("ghost MCP server missing from %s — add %s", primary, opencodeMCPEntryHint(ghostBin)), true
 	}
-	return opencodeMCPEntryVerdict(merged, from, ghostBin)
+	ok, msg := opencodeMCPEntryVerdict(merged, from, ghostBin)
+	return ok, msg, true
 }
 
 // opencodeMCPEntryVerdict classifies the merged mcp.ghost entry. path is the
@@ -324,17 +351,21 @@ func opencodeMCPEntryVerdict(entry opencodeMCPEntry, path, ghostBin string) (boo
 	if entry.Enabled != nil && !*entry.Enabled {
 		return false, fmt.Sprintf("ghost MCP server disabled in %s — set mcp.ghost.enabled to true", path)
 	}
-	if len(entry.Command) < 2 || entry.Command[1] != "mcp" {
+	var command []string
+	if entry.Command != nil {
+		command = *entry.Command
+	}
+	if len(command) < 2 || command[1] != "mcp" {
 		return false, fmt.Sprintf("ghost MCP server command in %s must be %s", path, opencodeMCPCommandHint(ghostBin))
 	}
-	resolved, err := exec.LookPath(entry.Command[0])
+	resolved, err := exec.LookPath(command[0])
 	if err != nil {
 		return false, fmt.Sprintf("ghost MCP server command %q in %s is not an executable file (%v)",
-			entry.Command[0], path, err)
+			command[0], path, err)
 	}
 	if !opencodeMCPCommandIsGhost(resolved, ghostBin) {
 		return false, fmt.Sprintf("ghost MCP server command %q in %s is not the ghost binary — update mcp.ghost.command to %s",
-			entry.Command[0], path, opencodeMCPCommandHint(ghostBin))
+			command[0], path, opencodeMCPCommandHint(ghostBin))
 	}
 	return true, ""
 }

@@ -20,6 +20,9 @@ func setupOpencodeTestEnv(t *testing.T) (home, xdg string) {
 	xdg = t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
+	// A $OPENCODE_CONFIG_DIR leaked from the host would move every path this
+	// test asserts on: opencode resolves exactly one config directory.
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
 
 	binDir := filepath.Join(home, "bin")
 	if err := os.MkdirAll(binDir, 0755); err != nil {
@@ -147,8 +150,11 @@ func TestParseOpencodeConfig_MCPEntry(t *testing.T) {
 		t.Fatalf("parseOpencodeConfig: %v", err)
 	}
 	entry := cfg.MCP["ghost"]
-	if len(entry.Command) != 2 || entry.Command[0] != "/opt/ghost/ghost" || entry.Command[1] != "mcp" {
-		t.Errorf("command = %q, want [/opt/ghost/ghost mcp]", entry.Command)
+	if entry.Command == nil || len(*entry.Command) != 2 || (*entry.Command)[0] != "/opt/ghost/ghost" || (*entry.Command)[1] != "mcp" {
+		t.Errorf("command = %v, want [/opt/ghost/ghost mcp]", entry.Command)
+	}
+	if entry.Type == nil || *entry.Type != "local" {
+		t.Errorf("type = %v, want local", entry.Type)
 	}
 	if entry.Enabled == nil || !*entry.Enabled {
 		t.Errorf("enabled = %v, want true", entry.Enabled)
@@ -275,7 +281,7 @@ func TestRunOpencode_DryRunWritesNothing(t *testing.T) {
 }
 
 // TestRunOpencode_InstallsLifecyclePlugin verifies init writes the embedded
-// adapter to <config>/opencode/plugins/ and that a second run is a no-op
+// adapter to <config-dir>/plugins/ and that a second run is a no-op
 // reporting "already installed".
 func TestRunOpencode_InstallsLifecyclePlugin(t *testing.T) {
 	home, xdg := setupOpencodeTestEnv(t)
