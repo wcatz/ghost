@@ -238,6 +238,45 @@ func TestSourceRefLabelBoundsWhatItPrints(t *testing.T) {
 
 func ptr(s string) *string { return &s }
 
+// agent= is printed on every listing beside source_ref=, and the same two writers
+// reach both columns without a bound — RestoreSnapshot and CreateFromCorpus — so
+// the display bound is the only thing standing between an artifact's `agent`
+// field and every answer that touches the row.
+func TestAgentLabelBoundsWhatItPrints(t *testing.T) {
+	huge := strings.Repeat("agent-", 200)
+	line := Item{Category: "fact", ID: "A1B2", Content: "a fact", Importance: 0.5, Agent: huge}.Line()
+	if !strings.Contains(line, "agent truncated") {
+		t.Errorf("a %d-byte agent is printed whole: %s", len(huge), line)
+	}
+	if len(line) > 1000 {
+		t.Errorf("line is %d bytes, want the agent bounded", len(line))
+	}
+	if strings.Contains(line, strings.TrimSuffix(huge, "agent-")) {
+		t.Errorf("the line presents the truncated value as a complete agent: %s", line)
+	}
+
+	// The cut has to land on a rune, and the rune has to be one whose width does
+	// not divide the bound evenly, or the cut lands on a boundary by luck and
+	// proves nothing. 128 divides by two and by four; three does not — 128 is 42
+	// of them and two bytes into the 43rd.
+	multibyte := Item{Category: "fact", ID: "A1B2", Content: "a fact", Importance: 0.5, Agent: strings.Repeat("\u20ac", 100)}.Line()
+	if !strings.Contains(multibyte, "agent truncated") {
+		t.Errorf("a 300-byte three-byte-rune agent was not truncated: %s", multibyte)
+	}
+	if !utf8.ValidString(multibyte) {
+		t.Errorf("line is not valid UTF-8 after truncating a multi-byte agent: %q", multibyte)
+	}
+
+	// A harness token is never truncated, which is the property that keeps the
+	// common case readable.
+	if got, want := AgentLabel("opencode"), " agent=«opencode»"; got != want {
+		t.Errorf("AgentLabel(opencode) = %q, want %q", got, want)
+	}
+	if got := AgentLabel(""); got != "" {
+		t.Errorf("AgentLabel(\"\") = %q, want empty", got)
+	}
+}
+
 // A browsing surface has not run stage 2, so a closed window is about to be
 // printed in full. Printing it unmarked is the worst available reading of a dated
 // row: the date is right there and nothing says what it means. ValidityStateOf is

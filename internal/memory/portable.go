@@ -581,6 +581,9 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	if _, err := boundedSourceRef(m.SourceRef); err != nil {
 		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
 	}
+	if _, err := boundedAgent(m.Agent); err != nil {
+		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
+	}
 	// The tags too, and before the apply check so a dry run classifies exactly as
 	// the apply run it previews. An artifact's tags column is untrusted input
 	// from a file and was being written raw; the record it lands in is an

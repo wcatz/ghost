@@ -201,16 +201,19 @@ type writeFields struct {
 //
 // source_ref is passed through as sent: it is stored text with no shape to impose,
 // and both guards on it belong to the store, which is the layer the renderer
-// depends on. memory.MaxSourceRefLen refuses an over-long one on the four writers
-// Ghost's own callers reach — UpsertWithOptions and UpdateMemoryWithOptions (the
-// writer tools), Create (the bench seeders) and ImportMemory (`ghost import`) —
-// because a reference is a path, a commit, a URL or a ticket, and a megabyte of
-// it is echoed into every answer that touches the row. The two writers that
-// deliberately do not reach it are RestoreSnapshot (SQL, from the snapshot table)
-// and CreateFromCorpus (insertMemory directly), and assemble.SourceRefLabel bounds
-// what a listing PRINTS for exactly those. And secret.Detect refuses a credential-shaped one, on the same terms as the content
-// beside it (#656). The tool boundary adds nothing, so there is one cap and one
-// message rather than two that could disagree.
+// depends on. memory.MaxSourceRefLen refuses an over-long one, and
+// secret.Detect a credential-shaped one, on the four writers Ghost's own callers
+// reach — UpsertWithOptions and UpdateMemoryWithOptions (the writer tools),
+// Create (the bench seeders) and ImportMemory (`ghost import`) — because a
+// reference is a path, a commit, a URL or a ticket, and a megabyte of it is
+// echoed into every answer that touches the row. The two writers that
+// deliberately do not reach them are RestoreSnapshot (SQL, from the snapshot
+// table) and CreateFromCorpus (insertMemory directly), and
+// assemble.SourceRefLabel bounds what a listing PRINTS for exactly those. The
+// same shape is the reason memory.MaxAgentLen and assemble.AgentLabel exist for
+// the agent printed beside it, though on this path the column can only ever
+// hold one of four harness tokens. The tool boundary adds nothing, so there is
+// one cap and one message rather than two that could disagree.
 func resolveWriteFields(args validityArgs) (writeFields, error) {
 	var out writeFields
 	var err error

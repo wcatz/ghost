@@ -98,8 +98,21 @@ func AgentLabel(agent string) string {
 	if agent == "" {
 		return ""
 	}
+	// The display bound, for the same reason SourceRefLabel has one: the renderer
+	// cannot assume its input came from a writer that enforces the cap, and this
+	// label is printed beside the reference on every listing. Cut on a rune —
+	// the input is exactly the untrusted text a writer would have refused.
+	if len(agent) > MaxRenderedAgentLen {
+		agent = clampBytes(agent, MaxRenderedAgentLen) + "…[agent truncated]"
+	}
 	return " agent=" + quoteData(agent)
 }
+
+// MaxRenderedAgentLen is what a listing prints of an agent. It is a DISPLAY
+// bound, not a claim about the column: memory.MaxAgentLen refuses a longer one on
+// the four writers that reach it, and this covers the two byte-exact writers that
+// do not — RestoreSnapshot and CreateFromCorpus.
+const MaxRenderedAgentLen = 128
 
 // MaxRenderedSourceRefLen bounds what a listing prints of a reference. It is a
 // DISPLAY bound, not a claim about what the column holds: every writer this build

@@ -71,6 +71,36 @@ func savedMemory(t *testing.T, srv *Server, session *mcp.ClientSession, tool str
 	return mems[0]
 }
 
+// savedDistinctMemory is savedMemory for a test that means to compare two
+// independent rows, and it fails rather than returns when the store folded the
+// save into an existing one.
+//
+// A fold is silent about the row it changes: the response still names the copy
+// that was inserted, and the claim the caller stated is handed to the target as
+// well. So a test whose two memories happen to clear the dedup bar stops being
+// about its own subject and starts being about dedup, with nothing saying so.
+// Asserting it here keeps the premise where a threshold change can break it
+// loudly.
+func savedDistinctMemory(t *testing.T, srv *Server, session *mcp.ClientSession, args map[string]any) memory.Memory {
+	t.Helper()
+	res := callTool(t, session, "ghost_memory_save", args)
+	if res.IsError {
+		t.Fatalf("ghost_memory_save returned an error: %s", resultText(res))
+	}
+	if text := resultText(res); strings.Contains(text, "likely duplicate") {
+		t.Fatalf("the save folded into an existing row, so the memories under test are not independent: %q", text)
+	}
+	id, ok := extractID(resultText(res))
+	if !ok || id == "" {
+		t.Fatalf("save response carries no memory id: %q", resultText(res))
+	}
+	mems, err := srv.store.GetByIDs(context.Background(), []string{id})
+	if err != nil || len(mems) != 1 {
+		t.Fatalf("GetByIDs(%q): err=%v n=%d", id, err, len(mems))
+	}
+	return mems[0]
+}
+
 // stamp reads a stored validity triple out of a row, failing on NULL.
 func stamp(t *testing.T, m memory.Memory, field string, got *string) string {
 	t.Helper()
@@ -979,30 +1009,38 @@ func TestSaveRecordsTheSessionIDTheHostReports(t *testing.T) {
 // normally the day after its window closed is exactly what #575 says the
 // schema promised and did not deliver, so this test goes through the tool and
 // the retrieval path rather than reading the row back.
+//
+// The two contents share only "summer" on purpose. They are one real fact each,
+// so nothing in the test needs them to be near-identical — but a save that
+// clears the store's 0.5 Jaccard bar folds into the row it matched and hands
+// the caller's claim to that row too (see the fold branch of
+// UpsertWithOptions), which would re-date the expired row and leave this test
+// asserting something else entirely. savedDistinctMemory fails the test if that
+// happens rather than letting the premise move under the assertion.
 func TestExpiredMemoryIsWithheldFromSearch(t *testing.T) {
 	srv, session := newCapSession(t)
 	pinAgent(t, "opencode")
 
 	today := time.Now().UTC()
 
-	savedMemory(t, srv, session, "ghost_memory_save", map[string]any{
+	savedDistinctMemory(t, srv, session, map[string]any{
 		"project_id":  "test-project",
-		"content":     "the gum gate contract moves to the new registry next quarter",
+		"content":     "the payment gateway throttle was retired after the summer migration",
 		"category":    "fact",
 		"valid_until": today.AddDate(0, 0, -1).Format("2006-01-02"),
 	})
-	live := savedMemory(t, srv, session, "ghost_memory_save", map[string]any{
+	live := savedDistinctMemory(t, srv, session, map[string]any{
 		"project_id":  "test-project",
-		"content":     "the registry contract moves to the new place next quarter",
+		"content":     "the checkout retry budget doubles once the summer freeze ends",
 		"category":    "fact",
 		"valid_until": today.AddDate(1, 0, 0).Format("2006-01-02"),
 	})
 
-	out := searchText(t, session, "test-project", "registry contract")
+	out := searchText(t, session, "test-project", "summer")
 	if !strings.Contains(out, live.ID) {
 		t.Fatalf("the live control memory is missing from the result, so the test proves nothing: %q", out)
 	}
-	if strings.Contains(out, "gum gate") {
+	if strings.Contains(out, "payment gateway") {
 		t.Errorf("an expired memory is still in the search result: %q", out)
 	}
 }

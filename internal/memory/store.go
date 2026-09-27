@@ -2443,6 +2443,9 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 	if _, err := boundedSourceRef(m.SourceRef); err != nil {
 		return "", err
 	}
+	if _, err := boundedAgent(m.Agent); err != nil {
+		return "", err
+	}
 	return s.insertMemory(ctx, projectID, m)
 }
 
@@ -2531,6 +2534,19 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 // call boundedSourceRef — the bound is one call each writer remembers, not
 // something the schema enforces.
 const MaxSourceRefLen = 512
+
+// MaxAgentLen is the byte cap on a write-time agent, for the same reason and by
+// the same route as MaxSourceRefLen: the shared item line prints `agent=` beside
+// `source_ref=` on every listing, so a value with no bound is a value echoed into
+// every answer that touches the row.
+//
+// On the harness path the column holds one of four tokens, so the cap can only
+// bite on an artifact — which is the point. A portable artifact's `agent` is
+// whatever wrote the export, and internal/portable accepts a 1 MiB record, so
+// without a bound an export could plant close to a megabyte of it in a column the
+// renderer had started echoing in this change. The same two writers are exempt
+// (RestoreSnapshot, CreateFromCorpus) and assemble.AgentLabel bounds the display.
+const MaxAgentLen = 128
 
 // StoredStampLayout is the layout a writer stores a validity stamp in: SQLite's
 // own datetime() shape, in UTC.
@@ -2708,6 +2724,20 @@ func nullIfEmptyPtr(s *string) any {
 		return nil
 	}
 	return *s
+}
+
+// boundedAgent applies MaxAgentLen, refusing rather than truncating, and maps an
+// empty agent to NULL. It refuses because the column's own values are short: a
+// value past the cap is not a harness name, so there is no honest prefix of it to
+// keep.
+func boundedAgent(agent string) (any, error) {
+	if agent == "" {
+		return nil, nil
+	}
+	if len(agent) > MaxAgentLen {
+		return nil, fmt.Errorf("agent must be at most %d bytes, got %d — it names the harness that wrote a row, not a document", MaxAgentLen, len(agent))
+	}
+	return agent, nil
 }
 
 // boundedSourceRef applies MaxSourceRefLen, refusing rather than truncating, and
@@ -2891,6 +2921,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		return "", "", 0, err
 	}
 	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
+		return "", "", 0, err
+	}
+	if _, err := boundedAgent(opts.Provenance.Agent); err != nil {
 		return "", "", 0, err
 	}
 	parentTx, inTx := storeTxFromContext(ctx)
@@ -3177,11 +3210,37 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			// save that strengthened this row in between was silently
 			// overwritten (issue #560). MIN(1.0, …) is the same cap the Go
 			// arithmetic applied.
+			//
+			// The caller's claim rides along to the target, for the reason pin
+			// does: the target is the row that keeps being retrieved and the one a
+			// later consolidation absorbs, so a save of near-identical text
+			// carrying valid_until that reached only the copy just inserted would
+			// report success and leave the row search returns with no window at
+			// all. COALESCE, as in the update path, so a save that says nothing
+			// about the window leaves whatever the target already holds — a fold
+			// re-states a fact, and re-stating it is not a retraction of a
+			// boundary somebody else recorded.
+			//
+			// agent and source_ref take the same COALESCE(NULLIF(?, ''), …) form
+			// for the same reason: an empty value means "the caller said nothing",
+			// and a detectable harness on this save is no evidence against the
+			// author of the row being folded into.
 			res, updateErr := tx.ExecContext(ctx, `
 				UPDATE memories
-				SET importance = MIN(1.0, importance + ?), access_count = access_count + 1
+				SET importance = MIN(1.0, importance + ?), access_count = access_count + 1,
+				    valid_from  = COALESCE(?, valid_from),
+				    valid_until = COALESCE(?, valid_until),
+				    verified_at = COALESCE(?, verified_at),
+				    confidence  = COALESCE(?, confidence),
+				    agent       = COALESCE(NULLIF(?, ''), agent),
+				    session_id  = COALESCE(NULLIF(?, ''), session_id),
+				    source_ref  = COALESCE(NULLIF(?, ''), source_ref)
 				WHERE id = ? AND project_id = ?
-			`, importance*0.2, existingID, projectID)
+			`, importance*0.2,
+				nullIfEmptyPtr(opts.Validity.ValidFrom), nullIfEmptyPtr(opts.Validity.ValidUntil),
+				nullIfEmptyPtr(opts.Validity.VerifiedAt), opts.Provenance.Confidence,
+				opts.Provenance.Agent, opts.Provenance.SessionID, opts.Provenance.SourceRef,
+				existingID, projectID)
 			if updateErr != nil {
 				return "", "", 0, fmt.Errorf("strengthen memory: %w", updateErr)
 			}
@@ -4055,6 +4114,9 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 		return err
 	}
 	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
+		return err
+	}
+	if _, err := boundedAgent(opts.Provenance.Agent); err != nil {
 		return err
 	}
 	s.mu.Lock()

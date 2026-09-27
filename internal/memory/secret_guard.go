@@ -148,12 +148,20 @@ func rejectSecretList(field string, values []string) error {
 //     tags column came straight out of an artifact file. All five, each before
 //     its lock, and TestEveryTagBearingWriterIsGuarded is the table.
 //
-//     The three remaining unguarded fields — agent, session_id, source_ref
-//     beside a saved memory, and a project's name and path — are not reached by
-//     either path above. source_ref IS checked, on the portable import, which is
-//     the one route where it is a file's content rather than the harness's own
-//     identity. The other three are the real gap and it is structural: see
-//     above.
+//     What is left unguarded is agent and session_id as the HARNESS states
+//     them, and a project's name and path. `source_ref` is not in that list any
+//     more: it became a caller-supplied argument on the three writer tools, so
+//     the harness route now carries it and is checked on all four writers that
+//     reach the column — Create, UpsertWithOptions, UpdateMemoryWithOptions and
+//     ImportMemory — beside the portable import it was already guarded on. The
+//     two that do not reach it are RestoreSnapshot (SQL, from the snapshot
+//     table) and CreateFromCorpus (insertMemory directly), the same byte-exact
+//     exclusions MaxContentLen draws, and assemble.SourceRefLabel bounds what it
+//     PRINTS for them. That is a length bound, not this guard: an untrusted
+//     `source_ref` is still checked wherever a writer can see it. agent and
+//     session_id as the harness states them are the real gap and it is
+//     structural: a harness is chosen by Ghost, not by the caller, so guarding
+//     it is the wrong layer — see above.
 //   - Content already in the database. This guard reads what a caller is
 //     trying to write; it does not sweep rows a previous version stored. Doing
 //     that is a separate, report-first job — a detection pass over existing
