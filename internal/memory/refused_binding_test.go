@@ -173,14 +173,24 @@ func TestResolveOrCreateRepoProjectReportsRefusedNameBinding(t *testing.T) {
 			// asserted as one: those commands, in that order, and nothing the
 			// kind must not name. "SAVED" stands for the project this save went
 			// to, which is a filesystem path and so is quoted in the notice.
-			rest := notice
+			//
+			// The order is checked by position rather than by scanning a window
+			// and resuming past what matched: a path is longer than the
+			// placeholder, so any offset taken from the template rather than
+			// from the text that matched leaves the next search starting
+			// inside the match it just consumed, and "in that order" quietly
+			// stops being the thing being tested.
+			previous := -1
 			for _, want := range tc.advice {
-				at := strings.Index(rest, strings.ReplaceAll(want, "SAVED", canonical))
+				at := strings.Index(notice, strings.ReplaceAll(want, "SAVED", canonical))
 				if at < 0 {
-					t.Errorf("notice does not suggest %q, or not in that order: %q", want, notice)
+					t.Errorf("notice does not suggest %q: %q", want, notice)
 					continue
 				}
-				rest = rest[at+len(want):]
+				if at < previous {
+					t.Errorf("notice suggests %q before the command before it, so the order it states is not the order it prints: %q", want, notice)
+				}
+				previous = at
 			}
 			for unwanted, why := range tc.forbidden {
 				if strings.Contains(notice, unwanted) {

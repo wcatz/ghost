@@ -434,7 +434,10 @@ type BindingRefusal struct {
 //
 // RefusedDifferentRemote has none: two projects that claim two different
 // repositories are not a split to be closed, and the project this save used
-// already records the checkout, so the next save finds it by id.
+// already records the checkout, so the next save finds it by id. It names both
+// projects by id and by path rather than by a command to run: `ghost project`
+// dispatches delete, merge and bind and nothing else (cmd/ghost/main.go), so
+// there is no listing command for a notice here to point at.
 //
 // Commands are quoted rather than bare because a project id is often a
 // checkout path, and a path with a space in it is a command that does not run.
@@ -461,7 +464,7 @@ func (r *BindingRefusal) Notice() string {
 		return fmt.Sprintf("%d projects are named %q (%s), so the repository could not be bound to any of them; saved to %s instead, which records this checkout and its repository, so the next save from here lands there — save under a project id to choose one instead; if two of the same-named projects are duplicates of each other, fold them with: ghost project merge <duplicate-id> <survivor-id> (the survivor keeps its own recorded checkout and repository, so pick the one whose is right)",
 			matched, r.Name, namedCandidates(r.ProjectIDs, matched), saved)
 	case RefusedDifferentRemote:
-		return fmt.Sprintf("project %q already belongs to a different repository (%s); saved to %s instead — those are two different repositories, so they are two different projects, and a merge would leave one of them without the repository it was verified against. Nothing needs repairing here: %s records this checkout, so the next save from it lands there. But a save under the name goes to the other repository's project, so address the one you meant by id (%s) or by path (%s), and \"ghost project list\" shows all of them",
+		return fmt.Sprintf("project %q already belongs to a different repository (%s); saved to %s instead — those are two different repositories, so they are two different projects, and a merge would leave one of them without the repository it was verified against. Nothing needs repairing here: %s records this checkout, so the next save from it lands there. But a save under the name goes to the other repository's project, so address the one you meant by id (%s) or by path (%s)",
 			r.Name, r.RecordedRemote, saved, saved, held, saved)
 	case RefusedPathMismatch:
 		return fmt.Sprintf("project %q already exists at %s; saved to %s instead — to write into that project rather than this one, save under %q by name or id. To make this checkout part of it instead, run both, in this order: ghost project merge %q %q (moves what was just saved here into it) then ghost project bind %q %q (records this checkout and its repository on it, so the next save from here lands there instead of splitting again)",

@@ -222,6 +222,56 @@ func TestRefusedBindingAdviceOrderIsLoadBearing(t *testing.T) {
 	}
 }
 
+// projectSubcommandRe finds every `ghost project <word>` a notice names,
+// whatever the word is. It exists because a notice that names a command this
+// package does not dispatch is advice that cannot be followed, and the notice
+// used to name `ghost project list`, which does not exist.
+var projectSubcommandRe = regexp.MustCompile(`ghost project (\S+)`)
+
+// dispatchedProjectSubcommands is the `case "project"` chain in main.go, which
+// dispatches delete, merge and bind and prints projectUsage for anything else.
+// A notice that names a fourth one is a notice that gets a usage error.
+var dispatchedProjectSubcommands = []string{"delete", "merge", "bind"}
+
+// TestRefusedBindingAdviceNamesOnlyDispatchedSubcommands is the general guard on
+// every refusal kind, so a future sentence cannot reintroduce a command that
+// does not run. It checks the dispatch list and projectUsage, the text a user
+// reads, so a new subcommand has to be added to this list in the same change
+// that makes it real.
+func TestRefusedBindingAdviceNamesOnlyDispatchedSubcommands(t *testing.T) {
+	notices := map[string]string{}
+	_, _, _, pathMismatch := refusedBindingNotice(t)
+	notices["path mismatch"] = pathMismatch
+	notices["ambiguous name"] = (&memory.BindingRefusal{
+		Kind: memory.RefusedAmbiguousName, Name: "infra",
+		ProjectIDs: []string{"a", "b"}, CandidateCount: 2, SavedTo: "/work/infra",
+	}).Notice()
+	notices["different remote"] = (&memory.BindingRefusal{
+		Kind: memory.RefusedDifferentRemote, Name: "infra",
+		ProjectIDs: []string{"other"}, CandidateCount: 1,
+		RecordedRemote: "github.com/someone/infra", SavedTo: "/work/infra",
+	}).Notice()
+
+	for kind, notice := range notices {
+		for _, match := range projectSubcommandRe.FindAllStringSubmatch(notice, -1) {
+			sub := match[1]
+			dispatched := false
+			for _, want := range dispatchedProjectSubcommands {
+				if sub == want {
+					dispatched = true
+				}
+			}
+			if !dispatched {
+				t.Errorf("%s notice names %q, which `ghost project` does not dispatch (%v): %q",
+					kind, sub, dispatchedProjectSubcommands, notice)
+			}
+			if !strings.Contains(projectUsage, "ghost project "+sub) {
+				t.Errorf("%s notice names %q, which projectUsage does not document: %q", kind, sub, projectUsage)
+			}
+		}
+	}
+}
+
 // TestDifferentRepositoryRefusalSuggestsNoCommand proves the other kind gets no
 // repair advice at all. Two projects that claim two different repositories are
 // not a split to be closed: a merge would move one project's memories under an
