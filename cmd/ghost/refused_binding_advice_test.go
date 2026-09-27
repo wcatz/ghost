@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -29,9 +28,17 @@ import (
 // directory the bind is refused.
 
 // adviceCommandRe finds the `ghost project <sub> <arg> [<arg>]` commands a
-// notice names, in the order it names them. Arguments are quoted by the
-// notice, so a path with a space in it is one argument rather than two.
-var adviceCommandRe = regexp.MustCompile(`ghost project (merge|bind) ("(?:[^"\\]|\\.)*"|\S+)(?: ("(?:[^"\\]|\\.)*"|\S+))?`)
+// notice names, in the order it names them. The notice shell-quotes its
+// arguments (single quotes, with an embedded quote closed, escaped and
+// reopened), so a path with a space in it is one argument rather than two and a
+// Windows path keeps one set of backslashes. A bare word is the same shape
+// minus the quotes, and covers the ids that need no quoting at all.
+//
+// The quoted alternative is an opening quote, then (any non-quote | an embedded quote
+// spelled \\'\\' followed by more non-quotes)*, then a closing quote. The doubled
+// backslashes are load-bearing: a backslash in a regexp pattern is an escape, so a single
+// one there reads as a bare quote and the word would end at the first quote it met.
+var adviceCommandRe = regexp.MustCompile(`ghost project (merge|bind) ('(?:[^']|'\\''[^']*)*'|\S+)(?: ('(?:[^']|'\\''[^']*)*'|\S+))?`)
 
 type adviceCommand struct {
 	sub  string
@@ -50,12 +57,11 @@ func adviceCommands(t *testing.T, notice string) []adviceCommand {
 			if raw == "" {
 				continue
 			}
-			if strings.HasPrefix(raw, `"`) {
-				unquoted, err := strconv.Unquote(raw)
-				if err != nil {
-					t.Fatalf("notice argument %s is not a quoted string: %v", raw, err)
-				}
-				cmd.args = append(cmd.args, unquoted)
+			if len(raw) >= 2 && strings.HasPrefix(raw, `'`) && strings.HasSuffix(raw, `'`) {
+				// A POSIX single-quoted word: everything between the outer
+				// quotes is literal except the `'\''` sequence, which
+				// stands for one embedded quote.
+				cmd.args = append(cmd.args, strings.ReplaceAll(raw[1:len(raw)-1], `'\''`, `'`))
 				continue
 			}
 			cmd.args = append(cmd.args, raw)
@@ -63,6 +69,52 @@ func adviceCommands(t *testing.T, notice string) []adviceCommand {
 		commands = append(commands, cmd)
 	}
 	return commands
+}
+
+// TestAdviceCommandsReadShellQuotedArguments pins the extractor's half of the
+// advice contract. A notice quotes a command argument for a shell, and the
+// commands these tests run come out of that text, so a quoting the extractor
+// cannot read would run a different command than the notice names — silently,
+// because the end-to-end fixtures below are plain ids with nothing to quote. The
+// three spellings are the three a notice can produce: a bare word, a
+// single-quoted word, and a single-quoted word carrying a quote of its own.
+func TestAdviceCommandsReadShellQuotedArguments(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		notice string
+		want   adviceCommand
+	}{
+		{
+			name:   "bare words",
+			notice: "run: ghost project merge /home/ada/work/infra real-infra",
+			want:   adviceCommand{sub: "merge", args: []string{"/home/ada/work/infra", "real-infra"}},
+		},
+		{
+			name:   "single-quoted words",
+			notice: "run: ghost project merge '/work/inf ra' real-infra then ghost project bind real-infra '/work/inf ra'",
+			want:   adviceCommand{sub: "merge", args: []string{"/work/inf ra", "real-infra"}},
+		},
+		{
+			name:   "a windows path",
+			notice: "run: ghost project bind 'C:\\work\\infra' 'C:\\work\\Downloads\\infra'",
+			want:   adviceCommand{sub: "bind", args: []string{`C:\work\infra`, `C:\work\Downloads\infra`}},
+		},
+		{
+			name:   "an embedded quote",
+			notice: "run: ghost project merge '/work/inf'\\''ra' real-infra",
+			want:   adviceCommand{sub: "merge", args: []string{"/work/inf'ra", "real-infra"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			commands := adviceCommands(t, tc.notice)
+			if len(commands) == 0 {
+				t.Fatalf("no command found in %q", tc.notice)
+			}
+			if commands[0].sub != tc.want.sub || strings.Join(commands[0].args, "|") != strings.Join(tc.want.args, "|") {
+				t.Errorf("extracted %+v, want %+v from %q", commands[0], tc.want, tc.notice)
+			}
+		})
+	}
 }
 
 // runAdvice runs one command from a notice through the same body the CLI runs.

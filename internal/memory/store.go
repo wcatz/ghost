@@ -448,8 +448,13 @@ type BindingRefusal struct {
 // dispatches delete, merge and bind and nothing else (cmd/ghost/main.go), so
 // there is no listing command for a notice here to point at.
 //
-// Commands are quoted rather than bare because a project id is often a
-// checkout path, and a path with a space in it is a command that does not run.
+// The commands are shell-quoted (shellQuote) rather than Go-quoted, because a
+// project id here is often a checkout path and the reader is meant to paste the
+// sentence: %q doubles the backslashes of a Windows path, leaves a $ or a
+// backtick for the shell to expand inside its double quotes, and escapes a
+// control character the shell cannot read back. Prose keeps %q, which is the
+// clearer way to set a name or a path inside a sentence that is read rather than
+// run.
 func (r *BindingRefusal) Notice() string {
 	if r == nil {
 		return ""
@@ -476,8 +481,8 @@ func (r *BindingRefusal) Notice() string {
 		return fmt.Sprintf("project %q already belongs to a different repository (%s); saved to %s instead — those are two different repositories, so they are two different projects, and a merge would leave one of them without the repository it was verified against. Nothing needs repairing here: %s records this checkout, so the next save from it lands there. But a save under the name goes to the other repository's project, so address the one you meant by id (%s) or by path (%s)",
 			r.Name, r.RecordedRemote, saved, saved, held, saved)
 	case RefusedPathMismatch:
-		return fmt.Sprintf("project %q already exists at %s; saved to %s instead — to write into that project rather than this one, save under %q by name or id. To make this checkout part of it instead, run both, in this order: ghost project merge %q %q (moves what was just saved here into it) then ghost project bind %q %q (records this checkout and its repository on it, so the next save from here lands there instead of splitting again)",
-			r.Name, r.RecordedPath, saved, r.Name, saved, held, held, saved)
+		return fmt.Sprintf("project %q already exists at %s; saved to %s instead — to write into that project rather than this one, save under %q by name or id. To make this checkout part of it instead, run both, in this order: ghost project merge %s %s (moves what was just saved here into it) then ghost project bind %s %s (records this checkout and its repository on it, so the next save from here lands there instead of splitting again)",
+			r.Name, r.RecordedPath, saved, r.Name, shellQuote(saved), shellQuote(held), shellQuote(held), shellQuote(saved))
 	default:
 		// A kind added later renders here rather than borrowing another
 		// kind's sentence, which would suggest commands that repair a split
