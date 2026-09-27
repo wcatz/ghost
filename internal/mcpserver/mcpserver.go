@@ -1006,10 +1006,17 @@ func (s *Server) registerTools() {
 		var truncated bool
 		args.Content, truncated = memory.ClampContent(args.Content)
 
-		// Validated before the write and before the project is created, so a
-		// contradictory window or an out-of-range confidence is a tool error the
-		// caller can act on rather than a row reading as a claim nobody meant and
-		// a project registered by a save that then failed.
+		// The claim-shaped arguments are validated before the project is created,
+		// so a contradictory window, an unreadable stamp or an out-of-range
+		// confidence is a tool error the caller can act on rather than a row
+		// reading as a claim nobody meant.
+		//
+		// Two refusals come later, from the store, because the checks belong to
+		// the column rather than to this tool: an over-long source_ref and a
+		// credential-shaped one. A first save to an unknown project therefore
+		// registers the project and then fails, leaving an empty project behind —
+		// the same residue the credential guard has always left on this path, and
+		// no more of it than that, since neither has written a memory.
 		fields, err := resolveWriteFields(args.validityArgs)
 		if err != nil {
 			return nil, nil, err

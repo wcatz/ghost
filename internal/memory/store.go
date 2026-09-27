@@ -2510,12 +2510,10 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 // The column is caller-supplied text that the shared item line prints as a labelled
 // field on every listing and every browsing surface, so an unbounded one is a
 // megabyte echoed into every answer that touches the row — and that is a property
-// of the column, not of the MCP tools. Store.Create, UpsertWithOptions,
-// UpdateMemoryWithOptions, ImportMemory and RestoreSnapshot all write it, and only
-// the first three were reachable through an argument resolver, so the cap lives
-// here where every writer of the column passes it. The tools keep their own check
-// as a caller-facing error, because a refusal naming the argument is a better
-// answer than the same refusal arriving from the middle of a write.
+// of the column, not of the MCP tools — and the tools are the only writers an MCP
+// caller reaches, so the cap lives here and the refusal surfaces from the store.
+// It is not repeated in the tool argument resolver: one cap, one message, and a
+// second copy could disagree about the size without anything noticing.
 //
 // A reference is a path, a commit, a URL or a ticket — a few hundred bytes at the
 // outside — and it is NOT clamped the way content is: ClampContent cuts prose and

@@ -201,12 +201,15 @@ type writeFields struct {
 //
 // source_ref is passed through as sent: it is stored text with no shape to impose,
 // and both guards on it belong to the store, which is the layer the renderer
-// depends on. memory.MaxSourceRefLen refuses an over-long one on every write path
-// — a reference is a path, a commit, a URL or a ticket, and a megabyte of it is
-// echoed into every answer that touches the row — and secret.Detect refuses a
-// credential-shaped one, on the same terms as the content beside it (#656). The
-// tool boundary adds nothing, so there is one cap and one message rather than two
-// that could disagree.
+// depends on. memory.MaxSourceRefLen refuses an over-long one on the four writers
+// a tool can reach — Create, UpsertWithOptions, UpdateMemoryWithOptions and
+// ImportMemory — because a reference is a path, a commit, a URL or a ticket and a
+// megabyte of it is echoed into every answer that touches the row; the two writers
+// that deliberately do not reach it are RestoreSnapshot and CreateFromCorpus, and
+// assemble.SourceRefLabel bounds what a listing PRINTS for exactly those. And
+// secret.Detect refuses a credential-shaped one, on the same terms as the content
+// beside it (#656). The tool boundary adds nothing, so there is one cap and one
+// message rather than two that could disagree.
 func resolveWriteFields(args validityArgs) (writeFields, error) {
 	var out writeFields
 	var err error
