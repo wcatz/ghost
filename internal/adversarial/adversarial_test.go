@@ -135,9 +135,10 @@ func TestSnapshotAndAssertions(t *testing.T) {
 }
 
 // TestSnapshotPinsItsPlaceholders covers the three entries Snapshot records as
-// something other than content, because all three are blind spots a fixture
-// author has to know about — and because the unreadable placeholder's whole
-// reason for existing is that it must NOT vary with how the root was spelled.
+// something other than content — an unreadable file, a directory, and a
+// non-regular entry — because all three are blind spots a fixture author has to
+// know about, and because the unreadable placeholder's whole reason for existing
+// is that it must NOT vary with how the root was spelled.
 func TestSnapshotPinsItsPlaceholders(t *testing.T) {
 	t.Run("unreadable_file", func(t *testing.T) {
 		if os.Geteuid() == 0 {
@@ -193,6 +194,26 @@ func TestSnapshotPinsItsPlaceholders(t *testing.T) {
 		}
 		if dirTree["swapped"] != dirEntry {
 			t.Errorf("a directory records as %q, want %q", dirTree["swapped"], dirEntry)
+		}
+	})
+
+	t.Run("non_regular_entry", func(t *testing.T) {
+		// The third placeholder. Pinned as an exact literal, because the
+		// property Snapshot is documenting is that a symlink records as its TYPE
+		// and never as its target's content — and "not the target" alone would
+		// pass for any other non-target string.
+		outside := t.TempDir()
+		if err := os.WriteFile(filepath.Join(outside, "target.md"), []byte("not ours"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		root := t.TempDir()
+		if err := os.Symlink(filepath.Join(outside, "target.md"), filepath.Join(root, "link.md")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		got := Snapshot(t, root)
+		want := "<" + os.ModeSymlink.String() + ">"
+		if got["link.md"] != want {
+			t.Errorf("a symlink records as %q, want %q", got["link.md"], want)
 		}
 	})
 
