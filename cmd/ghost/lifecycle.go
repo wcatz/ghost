@@ -380,18 +380,24 @@ func reflectRetained(projectMems, globalMems []reflection.ReflectMemory, promote
 }
 
 // reductionWarnMinInput is the corpus size below which no ratio is reported.
-// A 4-memory corpus compressing to 1 is a 75% reduction and says nothing: the
-// count is small enough that the strict 30% branch of the quality gate has
-// already judged the result, and a warning on every such run is noise.
+// A 4-memory corpus compressing to 1 is a 75% reduction and says nothing, and
+// a warning on nearly every such run is noise. The threshold is 6 for the same
+// reason the quality gate's is: the gate's smallest input is gateMinInput = 6,
+// so below it the gate judges nothing at all and this is the only signal there
+// is — which is exactly when a percentage is worth least.
 const reductionWarnMinInput = 6
 
-// reportReductionWarning prints the >50% reduction warning when an applied
-// consolidation kept less than half its consolidatable input, and prints
-// nothing otherwise. It takes the slices rather than two pre-counted numbers so
-// the count it reports is derived where it is printed: on the unattended
-// lifecycle path this line is the only report of a hard compression, so a wrong
-// count here is a warning that fires on rounds which lost nothing, and one that
-// stays silent on rounds that lost most of the corpus.
+// reportReductionWarning prints the >50% reduction warning when a consolidation
+// kept less than half its consolidatable input, and prints nothing otherwise. It
+// says nothing about whether the run applies: the call site is above the
+// `if !apply` return, so a dry run reports the same compression it would apply,
+// which is the more useful of the two.
+//
+// It takes the slices rather than two pre-counted numbers so the count it
+// reports is derived where it is printed: on the unattended lifecycle path this
+// line is the only report of a hard compression, so a wrong count here is a
+// warning that fires on rounds which lost nothing, and one that stays silent on
+// rounds that lost most of the corpus.
 //
 // The retained side is reflectRetained, not len(projectMems): with promotion off
 // applyReflection folds the cross-project candidates back into the project, so
@@ -406,9 +412,11 @@ func reportReductionWarning(w io.Writer, live []memory.Memory, projectMems, glob
 	if retained >= len(live)/2 {
 		return
 	}
-	// The results are discarded on purpose, as everywhere else on this path:
-	// a write that fails cannot be reported through the same write, and
-	// BuildReflectionPrompt handles its writer the same way.
+	// os.Stderr is best-effort here, as it is for every other report on this
+	// path — a write that fails cannot be reported through the same failed write,
+	// and on the unattended lifecycle path this stream is the stderr of a
+	// detached process nobody reads. The guarded-drop report a few lines above
+	// discards its results the same way.
 	_, _ = fmt.Fprintf(w, "WARNING: consolidation left %d memories in the project vs %d consolidatable (>50%% reduction)\n",
 		retained, len(live))
 	if len(globalMems) > 0 {
@@ -873,7 +881,8 @@ func runReflect() {
 	// The >50% reduction warning. On the unattended lifecycle path this is the
 	// only report of a hard compression, and it goes to the stderr of a process
 	// nobody reads while the exit status stays 0 — so the count it prints has to
-	// be the one that decides whether a memory survived.
+	// be the one that decides whether a memory survived. A dry run reports the
+	// compression it would apply, which is the more useful of the two.
 	reportReductionWarning(os.Stderr, live, projectMems, globalMems, parsed.promoteGlobals)
 
 	if !apply {
