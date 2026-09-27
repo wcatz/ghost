@@ -15,9 +15,9 @@ import (
 
 // historyOptions is `ghost history`'s parsed arguments.
 type historyOptions struct {
-	// MemoryID is the memory whose history to read. Required: with no id there
-	// is nothing to print, and guessing one (say, the most recent write) would
-	// answer a different question than the one asked.
+	// MemoryID is the memory whose history to read, or to purge with `purge`.
+	// Required: with no id there is nothing to print, and guessing one (say, the
+	// most recent write) would answer a different question than the one asked.
 	MemoryID string
 	// Limit caps how many entries are printed, newest kept. Zero means the
 	// caller passed no --limit, and the store's own default applies: every
@@ -26,12 +26,15 @@ type historyOptions struct {
 	// JSON prints one machine-readable object per entry instead of the
 	// human-readable block.
 	JSON bool
+	// Purge erases the memory and every recorded version of it, instead of
+	// printing its history. See runHistoryPurge.
+	Purge bool
 }
 
-// parseHistoryArgs parses `ghost history <memory-id> [--limit N] [--json]`. Only
-// --limit and --json are recognized; anything else is an error rather than
-// being ignored, because a silently misparsed flag here would print a confident
-// and wrong history.
+// parseHistoryArgs parses `ghost history <memory-id> [--limit N] [--json]` and
+// `ghost history purge <memory-id>`. Only --limit and --json are recognized;
+// anything else is an error rather than being ignored, because a silently
+// misparsed flag here would print a confident and wrong history.
 func parseHistoryArgs(args []string) (historyOptions, error) {
 	var opts historyOptions
 	for i := 0; i < len(args); i++ {
@@ -57,6 +60,8 @@ func parseHistoryArgs(args []string) (historyOptions, error) {
 			opts.JSON = true
 		case strings.HasPrefix(arg, "-"):
 			return opts, fmt.Errorf("unknown flag %q", arg)
+		case arg == "purge" && opts.MemoryID == "":
+			opts.Purge = true
 		default:
 			if opts.MemoryID != "" {
 				return opts, fmt.Errorf("history takes one memory id, got %q as well", arg)
@@ -66,6 +71,12 @@ func parseHistoryArgs(args []string) (historyOptions, error) {
 	}
 	if opts.MemoryID == "" {
 		return opts, fmt.Errorf("a memory id is required")
+	}
+	if opts.Purge && opts.Limit > 0 {
+		return opts, fmt.Errorf("--limit has nothing to limit when purging: nothing is printed")
+	}
+	if opts.Purge && opts.JSON {
+		return opts, fmt.Errorf("--json has nothing to print when purging: nothing survives")
 	}
 	return opts, nil
 }
@@ -86,17 +97,25 @@ func parseHistoryLimit(value string) (int, error) {
 // handleHelp), and the same text on stderr after a usage error. One text for
 // both, so the two cannot drift.
 const historyUsage = `Usage: ghost history <memory-id> [--limit N] [--json]
+       ghost history purge <memory-id>
 
-Prints one memory's append-only history (issue #578): every insert, edit,
-reflection rewrite, duplicate fold, resolve, supersession, restore, import and
-deletion, oldest first, each with the content, category, importance, resolved_at
-and source the memory held once that write landed.
+Prints one memory's append-only history: every insert, edit, reflection
+rewrite, duplicate fold, resolve, supersession, restore, import and deletion,
+oldest first, each with the content, category, importance, resolved_at and
+source the memory held once that write landed.
 
   --limit N   Print only the newest N entries (default: all the store keeps)
   --json      One JSON object per entry, for scripting
 
-The history survives the memory it describes: a deleted memory's last state is
-still readable here.
+  purge       Erase the memory AND every recorded version of it. This is the
+              redaction path: the history deliberately keeps the text a memory
+              used to hold, so deleting a memory that contained a credential
+              leaves that credential in the database and readable with
+              'ghost history' unless it is purged. The row and its history go
+              in one transaction, so neither can survive the other.
+
+The history outlives the memory: a deleted memory's last state is still
+readable here unless it was purged.
 
 This command writes no memory, history or project row. It does open the store
 read-write, the same open 'ghost maintenance status' and 'ghost backup' use, so
@@ -137,8 +156,8 @@ func printMemoryHistory(w io.Writer, v historyView) error {
 		}
 	default:
 		// No row and no history: an id that was never written, or one whose
-		// history the growth policy has already dropped. Saying "deleted"
-		// here would claim a tombstone that is not there.
+		// history has already been pruned. Saying "deleted" here would claim a
+		// tombstone that is not there.
 		_, err := fmt.Fprintf(w, "no memory and no history recorded for %s — it was never written, or its history has been pruned\n", v.MemoryID)
 		return err
 	}
@@ -177,8 +196,29 @@ func printHistoryEntry(w io.Writer, e memory.HistoryEntry) error {
 		e.Category, e.Source, e.Importance, resolved, e.ProjectID); err != nil {
 		return err
 	}
+	// The other end of the event, when it has one. A reader asking "what
+	// replaced this" or "what is claiming it" needs it on the same screen as the
+	// text, not in the JSON.
+	if e.RelatedID != "" {
+		if _, err := fmt.Fprintf(w, "  related memory: %s\n", e.RelatedID); err != nil {
+			return err
+		}
+	}
+	if e.MergedContent != "" {
+		if _, err := fmt.Fprintf(w, "  folded-in text: %s\n", singleLine(e.MergedContent)); err != nil {
+			return err
+		}
+	}
 	_, err := fmt.Fprintf(w, "  %s\n", e.Content)
 	return err
+}
+
+// singleLine collapses a folded-in text onto one line so the surrounding
+// indentation stays readable. The content column above it is printed verbatim:
+// that is the record, and this is a summary of something the record already
+// holds elsewhere.
+func singleLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // printHistoryJSON writes one JSON object per entry. The store's own
@@ -194,7 +234,8 @@ func printHistoryJSON(w io.Writer, entries []memory.HistoryEntry) error {
 	return nil
 }
 
-// runHistory implements `ghost history <memory-id>`.
+// runHistory implements `ghost history <memory-id>`, and `ghost history purge
+// <memory-id>`.
 //
 // The store is opened with memory.OpenDB, like every other report-style command
 // (`ghost maintenance status`, `ghost backup`). That is a read-write open and is
@@ -223,7 +264,12 @@ func runHistory() {
 			fmt.Fprintf(os.Stderr, "error: database: %v\n", err)
 			os.Exit(1)
 		}
-		view := historyView{MemoryID: opts.MemoryID, NoDatabase: true}
+		if opts.Purge {
+			// There is nothing to redact: no store holds the text. Saying so is
+			// better than reporting a successful purge of nothing.
+			fmt.Fprintf(os.Stderr, "no Ghost database at %s — nothing to purge\n", dbPath)
+			os.Exit(1)
+		}
 		if opts.JSON {
 			// Not an empty stream: a script that piped a no-database run into a
 			// loop would otherwise see zero lines and conclude the memory has no
@@ -232,6 +278,7 @@ func runHistory() {
 			printHistoryJSONError(os.Stdout, "no Ghost database yet (run ghost first) — no history to read")
 			os.Exit(1)
 		}
+		view := historyView{MemoryID: opts.MemoryID, NoDatabase: true}
 		if err := printMemoryHistory(os.Stdout, view); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -248,16 +295,49 @@ func runHistory() {
 
 	ctx := context.Background()
 	s := memory.NewStore(db, nil)
+	if opts.Purge {
+		runHistoryPurge(ctx, s, opts.MemoryID)
+		return
+	}
 	view, err := readHistoryView(ctx, s, opts.MemoryID, opts.Limit)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-
 	if err := printHistory(os.Stdout, view, opts.JSON); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// runHistoryPurge erases one memory and every recorded version of it.
+//
+// The count it prints is read BEFORE the purge, so the operator can see how much
+// text the purge removed rather than being told "done" and left guessing whether
+// the argument was even a live memory. A purge is irreversible by construction —
+// that is what makes it a redaction path — so the count is the only warning there
+// is, and it is printed before the write rather than after.
+func runHistoryPurge(ctx context.Context, s *memory.Store, memoryID string) {
+	entries, err := s.MemoryHistory(ctx, memoryID, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if len(entries) == 0 {
+		if _, liveErr := s.GetByIDs(ctx, []string{memoryID}); liveErr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", liveErr)
+			os.Exit(1)
+		} else {
+			fmt.Fprintf(os.Stderr, "no memory and no history for %s — nothing to purge\n", memoryID)
+			os.Exit(1)
+		}
+	}
+	fmt.Printf("Purging memory %s and %d recorded version(s) of its text.\n", memoryID, len(entries))
+	if err := s.DeleteWithOptions(ctx, memoryID, memory.DeleteOptions{PurgeHistory: true}); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("Purged. No version of this memory's text remains in the database.")
 }
 
 // readHistoryView gathers what the printer needs from an open store: the memory

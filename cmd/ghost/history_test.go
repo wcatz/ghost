@@ -337,3 +337,80 @@ func TestReadHistoryViewCarriesTheLiveRow(t *testing.T) {
 		t.Errorf("view for an unknown id = %+v, want empty and not live", gone)
 	}
 }
+
+func TestParseHistoryArgsPurge(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    historyOptions
+		wantErr string
+	}{
+		{
+			name: "purge with an id",
+			args: []string{"purge", "abc123"},
+			want: historyOptions{MemoryID: "abc123", Purge: true},
+		},
+		{
+			name:    "purge with no id",
+			args:    []string{"purge"},
+			wantErr: "a memory id is required",
+		},
+		{
+			name:    "purge and limit contradict each other",
+			args:    []string{"purge", "abc123", "--limit", "5"},
+			wantErr: "--limit has nothing to limit when purging",
+		},
+		{
+			name:    "purge and json contradict each other",
+			args:    []string{"purge", "abc123", "--json"},
+			wantErr: "--json has nothing to print when purging",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseHistoryArgs(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("parseHistoryArgs(%v) error = %v, want it to contain %q", tt.args, err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseHistoryArgs(%v): %v", tt.args, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseHistoryArgs(%v) = %+v, want %+v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPrintHistoryEntryNamesTheOtherEnd: the two fields that make a history
+// followable — which memory replaced this one, and what text a fold brought in.
+// A reader asking "what replaced this" needs the answer on the same screen as the
+// text, not only in the JSON.
+func TestPrintHistoryEntryNamesTheOtherEnd(t *testing.T) {
+	var buf bytes.Buffer
+	e := historyEntry("delete", "", "the fact this memory used to hold", "2026-09-27 09:00:00")
+	e.RelatedID = "SUCCESSOR01"
+	e.MergedContent = "the near-duplicate a fold brought in"
+	if err := printHistoryEntry(&buf, e); err != nil {
+		t.Fatalf("printHistoryEntry: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "related memory: SUCCESSOR01") {
+		t.Errorf("output does not name the successor:\n%s", out)
+	}
+	if !strings.Contains(out, "folded-in text: the near-duplicate a fold brought in") {
+		t.Errorf("output does not carry the folded-in text:\n%s", out)
+	}
+	// A row with neither says nothing about either, rather than printing empty
+	// labels on every event.
+	var plain bytes.Buffer
+	if err := printHistoryEntry(&plain, historyEntry("save", "claude-code", "text", "2026-09-27 09:00:00")); err != nil {
+		t.Fatalf("printHistoryEntry: %v", err)
+	}
+	if strings.Contains(plain.String(), "related memory") || strings.Contains(plain.String(), "folded-in text") {
+		t.Errorf("a row with no other end printed an empty label:\n%s", plain.String())
+	}
+}

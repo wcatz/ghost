@@ -1071,14 +1071,15 @@ func (s *Server) registerTools() {
 
 	// ghost_memory_delete — delete a memory by ID.
 	type deleteArgs struct {
-		ProjectID string `json:"project_id" jsonschema:"Project name the memory belongs to (required for ownership check)"`
-		MemoryID  string `json:"memory_id" jsonschema:"ID of the memory to delete"`
+		ProjectID    string `json:"project_id" jsonschema:"Project name the memory belongs to (required for ownership check)"`
+		MemoryID     string `json:"memory_id" jsonschema:"ID of the memory to delete"`
+		PurgeHistory bool   `json:"purge_history,omitempty" jsonschema:"Also erase this memory's recorded history — use it to REDACT something (a credential, a token, a personal detail), not to retire a memory you merely want gone. The history keeps the text a memory used to hold, so without this a deleted secret survives in the database and is still readable with ghost history."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_delete",
 		Title:       "Delete Memory",
-		Description: "Permanently delete a memory by ID. Requires project_id to verify ownership — you cannot delete memories from other projects. Use only when the user explicitly asks to remove a memory or when a memory is confirmed incorrect. Do not delete outdated memories — Ghost's reflection system handles pruning.",
+		Description: "Permanently delete a memory by ID. Requires project_id to verify ownership — you cannot delete memories from other projects. Use only when the user explicitly asks to remove a memory or when a memory is confirmed incorrect. Do not delete outdated memories — Ghost's reflection system handles pruning. Pass purge_history: true when the memory must be ERASED rather than retired: every recorded version of its text goes with it in the same transaction, which is the only way to redact a secret Ghost already stored.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(true),
 			OpenWorldHint:   boolPtr(false),
@@ -1107,13 +1108,19 @@ func (s *Server) registerTools() {
 			return nil, nil, fmt.Errorf("memory %s does not belong to project %s", args.MemoryID, args.ProjectID)
 		}
 
-		if err := s.store.Delete(ctx, args.MemoryID); err != nil {
+		if err := s.store.DeleteWithOptions(ctx, args.MemoryID, memory.DeleteOptions{
+			PurgeHistory: args.PurgeHistory,
+		}); err != nil {
 			return nil, nil, fmt.Errorf("delete failed: %w", err)
 		}
 		s.notifyProjectResource(ctx, resolvedProjectID, "context")
 
+		text := "Memory deleted."
+		if args.PurgeHistory {
+			text = "Memory deleted and its recorded history purged — no version of its text remains."
+		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "Memory deleted."}},
+			Content: []mcp.Content{&mcp.TextContent{Text: text}},
 		}, nil, nil
 	})
 

@@ -22,35 +22,66 @@ type reflectionApplier interface {
 // invokes the store apply boundary. Promotion is not nested under a
 // project-memory guard: a result containing only cross-project candidates is
 // precisely the case where an explicit promotion request must still run.
-func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool) (preserved []string, promoted int, keptMems []memory.Memory, err error) {
+func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[string][]string) (preserved []string, promoted int, keptMems []memory.Memory, err error) {
 	if !promoteGlobals && len(globalMems) > 0 {
 		projectMems = append(append([]reflection.ReflectMemory(nil), projectMems...), globalMems...)
 		globalMems = nil
 	}
-	projectRows := reflectMemoriesToMemory(projectID, projectMems)
-	globalRows := reflectMemoriesToMemory("_global", globalMems)
+	projectRows := reflectMemoriesToMemory(projectID, projectMems, replaced)
+	globalRows := reflectMemoriesToMemory("_global", globalMems, replaced)
 	if len(projectRows) == 0 && len(globalRows) == 0 {
 		return nil, 0, nil, nil
 	}
 	return store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals)
 }
 
-func reflectMemoriesToMemory(projectID string, mems []reflection.ReflectMemory) []memory.Memory {
+// reflectMemoriesToMemory converts proposals to store rows. replaced maps an
+// emitted memory's TEXT to the input ids that merge or rewrite consumed to produce
+// it, and is carried through as Memory.ReplacesIDs so ReplaceNonManual can stamp
+// the successor id on those rows' delete history: a rewrite or a merge gives the
+// row a new id, and without the mapping a reader following one memory's history
+// stops exactly where the memory changed.
+//
+// Text is the join key because it is the only handle the operation list and the
+// emitted list share — the operations are resolved before the memories are, and
+// nothing pairs them by id. Two emissions with identical text are the same fact
+// as far as consolidation is concerned, so they legitimately share the mapping.
+func reflectMemoriesToMemory(projectID string, mems []reflection.ReflectMemory, replaced map[string][]string) []memory.Memory {
 	if len(mems) == 0 {
 		return nil
 	}
 	rows := make([]memory.Memory, len(mems))
 	for i, m := range mems {
 		rows[i] = memory.Memory{
-			ProjectID:  projectID,
-			Category:   m.Category,
-			Content:    m.Content,
-			Importance: m.Importance,
-			Source:     "reflection",
-			Tags:       m.Tags,
+			ProjectID:   projectID,
+			Category:    m.Category,
+			Content:     m.Content,
+			Importance:  m.Importance,
+			Source:      "reflection",
+			Tags:        m.Tags,
+			ReplacesIDs: replaced[m.Content],
 		}
 	}
 	return rows
+}
+
+// replacedIDsByText inverts the operation list into the shape
+// reflectMemoriesToMemory consumes: for every merge and every rewrite (and every
+// drop that named a witness), the ids it disposed of, keyed by the text that
+// replaced them. A drop naming no witness contributes nothing — an obsolete drop
+// has no successor, and inventing one would put a false pointer on a delete row.
+func replacedIDsByText(result *reflection.ReflectionResult) map[string][]string {
+	out := map[string][]string{}
+	if result == nil {
+		return out
+	}
+	for _, m := range result.Merges {
+		out[m.Text] = append(out[m.Text], m.IDs...)
+	}
+	for _, r := range result.Replacements {
+		out[r.Text] = append(out[r.Text], r.ID)
+	}
+	return out
 }
 
 func reflectCategoryParts(mems []reflection.ReflectMemory) string {

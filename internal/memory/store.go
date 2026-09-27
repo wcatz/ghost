@@ -90,6 +90,17 @@ type Memory struct {
 	ValidFrom  *string `json:"valid_from,omitempty"`
 	ValidUntil *string `json:"valid_until,omitempty"`
 	VerifiedAt *string `json:"verified_at,omitempty"`
+
+	// ReplacesIDs names the input rows this row stands in for — the ids a
+	// consolidation folded together or rewrote into this one. Only
+	// ReplaceNonManual reads it, and only to stamp the successor id on those
+	// rows' delete history: a rewrite or a merge gives the row a NEW id, so
+	// without this a reader following one memory's history hits a wall at exactly
+	// the point where the memory changed. Set by the reflection apply path from
+	// the merge and rewrite operations, which know the ids; never persisted,
+	// hence json:"-", because it is a proposal's bookkeeping and not a field of
+	// the memory.
+	ReplacesIDs []string `json:"-"`
 }
 
 // Project represents a registered project.
@@ -2845,7 +2856,24 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			// access count — so it gets its own history entry, attributed to the
 			// agent whose save did the folding rather than to whoever wrote the
 			// row first.
-			if err := appendHistoryTx(ctx, tx, existingID, phaseMerge, opts.Provenance); err != nil {
+			//
+			// FoldOnly additionally records the incoming wording, because that is
+			// the one path that throws it away: the ordinary fold stores the new
+			// text as a linked copy of its own (so it is already in the history,
+			// under its own id), while a FoldOnly fold returns the target and
+			// stores nothing. Without this the only record of a promotion's
+			// discarded paraphrase was the database itself, before this table
+			// existed.
+			if opts.FoldOnly {
+				err := appendHistoryEventsTx(ctx, tx, []historyEvent{{
+					phase:         phaseMerge,
+					prov:          opts.Provenance,
+					mergedContent: content,
+				}}, []string{existingID})
+				if err != nil {
+					return "", "", 0, err
+				}
+			} else if err := appendHistoryTx(ctx, tx, existingID, phaseMerge, opts.Provenance); err != nil {
 				return "", "", 0, err
 			}
 		}
@@ -3491,12 +3519,36 @@ func (s *Store) MarkSupersedeNeither(ctx context.Context, projectID string, chec
 	return tx.Commit()
 }
 
-// Delete removes a specific memory. The row's last state is recorded first, in
-// the same transaction: memory_provenance.memory_id deliberately has no foreign
-// key, so a delete leaves behind a tombstone carrying the text the memory held
-// — the only remaining record of it, and the reason a cascading history table
-// would be empty exactly when the audit is asked.
+// DeleteOptions is what one delete is asked to do beyond removing the row.
+type DeleteOptions struct {
+	// PurgeHistory removes every memory_provenance row for this memory in the
+	// same transaction, leaving nothing behind.
+	//
+	// It is the redaction path, and the default is deliberately not it. The
+	// history keeps the text a memory USED to hold, so a plain delete preserves
+	// it — which is what makes the history worth having, and is also how a
+	// credential "removed" by deleting its memory survives in a table with a
+	// longer life than the row. A delete meant to ERASE rather than to retire has
+	// to say so here. See the ghost_memory_delete purge_history argument and
+	// `ghost history purge`.
+	PurgeHistory bool
+}
+
+// Delete removes a specific memory and KEEPS its history. The row's last state is
+// recorded first, in the same transaction: memory_provenance.memory_id
+// deliberately has no foreign key, so a delete leaves behind a tombstone carrying
+// the text the memory held — the only remaining record of it, and the reason a
+// cascading history table would be empty exactly when the audit is asked.
+//
+// For a redaction, use DeleteWithOptions with PurgeHistory.
 func (s *Store) Delete(ctx context.Context, id string) error {
+	return s.DeleteWithOptions(ctx, id, DeleteOptions{})
+}
+
+// DeleteWithOptions is Delete with the caller's choice about the history: kept (a
+// tombstone) or purged (nothing). Both happen inside the one transaction that
+// removes the row, so a memory and its history can never come apart.
+func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOptions) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -3506,12 +3558,14 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Before the DELETE, because afterwards there is nothing left to read. A
-	// missing row is not this call's error to report: the DELETE below says
-	// "memory not found" in its own words, and a bad id must produce that.
-	if err := appendHistoryTx(ctx, tx, id, phaseDelete, Provenance{}); err != nil &&
-		!errors.Is(err, errHistoryNoMemory) {
-		return err
+	if !opts.PurgeHistory {
+		// Before the DELETE, because afterwards there is nothing left to read. A
+		// missing row is not this call's error to report: the DELETE below says
+		// "memory not found" in its own words, and a bad id must produce that.
+		if err := appendHistoryTx(ctx, tx, id, phaseDelete, Provenance{}); err != nil &&
+			!errors.Is(err, errHistoryNoMemory) {
+			return err
+		}
 	}
 
 	result, err := tx.ExecContext(ctx, `DELETE FROM memories WHERE id = ?`, id)
@@ -3521,6 +3575,13 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	n, _ := result.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("memory not found: %s", id)
+	}
+	// A purge writes no tombstone of its own, which is the point: it must leave
+	// nothing behind that could carry the text being redacted.
+	if opts.PurgeHistory {
+		if err := purgeHistoryTx(ctx, tx, id); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -3577,6 +3638,16 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 		newTags = string(b)
 	}
 
+	// A memory with NO history yet is pre-v17 — migrateV17 records no starting
+	// row — and this write is the one that overwrites text nothing else keeps. So
+	// the state it held a moment ago is filed first, while the row still holds it;
+	// see recordBaselineHistoryTx, whose contract is that it runs before its
+	// caller's write. It is a no-op for every memory this build wrote, so the
+	// common case pays one indexed existence check.
+	if err := recordBaselineHistoryTx(ctx, tx, id, phaseBaseline, Provenance{}); err != nil {
+		return err
+	}
+
 	// resolved_at is a resolve pass's verdict, not part of the editable fields.
 	// Only a content change may clear it — a metadata-only edit (tags,
 	// importance, category) must not resurrect resolved evidence into ranked
@@ -3604,10 +3675,10 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 			return fmt.Errorf("invalidate link scan: %w", err)
 		}
 	}
-	// The text the row held before this edit is only in the history now, and
-	// #647 (as_of retrieval) cannot be built without it. No Provenance: this
-	// call carries no agent or session, and inventing one would be the
-	// fabricated provenance the agent columns exist to avoid.
+	// The state this write produced, which is the only other copy of the new text
+	// once the next edit overwrites it. No Provenance: this call carries no agent
+	// or session, and inventing one would be the fabricated provenance the agent
+	// columns exist to avoid.
 	if err := appendHistoryTx(ctx, tx, id, phaseUpdate, Provenance{}); err != nil {
 		return err
 	}
@@ -3981,6 +4052,13 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	// made, and interleaving the two statements per row would triple the
 	// statement count for no gain.
 	var reflected []string
+	// successorOf maps the ids this pass consumed to the row that now holds
+	// their content, so the consumed rows' delete history can say where their
+	// knowledge went. Only ids the caller declared (Memory.ReplacesIDs, which the
+	// reflection operations fill in) are eligible: a row this pass deleted for
+	// any other reason — a drop, a concurrent save it outran — has no successor
+	// and must not be given one.
+	successorOf := map[string]string{}
 	for i, m := range memories {
 		tags, _ := json.Marshal(m.Tags)
 		if stored, reusedRow := reuseFor[i]; reusedRow {
@@ -4025,6 +4103,9 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			}
 			reused++
 			reflected = append(reflected, id)
+			for _, replaced := range m.ReplacesIDs {
+				successorOf[replaced] = id
+			}
 			continue
 		}
 		var newID string
@@ -4036,12 +4117,24 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			return nil, fmt.Errorf("insert memory: %w", err)
 		}
 		reflected = append(reflected, newID)
+		for _, replaced := range m.ReplacesIDs {
+			successorOf[replaced] = newID
+		}
 	}
 	// One append for every row this pass wrote, reused and fresh alike: from
 	// outside, a reflection rewrite and the row it rewrote are the same event,
 	// and phaseReflect is what answers "which consolidation run touched this".
 	if err := appendHistoryForIDsTx(ctx, tx, reflected, phaseReflect, Provenance{}); err != nil {
 		return nil, err
+	}
+	// Now that every emission's final id is known, close the chain: each consumed
+	// row's delete row names the row that replaced it. Without this a rewrite or a
+	// merge ends one memory's history at a wall, because the row it became has a
+	// different id and nothing says so.
+	for oldID, newID := range successorOf {
+		if err := linkSuccessorTx(ctx, tx, oldID, newID); err != nil {
+			return nil, err
+		}
 	}
 
 	if s.logger != nil && (reused > 0 || len(concurrent) > 0) {

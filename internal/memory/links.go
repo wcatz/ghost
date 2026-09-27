@@ -79,7 +79,14 @@ func (s *Store) CreateLink(ctx context.Context, sourceID, targetID, relation str
 		// save/update/reflect versions this table exists to keep. Re-activating
 		// an invalidated edge IS a change, and is recorded.
 		if !active {
-			if err := appendHistoryTx(ctx, tx, targetID, phaseSupersede, Provenance{}); err != nil {
+			// relatedID is the memory whose edge makes the claim — the one that
+			// replaced this row. Without it a history says a memory went stale
+			// without saying to what, which is the half of the sentence an audit
+			// is asking for.
+			if err := appendHistoryEventsTx(ctx, tx, []historyEvent{{
+				phase:     phaseSupersede,
+				relatedID: sourceID,
+			}}, []string{targetID}); err != nil {
 				return err
 			}
 		}
@@ -420,18 +427,62 @@ func (s *Store) InvalidateLink(ctx context.Context, sourceID, targetID, relation
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE memory_links SET invalidated_at = datetime('now')
-		WHERE source_id = ? AND target_id = ? AND relation = ? AND invalidated_at IS NULL
-	`, sourceID, targetID, relation)
+	if relation != "supersedes" {
+		res, err := s.db.ExecContext(ctx, linkInvalidateSQL, sourceID, targetID, relation)
+		if err != nil {
+			return 0, fmt.Errorf("invalidate link: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			// A driver that cannot report the count is not a reason to fail: the
+			// invalidation itself already committed.
+			return 0, nil
+		}
+		return n, nil
+	}
+
+	// Withdrawing a supersession is a change in the target's standing, exactly as
+	// asserting one was, and the history has to say so: a corpus whose audit shows
+	// a supersede and no withdrawal reads as though the stale claim is still
+	// live. The edge and its row share a transaction, and the row is written only
+	// when the edge was live — the same guard the UPDATE applies, so a re-run
+	// that changes nothing records nothing.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin invalidate link: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	active, err := linkIsActive(ctx, tx, sourceID, targetID, relation)
+	if err != nil {
+		return 0, err
+	}
+	res, err := tx.ExecContext(ctx, linkInvalidateSQL, sourceID, targetID, relation)
 	if err != nil {
 		return 0, fmt.Errorf("invalidate link: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		// A driver that cannot report the count is not a reason to fail: the
-		// invalidation itself already committed.
 		return 0, nil
+	}
+	if n > 0 && active {
+		if err := appendHistoryEventsTx(ctx, tx, []historyEvent{{
+			phase:     phaseUnsupersede,
+			relatedID: sourceID,
+		}}, []string{targetID}); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit invalidate link: %w", err)
 	}
 	return n, nil
 }
+
+// linkInvalidateSQL is the soft delete InvalidateLink performs: a timestamp, never
+// a row removal, so the graph keeps the edge that was there. The guard on
+// invalidated_at IS NULL is what makes the count a real graph change rather than
+// a re-stamp.
+const linkInvalidateSQL = `
+		UPDATE memory_links SET invalidated_at = datetime('now')
+		WHERE source_id = ? AND target_id = ? AND relation = ? AND invalidated_at IS NULL
+	`

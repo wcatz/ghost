@@ -29,7 +29,10 @@ type MemoryStore interface {
 	UpsertWithProvenance(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, prov memory.Provenance) (string, string, float64, error)
 	// UpsertWithOptions is Upsert plus optional provenance and scope.
 	UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts memory.UpsertOptions) (string, string, float64, error)
+	// Delete keeps the memory's history; DeleteWithOptions is the redaction path,
+	// which removes the history rows in the same transaction.
 	Delete(ctx context.Context, id string) error
+	DeleteWithOptions(ctx context.Context, id string, opts memory.DeleteOptions) error
 	UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error
 	PromoteToGlobal(ctx context.Context, projectID, id string) error
 

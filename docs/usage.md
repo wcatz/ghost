@@ -140,7 +140,7 @@ ghost history <memory-id> --limit 5
 ghost history <memory-id> --json
 ```
 
-Every write to a memory is appended to its history in the same transaction, so `ghost history` can answer what a memory used to say, which pass or agent changed it, and when — including after the memory itself is gone, which is the case where the recorded text is all that is left. The command writes no memory, history or project row; like `ghost maintenance status` it opens the store read-write, so a database predating the history table is migrated by the open.
+Every write to a memory is appended to its history in the same transaction, so `ghost history` can answer what a memory used to say, which pass or agent changed it, and when — including after the memory itself is gone, which is the case where the recorded text is all that is left. To erase something rather than retire it, use `ghost history purge <memory-id>`: it deletes the row and every recorded version of it in one transaction, which is the only way a credential that was "removed" by deleting its memory stops being readable. Otherwise the command writes no memory, history or project row; like `ghost maintenance status` it opens the store read-write, so a database predating the history table is migrated by the open.
 
 ## Automatic lifecycle work
 

@@ -426,7 +426,7 @@ ghost context --cwd /path/to/project
 
 This is primarily used by the opencode adapter, which injects the returned block as instructions because opencode does not consume a stdout hook response.
 
-### `ghost history <memory-id>`
+### `ghost history <memory-id>` / `ghost history purge <memory-id>`
 
 Prints one memory's append-only history: every insert, edit, reflection rewrite,
 duplicate fold, resolve, supersession, restore, import and deletion, oldest
@@ -436,18 +436,38 @@ first.
 ghost history <memory-id>                    # human-readable changelog
 ghost history <memory-id> --limit 5          # the newest 5 entries
 ghost history <memory-id> --json | jq .phase # one JSON object per entry
+
+ghost history purge <memory-id>              # erase the row AND its history
+```
+
+```bash
+ghost history <memory-id>                    # human-readable changelog
+ghost history <memory-id> --limit 5          # the newest 5 entries
+ghost history <memory-id> --json | jq .phase # one JSON object per entry
 ```
 
 Each entry names when it happened, which write path made it (`save`, `update`,
-`reflect`, `merge`, `resolve`, `unresolve`, `supersede`, `restore`, `import`,
-`delete`), which agent and session performed it when the write path knew — the
-lifecycle passes do not, and the entry says so rather than inventing one — and
-the content, category, importance, `resolved_at` and source the memory held once
-that write landed.
+`reflect`, `merge`, `resolve`, `unresolve`, `supersede`, `unsupersede`, `restore`,
+`import`, `delete`, `baseline`), which agent and session performed it when the
+write path knew — the lifecycle passes do not, and the entry says so rather than
+inventing one — and the content, category, importance, `resolved_at` and source
+the memory held once that write landed.
+
+Two more fields appear when they apply: the memory on the other end of the event
+(`related memory:` — what replaced a deleted row, or whose edge claims this one)
+and the text a duplicate fold brought in and did not keep (`folded-in text:`).
 
 The history outlives the memory: a deleted memory's last state is still readable
 here, and a report that finds neither a row nor a history says so instead of
 printing nothing.
+
+`purge` is the exception, and it is the redaction path. Because the history keeps
+the text a memory **used** to hold, deleting a memory that contained a credential
+leaves that credential in the database and still readable with `ghost history`.
+`purge` deletes the row and every history row for it in one transaction, so
+neither can survive the other and nothing is left to print. The MCP equivalent is
+`ghost_memory_delete` with `purge_history: true`; use it whenever the intent is to
+erase something rather than to retire a memory.
 
 The command writes no memory, history or project row. It does open the store read-write — the same open `ghost maintenance status` and `ghost backup` use — so a database predating the history table is migrated by the open, and that migration first writes the full pre-migration backup copy it always takes. The strictly read-only opener is not used here because it refuses a store behind the current schema, which is exactly the store someone is most likely to run this against after upgrading.
 

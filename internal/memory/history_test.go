@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"math"
 	"path/filepath"
 	"strconv"
@@ -743,7 +744,9 @@ func TestMemoryHistorySkipsAnAlreadyActiveSupersedeEdge(t *testing.T) {
 		t.Fatalf("phases = %v, want [save supersede] — a re-link of a live edge changes nothing about the memory", got)
 	}
 
-	// Re-activating an invalidated edge IS a state change, so it is recorded.
+	// Invalidating it withdraws the claim, which is a change in its own right, and
+	// re-activating it asserts the claim again — so the pair is two events, not
+	// one.
 	if _, err := s.InvalidateLink(ctx, newer, older, "supersedes"); err != nil {
 		t.Fatalf("InvalidateLink: %v", err)
 	}
@@ -754,8 +757,8 @@ func TestMemoryHistorySkipsAnAlreadyActiveSupersedeEdge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MemoryHistory: %v", err)
 	}
-	if got := phasesOf(t, entries); !equalStrings(got, []string{"save:", "supersede:", "supersede:"}) {
-		t.Fatalf("phases = %v, want [save supersede supersede] — re-activating the edge is a change", got)
+	if got := phasesOf(t, entries); !equalStrings(got, []string{"save:", "supersede:", "unsupersede:", "supersede:"}) {
+		t.Fatalf("phases = %v, want [save supersede unsupersede supersede] — a withdrawal and a fresh claim are both changes", got)
 	}
 }
 
@@ -890,5 +893,553 @@ func TestMemoryHistoryFollowsAMemoryPromotedToGlobal(t *testing.T) {
 	}
 	if entries[0].Content != "a rule worth injecting everywhere" {
 		t.Errorf("the surviving history lost the text: %q", entries[0].Content)
+	}
+}
+
+// TestDeleteWithPurgeHistoryLeavesNothing: the redaction path. The history
+// deliberately outlives the row, so a plain delete KEEPS the text a memory held
+// — which is the whole point of the table and also how a credential that was
+// "removed" by deleting its memory would survive in a store with a longer memory
+// than the row. A purge is the one delete that erases both, in one transaction.
+func TestDeleteWithPurgeHistoryLeavesNothing(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	secret := "the deploy key is ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	id, _, _, err := s.UpsertWithProvenance(ctx, testProject, "gotcha", secret, "mcp", 0.5, nil,
+		Provenance{Agent: "claude-code", SessionID: "ses_a"})
+	if err != nil {
+		t.Fatalf("UpsertWithProvenance: %v", err)
+	}
+	if err := s.UpdateMemory(ctx, testProject, id, strPtr("the deploy key has been rotated"), nil, nil, nil); err != nil {
+		t.Fatalf("UpdateMemory: %v", err)
+	}
+	// Sanity: the credential really is in the history, or the purge proves nothing.
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) < 2 || !strings.Contains(entries[0].Content, "ghp_ABCDEF") {
+		t.Fatalf("history does not hold the original text: %v", phasesOf(t, entries))
+	}
+
+	if err := s.DeleteWithOptions(ctx, id, DeleteOptions{PurgeHistory: true}); err != nil {
+		t.Fatalf("DeleteWithOptions: %v", err)
+	}
+
+	entries, err = s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory after purge: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a purge left %d history rows (%v)", len(entries), phasesOf(t, entries))
+	}
+	live, err := s.GetByIDs(ctx, []string{id})
+	if err != nil || len(live) != 0 {
+		t.Errorf("the memory row survived the purge: %v %v", live, err)
+	}
+	// Nothing anywhere in the table carries the text any more — not this memory's
+	// rows, and not a row some other memory's writer copied.
+	var leaked int
+	if err := s.db.QueryRow(
+		`SELECT count(*) FROM memory_provenance WHERE content LIKE '%ghp_ABCDEF%'`,
+	).Scan(&leaked); err != nil {
+		t.Fatalf("scan for the credential: %v", err)
+	}
+	if leaked != 0 {
+		t.Errorf("%d history row(s) still carry the purged credential", leaked)
+	}
+}
+
+// TestDeleteWithoutPurgeKeepsTheTombstone: the default must stay a retirement,
+// not a redaction, or the history would be unusable for its stated purpose.
+func TestDeleteWithoutPurgeKeepsTheTombstone(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	id, _, _, err := s.Upsert(ctx, testProject, "fact", "a fact that outlives its row", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := s.Delete(ctx, id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if got := phasesOf(t, entries); !equalStrings(got, []string{"save:", "delete:"}) {
+		t.Errorf("phases = %v, want [save delete]", got)
+	}
+}
+
+// TestRedactHistoryContentRewritesWhatIsStored: the seam a credential detector
+// plugs into (internal/secret, #656 — not on main yet). It is a var so the
+// plumbing is testable before the detector exists; without this test, #656 would
+// land as a change of shape and a reader could not tell whether the rewrite
+// happens on the way IN or only on the way out.
+func TestRedactHistoryContentRewritesWhatIsStored(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	restore := setHistoryRedactor(func(content string) string {
+		return strings.ReplaceAll(content, "ghp_SECRET", "[redacted]")
+	})
+	t.Cleanup(restore)
+
+	id, _, _, err := s.Upsert(ctx, testProject, "fact", "the deploy key is ghp_SECRET", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := s.UpdateMemory(ctx, testProject, id, strPtr("the deploy key was rotated"), nil, nil, nil); err != nil {
+		t.Fatalf("UpdateMemory: %v", err)
+	}
+
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no history recorded")
+	}
+	for i, e := range entries {
+		if strings.Contains(e.Content, "ghp_SECRET") {
+			t.Errorf("row %d (%s) stored the unredacted credential: %q", i, e.Phase, e.Content)
+		}
+	}
+	// The redaction is recorded, not silent about it: the text is still there,
+	// marked.
+	if !strings.Contains(entries[0].Content, "[redacted]") {
+		t.Errorf("row 0 = %q, want the redacted form", entries[0].Content)
+	}
+	// The live row is NOT rewritten: the filter is the history's, and a memory
+	// that is merely about a credential is still a memory.
+	live, err := s.GetByIDs(ctx, []string{id})
+	if err != nil || len(live) != 1 || live[0].Content != "the deploy key was rotated" {
+		t.Errorf("the live row was altered by a history filter: %v %v", live, err)
+	}
+}
+
+// TestUpdateMemoryBaselinesAPreV17Memory: the case migrateV17 leaves open. A
+// memory that already existed when the history table arrived has NO rows in it,
+// and an edit is the one write that overwrites text nothing else keeps — so the
+// first edit of such a memory has to file the state it replaced, or the old
+// wording is gone from the database for good and #647's as_of read has no
+// version to read before the edit.
+func TestUpdateMemoryBaselinesAPreV17Memory(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	s := NewStore(db, nil)
+	ctx := context.Background()
+	t.Cleanup(func() { _ = db.Close() })
+	if err := s.EnsureProject(ctx, testProject, "/tmp/test", "test"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	// A v16 store: the memories table without the history table, stamped v16.
+	const original = "the link worker re-embeds a memory whose content changed"
+	if _, err := db.Exec(`DROP TABLE memory_provenance`); err != nil {
+		t.Fatalf("drop memory_provenance: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO memories (project_id, category, content, source, importance)
+		VALUES (?, 'gotcha', ?, 'mcp', 0.5)`, testProject, original); err != nil {
+		t.Fatalf("seed v16 memory: %v", err)
+	}
+	var id string
+	if err := db.QueryRow(`SELECT id FROM memories WHERE content = ?`, original).Scan(&id); err != nil {
+		t.Fatalf("read seeded id: %v", err)
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion-1)); err != nil {
+		t.Fatalf("stamp v16: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Reopen: the migration runs, and the memory now exists with no history.
+	migrated, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB (migrating): %v", err)
+	}
+	defer func() { _ = migrated.Close() }()
+	s = NewStore(migrated, nil)
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("the migrated memory already has %d history rows (%v); the test needs one with none", len(entries), phasesOf(t, entries))
+	}
+
+	const rewritten = "the link worker re-embeds and re-links a memory whose content changed"
+	if err := s.UpdateMemory(ctx, testProject, id, strPtr(rewritten), nil, nil, nil); err != nil {
+		t.Fatalf("UpdateMemory: %v", err)
+	}
+
+	entries, err = s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if got := phasesOf(t, entries); !equalStrings(got, []string{"baseline:", "update:"}) {
+		t.Fatalf("phases = %v, want [baseline update]", got)
+	}
+	if entries[0].Content != original {
+		t.Errorf("the baseline records %q, want the text the memory held before the edit (%q)", entries[0].Content, original)
+	}
+	if entries[0].Category != "gotcha" || entries[0].Source != "mcp" {
+		t.Errorf("baseline state = %s/%s, want gotcha/mcp", entries[0].Category, entries[0].Source)
+	}
+	if entries[1].Content != rewritten {
+		t.Errorf("the update row records %q, want %q", entries[1].Content, rewritten)
+	}
+}
+
+// TestUpdateMemoryBaselinesOnlyOnce: the baseline is a statement about a memory
+// this build had never seen. A memory it has been watching has a real history,
+// and a second baseline row in it would be a claim that the memory's first write
+// happened twice.
+func TestUpdateMemoryBaselinesOnlyOnce(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, _, _, err := s.Upsert(ctx, testProject, "fact", "a memory this build wrote", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := s.UpdateMemory(ctx, testProject, id, strPtr("a memory this build wrote, edited"), nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory %d: %v", i, err)
+		}
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if got := phasesOf(t, entries); !equalStrings(got, []string{"save:", "update:", "update:", "update:"}) {
+		t.Errorf("phases = %v, want one save and three updates — no baseline for a memory with history", got)
+	}
+}
+
+// TestHistoryTrimKeepsTheNewestRowOfAMemoryOverTheCap: the trim's floor. A memory
+// past the cap keeps its newest rows, and "newest" has to mean the row that says
+// what it says NOW — an audit whose last word about a live memory is a version
+// fifty edits old is worse than no history at all.
+func TestHistoryTrimKeepsTheNewestRowOfAMemoryOverTheCap(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	restore := historyVersionsPerMemory
+	historyVersionsPerMemory = 3
+	t.Cleanup(func() { historyVersionsPerMemory = restore })
+
+	id, _, _, err := s.Upsert(ctx, testProject, "fact", "a memory edited past the cap", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	const last = "revision twenty"
+	for i := 0; i < 20; i++ {
+		text := "revision " + itoa(i)
+		if i == 19 {
+			text = last
+		}
+		if err := s.UpdateMemory(ctx, testProject, id, strPtr(text), nil, nil, nil); err != nil {
+			t.Fatalf("UpdateMemory %d: %v", i, err)
+		}
+	}
+	entries, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) != historyVersionsPerMemory {
+		t.Fatalf("kept %d rows, want %d", len(entries), historyVersionsPerMemory)
+	}
+	newest := entries[len(entries)-1]
+	if newest.Content != last {
+		t.Errorf("the newest surviving row says %q, want %q — the trim took the wrong end", newest.Content, last)
+	}
+	if newest.Phase != "update" {
+		t.Errorf("the newest surviving row is a %q, want the update that produced it", newest.Phase)
+	}
+}
+
+// TestReplaceNonManualNamesTheSuccessorOfEveryReplacedRow: the chain. A rewrite
+// or a merge gives the row a NEW id — the new text is not byte-identical, so the
+// old row cannot be reused — which means the old id's history simply stops. A
+// reader following one memory (what #648 will do with a usefulness verdict)
+// would never learn that the memory it holds a verdict about is now a different
+// row, so the delete row has to name it.
+func TestReplaceNonManualNamesTheSuccessorOfEveryReplacedRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	old, _, _, err := s.Upsert(ctx, testProject, "fact", "search falls back to FTS when Ollama is down", "reflection", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	// The consolidation rewrites it, declaring which input row it stands for —
+	// the field the reflection operations (#659) fill in from their merge and
+	// rewrite output.
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category:    "fact",
+		Content:     "an unreachable Ollama degrades retrieval to lexical search only",
+		Importance:  0.5,
+		Source:      "reflection",
+		ReplacesIDs: []string{old},
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	all, err := s.GetAll(ctx, testProject, 10)
+	if err != nil || len(all) != 1 {
+		t.Fatalf("replace left %d rows, want 1: %v %v", len(all), all, err)
+	}
+	successor := all[0].ID
+	if successor == old {
+		t.Fatal("the rewrite reused the old row, so there is no successor to record and the test proves nothing")
+	}
+
+	entries, err := s.MemoryHistory(ctx, old, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory(old): %v", err)
+	}
+	tombstone := entries[len(entries)-1]
+	if tombstone.Phase != phaseDelete {
+		t.Fatalf("last row for the replaced id is a %q, want a delete", tombstone.Phase)
+	}
+	if tombstone.RelatedID != successor {
+		t.Errorf("the delete row names successor %q, want the row that now holds the content (%q)", tombstone.RelatedID, successor)
+	}
+	// And the successor's own history says what it is, so following the pointer
+	// lands somewhere real.
+	succHistory, err := s.MemoryHistory(ctx, successor, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory(successor): %v", err)
+	}
+	if len(succHistory) == 0 || succHistory[0].Content != "an unreachable Ollama degrades retrieval to lexical search only" {
+		t.Errorf("following the successor landed on %v", phasesOf(t, succHistory))
+	}
+}
+
+// TestReplaceNonManualLeavesAnUnrelatedDeleteWithoutASuccessor: only rows the
+// caller declared were replaced get a pointer. A row this pass deleted for any
+// other reason — a drop, a concurrent save it outran — has no successor, and
+// naming one would be a fabricated claim about where its knowledge went.
+func TestReplaceNonManualLeavesAnUnrelatedDeleteWithoutASuccessor(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	kept, _, _, err := s.Upsert(ctx, testProject, "fact", "a memory nobody mentions this pass", "reflection", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	// A verbatim keep survives, so something else has to be dropped: the emitted
+	// memory is a different fact entirely.
+	if _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+		Category:   "fact",
+		Content:    "an entirely different consolidated fact about the pipeline",
+		Importance: 0.5,
+		Source:     "reflection",
+	}}, ""); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	entries, err := s.MemoryHistory(ctx, kept, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	last := entries[len(entries)-1]
+	if last.Phase != phaseDelete {
+		t.Fatalf("last row is a %q, want a delete", last.Phase)
+	}
+	if last.RelatedID != "" {
+		t.Errorf("a dropped row names successor %q; nothing replaced it", last.RelatedID)
+	}
+}
+
+// TestUnsupersedeIsItsOwnEvent: withdrawing a claim is a change in the target's
+// standing exactly as asserting one was. A history that shows a supersede and no
+// withdrawal reads as though the stale claim is still live, and the superseding
+// id is the half of the sentence an audit is asking for.
+func TestUnsupersedeIsItsOwnEvent(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	newer, _, _, err := s.Upsert(ctx, testProject, "fact", "the retry budget is three attempts with jitter", "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert newer: %v", err)
+	}
+	older, _, _, err := s.Upsert(ctx, testProject, "fact", "the deploy pipeline runs on a weekly schedule", "mcp", 0.7, nil)
+	if err != nil {
+		t.Fatalf("Upsert older: %v", err)
+	}
+
+	if err := s.CreateLink(ctx, newer, older, "supersedes", 0.9, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+	entries, err := s.MemoryHistory(ctx, older, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if entries[len(entries)-1].RelatedID != newer {
+		t.Errorf("the supersede row names %q, want the superseding memory %q", entries[len(entries)-1].RelatedID, newer)
+	}
+
+	if _, err := s.InvalidateLink(ctx, newer, older, "supersedes"); err != nil {
+		t.Fatalf("InvalidateLink: %v", err)
+	}
+	entries, err = s.MemoryHistory(ctx, older, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if got := phasesOf(t, entries); !equalStrings(got, []string{"save:", "supersede:", "unsupersede:"}) {
+		t.Fatalf("phases = %v, want [save supersede unsupersede]", got)
+	}
+	withdrawn := entries[len(entries)-1]
+	if withdrawn.RelatedID != newer {
+		t.Errorf("the unsupersede row names %q, want the memory whose claim was withdrawn (%q)", withdrawn.RelatedID, newer)
+	}
+
+	// A second invalidation changes nothing — the edge was already dead — so it
+	// must not append a row that repeats the last one.
+	if _, err := s.InvalidateLink(ctx, newer, older, "supersedes"); err != nil {
+		t.Fatalf("InvalidateLink (repeat): %v", err)
+	}
+	entries, err = s.MemoryHistory(ctx, older, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Errorf("a repeat invalidation appended a row: phases = %v", phasesOf(t, entries))
+	}
+}
+
+// TestFoldOnlyMergeKeepsTheFoldedText: the one fold that throws the incoming
+// wording away. The ordinary fold stores it as a linked copy with its own save
+// row; FoldOnly returns the target and stores nothing, so without this the only
+// record of a promotion's discarded paraphrase was the database itself, before
+// this table existed.
+func TestFoldOnlyMergeKeepsTheFoldedText(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	// FoldOnly folds only what foldOnlyEquivalent calls the same memory — equal
+	// after normalization — because it drops one of the two texts, so the pair
+	// here differs in case and in a trailing full stop, and the dropped wording
+	// is the only record Ghost will have of what the caller actually sent.
+	target, _, _, err := s.UpsertWithProvenance(ctx, testProject, "fact",
+		"The production deploy target is Fly.io in region iad.", "mcp", 0.7, nil,
+		Provenance{Agent: "claude-code", SessionID: "ses_a"})
+	if err != nil {
+		t.Fatalf("UpsertWithProvenance: %v", err)
+	}
+	const folded = "the production deploy target is fly.io in region iad"
+	if _, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", folded, "mcp", 0.7, nil, UpsertOptions{
+		Provenance: Provenance{Agent: "opencode", SessionID: "ses_b"},
+		FoldOnly:   true,
+	}); err != nil {
+		t.Fatalf("UpsertWithOptions (FoldOnly): %v", err)
+	}
+
+	entries, err := s.MemoryHistory(ctx, target, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	last := entries[len(entries)-1]
+	if last.Phase != phaseMerge {
+		t.Fatalf("last row is a %q, want the merge", last.Phase)
+	}
+	if last.MergedContent != folded {
+		t.Errorf("the merge row kept %q, want the folded-in text %q", last.MergedContent, folded)
+	}
+	// And it is the merge row only: the default fold keeps the wording as a row
+	// of its own, so a second copy there would be duplication.
+	if entries[0].MergedContent != "" {
+		t.Errorf("the save row carries folded text %q; the default fold has no folded text to record", entries[0].MergedContent)
+	}
+}
+
+// TestAFailedWriteLeavesNoHistoryRow: the claim every other test here rests on —
+// the history and the state it describes commit or roll back together. A trigger
+// is the injection point: it aborts a statement mid-transaction without any
+// production hook, and the assertion is that NOTHING of the write survives, the
+// memory row included.
+func TestAFailedWriteLeavesNoHistoryRow(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, _, _, err := s.Upsert(ctx, testProject, "fact", "a fact recorded before the failure", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	before, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+
+	// The history append fails, so the edit that was about to be recorded must
+	// not be half-applied either.
+	if _, err := s.db.Exec(`
+		CREATE TRIGGER fail_history BEFORE INSERT ON memory_provenance
+		BEGIN SELECT RAISE(ABORT, 'injected history failure'); END`); err != nil {
+		t.Fatalf("install trigger: %v", err)
+	}
+	newText := "a fact that must not survive its own history failure"
+	if err := s.UpdateMemory(ctx, testProject, id, strPtr(newText), nil, nil, nil); err == nil {
+		t.Fatal("UpdateMemory succeeded; the injected failure did not fire, so this test proves nothing")
+	}
+
+	live, err := s.GetByIDs(ctx, []string{id})
+	if err != nil || len(live) != 1 {
+		t.Fatalf("the memory row is unreadable after the failure: %v %v", live, err)
+	}
+	if live[0].Content == newText {
+		t.Error("the edit was applied even though its history row failed — the two did not roll back together")
+	}
+	after, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("history has %d rows after the failure, want the %d it had — a failed write left a row", len(after), len(before))
+	}
+}
+
+// TestAFailedDeleteLeavesNoTombstone: the same claim for the delete path, whose
+// tombstone is written BEFORE the DELETE and must roll back with it. A tombstone
+// for a memory that still exists is worse than a missing one: it tells a reader
+// the memory is gone.
+func TestAFailedDeleteLeavesNoTombstone(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, _, _, err := s.Upsert(ctx, testProject, "fact", "a fact whose delete will fail", "mcp", 0.5, nil)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	before, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		CREATE TRIGGER fail_delete BEFORE DELETE ON memories
+		BEGIN SELECT RAISE(ABORT, 'injected delete failure'); END`); err != nil {
+		t.Fatalf("install trigger: %v", err)
+	}
+	if err := s.Delete(ctx, id); err == nil {
+		t.Fatal("Delete succeeded; the injected failure did not fire, so this test proves nothing")
+	}
+
+	live, err := s.GetByIDs(ctx, []string{id})
+	if err != nil || len(live) != 1 {
+		t.Fatalf("the memory is gone after a failed delete: %v %v", live, err)
+	}
+	after, err := s.MemoryHistory(ctx, id, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("history has %d rows after the failed delete, want %d — a tombstone was committed for a memory that still exists", len(after), len(before))
 	}
 }

@@ -859,7 +859,8 @@ func runReflect() {
 	// returns early and the recovery list was empty. applyReflection folds
 	// those candidates back into the project itself when promotion is off.
 	preserved, promoted, keptMems, err := applyReflection(
-		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals)
+		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals,
+		replacedIDsByText(&result))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 		os.Exit(1)

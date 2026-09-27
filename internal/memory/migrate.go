@@ -1012,8 +1012,19 @@ FROM memory_snapshots`,
 // migrateV17 adds memory_provenance, the append-only per-memory history
 // (schema v17, issue #578). The DDL is CREATE ... IF NOT EXISTS throughout, so
 // a database an operator has already created the table in is stamped without
-// harm — the step has no data to correct, and no backfill is attempted: a
-// history row Ghost never observed would be a claim about the past nobody made.
+// harm — the step has no data to correct, and no backfill is attempted.
+//
+// No backfill is a deliberate omission with a cost, not an oversight. Every
+// pre-v17 memory reaches this version with NO history row, so the first write
+// that touches one records a baseline of the state it read (see
+// recordBaselineHistoryTx) rather than only the state it produced: an edit is the
+// one write that destroys the text, and without the baseline a v16 memory's
+// first edit leaves the old wording unrecoverable. A backfill here would be the
+// other way to close that gap — one INSERT ... SELECT over memories — and was not
+// done because it writes a claim ("this is what it said when v17 arrived") about
+// rows whose real age and authorship nobody recorded, and because it would run on
+// every store with a large corpus during the open that also takes the
+// pre-migration backup.
 func migrateV17(tx *sql.Tx) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS memory_provenance (
@@ -1024,10 +1035,13 @@ func migrateV17(tx *sql.Tx) error {
     phase       TEXT NOT NULL
                 CHECK (phase IN (
                     'save', 'update', 'reflect', 'merge', 'resolve',
-                    'unresolve', 'supersede', 'restore', 'import', 'delete'
+                    'unresolve', 'supersede', 'unsupersede', 'restore',
+                    'import', 'delete', 'baseline'
                 )),
     agent       TEXT,
     session_id  TEXT,
+    related_id  TEXT,
+    merged_content TEXT,
     content     TEXT,
     category    TEXT,
     importance  REAL,

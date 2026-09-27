@@ -37,6 +37,7 @@ ghost export                      Write the store as a portable JSONL artifact
 ghost import <file> [--apply]     Load a JSONL artifact (dry-run by default)
 ghost context                     Render passive session context
 ghost history <memory-id>         Print one memory's append-only history
+ghost history purge <memory-id>   Erase a memory and every recorded version of it
 ghost bench [--sweep]             Run the built-in benchmark
 ghost upgrade                     Update a standalone binary
 ghost version                     Print the version
@@ -325,7 +326,7 @@ The main schema tables are:
 | `decisions` | Decisions, rationale, alternatives, and status |
 | `ghost_state` | Per-project learned context and interaction state |
 | `memory_snapshots` | Reflection rollback snapshots, including `scope` and its `scope_captured` marker (schema v14) so a restore can put scope back — and leave a live scope alone when the snapshot predates scope |
-| `memory_provenance` | Append-only per-memory history (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)): one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed |
+| `memory_provenance` | Append-only per-memory history (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)): one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed, plus the other memory the event is about (`related_id`) and the text a merge folded in (`merged_content`) |
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
 
@@ -357,7 +358,9 @@ the **same transaction** as the write, so history cannot diverge from state:
 | `update` | `UpdateMemory` | the edited row (a content change may also clear `resolved_at`) |
 | `reflect` | `ReplaceNonManual` — reuse, rewrite and fresh insert alike, including a verbatim re-emission that leaves every recorded column identical (see below) | the row as the consolidation left it |
 | `resolve` / `unresolve` | `SetResolved` / `ClearResolved` | the row with the new `resolved_at`, or without it |
-| `supersede` | `CreateLink` with a `supersedes` edge, when the edge becomes active | the **target**'s state — the row the edge declares stale |
+| `supersede` | `CreateLink` with a `supersedes` edge, when the edge becomes active | the **target**'s state, `related_id` naming the superseding memory |
+| `unsupersede` | `InvalidateLink` on a `supersedes` edge, when a live edge is withdrawn | the target's state again — a withdrawal is a change, and a history that shows a claim and no withdrawal reads as though it is still live |
+| `baseline` | the first write to a memory that predates the table, before that write | what the memory said when this build had never seen it |
 | `restore` | `RestoreSnapshot` | the row as the snapshot put it back |
 | `import` | `ImportMemory` | the imported row, attributed to the artifact's agent |
 | `delete` | `Delete`, the replace's bulk delete, the restore's cleanup | the state the row held immediately before it went |
@@ -375,6 +378,14 @@ Three properties are deliberate:
   lifecycle passes (`reflect`, `resolve`, `supersede`) and `Delete` know no
   session and leave both empty. An empty field is an admission, not a claim that
   nobody acted.
+- **A `delete` row names its successor.** A consolidation rewrite or merge gives
+  the row a new id, so without a pointer the old id's history simply stops, and a
+  reader following one memory — what [#648](https://github.com/wcatz/ghost/issues/648)
+  will do with a usefulness verdict — never learns the memory it holds a verdict
+  about is now a different row. `ReplaceNonManual` stamps it from
+  `Memory.ReplacesIDs`, which the reflection operations (#659) fill in; a row
+  deleted for any other reason is left without one rather than given a fabricated
+  successor.
 - **`memory_id` has no foreign key.** A hard `DELETE` takes the row with it, so
   a cascading history table would be empty exactly when the audit is asked — the
   `delete` row is the tombstone, and it carries the text the memory held.
@@ -416,14 +427,43 @@ project a memory was promoted out of takes the recorded past of a memory that is
 still live in `_global`, and `ghost history <id>` reports that it was never
 written.
 
+**Redaction.** The history is the one place Ghost keeps text it no longer holds
+anywhere else, which makes it a liability as well as an asset: a memory row is
+overwritten by the next edit and gone by the next delete, while its earlier
+versions sit here. So a secret that was "removed" by deleting its memory is not
+removed — it is in a table with a longer life than the row, and `ghost history`
+prints it. Three things follow:
+
+- **A purge path.** `ghost history purge <id>` and `ghost_memory_delete`'s
+  `purge_history` argument delete the row and every history row for it in one
+  transaction, so a memory and its history cannot come apart and a purge leaves
+  nothing. A plain delete deliberately keeps the history: that is what makes the
+  table worth having.
+- **A redaction seam on the way in.** `ghost_history_content` is a SQLite
+  function called by the append statement itself, so content is rewritten inside
+  the one statement that copies the state out of `memories` rather than in a
+  second pass that would leave an unredacted copy on disk. It is wired to
+  `internal/secret`'s `Detect` when [#656](https://github.com/wcatz/ghost/pull/656)
+  lands; until then it is the identity, and the plumbing is tested.
+- **The pre-v17 gap is not a purge's job.** `migrateV17` records no starting row,
+  so a memory that predates the table has no history until something writes one.
+  The first write that would destroy its text files a `baseline` row first
+  (`recordBaselineHistoryTx`), and a backfill is the documented alternative that
+  was not taken: it would assert what every existing row said at the moment of
+  the upgrade, which nobody recorded, on a store with a large corpus.
+
 **Growth policy.** The table is append-only, not unbounded, and both bounds are
 applied in the appending transaction — so neither needs a background job or a
 clock, and neither can be lost to a crash between the write and its cleanup:
 
 1. **Per memory**, only the newest 50 versions survive
-   (`historyVersionsPerMemory`). The oldest go: the recent past is what an audit
-   and an `as_of` read ([#647](https://github.com/wcatz/ghost/issues/647)) are
-   for.
+   (`historyVersionsPerMemory`), ranked by `rowid` rather than `recorded_at` —
+   which is second-precision, so every write one reflection makes in a pass shares
+   a timestamp and the order among them would be a tie-break. Ranking by `rowid`
+   also means the newest row can never be taken, so a memory always has one
+   statement of what it says now, and a memory under the cap keeps everything —
+   which is why a rarely-changed memory never loses its `baseline`. One
+   `ROW_NUMBER()` delete covers the whole batch, not one statement per id.
 2. **Across the store**, only the newest 20 000 rows survive (`historyRowsCap`).
    The per-memory bound cannot do this job — every created-then-dropped memory is
    a distinct `memory_id` with a couple of rows of its own, and one applied

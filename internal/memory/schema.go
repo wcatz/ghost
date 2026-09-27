@@ -322,15 +322,17 @@ CREATE TABLE IF NOT EXISTS memory_provenance (
     -- Which write path touched the row: save (a new row), update (an edit),
     -- reflect (a consolidation rewrite, reuse or insert), merge (a near-
     -- duplicate fold strengthening an existing row), resolve / unresolve
-    -- (resolved_at stamped or cleared), supersede (an active supersedes edge
-    -- now points at this memory), restore (a snapshot restore), import (a
-    -- portable artifact), delete (the row is being removed). A CHECK rather
-    -- than a convention: a phase no reader knows is a phase that can never be
-    -- filtered, and a typo must not create a new one silently.
+    -- (resolved_at stamped or cleared), supersede / unsupersede (an active
+    -- supersedes edge now points at this memory, or stopped), restore (a
+    -- snapshot restore), import (a portable artifact), delete (the row is being
+    -- removed). A CHECK rather than a convention: a phase no reader knows is a
+    -- phase that can never be filtered, and a typo must not create a new one
+    -- silently.
     phase       TEXT NOT NULL
                 CHECK (phase IN (
                     'save', 'update', 'reflect', 'merge', 'resolve',
-                    'unresolve', 'supersede', 'restore', 'import', 'delete'
+                    'unresolve', 'supersede', 'unsupersede', 'restore',
+                    'import', 'delete', 'baseline'
                 )),
     -- Who PERFORMED the write, when the write path knows: the save/merge/import
     -- paths carry a Provenance, the lifecycle passes (reflect, resolve,
@@ -338,6 +340,20 @@ CREATE TABLE IF NOT EXISTS memory_provenance (
     -- not a claim that nobody acted.
     agent       TEXT,
     session_id  TEXT,
+    -- The other memory this event is about, when there is one. A delete row
+    -- carries the id that replaced this row, which is the only way to follow one
+    -- memory's history into its successor's after a consolidation's rewrite or
+    -- merge gave the row a new id (#648). A supersede or unsupersede row carries
+    -- the memory whose edge makes the claim — the one that replaced THIS row.
+    -- NULL for a write that concerns one memory alone.
+    related_id  TEXT,
+    -- The incoming near-duplicate text a merge folded in, recorded only when the
+    -- fold did not store it as its own row. The default fold keeps that text as
+    -- a linked copy with its own save row, so this is NULL there; the FoldOnly
+    -- path (a promotion into the global bucket) deliberately drops the wording,
+    -- and without this column the only record of it was the database itself,
+    -- before this table existed.
+    merged_content TEXT,
     -- The state this memory held once the write landed. nullable because a
     -- delete row is written from the last live state and an older build could
     -- leave gaps, not because a memory has no state.
