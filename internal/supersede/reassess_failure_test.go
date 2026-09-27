@@ -70,8 +70,11 @@ func TestReassessReportsTheRepairItAlreadyMade(t *testing.T) {
 			"The restore path on one spindle is safe and takes under a minute.")
 		ids = append(ids, [2]string{newer, older})
 	}
+	// The call order is one supersedes write and one causes sweep per row, so
+	// failAt 3 is the SECOND supersedes write — the first row's pair of calls
+	// both succeed. (The causes sweep test below is the failAt 2 case.)
 	var buf strings.Builder
-	fs := &failingStore{Store: store, failAt: 2}
+	fs := &failingStore{Store: store, failAt: 3}
 	cls := NewRelationClassifier(&fakeProvider{resp: "NEITHER"})
 	res, withdrawn, err := Reassess(ctx, fs, cls, "p", true, slog.New(slog.NewTextHandler(&buf, nil)))
 	if err == nil {
@@ -107,36 +110,111 @@ func TestReassessReportsTheRepairItAlreadyMade(t *testing.T) {
 	}
 }
 
+// TestReassessKeepsTheRowWhoseCausesSweepFailed: the other half of the failure
+// contract. The supersedes withdrawal for this edge landed, and the 'causes'
+// sweep that follows it failed — so the row must still be reported, or the count
+// and the list disagree and the edge is gone from the graph and from the report
+// at the same time.
+func TestReassessKeepsTheRowWhoseCausesSweepFailed(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+	newer, older := seedEdge(t, store, db,
+		"A restore that spanned two spindles took 41 minutes and the row count matched afterwards.",
+		"NEVER run the restore with source and target on the same spindle.")
+	if err := store.CreateLink(ctx, older, newer, string(RelationCauses), 0.9, "llm"); err != nil {
+		t.Fatal(err)
+	}
+	fs := &failingStore{Store: store, failAt: 2} // the first call withdraws, the second is the sweep
+	cls := NewRelationClassifier(&fakeProvider{resp: "SUPERSEDES | replaced: the restore is unsafe on one spindle"})
+	res, withdrawn, err := Reassess(ctx, fs, cls, "p", true, discardLogger())
+	if err == nil || !strings.Contains(err.Error(), "causes link") {
+		t.Fatalf("err = %v, want the sweep's own failure named", err)
+	}
+	if res.Withdrawn != 1 {
+		t.Errorf("Withdrawn = %d, want 1: the supersedes withdrawal landed before the sweep ran", res.Withdrawn)
+	}
+	if len(withdrawn) != 1 || !withdrawn[0].Written {
+		t.Errorf("withdrawn = %+v, want the edge that landed, still listed and marked written", withdrawn)
+	}
+	if pairs, _ := store.SupersedesWithin(ctx, []string{newer, older}); len(pairs) != 0 {
+		t.Errorf("the supersedes edge is still live: %d pair(s)", len(pairs))
+	}
+}
+
 // TestReassessSweepsTheOtherRelationOnASelfContradictingVerdict: Run's contract
 // for NEITHER, the veto and REVERSED is a both-relations sweep — a 'causes' link
 // pointing INTO a note the pass has just decided is still current asserts the
 // opposite of that decision. The repair pass applies the same verdicts, so it
 // sweeps the same way. (A CAUSES verdict is left alone: there the existing
 // 'causes' edge may be saying something true, and a repair pass is not where
-// that is re-decided.)
+// that is re-decided — see the CAUSES test below.)
+//
+// Each subcase states which half decided it and asserts the counter that proves
+// it: the NEITHER and REVERSED pairs carry a plain older note, so the classifier
+// really is asked and its verdict is really parsed. An imperative older note
+// would let the veto settle all three, and the scripted reply would never be
+// read — which is exactly how this test passed for the wrong reason once.
 func TestReassessSweepsTheOtherRelationOnASelfContradictingVerdict(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		reply string
+		name string
+		// older is the older note's text. Only the veto case states a rule.
+		older  string
+		reply  string
+		byVeto bool
 	}{
-		{name: "neither", reply: "NEITHER"},
-		{name: "reversed", reply: "REVERSED"},
-		{name: "vetoed", reply: "SUPERSEDES | replaced: the restore is unsafe on one spindle"},
+		{
+			name:  "neither",
+			older: "The restore path on one spindle is safe and takes under a minute.",
+			reply: "NEITHER",
+		},
+		{
+			name:  "reversed",
+			older: "The restore path on one spindle is safe and takes under a minute.",
+			reply: "REVERSED",
+		},
+		{
+			name:   "vetoed",
+			older:  "NEVER run the restore with source and target on the same spindle.",
+			reply:  "SUPERSEDES | replaced: the restore is unsafe on one spindle",
+			byVeto: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, db := seed(t)
 			ctx := context.Background()
 			newer, older := seedEdge(t, store, db,
 				"A restore that spanned two spindles took 41 minutes and the row count matched afterwards.",
-				"NEVER run the restore with source and target on the same spindle.")
+				tc.older)
 			// The contradicting edge a pre-#686 rubric (or a hand edit) could
 			// have left behind.
 			if err := store.CreateLink(ctx, older, newer, string(RelationCauses), 0.9, "llm"); err != nil {
 				t.Fatal(err)
 			}
 			cls := NewRelationClassifier(&fakeProvider{resp: tc.reply})
-			if _, _, err := Reassess(ctx, store, cls, "p", true, discardLogger()); err != nil {
+			res, withdrawn, err := Reassess(ctx, store, cls, "p", true, discardLogger())
+			if err != nil {
 				t.Fatalf("Reassess: %v", err)
+			}
+			// Which half decided it, by the counter that only that half moves.
+			switch {
+			case tc.byVeto:
+				if res.Vetoed != 1 || cls.Calls() != 0 {
+					t.Errorf("vetoed=%d calls=%d, want 1 and 0: this subcase exists to be settled by the veto", res.Vetoed, cls.Calls())
+				}
+			case tc.reply == "NEITHER":
+				if res.Neither != 1 || cls.Calls() != 1 {
+					t.Errorf("neither=%d calls=%d, want 1 and 1: the classifier verdict must be the one that settles this pair", res.Neither, cls.Calls())
+				}
+			default:
+				if res.Reversed != 1 || cls.Calls() != 1 {
+					t.Errorf("reversed=%d calls=%d, want 1 and 1", res.Reversed, cls.Calls())
+				}
+			}
+			if res.CausesWithdrawn != 1 {
+				t.Errorf("CausesWithdrawn = %d, want 1: the sweep removes a second graph row and the report has to say so", res.CausesWithdrawn)
+			}
+			if len(withdrawn) != 1 || withdrawn[0].CausesSwept != 1 {
+				t.Errorf("withdrawn = %+v, want one row that reports the causes edge it dropped", withdrawn)
 			}
 			if pairs, _ := store.SupersedesWithin(ctx, []string{newer, older}); len(pairs) != 0 {
 				t.Errorf("the supersedes edge survived: %d pair(s) remain", len(pairs))
@@ -179,6 +257,9 @@ func TestReassessLeavesACausesEdgeUnderACausesVerdict(t *testing.T) {
 	}
 	if res.Causes != 1 || res.Withdrawn != 1 {
 		t.Errorf("causes=%d withdrawn=%d, want 1 and 1", res.Causes, res.Withdrawn)
+	}
+	if res.CausesWithdrawn != 0 {
+		t.Errorf("CausesWithdrawn = %d, want 0: a CAUSES verdict affirms that relation, so its row sweeps nothing", res.CausesWithdrawn)
 	}
 	if pairs, _ := store.SupersedesWithin(ctx, []string{newer, older}); len(pairs) != 0 {
 		t.Errorf("the supersedes edge survived a CAUSES verdict: %d pair(s) remain", len(pairs))

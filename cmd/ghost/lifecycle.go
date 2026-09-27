@@ -1360,15 +1360,17 @@ withdrawn edge justified.
 // actually landed.
 func supersedeReassessReport(projectName string, res supersede.ReassessResult, apply bool, withdrawn []supersede.WithdrawnEdge, calls int) string {
 	verb := "would withdraw"
+	causesVerb := "would sweep"
 	count := len(withdrawn)
 	if apply {
 		verb = "withdrew"
+		causesVerb = "swept"
 		count = res.Withdrawn
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN, %s %d (%d classify call(s))\n",
+	fmt.Fprintf(&b, "%s: %d live supersedes edge(s), %d not judged, %d vetoed, %d still supersedes, %d neither, %d causes, %d reversed, %d UNKNOWN, %s %d, %s %d causes edge(s) (%d classify call(s))\n",
 		projectName, res.Loaded, res.Skipped, res.Vetoed, res.Confirmed, res.Neither, res.Causes, res.Reversed,
-		res.Unclassified, verb, count, calls)
+		res.Unclassified, verb, count, causesVerb, res.CausesWithdrawn, calls)
 	short := func(id string) string {
 		if len(id) > 8 {
 			return id[:8]
@@ -1388,7 +1390,14 @@ func supersedeReassessReport(projectName string, res supersede.ReassessResult, a
 		if w.Vetoed {
 			by = "veto, no harness call"
 		}
-		fmt.Fprintf(&b, "  %s  %s -> %s  [%s]  %s\n", marker, short(w.NewerID), short(w.OlderID), by, w.Reason)
+		// The sweep removes a second graph row, so a row that has one says so:
+		// an operator applying this is deciding about that deletion too, and on
+		// the veto rows it is the only deletion no model adjudicated.
+		swept := ""
+		if w.CausesSwept > 0 {
+			swept = fmt.Sprintf("  [+%d causes edge]", w.CausesSwept)
+		}
+		fmt.Fprintf(&b, "  %s  %s -> %s  [%s]%s  %s\n", marker, short(w.NewerID), short(w.OlderID), by, swept, w.Reason)
 	}
 	if !apply && len(withdrawn) > 0 {
 		b.WriteString("\nRe-run with --apply to withdraw these edges.")

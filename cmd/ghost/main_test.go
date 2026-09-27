@@ -1447,17 +1447,19 @@ func TestSupersedeReport(t *testing.T) {
 // concurrent pass got there first.
 func TestSupersedeReassessReport(t *testing.T) {
 	edges := []supersede.WithdrawnEdge{
-		{NewerID: "abcdef0123456789", OlderID: "9876543210fedcba", Reason: "vetoed: older note states a rule (never) the newer note does not retire", Vetoed: true},
+		{NewerID: "abcdef0123456789", OlderID: "9876543210fedcba", Reason: "vetoed: older note states a rule (never) the newer note does not retire", Vetoed: true, CausesSwept: 1},
 		{NewerID: "1122334455667788", OlderID: "8877665544332211", Reason: "neither: both notes are still true"},
 	}
 	dry := supersedeReassessReport("proj", supersede.ReassessResult{
 		Loaded: 5, Skipped: 1, Vetoed: 1, Confirmed: 1, Neither: 1, Unclassified: 1, Withdrawn: 0,
 	}, false, edges, 2)
 	for _, want := range []string{
-		// The per-outcome numbers add up to Loaded, and the withdrawal count is
-		// the two edges below it, not the (dry-run-zero) Withdrawn field.
-		"proj: 5 live supersedes edge(s), 1 not judged, 1 vetoed, 1 still supersedes, 1 neither, 0 causes, 0 reversed, 1 UNKNOWN, would withdraw 2 (2 classify call(s))",
-		"  would withdraw  abcdef01 -> 98765432  [veto, no harness call]  vetoed:",
+		// The per-outcome numbers add up to Loaded, the withdrawal count is the
+		// two edges below it rather than the (dry-run-zero) Withdrawn field, and
+		// the sweep is PREDICTED here — it is a second graph row the operator is
+		// about to delete, so a dry run that hid it would be deciding for them.
+		"proj: 5 live supersedes edge(s), 1 not judged, 1 vetoed, 1 still supersedes, 1 neither, 0 causes, 0 reversed, 1 UNKNOWN, would withdraw 2, would sweep 0 causes edge(s) (2 classify call(s))",
+		"  would withdraw  abcdef01 -> 98765432  [veto, no harness call]  [+1 causes edge]  vetoed:",
 		"  would withdraw  11223344 -> 88776655  [classifier]  neither: both notes are still true",
 		"Re-run with --apply to withdraw these edges.",
 	} {
@@ -1473,17 +1475,17 @@ func TestSupersedeReassessReport(t *testing.T) {
 	// actually invalidated — one here, because a concurrent pass withdrew the
 	// vetoed edge first and the report must not claim this pass wrote it.
 	applied := []supersede.WithdrawnEdge{
-		{NewerID: edges[1].NewerID, OlderID: edges[1].OlderID, Reason: edges[1].Reason, Written: true},
+		{NewerID: edges[1].NewerID, OlderID: edges[1].OlderID, Reason: edges[1].Reason, Written: true, CausesSwept: 1},
 		{NewerID: edges[0].NewerID, OlderID: edges[0].OlderID, Reason: edges[0].Reason, Vetoed: true},
 	}
 	apply := supersedeReassessReport("proj", supersede.ReassessResult{
-		Loaded: 2, Vetoed: 1, Neither: 1, Withdrawn: 1,
+		Loaded: 2, Vetoed: 1, Neither: 1, Withdrawn: 1, CausesWithdrawn: 1,
 	}, true, applied, 1)
-	if !strings.Contains(apply, "withdrew 1 (1 classify call(s))") {
-		t.Errorf("apply report does not count the withdrawal that landed:\n%s", apply)
+	if !strings.Contains(apply, "withdrew 1, swept 1 causes edge(s) (1 classify call(s))") {
+		t.Errorf("apply report does not count the withdrawal that landed and the edge swept with it:\n%s", apply)
 	}
-	if !strings.Contains(apply, "  withdrew     11223344 -> 88776655  [classifier]") {
-		t.Errorf("apply report does not mark the edge it wrote:\n%s", apply)
+	if !strings.Contains(apply, "  withdrew     11223344 -> 88776655  [classifier]  [+1 causes edge]") {
+		t.Errorf("apply report does not mark the edge it wrote, or the causes edge it swept with it:\n%s", apply)
 	}
 	if !strings.Contains(apply, "  would withdraw  abcdef01 -> 98765432  [veto, no harness call]") {
 		t.Errorf("apply report does not mark the edge a concurrent pass withdrew first:\n%s", apply)

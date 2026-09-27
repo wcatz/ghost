@@ -305,10 +305,12 @@ func TestVetoSupersedeLetsEveryRetirementMarkerThrough(t *testing.T) {
 		{"retires", "The policy retires the Friday ban in the next release."},
 		{"retired", "The Friday ban was retired; deploys run on Tuesdays."},
 		{"retiring", "The team is retiring the Friday merge rule."},
+		{"retirement noun", "Retirement of the Friday merge rule starts next sprint."},
 		{"remove", "We remove the Friday restriction from the branch policy."},
 		{"removes", "The policy removes the Friday restriction."},
 		{"removed", "The Friday restriction was removed in the policy rewrite."},
 		{"removing", "The next release is removing the Friday restriction."},
+		{"removal noun", "The removal of the Friday merge restriction is complete."},
 		{"deprecated", "The Friday merge rule is deprecated; use the canary gate."},
 		{"obsolete", "The Friday merge rule is obsolete after the canary gate landed."},
 		{"replace", "The canary gate replaces the Friday merge rule."},
@@ -328,8 +330,8 @@ func TestVetoSupersedeLetsEveryRetirementMarkerThrough(t *testing.T) {
 	// word whose regex rotted unnoticed, which shows up as a lost supersession
 	// rather than as a failure.
 	words := []string{
-		"no longer", "retire", "retires", "retired", "retiring",
-		"remove", "removes", "removed", "removing",
+		"no longer", "retire", "retires", "retired", "retiring", "retirement",
+		"remove", "removes", "removed", "removing", "removal",
 		"deprecated", "obsolete", "replace", "replaced", "superseded", "dropped",
 		"relaxed", "loosened", "lifted", "waived", "must now", "not required",
 		"exception to",

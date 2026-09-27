@@ -79,7 +79,13 @@ type ReassessResult struct {
 	Causes       int // came back CAUSES: the older note is still true, so the edge goes
 	Reversed     int // came back REVERSED: the edge runs against the pair, so it goes
 	Unclassified int // unparseable verdict; the edge is left alone and re-offered
-	Withdrawn    int // edges actually invalidated (0 in dry-run)
+	Withdrawn    int // supersedes edges actually invalidated (0 in dry-run)
+	// CausesWithdrawn counts the 'causes' edges the other-relation sweep moved
+	// (0 in a dry run, where WithdrawnEdge.CausesSwept predicts them per row).
+	// A concurrent pass can take one first, so under --apply it can read lower
+	// than the dry run's prediction — the same relationship Withdrawn has to the
+	// list of rows.
+	CausesWithdrawn int
 }
 
 // WithdrawnEdge is one edge the pass withdrew, or would withdraw under --apply.
@@ -97,9 +103,31 @@ type WithdrawnEdge struct {
 	// at. The two are not the same kind of finding and a reader deciding whether
 	// to apply needs to tell them apart.
 	Vetoed bool
+	// CausesSwept counts the 'causes' edges this row's withdrawal also dropped,
+	// because a withdrawal that removes a second graph row and does not say so
+	// is a report the operator cannot decide from. It is 0 for a CAUSES verdict,
+	// which sweeps nothing.
+	CausesSwept int
 	// Written is true only when --apply actually invalidated the edge, so a
 	// dry-run list can never be read as a change that happened.
 	Written bool
+}
+
+// liveCausesPairs returns the [olderID, newerID] pairs carrying a live
+// 'causes'/'llm' edge — the orientation 'causes' is written in (the cause
+// precedes its effect), which is the reverse of a supersedes edge. It is read
+// once per pass, and only to make the report honest about the second graph row a
+// withdrawal drops.
+func liveCausesPairs(ctx context.Context, store reassessStore, projectID string) (map[[2]string]bool, error) {
+	links, err := store.LinksByRelationSource(ctx, projectID, string(RelationCauses), "llm")
+	if err != nil {
+		return nil, fmt.Errorf("load causes links: %w", err)
+	}
+	out := make(map[[2]string]bool, len(links))
+	for _, l := range links {
+		out[[2]string{l.SourceID, l.TargetID}] = true
+	}
+	return out, nil
 }
 
 // Reassess re-judges every live 'supersedes'/'llm' edge in the project with the
@@ -162,7 +190,11 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	type judged struct {
 		cand   Candidate
 		reason string // non-empty means already withdrawn, with this reason
-		vetoed bool   // settled without a harness call; sweep the other relation too
+		vetoed bool   // settled without a harness call
+		// sweep arms the other-relation sweep: every withdrawal that DENIES a
+		// relation drops the 'causes' edge too, exactly as Run does. A CAUSES
+		// verdict affirms that relation instead, so its row sweeps nothing.
+		sweep bool
 	}
 	var open []Candidate
 	var settled []judged
@@ -195,7 +227,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 				logger.Debug("supersede reassess: the older note states a rule this edge does not retire",
 					"newer", cand.NewerID, "older", cand.OlderID, "reason", reason)
 			}
-			settled = append(settled, judged{cand: cand, reason: "vetoed: " + reason, vetoed: true})
+			settled = append(settled, judged{cand: cand, reason: "vetoed: " + reason, vetoed: true, sweep: true})
 			continue
 		}
 		open = append(open, cand)
@@ -218,10 +250,10 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 				settled = append(settled, judged{cand: c, reason: "causes: the older note is still independently true"})
 			case RelationReversed:
 				res.Reversed++
-				settled = append(settled, judged{cand: c, reason: "reversed: the older note is the current one"})
+				settled = append(settled, judged{cand: c, reason: "reversed: the older note is the current one", sweep: true})
 			case RelationNeither:
 				res.Neither++
-				settled = append(settled, judged{cand: c, reason: "neither: both notes are still true"})
+				settled = append(settled, judged{cand: c, reason: "neither: both notes are still true", sweep: true})
 			default:
 				// Relation("") and any invalid value are a missing judgment, not a
 				// denial: the edge stays, counted, and the pair is offered again.
@@ -230,10 +262,25 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		}
 	}
 
+	// The live 'causes' edges, read once, so the report can say how many the
+	// sweep will drop alongside each withdrawal — in a dry run as well, because
+	// an operator deciding whether to pass --apply is deciding about that
+	// second deletion too. Read before any write, so a dry run stays
+	// side-effect-free.
+	causesPairs, err := liveCausesPairs(ctx, store, projectID)
+	if err != nil {
+		return res, nil, err
+	}
+
 	withdrawn := make([]WithdrawnEdge, 0, len(settled))
 	var fail error
 	for _, j := range settled {
 		w := WithdrawnEdge{NewerID: j.cand.NewerID, OlderID: j.cand.OlderID, Reason: j.reason, Vetoed: j.vetoed}
+		if j.sweep {
+			if causesPairs[[2]string{j.cand.OlderID, j.cand.NewerID}] {
+				w.CausesSwept = 1
+			}
+		}
 		if apply {
 			n, err := store.InvalidateLink(ctx, w.NewerID, w.OlderID, string(RelationSupersedes))
 			if err != nil {
@@ -255,21 +302,25 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 				w.Written = true
 				res.Withdrawn++
 			}
-			if j.vetoed {
-				// The both-relations sweep Run performs on the same verdicts: a
-				// 'causes' link pointing INTO a note this pass just decided is
-				// still a standing rule asserts the opposite of that decision.
-				// InvalidateLink writes no history row for a non-supersedes
-				// relation, so this leaves the audit exactly as Run leaves it.
-				if _, err := store.InvalidateLink(ctx, w.OlderID, w.NewerID, string(RelationCauses)); err != nil {
-					if fail == nil {
-						fail = fmt.Errorf("withdraw causes link %s→%s: %w", w.OlderID, w.NewerID, err)
-					}
-					break
-				}
-			}
 		}
+		// Appended BEFORE the sweep, so a sweep that fails cannot drop the row
+		// for an edge whose own withdrawal already landed: the count and the
+		// list would then disagree, which is the invisibility this pass exists
+		// to remove.
 		withdrawn = append(withdrawn, w)
+		if apply && j.sweep {
+			// The both-relations sweep Run performs on the same verdicts: a
+			// 'causes' link pointing INTO a note this pass just decided is
+			// still a standing rule asserts the opposite of that decision.
+			// InvalidateLink writes no history row for a non-supersedes
+			// relation, so this leaves the audit exactly as Run leaves it.
+			n, err := store.InvalidateLink(ctx, w.OlderID, w.NewerID, string(RelationCauses))
+			if err != nil {
+				fail = fmt.Errorf("withdraw causes link %s→%s: %w", w.OlderID, w.NewerID, err)
+				break
+			}
+			res.CausesWithdrawn += int(n)
+		}
 	}
 
 	if logger != nil {
@@ -277,7 +328,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			"loaded", res.Loaded, "skipped", res.Skipped, "vetoed", res.Vetoed,
 			"confirmed", res.Confirmed, "neither", res.Neither, "causes", res.Causes,
 			"reversed", res.Reversed, "unknown", res.Unclassified, "withdrawn", res.Withdrawn,
-			"failed", fail != nil)
+			"causes_withdrawn", res.CausesWithdrawn, "failed", fail != nil)
 	}
 	if fail != nil {
 		return res, withdrawn, fail
