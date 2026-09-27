@@ -215,7 +215,7 @@ var gooseHomeConfigRelPaths = [][]string{
 // platform, so where a symlink is refused the directory is copied instead.
 // The copy is made private to the child and dies with the scratch dir.
 func linkGooseConfigDirs(home string, env []string, homeDir string) error {
-	return linkGooseConfigDirsWith(home, env, homeDir, os.Lstat)
+	return linkGooseConfigDirsWith(home, env, homeDir, os.Lstat, os.Stat)
 }
 
 // linkGooseConfigDirsWith takes the probe as a parameter so a test can state a
@@ -236,6 +236,11 @@ func linkGooseConfigDirs(home string, env []string, homeDir string) error {
 // A probe failure that is not "not there" is returned rather than treated as
 // absence, so an untraversable home or a TCC-denied ~/Library is reported
 // instead of silently dropping the configuration.
+//
+// The probe is expected to RESOLVE symlinks (os.Stat), because the walk's only
+// question is "is there a directory here", and a symlink to one is that. A
+// symlink is not the fault this walk exists to find, and treating it as one
+// would refuse a home that is entirely symlinked.
 func firstExistingAncestor(path, stop string, probe func(string) (os.FileInfo, error)) (string, os.FileInfo, error) {
 	// filepath.Dir cleans, so the walk's values are always clean; stop comes
 	// from the environment and may not be (HOME=/home/user/ is a real thing
@@ -262,7 +267,13 @@ func firstExistingAncestor(path, stop string, probe func(string) (os.FileInfo, e
 		current = parent
 	}
 }
-func linkGooseConfigDirsWith(home string, env []string, homeDir string, probe func(string) (os.FileInfo, error)) error {
+
+// linkGooseConfigDirsWith takes two probes because the leaf and the walk need
+// different ones, and that difference is the point rather than an accident. The
+// leaf is probed WITHOUT following symlinks, so a symlinked config directory is
+// carried as itself instead of being followed somewhere else. The walk resolves
+// them, so a symlinked home or ~/.config is seen as the directory it is.
+func linkGooseConfigDirsWith(home string, env []string, homeDir string, leafProbe, walkProbe func(string) (os.FileInfo, error)) error {
 	if harnessEnvValue(env, "XDG_CONFIG_HOME") != "" {
 		// An absolute path the child reads directly; HOME plays no part.
 		return nil
@@ -275,7 +286,7 @@ func linkGooseConfigDirsWith(home string, env []string, homeDir string, probe fu
 		// file where a directory belongs — means the config is there and
 		// unreadable, and skipping it would hand the child an empty profile
 		// with nothing saying Ghost dropped it.
-		if _, err := probe(source); err != nil {
+		if _, err := leafProbe(source); err != nil {
 			// Whether this is "not this platform's location" or a real fault
 			// cannot be read from the source's own errno, because on Windows
 			// "a file where a directory belongs" is ERROR_PATH_NOT_FOUND and
@@ -292,7 +303,14 @@ func linkGooseConfigDirsWith(home string, env []string, homeDir string, probe fu
 			// the call, because their configuration comes from the environment.
 			// A file instead of a directory is the fault, and no errno at any
 			// depth can report it differently from an absent path.
-			ancestor, info, ancestorErr := firstExistingAncestor(source, homeDir, probe)
+			//
+			// The walk resolves symlinks, so a symlinked $HOME or a ~/.config
+			// pointing into a dotfiles repo is seen as the directory it is.
+			// Treating a symlink as the fault instead would fail every goose
+			// call on those machines — and name a perfectly good directory as
+			// broken. The leaf probe above stays Lstat, so a symlinked config
+			// DIRECTORY is still carried rather than followed.
+			ancestor, info, ancestorErr := firstExistingAncestor(source, homeDir, walkProbe)
 			switch {
 			case ancestorErr != nil:
 				// Report the walk's failure, not the leaf's: the leaf said

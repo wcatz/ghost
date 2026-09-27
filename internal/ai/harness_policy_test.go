@@ -325,7 +325,7 @@ func TestFirstExistingAncestor(t *testing.T) {
 	}
 
 	t.Run("starts at the path itself", func(t *testing.T) {
-		got, info, err := firstExistingAncestor(deep, home, os.Lstat)
+		got, info, err := firstExistingAncestor(deep, home, os.Stat)
 		if err != nil {
 			t.Fatalf("firstExistingAncestor: %v", err)
 		}
@@ -370,6 +370,35 @@ func TestFirstExistingAncestor(t *testing.T) {
 	})
 }
 
+// A symlinked ancestor is a directory, not the fault this walk looks for. A
+// home that is entirely a symlink, or a ~/.config pointing into a dotfiles
+// repo, is ordinary — and treating the symlink as a non-directory would refuse
+// a perfectly good location and fail every goose call on those machines, for a
+// user who has simply never run `goose configure`.
+func TestGooseConfigRootToleratesASymlinkedAncestor(t *testing.T) {
+	real := t.TempDir()
+	realConfig := filepath.Join(real, "config")
+	if err := os.MkdirAll(realConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	home := t.TempDir()
+	link := filepath.Join(home, ".config")
+	if err := os.Symlink(realConfig, link); err != nil {
+		t.Skipf("this host cannot create a symlink: %v", err)
+	}
+	// No <link>/goose: the leaf is genuinely absent, which is the state that
+	// sent the walk climbing in the first place.
+	//
+	// Called through the production wrapper, not with probes spelled out here,
+	// so the wiring is what is under test: the two probes differ on purpose
+	// (Lstat for the leaf, Stat for the walk) and a test that passes them
+	// explicitly would keep passing if the wrapper regressed.
+	if err := linkGooseConfigDirs(t.TempDir(), []string{"HOME=" + home}, home); err != nil {
+		t.Fatalf("a symlinked ~/.config was refused: %v", err)
+	}
+}
+
 // TestGooseIsolationNamesTheDirectoryItCouldNotProbe: the failure this branch
 // reports is the only thing pointing at the cause, so it has to name the
 // directory the walk actually failed on. Reporting the leaf's error instead
@@ -390,7 +419,7 @@ func TestGooseIsolationNamesTheDirectoryItCouldNotProbe(t *testing.T) {
 		return os.Lstat(name)
 	}
 
-	err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + home}, home, probe)
+	err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + home}, home, probe, probe)
 	if err == nil {
 		t.Fatal("an unreadable directory above the config root was skipped")
 	}
@@ -674,7 +703,7 @@ func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
 			}
 			return os.Lstat(name)
 		}
-		if err := linkGooseConfigDirsWith(isolated, []string{"HOME=" + home}, home, probe); err != nil {
+		if err := linkGooseConfigDirsWith(isolated, []string{"HOME=" + home}, home, probe, probe); err != nil {
 			t.Fatalf("a missing root must be skipped, not refused: %v", err)
 		}
 		if _, err := os.Stat(filepath.Join(isolated, ".config", "goose", "config.yaml")); err != nil {
@@ -693,7 +722,7 @@ func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
 			}
 			return os.Lstat(name)
 		}
-		if err := linkGooseConfigDirsWith(isolated, []string{"HOME=" + home}, home, probe); err == nil {
+		if err := linkGooseConfigDirsWith(isolated, []string{"HOME=" + home}, home, probe, probe); err == nil {
 			t.Fatal("a root that exists but is unusable was skipped as if absent")
 		}
 	})
@@ -708,7 +737,7 @@ func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(shapedHome, ".config"), []byte("not a directory\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, os.Lstat); err == nil {
+		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, os.Lstat, os.Stat); err == nil {
 			t.Fatal("a config root behind a non-directory parent was skipped as if absent")
 		}
 	})
@@ -722,7 +751,7 @@ func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(shapedHome, ".config"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, os.Lstat); err != nil {
+		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, os.Lstat, os.Stat); err != nil {
 			t.Fatalf("a location the user has not populated must be skipped, not refused: %v", err)
 		}
 	})
@@ -747,7 +776,7 @@ func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
 			}
 			return os.Lstat(name)
 		}
-		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, probe); err == nil {
+		if err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + shapedHome}, shapedHome, probe, probe); err == nil {
 			t.Fatal("a file above the parent was walked past as if the location were simply unused")
 		}
 	})
