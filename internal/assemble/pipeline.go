@@ -19,6 +19,12 @@ type pipeline struct {
 
 	// rows is the surviving candidate set, in rank order.
 	rows []memory.Candidate
+	// blockNotes are statements about the assembled block — its conflicts, its
+	// dedup and diversity state. They are held apart from noteBuf because stage 5
+	// runs before stage 8, and a block that stage 8 then empties must not be
+	// described as if it existed: the notes are folded in only when something
+	// was actually admitted, which is the last thing the pipeline knows.
+	blockNotes []string
 	// items mirrors rows, materialised once so rendering and the trace read
 	// the same values.
 	items []Item
@@ -186,19 +192,34 @@ func runConflicts(p *pipeline) {
 	in := len(p.rows)
 	var dropped []string
 	var notes []string
-	switch p.set.EdgesStatus.Status {
-	case "err":
-		notes = append(notes, formatNote("edges_unavailable: the link lookup failed (%s), so conflict handling had no edges to read", p.set.EdgesStatus.Err))
-	case "unavailable":
-		notes = append(notes, "edges_unavailable: no link joins two of these candidates")
-	}
-	// A contradiction pair is recorded, never removed.
-	for _, e := range p.set.Edges {
-		if e.Relation == "contradicts" {
-			notes = append(notes, formatNote("contradicts pair recorded, not separated: %s and %s both remain in the block", shortID(e.From), shortID(e.To)))
+	// Everything below is a statement about the block, so nothing is said when
+	// there is no block: "no link joins two of these candidates" is a claim
+	// about a set that was never retrieved, and an empty answer is explained by
+	// the removal breakdown instead. A contradicts note additionally checks that
+	// both endpoints survived, because the edge set covers every candidate while
+	// the block holds only the rows that made it through.
+	if len(p.items) > 0 {
+		admitted := make(map[string]bool, len(p.items))
+		for _, it := range p.items {
+			admitted[it.ID] = true
+		}
+		// Whether the block survives stage 8 is not known yet, so these are held
+		// as block notes rather than emitted: an empty answer must not claim two
+		// rows "both remain in the block".
+		switch p.set.EdgesStatus.Status {
+		case "err":
+			notes = append(notes, formatNote("edges_unavailable: the link lookup failed (%s), so conflict handling had no edges to read", p.set.EdgesStatus.Err))
+		case "unavailable":
+			notes = append(notes, "edges_unavailable: no link joins two of these candidates")
+		}
+		// A contradiction pair is recorded, never removed.
+		for _, e := range p.set.Edges {
+			if e.Relation == "contradicts" && admitted[e.From] && admitted[e.To] {
+				notes = append(notes, formatNote("contradicts pair recorded, not separated: %s and %s both remain in the block", shortID(e.From), shortID(e.To)))
+			}
 		}
 	}
-	p.noteBuf = append(p.noteBuf, notes...)
+	p.blockNotes = append(p.blockNotes, notes...)
 	p.trace.record(stageConflicts, in, len(p.rows), dropped, false, notes...)
 }
 
@@ -208,6 +229,8 @@ func runConflicts(p *pipeline) {
 // stage is a pass-through in v1 and says so in the trace rather than pretending
 // to have deduplicated.
 func runDedup(p *pipeline) {
+	p.blockNotes = append(p.blockNotes,
+		"near-duplicate reordering is applied by the retriever over the window; no source policy drops losers on this surface yet")
 	p.trace.record(stageDedup, len(p.rows), len(p.rows), nil, false,
 		"near-duplicate reordering is applied by the retriever over the window; no source policy drops losers on this surface yet")
 }
@@ -216,8 +239,9 @@ func runDedup(p *pipeline) {
 // measured. Recorded as a no-op so a reader can see the stage ran and changed
 // nothing, rather than inferring it was skipped.
 func runDiversity(p *pipeline) {
-	p.trace.record(stageDiversity, len(p.rows), len(p.rows), nil, false,
-		"diversity is off by default: no measured per-bucket quota")
+	note := "diversity is off by default: no measured per-bucket quota"
+	p.blockNotes = append(p.blockNotes, note)
+	p.trace.record(stageDiversity, len(p.rows), len(p.rows), nil, false, note)
 }
 
 // runBudget is stage 8: the final closure. The order the retriever returned is
@@ -354,11 +378,19 @@ func (p *pipeline) confidenceOf(id string) *float64 {
 // one cause and a caller who was told "withheld as out of date" while the budget
 // cut the rest needs to see that both happened.
 func (p *pipeline) notes() []string {
-	all := append([]string(nil), p.noteBuf...)
+	all := make([]string, 0, len(p.noteBuf)+1)
+	// First, not last. The breakdown qualifies the closed reason the answer leads
+	// with, and bounding the list drops from the end — so leading with it means
+	// pressure discards per-row detail instead of the one sentence that makes the
+	// label checkable.
 	if len(p.rows) == 0 && len(p.dropped) > 0 {
 		all = append(all, formatNote("%d candidate rows were removed and none reached the answer: %s",
 			len(p.dropped), p.removalBreakdown()))
 	}
+	if len(p.items) > 0 {
+		all = append(all, p.blockNotes...)
+	}
+	all = append(all, p.noteBuf...)
 	return boundNotes(all, p.req.Budget.MaxNoteBytes, p.req.Budget.MaxNotesBytes)
 }
 

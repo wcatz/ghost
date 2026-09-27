@@ -1054,3 +1054,141 @@ func TestMixedRemovalsReportTheDominantCause(t *testing.T) {
 			"a tie resolves to the earlier stage, not to iteration order", got.Reason)
 	}
 }
+
+// TestEmptyResultCarriesNoBlockShapedNotes: the notes an empty answer renders are
+// read by whoever receives it, and two of the stage-5 notes are statements about
+// the block — which by definition does not exist here. "No link joins two of
+// these candidates" is a claim about a set that was never retrieved, and
+// "both remain in the block" is false of two rows the budget removed. An empty
+// answer carries the removal breakdown instead, which is the part that is true.
+func TestEmptyResultCarriesNoBlockShapedNotes(t *testing.T) {
+	a := candidate("A1", "proj", "fact", "one", 0.9)
+	b := candidate("B1", "proj", "fact", "two", 0.8)
+	set := setOf(a, b)
+	set.Edges = []memory.LinkEdge{{From: "A1", To: "B1", Relation: "contradicts", Strength: 1}}
+	set.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+
+	req := baseRequest()
+	req.Budget.MaxItems = 1 // one row admitted, then the budget cuts the second
+	res := run(t, &fakeRetriever{set: set}, req)
+	if len(res.Items) != 1 {
+		t.Fatalf("precondition: wanted one admitted row, got %v", itemIDs(res.Items))
+	}
+	if !hasNote(res.Notes, "contradicts pair recorded") {
+		t.Errorf("a contradicts pair with both endpoints in the block is not reported: %v", res.Notes)
+	}
+
+	// Now stage 8 empties the block after stage 5 described it — the case the
+	// reviewer is about, and the one a caller sees as a bare "No matching
+	// memories found." with a link-graph claim attached.
+	cut := baseRequest()
+	cut.Budget = Budget{MaxItems: 10, MaxBytes: 1}
+	emptySet := setOf(a, b)
+	emptySet.Edges = set.Edges
+	emptySet.EdgesStatus = set.EdgesStatus
+	empty := run(t, &fakeRetriever{set: emptySet}, cut)
+	if len(empty.Items) != 0 {
+		t.Fatalf("precondition: wanted an empty result, got %v", itemIDs(empty.Items))
+	}
+	for _, n := range empty.Notes {
+		if hasNote([]string{n}, "remain in the block") {
+			t.Errorf("an empty result reports rows in the block: %q", n)
+		}
+		if hasNote([]string{n}, "edges_unavailable") {
+			t.Errorf("an empty result carries a link-graph claim about a set that was never retrieved: %q", n)
+		}
+	}
+
+	// The most common empty answer of all: retrieval found nothing, so there is
+	// no candidate set for a link to join.
+	noRows := setOf()
+	noRows.EdgesStatus = memory.EdgeStatus{Status: "unavailable"}
+	bare := run(t, &fakeRetriever{set: noRows}, baseRequest())
+	for _, n := range bare.Notes {
+		if hasNote([]string{n}, "edges_unavailable") {
+			t.Errorf("an answer over an empty candidate set claims a link fact about it: %q", n)
+		}
+	}
+
+	// One endpoint dropped by an earlier stage, the other admitted: the edge set
+	// still names the pair, and "both remain in the block" would be false of the
+	// row stage 2 removed.
+	expired := "2020-01-01 00:00:00"
+	kept := candidate("KEEP", "proj", "fact", "admitted row", 0.9)
+	gone := candidate("GONE", "proj", "fact", "expired row", 0.8)
+	gone.ValidUntil = &expired
+	half := setOf(kept, gone)
+	half.Edges = []memory.LinkEdge{{From: "KEEP", To: "GONE", Relation: "contradicts", Strength: 1}}
+	half.EdgesStatus = memory.EdgeStatus{Status: "ok"}
+	halfReq := baseRequest()
+	halfReq.Budget.MaxItems = 10
+	partial := run(t, &fakeRetriever{set: half}, halfReq)
+	if len(partial.Items) != 1 {
+		t.Fatalf("precondition: wanted one admitted row, got %v", itemIDs(partial.Items))
+	}
+	for _, n := range partial.Notes {
+		if hasNote([]string{n}, "remain in the block") {
+			t.Errorf("a contradicts note claims both rows are in the block when one was dropped: %q", n)
+		}
+	}
+}
+
+// TestBreakdownSurvivesNotePressure: the breakdown is what qualifies the closed
+// dominant-cause label, and the per-row notes are noise by comparison. It is
+// therefore rendered first, so bounding the list drops per-row detail rather than
+// the one sentence that makes the label checkable.
+func TestBreakdownSurvivesNotePressure(t *testing.T) {
+	rows := make([]memory.Candidate, 0, 40)
+	for i := range 40 {
+		row := candidate(string(rune('A'+i%26))+string(rune('a'+i/26)), "proj", "fact", "one", 0.5)
+		garbage := "not a timestamp"
+		row.ValidFrom = &garbage
+		rows = append(rows, row)
+	}
+	req := baseRequest()
+	req.Budget = Budget{MaxItems: 10, MaxBytes: 1} // everything removed, nothing admitted
+
+	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
+
+	if len(res.Notes) == 0 {
+		t.Fatal("no notes on an empty result")
+	}
+	if !hasNote(res.Notes, "none reached the answer") {
+		t.Errorf("the per-stage breakdown was the note dropped under pressure; got %v", res.Notes)
+	}
+}
+
+// TestReachableMixedRemovalIsValidityNotCategory: the mixed case a production
+// caller can actually produce is validity against the predicates, not validity
+// against the budget — a search with a category over rows that are mostly expired
+// and partly the wrong category. It is also the one the old code got wrong: the
+// category filter removed rows, so the fallback named `all_out_of_category` and
+// sent the caller to change a filter that was not the problem.
+func TestReachableMixedRemovalIsValidityNotCategory(t *testing.T) {
+	expired := "2020-01-01 00:00:00"
+	rows := make([]memory.Candidate, 0, 5)
+	for i := range 3 {
+		row := candidate(string(rune('a'+i)), "proj", "gotcha", "expired row", 0.9)
+		row.ValidUntil = &expired
+		rows = append(rows, row)
+	}
+	for i := range 2 {
+		rows = append(rows, candidate(string(rune('x'+i)), "proj", "fact", "wrong category row", 0.5))
+	}
+
+	req := baseRequest()
+	req.Category = "architecture" // matches nothing: every row is out of category
+	req.Budget.MaxItems = 10
+	res := run(t, &fakeRetriever{set: setOf(rows...)}, req)
+
+	if len(res.Items) != 0 {
+		t.Fatalf("precondition: wanted an empty result, got %v", itemIDs(res.Items))
+	}
+	if res.Reason != "all_invalid" {
+		t.Errorf("reason = %q, want all_invalid: three of the five rows were expired, and reporting a "+
+			"category problem would point the caller at a filter that was not the cause", res.Reason)
+	}
+	if !hasNote(res.Notes, "validity 3") || !hasNote(res.Notes, "predicates 2") {
+		t.Errorf("notes %v do not carry the per-stage breakdown of the mixed case", res.Notes)
+	}
+}
