@@ -62,7 +62,11 @@ type MemoryStore interface {
 	// different one. An empty identity means any recorded vector counts.
 	UnembeddedMemoryIDs(ctx context.Context, projectID, identity string, limit int) ([]string, error)
 	GetMemoryContent(ctx context.Context, id string) (string, error)
-	EmbeddingStats(ctx context.Context) (embedded, total int, err error)
+	// EmbeddingStats reports coverage as (embedded, stale, total): embedded
+	// counts vectors this process can search with, stale counts vectors
+	// recorded under a retired identity (awaiting a re-embed), total counts
+	// memories. stale is never counted as embedded.
+	EmbeddingStats(ctx context.Context) (embedded, stale, total int, err error)
 
 	// Links
 	LinkStats(ctx context.Context) (links, scans int, err error)

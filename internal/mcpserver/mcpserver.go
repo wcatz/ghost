@@ -1524,7 +1524,7 @@ func (s *Server) registerTools() {
 		fmt.Fprintf(&sb, "\n**Total memories:** %d\n", totalMemories)
 
 		if s.embedder != nil {
-			if embedded, total, err := s.store.EmbeddingStats(ctx); err == nil {
+			if embedded, stale, total, err := s.store.EmbeddingStats(ctx); err == nil {
 				fmt.Fprintf(&sb, "**Embeddings:** enabled — %d/%d memories embedded\n", embedded, total)
 				switch {
 				case total > 0 && embedded == 0:
@@ -1536,6 +1536,15 @@ func (s *Server) registerTools() {
 					// name the gap rather than leaving a bare fraction to be
 					// interpreted as healthy.
 					fmt.Fprintf(&sb, "  ⚠ %d memories are not in the current vector space yet — awaiting re-embed (check `ghost mcp status`)\n", total-embedded)
+				}
+				if stale > 0 {
+					// Split the gap: stale rows are the re-embed worker's
+					// queued work, unembedded rows have never had a vector.
+					// "Awaiting re-embed" alone cannot tell an operator
+					// whether to wait for the worker or to find out why it
+					// never ran.
+					fmt.Fprintf(&sb, "  ↳ %d stale (written under a retired model, width or task prefix), %d unembedded (no vector yet)\n",
+						stale, total-embedded-stale)
 				}
 			} else {
 				sb.WriteString("**Embeddings:** enabled\n")

@@ -300,7 +300,20 @@ are four, deliberately separate by caller:
 | may this stored vector enter a search? | `usableVectorEntries` | both vector scans (`SearchVector`, `SearchVectorAll`) |
 | may this stored vector act as a *query* vector? | `GetEmbedding` (returns nil) | the link worker and `ghost supersede`, which both search from a stored vector |
 | may this memory be compared at all yet? | `UnscannedEmbeddedMemoryIDs` | the link worker's queue, so a foreign row is neither paired across spaces nor marked scanned |
-| is this memory covered? | `EmbeddingStats` | `ghost mcp status` and `ghost_health`, which must not report full coverage mid-re-embed |
+| is this memory covered? | `EmbeddingStats` | `ghost mcp status` and `ghost_health`, which must not report full coverage mid-re-embed — and split the uncovered rows into stale (a vector under a retired identity) and unembedded (no vector at all), since only the first kind has something to rewrite |
+
+Rewriting a row under a new identity also clears the `link_scans` slot the
+memory earned in the old space (in `StoreEmbedding`, before the upsert), so the
+memory is re-queued for linking and the linker compares it again in the new
+space. The re-scan adds current-space edges alongside the ones the old space
+produced — nothing deletes the old `related` rows (only `supersede` calls
+`InvalidateLink`), and `CreateLink` upserts with `MAX(strength, ...)`, so an
+edge whose new-space similarity is lower keeps the strength the old space gave
+it; retiring those edges is a separate decision this change does not make. The
+failure ordering of the delete and the upsert fails safe in both directions, so
+they need no transaction. The foreign-vector warning in `usableVectorEntries`
+is likewise logged once per retired identity rather than once per search — a
+process that reconfigures twice warns about both retirements.
 
 The query-side rules matter because the filter only guards the *rows*: a stale
 vector used as a query would be a cosine between two spaces, and the number it

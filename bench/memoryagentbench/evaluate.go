@@ -34,7 +34,7 @@ type questionOutcome struct {
 // searchQuestion embeds question and runs Ghost's production hybrid search
 // under params p.
 func searchQuestion(ctx context.Context, store *memory.Store, project, question string, embedder *cachedEmbedder, p memory.SearchParams) ([]memory.Memory, error) {
-	qv, err := embedder.Embed(ctx, question)
+	qv, err := embedder.EmbedQuery(ctx, question)
 	if err != nil {
 		return nil, fmt.Errorf("embed question: %w", err)
 	}

@@ -248,12 +248,15 @@ func TestEmbeddingAndLinkStats(t *testing.T) {
 		t.Fatalf("MarkLinkScanned: %v", err)
 	}
 
-	embedded, total, err := s.EmbeddingStats(ctx)
+	embedded, stale, total, err := s.EmbeddingStats(ctx)
 	if err != nil {
 		t.Fatalf("EmbeddingStats: %v", err)
 	}
 	if embedded != 2 || total != 3 {
 		t.Errorf("EmbeddingStats = %d/%d, want 2/3", embedded, total)
+	}
+	if stale != 0 {
+		t.Errorf("EmbeddingStats stale = %d, want 0: no identity is configured, so no row is retired", stale)
 	}
 
 	links, scans, err := s.LinkStats(ctx)
