@@ -67,8 +67,11 @@ func TestNewGatedConsolidator_KeepsTheTierName(t *testing.T) {
 	}
 }
 
-// TestNewTieredConsolidator_StillPrefixesTheAutoPath is the other side: the
-// `auto` tier really does choose between several, so its label keeps saying so.
+// TestNewTieredConsolidator_StillPrefixesTheAutoPath holds the other side of the
+// label: only NewGatedConsolidator drops the prefix, so the constructor the
+// `auto` path uses keeps reporting "tiered:..." — including when `--require-llm`
+// left it with a single tier, because the prefix marks the constructor and not
+// the tier count.
 func TestNewTieredConsolidator_StillPrefixesTheAutoPath(t *testing.T) {
 	g := NewTieredConsolidator([]Consolidator{&stubConsolidator{name: "opencode", available: true}}, slog.Default())
 	if got := g.Name(); got != "tiered:opencode" {

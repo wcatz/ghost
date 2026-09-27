@@ -97,7 +97,8 @@ func TestGatedLLMTierAddsNoFallbackTier(t *testing.T) {
 // TestGatedLLMTierKeepsTheTierName: the operator selected a backend and the
 // `Consolidator:` line reports it back, so wrapping it in the gate must not
 // relabel it into `tiered:cli` — that would silently break any script or saved
-// log-grep keyed on the old label.
+// log-grep keyed on the old label. The prefix marks which constructor ran (see
+// TieredConsolidator.Name), and only the gated one drops it.
 func TestGatedLLMTierKeepsTheTierName(t *testing.T) {
 	for _, name := range []string{"cli", "opencode"} {
 		if got := gatedLLMTier(&gatedTierStub{name: name}, slog.Default()).Name(); got != name {

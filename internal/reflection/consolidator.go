@@ -58,13 +58,16 @@ func NewTieredConsolidator(tiers []Consolidator, logger *slog.Logger) *TieredCon
 	}
 }
 
-// Name reports the active tier, prefixed with "tiered:" because the `auto` path
-// really did choose between several. A consolidator built by
-// NewGatedConsolidator reports its one tier UNPREFIXED: the operator named that
-// backend on the command line, and `ghost reflect` prints this as
-// `Consolidator: <name>` — wrapping it is a change in how the tier is bounded,
-// not in which tier runs, so a script or a saved log-grep keyed on
-// `Consolidator: cli` must keep matching.
+// Name reports the active tier, prefixed with "tiered:" to mark that this came
+// from the tiered constructor the `auto` path uses. The prefix is a marker of
+// the constructor, NOT of how many tiers were in the list: `auto --require-llm`
+// builds a one-tier list too and still prints the prefix.
+//
+// A consolidator built by NewGatedConsolidator reports its one tier UNPREFIXED.
+// The operator named that backend on the command line, and `ghost reflect`
+// prints this as `Consolidator: <name>` — wrapping it changes how the tier is
+// bounded, not which tier runs, so a script or a saved log-grep keyed on
+// `Consolidator: cli` must keep matching. Nothing parses the label either way.
 func (t *TieredConsolidator) Name() string {
 	idx := int(t.active.Load())
 	prefix := "tiered:"
@@ -161,7 +164,8 @@ func gateMinOutput(inputCount int) int {
 // wrapper, so a caller that gates a Jaccard tier keeps today's behaviour.
 //
 // It reports the tier's own name rather than the "tiered:" prefix, so
-// `Consolidator: cli` still prints `cli` (see Name).
+// `Consolidator: cli` still prints `cli` (see Name — the prefix marks the
+// constructor, and the gate is not the `auto` path's constructor).
 func NewGatedConsolidator(c Consolidator, logger *slog.Logger) *TieredConsolidator {
 	t := NewTieredConsolidator([]Consolidator{c}, logger)
 	t.gated = true
