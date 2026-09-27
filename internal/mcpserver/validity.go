@@ -116,6 +116,20 @@ func parseStampFields(args validityArgs) (memory.Validity, error) {
 	return v, nil
 }
 
+// readStamp reads a stored validity stamp over every layout the store's readers
+// accept, reporting whether it was readable at all. It mirrors
+// assemble.parseStamp over the same memory.StampLayouts, and exists here so a
+// writer judging a value it did not store reads it exactly as a reader will: one
+// list of layouts, one owner, no writer-only dialect.
+func readStamp(s string) (time.Time, bool) {
+	for _, layout := range memory.StampLayouts {
+		if at, err := time.Parse(layout, s); err == nil {
+			return at, true
+		}
+	}
+	return time.Time{}, false
+}
+
 // checkWindowOrder refuses a window that does not end after it starts.
 //
 // stored is what the row already holds, which matters on the update path: a save
@@ -141,14 +155,19 @@ func checkWindowOrder(v, stored memory.Validity) error {
 	if from == nil || until == nil {
 		return nil
 	}
-	fromAt, fromErr := time.Parse(memory.StoredStampLayout, *from)
-	untilAt, untilErr := time.Parse(memory.StoredStampLayout, *until)
-	if fromErr != nil || untilErr != nil {
+	fromAt, fromReadable := readStamp(*from)
+	untilAt, untilReadable := readStamp(*until)
+	if !fromReadable || !untilReadable {
 		// Both halves came through parseStampArg, which accepts nothing
 		// unparseable, so a value that fails here is one this build stored — an
-		// imported artifact or a hand edit. Stage 2 reads it as unset, and so
-		// does this comparison; refusing would make an update fail on a row whose
-		// own stored value Ghost cannot read.
+		// imported artifact, a hand edit, or the whole-day form a reader accepts
+		// and a writer never produces. Read it the way the reader does before
+		// giving up: a check that only understood the shape this build writes
+		// would wave through a contradiction on every row stored as a bare date.
+		//
+		// A value no layout reads is genuinely not a claim, and stage 2 treats it
+		// as unset — so there is nothing here to contradict, and refusing would
+		// make an unrelated edit fail on a row Ghost cannot interpret.
 		return nil
 	}
 	if !untilAt.After(fromAt) {

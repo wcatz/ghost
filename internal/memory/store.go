@@ -2514,6 +2514,21 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory) (s
 // would show a caller a moment Ghost never recorded.
 const StoredStampLayout = "2006-01-02 15:04:05"
 
+// DateStampLayout is the whole-day form, the other shape SQLite's date() produces.
+const DateStampLayout = "2006-01-02"
+
+// StampLayouts is every layout a reader of a validity column accepts, in the order
+// to try them: what Ghost's own writers store first, then the whole-day form a
+// portable artifact, a hand edit or a date() call can leave behind.
+//
+// One list, owned here, because the column is the storage layer's. A writer
+// validating a value it did not store and a reader interpreting one have to agree
+// on what is readable, and two private copies of the layout set are two answers to
+// that question free to drift: a writer that accepted only the shape it writes
+// would wave through a contradiction on a date-only row, and a reader that
+// accepted only its own would read a real claim as no claim at all.
+var StampLayouts = []string{StoredStampLayout, DateStampLayout}
+
 // Validity is the optional temporal claim attached to one write: when the
 // memory became true, when it stops being true, and when someone last checked.
 //

@@ -77,8 +77,13 @@ ranking change:
   547 → 551, and four new candidates now compete for a ten-row window, so a
   query that filled its window from eleven candidates fills it from fifteen.
   That is the cost of a larger corpus rather than a ranking regression — the
-  shipped path did not move — and both gated metrics stay inside the 0.005
-  delta gate on every condition. Nothing in these conditions reads a validity
+  shipped path did not move — and every condition stays inside the 0.005
+  NDCG@10 / R@5 tolerance the context-assembler plan applies to each of its
+  ranking-affecting PRs (the plan's own comparison contract, measured on the
+  branch against `origin/main`; there is no CI job asserting it). The floors
+  `TestBenchRegressionFloors` does enforce — NDCG@10 0.73/0.78/0.80 and
+  recall@10 0.67/0.75/0.75 — are met with the same headroom as before, which
+  is why the `fts` CI job stays green. Nothing in these conditions reads a validity
   column: they call `SearchFTS`, `SearchVector` and `SearchHybrid` directly, so
   the new rows are inert here on purpose. What the corpus now carries is a
   validity window for the assembler's own condition to act on, which is where

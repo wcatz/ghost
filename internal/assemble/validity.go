@@ -8,13 +8,11 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// stampLayouts are the layouts SQLite's datetime() and date() produce. Both are
-// accepted because the columns are unconstrained text: a row written with a
-// date is as readable as one written with a timestamp, and rejecting the
-// shorter form would silently turn a real claim into no claim. The first is
-// memory.StoredStampLayout, which is what Ghost's own writers store; the second
-// is what a portable artifact, a hand edit or a date() call can leave behind.
-var stampLayouts = []string{memory.StoredStampLayout, dateOnlyLayout}
+// stampLayouts are the layouts SQLite's datetime() and date() produce, and they
+// live with the column they read rather than here: both are accepted because the
+// columns are unconstrained text, and a reader that accepted only the shape
+// Ghost writes would silently turn a real claim into no claim.
+var stampLayouts = memory.StampLayouts
 
 // parseStamp reads a stored timestamp, or the zero time when it cannot be read.
 // A malformed created_at is treated as ancient rather than fresh, so it can

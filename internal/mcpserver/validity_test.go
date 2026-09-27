@@ -394,9 +394,14 @@ func TestEveryWriterRejectsAWindowThatEndsBeforeItStarts(t *testing.T) {
 // vanish from every search with no error anywhere to say why.
 func TestUpdateRefusesAWindowThatContradictsTheStoredOne(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		first      map[string]any
-		update     map[string]any
+		name   string
+		first  map[string]any
+		update map[string]any
+		// storeFirst seeds the row through memory.Create rather than a tool, for
+		// the cases that need a stored boundary in a shape no tool ever writes.
+		// Create takes the value verbatim, which is what an import, a snapshot
+		// restore and a hand edit also do.
+		storeFirst memory.Validity
 		wantReject bool
 	}{
 		{
@@ -423,18 +428,68 @@ func TestUpdateRefusesAWindowThatContradictsTheStoredOne(t *testing.T) {
 			update:     map[string]any{"valid_until": "2027-06-01"},
 			wantReject: false,
 		},
+		{
+			// A stored boundary in the whole-day form — what a portable import, a
+			// snapshot restore or a hand edit leaves behind, and what Store.Create
+			// writes when a caller passes one. A writer that validated only the
+			// shape it writes would read this as unreadable, skip the comparison,
+			// and store the contradiction.
+			name:       "an end before a stored start held as a bare date",
+			storeFirst: memory.Validity{ValidFrom: datePtr("2026-01-01")},
+			update:     map[string]any{"valid_until": "2025-01-01"},
+			wantReject: true,
+		},
+		{
+			// The other direction, and the shape a whole-day end takes: a stored
+			// bare-date end judged against a timestamped start.
+			name:       "a start after a stored bare-date end",
+			storeFirst: memory.Validity{ValidUntil: datePtr("2026-06-01")},
+			update:     map[string]any{"valid_from": "2027-01-01"},
+			wantReject: true,
+		},
+		{
+			// The negative half of the same case: a bare-date boundary that does
+			// NOT contradict must still be accepted, or the check would be
+			// refusing edits on imported rows rather than on contradictions.
+			name:       "a valid end beside a stored bare-date start",
+			storeFirst: memory.Validity{ValidFrom: datePtr("2026-01-01")},
+			update:     map[string]any{"valid_until": "2027-01-01"},
+			wantReject: false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, session := newCapSession(t)
-			first := map[string]any{
-				"project_id": "test-project",
-				"content":    "a claim with half a window",
-				"category":   "fact",
+			var m memory.Memory
+			if tc.storeFirst.ValidFrom != nil || tc.storeFirst.ValidUntil != nil {
+				ctx := context.Background()
+				project, _, err := srv.store.ResolveProject(ctx, "test-project")
+				if err != nil {
+					t.Fatalf("resolve project: %v", err)
+				}
+				id, err := srv.store.Create(ctx, project, memory.Memory{
+					Category: "fact", Content: "a claim whose stored boundary is a bare date",
+					Source:    "mcp",
+					ValidFrom: tc.storeFirst.ValidFrom, ValidUntil: tc.storeFirst.ValidUntil,
+				})
+				if err != nil {
+					t.Fatalf("seed a bare-date row: %v", err)
+				}
+				rows, err := srv.store.GetByIDs(ctx, []string{id})
+				if err != nil || len(rows) != 1 {
+					t.Fatalf("GetByIDs(%q): err=%v n=%d", id, err, len(rows))
+				}
+				m = rows[0]
+			} else {
+				first := map[string]any{
+					"project_id": "test-project",
+					"content":    "a claim with half a window",
+					"category":   "fact",
+				}
+				for k, v := range tc.first {
+					first[k] = v
+				}
+				m = savedMemory(t, srv, session, "ghost_memory_save", first)
 			}
-			for k, v := range tc.first {
-				first[k] = v
-			}
-			m := savedMemory(t, srv, session, "ghost_memory_save", first)
 
 			edit := map[string]any{"project_id": "test-project", "memory_id": m.ID}
 			for k, v := range tc.update {
@@ -458,6 +513,22 @@ func TestUpdateRefusesAWindowThatContradictsTheStoredOne(t *testing.T) {
 	}
 }
 
+// datePtr is the stored whole-day form, the shape a tool never writes.
+func datePtr(s string) *string { return &s }
+
+// parseStampLikeReader reads a stored stamp over every layout the store's readers
+// accept, which is the whole-day form as well as the canonical one. A test that
+// parsed only the canonical form would agree with a broken writer that does the
+// same, which is the failure this whole file is about.
+func parseStampLikeReader(s string) (time.Time, bool) {
+	for _, layout := range memory.StampLayouts {
+		if at, err := time.Parse(layout, s); err == nil {
+			return at, true
+		}
+	}
+	return time.Time{}, false
+}
+
 // effectiveWindow reports whether a row's own two boundaries contradict, reading
 // them the way stage 2 does. It is the check the store cannot make for a caller
 // and the one the test above is really about.
@@ -465,9 +536,9 @@ func effectiveWindow(m memory.Memory) (string, bool) {
 	if m.ValidFrom == nil || m.ValidUntil == nil {
 		return "", false
 	}
-	from, errFrom := time.Parse(memory.StoredStampLayout, *m.ValidFrom)
-	until, errUntil := time.Parse(memory.StoredStampLayout, *m.ValidUntil)
-	if errFrom != nil || errUntil != nil {
+	from, fromOK := parseStampLikeReader(*m.ValidFrom)
+	until, untilOK := parseStampLikeReader(*m.ValidUntil)
+	if !fromOK || !untilOK {
 		return "", false
 	}
 	return *m.ValidFrom + " \u2192 " + *m.ValidUntil, !until.After(from)

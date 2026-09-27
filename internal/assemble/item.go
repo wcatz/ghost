@@ -125,21 +125,16 @@ func ConfidenceLabel(confidence *float64) string {
 	return " confidence " + strconv.FormatFloat(*confidence, 'g', -1, 64)
 }
 
-// dateOnlyLayout is both halves of one format: the second of the two
-// stampLayouts, which is what a reader accepts, and what a whole-day boundary is
-// printed as. A stamp at exactly midnight UTC renders as the date alone, because
-// a validity window is almost always stated in days and "valid until 2026-10-01"
-// is what the caller meant; anything with a time of day keeps it, since then the
-// time was the point. The two are the same instant, so nothing is lost — a
+// stampText renders one validity boundary, dropping the time of day only when it
+// is midnight UTC — into memory.DateStampLayout, the same whole-day form a reader
+// accepts. A validity window is almost always stated in days and "valid until
+// 2026-10-01" is what the caller meant; anything with a time of day keeps it, since
+// then the time was the point. The two are the same instant, so nothing is lost: a
 // caller who wrote 2026-01-15T00:00:00Z reads back 2026-01-15, and one who wrote
 // 2026-01-15T09:00:00Z reads back the hour.
-const dateOnlyLayout = "2006-01-02"
-
-// stampText renders one validity boundary, dropping the time of day only when it
-// is midnight UTC.
 func stampText(t *time.Time) string {
 	if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 {
-		return t.Format(dateOnlyLayout)
+		return t.Format(memory.DateStampLayout)
 	}
 	return t.Format(memory.StoredStampLayout)
 }

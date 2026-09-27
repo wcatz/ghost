@@ -677,14 +677,15 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 	if fields.SourceRef != "" {
 		changed = append(changed, "source_ref")
 	}
-	// Named only when the row's agent is about to change, which it is not
-	// necessarily: an undetectable harness leaves the stored author in place, and
-	// a confirmation naming a field that did not move is worse than one that
-	// stays silent. An edit by a known harness re-attributes the row to the last
-	// thing that wrote it; memory_history keeps the previous author, so this is
-	// re-attribution and not a lost record.
+	// Named only when the row's agent is about to change, which is neither
+	// automatic nor the usual case: an undetectable harness leaves the stored
+	// author in place, and an edit by the harness that already wrote the row
+	// writes back the value it already holds. A confirmation naming a field that
+	// did not move is worse than one that stays silent. When it does move, the row
+	// is re-attributed to the last thing that wrote it, and memory_history keeps
+	// the previous author — re-attribution, not a lost record.
 	editing := provenanceFor(req)
-	if editing.Agent != "" {
+	if editing.Agent != "" && editing.Agent != mems[0].Agent {
 		changed = append(changed, "agent")
 	}
 
