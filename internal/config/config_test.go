@@ -840,6 +840,26 @@ func TestLoadForHook_MalformedYAMLFallsBackWithWarning(t *testing.T) {
 	}
 }
 
+// TestLoadForHook_EmptySessionScopeValueFallsBackUnscoped pins the hook-path
+// cost of refusing an empty session_scope value: the whole file is dropped, so
+// the session is not scope-filtered, and the warning says why.
+func TestLoadForHook_EmptySessionScopeValueFallsBackUnscoped(t *testing.T) {
+	isolateConfig(t)
+	writeUserConfig(t, "injection:\n  session_scope:\n    environment: \"\"\n    component: api\n")
+	warnings := captureConfigWarnings(t)
+
+	cfg := LoadForHook()
+	if cfg == nil {
+		t.Fatal("LoadForHook() = nil; the hook path must always be given a config")
+	}
+	if len(cfg.Injection.SessionScope) != 0 {
+		t.Errorf("injection.session_scope = %v, want none (the refused file is not applied)", cfg.Injection.SessionScope)
+	}
+	if got := warnings.String(); !strings.Contains(got, "injection.session_scope: empty value for environment") {
+		t.Errorf("warning %q must name the refused session_scope key", got)
+	}
+}
+
 // TestLoadForHook_ValidConfigLoadsWithoutWarning is the other half of the hook
 // contract: the fallback must not fire (or warn) on a config that loads fine.
 func TestLoadForHook_ValidConfigLoadsWithoutWarning(t *testing.T) {

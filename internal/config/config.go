@@ -339,10 +339,16 @@ func Load() (*Config, error) {
 // checkScopeValues refuses an injection.session_scope key whose value is empty
 // or only whitespace, the way the env form does (stringMap, which trims through
 // commaPairs). An empty value is not a no-op: it is a filter that excludes every
-// row naming that key with any other value. Dropping the key instead would not
-// be safe either — the rest of the scope would still apply, so a row scoped to
-// the dropped key's excluded value would reach the session — so the file is
-// refused and LoadForHook falls back as it does for any unreadable value.
+// row naming that key with any other value.
+//
+// Refusing is chosen for being loud and consistent with the env form, not for
+// keeping rows out: it is not a narrowing guarantee. The CLI subcommands fail on
+// it, but LoadForHook falls back to the compiled defaults plus GHOST_*, which
+// carry no session_scope, so the session-start block for that session is not
+// scope-filtered at all — the same block a store with no session_scope gets
+// (pinned by TestLoadForHook_EmptySessionScopeValueFallsBackUnscoped). Dropping
+// only the bad key would have kept the others filtering, but silently, and left
+// the file and env forms disagreeing about the same input.
 func checkScopeValues(cfg *Config) error {
 	keys := make([]string, 0, len(cfg.Injection.SessionScope))
 	for key, value := range cfg.Injection.SessionScope {
