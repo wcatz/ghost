@@ -551,10 +551,11 @@ func TestCarryGooseConfigDirFallsBackToCopy(t *testing.T) {
 //
 // The classification is injected rather than reproduced from the filesystem,
 // because the interesting case is not buildable everywhere: Windows reports "a
-// file where a directory belongs" as ERROR_PATH_NOT_FOUND, which Go maps to
-// fs.ErrNotExist, so on that host this case legitimately classifies as absent.
-// The platform's own answer is honoured either way; what is pinned is that a
-// non-ENOENT failure is never skipped.
+// file where a directory belongs" as ERROR_PATH_NOT_FOUND and maps ENOTDIR to
+// that same constant, so on that host this case legitimately classifies as
+// absent. The platform's own answer is honoured either way; what is pinned is
+// that a non-ENOENT failure is never skipped, which EACCES states on every
+// platform.
 func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
 	home := t.TempDir()
 	config := filepath.Join(home, ".config", "goose")
@@ -582,9 +583,13 @@ func TestGooseConfigRootProbeClassifiesFailures(t *testing.T) {
 	})
 
 	t.Run("unusable is refused", func(t *testing.T) {
+		// EACCES, not ENOTDIR: on Windows syscall.ENOTDIR is
+		// ERROR_PATH_NOT_FOUND, which Go maps to fs.ErrNotExist, so a test
+		// using it asserts a different rule on that platform. EACCES is not
+		// ErrNotExist on any of them.
 		probe := func(name string) (os.FileInfo, error) {
 			if strings.Contains(name, "Library") {
-				return nil, &fs.PathError{Op: "lstat", Path: name, Err: syscall.ENOTDIR}
+				return nil, &fs.PathError{Op: "lstat", Path: name, Err: syscall.EACCES}
 			}
 			return os.Lstat(name)
 		}

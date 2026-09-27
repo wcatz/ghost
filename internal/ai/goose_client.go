@@ -220,10 +220,11 @@ func linkGooseConfigDirs(home string, env []string, homeDir string) error {
 
 // linkGooseConfigDirsWith takes the probe as a parameter because the
 // ENOENT/ENOTDIR distinction is not reproducible everywhere: Windows reports "a
-// file where a directory belongs" as ERROR_PATH_NOT_FOUND, which Go maps to
-// fs.ErrNotExist, so the very case this must refuse cannot be built on that
-// host. The platform's own answer is honoured — a genuine miss is skipped — and
-// only the classification is injected, so the test can pin it.
+// file where a directory belongs" as ERROR_PATH_NOT_FOUND, and syscall maps
+// ENOTDIR to that same constant, so on that host this case legitimately
+// classifies as absent. The platform's own answer is honoured — a genuine miss
+// is skipped — and only the classification is injected, so the test can pin the
+// rule itself rather than a platform's error code.
 func linkGooseConfigDirsWith(home string, env []string, homeDir string, probe func(string) (os.FileInfo, error)) error {
 	if harnessEnvValue(env, "XDG_CONFIG_HOME") != "" {
 		// An absolute path the child reads directly; HOME plays no part.
