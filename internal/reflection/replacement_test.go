@@ -216,11 +216,13 @@ func TestMergeLapsesWhenAFilterRemovesIt(t *testing.T) {
 		t.Fatalf("want the two passed-through rows left, got %+v", result.Memories)
 	}
 
-	// Only the union explains either source here, which is the shape the union
-	// branch exists for — and the reason this fixture is the one that can catch the
-	// mutation. The surviving-merge case is pinned separately, by
-	// TestMergedSourceIsStillScoredAgainstTheUnion, so the fix cannot be bought by
-	// dropping the union comparison altogether.
+	// No output explains either source, so with the merge gone both have to come
+	// back. The merge-text witness is what is being tested here: a filter can
+	// remove the merge after the ids are recorded, and a source still claiming a
+	// merge that is not there has nothing left to be scored against. The
+	// surviving-merge case is pinned separately, by
+	// TestMergedSourceIsStillScoredAgainstItsOwnMerge, so this cannot be satisfied
+	// by refusing to record merges at all.
 	drops := AuditGuardedDrops(in, result)
 	for _, want := range []string{ingest, export} {
 		if !auditContains(drops, want) {
@@ -229,34 +231,34 @@ func TestMergeLapsesWhenAFilterRemovesIt(t *testing.T) {
 	}
 }
 
-// TestMergedSourceIsStillScoredAgainstTheUnion guards the fix from
-// over-reaching: a merge that survived must keep the union comparison, or a
-// source whose substance the merge spread across siblings comes back beside the
-// merge that absorbed it.
-func TestMergedSourceIsStillScoredAgainstTheUnion(t *testing.T) {
+// TestMergedSourceIsStillScoredAgainstItsOwnMerge guards the fix from
+// over-reaching: a merge that survived must still absorb its sources, or a
+// source whose substance the merge carried comes back beside the merge that
+// absorbed it. Scoring is against the merge's own text (#549), so the merge text
+// has to actually carry each source — that is the whole witness available, since
+// a merge source is consumed by its merge and its own text is never in the
+// result.
+func TestMergedSourceIsStillScoredAgainstItsOwnMerge(t *testing.T) {
 	ssh := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1", Category: "gotcha", Content: "bastion SSH from the office is firewalled, so use port 2222"}
 	region := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2", Category: "fact", Content: "Production runs in region fsn1"}
-	kept := memory.Memory{ID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA3", Category: "fact", Content: "ssh from the office is firewalled for the whole subnet"}
-	input := ReflectionInput{ExistingMemories: []memory.Memory{ssh, region, kept}}
+	input := ReflectionInput{ExistingMemories: []memory.Memory{ssh, region}}
+	const merged = "bastion SSH from the office is firewalled, use port 2222, and production runs in region fsn1"
 
 	result := ReflectionResult{
-		Memories: []ReflectMemory{
-			{Category: "gotcha", Content: "the bastion is reached on port 2222 from the region fsn1"},
-			{Category: "fact", Content: kept.Content},
-		},
-		Merges: []Merge{{IDs: []string{ssh.ID, region.ID}, Text: "the bastion is reached on port 2222 from the region fsn1"}},
+		Memories: []ReflectMemory{{Category: "gotcha", Content: merged}},
+		Merges:   []Merge{{IDs: []string{ssh.ID, region.ID}, Text: merged}},
 	}
 	if drops := AuditGuardedDrops(input, result); len(drops) != 0 {
 		t.Fatalf("a surviving merge still lost a source: %+v", drops)
 	}
 
-	// The same result with the merge taken away. The union now holds only the
-	// memory that was not part of the merge, so the SSH note — which the union
-	// used to carry and no single survivor explains — has to come back.
+	// The same result with the merge taken away. Nothing carries the sources now,
+	// and the only surviving memory is a stranger to both, so both must come back.
 	filtered := result
-	filtered.Memories = result.Memories[1:]
-	if drops := AuditGuardedDrops(input, filtered); !auditContains(drops, ssh.Content) {
-		t.Fatalf("want the SSH source re-added once its merge is gone, got %+v", drops)
+	filtered.Merges = nil
+	filtered.Memories = []ReflectMemory{{Category: "fact", Content: "the ledger ingests batches over gRPC"}}
+	if drops := AuditGuardedDrops(input, filtered); len(drops) != 2 {
+		t.Fatalf("want both sources re-added once their merge is gone, got %d: %+v", len(drops), drops)
 	}
 }
 

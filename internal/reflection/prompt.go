@@ -34,28 +34,30 @@ type ReflectionResult struct {
 	LearnedContext string          `json:"learned_context"`
 	Memories       []ReflectMemory `json:"memories"`
 	// Merges are the merges the response performed, each with the ids it folded in
-	// and the text that came out. The drop guard scores a merged source against the
-	// union of the output memories rather than against any single output, because
-	// a merge may carry one source's substance across a survivor plus its
-	// siblings; an id outside a merge is measured against a single output, because
-	// there the guard is asking whether the response accounted for the memory at
-	// all (#639). The text is what makes the claim checkable after the fact — see
-	// Replacement for why an id alone is not enough.
+	// and the text that came out. The drop guard scores a merged source against
+	// the text of its own merge, because that is the only witness that can say
+	// whether the merge carried it — a merge source is consumed by its merge, so
+	// its own text is never in the result — and it scores an id outside a merge
+	// against a single output, because there the guard is asking whether the
+	// response accounted for the memory at all (#639). The text is what makes the
+	// claim checkable after the fact — see Replacement for why an id alone is not
+	// enough.
 	Merges []Merge `json:"merges,omitempty"`
 	// Replacements are the input ids a response disposed of, each with the text
 	// that stands in its place: a rewrite's own new text, or the emitted text of
 	// the successor a supersession named. They share one list because they are one
-	// claim — "this row no longer needs carrying, that text says it instead" — and
-	// the drop guard treats them identically.
+	// KIND of claim — "this row no longer needs carrying, that text says it
+	// instead" — and the drop guard treats them alike on whether the witness is
+	// present. They differ on whether it must also be related; see
+	// Replacement.Supersession.
 	Replacements []Replacement `json:"replacements,omitempty"`
 }
 
-// Merge is one merge operation and what it produced. Text and not just the ids for
-// the same reason Replacement carries its text: a filter that runs over the result
-// after the operations are resolved can remove the merge, and a source still
-// claiming a merge that is not there is scored against a union that has nothing to
-// do with it — which, with the pass-through emitting every unclaimed input, is the
-// rest of the project.
+// Merge is one merge operation and what it produced. Text and not just the ids so
+// the drop guard can check each source against the text its merge actually
+// produced: a source whose substance that text lost is not covered by the merge
+// and has to be put back, and scoring it against everything else in the result
+// would let an unrelated memory vouch for it instead (#549).
 type Merge struct {
 	IDs  []string
 	Text string
@@ -74,6 +76,15 @@ type Merge struct {
 type Replacement struct {
 	ID   string
 	Text string
+	// Supersession marks the witness as ANOTHER row rather than a new wording of
+	// this one, which is the only case where the two texts can be unrelated and
+	// the claim is still an assertion. A rewrite's text is the model's own
+	// replacement for that id and the grounding check has already tied it to that
+	// row's identifiers, so its presence is enough. A `superseded by` drop names
+	// some OTHER carried-forward id, and nothing constrains that id to be about
+	// the memory being disposed of — so that claim has to be checked, not merely
+	// witnessed (#549).
+	Supersession bool
 }
 
 // ReflectMemory is a discrete memory extracted during reflection.

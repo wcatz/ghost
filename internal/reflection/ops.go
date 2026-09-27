@@ -375,8 +375,13 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 		// merge's text when the successor was folded into one. Recording the
 		// successor's stored content instead would let the guard honour a claim
 		// about text the result does not hold.
+		//
+		// Supersession is flagged because this witness is a DIFFERENT row, and
+		// nothing here constrains it to be about the memory being disposed of —
+		// only that the target is carried forward. The drop guard checks the two
+		// texts are related before it lets the claim stand (#549).
 		result.Replacements = append(result.Replacements,
-			Replacement{ID: op.ids[0], Text: emitted[op.target]})
+			Replacement{ID: op.ids[0], Text: emitted[op.target], Supersession: true})
 	}
 
 	// Everything the response never named is carried through as a keep, verbatim

@@ -227,9 +227,16 @@ func TestDropOpEmitsNothingAndStaysUnderTheDropGuard(t *testing.T) {
 // model said explicitly that this row is now stated better elsewhere and named
 // the id that states it, so re-adding the stale row beside its own successor is
 // the goduckbot defect in #639 ("three open issues" restored next to "have
-// been fixed"). The guard must honour the claim instead of re-adding.
+// been fixed"). The guard must honour the claim instead of re-adding — and the
+// fixture's successor really does restate the same fact, because a witness that
+// shares nothing with the row it disposes of is an assertion rather than a
+// supersession and no longer exempts it (#549, see
+// TestUnrelatedSupersessionWitnessIsNotAnExemption).
 func TestSupersededDropIsNotReAdded(t *testing.T) {
 	in := opInput()
+	// The successor of the SSH note states the same fact, so the claim is
+	// corroborated rather than merely asserted. Containment is 0.556.
+	in.ExistingMemories[1] = opMem(opID2, "fact", "bastion SSH is reached on port 2222 rather than 22", 0.5, "prod")
 	result := opRun(t, in,
 		`{"learned_context":"ctx","ops":["drop `+opID1+` reason: superseded by `+opID2+`","keep `+opID2+`"]}`)
 
@@ -241,6 +248,8 @@ func TestSupersededDropIsNotReAdded(t *testing.T) {
 	}
 	if r := result.Replacements[0]; r.ID != opID1 || r.Text != in.ExistingMemories[1].Content {
 		t.Errorf("replacement = %+v, want %q replaced by the text of %q", r, opID1, opID2)
+	} else if !r.Supersession {
+		t.Error("the claim was not marked a supersession, so the guard cannot tell it from a rewrite")
 	}
 	drops := AuditGuardedDrops(in, result)
 	if len(drops) != 0 {
@@ -331,13 +340,15 @@ func TestRewrittenRowIsNotReAddedBesideItsReplacement(t *testing.T) {
 // TestSupersessionWitnessFollowsAMerge records the witness as the text the
 // successor actually carries, not its stored content: a successor folded into a
 // merge is replaced by the merge's text, and the claim is only checkable if it
-// points at what the result really holds.
+// points at what the result really holds. Relatedness is checked against that
+// same text, so the merge has to carry the disposed memory's substance for the
+// claim to stand — here it does, at containment 1.000.
 func TestSupersessionWitnessFollowsAMerge(t *testing.T) {
 	in := opInput()
 	in.ExistingMemories[0].Content = "the ledger is reached from the office subnet"
 	in.ExistingMemories = append(in.ExistingMemories,
 		opMem(opID3, "fact", "the bastion answers ping on 443", 0.5))
-	const merged = "Production in region fsn1 is fronted by Cloudflare and the bastion answers ping on 443"
+	const merged = "the ledger is reached from the office subnet, the bastion answers ping on 443, and production in region fsn1 is fronted by Cloudflare"
 	result := opRun(t, in,
 		`{"learned_context":"ctx","ops":["drop `+opID1+` reason: superseded by `+opID2+`","merge `+opID2+`,`+opID3+` -> `+merged+`"]}`)
 

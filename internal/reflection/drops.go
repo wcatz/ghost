@@ -2,6 +2,8 @@ package reflection
 
 import (
 	"strings"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // DroppedGuarded is an input memory, in any category, that has no close
@@ -41,14 +43,25 @@ const dropContainmentThreshold = 0.45
 // One exemption, and it is witnessed rather than inferred. result.Replacements
 // names the input ids a response disposed of together with the text that took
 // their place — a rewrite's own new text, or the emitted text of the successor a
-// supersession named. A rewrite and a supersession are the same claim about the
-// same thing, so they share one list and one check: re-adding such a row would
-// put it back beside the text that replaced it, which is a duplicate rather than a
-// save, and re-adding it is how a memory reading "three issues are still open"
-// survived beside "the three open issues have all been fixed".
+// supersession named. A rewrite and a supersession are the same KIND of claim —
+// "this row no longer needs carrying, that text says it instead" — so they share
+// one list: re-adding such a row would put it back beside the text that replaced
+// it, which is a duplicate rather than a save, and re-adding it is how a memory
+// reading "three issues are still open" survived beside "the three open issues
+// have all been fixed".
 //
-// The witness has to be there, though. A filter that runs over the result after
-// the operations are resolved can remove the replacing text —
+// They are not equally TRUSTED, though, and that distinction is the rest of this
+// paragraph. A rewrite's witness is the model's own text for that same id, and
+// the grounding check has already tied it to that row by rejecting a rewrite
+// that introduces an identifier absent from its sources, so presence is enough.
+// A supersession's witness is some OTHER carried-forward id, and nothing
+// constrains it to be about the memory being disposed of — the parser's only rule
+// is that the target survives the response. So a supersession is honoured only
+// when its witness is RELATED to the row it disposes of, scored at the same
+// containment the rest of the guard uses (#549).
+//
+// The witness has to be there too, for either kind. A filter that runs over the
+// result after the operations are resolved can remove the replacing text —
 // dropForeignProjectMemories deletes a memory naming a project the input corpus
 // never mentioned, and a rewrite or a merge is exactly such a memory — and an
 // exemption trusted on the id alone then disposes of a row with nothing in its
@@ -64,51 +77,102 @@ const dropContainmentThreshold = 0.45
 // the "absorbed" direction a silent deletion with no warning and no
 // --allow-drops. An id the model never mentioned needs no inference at all.
 //
-// Which output set an input is compared against is the remaining choice, and it is
-// witnessed the same way. A MERGED source (result.Merges) is measured against the
-// union of every output, because a merge may carry its substance across a survivor
-// plus its siblings — but only while the merge that folded it in is still in the
-// result, since with the pass-through above the union of a result whose merge was
-// removed is the rest of the project. Everything else is measured against a single
-// output. The SQLite fallback names no ids, so every one of its inputs is measured
-// the strict way.
+// Which output set an input is compared against is the remaining choice. A MERGED
+// source (result.Merges) is measured against the text of ITS OWN merge, since
+// that is the only witness that can say whether the merge carried it: a merge
+// source is consumed by its merge, so its own text is never in the result, and
+// the parser rejects an id claimed twice, so a sibling cannot be there either.
+// It is measured against nothing at all when the merge is not in the result, and
+// falls back to the strict per-output test. Everything else is measured against a
+// single output. The SQLite fallback names no ids, so every one of its inputs is
+// measured the strict way.
 //
 // Uses the package's tokenize (numeric-retaining, stopword-filtered) so merged
 // rewrites that preserve substance — including ports and versions — are
 // recognized as survivors and are not re-added alongside the merge.
 func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []DroppedGuarded {
 	outTokens := make([]map[string]bool, 0, len(result.Memories))
-	union := make(map[string]bool)
 	present := make(map[string]bool, len(result.Memories))
 	for _, m := range result.Memories {
 		tokens := tokenize(m.Content)
 		outTokens = append(outTokens, tokens)
-		for tok := range tokens {
-			union[tok] = true
-		}
 		present[m.Content] = true
 	}
 
+	// The disposed input's own text, so a supersession's claim can be checked for
+	// being ABOUT the memory it disposes of rather than only for having a witness.
+	byID := make(map[string]memory.Memory, len(input.ExistingMemories))
+	for _, in := range input.ExistingMemories {
+		byID[memIDKey(in.ID)] = in
+	}
+
+	// A disposition is honoured when its witness is PRESENT, and — for a
+	// supersession, where the witness is some OTHER row — only when it is also
+	// RELATED (#549). Presence alone was the whole test, so a response could
+	// dispose of any memory at all by naming any carried-forward id as its
+	// successor: the parser's only rule is that the target is carried forward, so
+	// naming a neighbour is a valid operation, and nothing downstream compared
+	// the two texts. The result was a deletion with no warning, no --allow-drops
+	// and a zero exit status — the loss this guard exists to prevent, reached
+	// through the one path the guard had exempted.
+	//
+	// A rewrite is not in that class and is not re-checked here. Its witness is
+	// the model's own text for that same id, already tied to that row by the
+	// grounding check, which rejects a rewrite introducing an identifier absent
+	// from its sources and asks for `keep` instead. The unconstrained assertion
+	// is specifically "this other row says it better".
+	//
+	// Relatedness is the same containment the rest of the guard uses, at the
+	// same threshold, so "the same fact" means one thing in this file. A
+	// supersession that genuinely rewords the fact in wholly different words
+	// scores low and its stale row is re-added beside the replacement — a visible
+	// duplicate, which is the direction this check must fail. The alternative
+	// failure is a silent deletion.
 	replaced := make(map[string]bool, len(result.Replacements))
 	for _, r := range result.Replacements {
-		if r.Text != "" && present[r.Text] {
-			replaced[memIDKey(r.ID)] = true
+		if r.Text == "" || !present[r.Text] {
+			continue
 		}
+		if r.Supersession {
+			disposed, ok := byID[memIDKey(r.ID)]
+			if !ok {
+				continue
+			}
+			if !hasCloseSurvivor(tokenize(disposed.Content), tokenize(r.Text)) {
+				continue
+			}
+		}
+		replaced[memIDKey(r.ID)] = true
 	}
-	// A merged source is scored against the union only while the merge that folded
-	// it in is still in the result. A merge a post-filter removed leaves the union
-	// as the rest of the project — the pass-through emits every unclaimed input —
-	// so a source whose words recur elsewhere would pass containment against a
-	// vocabulary that has nothing to do with it, and be neither re-added nor
-	// reported. A lapsed claim falls back to the strict per-output test, which is
-	// the right question once there is no merge to be spread across.
-	merged := make(map[string]bool, len(result.Merges))
+	// A merged source is scored against the text of ITS OWN merge, not against
+	// the union of every output (#549). The union was sound before the
+	// pass-through existed, when the union was a handful of survivors; now every
+	// id the response never named is emitted verbatim, so the union of a real
+	// result is the whole project's vocabulary, and a source whose substance its
+	// merge discarded passes containment on the strength of whatever unrelated
+	// memory happens to share its words. That is the same class of loss the
+	// pass-through was written to remove — an unrelated survivor sharing 45% of
+	// the absorbed memory's tokens — reintroduced through the merge branch.
+	//
+	// The merge's own text is the whole witness available: a merge source is
+	// consumed by its merge, so its own text is never in the result, and the
+	// parser rejects an id claimed by two operations, so a sibling cannot be in
+	// the result either. Scoring against the merge's siblings could only LOWER
+	// the bar — they add their own words to a set the merge's text already
+	// dominates — and it never rescues a merge whose own text is too thin, which
+	// is the case the guard exists for.
+	//
+	// A merge a post-filter removed has no witness and is absent from this map,
+	// so its sources fall back to the strict per-output test, which is the right
+	// question once there is no merge to be spread across.
+	mergedText := make(map[string]map[string]bool, len(result.Merges))
 	for _, m := range result.Merges {
 		if m.Text == "" || !present[m.Text] {
 			continue
 		}
+		tokens := tokenize(m.Text)
 		for _, id := range m.IDs {
-			merged[memIDKey(id)] = true
+			mergedText[memIDKey(id)] = tokens
 		}
 	}
 
@@ -122,8 +186,8 @@ func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []Dropped
 		if len(inTokens) == 0 {
 			continue
 		}
-		if merged[key] {
-			if hasCloseSurvivor(inTokens, union) {
+		if mergeTokens, ok := mergedText[key]; ok {
+			if hasCloseSurvivor(inTokens, mergeTokens) {
 				continue
 			}
 		} else if hasCloseSurvivorInAny(inTokens, outTokens) {
