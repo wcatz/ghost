@@ -2351,6 +2351,16 @@ func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 // row that records it share one transaction, so a memory cannot exist without
 // its own first entry in its history.
 func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string, error) {
+	// Guarded here rather than waved through as bench-only. The reach note in
+	// secret_guard.go used to argue that a caller reading provider.MemoryStore
+	// is hypothetical; it is what every implementor does, and the cost of
+	// guarding it measured out at nothing — every corpus this repository can
+	// seed from produced zero hits. The three corpora the bench harness
+	// downloads at run time are the one residual, and a benchmark that refuses a
+	// credential-shaped record has reached the right answer.
+	if err := rejectSecret("content", m.Content); err != nil {
+		return "", err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

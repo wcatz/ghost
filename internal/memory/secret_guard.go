@@ -85,8 +85,8 @@ func rejectSecretList(field string, values []string) error {
 // Reached: every write of text a tool, an import, or a model hands to a store
 // function the agent can reach — UpsertWithOptions (and so Upsert,
 // UpsertWithProvenance, the MCP save tools, the Claude first-contact import,
-// and reflection's candidate writes), UpdateMemory, RecordDecision, the three
-// task writers, UpdateLearnedContext, and the three portable importers
+// and reflection's candidate writes), Create, UpdateMemory, RecordDecision, the
+// three task writers, UpdateLearnedContext, and the three portable importers
 // ImportMemory/ImportTask/ImportDecision. The importers matter more than their
 // position in this list suggests: they write with raw INSERTs rather than
 // through Upsert, and their input is a JSONL artifact that arrived from
@@ -94,35 +94,43 @@ func rejectSecretList(field string, values []string) error {
 //
 // Not reached, on purpose:
 //
-//   - Store.Create, RestoreSnapshot and SeedGlobalMemories. These write
-//     byte-exact data into a throwaway or restored store: bench/eval seeders
-//     and dataset fixtures, a snapshot restore, and Ghost's own builtin seeds.
-//     A detector cannot be allowed to make a benchmark's third-party corpus
-//     unloadable, and a restore that silently dropped rows would be worse than
-//     the leak it prevents. The same three are outside the MaxContentLen
-//     contract in content.go, for the same reason and the same reason only.
+//   - Store.RestoreSnapshot and SeedGlobalMemories. These write byte-exact data
+//     into a restored store: a snapshot file, and Ghost's own builtin seeds. A
+//     restore that silently dropped rows would be worse than the leak it
+//     prevents — a restore is a user's own database coming back — and they are
+//     outside the MaxContentLen contract in content.go for the same reason.
 //   - Store.ReplaceNonManual, which writes the reflect tier's memories with its
-//     own statements and is likewise exported on provider.MemoryStore. It
-//     cannot be guarded here: it runs inside ApplyReflection's transaction, so a
-//     refusal would roll back an entire consolidation — every merge and every
-//     preserved row — over one contaminated memory. The mitigation is the
-//     tier's drop guard instead (dropSecretMemories, in
-//     internal/reflection/secrets.go), which removes the memory and lets the
-//     rest of the round commit. That is a weaker claim than this list makes for
-//     the entries above it, and it is stated as such rather than folded in.
+//     own statements and is likewise exported on provider.MemoryStore. Two
+//     reasons, and the second is the one that decided it.
+//
+//     It runs inside ApplyReflection's transaction, so a refusal would roll back
+//     an entire consolidation — every merge and every preserved row — over one
+//     contaminated memory. The tier's drop guard (dropSecretMemories, in
+//     internal/reflection/secrets.go) is the mitigation, and it runs before the
+//     store ever sees the value.
+//
+//     Filtering here instead would be worse than either. ReplaceNonManual
+//     deletes every replaceable row the snapshot does not account for, so
+//     dropping a credential-shaped memory from the emitted set DELETES the
+//     stored row: a database written before this guard existed would have that
+//     memory removed by an unattended nightly job, with no report and no way to
+//     recover it. That is the same reason the reflection drop guard takes an
+//     explicit --allow-drops before deleting anything (#549), and it is why
+//     clearing a credential out of an existing database is the separate,
+//     report-first job described below rather than a side effect of
+//     consolidation.
 //   - Content already in the database. This guard reads what a caller is
 //     trying to write; it does not sweep rows a previous version stored. Doing
 //     that is a separate, report-first job — a detection pass over existing
 //     rows has to be able to tell an operator what it found without changing
 //     their memory store under them. Note that the portable importers are NOT
-//     in this second category: an artifact is untrusted input arriving now,
-//     not a row that was already here.
+//     in this category: an artifact is untrusted input arriving now, not a row
+//     that was already here.
 //
 // The consequence of the first limit is stated plainly: a caller that reaches
-// Create, RestoreSnapshot or ReplaceNonManual directly bypasses the guard. All
-// three are raw "write exactly this" primitives on the provider.MemoryStore
-// interface, and none has a production caller that does not filter upstream —
-// the bench harness for Create, a snapshot file for RestoreSnapshot, the
-// reflection tier for ReplaceNonManual. So the exposure is a future caller
+// RestoreSnapshot or ReplaceNonManual directly bypasses the guard. Both are raw
+// "write exactly this" primitives on the provider.MemoryStore interface, both
+// have exactly one production caller, and each of those filters upstream — a
+// snapshot file, and the reflection tier. So the exposure is a future caller
 // reading the interface rather than a hole in a shipped path. If that changes,
 // the guard moves with it.

@@ -31,6 +31,7 @@ package secret
 
 import (
 	_ "embed"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -103,9 +104,17 @@ var rules = []rule{
 		re:    regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{24,}`),
 	},
 	{
+		// The two real OpenAI key shapes, and nothing looser. The earlier
+		// `sk-` + 24 or more of [A-Za-z0-9_-] accepted every hostname that
+		// happened to start with sk-, which is a naming convention an
+		// infrastructure team uses: sk-prod-cluster-node-01.example is a
+		// service, not a key. So the project-scoped form takes base62 only — a
+		// real project key has no dashes — at the length one actually has, and
+		// the legacy form is pinned to its exact 48 characters with a word
+		// boundary, so a longer token cannot be truncated into a match.
 		name:  "openai-key",
 		label: "OpenAI-style API key (sk-)",
-		re:    regexp.MustCompile(`\bsk-(?:proj-)?[A-Za-z0-9_-]{24,}`),
+		re:    regexp.MustCompile(`\b(?:sk-proj-[A-Za-z0-9]{40,}|sk-[A-Za-z0-9]{48})\b`),
 	},
 	{
 		name:  "github-pat",
@@ -177,56 +186,98 @@ var rules = []rule{
 		// the key they hold in a "type" field, and those names are only used for
 		// private material: a public or verification key file is spelled
 		// KESVerificationKey / EvolVerificationKey, which this does not match.
-		// The label is the reason this rule is not a keyword heuristic — the
-		// word "key" appears in every Cardano memory, the type name does not.
+		// The tail is [A-Za-z0-9_]* rather than [A-Za-z0-9]* because the modern
+		// key files name the curve too — PaymentSigningKeyShelley_ed25519 is a
+		// signing key and PlutusScriptV1 is a public script, and only one of
+		// those two contains the word.
 		name:  "cardano-key-file",
 		label: "Cardano private key file (operational/scaling/kes/evolving key)",
-		re:    regexp.MustCompile(`(?i)"type"\s*:\s*"[A-Za-z]*(?:Signing|Private)Key"|"type"\s*:\s*"(?:KES|Evol|Scaling|VRF|Delegation)Key"`),
+		re:    regexp.MustCompile(`(?i)"type"\s*:\s*"[A-Za-z0-9_]*(?:Signing|Private)Key[A-Za-z0-9_]*"|"type"\s*:\s*"(?:KES|Evol|Scaling|VRF|Delegation)Key"`),
 	},
 	{
-		// A cardano-cli signing key file is cborHex and nothing else, so the
-		// field name is the only signal available. The floor sits above a
-		// payment or stake credential (28 bytes, 56 hex) and a bare public key
-		// (32 bytes, 64 hex), which are published values, and below a 64-byte
-		// private scalar (128 hex) — the size every Cardano secret key has.
+		// The other side of the same envelope: a paste that names the file it
+		// came from rather than carrying the JSON type field. cardano-key-file
+		// owns the type field, and without this the cborHex rule would have no
+		// shape of its own — every type name it could read is one that rule
+		// already reads. So this matches the filename instead: a line naming a
+		// .skey file and carrying a key-sized hex run is a key paste, and a
+		// public Plutus script never names a .skey file.
 		name:  "cardano-cbor-hex",
-		label: "Cardano CBOR-encoded key (cborHex)",
-		re:    regexp.MustCompile(`(?i)cborhex"?\s*[:=]\s*"?[0-9a-f]{96,}`),
+		label: "Cardano CBOR-encoded key (cborHex beside a .skey file)",
+		re:    regexp.MustCompile(`(?i)\.skey\b[^\n]*\b[0-9a-f]{64,}`),
 	},
 	{
 		name:  "authorization-bearer",
 		label: "Authorization bearer token",
 		re:    regexp.MustCompile(`(?i)\b(?:proxy-)?authorization\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/=-]{20,}`),
 	},
-	{
-		// A userinfo section carrying a colon. "postgres://ghost@host/db" has a
-		// user and no password and is left alone; "postgres://ghost:pw@host/db"
-		// is a credential in a connection string, which is exactly what ends up
-		// pasted into an incident note. The eight-character floor on the password
-		// keeps a bare "scheme://a:b@host" from counting, which is a URL nobody
-		// writes and a shape some prose reaches.
-		name:  "url-inline-credentials",
-		label: "URL with inline credentials",
-		re:    regexp.MustCompile(`://[^\s/:@]+:[^\s/@]{8,}@`),
-	},
 }
 
-// assignedSecretValue is the index of the assigned value in
-// assignedSecretRe's submatches, and assignedSecretFloor is the shortest value
-// its pattern accepts.
-const (
-	assignedSecretValue = 1
-	// A value has to be at least this long to be a credential rather than a
-	// word: 16 is past the length of every spelling of "changeme" and every
-	// "example-secret" a config or a doc reaches for, and short of none of the
-	// real formats above.
-	assignedSecretFloor = 16
-)
+// urlCredentialsRe finds a userinfo section that carries a password — which is
+// what distinguishes "postgres://ghost@host/db" (a user, no secret) from
+// "postgres://ghost:pw@host/db" (a credential in a connection string, and
+// exactly what gets pasted into an incident note).
+//
+// It is checked outside the rules table because matching it is only half the
+// test: the userinfo has to be looked at, because a template carries a
+// password-shaped pair of words and a leak carries a value. Eight characters is
+// a floor, not a test — "PASSWORD" is eight and "changeme" is eight.
+var urlCredentialsRe = regexp.MustCompile(`://[^\s/:@]+:([^\s/@]{8,})@`)
 
-// longHexRe is checked outside the rules table for the same reason
-// assignedSecretRe is: matching it is only half the test, because the matched
-// run has to be inspected before it counts.
+// urlCredentialIndex is the submatch holding the userinfo password.
+const urlCredentialIndex = 1
+
+// urlPasswordAllCaps matches a userinfo password written in capitals. That is
+// placeholder convention — postgres://USER:PASSWORD@host/db is what a template, a
+// README and a docstring all say — and a real password made entirely of
+// upper-case alphanumerics is not a shape worth refusing over: every format
+// worth catching here (base64, base64url, hex, an AWS secret) is mixed case,
+// because that is what encoding random bytes produces.
+var urlPasswordAllCaps = regexp.MustCompile(`^[A-Z0-9_]+$`)
+
+// urlCredentialPlaceholders are the literal userinfo values a template carries,
+// matched in either case.
+var urlCredentialPlaceholders = map[string]bool{
+	"password": true, "passwd": true, "pass": true, "pwd": true,
+	"secret": true, "token": true, "apikey": true, "api_key": true,
+	"user": true, "username": true, "login": true, "admin": true,
+	"root": true, "hint": true, "todo": true, "none": true, "null": true,
+	"changeme": true, "change_me": true, "redacted": true, "example": true,
+	"your_password": true, "my_password": true, "db_password": true,
+	"the_password": true, "placeholder": true, "xxxxx": true,
+}
+
+// looksLikeURLCredential reports whether a matched userinfo password is a value
+// rather than a stand-in for one.
+func looksLikeURLCredential(password string) bool {
+	if urlPasswordAllCaps.MatchString(password) {
+		return false
+	}
+	return !urlCredentialPlaceholders[strings.ToLower(password)]
+}
+
+// longHexRe is checked outside the rules table for the same reason the
+// assignment and URL rules are: matching it is only half the test, because the
+// matched run has to be inspected before it counts.
 var longHexRe = regexp.MustCompile(`\b[0-9a-fA-F]{` + strconv.Itoa(longHexFloor) + `,}\b`)
+
+// cardanoCborHexLabel matches a value labelled as a Cardano CBOR field.
+var cardanoCborHexLabel = regexp.MustCompile(`(?i)"?cborhex"?\s*[:=]`)
+
+// inLabelledCardanoField reports whether text labels a long hex value as a
+// Cardano CBOR field, in which case the hex is a described value rather than an
+// unlabelled paste and its length is not enough to call it key material.
+//
+// A public Plutus script is what forces this. Its cborHex runs 200 to 1000
+// characters — well past longHexFloor — uses the same alphabet as a signing key,
+// and is quoted in ordinary memories about a validator, a fee, a datum or a
+// redeemer. A Cardano project cannot be operated without recording its scripts,
+// so refusing one refuses the knowledge. What separates a script from a key is
+// the envelope, and cardano-cbor-hex is the rule that reads it, so a labelled
+// cborHex is left to that rule and this one stands down.
+func inLabelledCardanoField(text string) bool {
+	return cardanoCborHexLabel.MatchString(text)
+}
 
 // looksLikeKeyMaterial reports whether a long hex run is worth refusing.
 //
@@ -253,29 +304,49 @@ func looksLikeKeyMaterial(run string) bool {
 	return digit && letter
 }
 
-// assignedSecretRe is the general case: a credential-shaped name, an
-// assignment, and a value long and character-class-rich enough that it could
-// not be prose about the setting. Those three requirements are what separate
-// "client_secret: rotate this value" from a leak, and none of them is a keyword
-// alone. The value floor is assignedSecretFloor, applied in the pattern.
+// assignmentRe finds the general case: a key token, an assignment, and a value
+// long enough to be worth looking at. It deliberately does NOT try to decide
+// whether the key names a secret — that is keyNamesSecret's job, and doing it
+// here is what the first version got wrong.
+//
+// The first version required a secret-ish word anywhere in the key, and refused
+// on that plus a long value. It refused a Helm chart, a Grafana provisioning
+// file and a CI workflow, because all three are mostly about credentials and all
+// three record the *name* of one: secretName, existingSecret, token_url,
+// password_changed_at, token: secrets.GITHUB_TOKEN. So the key is captured whole
+// and judged, and the value is judged separately, and BOTH have to hold.
 //
 // The value class excludes whitespace, quotes, commas and semicolons, so a
-// quoted scalar matches without its quotes and an English phrase after the
-// colon never starts a match. The remaining shape test is in
-// looksAssignedSecret.
-//
-// "credential" is deliberately absent from the name list while "secret",
-// "password", "token" and "apikey" are present, and the asymmetry is the point.
-// Those name a value; "credential" names a role. Its concrete forms in this
-// domain are public — a Cardano payment or stake credential, a wallet
-// credential — and those are exactly the values an operator records. A
-// provider's own secret field still matches, because AWS's is
-// aws_secret_access_key, Stripe's is sk_live_, GitHub's is ghp_: the "secret"
-// and the provider prefix reach what the bare word cannot.
-var assignedSecretRe = regexp.MustCompile(
-	`(?i)\b[a-z0-9_.-]*(?:api[_-]?key|apikey|secret|password|passwd|pwd|token|` +
-		`private[_-]?key|auth[_-]?token|access[_-]?token)[a-z0-9_.-]*` +
-		`\s*[:=]\s*["']?([^\s"',;]{` + strconv.Itoa(assignedSecretFloor) + `,})`)
+// quoted scalar matches without its quotes and an English phrase after the colon
+// never starts a match.
+var assignmentRe = regexp.MustCompile(
+	`(?i)\b([a-z0-9_.-]{1,64})\s*[:=]\s*["']?([^\s"',;]{` + strconv.Itoa(assignedSecretFloor) + `,})`)
+
+const (
+	assignmentKey   = 1
+	assignmentValue = 2
+	// assignedSecretFloor is the shortest value worth looking at. It is 20
+	// rather than 16 because every false positive that motivated the raise
+	// landed between 16 and 19: grafana-admin-v2 is 16, wildcard-tls-2024 is 17,
+	// secrets.GITHUB_TOKEN is 19. The true positives that matter are 20 and up.
+	assignedSecretFloor = 20
+	// longValueFloor is the length at which a value stops needing the strict
+	// entropy bar. A 32-character credential is material whatever its character
+	// distribution, because no description of a setting is 32 characters of
+	// mixed-case alphanumerics.
+	longValueFloor = 32
+	// minEntropyFloor and minEntropyLoose are bits of Shannon entropy per
+	// character, measured over the value's own bytes. Random base62 over 20
+	// characters scores about 4.3; the placeholder-shaped false positives score
+	// between 2.8 and 3.2. The gap is wide, and the thresholds sit inside it
+	// rather than on either side of a case.
+	minEntropyFloor = 3.5
+	minEntropyLoose = 3.0
+	// wordSegmentFloor is the length at which an all-lower or all-upper
+	// alphabetic run inside a value is a word rather than a key. Six is where
+	// "secret", "grafana" and "GITHUB" clear and "token", "tls" and "v2" do not.
+	wordSegmentFloor = 6
+)
 
 // placeholderChars are the characters that mark a value as a template rather
 // than a secret: ${VAR} and {{VAR}} substitutions, <angle> placeholders, and
@@ -284,15 +355,246 @@ var assignedSecretRe = regexp.MustCompile(
 // which is the behaviour this control wants to encourage.
 const placeholderChars = "${}<>*"
 
+// urlValuePrefix matches a value that is a URL. A secret is not a URL, and
+// token_url: https://oauth2.googleapis.com/token is a memory about a token
+// endpoint rather than about a token.
+var urlValuePrefix = regexp.MustCompile(`(?i)^[a-z][a-z0-9+.-]*://`)
+
+// secretNouns are the single words that name a credential field. Absent on
+// purpose: "credential", which names a role rather than a value — its concrete
+// forms here are a Cardano payment or stake credential, both of which are
+// published values an operator records on purpose.
+var secretNouns = map[string]bool{
+	"secret": true, "secrets": true,
+	"password": true, "passwords": true, "passwd": true, "pwd": true,
+	"token": true, "apikey": true,
+}
+
+// secretNounPairs are the two-word names a single-word list cannot express.
+var secretNounPairs = map[[2]string]bool{
+	{"api", "key"}: true, {"private", "key"}: true, {"secret", "key"}: true,
+	{"auth", "token"}: true, {"access", "token"}: true, {"bearer", "token"}: true,
+	{"encryption", "key"}: true, {"signing", "key"}: true,
+}
+
+// descriptorWords turn a credential noun into a reference to one. This is the
+// half of the key test that the noun list cannot do: "secret" is a whole word in
+// `secretName` and in `existingSecret` just as much as it is in
+// `client_secret`, and only the presence of a descriptor word beside it says
+// that the key points at a credential rather than holding one.
+var descriptorWords = map[string]bool{
+	"name": true, "names": true, "keyname": true, "label": true, "field": true,
+	"url": true, "uri": true, "endpoint": true, "host": true, "hostname": true,
+	"at": true, "ref": true, "refs": true, "reference": true,
+	"path": true, "paths": true, "file": true, "files": true, "dir": true,
+	"id": true, "ids": true, "type": true, "kind": true, "class": true,
+	"provider": true, "issuer": true, "algorithm": true, "version": true,
+	"hash": true, "len": true, "length": true, "count": true,
+	"expiry": true, "expires": true, "expiration": true, "ttl": true,
+	"rotation": true, "changed": true, "updated": true, "created": true,
+	"existing": true, "source": true, "store": true, "backend": true,
+	"location": true, "prefix": true, "pattern": true, "format": true,
+	"example": true, "placeholder": true, "hint": true,
+}
+
+// keyWords splits a config key into lower-cased words on the separators a key
+// uses — _, -, . — and on camelCase boundaries, so `existingSecret` yields
+// [existing, secret] and `token_url` yields [token, url]. Both spellings occur
+// in the same corpus: snake_case in a Helm values file, camelCase in a Java or
+// Go config struct, which is why the camel boundary is inserted before
+// lowercasing rather than by inspecting the already-lowered string.
+func keyWords(key string) []string {
+	runes := []rune(key)
+	marked := make([]rune, 0, len(runes)+4)
+	for i, r := range runes {
+		if i > 0 && isUpper(r) {
+			prev := runes[i-1]
+			nextIsLower := i+1 < len(runes) && isLower(runes[i+1])
+			if isLower(prev) || isDigit(prev) || (isUpper(prev) && nextIsLower) {
+				marked = append(marked, '_')
+			}
+		}
+		marked = append(marked, r)
+	}
+	fields := strings.FieldsFunc(string(marked), func(r rune) bool {
+		return r == '_' || r == '-' || r == '.' || !isLower(r) && !isDigit(r) && !isUpper(r)
+	})
+	for i, f := range fields {
+		fields[i] = strings.ToLower(f)
+	}
+	return fields
+}
+
+// keyNamesSecret reports whether a key names a credential field rather than
+// pointing at one.
+//
+// Two tests, and either can refuse. The key must contain a secret noun as a
+// whole word — `client_secret` and `api_key` pass, `notsecret` does not, because
+// there the noun is part of a longer word rather than being one. And the key must
+// contain no descriptor word anywhere: `secretName` and `existingSecret` each
+// carry `secret` as a whole word, and are refused because what they name is a
+// name.
+func keyNamesSecret(key string) bool {
+	words := keyWords(key)
+	for _, w := range words {
+		if descriptorWords[w] {
+			return false
+		}
+	}
+	for _, w := range words {
+		if secretNouns[w] {
+			return true
+		}
+	}
+	for i := 0; i+1 < len(words); i++ {
+		if secretNounPairs[[2]string{words[i], words[i+1]}] {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeCredentialMaterial reports whether an assigned value is a credential
+// rather than a reference to one, a placeholder for one, or a description of
+// where one lives.
+//
+// Four tests, all required:
+//
+//   - not a template (see placeholderChars);
+//   - not a URL, because a secret is not a URL;
+//   - not a name. A value split on its separators that contains an all-lower or
+//     all-upper run of wordSegmentFloor or more letters is naming something:
+//     `secrets.GITHUB_TOKEN`, `grafana-admin-v2`, `wildcard-tls-2024`. Key
+//     material is base16 or base64 of random bytes and mixes case, so it does
+//     not produce a six-letter single-case run;
+//   - and it has to pass the length/entropy bar, which is what separates a
+//     20-character random password from a 20-character word chain.
+func looksLikeCredentialMaterial(value string) bool {
+	if strings.ContainsAny(value, placeholderChars) {
+		return false
+	}
+	if urlValuePrefix.MatchString(value) {
+		return false
+	}
+	if hasWordSegment(value) {
+		return false
+	}
+	if !hasTwoCharClasses(value) {
+		return false
+	}
+	entropy := entropyPerChar(value)
+	return (len(value) >= assignedSecretFloor && entropy >= minEntropyFloor) ||
+		(len(value) >= longValueFloor && entropy >= minEntropyLoose)
+}
+
+// hasWordSegment reports whether value names something: a separator-delimited
+// run of wordSegmentFloor or more letters that is entirely one case.
+//
+// One case, and letters only, and both matter. Base64 of random bytes produces
+// mixed-case runs routinely — `wJalrXUtnFEMI` is thirteen letters with no digit
+// and is still key material — so a mixed-case run is not a word and a
+// single-case one is. Letters only matters because of the value this test must
+// not swallow: a lower-case hex key (`deadbeefcafebabe0123456789abcdef…`) is
+// letters and digits in one run, and reading it as a word because every letter
+// happens to be lower-case would be a false negative on the commonest secret
+// shape there is.
+func hasWordSegment(value string) bool {
+	for _, segment := range strings.FieldsFunc(value, func(r rune) bool {
+		return !isLetter(r)
+	}) {
+		if len(segment) < wordSegmentFloor {
+			continue
+		}
+		allLower, allUpper := true, true
+		for _, r := range segment {
+			if isLower(r) {
+				allUpper = false
+			} else {
+				allLower = false
+			}
+		}
+		if allLower || allUpper {
+			return true
+		}
+	}
+	return false
+}
+
+// hasTwoCharClasses reports whether value draws on at least two of lower case,
+// upper case and digits. A single-class run is a hostname, a flag name, a long
+// filename or a spelled-out word — a note about a setting, not a key.
+//
+// On today's thresholds this gate is mostly redundant with the other two, and
+// that is worth stating rather than rediscovering. A single-class value of
+// letters is a word segment, which hasWordSegment refuses; one of digits is
+// capped by the alphabet at log2(10) = 3.32 bits, under minEntropyFloor, so the
+// entropy bar refuses that. The shape it alone reaches is a long run of
+// punctuation, and the test suite says exactly that.
+//
+// It is kept anyway, because the two gates that duplicate it are thresholds
+// rather than invariants: lower minEntropyFloor to 3.0 to catch a 19-character
+// key, and a digits-only value starts passing with nothing left to stop it. A
+// second, differently-founded condition is what makes that retune safe.
+func hasTwoCharClasses(value string) bool {
+	var lower, upper, digit bool
+	for _, r := range value {
+		switch {
+		case isLower(r):
+			lower = true
+		case isUpper(r):
+			upper = true
+		case isDigit(r):
+			digit = true
+		}
+	}
+	classes := 0
+	for _, present := range []bool{lower, upper, digit} {
+		if present {
+			classes++
+		}
+	}
+	return classes >= 2
+}
+
+// entropyPerChar is the Shannon entropy of value's bytes, in bits per byte. It
+// is the standard measure for "this looks random", and it is what separates a
+// generated key from a phrase someone typed: the same length, the same
+// character set, a completely different distribution.
+func entropyPerChar(value string) float64 {
+	if value == "" {
+		return 0
+	}
+	var counts [256]int
+	for i := 0; i < len(value); i++ {
+		counts[value[i]]++
+	}
+	total := float64(len(value))
+	entropy := 0.0
+	for _, c := range counts {
+		if c == 0 {
+			continue
+		}
+		p := float64(c) / total
+		entropy -= p * math.Log2(p)
+	}
+	return entropy
+}
+
+func isLower(r rune) bool  { return r >= 'a' && r <= 'z' }
+func isUpper(r rune) bool  { return r >= 'A' && r <= 'Z' }
+func isDigit(r rune) bool  { return r >= '0' && r <= '9' }
+func isLetter(r rune) bool { return isLower(r) || isUpper(r) }
+
 // Detect reports whether text contains a credential-shaped value, and which
 // format it matched. It is a pure function of its input and is cheap enough to
 // call on every save: text is bounded by memory.MaxContentLen and the rules are
 // linear scans.
 //
-// Two rules are checked after the table rather than in it, because matching
-// them is only half the test: longHexRe and assignedSecretRe both need the
-// matched text inspected (looksLikeKeyMaterial, looksAssignedSecret) rather
-// than a boolean. Both therefore walk EVERY candidate in the text, not the
+// Three rules are checked after the table rather than in it, because matching
+// them is only half the test: longHexRe, urlCredentialsRe and assignmentRe all
+// need the matched text inspected (looksLikeKeyMaterial,
+// looksLikeURLCredential, keyNamesSecret + looksLikeCredentialMaterial) rather
+// than a boolean. All three therefore walk EVERY candidate in the text, not the
 // leftmost one. A first-match implementation is a false negative in the exact
 // case this control exists for: a placeholder-shaped candidate earlier in the
 // save — `${DB_PASSWORD}`, `****`, a filler run — shadows a real credential
@@ -309,12 +611,17 @@ func Detect(text string) (Finding, bool) {
 		}
 	}
 	for _, run := range longHexRe.FindAllString(text, -1) {
-		if looksLikeKeyMaterial(run) {
+		if looksLikeKeyMaterial(run) && !inLabelledCardanoField(text) {
 			return Finding{Rule: longHexRule, Label: longHexLabel}, true
 		}
 	}
-	for _, m := range assignedSecretRe.FindAllStringSubmatch(text, -1) {
-		if looksAssignedSecret(m[assignedSecretValue]) {
+	for _, m := range urlCredentialsRe.FindAllStringSubmatch(text, -1) {
+		if looksLikeURLCredential(m[urlCredentialIndex]) {
+			return Finding{Rule: urlCredentialsRule, Label: urlCredentialsLabel}, true
+		}
+	}
+	for _, m := range assignmentRe.FindAllStringSubmatch(text, -1) {
+		if keyNamesSecret(m[assignmentKey]) && looksLikeCredentialMaterial(m[assignmentValue]) {
 			return Finding{Rule: assignedSecretRule, Label: assignedSecretLabel}, true
 		}
 	}
@@ -326,6 +633,8 @@ func Detect(text string) (Finding, bool) {
 
 const (
 	mnemonicRule        = "bip39-mnemonic"
+	urlCredentialsRule  = "url-inline-credentials"
+	urlCredentialsLabel = "URL with inline credentials"
 	mnemonicWordsLabel  = "24-word BIP-39 recovery mnemonic"
 	longHexRule         = "long-hex"
 	longHexLabel        = "long hex blob (key material, or several digests concatenated)"

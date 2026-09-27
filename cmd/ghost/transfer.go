@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -406,6 +407,16 @@ func printExportSummary(out io.Writer, path string, stats portable.Stats) error 
 // reviewable: the reader sees each memory's content prefix, not just a count.
 func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	detail := r.Detail
+	// A credential refusal prints the id and nothing else. portable's
+	// safeDetail already reduces the detail to the id for any record whose text
+	// holds one — see the note there — and this is the second line for a
+	// RecordResult that reached this function with a detail set by something
+	// other than that helper. The format still reaches the reader through
+	// report.Errors, which is the part needed to fix the artifact.
+	var refused *memory.SecretContentError
+	if errors.As(r.Error, &refused) {
+		detail = r.ID
+	}
 	// Only a memory has provenance to speak of. A project or a task line that
 	// said "provenance kept as exported" would be a sentence about a field the
 	// record does not have.

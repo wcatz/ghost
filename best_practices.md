@@ -40,6 +40,8 @@
 - SOPS-encrypted secrets only — never git restore encrypted files
 - Every store path that writes caller-supplied text calls `memory.rejectSecret` first; the refusal names the field and the credential format and never the value
 - Credential detection is shape-based (`internal/secret`), never keyword-based: a memory store's ordinary vocabulary is full of the words a keyword heuristic would refuse, so a rule that fires on a word is a bug
+- A credential rule must be tested against the vocabulary of the tools Ghost's users run — Helm keys, k8s manifests, Grafana provisioning, CI workflows. Those record the NAME of a credential (`secretName`, `existingSecret`, `token_url`, `password_changed_at`, `secrets.GITHUB_TOKEN`) and never its value, so a rule that cannot tell a name from a value will refuse all of them
+- A refusal must not print the value it refused. A diagnostic about a credential names the format, the field and the record's id — and that covers the REPORT paths too, not only the error
 
 ## Project Invariants
 - The `_global` project is protected: every destructive or reassigning project operation (`DeleteProject`, `MergeProject`, any future op that deletes project rows or moves child records) must refuse `_global` on either side, with the refusal implemented at the store layer so all callers inherit it

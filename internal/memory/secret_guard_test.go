@@ -548,6 +548,41 @@ func TestUpdateLearnedContextRefusesCredentialContent(t *testing.T) {
 	}
 }
 
+// TestCreateRefusesCredentialContent closes the interface exposure the first
+// version of this guard left open. Create is the raw "insert exactly this"
+// primitive on provider.MemoryStore, its one production-side user is the bench
+// harness, and the reach comment argued from exactly that — a future caller
+// reading the interface is the exposure, not a hole in a shipped path.
+//
+// That argument is weaker than it looks, because a caller reading an interface
+// is not hypothetical: it is what every implementor does. And the cost of
+// guarding it turned out to be nothing — every corpus this repository can seed
+// from (bench/, internal/bench/, eval/, assets/) was checked against the
+// detector and produced zero hits, so the bench harness keeps working. What
+// remains is the three corpora downloaded at run time, and a benchmark refusing
+// a credential-shaped record is the correct outcome for one anyway.
+func TestCreateRefusesCredentialContent(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	_, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "the token is " + secretFixture, Source: "mcp", Importance: 0.7,
+	})
+	assertRefusal(t, err, "content")
+
+	if n := projectMemoryCount(t, s); n != 0 {
+		t.Errorf("a refused create stored %d memories, want 0", n)
+	}
+	if _, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "an ordinary fact worth keeping", Source: "mcp", Importance: 0.7,
+	}); err != nil {
+		t.Fatalf("the next create after a refusal failed too: %v", err)
+	}
+	if n := projectMemoryCount(t, s); n != 1 {
+		t.Errorf("store holds %d memories, want exactly the one ordinary save", n)
+	}
+}
+
 // TestSecretRefusalCarriesNoStoreWrites is the atomicity claim behind the
 // per-path count assertions above, stated once: whichever write path refuses,
 // the refusal happens before the statement rather than as a compensating

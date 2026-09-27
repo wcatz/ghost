@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/secret"
 )
 
 // ImportOptions is one import run's settings. It is an alias rather than a
@@ -406,7 +407,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 				project.Name, adopted)
 		}
 		adoptedElsewhere := adopted != project.ID
-		steps = append(steps, step{rec: p, kind: TypeProject, detail: detail, opts: opts,
+		steps = append(steps, step{rec: p, kind: TypeProject, detail: safeDetail(detail, project.ID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				if adoptedElsewhere {
 					// Nothing to write, and nothing that could be: the id belongs
@@ -427,7 +428,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 	for _, p := range memories {
 		m := p.rec.Memory
 		m.ProjectID = under(m.ProjectID)
-		steps = append(steps, step{rec: p, kind: TypeMemory, detail: contentPrefix(m.Content), check: checkFor(m.ProjectID), opts: opts,
+		steps = append(steps, step{rec: p, kind: TypeMemory, detail: safeDetail(contentPrefix(m.Content), m.ID), check: checkFor(m.ProjectID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				created, clamped, downgraded, err := s.ImportMemory(ctx, *m, opts)
 				if err != nil {
@@ -439,7 +440,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 	for _, p := range orderTasks(tasks) {
 		t := p.rec.Task
 		t.ProjectID = under(t.ProjectID)
-		steps = append(steps, step{rec: p, kind: TypeTask, detail: t.Title, check: checkFor(t.ProjectID), opts: opts,
+		steps = append(steps, step{rec: p, kind: TypeTask, detail: safeDetail(t.Title, t.ID), check: checkFor(t.ProjectID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				created, err := s.ImportTask(ctx, *t, opts.Apply)
 				if err != nil {
@@ -451,7 +452,7 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 	for _, p := range orderDecisions(decisions) {
 		d := p.rec.Decision
 		d.ProjectID = under(d.ProjectID)
-		steps = append(steps, step{rec: p, kind: TypeDecision, detail: d.Title, check: checkFor(d.ProjectID), opts: opts,
+		steps = append(steps, step{rec: p, kind: TypeDecision, detail: safeDetail(d.Title, d.ID), check: checkFor(d.ProjectID), opts: opts,
 			runFunc: func(ctx context.Context, s *memory.Store, opts ImportOptions) outcome {
 				created, err := s.ImportDecision(ctx, *d, opts.Apply)
 				if err != nil {
@@ -614,16 +615,55 @@ func (st step) run(ctx context.Context, s *memory.Store, report *ImportReport, o
 		report.count(report.Skipped, st.kind)
 	case ActionReject:
 		report.Rejected++
-		report.Errors = append(report.Errors, fmt.Errorf("line %d: %s %s: %w", st.rec.line, st.kind, labelOrID(result), err))
+		report.Errors = append(report.Errors, fmt.Errorf("line %d: %s %s: %w", st.rec.line, st.kind, labelOrID(result, err), err))
 	}
 	if onRecord != nil {
 		onRecord(result)
 	}
 }
 
+// safeDetail is the label a report line shows for a record, with the one
+// substitution that matters: where that label would carry a credential, the
+// record's id stands in for it.
+//
+// Every rejection path is a printing path, and the report is the only place the
+// artifact's own words are echoed back — the store refuses to write them, so
+// without this the value would reach the terminal through the very report that
+// announced the refusal. It is applied where the detail is built rather than
+// where it is printed, because a record can be rejected for a reason that has
+// nothing to do with the credential (a missing status, an unknown project) and
+// still carry one, and because RecordResult.Detail is a public field with
+// consumers in other packages — the per-record line in `ghost import` is one.
+//
+// The check runs on the label as it would be printed, not on the whole record:
+// a memory whose second line holds a credential has a clean first line, prints a
+// clean prefix, and is refused by the store with the format named. That is the
+// behaviour wanted — the report identifies the line, the error says what to
+// remove from it.
+func safeDetail(label, id string) string {
+	if _, ok := secret.Detect(label); ok {
+		return id
+	}
+	return label
+}
+
 // labelOrID names a record for an error line: the detail where there is one, the
 // id where there is not.
-func labelOrID(r RecordResult) string {
+//
+// err matters as much as the result. A credential refusal prints the id and
+// nothing else, whatever the detail happens to hold — safeDetail already reduces
+// it to the id, and this is the second line for a caller that sets Detail
+// directly or a kind added later that safeDetail does not know about. The format
+// still reaches the reader through the wrapped error, which is the part they need
+// in order to fix the artifact.
+func labelOrID(r RecordResult, err error) string {
+	var refused *memory.SecretContentError
+	if errors.As(err, &refused) {
+		if r.ID != "" {
+			return r.ID
+		}
+		return "(no id)"
+	}
 	switch {
 	case r.Detail != "" && r.ID != "":
 		return fmt.Sprintf("%q (%s)", r.Detail, r.ID)

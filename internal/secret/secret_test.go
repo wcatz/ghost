@@ -46,6 +46,15 @@ func TestDetectRejectsCredentialValues(t *testing.T) {
 			label: "OpenAI-style API key",
 		},
 		{
+			// The legacy shape, pinned to its exact 48 characters with a word
+			// boundary. Both openai-key branches need a case or the alternation
+			// is only half-covered.
+			name:  "openai legacy api key",
+			text:  "the key is " + token("sk-", "Zq7Xn4Bt2Lm9Kc5Vr8WdYh3Nf6Pj1Qs4Rw7Ed2Ua5Tz8Yb3X"),
+			rule:  "openai-key",
+			label: "OpenAI-style API key",
+		},
+		{
 			name:  "github classic personal access token",
 			text:  "GITHUB_TOKEN=ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
 			rule:  "github-pat",
@@ -72,8 +81,7 @@ func TestDetectRejectsCredentialValues(t *testing.T) {
 			text:  "slack: " + token("xoxb-", "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx"),
 			rule:  "slack-token",
 			label: "Slack token",
-		},
-		{
+		}, {
 			name:  "google api key",
 			text:  "AIzaSyD-0123456789abcdefghijklmnopqrstuvw",
 			rule:  "google-api-key",
@@ -154,10 +162,21 @@ func TestDetectRejectsCredentialValues(t *testing.T) {
 			label: "Cardano private key file",
 		},
 		{
-			name:  "cardano cborHex field with key material",
-			text:  `cborHex: "5820010df2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f"`,
+			// The envelope's type field, with the curve suffix the reviewer named
+			// and the reason the type-name tail accepts underscores and digits.
+			// cardano-key-file owns this shape.
+			name:  "cardano payment signing key file",
+			text:  `{"type":"PaymentSigningKeyShelley_ed25519","description":"Payment Signing Key","cborHex":"5820010df2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f"}`,
+			rule:  "cardano-key-file",
+			label: "Cardano private key file",
+		},
+		{
+			// The other envelope: a paste that names the file rather than the
+			// type. This is the shape cardano-cbor-hex owns.
+			name:  "cardano cold signing key beside its filename",
+			text:  "cold.skey cborHex 5820010df2429ae14536b3438abb84f7d3e8329ae48c3ecc9b1c1e5dbf1a1a5b8b4c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f",
 			rule:  "cardano-cbor-hex",
-			label: "Cardano CBOR-encoded key (cborHex)",
+			label: "Cardano CBOR-encoded key",
 		},
 		{
 			name:  "unlabelled cardano cold signing key paste",
@@ -191,6 +210,17 @@ func TestDetectRejectsCredentialValues(t *testing.T) {
 			// plain 64-char base64ish hex with no marker, so this is the case
 			// that decides whether an assigned-value rule is needed at all.
 			text:  "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+			rule:  "assigned-secret",
+			label: "assigned credential value",
+		},
+		{
+			name: "camelCase key naming a credential",
+			// The camel boundary in keyWords is what makes this a credential
+			// field at all: without it the key is the single token "myapikey",
+			// which is not a noun, and the value is missed. The negative side of
+			// the same boundary is in the Helm table (secretName,
+			// existingSecret).
+			text:  "myApiKey: Zq7Xn4Bt2Lm9Kc5Vr8Wd",
 			rule:  "assigned-secret",
 			label: "assigned credential value",
 		},
