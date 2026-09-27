@@ -106,7 +106,11 @@ type MemoryStore interface {
 	// path must be the session's directory on this filesystem: a project of the
 	// same name is claimed by its unique name only when its recorded path is
 	// unusable or contains path, so a synthetic path disables that fallback.
-	ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, error)
+	// A non-nil *memory.BindingRefusal beside the returned id means the
+	// unique-name fallback was not allowed to bind the repository to the project
+	// its name matched. The save is still routed to the returned id; the refusal
+	// names the project that kept the name, and only the caller can report that.
+	ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, *memory.BindingRefusal, error)
 	ResolveProject(ctx context.Context, input string) (id, name string, err error)
 	// ResolveExactProjectID reports whether input is literally a project's id,
 	// with no path, remote or basename fallback. The write side needs it to

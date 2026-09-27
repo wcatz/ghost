@@ -128,7 +128,7 @@ func TestConcurrentFirstPathSavesShareOneRepositoryProject(t *testing.T) {
 		projectID := fmt.Sprintf("/checkout-%d", i)
 		go func(server *Server, projectID string) {
 			<-start
-			id, err := server.ensureProjectForWithRemote(ctx, projectID, remote)
+			id, _, err := server.ensureProjectForWithRemote(ctx, projectID, remote)
 			results <- result{id: id, err: err}
 		}(server, projectID)
 	}
@@ -186,6 +186,12 @@ func TestPathSaveDoesNotBindAmbiguousRepositoryName(t *testing.T) {
 	})
 	if res.IsError {
 		t.Fatalf("save failed: %s", resultText(res))
+	}
+	// The save still creates its own project, and the result now says the two
+	// same-named projects were the reason: otherwise this is the same result
+	// text as a first save in a directory that happens to be new.
+	if out := resultText(res); !strings.Contains(out, "first") || !strings.Contains(out, "second") {
+		t.Errorf("ambiguous-name save does not name the projects it could not choose between:\n%s", out)
 	}
 	projects, err := srv.store.ListProjects(ctx)
 	if err != nil {
