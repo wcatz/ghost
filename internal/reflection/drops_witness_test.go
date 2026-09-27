@@ -109,6 +109,11 @@ func TestPromptRendersTheOpsContractAsOneContiguousList(t *testing.T) {
 		`- "rewrite <id> -> <text>"`,
 		`- "drop <id> reason: obsolete"`,
 		`- "drop <id> reason: superseded by <id>"`,
+		// The last splice site's far boundary. Without it the loop's final
+		// comparison stops at the supersession bullet and the blank line that
+		// second `replaceTail` produced — between that bullet and this heading —
+		// is unpinned, so reinstating the "\n" there would pass.
+		"   Rules:",
 	}
 	for i := 1; i < len(bullets); i++ {
 		_, afterPrev, ok := strings.Cut(prompt, bullets[i-1])

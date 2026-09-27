@@ -365,6 +365,35 @@ func reflectSkipDecision(skipUnchanged, apply bool, stored, current string) bool
 	return skipUnchanged && apply && stored != "" && stored == current
 }
 
+// promotionOutcome is what is knowable about --promote-globals at the moment the
+// reduction report is printed.
+//
+// It is a type rather than a bare count because zero kept is AMBIGUOUS: after an
+// apply it means every candidate became a _global row, and before one it means
+// nothing has been written at all. Inferring the state from the count produced a
+// report that told the operator a promotion "would" happen, printed after the
+// write that had already promoted all nine — the same untruth as the note this
+// replaced, pointing the other way. A count that is meaningful on its own cannot
+// also be the answer to "has this happened yet".
+type promotionOutcome struct {
+	// applied is whether ApplyReflection has run. False for a dry run, and for the
+	// pre-apply report on a run that will apply.
+	applied bool
+	// kept is how many candidates failed promotion and were written back into the
+	// project. Only meaningful once applied.
+	kept int
+}
+
+// keptInProject is how many candidates the project still holds. Before the apply
+// that is unknowable, so it is 0 and the report labels the count optimistic
+// rather than printing a number it cannot stand behind.
+func (o promotionOutcome) keptInProject() int {
+	if !o.applied {
+		return 0
+	}
+	return o.kept
+}
+
 // reflectRetained is how many memories the project ends up holding from one
 // applied result: its own project-scoped memories, plus the cross-project
 // candidates that did not become _global rows and were written back into the
@@ -373,14 +402,9 @@ func reflectSkipDecision(skipUnchanged, apply bool, stored, current string) bool
 // up with — the count that decides whether a memory survived. Reading
 // len(projectMems) alone understates retention by the whole candidate set and
 // fires the warning on rounds that lost nothing.
-//
-// promotionKept is how many of globalMems came back into the project, which is
-// applyReflection's keptMems. It is only knowable AFTER the apply, so a caller
-// reporting before the write passes 0 and says so on the report; see
-// reportReductionWarning.
-func reflectRetained(projectMems, globalMems []reflection.ReflectMemory, promoteGlobals bool, promotionKept int) int {
+func reflectRetained(projectMems, globalMems []reflection.ReflectMemory, promoteGlobals bool, promotion promotionOutcome) int {
 	if promoteGlobals {
-		return len(projectMems) + promotionKept
+		return len(projectMems) + promotion.keptInProject()
 	}
 	return len(projectMems) + len(globalMems)
 }
@@ -438,10 +462,18 @@ func reportDisposedClaims(w io.Writer, result reflection.ReflectionResult) {
 }
 
 // reportReductionWarning prints the >50% reduction warning when a consolidation
-// kept less than half its consolidatable input, and prints nothing otherwise. It
-// says nothing about whether the run applies: the apply path calls it again after
-// the write, with the promotion outcome it could not know beforehand, and a dry
-// run calls it once with nothing written and therefore nothing to fail.
+// kept less than half its consolidatable input, and prints nothing otherwise.
+//
+// It is called exactly once per run, and WHERE depends on what is knowable. A dry
+// run writes nothing so nothing can fail, so it reports before the (absent)
+// write. A run that applies with promotion off folds the cross-project candidates
+// back into the project either way, so the count cannot move and it also reports
+// before the write. A run that applies WITH promotion on can only know the count
+// afterwards, because a candidate may fail to become a _global row and land back
+// in the project instead — so that one reports after the write. The pre-apply
+// report is skipped rather than printed optimistically and corrected, because a
+// candidate set large enough to cross the 50% line would otherwise produce a
+// report of a reduction that did not happen, followed by silence about it.
 //
 // It takes the slices rather than two pre-counted numbers so the count it
 // reports is derived where it is printed: on the unattended lifecycle path this
@@ -455,18 +487,11 @@ func reportDisposedClaims(w io.Writer, result reflection.ReflectionResult) {
 // same way. The input side is len(live) — manual, builtin, pinned and resolved
 // rows are already excluded upstream, and every row left is one ReplaceNonManual
 // would delete.
-//
-// promotionKept is applyReflection's keptMems, and it is the one number here that
-// is NOT knowable before the apply: a candidate can fail to become a _global row
-// and land back in the project instead, so counting only projectMems would
-// report a run where every promotion failed as a far larger reduction than
-// happened. The pre-apply call passes 0 and labels the count optimistic rather
-// than printing a number it cannot stand behind.
-func reportReductionWarning(w io.Writer, live []memory.Memory, projectMems, globalMems []reflection.ReflectMemory, promoteGlobals bool, promotionKept int) {
+func reportReductionWarning(w io.Writer, live []memory.Memory, projectMems, globalMems []reflection.ReflectMemory, promoteGlobals bool, promotion promotionOutcome) {
 	if len(live) < reductionWarnMinInput {
 		return
 	}
-	retained := reflectRetained(projectMems, globalMems, promoteGlobals, promotionKept)
+	retained := reflectRetained(projectMems, globalMems, promoteGlobals, promotion)
 	// Doubled rather than len(live)/2: integer division rounds the half DOWN, so
 	// 3 of 7 reads as "at least half" and prints nothing, when 3/7 is a 57%
 	// reduction — more than the half the message names. The boundary is only
@@ -484,20 +509,26 @@ func reportReductionWarning(w io.Writer, live []memory.Memory, projectMems, glob
 	if len(globalMems) == 0 {
 		return
 	}
-	// The note states only what is true at this point in the run. Before the
-	// apply, a candidate is classified global and nothing more — calling them
-	// "promoted" there would claim a write that has not happened, and calling the
-	// whole set survivors would be wrong in the other direction, because a
-	// candidate that promotes has left the project.
+	// The note states only what is true at this point in the run, and the three
+	// states are distinguished by whether the apply has HAPPENED rather than by
+	// the kept count. Before it, a candidate is classified global and nothing
+	// more; calling them "promoted" there would claim a write that has not
+	// occurred, and calling the whole set survivors would be wrong the other way,
+	// since a candidate that promotes has left the project. After it, the split is
+	// known and a candidate that promoted really did leave the project, so it is
+	// not counted as retained and saying otherwise would overstate survival.
 	switch {
 	case !promoteGlobals:
 		_, _ = fmt.Fprintf(w, "  (%d memories classified as global — kept project-scoped; check scope accuracy)\n", len(globalMems))
-	case promotionKept > 0:
-		_, _ = fmt.Fprintf(w, "  (%d memories classified as global — %d promoted to _global, %d could not be and are back in the project; check scope accuracy)\n",
-			len(globalMems), len(globalMems)-promotionKept, promotionKept)
-	default:
+	case !promotion.applied:
 		_, _ = fmt.Fprintf(w, "  (%d memories classified as global — would be promoted to _global on apply; a failed promotion keeps them in the project; check scope accuracy)\n",
 			len(globalMems))
+	case promotion.kept > 0:
+		_, _ = fmt.Fprintf(w, "  (%d memories classified as global — %d promoted to _global, %d could not be and are back in the project; check scope accuracy)\n",
+			len(globalMems), len(globalMems)-promotion.kept, promotion.kept)
+	default:
+		_, _ = fmt.Fprintf(w, "  (%d memories classified as global — all %d promoted to _global; check scope accuracy)\n",
+			len(globalMems), len(globalMems))
 	}
 }
 
@@ -976,28 +1007,19 @@ func runReflect() {
 
 	// The >50% reduction warning. On the unattended lifecycle path this is the
 	// only report of a hard compression, and it goes to the stderr of a process
-	// nobody reads while the exit status still 0 — so the count it prints has to
-	// be the one that decides whether a memory survived. A dry run reports the
-	// compression it would apply, which is the more useful of the two.
-	// The >50% reduction warning. On the unattended lifecycle path this is the
-	// only report of a hard compression, and it goes to the stderr of a process
 	// nobody reads while the exit status stays 0 — so the count it prints has to
 	// be the one that decides whether a memory survived.
 	//
-	// It is skipped when this run will apply AND promotion is on, because there
-	// the post-apply count below is the exact one and this one cannot be: a
-	// candidate that fails to become a _global row lands back in the project
-	// instead, so a pre-apply count of projectMems alone understates retention by
-	// the whole candidate set. Reporting it first means telling the operator a
-	// number that is about to be contradicted, or — when the candidates are
-	// enough to cross the 50% line — reporting a reduction that did not happen at
-	// all and then staying silent about it.
-	//
-	// A dry run writes nothing, so nothing can fail there and this is the whole
-	// report. A run with promotion off folds the candidates back in either way, so
-	// the count cannot move and this is also the whole report.
+	// Reported here only when it cannot be wrong: a dry run writes nothing so
+	// nothing can fail, and promotion-off folds the candidates back in either way
+	// so the count cannot move. A run that applies WITH promotion on is reported
+	// after the write instead, because a candidate that fails to become a _global
+	// row lands back in the project, so a pre-apply count of projectMems alone
+	// understates retention by the whole candidate set — and when the candidates
+	// are enough to cross the 50% line, reporting it here would announce a
+	// reduction that did not happen and then say nothing about the real one.
 	if !apply || !parsed.promoteGlobals {
-		reportReductionWarning(os.Stderr, live, projectMems, globalMems, parsed.promoteGlobals, 0)
+		reportReductionWarning(os.Stderr, live, projectMems, globalMems, parsed.promoteGlobals, promotionOutcome{})
 	}
 
 	if !apply {
@@ -1052,12 +1074,15 @@ func runReflect() {
 	// this run applies with promotion on, so only now is it knowable how many
 	// candidates stayed in the project. A candidate that failed promotion is a row
 	// the project still holds, so it counts as retained — the count that decides
-	// whether a memory survived, which is the whole point of the line.
+	// whether a memory survived, which is the whole point of the line. `applied` is
+	// what distinguishes this from the pre-apply call: with no failures kept is 0,
+	// and a bare 0 would read as "nothing has been written yet".
 	//
 	// Printed even when nothing failed, because the skipped pre-apply report means
 	// this run would otherwise say nothing at all about how hard it compressed.
 	if apply && parsed.promoteGlobals {
-		reportReductionWarning(os.Stderr, live, projectMems, globalMems, true, len(keptMems))
+		reportReductionWarning(os.Stderr, live, projectMems, globalMems, true,
+			promotionOutcome{applied: true, kept: len(keptMems)})
 	}
 
 	// A round that wrote something counts as applied, and that includes a
