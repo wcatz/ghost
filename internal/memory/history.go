@@ -123,10 +123,6 @@ var errHistoryNoMemory = errors.New("no live memory row")
 // would be a second source of truth, and the wiring below would then have to set
 // both or the filter would silently not apply.
 //
-// It is installed through setHistoryRedactor, never assigned directly, and the
-// append statement asks THAT whether to call the SQL function — a second bool
-// would be a second source of truth, and the wiring below would then have to set
-// both or the filter would silently not apply.
 // filter is nil until a redactor is installed, and the append path's gate is
 // derived from it rather than kept beside it, so the two cannot disagree.
 var historyRedactor struct {
