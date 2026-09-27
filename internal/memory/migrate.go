@@ -1103,6 +1103,41 @@ func migrateV17(tx *sql.Tx) error {
 // depend on the pragma for its own consistency — and the cascade it installs is
 // the store's, not the migration's.
 func migrateV18(tx *sql.Tx) error {
+	// A memory_provenance table can already exist under this name, from a build
+	// between two commits that used the name for the CHANGE LOG (#664's pre-rename
+	// shape). initSQL's CREATE INDEX is a no-op against it — the change log's
+	// memory_id is there too — so this check is what stands between that table and
+	// an INSERT ... SELECT that fails with SQLite's "no such column: kind", which
+	// rolls the step back and leaves the operator with a store that will not open
+	// and an error that does not name the way out.
+	//
+	// It REFUSES rather than adapts. The rows in such a table are a dev build's
+	// change log under the wrong name; there is no shape to convert them into, no
+	// release ever wrote one, and the pre-migration backup OpenDB has already taken
+	// is the safety net a conversion would be guessing past. The remedy is the one
+	// line this build has always documented, and it is stated rather than logged:
+	// a store that cannot be opened is the operator's to fix, and a warning they
+	// may not see would leave every writer failing on the same missing column.
+	present, err := tableExists(tx, "memory_provenance")
+	if err != nil {
+		return err
+	}
+	if present {
+		for _, c := range evidenceTableColumns {
+			has, err := columnExists(tx, "memory_provenance", c)
+			if err != nil {
+				return err
+			}
+			if !has {
+				return fmt.Errorf(
+					"this database already holds a memory_provenance table without a %q column, so it is not Ghost's evidence table "+
+						"— it is a development build that used the reserved name for something else, and no release ever wrote one. "+
+						"Drop it and reopen: sqlite3 <db> 'DROP TABLE memory_provenance' (a pre-migration copy of this database is beside it)",
+					c)
+			}
+		}
+	}
+
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS memory_provenance (
     id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
@@ -1129,6 +1164,26 @@ WHERE (agent IS NOT NULL OR session_id IS NOT NULL OR source_ref IS NOT NULL OR 
 		}
 	}
 	return nil
+}
+
+// evidenceTableColumns is the column set the evidence table's own writers and
+// seed name. migrateV18 checks a pre-existing table against it before touching
+// it, and the check is a refusal rather than an adaptation — see the step.
+var evidenceTableColumns = []string{
+	"id", "memory_id", "kind", "agent", "session_id", "source_ref",
+	"confidence", "observed_at", "verified_at",
+}
+
+// tableExists reports whether a table of that name is in the schema.
+func tableExists(tx *sql.Tx, table string) (bool, error) {
+	var n int
+	err := tx.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table,
+	).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("look up table %s: %w", table, err)
+	}
+	return n > 0, nil
 }
 
 // migrateV14 adds memory_snapshots.scope and its scope_captured marker. v13

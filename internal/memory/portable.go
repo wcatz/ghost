@@ -632,17 +632,6 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	if !IsValidSource(m.Source) {
 		return false, false, false, fmt.Errorf("memory %s: invalid source %q — must be one of: reflection, chat, manual, tool, mcp, onboarding, decision_log, builtin", m.ID, m.Source)
 	}
-	// The evidence records are validated here, before anything is written, for the
-	// reason the two fields above are: a hand-edited artifact must be rejected by
-	// name, and in the dry run too. A record whose kind this build cannot store is
-	// not a record to drop — dropping it would import a memory with less support
-	// than the file claims, silently, and the reader of the restored store would
-	// have no way to tell.
-	for i, e := range m.Evidence {
-		if !IsValidEvidenceKind(e.Kind) {
-			return false, false, false, fmt.Errorf("memory %s: evidence record %d has invalid kind %q — must be one of: observed, imported, verified, legacy", m.ID, i, e.Kind)
-		}
-	}
 
 	content, cut := ClampContent(m.Content)
 	// A stated importance is clamped to [0,1], the same bound a normal save
@@ -692,9 +681,17 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// what makes the dry run worth running. An artifact is untrusted input
 	// arriving from a file, which is why it is guarded at all despite the
 	// same idempotence argument applying to Create.
+	// agent and session_id join source_ref here, and the reason is the arrival
+	// record below: an import writes the artifact's own agent and session onto a
+	// memory_provenance row, so an unguarded value here would be stored twice —
+	// once where #656 already reaches it and once where it does not. On this route
+	// all three are the FILE's content rather than the harness's identity, which is
+	// the condition secret_guard.go already names for guarding them.
 	if err := rejectSecretFields(
 		secretField{"content", m.Content},
 		secretField{"source_ref", m.SourceRef},
+		secretField{"agent", m.Agent},
+		secretField{"session_id", m.SessionID},
 	); err != nil {
 		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
 	}
@@ -705,6 +702,27 @@ func (s *Store) ImportMemory(ctx context.Context, m PortableMemory, opts ImportO
 	// the next reflect prompt like any other.
 	if err := rejectSecretList("tags", m.Tags); err != nil {
 		return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
+	}
+	// The evidence records' own text, in the same window and for the same reason.
+	// An artifact's evidence rows are the FILE's content, exactly as
+	// `source_ref` above is, and this is the one route where that is true: a
+	// harness's own identity is not a secret, but a hand-edited or hostile
+	// artifact can put anything in a nested field. The memory-level guard cannot
+	// see these, because the memory row does not hold them — so without this the
+	// table becomes the one place a credential survives, in an append-only store
+	// the next `ghost export` re-emits and only the purge's explicit DELETE
+	// reaches. The field is named per record, never the value.
+	for i, e := range m.Evidence {
+		if !IsValidEvidenceKind(e.Kind) {
+			return false, false, false, fmt.Errorf("memory %s: evidence record %d has invalid kind %q — must be one of: observed, imported, verified, legacy", m.ID, i, e.Kind)
+		}
+		if err := rejectSecretFields(
+			secretField{fmt.Sprintf("evidence[%d].agent", i), e.Agent},
+			secretField{fmt.Sprintf("evidence[%d].session_id", i), e.SessionID},
+			secretField{fmt.Sprintf("evidence[%d].source_ref", i), e.SourceRef},
+		); err != nil {
+			return false, false, false, fmt.Errorf("memory %s: %w", m.ID, err)
+		}
 	}
 
 	// A free id is not necessarily a NEW id. A memory deleted locally leaves its

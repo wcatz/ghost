@@ -1671,6 +1671,98 @@ func TestMigrateV18SeedsEvidenceFromTheColumnsMemoriesAlreadyHeld(t *testing.T) 
 	// cascade on a handle that has it on.
 }
 
+// TestMigrateV18RefusesADevTableUnderTheEvidenceName: the name was reserved
+// before it was used, and a build between two commits used it for the CHANGE LOG
+// instead (#664's pre-rename shape). initSQL's CREATE INDEX is a no-op against
+// such a table — the change log has a memory_id too — so nothing before the seed
+// stops the INSERT, and without the step's own check the operator gets "no such
+// column: kind", a rolled-back step and a store that will not open.
+//
+// The check REFUSES, and it has to name the way out: the rows in that table are a
+// dev build's change log under the wrong name, there is no shape to convert them
+// into, and adapting them would be guessing. A warning nobody may see leaves every
+// writer failing on the same missing column.
+func TestMigrateV18RefusesADevTableUnderTheEvidenceName(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "ghost.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+
+	if _, err := db.Exec(initSQL); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	for _, drop := range []string{`DROP INDEX idx_provenance_memory`, `DROP TABLE memory_provenance`} {
+		if _, err := db.Exec(drop); err != nil {
+			t.Fatalf("%s: %v", drop, err)
+		}
+	}
+	// The pre-rename #664 shape: a change log under the reserved name. It has a
+	// memory_id (so initSQL's index creates cleanly against it) and no kind.
+	if _, err := db.Exec(`
+		CREATE TABLE memory_provenance (
+			id          TEXT PRIMARY KEY,
+			memory_id   TEXT NOT NULL,
+			project_id  TEXT NOT NULL,
+			recorded_at TEXT NOT NULL,
+			phase       TEXT NOT NULL,
+			content     TEXT
+		)`); err != nil {
+		t.Fatalf("create the dev table: %v", err)
+	}
+	for _, s := range []string{
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v18-dev', 'p1')`,
+		`INSERT INTO memories (project_id, category, content, source) VALUES ('p1', 'fact', 'a pre-v18 fact', 'mcp')`,
+		`PRAGMA user_version = 17`,
+	} {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("seed (%s): %v", s, err)
+		}
+	}
+
+	err = migrate(db, 17)
+	if err == nil {
+		t.Fatal("migrate accepted a memory_provenance table that is not the evidence table")
+	}
+	msg := err.Error()
+	for _, want := range []string{"kind", "DROP TABLE memory_provenance", "development build"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error = %q, want it to name %q", msg, want)
+		}
+	}
+	// The refusal is a refusal: the dev table and the corpus are both untouched,
+	// and the version is not stamped, so the store is exactly as recoverable as it
+	// was before the upgrade was attempted.
+	if v := schemaVersionOf(t, db); v != 17 {
+		t.Errorf("user_version = %d after a refused migration, want 17", v)
+	}
+	var rows int
+	if err := db.QueryRow(`SELECT count(*) FROM memory_provenance`).Scan(&rows); err != nil {
+		t.Fatalf("read the dev table: %v", err)
+	}
+	if rows != 0 {
+		t.Errorf("the refused migration wrote %d row(s) into the dev table", rows)
+	}
+	// And the documented way out works: drop it and the step runs.
+	if _, err := db.Exec(`DROP TABLE memory_provenance`); err != nil {
+		t.Fatalf("drop the dev table: %v", err)
+	}
+	if err := migrate(db, 17); err != nil {
+		t.Fatalf("migrate after dropping the dev table: %v", err)
+	}
+	if v := schemaVersionOf(t, db); v != schemaVersion {
+		t.Errorf("user_version = %d, want %d", v, schemaVersion)
+	}
+	var seeded int
+	if err := db.QueryRow(`SELECT count(*) FROM memory_provenance WHERE kind = 'legacy'`).Scan(&seeded); err != nil {
+		t.Fatalf("count seeded rows: %v", err)
+	}
+	if seeded != 0 {
+		t.Errorf("%d legacy row(s) seeded, want none — the fixture's memory recorded no provenance", seeded)
+	}
+}
+
 // TestMigrateFreshDBHasMemoryHistory: a brand-new database (initSQL path, no
 // migration involved) must have memory_history and its indexes from the start
 // — guards against the table silently dropping out of initSQL while migrateV17

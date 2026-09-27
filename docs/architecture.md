@@ -371,12 +371,18 @@ supports this memory" rather than "how did this row change". The two are easy to
 confuse in prose and unrelated in fact, and a schema name is permanent once
 released, so this table is named for what it is.
 A development store built from a pre-rename commit of #664 can hold a
-`memory_provenance` table from that build, holding whatever shape that build
-wrote. `migrateV18` creates the table only `IF NOT EXISTS` and seeds it only
-where a memory has no record yet, so such a store is stamped rather than
-rewritten; if its columns differ from the current ones, the writers will say so
-and the table is dropped and rebuilt by hand with `sqlite3 <db> 'DROP TABLE
-memory_provenance'`.
+`memory_provenance` table from that build, holding the CHANGE LOG's shape under
+the reserved name. `initSQL` cannot stop that — the change log has a `memory_id`
+too, so its `CREATE INDEX` succeeds against the wrong table — so `migrateV18`
+checks the table's columns before it writes, and **refuses** a mismatch, naming
+the command rather than warning: a store that will not open is the operator's to
+fix, and a warning nobody may see leaves every writer failing on the same missing
+column. Nothing is converted, and nothing is dropped automatically — the rows in
+that table are a dev build's change log under the wrong name, there is no shape to
+convert them into, no release ever wrote one, and the pre-migration copy
+`OpenDB` has already taken is the net a conversion would be guessing past. A
+table of the current shape is left exactly as it is: the seed adds a `legacy` row
+only where a memory has none, so re-running the step cannot double them.
 
 | Phase | Appended by | What the row records |
 |---|---|---|
