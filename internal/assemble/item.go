@@ -126,12 +126,19 @@ func scopeToken(s string) string {
 		return `""`
 	}
 	for _, r := range s {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
-			r == '.' || r == '_' || r == '-' || r == ':' || r == '/' || r == '@' || r == '+') {
+		if !isScopeNameRune(r) {
 			return strconv.QuoteToASCII(s)
 		}
 	}
 	return s
+}
+
+func isScopeNameRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		return true
+	}
+	return strings.ContainsRune("._-:/@+", r)
 }
 
 // quoteData wraps untrusted stored text in «...» data delimiters, first
