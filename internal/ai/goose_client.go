@@ -225,16 +225,25 @@ func linkGooseConfigDirs(home string, env []string, homeDir string) error {
 // on that host a source-level check cannot tell that case from a genuine miss.
 //
 // firstExistingAncestor is what makes the rule hold anyway. It walks up from
-// path to stop (inclusive) and returns the first ancestor that stats, with its
-// info. A non-nil info whose IsDir is false is the Windows-shaped fault; a nil
-// info with a nil error means nothing up to and including the home exists, so
-// the leaf is merely unpopulated.
+// path itself to stop (inclusive) and returns the first path that stats, with
+// its info. A non-nil info whose IsDir is false is the Windows-shaped fault; a
+// nil info with a nil error means nothing up to and including the home exists,
+// so the leaf is merely unpopulated.
+//
+// The walk starts at path rather than its parent so the contract is true as
+// written; a caller that has already probed path pays for one redundant stat.
 //
 // A probe failure that is not "not there" is returned rather than treated as
 // absence, so an untraversable home or a TCC-denied ~/Library is reported
 // instead of silently dropping the configuration.
 func firstExistingAncestor(path, stop string, probe func(string) (os.FileInfo, error)) (string, os.FileInfo, error) {
-	current := filepath.Dir(path)
+	// filepath.Dir cleans, so the walk's values are always clean; stop comes
+	// from the environment and may not be (HOME=/home/user/ is a real thing
+	// launchers and systemd units set), and an unmatched bound would let the
+	// walk climb above the home and blame an unused location on a file up
+	// there.
+	stop = filepath.Clean(stop)
+	current := filepath.Clean(path)
 	for {
 		info, err := probe(current)
 		switch {
@@ -286,7 +295,12 @@ func linkGooseConfigDirsWith(home string, env []string, homeDir string, probe fu
 			ancestor, info, ancestorErr := firstExistingAncestor(source, homeDir, probe)
 			switch {
 			case ancestorErr != nil:
-				return fmt.Errorf("goose isolated config %s: %w", source, err)
+				// Report the walk's failure, not the leaf's: the leaf said
+				// "not there" and this is the fault found above it, and a
+				// message carrying the leaf's ErrNotExist would tell the
+				// reader the location is merely unpopulated — the one
+				// misreading this whole branch exists to prevent.
+				return fmt.Errorf("goose isolated config %s: cannot reach %s: %w", source, ancestor, ancestorErr)
 			case info != nil && !info.IsDir():
 				return fmt.Errorf("goose isolated config %s: %s is not a directory", source, ancestor)
 			}

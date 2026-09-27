@@ -311,6 +311,97 @@ printf '%s' 'KEEP'
 	}
 }
 
+// TestFirstExistingAncestor: the walk's two bounds are load-bearing. It must
+// start at the path itself, or the contract in its own comment is a lie; and it
+// must stop at a CLEANED home, because a HOME that is not already clean (a
+// trailing separator is set by launchers and systemd units) would never match
+// and the walk would climb above the home — where a file can be found and an
+// unused platform location blamed for it.
+func TestFirstExistingAncestor(t *testing.T) {
+	home := t.TempDir()
+	deep := filepath.Join(home, "Library", "Application Support", "goose")
+	if err := os.MkdirAll(deep, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("starts at the path itself", func(t *testing.T) {
+		got, info, err := firstExistingAncestor(deep, home, os.Lstat)
+		if err != nil {
+			t.Fatalf("firstExistingAncestor: %v", err)
+		}
+		if got != deep {
+			t.Errorf("walk started at %q, want the path itself %q", got, deep)
+		}
+		if info == nil || !info.IsDir() {
+			t.Errorf("info = %v, want the directory at %q", info, deep)
+		}
+	})
+
+	t.Run("an unclean home still bounds the walk", func(t *testing.T) {
+		outer := t.TempDir()
+		inner := filepath.Join(outer, "home")
+		if err := os.MkdirAll(inner, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		// The home reports absent, so the bound is the only thing that can stop
+		// the walk — and an unclean bound never matches, because the walk's
+		// values come from filepath.Dir and are always cleaned while
+		// HOME=/home/user/ (a trailing separator is set by launchers and
+		// systemd units) is not. Escaping the bound lets a location that is
+		// merely unused be refused, or blamed on an unrelated file above it.
+		missing := filepath.Join(inner, "no-such-dir", "goose")
+		visited := make(map[string]bool)
+		probe := func(name string) (os.FileInfo, error) {
+			visited[name] = true
+			if name == inner {
+				return nil, fs.ErrNotExist
+			}
+			return os.Lstat(name)
+		}
+		if _, _, err := firstExistingAncestor(missing, inner+string(os.PathSeparator), probe); err != nil {
+			t.Fatalf("firstExistingAncestor: %v", err)
+		}
+		for name := range visited {
+			clean := filepath.Clean(name)
+			if clean != inner && !strings.HasPrefix(clean, inner+string(os.PathSeparator)) {
+				t.Errorf("walk probed %q, outside the home %q — the bound did not hold", name, inner)
+			}
+		}
+	})
+}
+
+// TestGooseIsolationNamesTheDirectoryItCouldNotProbe: the failure this branch
+// reports is the only thing pointing at the cause, so it has to name the
+// directory the walk actually failed on. Reporting the leaf's error instead
+// says "no such file or directory" for a directory that exists and cannot be
+// read — a reader, or errors.Is against fs.ErrNotExist, would conclude the
+// location is merely unpopulated, which is the misreading this branch exists to
+// prevent.
+func TestGooseIsolationNamesTheDirectoryItCouldNotProbe(t *testing.T) {
+	home := t.TempDir()
+	blocked := filepath.Join(home, "Library", "Application Support")
+	if err := os.MkdirAll(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	probe := func(name string) (os.FileInfo, error) {
+		if name == blocked {
+			return nil, &fs.PathError{Op: "lstat", Path: name, Err: syscall.EACCES}
+		}
+		return os.Lstat(name)
+	}
+
+	err := linkGooseConfigDirsWith(t.TempDir(), []string{"HOME=" + home}, home, probe)
+	if err == nil {
+		t.Fatal("an unreadable directory above the config root was skipped")
+	}
+	if !strings.Contains(err.Error(), blocked) {
+		t.Errorf("error %q does not name the directory that could not be probed (%s)", err, blocked)
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("error %q reads as 'not there' when the fault is an unreadable directory", err)
+	}
+}
+
 // TestGooseChildCannotDiscoverGhostsOwnPlugin: goose discovers user-scope
 // Agent Plugins under $HOME/.agents/plugins/, and that is home-relative BY
 // SPECIFICATION rather than XDG-relative. `ghost mcp init --client goose`
