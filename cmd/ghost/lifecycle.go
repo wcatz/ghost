@@ -410,7 +410,11 @@ func reportReductionWarning(w io.Writer, live []memory.Memory, projectMems, glob
 		return
 	}
 	retained := reflectRetained(projectMems, globalMems, promoteGlobals)
-	if retained >= len(live)/2 {
+	// Doubled rather than len(live)/2: integer division rounds the half DOWN, so
+	// 3 of 7 reads as "at least half" and prints nothing, when 3/7 is a 57%
+	// reduction — more than the half the message names. The boundary is only
+	// reachable on an odd corpus, which is why it was easy to miss.
+	if retained*2 >= len(live) {
 		return
 	}
 	// os.Stderr is best-effort here, as it is for every other report on this

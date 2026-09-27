@@ -111,6 +111,51 @@ func TestRewriteWitnessIsNotReCheckedForRelatedness(t *testing.T) {
 	}
 }
 
+// TestSummarizingMergeReAddsTheSourceItCompressed pins the direction the
+// narrowing above deliberately accepts, so it is a decision rather than a
+// side-effect. A merge that SUMMARISES its sources — the normal shape of a real
+// consolidation, where the prompt asks for a corpus of high-quality memories and
+// not a short one — will often carry one source's substance past the bar and
+// compress another's below it. The carried one is absorbed; the compressed one
+// comes back verbatim, beside the merge that absorbed its sibling.
+//
+// That is a paraphrase duplicate, the class #639 measured on every project. It is
+// the price of the narrowing and it is a deliberate one: the alternatives are a
+// silent deletion and a silent duplicate, and only one of those is recoverable.
+// Containment here is 0.800 and 0.250.
+//
+// What this fixture pins is the OUTCOME for a summarizing merge, not the choice
+// of witness set — with one output the union and the merge's own text are the
+// same tokens. TestMergeSourceIsScoredAgainstItsOwnMerge is the one that needs
+// the extra unrelated memory to tell the two apart, and it fails if the union
+// comes back.
+func TestSummarizingMergeReAddsTheSourceItCompressed(t *testing.T) {
+	const (
+		sshID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1"
+		docID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA2"
+	)
+	carried := "the bastion accepts SSH on port 2222"
+	compressed := "OIDC discovery is documented in the ledger service README under auth"
+	const merged = "the bastion accepts SSH on 2222 and OIDC discovery is served by idp.internal on 8443"
+
+	in := ReflectionInput{ExistingMemories: []memory.Memory{
+		{ID: sshID, Category: "gotcha", Content: carried},
+		{ID: docID, Category: "fact", Content: compressed},
+	}}
+	result := ReflectionResult{
+		Memories: []ReflectMemory{{Category: "architecture", Content: merged}},
+		Merges:   []Merge{{IDs: []string{sshID, docID}, Text: merged}},
+	}
+
+	drops := AuditGuardedDrops(in, result)
+	if !auditContains(drops, compressed) {
+		t.Fatalf("a source the merge compressed below the bar was treated as absorbed: %+v", drops)
+	}
+	if auditContains(drops, carried) {
+		t.Errorf("the source the merge carried past the bar was flagged: %+v", drops)
+	}
+}
+
 // TestSupersessionFromTheOpsPathStillRequiresRelatedness guards the plumbing.
 // The audit only applies the relatedness check to a claim executeOps marked as a
 // supersession, so a result built the way the LLM tier actually builds one — not

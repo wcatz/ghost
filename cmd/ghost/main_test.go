@@ -970,6 +970,29 @@ func TestReportReductionWarningStaysQuietOnSmallCorpora(t *testing.T) {
 	}
 }
 
+// TestReportReductionWarningBoundaryIsNotRounded: the half is compared doubled,
+// not as len(live)/2. Integer division rounds down, so on an odd corpus "3 of 7"
+// — a 57% reduction, more than the half the message names — read as "kept at
+// least half" and printed nothing.
+func TestReportReductionWarningBoundaryIsNotRounded(t *testing.T) {
+	live := make([]memory.Memory, 7)
+	kept := make([]reflection.ReflectMemory, 3)
+
+	var buf bytes.Buffer
+	reportReductionWarning(&buf, live, kept, nil, false)
+	if !strings.Contains(buf.String(), "left 3 memories in the project vs 7") {
+		t.Errorf("3 of 7 is a 57%% reduction and must be reported; got:\n%s", buf.String())
+	}
+
+	// And the other side of the same boundary, on the same odd corpus: 4 of 7 is
+	// 43% retained, under the half, so it stays quiet.
+	buf.Reset()
+	reportReductionWarning(&buf, live, make([]reflection.ReflectMemory, 4), nil, false)
+	if buf.Len() != 0 {
+		t.Errorf("4 of 7 keeps more than half and must not be reported; got:\n%s", buf.String())
+	}
+}
+
 func TestConsolidatableFilters(t *testing.T) {
 	now := "2026-09-21 00:00:00"
 	mems := []memory.Memory{
