@@ -744,7 +744,7 @@ func TestMemoryHistorySkipsAnAlreadyActiveSupersedeEdge(t *testing.T) {
 	}
 
 	// Re-activating an invalidated edge IS a state change, so it is recorded.
-	if err := s.InvalidateLink(ctx, newer, older, "supersedes"); err != nil {
+	if _, err := s.InvalidateLink(ctx, newer, older, "supersedes"); err != nil {
 		t.Fatalf("InvalidateLink: %v", err)
 	}
 	if err := s.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
