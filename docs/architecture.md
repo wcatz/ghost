@@ -386,24 +386,30 @@ Three properties are deliberate:
   main's merge reassignment lists (there are two, one per implementation) carry
   the table.
 
-A write that changes none of the recorded columns appends no row: one repeating
-the previous state would record that nothing happened, at the cost of a row per
-recall. `Touch` (`access_count`, `last_accessed`), `TogglePin` and the resolve
-KEEP cache are in that class.
+A write that changes none of a memory's own recorded columns appends no row: one
+repeating the previous state would record that nothing happened, at the cost of a
+row per recall. `Touch` (`access_count`, `last_accessed`), `TogglePin` and the
+resolve KEEP cache are in that class.
 
-"Appends nothing" is not the same as "ignore it", and the one writer that shows
-the difference is `PromoteToGlobal`: it appends no row, but it moves the memory
-between projects, and `project_id` is what the project-delete cascade follows. So
-a move has to carry the history rows' `project_id` with the memory —
-`MergeProject` (in `projectMergeStatements`, and in the `s.mergeProjectTx` method
-the bind-recovery paths call) and `PromoteToGlobal` both do. Without it, deleting
-the project a memory was promoted out of takes the recorded past of a memory that
-is still live in `_global`, and `ghost history <id>` reports that it was never
-written. The same rule decides the `supersede` row: `ghost supersede` re-writes a
-pair whenever an endpoint moved since the edge was written, and re-writing an
-already-active edge changes nothing about the target, so the row is written when
-the edge *becomes* active — an insert, or a re-activation after an invalidation
-— and not on every re-write.
+`MergeProject` and `PromoteToGlobal` are in that class too — both change only
+`project_id` — and they are the writers that show the other half: appending
+nothing is not the same as ignoring them. A write that moves a memory between
+projects has to carry its history rows' `project_id` with it, because that column
+is what the project-delete cascade follows, and both do. Without it, deleting the
+project a memory was promoted out of takes the recorded past of a memory that is
+still live in `_global`, and `ghost history <id>` reports that it was never
+written.
+
+The `supersede` row is the one deliberate exception to the no-append rule, and it
+is a different kind of entry rather than an oversight. A `supersedes` edge moves
+none of the target's columns, but it does change its standing — "this is no
+longer current" — and an audit that could not see that would be blind to the
+corpus's main staleness signal. So the row records a claim, not a state change,
+which is also why it is written when the edge *becomes* active and not on every
+re-write: `ghost supersede` re-writes a pair whenever an endpoint moved since the
+edge was written, and a row repeating the previous state would spend one of the
+per-memory version slots until it pruned the real save/update/reflect versions
+this table exists to keep.
 
 **Growth policy.** The table is append-only, not unbounded, and both bounds are
 applied in the appending transaction — so neither needs a background job or a
