@@ -136,10 +136,11 @@ func TestSnapshotAndAssertions(t *testing.T) {
 }
 
 // TestSnapshotPinsItsPlaceholders covers the three kinds Snapshot records with
-// no content — an unreadable file, a directory, and a non-regular entry —
-// because all three are blind spots a fixture author has to know about, and
-// because an unreadable file's whole reason for recording a kind and nothing
-// else is that what it failed at must NOT vary with how the root was spelled.
+// no file content — an unreadable file, a directory, and a non-regular entry,
+// which records its type — because all three are blind spots a fixture author
+// has to know about, and because an unreadable file's whole reason for recording
+// a kind and nothing else is that what it failed at must NOT vary with how the
+// root was spelled.
 func TestSnapshotPinsItsPlaceholders(t *testing.T) {
 	t.Run("unreadable_file", func(t *testing.T) {
 		skipWithoutPOSIXModes(t)

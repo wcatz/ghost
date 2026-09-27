@@ -220,12 +220,13 @@ func (e entry) String() string {
 // read-only importer has to satisfy. Pair it with AssertTreeInside for the
 // writes case.
 //
-// Three kinds record no content, and each is a blind spot rather than a finding:
-// a file whose contents could not be read, a directory that could not be listed,
-// and a non-regular entry such as a symlink, whose target is deliberately not
-// read. The first two are logged with their path and cause. A fixture that needs
-// an assertion over one of them has to make the tree readable, or the entry a
-// real file, first.
+// Three kinds record no file content, and each is a blind spot rather than a
+// finding: a file whose contents could not be read, a directory that could not be
+// listed — both of which record nothing at all — and a non-regular entry such as
+// a symlink, which records its type because its target is deliberately not read.
+// The first two are logged with their path and cause. A fixture that needs an
+// assertion over one of them has to make the tree readable, or the entry a real
+// file, first.
 func Snapshot(t testing.TB, root string) Tree {
 	t.Helper()
 	out := Tree{}
