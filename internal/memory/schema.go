@@ -604,6 +604,21 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	}
 
 	if version < schemaVersion {
+		// A schema-shape refusal, BEFORE the backup (#673's memory_provenance
+		// check, which is the one today). The ordering is the whole point: the
+		// condition is permanent — nothing converts a foreign table, the operator
+		// drops it — and it leaves user_version where it was, so every later open
+		// re-enters this branch. Refusing after the backup would write a full copy
+		// of the database on every open of a store that cannot be opened, and two
+		// opens in the same wall-clock second collide on the copy's name, so the
+		// retry an operator is certain to make reports "refusing to overwrite an
+		// existing file" and names neither the table nor the remedy. A refusal
+		// that has already written a copy is not the refusal we want (#560's rule,
+		// applied one level down).
+		if err := refuseForeignProvenanceTable(db); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 		// Migration steps rebuild and DROP tables, so a bug in a step is
 		// unrecoverable without a copy. Fail closed: if the backup cannot be
 		// written, do not migrate.

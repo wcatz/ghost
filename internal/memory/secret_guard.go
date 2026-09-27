@@ -148,12 +148,18 @@ func rejectSecretList(field string, values []string) error {
 //     tags column came straight out of an artifact file. All five, each before
 //     its lock, and TestEveryTagBearingWriterIsGuarded is the table.
 //
-//     The three remaining unguarded fields — agent, session_id, source_ref
-//     beside a saved memory, and a project's name and path — are not reached by
-//     either path above. source_ref IS checked, on the portable import, which is
-//     the one route where it is a file's content rather than the harness's own
-//     identity. The other three are the real gap and it is structural: see
-//     above.
+//     The provenance fields — agent, session_id and source_ref — and a
+//     project's name and path are reached on ONE route only: the portable
+//     import, where all four are a file's content rather than the harness's own
+//     identity. That route guards all three provenance fields, and it has to
+//     guard them together: an import also writes the artifact's agent, session
+//     and reference onto a memory_provenance arrival record (#673), so guarding
+//     one of them at the memory level and not the others would leave a copy of
+//     the value unguarded in the new table. The MCP save path still does NOT
+//     guard them, and that is the real gap and it is structural: see above. A
+//     new writer that takes any of the four must call rejectSecret, and
+//     TestImportedEvidenceIsGuardedLikeTheMemoryRow is the table for the
+//     provenance half.
 //   - Content already in the database. This guard reads what a caller is
 //     trying to write; it does not sweep rows a previous version stored. Doing
 //     that is a separate, report-first job — a detection pass over existing

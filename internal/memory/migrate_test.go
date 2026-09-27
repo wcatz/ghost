@@ -1744,6 +1744,46 @@ func TestMigrateV18RefusesADevTableUnderTheEvidenceName(t *testing.T) {
 	if rows != 0 {
 		t.Errorf("the refused migration wrote %d row(s) into the dev table", rows)
 	}
+	// The OPEN path is where the cost and the diagnosis live, and the two
+	// consequences of putting the check only in the step are both observable:
+	//
+	//   - OpenDB takes a full VACUUM INTO copy before migrating, and this
+	//     condition is permanent, so a check that ran only inside migrateV18
+	//     would write a copy of the database on every open of a store that
+	//     cannot be opened (and keep three of them);
+	//   - the copy is named at one-second granularity and refuses an existing
+	//     path, so a second open in the same second — which is exactly what a
+	//     session start does, the hook and the MCP server both opening — would
+	//     report "refusing to overwrite an existing file" and name neither the
+	//     table nor the remedy.
+	//
+	// So: no copy is written, and the retry says the same actionable thing.
+	for attempt := range 2 {
+		if _, err := OpenDB(dbPath); err == nil {
+			t.Fatalf("attempt %d: OpenDB opened a store holding a foreign memory_provenance table", attempt)
+		} else {
+			msg := err.Error()
+			for _, want := range []string{"memory_provenance", "DROP TABLE memory_provenance"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("attempt %d: error = %q, want it to name %q", attempt, msg, want)
+				}
+			}
+			if strings.Contains(msg, "pre-migrate") {
+				t.Errorf("attempt %d: the refusal came from the backup path, so it cost a copy: %v", attempt, err)
+			}
+		}
+	}
+	backups, err := filepath.Glob(dbPath + ".pre-migrate-*")
+	if err != nil {
+		t.Fatalf("glob backups: %v", err)
+	}
+	if len(backups) != 0 {
+		t.Errorf("a refused open wrote %d pre-migration backup(s): %v", len(backups), backups)
+	}
+	if v := schemaVersionOf(t, db); v != 17 {
+		t.Errorf("user_version = %d after two refused opens, want 17", v)
+	}
+
 	// And the documented way out works: drop it and the step runs.
 	if _, err := db.Exec(`DROP TABLE memory_provenance`); err != nil {
 		t.Fatalf("drop the dev table: %v", err)

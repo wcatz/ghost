@@ -10,13 +10,15 @@ import (
 // TestImportedEvidenceIsGuardedLikeTheMemoryRow covers the one writer this change
 // added that takes caller-supplied text: an artifact's nested evidence records.
 //
-// The rule it defends is the one `secret_guard.go` states — source_ref IS checked
-// on the portable import, "the one route where it is a file's content rather than
-// the harness's own identity" — and the nested records are that route one level
-// deeper. The memory row's guard cannot see them, because the memory row does not
-// hold them, which is exactly what makes the gap a gap: the evidence table would
-// be the one place a credential survives, in an append-only store that the next
-// `ghost export` re-emits and that only the purge's explicit DELETE reaches.
+// The rule it defends is the one `secret_guard.go` states: the portable import is
+// the one route where a provenance field is a FILE's content rather than the
+// harness's own identity, and every field that route touches is guarded — which
+// is why `agent` and `session_id` joined `source_ref` there in the same commit
+// that added these records. The nested records are that route one level deeper,
+// and the memory row's guard cannot see them because the memory row does not hold
+// them. That is what makes the gap a gap rather than a duplication: the evidence
+// table would be the one place a credential survives, in an append-only store the
+// next `ghost export` re-emits and that only the purge's explicit DELETE reaches.
 func TestImportedEvidenceIsGuardedLikeTheMemoryRow(t *testing.T) {
 	// Assembled rather than written out: GitHub push protection matches the PAT
 	// format anywhere in a diff and rejects the push (GH013) before review.

@@ -856,13 +856,27 @@ var phase1aProvenanceColumns = []struct {
 	{"confidence", "REAL"},
 }
 
+// tableInspector is the read surface a schema precondition can be checked
+// against, satisfied by a migration's *sql.Tx and by the *sql.DB OpenDB holds
+// before it migrates. It exists so ONE check can live in the step that owns the
+// precondition and also run on the open path, where running it early is what
+// makes the refusal cheap and legible — see refuseForeignProvenanceTable.
+type tableInspector interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // columnExists reports whether table has a column named column, matching
 // case-insensitively — SQLite itself treats column identifiers as
 // case-insensitive, so a hand-migrated RESOLVED_AT column must be recognized
 // as the same column resolved_at names, not trigger a duplicate ALTER that
 // SQLite would then reject.
-func columnExists(tx *sql.Tx, table, column string) (bool, error) {
-	rows, err := tx.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+//
+// The handle is a tableInspector rather than a *sql.Tx so the same check serves
+// the open path; every existing caller passes a transaction and is unaffected.
+func columnExists(tx tableInspector, table, column string) (bool, error) {
+	ctx := context.Background()
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
 		return false, fmt.Errorf("read %s columns: %w", table, err)
 	}
@@ -1118,24 +1132,8 @@ func migrateV18(tx *sql.Tx) error {
 	// line this build has always documented, and it is stated rather than logged:
 	// a store that cannot be opened is the operator's to fix, and a warning they
 	// may not see would leave every writer failing on the same missing column.
-	present, err := tableExists(tx, "memory_provenance")
-	if err != nil {
+	if err := refuseForeignProvenanceTable(tx); err != nil {
 		return err
-	}
-	if present {
-		for _, c := range evidenceTableColumns {
-			has, err := columnExists(tx, "memory_provenance", c)
-			if err != nil {
-				return err
-			}
-			if !has {
-				return fmt.Errorf(
-					"this database already holds a memory_provenance table without a %q column, so it is not Ghost's evidence table "+
-						"— it is a development build that used the reserved name for something else, and no release ever wrote one. "+
-						"Drop it and reopen: sqlite3 <db> 'DROP TABLE memory_provenance' (a pre-migration copy of this database is beside it)",
-					c)
-			}
-		}
 	}
 
 	stmts := []string{
@@ -1166,6 +1164,58 @@ WHERE (agent IS NOT NULL OR session_id IS NOT NULL OR source_ref IS NOT NULL OR 
 	return nil
 }
 
+// refuseForeignProvenanceTable returns an error naming the remedy when the
+// database already holds a `memory_provenance` table that is NOT Ghost's evidence
+// table: a development build between two commits used the reserved name for the
+// change log (#664's pre-rename shape), and its table has a `memory_id` like the
+// evidence table does — so `initSQL`'s `CREATE INDEX` succeeds against the wrong
+// table and nothing before the seed catches it. Left alone, the seed fails with
+// SQLite's "no such column: kind": a rolled-back step and a store that will not
+// open.
+//
+// It is called from TWO places, and the second is the point:
+//
+//   - from `migrateV18`, so the step that owns the precondition is safe on its
+//     own and does not depend on its caller having checked;
+//   - from `OpenDB`, BEFORE `backupBeforeMigrate`. A refusal that arrives after a
+//     full `VACUUM INTO` copy is a refusal that costs a copy every time, because
+//     the condition is permanent (nothing converts that table; the operator drops
+//     it) and leaves `user_version` behind, so every later open re-enters the
+//     backup path — and two opens in the same wall-clock second collide on the
+//     copy's name, so the retry an operator is guaranteed to make (the hook and
+//     the MCP server both open on session start) reports "refusing to overwrite an
+//     existing file" and names neither the table nor the remedy. That is the
+//     diagnosability this check exists to provide, defeated on the most likely
+//     retry.
+//
+// It refuses rather than adapts. The rows in such a table are a dev build's
+// change log under the wrong name, there is no shape to convert them into, no
+// release ever wrote one, and the pre-migration copy is the net a conversion would
+// be guessing past.
+func refuseForeignProvenanceTable(run tableInspector) error {
+	present, err := tableExists(run, "memory_provenance")
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	for _, c := range evidenceTableColumns {
+		has, err := columnExists(run, "memory_provenance", c)
+		if err != nil {
+			return err
+		}
+		if !has {
+			return fmt.Errorf(
+				"this database already holds a memory_provenance table without a %q column, so it is not Ghost's evidence table "+
+					"— it is a development build that used the reserved name for something else, and no release ever wrote one. "+
+					"Drop it and reopen: sqlite3 <db> 'DROP TABLE memory_provenance'",
+				c)
+		}
+	}
+	return nil
+}
+
 // evidenceTableColumns is the column set the evidence table's own writers and
 // seed name. migrateV18 checks a pre-existing table against it before touching
 // it, and the check is a refusal rather than an adaptation — see the step.
@@ -1175,9 +1225,9 @@ var evidenceTableColumns = []string{
 }
 
 // tableExists reports whether a table of that name is in the schema.
-func tableExists(tx *sql.Tx, table string) (bool, error) {
+func tableExists(run tableInspector, table string) (bool, error) {
 	var n int
-	err := tx.QueryRow(
+	err := run.QueryRowContext(context.Background(),
 		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table,
 	).Scan(&n)
 	if err != nil {
