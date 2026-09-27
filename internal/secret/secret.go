@@ -112,7 +112,9 @@ type rule struct {
 //
 // The scale this is sized for: a memory is capped at 8,000 bytes and a 256 KB
 // single line measures in the low hundreds of milliseconds, pinned by
-// TestDetectIsLinearInLineLength.
+// TestDetectIsLinearInLineLength. A wall of $var= assignments on one line is a
+// separate shape with its own check — TestDetectDoesNotRescanTheLinePerAssignment
+// — and it found a second quadratic pass that the first fix missed.
 
 var rules = []rule{
 	{
@@ -836,6 +838,11 @@ var shellFlagRe = regexp.MustCompile(`(?:^|\s)-[A-Za-z]`)
 type lineIndex struct {
 	text string
 	ends []int // offset of each line's terminator, and len(text) as the last
+	// quoted[i] is whether the i-th line contains a quote character at all. The
+	// argument scan needs one only to find a closing pair, so a line without one
+	// is answered without touching it — and most lines have none, which is what
+	// makes the scan affordable rather than merely correct.
+	quoted []bool
 }
 
 // newLineIndex records every line end in text.
@@ -854,7 +861,32 @@ func newLineIndex(text string) *lineIndex {
 			}
 		}
 	}
-	return &lineIndex{text: text, ends: append(ends, len(text))}
+	ends = append(ends, len(text))
+	return &lineIndex{text: text, ends: ends, quoted: quoteByLine(text, ends)}
+}
+
+// quoteByLine records, per line, whether it holds a quote character.
+func quoteByLine(text string, ends []int) []bool {
+	out := make([]bool, len(ends))
+	prev := 0
+	for i, end := range ends {
+		limit := end
+		if limit > len(text) {
+			limit = len(text)
+		}
+		out[i] = strings.ContainsAny(text[prev:limit], "\"'")
+		prev = end + 1
+	}
+	return out
+}
+
+// lineQuoted reports whether the line containing offset holds a quote.
+func (li *lineIndex) lineQuoted(offset int) bool {
+	i := sort.SearchInts(li.ends, offset)
+	if i >= len(li.quoted) {
+		return false
+	}
+	return li.quoted[i]
 }
 
 // rest returns the remainder of the line containing offset, which is the empty
@@ -868,6 +900,23 @@ func (li *lineIndex) rest(offset int) string {
 		return ""
 	}
 	return li.text[offset:li.ends[i]]
+}
+
+// shellStatementEnd matches where one shell command's argument list ends.
+const shellStatementEnd = ";|&\n\r"
+
+// window returns the text from offset to the earlier of windowEnd and the end
+// of the line, cut at the first shell statement separator. A pipe or a semicolon
+// is where a new command begins, so nothing beyond it is this one's argument.
+func (li *lineIndex) window(offset, windowEnd int) string {
+	rest := li.rest(offset)
+	if windowEnd < len(li.text) && windowEnd-offset < len(rest) {
+		rest = rest[:windowEnd-offset]
+	}
+	if i := strings.IndexAny(rest, shellStatementEnd); i >= 0 {
+		rest = rest[:i]
+	}
+	return rest
 }
 
 // line returns the whole line containing offset, for the passes that need the
@@ -904,8 +953,21 @@ func offset2end(li *lineIndex, offset int) int {
 // they share is not the variable but the command: a value with a `-Flag` after
 // it is an argument list, and a leaked literal assigned to a variable has
 // nothing after it.
-func valueIsCommand(li *lineIndex, valueEnd int) bool {
-	return shellFlagRe.MatchString(li.rest(valueEnd))
+// Bounded by the WINDOW, not the line. A command's flags live inside its own
+// argument list, and the next assignment is where that list ends, so the regex
+// reads one command's worth of text rather than the rest of the line.
+//
+// This is the second half of the quadratic fix and the first half was not
+// enough. The line index removed the newline scan, and the statement cut removed
+// a scan to the next `;`, but a line with no separators — which is the shape a
+// wall of `$a = value` is — still left the flag regex reading to the end of the
+// line for every candidate on it, and 2,000 candidates on a 52 KB line measured
+// 1.8 s. Bounding by the next candidate makes the pass linear: each lookup is
+// proportional to one command, and they do not overlap.
+// TestDetectDoesNotRescanTheLinePerAssignment is the check, and it is what
+// found this.
+func valueIsCommand(li *lineIndex, valueEnd, windowEnd int) bool {
+	return shellFlagRe.MatchString(li.window(valueEnd, windowEnd))
 }
 
 // commandWordRe splits a candidate command word from a path or an executable:
@@ -966,10 +1028,19 @@ var quotedArgRe = regexp.MustCompile(`"([^"\n]{8,})"|'([^'\n]{8,})'`)
 // "K3q9Xm2pL7wRt4ZbAvN1" -AsPlainText -Force` names no secret in its variable, and
 // the value is in the argument. Both corpus cases that this gate exists for pass
 // it, because `{1}` carries placeholderChars and `$domainPassword` is not quoted.
-func detectQuotedArgument(rest string) (Finding, bool) {
-	// rest is the remainder of ONE line — the caller slices it with the line
-	// index — so a flag on the next line is a different statement and is not in
-	// scope here.
+func detectQuotedArgument(li *lineIndex, offset, windowEnd int) (Finding, bool) {
+	if !li.lineQuoted(offset) {
+		return Finding{}, false
+	}
+	rest := li.window(offset, windowEnd)
+	// The caller passes
+	// rest is the remainder of ONE SHELL STATEMENT, not of the line: a command's
+	// argument list ends at the first statement separator, so a semicolon, a pipe
+	// or a background marker is a boundary. That is semantically right — it is
+	// where a new command starts, so nothing after it is this command's
+	// argument — and it is what keeps the scan proportional to one command
+	// rather than to the length of the line.
+	//
 	// The caller passes text starting at the END of the value, so a quoted value
 	// leaves its own closing quote first. Left in place it pairs with the next
 	// argument's opening quote and `quotedArgRe` reads
@@ -1223,11 +1294,22 @@ func Detect(text string) (Finding, bool) {
 	}
 	// SubmatchIndex rather than Submatch: the shell-variable test has to know
 	// where the value ENDS, not how long it is, to see what follows it.
-	for _, m := range assignmentRe.FindAllStringSubmatchIndex(text, -1) {
+	// The match index, not just the match: a command's argument list ends where
+	// the next assignment begins, and the walk already knows where that is. Both
+	// per-match lookups below are bounded by it, which is what makes the whole
+	// pass linear — see valueIsCommand and detectQuotedArgument.
+	matches := assignmentRe.FindAllStringSubmatchIndex(text, -1)
+	for i, m := range matches {
+		// The window this candidate's command occupies: from the end of its own
+		// value to the start of the next candidate, clipped to the line.
+		windowEnd := len(text)
+		if i+1 < len(matches) && matches[i+1][0] < windowEnd {
+			windowEnd = matches[i+1][0]
+		}
 		key := text[m[2*assignmentKey]:m[2*assignmentKey+1]]
 		value := text[m[2*assignmentValue]:m[2*assignmentValue+1]]
 		if text[m[2*assignmentShellVar]:m[2*assignmentShellVar+1]] != "" &&
-			valueIsCommand(li, m[2*assignmentValue+1]) {
+			valueIsCommand(li, m[2*assignmentValue+1], windowEnd) {
 			// A shell line with a flag after the value, so whatever follows is an
 			// argument list. Two things have to be true at once and neither
 			// replaces the other.
@@ -1242,7 +1324,7 @@ func Detect(text string) (Finding, bool) {
 			// SecureString" …` is still assigning a cmdlet — whereas a quoted
 			// literal is a literal however much is flagged after it:
 			// `$db_password = "K3q9Xm2pL7wRt4ZbAvN1" -AsPlainText` is the secret.
-			if f, ok := detectQuotedArgument(li.rest(m[2*assignmentValue+1])); ok {
+			if f, ok := detectQuotedArgument(li, m[2*assignmentValue+1], windowEnd); ok {
 				return f, true
 			}
 			if isCommandWord(value) {
